@@ -43,9 +43,8 @@ pub(super) struct Registration {
 }
 
 impl Registration {
-    /// A front's registration on an adopted channel, read from what its turn already observes:
-    /// the host verdict, the tmux spawn marker or Bound Herdr row, and the live transcript and
-    /// session. Without a live execution the phase is Absent, whatever `busy` says.
+    /// A front's registration read from what its turn observes: host verdict, tmux spawn marker or
+    /// Bound Herdr row, live transcript. Without a live execution it is Absent, whatever `busy`.
     pub(super) fn observed(
         mailbox: ChannelMailboxHandle,
         (provider, origin, busy): (&str, InputOrigin, bool),
@@ -147,9 +146,8 @@ pub(in crate::services::discord) fn owner_drive(
     })
 }
 
-/// A front into the channel's running turn: the turn's inflight row names its pane, transcript
-/// and host row, the owner's claim spends the grant only for a live busy pane, and the drive
-/// waits for the input's settlement while the AI turn runs on.
+/// A front into the running turn whose inflight row names the pane; the grant is spent only for a
+/// live busy pane, and the drive waits for the input's settlement, not the AI turn.
 pub(in crate::services::discord) async fn hand_busy(
     (mailbox, pool): (ChannelMailboxHandle, Option<sqlx::PgPool>),
     provider: ProviderKind,
@@ -249,9 +247,8 @@ pub(super) fn take(turn: &StreamingTurn<'_>) -> Option<Taken> {
     take_owned(turn, None, registration, reply_once(None))
 }
 
-/// The owner's front handoff: the turn's claim on the drive's granted front, the owner's mailbox
-/// and the verified execution arrive as arguments, never through a static or task-local. The
-/// drive hears `settled` once the input settled; this thread runs on with the AI turn.
+/// The front handoff from its arguments alone, never a static or task-local; the drive hears
+/// `settled` once the input settled while this thread runs on with the AI turn.
 pub(super) fn execute_front(
     turn: StreamingTurn<'_>,
     sender: std::sync::mpsc::Sender<crate::services::agent_protocol::StreamMessage>,

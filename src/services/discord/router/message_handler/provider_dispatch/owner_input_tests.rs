@@ -1047,9 +1047,8 @@ fn running_row(rig: &Rig, pane: &str) {
     crate::services::discord::inflight::save_inflight_state(&row).unwrap();
 }
 
-/// A front handed into the running turn reaches the pane its inflight row names, once, with no
-/// registration but the runtime's own; without a live busy pane the grant stays unspent and no
-/// key is sent.
+/// A front handed into the running turn reaches the pane its inflight row names, once; without a
+/// live busy pane the grant stays unspent and no key is sent.
 #[test]
 fn a_busy_front_is_written_into_the_pane_its_running_turn_names() {
     let _root = crate::config::TestRuntimeRootGuard::new();
