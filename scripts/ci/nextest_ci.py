@@ -622,18 +622,20 @@ def load_justifications(path):
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         parts = [part.strip() for part in line.split("|")]
-        if len(parts) not in (3, 4) or parts[1] not in REMOVAL_KINDS or not parts[2] or len(parts[0].split(" ")) != 2:
-            raise PlanError(f"{path}:{n}: need `<binary-id> <test> | removed|runnable->ignored | <reason> [| platform=<os>]`")
+        if len(parts) != 3 or parts[1] not in REMOVAL_KINDS or not parts[2] or len(parts[0].split(" ")) != 2:
+            raise PlanError(f"{path}:{n}: need `<binary-id> <test> | removed|runnable->ignored | [platform=<os>] <reason>` (scope optional)")
         _check_id(*parts[0].split(" "))
         platform = None
-        if len(parts) == 4:
-            if parts[1] != "removed" or parts[3] not in ("platform=linux", "platform=macos", "platform=windows"):
+        reason = parts[2]
+        if reason.startswith("[platform="):
+            marker, separator, reason = reason.partition("] ")
+            if parts[1] != "removed" or marker not in ("[platform=linux", "[platform=macos", "[platform=windows") or not separator or not reason.strip():
                 raise PlanError(f"{path}:{n}: only removed rows may name platform=linux, platform=macos or platform=windows")
-            platform = parts[3].split("=", 1)[1]
+            platform = marker.split("=", 1)[1]
         if any(t == parts[0] and k == parts[1] and (p == platform or p is None or platform is None)
                for t, k, p in rows):
             raise PlanError(f"{path}:{n}: {parts[0]} {parts[1]} is listed twice")
-        rows[(parts[0], parts[1], platform)] = parts[2]
+        rows[(parts[0], parts[1], platform)] = reason
     return rows
 
 

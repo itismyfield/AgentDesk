@@ -800,7 +800,7 @@ class BaseDiff(Fixture):
         self.assertEqual(self.diff(SHA)[0], 0)
 
     def scoped_row(self, platform="windows"):
-        return f"{BIN} m::native | removed | Unix coverage retained | platform={platform}\n"
+        return f"{BIN} m::native | removed | [platform={platform}] Unix coverage retained\n"
 
     def same_plans(self):
         self.plan_ok(["m::a"], workers=1, out="base")
@@ -861,7 +861,8 @@ class BaseDiff(Fixture):
     def test_platform_scope_rejects_unknown_malformed_and_overlapping_rows(self):
         self.same_plans()
         for rows in (self.scoped_row("windwos"), self.scoped_row("windows,macos"),
-                     self.scoped_row().replace("platform=", "target="),
+                     self.scoped_row().replace("platform=", "platform=="),
+                     self.scoped_row().replace("] Unix coverage retained", "]"),
                      self.scoped_row() + self.scoped_row(),
                      self.scoped_row() + f"{BIN} m::native | removed | ambiguous legacy row\n",
                      self.scoped_row().replace(" | removed |", " | runnable->ignored |")):
