@@ -94,6 +94,7 @@ export function AchievementDetailDrawer({
                     }}
                     onClick={() => {
                       if (selectedCard.agent && onSelectAgent) {
+                        onClose();
                         onSelectAgent(selectedCard.agent);
                       }
                     }}

@@ -1,3 +1,4 @@
+import { createPortal } from "react-dom";
 import { useEffect, useRef } from "react";
 import type { RoundTableMeeting, RoundTableEntry } from "../types";
 import MeetingProviderFlow, { formatProviderFlow, providerFlowCaption } from "./MeetingProviderFlow";
@@ -65,11 +66,12 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
         ? t({ ko: "취소", en: "Cancelled" })
         : t({ ko: "진행중", en: "In Progress" });
 
-  return (
+  const dialog = (
+    <>
+    <div aria-hidden="true" className="fixed inset-0 z-[70]" style={{ background: "var(--th-modal-overlay)" }} />
     <div
       ref={overlayRef}
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: "var(--th-modal-overlay)" }}
+      className="fixed inset-0 z-[80] flex items-center justify-center p-4"
       onClick={(e) => {
         if (e.target === overlayRef.current) onClose();
       }}
@@ -319,7 +321,9 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
         </div>
       </div>
     </div>
+    </>
   );
+  return typeof document === "undefined" ? dialog : createPortal(dialog, document.body);
 }
 
 function MetaCard({ label, value }: { label: string; value: string }) {
