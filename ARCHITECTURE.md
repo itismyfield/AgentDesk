@@ -547,6 +547,8 @@ src/
 │   │   │   └── unread_tail_attribution_tests.rs
 │   │   ├── kanban/
 │   │   │   └── card_delete.rs
+│   │   ├── receipt/
+│   │   │   └── single_flight.rs
 │   │   ├── review_verdict/
 │   │   │   ├── decision_route.rs
 │   │   │   ├── mod.rs
