@@ -30,3 +30,5 @@ OpsPageModel의 293줄 style 문자열을 제거하고 Tailwind utility로 옮�
 `output/playwright/unslop-ops/`에 기준/최종/fixture 캡처와 재현 스크립트를 둔다. API 문서는 `/api/docs`, `/api/docs/observability/health`, `/api/docs/observability/cluster`, `/api/docs/internal/ops`를 먼저 확인했다.
 
 390×844 / 1440×1000 각각 light/dark에서 실제 페이지를 찍고 overflow·정렬·간격·하단 가림·44px 타깃을 직접 확인한다. 긴 데이터·빈 상태·오류·클러스터 세션 제어는 브라우저 fixture를 사용한다. 브라우저의 실제 쓰기 요청을 차단하고 설정 저장·세션 중지 등 운영 상태는 바꾸지 않는다.
+
+최종 확인은 아래에 기록한다.

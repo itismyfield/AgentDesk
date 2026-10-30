@@ -57,7 +57,7 @@ export default function ClusterNodesPanel({ isKo }: { isKo: boolean }) {
           const capacityAvailable = slots === undefined || (node.execution_occupied ?? slots) < slots;
           const controlReason = nodeControlUnavailable(node, nodes.data.cluster.local_instance_id, stale);
           const owned = sessions.data?.sessions.filter(s => s.instance_id === node.instance_id) ?? [];
-          return <article key={node.instance_id} className="min-w-0 space-y-2 border-b border-th-border-subtle pb-4 last:border-b-0 xl:border-b-0 xl:pb-0">
+          return <article key={node.instance_id} className="min-w-0 space-y-2 border-b border-th-border-subtle pb-4 last:border-b-0 xl:border-b-0 xl:pb-0 xl:even:border-l xl:even:border-th-border-subtle xl:even:pl-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="text-sm font-semibold [overflow-wrap:anywhere]">{node.hostname || node.instance_id}</h3>
               <StatusBadge tone={!stale && node.status === "online" ? "healthy" : "warning"}>{stale ? "STALE" : node.status ?? "unknown"}</StatusBadge>
@@ -92,7 +92,7 @@ export default function ClusterNodesPanel({ isKo }: { isKo: boolean }) {
         })}
       </div>
       {stop.isError && <p role="alert" className="text-[var(--th-badge-amber-text)]">{stop.error.message}</p>}
-      {selected && <div className="min-w-0 space-y-2 border-b border-th-border-subtle pb-4 last:border-b-0 xl:border-b-0 xl:pb-0" aria-label={tr("세션 출력", "Session output")}>
+      {selected && <div className="min-w-0 space-y-3 rounded-md border border-th-border-subtle bg-th-input-bg p-4" aria-label={tr("세션 출력", "Session output")}>
         <div className="flex flex-wrap items-center justify-between gap-2"><strong className="break-all">{selected.name || selected.session_key}</strong><button className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-md border border-th-border px-3 py-2 text-xs text-th-text-secondary hover:bg-surface-subtle disabled:opacity-50" type="button" onClick={() => setSelected(null)}>{tr("출력 닫기", "Close output")}</button></div>
         {!canControlSelected && <p role="status">{tr("소유 노드 상태를 다시 확인해야 합니다.", "Owner node status must be refreshed.")}</p>}
         {output.isError && <p role="alert" className="text-[var(--th-badge-amber-text)]">{output.error.message}</p>}

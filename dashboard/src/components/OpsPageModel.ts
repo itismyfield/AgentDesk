@@ -184,7 +184,7 @@ export function buildSignalCards(data: HealthResponse, isKo: boolean): SignalCar
   return [
     {
       key: "deferred_hooks",
-      label: "Deferred Hooks",
+      label: isKo ? "후처리 대기" : "Deferred Hooks",
       value: formatNumber(deferredHooks),
       rawValue: deferredHooks,
       severity: resolveSeverity(deferredHooks, SIGNAL_THRESHOLDS.deferred_hooks),
@@ -194,7 +194,7 @@ export function buildSignalCards(data: HealthResponse, isKo: boolean): SignalCar
     },
     {
       key: "outbox_age",
-      label: "Outbox Age",
+      label: isKo ? "전달 지연" : "Outbox Age",
       value: formatDurationCompact(outboxAge),
       rawValue: outboxAge,
       severity: resolveSeverity(outboxAge, SIGNAL_THRESHOLDS.outbox_age),
@@ -204,7 +204,7 @@ export function buildSignalCards(data: HealthResponse, isKo: boolean): SignalCar
     },
     {
       key: "pending_queue",
-      label: "Pending Queue",
+      label: isKo ? "처리 대기" : "Pending Queue",
       value: formatNumber(pendingQueue),
       rawValue: pendingQueue,
       severity: resolveSeverity(pendingQueue, SIGNAL_THRESHOLDS.pending_queue),
@@ -214,7 +214,7 @@ export function buildSignalCards(data: HealthResponse, isKo: boolean): SignalCar
     },
     {
       key: "active_watchers",
-      label: "Active Watchers",
+      label: isKo ? "감시 중" : "Active Watchers",
       value: formatNumber(activeWatchers),
       rawValue: activeWatchers,
       severity: resolveSeverity(activeWatchers, SIGNAL_THRESHOLDS.active_watchers),
@@ -224,7 +224,7 @@ export function buildSignalCards(data: HealthResponse, isKo: boolean): SignalCar
     },
     {
       key: "recovery_seconds",
-      label: "Recovery",
+      label: isKo ? "복구 시간" : "Recovery",
       value: formatDurationCompact(recoverySeconds),
       rawValue: recoverySeconds,
       severity: resolveSeverity(recoverySeconds, SIGNAL_THRESHOLDS.recovery_seconds),

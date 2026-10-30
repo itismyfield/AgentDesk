@@ -47,7 +47,6 @@ export default function OpsPageView({
   isKo,
 }: OpsPageViewProps) {
   const tr = useCallback((ko: string, en: string) => (isKo ? ko : en), [isKo]);
-  const localeTag = isKo ? "ko-KR" : "en-US";
 
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [promptRetention, setPromptRetention] = useState<PromptManifestRetentionStatus | null>(null);
@@ -315,7 +314,7 @@ export default function OpsPageView({
             </div>
           </div> : null}
           {health?.degraded_reasons && health.degraded_reasons.length > 0 ? <div className="flex flex-wrap gap-2">
-            {health.degraded_reasons.slice(0, 4).map(reason => <span key={reason} className="rounded-md border border-th-border-subtle px-2 py-1 text-xs leading-5 text-[var(--th-badge-amber-text)]">{describeDegradedReason(reason)}</span>)}
+            {health.degraded_reasons.slice(0, 4).map(reason => <span key={reason} className={`rounded-md border border-th-border-subtle px-2 py-1 text-xs leading-5 ${health.status === "unhealthy" ? "text-[var(--th-accent-danger)]" : "text-[var(--th-badge-amber-text)]"}`}>{describeDegradedReason(reason)}</span>)}
           </div> : null}
           <div data-testid="ops-signal-grid" className="grid grid-cols-2 overflow-hidden rounded-lg border border-th-border-subtle bg-th-bg-surface sm:grid-cols-4">
             {primarySignals.length > 0 ? primarySignals.map(signal => {
