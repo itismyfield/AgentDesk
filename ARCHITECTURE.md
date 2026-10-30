@@ -790,15 +790,34 @@ src/
 │   │   ├── recovery.rs
 │   │   └── worker.rs
 │   ├── campaign_execution/
+│   │   ├── adk_observe/
+│   │   │   ├── ci.rs
+│   │   │   └── ci_tests.rs
+│   │   ├── adk_observe.rs
+│   │   ├── adk_observe_tests.rs
+│   │   ├── adk_profile.rs
+│   │   ├── adk_profile_tests.rs
+│   │   ├── adk_resources.rs
+│   │   ├── adk_resources_tests.rs
+│   │   ├── adk_workspace.rs
+│   │   ├── adk_workspace_tests.rs
 │   │   ├── control.rs
 │   │   ├── control_tests.rs
 │   │   ├── definition.rs
 │   │   ├── definition_tests.rs
+│   │   ├── execution_pin.rs
+│   │   ├── execution_pin_tests.rs
+│   │   ├── main_integration.rs
+│   │   ├── main_integration_tests.rs
 │   │   ├── mod.rs
 │   │   ├── model.rs
 │   │   ├── model_tests.rs
 │   │   ├── profile.rs
 │   │   ├── profile_tests.rs
+│   │   ├── verification_run.rs
+│   │   ├── verification_run_tests.rs
+│   │   ├── verification_runner.rs
+│   │   ├── verification_runner_tests.rs
 │   │   ├── view.rs
 │   │   └── view_tests.rs
 │   ├── claude/
