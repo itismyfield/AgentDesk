@@ -35,6 +35,7 @@ impl AgentChannels {
         self.inner.insert(Self::normalize_key(id.as_ref()), channel)
     }
 
+    #[cfg(test)]
     pub fn contains_key(&self, id: &str) -> bool {
         self.inner.contains_key(&Self::normalize_key(id))
     }

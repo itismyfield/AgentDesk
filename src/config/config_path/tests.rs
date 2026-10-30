@@ -198,11 +198,6 @@ const PATH_OWNERS: &[(&str, &str, &str)] = &[
         "detects a legacy layout to migrate",
     ),
     (
-        "src/runtime_layout/config_merge.rs",
-        "fn merge_role_map_into_agentdesk_yaml(",
-        "merges role_map into the migrated file",
-    ),
-    (
         "src/cli/migrate/plan.rs",
         "fn load_existing_role_ids(",
         "reads both layouts as migration input",
