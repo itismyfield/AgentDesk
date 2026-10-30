@@ -87,7 +87,7 @@ const SURFACE_GHOST_BUTTON_STYLE = {
 
 const SURFACE_MODAL_CARD_STYLE = {
   background:
-    "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
+    "var(--th-bg-surface)",
   borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
 } as const;
 

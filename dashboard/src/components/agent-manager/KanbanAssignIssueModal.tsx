@@ -1,3 +1,4 @@
+import { Drawer } from "../common/overlay/Drawer";
 import { SurfaceActionButton, SurfaceCard, SurfaceNotice } from "../common/SurfacePrimitives";
 
 interface KanbanAssignIssueModalProps {
@@ -26,17 +27,8 @@ export default function KanbanAssignIssueModal({ ctx }: KanbanAssignIssueModalPr
   return (
     <>
       {assignIssue && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center p-0 sm:p-4" style={{ backgroundColor: "var(--th-modal-overlay)" }}>
-          <SurfaceCard
-            role="dialog"
-            aria-modal="true"
-            aria-label={assignIssue.title}
-            className="w-full max-w-lg rounded-t-3xl p-5 sm:rounded-3xl sm:p-6 space-y-4"
-            style={{
-              ...SURFACE_MODAL_CARD_STYLE,
-              paddingBottom: "max(6rem, calc(6rem + env(safe-area-inset-bottom)))",
-            }}
-          >
+        <Drawer open onClose={() => setAssignIssue(null)} title={tr("이슈 할당", "Assign issue")} ariaLabel={assignIssue.title} width="min(560px, 100vw)" closeButtonClassName="min-h-11 min-w-11">
+          <div className="min-w-0 space-y-5">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0 space-y-2">
                 <div className="flex flex-wrap items-center gap-2">
@@ -47,7 +39,7 @@ export default function KanbanAssignIssueModal({ ctx }: KanbanAssignIssueModalPr
                     #{assignIssue.number}
                   </span>
                 </div>
-                <h3 className="text-lg font-semibold" style={{ color: "var(--th-text-heading)" }}>
+                <h3 className="text-lg font-semibold leading-7 [overflow-wrap:anywhere]" style={{ color: "var(--th-text-heading)" }}>
                   {assignIssue.title}
                 </h3>
               </div>
@@ -71,7 +63,7 @@ export default function KanbanAssignIssueModal({ ctx }: KanbanAssignIssueModalPr
                 <select
                   value={assignAssigneeId}
                   onChange={(event) => setAssignAssigneeId(event.target.value)}
-                  className="w-full rounded-xl border px-3 py-2 text-sm"
+                  className="h-11 w-full rounded-md border px-3 py-2 text-sm"
                   style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
                 >
                   <option value="">{tr("에이전트 선택", "Select an agent")}</option>
@@ -101,8 +93,8 @@ export default function KanbanAssignIssueModal({ ctx }: KanbanAssignIssueModalPr
                 {assigningIssue ? tr("할당 중", "Assigning") : tr("ready로 할당", "Assign to ready")}
               </SurfaceActionButton>
             </div>
-          </SurfaceCard>
-        </div>
+          </div>
+        </Drawer>
       )}
     </>
   );

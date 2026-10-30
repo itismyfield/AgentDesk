@@ -1,3 +1,4 @@
+import { Drawer } from "../common/overlay/Drawer";
 import type { Agent, KanbanCard, UiLanguage } from "../../types";
 import { localeName } from "../../i18n";
 import { getProviderMeta } from "../../app/providerTheme";
@@ -88,24 +89,8 @@ export default function BacklogCardDrawer({
   ];
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 p-0 sm:items-center sm:p-4"
-      onClick={onClose}
-    >
-      <div
-        data-testid="agents-backlog-drawer"
-        role="dialog"
-        aria-modal="true"
-        aria-label={card.title}
-        onClick={(event) => event.stopPropagation()}
-        className="max-h-[88svh] w-full max-w-4xl overflow-y-auto rounded-t-[32px] border p-5 sm:max-h-[90vh] sm:rounded-[32px] sm:p-6"
-        style={{
-          background:
-            "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
-          borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
-          paddingBottom: "max(6rem, calc(6rem + env(safe-area-inset-bottom)))",
-        }}
-      >
+    <Drawer open onClose={onClose} title={card.title} width="min(820px, 100vw)" closeButtonClassName="min-h-11 min-w-11">
+      <div data-testid="agents-backlog-drawer" className="min-w-0 space-y-5 pb-4">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
@@ -305,6 +290,6 @@ export default function BacklogCardDrawer({
           </div>
         </div>
       </div>
-    </div>
+    </Drawer>
   );
 }

@@ -21,7 +21,7 @@ export default function PipelineVisualEditorStagePanel({ ctx, actions }: Props) 
   const tr = ctx.tr;
 
   return (
-    <div className="min-w-0 rounded-[24px] border p-4 sm:p-5 space-y-4" style={PANEL_STYLE}>
+    <div className="min-w-0 rounded-lg border p-4 sm:p-5 space-y-4" style={PANEL_STYLE}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h4 className="text-sm font-semibold" style={{ color: "var(--th-text-heading)" }}>

@@ -17,13 +17,13 @@ export default function PipelineVisualEditorView({ ctx, actions }: Props) {
 
   return (
     <section
-      className="min-w-0 overflow-hidden rounded-[28px] border p-4 sm:p-5 space-y-5"
+      className="[&_button]:min-h-11 [&_button]:min-w-11 [&_select]:min-h-11 min-w-0 overflow-hidden rounded-lg border p-4 sm:p-5 space-y-5"
       style={SECTION_STYLE}
     >
       <button
         type="button"
         onClick={() => actions.setCollapsed((value: boolean) => !value)}
-        className="flex w-full items-center justify-between gap-3 text-left"
+        className="flex min-h-11 w-full items-center justify-between gap-3 text-left"
       >
         <div className="min-w-0 space-y-1">
           <div className="flex flex-wrap items-center gap-2">
@@ -80,7 +80,7 @@ export default function PipelineVisualEditorView({ ctx, actions }: Props) {
           <PipelineVisualEditorStatus ctx={ctx} />
           {!ctx.pipelineDraft || !ctx.graph ? (
             <div
-              className="rounded-[24px] border px-4 py-8 text-sm text-center"
+              className="rounded-lg border px-4 py-8 text-sm text-center"
               style={ctx.error ? STATUS_ERROR_STYLE : EMPTY_PANEL_STYLE}
             >
               <div className="flex items-center justify-center gap-2">

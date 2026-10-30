@@ -17,7 +17,7 @@ export default function PipelineVisualEditorStatus({ ctx }: Props) {
         <div className="space-y-2">
           {ctx.error && (
             <div
-              className="rounded-[22px] border px-4 py-3 text-xs leading-6 sm:text-sm"
+              className="rounded-lg border px-4 py-3 text-xs leading-6 sm:text-sm"
               style={STATUS_ERROR_STYLE}
             >
               {ctx.error}
@@ -25,7 +25,7 @@ export default function PipelineVisualEditorStatus({ ctx }: Props) {
           )}
           {ctx.success && (
             <div
-              className="rounded-[22px] border px-4 py-3 text-xs leading-6 sm:text-sm"
+              className="rounded-lg border px-4 py-3 text-xs leading-6 sm:text-sm"
               style={STATUS_SUCCESS_STYLE}
             >
               {ctx.success}
