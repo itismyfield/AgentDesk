@@ -252,6 +252,158 @@ fn a_failed_launch_under_another_account_never_moves_the_running_session_s_accou
     crate::services::tmux_common::cleanup_session_temp_files(fx.logical());
 }
 
+// A fresh move to Herdr under another account left the tmux Claude running: the dispatched return
+// ends it, then the Herdr one, by one `/exit` each; its tmux turn resumes the Herdr session.
+#[test]
+fn a_dispatched_return_after_a_fresh_move_resumes_the_herdr_session_on_tmux_pg() {
+    use crate::db::dispatched_sessions::hosted_execution::{
+        HostedLookup, HostedLookupKey, load_hosted_execution_pg,
+    };
+    use crate::services::claude::herdr_return::tests::{StandIn, claude_account};
+    let fx = Fixture::new("return-fresh", None);
+    let logical = fx.logical().to_owned();
+    let (launched, n0) = launch_tmux(&fx, None);
+    let (s_a, _) = launched.split_once('\n').unwrap();
+    let (_account, _user, home) = claude_account("work");
+    let overlay = crate::services::discord::org_schema::overlay_from_tmux_session;
+    *fx.overlay.lock().unwrap() = Some(overlay(ProviderKind::Claude, &logical).unwrap());
+    *fx.session.lock().unwrap() = Some(s_a.to_owned());
+    let launcher = Arc::new(Launcher::default());
+    let ports = fx.ports(&launcher);
+    ports.old_tmux.alive.store(true, Ordering::SeqCst);
+    let fresh = Mutex::new(None);
+    let (result, _) = fx.turn(&HostedRecord::Legacy, &ports, || {
+        if let Some(started) = fx.start_provider(&launcher, true) {
+            fx.answer(&started);
+            *fresh.lock().unwrap() = Some(started);
+        }
+    });
+    assert_eq!(result, Ok(()));
+    assert_eq!(ports.old_tmux.exits.load(Ordering::SeqCst), 0);
+    let herdr = fresh.into_inner().unwrap().unwrap();
+    let s_b = herdr.session.clone();
+    assert!(s_b != s_a && herdr.path.starts_with(&home), "{s_b}");
+    assert_eq!(fx.session_auth(), Some(format!("{s_b}\nwork")));
+    let n1 = launcher.nonces.lock().unwrap()[0].clone();
+    read_through(&herdr.path, &s_b);
+    // The mapping is gone, so the channel's turn takes its Bound row back to tmux.
+    let key = session_key(&fx.owner);
+    let lookup = load_hosted_execution_pg(&fx.pool, HostedLookupKey::SessionKey(&key));
+    let HostedLookup::Found(row) = fx.rt.block_on(lookup) else {
+        panic!("no row");
+    };
+    let HostedRecord::Known(record) = row.record.clone() else {
+        panic!("no record");
+    };
+    assert_eq!(
+        (record.state, record.execution_nonce.as_str()),
+        (HostedState::Bound, &*n1)
+    );
+    let host = TurnHost::Return(Box::new(crate::services::turn_host::ReturnPlan {
+        row,
+        record,
+    }));
+    let stand_in = StandIn::new(&logical);
+    let tmux = FakeTmux::install(&logical);
+    tmux.enable_fixture_launch();
+    let _launch_bin = fx.own_claude();
+    stand_in.herdr.lock().unwrap().alive = true;
+    let mut old = stand_in.tmux.lock().unwrap();
+    (old.alive, old.ends) = (true, Some(tmux.missing_flag()));
+    drop(old);
+    let _hooks = crate::services::claude_tui::hook_server::publish_hook_endpoint(
+        "http://127.0.0.1:9".into(),
+    );
+    let spawn = crate::services::tmux_common::session_temp_path(&logical, "spawn_nonce");
+    let relaunched = || {
+        let stamped = std::fs::read_to_string(&spawn).unwrap_or_default();
+        Some(stamped.trim().to_owned()).filter(|nonce| ![&n0, &n1].contains(&nonce))
+    };
+    let cancel = Arc::new(CancelToken::new());
+    let (sender, _receiver) = std::sync::mpsc::channel();
+    let provider = ProviderKind::Claude;
+    let turn = StreamingTurn {
+        pool: Some(&fx.pool),
+        provider: &provider,
+        prompt: "질문",
+        session_id: Some(&s_b),
+        working_dir: fx.cwd.path().to_str().unwrap(),
+        system_prompt: None,
+        allowed_tools: &[],
+        cancel: cancel.clone(),
+        codex_observation: None,
+        tmux_session_name: Some(&logical),
+        teardown: None,
+        host: &host,
+        channel_id: CHANNEL,
+        model: None,
+        native_fast_mode: None,
+        codex_goals: None,
+        compact_percent: None,
+        compact_lower_bound_tokens: 0,
+        compact_token_limit: None,
+        cache_ttl_minutes: None,
+        dispatch_type: None,
+        force_fresh: false,
+        submission: None,
+    };
+    let start = crate::services::discord::router::intake_dispatch::replay_admission::dormant_start;
+    let ended = std::thread::scope(|scope| {
+        // Dispatch runs on a blocking thread of the daemon's runtime.
+        let runtime = fx.rt.handle().clone();
+        let run = scope.spawn(move || {
+            let _runtime = runtime.enter();
+            execute(turn, start("test").unwrap(), sender)
+        });
+        eventually("the relaunch", || {
+            relaunched().is_some() || run.is_finished()
+        });
+        cancel.cancelled.store(true, Ordering::SeqCst);
+        run.join().unwrap()
+    });
+    let n2 = relaunched().unwrap_or_else(|| panic!("no relaunch: {ended:?}"));
+    assert_eq!(stand_in.tmux.lock().unwrap().exits, 1);
+    assert_eq!(stand_in.herdr.lock().unwrap().exits, 1);
+    assert_eq!(fx.row(), Some(HostedState::Retired));
+    let context = execution_context("claude", &n2).unwrap();
+    let resumed = (
+        context.launch_mode.as_str(),
+        context.expected_native_session_id.as_deref(),
+    );
+    assert_eq!(resumed, ("resume", Some(s_b.as_str())));
+    let script = fx.launch_script();
+    assert!(script.contains(&format!("'--resume' '{s_b}'")), "{script}");
+    assert!(script.contains(home.to_str().unwrap()), "{script}");
+    assert_eq!(fx.session_auth(), Some(format!("{s_b}\nwork")));
+    let calls = tmux.take_calls();
+    let called = |command: &str| {
+        calls
+            .iter()
+            .filter(|call| call.starts_with(command))
+            .count()
+    };
+    assert_eq!(
+        (called("new-session"), called("kill-session")),
+        (1, 0),
+        "{calls:?}"
+    );
+    // The new execution's resumed start is taken; the ended Herdr execution's is not.
+    let start = json!({"session_id": s_b, "source": "resume", "transcript_path": herdr.path});
+    let own = HookBindingEnvelope {
+        context: CapturedContext::Captured(context),
+        observed: Default::default(),
+    };
+    let uri = format!("/hooks/claude/SessionStart?session_id={s_b}");
+    let envelope = own.encode().unwrap();
+    let sent = fx
+        .ingress
+        .send_envelope(&uri, &start, Some(&uuid()), Some(&envelope));
+    assert_eq!(sent.0, 202, "{sent:?}");
+    let ended_herdr = herdr.hook(&fx, "SessionStart", &start);
+    assert_ne!(ended_herdr, 202);
+    crate::services::tmux_common::cleanup_session_temp_files(fx.logical());
+}
+
 // A session handed back to tmux under a named account is found in that account's own home and
 // resumed there, its launch context naming that home; in the daemon's home only it starts anew.
 #[test]

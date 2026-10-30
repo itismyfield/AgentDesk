@@ -23,6 +23,8 @@ pub(crate) struct Side {
     stays: bool,
     reads: usize,
     pub(crate) exits: usize,
+    /// A flag the `/exit` that ends it writes, as its host sees the end.
+    pub(crate) ends: Option<PathBuf>,
 }
 
 struct View(Arc<Mutex<Side>>);
@@ -85,6 +87,9 @@ impl EarlierExecution for View {
         }
         side.exits += 1;
         side.alive = side.stays;
+        if let Some(flag) = side.ends.as_ref().filter(|_| !side.stays) {
+            std::fs::write(flag, "").unwrap();
+        }
         ExitSend::Sent
     }
 }
@@ -348,32 +353,53 @@ fn b3_a_herdr_claude_not_ended_by_its_exit_keeps_its_row_and_host_pg() {
     }
 }
 
-// A fresh move to Herdr left the channel's tmux Claude running: the return ends the Herdr Claude
-// alone and hands the channel back to that tmux, which needs no resume proof of the Herdr session.
+// A fresh move to Herdr left the channel's tmux Claude running: the return ends it by one
+// `/exit`, then the Herdr Claude, and the tmux turn resumes the Herdr session under its account.
 #[test]
-fn b9_a_return_after_a_fresh_move_ends_herdr_alone_and_goes_back_to_the_running_tmux_pg() {
+fn b9_a_return_after_a_fresh_move_ends_the_running_tmux_then_herdr_and_resumes_the_session_pg() {
     let fx = Fixture::new();
-    let other = uuid::Uuid::new_v4().to_string();
-    tc::write_claude_session_auth(LOGICAL, &other, "work").unwrap();
+    tc::write_claude_session_auth(LOGICAL, &fx.session, "work").unwrap();
     let ports = running();
     ports.tmux.lock().unwrap().alive = true;
     assert_eq!(fx.run(&ports), Ok(()));
-    assert_eq!(ports.herdr.lock().unwrap().exits, 1);
     let tmux = ports.tmux.lock().unwrap();
-    assert_eq!(
-        (tmux.exits, tmux.alive),
-        (0, true),
-        "the running tmux Claude is kept"
-    );
+    assert_eq!((tmux.exits, tmux.alive), (1, false));
     drop(tmux);
+    assert_eq!(ports.herdr.lock().unwrap().exits, 1);
     assert_eq!(fx.state(), HostedState::Retired);
     assert!(!on_herdr(fx.marker()));
     assert_eq!(herdr_listed_execution(LOGICAL), None);
     let profile = tc::session_temp_path(LOGICAL, "auth_profile");
-    assert!(
-        !std::path::Path::new(&profile).exists(),
-        "no account is recorded"
-    );
+    assert_eq!(std::fs::read_to_string(profile).unwrap(), "work");
+}
+
+// A tmux Claude a draft keeps, one outliving its `/exit` or an unobserved one stops the return
+// before Herdr is touched: no Herdr `/exit`, the row Bound, the listing and marker as they were.
+#[test]
+fn b10_a_running_tmux_not_ended_by_its_exit_leaves_herdr_untouched_pg() {
+    let fx = Fixture::new();
+    type Setup = fn(&mut Side);
+    let cases: [(&str, Setup, &str); 3] = [
+        ("draft", |tmux| tmux.draft = true, "kept running"),
+        ("stays", |tmux| tmux.stays = true, "did not exit"),
+        ("unobserved", |tmux| tmux.unknown = true, "unobserved"),
+    ];
+    for (name, setup, says) in cases {
+        let ports = running();
+        ports.tmux.lock().unwrap().alive = true;
+        setup(&mut ports.tmux.lock().unwrap());
+        let error = fx.run(&ports).unwrap_err();
+        assert!(error.contains(says), "{name}: {error}");
+        let herdr = ports.herdr.lock().unwrap();
+        assert_eq!((herdr.exits, herdr.reads), (0, 0), "{name}");
+        drop(herdr);
+        assert_eq!(fx.state(), HostedState::Bound, "{name}");
+        assert!(on_herdr(fx.marker()), "{name}");
+        let listed = herdr_listed_execution(LOGICAL);
+        assert_eq!(listed, Some(fx.nonce.clone()), "{name}");
+        let profile = tc::session_temp_path(LOGICAL, "auth_profile");
+        assert!(!std::path::Path::new(&profile).exists(), "{name}");
+    }
 }
 
 // A Herdr Claude that already exited is not typed to; a return that stopped after its retire
@@ -398,15 +424,17 @@ fn b4_a_return_resumed_after_its_exit_or_its_retire_finishes_without_another_exi
 }
 
 // A resume needs O to read the transcript and a launch of that session to have recorded its
-// account; a missing cursor, no record of that session or an unreadable transcript stops it.
+// account; without either, or with an unreadable transcript, it stops before a running tmux ends.
 #[test]
 fn b5_b6_a_resume_without_cursor_account_proof_or_readable_transcript_ends_nothing_pg() {
     let fx = Fixture::new();
     let refused = |name: &str, says: &str| {
         let ports = running();
+        ports.tmux.lock().unwrap().alive = true;
         let error = fx.run(&ports).unwrap_err();
         assert!(error.contains(says), "{name}: {error}");
         assert_eq!(ports.herdr.lock().unwrap().exits, 0, "{name}");
+        assert_eq!(ports.tmux.lock().unwrap().exits, 0, "{name}");
         assert_eq!(fx.state(), HostedState::Bound, "{name}");
     };
     let path = fx.transcript(false);

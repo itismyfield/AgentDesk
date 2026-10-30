@@ -1,5 +1,5 @@
 //! A channel leaving Herdr takes its Claude back to tmux: the Herdr execution ends by its `/exit`,
-//! its row retires and its pane is released; the tmux turn resumes the session or uses a live tmux.
+//! its row retires and its pane is released; a tmux Claude still running ends by its own `/exit`.
 
 use std::path::Path;
 
@@ -74,13 +74,11 @@ pub(crate) fn execute(
             "herdr return: {nonce} may hold an unsubmitted prompt"
         ));
     }
-    // A fresh move to Herdr leaves the channel's tmux Claude running; the turn goes back to it,
-    // so nothing is resumed and only the Herdr execution ends.
-    let account = match ports.tmux(logical).liveness() {
-        Liveness::Ended => resumable(turn, record)?,
-        Liveness::Running => None,
-        Liveness::Unknown(why) => return Err(format!("herdr return: tmux {logical}: {why}")),
-    };
+    let account = resumable(turn, record)?;
+    // A fresh move to Herdr leaves the channel's tmux Claude running; it ends by its own `/exit`
+    // before Herdr is touched, so the tmux turn starts again on the session it resumes.
+    session_handoff::end_by_exit(&mut *ports.tmux(logical), ports.exit_wait())
+        .map_err(|why| format!("herdr return: tmux {logical}: {why}"))?;
     if record.state == HostedState::Bound {
         session_handoff::end_by_exit(&mut *ports.herdr(record), ports.exit_wait())?;
         let retire = retire_pg(turn.pool, &plan.row, &record.owner, nonce);
