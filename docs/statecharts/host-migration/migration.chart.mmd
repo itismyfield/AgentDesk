@@ -1,0 +1,77 @@
+---
+title: "Claude channel moving between tmux and Herdr with the same session, issue 7503"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Tmux
+    lg1: Herdr
+    lg2: Moving
+    lg3: Breaks NoDeadlock or RecordMatchesProcesses
+    lg4: Breaks NoDeadlock in some cases
+    lg5: Path to the NoDeadlock or RecordMatchesProcesses bug
+  }
+  class lg0 blue
+  class lg1 teal
+  class lg2 pink
+  class lg3 breaks
+  class lg4 mayBreak
+  class lg5 bugPath
+  s0: On tmux, no Claude running (set to tmux)
+  s1: On tmux, Claude running (set to tmux)
+  s2: On tmux, no Claude running (set to Herdr)
+  s3: On tmux, Claude running (set to Herdr)
+  s4: Herdr launch sent, not bound yet
+  s5: Herdr launch sent, not bound yet, old tmux Claude still runs
+  s6: On Herdr, Claude running (set to Herdr)
+  s7: On Herdr, Claude running (set to Herdr), old tmux Claude still runs
+  s8: On Herdr, Claude running (set to tmux)
+  s9: On Herdr, Claude running (set to tmux), old tmux Claude still runs
+  s10: Herdr Claude ended, row not retired (set to tmux)
+  s11: Row retired, move back unfinished (set to tmux)
+  s12: Back on tmux, no Claude running (set to tmux)
+  s13: Back on tmux, Claude running (set to tmux)
+  [*] --> s0
+  [*] --> s1
+  s0 --> s2: the server restarts, maybe with the other host set
+  s1 --> s3: the server restarts, maybe with the other host set
+  s2 --> s0: the server restarts, maybe with the other host set
+  s3 --> s3: you send a message
+  s3 --> s1: the server restarts, maybe with the other host set
+  s0 --> s1: tmux launches with --resume of the same session
+  s2 --> s4: Herdr launches with --resume of the same session or Herdr launches a fresh session [no session to resume]
+  s3 --> s2: the old tmux Claude gets /exit and ends
+  s3 --> s5: Herdr launches a fresh session [no session to resume]
+  s4 --> s6: the launch reports its start and binds the Herdr row
+  s5 --> s7: the launch reports its start and binds the Herdr row
+  s6 --> s8: the server restarts, maybe with the other host set
+  s7 --> s9: the server restarts, maybe with the other host set
+  s8 --> s10: the Herdr Claude gets /exit and ends
+  s9 --> s9: you send a message
+  s10 --> s11: the Herdr row is retired
+  s11 --> s12: the host marker is set to tmux
+  s12 --> s13: tmux launches with --resume of the same session
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
+  class s0 blue
+  class s1 blue
+  class s1 bugPath
+  class s2 blue
+  class s3 blue
+  class s3 bugPath
+  class s4 teal
+  class s5 teal
+  class s5 breaks
+  class s5 bugPath
+  class s6 teal
+  class s7 teal
+  class s7 breaks
+  class s7 bugPath
+  class s8 teal
+  class s8 mayBreak
+  class s9 teal
+  class s9 breaks
+  class s9 bugPath
+  class s10 pink
+  class s11 pink
+  class s12 blue
+  class s13 blue

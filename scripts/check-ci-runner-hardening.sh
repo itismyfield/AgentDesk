@@ -294,6 +294,10 @@ unless trigger_events == ["pull_request"]
   warn "#{path}: required PR contexts must be triggered only by pull_request"
   exit 1
 end
+unless trigger["pull_request"] == {"types" => %w[opened synchronize reopened ready_for_review]}
+  warn "#{path}: pull_request must retain the default events plus ready_for_review"
+  exit 1
+end
 script_check_shard_jobs = {
   "scripts" => "cargo",
   "scripts_guards" => "guards",
@@ -304,7 +308,7 @@ unless script_checks_job.is_a?(Hash)
   warn "#{path}: Script checks runner job (scripts) must be a YAML mapping"
   exit 1
 end
-unless script_checks_job["if"] == "${{ !cancelled() }}"
+unless script_checks_job["if"] == "${{ !github.event.pull_request.draft && !cancelled() }}"
   warn "#{path}: Script checks runner job must use !cancelled() for producer-failure fallback"
   exit 1
 end
@@ -318,15 +322,15 @@ unless script_checks_job["needs"] == "changes"
 end
 # Every job the CI required judge reads, with the exact if that runs it; the judge
 # accepts a skip only when the changes outputs say the job was not expected.
-rust_tests_gate = "${{ !cancelled() && needs.changes.outputs.rust_tests == 'true' }}"
-built_gate = "${{ !cancelled() && needs.rust_build.result == 'success' }}"
-relay_gate = "${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}"
-cross_os_gate = "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'"
+rust_tests_gate = "${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests == 'true' }}"
+built_gate = "${{ !github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success' }}"
+relay_gate = "${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}"
+cross_os_gate = "${{ !github.event.pull_request.draft && needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true' }}"
 expected_closure_if = {
-  "changes" => nil, "rust_build" => rust_tests_gate, "rust_tests" => built_gate, "test_evidence" => built_gate,
-  "lint" => "needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true'",
-  "scripts" => "${{ !cancelled() }}", "scripts_guards" => "${{ !cancelled() }}", "scripts_contracts" => "${{ !cancelled() }}",
-  "dashboard" => "needs.changes.outputs.dashboard == 'true'", "pg15_owner_proof" => rust_tests_gate,
+  "changes" => "${{ !github.event.pull_request.draft }}", "rust_build" => rust_tests_gate, "rust_tests" => built_gate, "test_evidence" => built_gate,
+  "lint" => "${{ !github.event.pull_request.draft && (needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true') }}",
+  "scripts" => "${{ !github.event.pull_request.draft && !cancelled() }}", "scripts_guards" => "${{ !github.event.pull_request.draft && !cancelled() }}", "scripts_contracts" => "${{ !github.event.pull_request.draft && !cancelled() }}",
+  "dashboard" => "${{ !github.event.pull_request.draft && needs.changes.outputs.dashboard == 'true' }}", "pg15_owner_proof" => rust_tests_gate,
   "relay_authority_mutations" => relay_gate,
   "check_fast_cross_os" => cross_os_gate, "check_fast_cross_os_targets" => cross_os_gate,
   "required_contexts" => "${{ always() }}",
@@ -375,6 +379,9 @@ expected_required_job = {
   "timeout-minutes" => 15,
   "permissions" => {"contents" => "read"},
   "steps" => [
+    {"name" => "Reject draft PR", "if" => "github.event.pull_request.draft",
+     "env" => {"BASH_ENV" => "/dev/null"}, "shell" => "bash",
+     "run" => "echo \"draft PR: CI runs when the PR is marked ready for review\"\nexit 1\n"},
     {"uses" => "actions/checkout@v4"},
     {"name" => "Verify pinned judge and CI structure", "id" => "pins", "continue-on-error" => true,
      "env" => {"BASH_ENV" => "/dev/null"}, "shell" => "bash", "run" => pin_run},
@@ -390,8 +397,12 @@ end
 required_key_node = jobs_node.children.each_slice(2).find { |key_node, _| key_node.is_a?(Psych::Nodes::Scalar) && key_node.value == "required_contexts" }&.first
 required_source = required_key_node && raw_job_source(path, required_key_node).gsub(/\b[0-9a-f]{64}\b/, "<sha256>")
 required_source_sha256 = required_source && Digest::SHA256.hexdigest(required_source)
-unless required_source_sha256 == "dc368dd623895b68351f29e8e0c46a21c2b718820cf45d25e74ab657423702a5"
+unless required_source_sha256 == "916b1fddd0fc5f85a8a125b927e6167c1560e32e42f65bab69c4df863c70499c"
   warn "#{path}: required_contexts source bytes changed (scalar tags/styles and exact step surface are pinned); found #{required_source_sha256 || '<missing>'}"
+  exit 1
+end
+unless jobs.all? { |id, job| id == "required_contexts" || job["if"].to_s.match?(/\A\$\{\{ !github\.event\.pull_request\.draft(?: && | \}\}\z)/) }
+  warn "#{path}: every non-judge job must defer draft PRs"
   exit 1
 end
 script_check_steps = Array(script_checks_job["steps"]).select do |step|
@@ -553,7 +564,7 @@ script_check_shard_jobs.each do |job_id, shard|
   expected_raw_shard_job = {
     "name" => "Script checks runner (#{shard})",
     "needs" => "changes",
-    "if" => "${{ !cancelled() }}",
+    "if" => "${{ !github.event.pull_request.draft && !cancelled() }}",
     "runs-on" => "ubuntu-latest",
     "timeout-minutes" => "45",
     "steps" => [
@@ -685,7 +696,7 @@ targets = {
   "rust_build" => {
     "label" => "nextest build and plan job", "name" => "Rust tests build and plan",
     "needs" => "changes", "if" => rust_tests_gate, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 100, "job_sha256" => "dad6d5b4c9c44754f640fec13d168f622e1df8be2723654af2a0e5643eb0d4b0",
+    "job_timeout_minutes" => 100, "job_sha256" => "ca0b5f75c9e2aad794a5cef33a393de0cc29a017017e484f5dc579e8142f8025",
     "cargo_steps" => {
       "Check Rust test source wiring" => {"commands" => ["python3 scripts/ci/rust_test_sources.py check"], "timeout_minutes" => nil, "env" => {"BASH_ENV" => "/dev/null"}},
       "Archive, list, compare and plan" => {
@@ -716,7 +727,7 @@ targets = {
   "rust_tests" => {
     "label" => "nextest worker job", "name" => "Rust tests (worker ${{ matrix.worker }})",
     "needs" => %w[changes rust_build], "if" => built_gate, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 75, "job_sha256" => "8f3b3092e27904b1fa84db80039bf5da6a1da78cd7709b71199dd44e49453e7f", "require_debug_env" => false,
+    "job_timeout_minutes" => 75, "job_sha256" => "cf5cfe84d889c91e0dbca7dc7512249bb1c873c1d9e701fd30adcf2714cd9dc6", "require_debug_env" => false,
     "cargo_steps" => {
       "Verify archive and plan" => {
         "commands" => ['python3 scripts/ci/nextest_ci.py verify-archive --plan "$RUNNER_TEMP/nextest/plan/plan.json" --worker ${{ matrix.worker }} --archive "$RUNNER_TEMP/nextest/lib-tests.tar.zst" --config "$RUNNER_TEMP/nextest/plan/worker-${{ matrix.worker }}.toml" --sha "$GITHUB_SHA" --record "$RUNNER_TEMP/nextest-result"'],
@@ -739,7 +750,7 @@ targets = {
   "test_evidence" => {
     "label" => "nextest evidence job", "name" => "Rust tests evidence",
     "needs" => %w[changes rust_build rust_tests], "if" => built_gate, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 15, "job_sha256" => "14d385240c0d4d6438308e41efd0bf308f0ba963bde15592d5c1615b9c61cf45", "require_debug_env" => false,
+    "job_timeout_minutes" => 15, "job_sha256" => "5b87ed3331e067487761fda779525791d9c3d7a46070f8466d685e8d13098be4", "require_debug_env" => false,
     "cargo_steps" => {
       "Audit worker results" => {
         "commands" => [
@@ -759,9 +770,9 @@ targets = {
     "label" => "cross-OS job",
     "name" => 'Fast check + non-PG tests (${{ matrix.os }})',
     "needs" => "changes",
-    "if" => "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'",
+    "if" => "${{ !github.event.pull_request.draft && needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true' }}",
     "runs_on" => '${{ matrix.os }}',
-    "job_sha256" => "17e9ab8a51ddb0e4ddf21ab10360dfcbfe13c814f54b259c82450df361221201",
+    "job_sha256" => "148f6669238504a554aa6f1c312f502c84eab13886df25c205ae4c08bb460aa5",
     "cargo_steps" => {
       "cargo check" => {
         "commands" => ["cargo check --workspace --all-targets"],
@@ -773,9 +784,9 @@ targets = {
     "label" => "cross-OS exact targets job",
     "name" => 'Windows exact targets (${{ matrix.os }})',
     "needs" => "changes",
-    "if" => "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'",
+    "if" => "${{ !github.event.pull_request.draft && needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true' }}",
     "runs_on" => '${{ matrix.os }}',
-    "job_sha256" => "e7c2d6080345a730efa6def33cced471dc6096257d125f10c92eef59d34d0876",
+    "job_sha256" => "5af310f0434fc4ee5227d916f2b9bf1113ea1d9e3b43f644890fe428dfccd9fc",
     "cargo_steps" => {
       "Writer namespace exact Windows targets" => {
         "commands" => ["./scripts/ci/run-writer-namespace-windows-targets.sh"],
@@ -801,7 +812,7 @@ targets = {
     "if" => rust_tests_gate,
     "runs_on" => "ubuntu-latest",
     "job_timeout_minutes" => 50,
-    "job_sha256" => "8969b3636cef97c616239bf3aff95df073f8d2a36afb5fe368f120013a7d78ca",
+    "job_sha256" => "9cefc4440d03462576f60b0fa8f8f577bc59583bfb3157f3ad6082af48ac393e",
     "cargo_steps" => {
       "PostgreSQL 15 exact owner proof" => {
         "commands" => ["python3 scripts/run_test_lane.py --lane pg --max-summaries 4 --expected-ids scripts/ci/pg15_required_ids.txt -- env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib -- --exact db::auto_queue::run_owner_guard_pg_tests::cancel_rereads_dispatch_claimed_mid_cancel_pg db::auto_queue::run_owner_guard_pg_tests::concurrent_phase_gate_saves_serialize_on_dispatch_row_pg db::auto_queue::run_owner_guard_pg_tests::force_pause_cleanup_waits_for_run_token_pg db::auto_queue::run_owner_guard_pg_tests::legacy_context_only_retry_cannot_escape_cancel_pg db::auto_queue::run_owner_guard_pg_tests::legacy_context_only_retry_waits_on_run_token_not_origin_row_pg db::auto_queue::run_owner_guard_pg_tests::phase_gate_context_create_refused_after_cancel_pg db::auto_queue::run_owner_guard_pg_tests::phase_gate_transfer_foreign_to_target_refused_after_cancel_pg db::auto_queue::run_owner_guard_pg_tests::phase_gate_transfer_target_to_foreign_serializes_with_cancel_pg db::auto_queue::run_owner_guard_pg_tests::rest_revival_refused_for_cancelled_owner_pg db::auto_queue::run_owner_guard_pg_tests::review_recovery_cas_rejects_direct_cancel_pg db::auto_queue::run_owner_guard_pg_tests::review_recovery_refuses_failed_dispatch_of_cancelled_run_pg db::auto_queue::run_owner_guard_pg_tests::review_recovery_waits_for_run_cancel_and_refuses_pg db::auto_queue::run_owner_guard_pg_tests::verdict_rollback_revival_refused_for_cancelled_owner_pg db::postgres::tests::postgres_json_extract_0058_up_and_down_preserve_array_path_behavior dispatch::dispatch_cancel::pg_observability_tests::cancel_run_lookup_ignores_malformed_legacy_context services::auto_queue::cancel_run::malformed_context_pg_tests::owner_context_extract_matrix_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_census_failure_rolls_back_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_counts_surviving_associated_dispatch_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_ignores_unrelated_malformed_context_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_end_ignores_unrelated_malformed_context_pg --test-threads=1"],
@@ -814,9 +825,9 @@ targets = {
     "label" => "relay-authority mutations job",
     "name" => "Relay authority mutations (${{ matrix.shard }})",
     "needs" => "changes",
-    "if" => "${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}",
+    "if" => "${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "43f7e213658325ad0454f1176bdb2673ba797c129c0acb873a8fc389faa81205",
+    "job_sha256" => "9e2f665589c7d1985275bcbcdd5a967be5b99c1c7e1cc73ce36b2677ff6a5b2b",
     "job_timeout_minutes" => 45,
     "cargo_steps" => {
       "Fetch Cargo dependencies" => {

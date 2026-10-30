@@ -59,7 +59,6 @@ pub(super) async fn commit_episode_side_effects(
             history: Vec::new(),
             pending_uploads: Vec::new(),
             cleared: false,
-            remote_profile_name: None,
             channel_id: Some(channel_id),
             channel_name: authoritative_state
                 .channel_name

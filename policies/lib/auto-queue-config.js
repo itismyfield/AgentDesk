@@ -4,15 +4,14 @@
  *
  * Runtime-config readers for the auto-queue policy. Every reader has a
  * safe fallback so policies keep running even if the corresponding config
- * key is unset or malformed. Kept here (not inline) so the config surface
+ * key is unset or malformed; key-table keys get theirs from `config.get`. Kept here (not inline) so the config surface
  * stays discoverable and the SQL condition builder — which is the only
  * non-trivial derived value — can be unit-tested independently.
  */
 
+// config.get resolves maxEntryRetries (kv, YAML, default 3) and floors it at 1.
 function configuredAutoQueueMaxEntryRetries() {
-  var configured = parseInt(agentdesk.config.get("maxEntryRetries"), 10);
-  if (!configured || configured < 1) return 3;
-  return configured;
+  return agentdesk.config.get("maxEntryRetries");
 }
 
 function configuredStaleDispatchedGraceMinutes() {

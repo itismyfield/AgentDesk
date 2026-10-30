@@ -15,8 +15,10 @@ mod runtime_config_put;
 #[cfg(test)]
 pub use resolve::clamp_retry_limit;
 pub use resolve::{
-    DISPATCH_GATE_DANGER_PCT, DISPATCH_GATE_ENABLED, RATE_LIMIT_STALE_SEC, Resolved,
-    RuntimeSetting, SettingSource, max_entry_retries, resolve_with_kv, runtime_config_field,
+    CONTEXT_COMPACT_LOWER_BOUND_TOKENS, CONTEXT_COMPACT_PERCENT, CONTEXT_COMPACT_PERCENT_CLAUDE,
+    CONTEXT_COMPACT_PERCENT_CODEX, DISPATCH_GATE_DANGER_PCT, DISPATCH_GATE_ENABLED,
+    RATE_LIMIT_STALE_SEC, Resolved, RowSetting, RuntimeSetting, SettingSource, max_entry_retries,
+    policy_kv_rows, policy_value, resolve_row, resolve_with_kv, runtime_config_field,
 };
 use runtime_config_put::with_explicit_runtime_config_keys;
 

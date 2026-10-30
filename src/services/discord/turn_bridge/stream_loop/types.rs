@@ -531,8 +531,10 @@ impl StreamLoopContext {
         })
     }
     pub(super) async fn compact_lower_bound_tokens(&self) -> u64 {
-        crate::services::discord::adk_session::fetch_context_thresholds(self.shared_owned.api_port)
-            .await
-            .compact_lower_bound_tokens
+        crate::services::discord::adk_session::fetch_context_thresholds(
+            self.shared_owned.pg_pool.as_ref(),
+        )
+        .await
+        .compact_lower_bound_tokens
     }
 }

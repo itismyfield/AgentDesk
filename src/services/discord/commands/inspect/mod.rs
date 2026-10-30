@@ -171,7 +171,8 @@ async fn load_context_config(
         .and_then(ProviderKind::from_str)
         .unwrap_or_else(|| ctx.data().provider.clone());
     let thresholds =
-        super::super::adk_session::fetch_context_thresholds(ctx.data().shared.api_port).await;
+        super::super::adk_session::fetch_context_thresholds(ctx.data().shared.pg_pool.as_ref())
+            .await;
     let model =
         super::resolve_model_for_turn(&ctx.data().shared, ctx.channel_id(), &provider).await;
     let context_window_tokens = provider.resolve_context_window(model.as_deref());

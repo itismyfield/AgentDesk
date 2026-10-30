@@ -224,7 +224,7 @@ class Win32BuildTokenWorkflowContractTests(unittest.TestCase):
         native = jobs["win32_build_token"]
         needs = native["needs"]
         self.assertEqual([needs] if isinstance(needs, str) else needs, ["changes"])
-        self.assertEqual(self._job_condition(native["if"]), "needs.changes.outputs.win32_build_token == 'true'")
+        self.assertEqual(self._job_condition(native["if"]), "!github.event.pull_request.draft && needs.changes.outputs.win32_build_token == 'true'")
         self.assertEqual(native["runs-on"], "windows-latest")
         self.assertIs(native.get("continue-on-error", False), False)
         setup = [step for step in native["steps"] if step.get("uses") == "actions/setup-python@v5"]
@@ -245,7 +245,7 @@ class Win32BuildTokenWorkflowContractTests(unittest.TestCase):
         ])
         mirror = jobs["win32_build_token_required_context"]
         self.assertEqual(mirror["needs"], ["changes", "win32_build_token"])
-        self.assertEqual(self._job_condition(mirror["if"]), "!cancelled()")
+        self.assertEqual(self._job_condition(mirror["if"]), "!github.event.pull_request.draft && !cancelled()")
         self.assertEqual(mirror["runs-on"], "ubuntu-latest")
         self.assertIs(mirror.get("continue-on-error", False), False)
         execution = [step for step in mirror["steps"] if "run" in step]
@@ -278,7 +278,7 @@ class Win32BuildTokenWorkflowContractTests(unittest.TestCase):
 
     def test_equivalent_native_needs_and_if_forms_preserve_required_lane_contract(self):
         import yaml
-        condition = "needs.changes.outputs.win32_build_token == 'true'"
+        condition = "!github.event.pull_request.draft && needs.changes.outputs.win32_build_token == 'true'"
         for needs in ("changes", ["changes"]):
             for expression in (condition, "${{ " + condition + " }}"):
                 with self.subTest(needs=needs, expression=expression):
@@ -288,7 +288,7 @@ class Win32BuildTokenWorkflowContractTests(unittest.TestCase):
 
     def test_equivalent_mirror_if_forms_preserve_required_lane_contract(self):
         import yaml
-        for expression in ("!cancelled()", "${{ !cancelled() }}"):
+        for expression in ("!github.event.pull_request.draft && !cancelled()", "${{ !github.event.pull_request.draft && !cancelled() }}"):
             with self.subTest(expression=expression):
                 document = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
                 document["jobs"]["win32_build_token_required_context"]["if"] = expression

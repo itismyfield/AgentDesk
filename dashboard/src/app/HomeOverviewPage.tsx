@@ -18,6 +18,33 @@ import { buildHomeWidgetSpecs } from "./HomeWidgetSpecs";
 import { FreshnessIndicator } from "../components/common/FreshnessIndicator";
 import { coerceTimestampMs } from "../components/agent-manager/kanban-utils";
 
+/**
+ * Loads the 7d token analytics for the home page. It passes no abort signal so
+ * the request shares an in-flight GET with other callers; the returned stop
+ * function only keeps later answers and errors away from an unmounted page.
+ */
+export function loadHomeTokenAnalytics(onData: (next: TokenAnalyticsResponse) => void): () => void {
+  let active = true;
+  const cachedAnalytics = api.getCachedTokenAnalytics("7d");
+  if (cachedAnalytics) {
+    onData(cachedAnalytics.data);
+  }
+  api
+    .getTokenAnalytics("7d", { suppressErrorToast: true })
+    .then((next) => {
+      if (!active) return;
+      onData(next);
+    })
+    .catch((error) => {
+      if (!active) return;
+      console.error("Failed to load token analytics for home overview", error);
+    });
+
+  return () => {
+    active = false;
+  };
+}
+
 export default function HomeOverviewPage({
   isMobileViewport,
   isKo,
@@ -171,29 +198,7 @@ export default function HomeOverviewPage({
   }));
 
 
-  useEffect(() => {
-    const controller = new AbortController();
-    let active = true;
-    const cachedAnalytics = api.getCachedTokenAnalytics("7d");
-    if (cachedAnalytics) {
-      setAnalytics(cachedAnalytics.data);
-    }
-    api
-      .getTokenAnalytics("7d", { signal: controller.signal })
-      .then((next) => {
-        if (!active) return;
-        setAnalytics(next);
-      })
-      .catch((error) => {
-        if (!active || controller.signal.aborted) return;
-        console.error("Failed to load token analytics for home overview", error);
-      });
-
-    return () => {
-      active = false;
-      controller.abort();
-    };
-  }, []);
+  useEffect(() => loadHomeTokenAnalytics(setAnalytics), []);
 
   useEffect(() => {
     if (typeof window === "undefined") return;

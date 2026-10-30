@@ -168,7 +168,6 @@ fn shared(v2: bool) -> Arc<SharedData> {
 async fn real_bridge_postlude_posts_one_terminal_summary_for_all_retired_mode_flags_and_outcomes() {
     let _isolation = Isolation::new();
     let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
-    assert!(crate::services::discord::footer_retirement::retired());
     let mut channel = 586_101;
     for v2 in [false, true] {
         for single in [false, true] {

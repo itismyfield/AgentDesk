@@ -3,7 +3,6 @@ use std::sync::mpsc::Sender;
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::provider::{CancelToken, ProviderKind};
-use crate::services::remote::RemoteProfile;
 
 pub fn execute_command_streaming(
     prompt: &str,
@@ -13,7 +12,6 @@ pub fn execute_command_streaming(
     system_prompt: Option<&str>,
     allowed_tools: Option<&[String]>,
     cancel_token: Option<Arc<CancelToken>>,
-    remote_profile: Option<&RemoteProfile>,
     tmux_session_name: Option<&str>,
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
@@ -28,7 +26,6 @@ pub fn execute_command_streaming(
         system_prompt,
         allowed_tools,
         cancel_token.as_deref(),
-        remote_profile,
         tmux_session_name,
         report_channel_id,
         report_provider,

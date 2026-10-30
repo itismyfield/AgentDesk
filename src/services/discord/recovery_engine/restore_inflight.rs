@@ -728,7 +728,6 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                                 history: Vec::new(),
                                 pending_uploads: Vec::new(),
                                 cleared: false,
-                                remote_profile_name: None,
                                 channel_id: Some(state.channel_id),
                                 channel_name: effective_channel_name.clone(),
                                 category_name: None,
@@ -744,10 +743,6 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                     restore_recovered_session_worktree(session, &state);
                 }
 
-                super::recovery_two_message_panel::recover_two_message_panel(
-                    http, shared, provider, &mut state,
-                )
-                .await;
                 let finish_mailbox_on_completion =
                     reregister_active_turn_from_inflight(shared, &state).await;
 
@@ -1778,10 +1773,6 @@ pub(in crate::services::discord) async fn restore_inflight_states(
             recovery_phase_after_tmux_probe(true, Some(pane_alive)),
             RecoveryPhase::WatcherReattach
         ) {
-            super::recovery_two_message_panel::recover_two_message_panel(
-                http, shared, provider, &mut state,
-            )
-            .await;
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] ↻ inflight recovery: pane alive for channel {}, spawning watcher immediately",
@@ -1892,7 +1883,6 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                         history: Vec::new(),
                         pending_uploads: Vec::new(),
                         cleared: false,
-                        remote_profile_name: None,
                         channel_id: Some(channel_id.get()),
                         channel_name: effective_channel_name.clone(),
                         category_name: None,
@@ -1911,10 +1901,6 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                 restore_recovered_session_worktree(session, &state);
             }
 
-            super::recovery_two_message_panel::recover_two_message_panel(
-                http, shared, provider, &mut state,
-            )
-            .await;
             let finish_mailbox_on_completion =
                 reregister_active_turn_from_inflight(shared, &state).await;
 
@@ -2169,7 +2155,6 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                     history: Vec::new(),
                     pending_uploads: Vec::new(),
                     cleared: false,
-                    remote_profile_name: None,
                     channel_id: Some(channel_id.get()),
                     channel_name: channel_name.clone(),
                     category_name: None,
@@ -2186,7 +2171,6 @@ pub(in crate::services::discord) async fn restore_inflight_states(
             if session.channel_name.is_none() {
                 session.channel_name = channel_name.clone();
             }
-            session.remote_profile_name = None;
             restore_recovered_session_worktree(session, &state);
         }
 
@@ -2313,13 +2297,13 @@ pub(in crate::services::discord) async fn restore_inflight_states(
         state.session_key = state.session_key.or_else(|| adk_session_key.clone());
         state.dispatch_id = state.dispatch_id.or_else(|| recovery_dispatch_id.clone());
         // #3166: read the real configured thresholds (e.g.
-        // `context_compact_percent_claude`) instead of `ContextThresholds::default()`
+        // `context_compact_percent_claude`) instead of the compiled defaults
         // so the recovered turn's status panel reflects the user-set auto-compact
         // percent, matching the live launch paths (intake_turn/headless_turn).
         // This is the display ratio; Claude's launch script derives an absolute
         // `CLAUDE_CODE_AUTO_COMPACT_WINDOW` when its launch model is known.
         let recovery_compact_percent =
-            super::adk_session::fetch_context_thresholds(shared.api_port)
+            super::adk_session::fetch_context_thresholds(shared.pg_pool.as_ref())
                 .await
                 .compact_pct_for(&provider);
         if !state.silent_turn {

@@ -23,7 +23,16 @@ fn owes(owed: usize, prepared: usize, uncaptured: usize, binding_pending: usize)
         uncaptured,
         binding_pending,
         asked: 1,
+        ..Undelivered::default()
     }
+}
+
+/// The counts the actor published, without its per-source capture positions.
+fn counts(owed: &watch::Receiver<Option<Undelivered>>) -> Option<Undelivered> {
+    owed.borrow().clone().map(|owed| Undelivered {
+        captured: Vec::new(),
+        ..owed
+    })
 }
 
 /// A piece left `Prepared` by a crash, with no result recorded.
@@ -81,7 +90,7 @@ async fn the_actor_publishes_each_undelivered_responsibility_until_it_clears() {
     let (stop, task, owed, demand) = spawn_owing(writer, Arc::clone(&bindings), claude);
     let _wanting = demand.want();
     polls(2).await;
-    assert_eq!(*owed.borrow(), Some(owes(0, 1, 0, 0)), "an open Prepared");
+    assert_eq!(counts(&owed), Some(owes(0, 1, 0, 0)), "an open Prepared");
 
     let torn = row("m2", "two");
     let (head, tail) = torn.split_at(torn.len() / 2);
@@ -94,7 +103,7 @@ async fn the_actor_publishes_each_undelivered_responsibility_until_it_clears() {
     bindings.commit(bound(2, Some(&a), pending, BindingCause::Clear, None));
     polls(2).await;
     assert_eq!(
-        *owed.borrow(),
+        counts(&owed),
         Some(owes(2, 1, 1, 1)),
         "without ownership the piece, the torn line and the pending bind all wait"
     );
@@ -103,7 +112,7 @@ async fn the_actor_publishes_each_undelivered_responsibility_until_it_clears() {
     harness.gate.acquired();
     polls(35).await;
     assert_eq!(harness.port.posts(), ["one"]);
-    assert_eq!(*owed.borrow(), Some(owes(0, 0, 1, 1)), "posted and settled");
+    assert_eq!(counts(&owed), Some(owes(0, 0, 1, 1)), "posted and settled");
     append(&path, tail);
     let next = path.with_file_name("s2.jsonl");
     std::fs::write(&next, row("n1", "new")).unwrap();
@@ -114,13 +123,13 @@ async fn the_actor_publishes_each_undelivered_responsibility_until_it_clears() {
     bindings.commit(event(3, resolved, Utc::now()));
     polls(3).await;
     assert_eq!(harness.port.posts(), ["one", "two", "new"]);
-    assert_eq!(*owed.borrow(), Some(owes(0, 0, 0, 0)), "all clear");
+    assert_eq!(counts(&owed), Some(owes(0, 0, 0, 0)), "all clear");
 
     let store = path.parent().unwrap().join("o_store");
     let boundary = store.join(CHANNEL.to_string()).join(BOUNDARY_FILE);
     std::fs::write(&boundary, b"{not json").unwrap();
     polls(2).await;
-    assert_eq!(*owed.borrow(), None, "unreadable is not zero");
+    assert_eq!(counts(&owed), None, "unreadable is not zero");
     halt(stop, task).await;
     assert!(owed.has_changed().is_err(), "the ended actor dropped it");
 }
@@ -137,7 +146,7 @@ async fn a_channel_without_herdr_publishes_nothing_and_counts_no_posts() {
     append(&path, &row("m1", "one"));
     polls(3).await;
     assert_eq!(harness.port.posts(), ["one"]);
-    assert_eq!(*owed.borrow(), None);
+    assert_eq!(counts(&owed), None);
     assert!(!owed.has_changed().unwrap(), "never published");
     assert_eq!(undelivered_reads_for_test(), 0);
     assert_eq!(posts_in_flight(CHANNEL), Some(0));
@@ -167,14 +176,14 @@ async fn an_announced_unit_counts_as_unsealed_until_its_record_seals_it() {
         unsealed: 1,
         ..owes(0, 0, 0, 0)
     };
-    assert_eq!(*owed.borrow(), Some(unsealed));
+    assert_eq!(counts(&owed), Some(unsealed));
     let sealed = serde_json::json!({"type": "response_item", "payload": {
         "type": "message", "role": "assistant", "id": "msg_c1",
         "content": [{"type": "output_text", "text": "hello"}]}});
     append(&path, &codex(sealed));
     polls(3).await;
     assert_eq!(harness.port.posts(), ["hello"]);
-    assert_eq!(*owed.borrow(), Some(owes(0, 0, 0, 0)), "sealed and posted");
+    assert_eq!(counts(&owed), Some(owes(0, 0, 0, 0)), "sealed and posted");
     halt(stop, task).await;
 }
 
@@ -253,7 +262,192 @@ async fn local_retry_pending_budget_is_owed_even_with_no_ordinary_work_or_open_p
     let (stop, task, owed, demand) = spawn_owing(writer, bindings, ShadowProvider::Claude);
     let _wanting = demand.want();
     polls(3).await;
-    assert_eq!(*owed.borrow(), Some(owes(1, 0, 0, 0)));
+    assert_eq!(counts(&owed), Some(owes(1, 0, 0, 0)));
     assert!(harness.port.posts().is_empty());
+    halt(stop, task).await;
+}
+
+/// `startup_log` for a channel other than `CHANNEL`.
+fn startup_log_on(writer: &mut Writer, channel: u64) -> Arc<FakeBindings> {
+    let bindings = Arc::new(FakeBindings::new());
+    let sources: Vec<SourceId> = writer.store().cursors().map(|c| c.source.clone()).collect();
+    for (seq, source) in (1..).zip(sources) {
+        let target = BindingTarget::Source(source);
+        let mut startup = bound(seq, None, target, BindingCause::Startup, None);
+        startup.channel_id = channel;
+        bindings.commit(startup);
+    }
+    bindings
+}
+
+/// A confirmed turn-mode channel's actor answers the carried-turn close only while asked,
+/// with each source's real capture and the debts the close requires to be zero.
+#[tokio::test(start_paused = true)]
+async fn actual_actor_uncaptured_end_cannot_close_carried_turn() {
+    let channel = 7_533_201;
+    let _turns = crate::services::tui_o::turn_mode::TestConfirmation::new(channel);
+    let (harness, path, _) = switched_over_on(channel, &row("m0", "before"));
+    harness.gate.acquired();
+    let mut writer = harness.writer();
+    let bindings = startup_log_on(&mut writer, channel);
+    let (stop, task, owed, demand) = spawn_owing(writer, bindings, ShadowProvider::Claude);
+    polls(3).await;
+    assert!(
+        !owed.has_changed().unwrap(),
+        "nobody asked, so nothing is read"
+    );
+    let wanting = demand.want();
+    polls(2).await;
+    let len = std::fs::metadata(&path).unwrap().len();
+    let drained = owed.borrow().clone().expect("a turn-mode channel answers");
+    assert!(drained.asked >= wanting.asked());
+    assert_eq!(
+        counts(&owed),
+        Some(Undelivered {
+            asked: drained.asked,
+            ..owes(0, 0, 0, 0)
+        })
+    );
+    assert_eq!(
+        drained.captured,
+        vec![(path.clone(), len)],
+        "captured through the end"
+    );
+
+    // The last reply and its end land before the actor's next poll: the published capture is
+    // behind them, so no close can stand on it.
+    append(&path, &row("m1", "last"));
+    let end = std::fs::metadata(&path).unwrap().len();
+    let stale = owed.borrow().clone().unwrap();
+    assert!(stale.captured.iter().all(|(_, through)| *through < end));
+    polls(2).await;
+    let caught = owed.borrow().clone().unwrap();
+    assert_eq!(caught.captured, vec![(path.clone(), end)]);
+    assert_eq!(harness.port.posts(), ["last"]);
+
+    // A line still being written is read past by the file length but not captured: the actor
+    // publishes where its capture stands, never the length.
+    let torn = row("m2", "torn");
+    let (head, tail) = torn.split_at(torn.len() / 2);
+    append(&path, head);
+    polls(2).await;
+    let partial = owed.borrow().clone().unwrap();
+    let len = std::fs::metadata(&path).unwrap().len();
+    assert_eq!(partial.uncaptured, 1, "{partial:?}");
+    assert_eq!(
+        partial.captured,
+        vec![(path.clone(), end)],
+        "short of the torn line"
+    );
+    assert!(end < len);
+    append(&path, tail);
+    polls(2).await;
+    let whole = std::fs::metadata(&path).unwrap().len();
+    assert_eq!(
+        owed.borrow().clone().unwrap().captured,
+        vec![(path.clone(), whole)]
+    );
+    halt(stop, task).await;
+}
+
+/// A piece captured but whose POST is still running keeps `posting`, so it is not drained.
+#[tokio::test(start_paused = true)]
+async fn actual_actor_captured_unposted_end_keeps_carried_turn() {
+    let channel = 7_533_202;
+    let _turns = crate::services::tui_o::turn_mode::TestConfirmation::new(channel);
+    let (harness, path, _) = switched_over_on(channel, &row("m0", "before"));
+    harness.gate.acquired();
+    let release = held_post(&harness);
+    let mut writer = harness.writer();
+    let bindings = startup_log_on(&mut writer, channel);
+    let (stop, task, owed, demand) = spawn_owing(writer, bindings, ShadowProvider::Claude);
+    let _wanting = demand.want();
+    append(&path, &row("m1", "held"));
+    polls(3).await;
+    let held = owed.borrow().clone().unwrap();
+    let end = std::fs::metadata(&path).unwrap().len();
+    assert!(
+        held.captured.iter().any(|(_, through)| *through == end),
+        "captured"
+    );
+    assert!(
+        held.posting + held.prepared + held.owed > 0,
+        "an unfinished POST is still owed: {held:?}"
+    );
+    release.send(()).unwrap();
+    polls(3).await;
+    assert_eq!(harness.port.posts(), ["held"]);
+    let done = owed.borrow().clone().unwrap();
+    assert_eq!((done.posting, done.prepared, done.owed), (0, 0, 0));
+
+    // A POST another writer of the channel is running is published on its own.
+    let release = held_post(&harness);
+    let mut other = harness.writer();
+    let running = tokio::spawn(async move { other.deliver(&piece("m9", "other")).await });
+    polls(2).await;
+    let posting = owed.borrow().clone().unwrap();
+    assert_eq!(posting.posting, 1, "{posting:?}");
+    release.send(()).unwrap();
+    running.await.unwrap();
+    halt(stop, task).await;
+}
+
+/// The close's read takes only a poll that read the store after it asked: an earlier zero is
+/// passed over for the debt the next poll finds.
+#[tokio::test(start_paused = true)]
+async fn undelivered_request_rejects_pre_request_publication() {
+    let channel = 7_533_203;
+    let _turns = crate::services::tui_o::turn_mode::TestConfirmation::new(channel);
+    let (harness, path, _) = switched_over_on(channel, b"");
+    let mut writer = harness.writer();
+    let bindings = startup_log_on(&mut writer, channel);
+    let (stop, task, owed, demand) = spawn_owing(writer, bindings, ShadowProvider::Claude);
+    let readiness = super::super::super::host::Readiness::default();
+    let view = super::super::super::host::OwedView {
+        published: owed.clone(),
+        demand: demand.clone(),
+    };
+    readiness.track_owed_for_test(channel, view);
+    let first = readiness
+        .undelivered_after(channel, Duration::from_secs(3))
+        .await
+        .expect("an answer");
+    assert_eq!(first.owed, 0, "nothing owed yet");
+    // Not owned: the new piece stays owed. The earlier zero is still the latest publication.
+    append(&path, &row("m1", "owed"));
+    assert_eq!(owed.borrow().as_ref().map(|owed| owed.owed), Some(0));
+    let fresh = readiness
+        .undelivered_after(channel, Duration::from_secs(3))
+        .await
+        .expect("an answer");
+    assert!(fresh.asked > first.asked);
+    assert!(
+        fresh.owed > 0,
+        "the poll after the ask found the piece: {fresh:?}"
+    );
+    halt(stop, task).await;
+}
+
+/// A bind not applied yet keeps `binding_pending`, so no capture can be read as complete.
+#[tokio::test(start_paused = true)]
+async fn unapplied_binding_cannot_publish_close_proof() {
+    let channel = 7_533_204;
+    let _turns = crate::services::tui_o::turn_mode::TestConfirmation::new(channel);
+    let (harness, path, a) = switched_over_on(channel, &row("m0", "before"));
+    let mut writer = harness.writer();
+    let bindings = startup_log_on(&mut writer, channel);
+    let (stop, task, owed, demand) =
+        spawn_owing(writer, Arc::clone(&bindings), ShadowProvider::Claude);
+    let _wanting = demand.want();
+    let pending = BindingTarget::Pending {
+        payload_session_id: "s2".into(),
+        payload_transcript_path: path.with_file_name("s2.jsonl"),
+    };
+    let mut clear = bound(2, Some(&a), pending, BindingCause::Clear, None);
+    clear.channel_id = channel;
+    bindings.commit(clear);
+    polls(2).await;
+    let waiting = owed.borrow().clone().unwrap();
+    assert!(waiting.binding_pending >= 1, "{waiting:?}");
     halt(stop, task).await;
 }

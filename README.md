@@ -455,14 +455,20 @@ AgentDesk keeps settings in multiple surfaces on purpose. The contract is per-su
 <!-- BEGIN GENERATED: runtime setting precedence -->
 <!-- Generated from the key table in src/services/settings/resolve; regenerate: ADK_WRITE_SETTINGS_PRECEDENCE_DOC=1 cargo test --lib services::settings::resolve:: -->
 
-Rust readers resolve these `runtime-config` keys with `settings::resolve`: the persisted value when it outranks YAML, else the node's YAML snapshot, else the default.
+Rust readers and policy `agentdesk.config.get` resolve these keys with `settings::resolve`: the persisted value when it outranks YAML, else the node's YAML snapshot, else the default. An unreadable kv layer falls through to YAML and the default.
 
-| `runtime-config` field | YAML field | Default | Persisted value outranks YAML when |
+| Persisted value | YAML field | Default | Persisted value outranks YAML when |
 |---|---|---|---|
-| `dispatchRateLimitGateEnabled` | `runtime.dispatch_rate_limit_gate_enabled` | `true` | it is listed in `__runtimeConfigExplicitKeys` or differs from the default |
-| `dispatchRateLimitGateDangerPct` | `runtime.dispatch_rate_limit_gate_danger_pct` | `100` | it is listed in `__runtimeConfigExplicitKeys` or differs from the default |
-| `rateLimitStaleSec` | `runtime.rate_limit_stale_sec` | `600` | it is listed in `__runtimeConfigExplicitKeys` or differs from the default |
-| `maxEntryRetries` | `runtime.max_entry_retries` | `3` | it has the expected JSON type |
+| `runtime-config` field `dispatchRateLimitGateEnabled` | `runtime.dispatch_rate_limit_gate_enabled` | `true` | it is listed in `__runtimeConfigExplicitKeys` or differs from the default |
+| `runtime-config` field `dispatchRateLimitGateDangerPct` | `runtime.dispatch_rate_limit_gate_danger_pct` | `100` | it is listed in `__runtimeConfigExplicitKeys` or differs from the default |
+| `runtime-config` field `rateLimitStaleSec` | `runtime.rate_limit_stale_sec` | `600` | it is listed in `__runtimeConfigExplicitKeys` or differs from the default |
+| `runtime-config` field `maxEntryRetries` | `runtime.max_entry_retries` | `3` | it has the expected JSON type |
+| `kv_meta` row `requested_timeout_min` | `runtime.requested_timeout_min` | `45` | it parses as a non-negative integer; every layer is raised to at least 1 |
+| `kv_meta` row `in_progress_stale_min` | `runtime.in_progress_stale_min` | `120` | it parses as a non-negative integer; every layer is raised to at least 1 |
+| `kv_meta` row `context_compact_percent` | `runtime.context_compact_percent` | `60` | it parses as a non-negative integer |
+| `kv_meta` row `context_compact_percent_codex` | `runtime.context_compact_percent_codex` | `100` | it parses as a non-negative integer |
+| `kv_meta` row `context_compact_percent_claude` | `runtime.context_compact_percent_claude` | the `context_compact_percent` value | it parses as a non-negative integer |
+| `kv_meta` row `context_compact_lower_bound_tokens` | `runtime.context_compact_lower_bound_tokens` | `300000` | it parses as a non-negative integer |
 <!-- END GENERATED: runtime setting precedence -->
 
 Only a single node (`cluster.enabled: false`) or the `cluster.role: hub` node seeds YAML into `kv_meta` at boot. Runner and auto nodes read the hub's seeded values and fail startup until the hub has initialized `server_port` and `runtime-config`; see the ADR's seeding ownership section.

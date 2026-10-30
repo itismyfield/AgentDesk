@@ -976,3 +976,5 @@ pub(super) async fn handle_runtime_handoff_loop_message(
 
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use tests::codex_replacement::adopt_codex_replacement_for_test;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use tests::read_error_fallback::hand_failed_followup_read_to_watcher_for_test;

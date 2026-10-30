@@ -89,11 +89,6 @@ static PROVIDER_RUNTIME_MODE: LazyLock<RwLock<BTreeMap<String, bool>>> =
 static PROVIDER_RUNTIME_MODE_BY_CHANNEL: LazyLock<RwLock<BTreeMap<(String, u64), bool>>> =
     LazyLock::new(|| RwLock::new(BTreeMap::new()));
 
-/// Issue #2193 — runtime mirror of `providers.codex.remote_ssh_enabled`.
-/// Defaults to `false`; the bootstrap step hard-fails before this can be
-/// flipped on without the ADR prerequisites in place.
-static CODEX_REMOTE_SSH_ENABLED: LazyLock<RwLock<bool>> = LazyLock::new(|| RwLock::new(false));
-
 /// Serializes tests that install the process-wide hosting config.
 #[cfg(test)]
 pub(crate) static TEST_CONFIG_LOCK: LazyLock<std::sync::Mutex<()>> =
@@ -231,29 +226,6 @@ pub fn install_provider_hosting_config(config: &Config) {
         channel_summary = runtime_mode_channel_summary,
         "provider per-channel runtime_mode config installed"
     );
-
-    // Issue #2193 — mirror the codex remote SSH gate into a runtime cell
-    // the dispatch path can read without re-parsing the full Config.
-    let remote_ssh = config.codex_remote_ssh_enabled();
-    *CODEX_REMOTE_SSH_ENABLED
-        .write()
-        .unwrap_or_else(|error| error.into_inner()) = remote_ssh;
-    tracing::info!(
-        codex_remote_ssh_enabled = remote_ssh,
-        "codex remote SSH gate runtime mirror installed"
-    );
-}
-
-/// Issue #2193 — runtime read of the codex remote SSH gate.
-///
-/// `services::codex::execute_command_streaming` calls this on every
-/// dispatch where `remote_profile.is_some()`. Together with
-/// `services::codex_remote_policy::PREREQUISITES_SATISFIED`, this is
-/// the second line of defense beyond the bootstrap hard-fail.
-pub fn codex_remote_ssh_enabled() -> bool {
-    *CODEX_REMOTE_SSH_ENABLED
-        .read()
-        .unwrap_or_else(|error| error.into_inner())
 }
 
 pub fn resolve_provider_session_selection(provider: &ProviderKind) -> ProviderSessionSelection {
@@ -637,40 +609,6 @@ mod tests {
         );
     }
 
-    // Issue #2193 — gate mirror defaults to false and only flips when
-    // the operator explicitly sets the flag in `providers.codex`.
-    #[test]
-    fn codex_remote_ssh_gate_defaults_off() {
-        let _guard = TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        install_provider_hosting_config(&Config::default());
-
-        assert!(!codex_remote_ssh_enabled());
-    }
-
-    #[test]
-    fn codex_remote_ssh_gate_mirrors_explicit_true() {
-        let _guard = TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let mut config = Config::default();
-        config.providers.insert(
-            "codex".to_string(),
-            ProviderConfig {
-                remote_ssh_enabled: Some(true),
-                ..ProviderConfig::default()
-            },
-        );
-        install_provider_hosting_config(&config);
-
-        assert!(codex_remote_ssh_enabled());
-
-        // Reset for other tests.
-        install_provider_hosting_config(&Config::default());
-        assert!(!codex_remote_ssh_enabled());
-    }
-
     #[test]
     fn runtime_mode_parse_accepts_canonical_and_aliases() {
         assert_eq!(RuntimeMode::parse("pipe"), Some(RuntimeMode::Pipe));
@@ -700,7 +638,6 @@ mod tests {
             ProviderConfig {
                 tui_hosting: Some(true),
                 runtime: Some("pipe".to_string()),
-                ..ProviderConfig::default()
             },
         );
         install_provider_hosting_config(&config);
@@ -725,7 +662,6 @@ mod tests {
             ProviderConfig {
                 tui_hosting: Some(false),
                 runtime: Some("tui".to_string()),
-                ..ProviderConfig::default()
             },
         );
         install_provider_hosting_config(&config);
@@ -750,7 +686,6 @@ mod tests {
             ProviderConfig {
                 tui_hosting: Some(true),
                 runtime: Some("tui".to_string()),
-                ..ProviderConfig::default()
             },
         );
         config.agents.push(test_agent_with_claude_channel_runtime(
@@ -793,7 +728,6 @@ mod tests {
             ProviderConfig {
                 tui_hosting: Some(false),
                 runtime: Some("tui".to_string()),
-                ..ProviderConfig::default()
             },
         );
 
@@ -820,7 +754,6 @@ mod tests {
             ProviderConfig {
                 tui_hosting: Some(true),
                 runtime: Some("pipe".to_string()),
-                ..ProviderConfig::default()
             },
         );
         config.agents.push(test_agent_with_claude_channel(
@@ -875,7 +808,6 @@ mod tests {
             ProviderConfig {
                 tui_hosting: Some(true),
                 runtime: Some("pipe".to_string()),
-                ..ProviderConfig::default()
             },
         );
         // Other providers default to no TUI, so this should be false overall.
@@ -895,7 +827,6 @@ mod tests {
             ProviderConfig {
                 tui_hosting: Some(true),
                 runtime: Some("bogus".to_string()),
-                ..ProviderConfig::default()
             },
         );
         install_provider_hosting_config(&config);
@@ -930,7 +861,6 @@ mod tests {
                 ProviderConfig {
                     runtime: provider_runtime.map(str::to_owned),
                     tui_hosting: Some(legacy),
-                    ..ProviderConfig::default()
                 },
             );
             config.agents.push(test_agent_with_claude_channel_runtime(
