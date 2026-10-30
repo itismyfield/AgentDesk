@@ -347,6 +347,83 @@ pub async fn prewarm_token_analytics_cache() {
     }
 }
 
+/// Short in-process cache for `/api/receipt`, keyed by the resolved window
+/// (period and start), so tabs polling one window share a single ~1 min scan
+/// while a new day or rate-limit window never reuses the previous result.
+const RECEIPT_CACHE_TTL: StdDuration = StdDuration::from_secs(30);
+
+type CachedReceipt = (Instant, Arc<receipt::ReceiptData>);
+
+static RECEIPT_CACHE: LazyLock<Mutex<HashMap<String, CachedReceipt>>> =
+    LazyLock::new(Default::default);
+static RECEIPT_COLLECT_LOCKS: LazyLock<KeyedLocks> = LazyLock::new(KeyedLocks::default);
+
+/// Minute precision keeps the rolling fallback windows (`now - N days`) shareable.
+fn receipt_cache_key(period_id: &str, start: chrono::DateTime<chrono::Utc>) -> String {
+    format!("{period_id}@{}", start.timestamp().div_euclid(60))
+}
+
+fn read_cached_receipt(key: &str) -> Option<Arc<receipt::ReceiptData>> {
+    let cache = RECEIPT_CACHE.lock().ok()?;
+    let (cached_at, data) = cache.get(key)?;
+    (cached_at.elapsed() <= RECEIPT_CACHE_TTL).then(|| Arc::clone(data))
+}
+
+fn write_cached_receipt(key: String, data: Arc<receipt::ReceiptData>) {
+    if let Ok(mut cache) = RECEIPT_CACHE.lock() {
+        cache.retain(|_, (cached_at, _)| cached_at.elapsed() <= RECEIPT_CACHE_TTL);
+        cache.insert(key, (Instant::now(), data));
+    }
+}
+
+/// Cache-or-collect for one resolved receipt window; the flag is true when the
+/// data came from the cache. Misses run single-flight per window in a detached
+/// task, so an aborted request still fills the cache.
+async fn cached_or_collect_receipt_using<Collect>(
+    period_id: &'static str,
+    start: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+    label: &'static str,
+    collect: Collect,
+) -> Result<(Arc<receipt::ReceiptData>, bool), String>
+where
+    Collect: FnOnce(
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+            &str,
+        ) -> receipt::ReceiptData
+        + Send
+        + 'static,
+{
+    let key = receipt_cache_key(period_id, start);
+    if let Some(cached) = read_cached_receipt(&key) {
+        return Ok((cached, true));
+    }
+    let task_key = key.clone();
+    let work = async move {
+        if let Some(cached) = read_cached_receipt(&task_key) {
+            return Ok((cached, true));
+        }
+        let started = Instant::now();
+        let data = tokio::task::spawn_blocking(move || collect(start, now, label))
+            .await
+            .map_err(|error| format!("collection failed: {error}"))?;
+        tracing::info!(
+            period = period_id,
+            start = %start,
+            elapsed_ms = started.elapsed().as_millis(),
+            "receipt collected"
+        );
+        let data = Arc::new(data);
+        write_cached_receipt(task_key, Arc::clone(&data));
+        Ok((data, false))
+    };
+    RECEIPT_COLLECT_LOCKS
+        .run_detached(&key, work)
+        .await
+        .map_err(|error| format!("collection failed: {error}"))?
+}
+
 /// GET /api/receipt?period=month
 pub async fn get_receipt(
     State(state): State<AppState>,
@@ -356,7 +433,7 @@ pub async fn get_receipt(
     let now = chrono::Utc::now();
     let local_now = now.with_timezone(&Local);
 
-    let (start, label) = match period {
+    let (period_id, start, label) = match period {
         "today" => {
             // Local midnight (not UTC) so "Today" matches the user's calendar day.
             let local_midnight = Local
@@ -371,7 +448,7 @@ pub async fn get_receipt(
                 .single()
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|| now - chrono::Duration::hours(24));
-            (local_midnight, "Today")
+            ("today", local_midnight, "Today")
         }
         "week" => {
             // Calendar week: Monday 00:00 local time.
@@ -382,7 +459,7 @@ pub async fn get_receipt(
                 .single()
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|| now - chrono::Duration::days(7));
-            (local_monday, "This Week")
+            ("week", local_monday, "This Week")
         }
         "month" => {
             // Calendar month: 1st day 00:00 local time.
@@ -391,7 +468,7 @@ pub async fn get_receipt(
                 .single()
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|| now - chrono::Duration::days(30));
-            (first, "This Month")
+            ("month", first, "This Month")
         }
         "ratelimit" => {
             let ws = match state.pg_pool.as_ref() {
@@ -399,28 +476,32 @@ pub async fn get_receipt(
                 None => None,
             };
             (
+                "ratelimit",
                 ws.unwrap_or_else(|| now - chrono::Duration::days(7)),
                 "Rate Limit Window",
             )
         }
         "all" => (
+            "all",
             chrono::DateTime::from_timestamp(0, 0).unwrap_or(now - chrono::Duration::days(3650)),
             "All Time",
         ),
-        _ => (now - chrono::Duration::days(30), "Last 30 Days"),
+        _ => ("default", now - chrono::Duration::days(30), "Last 30 Days"),
     };
 
-    let label_owned = label.to_string();
-    let data = match tokio::task::spawn_blocking(move || receipt::collect(start, now, &label_owned))
-        .await
-    {
-        Ok(d) => d,
-        Err(e) => {
-            return Err(AppError::internal(format!("collection failed: {e}")));
-        }
-    };
+    let started = Instant::now();
+    let (data, from_cache) =
+        cached_or_collect_receipt_using(period_id, start, now, label, receipt::collect)
+            .await
+            .map_err(AppError::internal)?;
+    tracing::info!(
+        period = period_id,
+        cache_state = if from_cache { "hit" } else { "miss" },
+        elapsed_ms = started.elapsed().as_millis(),
+        "receipt responded"
+    );
 
-    Ok((StatusCode::OK, Json(json!(data))))
+    Ok((StatusCode::OK, Json(json!(data.as_ref()))))
 }
 
 /// GET /api/token-analytics?period=30d&fresh=1
@@ -805,6 +886,161 @@ mod tests {
         .expect("the period lock must not stay held after a panic")
         .expect("next result");
         assert_eq!(next.cache_state, TokenAnalyticsCacheState::Miss);
+    }
+
+    /// A receipt window no other test uses, so parallel tests never share a key.
+    fn unique_receipt_start() -> chrono::DateTime<chrono::Utc> {
+        let suffix = TEST_PERIOD_SUFFIX.fetch_add(1, Ordering::SeqCst) as i64;
+        chrono::DateTime::from_timestamp(1_000_000 + suffix * 86_400, 0).expect("test start")
+    }
+
+    fn counting_receipt_collect(
+        count: &Arc<AtomicUsize>,
+        delay: StdDuration,
+    ) -> impl FnOnce(
+        chrono::DateTime<chrono::Utc>,
+        chrono::DateTime<chrono::Utc>,
+        &str,
+    ) -> ReceiptData
+    + Send
+    + 'static {
+        let count = Arc::clone(count);
+        move |_start, _now, label| {
+            count.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(delay);
+            empty_receipt_data(label)
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_receipt_requests_for_one_window_collect_once() {
+        let start = unique_receipt_start();
+        let now = chrono::Utc::now();
+        let collect_count = Arc::new(AtomicUsize::new(0));
+
+        let (first, second) = tokio::join!(
+            cached_or_collect_receipt_using(
+                "month",
+                start,
+                now,
+                "This Month",
+                counting_receipt_collect(&collect_count, StdDuration::from_millis(50)),
+            ),
+            cached_or_collect_receipt_using(
+                "month",
+                start,
+                now,
+                "This Month",
+                counting_receipt_collect(&collect_count, StdDuration::ZERO),
+            ),
+        );
+
+        assert_eq!(collect_count.load(Ordering::SeqCst), 1);
+        let mut from_cache = [first.expect("first").1, second.expect("second").1];
+        from_cache.sort();
+        assert_eq!(from_cache, [false, true]);
+    }
+
+    #[tokio::test]
+    async fn aborted_receipt_request_still_fills_the_cache() {
+        let start = unique_receipt_start();
+        let collect_count = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let count = Arc::clone(&collect_count);
+        let first = tokio::spawn(cached_or_collect_receipt_using(
+            "week",
+            start,
+            chrono::Utc::now(),
+            "This Week",
+            move |_start, _now, label| {
+                count.fetch_add(1, Ordering::SeqCst);
+                let _ = started_tx.send(());
+                let _ = release_rx.recv();
+                empty_receipt_data(label)
+            },
+        ));
+        started_rx.await.expect("collect started");
+        first.abort();
+        assert!(matches!(first.await, Err(error) if error.is_cancelled()));
+        release_tx.send(()).expect("release collect");
+
+        let key = receipt_cache_key("week", start);
+        let mut cached = false;
+        for _ in 0..500 {
+            if read_cached_receipt(&key).is_some() {
+                cached = true;
+                break;
+            }
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }
+        assert!(
+            cached,
+            "the aborted request's collect must still write the cache"
+        );
+
+        let (_, from_cache) = cached_or_collect_receipt_using(
+            "week",
+            start,
+            chrono::Utc::now(),
+            "This Week",
+            counting_receipt_collect(&collect_count, StdDuration::ZERO),
+        )
+        .await
+        .expect("second result");
+        assert!(from_cache);
+        assert_eq!(collect_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn receipt_windows_with_another_start_or_period_collect_separately() {
+        let start = unique_receipt_start();
+        let next_day = start + chrono::Duration::days(1);
+        let now = chrono::Utc::now();
+        let collect_count = Arc::new(AtomicUsize::new(0));
+        for (period_id, window_start) in [("today", start), ("today", next_day), ("week", start)] {
+            let (data, from_cache) = cached_or_collect_receipt_using(
+                period_id,
+                window_start,
+                now,
+                period_id,
+                counting_receipt_collect(&collect_count, StdDuration::ZERO),
+            )
+            .await
+            .expect("receipt result");
+            assert!(
+                !from_cache,
+                "{period_id}@{window_start} must not reuse another window"
+            );
+            assert_eq!(data.period_label, period_id);
+        }
+        assert_eq!(collect_count.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn receipt_cache_write_drops_expired_windows() {
+        let expired_key = receipt_cache_key("today", unique_receipt_start());
+        let expired_at = Instant::now()
+            .checked_sub(RECEIPT_CACHE_TTL + StdDuration::from_secs(1))
+            .expect("expired instant");
+        RECEIPT_CACHE.lock().unwrap().insert(
+            expired_key.clone(),
+            (expired_at, Arc::new(empty_receipt_data("old day"))),
+        );
+
+        let fresh_key = receipt_cache_key("today", unique_receipt_start());
+        write_cached_receipt(fresh_key.clone(), Arc::new(empty_receipt_data("new day")));
+
+        // Read before asserting: a panic under the guard would poison the cache for other tests.
+        let (has_expired, has_fresh) = {
+            let cache = RECEIPT_CACHE.lock().unwrap();
+            (
+                cache.contains_key(&expired_key),
+                cache.contains_key(&fresh_key),
+            )
+        };
+        assert!(!has_expired, "an expired window must be dropped on write");
+        assert!(has_fresh);
     }
 
     #[tokio::test]
