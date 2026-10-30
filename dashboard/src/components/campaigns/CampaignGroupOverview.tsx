@@ -79,7 +79,7 @@ export default function CampaignGroupOverview({ nodes, onSelectGroup, tr }: Prop
     <div className="campaign-row"><strong>{tr("그룹별 전체 관계", "All campaign group relationships")}</strong><span>{tr(`그룹 ${overview.groups.length}개 · 작업 ${nodes.length}개`, `${overview.groups.length} groups · ${nodes.length} tasks`)}</span></div>
     <p className="campaign-muted">{tr("전체 작업의 그룹 관계입니다. 화살표는 선행 그룹 → 후속 그룹, 숫자는 연결된 의존성 수입니다. 그룹을 선택하면 해당 작업 목록으로 이동합니다.", "Groups across all tasks. Arrows point from dependency to dependent; numbers count the connecting dependencies. Select a group to open its task list.")}</p>
     {nodes.length === 0 ? <p>{tr("표시할 작업이 없습니다.", "No tasks to display.")}</p> : <>
-      <div className="campaign-graph-scroll"><div className="campaign-graph" style={{ height: Math.min(580, Math.max(300, Math.ceil(overview.groups.length / 3) * 210)) }}>
+      <div className="campaign-graph-scroll"><div className="campaign-graph [&_.react-flow\_\_controls]:shadow-none [&_.react-flow\_\_controls-button]:!bg-th-bg-surface [&_.react-flow\_\_controls-button]:!text-th-text-primary [&_.react-flow\_\_controls-button]:!border-th-border-subtle [&_.react-flow\_\_attribution]:!bg-th-bg-surface [&_.react-flow\_\_attribution_a]:!text-th-text-muted" style={{ height: Math.min(580, Math.max(300, Math.ceil(overview.groups.length / 3) * 210)) }}>
         <ReactFlow nodes={graphNodes} edges={edges} fitView fitViewOptions={{ padding: 0.18, minZoom: 0.65, maxZoom: 1 }} minZoom={0.65} maxZoom={1.4}
           nodesDraggable={false} nodesConnectable={false} panOnScroll zoomOnScroll={false}
           onNodeClick={(_, node) => onSelectGroup(String(node.data.group))}>
