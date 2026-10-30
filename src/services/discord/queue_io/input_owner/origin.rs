@@ -36,8 +36,8 @@ impl Execution {
         Self::NonTuiProvider,
     ];
 
-    /// A TUI target goes to the owner whatever the origin; a process or non-TUI provider keeps
-    /// its own path.
+    /// Any TUI target goes to a TUI owner whatever the origin, a remote one to its own node's
+    /// through placement; a process or non-TUI provider keeps its own path.
     pub(crate) fn owner_takes(self, _origin: InputOrigin) -> bool {
         matches!(self, Self::LocalTui | Self::RemoteTui)
     }
