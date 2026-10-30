@@ -504,7 +504,7 @@ export default function AgentInfoCard({
                     </span>
                   )}
                   <span className="rounded-full px-2 py-0.5 text-xs" style={{ background: "var(--th-bg-surface)", color: "var(--th-text-muted)" }}>
-                    {dept ? `${dept.icon} ${localeName(locale, dept)}` : tr("미배정", "Unassigned")}
+                    {dept ? <>{dept.icon} {localeName(locale, dept)}</> : tr("미배정", "Unassigned")}
                   </span>
                 </div>
                 <div className="flex flex-wrap gap-2">
