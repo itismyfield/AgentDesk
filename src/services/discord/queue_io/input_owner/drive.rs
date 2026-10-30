@@ -76,7 +76,7 @@ async fn run(lane: Arc<Lane>, drive: Arc<Drive>) {
                 break;
             }
             if let Err(error) = result {
-                tracing::info!(channel = drive.channel, %error, "owner front not delivered");
+                tracing::info!(channel_id = drive.channel, %error, "owner front not delivered");
             }
         }
         lane.running.store(false, Ordering::SeqCst);
@@ -101,7 +101,7 @@ async fn grant(drive: &Drive) -> Option<Front> {
         })
         .await;
     granted.unwrap_or_else(|error| {
-        tracing::warn!(channel = drive.channel, %error, "owner front unavailable");
+        tracing::warn!(channel_id = drive.channel, %error, "owner front unavailable");
         None
     })
 }
