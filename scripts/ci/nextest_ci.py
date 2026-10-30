@@ -616,18 +616,24 @@ REMOVAL_KINDS = ("removed", "runnable->ignored")
 
 
 def load_justifications(path):
-    """{(test ID text, kind): reason} from `<binary-id> <test> | <kind> | <reason>` rows."""
+    """Reasons keyed by test, kind and optional explicit platform scope."""
     rows = {}
     for n, line in enumerate(Path(path).read_text().splitlines(), 1):
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         parts = [part.strip() for part in line.split("|")]
-        if len(parts) != 3 or parts[1] not in REMOVAL_KINDS or not parts[2] or len(parts[0].split(" ")) != 2:
-            raise PlanError(f"{path}:{n}: need `<binary-id> <test> | removed|runnable->ignored | <reason>`")
+        if len(parts) not in (3, 4) or parts[1] not in REMOVAL_KINDS or not parts[2] or len(parts[0].split(" ")) != 2:
+            raise PlanError(f"{path}:{n}: need `<binary-id> <test> | removed|runnable->ignored | <reason> [| platform=<os>]`")
         _check_id(*parts[0].split(" "))
-        if (parts[0], parts[1]) in rows:
+        platform = None
+        if len(parts) == 4:
+            if parts[1] != "removed" or parts[3] not in ("platform=linux", "platform=macos", "platform=windows"):
+                raise PlanError(f"{path}:{n}: only removed rows may name platform=linux, platform=macos or platform=windows")
+            platform = parts[3].split("=", 1)[1]
+        if any(t == parts[0] and k == parts[1] and (p == platform or p is None or platform is None)
+               for t, k, p in rows):
             raise PlanError(f"{path}:{n}: {parts[0]} {parts[1]} is listed twice")
-        rows[(parts[0], parts[1])] = parts[2]
+        rows[(parts[0], parts[1], platform)] = parts[2]
     return rows
 
 
@@ -649,7 +655,10 @@ def platform_losses(path, binary_id):
     names = presence["macos"] + presence["windows"]
     if any(not isinstance(name, str) or not ID_RE.fullmatch(name) for name in names):
         return found, None
-    return found, {_check_id(binary_id, name) for name in names}
+    by_platform = {p: {_check_id(binary_id, name) for name in presence[p]} for p in ("macos", "windows")}
+    if isinstance(presence.get("linux"), list) and all(isinstance(t, str) and ID_RE.fullmatch(t) for t in presence["linux"]):
+        by_platform["linux"] = {_check_id(binary_id, name) for name in presence["linux"]}
+    return found, by_platform
 
 
 def cmd_base_diff(args):
@@ -685,27 +694,53 @@ def cmd_base_diff(args):
             "ignored_to_runnable": sorted(_id_text(t) for t in base_ign & run),
             "added": sorted(_id_text(t) for t in (run | ign) - (base_run | base_ign)),
             "platform_losses": {f"{t} | {kind}": p for (t, kind), p in sorted(platform_lost.items())}}
-    lost = {(t, "removed") for t in diff["removed"]} | set(platform_lost)
-    lost |= {(t, "runnable->ignored") for t in diff["runnable_to_ignored"]}
-    diff["unjustified"] = sorted(f"{t} | {kind}" for t, kind in lost - set(justified))
-    stale = set(justified) - lost
+    losses = {key: set(platforms) for key, platforms in platform_lost.items()}
+    for kind, field in (("removed", "removed"), ("runnable->ignored", "runnable_to_ignored")):
+        for test in diff[field]:
+            losses.setdefault((test, kind), set()).add("linux")
+    missing = {(t, kind) for (t, kind), platforms in losses.items()
+               if any((t, kind, None) not in justified and (t, kind, p) not in justified for p in platforms)}
+    diff["unjustified"] = sorted(f"{t} | {kind}" for t, kind in missing)
+    matched = {row for row in justified if row[:2] in losses
+               and (row[2] is None or row[2] in losses[row[:2]])}
+    stale = set(justified) - matched
     present = base_run | base_ign | run | ign
-    landed = {(t, kind) for t, kind in stale
-              if native_present is not None and tuple(t.split(" ")) not in present | native_present}
-    diff["stale_justifications"] = sorted(f"{t} | {kind}" for t, kind in stale)
-    diff["landed_justifications"] = sorted(f"{t} | {kind}" for t, kind in landed)
+    # A platform exclusion remains meaningful only while another platform retains coverage.
+    def platform_exclusion_remains(row):
+        test, _kind, platform = row
+        if platform is None or native_present is None or platform not in native_present:
+            return False
+        test_id = tuple(test.split(" "))
+        target = native_present[platform] | (present if platform == "linux" else set())
+        others = (present if platform != "linux" else set()) | set().union(
+            *(ids for p, ids in native_present.items() if p != platform))
+        return test_id not in target and test_id in others
+
+    carried = {row for row in stale if platform_exclusion_remains(row)}
+    stale -= carried
+    # Legacy rows retain their existing whole-test removal and warning behavior.
+    native_union = native_present["macos"] | native_present["windows"] if native_present is not None else None
+    landed = {row for row in stale if row[2] is None
+              and native_union is not None and tuple(row[0].split(" ")) not in present | native_union}
+
+    def row_text(row):
+        t, kind, platform = row
+        return f"{t} | {kind}" + (f" | platform={platform}" if platform else "")
+
+    diff["stale_justifications"] = sorted(map(row_text, stale))
+    diff["landed_justifications"] = sorted(map(row_text, landed))
+    diff["platform_justifications"] = sorted(map(row_text, carried))
     Path(args.json_out).write_text(json.dumps(diff, indent=1, sort_keys=True) + "\n")
     print(f"removed {len(diff['removed'])} · runnable->ignored {len(diff['runnable_to_ignored'])} · "
           f"platform losses {len(platform_lost)} · ignored->runnable {len(diff['ignored_to_runnable'])} · "
-          f"added {len(diff['added'])} · justified {len(lost) - len(diff['unjustified'])}")
+          f"added {len(diff['added'])} · justified {len(losses) - len(diff['unjustified'])}")
     for row in diff["unjustified"]:
         print(f"ERROR lost without a justification row: {row}", file=sys.stderr)
-    for t, kind in sorted(landed):
+    for row in sorted(landed):
         print(f"WARN justification row refers to a test absent from base and head; clear in any PR: "
-              f"{t} | {kind} | {justified[(t, kind)]}", file=sys.stderr)
-    for t, kind in sorted(stale - landed):
-        row = f"{t} | {kind}"
-        print(f"ERROR justification row matches no loss against {args.comparison_base_sha}: {row}", file=sys.stderr)
+              f"{row_text(row)} | {justified[row]}", file=sys.stderr)
+    for row in sorted(stale - landed, key=row_text):
+        print(f"ERROR justification row matches no loss against {args.comparison_base_sha}: {row_text(row)}", file=sys.stderr)
     return 1 if diff["unjustified"] or stale - landed else 0
 
 

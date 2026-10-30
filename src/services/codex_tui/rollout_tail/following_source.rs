@@ -22,6 +22,22 @@ enum RolloutSource {
     FixedOpened(FixedRecoverySource),
 }
 
+pub(super) trait TailClock {
+    fn now(&self) -> Instant;
+    fn sleep(&self, duration: Duration);
+}
+
+struct SystemTailClock;
+
+impl TailClock for SystemTailClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+    fn sleep(&self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+}
+
 pub(crate) fn tail_recovery_rollout_for_tmux<L: Into<PaneLiveness>>(
     rollout_path: &Path,
     start_offset: u64,
@@ -123,11 +139,50 @@ fn validate_fixed_record(line: &[u8], turn: &str, session: Option<&str>) -> Resu
 
 fn tail_source<L: Into<PaneLiveness>>(
     source: RolloutSource,
+    location: (&Path, u64, Option<String>),
+    sender: &Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+    is_alive: impl FnMut() -> L,
+    options: RolloutTailOptions,
+) -> Result<(ReadOutputResult, RolloutTailOutcome), String> {
+    tail_source_with_clock(
+        source,
+        location,
+        sender,
+        cancel_token,
+        is_alive,
+        options,
+        &SystemTailClock,
+    )
+}
+
+#[cfg(test)]
+pub(super) fn tail_with_clock<L: Into<PaneLiveness>>(
+    location: (&Path, u64, Option<String>),
+    sender: &Sender<StreamMessage>,
+    is_alive: impl FnMut() -> L,
+    options: RolloutTailOptions,
+    clock: &impl TailClock,
+) -> Result<(ReadOutputResult, RolloutTailOutcome), String> {
+    tail_source_with_clock(
+        RolloutSource::Follow,
+        location,
+        sender,
+        None,
+        is_alive,
+        options,
+        clock,
+    )
+}
+
+fn tail_source_with_clock<L: Into<PaneLiveness>>(
+    source: RolloutSource,
     (rollout_path, mut start_offset, mut initial_session_id): (&Path, u64, Option<String>),
     sender: &Sender<StreamMessage>,
     cancel_token: Option<Arc<CancelToken>>,
     mut is_alive: impl FnMut() -> L,
     options: RolloutTailOptions,
+    clock: &impl TailClock,
 ) -> Result<(ReadOutputResult, RolloutTailOutcome), String> {
     let RolloutTailOptions {
         terminal_drain,
@@ -217,7 +272,7 @@ fn tail_source<L: Into<PaneLiveness>>(
     let mut buf = [0u8; 8192];
     let mut last_output_at: Option<Instant> = None;
     let mut pane_busy_veto_started_at: Option<Instant> = None;
-    let mut started_at = Instant::now();
+    let mut started_at = clock.now();
     let mut hook_events = crate::services::claude_tui::hook_server::subscribe_hook_events();
     let mut terminal_range = (
         seek_offset,
@@ -299,7 +354,7 @@ fn tail_source<L: Into<PaneLiveness>>(
                 };
                 partial_line.clear();
                 last_output_at = None;
-                started_at = Instant::now();
+                started_at = clock.now();
                 pane_busy_veto_started_at = None;
                 death.reset();
                 terminal_range.0 = seek_offset;
@@ -314,7 +369,7 @@ fn tail_source<L: Into<PaneLiveness>>(
                 .metadata()
                 .is_ok_and(|metadata| metadata.len() >= current_offset)
             {
-                std::thread::sleep(Duration::from_millis(100));
+                clock.sleep(Duration::from_millis(100));
                 continue;
             }
         }
@@ -351,7 +406,7 @@ fn tail_source<L: Into<PaneLiveness>>(
                             outcome(&state, seek_offset, &current_path),
                         ));
                     }
-                    std::thread::sleep(Duration::from_millis(100));
+                    clock.sleep(Duration::from_millis(100));
                     continue;
                 }
                 let mut pane_is_alive =
@@ -401,7 +456,7 @@ fn tail_source<L: Into<PaneLiveness>>(
                     ));
                 }
                 if source_pin.is_some() {
-                    std::thread::sleep(Duration::from_millis(100));
+                    clock.sleep(Duration::from_millis(100));
                     continue;
                 }
                 // Keep in-flight tools out of the drain timer. Legacy writers without lifecycle
@@ -416,7 +471,9 @@ fn tail_source<L: Into<PaneLiveness>>(
                 };
                 if state.saw_assistant_text && !state.has_pending_tool_call() {
                     if effective_drain.is_zero()
-                        || last_output_at.is_some_and(|at| at.elapsed() >= effective_drain)
+                        || last_output_at.is_some_and(|at| {
+                            clock.now().saturating_duration_since(at) >= effective_drain
+                        })
                     {
                         if heuristic_finalize_allowed(&mut state, &current_path, current_offset) {
                             emit_done(
@@ -434,7 +491,7 @@ fn tail_source<L: Into<PaneLiveness>>(
                                 outcome(&state, seek_offset, &current_path),
                             ));
                         }
-                        last_output_at = Some(Instant::now());
+                        last_output_at = Some(clock.now());
                     }
                 }
                 // Unresolved tools recover after inactivity, including tools started before assistant text.
@@ -443,7 +500,8 @@ fn tail_source<L: Into<PaneLiveness>>(
                         || apply_pending_tool_deadline_without_assistant_text);
                 if tool_deadline_gate
                     && let Some(deadline) = pending_tool_call_deadline
-                    && last_output_at.is_some_and(|at| at.elapsed() >= deadline)
+                    && last_output_at
+                        .is_some_and(|at| clock.now().saturating_duration_since(at) >= deadline)
                 {
                     let busy_signal = pane_busy_probe.as_mut().map_or(
                         super::super::input::CodexPaneBusySignal::Unavailable,
@@ -451,29 +509,31 @@ fn tail_source<L: Into<PaneLiveness>>(
                     );
                     if busy_signal == super::super::input::CodexPaneBusySignal::Fresh {
                         let veto_started_at =
-                            *pane_busy_veto_started_at.get_or_insert_with(Instant::now);
-                        if veto_started_at.elapsed() < pane_busy_veto_cap {
+                            *pane_busy_veto_started_at.get_or_insert_with(|| clock.now());
+                        if clock.now().saturating_duration_since(veto_started_at)
+                            < pane_busy_veto_cap
+                        {
                             tracing::debug!(
                                 rollout_path = %rollout_path.display(),
                                 pending_keyed = state.pending_tool_calls.len(),
                                 pending_unkeyed = state.pending_tool_calls_unkeyed,
-                                veto_elapsed_ms = veto_started_at.elapsed().as_millis(),
+                                veto_elapsed_ms = clock.now().saturating_duration_since(veto_started_at).as_millis(),
                                 veto_cap_ms = pane_busy_veto_cap.as_millis(),
                                 "Codex rollout tail kept pending tool call open because the pane busy signal is fresh"
                             );
-                            std::thread::sleep(Duration::from_millis(100));
+                            clock.sleep(Duration::from_millis(100));
                             continue;
                         }
                         tracing::warn!(
                             rollout_path = %rollout_path.display(),
-                            veto_elapsed_ms = veto_started_at.elapsed().as_millis(),
+                            veto_elapsed_ms = clock.now().saturating_duration_since(veto_started_at).as_millis(),
                             veto_cap_ms = pane_busy_veto_cap.as_millis(),
                             "Codex pane-busy veto reached its hard cap; failing open to pending-tool recovery"
                         );
                     }
 
                     let elapsed_secs = last_output_at
-                        .map(|at| at.elapsed().as_secs())
+                        .map(|at| clock.now().saturating_duration_since(at).as_secs())
                         .unwrap_or_default();
                     let tool_first = !state.saw_assistant_text;
                     tracing::warn!(
@@ -534,8 +594,10 @@ fn tail_source<L: Into<PaneLiveness>>(
                 }
                 // Rollout activity resets the no-text deadline; post-text completion uses its own drain.
                 // Confirm clean negatives and consume unread growth before synthesizing a timeout.
-                let idle_elapsed =
-                    last_output_at.map_or_else(|| started_at.elapsed(), |at| at.elapsed());
+                let idle_elapsed = last_output_at.map_or_else(
+                    || clock.now().saturating_duration_since(started_at),
+                    |at| clock.now().saturating_duration_since(at),
+                );
                 let unread_growth = file.metadata().is_ok_and(|m| m.len() > current_offset);
                 if !state.saw_assistant_text
                     && let Some(deadline) = assistant_response_deadline
@@ -563,7 +625,7 @@ fn tail_source<L: Into<PaneLiveness>>(
                         outcome(&state, seek_offset, &current_path),
                     ));
                 }
-                std::thread::sleep(Duration::from_millis(100));
+                clock.sleep(Duration::from_millis(100));
             }
             Ok(n) => {
                 #[cfg(all(test, unix))]
@@ -610,12 +672,12 @@ fn tail_source<L: Into<PaneLiveness>>(
                     }
                     state.record(line.len());
                     if process_rollout_line_bytes(&line, &sender, &mut state) {
-                        last_output_at = Some(Instant::now());
+                        last_output_at = Some(clock.now());
                     }
                 }
             }
             Err(_) if source_pin.is_some() => {
-                std::thread::sleep(Duration::from_millis(100));
+                clock.sleep(Duration::from_millis(100));
             }
             Err(error) => {
                 return Err(format!(

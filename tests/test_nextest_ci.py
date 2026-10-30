@@ -799,6 +799,75 @@ class BaseDiff(Fixture):
         self.plan_ok(["m::a", "m::b"], workers=1)
         self.assertEqual(self.diff(SHA)[0], 0)
 
+    def scoped_row(self, platform="windows"):
+        return f"{BIN} m::native | removed | Unix coverage retained | platform={platform}\n"
+
+    def same_plans(self):
+        self.plan_ok(["m::a"], workers=1, out="base")
+        self.plan_ok(["m::a"], workers=1)
+
+    def test_platform_loss_requires_a_matching_platform_reason(self):
+        self.same_plans()
+        source = source_losses(removed={"windows": ["m::native"]}, present={"macos": ["m::native"]})
+        for rows in ("", self.scoped_row("macos")):
+            with self.subTest(rows=rows):
+                self.assertEqual(self.diff(SHA, rows=rows, source=source)[0], 1)
+        self.assertEqual(self.diff(SHA, rows=self.scoped_row(), source=source), (0, ""))
+        source["removed"]["macos"] = ["m::native"]
+        self.assertEqual(self.diff(SHA, rows=self.scoped_row(), source=source)[0], 1)
+        self.assertEqual(self.diff(SHA, rows=self.scoped_row() + self.scoped_row("macos"), source=source)[0], 0)
+
+    def test_landed_platform_reason_keeps_coverage_on_another_platform(self):
+        self.same_plans()
+        for target, other in (("windows", "macos"), ("macos", "windows"), ("linux", "macos")):
+            with self.subTest(target=target):
+                source = source_losses(present={other: ["m::native"]})
+                source["present_tests"].setdefault("linux", [])
+                rc, err = self.diff(SHA, rows=self.scoped_row(target), source=source)
+                self.assertEqual(rc, 0, err)
+                self.assertNotIn("WARN", err)
+                diff = json.loads((self.dir / "diff.json").read_text())
+                self.assertEqual(diff["stale_justifications"], [])
+                self.assertEqual(diff["platform_justifications"], [f"{BIN} m::native | removed | platform={target}"])
+
+    def test_platform_reason_is_stale_when_its_target_still_has_the_test(self):
+        self.same_plans()
+        for source in (source_losses(present={"windows": ["m::native"], "macos": ["m::native"]}),
+                       source_losses(), {**source_losses(present={}), "present_tests": {"macos": []}}):
+            with self.subTest(source=source):
+                rc, err = self.diff(SHA, rows=self.scoped_row(), source=source)
+                self.assertEqual(rc, 1)
+                self.assertIn("matches no loss", err)
+
+    def test_platform_reason_is_stale_after_the_test_disappears_everywhere(self):
+        self.same_plans()
+        rc, err = self.diff(SHA, rows=self.scoped_row(), source=source_losses(present={}))
+        self.assertEqual(rc, 1)
+        self.assertIn("matches no loss", err)
+
+    def test_legacy_reason_rules_stay_unchanged(self):
+        self.same_plans()
+        row = f"{BIN} m::native | removed | legacy reason\n"
+        source = source_losses(removed={"windows": ["m::native"]})
+        self.assertEqual(self.diff(SHA, rows=row, source=source), (0, ""))
+        rc, err = self.diff(SHA, rows=row, source=source_losses(present={}))
+        self.assertEqual(rc, 0, err)
+        self.assertIn("WARN justification row refers to a test absent", err)
+        self.assertEqual(self.diff(SHA, rows=row, source=source_losses(present={"macos": ["m::native"]}))[0], 1)
+        source = source_losses(present={})
+        source["present_tests"]["linux"] = [False]
+        self.assertEqual(self.diff(SHA, rows=row, source=source)[0], 0)
+
+    def test_platform_scope_rejects_unknown_malformed_and_overlapping_rows(self):
+        self.same_plans()
+        for rows in (self.scoped_row("windwos"), self.scoped_row("windows,macos"),
+                     self.scoped_row().replace("platform=", "target="),
+                     self.scoped_row() + self.scoped_row(),
+                     self.scoped_row() + f"{BIN} m::native | removed | ambiguous legacy row\n",
+                     self.scoped_row().replace(" | removed |", " | runnable->ignored |")):
+            with self.subTest(rows=rows):
+                self.assertEqual(self.diff(SHA, rows=rows)[0], 1)
+
 
 class NativePlan(Fixture):
     """Native macOS/Windows runs plan only the classifier's non-PG tests; a base rebuild copies a plan's identity."""
