@@ -261,6 +261,17 @@ pub(crate) struct HerdrSnapshot {
     pub version: String,
     pub protocol: u32,
     pub panes: Vec<HerdrPane>,
+    /// Absent in a reply that omits it; a reader that needs labels treats that as incomplete.
+    #[serde(default)]
+    pub workspaces: Option<Vec<HerdrWorkspace>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct HerdrWorkspace {
+    pub workspace_id: String,
+    pub label: String,
+    pub pane_count: u32,
+    pub tab_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

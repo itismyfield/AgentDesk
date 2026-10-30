@@ -24,6 +24,38 @@ pub(super) fn optional_durable_current_msg_id_from_detached(detached_id: Message
     (durable_id != 0).then_some(durable_id)
 }
 
+/// A confirmed turn-mode turn that runs without a response anchor.
+pub(super) fn turn_mode_anchorless(channel_id: ChannelId, current_msg_id: MessageId) -> bool {
+    optional_durable_current_msg_id_from_detached(current_msg_id).is_none()
+        && crate::services::tui_o::turn_mode::transcript_turns(channel_id.get())
+}
+
+/// A lifecycle notice of a turn with no response anchor, as a reply to the user's own message.
+/// The reply's returned id is the notice's only delivery evidence; the turn keeps no anchor.
+pub(super) async fn send_anchorless_notice(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    row: &InflightTurnState,
+    content: &str,
+    event: &'static str,
+) -> Option<MessageId> {
+    let http = shared.serenity_http_or_token_fallback()?;
+    let user_msg_id = crate::services::discord::inflight::opt_message_id(row.user_msg_id)?;
+    let nonce = row.turn_nonce.as_deref().unwrap_or_default();
+    crate::services::discord::outbound::serenity_reference::send_referenced_lifecycle_notice(
+        http,
+        shared.clone(),
+        channel_id,
+        user_msg_id,
+        content,
+        format!("{event}:{nonce}"),
+        event.to_string(),
+    )
+    .await
+    .ok()
+    .flatten()
+}
+
 pub(super) fn unbound_current_message_candidate(
     current_msg_id: MessageId,
     expected_durable_id: u64,

@@ -14,6 +14,7 @@ use crate::services::discord::inflight::seed_session_row;
 use crate::services::provider::CancelToken;
 
 mod replay_turn_tests;
+mod turn_mode_retry_tests;
 
 pub(super) fn assert_completed_summary(summary: &str) {
     let shape =

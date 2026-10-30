@@ -23,6 +23,8 @@ pub(super) mod replay_scope;
 
 pub(super) struct StreamingTurn<'a> {
     pub pool: Option<&'a sqlx::PgPool>,
+    /// The bot whose channel lease a Herdr turn takes to resolve an unplaced launch.
+    pub shared: Option<&'a Arc<crate::services::discord::SharedData>>,
     pub provider: &'a ProviderKind,
     pub prompt: &'a str,
     pub session_id: Option<&'a str>,
@@ -468,6 +470,7 @@ mod herdr {
     use crate::services::claude::herdr_turn::{self, AttachRequest, HerdrTurn, HerdrTurnPorts};
     use crate::services::claude_tui::hook_server::{HookEvent, subscribe_hook_events};
     use crate::services::codex::herdr_turn::{CodexHerdrPorts, CodexHerdrTurn};
+    use crate::services::discord::UnplacedLease;
     use crate::services::discord::recovery_engine::host_reconcile::{
         HerdrEndpointId, HerdrExecutionReader, HerdrPaneEvidence, HerdrPaneReading,
         reconcile_hosted_session_pg,
@@ -496,6 +499,7 @@ mod herdr {
         let ports = BootPorts {
             pool,
             channel_id: turn.channel_id,
+            shared: turn.shared,
         };
         if *turn.provider == ProviderKind::Codex {
             let codex = CodexHerdrTurn {
@@ -559,6 +563,7 @@ mod herdr {
     pub(super) struct BootPorts<'a> {
         pub(super) pool: &'a PgPool,
         pub(super) channel_id: u64,
+        pub(super) shared: Option<&'a Arc<crate::services::discord::SharedData>>,
     }
 
     impl CodexHerdrPorts for BootPorts<'_> {
@@ -596,6 +601,10 @@ mod herdr {
         ) -> Result<(), String> {
             self.confirmed(owner, record, target)
         }
+
+        fn unplaced_lease(&self, _: &HostedOwner) -> Result<UnplacedLease, String> {
+            self.lease()
+        }
     }
 
     impl HerdrTurnPorts for BootPorts<'_> {
@@ -632,9 +641,22 @@ mod herdr {
         ) -> Result<(), String> {
             self.confirmed(owner, record, target)
         }
+
+        fn unplaced_lease(&self, _: &HostedOwner) -> Result<UnplacedLease, String> {
+            self.lease()
+        }
     }
 
     impl BootPorts<'_> {
+        /// Waits on the channel's transition lease as any transition claim does.
+        fn lease(&self) -> Result<UnplacedLease, String> {
+            let shared = self.shared.ok_or("no channel lease")?;
+            let channel = crate::services::discord::ChannelId::new(self.channel_id);
+            Handle::current()
+                .block_on(UnplacedLease::acquire(shared, channel))
+                .map_err(|_| "transition_busy".to_string())
+        }
+
         /// `Ok` only while the reconcile reads the Bound execution as a match.
         fn confirmed(
             &self,
@@ -793,6 +815,7 @@ pub(super) mod tests {
         let tools = vec!["Read".to_string()];
         let mut turn = StreamingTurn {
             pool: None,
+            shared: None,
             provider: &provider,
             prompt: "question",
             session_id: Some("conversation"),
@@ -887,6 +910,7 @@ pub(super) mod tests {
             let (sender, _receiver) = std::sync::mpsc::channel();
             let turn = StreamingTurn {
                 pool: Some(&pool),
+                shared: None,
                 provider: &provider,
                 prompt: "question",
                 session_id: None,

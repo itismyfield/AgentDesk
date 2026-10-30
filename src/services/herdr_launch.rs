@@ -4,6 +4,7 @@
 pub(crate) mod policy;
 mod prepared;
 pub(crate) mod retired_hold;
+pub(crate) mod unplaced;
 
 use crate::config::session_hosts::EndpointMode;
 use policy::{LaunchGrantStore, PermitFuture, UserDefaultCreateRequest};
@@ -159,6 +160,34 @@ pub(crate) trait HerdrLaunchHost: Send + Sync {
     fn create(&self, request: &HerdrCreateRequest) -> HerdrCreateOutcome;
     /// Root shell and provider of the pane as launch evidence, from reads only, or why not.
     fn launch_evidence(&self, probe: &EvidenceProbe) -> Result<ExpectedExecution, EvidenceGap>;
+    /// The server an unplaced launch's panes are read and removed on, under that endpoint's write
+    /// policy for execution `nonce`.
+    fn unplaced_witness(
+        &self,
+        _: &HerdrLaunchEndpoint,
+        _nonce: &str,
+    ) -> Result<ServerWitness, String> {
+        Err("unplaced resolution unsupported".into())
+    }
+    /// Every pane of `logical_key`'s workspaces on `endpoint`, each answer from `witness`'s server.
+    fn channel_panes(
+        &self,
+        _: &HerdrLaunchEndpoint,
+        _logical_key: &str,
+        _: &ServerWitness,
+    ) -> Result<Vec<unplaced::ChannelPane>, String> {
+        Err("channel pane listing unsupported".into())
+    }
+    /// Closes execution `nonce`'s create residue under that endpoint's write policy, then confirms
+    /// the pane and its root shell are gone.
+    fn dispose_residue(
+        &self,
+        _: &HerdrLaunchEndpoint,
+        _nonce: &str,
+        _: &unplaced::Residue,
+    ) -> Result<(), String> {
+        Err("residue disposal unsupported".into())
+    }
 }
 
 pub(crate) struct HerdrLaunch {
@@ -184,7 +213,8 @@ pub(crate) enum HerdrLaunchOutcome {
         location: HostedLocation,
         evidence: Result<(), EvidenceGap>,
     },
-    /// The pane may exist unrecorded. Pending stays; nothing is resent, adopted or killed.
+    /// The pane may exist unrecorded. Pending stays and nothing is resent; a later turn or
+    /// restart pass resolves it ([`unplaced`]).
     Indeterminate {
         execution_nonce: String,
         detail: String,
@@ -293,6 +323,24 @@ async fn restore_off_witness(
     on_blocking_thread(host, move |host| host.restore_resume(&endpoint))
         .await?
         .admitted_witness()
+}
+
+/// Where a pane of `endpoint` is recorded.
+fn pane_location(endpoint: &HerdrLaunchEndpoint, pane_id: String) -> HostedLocation {
+    HostedLocation {
+        host: HostKind::Herdr.as_str().to_string(),
+        execution_node: endpoint.execution_node.clone(),
+        endpoint_config_key: endpoint.config_key.clone(),
+        socket_addr: endpoint.socket_addr.clone(),
+        named_session: endpoint.herdr_session.clone(),
+        pane_id,
+    }
+}
+
+/// The workspace label a launch creates: the channel's logical key and the execution nonce, so the
+/// pane is the launch's own before any provider runs in it, and after a server restart.
+pub(crate) fn workspace_marker(logical_key: &str, nonce: &str) -> String {
+    format!("{logical_key}#{nonce}")
 }
 
 /// An existing absolute cwd and one line of command, since the command is typed into the
@@ -408,6 +456,8 @@ pub(crate) async fn launch_herdr_session(
     launch_command_eligible(&command.cwd, &command.command)
         .map_err(HerdrLaunchError::Ineligible)?;
     let nonce = incarnation.context.execution_nonce.clone();
+    // Held until this call and its create worker are both done, so no resolver judges it meanwhile.
+    let in_flight = unplaced::LaunchInFlight::begin(&nonce);
     let pending =
         HostedExecution::pending(owner.clone(), nonce.clone(), source_ref(&owner, &nonce));
     match install_pending_pg(pool, &observed, pending).await {
@@ -439,11 +489,11 @@ pub(crate) async fn launch_herdr_session(
     } = prepared::create(
         pool,
         &owner,
-        &nonce,
         &endpoint,
         command,
         &host,
         create_permit,
+        &in_flight,
     )
     .await?;
     let indeterminate = |detail: String| HerdrLaunchOutcome::Indeterminate {
@@ -471,14 +521,7 @@ pub(crate) async fn launch_herdr_session(
         Some(HerdrCreateOutcome::Indeterminate(detail)) => return Ok(indeterminate(detail)),
         None => return Ok(indeterminate("create call did not return".into())),
     };
-    let location = HostedLocation {
-        host: HostKind::Herdr.as_str().to_string(),
-        execution_node: endpoint.execution_node,
-        endpoint_config_key: endpoint.config_key,
-        socket_addr: endpoint.socket_addr,
-        named_session: endpoint.herdr_session,
-        pane_id,
-    };
+    let location = pane_location(&endpoint, pane_id);
     // The row is read again after the socket call: only this nonce's Pending takes the pane.
     let recorded = match load_row(pool, &owner).await {
         Ok(current) => {
@@ -522,25 +565,35 @@ async fn retire_unsent(
     nonce: &str,
     error: HerdrLaunchError,
 ) -> HerdrLaunchError {
-    let retired = match load_row(pool, owner).await {
-        Ok(current) => match &current.record {
-            HostedRecord::Known(record)
-                if record.state == HostedState::Pending
-                    && record.location.is_none()
-                    && record.expected.is_none() =>
-            {
-                retire_pg(pool, &current, owner, nonce)
-                    .await
-                    .map_err(|e| format!("{e:?}"))
-            }
-            _ => Err("the row is no longer this launch's unplaced Pending".into()),
-        },
-        Err(row) => Err(format!("{row:?}")),
-    };
+    let retired = retire_own_unplaced(pool, owner, nonce).await;
     if retired != Ok(HostedCasOutcome::Written) {
         tracing::warn!(nonce, ?retired, ?error, "herdr launch: unsent Pending kept");
     }
     error
+}
+
+/// Retires `nonce`'s Pending only while it still names no pane and no evidence.
+pub(crate) async fn retire_own_unplaced(
+    pool: &PgPool,
+    owner: &HostedOwner,
+    nonce: &str,
+) -> Result<HostedCasOutcome, String> {
+    let current = load_row(pool, owner)
+        .await
+        .map_err(|row| format!("{row:?}"))?;
+    match &current.record {
+        HostedRecord::Known(record)
+            if record.state == HostedState::Pending
+                && record.execution_nonce == nonce
+                && record.location.is_none()
+                && record.expected.is_none() =>
+        {
+            retire_pg(pool, &current, owner, nonce)
+                .await
+                .map_err(|e| format!("{e:?}"))
+        }
+        _ => Err("the row is no longer this launch's unplaced Pending".into()),
+    }
 }
 
 /// The pane of a Pending that has one on this endpoint but no evidence: its provider was

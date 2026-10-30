@@ -148,6 +148,22 @@ fn env_path_is_used_for_the_runtime_root_only() {
     assert_eq!(config_path_in(&other), config_file_path(&other));
 }
 
+#[test]
+fn test_builds_never_resolve_the_home_release_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let (home, root) = (dir.path().join("home"), dir.path().join("root"));
+    let release = home.join(".adk").join("release");
+    write_config(&config_file_path(&release), 1);
+    write_config(&legacy_config_file_path(&release), 2);
+
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let _home = set_env("HOME", Some(home.as_os_str()));
+    let _root = set_env("AGENTDESK_ROOT_DIR", Some(root.as_os_str()));
+    let _explicit = set_env(EXPLICIT_ENV, None);
+
+    assert_eq!(resolved_config_path(), config_file_path(&root));
+}
+
 /// Sets or removes one variable while the caller holds the shared env lock.
 fn set_env(key: &'static str, value: Option<&std::ffi::OsStr>) -> crate::config::TestEnvVarGuard {
     let guard = crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock(key);

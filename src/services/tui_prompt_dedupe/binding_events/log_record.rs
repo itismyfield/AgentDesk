@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// A log line: the event plus whether its source passed the Claude source check and when its hook
 /// was published. Both sit beside the event so readers of `BindingEvent` see the same record.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub(super) struct Logged {
     #[serde(flatten)]
     pub(super) event: BindingEvent,

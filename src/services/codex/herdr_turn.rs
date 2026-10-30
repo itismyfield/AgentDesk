@@ -34,8 +34,10 @@ use crate::services::codex_tui::session::{
     read_codex_tui_launch_options_fingerprint, write_codex_tui_launch_options_fingerprint,
 };
 use crate::services::codex_tui::warm_followup::codex_tui_launch_options_fingerprint;
+use crate::services::discord::UnplacedLease;
 use crate::services::herdr_launch::{
     HerdrLaunch, HerdrLaunchCommand, HerdrLaunchEndpoint, HerdrLaunchHost, launch_herdr_session,
+    unplaced::{self, Resolution, Unplaced},
 };
 use crate::services::provider::cancel_token_claude_interrupt::{
     HerdrSubmission, HerdrTurnStart, herdr_stop_settlement_available,
@@ -94,6 +96,10 @@ pub(crate) trait CodexHerdrPorts {
         record: &HostedExecution,
         target: &HerdrTarget,
     ) -> Result<(), String>;
+    /// The channel's transition lease for resolving `owner`'s unplaced Pending.
+    fn unplaced_lease(&self, _owner: &HostedOwner) -> Result<UnplacedLease, String> {
+        Err("no channel lease".into())
+    }
 }
 
 /// Why a pane took no prompt; nothing was written to it.
@@ -229,6 +235,21 @@ fn pending_launch(
         return Err(format!(
             "herdr turn: pending codex execution {nonce} already took its first prompt"
         ));
+    }
+    if record.location.is_none() && record.expected.is_none() {
+        let target = Unplaced {
+            pool: turn.pool,
+            owner: &turn.owner,
+            nonce,
+            endpoint: &turn.endpoint,
+            host: ports.launch_host().ok_or("herdr turn: no launch host")?,
+            quiet: unplaced::quiet(),
+        };
+        let lease = ports.unplaced_lease(&turn.owner);
+        return match unplaced::resolve_for_turn(runtime, lease, target)? {
+            Resolution::Retired => fresh_launch(turn, runtime, ports),
+            _ => Ok(nonce.clone()),
+        };
     }
     if record.expected.is_none() {
         let host = ports.launch_host().ok_or("herdr turn: no launch host")?;

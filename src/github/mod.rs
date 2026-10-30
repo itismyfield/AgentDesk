@@ -141,6 +141,15 @@ fn adapter() -> &'static dyn GitHubAdapter {
     &ADAPTER
 }
 
+// Read-only callers outside this module reuse the CLI adapter's timeout and kill-on-drop.
+pub(crate) fn run_async(
+    args: Vec<String>,
+    timeout: Duration,
+    timeout_context: String,
+) -> GitHubFuture<'static, Result<String, String>> {
+    adapter().run_async(args, timeout, timeout_context)
+}
+
 fn close_issue_with(
     adapter: &dyn GitHubAdapter,
     repo: &str,

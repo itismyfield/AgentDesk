@@ -762,7 +762,7 @@ fn formats_ssh_direct_prompt_notification_with_truncation() {
         ("*", r"\*", 997),
         ("@", "@\u{200b}", 997),
         ("\\", r"\\", 997),
-        ("\n", "\n-# ", 498),
+        ("\n", "\n", 1994),
     ] {
         let exact = format_ssh_direct_prompt_notification("codex", "s", &raw.repeat(fits));
         assert_eq!(exact, format!("-# ⌨️ {}", escaped.repeat(fits)));
@@ -770,6 +770,8 @@ fn formats_ssh_direct_prompt_notification_with_truncation() {
 
         let output = format_ssh_direct_prompt_notification("codex", "s", &raw.repeat(fits + 1));
         let (shown, suffix) = output.rsplit_once("… (이하 ").expect("overflow marker");
+        let omission_prefix = if raw == "\n" { "-# " } else { "" };
+        let shown = shown.strip_suffix(omission_prefix).unwrap();
         let omitted: usize = suffix.strip_suffix("자)").unwrap().parse().unwrap();
         assert!(omitted > 0 && omitted <= fits + 1);
         assert_eq!(
@@ -777,7 +779,10 @@ fn formats_ssh_direct_prompt_notification_with_truncation() {
             format!("-# ⌨️ {}", escaped.repeat(fits + 1 - omitted))
         );
         assert!(output.encode_utf16().count() <= 2000, "{raw:?}");
-        let one_more = format!("{shown}{escaped}… (이하 {}자)", omitted - 1);
+        let one_more = format!(
+            "{shown}{escaped}{omission_prefix}… (이하 {}자)",
+            omitted - 1
+        );
         assert!(
             one_more.encode_utf16().count() > 2000,
             "maximal prefix: {raw:?}"
@@ -793,14 +798,89 @@ fn formats_ssh_direct_prompt_notification_preserves_safe_multiline_text() {
         output,
         concat!(
             "-# ⌨️   \\*\\*bold\\*\\* @\u{200b}everyone ‹@\u{200b}123456789012345678›\n",
-            "-# \n-# \\# heading\n-# › quote\n-# \\[link\\]\\(https://x\\.y\\)\n",
-            "-# \\`\\`\\` @\u{200b}here\n-# \\- item\n-# 1\\. item\n-# \\\\\\_\\~\\|\\|\n-# "
+            "\n-# \\# heading\n-# › quote\n-# \\[link\\]\\(https://x\\.y\\)\n",
+            "-# \\`\\`\\` @\u{200b}here\n-# \\- item\n-# 1\\. item\n-# \\\\\\_\\~\\|\\|\n"
         )
     );
     assert!(!super::super::session_notice::is_inline(&output));
     let other = super::super::session_notice::subtext("⚠️", "first **bold**\nsecond");
     assert_eq!(other, r"-# ⚠️ first \*\*bold\*\* (+1줄)");
     assert!(super::super::session_notice::is_inline(&other));
+}
+
+#[test]
+fn formats_ssh_direct_prompt_notification_preserves_blank_lines() {
+    for separator in ["", " \t ", "\u{3000}"] {
+        let prompt = format!("first paragraph\n{separator}\nsecond paragraph\n{separator}");
+        let output = format_ssh_direct_prompt_notification("claude", "s", &prompt);
+        assert_eq!(output, "-# ⌨️ first paragraph\n\n-# second paragraph\n");
+        assert!(output.lines().all(|line| line.trim() != "-#"));
+    }
+}
+
+#[test]
+fn formats_ssh_direct_prompt_notification_preserves_url_tokens() {
+    let url = "https://github.com/itismyfield/AgentDesk/pull/7550";
+    let prompt = format!(
+        "{url}\n1. **bold**\thttp://x.y/a_(b)?q=1+2#anchor! @here\nhttps://u@x.y/<tag> https://x.y/a*b\\c https://x.y/end.\n**after** foohttps://x.y"
+    );
+    let output = format_ssh_direct_prompt_notification("claude", "s", &prompt);
+    assert_eq!(
+        output,
+        format!(
+            "-# ⌨️ {url}\n-# 1\\. \\*\\*bold\\*\\*\thttp://x.y/a_(b)?q=1+2#anchor! @\u{200b}here\n-# https://u@\u{200b}x.y/‹tag› https://x.y/a*b\\c https://x.y/end.\n-# \\*\\*after\\*\\* foohttps://x\\.y"
+        )
+    );
+}
+
+#[test]
+fn formats_ssh_direct_prompt_notification_clamps_blank_lines_and_urls() {
+    let url = "https://github.com/itismyfield/AgentDesk/pull/7550";
+    for (padding, tail, shown_tail, omitted) in [
+        (
+            1973,
+            format!("\n \t\n{}", "끝".repeat(30)),
+            "\n\n-# 끝끝끝끝끝끝",
+            24,
+        ),
+        (1980, format!("\n \t\n{}", "끝".repeat(30)), "\n-# ", 31),
+        (1960, format!(" {url}"), " https://github.com/itis", 27),
+        (
+            1948,
+            format!("\n\n{url}"),
+            "\n\n-# https://github.com/itismyfield/",
+            19,
+        ),
+    ] {
+        let prompt = format!("{}{tail}", "한".repeat(padding));
+        let output = format_ssh_direct_prompt_notification("codex", "s", &prompt);
+        assert_eq!(
+            output,
+            format!(
+                "-# ⌨️ {}{shown_tail}… (이하 {omitted}자)",
+                "한".repeat(padding)
+            )
+        );
+        assert!(output.encode_utf16().count() <= 2000);
+        assert!(
+            output
+                .lines()
+                .filter(|line| !line.is_empty())
+                .all(|line| line.starts_with("-# "))
+        );
+    }
+    for (padding, tail, rendered) in [
+        (1939, format!("\n\n{url}"), format!("\n\n-# {url}")),
+        (1988, "\n \t\n한".to_string(), "\n\n-# 한".to_string()),
+    ] {
+        let output = format_ssh_direct_prompt_notification(
+            "codex",
+            "s",
+            &format!("{}{tail}", "한".repeat(padding)),
+        );
+        assert_eq!(output, format!("-# ⌨️ {}{rendered}", "한".repeat(padding)));
+        assert_eq!(output.encode_utf16().count(), 2000);
+    }
 }
 
 #[test]

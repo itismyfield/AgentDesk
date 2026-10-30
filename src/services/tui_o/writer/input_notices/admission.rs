@@ -6,7 +6,7 @@ use crate::services::tui_input::human_frame::history::{self, ObservedAttempt};
 use crate::services::tui_o::shadow::{SourceId, UnitKind};
 use crate::services::tui_o::store::{ChannelStore, ledger::LedgerEntry};
 use crate::services::tui_prompt_dedupe::binding_events::{self as p5, BindingEvent, BindingTarget};
-use crate::services::{discord, session_host, tmux_common as tc, tui_prompt_dedupe};
+use crate::services::{discord, session_host, tmux_common as tc};
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum NoticeRefusal {
@@ -59,10 +59,15 @@ pub(crate) fn admit_notice<R>(
             "input notice provenance is incomplete or unresolved",
         ));
     }
+    // Every send, a retry of a debt the released build left included, passes the one floor.
+    let floored = super::evidence::before_migration_floor(notices, evidence);
     let prompt = evidence
         .prompt
         .clone()
         .ok_or_else(|| withheld("input notice prompt missing"))?;
+    if floored {
+        return exclude(piece, store, "input_notice_migration_floor");
+    }
     tc::try_with_tmux_source_authority(&origin.logical_session, |_| {
         let events = p5::records_strict(store.init().channel)
             .map_err(|error| withheld(error.to_string()))?
@@ -70,9 +75,7 @@ pub(crate) fn admit_notice<R>(
         if cleared(&events, origin, store)? {
             return exclude(piece, store, "input_notice_clear");
         }
-        if tui_prompt_dedupe::is_discord_relayed_user_prompt(&prompt)
-            || discord::input_notice_content(&prompt).is_none()
-        {
+        if super::discord_input(&prompt) || discord::input_notice_content(&prompt).is_none() {
             return exclude(piece, store, "input_notice_source");
         }
         match history::observed_attempt_checked(

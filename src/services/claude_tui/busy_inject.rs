@@ -25,6 +25,7 @@ enum TurnGate {
     AnyTurn,
 }
 pub(crate) use receipt::exact as exact_receipt;
+pub(crate) use receipt::pasted_inner;
 #[cfg(test)]
 mod receipt_interleave_tests;
 #[cfg(all(test, unix))]

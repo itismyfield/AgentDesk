@@ -26,7 +26,7 @@ const DEFUSE: &str = "inflight_guard.defuse()";
 const ESTABLISH: &str = "pub(super) async fn establish_bridge_entry_authority";
 const PERSIST: &str = "let outcome =";
 const GATE: &str = "if !bridge_entry_disposition_continues(";
-const ANCHOR: &str = "if !ensure_bridge_current_message_anchor";
+const ANCHOR: &str = "&& !ensure_bridge_current_message_anchor";
 const REFRESH: &str = "reconcile_runtime_locals_from_inflight_state";
 const ANCHOR_SIGNAL: &str = "signal_bridge_entry_abort_completion(&mut ctx.bridge.completion_tx);";
 const ANCHOR_RETURN: &str = "return Err(None);";

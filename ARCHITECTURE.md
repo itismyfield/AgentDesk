@@ -792,15 +792,34 @@ src/
 │   │   ├── recovery.rs
 │   │   └── worker.rs
 │   ├── campaign_execution/
+│   │   ├── adk_observe/
+│   │   │   ├── ci.rs
+│   │   │   └── ci_tests.rs
+│   │   ├── adk_observe.rs
+│   │   ├── adk_observe_tests.rs
+│   │   ├── adk_profile.rs
+│   │   ├── adk_profile_tests.rs
+│   │   ├── adk_resources.rs
+│   │   ├── adk_resources_tests.rs
+│   │   ├── adk_workspace.rs
+│   │   ├── adk_workspace_tests.rs
 │   │   ├── control.rs
 │   │   ├── control_tests.rs
 │   │   ├── definition.rs
 │   │   ├── definition_tests.rs
+│   │   ├── execution_pin.rs
+│   │   ├── execution_pin_tests.rs
+│   │   ├── main_integration.rs
+│   │   ├── main_integration_tests.rs
 │   │   ├── mod.rs
 │   │   ├── model.rs
 │   │   ├── model_tests.rs
 │   │   ├── profile.rs
 │   │   ├── profile_tests.rs
+│   │   ├── verification_run.rs
+│   │   ├── verification_run_tests.rs
+│   │   ├── verification_runner.rs
+│   │   ├── verification_runner_tests.rs
 │   │   ├── view.rs
 │   │   └── view_tests.rs
 │   ├── claude/
@@ -1858,6 +1877,7 @@ src/
 │   │   │   ├── terminal_text_idempotency.rs
 │   │   │   ├── terminal_watcher.rs
 │   │   │   ├── tmux_probe.rs
+│   │   │   ├── turn_mode_restart_tests.rs
 │   │   │   └── turn_summary_recovery_tests.rs
 │   │   ├── recovery_paths/
 │   │   │   ├── controller_cutover.rs
@@ -2036,6 +2056,7 @@ src/
 │   │   │   │   │   └── recheck_tests.rs
 │   │   │   │   ├── tui_followup/
 │   │   │   │   │   ├── busy_notice.rs
+│   │   │   │   │   ├── busy_refusal_reply_tests.rs
 │   │   │   │   │   ├── codex_observation.rs
 │   │   │   │   │   └── nameless_gate.rs
 │   │   │   │   ├── attachments.rs
@@ -2591,7 +2612,8 @@ src/
 │   │   ├── turn_bridge/
 │   │   │   ├── bridge_entry_persist/
 │   │   │   │   ├── tests/
-│   │   │   │   │   └── source_guard_tests.rs
+│   │   │   │   │   ├── source_guard_tests.rs
+│   │   │   │   │   └── turn_mode_entry_tests.rs
 │   │   │   │   └── identity_and_owner.rs
 │   │   │   ├── completion_guard/
 │   │   │   │   ├── completion_context.rs
@@ -2682,7 +2704,8 @@ src/
 │   │   │   ├── terminal_outcome_delivery/
 │   │   │   │   ├── delivery_epilogue_tests/
 │   │   │   │   │   ├── recovery_retry_guard_tests/
-│   │   │   │   │   │   └── replay_turn_tests.rs
+│   │   │   │   │   │   ├── replay_turn_tests.rs
+│   │   │   │   │   │   └── turn_mode_retry_tests.rs
 │   │   │   │   │   ├── rowless_receipt_tests/
 │   │   │   │   │   │   ├── background_child_ordering_tests.rs
 │   │   │   │   │   │   ├── o_after_done_chain_tests.rs
@@ -2695,7 +2718,8 @@ src/
 │   │   │   │   │   ├── recovery_retry_guard_tests.rs
 │   │   │   │   │   ├── rest_delivery_tests.rs
 │   │   │   │   │   ├── rowless_receipt_tests.rs
-│   │   │   │   │   └── settled_delivery_tests.rs
+│   │   │   │   │   ├── settled_delivery_tests.rs
+│   │   │   │   │   └── turn_mode_anchor_tests.rs
 │   │   │   │   ├── empty_response_recovery/
 │   │   │   │   │   ├── guidance.rs
 │   │   │   │   │   └── handler.rs
@@ -3205,7 +3229,9 @@ src/
 │   │   ├── policy.rs
 │   │   ├── policy_tests.rs
 │   │   ├── prepared.rs
-│   │   └── retired_hold.rs
+│   │   ├── retired_hold.rs
+│   │   ├── unplaced.rs
+│   │   └── unplaced_tests.rs
 │   ├── herdr_launch_tests/
 │   │   └── retired_hold_tests.rs
 │   ├── imsg_reply/
@@ -3514,6 +3540,7 @@ src/
 │   │   │   ├── provenance_tests.rs
 │   │   │   ├── transport.rs
 │   │   │   ├── transport_tests.rs
+│   │   │   ├── unplaced_rig_tests.rs
 │   │   │   └── wire.rs
 │   │   ├── herdr_gate/
 │   │   │   ├── legacy_return.rs
@@ -3570,6 +3597,7 @@ src/
 │   ├── termination_audit/
 │   │   └── host_terminate.rs
 │   ├── tmux_common/
+│   │   ├── claude_footer.rs
 │   │   ├── host_marker.rs
 │   │   └── session_markers.rs
 │   ├── tmux_turn_liveness/
@@ -3964,11 +3992,13 @@ src/
 │   │   │   │   ├── settled.rs
 │   │   │   │   └── terminal.rs
 │   │   │   ├── admission_tests.rs
+│   │   │   ├── cache_tests.rs
 │   │   │   ├── claude_fold.rs
 │   │   │   ├── codex.rs
 │   │   │   ├── codex_claim_tests.rs
 │   │   │   ├── lane_tests.rs
-│   │   │   └── log_record.rs
+│   │   │   ├── log_record.rs
+│   │   │   └── read_cache.rs
 │   │   ├── hosted_source/
 │   │   │   ├── observation.rs
 │   │   │   └── source_tests.rs

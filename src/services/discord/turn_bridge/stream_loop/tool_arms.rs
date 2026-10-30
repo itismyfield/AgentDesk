@@ -259,6 +259,7 @@ pub(super) async fn handle_stream_tool_message(
             }
             if should_open_long_running_placeholder_controller(
                 shared_owned.ui.status_panel_v2_enabled,
+                (channel_id, *current_msg_id),
             ) && long_running_placeholder_active.is_none()
                 && pending_long_running_open_after_state_save.is_none()
                 && pending_long_running_retarget_after_state_save.is_none()

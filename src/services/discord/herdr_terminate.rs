@@ -1,5 +1,5 @@
 //! Explicit termination of one Herdr execution, by the operator route, a user clear or an HTTP
-//! force cancel.
+//! force cancel, and the close of an execution no row records.
 pub(crate) mod http_force;
 mod retired_exclusion;
 pub(crate) mod root_replaced;
@@ -481,24 +481,7 @@ async fn terminate_scoped(
     };
     unsent.disarm();
     if !ended {
-        // Blocking socket work remains outside the async executor; the fence stays owned here.
-        let close_target = target.clone();
-        let close_fence = fence.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            terminate_herdr_once(OperatorTerminateWarrant::issue_fenced(
-                close_target,
-                &close_fence,
-            ))
-        })
-        .await
-        .map_err(|e| Indeterminate(e.to_string()))?;
-        if !matches!(
-            result,
-            HerdrTerminateResult::Acknowledged | HerdrTerminateResult::Indeterminate(_)
-        ) {
-            fence.reopen();
-            return Err(TerminationResult::Close(result));
-        }
+        close_fenced(&target, &fence).await?;
     }
     #[cfg(test)]
     run_probe(&AFTER_CLOSE).await;
@@ -517,6 +500,61 @@ async fn terminate_scoped(
         provider,
         channel,
     ))
+}
+/// The service's one close. A close that cannot have reached Herdr reopens the fence; the socket
+/// work stays off the async executor.
+async fn close_fenced(
+    target: &HerdrTarget,
+    fence: &Arc<TerminationFence>,
+) -> Result<(), TerminationResult> {
+    let (close_target, close_fence) = (target.clone(), fence.clone());
+    let result = tokio::task::spawn_blocking(move || {
+        terminate_herdr_once(OperatorTerminateWarrant::issue_fenced(
+            close_target,
+            &close_fence,
+        ))
+    })
+    .await
+    .map_err(|e| TerminationResult::Indeterminate(e.to_string()))?;
+    if !matches!(
+        result,
+        HerdrTerminateResult::Acknowledged | HerdrTerminateResult::Indeterminate(_)
+    ) {
+        fence.reopen();
+        return Err(TerminationResult::Close(result));
+    }
+    Ok(())
+}
+
+/// Closes the pane of `orphan`, an execution no row records, if `holds` still reads true once its
+/// fence is shut; `Ok` only when its pane and provider are gone. Nothing is retired or settled.
+pub(crate) async fn close_unrecorded(
+    orphan: &HostedExecution,
+    holds: impl std::future::Future<Output = bool>,
+) -> Result<(), TerminationResult> {
+    use TerminationResult::Refused;
+    if !terminate_enabled() {
+        return Err(TerminationResult::Disabled);
+    }
+    let Some(target) = herdr_endpoints().target(orphan) else {
+        return Err(Refused("missing launch evidence".into()));
+    };
+    let fence = match target.termination_fence() {
+        Ok(fence) => Arc::new(fence),
+        Err(e) => return Err(Refused(format!("{e:?}"))),
+    };
+    let unsent = UnsentClose(Some(fence.clone()));
+    if !holds.await {
+        return Err(Refused("row changed under fence".into()));
+    }
+    let read_target = target.clone();
+    match tokio::task::spawn_blocking(move || read_target.revalidate_termination_reads()).await {
+        Ok(Ok(_)) => {}
+        other => return Err(Refused(format!("termination provenance: {other:?}"))),
+    }
+    unsent.disarm();
+    close_fenced(&target, &fence).await?;
+    read_end(target, orphan.clone()).await
 }
 async fn load(pool: &PgPool, key: &str) -> Result<HostedObservation, TerminationResult> {
     match hosted_execution::load_hosted_execution_pg(pool, HostedLookupKey::SessionKey(key)).await {

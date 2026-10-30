@@ -17,6 +17,84 @@ macro_rules! capture {
 const MANUAL_FOOTER: &str = "⏸ manual mode on";
 const BYPASS_FOOTER: &str = "⏵⏵ bypass permissions on";
 
+const STREAMING_FOOTER: &str =
+    include_str!("../../../../../tests/fixtures/tui_input/claude-2.1.311-c2-busy.txt");
+const SHELL_FOOTER: &str =
+    include_str!("../../../../../tests/fixtures/tui_input/claude-2.1.311-b2-busy.txt");
+
+fn stop_decision(pane: &str) -> ClaudeStopDeliveryDecision {
+    let (ready, active, draft) = claude_tui_stop_pane_evidence(pane);
+    decide_claimed_claude_stop_delivery(
+        ClaudeTurnInterruptDelivery::TuiEscape,
+        classify_tui_interrupt_phase(Some(TuiTurnState::Streaming), ready || draft, active),
+    )
+}
+
+#[test]
+fn claude_tui_stop_delivers_escape_for_streaming_footer_without_spinner() {
+    use crate::services::tmux_common as screen;
+    assert_eq!(
+        stop_decision(STREAMING_FOOTER),
+        ClaudeStopDeliveryDecision::Deliver(ClaudeTurnInterruptDelivery::TuiEscape)
+    );
+    assert!(screen::tmux_capture_indicates_claude_tui_busy(
+        STREAMING_FOOTER
+    ));
+    assert!(!screen::tmux_capture_indicates_claude_tui_ready_for_input(
+        STREAMING_FOOTER
+    ));
+    let draft = STREAMING_FOOTER.replace("❯", "❯ queued follow-up");
+    assert!(screen::tmux_capture_indicates_claude_tui_prompt_draft(
+        &draft
+    ));
+    assert!(!screen::tmux_capture_indicates_claude_tui_idle_suggestion(
+        &draft
+    ));
+    assert!(crate::services::tui_input::actor::gate::submission_busy(
+        crate::services::tui_o::shadow::ShadowProvider::Claude,
+        &draft
+    ));
+    assert_eq!(
+        stop_decision(&draft),
+        ClaudeStopDeliveryDecision::SkipAmbiguous
+    );
+}
+
+#[test]
+fn claude_tui_stop_delivers_escape_for_shell_interrupt_manage_footer() {
+    for pane in [
+        SHELL_FOOTER.to_owned(),
+        SHELL_FOOTER.replace("1 shell", "2 shells"),
+    ] {
+        assert_eq!(
+            stop_decision(&pane),
+            ClaudeStopDeliveryDecision::Deliver(ClaudeTurnInterruptDelivery::TuiEscape)
+        );
+    }
+}
+
+#[test]
+fn claude_tui_stop_rejects_quoted_interrupt_footer_above_composer() {
+    let footer = STREAMING_FOOTER.lines().last().unwrap();
+    let idle = STREAMING_FOOTER.replace(footer, "  ⏵⏵ bypass permissions on");
+    for pane in [
+        format!("⏺ The footer says esc to interrupt.\n{idle}"),
+        format!("{footer}\n{idle}"),
+        idle.replace("❯", &format!("❯ quote\n{footer}")),
+        footer.to_owned(),
+    ] {
+        assert!(!crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(&pane));
+        assert!(!crate::services::tui_input::actor::gate::submission_busy(
+            crate::services::tui_o::shadow::ShadowProvider::Claude,
+            &pane
+        ));
+        assert_eq!(
+            stop_decision(&pane),
+            ClaudeStopDeliveryDecision::SkipAmbiguous
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Transcript {
     Submitted,

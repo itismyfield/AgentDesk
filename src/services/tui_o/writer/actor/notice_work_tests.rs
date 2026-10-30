@@ -487,9 +487,10 @@ async fn queued_unresolved_notice_releases_its_raw_and_survives_recreation_besid
         .writer
         .record(LedgerEntry::InputNotice {
             entry: Box::new(NoticeEntry::MigrationStarted {
+                // Frozen before the binding log named the source, so all of it is new.
                 snapshot: MigrationSnapshot {
                     sources: Vec::new(),
-                    binding_checkpoint: 1,
+                    binding_checkpoint: 0,
                     history: MigrationHistory::Fixed {
                         lower: 10,
                         upper: 10,
@@ -671,9 +672,10 @@ fn start_migration(actor: &mut Host) {
         .writer
         .record(LedgerEntry::InputNotice {
             entry: Box::new(NoticeEntry::MigrationStarted {
+                // Frozen before the binding log named the source, so all of it is new.
                 snapshot: MigrationSnapshot {
                     sources: Vec::new(),
-                    binding_checkpoint: 1,
+                    binding_checkpoint: 0,
                     history: MigrationHistory::Fixed {
                         lower: 10,
                         upper: 10,

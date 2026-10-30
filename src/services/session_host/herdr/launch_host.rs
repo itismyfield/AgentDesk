@@ -1,7 +1,9 @@
 //! Socket launch adapter; legacy E7 and user-default permits remain separate.
 
 use super::policy::grant_store::GrantRestoration;
-use super::policy::permit::{CreatePermit, ExistingMutationEvidence, LaunchAdmissionGrant};
+use super::policy::permit::{
+    CreatePermit, ExistingMutationEvidence, ExistingMutationPermit, LaunchAdmissionGrant,
+};
 use super::policy::{LocalChecker, PeerSource, ProofCache, Unverified, peer::SocketPeerSource};
 use crate::config::session_hosts::EndpointMode;
 use crate::services::herdr_launch::policy::{PermitFuture, UserDefaultCreateRequest};
@@ -20,10 +22,12 @@ use super::pane_probe::{
 use super::transport::{HerdrSocketConfig, HerdrSocketTransport};
 use super::wire::LineJsonFraming;
 use crate::db::dispatched_sessions::hosted_execution::ExpectedExecution;
+use crate::services::herdr_launch::unplaced::{ChannelPane, Residue, candidate_label};
 use crate::services::herdr_launch::{
     EvidenceProbe, HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunchEndpoint, HerdrLaunchHost,
     launch_command_eligible,
 };
+use crate::services::session_host::herdr_gate::residue;
 use crate::services::session_host::model::HostMutation;
 
 pub(crate) struct SocketHerdrLaunchHost {
@@ -483,7 +487,7 @@ impl HerdrLaunchHost for SocketHerdrLaunchHost {
     }
 
     /// Create, check the pane's cwd, read E7 again, then type the command with Enter, each
-    /// sent only to the server E7 named; after the create nothing removes or retries the pane.
+    /// sent only to the server E7 named; the launch itself never removes or retries the pane.
     fn create(&self, request: &HerdrCreateRequest) -> HerdrCreateOutcome {
         if let Err(detail) = launch_command_eligible(&request.cwd, &request.command) {
             return HerdrCreateOutcome::NotSent(detail);
@@ -517,6 +521,89 @@ impl HerdrLaunchHost for SocketHerdrLaunchHost {
         let probed = pane_probe::probe(&read, self.os.as_ref(), &request);
         tracing::info!(pane = %location.pane_id, ?probed, "herdr launch evidence");
         probed
+    }
+
+    /// LegacyDedicated: a fresh E7 `Off` reading. UserDefault: the server execution `nonce`'s grant
+    /// or the startup proof admits, as for any write to an existing pane.
+    fn unplaced_witness(
+        &self,
+        launch: &HerdrLaunchEndpoint,
+        nonce: &str,
+    ) -> Result<ServerWitness, String> {
+        let configured = self.endpoint(launch).ok_or("endpoint is not configured")?;
+        let (endpoint, transport) = configured;
+        if endpoint.mode() != EndpointMode::UserDefault {
+            return match (self.read_restore)(transport, endpoint) {
+                RestoreResume::Off { witness } => Ok(witness),
+                other => Err(format!("{RESTORE_RESUME_NOT_OFF}: {other:?}")),
+            };
+        }
+        let evidence = self.mutation_evidence(endpoint, nonce);
+        let evidence = evidence.map_err(|why| format!("mutation evidence: {why:?}"))?;
+        let current = transport
+            .server_witness()
+            .map_err(|why| format!("{why:?}"))?;
+        ExistingMutationPermit::issue(launch, nonce, current, &evidence)
+            .map(|permit| permit.witness().clone())
+            .map_err(|why| format!("existing mutation permit: {why:?}"))
+    }
+
+    fn channel_panes(
+        &self,
+        launch: &HerdrLaunchEndpoint,
+        logical_key: &str,
+        witness: &ServerWitness,
+    ) -> Result<Vec<ChannelPane>, String> {
+        let (_, transport) = self.endpoint(launch).ok_or("endpoint is not configured")?;
+        let snapshot = residue::snapshot_on(transport.as_ref(), witness, &self.next_id)?;
+        let workspaces = snapshot.workspaces.as_deref().unwrap_or_default();
+        let mut panes = Vec::new();
+        for workspace in workspaces
+            .iter()
+            .filter(|workspace| candidate_label(logical_key, &workspace.label))
+        {
+            let pristine = workspace.pane_count == 1 && workspace.tab_count == 1;
+            let held = snapshot
+                .panes
+                .iter()
+                .filter(|pane| pane.workspace_id == workspace.workspace_id);
+            for pane in held {
+                let reading = self.read_processes(transport, &pane.pane_id);
+                panes.push(ChannelPane {
+                    pane_id: pane.pane_id.clone(),
+                    label: workspace.label.clone(),
+                    pristine,
+                    occupant: pane_probe::occupant(reading, self.os.as_ref(), witness),
+                });
+            }
+        }
+        Ok(panes)
+    }
+
+    /// Removes the residue only while the endpoint's write policy still names its server.
+    fn dispose_residue(
+        &self,
+        launch: &HerdrLaunchEndpoint,
+        nonce: &str,
+        residue: &Residue,
+    ) -> Result<(), String> {
+        let (_, transport) = self.endpoint(launch).ok_or("endpoint is not configured")?;
+        if self.unplaced_witness(launch, nonce)? != residue.witness {
+            return Err("the endpoint's server changed".into());
+        }
+        let shell = residue::CreateResidue {
+            pane_id: residue.pane_id.clone(),
+            label: residue.label.clone(),
+            root: residue.root.clone(),
+        };
+        let os = self.os.as_ref();
+        residue::dispose_create_residue(
+            transport.as_ref(),
+            os,
+            &residue.witness,
+            &self.next_id,
+            &shell,
+        )
     }
 }
 

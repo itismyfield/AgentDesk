@@ -1,5 +1,6 @@
 use super::*;
 use crate::services::tui_o::turn_mode::TestConfirmation;
+use crate::services::tui_prompt_dedupe::binding_events as p5;
 
 type Run = tokio::task::JoinHandle<Option<crate::services::tui_o::writer::deliver::StopCause>>;
 
@@ -418,4 +419,314 @@ async fn frozen_pending_ownership_is_excluded_after_its_receipt_without_a_migrat
 #[tokio::test(start_paused = true)]
 async fn frozen_pending_ownership_withdrawn_takes_the_ordinary_legacy_judgment() {
     pending_in_frozen_cohort(true).await;
+}
+
+/// A native input row written at `at`, as Claude stamps each transcript row.
+fn stamped(id: &str, prompt: &str, at: chrono::DateTime<chrono::Utc>) -> Vec<u8> {
+    let mut b = serde_json::to_vec(&serde_json::json!({
+        "type":"user","uuid":id,"timestamp":at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "message":{"role":"user","content":prompt}
+    }))
+    .unwrap();
+    b.push(b'\n');
+    b
+}
+
+fn past() -> chrono::DateTime<chrono::Utc> {
+    "2026-10-19T06:57:08.000Z".parse().unwrap()
+}
+
+/// After the deploy, past the instant the writer froze its cohort.
+fn later() -> chrono::DateTime<chrono::Utc> {
+    chrono::Utc::now() + chrono::TimeDelta::seconds(1)
+}
+
+/// A Discord input pasted into a running turn in the pre-v1 frame, which no hook announced.
+fn pasted(nonce: &str, body: &str) -> String {
+    crate::services::tui_input::human_frame::legacy_inject(
+        "discord",
+        "1479017284805722200",
+        nonce,
+        body,
+    )
+}
+
+/// Records what the hook proposes for `path` in `logical`: a Pending until its file exists.
+fn propose(path: &std::path::Path, logical: &str, cause: p5::BindingCause) {
+    let proposal = p5::Proposal {
+        channel_id: CHANNEL,
+        provider: "claude",
+        tmux_session: logical,
+        session_id: Some("native"),
+        path: path.to_str().unwrap(),
+        replaced: None,
+        cause: p5::CauseSource::Hook(cause),
+        hook: None,
+    };
+    assert_eq!(
+        p5::record_source(&proposal).unwrap(),
+        p5::Committed::Appended
+    );
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Return {
+    Regrow,
+    Resume,
+}
+
+/// The old build follows a new transcript and retires the drained one, keeping its spool; with
+/// `released`, the released build already froze a cohort that left the retired source out.
+async fn retired_before_the_deploy(released: bool, back: Return) {
+    let _turns = TURNS.lock().await;
+    let _guard = crate::config::TestRuntimeRootGuard::new();
+    let runtime = tempfile::tempdir().unwrap();
+    let path = runtime.path().join("native.jsonl");
+    let old = [
+        stamped("old", &pasted("59c597ef", "old discord input"), past()),
+        body("old-body", "old answer"),
+    ];
+    std::fs::write(&path, old.concat()).unwrap();
+    let (o, _binding) = begin(runtime.path(), &path, "retired-pane");
+    let port = Arc::new(Port::default());
+    old_build(&o, &port).await;
+    let next = runtime.path().join("next.jsonl");
+    std::fs::write(&next, b"").unwrap();
+    let _next_binding = bind(
+        runtime.path(),
+        CHANNEL,
+        &source_of(&next),
+        "retired-pane-next",
+        "73320000000000000000000000000097",
+    );
+    let mut actor = host(&o, port.clone(), Alarms::default(), u64::MAX);
+    actor.deriver = UnitDeriver::new(CHANNEL, ShadowProvider::Claude);
+    resume(&mut actor);
+    actor.read_sources();
+    (actor.writer.store())
+        .set_retired(&source_of(&path), true)
+        .unwrap();
+    if released {
+        let snapshot = MigrationSnapshot {
+            sources: vec![MigrationSource {
+                source: source_of(&next),
+                lower: 0,
+                upper: 0,
+                prefix_hash: hex::encode(Sha256::digest(b"")),
+            }],
+            binding_checkpoint: 2,
+            history: MigrationHistory::Fixed {
+                lower: 10,
+                upper: 10,
+            },
+        };
+        let entry = Box::new(NoticeEntry::MigrationStarted { snapshot });
+        actor
+            .writer
+            .record(LedgerEntry::InputNotice { entry })
+            .unwrap();
+    }
+    drop(actor);
+
+    let _confirmed = TestConfirmation::new(CHANNEL);
+    let run = spawn(&o, port.clone());
+    settle(&port, 1).await;
+    append(
+        &next,
+        &stamped("after", "terminal input after the deploy", later()),
+    );
+    settle(&port, 2).await;
+    if back == Return::Resume {
+        propose(&path, "retired-pane-next", p5::BindingCause::Resume);
+    }
+    append(
+        &path,
+        &stamped("back", "input on the transcript taken up again", later()),
+    );
+    settle(&port, 3).await;
+    finish(run).await;
+    let expected = [
+        "old answer".to_string(),
+        notice("terminal input after the deploy"),
+        notice("input on the transcript taken up again"),
+    ];
+    assert_eq!(
+        *port.posts.lock().unwrap(),
+        expected,
+        "a retired source's retained input is not announced again"
+    );
+
+    let again = spawn(&o, port.clone());
+    settle(&port, expected.len() + 1).await;
+    finish(again).await;
+    assert_eq!(
+        *port.posts.lock().unwrap(),
+        expected,
+        "a restart posts nothing"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_source_the_old_build_retired_never_backfills_its_retained_inputs_as_notices() {
+    retired_before_the_deploy(false, Return::Regrow).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cohort_the_released_build_froze_without_a_retired_source_still_floors_it() {
+    retired_before_the_deploy(true, Return::Regrow).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_source_the_released_build_left_out_announces_new_input_after_a_resume() {
+    retired_before_the_deploy(true, Return::Resume).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_source_pending_at_the_freeze_and_resolved_after_it_announces_its_input() {
+    let _turns = TURNS.lock().await;
+    let _guard = crate::config::TestRuntimeRootGuard::new();
+    let runtime = tempfile::tempdir().unwrap();
+    let path = runtime.path().join("native.jsonl");
+    std::fs::write(
+        &path,
+        [row("old", "old input"), body("old-body", "old answer")].concat(),
+    )
+    .unwrap();
+    let (o, _binding) = begin(runtime.path(), &path, "pending-pane");
+    let port = Arc::new(Port::default());
+    legacy(&port, "old input");
+    old_build(&o, &port).await;
+    // The hook binds the next transcript before Claude has written it.
+    let next = runtime.path().join("next.jsonl");
+    propose(&next, "pending-pane", p5::BindingCause::Clear);
+
+    let _confirmed = TestConfirmation::new(CHANNEL);
+    let run = spawn(&o, port.clone());
+    settle(&port, 1).await;
+    assert!(
+        notices(&o).migration.is_some(),
+        "the freeze precedes the resolution"
+    );
+    std::fs::write(
+        &next,
+        stamped("first", "first input on the resolved transcript", later()),
+    )
+    .unwrap();
+    propose(&next, "pending-pane", p5::BindingCause::Clear);
+    settle(&port, 2).await;
+    finish(run).await;
+    let expected = [
+        "old answer".to_string(),
+        notice("first input on the resolved transcript"),
+    ];
+    assert_eq!(*port.posts.lock().unwrap(), expected);
+    let again = spawn(&o, port.clone());
+    settle(&port, 3).await;
+    finish(again).await;
+    assert_eq!(
+        *port.posts.lock().unwrap(),
+        expected,
+        "a restart posts nothing"
+    );
+}
+
+/// A frame in one whole paste block as Claude records a folded paste, optionally with its outer LFs.
+fn in_paste(frame: &str, outer: bool) -> String {
+    let block = format!("<pasted_content id=\"a733\">\n{frame}\n</pasted_content id=\"a733\">");
+    if outer {
+        format!("\n\n{block}\n")
+    } else {
+        block
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Recorded {
+    Bare,
+    Pasted,
+    PastedWithOuterLf,
+}
+
+async fn legacy_frames_in_the_frozen_tail(recorded: Recorded) {
+    let _turns = TURNS.lock().await;
+    let _guard = crate::config::TestRuntimeRootGuard::new();
+    let runtime = tempfile::tempdir().unwrap();
+    let path = runtime.path().join("native.jsonl");
+    std::fs::write(
+        &path,
+        [row("old", "old input"), body("old-body", "old answer")].concat(),
+    )
+    .unwrap();
+    let (o, _binding) = begin(runtime.path(), &path, "legacy-frame-pane");
+    let port = Arc::new(Port::default());
+    legacy(&port, "old input");
+    old_build(&o, &port).await;
+    let as_recorded = |frame: String| match recorded {
+        Recorded::Bare => frame,
+        Recorded::Pasted => in_paste(&frame, false),
+        Recorded::PastedWithOuterLf => in_paste(&frame, true),
+    };
+    // The frozen tail holds Discord input in the old frame, one input typed at the terminal, and
+    // a terminal sentence typed beside a pasted frame, which stays a terminal input.
+    let beside = format!(
+        "{}\ntyped beside the paste",
+        in_paste(&pasted("bbf58a6f", "pasted discord input"), false)
+    );
+    append(
+        &path,
+        &row(
+            "frame-1",
+            &as_recorded(pasted("59c597ef", "first discord input")),
+        ),
+    );
+    append(&path, &row("typed", "silent gap input"));
+    append(
+        &path,
+        &row(
+            "frame-2",
+            &as_recorded(pasted("4ddea31c", "second discord input")),
+        ),
+    );
+    append(&path, &row("beside", &beside));
+    append(&path, &body("gap-body", "gap answer"));
+
+    let _confirmed = TestConfirmation::new(CHANNEL);
+    let run = spawn(&o, port.clone());
+    settle(&port, 4).await;
+    append(&path, &row("after", "input after activation"));
+    settle(&port, 5).await;
+    finish(run).await;
+    let posted = port.posts.lock().unwrap().clone();
+    assert_eq!(posted.len(), 5, "{posted:?}");
+    for expected in [
+        notice("silent gap input"),
+        notice(&beside),
+        "gap answer".into(),
+        notice("input after activation"),
+    ] {
+        assert_eq!(posted.iter().filter(|p| **p == expected).count(), 1);
+    }
+    let again = spawn(&o, port.clone());
+    settle(&port, 6).await;
+    finish(again).await;
+    assert_eq!(
+        port.posts.lock().unwrap().len(),
+        5,
+        "a restart posts nothing"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn legacy_discord_frames_in_the_frozen_tail_stay_unannounced_beside_terminal_input() {
+    legacy_frames_in_the_frozen_tail(Recorded::Bare).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn pasted_legacy_discord_frames_in_the_frozen_tail_stay_unannounced() {
+    legacy_frames_in_the_frozen_tail(Recorded::Pasted).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn pasted_legacy_discord_frames_with_outer_lfs_stay_unannounced() {
+    legacy_frames_in_the_frozen_tail(Recorded::PastedWithOuterLf).await;
 }
