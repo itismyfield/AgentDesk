@@ -81,9 +81,8 @@ pub(super) fn take(turn: &StreamingTurn<'_>) -> Option<Taken> {
     take_owned(turn, None, registration, reply_once(None))
 }
 
-/// The owner's front handoff: the turn's claim on the drive's granted front, the owner's mailbox
-/// and the verified execution arrive as arguments, never through a static or task-local. The
-/// drive hears `settled` once the input settled; this thread runs on with the AI turn.
+/// The owner's front handoff, from its arguments alone: the drive hears `settled` once the input
+/// settled, while this thread runs on with the AI turn.
 pub(super) fn execute_front(
     turn: StreamingTurn<'_>,
     sender: std::sync::mpsc::Sender<crate::services::agent_protocol::StreamMessage>,

@@ -142,9 +142,8 @@ async fn one_drive_per_channel_hands_each_front_on_once_in_order() {
     );
 }
 
-/// A front cancelled after its grant and before its claim is never reserved, and the drive goes
-/// on with the front that took its place; a clear before the claim leaves nothing reserved, and a
-/// cancel of the input behind keeps the front's grant, so it is delivered with no further wake.
+/// A front cancelled or cleared after its grant is never reserved and the drive goes on; a cancel
+/// behind the front keeps its grant, so it is delivered on its one handoff.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_front_that_moved_after_its_grant_is_never_reserved() {
     let _root = TestRuntimeRootGuard::new();
