@@ -157,7 +157,10 @@ pub(crate) fn idle_codex(pane: busy_inject::Pane, session: String) -> Leaf {
             };
             match key(&pane, paste) {
                 Key::Applied => {}
-                Key::Held => return refused("pane_moved".into()),
+                Key::Held => {
+                    owner_input::first_key_held("pane_moved");
+                    return Completion::NotSent("pane_moved".into());
+                }
                 Key::Failed => return Completion::WriteUncertain("paste_failed".into()),
             }
             std::thread::sleep(codex_inject::TIMING.settle);

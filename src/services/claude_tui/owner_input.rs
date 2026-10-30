@@ -112,6 +112,17 @@ pub(crate) fn vetoed(reason: &str) {
     }
 }
 
+/// The first payload key, with no C-s before it, was held before tmux ran it: nothing reached
+/// the pane, so the attempt still proves not-sent.
+#[cfg(all(test, unix))]
+pub(crate) fn first_key_held(reason: &str) {
+    if let Some(scope) = current() {
+        scope.allowed.store(false, Ordering::SeqCst);
+        scope.keyed.store(false, Ordering::SeqCst);
+    }
+    vetoed(reason);
+}
+
 /// `None` without an owner on this thread; otherwise whether this owner may write `physical`,
 /// holding it for the owner's lifetime. A foreign host or tmux owner fails closed.
 pub(crate) fn hold_content(host: &str, physical: &str, key: &str) -> Option<Result<(), String>> {
