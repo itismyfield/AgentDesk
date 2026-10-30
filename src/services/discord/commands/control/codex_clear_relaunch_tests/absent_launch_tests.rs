@@ -16,6 +16,7 @@ mod source_boundary_tests;
 enum HistoricalMarker {
     Absent,
     ForeignIdentity,
+    MissingIdentity,
     OwnedMemory,
     OwnedBoot,
 }
@@ -55,6 +56,16 @@ async fn disconnected_foreign_identity_queue_kickoff_starts_turn_pg() {
         "::disconnected_foreign_identity_queue_kickoff_starts_turn_pg"
     )) {
         restored_head_reaches_provider(HistoricalMarker::ForeignIdentity, true, true).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn canonical_missing_identity_queue_kickoff_starts_turn_pg() {
+    if isolated(concat!(
+        module_path!(),
+        "::canonical_missing_identity_queue_kickoff_starts_turn_pg"
+    )) {
+        restored_head_reaches_provider(HistoricalMarker::MissingIdentity, true, true).await;
     }
 }
 
@@ -142,7 +153,10 @@ async fn restored_head_reaches_provider(marker: HistoricalMarker, warm: bool, st
     let mut fixture =
         CanaryFixture::build_with_host(0, CodexSourceMode::Verified, Some("b1-absent-test-host"))
             .await;
-    if matches!(marker, HistoricalMarker::ForeignIdentity) {
+    if matches!(
+        marker,
+        HistoricalMarker::ForeignIdentity | HistoricalMarker::MissingIdentity
+    ) {
         let hash = crate::services::discord::settings::discord_token_hash(TEST_BOT);
         let key = crate::services::discord::adk_session::build_namespaced_session_key(
             &hash,
@@ -231,7 +245,9 @@ async fn restored_head_reaches_provider(marker: HistoricalMarker, warm: bool, st
     crate::services::session_backend::remove_process_session(CANARY_TMUX);
     if matches!(
         marker,
-        HistoricalMarker::Absent | HistoricalMarker::ForeignIdentity
+        HistoricalMarker::Absent
+            | HistoricalMarker::ForeignIdentity
+            | HistoricalMarker::MissingIdentity
     ) {
         crate::services::tmux_common::cleanup_session_temp_files(CANARY_TMUX);
     } else {
@@ -277,29 +293,56 @@ async fn restored_head_reaches_provider(marker: HistoricalMarker, warm: bool, st
         (activity.activity, activity.reason),
         (Activity::Idle, "no_session")
     );
-    if matches!(marker, HistoricalMarker::ForeignIdentity) {
+    if matches!(
+        marker,
+        HistoricalMarker::ForeignIdentity | HistoricalMarker::MissingIdentity
+    ) {
         let pool = fixture.shared.pg_pool.as_ref().unwrap();
         sqlx::query("UPDATE sessions SET identity_kind = NULL, discord_token_hash = NULL")
             .execute(pool)
             .await
             .unwrap();
-        sqlx::query(
-            "INSERT INTO sessions (session_key, provider, status, channel_id,
-                                   identity_kind, discord_token_hash, last_heartbeat)
-             VALUES ($1, 'codex', 'disconnected', $2, 'discord_channel', $3,
-                     NOW() - INTERVAL '60 days')",
-        )
-        .bind(format!(
-            "codex/{}/old-mac-mini:{CANARY_TMUX}",
-            fixture.shared.token_hash
-        ))
-        .bind(CANARY_CHANNEL.to_string())
-        .bind(&fixture.shared.token_hash)
-        .execute(pool)
-        .await
-        .unwrap();
+        if matches!(marker, HistoricalMarker::ForeignIdentity) {
+            sqlx::query(
+                "INSERT INTO sessions (session_key, provider, status, channel_id,
+                                       identity_kind, discord_token_hash, last_heartbeat)
+                 VALUES ($1, 'codex', 'disconnected', $2, 'discord_channel', $3,
+                         NOW() - INTERVAL '60 days')",
+            )
+            .bind(format!(
+                "codex/{}/old-mac-mini:{CANARY_TMUX}",
+                fixture.shared.token_hash
+            ))
+            .bind(CANARY_CHANNEL.to_string())
+            .bind(&fixture.shared.token_hash)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
     }
-    if !matches!(marker, HistoricalMarker::ForeignIdentity) {
+    let unowned_row: Option<(i64, String)> = if matches!(marker, HistoricalMarker::MissingIdentity)
+    {
+        assert!(crate::services::tui_o::turn_mode::transcript_turns(
+            CANARY_CHANNEL
+        ));
+        assert!(!dedupe::clear_relaunch::relaunch_open(CANARY_TMUX));
+        Some(
+            sqlx::query_as(
+                "SELECT id, session_key FROM sessions WHERE provider = 'codex'
+             AND channel_id = $1 AND identity_kind IS NULL AND discord_token_hash IS NULL",
+            )
+            .bind(CANARY_CHANNEL.to_string())
+            .fetch_one(fixture.shared.pg_pool.as_ref().unwrap())
+            .await
+            .unwrap(),
+        )
+    } else {
+        None
+    };
+    if !matches!(
+        marker,
+        HistoricalMarker::ForeignIdentity | HistoricalMarker::MissingIdentity
+    ) {
         let blocked = crate::services::discord::router::hosted_tui_promote_readiness_blocked(
             &fixture.shared,
             &ProviderKind::Codex,
@@ -425,6 +468,54 @@ async fn restored_head_reaches_provider(marker: HistoricalMarker, warm: bool, st
     assert!(!dedupe::clear_relaunch::relaunch_open(CANARY_TMUX));
     let after = fixture.shared.mailbox(channel).snapshot().await;
     assert!(after.intervention_queue.is_empty() && after.pending_user_dispatch.is_none());
+    if let Some(expected_row) = unowned_row {
+        let pool = fixture.shared.pg_pool.as_ref().unwrap();
+        let channel_text = CANARY_CHANNEL.to_string();
+        let canonical = CanonicalSessionIdentity {
+            kind: SessionIdentityKind::DiscordChannel,
+            discord_token_hash: &fixture.shared.token_hash,
+            channel_id: &channel_text,
+        };
+        for key in [Some(expected_row.1.as_str()), None] {
+            let resolved =
+                crate::db::dispatched_session_canonical_identity::resolve_session_row_pg(
+                    pool,
+                    key,
+                    Some("codex"),
+                    Some(canonical),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resolved.as_ref(), Some(&expected_row));
+        }
+        let identity: (String, String) =
+            sqlx::query_as("SELECT identity_kind, discord_token_hash FROM sessions WHERE id = $1")
+                .bind(expected_row.0)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(identity.0, "discord_channel");
+        assert_eq!(identity.1, fixture.shared.token_hash);
+        assert_eq!(
+            crate::services::discord::host_key_derivation::derive_channel_session_name(
+                pool,
+                std::slice::from_ref(&fixture.shared.token_hash),
+                &ProviderKind::Codex,
+                CANARY_CHANNEL,
+            )
+            .await
+            .unwrap(),
+            CANARY_TMUX
+        );
+        assert!(
+            !crate::services::discord::host_defer_gate::nameless_channel_deferred(
+                &fixture.shared,
+                &ProviderKind::Codex,
+                CANARY_CHANNEL,
+            )
+            .await
+        );
+    }
     let (disk, _) =
         crate::services::turn_orchestrator::test_support::load_channel_pending_queue_checked(
             &ProviderKind::Codex,

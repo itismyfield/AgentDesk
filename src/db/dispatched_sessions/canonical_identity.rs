@@ -328,8 +328,8 @@ pub(crate) async fn resolve_session_key_with_identity_pg(
         .map(|row| row.map(|(_, key)| key))
 }
 
-/// Converge exact locators and the canonical tuple, handing off a disconnected
-/// foreign owner to its unique operational legacy successor under the same locks.
+/// Converge exact locators and the canonical tuple through locked operational
+/// promotion, with disconnected foreign owners released only for legacy records.
 pub(crate) async fn resolve_session_row_pg(
     pool: &PgPool,
     session_key: Option<&str>,
@@ -484,48 +484,63 @@ async fn load_canonical_for_update(
             "canonical Discord identity is ambiguous",
         ));
     }
-    let Some(owner) = rows.into_iter().next().map(decode_evidence).transpose()? else {
-        return Ok(None);
-    };
+    let owner = rows.into_iter().next().map(decode_evidence).transpose()?;
     let candidate = load_unique_legacy_candidate_for_update(tx, provider, identity, true)
         .await
         .map_err(|error| match error.conflict_kind() {
             Some(SessionIdentityConflictKind::AmbiguousLegacy) => conflict(
                 SessionIdentityConflictKind::EvidenceDivergence,
-                "canonical owner has ambiguous legacy successors",
+                "canonical identity has ambiguous operational legacy candidates",
             ),
             _ => error,
         })?;
     let Some(mut candidate) = candidate else {
-        return Ok(Some(owner));
+        return Ok(owner);
     };
-    let disconnected: bool = sqlx::query_scalar(
-        "SELECT lower(COALESCE(status, '')) = 'disconnected' FROM sessions WHERE id = $1",
+    let records_absent: bool = sqlx::query_scalar(
+        "SELECT NOT EXISTS (SELECT 1 FROM sessions
+         WHERE id IN ($1, $2) AND hosted_execution IS NOT NULL)",
     )
-    .bind(owner.id)
+    .bind(owner.as_ref().map(|owner| owner.id))
+    .bind(candidate.id)
     .fetch_one(&mut **tx)
     .await
     .map_err(database_error)?;
-    let hosts = [owner.session_key.as_str(), candidate.session_key.as_str()].map(|key| {
-        crate::services::discord::session_identity::SessionIdentity::parse(key)
-            .map(|parsed| parsed.host.to_ascii_lowercase())
-    });
-    let foreign = matches!(&hosts, [Some(old), Some(live)]
-        if old.trim_end_matches(".local") != live.trim_end_matches(".local"));
-    if !disconnected || !foreign {
+    if !records_absent {
         return Err(conflict(
             SessionIdentityConflictKind::EvidenceDivergence,
-            "canonical and legacy rows lack a disconnected foreign-host handoff",
+            "automatic identity convergence requires absent hosted records",
         ));
     }
-    // Release the old tuple before claiming it; both rows stay locked until commit.
-    sqlx::query(
-        "UPDATE sessions SET identity_kind = NULL, discord_token_hash = NULL WHERE id = $1",
-    )
-    .bind(owner.id)
-    .execute(&mut **tx)
-    .await
-    .map_err(database_error)?;
+    if let Some(owner) = owner {
+        let disconnected: bool = sqlx::query_scalar(
+            "SELECT lower(COALESCE(status, '')) = 'disconnected' FROM sessions WHERE id = $1",
+        )
+        .bind(owner.id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(database_error)?;
+        let hosts = [owner.session_key.as_str(), candidate.session_key.as_str()].map(|key| {
+            crate::services::discord::session_identity::SessionIdentity::parse(key)
+                .map(|parsed| parsed.host.to_ascii_lowercase())
+        });
+        let foreign = matches!(&hosts, [Some(old), Some(live)]
+            if old.trim_end_matches(".local") != live.trim_end_matches(".local"));
+        if !disconnected || !foreign {
+            return Err(conflict(
+                SessionIdentityConflictKind::EvidenceDivergence,
+                "canonical and legacy rows lack a disconnected foreign-host handoff",
+            ));
+        }
+        // Release the old tuple before claiming it; both rows stay locked until commit.
+        sqlx::query(
+            "UPDATE sessions SET identity_kind = NULL, discord_token_hash = NULL WHERE id = $1",
+        )
+        .bind(owner.id)
+        .execute(&mut **tx)
+        .await
+        .map_err(database_error)?;
+    }
     sqlx::query("UPDATE sessions SET identity_kind = $2, discord_token_hash = $3 WHERE id = $1")
         .bind(candidate.id)
         .bind(identity.kind.as_str())

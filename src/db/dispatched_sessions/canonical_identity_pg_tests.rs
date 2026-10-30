@@ -2832,3 +2832,274 @@ async fn canonical_identity_foreign_handoff_resolver_and_hook_converge_pg() {
     }
     test_db.drop().await;
 }
+
+#[tokio::test]
+async fn canonical_identity_missing_owner_promotes_operational_row_and_refuses_ambiguity_pg() {
+    let Some(db) = CanonicalIdentityPgDatabase::create().await else {
+        return;
+    };
+    let pool = db.migrate().await;
+    let channel = "1490141485167808532";
+    let old = "claude/discord_0123456789abcdef/mac-mini:AgentDesk-claude-missing";
+    let live = "claude/discord_0123456789abcdef/mac-book:AgentDesk-claude-missing";
+    let alias = "claude/discord_0123456789abcdef/mac-mini:AgentDesk-claude-missing-alias";
+    for entry in 0..5 {
+        sqlx::query("DELETE FROM sessions")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut stale = params(old, channel);
+        stale.status = "disconnected";
+        super::upsert_legacy_hook_session_pg(&pool, stale)
+            .await
+            .unwrap();
+        super::upsert_legacy_hook_session_pg(&pool, params(live, channel))
+            .await
+            .unwrap();
+        if entry == 4 {
+            super::upsert_legacy_hook_session_pg(&pool, params(alias, channel))
+                .await
+                .unwrap();
+        } else if entry == 1 {
+            sqlx::query("INSERT INTO session_key_aliases (session_key, session_id) SELECT $1, id FROM sessions WHERE session_key = $2")
+                .bind(alias).bind(old).execute(&pool).await.unwrap();
+        }
+        let before: Vec<Value> =
+            sqlx::query_scalar("SELECT to_jsonb(s) FROM sessions s ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        if entry == 4 {
+            for key in [Some(live), None] {
+                let error = super::resolve_session_row_pg(
+                    &pool,
+                    key,
+                    Some("claude"),
+                    Some(identity(channel)),
+                )
+                .await
+                .unwrap_err();
+                assert_eq!(
+                    error.conflict_kind(),
+                    Some(SessionIdentityConflictKind::EvidenceDivergence)
+                );
+            }
+            let error = upsert_hook_session_with_identity_pg(
+                &pool,
+                params(live, channel),
+                Some(identity(channel)),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error.conflict_kind(),
+                Some(SessionIdentityConflictKind::EvidenceDivergence)
+            );
+            let after: Vec<Value> =
+                sqlx::query_scalar("SELECT to_jsonb(s) FROM sessions s ORDER BY id")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(after, before);
+            continue;
+        }
+        if entry == 1 {
+            for key in [old, alias] {
+                let error = super::resolve_session_row_pg(
+                    &pool,
+                    Some(key),
+                    Some("claude"),
+                    Some(identity(channel)),
+                )
+                .await
+                .unwrap_err();
+                assert_eq!(
+                    error.conflict_kind(),
+                    Some(SessionIdentityConflictKind::EvidenceDivergence)
+                );
+                let error = upsert_hook_session_with_identity_pg(
+                    &pool,
+                    params(key, channel),
+                    Some(identity(channel)),
+                )
+                .await
+                .unwrap_err();
+                assert_eq!(
+                    error.conflict_kind(),
+                    Some(SessionIdentityConflictKind::EvidenceDivergence)
+                );
+                let after: Vec<Value> =
+                    sqlx::query_scalar("SELECT to_jsonb(s) FROM sessions s ORDER BY id")
+                        .fetch_all(&pool)
+                        .await
+                        .unwrap();
+                assert_eq!(
+                    after, before,
+                    "late exact/alias conflict rolls back promotion"
+                );
+            }
+        }
+        if entry == 0 {
+            let outcome = upsert_hook_session_with_identity_pg(
+                &pool,
+                params(live, channel),
+                Some(identity(channel)),
+            )
+            .await
+            .unwrap();
+            assert_eq!(outcome.session_key, live);
+        } else if entry == 3 {
+            let (read, hook) = tokio::join!(
+                super::resolve_session_row_pg(
+                    &pool,
+                    Some(live),
+                    Some("claude"),
+                    Some(identity(channel))
+                ),
+                upsert_hook_session_with_identity_pg(
+                    &pool,
+                    params(live, channel),
+                    Some(identity(channel))
+                ),
+            );
+            assert_eq!(read.unwrap().unwrap().1, live);
+            assert_eq!(hook.unwrap().session_key, live);
+        } else {
+            let key = (entry == 1).then_some(live);
+            let resolved =
+                super::resolve_session_row_pg(&pool, key, Some("claude"), Some(identity(channel)))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(resolved.1, live);
+        }
+        let again =
+            super::resolve_session_row_pg(&pool, None, Some("claude"), Some(identity(channel)))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(again.1, live);
+        let after: Vec<Value> =
+            sqlx::query_scalar("SELECT to_jsonb(s) FROM sessions s ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let mut expected = before;
+        expected[1]["identity_kind"] = json!("discord_channel");
+        expected[1]["discord_token_hash"] = json!(TOKEN);
+        if entry == 0 || entry == 3 {
+            expected[1]["last_heartbeat"] = after[1]["last_heartbeat"].clone();
+        }
+        assert_eq!(after, expected, "promotion preserves every other column");
+    }
+    sqlx::query("DELETE FROM sessions")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        super::resolve_session_row_pg(&pool, None, Some("claude"), Some(identity(channel)))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mut stale = params(old, channel);
+    stale.status = "disconnected";
+    super::upsert_legacy_hook_session_pg(&pool, stale)
+        .await
+        .unwrap();
+    let before = actor_pin_session_snapshot(&pool, old).await;
+    assert!(
+        super::resolve_session_row_pg(&pool, None, Some("claude"), Some(identity(channel)))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(actor_pin_session_snapshot(&pool, old).await, before);
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn canonical_identity_hosted_handoff_preserves_both_rows_pg() {
+    let Some(db) = CanonicalIdentityPgDatabase::create().await else {
+        return;
+    };
+    let pool = db.migrate().await;
+    let channel = "1490141485167808532";
+    let old = "claude/discord_0123456789abcdef/mac-mini:AgentDesk-claude-hosted-handoff";
+    let live = "claude/discord_0123456789abcdef/mac-book:AgentDesk-claude-hosted-handoff";
+    for on_old in [true, false] {
+        for raw in [
+            wire(&record(&owner(channel), "handoff", HostedState::Pending)),
+            wire(&record(&owner(channel), "handoff", HostedState::Bound)),
+            wire(&record(&owner(channel), "handoff", HostedState::Retired)),
+            future_schema(&owner(channel)),
+            Value::Null,
+        ] {
+            sqlx::query("DELETE FROM sessions")
+                .execute(&pool)
+                .await
+                .unwrap();
+            let mut stale = params(old, channel);
+            stale.status = "disconnected";
+            upsert_hook_session_with_identity_pg(&pool, stale, Some(identity(channel)))
+                .await
+                .unwrap();
+            super::upsert_legacy_hook_session_pg(&pool, params(live, channel))
+                .await
+                .unwrap();
+            set_raw(&pool, if on_old { old } else { live }, Some(raw)).await;
+            let before: Vec<Value> =
+                sqlx::query_scalar("SELECT to_jsonb(s) FROM sessions s ORDER BY id")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            let old_lookup =
+                load_hosted_execution_pg(&pool, HostedLookupKey::SessionKey(old)).await;
+            let live_lookup =
+                load_hosted_execution_pg(&pool, HostedLookupKey::SessionKey(live)).await;
+            for key in [Some(live), None] {
+                let error = super::resolve_session_row_pg(
+                    &pool,
+                    key,
+                    Some("claude"),
+                    Some(identity(channel)),
+                )
+                .await
+                .unwrap_err();
+                assert_eq!(
+                    error.conflict_kind(),
+                    Some(SessionIdentityConflictKind::EvidenceDivergence)
+                );
+            }
+            let error = upsert_hook_session_with_identity_pg(
+                &pool,
+                params(live, channel),
+                Some(identity(channel)),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error.conflict_kind(),
+                Some(SessionIdentityConflictKind::EvidenceDivergence)
+            );
+            let after: Vec<Value> =
+                sqlx::query_scalar("SELECT to_jsonb(s) FROM sessions s ORDER BY id")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                after, before,
+                "non-NULL hosted evidence must stay unchanged"
+            );
+            assert_eq!(
+                load_hosted_execution_pg(&pool, HostedLookupKey::SessionKey(old)).await,
+                old_lookup
+            );
+            assert_eq!(
+                load_hosted_execution_pg(&pool, HostedLookupKey::SessionKey(live)).await,
+                live_lookup
+            );
+        }
+    }
+    db.drop().await;
+}
