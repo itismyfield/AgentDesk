@@ -44,7 +44,8 @@ pub(crate) enum BindingCause {
     Fork,
     Unknown,
 }
-/// `Resolved` completes the `Pending` record `pending_seq`; `Rejected` is audit only.
+/// `Resolved` completes the named Pending; bare `Rejected` is audit only.
+/// Codex typed ownership can name the exact Pending a rejection closes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum BindingTarget {

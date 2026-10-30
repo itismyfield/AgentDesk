@@ -80,6 +80,7 @@ fn inputs(mode: &str) -> Inputs {
         },
         current: source(1),
         events: vec![event(1, NONCE, None, BindingTarget::Source(source(1)))],
+        settled_companions: Default::default(),
         tail: 1,
         log_digest: "whole-log-1".into(),
         census_digest: "whole-census".into(),
@@ -342,4 +343,156 @@ fn codex_observation_herdr_and_legacy_keep_separate_context_policies() {
     let mut input = inputs("fresh");
     input.context.source_policy = Some("verified".into());
     assert_eq!(complete(input).held, vec![source(1)]);
+}
+
+#[cfg(unix)]
+mod companions {
+    use super::*;
+    use crate::services::tui_prompt_dedupe::binding_events::{self as p5, codex};
+    use serde_json::Value;
+
+    const CHANNEL: u64 = 1509350778043895902;
+
+    fn rows() -> Vec<Value> {
+        include_str!("../../../../../tests/fixtures/codex_history/resume_companions.jsonl")
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    struct Fixture {
+        _root: crate::config::TestRuntimeRootGuard,
+        path: std::path::PathBuf,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let root = crate::config::TestRuntimeRootGuard::new();
+            let runtime = crate::config::runtime_root().unwrap();
+            p5::set_test_root(Some(&runtime));
+            let path = runtime.join(format!("binding_events/{CHANNEL}.log"));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            Self { _root: root, path }
+        }
+
+        fn write(&self, rows: &[Value]) -> Vec<u8> {
+            let prefix = (1..117).map(|seq| {
+                let mut row = rows[0].clone();
+                row["seq"] = seq.into();
+                row
+            });
+            let bytes = prefix
+                .chain(rows.iter().cloned())
+                .map(|row| format!("{}\n", serde_json::to_string(&row).unwrap()))
+                .collect::<String>()
+                .into_bytes();
+            std::fs::write(&self.path, &bytes).unwrap();
+            bytes
+        }
+
+        fn input(&self) -> Result<Inputs, String> {
+            let log = codex::observe_channel(CHANNEL, 65_536)?;
+            let last = log.events.last().unwrap();
+            let BindingTarget::Source(current) = &last.new else {
+                panic!("fixture ends in current source");
+            };
+            let mut input = inputs("fresh");
+            input.target.channel = CHANNEL;
+            input.target.tmux = last.tmux_session.clone();
+            input.target.nonce = last.execution_nonce.clone().unwrap();
+            input.context.channel_id = Some(CHANNEL);
+            input.context.tmux_session = input.target.tmux.clone();
+            input.context.execution_nonce = input.target.nonce.clone();
+            input.context.created_at = last.committed_at;
+            input.current = current.clone();
+            input.panes[0].name = input.target.tmux.clone();
+            input.events = log.events;
+            input.settled_companions = log.settled_companions;
+            input.tail = log.tail;
+            input.log_digest = log.digest;
+            Ok(input)
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            p5::forget_channel_for_tests(CHANNEL);
+            p5::set_test_root(None);
+        }
+    }
+
+    #[test]
+    fn codex_observation_settled_resume_companion_allows_history_and_retention() {
+        let fixture = Fixture::new();
+        let rows = rows();
+        let before = fixture.write(&rows);
+        let snapshot = complete(fixture.input().unwrap());
+        assert_eq!(snapshot.held, [snapshot.current.clone()]);
+        let old: SourceId = serde_json::from_value(rows[0]["new"]["source"].clone()).unwrap();
+        let claim = crate::services::tui_o::writer::actor::codex_retention::for_hop(
+            &snapshot,
+            &crate::services::tui_o::store::spool::source_key(&old),
+            &old,
+            122,
+            &snapshot.target.tmux,
+        )
+        .unwrap();
+        assert_eq!((claim.binding_seq, claim.binder_seq), (118, 121));
+        assert_eq!(std::fs::read(&fixture.path).unwrap(), before);
+    }
+
+    #[test]
+    fn codex_observation_companion_requires_same_nonce_and_full_payload() {
+        let fixture = Fixture::new();
+        for mismatch in ["nonce", "session", "path"] {
+            let mut rows = rows();
+            for index in [2, 3] {
+                let row = &mut rows[index];
+                let kind = if index == 2 { "pending" } else { "rejected" };
+                match mismatch {
+                    "nonce" => {
+                        row["execution_nonce"] = "4".repeat(32).into();
+                        row["codex_ownership"]["context"]["execution_nonce"] =
+                            row["execution_nonce"].clone();
+                    }
+                    "session" => {
+                        let id = "01a1392e-0000-7000-8000-000000000009";
+                        row["new"][kind]["payload_session_id"] = id.into();
+                        row["codex_ownership"]["claim"]["session_id"] = id.into();
+                    }
+                    "path" => {
+                        let path = "/native/sessions/other.jsonl";
+                        row["new"][kind]["payload_transcript_path"] = path.into();
+                        row["codex_ownership"]["claim"]["path"] = path.into();
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            fixture.write(&rows);
+            unknown(fixture.input().unwrap());
+        }
+    }
+
+    #[test]
+    fn codex_observation_companion_without_exact_terminal_evidence_stays_unknown() {
+        let fixture = Fixture::new();
+        for terminal in [false, true] {
+            let mut rows = rows();
+            // Bare Rejected is audit-only, even when a matching Resolved follows it.
+            for row in &mut rows {
+                row.as_object_mut().unwrap().remove("codex_ownership");
+            }
+            if !terminal {
+                rows[3]["new"] = rows[2]["new"].clone();
+                rows[4]["new"] = rows[2]["new"].clone();
+            }
+            fixture.write(&rows);
+            unknown(fixture.input().unwrap());
+        }
+        let mut rows = rows();
+        rows[4].as_object_mut().unwrap().remove("codex_ownership");
+        rows[4]["new"] = rows[3]["new"].clone();
+        fixture.write(&rows);
+        unknown(fixture.input().unwrap());
+    }
 }

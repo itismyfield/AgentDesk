@@ -95,6 +95,7 @@ fn requested(
         seq,
         &events[0].tmux_session,
         events,
+        &SettledCompanions::default(),
     )
 }
 
