@@ -117,10 +117,6 @@ async fn routine_receipt_survives_reset_and_starts_one_provider_turn_pg() {
             .args(["--exact", TEST, "--nocapture"])
             .env(CHILD, "1")
             .env(
-                crate::services::tui_o::cutover::test_override::CHILD_ENV,
-                "1",
-            )
-            .env(
                 crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
                 "[]",
             )

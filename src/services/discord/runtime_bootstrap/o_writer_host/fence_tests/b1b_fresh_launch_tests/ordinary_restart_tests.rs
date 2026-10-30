@@ -110,7 +110,6 @@ async fn restart_with_binding(
         Some(fixture.old_source.session_id.as_str())
     );
     let _routing = fixture.scoped_test_env("ADK_INTAKE_ROUTING_MODE", "disabled".as_ref());
-    let _writer = fixture.scoped_test_env(test_override::CHILD_ENV, "1".as_ref());
     let channels = serde_json::to_string(&[(CANARY_CHANNEL, CodexTui)]).unwrap();
     let _channels = fixture.scoped_test_env(test_override::CHANNELS_ENV, channels.as_ref());
     let _selected = test_override::force_channels(&[(CANARY_CHANNEL, CodexTui)]);

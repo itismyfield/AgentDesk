@@ -12,7 +12,6 @@ fn live_session() -> crate::services::discord::DiscordSession {
         history: Vec::new(),
         pending_uploads: Vec::new(),
         cleared: false,
-        remote_profile_name: None,
         channel_id: Some(CHANNEL),
         channel_name: Some("live-channel".to_string()),
         category_name: None,

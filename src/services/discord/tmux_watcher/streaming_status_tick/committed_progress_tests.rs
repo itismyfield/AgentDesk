@@ -459,10 +459,6 @@ fn legacy_tick_with_legacy_ownership_emits_long_body() {
             .env(CHILD, "1")
             .env("AGENTDESK_SINGLE_MESSAGE_PANEL", "0")
             .env(
-                crate::services::tui_o::cutover::test_override::CHILD_ENV,
-                "1",
-            )
-            .env(
                 crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
                 "[]",
             )

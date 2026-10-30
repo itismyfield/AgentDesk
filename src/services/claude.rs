@@ -41,7 +41,6 @@ use crate::services::provider::{
     fold_read_output_result, register_child_pid, spawn_cancel_watchdog,
 };
 use crate::services::provider_hosting::ProviderSessionDriver;
-use crate::services::remote::RemoteProfile;
 #[cfg(unix)]
 use crate::services::session_backend::read_claude_tui_output_file_until_result_with_harvest as read_output_file_until_result_with_harvest;
 use crate::services::session_backend::{
@@ -635,7 +634,6 @@ pub fn execute_command_streaming(
     system_prompt: Option<&str>,
     allowed_tools: Option<&[String]>,
     cancel_token: Option<std::sync::Arc<CancelToken>>,
-    remote_profile: Option<&RemoteProfile>,
     tmux_session_name: Option<&str>,
     teardown: Option<&TeardownClearance>,
     report_channel_id: Option<u64>,
@@ -657,8 +655,7 @@ pub fn execute_command_streaming(
     debug_log(&format!("working_dir: {}", working_dir));
     debug_log(&format!("timestamp: {:?}", std::time::SystemTime::now()));
     #[cfg(unix)]
-    let entrypoint_supports_tui_hosting =
-        remote_profile.is_none() && tmux_session_name.is_some() && is_tmux_available();
+    let entrypoint_supports_tui_hosting = tmux_session_name.is_some() && is_tmux_available();
     #[cfg(not(unix))]
     let entrypoint_supports_tui_hosting = false;
     let session_selection =
@@ -744,10 +741,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
         let tmux_available = is_tmux_available();
         #[cfg(unix)]
         {
-            if remote_profile.is_none()
-                && tmux_available
-                && session_selection.driver == ProviderSessionDriver::TuiHosting
-            {
+            if tmux_available && session_selection.driver == ProviderSessionDriver::TuiHosting {
                 if let Some(hook_endpoint) =
                     crate::services::claude_tui::hook_server::current_hook_endpoint()
                 {
@@ -781,23 +775,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
 
         #[cfg(unix)]
         {
-            if let Some(profile) = remote_profile {
-                // Remote sessions always use tmux (TmuxBackend only)
-                if tmux_available {
-                    debug_log(&format!("Remote tmux session: {}", tmux_name));
-                    return execute_streaming_remote_tmux(
-                        profile,
-                        &args,
-                        prompt,
-                        working_dir,
-                        sender,
-                        cancel_token,
-                        tmux_name,
-                    );
-                } else {
-                    debug_log("Remote session requested but tmux not available");
-                }
-            } else if tmux_available {
+            if tmux_available {
                 // Local with tmux → TmuxBackend (existing path)
                 cleanup_process_backend_before_tmux(tmux_name);
                 debug_log(&format!("TmuxBackend session: {}", tmux_name));
@@ -854,7 +832,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
         }
         #[cfg(not(unix))]
         {
-            let _ = (remote_profile, teardown);
+            let _ = teardown;
             // No tmux on non-Unix — fall through to ProcessBackend
             debug_log(&format!("ProcessBackend session (non-unix): {}", tmux_name));
             return execute_streaming_local_process(
@@ -867,12 +845,6 @@ IMPORTANT: Format your responses using Markdown for better readability:
                 (compact_percent, compact_lower_bound_tokens),
             );
         }
-    }
-
-    // Remote execution path: SSH to remote host
-    if let Some(profile) = remote_profile {
-        debug_log("Remote profile detected — delegating to execute_streaming_remote()");
-        return execute_streaming_remote(profile, &args, prompt, working_dir, sender, cancel_token);
     }
 
     let (claude_bin, resolution) = resolve_claude_binary().map_err(|error| {
@@ -1649,20 +1621,6 @@ fn recover_claude_tui_session_resolution_from_runtime_binding(
         transcript_path,
         resume: true,
     })
-}
-
-/// Execute claude command on a remote host via SSH, streaming stdout lines
-/// back through the sender channel.
-/// NOTE: Remote SSH execution is not available in AgentDesk — always returns Err.
-fn execute_streaming_remote(
-    _profile: &RemoteProfile,
-    _args: &[String],
-    _prompt: &str,
-    _working_dir: &str,
-    _sender: Sender<StreamMessage>,
-    _cancel_token: Option<std::sync::Arc<CancelToken>>,
-) -> Result<(), String> {
-    Err("Remote SSH execution is not available in AgentDesk".to_string())
 }
 
 /// Check if tmux is available on the system
@@ -2896,21 +2854,6 @@ fn send_followup_to_process(
         remove_process_session(session_name);
     }
     Ok(outcome)
-}
-
-/// Execute Claude inside a tmux session on a remote host via SSH.
-/// NOTE: Remote SSH execution is not available in AgentDesk — always returns Err.
-#[cfg(unix)]
-fn execute_streaming_remote_tmux(
-    _profile: &RemoteProfile,
-    _args: &[String],
-    _prompt: &str,
-    _working_dir: &str,
-    _sender: Sender<StreamMessage>,
-    _cancel_token: Option<std::sync::Arc<CancelToken>>,
-    _tmux_session_name: &str,
-) -> Result<(), String> {
-    Err("Remote SSH tmux execution is not available in AgentDesk".to_string())
 }
 
 #[cfg(all(test, unix))]

@@ -1328,7 +1328,6 @@ fn dispatch(switch: Option<bool>) -> Result<(), String> {
         allowed_tools: &[],
         cancel: Arc::new(CancelToken::new()),
         codex_observation: None,
-        remote_profile: None,
         tmux_session_name: Some("AgentDesk-claude-dash"),
         teardown: None,
         host: &host,

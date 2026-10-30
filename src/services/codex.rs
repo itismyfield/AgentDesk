@@ -104,7 +104,6 @@ enum CodexRuntimeKind {
     DirectTui,
     LegacyWrapperFallback,
     ProcessBackend,
-    RemoteDirect,
     // #3034: runtime-kind taxonomy variant; constructed only in tests today.
     #[allow(dead_code)]
     RemoteTmux,
@@ -118,7 +117,6 @@ impl CodexRuntimeKind {
             Self::DirectTui => "direct-tui",
             Self::LegacyWrapperFallback => "legacy-wrapper-fallback",
             Self::ProcessBackend => "process-backend",
-            Self::RemoteDirect => "remote-direct",
             Self::RemoteTmux => "remote-tmux",
             Self::DirectHeadless => "direct-headless",
             Self::SimpleHeadless => "simple-headless",
@@ -127,7 +125,7 @@ impl CodexRuntimeKind {
 
     fn uses_codex_exec_json(self) -> bool {
         match self {
-            Self::DirectTui | Self::RemoteDirect | Self::RemoteTmux => false,
+            Self::DirectTui | Self::RemoteTmux => false,
             Self::LegacyWrapperFallback
             | Self::ProcessBackend
             | Self::DirectHeadless
@@ -1173,6 +1171,7 @@ pub fn execute_command_streaming(
     system_prompt: Option<&str>,
     allowed_tools: Option<&[String]>,
     cancel_token: Option<std::sync::Arc<CancelToken>>,
+    // Always `None` in production; clear-ticket tests use its refusal as a launch-free dispatch.
     remote_profile: Option<&RemoteProfile>,
     tmux_session_name: Option<&str>,
     teardown: Option<&TeardownClearance>,
@@ -1299,21 +1298,6 @@ fn execute_streaming_direct(
             false
         }
     })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn execute_streaming_remote_direct(
-    _profile: &RemoteProfile,
-    _session_id: Option<&str>,
-    _prompt: &str,
-    _model: Option<&str>,
-    _fast_mode_enabled: Option<bool>,
-    _goals_enabled: Option<bool>,
-    _working_dir: &str,
-    _sender: Sender<StreamMessage>,
-    _cancel_token: Option<std::sync::Arc<CancelToken>>,
-) -> Result<(), String> {
-    Err("Remote SSH execution is not available in AgentDesk".to_string())
 }
 
 /// Tear down an existing tmux session before relaunching Codex Direct TUI,
@@ -2477,7 +2461,6 @@ mod tui_hosting_tests {
         assert!(!CodexRuntimeKind::DirectTui.uses_codex_exec_json());
         assert!(CodexRuntimeKind::LegacyWrapperFallback.uses_codex_exec_json());
         assert!(CodexRuntimeKind::ProcessBackend.uses_codex_exec_json());
-        assert!(!CodexRuntimeKind::RemoteDirect.uses_codex_exec_json());
         assert!(!CodexRuntimeKind::RemoteTmux.uses_codex_exec_json());
         assert!(CodexRuntimeKind::DirectHeadless.uses_codex_exec_json());
         assert!(CodexRuntimeKind::SimpleHeadless.uses_codex_exec_json());
@@ -2616,17 +2599,8 @@ mod codex_fifo_followup_transport_tests {
 
 #[cfg(test)]
 mod remote_dispatch_gate_tests {
-    //! Issue #2193 — regression tests for the Codex remote SSH dispatch
-    //! gate inside `execute_command_streaming`. These tests verify that:
-    //!
-    //!   1. A remote profile + tmux + `AGENTDESK_CODEX_REMOTE_TMUX=true`
-    //!      is hard-refused as a policy non-goal, regardless of the
-    //!      direct-SSH gate state.
-    //!   2. A remote profile without the env var is refused when the
-    //!      runtime gate is off (the default).
-    //!
-    //! Both refusals MUST happen before any SSH attempt, so they return
-    //! `Err` synchronously and never call into `services::remote_stub`.
+    //! `execute_command_streaming` refuses every remote profile synchronously, before any SSH
+    //! attempt, even with the removed `remote_ssh_enabled: true` key still in the yaml.
 
     use crate::services::remote::{RemoteAuth, RemoteProfile};
     use std::sync::Mutex;
@@ -2658,10 +2632,12 @@ mod remote_dispatch_gate_tests {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
 
-        // Default gate: OFF. This mirrors fresh-bootstrap state.
-        crate::services::provider_hosting::install_provider_hosting_config(
-            &crate::config::Config::default(),
-        );
+        // An operator may leave the removed gate key on; it must not open any remote path.
+        let mut yaml = serde_yaml::to_string(&crate::config::Config::default()).unwrap();
+        yaml.push_str("providers:\n  codex:\n    remote_ssh_enabled: true\n");
+        let config: crate::config::Config =
+            serde_yaml::from_str(&yaml).expect("retired remote SSH key parses as an ignored key");
+        crate::services::provider_hosting::install_provider_hosting_config(&config);
 
         // Manipulate the env var the dispatch path reads.
         match remote_tmux_env {
@@ -2697,9 +2673,7 @@ mod remote_dispatch_gate_tests {
         result
     }
 
-    /// Remote tmux is a policy non-goal and MUST be refused even if the
-    /// direct-SSH gate is later opened — i.e. the refusal does not
-    /// depend on `remote_ssh_enabled` or `PREREQUISITES_SATISFIED`.
+    /// Remote tmux is a policy non-goal and keeps its own refusal message.
     #[cfg(unix)]
     #[test]
     fn remote_tmux_is_hard_refused_as_policy_non_goal() {
@@ -2712,12 +2686,11 @@ mod remote_dispatch_gate_tests {
         assert!(err.contains("#2193"), "refusal must cite the issue: {err}");
     }
 
-    /// Direct remote SSH dispatch (no tmux env) is refused while the
-    /// gate is off. This guards against a future change wiring real
-    /// `RemoteProfile` lists before flipping `remote_ssh_enabled`.
+    /// Direct remote SSH dispatch is refused even when the yaml still says `remote_ssh_enabled: true`.
     #[test]
-    fn remote_direct_is_refused_when_gate_off() {
-        let err = run_dispatch(None, None).expect_err("remote SSH must be refused while gate off");
+    fn remote_direct_is_refused_with_retired_gate_key_on() {
+        let err =
+            run_dispatch(None, None).expect_err("remote SSH must be refused with the old key on");
         assert!(
             err.contains("disabled by policy"),
             "expected policy refusal, got: {err}"

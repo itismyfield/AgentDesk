@@ -32,17 +32,6 @@ thread_local! {
     pub(super) static SEPARATE_PANEL_FOR_TESTS: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
 }
-#[cfg(test)]
-pub(super) fn bridge_separate_status_panel_enabled(status_panel_v2_enabled: bool) -> bool {
-    #[cfg(test)]
-    if SEPARATE_PANEL_FOR_TESTS.get() {
-        return status_panel_v2_enabled;
-    }
-    super::single_message_panel::separate_status_panel_enabled_for_flags(
-        crate::services::discord::single_message_panel_enabled(),
-        status_panel_v2_enabled,
-    )
-}
 pub(super) fn bridge_status_panel_dirty_should_edit_separate_panel(
     status_panel_dirty: bool,
     single_message_panel_footer_mode: bool,
@@ -83,37 +72,19 @@ pub(super) fn status_panel_edit_defer_for_first_answer(
     !first_answer_relayed && first_answer_text_pending
 }
 
-#[cfg(test)]
-fn bridge_status_panel_msg_id_for_footer_mode(
-    single_message_panel_footer_mode: bool,
-    status_panel_msg_id: Option<MessageId>,
-) -> Option<MessageId> {
-    if single_message_panel_footer_mode {
-        None
-    } else {
-        status_panel_msg_id
-    }
-}
-
+// Separate-panel creation is retired; the legacy panel path removal drops this gate.
 pub(super) fn bridge_should_create_separate_status_panel(
-    single_message_panel_footer_mode: bool,
-    status_panel_v2_enabled: bool,
-    status_panel_msg_id: Option<MessageId>,
-    current_msg_id: MessageId,
+    _single_message_panel_footer_mode: bool,
+    _status_panel_v2_enabled: bool,
+    _status_panel_msg_id: Option<MessageId>,
+    _current_msg_id: MessageId,
 ) -> bool {
-    !super::super::footer_retirement::retired()
-        && !single_message_panel_footer_mode
-        && status_panel_v2_enabled
-        && (status_panel_msg_id.is_none() || status_panel_msg_id == Some(current_msg_id))
+    false
 }
 
 #[cfg(test)]
 pub(super) fn bridge_should_complete_separate_status_panel(status_panel_v2_enabled: bool) -> bool {
-    if super::super::footer_retirement::retired() {
-        status_panel_v2_enabled
-    } else {
-        bridge_separate_status_panel_enabled(status_panel_v2_enabled)
-    }
+    status_panel_v2_enabled
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -219,8 +190,7 @@ pub(super) fn build_bridge_single_message_panel_status_block(
 ) -> String {
     // Retired snapshots omit this block, but keep its budget to preserve rollover offsets.
     if bridge_single_message_panel_footer_enabled(shared.ui.status_panel_v2_enabled)
-        || (super::super::footer_retirement::retired()
-            && crate::services::discord::single_message_panel_enabled()
+        || (crate::services::discord::single_message_panel_enabled()
             && shared.ui.status_panel_v2_enabled)
     {
         let content = (full_response, indicator);
@@ -563,7 +533,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::discord::{DISCORD_MSG_LIMIT, footer_retirement::legacy_for_test};
+    use crate::services::discord::DISCORD_MSG_LIMIT;
 
     const PANEL: &str = "🟢 진행 중 — Claude (<t:1700000000:R>)\n\nSubagents\n└ review inspect";
 
@@ -602,37 +572,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_footer_mode_requires_both_flags() {
-        let _legacy = legacy_for_test();
-        assert!(super::single_message_panel::footer_mode_enabled(true, true));
-        assert!(!super::single_message_panel::footer_mode_enabled(
-            true, false
-        ));
-        assert!(!super::single_message_panel::footer_mode_enabled(
-            false, true
-        ));
-    }
-
-    #[test]
-    fn bridge_footer_streaming_edit_text_includes_panel_footer() {
-        let _legacy = legacy_for_test();
-        let status_block = super::single_message_panel::compose_footer_status_block("⠸", PANEL);
-        let rendered = super::super::build_turn_bridge_streaming_edit_text(
-            true,
-            "Bridge body",
-            &status_block,
-            &ProviderKind::Claude,
-        );
-
-        assert!(rendered.starts_with("Bridge body\n\n-# ⠸ 진행 중 — Claude"));
-        assert!(!rendered.contains("계속 처리 중"));
-        assert!(!rendered.contains('🟢'));
-        assert!(rendered.contains("-# Subagents\n-# └ review inspect"));
-    }
-
-    #[test]
     fn bridge_mid_turn_placeholder_context_uses_subtext_and_compact_format_4848() {
-        let _legacy = legacy_for_test();
         let shared = super::super::make_shared_data_for_tests();
         let channel_id = ChannelId::new(4_848_301);
         assert!(
@@ -649,16 +589,8 @@ mod tests {
         );
         let status_block =
             super::single_message_panel::compose_footer_status_block("⠸", &panel_text);
-        let rendered = super::super::build_turn_bridge_streaming_edit_text(
-            true,
-            "Bridge body",
-            &status_block,
-            &ProviderKind::Claude,
-        );
-        let footer = rendered
-            .split_once("\n\n")
-            .map(|(_, footer)| footer)
-            .expect("mid-turn placeholder footer");
+        // The block is the budget input of every mid-turn placeholder edit.
+        let footer = status_block.as_str();
 
         assert!(
             footer.contains("-# 📦 460.0k / 1.0M (46%) · auto-compact 50%"),
@@ -672,24 +604,6 @@ mod tests {
                 .filter(|line| !line.is_empty())
                 .all(|line| line.starts_with("-# ")),
             "every mid-turn placeholder footer line must be subtext: {footer:?}"
-        );
-    }
-
-    #[test]
-    fn bridge_footer_disables_separate_panel_creation_and_binding() {
-        let _legacy = legacy_for_test();
-        let footer_mode = super::single_message_panel::footer_mode_enabled(true, true);
-        let current = MessageId::new(7);
-
-        assert!(!bridge_should_create_separate_status_panel(
-            footer_mode,
-            true,
-            None,
-            current,
-        ));
-        assert_eq!(
-            bridge_status_panel_msg_id_for_footer_mode(footer_mode, Some(MessageId::new(42))),
-            None,
         );
     }
 
@@ -903,7 +817,6 @@ mod tests {
 
     #[test]
     fn bridge_pathological_panel_stays_within_discord_limit() {
-        let _legacy = legacy_for_test();
         let huge_panel = format!(
             "🟢 진행 중 — Claude (<t:1700000000:R>)\n\nSubagents\n{}",
             "└ reviewer ".repeat(1_000)
@@ -913,7 +826,6 @@ mod tests {
         let rendered = super::formatting::build_streaming_placeholder_text("body", &status_block);
 
         assert!(rendered.len() <= DISCORD_MSG_LIMIT);
-        assert!(rendered.contains("\n\n"));
     }
 
     // ---- #3959: TUI-direct mirror suppresses the #3089 chrome footer ----

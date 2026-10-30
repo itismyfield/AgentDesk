@@ -14,7 +14,7 @@ pub(super) async fn nameless_promote_blocked(
         use crate::services::codex_tui::canary::{CANARY_CHANNEL, CANARY_TMUX};
         if matches!(provider, ProviderKind::Codex)
             && channel_id.get() == CANARY_CHANNEL
-            && named_blocked(provider, channel_id, CANARY_TMUX, false)
+            && named_blocked(provider, channel_id, CANARY_TMUX)
         {
             return true;
         }
@@ -38,14 +38,10 @@ pub(super) fn named_blocked(
     provider: &ProviderKind,
     channel: serenity::ChannelId,
     tmux: &str,
-    remote: bool,
 ) -> bool {
     use crate::services::tui_prompt_dedupe::clear_relaunch;
     if !matches!(provider, ProviderKind::Codex) {
         return false;
-    }
-    if remote {
-        return clear_relaunch::launch_blocked(tmux);
     }
     let Some(observation) = crate::services::discord::codex_absence::readiness(channel.get(), tmux)
     else {
@@ -84,7 +80,7 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
         return false;
     }
 
-    let (tmux_session_name, remote_profile_named, current_path, session_id) = {
+    let (tmux_session_name, current_path, session_id) = {
         let data = shared.core.lock().await;
         let Some(session) = data.sessions.get(&channel_id) else {
             drop(data);
@@ -100,7 +96,6 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
         };
         (
             tmux_session_name,
-            session.remote_profile_name.is_some(),
             session.current_path.clone(),
             session.session_id.clone(),
         )
@@ -110,12 +105,7 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
     };
     // Verified incarnations wait for source and permission before queue teardown.
     #[cfg(unix)]
-    if named_blocked(
-        provider,
-        channel_id,
-        &tmux_session_name,
-        remote_profile_named,
-    ) {
+    if named_blocked(provider, channel_id, &tmux_session_name) {
         return true;
     }
     // ADK_TEST_CODEX_PROMOTE_READY isolates source permission from host readiness in tests.
@@ -143,7 +133,6 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
         }
         return true;
     }
-    // A recorded remote profile prevents a local-only busy probe even if that profile is missing.
     // Platforms without tmux retain the ordinary dispatch path.
     #[cfg(unix)]
     let blocked = tui_busy_followup_diagnostic(
@@ -151,7 +140,6 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
         provider,
         channel_id,
         Some(tmux_session_name.as_str()),
-        remote_profile_named,
         current_path.as_deref(),
         session_id.as_deref(),
     )
@@ -162,7 +150,6 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
             shared,
             provider,
             &tmux_session_name,
-            remote_profile_named,
             &current_path,
             &session_id,
         );
