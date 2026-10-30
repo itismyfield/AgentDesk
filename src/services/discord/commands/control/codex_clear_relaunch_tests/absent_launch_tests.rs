@@ -142,6 +142,22 @@ async fn restored_head_reaches_provider(marker: HistoricalMarker, warm: bool, st
     let mut fixture =
         CanaryFixture::build_with_host(0, CodexSourceMode::Verified, Some("b1-absent-test-host"))
             .await;
+    if matches!(marker, HistoricalMarker::ForeignIdentity) {
+        let hash = crate::services::discord::settings::discord_token_hash(TEST_BOT);
+        let key = crate::services::discord::adk_session::build_namespaced_session_key(
+            &hash,
+            &ProviderKind::Codex,
+            CANARY_TMUX,
+        );
+        sqlx::query("UPDATE sessions SET session_key = $1, discord_token_hash = $2 WHERE discord_token_hash = $3")
+            .bind(key)
+            .bind(&hash)
+            .bind(&fixture.shared.token_hash)
+            .execute(fixture.shared.pg_pool.as_ref().unwrap())
+            .await
+            .unwrap();
+        Arc::get_mut(&mut fixture.shared).unwrap().token_hash = hash;
+    }
     let _warm = fixture.warm_followup(warm);
     assert_eq!(
         crate::services::codex_tui::warm_followup::codex_tui_warm_followup_enabled(),

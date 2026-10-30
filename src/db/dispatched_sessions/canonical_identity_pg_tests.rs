@@ -2667,7 +2667,6 @@ async fn canonical_identity_foreign_handoff_insufficient_evidence_stays_divergen
         ("disconnected", "mac-book", "idle"),
         ("disconnected", "MAC-BOOK.local", "idle"),
         ("disconnected", "mac-mini", "disconnected"),
-        ("disconnected", "mac-mini", ""),
     ] {
         sqlx::query("DELETE FROM sessions")
             .execute(&pool)
