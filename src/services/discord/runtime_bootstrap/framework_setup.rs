@@ -66,9 +66,6 @@ pub(super) async fn run_bot_framework_setup(
         .register_http(provider_for_setup.as_str().to_string(), ctx.http.clone())
         .await;
 
-    // Enrich role_map.json with channelId for reliable name→ID resolution
-    enrich_role_map_with_channel_ids();
-
     let shared_for_tmux = shared_for_migrate.clone();
 
     super::footer_retirement::enqueue_completed_singletons(

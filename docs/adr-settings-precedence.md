@@ -41,6 +41,12 @@ We keep per-surface storage, but every settings surface must declare:
 | Policy/config keys | Dashboard policy controls and automation helpers | hardcoded defaults -> YAML sections (`review:`, `runtime:`, `kanban:`) -> individual `kv_meta` rows | YAML-backed keys are re-seeded on restart. Hardcoded-only keys keep their DB override unless the reset flag is on. Read-only entries are surfaced as config metadata only. | `PATCH /api/settings/config` writes editable keys only. `GET` returns effective value plus baseline metadata. |
 | Onboarding / secrets | Onboarding wizard | Dedicated onboarding keys and flows, not general settings | Persist until onboarding updates them. | Managed only through `/api/onboarding/*` and onboarding-specific helpers. |
 
+### Organization and channel configuration
+
+`~/.adk/release/config/org.yaml` remains an optional organization schema for agent/channel definitions, workspaces, shared prompts, meetings, and provider authentication/recovery policy. Runtime role, workspace, shared-prompt and meeting lookups use agentdesk YAML first, then org.yaml. Registered-channel lists give agentdesk YAML precedence over duplicate org.yaml IDs. The existing org.yaml loaders and error behavior are retained.
+
+`agents[].channels.<provider>.thread_inherit` is a YAML boolean with default `true`. It is read through the validated snapshot at intake and classified `live`; a valid reload updates future intake. It controls parent role/workspace/memory and placement-policy inheritance for threads. Legacy JSON `threadInherit` is ignored. No new command, switch or migration procedure is introduced.
+
 ### Keys resolved through `settings::resolve`
 
 <!-- BEGIN GENERATED: runtime setting precedence -->

@@ -186,7 +186,7 @@ package "Discord Service  (src/services/discord/)" as DiscordPkg #AliceBlue {
     [health.rs\n(HealthRegistry)] as DiscHealth
     [settings.rs] as DiscSettings
     [org_schema.rs / org_writer.rs] as OrgSchema
-    [role_map.rs] as RoleMap
+    [agentdesk_config.rs] as AgentdeskConfig
 }
 
 ' ============================================================

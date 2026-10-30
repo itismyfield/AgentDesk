@@ -250,6 +250,21 @@ fn find_channel_binding<'a>(
     best.map(|(agent, provider_key, channel, _)| (agent, provider_key, channel))
 }
 
+pub(super) fn thread_inheritance_enabled(
+    channel_id: ChannelId,
+    channel_name: Option<&str>,
+) -> bool {
+    let Some(config) = load_agentdesk_config() else {
+        return true;
+    };
+    find_channel_binding(&config, channel_id, channel_name)
+        .map(|(_, _, channel)| match channel {
+            AgentChannel::Detailed(channel) => channel.thread_inherit,
+            AgentChannel::Legacy(_) => true,
+        })
+        .unwrap_or(true)
+}
+
 fn binding_provider(
     agent: &crate::config::AgentDef,
     provider_key: &str,
@@ -900,6 +915,15 @@ pub(crate) fn configured_workspaces() -> Vec<String> {
         }
     }
     workspaces
+}
+
+#[cfg(test)]
+pub(crate) fn write_bindings_for_test(root: &Path, agents: serde_json::Value) {
+    let mut config = Config::default();
+    config.agents = serde_json::from_value(agents).expect("test agent bindings");
+    let path = crate::runtime_layout::config_file_path(root);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, serde_yaml::to_string(&config).unwrap()).unwrap();
 }
 
 #[cfg(test)]

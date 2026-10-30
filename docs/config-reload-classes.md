@@ -92,6 +92,7 @@ seconds with content comparison, independently of native filesystem notification
 | `agents.*.channels.*.runtime` | restart | `src/services/provider_hosting.rs` install_provider_hosting_config |
 | `agents.*.channels.*.model` | live | `src/services/discord/agentdesk_config.rs` role_binding_from_channel |
 | `agents.*.channels.*.reasoning_effort` | live | `src/services/discord/agentdesk_config.rs` role_binding_from_channel |
+| `agents.*.channels.*.thread_inherit` | live | `src/services/discord/agentdesk_config.rs` thread_inheritance_enabled (validated snapshot per intake) |
 | `agents.*.channels.*.peer_agents` | live | `src/services/discord/agentdesk_config.rs` role_binding_from_channel |
 | `agents.*.channels.*.quality_feedback_injection` | live | `src/services/discord/agentdesk_config.rs` role_binding_from_channel |
 | `agents.*.channels.*.dispatch_profile` | live | `src/services/discord/agentdesk_config.rs` resolve_dispatch_profile |

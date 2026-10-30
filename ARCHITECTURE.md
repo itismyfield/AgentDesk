@@ -3025,8 +3025,6 @@ src/
 │   │   ├── response_sanitizer.rs
 │   │   ├── restart_mode.rs
 │   │   ├── restart_report.rs
-│   │   ├── role_map.rs
-│   │   ├── role_map_enrichment.rs
 │   │   ├── runtime_bootstrap.rs
 │   │   ├── runtime_store.rs
 │   │   ├── runtime_store_checkpoint_lock_tests.rs
@@ -4325,7 +4323,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/services/discord/gateway.rs` / `discord_io.rs` / `queue_io.rs` | Discord gateway bridge and outbound/inbound message plumbing. |
 | `src/services/discord/commands/` | Slash command handlers for session, config, diagnostics, meetings, models, receipts, skills. |
 | `src/services/discord/agentdesk_config.rs` | YAML/DB/legacy config source-of-truth handling. |
-| `src/services/discord/prompt_builder/` / `shared_memory.rs` / `role_map.rs` | Turn prompt assembly and org/shared memory context. |
+| `src/services/discord/prompt_builder/` / `shared_memory.rs` | Turn prompt assembly and org/shared memory context. |
 
 ### Provider and Execution Services
 

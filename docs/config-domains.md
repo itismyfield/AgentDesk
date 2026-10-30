@@ -68,6 +68,10 @@ A surface that doesn't fit one of the three domains (onboarding/secrets) is a se
 
 **Read path**: YAML wins. Legacy files and DB rows are migration inputs and are loaded only when YAML lacks an explicit value (see `discord_config_audit.rs`). The `.migrated` snapshots live under `~/.adk/release/config/.backups/YYYY-MM-DD/` per `source-of-truth.md`.
 
+**Organization schema**: `~/.adk/release/config/org.yaml` remains an optional source of agent/channel bindings, workspaces, shared prompts, meeting settings, and provider authentication/recovery policy. Runtime role, workspace, shared-prompt and meeting resolvers try agentdesk YAML first, then org.yaml. Registered channels merge org.yaml first and agentdesk YAML last, so YAML wins for duplicate IDs. The existing org.yaml loaders remain in place.
+
+**Thread inheritance**: `agents[].channels.<provider>.thread_inherit` is a boolean with default `true`, including shorthand bindings and unmatched parents. `false` disables parent role/workspace/memory and placement-policy inheritance for threads. It is a `live` field: boot loads the validated configuration and a valid reload publishes the value for subsequent intake. Legacy JSON `threadInherit` does not override it.
+
 **Pitfalls**:
 
 - Editing `bot_settings.json` directly: the change is ignored as soon as YAML re-asserts.
