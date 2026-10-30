@@ -170,7 +170,7 @@ fn integration_change_covered(integration: &IntegrationCandidate) -> bool {
         && integration.integration_verified_sha.as_deref() == Some(integration.head_sha.as_str())
 }
 
-// Shared F5/F6 main-adoption judgment. Inputs carry no closed/CLEAN/CI/issue-text signal: only the
+// Main adoption shared by eligibility and landing. No closed/CLEAN/CI/issue-text signal is an input: the
 // merged PR, a fresh remote main fetch and the git graph decide.
 pub fn judge_main_adoption(request: &AdoptionRequest<'_>) -> Observation<MainAdoption> {
     let (pr, main, integration) = (request.pr, request.main, request.integration);
