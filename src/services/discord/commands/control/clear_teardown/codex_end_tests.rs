@@ -855,7 +855,6 @@ fn actual_local_fresh_direct_dispatch_consumes_ticket_before_safe_cli_failure() 
         crate::config::ProviderConfig {
             tui_hosting: Some(true),
             runtime: Some("tui".into()),
-            ..Default::default()
         },
     );
     crate::services::provider_hosting::install_provider_hosting_config(&config);

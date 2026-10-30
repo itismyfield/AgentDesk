@@ -78,18 +78,6 @@ pub(super) fn watcher_should_clear_stale_terminal_message_ids(
     has_assistant_response && !inflight_present && placeholder_msg_id.is_some()
 }
 
-/// #3003: does the watcher need to proactively create a status-panel-v2
-/// message for the live turn? A pure TUI-direct turn has no preceding
-/// Discord-origin message to re-designate as a panel, so the watcher creates
-/// one itself once v2 is enabled and none exists yet.
-pub(super) fn watcher_should_create_external_input_status_panel(
-    status_panel_v2_enabled: bool,
-    status_panel_present: bool,
-    inflight_represents_external_input: bool,
-) -> bool {
-    status_panel_v2_enabled && !status_panel_present && inflight_represents_external_input
-}
-
 pub(super) fn enqueue_watcher_status_panel_orphan(
     shared: &SharedData,
     provider: &ProviderKind,

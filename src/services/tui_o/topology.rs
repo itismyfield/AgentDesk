@@ -3,15 +3,6 @@
 use super::channel_policy::BootChannels;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 
-/// Build switch for the O writer. With no channel in the boot list, intake and health stay as before.
-pub(crate) const O_TUI_WRITER: bool = true;
-
-/// What `agentdesk build-info` reports to the deploy guard; keep `true` if the switch retires.
-// CONSUMED-BY: scripts/deploy-release.sh via src/cli/build_info.rs.
-pub(crate) fn o_tui_writer_build_switch() -> bool {
-    O_TUI_WRITER
-}
-
 /// Degraded reason a non-gateway node carries for each provider whose writer channels only the
 /// gateway may serve.
 pub(crate) const TUI_OUTPUT_REQUIRES_GATEWAY: &str = "tui_output_requires_gateway";
@@ -27,7 +18,6 @@ pub(crate) enum HostRole {
 /// How many of `provider`'s boot writer channels this node leaves to the gateway; `None` when
 /// the boot list is unknown, which health must not read as zero.
 pub(crate) fn gateway_only_channels(
-    o_tui_writer: bool,
     provider: &str,
     role: HostRole,
     boot: Option<&BootChannels>,
@@ -37,7 +27,7 @@ pub(crate) fn gateway_only_channels(
         "codex" => RuntimeHandoffKind::CodexTui,
         _ => return Some(0),
     };
-    if !o_tui_writer || role == HostRole::Gateway {
+    if role == HostRole::Gateway {
         return Some(0);
     }
     let boot = boot?;
@@ -68,16 +58,15 @@ mod tests {
         use RuntimeHandoffKind::{ClaudeTui, CodexTui};
         let _o = test_override::force_channels(&[(1, ClaudeTui), (2, ClaudeTui), (3, CodexTui)]);
         test_override::with_channels(|boot| {
-            let count = |on, provider, role| gateway_only_channels(on, provider, role, boot);
-            assert_eq!(count(true, "claude", HostRole::Runner), Some(2));
-            assert_eq!(count(true, "Codex", HostRole::Standby), Some(1));
-            assert_eq!(count(true, "claude", HostRole::Gateway), Some(0));
-            assert_eq!(count(true, "gemini", HostRole::Runner), Some(0));
-            assert_eq!(count(false, "claude", HostRole::Runner), Some(0));
+            let count = |provider, role| gateway_only_channels(provider, role, boot);
+            assert_eq!(count("claude", HostRole::Runner), Some(2));
+            assert_eq!(count("Codex", HostRole::Standby), Some(1));
+            assert_eq!(count("claude", HostRole::Gateway), Some(0));
+            assert_eq!(count("gemini", HostRole::Runner), Some(0));
         });
         // An unknown list is not an empty one: health must keep the reason without evidence.
         assert_eq!(
-            gateway_only_channels(true, "claude", HostRole::Runner, None),
+            gateway_only_channels("claude", HostRole::Runner, None),
             None
         );
     }

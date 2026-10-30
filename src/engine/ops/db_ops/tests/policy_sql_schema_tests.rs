@@ -1188,6 +1188,10 @@ impl Evaluator<'_> {
                     }
                     return dynamic("join");
                 }
+                // Key-table values reach policy SQL already resolved to a number.
+                (Expr::Member(_, namespace), "get") if namespace == "config" => {
+                    return vec!["1".to_string()];
+                }
                 (_, "trim") => {
                     return self
                         .eval(object, file, env, depth + 1)

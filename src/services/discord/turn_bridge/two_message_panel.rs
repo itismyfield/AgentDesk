@@ -25,29 +25,15 @@
 //! `turn_bridge/status_panel.rs` stay lean. The parent's call sites are thin.
 
 use super::*;
-/// Pure gate: should the sink create the #3805 P2 status panel as a NEW message
-/// BELOW the answer (answer-first layout)?
-///
-/// Only fires when the two-message rollout flag is ON, the turn is NOT in
-/// `AGENTDESK_SINGLE_MESSAGE_PANEL` footer mode, `status_panel_v2` is enabled,
-/// no panel has been bound yet (`status_panel_msg_id.is_none()`), and the answer
-/// anchor is a REAL Discord message (a synthetic-headless turn has no message to
-/// anchor a panel under, matching the OFF path's synthetic short-circuit). When
-/// this returns `false` under an ON flag the caller does nothing — the ON path
-/// never falls back to the OFF panel-above swap.
+// Two-message panel creation is retired; the legacy panel path removal drops this gate.
 pub(super) fn bridge_should_create_two_message_status_panel(
-    two_message_panel_enabled: bool,
-    single_message_panel_footer_mode: bool,
-    status_panel_v2_enabled: bool,
-    status_panel_msg_id: Option<MessageId>,
-    current_msg_id: MessageId,
+    _two_message_panel_enabled: bool,
+    _single_message_panel_footer_mode: bool,
+    _status_panel_v2_enabled: bool,
+    _status_panel_msg_id: Option<MessageId>,
+    _current_msg_id: MessageId,
 ) -> bool {
-    !super::super::footer_retirement::retired()
-        && two_message_panel_enabled
-        && !single_message_panel_footer_mode
-        && status_panel_v2_enabled
-        && status_panel_msg_id.is_none()
-        && !is_synthetic_headless_message_id(current_msg_id)
+    false
 }
 
 /// Create the #3805 P2 status panel as a NEW message BELOW the answer.
@@ -259,24 +245,12 @@ pub(in crate::services::discord) fn two_message_status_edit_generation_is_stale(
     panel_owned_on_disk && on_disk_generation > this_turn_generation
 }
 
-/// #3805 P2 (PR-D) shared gate (pure): should the driver RE-ANCHOR the
-/// two-message status panel BELOW the new answer chunk after a mid-turn answer
-/// rollover?
-///
-/// Fires only when the two-message rollout flag is ON and this turn actually has
-/// a live separate panel (`status_panel_present`) to move — footer-mode / v2-OFF
-/// / synthetic turns carry no separate panel and never re-anchor. OFF returns
-/// `false`, so the rollover path is byte-identical to today (no send/delete/CAS).
-///
-/// Visible to the whole `discord` module so the tmux WATCHER rollover call site
-/// reuses this exact gate — the sink and watcher must share ONE re-anchor
-/// decision (parity), not two divergent copies (mirrors the shared generation
-/// staleness predicate above).
+/// Shared by the sink and watcher rollovers; re-anchoring is retired with the two-message panel.
 pub(in crate::services::discord) fn two_message_should_reanchor_panel_on_rollover(
-    two_message_panel_enabled: bool,
-    status_panel_present: bool,
+    _two_message_panel_enabled: bool,
+    _status_panel_present: bool,
 ) -> bool {
-    !super::super::footer_retirement::retired() && two_message_panel_enabled && status_panel_present
+    false
 }
 
 /// Re-anchor the panel below the fresh rollover answer chunk.
@@ -427,7 +401,6 @@ pub(super) async fn reanchor_bridge_two_message_status_panel_below_answer<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::discord::footer_retirement::legacy_for_test;
     use crate::services::discord::formatting::ReplaceLongMessageOutcome;
     use crate::services::discord::gateway::GatewayFuture;
     use std::sync::Mutex;
@@ -604,36 +577,6 @@ mod tests {
         fn bot_owner_provider(&self) -> Option<ProviderKind> {
             Some(ProviderKind::Claude)
         }
-    }
-
-    #[test]
-    fn gate_requires_flag_on_v2_no_footer_no_panel_real_answer() {
-        let answer = MessageId::new(10);
-        let _legacy = legacy_for_test();
-        // Happy path: flag ON, footer OFF, v2 ON, no panel yet, real answer.
-        assert!(bridge_should_create_two_message_status_panel(
-            true, false, true, None, answer,
-        ));
-        // Flag OFF → never (the OFF single-message layout is unchanged).
-        assert!(!bridge_should_create_two_message_status_panel(
-            false, false, true, None, answer,
-        ));
-        // Footer mode → never (single-message footer owns the surface).
-        assert!(!bridge_should_create_two_message_status_panel(
-            true, true, true, None, answer,
-        ));
-        // v2 OFF → never.
-        assert!(!bridge_should_create_two_message_status_panel(
-            true, false, false, None, answer,
-        ));
-        // Panel already bound → never (idempotent; no second panel).
-        assert!(!bridge_should_create_two_message_status_panel(
-            true,
-            false,
-            true,
-            Some(MessageId::new(99)),
-            answer,
-        ));
     }
 
     #[test]
@@ -830,17 +773,6 @@ mod tests {
         // Not owned on disk → never suppress, even if the epoch is higher (an
         // unrelated turn's epoch must not gate this completion).
         assert!(!two_message_status_edit_generation_is_stale(1, false, 9));
-    }
-
-    #[test]
-    fn reanchor_gate_requires_flag_on_and_a_live_panel() {
-        let _legacy = legacy_for_test();
-        assert!(!two_message_should_reanchor_panel_on_rollover(false, true));
-        assert!(!two_message_should_reanchor_panel_on_rollover(false, false));
-        // ON but no live panel → nothing to re-anchor.
-        assert!(!two_message_should_reanchor_panel_on_rollover(true, false));
-        // ON with a live panel → re-anchor below the new answer chunk.
-        assert!(two_message_should_reanchor_panel_on_rollover(true, true));
     }
 
     #[tokio::test]

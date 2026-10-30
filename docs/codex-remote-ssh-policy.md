@@ -1,11 +1,17 @@
 # Codex Remote SSH Runtime Policy
 
 Issue: #2193
-Status: Proposed
+Status: Retired gate (#7349)
+
+The `providers.codex.remote_ssh_enabled` gate and its compile-time prerequisites constant were
+removed. AgentDesk has no remote SSH runtime, the dispatcher refuses every remote profile, and an
+old `remote_ssh_enabled` key in `agentdesk.yaml` loads as an ignored key. The clauses below stay
+as the contract any future remote implementation must meet; that work needs a new ADR and its own
+opt-in, not a revived boolean.
 
 This ADR fixes the policy gap that #2193 opened: AgentDesk's
-`execute_streaming_remote_direct` and `execute_streaming_remote_tmux` are
-currently disabled stubs that return errors, and #2175 classified them as
+`execute_streaming_remote_direct` and `execute_streaming_remote_tmux` were
+disabled stubs that returned errors, and #2175 classified them as
 "not allowed now" without saying what would have to be true before they
 flip on. This document is that contract. Until every prerequisite below is
 satisfied, remote Codex over SSH stays off, and the codepath stays a stub.
@@ -20,10 +26,10 @@ AgentDesk host at all.
 AgentDesk hosts Codex via three local strategies — direct TUI hosting,
 the legacy tmux wrapper, and ProcessBackend — all of which run Codex as a
 child of the AgentDesk process on the same host. `RemoteProfile` exists in
-the codebase (`src/services/remote_stub.rs`) and is plumbed through
-`execute_command_streaming`, but `services::remote` is a stub: SSH is
-unavailable in the AgentDesk build, `ssh_connect_and_auth` returns `Err`,
-and the two remote entry points always error.
+the codebase (`src/services/remote_stub.rs`) only as the Codex
+`execute_command_streaming` parameter, which production always passes as
+`None` and which refuses any profile. SSH is unavailable in the AgentDesk
+build; no other provider takes a remote profile.
 
 The gap remote SSH would fill is operator-driven: running a Codex turn
 *as* a different machine (typically `mac-mini` or `mac-book`) when that
@@ -39,18 +45,10 @@ ambiguity this ADR closes.
 
 Remote Codex execution over SSH is a **single-policy** feature, not a
 configurable matrix. When it is eventually enabled, it MUST conform to
-every clause below. Until it does, both `execute_streaming_remote_direct`
-and `execute_streaming_remote_tmux` remain stubs that return
-`Err("Remote SSH execution is not available in AgentDesk")`, and the
-top-level dispatcher MUST refuse to route a turn to them when the gate is
-off.
-
-The gate is a single boolean: `providers.codex.remote_ssh_enabled` in
-`agentdesk.yaml`, default `false`. Setting it to `true` is a declaration
-by the operator that every prerequisite in this ADR is in place. The gate
-is intentionally codex-scoped and not a top-level toggle; other providers
-(Claude, Gemini, Qwen, OpenCode) have their own remote stubs and will get
-their own ADRs if and when they need them.
+every clause below. Until it does, the top-level dispatcher refuses every
+remote profile before any SSH attempt. Other providers (Claude, Gemini,
+Qwen, OpenCode) will get their own ADRs if and when they need remote
+execution.
 
 This policy intentionally picks one model rather than enumerating
 options. The model is: **AgentDesk SSHes to a small, operator-curated
@@ -221,9 +219,8 @@ hold:
    `providers.codex.remote_hosts: [...]` in `agentdesk.yaml`. Each entry
    is a structured record `{ name, host, port, user, default_path }`.
    Wildcards are not accepted. The legacy free-form `remote_profiles`
-   list (currently stubbed to empty in `config::Settings::load`) is
-   **not** the allow-list; it is a separate compatibility shim and MUST
-   NOT be consulted for routing decisions.
+   plumbing has been removed; a legacy profile name MUST NOT be
+   consulted for routing decisions.
 2. The current caller MUST be permitted to target that named host. For
    the initial rollout, the permission rule is: only agents whose
    `AgentDef` declares an explicit `codex.remote_host: <name>` field
@@ -308,13 +305,11 @@ The contract — process-group based, not PTY-foreground based:
   assert the same "no descendants" property holds after the wrapper's
   SIGHUP handler runs.
 
-Without **both** integration tests passing, the gate stays off
-regardless of `remote_ssh_enabled` — this is what
-`PREREQUISITES_SATISFIED` in `src/services/codex_remote_policy.rs`
-gates.
+Without **both** integration tests passing, remote execution stays
+unavailable.
 
 This ADR explicitly does **not** introduce a remote tmux session for
-Codex. `execute_streaming_remote_tmux` remains a stub because remote
+Codex. `execute_command_streaming` keeps refusing it because remote
 tmux fragments the cancel story (the SSH session can drop while the
 tmux session — and Codex — keeps running on the remote host with no
 owner). Reviving remote tmux requires a separate ADR.
@@ -359,15 +354,15 @@ owner). Reviving remote tmux requires a separate ADR.
 - Per-turn dynamic host selection from a PMD policy, an LLM, or the
   Discord operator. Targeting is static config.
 - Remote tmux for Codex (see "Cancel semantics"). The dispatch path
-  in `services::codex::execute_command_streaming` hard-refuses the
-  `AGENTDESK_CODEX_REMOTE_TMUX=true` env-var branch independent of the
-  direct-SSH gate, so opening the gate for direct remote SSH does not
-  also open the remote tmux branch.
+  in `services::codex::execute_command_streaming` keeps a separate
+  refusal for the `AGENTDESK_CODEX_REMOTE_TMUX=true` env-var branch;
+  introducing remote tmux needs its own ADR.
 - Enabling remote SSH for any provider other than Codex. Claude,
-  Gemini, Qwen, and OpenCode keep their stubs.
-- Storing SSH credentials in `agentdesk.yaml`. Cleartext password and
-  passphrase-protected key paths are explicitly forbidden at
-  config-load time when the gate is on.
+  Gemini, Qwen, OpenCode and the stream-json providers take no remote
+  profile at all.
+- Storing SSH credentials in `agentdesk.yaml`. A future remote
+  implementation must reject cleartext password and passphrase-protected
+  key paths at config-load time for every remote profile.
 
 ## Open questions
 
@@ -397,19 +392,8 @@ explicit follow-ups gated behind this document:
    known_hosts, no password/passphrase). Tracked separately.
 2. Add `providers.codex.remote_hosts: [...]` deserialization plus the
    per-`AgentDef` `codex.remote_host` field. Tracked separately.
-3. Implement `execute_streaming_remote_direct` end-to-end with the
-   PTY-bound cancel path and the integration test described in
-   "Cancel semantics". Tracked separately.
+3. Implement a remote direct runtime end-to-end with the PTY-bound
+   cancel path and the integration test described in "Cancel
+   semantics". Tracked separately.
 4. Reject `RemoteAuth::Password` and `RemoteAuth::KeyFile` at
-   config-load time when `remote_ssh_enabled` is `true`. Tracked
-   separately.
-
-Per this ADR, the gate `providers.codex.remote_ssh_enabled` lands now
-and defaults `false`. Flipping it to `true` while the follow-ups above
-are not in place is a **hard bootstrap error**, not a warning — see
-`src/services/codex_remote_policy.rs::PREREQUISITES_SATISFIED`. A
-warn-only gate would become a persisted "enabled" signal that a
-partial future implementation could silently honor; the hard-fail
-removes that risk and forces the implementation PR to flip
-`PREREQUISITES_SATISFIED` to `true` in the same change that wires
-everything up.
+   config-load time for any remote profile. Tracked separately.

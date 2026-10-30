@@ -229,7 +229,7 @@ pub(super) async fn stream_tui_idle_response_through_bridge(
     // #3097: resolve the provider-specific compact threshold so the status
     // panel reflects the configured value.
     let context_compact_percent =
-        super::super::adk_session::fetch_context_thresholds(shared.api_port)
+        super::super::adk_session::fetch_context_thresholds(shared.pg_pool.as_ref())
             .await
             .compact_pct_for(&provider);
     let gateway = Arc::new(TuiDirectBridgeGateway {

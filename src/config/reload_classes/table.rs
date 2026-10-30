@@ -21,7 +21,7 @@ pub const FIELDS: &[FieldReload] = &[
     row("discord.dm_default_agent", Live, "`src/services/discord/agentdesk_config.rs` resolve_dm_default_agent (validated snapshot per DM)"),
     row("discord.owner_id", Restart, "`src/services/discord/settings/read.rs` load_bot_settings (owner_user_id into SharedData.settings)"),
     row("discord.scheduled_message_required_mention_user_ids", Restart, "`src/server/routes/scheduled_messages/discord_mentions.rs` required_from_state (AppState.config)"),
-    row("providers", Restart, "`src/services/provider_hosting.rs` install_provider_hosting_config (process-global map); remote_ssh_enabled gated in `src/bootstrap.rs` initialize"),
+    row("providers", Restart, "`src/services/provider_hosting.rs` install_provider_hosting_config (process-global map)"),
     row("voice.enabled", Restart, "`src/services/discord/voice_barge_in/runtime_lifecycle.rs` VoiceBargeInRuntime::from_voice_config (runtime_bootstrap.rs:run_bot)"),
     row("voice.verbose_progress", Restart, "`src/services/discord/voice_barge_in/runtime_lifecycle.rs` VoiceBargeInRuntime::from_voice_config (AtomicBool)"),
     row("voice.audio.recordings_dir", Restart, "`src/voice/receiver.rs` VoiceReceiverConfig::from_voice_config (runtime_bootstrap/voice.rs:run_bot_init_voice_workers)"),

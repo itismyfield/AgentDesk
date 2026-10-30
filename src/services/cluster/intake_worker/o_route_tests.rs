@@ -70,14 +70,6 @@ async fn a_worker_leaves_o_rows_to_their_ready_gateway_and_drains_the_rest_pg() 
     let not_cancelled = || false;
     let tick = || run_intake_worker_tick(&pool, &shared, "worker-1", "claude", "o", &not_cancelled);
 
-    let unread = test_probe::answers(&[]);
-    let off_row = seed(&pool, O, 1).await;
-    let selected = test_override::force_channels(&[(O, ClaudeTui)]);
-    let off = test_override::force_off();
-    assert_eq!(tick().await.unwrap(), TickOutcome::Processed);
-    assert!(ran_past_o(state(&pool, off_row).await), "writer off");
-    drop((off, selected, unread));
-
     let _selected = test_override::force_channels(&[(O, ClaudeTui)]);
     let (o_row, legacy_row) = (seed(&pool, O, 2).await, seed(&pool, LEGACY, 3).await);
     let not_ready = test_probe::answer_with(|_| false);
@@ -195,7 +187,6 @@ fn in_own_process(name: &str) -> bool {
         .args(["--exact", &qualified, "--nocapture", "--test-threads=1"])
         .env(CHILD, "1")
         .env("AGENTDESK_ROOT_DIR", root.path())
-        .env_remove(test_override::CHILD_ENV)
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);

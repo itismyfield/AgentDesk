@@ -199,14 +199,108 @@ fn missing_yaml_snapshot_falls_back_to_the_default() {
     );
 }
 
+/// A row key, its stored rows, the YAML snapshot and the expected value and source.
+type RowCase<'a> = (
+    &'a RowSetting,
+    &'a [(&'a str, &'a str)],
+    Option<&'a Config>,
+    u64,
+    SettingSource,
+);
+
+/// Row keys: a parsable row, else YAML, else the default (Claude: the generic value), floored.
+#[test]
+fn row_settings_resolve_row_then_yaml_then_default() {
+    let mut yaml = Config::default();
+    yaml.runtime.requested_timeout_min = Some(30);
+    yaml.runtime.context_compact_percent = Some(70);
+    let mut claude_yaml = Config::default();
+    claude_yaml.runtime.context_compact_percent_claude = Some(50);
+    let (requested, stale) = (&REQUESTED_TIMEOUT_MIN, &IN_PROGRESS_STALE_MIN);
+    let (generic, claude) = (&CONTEXT_COMPACT_PERCENT, &CONTEXT_COMPACT_PERCENT_CLAUDE);
+    let cases: [RowCase; 14] = [
+        (
+            requested,
+            &[("requested_timeout_min", " 20 ")],
+            Some(&yaml),
+            20,
+            K,
+        ),
+        (
+            requested,
+            &[("requested_timeout_min", "0")],
+            Some(&yaml),
+            1,
+            K,
+        ),
+        (
+            requested,
+            &[("requested_timeout_min", "7.5")],
+            Some(&yaml),
+            30,
+            Y,
+        ),
+        (requested, &[], Some(&yaml), 30, Y),
+        (requested, &[], None, 45, D),
+        (stale, &[("in_progress_stale_min", "-5")], None, 120, D),
+        (
+            generic,
+            &[("context_compact_percent", "0")],
+            Some(&yaml),
+            0,
+            K,
+        ),
+        (claude, &[("context_compact_percent", "80")], None, 80, K),
+        (claude, &[], Some(&yaml), 70, Y),
+        (claude, &[], None, 60, D),
+        (
+            claude,
+            &[("context_compact_percent", "80")],
+            Some(&claude_yaml),
+            50,
+            Y,
+        ),
+        (
+            claude,
+            &[("context_compact_percent_claude", "55")],
+            Some(&yaml),
+            55,
+            K,
+        ),
+        (&CONTEXT_COMPACT_PERCENT_CODEX, &[], Some(&yaml), 100, D),
+        (&CONTEXT_COMPACT_LOWER_BOUND_TOKENS, &[], None, 300_000, D),
+    ];
+    for (key, rows, config, value, source) in cases {
+        let rows = rows
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        assert_eq!(
+            resolve_row(key, &rows, config),
+            Resolved { value, source },
+            "{} {rows:?}",
+            key.kv_key
+        );
+    }
+}
+
 /// One key-table row for the generated docs and the census.
 struct KeyRow {
     kv_key: &'static str,
+    /// An individual `kv_meta` row rather than a `runtime-config` field.
+    row_key: bool,
     yaml_field: &'static str,
     default: String,
-    authority: KvAuthority,
+    rule: &'static str,
     /// Whether a non-default `yaml_sample` at `yaml_field` reaches the resolver as YAML.
     yaml_is_read: bool,
+}
+
+fn yaml_sample(yaml_field: &str, yaml_sample: &str) -> Config {
+    let field = yaml_field.strip_prefix("runtime.").unwrap();
+    let mut config = Config::default();
+    config.runtime = serde_yaml::from_str(&format!("{field}: {yaml_sample}\n")).unwrap();
+    config
 }
 
 /// `yaml_field` is checked against the key's accessor, so the docs cannot name another field.
@@ -215,19 +309,41 @@ fn row<T: Copy + PartialEq + std::fmt::Display>(
     yaml_field: &'static str,
     yaml_sample: &str,
 ) -> KeyRow {
-    let field = yaml_field.strip_prefix("runtime.").unwrap();
-    let mut config = Config::default();
-    config.runtime = serde_yaml::from_str(&format!("{field}: {yaml_sample}\n")).unwrap();
+    let config = self::yaml_sample(yaml_field, yaml_sample);
     KeyRow {
         kv_key: key.kv_key,
+        row_key: false,
         yaml_field,
-        default: key.default.to_string(),
-        authority: key.authority,
+        default: format!("`{}`", key.default),
+        rule: match key.authority {
+            KvAuthority::AnyValue => "it has the expected JSON type",
+            KvAuthority::ExplicitOrNonDefault => {
+                "it is listed in `__runtimeConfigExplicitKeys` or differs from the default"
+            }
+        },
         yaml_is_read: resolve(key, None, Some(&config)).source == Y,
     }
 }
 
-fn key_rows() -> [KeyRow; 4] {
+fn row_key(key: &RowSetting, yaml_field: &'static str, yaml_sample: &str) -> KeyRow {
+    let config = self::yaml_sample(yaml_field, yaml_sample);
+    KeyRow {
+        kv_key: key.kv_key,
+        row_key: true,
+        yaml_field,
+        default: match key.inherits {
+            Some(parent) => format!("the `{}` value", parent.kv_key),
+            None => format!("`{}`", key.default),
+        },
+        rule: match key.floor {
+            0 => "it parses as a non-negative integer",
+            _ => "it parses as a non-negative integer; every layer is raised to at least 1",
+        },
+        yaml_is_read: resolve_row(key, &HashMap::new(), Some(&config)).source == Y,
+    }
+}
+
+fn key_rows() -> [KeyRow; 10] {
     [
         row(
             &DISPATCH_GATE_ENABLED,
@@ -241,6 +357,36 @@ fn key_rows() -> [KeyRow; 4] {
         ),
         row(&RATE_LIMIT_STALE_SEC, "runtime.rate_limit_stale_sec", "900"),
         row(&MAX_ENTRY_RETRIES, "runtime.max_entry_retries", "5"),
+        row_key(
+            &REQUESTED_TIMEOUT_MIN,
+            "runtime.requested_timeout_min",
+            "30",
+        ),
+        row_key(
+            &IN_PROGRESS_STALE_MIN,
+            "runtime.in_progress_stale_min",
+            "90",
+        ),
+        row_key(
+            &CONTEXT_COMPACT_PERCENT,
+            "runtime.context_compact_percent",
+            "70",
+        ),
+        row_key(
+            &CONTEXT_COMPACT_PERCENT_CODEX,
+            "runtime.context_compact_percent_codex",
+            "90",
+        ),
+        row_key(
+            &CONTEXT_COMPACT_PERCENT_CLAUDE,
+            "runtime.context_compact_percent_claude",
+            "50",
+        ),
+        row_key(
+            &CONTEXT_COMPACT_LOWER_BOUND_TOKENS,
+            "runtime.context_compact_lower_bound_tokens",
+            "200000",
+        ),
     ]
 }
 
@@ -263,21 +409,21 @@ fn render_precedence_table() -> String {
         "{DOC_BEGIN}\n\
          <!-- Generated from the key table in src/services/settings/resolve; regenerate: \
          ADK_WRITE_SETTINGS_PRECEDENCE_DOC=1 cargo test --lib services::settings::resolve:: -->\n\n\
-         Rust readers resolve these `runtime-config` keys with `settings::resolve`: the persisted \
-         value when it outranks YAML, else the node's YAML snapshot, else the default.\n\n\
-         | `runtime-config` field | YAML field | Default | Persisted value outranks YAML when |\n\
+         Rust readers and policy `agentdesk.config.get` resolve these keys with \
+         `settings::resolve`: the persisted value when it outranks YAML, else the node's YAML \
+         snapshot, else the default. An unreadable kv layer falls through to YAML and the \
+         default.\n\n\
+         | Persisted value | YAML field | Default | Persisted value outranks YAML when |\n\
          |---|---|---|---|\n"
     );
     for row in key_rows() {
-        let rule = match row.authority {
-            KvAuthority::AnyValue => "it has the expected JSON type",
-            KvAuthority::ExplicitOrNonDefault => {
-                "it is listed in `__runtimeConfigExplicitKeys` or differs from the default"
-            }
+        let persisted = match row.row_key {
+            true => "`kv_meta` row",
+            false => "`runtime-config` field",
         };
         out.push_str(&format!(
-            "| `{}` | `{}` | `{}` | {rule} |\n",
-            row.kv_key, row.yaml_field, row.default
+            "| {persisted} `{}` | `{}` | {} | {} |\n",
+            row.kv_key, row.yaml_field, row.default, row.rule
         ));
     }
     out.push_str(DOC_END);
@@ -343,12 +489,18 @@ fn runtime_setting_layers_are_read_only_through_resolve() {
         let source = std::fs::read_to_string(&path).unwrap();
         let (text, code) = production_view(&source, &relative);
         for row in key_rows() {
-            let field_read = format!(".{}", row.yaml_field.strip_prefix("runtime.").unwrap());
-            let needles = [
+            let field = row.yaml_field.strip_prefix("runtime.").unwrap();
+            // Row-key fields share names with turn context structs, so only `runtime.` reads count.
+            let mut needles = vec![
                 (&text, format!(".get(\"{}\")", row.kv_key)),
                 (&text, format!("[\"{}\"]", row.kv_key)),
-                (&code, field_read),
             ];
+            if row.row_key {
+                needles.push((&code, format!("runtime.{field}")));
+                needles.push((&text, format!(".bind(\"{}\")", row.kv_key)));
+            } else {
+                needles.push((&code, format!(".{field}")));
+            }
             for (view, needle) in needles {
                 for (offset, _) in view.match_indices(needle.as_str()) {
                     let next = view[offset + needle.len()..].chars().next();
@@ -466,6 +618,44 @@ const RESOLVER_BINDINGS: &[(&str, &str, &[&str])] = &[
         "fn resolve_config_get_raw(",
         &["settings::runtime_config_field("],
     ),
+    (
+        "src/engine/ops/config_ops.rs",
+        "fn select<",
+        &[
+            "settings::policy_kv_rows(key)",
+            "resolved_config_value(key,&rows)",
+        ],
+    ),
+    (
+        "src/engine/ops/config_ops.rs",
+        "fn config_get_without_kv(",
+        &["resolved_config_value(key,"],
+    ),
+    (
+        "src/engine/ops/config_ops.rs",
+        "fn resolved_config_value(",
+        &["settings::policy_value(key,rows,live.as_deref())"],
+    ),
+    (
+        "src/services/discord/adk_session.rs",
+        "fn fetch_context_thresholds(",
+        &["resolve_context_thresholds(&read,live.as_deref(),"],
+    ),
+    (
+        "src/services/discord/adk_session.rs",
+        "fn resolve_context_thresholds(",
+        &["settings::resolve_row(key,rows,yaml)"],
+    ),
+    (
+        "src/services/settings/resolve.rs",
+        "fn resolve_with_kv<",
+        &["layered("],
+    ),
+    (
+        "src/services/settings/resolve.rs",
+        "fn resolve_row(",
+        &["layered(kv,yaml_value,key.default)"],
+    ),
 ];
 
 #[test]
@@ -507,7 +697,7 @@ fn collect_production_sources(dir: &std::path::Path, files: &mut Vec<std::path::
     }
 }
 
-/// Comment-free text and code mask with every `#[cfg(test)]` item blanked out.
+/// Comment-free text and code mask with every `#[cfg(test)]` item or statement blanked out.
 fn production_view(source: &str, path: &str) -> (String, String) {
     let text = crate::test_support::strip_rust_comments(source)
         .unwrap_or_else(|error| panic!("{path}: {error}"));
@@ -517,21 +707,91 @@ fn production_view(source: &str, path: &str) -> (String, String) {
     let mut from = 0;
     while let Some(offset) = code[from..].find("#[cfg(test)]") {
         let start = from + offset;
-        match crate::test_support::braced_item_span(&code[start..], "#[cfg(test)]") {
-            Some(span) => {
-                for index in start + span.start..start + span.end {
-                    if text[index] != b'\n' {
-                        text[index] = b' ';
-                        masked[index] = b' ';
-                    }
-                }
-                from = start + span.end;
+        let end = cfg_test_item_end(&code, start)
+            .unwrap_or_else(|| panic!("{path}: unparsable #[cfg(test)] form at byte {start}"));
+        for index in start..end {
+            if text[index] != b'\n' {
+                text[index] = b' ';
+                masked[index] = b' ';
             }
-            None => from = start + 1,
         }
+        from = end;
     }
     (
         String::from_utf8_lossy(&text).into_owned(),
         String::from_utf8_lossy(&masked).into_owned(),
     )
+}
+
+/// End of the item, statement, field or arm a `#[cfg(test)]` at `start` gates: its `;` or `,`,
+/// the brace that closes a block not continued by an operator, or the enclosing close.
+fn cfg_test_item_end(code: &str, start: usize) -> Option<usize> {
+    let bytes = code.as_bytes();
+    let mut index = start;
+    // Skip this and any further outer attributes.
+    while code[index..].trim_start().starts_with("#[") {
+        index += code[index..].find("#[")? + 1;
+        let mut depth = 0usize;
+        loop {
+            match *bytes.get(index)? {
+                b'[' => depth += 1,
+                b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+        index += 1;
+    }
+    let (mut depth, mut angle) = (0usize, 0usize);
+    while let Some(&byte) = bytes.get(index) {
+        let prev = index.checked_sub(1).map(|i| bytes[i]);
+        match byte {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' if depth == 0 => return Some(index),
+            b')' | b']' => depth -= 1,
+            b'}' => {
+                depth -= 1;
+                let rest = code[index + 1..].trim_start();
+                let continued = rest.starts_with(|c: char| ".?;,=+-*/%&|^<>!".contains(c))
+                    || ["else", "as "].iter().any(|word| rest.starts_with(word));
+                if depth == 0 && !continued {
+                    return Some(index + 1);
+                }
+            }
+            b'<' if depth == 0 => angle += 1,
+            b'>' if depth == 0 && !matches!(prev, Some(b'-' | b'=')) => {
+                angle = angle.saturating_sub(1);
+            }
+            b';' if depth == 0 => return Some(index + 1),
+            b',' if depth == 0 && angle == 0 => return Some(index + 1),
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Test-only statements are blanked like items, and a form the census cannot bound fails closed.
+#[test]
+fn production_view_blanks_test_only_statements_and_rejects_unbounded_forms() {
+    let source = "fn f() -> i64 {\n    #[cfg(test)]\n    let _ = settings::max_entry_retries(a, b);\n    \
+                  #[cfg(test)] pub use x::y;\n    read(\"k\")\n}\n#[cfg(test)]\nstatic M: Map<K, Vec<V>> = m();\n\
+                  struct S { #[cfg(test)] a: Vec<(u8, u8)>, b: u8 }\n";
+    let (_, code) = production_view(source, "fixture.rs");
+    assert_eq!(
+        code.split_whitespace().collect::<Vec<_>>(),
+        [
+            "fn", "f()", "->", "i64", "{", "read(", ")", "}", "struct", "S", "{", "b:", "u8", "}"
+        ]
+    );
+    let unbounded = std::panic::catch_unwind(|| production_view("#[cfg(test)]\nlet x = 1", "x.rs"));
+    assert!(
+        unbounded.is_err(),
+        "an unterminated #[cfg(test)] form must fail closed"
+    );
 }

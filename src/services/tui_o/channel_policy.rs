@@ -245,11 +245,10 @@ impl BootChannels {
     /// node adopts nothing and reports local store state.
     pub(crate) fn seeded(
         mut self,
-        enabled: bool,
         config: &Config,
         stored: impl FnOnce(&BTreeSet<u64>, bool) -> std::io::Result<BTreeMap<u64, Adoption>>,
     ) -> Result<Self> {
-        if !enabled || self.selected.is_empty() {
+        if self.selected.is_empty() {
             return Ok(self);
         }
         let alarms = AlarmRouter::for_process(None, None);
@@ -589,8 +588,7 @@ pub(crate) fn install(config: &Config) -> Result<()> {
                     Ok(adoption::stored(root.as_deref(), channels))
                 }
             };
-            let enabled = super::cutover::writer_enabled();
-            let seeded = candidate.clone().seeded(enabled, config, stored)?;
+            let seeded = candidate.clone().seeded(config, stored)?;
             BOOT.get_or_init(|| seeded)
         }
     };
@@ -606,13 +604,11 @@ pub(crate) fn boot() -> Option<&'static BootChannels> {
 }
 
 pub(crate) fn owns_output(
-    enabled: bool,
     channels: &BTreeSet<u64>,
     channel: u64,
     kind: Option<RuntimeHandoffKind>,
 ) -> bool {
-    enabled
-        && channels.contains(&channel)
+    channels.contains(&channel)
         && matches!(
             kind,
             Some(RuntimeHandoffKind::ClaudeTui | RuntimeHandoffKind::CodexTui)

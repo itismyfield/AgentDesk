@@ -31,7 +31,7 @@ module.exports = function attachCardTimeouts(timeouts, helpers) {
       // retry_count < 10이면 수동 판단 대신 failed만 마크 → [J]가 30초 후 재시도
       var aCfg = agentdesk.pipeline.getConfig();
       var aInitial = agentdesk.pipeline.kickoffState(aCfg);
-      var requestedInterval = getTimeoutInterval("requested_timeout_min", 45);
+      var requestedInterval = getTimeoutInterval("requested_timeout_min");
       var staleRequested = agentdesk.db.query(
         "SELECT kc.id, kc.assigned_agent_id, kc.latest_dispatch_id, " +
         "COALESCE(td.retry_count, 0) as retry_count, td.dispatch_type " +
@@ -89,7 +89,7 @@ module.exports = function attachCardTimeouts(timeouts, helpers) {
       var bCfg = agentdesk.pipeline.getConfig();
       var bInitial = agentdesk.pipeline.kickoffState(bCfg);
       var bInProgress = agentdesk.pipeline.nextGatedTarget(bInitial, bCfg);
-      var inProgressInterval = getTimeoutInterval("in_progress_stale_min", 120);
+      var inProgressInterval = getTimeoutInterval("in_progress_stale_min");
       var staleInProgress = agentdesk.db.query(
         "SELECT kc.id FROM kanban_cards kc " +
         "LEFT JOIN task_dispatches td ON td.id = kc.latest_dispatch_id " +
@@ -98,7 +98,7 @@ module.exports = function attachCardTimeouts(timeouts, helpers) {
         [bInProgress]
       );
       for (var j = 0; j < staleInProgress.length; j++) {
-        var staleMin = parseInt(agentdesk.config.get("in_progress_stale_min"), 10) || 120;
+        var staleMin = agentdesk.config.get("in_progress_stale_min");
         var stalledReason = "Stalled: no activity for " + staleMin + "+ min";
         escalateToManualIntervention(staleInProgress[j].id, stalledReason);
         agentdesk.log.warn("[timeout] Card " + staleInProgress[j].id + " " + bInProgress + " stale → manual intervention");

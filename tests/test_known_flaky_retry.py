@@ -175,6 +175,24 @@ sys.stdout.write((p / file).read_text())
         self.assertIn("decision=no-op:no-worker-failure", out)
         self.assertFalse(any(c[:2] == ["run", "rerun"] for c in calls), calls)
 
+    def test_draft_judge_failure_is_retried_by_neither_classifier(self):
+        command = self.infra_command()
+        jobs = yaml.safe_load((ROOT / ".github/workflows/ci-pr.yml").read_text())["jobs"]
+        step = jobs["required_contexts"]["steps"][0]
+        self.assertEqual(step["name"], "Reject draft PR")
+        failed = subprocess.run(["bash", "-e", "-c", step["run"]], capture_output=True, text=True)
+        self.assertEqual(failed.returncode, 1)
+        self.jobs({**self.job(901), "name": nextest_required.GATE,
+                   "steps": [dict(name=step["name"], conclusion="failure")]},
+                  {**self.job(902, "skipped"), "name": "Changed paths"},
+                  {**self.job(903, "skipped"), "name": "Rust tests (worker 0)"})
+        (self.path / "901.log").write_text(failed.stdout + "##[error]Process completed with exit code 1.\n")
+        for classifier in (None, command):
+            with self.subTest(classifier=classifier):
+                out, calls = self.run_retry(command=classifier)
+                self.assertIn("no-op:", out)
+                self.assertFalse(any(c[:2] == ["run", "rerun"] for c in calls), calls)
+
     def test_flaky_exception_still_runs_workflow_infra_fallback_once(self):
         command = self.infra_command()
         self.script.write_text("raise RuntimeError('classifier fixture failure')\n")

@@ -252,6 +252,36 @@ impl Readiness {
         Some(live.get(&channel)?.owed.clone())
     }
 
+    /// What the running actor owes as read by a poll after this ask; `None` without an actor,
+    /// on an unreadable store, or with no such poll within `limit`.
+    pub async fn undelivered_after(
+        &self,
+        channel: u64,
+        limit: std::time::Duration,
+    ) -> Option<Undelivered> {
+        let view = self.undelivered(channel)?;
+        let mut published = view.published;
+        let wanting = view.demand.want();
+        if crate::services::tui_o::turn_mode::carried_close_mutant("stale_ask") {
+            return published.borrow().clone();
+        }
+        // What is already there was published before this ask, including the initial `None`.
+        published.borrow_and_update();
+        let answer = async {
+            loop {
+                published.changed().await.ok()?;
+                let poll = published.borrow_and_update().clone();
+                if poll
+                    .as_ref()
+                    .is_none_or(|poll| poll.asked >= wanting.asked())
+                {
+                    return poll;
+                }
+            }
+        };
+        tokio::time::timeout(limit, answer).await.ok()?
+    }
+
     pub(crate) fn submission(&self, channel: u64) -> Option<actor::codex_submission::Port> {
         locked(&self.live).get(&channel)?.submission.clone()
     }

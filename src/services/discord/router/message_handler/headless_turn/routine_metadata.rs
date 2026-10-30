@@ -227,14 +227,14 @@ mod process_tests {
             );
             let kind =
                 super::super::super::provider_isolation::prelaunch_runtime_kind_for_managed_session(
-                    &provider, true, false, None,
+                    &provider, false, None,
                 );
             assert_eq!(
                 kind, None,
                 "process mode must not register a managed tmux runtime"
             );
             assert_eq!(
-                super::super::super::provider_isolation::prelaunch_inflight_runtime_seed_without_codex_raw(&provider, true, None, kind),
+                super::super::super::provider_isolation::prelaunch_inflight_runtime_seed_without_codex_raw(&provider, None, kind),
                 (None, None, None, 0),
                 "a process attempt must not seed wrapper files or a tmux watcher target",
             );

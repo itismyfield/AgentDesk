@@ -413,7 +413,6 @@ async fn real_watcher_producer_posts_body_then_one_summary_for_retired_flags_and
 {
     let _isolation = Isolation::new();
     let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
-    assert!(crate::services::discord::footer_retirement::retired());
     let mut channel = 586_201;
     for v2 in [false, true] {
         for single in [false, true] {

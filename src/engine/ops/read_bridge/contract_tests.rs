@@ -114,7 +114,7 @@ async fn policy_read_bridge_reuses_context_resources() {
         assert_eq!(js.eval(READ_ALL), r#"["s1",7,"v1","later",null]"#);
     }
     assert_eq!(proxy.accepted(), 1, "every read shares one connection");
-    assert_eq!(policy_selects(&proxy), 60, "every read runs its SELECTs");
+    assert_eq!(policy_selects(&proxy), 50, "every read runs its SELECTs");
 
     write(
         &direct,
@@ -290,8 +290,8 @@ async fn policy_read_bridge_engines_read_through_their_own_source() {
     }
     assert_eq!(
         (policy_selects(&main_proxy), policy_selects(&tick_proxy)),
-        (18, 18),
-        "each engine's six SELECTs per read go to its own pool"
+        (15, 15),
+        "each engine's five SELECTs per read go to its own pool"
     );
     assert!(
         answers

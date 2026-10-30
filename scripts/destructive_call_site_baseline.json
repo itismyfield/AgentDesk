@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "0329dc70c8784c8fec663ff623507303ecd97ad3",
+  "measured_at_sha": "a3cd1e77a4cdcf0308eee19cde71414f6de08956",
   "comment": "These counts are a growth-blocking baseline, not proof of safety.",
   "categories": {
     "tmux_kill": {
@@ -112,6 +112,7 @@
       "files": {
         "src/server/routes/health_api.rs": 1,
         "src/services/discord/commands/control/clear_teardown/execution_cleanup.rs": 1,
+        "src/services/discord/health/recovery/carried_turn_close.rs": 1,
         "src/services/discord/health/recovery/inflight_repair.rs": 3,
         "src/services/discord/health/recovery/runtime_stop.rs": 3,
         "src/services/discord/health/recovery/watchdog_pass.rs": 2,

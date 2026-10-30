@@ -3,11 +3,6 @@
 //! Uncertain identities withhold the body.
 //! This is an ownership fact, never delivery evidence; evidence readers must not consult it.
 
-/// The one O writer build switch, shared with the intake topology so both flip together.
-/// On, only the boot selection and the O home's committed channels move to O; an empty selection
-/// leaves all to Legacy.
-pub(crate) use super::topology::O_TUI_WRITER;
-
 use super::channel_policy::{self, BootChannels, Candidate, Site};
 use crate::services::agent_protocol::RuntimeHandoffKind;
 
@@ -25,11 +20,6 @@ pub(crate) use channel_gate::{
     claims_judged, o_owns_tui_output_for_channel, o_owns_tui_output_for_channel_tmux,
 };
 
-/// Whether the writer switch is on; test builds may turn it on or off per thread.
-pub(crate) fn writer_enabled() -> bool {
-    test_override::enabled()
-}
-
 pub(crate) fn boot_snapshot() -> Option<BootChannels> {
     test_override::with_channels(|snapshot| snapshot.cloned())
 }
@@ -37,7 +27,6 @@ pub(crate) fn boot_snapshot() -> Option<BootChannels> {
 /// Each boot-snapshot channel with its boot kind and, where this node may host it, its adoption;
 /// the writer host derives its channels from this, never from a reloaded config.
 pub(crate) fn boot_ownership() -> Vec<(u64, Option<RuntimeHandoffKind>, Option<Candidate>)> {
-    let enabled = writer_enabled();
     let evaluate = |snapshot: Option<&channel_policy::BootChannels>| {
         let Some(snapshot) = snapshot else {
             return Vec::new();
@@ -45,7 +34,7 @@ pub(crate) fn boot_ownership() -> Vec<(u64, Option<RuntimeHandoffKind>, Option<C
         let channels = snapshot.channels();
         let judged = |&channel: &u64| {
             let kind = snapshot.kind(channel);
-            let hosted = channel_policy::owns_output(enabled, channels, channel, kind);
+            let hosted = channel_policy::owns_output(channels, channel, kind);
             let blocked = snapshot
                 .execution(channel)
                 .is_some_and(|view| view.permit.is_err());
@@ -59,11 +48,8 @@ pub(crate) fn boot_ownership() -> Vec<(u64, Option<RuntimeHandoffKind>, Option<C
     test_override::with_channels(evaluate)
 }
 
-/// The channels O owns with their boot kind; the snapshot is not read while the writer is off.
+/// The channels O owns with their boot kind.
 fn owned_channels() -> Vec<(u64, RuntimeHandoffKind)> {
-    if !writer_enabled() {
-        return Vec::new();
-    }
     test_override::with_channels(|snapshot| {
         let Some(snapshot) = snapshot else {
             return Vec::new();
@@ -75,9 +61,6 @@ fn owned_channels() -> Vec<(u64, RuntimeHandoffKind)> {
 
 /// The boot kind of `channel` when O owns it; no other channel's adoption is read.
 fn owned_kind(channel: u64) -> Option<RuntimeHandoffKind> {
-    if !writer_enabled() {
-        return None;
-    }
     test_override::with_channels(|snapshot| owned_in(snapshot?, channel))
 }
 
@@ -86,7 +69,7 @@ fn owned_in(snapshot: &BootChannels, channel: u64) -> Option<RuntimeHandoffKind>
     if snapshot.execution(channel).is_some() {
         return kind;
     }
-    let hosted = channel_policy::owns_output(true, snapshot.channels(), channel, kind);
+    let hosted = channel_policy::owns_output(snapshot.channels(), channel, kind);
     snapshot
         .output_candidate(channel)
         .filter(|c| hosted && c.peek().owned())?;
@@ -118,9 +101,7 @@ pub(crate) fn mark_codex_turn_admitted(
     provider_session_id: Option<&str>,
 ) {
     use super::writer::binding::{BindingEvents, ChannelBindingLog};
-    if !writer_enabled()
-        || *provider != crate::services::provider::ProviderKind::Codex
-        || provider_session_id.is_some()
+    if *provider != crate::services::provider::ProviderKind::Codex || provider_session_id.is_some()
     {
         return;
     }
@@ -146,9 +127,6 @@ pub(crate) fn mark_codex_turn_admitted(
 /// Before a new placement: a non-home node holds a selected channel, and the home releases a
 /// pending adoption so the placed Legacy turn never shares the channel with O.
 fn claim_for_placement(channel: Option<u64>) -> Result<(), String> {
-    if !writer_enabled() {
-        return Ok(());
-    }
     test_override::with_channels(|snapshot| {
         let Some(snapshot) = snapshot.filter(|s| !s.channels().is_empty()) else {
             return Ok(());
@@ -181,49 +159,15 @@ fn claim_for_placement(channel: Option<u64>) -> Result<(), String> {
 mod test_override {
     use super::channel_policy::{self, BootChannels};
 
-    pub(super) fn enabled() -> bool {
-        super::O_TUI_WRITER
-    }
-
     pub(super) fn with_channels<R>(evaluate: impl FnOnce(Option<&BootChannels>) -> R) -> R {
         evaluate(channel_policy::boot())
     }
 }
 
-/// Test builds can act as if the flag were on, per thread or for a whole child process,
-/// without touching the constant.
+/// Test builds force the boot channel snapshot per thread or for a whole child process.
 #[cfg(test)]
 pub(crate) mod test_override {
     use crate::services::agent_protocol::RuntimeHandoffKind;
-    use std::cell::Cell;
-
-    /// Set only on re-exec'd child test processes that own their whole runtime.
-    pub(crate) const CHILD_ENV: &str = "ADK_TEST_O_TUI_WRITER";
-
-    thread_local! {
-        static FORCED: Cell<Option<bool>> = const { Cell::new(None) };
-    }
-
-    /// The switch this thread forced, otherwise the build constant.
-    pub(crate) fn enabled() -> bool {
-        let child = std::env::var_os(CHILD_ENV).is_some();
-        FORCED
-            .with(Cell::get)
-            .unwrap_or(super::O_TUI_WRITER || child)
-    }
-
-    pub(crate) struct ForceGuard(Option<bool>);
-
-    // Private: the list is set with the switch; use `force_channels`.
-    fn force_on() -> ForceGuard {
-        ForceGuard(FORCED.with(|cell| cell.replace(Some(true))))
-    }
-
-    impl Drop for ForceGuard {
-        fn drop(&mut self) {
-            FORCED.with(|cell| cell.set(self.0));
-        }
-    }
 
     /// Binds a tmux session as a Claude TUI until dropped, so session-keyed gates see a TUI kind.
     pub(crate) struct TuiSessionGuard(String);
@@ -288,7 +232,6 @@ pub(crate) mod test_override {
     }
 
     pub(crate) struct ChannelsGuard {
-        _forced: ForceGuard,
         previous: Option<BootChannels>,
     }
 
@@ -322,7 +265,6 @@ pub(crate) mod test_override {
 
     fn force_snapshot(snapshot: BootChannels) -> ChannelsGuard {
         ChannelsGuard {
-            _forced: force_on(),
             previous: CHANNELS.with(|cell| cell.replace(Some(snapshot))),
         }
     }
@@ -370,9 +312,6 @@ pub(crate) mod test_override {
         false
     }
 
-    pub(crate) fn force_off() -> ForceGuard {
-        ForceGuard(FORCED.with(|cell| cell.replace(Some(false))))
-    }
     // Registry-reset tests run concurrently, so binding-dependent fixtures use their own process.
     pub(crate) fn isolated_binding_case(name: &str) -> bool {
         const CHILD: &str = "ADK_TEST_O_BINDING_CASE";
@@ -395,8 +334,7 @@ pub(crate) mod test_override {
         false
     }
 
-    /// The owned set matches boot ownership in every adoption state, on either site, with the
-    /// writer on and off.
+    /// The owned set matches boot ownership in every adoption state, on either site.
     #[test]
     fn owned_channels_match_boot_ownership() {
         let channels = [
@@ -430,8 +368,6 @@ pub(crate) mod test_override {
                 let _boot = force_boot(boot);
                 assert_eq!(super::owned_channels(), from_boot(), "{state:?}");
                 owned_somewhere |= !super::owned_channels().is_empty();
-                let _off = force_off();
-                assert_eq!(super::owned_channels(), from_boot(), "{state:?} off");
             }
         }
         assert!(owned_somewhere, "some state owns channels");

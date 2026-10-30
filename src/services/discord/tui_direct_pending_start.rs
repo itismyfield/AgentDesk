@@ -62,10 +62,11 @@ pub(super) use state::{
 #[cfg(test)]
 pub(super) use state::{pending_synthetic_start_abandoned, reset_present_for_tests};
 
+pub(in crate::services::discord) use state::inflight_generation_precedes_current;
 #[cfg(test)]
 use state::{
-    ActiveWorkerGuard, claude_tui_output_path_missing, inflight_generation_precedes_current,
-    mark_absent, mark_present, records_for_channel, restart_orphan_independent_pane_ready, root,
+    ActiveWorkerGuard, claude_tui_output_path_missing, mark_absent, mark_present,
+    records_for_channel, restart_orphan_independent_pane_ready, root,
 };
 use state::{
     active_worker_guard_for_spawn, committed_foreign_complete_finalize_context,

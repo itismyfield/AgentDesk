@@ -2479,10 +2479,6 @@ pub(crate) mod p11 {
             .env("XDG_CONFIG_HOME", home.join("xdg"))
             .env_remove(crate::services::herdr_admission::ADMISSION_ENV)
             .env(
-                crate::services::tui_o::cutover::test_override::CHILD_ENV,
-                "1",
-            )
-            .env(
                 crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
                 format!("[[{channel},\"claude_tui\"]]"),
             );
