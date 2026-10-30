@@ -175,8 +175,14 @@ impl HerdrOwner {
             name: "tester".into(),
             clock: Arc::new(|| 10_000),
             timing: &crate::services::claude_tui::busy_inject::TIMING,
+            until_done: None,
         };
-        created(registration, prompt.into(), wanted, None)
+        created(
+            registration,
+            prompt.into(),
+            wanted,
+            (None, reply_once(None)),
+        )
     }
 
     /// The owner's head as the pane saw it at each send.

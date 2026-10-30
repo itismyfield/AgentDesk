@@ -147,7 +147,11 @@ impl OwnerInput {
         let ticket = AdmissionTicket::stored(&self.ticket);
         Ok(
             match admission::exact_turn(handle, &ticket, &original).await? {
-                TurnBind::Armed(turn) | TurnBind::Settled(turn) => Some((turn.attempt, turn.turn)),
+                TurnBind::Armed(turn) | TurnBind::Settled(turn)
+                    if observable(handle, &turn.attempt).await? =>
+                {
+                    Some((turn.attempt, turn.turn))
+                }
                 _ => None,
             },
         )
@@ -174,7 +178,7 @@ impl OwnerInput {
         let found = admission::exact_turn(handle, &ticket, &original).await?;
         match found {
             TurnBind::Armed(turn) | TurnBind::Settled(turn)
-                if turn.is(attempt, source.as_ref()) =>
+                if turn.is(attempt, source.as_ref()) && observable(handle, attempt).await? =>
             {
                 let context = handle
                     .v2_admission_context(original, self.ticket.clone())
@@ -188,6 +192,19 @@ impl OwnerInput {
             _ => Err("observer does not name the owner's exact turn".into()),
         }
     }
+}
+
+/// An attempt past its bootstrap window: a modal can no longer end it unsent for a retry.
+async fn observable(handle: &ChannelMailboxHandle, attempt: &str) -> Result<bool, String> {
+    let attempt = attempt.to_string();
+    handle
+        .v2_request(move |slot| {
+            Ok(!slot
+                .as_ref()
+                .ok_or("V2 not adopted")?
+                .bootstrapping(&attempt))
+        })
+        .await
 }
 
 pub(crate) async fn mailbox(

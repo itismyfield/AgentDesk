@@ -7,6 +7,7 @@ use crate::services::claude_tui::input::submission::tests::{events, renderer_wit
 use crate::services::discord::queue_io::input_owner::admission::{
     AdmissionTicket, TurnBind, admit, exact_turn,
 };
+use crate::services::discord::queue_io::input_owner::drive::{Front, claim_turn};
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture;
 use crate::services::turn_orchestrator::{ChannelMailboxRegistry, PendingQueueItem};
@@ -37,11 +38,13 @@ pub(super) struct Rig {
     pub(super) nonce: String,
     pub(super) renderer: std::path::PathBuf,
     program: std::path::PathBuf,
-    runtime: tokio::runtime::Runtime,
+    pub(super) runtime: tokio::runtime::Runtime,
     _registry: ChannelMailboxRegistry,
     mailbox: ChannelMailboxHandle,
     ticket: AdmissionTicket,
     original: PendingQueueItem,
+    /// The database an idle turn's execution capacity is leased in, when a test gives one.
+    pub(super) pool: std::sync::OnceLock<sqlx::PgPool>,
 }
 
 /// A known pane over `transcript` and an owner with one admitted original.
@@ -142,6 +145,7 @@ pub(super) fn owned(
         mailbox,
         ticket,
         original,
+        pool: std::sync::OnceLock::new(),
     }
 }
 
@@ -190,7 +194,13 @@ impl Rig {
         })
     }
 
-    /// The owner's front through the drive's handoff entry, the owner passed as its argument.
+    /// The owner's turn claim on `front`, as the turn that starts it makes it.
+    pub(super) fn claim(&self, front: &Front) -> Option<FrontClaim> {
+        let claimed = claim_turn(&self.mailbox, front.1.message_id, front);
+        self.runtime.block_on(claimed).unwrap()
+    }
+
+    /// The turn's claim on `front`, then the drive's handoff entry with the owner as its argument.
     pub(super) fn handoff(
         &self,
         front: Front,
@@ -198,9 +208,33 @@ impl Rig {
         phase: target::Phase,
         transcript: &Path,
     ) -> Result<(), String> {
-        let owner = self.registration(&provider, phase, transcript, Execution::LocalTui);
+        let claim = self.claim(&front).ok_or("NotSent(\"front_not_granted\")")?;
+        self.execute(claim, provider, phase, transcript)
+    }
+
+    pub(super) fn execute(
+        &self,
+        claim: FrontClaim,
+        provider: ProviderKind,
+        phase: target::Phase,
+        transcript: &Path,
+    ) -> Result<(), String> {
+        let (settled, _) = tokio::sync::oneshot::channel();
+        self.execute_until(claim, (provider, phase, transcript), settled, None)
+    }
+
+    /// As `execute`, answering the drive on `settled` and observing the AI turn with `until_done`.
+    pub(super) fn execute_until(
+        &self,
+        claim: FrontClaim,
+        (provider, phase, transcript): (ProviderKind, target::Phase, &Path),
+        settled: Settled,
+        until_done: Option<Box<dyn FnOnce() + Send>>,
+    ) -> Result<(), String> {
+        let mut owner = self.registration(&provider, phase, transcript, Execution::LocalTui);
+        owner.until_done = until_done;
         self.with_turn(&provider, Some(&self.name), |turn, sender| {
-            execute_front(turn, sender, front, owner)
+            execute_front(turn, sender, claim, owner, settled)
         })
     }
 
@@ -250,6 +284,7 @@ impl Rig {
             name: NAME.into(),
             clock: Arc::new(|| 10_000),
             timing: &OWNER_TIMING,
+            until_done: None,
         }
     }
 
@@ -264,7 +299,7 @@ impl Rig {
     ) -> Result<(), String> {
         let host = TurnHost::Tmux;
         let turn = StreamingTurn {
-            pool: None,
+            pool: self.pool.get(),
             provider,
             prompt: PROMPT,
             session_id: None,
@@ -409,7 +444,7 @@ fn owner_busy_claude_submits_once_and_holds_a_modal_front() {
 }
 
 /// The drive's handoff runs the owner's front from its arguments alone, with nothing registered
-/// for the channel: a front it was not granted reserves nothing, the granted one is delivered.
+/// for the channel: a front it was not granted reserves nothing, the granted one is delivered once.
 #[test]
 fn the_front_handoff_runs_from_its_arguments_and_never_an_ungranted_front() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -428,18 +463,6 @@ fn the_front_handoff_runs_from_its_arguments_and_never_an_ungranted_front() {
     assert_eq!(refused, Err("NotSent(\"front_not_granted\")".into()));
     assert!(rig.events().is_empty(), "{:?}", rig.events());
     assert!(rig.snapshot()["head_injection"].is_null());
-    let ungranted = rig.handoff(
-        front.clone(),
-        ProviderKind::Claude,
-        target::Phase::Busy,
-        &transcript,
-    );
-    assert_eq!(
-        ungranted,
-        Err("NotSent(\"front_not_granted\")".into()),
-        "the grant was spent"
-    );
-    let front = rig.granted_front();
     let registered = REGISTERED
         .lock()
         .unwrap()
@@ -447,13 +470,165 @@ fn the_front_handoff_runs_from_its_arguments_and_never_an_ungranted_front() {
         .any(|(id, _)| *id == rig.channel);
     assert!(!registered, "nothing travels through the static");
     let result = rig.handoff(
+        front.clone(),
+        ProviderKind::Claude,
+        target::Phase::Busy,
+        &transcript,
+    );
+    assert_eq!(result, Ok(()), "the refused front left the grant in place");
+    let again = rig.handoff(
         front,
         ProviderKind::Claude,
         target::Phase::Busy,
         &transcript,
     );
-    assert_eq!(result, Ok(()));
+    assert_eq!(again, Err("NotSent(\"front_not_granted\")".into()));
     assert_eq!(rig.events(), ["paste", "Enter"]);
+    rig.delivered();
+}
+
+/// The turn's claim carries the granted front to one reserve with no second grant; a claim the queue
+/// cancelled before its reserve sends nothing.
+#[test]
+fn a_turn_claim_carries_its_front_to_one_reserve() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig("oc-claim", 7_272_536, "normal", view("", false), BUSY);
+    let front = rig.granted_front();
+    let claim = rig.claim(&front).expect("the granted front's claim");
+    assert!(rig.claim(&front).is_none(), "one claim per grant");
+    let delivered = rig.execute(
+        claim,
+        ProviderKind::Claude,
+        target::Phase::Busy,
+        &rig.transcript(),
+    );
+    assert_eq!(delivered, Ok(()));
+    assert_eq!(rig.events(), ["paste", "Enter"]);
+    rig.delivered();
+
+    let rig = rig_cancelled_after_claim();
+    assert!(rig.events().is_empty(), "{:?}", rig.events());
+    assert!(rig.snapshot()["head_injection"].is_null());
+}
+
+fn rig_cancelled_after_claim() -> Rig {
+    let rig = rig(
+        "oc-claim-cancel",
+        7_272_537,
+        "normal",
+        view("", false),
+        BUSY,
+    );
+    let front = rig.granted_front();
+    let claim = rig.claim(&front).unwrap();
+    let ctx = crate::services::turn_orchestrator::QueuePersistenceContext::new(
+        &ProviderKind::Claude,
+        "claim",
+        None,
+    );
+    let id = poise::serenity_prelude::MessageId::new(front.1.message_id);
+    let cancelled = rig.mailbox.cancel_queued_primary_message(id, ctx);
+    assert!(rig.runtime.block_on(cancelled).removed.is_some());
+    let result = rig.execute(
+        claim,
+        ProviderKind::Claude,
+        target::Phase::Busy,
+        &rig.transcript(),
+    );
+    assert_eq!(result, Err("NotSent(\"front_not_granted\")".into()));
+    rig
+}
+
+/// An idle front's handoff ends at its local settlement while its AI turn runs on: the next front
+/// is delivered busy before that turn ends, and the turn's end is observed once.
+#[test]
+fn an_idle_handoff_ends_at_settlement_while_its_ai_turn_runs() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig("oi-turn", 7_272_538, "normal", view("", false), BUSY);
+    let mut next = rig.original.clone();
+    next.message_id += 1;
+    next.source_message_ids = vec![next.message_id];
+    let admitted = rig
+        .runtime
+        .block_on(admit(&rig.mailbox, &next, AdmissionTicket::new()));
+    assert!(matches!(
+        admitted,
+        crate::services::discord::queue_io::input_owner::admission::Admission::Accepted(_)
+    ));
+    let done = Arc::new(Mutex::new(0));
+    let (settled, answer) = tokio::sync::oneshot::channel();
+    let claim = rig.claim(&rig.granted_front()).unwrap();
+    let transcript = rig.transcript();
+    std::thread::scope(|scope| {
+        // Inside the scope, so a failed assertion drops it and ends the held AI turn.
+        let (release, turn) = std::sync::mpsc::channel::<()>();
+        let observed = done.clone();
+        let until_done: Box<dyn FnOnce() + Send> = Box::new(move || {
+            let _ = turn.recv();
+            *observed.lock().unwrap() += 1;
+        });
+        let first = scope.spawn(|| {
+            let how = (
+                ProviderKind::Claude,
+                target::Phase::Idle,
+                transcript.as_path(),
+            );
+            rig.execute_until(claim, how, settled, Some(until_done))
+        });
+        let wait = async { tokio::time::timeout(Duration::from_secs(20), answer).await };
+        let answered = rig.runtime.block_on(wait);
+        let busy = rig.handoff(
+            rig.granted_front(),
+            ProviderKind::Claude,
+            target::Phase::Busy,
+            &transcript,
+        );
+        let before_end = rig.events();
+        release.send(()).unwrap();
+        assert_eq!(first.join().unwrap(), Ok(()));
+        assert_eq!(
+            answered.map(Result::ok),
+            Ok(Some(Ok(()))),
+            "settled before the AI turn ended"
+        );
+        assert_eq!(busy, Ok(()));
+        // The fake pane still draws A's text, so B may park it first; each input is pasted once.
+        let pastes = before_end.iter().filter(|event| *event == "paste").count();
+        assert_eq!(pastes, 2, "{before_end:?}");
+        assert_eq!(before_end[..2], ["paste", "Enter"], "{before_end:?}");
+        assert!(before_end.ends_with(&["paste".to_string(), "Enter".to_string()]));
+    });
+    assert_eq!(*done.lock().unwrap(), 1, "the turn's end is observed once");
+}
+
+/// An idle pane showing a modal sends no key and holds the front with its ticket, unretained; once
+/// the modal is gone the same front is delivered with no new input.
+#[test]
+fn owner_idle_claude_holds_a_modal_front_until_the_modal_is_gone() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let modal = "Do you want to proceed?\n❯ 1. Yes\n  2. No\nEnter to select · Esc to cancel\n";
+    let rig = rig("oi-modal", 7_272_547, "normal", modal.into(), IDLE);
+    let (idle, transcript) = (target::Phase::Idle, rig.transcript());
+    let held = rig.handoff(rig.granted_front(), ProviderKind::Claude, idle, &transcript);
+    assert_eq!(held, Err("NotSent(\"Modal\")".into()));
+    assert!(rig.events().is_empty(), "no key: {:?}", rig.events());
+    let snapshot = rig.snapshot();
+    assert!(snapshot["head_injection"].is_null(), "{snapshot}");
+    assert_eq!(
+        snapshot["retained_inputs"],
+        json!([]),
+        "held, not retained: {snapshot}"
+    );
+    let front = rig.granted_front();
+    assert_eq!(front.0.as_deref(), Some(rig.ticket.as_str()), "same ticket");
+    // C-u makes the fake pane draw its empty composer and the history goes: the modal is gone.
+    let pane = format!("={}:", rig.name);
+    rig.f.tmux(&["send-keys", "-t", &pane, "C-u"]);
+    wait("modal-closed", || rig.events() == ["clear"]);
+    rig.f.tmux(&["clear-history", "-t", &pane]);
+    let delivered = rig.handoff(front, ProviderKind::Claude, idle, &transcript);
+    assert_eq!(delivered, Ok(()));
+    assert_eq!(rig.events(), ["clear", "paste", "Enter"]);
     rig.delivered();
 }
 
@@ -616,6 +791,7 @@ fn prepared_before_launch(rig: &Rig) -> Registration {
         name: NAME.into(),
         clock: Arc::new(|| 10_000),
         timing: &OWNER_TIMING,
+        until_done: None,
     }
 }
 
@@ -634,7 +810,7 @@ fn created_first_prompt(rig: &Rig) -> Result<(), String> {
         prepared_before_launch(rig),
         PROMPT.into(),
         scope::Lineage::Created,
-        None,
+        (None, reply_once(None)),
     );
     let _entered = rig.runtime.enter();
     hook(scope::Lineage::Created, target, source, None, submit)
@@ -737,7 +913,7 @@ impl Rig {
             prepared_before_launch(self),
             PROMPT.into(),
             scope::Lineage::Created,
-            None,
+            (None, reply_once(None)),
         );
         let writer = writer.map(str::to_owned);
         let _hook = scope::install_launch(match writer {

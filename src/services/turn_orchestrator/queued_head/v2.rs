@@ -28,6 +28,8 @@ pub(crate) struct Owner {
     unacknowledged: Vec<(String, source_admission::Admitted)>,
     /// The front the drive handed to a turn by exact ticket and original; one owner claim spends it.
     front_grant: Option<Front>,
+    /// The front a turn claimed from its grant; one reserve takes it.
+    front_claim: Option<Front>,
 }
 
 /// The owner's unattempted front as the drive hands it on: its slot's ticket and the original.
@@ -66,6 +68,7 @@ impl Owner {
             fault: Fault::None,
             unacknowledged: Vec::new(),
             front_grant: None,
+            front_claim: None,
         };
         // A restored bootstrap is possibly sent; missing deadline never proves NotSent.
         let mut restored = owner.snapshot.clone();
@@ -146,6 +149,7 @@ impl Owner {
         }
         next.head_injection = Some(head);
         next.bind_reserved();
+        self.revoke_front();
         self.commit(next)?;
         Ok(key)
     }
@@ -257,10 +261,46 @@ impl Owner {
         }
     }
 
-    /// Spends the grant, in the caller's actor turn, only on the exact front it named.
-    pub(crate) fn claim_front(&mut self, front: &Front) -> bool {
-        let granted = self.front_grant.take().is_some_and(|g| is_front(&g, front));
-        granted && self.front().is_some_and(|now| is_front(&now, front))
+    /// The owner's turn claim spends the grant only when it and the current front are exactly
+    /// `front`; a refused claim leaves it for the front it was granted to.
+    pub(crate) fn claim_turn(&mut self, message: u64, front: &Front) -> Option<Front> {
+        let granted = front.1.message_id == message
+            && self
+                .front_grant
+                .as_ref()
+                .is_some_and(|g| is_front(g, front))
+            && self.front().is_some_and(|now| is_front(&now, front));
+        if !granted {
+            return None;
+        }
+        self.front_claim = self.front_grant.take();
+        self.front_claim.clone()
+    }
+
+    /// Reserves the front a turn claimed, once, without spending a grant again; a front the queue
+    /// moved since the claim reserves nothing.
+    pub(crate) fn reserve_claimed(
+        &mut self,
+        front: &Front,
+        attempt: AttemptIdentity,
+        payload: PreparedPayload,
+    ) -> Result<AttemptRef, String> {
+        let claimed = self.front_claim.take().is_some_and(|c| is_front(&c, front))
+            && self.front().is_some_and(|now| is_front(&now, front));
+        if !claimed {
+            return Err("NotSent(\"front_not_granted\")".into());
+        }
+        self.reserve(attempt, payload)
+    }
+
+    /// Whether the drive's right on the front is still neither spent by a reserve nor revoked.
+    pub(crate) fn front_outstanding(&self) -> bool {
+        self.front_grant.is_some() || self.front_claim.is_some()
+    }
+
+    /// Withdraws that right; only taking or replacing the queue front itself does.
+    fn revoke_front(&mut self) {
+        (self.front_grant, self.front_claim) = (None, None);
     }
 
     /// Whether any source the owner holds, queued, attempted, retained or settled, is `message`.
@@ -284,18 +324,14 @@ impl Owner {
         held.any(names) || settled
     }
 
-    /// Whether this owner refuses a turn claim for `message`: only an owner claim presenting its
-    /// granted front starts it, a source it holds never does, and another claim keeps V1's order.
+    /// Whether this owner refuses a legacy turn claim for `message`: a source it holds never
+    /// starts, and another claim keeps V1's order; its own front starts only through `claim_turn`.
     pub(crate) fn blocks_claim(
-        &mut self,
+        &self,
         message: u64,
-        owner: Option<&Front>,
         order: crate::services::turn_orchestrator::TurnAdmissionOrder,
     ) -> bool {
         use crate::services::turn_orchestrator::TurnAdmissionOrder;
-        if let Some(front) = owner {
-            return front.1.message_id != message || !self.claim_front(front);
-        }
         self.holds(message)
             || self.snapshot.head_injection.is_some()
             || (order != TurnAdmissionOrder::Immediate && !self.snapshot.items.is_empty())

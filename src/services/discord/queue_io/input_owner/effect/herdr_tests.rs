@@ -314,3 +314,95 @@ fn owner_herdr_modal_holds_the_front_without_a_key() {
     assert_eq!(snapshot["retained_inputs"], json!([]), "{snapshot}");
     assert_eq!(snapshot["items"][0]["text"], PROMPT, "{snapshot}");
 }
+
+/// One busy Claude screen per composer case, and whether the owner parks it with C-s.
+fn composer_cases() -> [(&'static str, String, usize); 5] {
+    let border = "─".repeat(60);
+    let thinking = "⏺ Working on it.\n\n✻ Thinking… (12s · esc to interrupt)\n";
+    let screen = |above: &str, composer: &str| {
+        format!(
+            "{thinking}{above}\n{border}\n❯\u{00a0}{composer}\n{border}\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+        )
+    };
+    [
+        ("person draft", screen("", "half typed"), 1),
+        (
+            "injected frame",
+            screen("", "[📱 tester] earlier question"),
+            0,
+        ),
+        ("existing stash", screen("› stashed", "half typed"), 0),
+        ("empty composer", screen("", ""), 0),
+        ("unreadable", thinking.into(), 0),
+    ]
+}
+
+/// Herdr and tmux owners read the same capture alike: only a person's draft is parked with C-s,
+/// never an injected frame, a draft beside a stash, an empty or an unread composer.
+#[test]
+fn the_tmux_owner_parks_only_what_the_herdr_owner_parks() {
+    for (at, (case, screen, parks)) in composer_cases().into_iter().enumerate() {
+        let (rig, completion, snapshot, _, _) =
+            attempt(7_272_548 + at as u64, true, None, read(&screen));
+        assert_eq!(
+            completion,
+            Completion::Submitted,
+            "herdr {case}: {snapshot}"
+        );
+        let sends = rig.sends();
+        let keyed = |key: &str| sends.iter().filter(|s| s["keys"] == json!([key])).count();
+        assert_eq!(keyed("ctrl+s"), parks, "herdr {case}: {sends:?}");
+        assert_eq!(
+            (sends.len(), keyed("enter")),
+            (parks + 2, 1),
+            "herdr {case}: {sends:?}"
+        );
+    }
+    use crate::services::claude_tui::input::submission::tests::ScriptedTmux;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let tmux = ScriptedTmux::new("");
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("busy.jsonl");
+    std::fs::write(&transcript, BUSY).unwrap();
+    for (at, (case, screen, parks)) in composer_cases().into_iter().enumerate() {
+        tmux.clear();
+        tmux.show(&screen);
+        let (session, nonce) = (format!("owner-park-{at}"), format!("0a1b2c3{at}"));
+        let pane = busy_inject::Pane::with_program(&session, "tmux".into());
+        let request = busy_inject::Request {
+            session: &session,
+            transcript: &transcript,
+            source: "discord",
+            author: "7",
+            name: "tester",
+            nonce: &nonce,
+            text: PROMPT,
+        };
+        let report = busy_inject::inject_owned(&pane, &request, &busy_inject::TIMING);
+        assert_eq!(
+            report.outcome,
+            busy_inject::Outcome::Injected,
+            "tmux {case}"
+        );
+        let sends = tmux.sends();
+        let keyed = |key: &str| sends.iter().filter(|s| *s == key).count();
+        assert_eq!(keyed("C-s"), parks, "tmux {case}: {sends:?}");
+        assert_eq!(
+            (keyed("paste"), keyed("Enter")),
+            (1, 1),
+            "tmux {case}: {sends:?}"
+        );
+        let calls = tmux.pane_calls(&session);
+        let first = calls
+            .iter()
+            .position(|c| c == "send-keys" || c == "paste-buffer");
+        let read = calls[..first.unwrap()]
+            .iter()
+            .filter(|c| *c == "capture-pane");
+        assert_eq!(
+            read.count(),
+            1,
+            "tmux {case}: one read before any key: {calls:?}"
+        );
+    }
+}

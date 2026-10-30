@@ -30,7 +30,10 @@ async fn claims(
                 owner.grant_front(grant)?;
             }
             Ok((claims.iter())
-                .map(|claim| owner.blocks_claim(id, claim.as_ref(), BehindQueue))
+                .map(|claim| match claim {
+                    Some(front) => owner.claim_turn(id, front).is_none(),
+                    None => owner.blocks_claim(id, BehindQueue),
+                })
                 .collect())
         })
         .await
@@ -106,7 +109,7 @@ async fn the_owner_front_names_the_ticket_bound_to_its_own_slot() {
 }
 
 /// Only an owner claim presenting the exact granted front spends the grant, once: a bare message ID,
-/// another ticket or another body never does, and a cancel or clear revokes it.
+/// another ticket or another body never does nor clears it, and a cancel or clear revokes it.
 #[tokio::test]
 async fn an_owner_grant_is_spent_once_and_only_by_its_exact_front() {
     let _root = TestRuntimeRootGuard::new();
@@ -125,16 +128,24 @@ async fn an_owner_grant_is_spent_once_and_only_by_its_exact_front() {
         &handle,
         id,
         Some(a.clone()),
-        vec![Some(other_ticket), Some(a.clone())],
+        vec![Some(other_ticket), Some(a.clone()), Some(a.clone())],
     );
-    assert_eq!(spent.await, [true, true], "another ticket spends nothing");
+    assert_eq!(
+        spent.await,
+        [true, false, true],
+        "another ticket spends nothing; the exact front once"
+    );
     let spent = claims(
         &handle,
         id,
         Some(a.clone()),
-        vec![Some(other_body), Some(a.clone())],
+        vec![Some(other_body), Some(a.clone()), Some(a.clone())],
     );
-    assert_eq!(spent.await, [true, true], "another body spends nothing");
+    assert_eq!(
+        spent.await,
+        [true, false, true],
+        "another body spends nothing; the exact front once"
+    );
     let spent = claims(
         &handle,
         id,

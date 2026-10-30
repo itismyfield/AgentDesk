@@ -23,8 +23,9 @@ async fn admit(handle: &ChannelMailboxHandle, original: PendingQueueItem, ticket
         .unwrap();
 }
 
-/// Reserves the queue front under `nonce`, arms it, and either submits it or lets its deadline lapse.
-async fn attempt(handle: &ChannelMailboxHandle, nonce: &str, submitted: bool) {
+/// Reserves the queue front under `nonce` and arms it; `Some(true)` submits it, `Some(false)` lets
+/// its deadline lapse, `None` leaves it armed and unsettled.
+async fn attempt(handle: &ChannelMailboxHandle, nonce: &str, submitted: Option<bool>) {
     let attempt = json!({"nonce":nonce,"provider":"claude",
         "target":{"host":"tmux","owner":format!("notice-{nonce}"),"root":"/test","execution_nonce":"e"},
         "source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}});
@@ -36,8 +37,9 @@ async fn attempt(handle: &ChannelMailboxHandle, nonce: &str, submitted: bool) {
                 owner.reserve_unit(attempt, |item| Some((String::new(), item.text.clone())))?;
             drop(owner.arm(&key, 1)?);
             match submitted {
-                true => owner.settle(&key, true, 2),
-                false => owner.tick(40_000),
+                Some(true) => owner.settle(&key, true, 2),
+                Some(false) => owner.tick(40_000),
+                None => Ok(()),
             }
         })
         .await
@@ -70,10 +72,10 @@ async fn owed_notices_post_once_by_kind_and_a_local_submit_owes_none_pg() {
         .await
         .unwrap();
     admit(&handle, item(1, &[1], None), "notice-1").await;
-    attempt(&handle, "unconfirmed", false).await;
+    attempt(&handle, "unconfirmed", Some(false)).await;
     admit(&handle, item(2, &[1, 2], Some("quoted")), "notice-2").await;
     admit(&handle, item(3, &[3], None), "notice-3").await;
-    attempt(&handle, "submitted", true).await;
+    attempt(&handle, "submitted", Some(true)).await;
 
     assert_eq!(drain(&pool, &handle, "claude", CHANNEL).await.unwrap(), 2);
     let posted = posts(&pool).await;
@@ -114,4 +116,56 @@ async fn owed_notices_post_once_by_kind_and_a_local_submit_owes_none_pg() {
         "a failed projection holds no notice"
     );
     assert_eq!(posts(&pool).await, posted, "a restart posts nothing twice");
+}
+
+/// A restart settles an armed head whose window passed while nothing ticked: the original is
+/// retained and its unconfirmed notice posts once, from `recover` alone.
+#[tokio::test(flavor = "current_thread")]
+async fn a_restart_retains_an_expired_unsettled_head_and_posts_its_notice_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap();
+    let file = root
+        .join("claude")
+        .join("expired")
+        .join(format!("{CHANNEL}.json"));
+    let before = ChannelMailboxRegistry::default();
+    let handle = before.handle(ChannelId::new(CHANNEL));
+    handle
+        .v2_adopt(file.clone(), "expired".into())
+        .await
+        .unwrap();
+    admit(&handle, item(1, &[1], None), "expired-1").await;
+    attempt(&handle, "expired", None).await;
+    drop((handle, before));
+
+    let restarted = ChannelMailboxRegistry::default();
+    let handle = restarted.handle(ChannelId::new(CHANNEL));
+    let history = Registry::at(dir.path().join("history.json"));
+    let recovered = super::super::recovery::recover(
+        &handle,
+        (file, "expired".into()),
+        history,
+        Some(&pool),
+        ("claude", CHANNEL, 40_000),
+    );
+    assert_eq!(recovered.await, Ok(1));
+    let snapshot = handle.v2_request(|slot| slot.as_ref().ok_or("no owner")?.json());
+    let snapshot = snapshot.await.unwrap();
+    assert!(snapshot["head_injection"].is_null(), "{snapshot}");
+    assert_eq!(
+        snapshot["retained_inputs"].as_array().map(Vec::len),
+        Some(1),
+        "{snapshot}"
+    );
+    let posted = posts(&pool).await;
+    assert_eq!(posted.len(), 1, "{posted:?}");
+    assert!(
+        posted[0].0.contains("전달 여부를 확인하지 못해"),
+        "{posted:?}"
+    );
+    pool.close().await;
+    db.drop().await;
 }

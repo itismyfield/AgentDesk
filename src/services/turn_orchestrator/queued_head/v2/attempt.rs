@@ -120,6 +120,15 @@ impl Owner {
 }
 
 impl Owner {
+    /// Whether the head attempt `nonce` is still in its bootstrap window, which a modal may yet
+    /// end unsent; no observer binds such an attempt.
+    pub(crate) fn bootstrapping(&self, nonce: &str) -> bool {
+        self.snapshot.head_injection.as_ref().is_some_and(|head| {
+            head.attempt.as_ref().is_some_and(|a| a.nonce == nonce)
+                && matches!(head.payload_window, Some(PayloadWindow::Bootstrap))
+        })
+    }
+
     pub(crate) fn payload_started(&mut self, key: &AttemptRef, now: u64) -> Result<(), String> {
         let head = self
             .snapshot

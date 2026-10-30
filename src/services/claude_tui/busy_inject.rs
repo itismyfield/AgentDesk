@@ -365,6 +365,19 @@ pub(in crate::services::claude_tui) fn before_paste(
     pane: &Pane,
     stash_allowed: bool,
 ) -> Result<bool, Veto> {
+    before_paste_by(pane, listed(stash_allowed))
+}
+
+/// Which draft one capture lets C-s park; `None` parks nothing.
+type Park = Option<fn(&str) -> bool>;
+
+/// The one rule for a visible draft: a listed channel parks it with C-s, any other channel
+/// pastes behind it.
+fn listed(stash_allowed: bool) -> Park {
+    stash_allowed.then_some(screen::parkable)
+}
+
+fn before_paste_by(pane: &Pane, park: Park) -> Result<bool, Veto> {
     #[cfg(unix)]
     if epoch::observe(pane.target().trim_start_matches('=').trim_end_matches(':')).is_err() {
         return Err(Veto::PaneUnavailable);
@@ -381,13 +394,7 @@ pub(in crate::services::claude_tui) fn before_paste(
     if modal(&capture) {
         return Err(Veto::Modal);
     }
-    Ok(park_draft(stash_allowed, screen::parkable(&capture)))
-}
-
-/// The one rule for a visible draft: a listed channel parks it with C-s, any other channel
-/// pastes behind it.
-fn park_draft(stash_allowed: bool, parkable: bool) -> bool {
-    stash_allowed && parkable
+    Ok(park.is_some_and(|park| park(&capture)))
 }
 
 /// Channel ids whose panes may take the stash path, comma-separated and read once; unset is none.
@@ -439,10 +446,10 @@ fn inject_locked(
     request: &Request<'_>,
     text: &str,
     timing: &Timing,
-    stash: bool,
+    park: Park,
     turn_gate: TurnGate,
 ) -> Report {
-    let park = match before_paste(pane, stash) {
+    let park = match before_paste_by(pane, park) {
         Ok(park) => park,
         Err(veto) => return Report::not_sent(veto),
     };
