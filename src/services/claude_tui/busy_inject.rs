@@ -358,11 +358,6 @@ pub(crate) fn modal(capture: &str) -> bool {
     screen::modal(capture)
 }
 
-#[cfg(all(test, unix))]
-pub(crate) fn parkable(capture: &str) -> bool {
-    screen::parkable(capture)
-}
-
 /// Read once before any key: whether a visible draft is parked with C-s. An unread composer
 /// deliberately proceeds without C-s.
 pub(in crate::services::claude_tui) fn before_paste(

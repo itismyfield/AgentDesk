@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use super::{Completion, Leaf, MODAL};
+use crate::services::claude_tui::composer_lock::DraftSighting;
 use crate::services::claude_tui::host_input::{InputRun, run_herdr};
 use crate::services::claude_tui::input::TuiInputAction;
 use crate::services::claude_tui::{busy_inject, owner_input};
@@ -72,8 +73,9 @@ impl BusyClaudeHerdr {
         if owner_input::ready_payload().is_err() {
             return withdrawn("owner_refused");
         }
-        // A visible draft is parked whichever channel the input names; an unread one is not.
-        let park = busy_inject::parkable(&capture);
+        // A person's visible draft is parked whichever channel the input names; an unread one,
+        // or one beside an existing stash, is not.
+        let park = busy_inject::draft_sighting(&capture) == DraftSighting::PersonDraft;
         if park {
             owner_input::keyed();
             let parked = (self.target.pin(HerdrMutation::Input).ok())
