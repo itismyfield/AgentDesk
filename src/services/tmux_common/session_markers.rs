@@ -48,7 +48,6 @@ pub(crate) fn write_claude_session_auth(
 
 /// Whether `session_id` ran under `profile_id`: by its own record, or by the profile marker while
 /// no launch recorded one. A record of another session vouches for nothing.
-#[cfg(unix)]
 pub(crate) fn claude_session_auth_matches(
     session_name: &str,
     session_id: &str,
