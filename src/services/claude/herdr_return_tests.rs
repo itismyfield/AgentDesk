@@ -27,8 +27,10 @@ pub(crate) struct Side {
 
 struct View(Arc<Mutex<Side>>);
 
-/// The Herdr and tmux Claude of each logical key a production return reads instead of its hosts.
-static STAND_INS: Mutex<Vec<(String, Arc<Mutex<Side>>, Arc<Mutex<Side>>)>> = Mutex::new(Vec::new());
+/// A logical key with the Herdr and tmux Claude a production return reads instead of its hosts.
+type StandIns = Vec<(String, Arc<Mutex<Side>>, Arc<Mutex<Side>>)>;
+
+static STAND_INS: Mutex<StandIns> = Mutex::new(Vec::new());
 
 /// `logical`'s Herdr and tmux Claude as every production return reads them while this lives.
 pub(crate) struct StandIn {
