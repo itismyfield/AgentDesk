@@ -13,6 +13,32 @@ use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem}
 
 /// The owner's granted front: its slot's ticket and the original.
 pub(crate) type Front = (Option<String>, PendingQueueItem);
+/// The right to reserve one front, spent from its grant by the owner's turn claim; it moves, never
+/// copies, from that claim to the reserve.
+pub(crate) struct FrontClaim(Front);
+
+impl FrontClaim {
+    pub(super) fn front(&self) -> &Front {
+        &self.0
+    }
+}
+
+/// The owner's turn claim on a front the drive granted; `None` when the owner refuses it.
+pub(crate) async fn claim_turn(
+    mailbox: &ChannelMailboxHandle,
+    message: u64,
+    front: &Front,
+) -> Result<Option<FrontClaim>, String> {
+    let front = front.clone();
+    let claimed = mailbox.v2_request(move |slot| {
+        Ok(slot
+            .as_mut()
+            .ok_or("V2 not adopted")?
+            .claim_turn(message, &front))
+    });
+    Ok(claimed.await?.map(FrontClaim))
+}
+
 /// Runs one granted front to its local settlement; the AI's completion is not awaited.
 pub(crate) type Handoff =
     Arc<dyn Fn(Front) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>;

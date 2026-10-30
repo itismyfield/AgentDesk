@@ -368,7 +368,7 @@ fn a_v2_owner_starts_only_its_granted_front_and_never_a_held_source() {
                         let owner = slot.as_mut().ok_or("no owner")?;
                         Ok(claims
                             .into_iter()
-                            .map(|(id, order)| owner.blocks_claim(id, None, order))
+                            .map(|(id, order)| owner.blocks_claim(id, order))
                             .collect::<Vec<_>>())
                     })
                     .await
@@ -406,10 +406,10 @@ fn a_v2_owner_starts_only_its_granted_front_and_never_a_held_source() {
                 assert!(owner.grant_front(&other).is_err());
                 owner.grant_front(&front)?;
                 Ok([
-                    owner.blocks_claim(101, None, behind),
-                    owner.blocks_claim(100, None, behind),
-                    owner.blocks_claim(100, Some(&front), behind),
-                    owner.blocks_claim(100, Some(&front), behind),
+                    owner.blocks_claim(101, behind),
+                    owner.blocks_claim(100, behind),
+                    owner.claim_turn(100, &front).is_none(),
+                    owner.claim_turn(100, &front).is_none(),
                 ])
             })
             .await
@@ -820,7 +820,7 @@ fn ensure_adopts_once_and_refuses_another_identity() {
         let claimed = handle.v2_request(|slot| {
             let owner = slot.as_mut().ok_or("no owner")?;
             let front = owner.front().ok_or("no front")?;
-            Ok(owner.claim_front(&front))
+            Ok(owner.claim_turn(front.1.message_id, &front).is_some())
         });
         assert!(claimed.await.unwrap(), "the same owner, its grant kept");
         let elsewhere = file.with_file_name("7272646-other.json");

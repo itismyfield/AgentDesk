@@ -26,6 +26,7 @@ impl Owner {
                 .is_some_and(|(a, b)| !same(a, b))
         {
             self.front_grant = None;
+            self.front_claim = None;
         }
         let candidate = serde_json::to_string_pretty(&next).map_err(|e| e.to_string())?;
         let actual = read(&self.path)?;

@@ -30,7 +30,10 @@ async fn claims(
                 owner.grant_front(grant)?;
             }
             Ok((claims.iter())
-                .map(|claim| owner.blocks_claim(id, claim.as_ref(), BehindQueue))
+                .map(|claim| match claim {
+                    Some(front) => owner.claim_turn(id, front).is_none(),
+                    None => owner.blocks_claim(id, BehindQueue),
+                })
                 .collect())
         })
         .await

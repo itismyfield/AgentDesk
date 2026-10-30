@@ -5,6 +5,7 @@ use std::sync::Mutex;
 
 use super::StreamingTurn;
 use crate::services::claude_tui::{busy_inject, owner_input as scope};
+use crate::services::discord::queue_io::input_owner::drive::FrontClaim;
 use crate::services::discord::queue_io::input_owner::effect::{
     self, BusyClaude, BusyClaudeHerdr, BusyCodex, BusyCodexHerdr, Clock, CodexInput, Completion,
     PreparedPayload,
@@ -13,10 +14,7 @@ use crate::services::discord::queue_io::input_owner::origin::{Execution, InputOr
 use crate::services::discord::queue_io::input_owner::{pump, target};
 use crate::services::session_host::HerdrTarget;
 use crate::services::turn_host::TurnHost;
-use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};
-
-/// The owner's granted front: its slot's ticket and the original.
-type Front = (Option<String>, PendingQueueItem);
+use crate::services::turn_orchestrator::ChannelMailboxHandle;
 
 /// What the owner verified about a channel's target before its turn reached dispatch.
 pub(super) struct Registration {
@@ -68,15 +66,15 @@ pub(super) fn take(turn: &StreamingTurn<'_>) -> Option<Taken> {
     take_owned(turn, None, registration)
 }
 
-/// The owner's front handoff: the ticket and original the drive granted, the owner's mailbox and
-/// the verified execution arrive as arguments, never through a static or task-local.
+/// The owner's front handoff: the turn's claim on the drive's granted front, the owner's mailbox
+/// and the verified execution arrive as arguments, never through a static or task-local.
 pub(super) fn execute_front(
     turn: StreamingTurn<'_>,
     sender: std::sync::mpsc::Sender<crate::services::agent_protocol::StreamMessage>,
-    front: Front,
+    claim: FrontClaim,
     owner: Registration,
 ) -> Result<(), String> {
-    match take_owned(&turn, Some(front), owner) {
+    match take_owned(&turn, Some(claim), owner) {
         Some(Taken::Done(result)) => result,
         Some(Taken::Launch(guard)) => guard.finish(super::drive(turn, sender)),
         None => Err("NotSent(\"not_owned\")".into()),
@@ -85,7 +83,7 @@ pub(super) fn execute_front(
 
 fn take_owned(
     turn: &StreamingTurn<'_>,
-    front: Option<Front>,
+    front: Option<FrontClaim>,
     registration: Registration,
 ) -> Option<Taken> {
     let host = match turn.host {
@@ -134,7 +132,7 @@ fn take_owned(
 /// Submits on the owner's pump from the driver's blocking thread, for the granted front if any.
 fn submit(
     (mailbox, clock): (&ChannelMailboxHandle, Clock),
-    front: Option<Front>,
+    front: Option<FrontClaim>,
     prepared: PreparedPayload,
     leaf: effect::Leaf,
 ) -> Result<(), String> {
@@ -151,7 +149,7 @@ fn created(
     r: Registration,
     frame: String,
     wanted: scope::Lineage,
-    front: Option<Front>,
+    front: Option<FrontClaim>,
 ) -> scope::LaunchHook {
     Box::new(move |lineage, target, source, writer, submit_created| {
         if lineage != wanted {
@@ -191,7 +189,7 @@ fn run(
     turn: &StreamingTurn<'_>,
     route: target::Route,
     r: Registration,
-    front: Option<Front>,
+    front: Option<FrontClaim>,
 ) -> Result<(), String> {
     let nonce = r.attempt["nonce"].as_str().unwrap_or_default().to_string();
     let session = || turn.tmux_session_name.ok_or("owner input without a pane");

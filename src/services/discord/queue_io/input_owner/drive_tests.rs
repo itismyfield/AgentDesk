@@ -75,7 +75,9 @@ fn handoff(
             });
             let clock = Arc::new(|| 10_000);
             let prepared = prepared(channel, &text);
-            match pump::submit_front(&mailbox, Some(front), prepared, clock, leaf).await? {
+            let claim = claim_turn(&mailbox, front.1.message_id, &front).await?;
+            let claim = claim.ok_or("NotSent(\"front_not_granted\")")?;
+            match pump::submit_front(&mailbox, Some(claim), prepared, clock, leaf).await? {
                 Completion::Submitted => Ok(()),
                 other => Err(format!("{other:?}")),
             }
@@ -230,4 +232,72 @@ async fn a_modal_front_is_held_and_delivered_after_release_without_new_input() {
         "held, not retained: {between}"
     );
     assert_eq!(between["items"][0]["text"], "input 0", "{between}");
+}
+
+/// A turn's claim gives one reserve: a spent grant gives no second claim, and a claimed front a
+/// cancel, clear or purge took before the reserve sends nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_claimed_front_the_queue_took_reserves_nothing() {
+    use crate::services::turn_orchestrator::checked_purge::ExpectedQueue;
+    let _root = TestRuntimeRootGuard::new();
+    let registry = ChannelMailboxRegistry::default();
+    for (channel, how) in [
+        (7_272_705, "cancel"),
+        (7_272_706, "clear"),
+        (7_272_707, "purge"),
+    ] {
+        let mailbox = owner(&registry, channel, 1).await;
+        let front = (mailbox.v2_request(|slot| {
+            let owner = slot.as_mut().ok_or("no owner")?;
+            let front = owner.front().ok_or("no front")?;
+            owner.grant_front(&front).map(|()| front)
+        }))
+        .await
+        .unwrap();
+        let claim = claim_turn(&mailbox, front.1.message_id, &front).await;
+        let claim = claim.unwrap().expect("the granted front's claim");
+        let again = claim_turn(&mailbox, front.1.message_id, &front).await;
+        assert!(again.unwrap().is_none(), "one claim per grant");
+        let ctx = crate::services::turn_orchestrator::QueuePersistenceContext::new(
+            &crate::services::provider::ProviderKind::Claude,
+            "drive",
+            None,
+        );
+        let id = poise::serenity_prelude::MessageId::new(front.1.message_id);
+        match how {
+            "cancel" => assert!(
+                mailbox
+                    .cancel_queued_primary_message(id, ctx)
+                    .await
+                    .removed
+                    .is_some()
+            ),
+            "clear" => assert!(mailbox.clear(ctx).await.persistence.failed.is_empty()),
+            _ => {
+                let fingerprint =
+                    mailbox.v2_request(|slot| slot.as_ref().ok_or("no owner")?.fingerprint());
+                let expected = ExpectedQueue::of(&mailbox.snapshot().await)
+                    .with_v2(fingerprint.await.unwrap());
+                let purged = mailbox
+                    .try_purge_queue_if_unchanged(ctx, expected)
+                    .await
+                    .unwrap();
+                assert!(purged.failed.is_none(), "{:?}", purged.failed);
+            }
+        }
+        let sent = Arc::new(AtomicUsize::new(0));
+        let counted = sent.clone();
+        let leaf: Leaf = Box::new(move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(Completion::Submitted)
+        });
+        let clock = Arc::new(|| 10_000);
+        let result = pump::submit_front(&mailbox, Some(claim), prepared(channel, "x"), clock, leaf);
+        assert_eq!(
+            result.await,
+            Err("NotSent(\"front_not_granted\")".into()),
+            "{how}"
+        );
+        assert_eq!(sent.load(Ordering::SeqCst), 0, "{how}");
+    }
 }

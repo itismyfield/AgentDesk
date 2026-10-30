@@ -4,10 +4,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
+use super::drive::FrontClaim;
 use super::effect::{self, Clock, Completion, Leaf, PreparedPayload, parse};
 use super::target::TargetKey;
 use crate::services::turn_orchestrator::ChannelMailboxHandle;
-use crate::services::turn_orchestrator::PendingQueueItem;
 
 type Lane = tokio::sync::Mutex<()>;
 
@@ -37,11 +37,11 @@ pub(crate) async fn submit(
     submit_front(mailbox, None, prepared, clock, leaf).await
 }
 
-/// As `submit`; given the drive's granted front, the grant is spent and the head reserved in one
-/// actor turn, so a front that changed since its grant is never reserved.
+/// As `submit`; given a turn's claim on the owner's front, that front is reserved once, never one
+/// the queue moved since the claim.
 pub(crate) async fn submit_front(
     mailbox: &ChannelMailboxHandle,
-    front: Option<(Option<String>, PendingQueueItem)>,
+    claim: Option<FrontClaim>,
     prepared: PreparedPayload,
     clock: Clock,
     leaf: Leaf,
@@ -61,10 +61,12 @@ pub(crate) async fn submit_front(
     mailbox
         .v2_request(move |slot| {
             let owner = slot.as_mut().ok_or("V2 not adopted")?;
-            if front.is_some_and(|front| !owner.claim_front(&front)) {
-                return Err("NotSent(\"front_not_granted\")".into());
+            let (attempt, payload) = (parse(attempt)?, parse(payload)?);
+            match claim {
+                Some(claim) => owner.reserve_claimed(claim.front(), attempt, payload),
+                None => owner.reserve(attempt, payload),
             }
-            owner.reserve(parse(attempt)?, parse(payload)?).map(drop)
+            .map(drop)
         })
         .await?;
     effect::run(mailbox, clock, leaf).await

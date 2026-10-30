@@ -7,6 +7,7 @@ use crate::services::claude_tui::input::submission::tests::{events, renderer_wit
 use crate::services::discord::queue_io::input_owner::admission::{
     AdmissionTicket, TurnBind, admit, exact_turn,
 };
+use crate::services::discord::queue_io::input_owner::drive::{Front, claim_turn};
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture;
 use crate::services::turn_orchestrator::{ChannelMailboxRegistry, PendingQueueItem};
@@ -190,7 +191,13 @@ impl Rig {
         })
     }
 
-    /// The owner's front through the drive's handoff entry, the owner passed as its argument.
+    /// The owner's turn claim on `front`, as the turn that starts it makes it.
+    pub(super) fn claim(&self, front: &Front) -> Option<FrontClaim> {
+        let claimed = claim_turn(&self.mailbox, front.1.message_id, front);
+        self.runtime.block_on(claimed).unwrap()
+    }
+
+    /// The turn's claim on `front`, then the drive's handoff entry with the owner as its argument.
     pub(super) fn handoff(
         &self,
         front: Front,
@@ -198,9 +205,20 @@ impl Rig {
         phase: target::Phase,
         transcript: &Path,
     ) -> Result<(), String> {
+        let claim = self.claim(&front).ok_or("NotSent(\"front_not_granted\")")?;
+        self.execute(claim, provider, phase, transcript)
+    }
+
+    pub(super) fn execute(
+        &self,
+        claim: FrontClaim,
+        provider: ProviderKind,
+        phase: target::Phase,
+        transcript: &Path,
+    ) -> Result<(), String> {
         let owner = self.registration(&provider, phase, transcript, Execution::LocalTui);
         self.with_turn(&provider, Some(&self.name), |turn, sender| {
-            execute_front(turn, sender, front, owner)
+            execute_front(turn, sender, claim, owner)
         })
     }
 
@@ -450,6 +468,58 @@ fn the_front_handoff_runs_from_its_arguments_and_never_an_ungranted_front() {
     assert_eq!(again, Err("NotSent(\"front_not_granted\")".into()));
     assert_eq!(rig.events(), ["paste", "Enter"]);
     rig.delivered();
+}
+
+/// The turn's claim carries the granted front to one reserve with no second grant; a claim the queue
+/// cancelled before its reserve sends nothing.
+#[test]
+fn a_turn_claim_carries_its_front_to_one_reserve() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig("oc-claim", 7_272_536, "normal", view("", false), BUSY);
+    let front = rig.granted_front();
+    let claim = rig.claim(&front).expect("the granted front's claim");
+    assert!(rig.claim(&front).is_none(), "one claim per grant");
+    let delivered = rig.execute(
+        claim,
+        ProviderKind::Claude,
+        target::Phase::Busy,
+        &rig.transcript(),
+    );
+    assert_eq!(delivered, Ok(()));
+    assert_eq!(rig.events(), ["paste", "Enter"]);
+    rig.delivered();
+
+    let rig = rig_cancelled_after_claim();
+    assert!(rig.events().is_empty(), "{:?}", rig.events());
+    assert!(rig.snapshot()["head_injection"].is_null());
+}
+
+fn rig_cancelled_after_claim() -> Rig {
+    let rig = rig(
+        "oc-claim-cancel",
+        7_272_537,
+        "normal",
+        view("", false),
+        BUSY,
+    );
+    let front = rig.granted_front();
+    let claim = rig.claim(&front).unwrap();
+    let ctx = crate::services::turn_orchestrator::QueuePersistenceContext::new(
+        &ProviderKind::Claude,
+        "claim",
+        None,
+    );
+    let id = poise::serenity_prelude::MessageId::new(front.1.message_id);
+    let cancelled = rig.mailbox.cancel_queued_primary_message(id, ctx);
+    assert!(rig.runtime.block_on(cancelled).removed.is_some());
+    let result = rig.execute(
+        claim,
+        ProviderKind::Claude,
+        target::Phase::Busy,
+        &rig.transcript(),
+    );
+    assert_eq!(result, Err("NotSent(\"front_not_granted\")".into()));
+    rig
 }
 
 /// A legacy draft guard does not stop the owner's transaction: the guard is legacy state.
