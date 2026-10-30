@@ -268,30 +268,32 @@ function AccountRow({
         <div className="min-w-0 text-sm font-medium [overflow-wrap:anywhere]" style={{ color: "var(--th-text)" }}>
           {isDefault ? tr("시스템 기본", "System default") : account.id}
         </div>
-        {isDefault ? null : (
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          {isDefault ? null : (
+            <button
+              type="button"
+              onClick={onRemove}
+              disabled={removing}
+              className="flex h-11 w-11 items-center justify-center rounded-md disabled:opacity-50"
+              style={{ color: "var(--th-text-muted)" }}
+              title={tr("연결 해제 (자격 증명은 유지)", "Unlink (keep credentials)")}
+              aria-label={tr("계정 연결 해제", "Unlink account")}
+            >
+              <X size={14} />
+            </button>
+          )}
           <button
             type="button"
-            onClick={onRemove}
-            disabled={removing}
-            className="flex h-11 w-11 items-center justify-center rounded-md disabled:opacity-50"
-            style={{ color: "var(--th-text-muted)" }}
-            title={tr("연결 해제 (자격 증명은 유지)", "Unlink (keep credentials)")}
-            aria-label={tr("계정 연결 해제", "Unlink account")}
+            onClick={onSetPrimary}
+            disabled={isPrimary}
+            className="inline-flex min-h-11 min-w-11 items-center justify-center gap-1 rounded-md border px-2 py-1 text-xs disabled:opacity-70"
+            style={{ borderColor: "var(--th-border)", color: "var(--th-text-muted)" }}
+            title={tr("이 provider의 기본 계정으로 사용", "Use as this provider's primary account")}
           >
-            <X size={14} />
+            {isPrimary ? <Check size={12} /> : null}
+            {isPrimary ? tr("기본", "Primary") : tr("기본으로", "Make primary")}
           </button>
-        )}
-        <button
-          type="button"
-          onClick={onSetPrimary}
-          disabled={isPrimary}
-          className="inline-flex min-h-11 min-w-11 items-center justify-center gap-1 rounded-md border px-2 py-1 text-xs disabled:opacity-70"
-          style={{ borderColor: "var(--th-border)", color: "var(--th-text-muted)" }}
-          title={tr("이 provider의 기본 계정으로 사용", "Use as this provider's primary account")}
-        >
-          {isPrimary ? <Check size={12} /> : null}
-          {isPrimary ? tr("기본", "Primary") : tr("기본으로", "Make primary")}
-        </button>
+        </div>
         {account.usage?.unsupported ? (
           <span className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
             {account.usage.reason ?? tr("사용량 미지원", "Usage unsupported")}

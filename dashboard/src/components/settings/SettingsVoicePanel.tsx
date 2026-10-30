@@ -356,11 +356,11 @@ export function SettingsVoicePanel({
         >
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
-              <div className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
+              <div className="text-sm font-semibold [overflow-wrap:anywhere]" style={{ color: "var(--th-text)" }}>
                 {displayName}
               </div>
               {secondaryName ? (
-                <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                <div className="mt-1 text-[11px] [overflow-wrap:anywhere]" style={{ color: "var(--th-text-muted)" }}>
                   {secondaryName}
                 </div>
               ) : null}
@@ -526,7 +526,7 @@ export function SettingsVoicePanel({
             selectedAgentCard
           ) : (
             <SettingsEmptyState className="text-sm">
-              {tr("검색 결과가 없습니다.", "No matching agents.")}
+              {voiceDraft.agents.length ? tr("검색 결과가 없습니다.", "No matching agents.") : tr("등록된 에이전트가 없습니다. 에이전트를 추가하면 음성 설정을 조정할 수 있습니다.", "No agents yet. Add an agent to configure voice settings.")}
             </SettingsEmptyState>
           )}
         </div>
