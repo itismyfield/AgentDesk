@@ -153,7 +153,11 @@ struct Stamp {
     revision: u64,
     source: Option<String>,
     notice: NoticeObservation,
+    closed: Option<ClosedBoundary>,
 }
+
+mod closed_boundary;
+pub(in crate::services::discord) use closed_boundary::ClosedBoundary;
 
 /// One fresh judgment and the watch state it read.
 pub(in crate::services::discord) struct Reading {
@@ -196,6 +200,12 @@ impl Reading {
 
     pub(in crate::services::discord) fn session(&self) -> Option<&str> {
         self.stamp.as_ref().map(|stamp| stamp.key.session.as_str())
+    }
+
+    /// The native end a `closed` judgment read, only when the reader read that turn from its
+    /// opener and no queued input's receipt has arrived since without a turn opening for it.
+    pub(in crate::services::discord) fn closed_boundary(&self) -> Option<&ClosedBoundary> {
+        self.stamp.as_ref()?.closed.as_ref()
     }
 
     pub(in crate::services::discord) fn source(&self) -> Option<&str> {
@@ -252,6 +262,7 @@ impl Reading {
             revision: 0,
             source: source.map(str::to_string),
             notice: NoticeObservation::legacy(observed.reason, session),
+            closed: None,
         });
         let mut reading = Self::bound(observed, stamp, None, session);
         reading.notice = NoticeObservation::legacy(observed.reason, session.unwrap_or_default());
@@ -278,6 +289,7 @@ impl Reading {
             revision: 0,
             source: None,
             notice: NoticeObservation::legacy(observed.reason, "overtaken"),
+            closed: None,
         };
         Self::bound(
             observed,
@@ -303,6 +315,7 @@ fn at(guard: &Watch, answer: Observed) -> Answer {
         revision: guard.revision,
         source,
         notice: guard.notice.clone().observed(answer),
+        closed: closed_boundary::closed_boundary(guard, answer),
     });
     let answer = (answer, stamp);
     if matches!(guard.outcome, Outcome::Rebuilding) {
