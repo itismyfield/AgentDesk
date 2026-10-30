@@ -15,6 +15,16 @@ pub(super) fn materialized_notice(
     native_key: &str,
     prompt: &str,
 ) -> (BindingRoot, PieceWork) {
+    materialized_notice_in(harness, native_key, prompt, true)
+}
+
+/// Without `freeze`, no migration is recorded, as before the released build froze its cohort.
+pub(super) fn materialized_notice_in(
+    harness: &Harness,
+    native_key: &str,
+    prompt: &str,
+    freeze: bool,
+) -> (BindingRoot, PieceWork) {
     let raw = serde_json::to_vec(&serde_json::json!({
         "type":"user", "uuid":native_key,
         "message":{"role":"user", "content":prompt},
@@ -58,14 +68,15 @@ pub(super) fn materialized_notice(
         notice_origin: Some(origin.clone()),
     };
     let mut store = harness.channel();
-    if store.ledger().input_notices().migration.is_none() {
+    if freeze && store.ledger().input_notices().migration.is_none() {
         let anchor = store.init().initial_anchor;
         store
             .append_ledger(LedgerEntry::InputNotice {
                 entry: Box::new(NoticeEntry::MigrationStarted {
+                    // Frozen before this binding, so the notice is new.
                     snapshot: MigrationSnapshot {
                         sources: Vec::new(),
-                        binding_checkpoint: events.last().unwrap().seq,
+                        binding_checkpoint: events.last().unwrap().seq - 1,
                         history: MigrationHistory::Fixed {
                             lower: anchor,
                             upper: anchor,

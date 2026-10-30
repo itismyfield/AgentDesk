@@ -57,6 +57,12 @@ fn handed_over(channel: u64) -> bool {
     found
 }
 
+/// Discord input by its frame, the pre-v1 `[📱 …]` inject frame included; nothing announces it.
+pub(crate) fn discord_input(prompt: &str) -> bool {
+    tui_prompt_dedupe::is_discord_relayed_user_prompt(prompt)
+        || crate::services::tui_input::human_frame::opens_legacy_inject(prompt)
+}
+
 /// A native user row always carries the JSON string `"user"`, so other rows skip the parse.
 fn may_be_user(line: &[u8]) -> bool {
     line.windows(6).any(|window| window == b"\"user\"")
@@ -71,8 +77,7 @@ pub(crate) fn needs_origin(record: &CapturedRecord) -> bool {
                 tui_prompt_dedupe::extract_claude_transcript_user_prompt_with_entry_id(&value)
             })
             .is_some_and(|(prompt, _)| {
-                !tui_prompt_dedupe::is_discord_relayed_user_prompt(&prompt)
-                    && discord::input_notice_content(&prompt).is_some()
+                !discord_input(&prompt) && discord::input_notice_content(&prompt).is_some()
             })
 }
 
@@ -120,7 +125,7 @@ impl Projection {
         else {
             return Ok(None);
         };
-        if tui_prompt_dedupe::is_discord_relayed_user_prompt(&prompt) {
+        if discord_input(&prompt) {
             return Ok(None);
         }
         let Some(payload) = discord::input_notice_content(&prompt) else {

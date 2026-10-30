@@ -59,17 +59,27 @@ impl Projection {
     }
 }
 
-/// Below a frozen source's lower, or on a source bound by the freeze that the snapshot left out:
-/// that one held no live tail then, so everything it replays predates the writer's ownership.
+/// Below a frozen source's lower; on a source the freeze did not hold, a row written before the
+/// freeze, or for a row without a time, one whose source the freeze had already bound.
 pub(crate) fn before_migration_floor(
     state: &crate::services::tui_o::store::ledger::input_notices::NoticeState,
-    record: &SourceRange,
-    origin: Option<&NoticeOrigin>,
+    input: &NoticeEvidence,
 ) -> bool {
     state.migration.as_ref().is_some_and(|snapshot| {
+        let record = &input.record;
         match snapshot.sources.iter().find(|s| s.source == record.source) {
             Some(source) => record.start < source.lower,
-            None => origin.is_some_and(|origin| origin.binding_seq <= snapshot.binding_checkpoint),
+            None => match written_at(&input.raw_record) {
+                Some(at) => state.frozen_at.is_some_and(|frozen| at < frozen),
+                None => (input.origin.as_ref())
+                    .is_some_and(|origin| origin.binding_seq <= snapshot.binding_checkpoint),
+            },
         }
     })
+}
+
+fn written_at(raw: &[u8]) -> Option<chrono::DateTime<chrono::Utc>> {
+    let row: serde_json::Value = serde_json::from_slice(raw).ok()?;
+    let at = chrono::DateTime::parse_from_rfc3339(row.get("timestamp")?.as_str()?).ok()?;
+    Some(at.with_timezone(&chrono::Utc))
 }

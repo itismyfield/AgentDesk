@@ -397,3 +397,81 @@ async fn input_notice_origin_survives_prepared_restart_and_local_retry() {
     assert_eq!(store.ledger().piece(1).unwrap().notice_origin, Some(origin));
     assert_eq!(harness.port.posts(), [item.payload.clone(), item.payload]);
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_retry_debt_below_the_migration_floor_is_excluded_and_never_posted() {
+    use crate::services::tui_o::store::ledger::input_notices::{
+        MigrationHistory, MigrationSnapshot, NoticeEntry,
+    };
+    let _guard = crate::config::TestRuntimeRootGuard::new();
+    let harness = Harness::new();
+    harness.gate.acquired();
+    harness.port.say(BOT + 1, "readable");
+    (harness.port.replies.lock().unwrap()).push_back(Reply::Created);
+    let (_old, past) = super::input_notice_transport_tests::materialized_notice_in(
+        &harness,
+        "past-input",
+        "past input",
+        false,
+    );
+    // The released build froze after binding that source, left it out, and its first POST of the
+    // past input settled NotFound with the retry budget, as `old_not_found` plants it.
+    let mut store = harness.channel();
+    let anchor = store.init().initial_anchor;
+    let snapshot = MigrationSnapshot {
+        sources: Vec::new(),
+        binding_checkpoint: past.notice_origin.as_ref().unwrap().binding_seq,
+        history: MigrationHistory::Fixed {
+            lower: anchor,
+            upper: anchor,
+        },
+    };
+    for entry in [
+        LedgerEntry::InputNotice {
+            entry: Box::new(NoticeEntry::MigrationStarted { snapshot }),
+        },
+        LedgerEntry::Prepared {
+            notice_origin: past.notice_origin.clone(),
+            serial: 0,
+            unit_key: past.unit_key.clone(),
+            piece_index: 0,
+            payload: past.payload.clone(),
+            anchor_id: store.ledger().anchor(),
+            epoch: 1,
+            local_retry: Some(LocalRetryMark::Budget),
+        },
+        LedgerEntry::NotFound { serial: 0 },
+    ] {
+        store.append_ledger(entry).unwrap();
+    }
+    drop(store);
+
+    let mut writer = harness.writer();
+    let pending = local_retry::pending(writer.store().ledger()).expect("saved retry debt");
+    assert_eq!(writer.retry_local(pending.due).await, Step::Done);
+    assert!(
+        harness.port.posts().is_empty(),
+        "the past input is never posted"
+    );
+    assert_eq!(
+        writer.store().ledger().excluded(&past.unit_key),
+        Some("input_notice_migration_floor")
+    );
+    assert!(local_retry::pending(writer.store().ledger()).is_none());
+    let (_new, fresh) = super::input_notice_transport_tests::materialized_notice_in(
+        &harness,
+        "fresh-input",
+        "terminal input after the deploy",
+        false,
+    );
+    let mut writer = harness.writer();
+    assert_eq!(
+        writer.deliver(&Derived::Piece(fresh.clone())).await,
+        Step::Done
+    );
+    drop(writer);
+    let mut writer = harness.writer();
+    assert!(local_retry::pending(writer.store().ledger()).is_none());
+    assert_eq!(writer.retry_local(Utc::now()).await, Step::Done);
+    assert_eq!(harness.port.posts(), [fresh.payload]);
+}

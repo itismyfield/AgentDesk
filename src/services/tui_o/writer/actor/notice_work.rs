@@ -174,8 +174,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         for evidence in self.deriver.take_notice_evidence() {
             if super::super::input_notices::evidence::before_migration_floor(
                 self.writer.store().ledger().input_notices(),
-                &evidence.record,
-                evidence.origin.as_deref(),
+                &evidence,
             ) {
                 continue;
             }
