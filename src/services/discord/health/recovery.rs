@@ -61,6 +61,7 @@ pub use stop_result::{
     InflightDisposition, RuntimeTurnStopResult, TOKEN_SUPERSEDED_PATH,
 };
 
+mod carried_turn_close;
 mod channel_runtime;
 mod inflight_repair;
 mod runtime_lookup;

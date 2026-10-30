@@ -490,8 +490,11 @@ async fn polled(view: &OwedView, n: usize) -> Option<Option<Undelivered>> {
         changed
             .expect("hang guard: the actor published no poll")
             .ok()?;
-        let poll = *published.borrow_and_update();
-        if poll.is_none_or(|poll| poll.asked >= wanting.asked()) {
+        let poll = published.borrow_and_update().clone();
+        if poll
+            .as_ref()
+            .is_none_or(|poll| poll.asked >= wanting.asked())
+        {
             (last, seen) = (Some(poll), seen + 1);
         }
     }
