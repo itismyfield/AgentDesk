@@ -800,13 +800,13 @@ AgentDesk/
 
 AgentDesk incorporates and builds upon code from the following projects:
 
-- **[cokacdir](https://github.com/itismyfield/cokacdir)** (MIT License) — A Rust-based Telegram relay for Claude Code sessions. AgentDesk was originally forked from cokacdir's Telegram relay foundation, then extended with Discord support, session management, tmux lifecycle, and turn bridge functionality.
+- **[cokacdir](https://github.com/kstost/cokacdir)** (MIT License) — A Rust-based Telegram relay for Claude Code sessions. AgentDesk was originally forked from cokacdir's Telegram relay foundation, then extended with Discord support, session management, tmux lifecycle, and turn bridge functionality.
 - **[claw-empire](https://github.com/GreenSheep01201/claw-empire)** (Apache 2.0 License) — Agent avatar sprite images used in the dashboard were sourced from claw-empire.
 
 ## License
 
 AgentDesk is licensed under the [MIT License](LICENSE).
 
-You are free to use, modify, and distribute this software, including for commercial purposes. **Attribution is required** — you must retain the copyright notice and include the [NOTICE](NOTICE) file in any distribution or derivative work.
+You are free to use, modify, and distribute this software, including for commercial purposes. Under the MIT License, redistributions must retain the applicable copyright and permission notices. See [NOTICE](NOTICE) for upstream and other third-party attributions.
 
 See [LICENSE](LICENSE) and [NOTICE](NOTICE) for full details.
