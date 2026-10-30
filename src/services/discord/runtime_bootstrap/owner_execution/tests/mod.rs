@@ -129,7 +129,7 @@ async fn owner_cleanup_boot_diagnostics_wait_for_execution_read_pg() {
             .unwrap();
         let boot = BootChannels::validate(&config)
             .unwrap()
-            .seeded(true, &config, |selected, _| {
+            .seeded(&config, |selected, _| {
                 Ok(crate::services::tui_o::channel_policy::stored(
                     Some(&root),
                     selected,
@@ -148,7 +148,7 @@ async fn owner_cleanup_boot_diagnostics_wait_for_execution_read_pg() {
         let halted = alarm::health_reasons().contains(&format!("tui_o:halted:{channel}"));
         assert_eq!(halted, mode != "local", "{mode} foreign-store diagnostic");
         assert_eq!(
-            gateway_only_channels(true, "claude", HostRole::Standby, Some(&snapshot)),
+            gateway_only_channels("claude", HostRole::Standby, Some(&snapshot)),
             Some(usize::from(mode != "local")),
             "{mode} gateway-only diagnostic"
         );
