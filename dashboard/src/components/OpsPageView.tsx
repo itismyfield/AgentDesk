@@ -313,9 +313,6 @@ export default function OpsPageView({
               <p className="mt-1 text-xs leading-5 text-th-text-muted">{error}</p>
             </div>
           </div> : null}
-          {health?.degraded_reasons && health.degraded_reasons.length > 0 ? <div className="flex flex-wrap gap-2">
-            {health.degraded_reasons.slice(0, 4).map(reason => <span key={reason} className={`rounded-md border border-th-border-subtle px-2 py-1 text-xs leading-5 ${health.status === "unhealthy" ? "text-[var(--th-accent-danger)]" : "text-[var(--th-badge-amber-text)]"}`}>{describeDegradedReason(reason)}</span>)}
-          </div> : null}
           <div data-testid="ops-signal-grid" className="grid grid-cols-2 overflow-hidden rounded-lg border border-th-border-subtle bg-th-bg-surface sm:grid-cols-4">
             {primarySignals.length > 0 ? primarySignals.map(signal => {
               const chrome = surfaceStyleForSeverity(signal.severity);
@@ -329,6 +326,9 @@ export default function OpsPageView({
               <p className="mt-1 text-xs leading-5 text-th-text-muted">{tr("초기 health 응답이 도착하면 상태 요약을 표시합니다.", "The health summary appears after the first response arrives.")}</p>
             </SurfaceEmptyState>}
           </div>
+          {health?.degraded_reasons && health.degraded_reasons.length > 0 ? <div className="flex flex-wrap gap-2">
+            {health.degraded_reasons.slice(0, 4).map(reason => <span key={reason} className={`rounded-md border border-th-border-subtle px-2 py-1 text-xs leading-5 ${health.status === "unhealthy" ? "text-[var(--th-accent-danger)]" : "text-[var(--th-badge-amber-text)]"}`}>{describeDegradedReason(reason)}</span>)}
+          </div> : null}
         </section>
 
         <section aria-labelledby="ops-watchlist-title" className="min-w-0 rounded-lg border border-th-border-subtle bg-th-bg-surface">

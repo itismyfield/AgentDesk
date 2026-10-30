@@ -31,4 +31,14 @@ OpsPageModel의 293줄 style 문자열을 제거하고 Tailwind utility로 옮�
 
 390×844 / 1440×1000 각각 light/dark에서 실제 페이지를 찍고 overflow·정렬·간격·하단 가림·44px 타깃을 직접 확인한다. 긴 데이터·빈 상태·오류·클러스터 세션 제어는 브라우저 fixture를 사용한다. 브라우저의 실제 쓰기 요청을 차단하고 설정 저장·세션 중지 등 운영 상태는 바꾸지 않는다.
 
-최종 확인은 아래에 기록한다.
+실화면 검사에서 긴 degraded reason이 주요 수치를 밀어내는 문제를 발견해, 진단 문자열을 지표 뒤로 옮겼다. 긴 hostname/session/backend/output/config_source는 줄바꿈하며 세션 출력은 별도 경계로 구분한다.
+
+- build 성공 (foundation 4c299336f0 기반)
+- 관련 HealthWidget/StatusBadge unit 12개 통과
+- 기존 Ops E2E 6개 통과 (상태/병목, WS 이벤트 갱신, 출력·중지 fixture, stale 제어 차단)
+- 기본 화면 28개 + 상태 fixture 60개 =88회 overflow/44px 검사 결함 0건
+- 기준 4장 + 최종 28장 + 상태 60장 =92개 PNG. `before/`, `final/`, `states/`
+- `capture-baseline.js`, `capture-final.js`, `capture-states.js` 재현 스크립트. Playwright CLI session `unslop-ops`, Vite5295, 기존 E2E5279로 격리.
+- `git diff --check`, stacked delta cap 4 production files / net -557 통과.
+
+부모의 독립 검토 후에만 완료 알림을 보낸다. API/WS/schema와 운영 설정은 변경하지 않았다.
