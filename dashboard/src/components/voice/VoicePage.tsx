@@ -191,7 +191,7 @@ export default function VoicePage() {
     : "idle";
   const statusLabel = {
     idle: t({ ko: "마이크를 눌러 시작하세요", en: "Tap the mic to start" }),
-    listening: t({ ko: "듣고 있어요", en: "Listening" }),
+    listening: handsFree ? t({ ko: "듣고 있어요", en: "Listening" }) : t({ ko: "녹음하려면 마이크를 누르세요", en: "Tap the mic to record" }),
     recording: t({ ko: "말씀하세요", en: "Go ahead" }),
     thinking: t({ ko: "처리 중", en: "Working" }),
     speaking: t({ ko: "읽어주는 중", en: "Speaking" }),
