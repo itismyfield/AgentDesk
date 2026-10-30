@@ -72,7 +72,7 @@ export function BottomSheet({
         >
           <div className="flex items-center justify-center pt-3">
             <VaulDrawer.Handle
-              className="h-1 w-10 rounded-full bg-white/20"
+              className="h-1 w-10 rounded-full bg-th-text-muted"
               aria-hidden="true"
             />
           </div>
