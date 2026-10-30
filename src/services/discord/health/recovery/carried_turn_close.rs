@@ -105,16 +105,27 @@ async fn close_channel(
     let result = try_close(shared, provider, channel).await;
     let mut last = KEPT.lock().unwrap_or_else(|e| e.into_inner());
     match &result {
-        Err(Kept::Because(reason)) if last.get(&channel.get()) != Some(reason) => {
-            tracing::info!(
-                provider = provider.as_str(),
-                channel_id = channel.get(),
-                reason = reason.as_str(),
-                "[tui_o] carried-over turn kept"
-            );
+        Err(Kept::Because(reason) | Kept::Stuck(reason))
+            if last.get(&channel.get()) != Some(reason) =>
+        {
+            if matches!(result, Err(Kept::Stuck(_))) {
+                tracing::warn!(
+                    provider = provider.as_str(),
+                    channel_id = channel.get(),
+                    reason = reason.as_str(),
+                    "[tui_o] carried-over turn kept"
+                );
+            } else {
+                tracing::info!(
+                    provider = provider.as_str(),
+                    channel_id = channel.get(),
+                    reason = reason.as_str(),
+                    "[tui_o] carried-over turn kept"
+                );
+            }
             last.insert(channel.get(), reason.clone());
         }
-        Err(Kept::Because(_)) => {}
+        Err(Kept::Because(_) | Kept::Stuck(_)) => {}
         Ok(()) | Err(Kept::NoRow) => {
             last.remove(&channel.get());
         }
@@ -127,6 +138,8 @@ enum Kept {
     /// Nothing carried: the channel's ordinary state, not logged.
     NoRow,
     Because(String),
+    /// Archived, yet its episode or its row is still there: a warning, still once per change.
+    Stuck(String),
 }
 
 fn kept(reason: impl Into<String>) -> Kept {
@@ -222,12 +235,6 @@ async fn try_close(
                 ),
             };
             if archive != GuardedClearOutcome::Cleared {
-                tracing::info!(
-                    provider = provider.as_str(),
-                    channel_id = channel.get(),
-                    ?archive,
-                    "[tui_o] carried-over turn kept: its row changed before the archive"
-                );
                 return Err(kept(format!("archive_{archive:?}")));
             }
             let target = Target {
@@ -287,15 +294,10 @@ async fn try_close(
     let row_gone = inflight::load_inflight_state(provider, channel.get())
         .is_none_or(|row| row.effective_finalizer_turn_id() != target.finalizer_turn_id);
     if !(released && row_gone) {
-        tracing::warn!(
-            provider = provider.as_str(),
-            channel_id = channel.get(),
-            finalizer_turn_id = target.finalizer_turn_id,
-            released,
-            row_gone,
-            "[tui_o] carried-over turn archived but its episode is still open; retrying next pass"
-        );
-        return Err(kept("archived_episode_open"));
+        return Err(Kept::Stuck(format!(
+            "archived_episode_open:finalizer_turn_id={}:released={released}:row_gone={row_gone}",
+            target.finalizer_turn_id
+        )));
     }
     archived().remove(&channel.get());
     tracing::info!(

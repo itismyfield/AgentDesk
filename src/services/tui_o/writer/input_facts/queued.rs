@@ -148,6 +148,7 @@ fn classify(value: &Value) -> Option<Record> {
                 false => Some(Record::Command(prompt)),
             }
         }
+        "user" if value["isMeta"] == true && mutant("exclude_meta") => None,
         "user" => body(&value["message"]["content"]).map(Record::Prompt),
         _ => None,
     }
