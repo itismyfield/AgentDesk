@@ -1,3 +1,4 @@
+import { createPortal } from "react-dom";
 import { useEffect, useRef, useState } from "react";
 import {
   getAgentWarnings,
@@ -30,6 +31,7 @@ import { AgentInfoProfileSections } from "./AgentInfoProfileSections";
 import { AgentInfoRoutingSections } from "./AgentInfoRoutingSections";
 import { AgentExecutionNodeSelect } from "./AgentExecutionNodeSelect";
 import { inferBindingSource } from "./AgentInfoCardModel";
+import { getSystemHealthTone } from "../../theme/statusTokens";
 import { isDiscordSnowflake } from "./discord-routing";
 import { catalogLabel, getProviderAuthProfiles, useProviderCatalog } from "../../api/providers";
 import type { ProviderAuthProvider } from "../settings/SettingsProvidersModel";
@@ -73,6 +75,7 @@ export default function AgentInfoCard({
   const [loadingBindings, setLoadingBindings] = useState(true);
   const [auditLogs, setAuditLogs] = useState<Array<{ id: string; action: string; ts: number; detail?: string; summary?: string; created_at?: number }>>([]);
   const [loadingAudit, setLoadingAudit] = useState(true);
+  const [auditError, setAuditError] = useState(false);
   const [editingAlias, setEditingAlias] = useState(false);
   const [aliasValue, setAliasValue] = useState(agent.alias ?? "");
   const [savingAlias, setSavingAlias] = useState(false);
@@ -265,6 +268,13 @@ export default function AgentInfoCard({
         setTimeline([]);
         setLoadingTimeline(false);
       });
+
+    setLoadingAudit(true);
+    setAuditError(false);
+    api.getAuditLogs(20, { agentId: agent.id })
+      .then((logs) => setAuditLogs(logs.map((log) => ({ ...log, ts: log.created_at }))))
+      .catch(() => { setAuditLogs([]); setAuditError(true); })
+      .finally(() => setLoadingAudit(false));
   }, [agent.id]);
 
   useEffect(() => {
@@ -337,6 +347,7 @@ export default function AgentInfoCard({
     break: { ko: "휴식", en: "Break" },
     offline: { ko: "오프라인", en: "Offline" },
   };
+  const statusTone = getSystemHealthTone(agent.status === "working" ? "healthy" : agent.status === "break" ? "warning" : agent.status === "offline" ? "critical" : "idle");
 
   const sourceLabel =
     agent.activity_source === "agentdesk"
@@ -397,12 +408,13 @@ export default function AgentInfoCard({
   const levelInfo = getAgentLevel(agent.stats_xp);
   const levelTitle = getAgentTitle(agent.stats_xp, isKo);
 
-  return (
+  return createPortal(
+    <>
+    <div aria-hidden="true" className="fixed inset-0 z-[70]" style={{ background: "var(--th-modal-overlay)" }} />
     <div
       ref={overlayRef}
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-hidden px-3 py-4 sm:items-center sm:p-4"
+      className="fixed inset-0 z-[80] flex items-start justify-center overflow-hidden px-3 py-4 sm:items-center sm:p-4"
       style={{
-        background: "var(--th-modal-overlay)",
         paddingTop: "max(1rem, calc(env(safe-area-inset-top) + 0.75rem))",
         paddingBottom: "max(1rem, calc(env(safe-area-inset-bottom) + 0.75rem))",
       }}
@@ -414,11 +426,11 @@ export default function AgentInfoCard({
         role="dialog"
         aria-modal="true"
         aria-label={`${primaryName} — ${tr("직원 상세", "Agent Details")}`}
-        className="w-full self-start max-h-[calc(100dvh-env(safe-area-inset-top)-env(safe-area-inset-bottom)-1.5rem)] max-w-[calc(100vw-1.5rem)] overflow-x-hidden overflow-y-auto overscroll-contain rounded-[32px] border p-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200 sm:my-auto sm:max-h-[90vh] sm:max-w-4xl sm:p-5"
+        className="w-full self-start max-h-[calc(100dvh-env(safe-area-inset-top)-env(safe-area-inset-bottom)-1.5rem)] max-w-[calc(100vw-1.5rem)] overflow-x-hidden overflow-y-auto overscroll-contain rounded-lg border p-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200 sm:my-auto sm:max-h-[90vh] sm:max-w-4xl sm:p-5"
         style={{
           borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
           background:
-            "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+            "var(--th-bg-surface)",
           WebkitOverflowScrolling: "touch",
           touchAction: "pan-y",
         }}
@@ -435,7 +447,7 @@ export default function AgentInfoCard({
             )}
           >
             <div className="mt-4 flex flex-col gap-4 md:flex-row md:items-start">
-              <div className="relative shrink-0">
+              <div className="relative w-fit shrink-0">
                 <AgentAvatar agent={agent} spriteMap={spriteMap} size={64} rounded="xl" />
                 <div
                   className={`absolute -bottom-0.5 -right-0.5 h-4 w-4 rounded-full border-2 ${STATUS_DOT[agent.status] ?? STATUS_DOT.idle}`}
@@ -453,7 +465,7 @@ export default function AgentInfoCard({
                       onBlur={saveAlias}
                       disabled={savingAlias}
                       placeholder={tr("별명 입력", "Enter alias")}
-                      className="rounded-xl border px-2 py-1 text-xs outline-none"
+                      className="min-h-11 rounded-md border px-2 py-1 text-xs outline-none"
                       style={{
                         background: "var(--th-bg-surface)",
                         borderColor: "var(--th-input-border)",
@@ -474,14 +486,8 @@ export default function AgentInfoCard({
                   <span
                     className="rounded-full px-2 py-0.5 text-xs font-medium"
                     style={{
-                      background: agent.status === "working" ? "rgba(16,185,129,0.15)" :
-                        agent.status === "break" ? "rgba(245,158,11,0.15)" :
-                        agent.status === "offline" ? "rgba(239,68,68,0.15)" :
-                        "rgba(100,116,139,0.15)",
-                      color: agent.status === "working" ? "#34d399" :
-                        agent.status === "break" ? "#fbbf24" :
-                        agent.status === "offline" ? "#f87171" :
-                        "#94a3b8",
+                      background: statusTone.bg,
+                      color: statusTone.text,
                     }}
                   >
                     {isKo ? statusLabel[agent.status]?.ko : statusLabel[agent.status]?.en}
@@ -498,7 +504,7 @@ export default function AgentInfoCard({
                     </span>
                   )}
                   <span className="rounded-full px-2 py-0.5 text-xs" style={{ background: "var(--th-bg-surface)", color: "var(--th-text-muted)" }}>
-                    {dept ? `${dept.icon} ${localeName(locale, dept)}` : tr("미배정", "Unassigned")}
+                    {dept ? <>{dept.icon} {localeName(locale, dept)}</> : tr("미배정", "Unassigned")}
                   </span>
                 </div>
                 <div className="flex flex-wrap gap-2">
@@ -583,6 +589,7 @@ export default function AgentInfoCard({
               loadingCron={loadingCron}
               auditLogs={auditLogs}
               loadingAudit={loadingAudit}
+              auditError={auditError}
               agentSkills={agentSkills}
               sharedSkills={sharedSkills}
               loadingSkills={loadingSkills}
@@ -599,5 +606,7 @@ export default function AgentInfoCard({
         </div>
       </div>
     </div>
+    </>,
+    document.body,
   );
 }
