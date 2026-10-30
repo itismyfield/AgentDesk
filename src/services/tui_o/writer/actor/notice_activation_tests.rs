@@ -108,6 +108,103 @@ fn debt_candidates(
 }
 
 #[tokio::test(start_paused = true)]
+async fn rerendered_notice_synced_collision_boots_and_drains_without_ledger_violation() {
+    let _turns = TURNS.lock().await;
+    let _guard = crate::config::TestRuntimeRootGuard::new();
+    let runtime = tempfile::tempdir().unwrap();
+    let (o, current, _binding) = rerender_fixture(runtime.path());
+    let port = Arc::new(Port::default());
+    let alarms = Alarms::default();
+    let mut actor = host(&o, port.clone(), alarms.clone(), u64::MAX);
+    start_migration(&mut actor);
+    let mut raw = current.raw_record.clone();
+    raw.push(b'\n');
+    actor
+        .writer
+        .store()
+        .append_spool(
+            &crate::services::tui_o::shadow::CaptureBatch {
+                source: current.record.source.clone(),
+                records: vec![crate::services::tui_o::shadow::CapturedRecord {
+                    start: current.record.start,
+                    end: current.record.end,
+                    line: current.raw_record.clone(),
+                }],
+                captured_through: current.record.end,
+            },
+            &hex::encode(Sha256::digest(&raw)),
+        )
+        .unwrap();
+    let mut original = current.clone();
+    original.payload = Some(OLD_NOTICE_PAYLOAD.into());
+    for input in [original.clone(), current] {
+        actor
+            .writer
+            .store()
+            .append_ledger(LedgerEntry::InputNotice {
+                entry: Box::new(NoticeEntry::Materialized {
+                    evidence: Box::new(input),
+                }),
+            })
+            .unwrap();
+    }
+    drop(actor);
+    let before = std::fs::read(notice_ledger(runtime.path())).unwrap();
+    let _confirmed = TestConfirmation::new(CHANNEL);
+    for _ in 0..2 {
+        crate::services::tui_o::writer::boot::capture();
+        let actor = host(&o, port.clone(), alarms.clone(), u64::MAX);
+        assert!(
+            !actor.writer.is_stopped(),
+            "a synced renderer collision must recover at writer construction"
+        );
+        let (stop, stopped) = watch::channel(false);
+        let (cause, ()) = tokio::join!(
+            crate::services::tui_o::writer::actor::run_channel_at(
+                actor.writer,
+                ShadowProvider::Claude,
+                actor.bindings,
+                stopped,
+                chrono::Utc::now(),
+            ),
+            async {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                stop.send_replace(true);
+            }
+        );
+        assert!(cause.is_none(), "{cause:?}");
+        let events = crate::services::tui_o::writer::boot::events();
+        assert!(
+            events
+                .iter()
+                .any(|e| e.stage == "first_drain" && e.status == "ok"),
+            "{events:?}"
+        );
+        assert!(!events.iter().any(|e| e.status == "stopped"), "{events:?}");
+    }
+    assert_eq!(*port.posts.lock().unwrap(), [OLD_NOTICE_PAYLOAD]);
+    assert!(alarms.0.lock().unwrap().is_empty());
+    let after = std::fs::read(notice_ledger(runtime.path())).unwrap();
+    assert!(
+        after.starts_with(&before),
+        "recovery must not remove or rewrite synced evidence"
+    );
+    let state = notices(&o);
+    assert_eq!(state.evidence.values().next(), Some(&original));
+    let rows: Vec<serde_json::Value> = String::from_utf8(after)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row["entry"]["entry"]["kind"] == "materialized")
+            .count(),
+        2
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn first_activation_freezes_the_gap_before_resume_and_notices_each_new_input_once() {
     let _turns = TURNS.lock().await;
     let _guard = crate::config::TestRuntimeRootGuard::new();
