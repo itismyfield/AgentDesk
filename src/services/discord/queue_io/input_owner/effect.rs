@@ -168,6 +168,7 @@ pub(crate) fn idle_claude(session: String) -> Leaf {
     Box::new(move |frame| {
         match crate::services::claude_tui::input::send_warm_followup_owned(&session, &frame, None) {
             Ok(()) => Ok(Completion::Submitted),
+            Err(SubmissionError::Held(hold)) if hold.modal => Ok(Completion::NotSent(MODAL.into())),
             Err(SubmissionError::Held(hold)) => Ok(Completion::NotSent(format!("held: {hold:?}"))),
             Err(error) => Ok(Completion::WriteUncertain(format!("{error:?}"))),
         }

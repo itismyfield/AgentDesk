@@ -72,6 +72,7 @@ fn submit(
         cancel,
         timing: &busy_inject::TIMING,
     };
+    let modal = std::cell::Cell::new(false);
     let result = match submission_fence::idle_stash_scope() {
         Some((_, context)) if !context.available || context.target != session => {
             InputRun::Refused(InputRefusal::IdentityMismatch)
@@ -82,7 +83,7 @@ fn submit(
                 session: session.into(),
             },
             busy_inject::stash_enabled(Some(context.channel)),
-            &request,
+            (&request, &modal),
         ),
         // No channel is known here, so a visible draft is never parked; a pane held for draft
         // recovery still takes no automatic write.
@@ -92,12 +93,12 @@ fn submit(
                     admit_automatic_write(session, readiness)
                 })?;
             }
-            run(&Unmanaged, false, &request)
+            run(&Unmanaged, false, (&request, &modal))
         }
     };
     guarded_outcome::finish(&result);
     SubmissionError::from_run(result)
-        .map_err(|error| preparation_hold::idle_stash_stopped(session, error))
+        .map_err(|error| preparation_hold::idle_stash_stopped(session, error, modal.get()))
 }
 
 #[cfg(not(unix))]
@@ -134,7 +135,12 @@ fn refused(reason: Refusal) -> InputRun {
 }
 
 #[cfg(unix)]
-fn run(authority: &dyn StashAuthority, stash_allowed: bool, request: &Request<'_>) -> InputRun {
+/// `modal` records whether the one capture before any key refused the pane for a modal.
+fn run(
+    authority: &dyn StashAuthority,
+    stash_allowed: bool,
+    (request, modal): (&Request<'_>, &std::cell::Cell<bool>),
+) -> InputRun {
     let session = request.session;
     composer_lock::try_with_composer_mutation_lock(session, || {
         if !authority.admits(session) {
@@ -146,7 +152,10 @@ fn run(authority: &dyn StashAuthority, stash_allowed: bool, request: &Request<'_
         let pane = busy_inject::Pane::with_program(session, "tmux".into());
         let park = match busy_inject::before_paste(&pane, stash_allowed) {
             Ok(park) => park,
-            Err(_) => return refused(Refusal::NotReady),
+            Err(veto) => {
+                modal.set(veto == busy_inject::Veto::Modal);
+                return refused(Refusal::NotReady);
+            }
         };
         if authority.claim(session).is_err() {
             return refused(Refusal::SubmissionFence);

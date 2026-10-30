@@ -601,6 +601,37 @@ fn an_idle_handoff_ends_at_settlement_while_its_ai_turn_runs() {
     assert_eq!(*done.lock().unwrap(), 1, "the turn's end is observed once");
 }
 
+/// An idle pane showing a modal sends no key and holds the front with its ticket, unretained; once
+/// the modal is gone the same front is delivered with no new input.
+#[test]
+fn owner_idle_claude_holds_a_modal_front_until_the_modal_is_gone() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let modal = "Do you want to proceed?\n❯ 1. Yes\n  2. No\nEnter to select · Esc to cancel\n";
+    let rig = rig("oi-modal", 7_272_547, "normal", modal.into(), IDLE);
+    let (idle, transcript) = (target::Phase::Idle, rig.transcript());
+    let held = rig.handoff(rig.granted_front(), ProviderKind::Claude, idle, &transcript);
+    assert_eq!(held, Err("NotSent(\"Modal\")".into()));
+    assert!(rig.events().is_empty(), "no key: {:?}", rig.events());
+    let snapshot = rig.snapshot();
+    assert!(snapshot["head_injection"].is_null(), "{snapshot}");
+    assert_eq!(
+        snapshot["retained_inputs"],
+        json!([]),
+        "held, not retained: {snapshot}"
+    );
+    let front = rig.granted_front();
+    assert_eq!(front.0.as_deref(), Some(rig.ticket.as_str()), "same ticket");
+    // C-u makes the fake pane draw its empty composer and the history goes: the modal is gone.
+    let pane = format!("={}:", rig.name);
+    rig.f.tmux(&["send-keys", "-t", &pane, "C-u"]);
+    wait("modal-closed", || rig.events() == ["clear"]);
+    rig.f.tmux(&["clear-history", "-t", &pane]);
+    let delivered = rig.handoff(front, ProviderKind::Claude, idle, &transcript);
+    assert_eq!(delivered, Ok(()));
+    assert_eq!(rig.events(), ["clear", "paste", "Enter"]);
+    rig.delivered();
+}
+
 /// A legacy draft guard does not stop the owner's transaction: the guard is legacy state.
 #[test]
 fn legacy_guard_value_does_not_block_owner_a() {
