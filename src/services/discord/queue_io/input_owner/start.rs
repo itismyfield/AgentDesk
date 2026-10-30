@@ -1,6 +1,5 @@
-//! A synthetic start (HTTP, direct headless, routine, scheduled) on an owned channel: the caller's
-//! own preflight runs first, the owner admits the original under the caller's stable ticket with
-//! its provenance, and an accepted original wakes the drive.
+//! A synthetic start on an owned channel: the caller's preflight runs first, then the owner admits
+//! the original under the caller's ticket with its provenance, and an acceptance wakes the drive.
 #![cfg(unix)]
 use std::sync::Arc;
 

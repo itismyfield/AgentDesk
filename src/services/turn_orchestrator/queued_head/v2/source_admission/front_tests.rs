@@ -36,9 +36,8 @@ async fn claims(
         .unwrap()
 }
 
-/// The front names the ticket bound to its own slot: a cancelled or delivered admission of the same
-/// body never stands for the input behind it, before or after a restart, and a migrated or partly
-/// admitted front still runs, with no ticket to settle.
+/// The front names its own slot's ticket, never a settled admission of the same body across a
+/// restart; a migrated or partly admitted front still runs with no ticket.
 #[tokio::test]
 async fn the_owner_front_names_the_ticket_bound_to_its_own_slot() {
     let _root = TestRuntimeRootGuard::new();

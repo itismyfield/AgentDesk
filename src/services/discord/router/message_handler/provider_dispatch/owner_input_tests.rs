@@ -350,9 +350,8 @@ impl Rig {
     }
 }
 
-/// A busy pane parks a visible draft once, listed channel or not, pastes once and enters once, and
-/// an empty composer gets no C-s; a modal gets no key and the original stays at the queue front,
-/// unretained.
+/// A busy pane parks a visible draft once, pastes and enters once, and an empty composer gets no
+/// C-s; a modal gets no key and the original stays unretained at the queue front.
 #[test]
 fn owner_busy_claude_submits_once_and_holds_a_modal_front() {
     let _root = crate::config::TestRuntimeRootGuard::new();

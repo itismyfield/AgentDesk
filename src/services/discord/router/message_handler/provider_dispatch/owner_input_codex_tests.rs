@@ -291,9 +291,8 @@ fn an_idle_owner_front_needs_execution_capacity_before_any_key() {
     assert_eq!(snapshot["items"][0]["text"], PROMPT, "{snapshot}");
 }
 
-/// The first pinned paste held by a pane replaced just before it ran proves the attempt not sent
-/// through the owner's settlement: no content or Enter, no head, one known_not_sent original with
-/// its notice. A pane replaced after the paste holds only the Enter, a write that may have landed.
+/// A first paste held by a pane replaced before it ran settles not sent with one notice; a pane
+/// replaced after the paste holds only the Enter, a write that may have landed.
 #[test]
 fn an_idle_codex_paste_held_before_it_ran_settles_not_sent() {
     let _root = crate::config::TestRuntimeRootGuard::new();

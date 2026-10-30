@@ -787,9 +787,8 @@ fn a_v2_checked_purge_keeps_every_member_of_a_reserved_unit() {
     });
 }
 
-/// Ensure adopts a channel's queue file once: a second ensure of the same file and namespace keeps
-/// the owner it adopted, in-memory grant included, and an owner of another file or namespace
-/// refuses.
+/// Ensure adopts a queue file once: the same file and namespace keep the owner and its grant, and
+/// another file or namespace refuses.
 #[test]
 fn ensure_adopts_once_and_refuses_another_identity() {
     let _root = TestRuntimeRootGuard::new();
