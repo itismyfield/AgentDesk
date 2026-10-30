@@ -1993,7 +1993,7 @@ test.describe("Dashboard smoke tests", () => {
     );
   });
 
-  test("home: mobile stacks widgets and disables edit affordance", async ({ page }, testInfo) => {
+  test("home: mobile pairs usage metrics and disables edit affordance", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "desktop", "Mobile-only test");
 
     await page.goto("/home");
@@ -2010,7 +2010,9 @@ test.describe("Dashboard smoke tests", () => {
 
     expect(tokensBox).not.toBeNull();
     expect(costBox).not.toBeNull();
-    expect(costBox!.y).toBeGreaterThan(tokensBox!.y + tokensBox!.height - 1);
+    expect(Math.abs(costBox!.y - tokensBox!.y)).toBeLessThanOrEqual(1);
+    expect(costBox!.x).toBeGreaterThan(tokensBox!.x + tokensBox!.width);
+    await expectNoHorizontalOverflow(page);
   });
 
   test("achievements: dedicated page renders sections and shared gamification blocks", async ({ page }) => {

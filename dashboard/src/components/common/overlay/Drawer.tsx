@@ -20,6 +20,7 @@ export interface DrawerProps {
   closeOnBackdrop?: boolean;
   closeOnEsc?: boolean;
   ariaLabel?: string;
+  closeButtonClassName?: string;
 }
 
 export function Drawer({
@@ -32,6 +33,7 @@ export function Drawer({
   closeOnBackdrop = true,
   closeOnEsc = true,
   ariaLabel,
+  closeButtonClassName,
 }: DrawerProps) {
   const isMobile = useIsMobile();
   const accessibleTitle = getOverlayAccessibleTitle(title, ariaLabel, "Drawer");
@@ -46,6 +48,7 @@ export function Drawer({
         closeOnBackdrop={closeOnBackdrop}
         closeOnEsc={closeOnEsc}
         ariaLabel={ariaLabel}
+        closeButtonClassName={closeButtonClassName}
       >
         {children}
       </BottomSheet>
@@ -82,13 +85,13 @@ export function Drawer({
               className="flex items-center justify-between gap-3 border-b px-5 py-4"
               style={{ borderColor: "var(--th-border, rgba(148,163,184,0.12))" }}
             >
-              <Dialog.Title className="text-base font-semibold">
+              <Dialog.Title className="min-w-0 text-base font-semibold [overflow-wrap:anywhere]">
                 {title}
               </Dialog.Title>
               <Dialog.Close asChild>
                 <button
                   type="button"
-                  className="flex h-8 w-8 items-center justify-center rounded-lg border text-[var(--th-text-muted,_#94a3b8)] hover:bg-white/5"
+                  className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border text-[var(--th-text-muted,_#94a3b8)] hover:bg-white/5 ${closeButtonClassName ?? ""}`}
                   style={{ borderColor: "var(--th-border, rgba(148,163,184,0.16))" }}
                   aria-label="Close"
                 >
