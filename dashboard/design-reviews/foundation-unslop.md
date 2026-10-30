@@ -45,3 +45,5 @@ Vite의 문자열 `/api` proxy는 changeOrigin=true로 정규화되어 Host만87
 ### 작은 조작·화면 경계 확인
 
 후속 오류 화면에서 Sonner 닫기가 20px인 점을 발견해 44px로 늘리고 문구 영역과 분리했다. 긴 오류 문구로 4조합 모두 버튼 44×44, 문구 교차 면적 0을 확인했다(`after/toast-*.png`). 공통 TooltipLabel도 키보드 동작이 없는 span을 native 버튼으로 바꾸고, 44px 조작·12px 도움말·화면 좌우 경계 보정을 적용했다. production preview에서 Enter로 열기/Escape로 닫기와 4조합 경계 내 배치를 확인했다(`after/tooltip-*.png`).
+
+추가 에이전트 폼 검수에서 배경 API 오류 토스트가 모달 하단 조작을 가로막는 점도 확인했다. Toaster를 공통 Modal/Drawer의70·80보다 낮은65층에 두어 배경 알림이 모달 조작을 가로채지 않게 했다. 4조합 실제 브라우저에서 교차 영역의 hit-test와 일반 닫기를 통과했다(`after/toast-modal-*.png`).
