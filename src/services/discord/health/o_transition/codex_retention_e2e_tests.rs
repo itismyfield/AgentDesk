@@ -295,3 +295,52 @@ fn pg_codex_native_configured_herdr_sweep_retires_aged_backlog() {
         "retention never sends terminal input"
     );
 }
+
+#[test]
+fn codex_twenty_reader_backlog_retires_after_complete_retention_evidence() {
+    let fixture = Fixture::new(false);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(assert_sweep(&fixture, fixture.shared(None), 19, false));
+}
+
+#[test]
+fn codex_twenty_readers_survive_watcher_and_pane_census_skips() {
+    for component in ["watcher_binding", "pane_census"] {
+        let fixture = Fixture::new(false);
+        let (sources, _) = backlog(&fixture, 19);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let shared = if component == "watcher_binding" {
+                crate::services::discord::make_shared_data_for_tests_with_storage(None)
+            } else {
+                let tmux = fixture.bin.path().join("tmux");
+                std::fs::write(tmux, format!(
+                    "#!/bin/sh\n[ \"$1\" = -u ] && shift\ncase \"$1\" in list-sessions) printf '%s\\n' '{}' 'AgentDesk-unassigned-observation-test' ;; esac\nexit 0\n",
+                    fixture.context.tmux_session
+                )).unwrap();
+                fixture.shared(None)
+            };
+            shared.settings.write().await.allowed_channel_ids = vec![CHANNEL];
+            let registry = HealthRegistry::new();
+            registry.register("codex".into(), shared).await;
+            let (_, cursors, reading) = with_ready_codex_backlog(
+                sources, fixture.context.tmux_session.clone(), false,
+                |ready| async move {
+                    assert_eq!(test_support::codex_sweep_for_test(&registry, &ready, CHANNEL).await.unwrap_err(), "no Codex Inspect was sent");
+                    assert_eq!(test_support::codex_skips_for_test(), std::collections::BTreeMap::from([
+                        (format!("codex_context_unavailable:{component}"), 1)
+                    ]));
+                }
+            ).await;
+            assert_eq!(reading, Some(20), "component={component}");
+            assert_eq!(cursors.len(), 20);
+            assert!(cursors.iter().all(|cursor| !cursor.retired && cursor.transition_cleanup.is_none()), "component={component}");
+        });
+    }
+}
