@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::definition::{DefinitionError, DefinitionHashes, DefinitionInput, ValidatedDefinition};
+use super::verification_run::VerificationRun;
 
 macro_rules! domain_enum {
     ($name:ident { $($variant:ident),+ $(,)? }) => {
@@ -61,7 +62,8 @@ domain_enum!(ActionKind {
     DeliverStage,
     CreatePr,
     Merge,
-    Deploy
+    Deploy,
+    VerificationPhase
 });
 domain_enum!(ActionState {
     Planned,
@@ -221,6 +223,9 @@ pub struct Run {
     pub attempts: BTreeMap<String, Attempt>,
     pub actions: BTreeMap<String, Action>,
     pub sessions: Vec<SessionRecord>,
+    // Pre-registered verification executions keyed by execution ID; absent in documents saved before them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub verifications: BTreeMap<String, VerificationRun>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

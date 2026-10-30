@@ -561,3 +561,6 @@ impl SocketHerdrLaunchHost {
         host
     }
 }
+
+#[path = "unplaced_rig_tests.rs"]
+mod unplaced_rig;

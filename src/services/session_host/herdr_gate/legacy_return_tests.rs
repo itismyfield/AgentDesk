@@ -23,6 +23,7 @@ impl HerdrTransport for MissingPane {
                         version: "0.9.3".into(),
                         protocol: 22,
                         panes: vec![],
+                        workspaces: None,
                     },
                 }),
             }),
