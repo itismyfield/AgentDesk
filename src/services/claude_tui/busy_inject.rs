@@ -360,6 +360,7 @@ pub(crate) fn modal(capture: &str) -> bool {
 
 /// Read once before any key: whether a visible draft is parked with C-s. An unread composer
 /// deliberately proceeds without C-s.
+#[cfg(unix)]
 pub(in crate::services::claude_tui) fn before_paste(
     pane: &Pane,
     stash_allowed: bool,

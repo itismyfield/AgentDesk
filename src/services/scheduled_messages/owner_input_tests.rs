@@ -52,8 +52,8 @@ async fn postgres_accepted_snapshot_waits_for_exact_owner_then_settles_recorded_
         assert_eq!(before,std::fs::read(&empty_path).unwrap(),"known scheduled admission cannot be recreated after owner loss");
         assert!(turn_completion::record(&pool,&turn,turn_completion::ScheduledTurnOutcome::Delivered).await.unwrap().is_evidence());
         assert!(!poll_agent_delivery(&pool,running.clone()).await,"recorded output alone cannot bypass the owner bind");
-        let during=bootstrap_held_by_modal(&handle,"bootstrap-attempt",poll_agent_delivery(&pool,running.clone())).await;
-        assert!(!during,"an attempt in its bootstrap window is no observer's");
+        #[cfg(unix)]
+        assert!(!bootstrap_held_by_modal(&handle,"bootstrap-attempt",poll_agent_delivery(&pool,running.clone())).await,"an attempt in its bootstrap window is no observer's");
         handle.v2_arm_head_for_tests("actual-scheduled-attempt").await.unwrap();
         assert!(!poll_agent_delivery(&pool,running.clone()).await,"the observer binds the armed attempt before it reads");
         let error:String=sqlx::query_scalar("SELECT error FROM scheduled_message_deliveries WHERE id=$1").bind(&fire.delivery_id).fetch_one(&pool).await.unwrap();
@@ -79,6 +79,7 @@ async fn postgres_accepted_snapshot_waits_for_exact_owner_then_settles_recorded_
 
 /// Reserves the head as `nonce` and arms it in its bootstrap window, runs `poll` there, then a
 /// modal veto ends it unsent and holds the original for its retry.
+#[cfg(unix)]
 async fn bootstrap_held_by_modal<T>(
     handle: &ChannelMailboxHandle,
     nonce: &str,

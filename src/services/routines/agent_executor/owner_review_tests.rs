@@ -301,6 +301,7 @@ async fn owner_observer_binds_the_armed_attempt_on_its_own_pg() {
 
 /// Reserves the head as `nonce` and arms it in its bootstrap window, runs `poll` there, then a
 /// modal veto ends it unsent and holds the original for its retry.
+#[cfg(unix)]
 async fn bootstrap_held_by_modal<T>(
     handle: &ChannelMailboxHandle,
     nonce: &str,
@@ -349,6 +350,7 @@ async fn bootstrap_held_by_modal<T>(
 
 /// An attempt still in its bootstrap window is no observer's: the poll there binds nothing, a modal
 /// ends it unsent, and the retry of the same admission is the attempt bound and completed.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn owner_observer_skips_a_bootstrapping_attempt_and_completes_its_retry_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
