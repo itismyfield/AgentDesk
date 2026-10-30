@@ -96,9 +96,8 @@ fn claude_path(fx: &Fixture, session: &str) -> PathBuf {
     path(fx.cwd.path(), session, None).unwrap()
 }
 
-/// The same execution's `/clear` to a new session and that session's first prompt: their hooks,
-/// under the hook command the running Claude launched with, name the new session and its
-/// transcript, which the pane adopts.
+/// The same execution's `/clear` and the new session's first prompt, whose hooks under the launch
+/// hook command name that session and its transcript; the pane adopts it.
 fn clear_to_new_session(
     fx: &Fixture,
     envelope: &HookBindingEnvelope,
