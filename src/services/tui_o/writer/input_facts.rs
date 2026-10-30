@@ -212,6 +212,11 @@ impl InputFacts {
 
     /// A queued input was received whose native run has not started, so a run is still owed.
     pub fn pending_receipt(&self) -> bool {
+        self.queued.owed() > 0
+    }
+
+    /// How many received inputs have not started their native run.
+    pub fn owed_inputs(&self) -> usize {
         self.queued.owed()
     }
 
