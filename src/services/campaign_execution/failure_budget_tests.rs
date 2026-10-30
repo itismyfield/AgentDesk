@@ -34,7 +34,11 @@ fn three_repairs_are_allowed_and_each_cycle_counts_once() {
     );
     assert_eq!(node.disposition, NodeDisposition::Failed);
     assert_eq!((node.quality_failures, node.repair_cycles), (4, 3));
-    // A late report from an earlier cycle changes nothing.
+    // The exhausted cycle reported again, or a late report from an earlier one, changes nothing.
+    assert_eq!(
+        record_quality_failure(&mut node, &mut counted, 3, &limits()),
+        FailureDisposition::AlreadyCounted
+    );
     assert_eq!(
         record_quality_failure(&mut node, &mut counted, 1, &limits()),
         FailureDisposition::AlreadyCounted

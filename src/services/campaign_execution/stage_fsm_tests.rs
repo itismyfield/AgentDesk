@@ -583,3 +583,58 @@ fn finish_stage_freezes_the_current_review_v_and_immediate_revokes_it() {
         RejectionCode::StaleFence
     );
 }
+
+#[test]
+fn finish_stage_keeps_the_unsealed_work_v_slots_for_the_same_work() {
+    let (state, work) = assigned();
+    let finishing = domain::stop(&state, StopMode::FinishStage);
+    let stop = finishing.run.as_ref().unwrap().stop.as_ref().unwrap();
+    assert_eq!(stop.finish_grants.len(), 2);
+    assert!(stop.finish_grants.iter().all(|g| g.consumer_attempt == "work-a"));
+    let start = execution(&state, "work-a").start_executions[0].clone();
+    let archive = phase_action(&finishing, &start, "archive");
+    assert_eq!(action(&finishing, &archive), ActionState::Planned);
+    assert_eq!(action(&finishing, "launch-work-a"), ActionState::Cancelled);
+    // The output sealed after the stop fills the slot registered before it; no new V appears.
+    let mut materialized = finishing.clone();
+    materialize(&mut materialized, &start, &seal_of(&state, &work));
+    let claimed = apply(&materialized, advance(&start, "archive", &work, ActionState::Claimed));
+    assert_eq!(action(&claimed, &archive), ActionState::Claimed);
+    assert_eq!(claimed.run.as_ref().unwrap().verifications.len(), 2);
+}
+
+#[test]
+fn finish_plan_phase_may_start_after_its_gate_applied_the_stop_fence() {
+    let (mut handed, work, review, seal) = handed_over();
+    let finish = finish_v(&handed);
+    materialize(&mut handed, &finish, &seal);
+    let run = handed.run.as_mut().unwrap();
+    run.attempts.get_mut("review-r").unwrap().started = true;
+    let finishing = domain::stop(&handed, StopMode::FinishStage);
+    let archive = phase_action(&finishing, &finish, "archive");
+    let run = finishing.run.as_ref().unwrap();
+    let fenced = apply(
+        &finishing,
+        Command::AcknowledgeFence {
+            expected_run: run.id.clone(),
+            target: run.actions[&archive].target.clone(),
+            control_version: run.control_version,
+        },
+    );
+    let claimed = apply(&fenced, advance(&finish, "archive", &review, ActionState::Claimed));
+    let pending = apply(
+        &claimed,
+        advance(&finish, "archive", &review, ActionState::StartPending),
+    );
+    let started = apply(
+        &pending,
+        Command::ObserveAction {
+            action_id: archive.clone(),
+            binding: Box::new(work),
+            observation: ActionObservation::Started {
+                receipt: "archive-receipt".into(),
+            },
+        },
+    );
+    assert_eq!(action(&started, &archive), ActionState::Started);
+}
