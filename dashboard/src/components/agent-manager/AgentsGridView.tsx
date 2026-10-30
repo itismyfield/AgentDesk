@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import type { Agent, Department } from "../../types";
 import { localeName } from "../../i18n";
 import { getProviderMeta } from "../../app/providerTheme";
@@ -53,6 +54,8 @@ export function AgentsGridView({
   topSkillsByAgent,
   tr,
 }: AgentsGridViewProps) {
+  const selectionPanelRef = useRef<HTMLDivElement>(null);
+
   return (
 <div
   data-testid="agents-view-grid"
@@ -70,7 +73,14 @@ export function AgentsGridView({
           key={agent.id}
           type="button"
           data-testid={`agents-grid-card-${agent.id}`}
-          onClick={() => setSelectedAgentId(agent.id)}
+          onClick={() => {
+            setSelectedAgentId(agent.id);
+            requestAnimationFrame(() => {
+              if (window.matchMedia("(max-width: 1279px)").matches) {
+                selectionPanelRef.current?.scrollIntoView({ block: "start" });
+              }
+            });
+          }}
           aria-pressed={isSelected}
           className={`min-w-0 rounded-lg border p-4 text-left transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--th-accent-primary)] ${isSelected ? "border-[var(--th-accent-primary)] bg-surface-subtle" : "border-th-border-subtle bg-th-bg-surface hover:bg-surface-subtle"}`}
         >
@@ -148,7 +158,8 @@ export function AgentsGridView({
   </div>
 
   {selectedAgent ? (
-    <SurfaceCard data-testid="agents-selection-panel" className="order-first min-w-0 p-4 sm:p-5 xl:order-none xl:sticky xl:top-0">
+    <div ref={selectionPanelRef} className="order-first min-w-0 scroll-mt-4 xl:order-none xl:sticky xl:top-0">
+    <SurfaceCard data-testid="agents-selection-panel" className="min-w-0 p-4 sm:p-5">
       {(() => {
         const department = departments.find((candidate) => candidate.id === selectedAgent.department_id);
         const providerMeta = getProviderMeta(selectedAgent.cli_provider);
@@ -191,7 +202,7 @@ export function AgentsGridView({
                 },
                 {
                   label: tr("부서", "Department"),
-                  value: department ? `${department.icon} ${localeName(locale, department)}` : tr("미배정", "Unassigned"),
+                  value: department ? [department.icon, localeName(locale, department)].filter(Boolean).join(" ") : tr("미배정", "Unassigned"),
                 },
                 {
                   label: tr("레벨", "Level"),
@@ -304,6 +315,7 @@ export function AgentsGridView({
         );
       })()}
     </SurfaceCard>
+    </div>
   ) : (
     <p className="text-xs leading-5 text-th-text-muted">{tr("에이전트를 선택하면 상세 정보와 편집·복제·삭제 동작을 확인할 수 있습니다.", "Select an agent to view details, edit, duplicate, or delete.")}</p>
   )}

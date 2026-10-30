@@ -5,7 +5,7 @@ PR #7562 홈의 정보 위계를 에이전트 관리 화면에 적용했다. 기
 ## 화면과 동작
 
 - 에이전트 3탭, 부서/상태/정렬/검색, grid/list 선택을 보존했다. 부서 칩 12개 대신 개수를 포함한 select를 쓰고 선택한 부서 편집을 명시적 동작으로 제공한다.
-- 선택 전 비어 있던 PC 상세 열을 없애 목록이 전체 폭을 쓴다. 선택하면 PC는 목록/상세 2영역, 모바일은 선택 상세가 목록 앞에 나타난다. 선택 닫기를 추가했다.
+- 선택 전 비어 있던 PC 상세 열을 없애 목록이 전체 폭을 쓴다. 선택하면 PC는 목록/상세 2영역, 모바일은 선택 상세가 목록 앞에 나타난다. 선택 닫기를 추가했다. 한 열로 표시되는 폭에서는 카드 선택 직후 앱이 상세 패널로 이동하며, 이미 선택한 카드를 다시 눌러도 상세가 보인다.
 - 목록은 이름/역할/현재 작업/관리 동작을 분리하고 긴 텍스트를 줄바꿈한다. 목록 항목의 키보드 진입도 지원한다.
 - 부서 카드/순서 변경/생성 폼, 에이전트 수정 폼/생성 마법사 6단계, 직원 상세, 파견 인력/세션 상세를 같은 작은 모서리와 경계선으로 정리했다.
 - 잘리던 모바일 마법사는 고정 헤더·푸터 사이의 본문이 스크롤한다. 프롬프트 파일 경로와 확인 화면은 긴 문자열을 감싼다. avatar 상태 점은 실제 avatar 경계를 따른다.
@@ -28,7 +28,7 @@ PR #7562 홈의 정보 위계를 에이전트 관리 화면에 적용했다. 기
 - `npm run build` 성공.
 - `PLAYWRIGHT_PORT=5275 npm run test:e2e -- --grep 'agents:' --reporter=line`: 4 passed, 2 viewport-specific skips.
 - AgentFormModal 단위 시험 통과.
-- Playwright CLI `verify-agents.js`: 68개 상태에서 폭 검사 실패 0건. 모든 기본/폼/마법사/세션 상태를 캡처하고 DOM 폭을 확인했다. 비활성 tooltip과 Vaul의 숨은 hit area는 실제 표시와 구분한다.
+- Playwright CLI `verify-agents.js`: 기본 68개 상태와 모바일 자연 선택 4개 상태에서 폭 검사 실패 0건. 모든 기본/폼/마법사/세션 상태를 캡처하고 DOM 폭을 확인했다. 최초 검증의 선택 직후 강제 스크롤은 제거했다. 추가로 실제 390px에서 목록 하단 카드를 클릭하고 같은 카드를 다시 눌렀을 때 라이트/다크 모두 상세 상단이 105px에 나타나는지 확인했다. 검증 스크립트는 클릭 뒤 스크롤을 조작하지 않는다. 비활성 tooltip과 Vaul의 숨은 hit area는 실제 표시와 구분한다.
 - `git diff --check`와 foundation 기준 PR cap 확인.
 
-로컬 증거는 `output/playwright/people/`의 `before/`, `final/`, `verify-agents.js`, `layout-results.txt`다. 캡처와 검증 스크립트는 별도 ZIP으로 전달하며 저장소에 PNG를 넣지 않는다. 머지·배포하지 않는다.
+로컬 증거는 `output/playwright/people/`의 `before/`, `final/`, `verify-agents.js`, `layout-results.txt`, `natural-selection.js`, `natural-selection-results.txt`다. 자연 선택 결함 원본은 `natural-selection-before.png`에 별도로 남겼다. 캡처와 검증 스크립트는 별도 ZIP으로 전달하며 저장소에 PNG를 넣지 않는다. 머지·배포하지 않는다.
