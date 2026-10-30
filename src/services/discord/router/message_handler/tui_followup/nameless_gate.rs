@@ -173,8 +173,8 @@ async fn returns_to_tmux(
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
 ) -> bool {
-    let build = crate::services::discord::adk_session::build_adk_session_key;
-    let key = build(shared, channel_id, provider, None).await;
+    let key = crate::services::discord::adk_session::turn_session_key;
+    let key = key(shared, channel_id, provider).await;
     let pool = shared.pg_pool.as_ref();
     let host =
         crate::services::turn_host::for_turn(pool, provider, channel_id.get(), key.as_deref());

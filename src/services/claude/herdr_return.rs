@@ -1,5 +1,5 @@
-//! A channel leaving Herdr takes its Claude session back to tmux: the Herdr execution ends by its
-//! own `/exit`, its row retires, and its pane is released before the tmux turn resumes the session.
+//! A channel leaving Herdr takes its Claude back to tmux: the Herdr execution ends by its `/exit`,
+//! its row retires and its pane is released; the tmux turn resumes the session or uses a live tmux.
 
 use std::path::Path;
 
@@ -34,7 +34,18 @@ pub(crate) trait ReturnPorts {
 
 pub(crate) struct ProductionPorts;
 
-impl ReturnPorts for ProductionPorts {}
+impl ReturnPorts for ProductionPorts {
+    #[cfg(test)]
+    fn herdr<'a>(&self, record: &'a HostedExecution) -> Box<dyn EarlierExecution + 'a> {
+        let logical = &record.owner.logical_key;
+        tests::standing_in(logical, true).unwrap_or_else(|| Box::new(HerdrPane::of(record)))
+    }
+
+    #[cfg(test)]
+    fn tmux<'a>(&self, logical: &'a str) -> Box<dyn EarlierExecution + 'a> {
+        tests::standing_in(logical, false).unwrap_or_else(|| Box::new(LegacyTmux(logical)))
+    }
+}
 
 /// What a return turn carries over to its tmux turn.
 pub(crate) struct ReturnTurn<'a> {
@@ -63,12 +74,13 @@ pub(crate) fn execute(
             "herdr return: {nonce} may hold an unsubmitted prompt"
         ));
     }
-    match ports.tmux(logical).liveness() {
-        Liveness::Ended => {}
-        Liveness::Running => return Err(format!("herdr return: tmux {logical} still runs")),
+    // A fresh move to Herdr leaves the channel's tmux Claude running; the turn goes back to it,
+    // so nothing is resumed and only the Herdr execution ends.
+    let account = match ports.tmux(logical).liveness() {
+        Liveness::Ended => resumable(turn, record)?,
+        Liveness::Running => None,
         Liveness::Unknown(why) => return Err(format!("herdr return: tmux {logical}: {why}")),
-    }
-    let account = resumable(turn, record)?;
+    };
     if record.state == HostedState::Bound {
         session_handoff::end_by_exit(&mut *ports.herdr(record), ports.exit_wait())?;
         let retire = retire_pg(turn.pool, &plan.row, &record.owner, nonce);

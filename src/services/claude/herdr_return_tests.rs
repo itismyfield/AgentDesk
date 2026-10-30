@@ -16,16 +16,54 @@ const LOGICAL: &str = "AgentDesk-claude-return";
 
 /// One host's earlier Claude: running while `alive`; an `/exit` ends it unless `stays`.
 #[derive(Default)]
-struct Side {
-    alive: bool,
+pub(crate) struct Side {
+    pub(crate) alive: bool,
     unknown: bool,
     draft: bool,
     stays: bool,
     reads: usize,
-    exits: usize,
+    pub(crate) exits: usize,
 }
 
 struct View(Arc<Mutex<Side>>);
+
+/// The Herdr and tmux Claude of each logical key a production return reads instead of its hosts.
+static STAND_INS: Mutex<Vec<(String, Arc<Mutex<Side>>, Arc<Mutex<Side>>)>> = Mutex::new(Vec::new());
+
+/// `logical`'s Herdr and tmux Claude as every production return reads them while this lives.
+pub(crate) struct StandIn {
+    logical: String,
+    pub(crate) herdr: Arc<Mutex<Side>>,
+    pub(crate) tmux: Arc<Mutex<Side>>,
+}
+
+impl StandIn {
+    pub(crate) fn new(logical: &str) -> Self {
+        let (herdr, tmux) = (Arc::<Mutex<Side>>::default(), Arc::<Mutex<Side>>::default());
+        let mut stand_ins = STAND_INS.lock().unwrap_or_else(|e| e.into_inner());
+        stand_ins.retain(|(key, _, _)| key != logical);
+        stand_ins.push((logical.to_owned(), Arc::clone(&herdr), Arc::clone(&tmux)));
+        Self {
+            logical: logical.to_owned(),
+            herdr,
+            tmux,
+        }
+    }
+}
+
+impl Drop for StandIn {
+    fn drop(&mut self) {
+        let mut stand_ins = STAND_INS.lock().unwrap_or_else(|e| e.into_inner());
+        stand_ins.retain(|(key, _, _)| *key != self.logical);
+    }
+}
+
+pub(super) fn standing_in(logical: &str, herdr: bool) -> Option<Box<dyn EarlierExecution>> {
+    let stand_ins = STAND_INS.lock().unwrap_or_else(|e| e.into_inner());
+    let (_, on_herdr, on_tmux) = stand_ins.iter().find(|(key, _, _)| key == logical)?;
+    let side = if herdr { on_herdr } else { on_tmux };
+    Some(Box::new(View(Arc::clone(side))))
+}
 
 impl EarlierExecution for View {
     fn liveness(&mut self) -> Liveness {
@@ -255,13 +293,13 @@ fn b1_a_bound_herdr_claude_exits_once_retires_and_hands_its_session_back_pg() {
     assert_eq!(herdr_listed_execution(LOGICAL).as_deref(), Some("newer"));
 }
 
-// A draft, a held prompt, a running tmux Claude, an unobserved Herdr Claude or one outliving its
-// exit leaves the row Bound, the listing and the Herdr marker as they were, and stops the turn.
+// A draft, a held prompt, an unobserved Herdr Claude or one outliving its exit leaves the row
+// Bound, the listing and the Herdr marker as they were, and stops the turn.
 #[test]
 fn b3_a_herdr_claude_not_ended_by_its_exit_keeps_its_row_and_host_pg() {
     let fx = Fixture::new();
     type Setup = fn(&Ports, &Fixture);
-    let cases: [(&str, Setup, &str, usize); 5] = [
+    let cases: [(&str, Setup, &str, usize); 4] = [
         (
             "draft",
             |p, _| p.herdr.lock().unwrap().draft = true,
@@ -276,12 +314,6 @@ fn b3_a_herdr_claude_not_ended_by_its_exit_keeps_its_row_and_host_pg() {
                 std::fs::write(hold, "t").unwrap();
             },
             "unsubmitted prompt",
-            0,
-        ),
-        (
-            "tmux runs",
-            |p, _| p.tmux.lock().unwrap().alive = true,
-            "still runs",
             0,
         ),
         (
@@ -312,6 +344,34 @@ fn b3_a_herdr_claude_not_ended_by_its_exit_keeps_its_row_and_host_pg() {
         );
         let _ = crate::services::claude::herdr_turn::unlink_hold(&fx.nonce);
     }
+}
+
+// A fresh move to Herdr left the channel's tmux Claude running: the return ends the Herdr Claude
+// alone and hands the channel back to that tmux, which needs no resume proof of the Herdr session.
+#[test]
+fn b9_a_return_after_a_fresh_move_ends_herdr_alone_and_goes_back_to_the_running_tmux_pg() {
+    let fx = Fixture::new();
+    let other = uuid::Uuid::new_v4().to_string();
+    tc::write_claude_session_auth(LOGICAL, &other, "work").unwrap();
+    let ports = running();
+    ports.tmux.lock().unwrap().alive = true;
+    assert_eq!(fx.run(&ports), Ok(()));
+    assert_eq!(ports.herdr.lock().unwrap().exits, 1);
+    let tmux = ports.tmux.lock().unwrap();
+    assert_eq!(
+        (tmux.exits, tmux.alive),
+        (0, true),
+        "the running tmux Claude is kept"
+    );
+    drop(tmux);
+    assert_eq!(fx.state(), HostedState::Retired);
+    assert!(!on_herdr(fx.marker()));
+    assert_eq!(herdr_listed_execution(LOGICAL), None);
+    let profile = tc::session_temp_path(LOGICAL, "auth_profile");
+    assert!(
+        !std::path::Path::new(&profile).exists(),
+        "no account is recorded"
+    );
 }
 
 // A Herdr Claude that already exited is not typed to; a return that stopped after its retire
