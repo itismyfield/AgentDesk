@@ -3915,11 +3915,13 @@ src/
 │   │   │   │   ├── settled.rs
 │   │   │   │   └── terminal.rs
 │   │   │   ├── admission_tests.rs
+│   │   │   ├── cache_tests.rs
 │   │   │   ├── claude_fold.rs
 │   │   │   ├── codex.rs
 │   │   │   ├── codex_claim_tests.rs
 │   │   │   ├── lane_tests.rs
-│   │   │   └── log_record.rs
+│   │   │   ├── log_record.rs
+│   │   │   └── read_cache.rs
 │   │   ├── hosted_source/
 │   │   │   ├── observation.rs
 │   │   │   └── source_tests.rs
