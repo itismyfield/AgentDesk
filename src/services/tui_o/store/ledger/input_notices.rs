@@ -78,6 +78,7 @@ pub struct MigrationDebt {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NoticeState {
     pub migration: Option<MigrationSnapshot>,
+    pub frozen_at: Option<chrono::DateTime<chrono::Utc>>,
     pub evidence: HashMap<RecordId, NoticeEvidence>,
     pub unresolved: HashMap<RecordId, MigrationDebt>,
     pub imported: BTreeMap<UnitKey, u64>,

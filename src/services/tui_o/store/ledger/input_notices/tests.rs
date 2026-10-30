@@ -90,8 +90,9 @@ fn materialized_unresolved_input_replays_raw_evidence_without_a_receipt() {
         let entry = LedgerEntry::InputNotice {
             entry: Box::new(entry),
         };
-        super::super::append(&path, Utc::now(), &entry).unwrap();
-        expected.apply(Utc::now(), entry);
+        let at = Utc::now();
+        super::super::append(&path, at, &entry).unwrap();
+        expected.apply(at, entry);
     }
     let replay = super::super::recover(&path, 100).unwrap();
     assert_eq!(replay, expected);
