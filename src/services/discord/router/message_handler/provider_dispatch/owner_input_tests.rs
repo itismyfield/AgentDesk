@@ -300,6 +300,7 @@ impl Rig {
         let host = TurnHost::Tmux;
         let turn = StreamingTurn {
             pool: self.pool.get(),
+            shared: None,
             provider,
             prompt: PROMPT,
             session_id: None,
@@ -1024,4 +1025,92 @@ fn a_create_route_refuses_an_existing_hand_over() {
     assert_eq!(snapshot["retained_inputs"], json!([]), "{snapshot}");
     assert_eq!(rig.bind(), TurnBind::NotArmed);
     assert!(rig.events().is_empty(), "{:?}", rig.events());
+}
+
+/// The turn's inflight row as the running turn records it: its pane and live transcript.
+fn running_row(rig: &Rig, pane: &str) {
+    let transcript = rig.transcript().display().to_string();
+    let row = crate::services::discord::inflight::InflightTurnState::new(
+        ProviderKind::Claude,
+        rig.channel,
+        None,
+        7,
+        1,
+        2,
+        "go".into(),
+        Some(format!("sid-{}", rig.channel)),
+        Some(pane.into()),
+        Some(transcript),
+        None,
+        0,
+    );
+    crate::services::discord::inflight::save_inflight_state(&row).unwrap();
+}
+
+/// A front handed into the running turn reaches the pane its inflight row names, once, with no
+/// registration but the runtime's own; without a live busy pane the grant stays unspent and no
+/// key is sent.
+#[test]
+fn a_busy_front_is_written_into_the_pane_its_running_turn_names() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig("hb-busy", 7_272_521, "normal", view("", false), BUSY);
+    let hand = |front: Front| {
+        let owner = (rig.mailbox.clone(), None);
+        let handed = hand_busy(owner, ProviderKind::Claude, (rig.channel, front));
+        rig.runtime.block_on(handed)
+    };
+    let unobserved = Err("NotSent(\"busy_turn_unobserved\")".to_string());
+    assert_eq!(hand(rig.granted_front()), unobserved, "no running turn row");
+    running_row(&rig, "hb-gone");
+    assert_eq!(hand(rig.granted_front()), unobserved, "its pane is gone");
+    assert!(rig.events().is_empty(), "no key: {:?}", rig.events());
+    let outstanding = rig
+        .mailbox
+        .v2_request(|slot| Ok(slot.as_ref().unwrap().front_outstanding()));
+    assert_eq!(
+        rig.runtime.block_on(outstanding),
+        Ok(true),
+        "the grant is unspent"
+    );
+    running_row(&rig, &rig.name);
+    assert_eq!(hand(rig.granted_front()), Ok(()));
+    assert_eq!(rig.events(), ["paste", "Enter"]);
+    let snapshot = rig.snapshot();
+    assert!(snapshot["head_injection"].is_null(), "{snapshot}");
+    assert!(
+        snapshot["items"].as_array().unwrap().is_empty(),
+        "{snapshot}"
+    );
+    assert_eq!(snapshot["retained_inputs"], json!([]), "{snapshot}");
+    let pasted = fs::read_to_string(rig.renderer.join("body")).unwrap();
+    assert!(pasted.contains(PROMPT), "{pasted}");
+}
+
+/// With no turn running the drive hands each front to the idle start, never into a pane.
+#[test]
+fn an_idle_channel_hands_its_front_to_the_turn_start() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig("hb-idle", 7_272_522, "normal", view("", false), IDLE);
+    let fronts = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = fronts.clone();
+    let idle: crate::services::discord::queue_io::input_owner::drive::Handoff =
+        Arc::new(move |front: Front| {
+            seen.lock().unwrap().push(front);
+            Box::pin(async { Err("left queued".into()) })
+        });
+    let owner = (rig.mailbox.clone(), None);
+    let drive = owner_drive(owner, (ProviderKind::Claude, rig.channel), idle);
+    let _entered = rig.runtime.enter();
+    crate::services::discord::queue_io::input_owner::drive::wake(drive);
+    for _ in 0..200 {
+        if !fronts.lock().unwrap().is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    let fronts = fronts.lock().unwrap();
+    assert_eq!(fronts.len(), 1, "one look while the front stays put");
+    assert_eq!(fronts[0].1.text, PROMPT);
+    assert!(rig.events().is_empty(), "no key: {:?}", rig.events());
 }

@@ -5,16 +5,20 @@ use std::sync::Mutex;
 
 use super::StreamingTurn;
 use crate::services::claude_tui::{busy_inject, owner_input as scope};
-use crate::services::discord::queue_io::input_owner::drive::FrontClaim;
+use crate::services::discord::queue_io::input_owner::drive::{
+    Drive, Front, FrontClaim, Handoff, claim_turn,
+};
 use crate::services::discord::queue_io::input_owner::effect::{
     self, BusyClaude, BusyClaudeHerdr, BusyCodex, BusyCodexHerdr, Clock, CodexInput, Completion,
     PreparedPayload,
 };
 use crate::services::discord::queue_io::input_owner::origin::{Execution, InputOrigin};
 use crate::services::discord::queue_io::input_owner::{pump, target};
+use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::session_host::HerdrTarget;
-use crate::services::turn_host::TurnHost;
-use crate::services::turn_orchestrator::ChannelMailboxHandle;
+use crate::services::turn_host::{HerdrTurnPlan, TurnHost};
+use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};
+use serde_json::{Value, json};
 
 /// What the owner verified about a channel's target before its turn reached dispatch.
 pub(super) struct Registration {
@@ -36,6 +40,170 @@ pub(super) struct Registration {
     timing: &'static busy_inject::Timing,
     /// The provider's observer of the AI turn an idle submit starts; returns once that turn ends.
     until_done: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl Registration {
+    /// A front's registration on an adopted channel, read from what its turn already observes:
+    /// the host verdict, the tmux spawn marker or Bound Herdr row, and the live transcript and
+    /// session. Without a live execution the phase is Absent, whatever `busy` says.
+    pub(super) fn observed(
+        mailbox: ChannelMailboxHandle,
+        (provider, origin, busy): (&str, InputOrigin, bool),
+        (host, session, live): (&TurnHost, &str, Option<(&str, Option<&str>)>),
+        original: &PendingQueueItem,
+        until_done: Option<Box<dyn FnOnce() + Send>>,
+    ) -> Result<Self, String> {
+        let herdr = match host {
+            TurnHost::Herdr(plan) => bound_herdr(plan),
+            _ => None,
+        };
+        let alive = match host {
+            TurnHost::Tmux => crate::services::platform::tmux::has_session(session),
+            _ => herdr.is_some(),
+        };
+        let phase = match (alive, busy) {
+            (false, _) => target::Phase::Absent,
+            (true, true) => target::Phase::Busy,
+            (true, false) => target::Phase::Idle,
+        };
+        // An Absent attempt's target and source are the created execution's, set by its launch.
+        let target = match (&herdr, phase) {
+            (_, target::Phase::Absent) => Value::Null,
+            (Some((_, _, target)), _) => target.clone(),
+            (None, _) => scope::created_tmux_target(provider, session)?,
+        };
+        let source = match live.filter(|_| phase != target::Phase::Absent) {
+            Some((path, Some(session_id))) => {
+                use std::os::unix::fs::MetadataExt;
+                let meta = std::fs::metadata(path).map_err(|error| error.to_string())?;
+                json!({"kind":"existing","session_id":session_id,"transcript":path,
+                    "file":[meta.dev(), meta.ino()],"offset":meta.len()})
+            }
+            _ => json!({"kind":"pre_source","expected_session_id":null,
+                "expected_transcript":null,"binding_watermark":null}),
+        };
+        let sources = match original.source_message_ids.as_slice() {
+            [] => vec![original.message_id.to_string()],
+            ids => ids.iter().map(u64::to_string).collect(),
+        };
+        Ok(Self {
+            mailbox,
+            execution: Execution::LocalTui,
+            origin,
+            phase,
+            attempt: json!({"nonce":busy_inject::fresh_nonce(),"provider":provider,
+                "target":target,"source":source}),
+            sources,
+            transcript: live.map_or_else(PathBuf::new, |(path, _)| path.into()),
+            program: "tmux".into(),
+            herdr: herdr.map(|(pane, writer, _)| (pane, writer)),
+            author: original.author_id.to_string(),
+            name: format!("discord:{}", original.author_id),
+            clock: std::sync::Arc::new(|| chrono::Utc::now().timestamp_millis().max(0) as u64),
+            timing: &busy_inject::TIMING,
+            until_done,
+        })
+    }
+}
+
+/// A Bound Herdr row's gated pane, its physical writer `socket#pane` and its attempt target.
+fn bound_herdr(plan: &HerdrTurnPlan) -> Option<(HerdrTarget, String, Value)> {
+    use crate::db::dispatched_sessions::hosted_execution::{HostedRecord, HostedState};
+    let HostedRecord::Known(record) = &plan.row.as_ref()?.record else {
+        return None;
+    };
+    let at = (record.location.as_ref()).filter(|_| record.state == HostedState::Bound)?;
+    let pane = crate::services::session_host::herdr_endpoints().target(record)?;
+    let target = json!({"host":"herdr","owner":record.owner.logical_key,"root":at.socket_addr,
+        "execution_nonce":record.execution_nonce});
+    Some((pane, format!("{}#{}", at.socket_addr, at.pane_id), target))
+}
+
+/// The channel's owner drive: a front goes into the turn that runs, else to `idle`, the start of
+/// a turn that claims it.
+pub(in crate::services::discord) fn owner_drive(
+    (mailbox, pool): (ChannelMailboxHandle, Option<sqlx::PgPool>),
+    (provider, channel): (ProviderKind, u64),
+    idle: Handoff,
+) -> std::sync::Arc<Drive> {
+    let busy = mailbox.clone();
+    let handoff: Handoff = std::sync::Arc::new(move |front| {
+        let (mailbox, pool, provider, idle) =
+            (busy.clone(), pool.clone(), provider.clone(), idle.clone());
+        Box::pin(async move {
+            match mailbox.has_active_turn().await {
+                Ok(true) => hand_busy((mailbox, pool), provider, (channel, front)).await,
+                Ok(false) => idle(front).await,
+                Err(unreachable) => Err(format!("{unreachable:?}")),
+            }
+        })
+    });
+    let recheck = std::time::Duration::from_secs(5);
+    std::sync::Arc::new(Drive {
+        mailbox,
+        channel,
+        handoff,
+        recheck,
+    })
+}
+
+/// A front into the channel's running turn: the turn's inflight row names its pane, transcript
+/// and host row, the owner's claim spends the grant only for a live busy pane, and the drive
+/// waits for the input's settlement while the AI turn runs on.
+pub(in crate::services::discord) async fn hand_busy(
+    (mailbox, pool): (ChannelMailboxHandle, Option<sqlx::PgPool>),
+    provider: ProviderKind,
+    (channel, front): (u64, Front),
+) -> Result<(), String> {
+    let unobserved = || "NotSent(\"busy_turn_unobserved\")".to_string();
+    let row = crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel)
+        .ok_or_else(unobserved)?;
+    let session = row.tmux_session_name.clone().ok_or_else(unobserved)?;
+    let key = row.session_key.as_deref();
+    let host = crate::services::turn_host::for_turn(pool.as_ref(), &provider, channel, key).await;
+    let live = (row.output_path.as_deref()).map(|path| (path, row.session_id.as_deref()));
+    let at = (&host, session.as_str(), live);
+    let kind = (provider.as_str(), InputOrigin::Discord, true);
+    let owner = Registration::observed(mailbox.clone(), kind, at, &front.1, None)?;
+    if owner.phase != target::Phase::Busy {
+        return Err(unobserved());
+    }
+    let claim = claim_turn(&mailbox, front.1.message_id, &front).await?;
+    let claim = claim.ok_or("NotSent(\"front_not_granted\")")?;
+    let (settled, answer) = tokio::sync::oneshot::channel();
+    let thread = tokio::task::spawn_blocking(move || {
+        let turn = StreamingTurn {
+            pool: pool.as_ref(),
+            shared: None,
+            provider: &provider,
+            prompt: &front.1.text,
+            session_id: None,
+            working_dir: "",
+            system_prompt: None,
+            allowed_tools: &[],
+            cancel: std::sync::Arc::new(CancelToken::new()),
+            codex_observation: None,
+            tmux_session_name: Some(&session),
+            teardown: None,
+            host: &host,
+            channel_id: channel,
+            model: None,
+            native_fast_mode: None,
+            codex_goals: None,
+            compact_percent: None,
+            compact_lower_bound_tokens: 0,
+            compact_token_limit: None,
+            cache_ttl_minutes: None,
+            dispatch_type: None,
+            force_fresh: false,
+            submission: None,
+        };
+        execute_front(turn, std::sync::mpsc::channel().0, claim, owner, settled)
+    });
+    match answer.await {
+        Ok(settlement) => settlement,
+        Err(_) => thread.await.map_err(|error| error.to_string())?,
+    }
 }
 
 /// The drive's answer for one front: its local settlement, never its AI completion.
