@@ -110,6 +110,111 @@ fn materialized_unresolved_input_replays_raw_evidence_without_a_receipt() {
     assert_eq!((replay.anchor(), replay.next_serial()), (100, 0));
 }
 
+fn replay_materialized(inputs: &[NoticeEvidence]) -> LedgerState {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledger.jsonl");
+    std::fs::File::create(&path).unwrap();
+    for input in inputs {
+        super::super::append(
+            &path,
+            Utc::now(),
+            &LedgerEntry::InputNotice {
+                entry: Box::new(NoticeEntry::Materialized {
+                    evidence: Box::new(input.clone()),
+                }),
+            },
+        )
+        .unwrap();
+    }
+    super::super::recover(&path, 10).unwrap()
+}
+
+#[test]
+fn rerendered_materialized_replay_keeps_first_payload_and_enriches_missing_fields() {
+    for reverse in [false, true] {
+        for missing_payload in [false, true] {
+            let mut first = evidence("p", "first\n\nhttps://example.com/a_b", 0);
+            let mut next = first.clone();
+            next.payload = Some("another renderer's payload".into());
+            if reverse {
+                std::mem::swap(&mut first.payload, &mut next.payload);
+            }
+            if missing_payload {
+                first.payload = None;
+            }
+            first.origin = None;
+            let state = replay_materialized(&[first.clone(), next.clone()]);
+            assert_eq!(state.violation(), None);
+            let mut expected = first.clone();
+            expected.payload = first.payload.or(next.payload);
+            expected.origin = next.origin;
+            assert_eq!(
+                state.input_notices().evidence.values().next(),
+                Some(&expected)
+            );
+        }
+    }
+    let first = evidence("p", "first", 0);
+    let mut partial = first.clone();
+    partial.payload = None;
+    partial.origin = None;
+    let state = replay_materialized(&[first.clone(), partial]);
+    assert_eq!(state.violation(), None);
+    assert_eq!(state.input_notices().evidence.values().next(), Some(&first));
+}
+
+#[test]
+fn materialized_prompt_must_match_raw_even_without_digest_or_native_key() {
+    let mut first = evidence("p", "first", 0);
+    first.prompt_sha256 = None;
+    first.unit_key = None;
+    let mut changed = first.clone();
+    changed.prompt = Some("other".into());
+    for inputs in [vec![changed.clone()], vec![first.clone(), changed]] {
+        let state = replay_materialized(&inputs);
+        assert_eq!(
+            state.violation(),
+            Some("input notice prompt or native key mismatches its raw record")
+        );
+        assert_eq!(state.input_notices().evidence.len(), inputs.len() - 1);
+        if inputs.len() == 2 {
+            assert_eq!(state.input_notices().evidence.values().next(), Some(&first));
+        }
+    }
+}
+
+#[test]
+fn rerendered_materialized_replay_still_rejects_source_field_conflicts() {
+    let first = evidence("p", "first", 0);
+    let mut changed_origin = first.clone();
+    changed_origin.origin.as_mut().unwrap().execution_nonce = "other".into();
+    let mut changed_key = first.clone();
+    changed_key.unit_key.as_mut().unwrap().channel_id += 1;
+    let mut changed_prompt = first.clone();
+    changed_prompt.prompt = Some("other".into());
+    changed_prompt.prompt_sha256 = Some(hex::encode(Sha256::digest(b"other")));
+    let mut changed_digest = first.clone();
+    changed_digest.prompt_sha256 = Some("f".repeat(64));
+    let mut changed_raw = first.clone();
+    let bytes = String::from_utf8(changed_raw.raw_record).unwrap();
+    changed_raw.raw_record = bytes
+        .replace("\"role\":\"user\"", "\"role\":\"USER\"")
+        .into_bytes();
+    assert_ne!(changed_raw.raw_record, first.raw_record);
+    for mut changed in [
+        changed_origin,
+        changed_key,
+        changed_prompt,
+        changed_digest,
+        changed_raw,
+    ] {
+        changed.payload = Some("another renderer's payload".into());
+        let state = replay_materialized(&[first.clone(), changed]);
+        assert!(state.violation().is_some());
+        assert_eq!(state.input_notices().evidence.values().next(), Some(&first));
+    }
+}
+
 #[test]
 fn legacy_import_is_one_atomic_receipt_without_moving_body_frontiers() {
     let first = evidence("p", "same", 0);

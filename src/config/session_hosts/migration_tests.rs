@@ -341,9 +341,9 @@ async fn migration_compares_recorded_location_to_proposed_mapping_not_old_locato
 }
 
 #[tokio::test]
-async fn migration_endpoint_identity_changes_and_channel_removal_refuse_live_rows() {
+async fn migration_endpoint_identity_changes_and_endpoint_removal_refuse_live_rows() {
     type Edit = (&'static str, fn(&mut BootSessionHosts));
-    let edits: [Edit; 8] = [
+    let edits: [Edit; 7] = [
         ("socket", |h| {
             h.config.herdr.endpoints.get_mut("one").unwrap().socket_path =
                 "/fixture/new.sock".into();
@@ -378,10 +378,6 @@ async fn migration_endpoint_identity_changes_and_channel_removal_refuse_live_row
         ("local node", |h| {
             h.local_node = Some("another-node".into());
         }),
-        ("channel removed", |h| {
-            h.channels.clear();
-            h.config.herdr.channels.clear();
-        }),
         ("endpoint removed", |h| {
             h.channels.clear();
             h.config.herdr = HerdrSection::default();
@@ -393,6 +389,109 @@ async fn migration_endpoint_identity_changes_and_channel_removal_refuse_live_row
         edit(&mut candidate);
         let store = Store::new(Some(old.clone()));
         let rows = Rows::new(vec![row(located(HostedState::Bound))]);
+        let selected = select(candidate, &store, &rows, &NoHoldStore, false)
+            .await
+            .into_hosts();
+        assert_eq!(Projection::of(&selected), Projection::of(&old), "{name}");
+        assert_eq!(
+            reason(&selected),
+            Some("session_hosts_migration_refused"),
+            "{name}"
+        );
+        assert!(store.saved.borrow().is_empty(), "{name}");
+    }
+}
+
+fn unmapped(hosts: &mut BootSessionHosts) {
+    hosts.channels.clear();
+    hosts.config.herdr.channels.clear();
+}
+
+// Removing only a channel's mapping lets its Bound local Claude execution return to tmux on its
+// first turn; any other row, or any other change to the endpoint it runs on, still refuses.
+#[tokio::test]
+async fn migration_mapping_removal_alone_approves_only_a_bound_local_claude_row() {
+    let old = fixture();
+    let mut candidate = old.clone();
+    unmapped(&mut candidate);
+    let store = Store::new(Some(old.clone()));
+    let rows = Rows::new(vec![row(located(HostedState::Bound))]);
+    let selected = select(candidate.clone(), &store, &rows, &NoHoldStore, false)
+        .await
+        .into_hosts();
+    assert_eq!(Projection::of(&selected), Projection::of(&candidate));
+    assert_eq!(reason(&selected), None);
+
+    let codex = || {
+        let mut record = located(HostedState::Bound);
+        if let HostedRecord::Known(known) = &mut record {
+            known.owner.provider = "codex".into();
+        }
+        record
+    };
+    type Case = (&'static str, fn(&mut BootSessionHosts), HostedRecord);
+    let cases: [Case; 8] = [
+        ("pending", |_| {}, located(HostedState::Pending)),
+        ("codex", |_| {}, codex()),
+        (
+            "socket",
+            |h| {
+                h.config.herdr.endpoints.get_mut("one").unwrap().socket_path =
+                    "/fixture/new.sock".into();
+            },
+            located(HostedState::Bound),
+        ),
+        (
+            "named session",
+            |h| {
+                h.config
+                    .herdr
+                    .endpoints
+                    .get_mut("one")
+                    .unwrap()
+                    .herdr_session = "new-session".into();
+            },
+            located(HostedState::Bound),
+        ),
+        (
+            "home",
+            |h| {
+                h.config.herdr.endpoints.get_mut("one").unwrap().herdr_home =
+                    "/fixture/new-home".into();
+            },
+            located(HostedState::Bound),
+        ),
+        (
+            "mode",
+            |h| {
+                h.config.herdr.endpoints.get_mut("one").unwrap().mode = EndpointMode::UserDefault;
+            },
+            located(HostedState::Bound),
+        ),
+        (
+            "endpoint node",
+            |h| {
+                h.config
+                    .herdr
+                    .endpoints
+                    .get_mut("one")
+                    .unwrap()
+                    .execution_node = "another-node".into();
+            },
+            located(HostedState::Bound),
+        ),
+        (
+            "local node",
+            |h| h.local_node = Some("another-node".into()),
+            located(HostedState::Bound),
+        ),
+    ];
+    for (name, edit, record) in cases {
+        let mut candidate = old.clone();
+        unmapped(&mut candidate);
+        edit(&mut candidate);
+        let store = Store::new(Some(old.clone()));
+        let rows = Rows::new(vec![row(record)]);
         let selected = select(candidate, &store, &rows, &NoHoldStore, false)
             .await
             .into_hosts();

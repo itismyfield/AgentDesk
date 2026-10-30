@@ -72,15 +72,27 @@ pub(crate) fn adopt_claude_continuation_explained(
     payload_session_id: &str,
     hook: &HookSignal,
 ) -> Result<Explained, BindingPersistError> {
-    let (mut failure, mut skip) = (None, None);
+    adopt_claude_continuation_moved(command_session_id, payload_session_id, hook)
+        .map(|(explained, _)| explained)
+}
+
+/// As `adopt_claude_continuation_explained`, with the session the pane was bound to when this
+/// hook moved it on; `None` when the hook moved nothing, as a later hook of the same move does.
+pub(crate) fn adopt_claude_continuation_moved(
+    command_session_id: &str,
+    payload_session_id: &str,
+    hook: &HookSignal,
+) -> Result<(Explained, Option<String>), BindingPersistError> {
+    let (mut failure, mut skip, mut previous) = (None, None, None);
     let adopted = adopt_continuation(
         command_session_id,
         payload_session_id,
         hook,
         &mut failure,
         &mut skip,
+        &mut previous,
     );
-    failure.map_or(Ok((adopted, skip)), Err)
+    failure.map_or(Ok(((adopted, skip), previous)), Err)
 }
 
 /// Herdr panes by logical key: the latest installed or judged execution's nonce and whether a
@@ -219,6 +231,19 @@ pub(crate) fn withhold_herdr_execution(logical: &str, nonce: Option<&str>) {
     });
 }
 
+/// Execution `nonce` left `logical` for tmux: its listing ends, so the pane's hooks and watcher
+/// read as tmux again. A newer execution listed there stays.
+pub(crate) fn release_herdr_execution(logical: &str, nonce: &str) {
+    change_hold(logical, |executions| {
+        if executions
+            .get(logical)
+            .is_some_and(|(listed, _)| listed == nonce)
+        {
+            executions.remove(logical);
+        }
+    });
+}
+
 /// Whether a claim on `logical` may be withheld: a Herdr host, or a pane a launch listed.
 /// Any other claim is admitted, whatever other panes are listed. Read under `herdr_listing_order`.
 pub(crate) fn herdr_claim_may_be_withheld(logical: &str, herdr_host: bool) -> bool {
@@ -233,6 +258,14 @@ pub(crate) fn herdr_execution_listed(logical: &str) -> bool {
     let executions = HERDR_EXECUTIONS.lock();
     let executions = executions.unwrap_or_else(|poison| poison.into_inner());
     executions.contains_key(logical)
+}
+
+/// The execution a launch or a reconcile last listed on `logical` as a Herdr pane. Read without
+/// the listed flag, which a test keeps per thread; the lock is a leaf.
+pub(crate) fn herdr_listed_execution(logical: &str) -> Option<String> {
+    let executions = HERDR_EXECUTIONS.lock();
+    let executions = executions.unwrap_or_else(|poison| poison.into_inner());
+    executions.get(logical).map(|(nonce, _)| nonce.clone())
 }
 
 /// Whether hooks must leave the pane on its current source; the lock is a leaf.

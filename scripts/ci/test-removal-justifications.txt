@@ -4,6 +4,8 @@
 # Scoped rows cover only that platform; after landing they require its absence and coverage elsewhere.
 # Unscoped rows keep the existing whole-test rules; a loss with no matching reason fails.
 # Unscoped rows absent from base and head only warn after landing; clear them in any later PR.
+agentdesk services::claude::tui_session_launch::tests::claude_herdr_prepare_refuses_resume_before_binary_resolution | removed | Replaced by claude_herdr_prepare_resumes_only_the_session_its_context_names: a Herdr Claude launch now resumes the session its own launch context names; a resume naming another session or none is still refused before the binary
+agentdesk config::session_hosts::migration::tests::migration_endpoint_identity_changes_and_channel_removal_refuse_live_rows | removed | Renamed to migration_endpoint_identity_changes_and_endpoint_removal_refuse_live_rows without its channel-removal case: removing only a channel's mapping now approves a Bound local Claude row returning to tmux, covered by migration_mapping_removal_alone_approves_only_a_bound_local_claude_row
 agentdesk config::remote_settings_tests::settings_load_exposes_no_remote_profiles | removed | Settings remote-profile shim deleted; no session or config carries a remote profile any more
 agentdesk runtime_layout::config_merge::config_secret_tests::role_map_merge_keeps_disk_secrets | removed | JSON-to-YAML migration retired; replacement verifies setup ignores the legacy file and cannot rewrite YAML secrets
 agentdesk services::codex::remote_dispatch_gate_tests::remote_direct_is_refused_when_gate_off | removed | renamed to remote_direct_is_refused_with_retired_gate_key_on; the remote_ssh_enabled gate it was named after was deleted

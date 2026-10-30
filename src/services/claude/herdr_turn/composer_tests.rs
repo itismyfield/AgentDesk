@@ -135,6 +135,8 @@ fn herdr_claude_entry_holds_draft_modal_busy_and_failed_capture_without_paste_or
             row: None,
             prompt: "preserve queued input",
             working_dir: "/tmp",
+            session_id: None,
+            force_fresh: false,
             system_prompt: None,
             model: None,
             hook_endpoint: None,
@@ -175,7 +177,10 @@ fn herdr_claude_entry_holds_draft_modal_busy_and_failed_capture_without_paste_or
     }
     let ready_screen = pane("✻ Baked for 2s", "").replace("❯", "\x1b[36m❯\x1b[0m");
     assert!(
-        matches!(observation(Some(&ready_screen)), ControlFlow::Break(true)),
+        matches!(
+            observation(Some(&ready_screen), false),
+            ControlFlow::Break(true)
+        ),
         "human_finished_composer_ready_contract"
     );
     rig.answer("pane.read", serde_json::json!({"type":"pane_read", "read":{"pane_id":PANE, "source":"recent_unwrapped", "text":ready_screen, "revision":2, "truncated":false}}));
@@ -264,4 +269,30 @@ fn herdr_claude_composer_waits_from_busy_to_ready_before_exactly_one_submit() {
         reads, 2,
         "busy_then_ready_composer_reads_both_screens_contract"
     );
+}
+
+// An `/exit` sends nothing while a draft is stashed under an empty composer, where a prompt goes on;
+// with no stash both are sent.
+#[test]
+fn an_exit_is_never_sent_over_a_stashed_draft() {
+    let clear = pane("✻ Baked for 2s", "");
+    let stash_row = format!("{:>50}", "\u{203a} stashed");
+    let stashed = clear.replacen("\n\n", &format!("\n{stash_row}\n"), 1);
+    for (capture, exit, sent) in [
+        (&stashed, true, false),
+        (&stashed, false, true),
+        (&clear, true, true),
+    ] {
+        let called = std::cell::Cell::new(false);
+        let send = || {
+            called.set(true);
+            InputRun::Applied
+        };
+        let capture = || Some(capture.clone());
+        let run = match exit {
+            true => when_ready_to_exit(capture, None, send),
+            false => when_ready(capture, None, send),
+        };
+        assert_eq!(called.get(), sent, "exit {exit}: {run:?}");
+    }
 }

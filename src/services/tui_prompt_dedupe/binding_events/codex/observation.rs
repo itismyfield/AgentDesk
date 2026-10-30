@@ -9,6 +9,7 @@ const BYTE_LIMIT: u64 = 16 * 1024 * 1024;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ChannelObservation {
     pub events: Vec<BindingEvent>,
+    pub settled_companions: SettledCompanions,
     pub tail: u64,
     pub digest: String,
 }
@@ -50,12 +51,14 @@ pub(crate) fn observe_channel(channel: u64, limit: usize) -> Result<ChannelObser
             records.push(serde_json::from_slice::<Logged>(line).map_err(io::Error::other)?);
         }
         let records = checked_ownership_records(channel, records)?;
+        let settled_companions = super::terminal::settled_companions(&records);
         let tail = records.last().map_or(0, |record| record.event.seq);
         let mut digest = Sha256::new();
         digest.update(b"adk-codex-p5-observation-v1\0");
         digest.update(&bytes);
         Ok(ChannelObservation {
             events: records.into_iter().map(|record| record.event).collect(),
+            settled_companions,
             tail,
             digest: format!("sha256:{}", hex::encode(digest.finalize())),
         })

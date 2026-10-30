@@ -226,7 +226,8 @@ impl NoticeState {
                     merge(&mut merged.prompt, next.prompt)?;
                     merge(&mut merged.prompt_sha256, next.prompt_sha256)?;
                     merge(&mut merged.unit_key, next.unit_key)?;
-                    merge(&mut merged.payload, next.payload)?;
+                    // Rendering may change between builds; the first stored payload stays canonical.
+                    merged.payload = merged.payload.or(next.payload);
                     merge(&mut merged.origin, next.origin)?;
                     next = merged;
                 }

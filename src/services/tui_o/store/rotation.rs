@@ -401,6 +401,25 @@ impl OStore {
             read => Ok(read.map(|checkpoint| checkpoint.seq)),
         }
     }
+
+    /// The channel's stored cursors, read without opening the channel; an unreadable cursor is an
+    /// error, never an absent one.
+    pub fn peek_cursors(&self, channel: u64) -> Result<Vec<super::spool::Cursor>, StoreError> {
+        let dir = self.channel_dir(channel).join(super::CURSOR_DIR);
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut cursors = Vec::new();
+        for entry in entries {
+            let entry = entry?.path();
+            if entry.extension().is_some_and(|ext| ext == "json") {
+                cursors.extend(durable::read_json::<super::spool::Cursor>(&entry)?);
+            }
+        }
+        Ok(cursors)
+    }
 }
 
 #[cfg(test)]

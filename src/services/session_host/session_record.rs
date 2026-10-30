@@ -1,19 +1,26 @@
-//! Sessions-row witness for the target resolver. Only a found row with no hosted
-//! record proves a legacy session; a missing row, a failed read or a trace never does.
+//! Sessions-row witness for the target resolver. Only a found row with no hosted record, or a
+//! retired one whose session returned to tmux, proves a legacy session; nothing else does.
 
 use super::model::HostKind;
 use super::resolve::HostWitness;
-use crate::db::dispatched_sessions::hosted_execution::{HostedLookup, HostedRecord};
+use crate::db::dispatched_sessions::hosted_execution::{HostedLookup, HostedRecord, HostedState};
 
 pub(crate) fn session_record_witness(lookup: &HostedLookup) -> HostWitness {
     match lookup {
         HostedLookup::Found(found) => match &found.record {
             HostedRecord::Legacy => HostWitness::LegacyRow,
-            // Only a Herdr launch writes a record, so even a retired one keeps the row off tmux.
-            HostedRecord::Known(record) => HostWitness::Known {
-                kind: HostKind::Herdr,
-                target: record.location.as_ref().map(|at| at.pane_id.clone()),
-            },
+            // Only a Herdr launch writes a record; a retired one stays off tmux unless the resolver
+            // sees its session returned there.
+            HostedRecord::Known(record) => {
+                let herdr = HostWitness::Known {
+                    kind: HostKind::Herdr,
+                    target: record.location.as_ref().map(|at| at.pane_id.clone()),
+                };
+                match record.state {
+                    HostedState::Retired => HostWitness::Retired(Box::new(herdr)),
+                    _ => herdr,
+                }
+            }
             HostedRecord::Unknown(raw) => HostWitness::Unrecognized(raw.to_string()),
         },
         HostedLookup::Missing => HostWitness::NoRow,
@@ -149,7 +156,11 @@ mod tests {
         let cases = [
             (key("legacy"), HostWitness::LegacyRow, proceed),
             (key("bound"), herdr(Some("pane-1")), defer),
-            (key("retired"), herdr(Some("pane-1")), defer),
+            (
+                key("retired"),
+                HostWitness::Retired(Box::new(herdr(Some("pane-1")))),
+                defer,
+            ),
             (key("pending"), herdr(None), unknown),
             (key("absent"), HostWitness::NoRow, unknown),
             (

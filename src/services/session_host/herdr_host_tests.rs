@@ -3344,6 +3344,7 @@ fn terminate_entry_violations(sources: &BTreeMap<String, String>) -> Vec<String>
                     (HERDR_CLI, 1),
                     (TERMINATE_SERVICE, 1),
                     ("src/services/herdr_launch.rs", 1),
+                    ("src/services/claude/herdr_return.rs", 1),
                 ],
             ),
             (

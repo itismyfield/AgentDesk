@@ -169,6 +169,25 @@ pub fn create_session(
     Ok(output)
 }
 
+/// Starts `shell_command` again in the dead pane of `session_name`. Without `-k` tmux refuses a
+/// pane still running, so nothing live is replaced.
+#[cfg(unix)]
+pub fn respawn_dead_pane(
+    session_name: &str,
+    working_dir: Option<&str>,
+    shell_command: &str,
+) -> Result<Output, String> {
+    let mut cmd = tmux_command().map_err(|e| format!("Failed to respawn tmux pane: {e}"))?;
+    cmd.args(["respawn-pane", "-t", &exact_target(session_name)]);
+    if let Some(dir) = working_dir {
+        cmd.args(["-c", dir]);
+    }
+    cmd.arg(shell_command);
+    cmd.env_remove("CLAUDECODE");
+    cmd.output()
+        .map_err(|e| format!("Failed to respawn tmux pane: {e}"))
+}
+
 fn sh_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }

@@ -45,6 +45,8 @@ pub(crate) struct Inputs {
     pub context: BindingContext,
     pub current: SourceId,
     pub events: Vec<BindingEvent>,
+    pub settled_companions:
+        crate::services::tui_prompt_dedupe::binding_events::codex::SettledCompanions,
     pub tail: u64,
     pub log_digest: String,
     pub census_digest: String,

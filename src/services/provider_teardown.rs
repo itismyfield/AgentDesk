@@ -11,6 +11,9 @@ pub(crate) enum TeardownClearance {
     Refused(String),
     /// The turn has no session key, so the teardown stays name-only as before.
     Unkeyed,
+    /// The turn brought its session back from Herdr: nothing is torn down, and only a pane its
+    /// own provider's exit left dead is respawned.
+    Returned,
 }
 
 /// Session name a teardown may act on; a clearance for another name, a refusal or a
@@ -27,6 +30,7 @@ fn admitted<'a>(
         Some(TeardownClearance::Unkeyed) => return Ok(None),
         Some(TeardownClearance::Cleared(session)) => format!("cleared {}", session.name()),
         Some(TeardownClearance::Refused(reason)) => reason.clone(),
+        Some(TeardownClearance::Returned) => "a returned session is never torn down".to_string(),
         None => "no teardown clearance".to_string(),
     };
     tracing::warn!(tmux_name, refusal, "host guard kept the tmux session");

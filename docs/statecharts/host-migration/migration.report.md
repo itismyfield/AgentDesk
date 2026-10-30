@@ -1,5 +1,4 @@
 # HostMigration
-<!-- doc-path-refs: proposed session_handoff.rs herdr_return.rs -->
 
 Model written against AgentDesk `feat/i7503-claude-resume-both` `db99888121` (2026-10-30; base `origin/main` `e8d94425a0`), for #7503: a Claude channel moving tmux → Herdr and back (Return) with the same session id. Every counterexample was replayed step by step against the code by reading it (no build or test run); see the table at the end.
 
