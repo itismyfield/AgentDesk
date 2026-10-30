@@ -324,6 +324,7 @@ fn a_dispatched_return_after_a_fresh_move_resumes_the_herdr_session_on_tmux_pg()
     let provider = ProviderKind::Claude;
     let turn = StreamingTurn {
         pool: Some(&fx.pool),
+        shared: None,
         provider: &provider,
         prompt: "질문",
         session_id: Some(&s_b),
