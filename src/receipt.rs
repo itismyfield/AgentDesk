@@ -563,6 +563,20 @@ fn scan_gemini_chats(home: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Drops files last written before `start`. Usage logs are appended to or
+/// rewritten whole, so such a file holds no record at or after `start`.
+fn written_since(files: Vec<PathBuf>, start: DateTime<Utc>) -> Vec<PathBuf> {
+    let start = std::time::SystemTime::from(start);
+    files
+        .into_iter()
+        .filter(|path| {
+            fs::metadata(path)
+                .and_then(|meta| meta.modified())
+                .map_or(true, |modified| modified >= start)
+        })
+        .collect()
+}
+
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
@@ -1102,10 +1116,10 @@ pub async fn ratelimit_window_start_pg(pool: &sqlx::PgPool) -> Option<DateTime<U
 
 fn scan_usage_records(start: DateTime<Utc>, end: DateTime<Utc>) -> Vec<UsageRecord> {
     let home = dirs::home_dir().unwrap_or_default();
-    let claude_files = find_jsonl(&home.join(".claude").join("projects"));
-    let codex_files = find_jsonl(&home.join(".codex").join("sessions"));
-    let gemini_files = scan_gemini_chats(&home);
-    let qwen_files = find_jsonl(&home.join(".qwen").join("projects"));
+    let claude_files = written_since(find_jsonl(&home.join(".claude").join("projects")), start);
+    let codex_files = written_since(find_jsonl(&home.join(".codex").join("sessions")), start);
+    let gemini_files = written_since(scan_gemini_chats(&home), start);
+    let qwen_files = written_since(find_jsonl(&home.join(".qwen").join("projects")), start);
     let ws_map = build_workspace_map();
 
     let mut all: Vec<UsageRecord> = Vec::new();
@@ -1471,5 +1485,53 @@ pub fn collect_token_analytics(
         receipt,
         daily,
         heatmap: build_heatmap(&records, end),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn usage_line(timestamp: &str) -> String {
+        serde_json::json!({
+            "type": "assistant",
+            "timestamp": timestamp,
+            "sessionId": "s1",
+            "message": {
+                "id": format!("msg-{timestamp}"),
+                "model": "claude-sonnet-4-5",
+                "usage": {"input_tokens": 10, "output_tokens": 5}
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn files_written_before_the_window_are_skipped_and_mixed_files_are_filtered() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let start: DateTime<Utc> = "2026-10-01T00:00:00Z".parse().unwrap();
+        let end: DateTime<Utc> = "2026-10-30T00:00:00Z".parse().unwrap();
+
+        let old = dir.path().join("old.jsonl");
+        fs::write(&old, usage_line("2026-09-20T00:00:00Z") + "\n").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(std::time::SystemTime::from(start - Duration::days(3)))
+            .unwrap();
+        let mixed = dir.path().join("mixed.jsonl");
+        let lines = [
+            usage_line("2026-09-20T00:00:00Z"),
+            usage_line("2026-10-02T00:00:00Z"),
+        ];
+        fs::write(&mixed, lines.join("\n") + "\n").unwrap();
+
+        let kept = written_since(vec![old, mixed.clone()], start);
+        assert_eq!(kept, vec![mixed.clone()]);
+
+        let (records, _, _) = parse_claude(&mixed, start, end, &HashMap::new());
+        let stamps: Vec<String> = records.iter().map(|r| r.timestamp.to_rfc3339()).collect();
+        assert_eq!(stamps, vec!["2026-10-02T00:00:00+00:00"]);
     }
 }

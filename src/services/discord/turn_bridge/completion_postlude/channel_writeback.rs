@@ -316,7 +316,6 @@ mod tests {
             ],
             pending_uploads: Vec::new(),
             cleared: false,
-            remote_profile_name: None,
             channel_id: Some(42),
             channel_name: Some("live-channel".to_string()),
             category_name: None,

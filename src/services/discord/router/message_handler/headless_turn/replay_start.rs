@@ -37,7 +37,6 @@ pub(super) struct Prepared<'a> {
     pub reply: Option<&'a str>,
     pub uploads: &'a PendingUploads,
     pub session_key: Option<&'a str>,
-    pub remote: bool,
     pub tmux: Option<&'a str>,
 }
 
@@ -236,28 +235,21 @@ impl Request<'_> {
                 Err(StartStop::Deferred("headless exact owner changed".into()))
             };
         }
-        let (name, remote) = self
+        let name = self
             .shared
             .core
             .lock()
             .await
             .sessions
             .get(&self.channel)
-            .map(|session| {
-                (
-                    session.channel_name.clone(),
-                    session.remote_profile_name.is_some(),
-                )
-            })
-            .unwrap_or_default();
+            .and_then(|session| session.channel_name.clone());
         let tmux = routine_tmux_session_name(
             self.provider,
             self.metadata,
             self.tmux_label,
             name.as_deref().or(self.channel_hint),
         );
-        let scope =
-            replay_scope::selected(self.provider, self.channel.get(), remote, tmux.as_deref());
+        let scope = replay_scope::selected(self.provider, self.channel.get(), tmux.as_deref());
         if scope.driver == crate::services::provider_hosting::ProviderSessionDriver::TuiHosting {
             return Ok(());
         }
@@ -315,12 +307,7 @@ impl Request<'_> {
     ) -> Result<(ReplayStart, bool), StartStop> {
         let channel = self.channel.to_string();
         let continuation = replay_policy::take_continuation();
-        let scope = replay_scope::selected(
-            self.provider,
-            self.channel.get(),
-            prepared.remote,
-            prepared.tmux,
-        );
+        let scope = replay_scope::selected(self.provider, self.channel.get(), prepared.tmux);
         let supported = replay_policy::activation::supported(
             self.provider.as_str(),
             scope.driver.as_str(),

@@ -434,7 +434,6 @@ mod tests {
                             history: Vec::new(),
                             pending_uploads: Vec::new(),
                             cleared: false,
-                            remote_profile_name: None,
                             channel_id: Some(scenario.channel_id),
                             channel_name: Some("dm-343742347365974026".to_string()),
                             category_name: None,

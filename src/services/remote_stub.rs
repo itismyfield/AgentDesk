@@ -1,10 +1,6 @@
-//! Disabled remote SSH compatibility surface.
+//! Disabled remote SSH surface; AgentDesk has no remote runtime.
 //!
-//! #1606 removed user-facing remote execution, #2175 classified Codex remote
-//! direct/tmux as "not allowed now", and #2193 defines the ADR prerequisites
-//! for any future re-enable. Until those follow-ups land, these profile/auth
-//! types exist only so provider signatures can continue to parse old shapes;
-//! they are not a supported runtime configuration surface.
+//! Only the Codex dispatch parameter still takes these types, and it always refuses them.
 
 use serde::{Deserialize, Serialize};
 
@@ -22,9 +18,7 @@ pub enum RemoteAuth {
     },
 }
 
-/// Parse-compatibility only. AgentDesk does not load `RemoteProfile` entries
-/// from operator config, and remote dispatch paths must refuse before any SSH
-/// attempt unless the #2193 prerequisites are fully implemented.
+/// Never loaded from operator config; Codex dispatch refuses it before any SSH attempt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteProfile {
     pub name: String,

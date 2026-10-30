@@ -34,7 +34,6 @@ fn isolated(name: &str) -> bool {
         .env("HTTPS_PROXY", "http://127.0.0.1:9")
         .env("ALL_PROXY", "http://127.0.0.1:9")
         .env("NO_PROXY", "")
-        .env_remove(cutover::test_override::CHILD_ENV)
         .env_remove("DATABASE_URL");
     let output = child.output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);

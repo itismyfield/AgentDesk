@@ -47,24 +47,7 @@ fn footer_mode_enabled(single_message_panel_enabled: bool, status_panel_v2_enabl
 
 pub(super) fn watcher_separate_status_panel_enabled(status_panel_v2_enabled: bool) -> bool {
     // Existing ids still need adoption, edits and reclaim; creation has its own retirement gate.
-    if crate::services::discord::footer_retirement::retired() {
-        status_panel_v2_enabled
-    } else {
-        separate_status_panel_enabled_for_flags(
-            crate::services::discord::single_message_panel_enabled(),
-            status_panel_v2_enabled,
-        )
-    }
-}
-
-fn separate_status_panel_enabled_for_flags(
-    single_message_panel_enabled: bool,
-    status_panel_v2_enabled: bool,
-) -> bool {
-    crate::services::discord::single_message_panel::separate_status_panel_enabled_for_flags(
-        single_message_panel_enabled,
-        status_panel_v2_enabled,
-    )
+    status_panel_v2_enabled
 }
 
 pub(super) fn watcher_live_events_dirty_should_force_status_update(
@@ -77,31 +60,14 @@ pub(super) fn watcher_live_events_dirty_should_force_status_update(
     )
 }
 
-#[cfg(test)]
-fn watcher_status_panel_msg_id_for_footer_mode(
-    single_message_panel_footer_mode: bool,
-    status_panel_msg_id: Option<serenity::MessageId>,
-) -> Option<serenity::MessageId> {
-    if single_message_panel_footer_mode {
-        None
-    } else {
-        status_panel_msg_id
-    }
-}
-
+// Separate-panel creation is retired; the legacy panel path removal drops this gate.
 pub(super) fn watcher_should_create_separate_status_panel(
-    single_message_panel_footer_mode: bool,
-    status_panel_v2_enabled: bool,
-    status_panel_present: bool,
-    panel_eligible_turn: bool,
+    _single_message_panel_footer_mode: bool,
+    _status_panel_v2_enabled: bool,
+    _status_panel_present: bool,
+    _panel_eligible_turn: bool,
 ) -> bool {
-    !crate::services::discord::footer_retirement::retired()
-        && !single_message_panel_footer_mode
-        && watcher_should_create_external_input_status_panel(
-            status_panel_v2_enabled,
-            status_panel_present,
-            panel_eligible_turn,
-        )
+    false
 }
 
 pub(super) fn watcher_should_complete_separate_status_panel(status_panel_v2_enabled: bool) -> bool {
@@ -129,8 +95,7 @@ pub(super) fn build_watcher_single_message_panel_status_block(
 ) -> String {
     // Retired snapshots omit this block, but keep its budget to preserve rollover offsets.
     if watcher_single_message_panel_footer_enabled(shared.ui.status_panel_v2_enabled)
-        || (crate::services::discord::footer_retirement::retired()
-            && crate::services::discord::single_message_panel_enabled()
+        || (crate::services::discord::single_message_panel_enabled()
             && shared.ui.status_panel_v2_enabled)
     {
         let content = (full_response, indicator);
@@ -447,17 +412,9 @@ pub(super) async fn complete_watcher_terminal_footer_or_status_panel(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::discord::{DISCORD_MSG_LIMIT, footer_retirement::legacy_for_test};
+    use crate::services::discord::DISCORD_MSG_LIMIT;
 
     const PANEL: &str = "🟢 진행 중 — Claude (<t:1700000000:R>)\n\nSubagents\n└ review inspect";
-
-    #[test]
-    fn single_message_panel_footer_mode_requires_both_flags() {
-        let _legacy = legacy_for_test();
-        assert!(footer_mode_enabled(true, true));
-        assert!(!footer_mode_enabled(true, false));
-        assert!(!footer_mode_enabled(false, true));
-    }
 
     #[test]
     fn single_message_panel_footer_status_block_keeps_spinner_first() {
@@ -467,52 +424,6 @@ mod tests {
         assert!(!block.contains("계속 처리 중"));
         assert!(!block.contains('🟢'));
         assert!(block.contains("-# Subagents\n-# └ review inspect"));
-    }
-
-    #[test]
-    fn single_message_panel_footer_disables_separate_panel_creation_and_binding() {
-        let _legacy = legacy_for_test();
-        let footer_mode = footer_mode_enabled(true, true);
-
-        assert!(!watcher_should_create_separate_status_panel(
-            footer_mode,
-            true,
-            false,
-            true,
-        ));
-        assert_eq!(
-            watcher_status_panel_msg_id_for_footer_mode(
-                footer_mode,
-                Some(serenity::MessageId::new(42))
-            ),
-            None,
-        );
-    }
-
-    #[test]
-    fn single_message_panel_footer_rollover_keeps_panel_in_seed_only() {
-        let _legacy = legacy_for_test();
-        let status_block = compose_single_message_footer_status_block("⠸", PANEL);
-        let footer = format!("\n\n{status_block}");
-        let current_portion = "x".repeat(DISCORD_MSG_LIMIT);
-
-        let plan = crate::services::discord::formatting::plan_streaming_rollover(
-            &current_portion,
-            &status_block,
-        )
-        .expect("footer-bearing status block should force rollover");
-        let seed = crate::services::discord::formatting::build_streaming_placeholder_text(
-            "",
-            &status_block,
-        );
-
-        assert!(!plan.frozen_chunk.contains("계속 처리 중"));
-        assert!(!plan.frozen_chunk.contains("Subagents"));
-        assert!(plan.display_snapshot.ends_with(&footer));
-        assert!(seed.starts_with("-# ⠸ 진행 중 — Claude"));
-        assert!(!seed.contains("계속 처리 중"));
-        assert!(!seed.contains('🟢'));
-        assert!(seed.contains("Subagents"));
     }
 
     #[test]
@@ -531,11 +442,6 @@ mod tests {
     }
 
     #[test]
-    fn single_message_panel_completion_skips_separate_panel_completion() {
-        assert!(!separate_status_panel_enabled_for_flags(true, true));
-    }
-
-    #[test]
     fn single_message_panel_footer_only_dirty_does_not_force_status_update() {
         assert!(!watcher_live_events_dirty_should_force_status_update(
             true, true,
@@ -547,7 +453,6 @@ mod tests {
 
     #[test]
     fn single_message_panel_pathological_panel_stays_within_discord_limit() {
-        let _legacy = legacy_for_test();
         let huge_panel = format!(
             "🟢 진행 중 — Claude (<t:1700000000:R>)\n\nSubagents\n{}",
             "└ reviewer ".repeat(1_000)
@@ -559,6 +464,5 @@ mod tests {
         );
 
         assert!(rendered.len() <= DISCORD_MSG_LIMIT);
-        assert!(rendered.contains("\n\n"));
     }
 }
