@@ -52,6 +52,8 @@ async fn postgres_accepted_snapshot_waits_for_exact_owner_then_settles_recorded_
         assert_eq!(before,std::fs::read(&empty_path).unwrap(),"known scheduled admission cannot be recreated after owner loss");
         assert!(turn_completion::record(&pool,&turn,turn_completion::ScheduledTurnOutcome::Delivered).await.unwrap().is_evidence());
         assert!(!poll_agent_delivery(&pool,running.clone()).await,"recorded output alone cannot bypass the owner bind");
+        let during=bootstrap_held_by_modal(&handle,"bootstrap-attempt",poll_agent_delivery(&pool,running.clone())).await;
+        assert!(!during,"an attempt in its bootstrap window is no observer's");
         handle.v2_arm_head_for_tests("actual-scheduled-attempt").await.unwrap();
         assert!(!poll_agent_delivery(&pool,running.clone()).await,"the observer binds the armed attempt before it reads");
         let error:String=sqlx::query_scalar("SELECT error FROM scheduled_message_deliveries WHERE id=$1").bind(&fire.delivery_id).fetch_one(&pool).await.unwrap();
@@ -73,4 +75,52 @@ async fn postgres_accepted_snapshot_waits_for_exact_owner_then_settles_recorded_
     assert_eq!(snapshot["admission_sequence"], 1);
     pool.close().await;
     db.drop().await;
+}
+
+/// Reserves the head as `nonce` and arms it in its bootstrap window, runs `poll` there, then a
+/// modal veto ends it unsent and holds the original for its retry.
+async fn bootstrap_held_by_modal<T>(
+    handle: &ChannelMailboxHandle,
+    nonce: &str,
+    poll: impl std::future::Future<Output = T>,
+) -> T {
+    let attempt = serde_json::json!({"nonce":nonce,"provider":"claude","target":{"host":"tmux","owner":"bootstrap-pane","root":"/test","execution_nonce":"execution"},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}});
+    let reserved = handle.v2_request(move |slot| {
+        let payload = serde_json::json!({"frame":"frame","digest":"digest","attribution":{}});
+        let attempt = serde_json::from_value(attempt).map_err(|e| e.to_string())?;
+        let payload = serde_json::from_value(payload).map_err(|e| e.to_string())?;
+        let owner = slot.as_mut().ok_or("no owner")?;
+        owner.reserve(attempt, payload).map(drop)
+    });
+    reserved.await.unwrap();
+    let (armed, in_window) = tokio::sync::oneshot::channel();
+    let (polled, release) = std::sync::mpsc::channel::<()>();
+    let owner = handle.clone();
+    let cold = tokio::spawn(async move {
+        let effect = move |_| {
+            let _ = armed.send(());
+            let _ = release.recv();
+            crate::services::claude_tui::owner_input::vetoed("Modal");
+            Ok::<(), String>(())
+        };
+        owner
+            .v2_cold_observed(0, std::sync::Arc::new(|| 0), effect)
+            .await
+    });
+    if in_window.await.is_err() {
+        panic!("cold: {:?}", cold.await.unwrap().map(|r| r.0));
+    }
+    let during = poll.await;
+    polled.send(()).unwrap();
+    let (identity, outcome) = cold.await.unwrap().unwrap();
+    let proof = outcome
+        .not_sent
+        .expect("a modal veto proves nothing was sent");
+    let held = handle.v2_request(move |slot| {
+        let owner = slot.as_mut().ok_or("no owner")?;
+        let key = serde_json::from_value(identity).map_err(|e| e.to_string())?;
+        owner.hold_not_sent(&key, proof)
+    });
+    held.await.unwrap();
+    during
 }
