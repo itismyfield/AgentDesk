@@ -2152,7 +2152,6 @@ pub fn cmd_config_set(json_str: &str) -> Result<(), String> {
 pub fn cmd_config_audit(dry_run: bool) -> Result<(), String> {
     let root = crate::config::runtime_root()
         .ok_or_else(|| "Failed to resolve AGENTDESK_ROOT_DIR".to_string())?;
-    let legacy_scan = crate::services::discord_config_audit::scan_legacy_sources(&root);
 
     if !dry_run {
         crate::runtime_layout::ensure_runtime_layout(&root)?;
@@ -2164,7 +2163,6 @@ pub fn cmd_config_audit(dry_run: bool) -> Result<(), String> {
         loaded.config,
         loaded.path,
         loaded.existed,
-        &legacy_scan,
         dry_run,
     )?;
     print_json(&serde_json::to_value(outcome.report).map_err(|err| err.to_string())?);

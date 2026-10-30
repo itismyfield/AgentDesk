@@ -305,11 +305,12 @@ impl Fixture {
         let context = self.context.clone();
         shared.http.cached_serenity_ctx.set(context).unwrap();
         // Startup restores only channels the configuration binds, where the route read the allowlist.
-        let role_map = runtime_store::role_map_path().unwrap();
-        std::fs::create_dir_all(role_map.parent().unwrap()).unwrap();
-        let bound = json!({ "byChannelId": { self.channel.get().to_string():
-            { "roleId": "s2b-head-agent", "promptFile": "prompt.md", "provider": "claude" } } });
-        std::fs::write(role_map, bound.to_string()).unwrap();
+        crate::services::discord::agentdesk_config::write_bindings_for_test(
+            &crate::config::runtime_root().unwrap(),
+            json!([{"id": "s2b-head-agent", "name": "Head", "provider": "claude", "channels": {
+                "claude": {"id": self.channel.to_string(), "prompt_file": "prompt.md"}
+            }}]),
+        );
         let restore =
             crate::services::discord::runtime_bootstrap::restore_queued_and_inflight_for_tests;
         restore(&self.http, &shared, &ProviderKind::Claude).await;

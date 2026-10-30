@@ -270,15 +270,13 @@ pub(super) fn extract_first_heading(content: &str) -> Option<String> {
 pub(in crate::services::discord) fn load_shared_prompt_for_profile(
     profile: &str,
 ) -> Option<String> {
-    let path_str = agentdesk_config::load_shared_prompt_path()
-        .or_else(|| {
-            if org_schema::org_schema_exists() {
-                org_schema::load_shared_prompt_path()
-            } else {
-                None
-            }
-        })
-        .or_else(load_shared_prompt_path_from_role_map)?;
+    let path_str = agentdesk_config::load_shared_prompt_path().or_else(|| {
+        if org_schema::org_schema_exists() {
+            org_schema::load_shared_prompt_path()
+        } else {
+            None
+        }
+    })?;
 
     let raw = fs::read_to_string(Path::new(&path_str)).ok()?;
     let sections = matching_profile_sections(&raw, profile);
@@ -585,7 +583,7 @@ pub(in crate::services::discord) fn is_known_agent(role_id: &str) -> bool {
     {
         return known;
     }
-    is_known_agent_from_role_map(role_id)
+    false
 }
 
 /// Cache peer guidance by role and the installed config snapshot.

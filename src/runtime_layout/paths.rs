@@ -28,10 +28,6 @@ pub fn legacy_config_file_path(root: &Path) -> PathBuf {
     crate::config::config_path::selection::legacy_config_file_path(root)
 }
 
-pub fn role_map_path(root: &Path) -> PathBuf {
-    config_dir(root).join("role_map.json")
-}
-
 pub fn org_schema_path(root: &Path) -> PathBuf {
     config_dir(root).join("org.yaml")
 }

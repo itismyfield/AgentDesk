@@ -420,6 +420,176 @@ mod cases {
         }
     }
 
+    /// The deploy shape: an earlier generation's managed row re-saved after restart, above history
+    /// whose queued background notifications were drained mid-turn and so owe nothing.
+    #[tokio::test(flavor = "current_thread")]
+    async fn drained_notifications_in_history_do_not_hold_a_carried_managed_row() {
+        let note = "<task-notification>job done</task-notification>";
+        let notification = format!(
+            r#"{{"type":"attachment","attachment":{{"type":"queued_command","prompt":"{note}","commandMode":"task-notification","origin":{{"kind":"task-notification"}}}}}}"#
+        );
+        let options = Options {
+            transcript: vec![
+                user("earlier"),
+                enqueue(note),
+                notification,
+                answer(),
+                END.to_string(),
+                user("carried"),
+                answer(),
+                END.to_string(),
+            ],
+            ..Options::default()
+        };
+        let fx = Fixture::new(7_533_336, 9_100_095_491_915_387_881, options).await;
+        // This process saved the row again after the restart.
+        let mut row = fx.row().unwrap();
+        assert_eq!(row.turn_source, inflight::TurnSource::Managed);
+        row.save_generation += 1;
+        let file = inflight::inflight_state_path(
+            &inflight::inflight_runtime_root().unwrap(),
+            &PROVIDER,
+            fx.channel.get(),
+        );
+        std::fs::write(&file, serde_json::to_vec(&row).unwrap()).unwrap();
+        fx.pass().await;
+        fx.assert_closed("the drained notifications owed nothing")
+            .await;
+        assert_eq!(events(fx.channel.get()), ["complete"]);
+    }
+
+    /// A kept carried turn names its reason once per change, never each pass.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_kept_turn_logs_its_reason_once_per_change() {
+        let fx = Fixture::new(7_533_337, 9_100_095_491_915_388_016, Options::default()).await;
+        append(&fx.path, &[&enqueue("waiting")]);
+        let logs = Logs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(logs.clone())
+            .finish();
+        crate::logging::test_capture::pin_callsite_interest();
+        let guard = tracing::subscriber::set_default(subscriber);
+        fx.pass().await;
+        fx.pass().await;
+        drop(guard);
+        let logs = logs.text();
+        let kept = "no_native_end:pending_receipt:owed_inputs=1";
+        assert_eq!(logs.matches(kept).count(), 1, "{logs}");
+        fx.assert_kept("waiting").await;
+    }
+
+    /// The hold diagnostics each pass logs for the channel, with `prepare(pass)` run before it.
+    async fn held_lines(fx: &Fixture, passes: usize, prepare: impl Fn(usize)) -> Vec<Vec<String>> {
+        let channel = format!("channel_id={}", fx.channel.get());
+        let logs = Logs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(logs.clone())
+            .finish();
+        crate::logging::test_capture::pin_callsite_interest();
+        let guard = tracing::subscriber::set_default(subscriber);
+        let mut per_pass = Vec::new();
+        for pass in 0..passes {
+            prepare(pass);
+            let before = logs.text().len();
+            fx.pass().await;
+            let text = logs.text();
+            let held = text[before..]
+                .lines()
+                .filter(|line| line.contains(&channel) && line.contains("carried-over turn"))
+                .filter(|line| !line.contains("turn closed"))
+                .map(str::to_owned)
+                .collect();
+            per_pass.push(held);
+        }
+        drop(guard);
+        per_pass
+    }
+
+    /// Rewrites the channel's inflight row with the next save generation, as a concurrent save.
+    fn bump_save_generation(channel: u64) {
+        let file = inflight::inflight_state_path(
+            &inflight::inflight_runtime_root().unwrap(),
+            &PROVIDER,
+            channel,
+        );
+        let mut row: InflightTurnState =
+            serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        row.save_generation += 1;
+        std::fs::write(&file, serde_json::to_vec(&row).unwrap()).unwrap();
+    }
+
+    /// An archived turn whose episode stays open warns once per change: a first reason is named,
+    /// the same reason next pass is not, a changed reason is named again.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_open_episode_after_the_archive_is_logged_once_per_change() {
+        let fx = Fixture::new(7_533_397, 9_100_095_491_915_388_077, Options::default()).await;
+        let channel = fx.channel.get();
+        WITHHOLD.with(|withhold| withhold.borrow_mut().extend([channel, channel]));
+        let held = held_lines(&fx, 3, |pass| {
+            // The third pass finds an input queued after the end: another reason to keep it.
+            if pass == 2 {
+                append(&fx.path, &[&enqueue("later")]);
+            }
+        })
+        .await;
+        assert_eq!(
+            held.iter().map(Vec::len).collect::<Vec<_>>(),
+            [1, 0, 1],
+            "{held:?}"
+        );
+        assert!(held[0][0].trim_start().starts_with("WARN"), "{held:?}");
+    }
+
+    /// A row that changes before each archive names that hold once; the open episode a later
+    /// archive leaves is a changed reason, named again.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_repeated_archive_failure_is_logged_once_per_change() {
+        let fx = Fixture::new(7_533_398, 9_100_095_491_915_388_078, Options::default()).await;
+        let channel = fx.channel.get();
+        let held = held_lines(&fx, 3, |pass| match pass {
+            2 => WITHHOLD.with(|withhold| withhold.borrow_mut().push(channel)),
+            _ => on("archive", channel, move || bump_save_generation(channel)),
+        })
+        .await;
+        assert_eq!(
+            held.iter().map(Vec::len).collect::<Vec<_>>(),
+            [1, 0, 1],
+            "{held:?}"
+        );
+    }
+
+    #[derive(Clone, Default)]
+    struct Logs(Arc<Mutex<Vec<u8>>>);
+
+    impl Logs {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    impl Write for Logs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
+        type Writer = Logs;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
     /// An unconfirmed paste settled after the transcript last grew may have reached the pane unrecorded.
     #[tokio::test(flavor = "current_thread")]
     async fn injection_delivered_after_last_growth_keeps_carried_episode() {
@@ -537,17 +707,7 @@ mod cases {
     async fn archive_pin_drift_blocks_finalize() {
         let fx = Fixture::new(7_533_351, 9_100_095_491_915_388_031, Options::default()).await;
         let channel = fx.channel.get();
-        on("archive", channel, move || {
-            let file = inflight::inflight_state_path(
-                &inflight::inflight_runtime_root().unwrap(),
-                &PROVIDER,
-                channel,
-            );
-            let mut row: InflightTurnState =
-                serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
-            row.save_generation += 1;
-            std::fs::write(&file, serde_json::to_vec(&row).unwrap()).unwrap();
-        });
+        on("archive", channel, move || bump_save_generation(channel));
         fx.pass().await;
         fx.assert_kept("pin drifted").await;
     }

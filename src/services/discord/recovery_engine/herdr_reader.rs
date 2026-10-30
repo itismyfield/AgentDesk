@@ -12,7 +12,7 @@ use super::host_reconcile::{
 };
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedExecution, HostedLookup, HostedObservation, HostedRecord, HostedState,
-    list_local_herdr_rows_pg,
+    list_local_herdr_rows_pg, list_local_unplaced_pending_pg,
 };
 use crate::services::discord::herdr_terminate::root_replaced::{
     self, Recovery, RootReplacedCandidate,
@@ -265,6 +265,7 @@ fn reconnect_pass(
             return;
         }
     };
+    resolve_unplaced_rows(&runtime, shared, pool, &node, codex);
     root_replaced::prune(&rows);
     let before = with_pass(|pass| pass.results.clone());
     let mut after = BTreeMap::new();
@@ -338,6 +339,86 @@ fn reconnect_pass(
         pass.results.extend(after);
     });
 }
+
+/// Resolves this bot's Pending rows of the pass's provider whose launch recorded no pane, each
+/// nonce once in a while; it never launches. A busy channel waits for a later pass.
+fn resolve_unplaced_rows(
+    runtime: &Handle,
+    shared: &std::sync::Arc<crate::services::discord::SharedData>,
+    pool: &PgPool,
+    node: &str,
+    codex: bool,
+) {
+    use crate::services::herdr_launch::unplaced::{Unplaced, quiet, resolve_unplaced};
+    let rows = match runtime.block_on(list_local_unplaced_pending_pg(pool, node)) {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(%error, "herdr unplaced: rows unreadable");
+            return;
+        }
+    };
+    let root = crate::config::runtime_root().map(|root| root.display().to_string());
+    for row in rows.iter().filter(|row| codex_row(&row.record) == codex) {
+        let HostedRecord::Known(record) = &row.record else {
+            continue;
+        };
+        let owner = &record.owner;
+        let channel = owner
+            .channel_id
+            .parse::<u64>()
+            .ok()
+            .filter(|channel| *channel != 0);
+        let endpoint = channel.and_then(crate::config::session_hosts::herdr_endpoint);
+        let (Some(channel), Some(endpoint)) = (channel, endpoint) else {
+            continue;
+        };
+        let nonce = record.execution_nonce.as_str();
+        if owner.discord_token_hash != shared.token_hash
+            || root.as_deref() != Some(owner.runtime_root.as_str())
+            || !unplaced_due(nonce)
+        {
+            continue;
+        }
+        let Some(host) = crate::services::claude::herdr_turn::boot_launch_host() else {
+            return;
+        };
+        let channel = crate::services::discord::ChannelId::new(channel);
+        let Ok(lease) = crate::services::discord::UnplacedLease::try_acquire(shared, channel)
+        else {
+            continue;
+        };
+        let target = Unplaced {
+            pool,
+            owner,
+            nonce,
+            endpoint: &crate::services::turn_host::launch_endpoint(endpoint),
+            host,
+            quiet: quiet(),
+        };
+        runtime.block_on(resolve_unplaced(&lease, &target));
+    }
+}
+
+/// Whether `nonce` was not tried in the last half minute; trying it now records the time.
+fn unplaced_due(nonce: &str) -> bool {
+    static TRIED: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    > = std::sync::LazyLock::new(Default::default);
+    let mut tried = TRIED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = std::time::Instant::now();
+    tried.retain(|_, at| now.duration_since(*at) < UNPLACED_RETRY * 4);
+    match tried.get(nonce) {
+        Some(at) if now.duration_since(*at) < UNPLACED_RETRY => false,
+        _ => {
+            tried.insert(nonce.to_owned(), now);
+            true
+        }
+    }
+}
+
+const UNPLACED_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// A Pending execution is left to its next turn: nothing is launched or attached for it here.
 fn reconnect_unless_pending(

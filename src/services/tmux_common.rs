@@ -1,3 +1,4 @@
+pub(crate) mod claude_footer;
 pub(crate) mod host_marker;
 mod session_markers;
 pub(crate) use session_markers::{
@@ -267,14 +268,15 @@ fn tmux_lines_after_claude_prompt_show_idle_suggestion_chrome(lines: &[&str]) ->
     // detection for 0-tool turns (#3524). The freshly-submitted-vs-idle guard
     // (a just-submitted prompt must not read as READY) lives in the
     // `ready_for_input` caller via `..._show_freshly_submitted_footer` (#3463).
-    let busy = lines.iter().any(|line| {
-        let trimmed = trim_prompt_line(line);
-        let lower = trimmed.to_ascii_lowercase();
-        line_has_claude_tui_interrupt_chrome(trimmed)
-            || lower.contains("processing")
-            || lower.contains("thinking")
-            || lower.contains("running")
-    });
+    let busy = tmux_lines_after_claude_prompt_have_interrupt_footer(lines)
+        || lines.iter().any(|line| {
+            let trimmed = trim_prompt_line(line);
+            let lower = trimmed.to_ascii_lowercase();
+            line_has_claude_tui_interrupt_chrome(trimmed)
+                || lower.contains("processing")
+                || lower.contains("thinking")
+                || lower.contains("running")
+        });
     if busy {
         return false;
     }
@@ -567,13 +569,35 @@ fn lines_reconstruct_claude_tui_interrupt_chrome(first: &str, second: &str) -> b
     line_has_claude_tui_interrupt_chrome(&combined)
 }
 
+fn tmux_lines_after_claude_prompt_have_interrupt_footer(lines: &[&str]) -> bool {
+    // The composer's border starts at column 0; an indented one is a draft's continuation text.
+    let Some(bottom) = lines.iter().position(|line| {
+        let border = trim_prompt_line(line);
+        !line.starts_with(char::is_whitespace)
+            && border.chars().count() >= 8
+            && border.chars().all(|ch| ch == '─')
+    }) else {
+        return false;
+    };
+    lines[bottom + 1..]
+        .iter()
+        .any(|line| claude_footer::bypass_interrupt(line) == Some(true))
+}
+
 fn tmux_recent_lines_show_claude_tui_interrupt_chrome(lines: &[&str]) -> bool {
-    lines.iter().enumerate().any(|(index, line)| {
-        line_has_claude_tui_interrupt_chrome(line)
-            || index.checked_sub(1).is_some_and(|previous_index| {
-                lines_reconstruct_claude_tui_interrupt_chrome(lines[previous_index], line)
-            })
-    })
+    let footer = lines
+        .iter()
+        .rposition(|line| trim_prompt_line(line).starts_with(CLAUDE_TUI_PROMPT_MARKER))
+        .is_some_and(|prompt| {
+            tmux_lines_after_claude_prompt_have_interrupt_footer(&lines[prompt + 1..])
+        });
+    footer
+        || lines.iter().enumerate().any(|(index, line)| {
+            line_has_claude_tui_interrupt_chrome(line)
+                || index.checked_sub(1).is_some_and(|previous_index| {
+                    lines_reconstruct_claude_tui_interrupt_chrome(lines[previous_index], line)
+                })
+        })
 }
 
 fn claude_tui_markdown_fence_marker(line: &str) -> Option<(char, usize)> {
@@ -1223,6 +1247,7 @@ pub fn tmux_channel_path(tmux_session_name: &str) -> String {
 }
 
 /// Persist the Discord channel owning a tmux session across dcserver restarts.
+#[cfg(test)]
 pub fn write_tmux_channel_binding(tmux_session_name: &str, channel_id: u64) -> Result<(), String> {
     with_tmux_source_authority(tmux_session_name, |authority| {
         write_tmux_channel_binding_with_name(authority, tmux_session_name, channel_id)

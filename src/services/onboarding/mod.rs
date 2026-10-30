@@ -965,14 +965,6 @@ fn requested_channel_fingerprint(body: &CompleteBody, provider: &str) -> Result<
     Ok(hex::encode(hasher.finalize()))
 }
 
-fn role_map_entry_role_id(value: &serde_json::Value) -> Option<&str> {
-    value.get("roleId").and_then(|value| value.as_str())
-}
-
-fn role_map_entry_channel_id(value: &serde_json::Value) -> Option<&str> {
-    value.get("channelId").and_then(|value| value.as_str())
-}
-
 async fn discord_list_guild_channels(
     client: &reqwest::Client,
     token: &str,
@@ -1379,23 +1371,6 @@ pub(super) fn load_onboarding_config(runtime_root: &Path) -> Result<crate::confi
     }
 }
 
-fn load_onboarding_role_map(runtime_root: &Path) -> Result<serde_json::Value, String> {
-    let path = crate::runtime_layout::role_map_path(runtime_root);
-    if !path.is_file() {
-        return Ok(json!({
-            "version": 1,
-            "byChannelId": {},
-            "byChannelName": {},
-            "fallbackByChannelName": { "enabled": true },
-        }));
-    }
-
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("failed to read role map {}: {e}", path.display()))?;
-    serde_json::from_str(&content)
-        .map_err(|e| format!("failed to parse role map {}: {e}", path.display()))
-}
-
 fn validate_unique_resolved_channels(
     resolved_channels: &[ResolvedChannelMapping],
 ) -> Result<(), String> {
@@ -1433,13 +1408,6 @@ async fn collect_onboarding_conflicts_pg(
     validate_unique_resolved_channels(resolved_channels)?;
 
     let config = load_onboarding_config(runtime_root)?;
-    let role_map = load_onboarding_role_map(runtime_root)?;
-    let by_channel_id = role_map
-        .get("byChannelId")
-        .and_then(|value| value.as_object());
-    let by_channel_name = role_map
-        .get("byChannelName")
-        .and_then(|value| value.as_object());
 
     let mut conflicts = Vec::new();
 
@@ -1594,144 +1562,9 @@ async fn collect_onboarding_conflicts_pg(
                 ));
             }
         }
-
-        if let Some(entry) = by_channel_id.and_then(|entries| entries.get(&mapping.channel_id))
-            && let Some(role_id) = role_map_entry_role_id(entry)
-            && role_id != mapping.role_id
-        {
-            conflicts.push(format!(
-                "role_map.json already binds channel '{}' to agent '{}'",
-                mapping.channel_id, role_id
-            ));
-        }
-
-        if let Some(entry) = by_channel_name.and_then(|entries| entries.get(&mapping.channel_name))
-            && let Some(role_id) = role_map_entry_role_id(entry)
-            && role_id != mapping.role_id
-        {
-            conflicts.push(format!(
-                "role_map.json already binds channel name '{}' to agent '{}'",
-                mapping.channel_name, role_id
-            ));
-        }
-
-        if rerun_policy == OnboardingRerunPolicy::ReuseExisting {
-            if let Some(entries) = by_channel_id {
-                for (existing_channel_id, entry) in entries {
-                    if role_map_entry_role_id(entry) == Some(mapping.role_id.as_str())
-                        && existing_channel_id != &mapping.channel_id
-                    {
-                        conflicts.push(format!(
-                            "role_map.json already binds agent '{}' to Discord channel '{}'; rerun_policy=reuse_existing refuses to replace it with '{}'",
-                            mapping.role_id, existing_channel_id, mapping.channel_id
-                        ));
-                    }
-                }
-            }
-
-            if let Some(entries) = by_channel_name {
-                for (existing_name, entry) in entries {
-                    if role_map_entry_role_id(entry) != Some(mapping.role_id.as_str()) {
-                        continue;
-                    }
-
-                    let same_name = existing_name == &mapping.channel_name
-                        || existing_name == &mapping.requested_channel_name;
-                    if !same_name {
-                        conflicts.push(format!(
-                            "role_map.json already binds agent '{}' to channel name '{}'; rerun_policy=reuse_existing refuses to replace it with '{}'",
-                            mapping.role_id, existing_name, mapping.channel_name
-                        ));
-                        continue;
-                    }
-
-                    if let Some(existing_channel_id) = role_map_entry_channel_id(entry)
-                        && existing_channel_id != mapping.channel_id
-                    {
-                        conflicts.push(format!(
-                            "role_map.json already binds channel name '{}' for agent '{}' to Discord channel '{}'; rerun_policy=reuse_existing refuses to replace it with '{}'",
-                            existing_name, mapping.role_id, existing_channel_id, mapping.channel_id
-                        ));
-                    }
-                }
-            }
-        }
     }
 
     Ok(conflicts)
-}
-
-fn write_onboarding_role_map(
-    runtime_root: &Path,
-    provider: &str,
-    resolved_channels: &[ResolvedChannelMapping],
-) -> Result<(), String> {
-    let mut role_map = load_onboarding_role_map(runtime_root)?;
-    let root = role_map
-        .as_object_mut()
-        .ok_or_else(|| "role map root must be a JSON object".to_string())?;
-
-    root.insert("version".to_string(), json!(1));
-    root.entry("fallbackByChannelName".to_string())
-        .or_insert_with(|| json!({ "enabled": true }));
-    root.entry("byChannelId".to_string())
-        .or_insert_with(|| json!({}));
-    root.entry("byChannelName".to_string())
-        .or_insert_with(|| json!({}));
-
-    let resolved_role_ids = resolved_channels
-        .iter()
-        .map(|mapping| mapping.role_id.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
-    root.get_mut("byChannelId")
-        .and_then(|value| value.as_object_mut())
-        .ok_or_else(|| "role map byChannelId must be a JSON object".to_string())?
-        .retain(|_, entry| {
-            role_map_entry_role_id(entry)
-                .map(|role_id| !resolved_role_ids.contains(role_id))
-                .unwrap_or(true)
-        });
-    root.get_mut("byChannelName")
-        .and_then(|value| value.as_object_mut())
-        .ok_or_else(|| "role map byChannelName must be a JSON object".to_string())?
-        .retain(|_, entry| {
-            role_map_entry_role_id(entry)
-                .map(|role_id| !resolved_role_ids.contains(role_id))
-                .unwrap_or(true)
-        });
-
-    for mapping in resolved_channels {
-        let workspace_tilde =
-            tilde_display_path(&runtime_root.join("workspaces").join(&mapping.role_id));
-        root.get_mut("byChannelId")
-            .and_then(|value| value.as_object_mut())
-            .ok_or_else(|| "role map byChannelId must be a JSON object".to_string())?
-            .insert(
-                mapping.channel_id.clone(),
-                json!({
-                    "roleId": mapping.role_id,
-                    "provider": provider,
-                    "workspace": workspace_tilde.clone(),
-                }),
-            );
-        root.get_mut("byChannelName")
-            .and_then(|value| value.as_object_mut())
-            .ok_or_else(|| "role map byChannelName must be a JSON object".to_string())?
-            .insert(
-                mapping.channel_name.clone(),
-                json!({
-                    "roleId": mapping.role_id,
-                    "channelId": mapping.channel_id,
-                    "workspace": workspace_tilde,
-                }),
-            );
-    }
-
-    let path = crate::runtime_layout::role_map_path(runtime_root);
-    let content = serde_json::to_string_pretty(&role_map)
-        .map_err(|e| format!("failed to serialize role map: {e}"))?;
-    std::fs::write(&path, content)
-        .map_err(|e| format!("failed to write role map {}: {e}", path.display()))
 }
 
 fn write_agentdesk_channel_bindings(
@@ -1917,14 +1750,6 @@ fn verify_onboarding_settings_artifacts(
         }
     }
 
-    let role_map_path = crate::runtime_layout::role_map_path(runtime_root);
-    if !role_map_path.is_file() {
-        return Err(format!(
-            "role map was not written at {}",
-            role_map_path.display()
-        ));
-    }
-
     let workspace_root = runtime_root.join("workspaces");
     for mapping in resolved_channels {
         let workspace = workspace_root.join(&mapping.role_id);
@@ -1979,7 +1804,6 @@ fn verify_onboarding_settings_artifacts(
 
     Ok(json!({
         "config_path": config_path.display().to_string(),
-        "role_map_path": role_map_path.display().to_string(),
         "workspace_root": workspace_root.display().to_string(),
         "workspace_count": resolved_channels.len(),
         "announce_credential_path": announce_path.display().to_string(),
@@ -2434,7 +2258,7 @@ async fn resolve_complete_channels(
     Ok(resolved_channels)
 }
 
-/// Persists the filesystem artifacts (config/workspace dirs, role map, channel
+/// Persists the filesystem artifacts (config/workspace dirs, channel
 /// bindings, discord config, credentials) and verifies the settings and
 /// pipeline artifacts. On any failure the error is recorded on
 /// `completion_state`, best-effort persisted, and a ready-to-return response is
@@ -2482,15 +2306,6 @@ fn persist_complete_filesystem_artifacts(
                 format!("failed to create workspace {}: {error}", ws_dir.display()),
             ));
         }
-    }
-
-    if let Err(error) = write_onboarding_role_map(root, provider, resolved_channels) {
-        return Err(fail_and_persist_completion_state(
-            ctx,
-            root,
-            completion_state,
-            error,
-        ));
     }
 
     if let Err(error) = write_agentdesk_channel_bindings(root, provider, resolved_channels) {
@@ -2836,7 +2651,7 @@ async fn complete_with_options(
             "ok": true,
             "label": "Settings persisted",
             "detail": format!(
-                "agentdesk config, credentials, role-map, and {} workspaces verified",
+                "agentdesk config, credentials, and {} workspaces verified",
                 resolved_channels.len()
             ),
         }),
@@ -2939,3 +2754,139 @@ mod canonical_status_tests {
 }
 
 // Provider check + AI prompt generation handlers moved to `provider` submodule.
+
+#[cfg(test)]
+mod role_map_retirement_tests {
+    use super::*;
+
+    #[test]
+    fn completion_persists_yaml_without_role_map_and_ignores_leftovers() {
+        let root = tempfile::tempdir().unwrap();
+        let _root = crate::config::set_agentdesk_root_for_test(root.path());
+        let policy_dir = root.path().join("policies");
+        std::fs::create_dir_all(&policy_dir).unwrap();
+        std::fs::write(policy_dir.join("default-pipeline.yaml"), "name: fixture\nversion: 1\nstates: [{id: ready, label: Ready}]\ntransitions: [{from: ready, to: ready, type: free}]\n").unwrap();
+        let mut config = crate::config::Config::default();
+        config.policies.dir = policy_dir;
+        let path = onboarding_config_path(root.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        crate::config::save_to_path(&path, &config).unwrap();
+        let body: CompleteBody = serde_json::from_value(json!({
+            "token": "onboarding-fixture-token", "guild_id": "73490000", "channels": []
+        }))
+        .unwrap();
+        let channels = vec![ResolvedChannelMapping {
+            channel_id: "73490001".into(),
+            channel_name: "yaml-agent".into(),
+            requested_channel_name: "yaml-agent".into(),
+            role_id: "yaml-agent".into(),
+            description: None,
+            system_prompt: None,
+            created: false,
+            resolution: ChannelResolutionKind::ProvidedId,
+        }];
+        let ctx = CompleteErrorContext {
+            provider: "codex",
+            rerun_policy: OnboardingRerunPolicy::ReuseExisting,
+            explicit_rerun_policy: false,
+        };
+        let mut completion = build_onboarding_completion_state(
+            "fixture",
+            &body.guild_id,
+            "codex",
+            OnboardingRerunPolicy::ReuseExisting,
+            OnboardingCompletionStage::ChannelsResolved,
+            false,
+            false,
+            None,
+            &channels,
+        );
+        let legacy = root.path().join("config/role_map.json");
+        let (report, _) = persist_complete_filesystem_artifacts(
+            &ctx,
+            root.path(),
+            &body,
+            "codex",
+            &channels,
+            &mut completion,
+        )
+        .unwrap();
+        assert!(!legacy.exists(), "onboarding recreated the retired file");
+        assert!(report.get("role_map_path").is_none());
+        assert_eq!(report["workspace_count"], 1);
+        let saved = crate::config::load_from_path(&path).unwrap();
+        assert_eq!(saved.agents[0].id, "yaml-agent");
+        assert_eq!(
+            channel_config_from_existing(saved.agents[0].channels.get("codex").cloned())
+                .id
+                .as_deref(),
+            Some("73490001")
+        );
+        std::fs::write(&legacy, "invalid JSON must stay untouched").unwrap();
+        let (report, _) = persist_complete_filesystem_artifacts(
+            &ctx,
+            root.path(),
+            &body,
+            "codex",
+            &channels,
+            &mut completion,
+        )
+        .unwrap();
+        assert!(report.get("role_map_path").is_none());
+        assert_eq!(
+            std::fs::read_to_string(&legacy).unwrap(),
+            "invalid JSON must stay untouched"
+        );
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn yaml_conflicts_remain_when_legacy_json_is_invalid_pg() {
+        let root = tempfile::tempdir().unwrap();
+        let _root = crate::config::set_agentdesk_root_for_test(root.path());
+        let fixture = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = fixture.connect_and_migrate().await;
+        crate::services::discord::agentdesk_config::write_bindings_for_test(
+            root.path(),
+            json!([{"id":"yaml-agent","name":"YAML Agent","provider":"codex","channels":{"codex":{"id":"73490002","name":"old-channel"}}}]),
+        );
+        std::fs::write(
+            root.path().join("config/role_map.json"),
+            "invalid legacy JSON",
+        )
+        .unwrap();
+        let channels = vec![ResolvedChannelMapping {
+            channel_id: "73490001".into(),
+            channel_name: "new-channel".into(),
+            requested_channel_name: "new-channel".into(),
+            role_id: "yaml-agent".into(),
+            description: None,
+            system_prompt: None,
+            created: false,
+            resolution: ChannelResolutionKind::ProvidedId,
+        }];
+        let conflicts = collect_onboarding_conflicts_pg(
+            &pool,
+            root.path(),
+            "codex",
+            &channels,
+            OnboardingRerunPolicy::ReuseExisting,
+        )
+        .await
+        .unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert!(conflicts[0].contains("already maps to a different channel in agentdesk.yaml"));
+        assert!(
+            collect_onboarding_conflicts_pg(
+                &pool,
+                root.path(),
+                "codex",
+                &channels,
+                OnboardingRerunPolicy::ReplaceExisting
+            )
+            .await
+            .unwrap()
+            .is_empty()
+        );
+        pool.close().await;
+        fixture.drop().await;
+    }
+}

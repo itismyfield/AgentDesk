@@ -34,6 +34,12 @@ pub(super) async fn exit_held(
     current_msg_id: MessageId,
     (cancelled, terminal_admitted, held): (bool, bool, bool),
 ) -> bool {
+    // The bridge's in-memory absence is no message to show or compare a stop on.
+    let current_msg_id =
+        super::current_message_anchor::optional_durable_current_msg_id_from_detached(
+            current_msg_id,
+        )
+        .map(MessageId::new);
     // The row pass already settled this turn and woke its reader: nothing is left to finish.
     let settled = actor.is_completion_cleanup() && actor.herdr_interrupt_state().is_some();
     if held
@@ -60,7 +66,7 @@ async fn run_policy_close(
     gateway: &dyn TurnGateway,
     actor: &Arc<CancelToken>,
     row: &InflightTurnState,
-    current_msg_id: MessageId,
+    current_msg_id: Option<MessageId>,
     proof: &BeforeStartProof,
 ) -> bool {
     let channel = ChannelId::new(row.channel_id);
@@ -77,12 +83,18 @@ async fn run_policy_close(
                 row,
                 (proof, current_msg_id),
                 &mut previous_sent,
-                || {
-                    gateway.replace_message_with_outcome(
-                        channel,
-                        current_msg_id,
-                        ADMITTED_ABORT_NOTICE,
-                    )
+                || async move {
+                    // Without an anchor only O's reply path can show the stop.
+                    let Some(current_msg_id) = current_msg_id else {
+                        return Err("no message to show the stop on".to_string());
+                    };
+                    gateway
+                        .replace_message_with_outcome(
+                            channel,
+                            current_msg_id,
+                            ADMITTED_ABORT_NOTICE,
+                        )
+                        .await
                 },
             )
             .await;
@@ -126,7 +138,7 @@ async fn consume<F>(
     (fin, mailbox): (&TurnFinalizer, &ChannelMailboxHandle),
     actor: &Arc<CancelToken>,
     row: &InflightTurnState,
-    (proof, anchor): (&BeforeStartProof, MessageId),
+    (proof, anchor): (&BeforeStartProof, Option<MessageId>),
     previous_sent: &mut Option<ReplaceLongMessageOutcome>,
     notice: impl FnOnce() -> F,
 ) -> CloseAttempt
@@ -166,7 +178,9 @@ where
     // The stop shows on the durable row's message, as a reply where O owns that body; an
     // unreadable ownership shows nothing.
     let o_body = o_owns_body(&admitted);
-    if admitted.current_msg_id != anchor.get() || o_body.is_none() {
+    if crate::services::discord::inflight::opt_message_id(admitted.current_msg_id) != anchor
+        || o_body.is_none()
+    {
         return CloseAttempt::Held;
     }
     if !mailbox_owns(mailbox, actor).await {
@@ -250,6 +264,15 @@ pub(in crate::services::discord) fn o_owns_body(row: &InflightTurnState) -> Opti
     .ok()
 }
 
+/// The turn's message, or for a turn started anchorless in turn mode, the user's own message.
+fn stop_reply_target(row: &InflightTurnState) -> Option<MessageId> {
+    crate::services::discord::inflight::opt_message_id(row.current_msg_id).or_else(|| {
+        row.anchorless_turn_mode
+            .then(|| crate::services::discord::inflight::opt_message_id(row.user_msg_id))
+            .flatten()
+    })
+}
+
 /// The stop notice as a reply to `row`'s message, for a body O owns. The turn nonce names the
 /// send, so a resend after a lost ack is deduplicated rather than shown twice.
 pub(in crate::services::discord) async fn send_stop_reply(
@@ -257,15 +280,15 @@ pub(in crate::services::discord) async fn send_stop_reply(
     shared: &Arc<SharedData>,
     row: &InflightTurnState,
 ) -> Result<Option<MessageId>, String> {
-    if row.current_msg_id == 0 {
+    let Some(target) = stop_reply_target(row) else {
         return Err("no message to reply to".into());
-    }
+    };
     let nonce = row.turn_nonce.as_deref().unwrap_or_default();
     crate::services::discord::outbound::serenity_reference::send_referenced_lifecycle_notice(
         http.clone(),
         shared.clone(),
         ChannelId::new(row.channel_id),
-        MessageId::new(row.current_msg_id),
+        target,
         ADMITTED_ABORT_NOTICE,
         format!("herdr-stop:{nonce}"),
         "herdr_stop_notice".into(),
@@ -298,7 +321,7 @@ async fn consume_once(
     fin: &TurnFinalizer,
     actor: &Arc<CancelToken>,
     row: &InflightTurnState,
-    proof: (&BeforeStartProof, MessageId),
+    proof: (&BeforeStartProof, impl Into<Option<MessageId>>),
     notice: impl std::future::Future<Output = Result<ReplaceLongMessageOutcome, String>>,
 ) -> bool {
     let Some(mailbox) = shared.mailbox_peek(ChannelId::new(row.channel_id)) else {
@@ -310,7 +333,7 @@ async fn consume_once(
             (fin, &mailbox),
             actor,
             row,
-            proof,
+            (proof.0, proof.1.into()),
             &mut None,
             || notice
         )

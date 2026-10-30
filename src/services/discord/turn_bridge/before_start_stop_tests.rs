@@ -785,8 +785,8 @@ impl Close {
         }
     }
 
-    fn anchor(&self) -> MessageId {
-        MessageId::new(self.row.current_msg_id)
+    fn anchor(&self) -> Option<MessageId> {
+        discord::inflight::opt_message_id(self.row.current_msg_id)
     }
 
     async fn consume(

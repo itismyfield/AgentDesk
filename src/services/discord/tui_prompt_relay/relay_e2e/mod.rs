@@ -597,14 +597,11 @@ impl RelayE2eHarness {
     /// Registers the channel in the role map with no checkpoint, which is what
     /// makes `catch_up` scan it in `Recent` mode.
     pub(super) fn register_channel_in_role_map(&self) {
-        let path = crate::runtime_layout::role_map_path(self.root.path());
-        std::fs::create_dir_all(path.parent().expect("role map dir")).expect("role map dir");
-        let role_map = serde_json::json!({
-            "byChannelId": {
-                CHANNEL_ID.to_string(): {"roleId": "adk-cc", "promptFile": "prompt.md", "provider": PROVIDER_KEY}
-            }
-        });
-        std::fs::write(path, role_map.to_string()).expect("write role map");
+        crate::services::discord::agentdesk_config::write_bindings_for_test(
+            self.root.path(),
+            serde_json::json!([{"id": "adk-cc", "name": "Relay", "provider": PROVIDER_KEY,
+                "channels": {PROVIDER_KEY: {"id": CHANNEL_ID.to_string(), "prompt_file": "prompt.md"}}}]),
+        );
     }
 
     /// One production catch-up sweep, both phases, over the mock transport.
@@ -757,7 +754,19 @@ mod headless_turn_provider_tests {
     async fn headless_turn_setup_failure_releases_only_its_slot_and_active_count() {
         use crate::services::discord::{health, increment_global_active};
         let harness = RelayE2eHarness::start().await;
-        harness.register_channel_in_role_map();
+        let org = crate::runtime_layout::org_schema_path(harness.root.path());
+        std::fs::create_dir_all(org.parent().unwrap()).unwrap();
+        std::fs::write(
+            org,
+            serde_yaml::to_string(&serde_json::json!({
+                "version": 1,
+                "agents": {"adk-cc": {"display_name": "Relay", "provider": PROVIDER_KEY,
+                    "prompt_file": "prompt.md"}},
+                "channels": {"by_id": {CHANNEL_ID.to_string(): {"agent": "adk-cc"}}}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         let shared = make_shared_data_for_tests();
         let mut other = make_shared_data_for_tests();
         Arc::get_mut(&mut other).unwrap().provider = ProviderKind::Codex;
@@ -858,11 +867,11 @@ mod headless_turn_provider_tests {
             Arc::get_mut(&mut shared).unwrap().provider = runtime.clone();
             shared.settings.write().await.provider = runtime.clone();
             let channel = harness.channel_id;
-            let path = crate::runtime_layout::role_map_path(harness.root.path());
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, serde_json::json!({"byChannelId": {
-            channel.to_string(): {"roleId": "provider-test", "promptFile": "prompt.md", "provider": execution.as_str()}
-        }}).to_string()).unwrap();
+            crate::services::discord::agentdesk_config::write_bindings_for_test(
+                harness.root.path(),
+                serde_json::json!([{"id": "provider-test", "name": "Provider", "provider": execution.as_str(),
+                    "channels": {execution.as_str(): {"id": channel.to_string(), "prompt_file": "prompt.md"}}}]),
+            );
             let incumbent = Arc::new(CancelToken::new());
             assert!(
                 mailbox_try_start_turn(

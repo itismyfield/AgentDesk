@@ -73,34 +73,6 @@ fn read_optional(path: Option<std::path::PathBuf>) -> Result<Option<Vec<u8>>, St
 // Preserve registration precedence without config hardening or recovery-catalog mutation.
 fn registrations() -> Result<Vec<RegisteredChannelBinding>, String> {
     let mut bindings = BTreeMap::new();
-    if let Some(bytes) = read_optional(runtime_store::role_map_path())? {
-        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-        if let Some(by_id) = value.get("byChannelId").and_then(|v| v.as_object()) {
-            for (id, entry) in by_id {
-                let Some(channel_id) = id.parse::<u64>().ok().filter(|_| {
-                    entry.get("roleId").and_then(|v| v.as_str()).is_some()
-                        && entry.get("promptFile").and_then(|v| v.as_str()).is_some()
-                }) else {
-                    continue;
-                };
-                if let Some(owner_provider) = entry
-                    .get("provider")
-                    .and_then(|v| v.as_str())
-                    .and_then(ProviderKind::from_str)
-                    .filter(ProviderKind::is_supported)
-                {
-                    bindings.insert(
-                        channel_id,
-                        RegisteredChannelBinding {
-                            channel_id,
-                            owner_provider,
-                            fallback_name: None,
-                        },
-                    );
-                }
-            }
-        }
-    }
     if let Some(bytes) = read_optional(runtime_store::org_schema_path())? {
         let text = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
         let schema = org_schema::parse_org_schema(text)?;

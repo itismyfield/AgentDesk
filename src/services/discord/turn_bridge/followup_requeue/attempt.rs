@@ -9,23 +9,36 @@ pub(in crate::services::discord) async fn requeue_claude_tui_followup_pre_submit
     adk_session_key: Option<&str>,
     attempt: BusyAttempt<'_>,
 ) -> FollowupRequeueOutcome {
-    let notice_message_id = super::super::busy_followup_retry_store::bind_notice_if_absent(
-        provider,
-        channel_id.get(),
-        inflight_state.effective_busy_followup_retry_user_msg_id(),
-        inflight_state.current_msg_id,
-    )
-    .map(|state| MessageId::new(state.notice_message_id))
-    .unwrap_or_else(|error| {
-        tracing::warn!(
-            provider = %provider.as_str(),
-            channel_id = channel_id.get(),
-            user_msg_id = inflight_state.effective_busy_followup_retry_user_msg_id(),
-            error = %error,
-            "failed to bind busy follow-up notice; using current placeholder"
-        );
-        MessageId::new(inflight_state.current_msg_id)
-    });
+    // A turn with no anchor keeps a budget without a card; it never binds a zero id.
+    let notice_message_id = if inflight_state.current_msg_id == 0 {
+        super::super::busy_followup_retry_store::load(
+            provider,
+            channel_id.get(),
+            inflight_state.effective_busy_followup_retry_user_msg_id(),
+        )
+        .filter(|state| state.notice_bound)
+        .and_then(|state| super::super::inflight::opt_message_id(state.notice_message_id))
+    } else {
+        Some(
+            super::super::busy_followup_retry_store::bind_notice_if_absent(
+                provider,
+                channel_id.get(),
+                inflight_state.effective_busy_followup_retry_user_msg_id(),
+                inflight_state.current_msg_id,
+            )
+            .map(|state| MessageId::new(state.notice_message_id))
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    provider = %provider.as_str(),
+                    channel_id = channel_id.get(),
+                    user_msg_id = inflight_state.effective_busy_followup_retry_user_msg_id(),
+                    error = %error,
+                    "failed to bind busy follow-up notice; using current placeholder"
+                );
+                MessageId::new(inflight_state.current_msg_id)
+            }),
+        )
+    };
     // A pane protecting a person's draft refused this input, not a busy turn.
     let held = inflight_state
         .tmux_session_name
@@ -38,7 +51,7 @@ pub(in crate::services::discord) async fn requeue_claude_tui_followup_pre_submit
         (
             channel_id.get(),
             inflight_state.effective_busy_followup_retry_user_msg_id(),
-            notice_message_id.get(),
+            notice_message_id.map_or(0, MessageId::get),
         ),
         &sources,
         attempt.cost,

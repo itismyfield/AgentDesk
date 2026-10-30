@@ -266,3 +266,76 @@ fn a_rebuilt_reader_replays_owed_inputs() {
     assert_eq!(rebuilt.pending_receipt(), facts.pending_receipt());
     assert!(rebuilt.pending_receipt());
 }
+
+fn notification(body: &str) -> Value {
+    json!({"type":"attachment", "attachment":{"type":"queued_command", "prompt":body,
+        "commandMode":"task-notification", "origin":{"kind":"task-notification"}}})
+}
+
+/// A background task's notification Claude queued is consumed by its own drain mid-turn, or by the
+/// meta row that opens its turn: neither leaves it owed.
+#[test]
+fn a_queued_notification_is_settled_by_its_own_drain() {
+    let note = "<task-notification>done</task-notification>";
+    let drained = [
+        user("a", "first"),
+        enqueue(note),
+        queue("remove", Some(note), Some("absorbed_mid_turn")),
+        notification(note),
+        queue("dequeue", None, None),
+        idle(),
+    ];
+    assert!(!closed_with(&drained).pending_receipt());
+    let meta = json!({"type":"user", "isMeta":true, "origin":{"kind":"task-notification"},
+        "message":{"content":note}});
+    let own_turn = [
+        user("a", "first"),
+        enqueue(note),
+        idle(),
+        queue("dequeue", None, None),
+        meta,
+        assistant("handled"),
+        idle(),
+    ];
+    assert!(!closed_with(&own_turn).pending_receipt());
+}
+
+/// A meta row inside an already open turn runs one queued input with its body; of two queued with
+/// the same body, as plain text and as a text block, in either order, the other stays owed.
+#[test]
+fn a_meta_row_inside_an_open_turn_runs_one_queued_input_with_its_body() {
+    let note = "<task-notification>done</task-notification>";
+    let meta = json!({"type":"user", "isMeta":true, "origin":{"kind":"task-notification"},
+        "message":{"content":note}});
+    let alone = closed_with(&[user("a", "first"), enqueue(note), meta.clone(), idle()]);
+    assert_eq!((alone.pending_receipt(), alone.owed_inputs()), (false, 0));
+    let human = enqueue(note);
+    let queued_note = json!({"type":"queue-operation", "operation":"enqueue",
+        "content":[{"type":"text", "text":note}]});
+    for (first, second) in [(human.clone(), queued_note.clone()), (queued_note, human)] {
+        let both = closed_with(&[user("a", "first"), first, second, meta.clone(), idle()]);
+        assert_eq!(both.owed_inputs(), 1);
+    }
+}
+
+/// The dequeue Claude writes after an absorption is that absorption's: it takes no other input.
+#[test]
+fn a_dequeue_after_an_absorption_takes_no_other_input() {
+    let rows = [
+        user("a", "first"),
+        enqueue("b"),
+        enqueue("c"),
+        queue("remove", Some("b"), Some("absorbed_mid_turn")),
+        queued_command("b"),
+        queue("dequeue", None, None),
+        idle(),
+        assistant("a turn that names no input"),
+        idle(),
+    ];
+    let facts = closed_with(&rows);
+    assert!(
+        facts.pending_receipt(),
+        "c is not tied to that turn by b's dequeue"
+    );
+    assert_eq!(facts.owed_inputs(), 1);
+}

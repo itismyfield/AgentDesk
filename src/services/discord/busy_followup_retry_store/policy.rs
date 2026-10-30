@@ -82,7 +82,7 @@ impl RetryBudget {
             draft_hold: false,
             active_retry_ms: 0,
             capped: false,
-            notice_bound: true,
+            notice_bound: notice_message_id != 0,
             draft_session: None,
         });
         if draft_session.is_none() && budget.first_busy_retry_at_ms == 0 {
@@ -164,7 +164,7 @@ pub(in crate::services::discord) fn decode_checked(
         return Err(ReadRefusal::new(IncompleteRecord, detail));
     }
     let budget: RetryBudget = serde_json::from_slice(bytes).map_err(malformed)?;
-    if budget.notice_message_id == 0 {
+    if budget.notice_bound && budget.notice_message_id == 0 {
         return Err(ReadRefusal::new(InvalidNotice, "notice_message_id is 0"));
     }
     Ok(budget)

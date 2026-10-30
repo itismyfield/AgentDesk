@@ -188,6 +188,8 @@ use self::claude_idle_bridge::{
     tui_idle_tail_stream_should_commit_runtime_binding_offset,
 };
 #[cfg(unix)]
+pub(super) use self::claude_idle_runtime::resolve_known_tmux_channel_id;
+#[cfg(unix)]
 pub(super) use self::claude_idle_runtime::resolve_rehydrated_claude_tmux_channel_id;
 #[cfg(unix)]
 use self::claude_idle_runtime::{

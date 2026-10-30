@@ -414,6 +414,24 @@ pub struct TestEvidence {
     pub log_refs: Vec<String>,
 }
 
+// The candidate a stored execution verifies, resolved by the server; callers cannot construct it freely.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServerResolvedSubject(Candidate);
+
+impl ServerResolvedSubject {
+    pub fn bound_candidate(binding: &AttemptBinding) -> Self {
+        Self(Candidate {
+            repository: binding.repository,
+            base_sha: binding.base_sha.clone(),
+            head_sha: binding.candidate_sha.clone(),
+        })
+    }
+
+    pub(super) fn sealed(candidate: Candidate) -> Self {
+        Self(candidate)
+    }
+}
+
 impl TestEvidence {
     // Completeness/provenance only: a complete failed execution remains valid evidence, not a PASS.
     pub fn validate_execution(
@@ -421,11 +439,27 @@ impl TestEvidence {
         plan: &VerificationPlan,
         binding: &AttemptBinding,
     ) -> Result<(), ContractError> {
+        self.validate_execution_subject(
+            plan,
+            binding,
+            &ServerResolvedSubject::bound_candidate(binding),
+        )
+    }
+
+    // Only the candidate link is widened to the server-resolved subject; binding and completeness stay.
+    pub fn validate_execution_subject(
+        &self,
+        plan: &VerificationPlan,
+        binding: &AttemptBinding,
+        subject: &ServerResolvedSubject,
+    ) -> Result<(), ContractError> {
         plan.validate()?;
         if &self.binding != binding || plan.stage != binding.stage {
             return Err(ContractError::BindingMismatch);
         }
-        plan.candidate.validate_binding(binding)?;
+        if plan.candidate != subject.0 {
+            return Err(ContractError::CandidateMismatch);
+        }
         if self.environment.checkout.observed_sha != plan.candidate.head_sha {
             return Err(ContractError::CandidateMismatch);
         }

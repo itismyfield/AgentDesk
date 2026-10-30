@@ -113,13 +113,20 @@ fn s1_unbound_marker_collection_does_not_create_runtime_directories() {
 fn s1_unbound_registration_reads_preserve_precedence_and_permissions() {
     use std::os::unix::fs::PermissionsExt;
     let _root = TestRuntimeRootGuard::new();
-    let role = runtime_store::role_map_path().unwrap();
+    let role = crate::config::runtime_root()
+        .unwrap()
+        .join("config/role_map.json");
     std::fs::create_dir_all(role.parent().unwrap()).unwrap();
-    std::fs::write(&role, br#"{"byChannelId":{"69181602":{"roleId":"role","promptFile":"p","provider":"claude"},"69181603":{"roleId":"role","promptFile":"p","provider":"codex"}}}"#).unwrap();
+    std::fs::write(&role, br#"{"byChannelId":{"69181602":{"roleId":"role","promptFile":"p","provider":"claude"},"69181604":{"roleId":"role","promptFile":"p","provider":"codex"}}}"#).unwrap();
     let org = runtime_store::org_schema_path().unwrap();
     std::fs::create_dir_all(org.parent().unwrap()).unwrap();
     std::fs::write(&org, "version: 1\nagents:\n  role:\n    display_name: Role\n    provider: codex\nchannels:\n  by_id:\n    '69181602':\n      agent: role\n").unwrap();
-    let config = Config::default();
+    let mut config = Config::default();
+    config.agents = serde_json::from_value(serde_json::json!([{
+        "id": "yaml-role", "name": "YAML role", "provider": "codex",
+        "channels": {"codex": {"id": "69181603"}}
+    }]))
+    .unwrap();
     let path = crate::runtime_layout::config_file_path(&crate::config::runtime_root().unwrap());
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, serde_yaml::to_string(&config).unwrap()).unwrap();
@@ -128,6 +135,8 @@ fn s1_unbound_registration_reads_preserve_precedence_and_permissions() {
     assert_eq!(bindings.len(), 2);
     assert_eq!(bindings[0].channel_id, 69_181_602);
     assert_eq!(bindings[0].owner_provider, ProviderKind::Codex);
+    assert_eq!(bindings[1].channel_id, 69_181_603);
+    assert_eq!(bindings[1].owner_provider, ProviderKind::Codex);
     assert_eq!(
         std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
         0o644

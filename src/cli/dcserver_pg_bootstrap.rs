@@ -271,7 +271,6 @@ pub(crate) async fn initialize_postgres_for_bootstrap(
     pool: &sqlx::PgPool,
     mut config: crate::config::Config,
     runtime_root: Option<&Path>,
-    legacy_scan: &crate::services::discord_config_audit::LegacySourceScan,
 ) -> Result<crate::config::Config, PgConnectFailure> {
     let initialized = crate::db::postgres::with_startup_advisory_lock(pool, || async {
         crate::db::postgres::migrate(pool).await?;
@@ -282,7 +281,6 @@ pub(crate) async fn initialize_postgres_for_bootstrap(
                 loaded.config,
                 loaded.path,
                 loaded.existed,
-                legacy_scan,
                 false,
             )?
             .config;
@@ -584,7 +582,34 @@ mod tests {
     fn rename_over(path: &Path, bytes: &[u8]) {
         let staged = path.with_extension("staged");
         std::fs::write(&staged, bytes).expect("write staged binary");
+        // The metadata-only fallback needs an observable change even within one filesystem tick.
+        filetime::set_file_mtime(
+            &staged,
+            filetime::FileTime::from_unix_time(1_600_000_002, 0),
+        )
+        .expect("set replacement timestamp");
         std::fs::rename(&staged, path).expect("rename staged binary over the install path");
+    }
+
+    fn initial_binary(path: &Path) {
+        std::fs::write(path, b"old-binary").expect("write binary");
+        filetime::set_file_mtime(path, filetime::FileTime::from_unix_time(1_600_000_000, 0))
+            .expect("set initial timestamp");
+    }
+
+    fn metadata_only(identity: BinaryIdentity) -> BinaryIdentity {
+        #[cfg(unix)]
+        {
+            BinaryIdentity {
+                dev: 0,
+                ino: 0,
+                ..identity
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            identity
+        }
     }
 
     async fn hold_returns_within_an_hour(watch: &BinaryWatch) -> bool {
@@ -602,7 +627,7 @@ mod tests {
     async fn hold_ends_only_when_the_install_path_holds_a_new_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("agentdesk");
-        std::fs::write(&path, b"old-binary").expect("write binary");
+        initial_binary(&path);
         let watch = BinaryWatch::capture(path.clone()).expect("capture");
 
         assert!(
@@ -627,12 +652,34 @@ mod tests {
     /// first bootstrap failure still ends the hold.
     #[tokio::test(start_paused = true)]
     async fn hold_ends_for_a_binary_replaced_before_it_started() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("agentdesk");
-        std::fs::write(&path, b"old-binary").expect("write binary");
-        let watch = BinaryWatch::capture(path.clone()).expect("capture");
-        rename_over(&path, b"new-binary");
-        assert!(hold_returns_within_an_hour(&watch).await);
+        for metadata_fallback in [false, true] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("agentdesk");
+            initial_binary(&path);
+            let mut watch = BinaryWatch::capture(path.clone()).expect("capture");
+            if metadata_fallback {
+                watch.identity = metadata_only(watch.identity);
+            }
+            rename_over(&path, b"new-binary");
+            let probe = |path: &Path| {
+                BinaryIdentity::of(path).map(|identity| {
+                    if metadata_fallback {
+                        metadata_only(identity)
+                    } else {
+                        identity
+                    }
+                })
+            };
+            assert!(
+                tokio::time::timeout(
+                    Duration::from_secs(3600),
+                    hold_while_schema_ahead(&watch, "ahead", probe, tokio::time::sleep),
+                )
+                .await
+                .is_ok(),
+                "replacement must end the hold, metadata fallback={metadata_fallback}"
+            );
+        }
     }
 
     /// A migration newer than this binary is SchemaAhead; an unknown version below
@@ -666,14 +713,9 @@ mod tests {
                 .execute(&pool)
                 .await
                 .expect("insert unknown migration row");
-                initialize_postgres_for_bootstrap(
-                    &pool,
-                    crate::config::Config::default(),
-                    None,
-                    &crate::services::discord_config_audit::LegacySourceScan::default(),
-                )
-                .await
-                .expect_err("an unknown applied migration must fail startup")
+                initialize_postgres_for_bootstrap(&pool, crate::config::Config::default(), None)
+                    .await
+                    .expect_err("an unknown applied migration must fail startup")
             }
         };
 

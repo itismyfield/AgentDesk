@@ -1948,17 +1948,35 @@ mod tests {
         ));
     }
 
-    /// #3419 B (activity-based idle): a turn that keeps emitting NON-assistant
-    /// output (here `reasoning` lifecycle records) at an interval SHORTER than
-    /// the idle deadline must NOT trip the no-assistant-response timeout — the
-    /// idle clock resets on every real rollout record. Pre-B this measured
-    /// `started_at.elapsed()` (absolute) and would have fired regardless of
-    /// activity, killing a live long/interactive codex turn. We append several
-    /// reasoning lines spaced under the deadline, then assert no timeout Done
-    /// was emitted (and the turn ends only when the pane dies, not the timer).
+    /// Activity refreshes the idle clock; the total active window exceeds the deadline.
     #[test]
     fn idle_deadline_survives_continuous_nonassistant_activity() {
+        use std::cell::Cell;
         use std::io::Write;
+        struct ActivityClock<'a> {
+            at: Cell<Instant>,
+            records: Cell<usize>,
+            rollout: &'a Path,
+        }
+        impl following_source::TailClock for ActivityClock<'_> {
+            fn now(&self) -> Instant {
+                self.at.get()
+            }
+            fn sleep(&self, duration: Duration) {
+                self.at.set(self.at.get() + duration);
+                if self.records.get() < 5 {
+                    let mut file = std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(self.rollout)
+                        .unwrap();
+                    file.write_all(
+                        b"{\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\"}}\n",
+                    )
+                    .unwrap();
+                    self.records.set(self.records.get() + 1);
+                }
+            }
+        }
         let dir = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
         let rollout = write_rollout(
@@ -1968,70 +1986,43 @@ mod tests {
             cwd.path(),
             "",
         );
+        let started = Instant::now();
+        let clock = ActivityClock {
+            at: Cell::new(started),
+            records: Cell::new(0),
+            rollout: &rollout,
+        };
         let (tx, rx) = mpsc::channel();
-        // Pane death is the ONLY non-timer exit; flip it AFTER the activity
-        // window so the test terminates deterministically without relying on
-        // the (longer) idle deadline. `alive` stays true while we append.
-        let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let writer_alive = alive.clone();
-        let writer_path = rollout.clone();
-        let writer = std::thread::spawn(move || {
-            // 5 reasoning records, ~60ms apart (300ms total) — each one is a
-            // rollout activity that resets the 200ms idle clock, so the gap
-            // between activities (60ms) never reaches the deadline (200ms).
-            for _ in 0..5 {
-                std::thread::sleep(Duration::from_millis(60));
-                let mut file = std::fs::OpenOptions::new()
-                    .append(true)
-                    .open(&writer_path)
-                    .unwrap();
-                file.write_all(
-                    b"{\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\"}}\n",
-                )
-                .unwrap();
-            }
-            // Activity over: let the pane die so the tail exits via `is_alive`,
-            // proving it reached EOF still ALIVE without the timer firing.
-            std::thread::sleep(Duration::from_millis(60));
-            writer_alive.store(false, std::sync::atomic::Ordering::SeqCst);
-        });
-        let is_alive_flag = alive.clone();
-        let (result, _outcome) = tail_rollout_file_until_assistant_response(
-            &rollout,
-            0,
-            None,
+        let (result, outcome) = following_source::tail_with_clock(
+            (&rollout, 0, None),
             &tx,
-            None,
-            move || is_alive_flag.load(std::sync::atomic::Ordering::SeqCst),
-            Duration::ZERO,
-            // Idle deadline (200ms) is shorter than the TOTAL active window
-            // (~360ms) but longer than the per-activity gap (60ms): an
-            // absolute-time gate would fire; an idle gate must not.
-            Some(Duration::from_millis(200)),
-            None,
-            true,
-            None,
-            true,
-            None,
-            None,
+            || clock.records.get() < 5,
+            RolloutTailOptions {
+                terminal_drain: Duration::ZERO,
+                assistant_response_deadline: Some(Duration::from_millis(200)),
+                ..Default::default()
+            },
+            &clock,
         )
         .unwrap();
-        writer.join().unwrap();
         drop(tx);
         let messages: Vec<_> = rx.iter().collect();
-        // No assistant text ever arrived, so the pane-death branch surfaces
-        // SessionDied — NOT a timer-driven Completed/Done.
+        assert_eq!(clock.records.get(), 5);
+        assert!(clock.at.get().duration_since(started) > Duration::from_millis(200));
+        assert_eq!(
+            outcome.final_offset,
+            std::fs::metadata(&rollout).unwrap().len()
+        );
         assert!(
             matches!(result, ReadOutputResult::SessionDied { .. }),
             "live activity must keep the idle timer from firing; got {result:?}"
         );
         assert!(
-            !messages.iter().any(|m| matches!(
-                m,
-                StreamMessage::Done { result, .. }
-                    if result.contains("timed out") || result.contains("idle")
-            )),
-            "no idle/timeout Done may be emitted while activity is ongoing: {messages:?}"
+            !messages
+                .iter()
+                .any(|m| matches!(m, StreamMessage::Done { result, .. }
+            if result.contains("timed out") || result.contains("idle"))),
+            "no timeout during activity: {messages:?}"
         );
     }
 

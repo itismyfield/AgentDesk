@@ -11,7 +11,7 @@ use crate::services::discord::inflight::{self, GuardedClearOutcome, InflightTurn
 use crate::services::discord::turn_finalizer::{
     FinalizeContext, SyntheticClaimSnapshot, TerminalEvent, TurnKey,
 };
-use crate::services::discord::turn_presence::activity::ClosedBoundary;
+use crate::services::discord::turn_presence::activity::{ClosedBoundary, NoBoundary};
 use crate::services::tui_o::turn_mode::carried_close_mutant as mutant;
 
 /// How long the close waits for the O actor's poll after it asked; O polls every second.
@@ -94,15 +94,68 @@ enum Carried {
     Archived(Box<Target>),
 }
 
+/// The reason each channel's carried turn was last kept, logged once per change.
+static KEPT: LazyLock<Mutex<HashMap<u64, String>>> = LazyLock::new(Default::default);
+
 async fn close_channel(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel: ChannelId,
 ) -> bool {
-    if !crate::services::tui_o::turn_mode::transcript_turns(channel.get())
-        || !super::super::transcript_binding_stall::o_owns(channel.get())
-    {
-        return false;
+    let result = try_close(shared, provider, channel).await;
+    let mut last = KEPT.lock().unwrap_or_else(|e| e.into_inner());
+    match &result {
+        Err(Kept::Because(reason) | Kept::Stuck(reason))
+            if last.get(&channel.get()) != Some(reason) =>
+        {
+            if matches!(result, Err(Kept::Stuck(_))) {
+                tracing::warn!(
+                    provider = provider.as_str(),
+                    channel_id = channel.get(),
+                    reason = reason.as_str(),
+                    "[tui_o] carried-over turn kept"
+                );
+            } else {
+                tracing::info!(
+                    provider = provider.as_str(),
+                    channel_id = channel.get(),
+                    reason = reason.as_str(),
+                    "[tui_o] carried-over turn kept"
+                );
+            }
+            last.insert(channel.get(), reason.clone());
+        }
+        Err(Kept::Because(_) | Kept::Stuck(_)) => {}
+        Ok(()) | Err(Kept::NoRow) => {
+            last.remove(&channel.get());
+        }
+    }
+    result.is_ok()
+}
+
+/// Why a pass left a channel's carried turn open.
+enum Kept {
+    /// Nothing carried: the channel's ordinary state, not logged.
+    NoRow,
+    Because(String),
+    /// Archived, yet its episode or its row is still there: a warning, still once per change.
+    Stuck(String),
+}
+
+fn kept(reason: impl Into<String>) -> Kept {
+    Kept::Because(reason.into())
+}
+
+async fn try_close(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+) -> Result<(), Kept> {
+    if !crate::services::tui_o::turn_mode::transcript_turns(channel.get()) {
+        return Err(kept("not_turn_mode"));
+    }
+    if !super::super::transcript_binding_stall::o_owns(channel.get()) {
+        return Err(kept("not_o_owned"));
     }
     let generation = shared.restart.current_generation;
     let row = inflight::load_inflight_state(provider, channel.get());
@@ -113,49 +166,57 @@ async fn close_channel(
                 &row, generation,
             ) && !mutant("generation")
             {
-                return false;
+                return Err(kept("current_generation"));
             }
             Carried::Row(Box::new(row))
         }
         (None, Some(target)) => Carried::Archived(Box::new(target)),
-        (None, None) => return false,
+        (None, None) => return Err(Kept::NoRow),
     };
     let before = episode(shared, channel).await;
     let target_episode = match &carried {
         Carried::Row(row) => {
             let nonce = row.turn_nonce.as_deref();
             if !before.empty() && !before.is(row.effective_finalizer_turn_id(), nonce) {
-                return false;
+                let other = before.message == Some(row.effective_finalizer_turn_id());
+                return Err(kept(match other {
+                    true => "episode_other_nonce",
+                    false => "episode_other_turn",
+                }));
             }
             !before.empty()
         }
         Carried::Archived(target) => {
             if !before.is(target.finalizer_turn_id, target.nonce.as_deref()) {
                 archived().remove(&channel.get());
-                return false;
+                return Err(kept("archived_episode_gone"));
             }
             true
         }
     };
-    let Some(end) = native_end(shared, provider, channel).await else {
-        return false;
-    };
-    if !o_delivered_through(channel, &end).await {
-        return false;
-    }
+    let end = native_end(shared, provider, channel).await.map_err(|no| {
+        kept(format!(
+            "no_native_end:{}:owed_inputs={}",
+            no.reason, no.owed_inputs
+        ))
+    })?;
+    o_delivered_through(channel, &end).await.map_err(kept)?;
     // Injection holds this lock through its paste and settlement; a busy lock is this tick's no-op.
     let transition = match shared.session_transition_lock(channel).try_lock_owned() {
         Ok(transition) => Some(transition),
         Err(_) if mutant("lock") => None,
-        Err(_) => return false,
+        Err(_) => return Err(kept("transition_lock_busy")),
     };
     #[cfg(test)]
     tests::pause("locked", channel.get()).await;
-    if !still_closed(shared, provider, channel, &end).await
-        || (input_delivered_since(provider, channel, &end) && !mutant("delivery"))
-        || episode(shared, channel).await != before
-    {
-        return false;
+    if !still_closed(shared, provider, channel, &end).await {
+        return Err(kept("native_moved_under_lock"));
+    }
+    if input_delivered_since(provider, channel, &end) && !mutant("delivery") {
+        return Err(kept("unconfirmed_injection_since_growth"));
+    }
+    if episode(shared, channel).await != before {
+        return Err(kept("episode_changed_under_lock"));
     }
     let target = match carried {
         Carried::Row(row) => {
@@ -174,13 +235,7 @@ async fn close_channel(
                 ),
             };
             if archive != GuardedClearOutcome::Cleared {
-                tracing::info!(
-                    provider = provider.as_str(),
-                    channel_id = channel.get(),
-                    ?archive,
-                    "[tui_o] carried-over turn kept: its row changed before the archive"
-                );
-                return false;
+                return Err(kept(format!("archive_{archive:?}")));
             }
             let target = Target {
                 finalizer_turn_id: row.effective_finalizer_turn_id(),
@@ -239,15 +294,10 @@ async fn close_channel(
     let row_gone = inflight::load_inflight_state(provider, channel.get())
         .is_none_or(|row| row.effective_finalizer_turn_id() != target.finalizer_turn_id);
     if !(released && row_gone) {
-        tracing::warn!(
-            provider = provider.as_str(),
-            channel_id = channel.get(),
-            finalizer_turn_id = target.finalizer_turn_id,
-            released,
-            row_gone,
-            "[tui_o] carried-over turn archived but its episode is still open; retrying next pass"
-        );
-        return false;
+        return Err(Kept::Stuck(format!(
+            "archived_episode_open:finalizer_turn_id={}:released={released}:row_gone={row_gone}",
+            target.finalizer_turn_id
+        )));
     }
     archived().remove(&channel.get());
     tracing::info!(
@@ -259,7 +309,7 @@ async fn close_channel(
         episode_released = target_episode,
         "[tui_o] carried-over turn closed: its native turn ended and O delivered it"
     );
-    true
+    Ok(())
 }
 
 /// The transcript's native end, read fresh.
@@ -267,10 +317,14 @@ async fn native_end(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel: ChannelId,
-) -> Option<ClosedBoundary> {
+) -> Result<ClosedBoundary, NoBoundary> {
     #[cfg(test)]
     if let Some(end) = tests::native_end(channel.get()) {
-        return end;
+        let scripted = NoBoundary {
+            reason: "scripted",
+            owed_inputs: 0,
+        };
+        return end.ok_or(scripted);
     }
     let reading = discord::turn_presence::activity::reading_now(shared, provider, channel).await;
     reading.closed_boundary().cloned()
@@ -285,7 +339,7 @@ async fn still_closed(
 ) -> bool {
     native_end(shared, provider, channel)
         .await
-        .is_some_and(|now| now.source == end.source && now.through == end.through)
+        .is_ok_and(|now| now.source == end.source && now.through == end.through)
 }
 
 /// An unconfirmed injection settled at or after the transcript last grew may have reached the pane
@@ -300,13 +354,14 @@ fn input_delivered_since(
 }
 
 /// O, asked after the native end was read, owes nothing and captured that source through it.
-async fn o_delivered_through(channel: ChannelId, end: &ClosedBoundary) -> bool {
+async fn o_delivered_through(channel: ChannelId, end: &ClosedBoundary) -> Result<(), String> {
     let readiness = crate::services::tui_o::writer::host::process_readiness();
     let Some(owed) = readiness
         .undelivered_after(channel.get(), OWED_READ_LIMIT)
         .await
     else {
-        return false;
+        let hosted = readiness.undelivered(channel.get()).is_some();
+        return Err(format!("o_unanswered:hosted={hosted}"));
     };
     let drained = mutant("debt")
         || (owed.owed == 0
@@ -316,10 +371,28 @@ async fn o_delivered_through(channel: ChannelId, end: &ClosedBoundary) -> bool {
             && owed.binding_pending == 0
             && owed.verified_work == 0
             && owed.posting == 0);
-    drained
-        && owed.captured.iter().any(|(path, through)| {
-            same_source(path, &end.source) && (*through >= end.through || mutant("capture"))
-        })
+    if !drained {
+        return Err(format!(
+            "o_owes:owed={} prepared={} unsealed={} uncaptured={} binding_pending={} \
+             verified_work={} posting={}",
+            owed.owed,
+            owed.prepared,
+            owed.unsealed,
+            owed.uncaptured,
+            owed.binding_pending,
+            owed.verified_work,
+            owed.posting
+        ));
+    }
+    let source = owed
+        .captured
+        .iter()
+        .find(|(path, _)| same_source(path, &end.source));
+    match source {
+        Some((_, through)) if *through >= end.through || mutant("capture") => Ok(()),
+        Some((_, through)) => Err(format!("o_capture_behind:{through}<{}", end.through)),
+        None => Err(format!("o_source_unbound:sources={}", owed.captured.len())),
+    }
 }
 
 fn same_source(left: &Path, right: &Path) -> bool {
