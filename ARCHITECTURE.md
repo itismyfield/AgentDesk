@@ -2292,6 +2292,7 @@ src/
 │   │   │   │   ├── state.rs
 │   │   │   │   ├── stream_chunk.rs
 │   │   │   │   └── stream_seed.rs
+│   │   │   ├── adopted_run_first_output_tests.rs
 │   │   │   ├── body_footer_rollover_tests.rs
 │   │   │   ├── cancel_handoff.rs
 │   │   │   ├── codex_replacement_tests.rs
@@ -2590,6 +2591,7 @@ src/
 │   │   │   │   ├── codex_replacement_tests.rs
 │   │   │   │   ├── guarded_save.rs
 │   │   │   │   ├── herdr_owner_tests.rs
+│   │   │   │   ├── read_error_fallback_tests.rs
 │   │   │   │   ├── tests.rs
 │   │   │   │   └── watcher_handoff.rs
 │   │   │   ├── status_panel/
