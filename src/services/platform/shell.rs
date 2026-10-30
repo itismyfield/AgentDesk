@@ -150,6 +150,37 @@ mod hostname_tests {
         assert_eq!(HOSTNAME_NATIVE_READS.with(|count| count.get()), 0);
     }
 
+    /// Counted from the first call in a fresh process, before the cache holds a name: filling it
+    /// reads the name natively once and starts no `hostname` process.
+    #[cfg(unix)]
+    #[test]
+    fn first_short_hostname_call_in_a_fresh_process_spawns_no_child() {
+        const CHILD: &str = "ADK_TEST_HOSTNAME_FIRST_CALL_CHILD";
+        let thread = std::thread::current();
+        let name = thread.name().expect("named libtest worker");
+        if std::env::var(CHILD).ok().as_deref() == Some(name) {
+            let first = hostname_short();
+            assert_eq!(HOSTNAME_SPAWNS.with(|count| count.get()), 0);
+            assert_eq!(
+                HOSTNAME_NATIVE_READS.with(|count| count.get()),
+                1,
+                "this call filled the cache"
+            );
+            assert_eq!(hostname_short(), first);
+            assert_eq!(HOSTNAME_NATIVE_READS.with(|count| count.get()), 1);
+            return;
+        }
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env(CHILD, name)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{name}: {stdout}\n{stderr}");
+        assert!(stdout.contains("1 passed; 0 failed"), "{stdout}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn health_hostname_falls_back_on_failed_empty_invalid_or_cut_names() {
