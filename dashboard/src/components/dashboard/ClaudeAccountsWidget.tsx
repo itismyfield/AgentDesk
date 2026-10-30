@@ -615,7 +615,7 @@ function ClaudeAccountsWidgetImpl({ t }: ClaudeAccountsWidgetProps) {
                         compact
                         disabled={account.active || !target || Boolean(switchingAccount)}
                         onClick={target ? () => void handleSwitch(target) : undefined}
-                        className="gap-1.5"
+                        className="shrink-0 gap-1.5"
                       >
                         {isSwitching ? (
                           <Loader2 size={12} className="motion-safe:animate-spin" aria-hidden />
