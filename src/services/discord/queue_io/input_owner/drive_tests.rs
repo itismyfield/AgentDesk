@@ -143,18 +143,27 @@ async fn one_drive_per_channel_hands_each_front_on_once_in_order() {
 }
 
 /// A front cancelled after its grant and before its claim is never reserved, and the drive goes
-/// on with the front that took its place; a clear before the claim leaves nothing reserved.
+/// on with the front that took its place; a clear before the claim leaves nothing reserved, and a
+/// cancel of the input behind keeps the front's grant, so it is delivered with no further wake.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_front_that_moved_after_its_grant_is_never_reserved() {
     let _root = TestRuntimeRootGuard::new();
     let registry = ChannelMailboxRegistry::default();
-    for (channel, how) in [(7_272_702, "cancel"), (7_272_703, "clear")] {
+    for (channel, how) in [
+        (7_272_702, "cancel"),
+        (7_272_703, "clear"),
+        (7_272_708, "tail"),
+    ] {
         let mailbox = owner(&registry, channel, 2).await;
         let ran = Arc::new(Mutex::new(Vec::new()));
         let (m, r) = (mailbox.clone(), ran.clone());
         let before = move |front: &Front| {
             let (m, first) = (m.clone(), front.1.text == "input 0");
-            let id = poise::serenity_prelude::MessageId::new(front.1.message_id);
+            let id = match how {
+                "tail" => original(channel, 1).message_id,
+                _ => front.1.message_id,
+            };
+            let id = poise::serenity_prelude::MessageId::new(id);
             Box::pin(async move {
                 let ctx = crate::services::turn_orchestrator::QueuePersistenceContext::new(
                     &crate::services::provider::ProviderKind::Claude,
@@ -162,7 +171,9 @@ async fn a_front_that_moved_after_its_grant_is_never_reserved() {
                     None,
                 );
                 match (first, how) {
-                    (true, "cancel") => drop(m.cancel_queued_primary_message(id, ctx).await),
+                    (true, "cancel" | "tail") => {
+                        drop(m.cancel_queued_primary_message(id, ctx).await)
+                    }
                     (true, _) => drop(m.clear(ctx).await),
                     _ => {}
                 }
@@ -182,7 +193,11 @@ async fn a_front_that_moved_after_its_grant_is_never_reserved() {
         let after = settled(&mailbox).await;
         assert!(after["head_injection"].is_null(), "{how}: {after}");
         assert_eq!(after["retained_inputs"], json!([]), "{how}: {after}");
-        let expected: &[&str] = if how == "cancel" { &["input 1"] } else { &[] };
+        let expected: &[&str] = match how {
+            "cancel" => &["input 1"],
+            "tail" => &["input 0"],
+            _ => &[],
+        };
         assert_eq!(*ran.lock().unwrap(), expected, "{how}");
     }
 }
@@ -260,7 +275,7 @@ async fn a_claimed_front_the_queue_took_reserves_nothing() {
         assert!(again.unwrap().is_none(), "one claim per grant");
         let ctx = crate::services::turn_orchestrator::QueuePersistenceContext::new(
             &crate::services::provider::ProviderKind::Claude,
-            "drive",
+            "input-owner-drive",
             None,
         );
         let id = poise::serenity_prelude::MessageId::new(front.1.message_id);
@@ -300,4 +315,39 @@ async fn a_claimed_front_the_queue_took_reserves_nothing() {
         );
         assert_eq!(sent.load(Ordering::SeqCst), 0, "{how}");
     }
+}
+
+/// Two migrated inputs with the same body and no ticket: one wake hands each on once, since a
+/// delivered front is progress whatever the next one looks like.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn identical_migrated_inputs_are_each_handed_on_once() {
+    let _root = TestRuntimeRootGuard::new();
+    let registry = ChannelMailboxRegistry::default();
+    let channel = 7_272_709;
+    let dir = crate::services::discord::runtime_store::discord_pending_queue_root()
+        .unwrap()
+        .join("claude/input-owner-drive");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{channel}.json"));
+    let twin = original(channel, 0);
+    std::fs::write(&path, serde_json::to_string(&[&twin, &twin]).unwrap()).unwrap();
+    let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(channel));
+    mailbox.v2_adopt(path, "input-owner".into()).await.unwrap();
+    let handed = Arc::new(AtomicUsize::new(0));
+    let h = handed.clone();
+    let answer = move |_: &str| {
+        h.fetch_add(1, Ordering::SeqCst);
+        Completion::Submitted
+    };
+    let none = |_: &Front| Box::pin(async {}) as Pin<Box<dyn Future<Output = ()> + Send>>;
+    let drive = Arc::new(Drive {
+        mailbox: mailbox.clone(),
+        channel,
+        handoff: handoff(mailbox.clone(), channel, none, answer),
+        recheck: Duration::from_millis(20),
+    });
+    wake(drive);
+    let after = settled(&mailbox).await;
+    assert!(after["items"].as_array().unwrap().is_empty(), "{after}");
+    assert_eq!(handed.load(Ordering::SeqCst), 2, "{after}");
 }

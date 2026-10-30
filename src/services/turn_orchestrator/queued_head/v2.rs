@@ -149,6 +149,7 @@ impl Owner {
         }
         next.head_injection = Some(head);
         next.bind_reserved();
+        self.revoke_front();
         self.commit(next)?;
         Ok(key)
     }
@@ -269,7 +270,10 @@ impl Owner {
                 .as_ref()
                 .is_some_and(|g| is_front(g, front))
             && self.front().is_some_and(|now| is_front(&now, front));
-        self.front_claim = granted.then(|| self.front_grant.take()).flatten();
+        if !granted {
+            return None;
+        }
+        self.front_claim = self.front_grant.take();
         self.front_claim.clone()
     }
 
@@ -287,6 +291,16 @@ impl Owner {
             return Err("NotSent(\"front_not_granted\")".into());
         }
         self.reserve(attempt, payload)
+    }
+
+    /// Whether the drive's right on the front is still neither spent by a reserve nor revoked.
+    pub(crate) fn front_outstanding(&self) -> bool {
+        self.front_grant.is_some() || self.front_claim.is_some()
+    }
+
+    /// Withdraws that right; only taking or replacing the queue front itself does.
+    fn revoke_front(&mut self) {
+        (self.front_grant, self.front_claim) = (None, None);
     }
 
     /// Whether any source the owner holds, queued, attempted, retained or settled, is `message`.
