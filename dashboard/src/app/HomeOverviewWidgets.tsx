@@ -36,82 +36,19 @@ export function HomeMetricTile({
           .join(" ")
       : null;
   return (
-    <div
-      className="h-full overflow-hidden rounded-[1.15rem] border"
-      style={{
-        borderColor: "var(--th-border-subtle)",
-        background:
-          "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
-      }}
-    >
-      <div className="px-4 py-4 sm:px-5">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2 text-[11.5px] font-medium uppercase tracking-[0.08em]" style={{ color: "var(--th-text-muted)" }}>
-            {icon}
-            <span>{title}</span>
-          </div>
-          {delta ? (
-            <span
-              className="rounded-md px-1.5 py-0.5 text-[11px] font-medium"
-              style={{
-                background:
-                  deltaTone === "up"
-                    ? "color-mix(in srgb, var(--th-accent-success) 14%, transparent)"
-                    : deltaTone === "down"
-                      ? "color-mix(in srgb, var(--th-accent-danger) 14%, transparent)"
-                      : "var(--th-overlay-medium)",
-                color:
-                  deltaTone === "up"
-                    ? "var(--th-accent-success)"
-                    : deltaTone === "down"
-                      ? "var(--th-accent-danger)"
-                      : "var(--th-text-muted)",
-              }}
-            >
-              {delta}
-            </span>
-          ) : null}
-        </div>
-        <div
-          className="mt-3 text-[26px] font-semibold tracking-tight"
-          style={{ color: "var(--th-text-heading)" }}
-        >
-          {value}
-        </div>
-        <div className="mt-1 text-xs" style={{ color: "var(--th-text-muted)" }}>
-          {sub}
-        </div>
-        <svg
-          viewBox="0 0 100 30"
-          preserveAspectRatio="none"
-          className="mt-3 h-8 w-full"
-          aria-hidden="true"
-        >
-          {strokePoints ? (
-            <polyline
-              fill="none"
-              stroke={accent}
-              strokeWidth="2"
-              strokeLinejoin="round"
-              strokeLinecap="round"
-              points={strokePoints}
-            />
-          ) : (
-            <line
-              x1="0"
-              x2="100"
-              y1="16"
-              y2="16"
-              stroke={accent}
-              strokeWidth="1.4"
-              strokeDasharray="2.5 4"
-              strokeLinecap="round"
-              opacity="0.55"
-            />
-          )}
-        </svg>
+    <section className="flex h-full min-w-0 flex-col rounded-lg border border-th-border-subtle bg-th-bg-surface px-4 py-4 sm:px-5">
+      <div className="flex items-center gap-2 text-xs text-th-text-muted">{icon}<span>{title}</span></div>
+      <div className="mt-3 break-words text-[28px] font-semibold leading-9 tracking-tight tabular-nums text-th-text-heading">{value}</div>
+      <div className="mt-1 text-xs leading-5 text-th-text-muted">{sub}</div>
+      <div className="mt-auto flex flex-wrap items-end justify-between gap-1 pt-3">
+        {delta ? <span className={`text-[11px] leading-5 ${deltaTone === "up" ? "text-[var(--th-accent-success)]" : deltaTone === "down" ? "text-[var(--th-accent-danger)]" : "text-th-text-muted"}`}>{delta}</span> : null}
+        {strokePoints ? (
+          <svg viewBox="0 0 100 30" preserveAspectRatio="none" className="ml-auto h-5 w-16 shrink-0 sm:w-24" aria-hidden="true">
+            <polyline fill="none" stroke={accent} strokeWidth="1.8" strokeLinejoin="round" strokeLinecap="round" points={strokePoints} />
+          </svg>
+        ) : null}
       </div>
-    </div>
+    </section>
   );
 }
 
@@ -128,18 +65,17 @@ export function HomeWidgetShell({
 }) {
   return (
     <div
-      className="h-full overflow-hidden rounded-[1.15rem] border"
+      className="h-full min-w-0 overflow-hidden rounded-lg border"
       style={{
         borderColor: "var(--th-border-subtle)",
-        background:
-          "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+        background: "var(--th-bg-surface)",
       }}
     >
       <div className="flex items-start justify-between gap-3 border-b px-4 py-3 sm:px-5" style={{ borderColor: "var(--th-border-subtle)" }}>
         <div className="min-w-0">
-          <div className="truncate text-[12.5px] font-medium" style={{ color: "var(--th-text-secondary)" }}>
+          <h2 className="text-base font-semibold" style={{ color: "var(--th-text-secondary)" }}>
             {title}
-          </div>
+          </h2>
           <div
             className="mt-1 line-clamp-1 text-[11px] leading-5"
             title={subtitle}
@@ -190,10 +126,11 @@ export function HomeSortableWidget({
       ref={setNodeRef}
       data-testid={`home-widget-${widgetId}`}
       className={[
+        "min-w-0",
         className,
         isDragging ? "opacity-70" : "",
         isOver
-          ? "rounded-[2rem] ring-2 ring-[color:var(--th-accent-primary)] ring-offset-2 ring-offset-transparent"
+          ? "rounded-lg ring-2 ring-[color:var(--th-accent-primary)] ring-offset-2 ring-offset-transparent"
           : "",
       ]
         .filter(Boolean)
@@ -203,14 +140,14 @@ export function HomeSortableWidget({
         transition: transition ?? undefined,
       }}
     >
-      <div className="relative h-full">
+      <div className={`relative h-full ${showHandle ? "pt-14" : ""}`}>
         {showHandle ? (
           <button
             ref={setActivatorNodeRef}
             type="button"
             data-testid={`home-drag-handle-${widgetId}`}
             aria-label={handleLabel}
-            className="absolute right-4 top-4 z-10 flex h-8 w-8 cursor-grab items-center justify-center rounded-full border transition-colors hover:bg-white/10 active:cursor-grabbing"
+            className="absolute right-2 top-2 z-10 flex h-11 w-11 cursor-grab items-center justify-center rounded-md border transition-colors hover:bg-white/10 active:cursor-grabbing"
             style={{
               borderColor: "var(--th-border-subtle)",
               background: "color-mix(in srgb, var(--th-card-bg) 90%, transparent)",

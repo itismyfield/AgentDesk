@@ -19,6 +19,7 @@ import {
 import { Drawer } from "../common/overlay/Drawer";
 import type { TFunction } from "./model";
 import { cx } from "./ui";
+import { HomeRoutinesTimeline } from "./HomeRoutinesTimeline";
 
 type RoutineFilter = "all" | RoutineStatus;
 
@@ -853,6 +854,7 @@ function RoutineDetailDrawer({
   localeTag,
   language,
   onClose,
+  home = false,
 }: {
   routine: RoutineRecord | null;
   runs: RoutineRunRecord[];
@@ -862,6 +864,7 @@ function RoutineDetailDrawer({
   localeTag: string;
   language: "ko" | "en" | "ja" | "zh";
   onClose: () => void;
+  home?: boolean;
 }) {
   const purpose = routine ? describeRoutinePurpose(routine, t) : "";
 
@@ -870,6 +873,7 @@ function RoutineDetailDrawer({
       open={Boolean(routine)}
       onClose={onClose}
       width="min(560px, 100vw)"
+      closeButtonClassName={home ? "min-h-11 min-w-11" : undefined}
       title={routine?.name ?? t({ ko: "루틴 상세", en: "Routine detail", ja: "ルーチン詳細", zh: "例程详情" })}
     >
       {routine ? (
@@ -955,12 +959,14 @@ interface RoutinesTimelineWidgetProps {
   t: TFunction;
   localeTag: string;
   language: "ko" | "en" | "ja" | "zh";
+  variant?: "default" | "home";
 }
 
 export function RoutinesTimelineWidget({
   t,
   localeTag,
   language,
+  variant = "default",
 }: RoutinesTimelineWidgetProps) {
   const [filter, setFilter] = useState<RoutineFilter>("all");
   const [routines, setRoutines] = useState<RoutineRecord[]>([]);
@@ -1062,6 +1068,39 @@ export function RoutinesTimelineWidget({
 
   return (
     <>
+      {variant === "home" ? (
+        <HomeRoutinesTimeline
+          t={t}
+          loading={loading}
+          error={error}
+          count={routines.length}
+          activeCount={activeCount}
+          nextRun={nextRoutine ? formatDateTime(nextRoutine.next_due_at, localeTag) : "-"}
+          filters={FILTERS.map((item) => ({
+            id: item,
+            label: filterLabel(item, t),
+            active: filter === item,
+            onSelect: () => setFilter(item),
+          }))}
+          rows={sortedRoutines.map((routine) => ({
+            id: routine.id,
+            name: routine.name,
+            purpose: describeRoutinePurpose(routine, t),
+            status: statusLabel(routine, t),
+            tone: statusTone(routine),
+            latestStatus: runStatusLabel(latestRunsByRoutine[routine.id]?.status, t),
+            latestTone: runStatusTone(latestRunsByRoutine[routine.id]?.status),
+            nextRun: formatDateTime(routine.next_due_at, localeTag),
+            relative: formatRelative(routine.next_due_at, localeTag) ?? t({ ko: "수동", en: "Manual", ja: "手動", zh: "手动" }),
+            schedule: describeRoutineSchedule(routine.schedule, language),
+            agent: routine.agent_id ?? null,
+            lastRun: formatDateTime(routine.last_run_at, localeTag),
+            openLabel: t({ ko: `${routine.name} 상세 열기`, en: `Open ${routine.name} details`, ja: `${routine.name} の詳細を開く`, zh: `打开 ${routine.name} 详情` }),
+            onOpen: () => setSelectedRoutineId(routine.id),
+          }))}
+          onRefresh={() => setReloadKey((value) => value + 1)}
+        />
+      ) : (
       <SurfaceSubsection
         data-testid="routines-timeline"
         title={t({ ko: "루틴 시간표", en: "Routines Timeline", ja: "ルーチン時系列", zh: "例程时间线" })}
@@ -1237,7 +1276,9 @@ export function RoutinesTimelineWidget({
         </div>
       )}
       </SurfaceSubsection>
+      )}
       <RoutineDetailDrawer
+        home={variant === "home"}
         routine={selectedRoutine}
         runs={selectedRuns}
         runsLoading={runsLoading}

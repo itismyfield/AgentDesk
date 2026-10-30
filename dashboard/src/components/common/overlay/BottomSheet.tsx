@@ -16,6 +16,7 @@ export interface BottomSheetProps {
   closeOnBackdrop?: boolean;
   closeOnEsc?: boolean;
   ariaLabel?: string;
+  closeButtonClassName?: string;
 }
 
 export function BottomSheet({
@@ -26,6 +27,7 @@ export function BottomSheet({
   closeOnBackdrop = true,
   closeOnEsc = true,
   ariaLabel,
+  closeButtonClassName,
 }: BottomSheetProps) {
   const accessibleTitle = getOverlayAccessibleTitle(
     title,
@@ -79,13 +81,13 @@ export function BottomSheet({
               className="flex items-center justify-between gap-3 border-b px-5 py-3"
               style={{ borderColor: "var(--th-border, rgba(148,163,184,0.12))" }}
             >
-              <VaulDrawer.Title className="text-base font-semibold">
+              <VaulDrawer.Title className="min-w-0 text-base font-semibold [overflow-wrap:anywhere]">
                 {title}
               </VaulDrawer.Title>
               <VaulDrawer.Close asChild>
                 <button
                   type="button"
-                  className="flex h-8 w-8 items-center justify-center rounded-lg border text-[var(--th-text-muted,_#94a3b8)] hover:bg-white/5"
+                  className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border text-[var(--th-text-muted,_#94a3b8)] hover:bg-white/5 ${closeButtonClassName ?? ""}`}
                   style={{ borderColor: "var(--th-border, rgba(148,163,184,0.16))" }}
                   aria-label="Close"
                 >
