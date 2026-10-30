@@ -13,7 +13,10 @@ use crate::services::discord::queue_io::input_owner::origin::{Execution, InputOr
 use crate::services::discord::queue_io::input_owner::{pump, target};
 use crate::services::session_host::HerdrTarget;
 use crate::services::turn_host::TurnHost;
-use crate::services::turn_orchestrator::ChannelMailboxHandle;
+use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};
+
+/// The owner's granted front: its slot's ticket and the original.
+type Front = (Option<String>, PendingQueueItem);
 
 /// What the owner verified about a channel's target before its turn reached dispatch.
 struct Registration {
@@ -62,6 +65,29 @@ pub(super) fn take(turn: &StreamingTurn<'_>) -> Option<Taken> {
             .position(|(id, _)| *id == turn.channel_id)?;
         registered.remove(at).1
     };
+    take_owned(turn, None, registration)
+}
+
+/// The owner's front handoff: the ticket and original the drive granted, the owner's mailbox and
+/// the verified execution arrive as arguments, never through a static or task-local.
+pub(super) fn execute_front(
+    turn: StreamingTurn<'_>,
+    sender: std::sync::mpsc::Sender<crate::services::agent_protocol::StreamMessage>,
+    front: Front,
+    owner: Registration,
+) -> Result<(), String> {
+    match take_owned(&turn, Some(front), owner) {
+        Some(Taken::Done(result)) => result,
+        Some(Taken::Launch(guard)) => guard.finish(super::drive(turn, sender)),
+        None => Err("NotSent(\"not_owned\")".into()),
+    }
+}
+
+fn take_owned(
+    turn: &StreamingTurn<'_>,
+    front: Option<Front>,
+    registration: Registration,
+) -> Option<Taken> {
     let host = match turn.host {
         TurnHost::Tmux => "tmux",
         TurnHost::Herdr(_) => "herdr",
@@ -81,16 +107,53 @@ pub(super) fn take(turn: &StreamingTurn<'_>) -> Option<Taken> {
         _ => None,
     };
     if let Some(wanted) = wanted {
-        let hook = created(registration, turn.prompt.into(), wanted);
+        let hook = created(registration, turn.prompt.into(), wanted, front);
         return Some(Taken::Launch(scope::install_launch(hook)));
     }
-    Some(Taken::Done(run(turn, route, registration)))
+    // An idle pane runs a new turn, so it holds the node's execution capacity through the effect;
+    // a busy pane writes into the turn that already holds it.
+    let _capacity = match route {
+        target::Route::ClaudeIdle | target::Route::CodexIdle => {
+            let cancel = std::sync::Arc::clone(&turn.cancel);
+            let (pool, provider) = (turn.pool, turn.provider.as_str());
+            match crate::services::cluster::execution_capacity::acquire(
+                pool,
+                provider,
+                turn.channel_id,
+                cancel,
+            ) {
+                Ok(guard) => guard,
+                Err(refused) => return Some(Taken::Done(Err(format!("NotSent({refused:?})")))),
+            }
+        }
+        _ => None,
+    };
+    Some(Taken::Done(run(turn, route, registration, front)))
+}
+
+/// Submits on the owner's pump from the driver's blocking thread, for the granted front if any.
+fn submit(
+    (mailbox, clock): (&ChannelMailboxHandle, Clock),
+    front: Option<Front>,
+    prepared: PreparedPayload,
+    leaf: effect::Leaf,
+) -> Result<(), String> {
+    let submitted = pump::submit_front(mailbox, front, prepared, clock, leaf);
+    match tokio::runtime::Handle::current().block_on(submitted)? {
+        Completion::Submitted => Ok(()),
+        other => Err(format!("{other:?}")),
+    }
 }
 
 /// Reserves the first prompt on the target of the execution its driver observed, runs the driver's
 /// submit as the effect, and refuses any lineage but `wanted` before reserving.
-fn created(r: Registration, frame: String, wanted: scope::Lineage) -> scope::LaunchHook {
-    Box::new(move |lineage, target, source, writer, submit| {
+fn created(
+    r: Registration,
+    frame: String,
+    wanted: scope::Lineage,
+    front: Option<Front>,
+) -> scope::LaunchHook {
+    Box::new(move |lineage, target, source, writer, submit_created| {
         if lineage != wanted {
             return Err(format!("NotSent(\"lineage_refused: {lineage:?}\")"));
         }
@@ -108,12 +171,8 @@ fn created(r: Registration, frame: String, wanted: scope::Lineage) -> scope::Lau
             sources: r.sources,
             attempt,
         };
-        let leaf = effect::created(submit, writer);
-        let submitted = pump::submit(&r.mailbox, prepared, r.clock, leaf);
-        match tokio::runtime::Handle::current().block_on(submitted)? {
-            Completion::Submitted => Ok(()),
-            other => Err(format!("{other:?}")),
-        }
+        let leaf = effect::created(submit_created, writer);
+        submit((&r.mailbox, r.clock), front, prepared, leaf)
     })
 }
 
@@ -128,7 +187,12 @@ fn codex_herdr_frame(prompt: &str) -> Result<String, String> {
     Ok(typed.collect())
 }
 
-fn run(turn: &StreamingTurn<'_>, route: target::Route, r: Registration) -> Result<(), String> {
+fn run(
+    turn: &StreamingTurn<'_>,
+    route: target::Route,
+    r: Registration,
+    front: Option<Front>,
+) -> Result<(), String> {
     let nonce = r.attempt["nonce"].as_str().unwrap_or_default().to_string();
     let session = || turn.tmux_session_name.ok_or("owner input without a pane");
     let (frame, leaf) = match route {
@@ -224,11 +288,7 @@ fn run(turn: &StreamingTurn<'_>, route: target::Route, r: Registration) -> Resul
         sources: r.sources,
         attempt: r.attempt,
     };
-    let submitted = pump::submit(&r.mailbox, prepared, r.clock, leaf);
-    match tokio::runtime::Handle::current().block_on(submitted)? {
-        Completion::Submitted => Ok(()),
-        other => Err(format!("{other:?}")),
-    }
+    submit((&r.mailbox, r.clock), front, prepared, leaf)
 }
 
 #[cfg(test)]

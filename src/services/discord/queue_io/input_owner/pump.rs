@@ -34,22 +34,12 @@ pub(crate) async fn submit(
     clock: Clock,
     leaf: Leaf,
 ) -> Result<Completion, String> {
-    reserve_run(mailbox, None, prepared, clock, leaf).await
+    submit_front(mailbox, None, prepared, clock, leaf).await
 }
 
-/// As `submit`, for the drive's granted front: the grant is spent and the head reserved in one
+/// As `submit`; given the drive's granted front, the grant is spent and the head reserved in one
 /// actor turn, so a front that changed since its grant is never reserved.
 pub(crate) async fn submit_front(
-    mailbox: &ChannelMailboxHandle,
-    front: (Option<String>, PendingQueueItem),
-    prepared: PreparedPayload,
-    clock: Clock,
-    leaf: Leaf,
-) -> Result<Completion, String> {
-    reserve_run(mailbox, Some(front), prepared, clock, leaf).await
-}
-
-async fn reserve_run(
     mailbox: &ChannelMailboxHandle,
     front: Option<(Option<String>, PendingQueueItem)>,
     prepared: PreparedPayload,
