@@ -5,9 +5,8 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::Mutex as AsyncMutex;
 
-/// Async locks keyed by a resolved period, shared by the token-analytics and
-/// receipt collectors. Idle locks are dropped so the map only holds keys that
-/// someone is collecting or waiting on.
+/// Async locks keyed by a resolved period for the token-analytics and receipt
+/// collectors; idle locks are dropped so the map only holds keys in use.
 #[derive(Default)]
 pub(super) struct KeyedLocks {
     locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
@@ -22,9 +21,8 @@ impl KeyedLocks {
         Arc::clone(locks.entry(key.to_string()).or_default())
     }
 
-    /// Runs `work` under the key's lock in a detached task. Dropping the
-    /// returned future (client abort) leaves the task running to its cache
-    /// write; the lock is released when the task ends, including on panic.
+    /// Runs `work` under the key's lock in a detached task that outlives a dropped
+    /// caller (client abort); the lock is released when the task ends or panics.
     pub(super) async fn run_detached<T, Work>(
         &self,
         key: &str,

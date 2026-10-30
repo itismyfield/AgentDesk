@@ -347,9 +347,8 @@ pub async fn prewarm_token_analytics_cache() {
     }
 }
 
-/// Short in-process cache for `/api/receipt`, keyed by the resolved window
-/// (period and start), so tabs polling one window share a single ~1 min scan
-/// while a new day or rate-limit window never reuses the previous result.
+/// Short `/api/receipt` cache keyed by the resolved window (period and start):
+/// tabs share one scan, and a new day or rate-limit window gets a new key.
 const RECEIPT_CACHE_TTL: StdDuration = StdDuration::from_secs(30);
 
 type CachedReceipt = (Instant, Arc<receipt::ReceiptData>);
@@ -376,9 +375,8 @@ fn write_cached_receipt(key: String, data: Arc<receipt::ReceiptData>) {
     }
 }
 
-/// Cache-or-collect for one resolved receipt window; the flag is true when the
-/// data came from the cache. Misses run single-flight per window in a detached
-/// task, so an aborted request still fills the cache.
+/// Cache-or-collect for one receipt window (flag = served from cache). Misses
+/// run single-flight in a detached task, so an aborted request still fills it.
 async fn cached_or_collect_receipt_using<Collect>(
     period_id: &'static str,
     start: chrono::DateTime<chrono::Utc>,
