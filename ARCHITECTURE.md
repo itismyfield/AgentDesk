@@ -783,6 +783,11 @@ src/
 │   │   ├── recovery.rs
 │   │   └── worker.rs
 │   ├── campaign_execution/
+│   │   ├── adk_observe/
+│   │   │   ├── ci.rs
+│   │   │   └── ci_tests.rs
+│   │   ├── adk_observe.rs
+│   │   ├── adk_observe_tests.rs
 │   │   ├── adk_profile.rs
 │   │   ├── adk_profile_tests.rs
 │   │   ├── adk_resources.rs
@@ -795,6 +800,8 @@ src/
 │   │   ├── definition_tests.rs
 │   │   ├── execution_pin.rs
 │   │   ├── execution_pin_tests.rs
+│   │   ├── main_integration.rs
+│   │   ├── main_integration_tests.rs
 │   │   ├── mod.rs
 │   │   ├── model.rs
 │   │   ├── model_tests.rs
