@@ -2460,7 +2460,7 @@ jobs:
                 )
         quoted = workflow.replace(
             "  required_contexts:\n",
-            '  "yes":\n    name: quoted-key probe\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n\n  required_contexts:\n',
+            '  "yes":\n    name: quoted-key probe\n    if: ${{ !github.event.pull_request.draft }}\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n\n  required_contexts:\n',
             1,
         )
         self.assertEqual(self.run_hardening_fixture(quoted).returncode, 0)
