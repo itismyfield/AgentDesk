@@ -2,3 +2,4 @@
 #   <binary-id> <test> | removed|runnable->ignored | <reason>
 # A row must match a loss the base diff reports for this change, and a loss with no row fails.
 # Rows for tests absent from base and head only warn after landing; clear them in any later PR.
+agentdesk services::discord::router::message_handler::provider_dispatch::herdr_tests::a_lost_create_reply_keeps_its_pending_through_the_next_turn_and_restart_pg | removed | Replaced by a_lost_create_reply_is_resolved_by_the_next_turn_which_launches_once_pg: an unplaced Pending is no longer kept forever; without the channel lease the turn is held with zero writes, with it the turn retires and launches once.

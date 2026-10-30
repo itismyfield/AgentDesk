@@ -329,7 +329,7 @@ create 응답을 잃었거나 위치 기록 전에 실패해 pane이 있을 수�
 - Held의 원인을 사람이 치우면 다음 턴이나 pass가 다시 판정한다.
 - 이렇게 retire된 row는 위치와 증거가 없어 tmux Return 종료 증거가 되지 않는다(`Incomplete`).
 
-근거: `src/services/herdr_launch/unplaced.rs`; `src/services/session_host/herdr_gate/residue.rs`; `src/services/discord/recovery_engine/herdr_reader.rs`.
+근거: `src/services/herdr_launch/unplaced.rs`; `src/services/session_host/herdr_gate.rs`(residue); `src/services/discord/recovery_engine/herdr_reader.rs`.
 
 ### 3.5 후속 필요 — 같은 채널의 명시적 전환
 
