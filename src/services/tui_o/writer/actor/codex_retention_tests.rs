@@ -81,7 +81,6 @@ fn fixture() -> (Snapshot, Vec<BindingEvent>) {
             }],
         },
         events,
-        &SettledCompanions::default(),
     )
 }
 fn requested(
@@ -96,6 +95,7 @@ fn requested(
         seq,
         &events[0].tmux_session,
         events,
+        &SettledCompanions::default(),
     )
 }
 
