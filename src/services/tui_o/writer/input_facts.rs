@@ -10,6 +10,7 @@ use crate::services::tui_o::shadow::{
     CaptureOutcome, CaptureSource, ShadowProvider, SourceBinding,
 };
 
+mod queued;
 pub mod reactions;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,6 +68,12 @@ pub struct InputFacts {
     /// A resumed reader's carried state; only the carried turn's own closer may end it.
     carried: TurnState,
     awaiting_boundary: bool,
+    /// Whether the last close was an interrupt, kept only when this reader read an opener first, so
+    /// every receipt of that turn lies in what it read.
+    last_close_aborted: Option<bool>,
+    opened: bool,
+    /// Queued inputs received and not yet run to a close.
+    queued: queued::QueuedInputs,
 }
 
 impl InputFacts {
@@ -123,6 +130,9 @@ impl InputFacts {
             resume: None,
             carried: TurnState::Unknown,
             awaiting_boundary: false,
+            last_close_aborted: None,
+            opened: false,
+            queued: queued::QueuedInputs::default(),
         })
     }
 
@@ -192,6 +202,17 @@ impl InputFacts {
     /// A resumed reader that has not yet seen the carried turn's closer or a new opener.
     pub fn awaiting_boundary(&self) -> bool {
         self.awaiting_boundary
+    }
+
+    /// Whether the last close read was an interrupt; `None` before a close whose turn this reader
+    /// read from an opener.
+    pub fn last_close_aborted(&self) -> Option<bool> {
+        self.last_close_aborted
+    }
+
+    /// A queued input was received whose native run has not started, so a run is still owed.
+    pub fn pending_receipt(&self) -> bool {
+        self.queued.owed()
     }
 
     pub fn binding(&self) -> &SourceBinding {
@@ -266,6 +287,7 @@ impl InputFacts {
                 return Err("sidechain record in parent transcript".into());
             }
             let row = row_key(&value);
+            let was_open = matches!(self.state, TurnState::Open { .. });
             let range = (record.start, record.end);
             for fact in classify(self.binding.provider, &value) {
                 self.saw_turn_evidence |= !matches!(fact, RecordFact::Prompt(false, _));
@@ -333,6 +355,9 @@ impl InputFacts {
                     self.mark(next, range, closed, &value);
                 }
             }
+            let open = matches!(self.state, TurnState::Open { .. });
+            let provider = self.binding.provider;
+            self.queued.read(provider, &value, open, open && !was_open);
             if record.line.windows(9).any(|bytes| bytes == b"[adk:tok=") {
                 self.events.push(Ordered::Input {
                     range,
@@ -357,15 +382,25 @@ impl InputFacts {
 
     fn mark(&mut self, next: TurnState, range: (u64, u64), closed: Option<String>, value: &Value) {
         match &next {
-            TurnState::Open { native_turn_id } => self.events.push(Ordered::Opened {
-                range,
-                native_turn_id: native_turn_id.clone(),
-            }),
-            _ if self.state != TurnState::Idle => self.events.push(Ordered::Closed {
-                range,
-                native_turn_id: closed,
-                aborted: aborted(self.binding.provider, value),
-            }),
+            TurnState::Open { native_turn_id } => {
+                self.opened = true;
+                self.events.push(Ordered::Opened {
+                    range,
+                    native_turn_id: native_turn_id.clone(),
+                })
+            }
+            _ if self.state != TurnState::Idle => {
+                let aborted = aborted(self.binding.provider, value);
+                let opened = self.opened
+                    || crate::services::tui_o::turn_mode::carried_close_mutant("opener");
+                self.last_close_aborted = opened.then_some(aborted);
+                self.queued.closed();
+                self.events.push(Ordered::Closed {
+                    range,
+                    native_turn_id: closed,
+                    aborted,
+                })
+            }
             _ => {}
         }
         self.state = next;
@@ -384,6 +419,8 @@ fn aborted(provider: ShadowProvider, value: &Value) -> bool {
     }
 }
 
+#[cfg(test)]
+mod receipt_tests;
 #[cfg(test)]
 mod resume_tests;
 #[cfg(test)]

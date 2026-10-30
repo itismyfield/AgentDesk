@@ -1,3 +1,4 @@
+import { Drawer } from "../common/overlay/Drawer";
 import type { GitHubIssue } from "../../api";
 import type { UiLanguage } from "../../types";
 import MarkdownContent from "../common/MarkdownContent";
@@ -24,18 +25,8 @@ export default function BacklogIssueDetail({
   onAssign,
 }: BacklogIssueDetailProps) {
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center p-0 sm:p-4" style={{ backgroundColor: "var(--th-modal-overlay)" }} onClick={onClose}>
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-3xl max-h-[88svh] overflow-y-auto rounded-t-3xl border p-5 sm:max-h-[90vh] sm:rounded-3xl sm:p-6 space-y-4"
-        style={{
-          background:
-            "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
-          borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
-          paddingBottom: "max(6rem, calc(6rem + env(safe-area-inset-bottom)))",
-        }}
-        role="dialog" aria-modal="true" aria-label="Backlog issue details"
-      >
+    <Drawer open onClose={onClose} title={tr("이슈 상세", "Issue details")} width="min(820px, 100vw)" closeButtonClassName="min-h-11 min-w-11">
+      <div className="min-w-0 space-y-5 pb-4">
         <div className="flex items-start justify-between gap-3">
           <div>
             <div className="flex flex-wrap items-center gap-2">
@@ -55,7 +46,7 @@ export default function BacklogIssueDetail({
                 </span>
               ))}
             </div>
-            <h3 className="mt-2 text-xl font-semibold" style={{ color: "var(--th-text-heading)" }}>
+            <h3 className="mt-2 text-xl font-semibold leading-7 [overflow-wrap:anywhere]" style={{ color: "var(--th-text-heading)" }}>
               {issue.title}
             </h3>
           </div>
@@ -165,7 +156,7 @@ export default function BacklogIssueDetail({
             href={issue.url}
             target="_blank"
             rel="noopener noreferrer"
-            className="rounded-xl px-4 py-2 text-sm text-center hover:underline"
+            className="rounded-md px-4 py-2 text-sm text-center hover:underline"
             style={{ color: "#93c5fd" }}
           >
             {tr("GitHub에서 보기", "View on GitHub")}
@@ -192,6 +183,6 @@ export default function BacklogIssueDetail({
           </div>
         </div>
       </div>
-    </div>
+    </Drawer>
   );
 }

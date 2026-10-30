@@ -47,11 +47,11 @@ export default function PipelineVisualEditorInspector({ ctx, actions }: Props) {
 
       {ctx.isFsmVariant && !ctx.selectedTransition && !ctx.selectedState && (
         <div
-          className="rounded-[20px] border px-4 py-6 text-sm"
+          className="rounded-lg border px-4 py-6 text-sm"
           style={{
             ...EMPTY_PANEL_STYLE,
             borderColor: "color-mix(in srgb, var(--th-border) 82%, transparent)",
-            background: "#11141b",
+            background: "var(--th-bg-surface)",
           }}
         >
           {tr(

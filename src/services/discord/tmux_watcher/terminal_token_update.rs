@@ -60,8 +60,10 @@ pub(super) async fn run_watcher_terminal_token_update(ctx: WatcherTerminalTokenU
         )
         .await;
 
-        let ctx_cfg =
-            crate::services::discord::adk_session::fetch_context_thresholds(shared.api_port).await;
+        let ctx_cfg = crate::services::discord::adk_session::fetch_context_thresholds(
+            shared.pg_pool.as_ref(),
+        )
+        .await;
         let pct = (tokens * 100) / ctx_cfg.context_window.max(1);
         // #227: Re-enabled with 5-min cooldown (matches turn_bridge path).
         // Without cooldown, the compact turn's own result could re-trigger compact.

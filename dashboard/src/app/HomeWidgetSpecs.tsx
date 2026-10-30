@@ -1,5 +1,4 @@
-import { Link } from "react-router";
-import { ChevronRight, Flame, Gauge, Sparkles, Zap } from "lucide-react";
+import { Flame, Gauge, Sparkles, Zap } from "lucide-react";
 
 import AgentAvatar from "../components/AgentAvatar";
 import { AgentQualityWidget } from "../components/dashboard/ExtraWidgets";
@@ -7,6 +6,7 @@ import { RoutinesTimelineWidget } from "../components/dashboard/RoutinesTimeline
 import { MiniRateLimitBar } from "../components/dashboard/MiniRateLimitBar";
 import { DailyMissions, StreakCounter } from "../components/gamification/GamificationShared";
 import { HomeMetricTile, HomeWidgetShell } from "./HomeOverviewWidgets";
+import { HomeWorkSnapshot } from "./HomeWorkSnapshot";
 
 export function buildHomeWidgetSpecs(ctx: any) {
   const {
@@ -23,14 +23,11 @@ export function buildHomeWidgetSpecs(ctx: any) {
     gamificationLevel,
     isKo,
     kanbanCards,
-    kanbanColumns,
     latestAnalyticsDay,
     localeTag,
     missionResetLabel,
     missionXpLabel,
     recentDoneCards,
-    recentDoneCount,
-    requestedCards,
     reviewQueue,
     stats,
     streakLeader,
@@ -42,19 +39,12 @@ export function buildHomeWidgetSpecs(ctx: any) {
 
   return {
       m_tokens: {
-        className: "lg:col-span-3",
+        className: "min-w-0 lg:col-span-3",
         render: () => (
           <HomeMetricTile
             icon={<Zap size={14} />}
             title={tr("오늘 토큰", "Today's tokens")}
-            /* `analytics` is null on the first home visit until
-               /api/token-analytics resolves (~9 s cold path on PG-only
-               runtimes; ~10 ms once the server-side in-process cache is
-               warm). The previous fallback `?? 0` showed a real-looking
-               "0" while the fetch was inflight, which made the tile look
-               broken. Render the loading placeholder explicitly and
-               mark the trend slot as pending too so the dashed line
-               doesn't briefly show as the real sparkline. */
+            // Keep an unresolved aggregate distinct from a measured zero.
             value={analytics ? formatCompact(latestAnalyticsDay?.total_tokens ?? 0) : "…"}
             sub={
               analytics
@@ -76,7 +66,7 @@ export function buildHomeWidgetSpecs(ctx: any) {
         ),
       },
       m_cost: {
-        className: "lg:col-span-3",
+        className: "min-w-0 lg:col-span-3",
         render: () => (
           <HomeMetricTile
             icon={<Sparkles size={14} />}
@@ -131,50 +121,15 @@ export function buildHomeWidgetSpecs(ctx: any) {
         ),
       },
       m_rate_limit: {
-        className: "lg:col-span-6",
-        /* User reported "한도 UI 정보 밀도 낮음" — replace the previous
-           single-percentage HomeMetricTile + sparkline with the
-           per-provider/per-bucket gauge rows of `MiniRateLimitBar`.
-           One card now shows every provider's 5h/7d bucket utilization with the same color/glow language as
-           /stats, and fetches its own data on a 30 s timer so the home
-           tile no longer needs the manual fetch + summary state.
-           The header mirrors HomeMetricTile (icon + uppercase title +
-           trailing badge slot) and the gauge uses the comfortable density
-           so this card can use a 2-unit desktop span without introducing
-           a separate home-specific rate-limit visualization. */
+        className: "col-span-2 min-w-0 lg:col-span-6",
         render: () => (
-          <div
-            className="flex h-full flex-col overflow-hidden rounded-[1.15rem] border"
-            style={{
-              borderColor: "var(--th-border-subtle)",
-              background:
-                "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
-            }}
-          >
-            <div className="flex flex-1 flex-col px-4 py-4 sm:px-5">
-              <div className="flex items-center justify-between gap-3">
-                <div
-                  className="flex items-center gap-2 text-[11.5px] font-medium uppercase tracking-[0.08em]"
-                  style={{ color: "var(--th-text-muted)" }}
-                >
-                  <Gauge size={14} />
-                  <span>{tr("한도", "Rate limit")}</span>
-                </div>
-                <span
-                  className="rounded-md px-1.5 py-0.5 text-[11px] font-medium"
-                  style={{
-                    background: "var(--th-overlay-medium)",
-                    color: "var(--th-text-muted)",
-                  }}
-                >
-                  {tr("30s 갱신", "30s refresh")}
-                </span>
-              </div>
-              <div className="mt-auto">
-                <MiniRateLimitBar isKo={isKo} density="comfortable" layout="homeWide" />
-              </div>
+          <section className="h-full min-w-0 rounded-lg border border-th-border-subtle bg-th-bg-surface px-4 py-4 sm:px-5" aria-label={tr("사용 한도", "Usage limits")}>
+            <div className="flex items-center justify-between gap-3 text-xs text-th-text-muted">
+              <span className="inline-flex items-center gap-2"><Gauge size={14} />{tr("사용 한도", "Usage limits")}</span>
+              <span>{tr("30초마다 갱신", "Updates every 30s")}</span>
             </div>
-          </div>
+            <MiniRateLimitBar isKo={isKo} layout="homeSummary" />
+          </section>
         ),
       },
       missions: {
@@ -288,89 +243,14 @@ export function buildHomeWidgetSpecs(ctx: any) {
         },
       },
       kanban: {
-        className: "lg:col-span-12",
-        render: () => (
-          <HomeWidgetShell
-            title={tr("칸반 스냅샷", "Kanban snapshot")}
-            subtitle={tr("현재 카드 흐름을 한 번에 살피는 요약 보드입니다.", "A wide snapshot of the current card flow.")}
-            action={
-              <Link
-                to="/kanban"
-                className="inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-white/5"
-                style={{ borderColor: "var(--th-border-subtle)", color: "var(--th-text-primary)" }}
-              >
-                {tr("칸반 열기", "Open kanban")}
-                <ChevronRight size={14} />
-              </Link>
-            }
-          >
-            <div className="grid gap-3 lg:grid-cols-4">
-              {kanbanColumns.map((column: any) => {
-                /* The done column shows only the last 24h of shipments
-                   (count + preview cards) so the snapshot stays focused
-                   on today's throughput rather than the full archive. */
-                const cards =
-                  column.id === "done"
-                    ? recentDoneCards.slice(0, 3)
-                    : kanbanCards.filter((card: any) => card.status === column.id).slice(0, 3);
-                return (
-                  <div key={column.id} className="rounded-[1.5rem] border p-3" style={{ borderColor: "var(--th-border-subtle)", background: "color-mix(in srgb, var(--th-card-bg) 90%, transparent)" }}>
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="text-sm font-semibold" style={{ color: "var(--th-text-heading)" }}>
-                        {column.label}
-                        {column.id === "done" ? (
-                          <span
-                            className="ml-1.5 align-middle text-[10px] font-medium uppercase tracking-[0.06em]"
-                            style={{ color: "var(--th-text-muted)" }}
-                          >
-                            {tr("· 최근 24h", "· last 24h")}
-                          </span>
-                        ) : null}
-                      </div>
-                      <span className="rounded-full px-2 py-1 text-[11px] font-semibold" style={{ background: "var(--th-overlay-medium)", color: column.accent }}>
-                        {column.id === "requested"
-                          ? requestedCards
-                          : column.id === "in_progress"
-                            ? kanbanCards.filter((card: any) => card.status === "in_progress").length
-                            : column.id === "review"
-                              ? kanbanCards.filter((card: any) => card.status === "review").length
-                              : recentDoneCount}
-                      </span>
-                    </div>
-                    <div className="mt-3 space-y-2">
-                      {cards.length === 0 ? (
-                        <div className="rounded-2xl border px-3 py-4 text-sm" style={{ borderColor: "var(--th-border-subtle)", color: "var(--th-text-muted)", background: "var(--th-overlay-subtle)" }}>
-                          {tr("표시할 카드 없음", "No cards")}
-                        </div>
-                      ) : (
-                        cards.map((card: any) => (
-                          <div key={card.id} className="rounded-2xl border px-3 py-3" style={{ borderColor: "var(--th-border-subtle)", background: "color-mix(in srgb, var(--th-bg-surface) 92%, transparent)" }}>
-                            <div className="line-clamp-2 text-sm font-medium leading-6" style={{ color: "var(--th-text-primary)" }}>
-                              {card.title}
-                            </div>
-                            <div className="mt-2 flex items-center justify-between gap-2 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
-                              <span className="truncate">
-                                {card.github_repo ?? tr("repo 미지정", "No repo")}
-                              </span>
-                              <span className="whitespace-nowrap">
-                                #{card.github_issue_number ?? "—"}
-                              </span>
-                            </div>
-                          </div>
-                        ))
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </HomeWidgetShell>
-        ),
+        className: "col-span-2 min-w-0 lg:col-span-12",
+        render: () => <HomeWorkSnapshot cards={kanbanCards} recentDoneCards={recentDoneCards} isKo={isKo} />,
       },
       routines: {
-        className: "lg:col-span-12",
+        className: "col-span-2 min-w-0 lg:col-span-12",
         render: () => (
           <RoutinesTimelineWidget
+            variant="home"
             t={t}
             localeTag={localeTag}
             language={isKo ? "ko" : "en"}

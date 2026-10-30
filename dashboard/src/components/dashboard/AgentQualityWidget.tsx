@@ -4,7 +4,7 @@ import * as api from "../../api/client";
 import { localeName } from "../../i18n";
 import AgentAvatar from "../AgentAvatar";
 import { getRankTier, type TFunction } from "./model";
-import { cx, dashboardBadge, dashboardCard, DashboardEmptyState } from "./ui";
+import { cx, dashboardBadge, DashboardEmptyState } from "./ui";
 
 // ── Agent Quality Widget ──
 
@@ -169,7 +169,7 @@ function QualityMetricCell({
   accent: string;
 }) {
   return (
-    <div className="rounded-xl border px-3 py-2" style={{ borderColor: "rgba(148,163,184,0.14)", background: "rgba(15,23,42,0.16)" }}>
+    <div className="rounded-md border px-3 py-2" style={{ borderColor: "rgba(148,163,184,0.14)", background: "var(--th-bg-surface)" }}>
       <div className="text-[11px] font-medium" style={{ color: "var(--th-text-muted)" }}>
         {label}
       </div>
@@ -254,7 +254,7 @@ export function AgentQualityWidget({ agents, t, localeTag, compact = false }: Ag
 
   return (
     <div
-      className={cx(dashboardCard.standard, "space-y-4")}
+      className="min-w-0 space-y-4 rounded-lg border border-th-border-subtle bg-th-bg-surface p-4 sm:p-5"
       style={{ borderColor: "var(--th-border)", background: "var(--th-surface)" }}
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -281,7 +281,7 @@ export function AgentQualityWidget({ agents, t, localeTag, compact = false }: Ag
       </div>
 
       {visibleRanking.length === 0 ? (
-        <div className={cx(dashboardCard.nestedCompact, "text-sm")} style={{ color: "var(--th-text-muted)", background: "var(--th-bg-surface)" }}>
+        <div className={cx("min-w-0 border-t border-th-border-subtle py-3", "text-sm")} style={{ color: "var(--th-text-muted)", background: "var(--th-bg-surface)" }}>
           {error || t({ ko: "아직 품질 집계가 없습니다", en: "No quality rollup yet", ja: "品質集計はまだありません", zh: "尚无质量汇总" })}
         </div>
       ) : (
@@ -291,13 +291,13 @@ export function AgentQualityWidget({ agents, t, localeTag, compact = false }: Ag
             const summary = summaries[entry.agentId];
             const isSelected = entry.agentId === selectedAgentId;
             const label = qualityAgentLabel(agent, entry, entry.agentId);
-            const accent = isSelected ? "#38bdf8" : "#34d399";
+            const accent = isSelected ? "var(--th-accent-primary)" : "var(--th-text-secondary)";
             return (
               <button
                 key={entry.agentId}
                 type="button"
                 className={cx(
-                  dashboardCard.interactiveNestedCompact,
+                  "min-h-11 min-w-0 rounded-md border border-th-border-subtle p-3",
                   "min-w-0 text-left transition",
                 )}
                 style={{
@@ -308,6 +308,7 @@ export function AgentQualityWidget({ agents, t, localeTag, compact = false }: Ag
                     ? "color-mix(in srgb, var(--th-accent-info) 42%, var(--th-border) 58%)"
                     : "rgba(148,163,184,0.14)",
                 }}
+                aria-pressed={isSelected}
                 onClick={() => setSelectedAgentId(entry.agentId)}
               >
                 <div className="flex items-center gap-2">
@@ -317,7 +318,7 @@ export function AgentQualityWidget({ agents, t, localeTag, compact = false }: Ag
                       <span className="text-xs font-semibold" style={{ color: accent }}>
                         #{entry.rank}
                       </span>
-                      <span className="truncate text-sm font-semibold" style={{ color: "var(--th-text)" }}>
+                      <span className="[overflow-wrap:anywhere] text-sm font-semibold" style={{ color: "var(--th-text)" }}>
                         {label}
                       </span>
                     </div>
@@ -344,12 +345,12 @@ export function AgentQualityWidget({ agents, t, localeTag, compact = false }: Ag
       )}
 
       {selectedAgentId ? (
-        <div className={cx(dashboardCard.nestedCompact, "space-y-3")} style={{ background: "var(--th-bg-surface)" }}>
+        <div className={cx("min-w-0 border-t border-th-border-subtle py-3", "space-y-3")} style={{ background: "var(--th-bg-surface)" }}>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex min-w-0 items-center gap-2">
               <AgentAvatar agent={selectedAgent} agents={agents} size={36} rounded="xl" className="shrink-0 shadow-sm" />
               <div className="min-w-0">
-                <div className="truncate text-sm font-semibold" style={{ color: "var(--th-text)" }}>
+                <div className="[overflow-wrap:anywhere] text-sm font-semibold" style={{ color: "var(--th-text)" }}>
                   {selectedLabel}
                 </div>
                 <div className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
@@ -380,7 +381,7 @@ export function AgentQualityWidget({ agents, t, localeTag, compact = false }: Ag
           </div>
 
           <div className="grid gap-3 lg:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
-            <div className="rounded-xl border px-3 py-2" style={{ borderColor: "rgba(148,163,184,0.14)", background: "rgba(15,23,42,0.12)" }}>
+            <div className="rounded-md border px-3 py-2" style={{ borderColor: "rgba(148,163,184,0.14)", background: "var(--th-bg-surface)" }}>
               <div className="mb-2 text-[11px] font-medium" style={{ color: "var(--th-text-muted)" }}>
                 {t({ ko: "추세", en: "Trend", ja: "推移", zh: "趋势" })}
               </div>
@@ -389,14 +390,14 @@ export function AgentQualityWidget({ agents, t, localeTag, compact = false }: Ag
             </div>
             <div className="max-h-56 space-y-1.5 overflow-y-auto">
               {dailyRows.length === 0 ? (
-                <div className="rounded-xl px-3 py-3 text-xs" style={{ color: "var(--th-text-muted)", background: "rgba(148,163,184,0.08)" }}>
+                <div className="rounded-md px-3 py-3 text-xs" style={{ color: "var(--th-text-muted)", background: "rgba(148,163,184,0.08)" }}>
                   {t({ ko: "일별 상세 없음", en: "No daily detail", ja: "日別詳細なし", zh: "无每日详情" })}
                 </div>
               ) : (
                 dailyRows.map((record) => (
                   <div
                     key={`${record.agentId}-${record.day}`}
-                    className="grid grid-cols-[4.5rem_1fr_1fr_3rem] items-center gap-2 rounded-xl px-3 py-2 text-xs"
+                    className="grid grid-cols-[4.5rem_1fr_1fr_3rem] items-center gap-2 rounded-md px-3 py-2 text-xs"
                     style={{ background: "rgba(148,163,184,0.08)", color: "var(--th-text)" }}
                   >
                     <span style={{ color: "var(--th-text-muted)" }}>{formatQualityDay(record.day, localeTag)}</span>

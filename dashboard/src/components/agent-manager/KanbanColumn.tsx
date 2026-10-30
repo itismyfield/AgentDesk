@@ -7,7 +7,6 @@ import type {
 import { getProviderMeta } from "../../app/providerTheme";
 import {
   STATUS_TRANSITIONS,
-  TRANSITION_STYLE,
   buildGitHubIssueUrl,
   isReviewCard,
   labelForStatus,
@@ -74,9 +73,9 @@ export default function KanbanColumn({
   return (
     <section
       data-testid={`kanban-column-${column.status}`}
-      className={`${compactBoard ? "w-full" : "w-full min-w-0"} space-y-3 rounded-2xl border p-3`}
+      className={`${compactBoard ? "w-full" : "w-full min-w-0"} space-y-3 rounded-lg border p-3`}
       style={{
-        borderColor: "rgba(148,163,184,0.24)",
+        borderColor: "var(--th-border-subtle)",
         backgroundColor: "var(--th-bg-surface)",
       }}
     >
@@ -101,7 +100,7 @@ export default function KanbanColumn({
         {column.status === "backlog" && loadingIssues && (
           <SurfaceEmptyState
             className="rounded-2xl px-3 py-4 text-center text-xs"
-            style={{ borderColor: "rgba(148,163,184,0.24)" }}
+            style={{ borderColor: "var(--th-border-subtle)" }}
           >
             {tr("GitHub backlog 로딩 중...", "Loading GitHub backlog...")}
           </SurfaceEmptyState>
@@ -127,7 +126,7 @@ export default function KanbanColumn({
         {backlogCount === 0 && !initialLoading && !(column.status === "backlog" && loadingIssues) && (
           <SurfaceEmptyState
             className="rounded-2xl px-3 py-4 text-center text-xs"
-            style={{ borderColor: "rgba(148,163,184,0.24)" }}
+            style={{ borderColor: "var(--th-border-subtle)" }}
           >
             {column.status === "backlog"
               ? tr("repo backlog가 비어 있습니다.", "This repo backlog is empty.")
@@ -167,7 +166,6 @@ interface BacklogIssueCardProps {
 
 function BacklogIssueCard({
   issue,
-  columnAccent,
   tr,
   closingIssueNumber,
   assigningIssue,
@@ -183,11 +181,10 @@ function BacklogIssueCard({
   return (
     <article
       data-testid={`kanban-backlog-issue-${issue.number}`}
-      className="cursor-pointer rounded-2xl border p-3 transition-colors hover:border-[rgba(148,163,184,0.4)]"
+      className="min-w-0 rounded-md border p-3 transition-colors hover:bg-surface-subtle"
       style={{
-        borderColor: "rgba(148,163,184,0.2)",
-        background:
-          "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+        borderColor: "var(--th-border-subtle)",
+        background: "var(--th-bg-primary)",
       }}
       onClick={() => onBacklogIssueClick(issue)}
     >
@@ -199,16 +196,16 @@ function BacklogIssueCard({
           >
             #{issue.number}
           </span>
-          <h4 className="mt-2 text-sm font-semibold leading-snug" style={{ color: "var(--th-text-heading)" }}>
-            {issue.title}
+          <h4 className="mt-1 text-sm font-medium leading-6 [overflow-wrap:anywhere]" style={{ color: "var(--th-text-heading)" }}>
+            <button type="button" className="min-h-11 w-full text-left [overflow-wrap:anywhere]" onClick={event => { event.stopPropagation(); onBacklogIssueClick(issue); }}>{issue.title}</button>
           </h4>
         </div>
         <a
           href={issue.url}
           target="_blank"
           rel="noopener noreferrer"
-          className="text-xs hover:underline"
-          style={{ color: "#93c5fd" }}
+          className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-md text-xs text-th-text-secondary hover:bg-surface-hover"
+          style={{ color: "var(--th-text-secondary)" }}
           onClick={(event) => event.stopPropagation()}
         >
           GH
@@ -235,8 +232,8 @@ function BacklogIssueCard({
               onOpenAssignModal(issue);
             }}
             disabled={assigningIssue}
-            className="rounded-lg px-3 py-1.5 text-white disabled:opacity-50"
-            style={{ backgroundColor: columnAccent }}
+            className="min-h-11 rounded-md border border-th-border-subtle px-3 text-th-text-primary disabled:opacity-50"
+            style={{ backgroundColor: "var(--th-overlay-subtle)" }}
           >
             {autoAgent ? `→ ${getAgentLabel(autoAgent.id)}` : tr("할당", "Assign")}
           </button>
@@ -277,12 +274,10 @@ function KanbanCardArticle({
     <article
       data-testid={`kanban-card-${card.id}`}
       onClick={() => onCardClick(card.id)}
-      className="cursor-pointer rounded-2xl border p-3 transition-transform hover:-translate-y-0.5"
+      className="min-w-0 rounded-md border p-3 transition-colors hover:bg-surface-subtle"
       style={{
-        borderColor: "rgba(148,163,184,0.2)",
-        background: isReviewCard(card)
-          ? "linear-gradient(180deg, color-mix(in oklch, var(--ok) 14%, var(--th-card-bg) 86%) 0%, color-mix(in oklch, var(--th-bg-surface) 96%, transparent) 100%)"
-          : "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+        borderColor: "var(--th-border-subtle)",
+        background: "var(--th-bg-primary)",
         borderLeft: isReviewCard(card)
           ? "3px solid color-mix(in oklch, var(--ok) 62%, transparent)"
           : undefined,
@@ -301,17 +296,17 @@ function KanbanCardArticle({
               <span
                 className="rounded-full border px-2 py-0.5 text-[11px] font-semibold"
                 style={{
-                  color: providerMeta.color,
-                  background: providerMeta.bg,
-                  borderColor: providerMeta.border,
+                  color: "var(--th-text-muted)",
+                  background: "transparent",
+                  borderColor: "var(--th-border-subtle)",
                 }}
               >
                 {providerMeta.label}
               </span>
             ) : null}
           </div>
-          <h4 className="mt-2 text-sm font-semibold leading-snug" style={{ color: "var(--th-text-heading)" }}>
-            {card.title}
+          <h4 className="mt-1 text-sm font-medium leading-6 [overflow-wrap:anywhere]" style={{ color: "var(--th-text-heading)" }}>
+            <button type="button" className="min-h-11 w-full text-left [overflow-wrap:anywhere]" onClick={event => { event.stopPropagation(); onCardClick(card.id); }}>{card.title}</button>
           </h4>
         </div>
         {githubIssueUrl && (
@@ -319,7 +314,7 @@ function KanbanCardArticle({
             href={githubIssueUrl}
             target="_blank"
             rel="noopener noreferrer"
-            className="text-xs hover:underline"
+            className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-md text-xs text-th-text-secondary hover:bg-surface-hover"
             style={{ color: "var(--info)" }}
             onClick={(event) => event.stopPropagation()}
           >
@@ -331,7 +326,6 @@ function KanbanCardArticle({
       {(STATUS_TRANSITIONS[card.status] ?? []).length > 0 && (
         <div className="mt-2 flex flex-wrap gap-1.5" onClick={(event) => event.stopPropagation()}>
           {(STATUS_TRANSITIONS[card.status] ?? []).map((target) => {
-            const style = TRANSITION_STYLE[target] ?? TRANSITION_STYLE.backlog;
             return (
               <SurfaceActionButton
                 key={target}
@@ -341,11 +335,8 @@ function KanbanCardArticle({
                 }}
                 tone="neutral"
                 compact
-                style={{
-                  background: style.bg,
-                  borderColor: style.text,
-                  color: style.text,
-                }}
+                className="min-h-11"
+                style={{ color: "var(--th-text-secondary)" }}
               >
                 → {labelForStatus(target, tr)}
               </SurfaceActionButton>

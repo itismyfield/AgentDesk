@@ -120,7 +120,7 @@ export default function AgentManagerView({
     onTabChange,
   });
   const [isDesktopViewport, setIsDesktopViewport] = useState(() =>
-    typeof window === "undefined" ? true : window.matchMedia("(min-width: 640px)").matches,
+    typeof window === "undefined" ? true : window.matchMedia("(min-width: 900px)").matches,
   );
 
   useEffect(() => {
@@ -128,7 +128,7 @@ export default function AgentManagerView({
       return undefined;
     }
 
-    const mediaQuery = window.matchMedia("(min-width: 640px)");
+    const mediaQuery = window.matchMedia("(min-width: 900px)");
     const updateViewport = () => setIsDesktopViewport(mediaQuery.matches);
 
     updateViewport();
@@ -256,7 +256,7 @@ export default function AgentManagerView({
       data-testid="agents-tab-bar-mobile"
       role="tablist"
       aria-label={tr("에이전트 관리 섹션", "Agent manager sections")}
-      className="mt-4 grid grid-cols-2 gap-2 sm:hidden"
+      className="mt-4 grid grid-cols-3 gap-1 border-b border-th-border-subtle sm:hidden"
     >
       {tabItems.map((item) => (
         <SurfaceSegmentButton
@@ -288,21 +288,21 @@ export default function AgentManagerView({
   return (
     <div
       data-testid="agents-page"
-      className={`mx-auto w-full max-w-5xl min-w-0 space-y-4 overflow-x-hidden p-4 pb-40 sm:p-6 ${
+      className={`mx-auto w-full max-w-[88rem] min-w-0 space-y-5 overflow-x-hidden p-4 pb-8 sm:p-8 ${
         scrollable ? "h-full overflow-y-auto" : ""
       }`}
       style={{
-        paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))",
+        paddingBottom: "max(2rem, env(safe-area-inset-bottom))",
         WebkitOverflowScrolling: scrollable ? "touch" : undefined,
         touchAction: scrollable ? "pan-y" : undefined,
       }}
     >
       {showHeader && (
-        <header className="space-y-3" data-testid="agents-page-header">
+        <header className="space-y-4 border-b border-th-border-subtle pb-5" data-testid="agents-page-header">
           <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
             <div className="min-w-0">
               <h1
-                className="text-2xl font-black tracking-tight sm:text-3xl"
+                className="text-2xl font-semibold tracking-tight"
                 style={{ color: "var(--th-text-heading)" }}
               >
                 {resolvedTitle}

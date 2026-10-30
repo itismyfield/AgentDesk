@@ -549,7 +549,7 @@ async fn emit_context_compacted_lifecycle_from_watcher(
     model: Option<&str>,
     usage: Option<TurnTokenUsage>,
 ) -> bool {
-    let ctx_cfg = super::adk_session::fetch_context_thresholds(shared.api_port).await;
+    let ctx_cfg = super::adk_session::fetch_context_thresholds(shared.pg_pool.as_ref()).await;
     // Provider auto-compaction output does not expose the exact pre-compaction
     // token total, so record the configured trigger threshold as the lower-bound
     // before percentage.

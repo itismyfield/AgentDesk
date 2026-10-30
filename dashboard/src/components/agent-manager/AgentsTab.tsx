@@ -129,120 +129,42 @@ export default function AgentsTab({
 
   return (
     <div data-testid="agents-tab" className="space-y-4">
-      <SurfaceCard className="space-y-3 rounded-[28px] p-4 sm:p-5">
+      <SurfaceCard className="min-w-0 space-y-3 p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex flex-wrap gap-2">
-            <SurfaceSegmentButton
-              active={deptTab === "all"}
-              onClick={() => setDeptTab("all")}
-              tone="accent"
-            >
-              {tr("전체", "All")} <span className="opacity-60">{agents.length}</span>
-            </SurfaceSegmentButton>
-            {departments.map((department) => {
-              const count = deptCounts.get(department.id);
-              return (
-                <SurfaceSegmentButton
-                  key={department.id}
-                  active={deptTab === department.id}
-                  onClick={() => setDeptTab(department.id)}
-                  tone="info"
-                  className="flex items-center gap-1"
-                  style={{ maxWidth: "100%" }}
-                >
-                  <span
-                    onDoubleClick={(event) => {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      onEditDepartment(department);
-                    }}
-                    title={tr("더블클릭: 부서 편집", "Double-click: edit dept")}
-                    className="inline-flex items-center gap-1"
-                  >
-                    <span>{department.icon}</span>
-                    <span className="hidden sm:inline">
-                      {localeName(locale, department)}
-                    </span>
-                    <span className="opacity-60">{count?.total ?? 0}</span>
-                  </span>
-                </SurfaceSegmentButton>
-              );
-            })}
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+            <label className="min-w-0 flex-1 sm:flex-none">
+              <span className="sr-only">{tr("소속 부서", "Department")}</span>
+              <select value={deptTab} onChange={event => setDeptTab(event.target.value)} className="min-h-11 w-full max-w-full rounded-md border border-th-input-border bg-th-input-bg px-3 text-xs text-th-text-primary sm:w-56">
+                <option value="all">{tr(`전체 부서 · ${agents.length}명`, `All departments · ${agents.length} agents`)}</option>
+                {departments.map(department => <option key={department.id} value={department.id}>{localeName(locale, department)} · {deptCounts.get(department.id)?.total ?? 0}</option>)}
+              </select>
+            </label>
+            {deptTab !== "all" && departments.find(department => department.id === deptTab) ? <SurfaceActionButton tone="neutral" compact onClick={() => onEditDepartment(departments.find(department => department.id === deptTab)!)}>{tr("부서 편집", "Edit department")}</SurfaceActionButton> : null}
           </div>
-
-          <div data-testid="agents-view-mode" className="flex items-center gap-2">
-            <SurfaceSegmentButton
-              active={viewMode === "grid"}
-              onClick={() => setViewMode("grid")}
-              tone="warn"
-            >
-              {tr("그리드", "Grid")}
-            </SurfaceSegmentButton>
-            <SurfaceSegmentButton
-              active={viewMode === "list"}
-              onClick={() => setViewMode("list")}
-              tone="warn"
-            >
-              {tr("리스트", "List")}
-            </SurfaceSegmentButton>
+          <div data-testid="agents-view-mode" className="flex items-center gap-1" aria-label={tr("보기 방식", "View mode")}>
+            <SurfaceSegmentButton active={viewMode === "grid"} onClick={() => setViewMode("grid")} tone="neutral">{tr("그리드", "Grid")}</SurfaceSegmentButton>
+            <SurfaceSegmentButton active={viewMode === "list"} onClick={() => setViewMode("list")} tone="neutral">{tr("리스트", "List")}</SurfaceSegmentButton>
           </div>
         </div>
-
-        <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
-          <div className="text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
-            {tr(
-              "기본 그리드는 시안 원형을 유지하고, 리스트는 운영용 확장 보기로 제공합니다.",
-              "Grid keeps the reference shell; list mode remains as the operational extension.",
-            )}
-          </div>
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-            <select
-              value={statusFilter}
-              onChange={(event) => setStatusFilter(event.target.value)}
-              className="rounded-xl px-3 py-2 text-xs outline-none"
-              style={{
-                background: "var(--th-input-bg)",
-                border: "1px solid var(--th-input-border)",
-                color: "var(--th-text-primary)",
-              }}
-            >
-              <option value="all">{tr("상태: 전체", "Status: All")}</option>
-              <option value="working">{tr("근무 중", "Working")}</option>
-              <option value="idle">{tr("대기", "Idle")}</option>
-              <option value="break">{tr("휴식", "Break")}</option>
-              <option value="offline">{tr("오프라인", "Offline")}</option>
-            </select>
-            <select
-              value={sortMode}
-              onChange={(event) => setSortMode(event.target.value as AgentSortMode)}
-              className="rounded-xl px-3 py-2 text-xs outline-none"
-              style={{
-                background: "var(--th-input-bg)",
-                border: "1px solid var(--th-input-border)",
-                color: "var(--th-text-primary)",
-              }}
-            >
-              <option value="status">{tr("정렬: 상태", "Sort: Status")}</option>
-              <option value="department">{tr("정렬: 부서", "Sort: Department")}</option>
-              <option value="name">{tr("정렬: 이름", "Sort: Name")}</option>
-              <option value="xp">{tr("정렬: XP", "Sort: XP")}</option>
-              <option value="activity">{tr("정렬: 활동량", "Sort: Activity")}</option>
-              <option value="created">{tr("정렬: 생성일", "Sort: Created")}</option>
-            </select>
-            <input
-              type="text"
-              placeholder={`${tr("검색", "Search")}...`}
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              className="w-full rounded-xl px-3 py-2 text-xs outline-none transition-shadow sm:w-48"
-              style={{
-                background: "var(--th-input-bg)",
-                border: "1px solid var(--th-input-border)",
-                color: "var(--th-text-primary)",
-              }}
-            />
-          </div>
+        <div className="grid min-w-0 grid-cols-2 gap-2 sm:grid-cols-[minmax(0,1fr)_auto_auto]">
+          <input aria-label={tr("에이전트 검색", "Search agents")} type="search" placeholder={tr("이름·역할 검색", "Search name or role")} value={search} onChange={event => setSearch(event.target.value)} className="col-span-2 min-h-11 min-w-0 w-full rounded-md border border-th-input-border bg-th-input-bg px-3 text-sm text-th-text-primary sm:col-span-1" />
+          <select aria-label={tr("에이전트 상태", "Agent status")} value={statusFilter} onChange={event => setStatusFilter(event.target.value)} className="min-h-11 min-w-0 rounded-md border border-th-input-border bg-th-input-bg px-3 text-xs text-th-text-primary">
+            <option value="all">{tr("전체 상태", "All statuses")}</option>
+            <option value="working">{tr("근무 중", "Working")}</option>
+            <option value="idle">{tr("대기", "Idle")}</option>
+            <option value="break">{tr("휴식", "Break")}</option>
+            <option value="offline">{tr("오프라인", "Offline")}</option>
+          </select>
+          <select aria-label={tr("에이전트 정렬", "Sort agents")} value={sortMode} onChange={event => setSortMode(event.target.value as AgentSortMode)} className="min-h-11 min-w-0 rounded-md border border-th-input-border bg-th-input-bg px-3 text-xs text-th-text-primary">
+            <option value="status">{tr("상태순", "By status")}</option>
+            <option value="department">{tr("부서순", "By department")}</option>
+            <option value="name">{tr("이름순", "By name")}</option>
+            <option value="xp">{tr("XP순", "By XP")}</option>
+            <option value="activity">{tr("활동량순", "By activity")}</option>
+            <option value="created">{tr("생성일순", "By created date")}</option>
+          </select>
         </div>
+        <p className="text-xs text-th-text-muted" aria-live="polite">{tr(`${sortedAgents.length}명 표시 · 에이전트를 선택하면 상세와 관리 동작을 확인합니다.`, `${sortedAgents.length} agents shown · Select an agent for details and management.`)}</p>
       </SurfaceCard>
 
       {sortedAgents.length === 0 ? (

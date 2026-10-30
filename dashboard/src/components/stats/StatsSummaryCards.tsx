@@ -14,6 +14,7 @@ export function StatsSummaryGrid({
   numberFormatter,
   rangeDays,
   summary,
+  loading,
   tokenMomentumDelta,
   cacheSavingsDelta,
 }: {
@@ -21,9 +22,14 @@ export function StatsSummaryGrid({
   numberFormatter: Intl.NumberFormat;
   rangeDays: number;
   summary: TokenAnalyticsResponse["summary"] | null | undefined;
+  loading: boolean;
   tokenMomentumDelta: MetricDelta | null;
   cacheSavingsDelta: MetricDelta | null;
 }) {
+  const missingValue = loading ? "…" : "—";
+  const missingNotice = t(loading
+    ? msg("데이터 불러오는 중", "Loading data", "データを読み込み中", "正在加载数据")
+    : msg("데이터 확인 불가", "Data unavailable", "データを確認できません", "数据不可用"));
   const peakDay = summary?.peak_day ?? null;
   const averageDailyTokens = summary?.average_daily_tokens ?? 0;
   const peakRatio =
@@ -32,11 +38,11 @@ export function StatsSummaryGrid({
       : null;
 
   return (
-    <div className="grid grid-4" data-testid="stats-summary-grid">
+    <div className="grid grid-cols-2 gap-3 lg:grid-cols-4 sm:gap-4" data-testid="stats-summary-grid">
       <div data-testid="stats-summary-total-tokens">
         <HeadlineMetricCard
           title={t(msg("총 토큰", "Total Tokens", "総トークン", "总代币"))}
-          value={summary ? formatTokens(summary.total_tokens) : "…"}
+          value={summary ? formatTokens(summary.total_tokens) : missingValue}
           sub={t(
             msg(
               `${numberFormatter.format(rangeDays)}일 누적`,
@@ -60,7 +66,7 @@ export function StatsSummaryGrid({
       <div data-testid="stats-summary-api-spend">
         <HeadlineMetricCard
           title={t(msg("API 비용", "API Spend", "API コスト", "API 成本"))}
-          value={summary ? formatCurrency(summary.total_cost) : "…"}
+          value={summary ? formatCurrency(summary.total_cost) : missingValue}
           sub={
             summary
               ? t(
@@ -71,7 +77,7 @@ export function StatsSummaryGrid({
                     `${formatCurrency(summary.cache_discount)} 已节省`,
                   ),
                 )
-              : t(msg("비용 집계 대기", "Waiting for spend data"))
+              : missingNotice
           }
           tip={t(
             msg(
@@ -91,7 +97,7 @@ export function StatsSummaryGrid({
           value={
             summary
               ? `${numberFormatter.format(summary.active_days)} / ${numberFormatter.format(rangeDays)}`
-              : "…"
+              : missingValue
           }
           sub={
             summary
@@ -103,7 +109,7 @@ export function StatsSummaryGrid({
                     `日均 ${formatTokens(Math.round(averageDailyTokens))}`,
                   ),
                 )
-              : t(msg("활성 일수 집계 대기", "Waiting for active-day data"))
+              : missingNotice
           }
           tip={t(
             msg(
@@ -129,7 +135,7 @@ export function StatsSummaryGrid({
                     `${formatTokens(peakDay.total_tokens)} · ${peakRatio ? `${peakRatio.toFixed(1)}x 平均` : "相对平均"}`,
                   ),
                 )
-              : t(msg("피크 데이터 없음", "No peak-day data"))
+              : summary ? t(msg("피크 데이터 없음", "No peak-day data")) : missingNotice
           }
           tip={t(
             msg(

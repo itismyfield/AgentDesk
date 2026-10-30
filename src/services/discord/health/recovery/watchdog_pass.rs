@@ -193,6 +193,10 @@ pub(crate) async fn run_stall_watchdog_pass(
     }
     // Every consumer of this tick reads the one enumeration; the next tick makes its own.
     let tick = TickMailboxes::enumerate(provider, runtimes).await;
+    // A carried turn proven ended closes before any snapshot below reads it as open.
+    if !crate::services::tui_o::turn_mode::carried_close_mutant("no_pass") {
+        super::carried_turn_close::run_carried_turn_close_pass(registry, provider).await;
+    }
     let mut candidate_channels: Vec<(ChannelId, Arc<SharedData>)> = Vec::new();
     let mut seen: std::collections::HashSet<ChannelId> = std::collections::HashSet::new();
     for runtime in tick.runtimes() {

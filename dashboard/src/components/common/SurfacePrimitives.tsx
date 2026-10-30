@@ -52,7 +52,7 @@ function getToneChrome(tone: SurfaceTone): {
     default:
       return {
         borderColor: "color-mix(in srgb, var(--th-border) 76%, transparent)",
-        background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
+        background: "var(--th-bg-surface)",
         accent: "var(--th-text-muted)",
       };
   }
@@ -60,13 +60,12 @@ function getToneChrome(tone: SurfaceTone): {
 
 const defaultSectionStyle: CSSProperties = {
   border: "1px solid color-mix(in srgb, var(--th-border) 72%, transparent)",
-  background:
-    "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+  background: "var(--th-bg-surface)",
 };
 
 const defaultCardStyle: CSSProperties = {
   borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
-  background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
+  background: "var(--th-bg-surface)",
 };
 
 interface SurfaceSectionProps extends Omit<HTMLAttributes<HTMLElement>, "title" | "children"> {
@@ -94,24 +93,24 @@ export function SurfaceSection({
   return (
     <section
       {...rest}
-      className={joinClasses("rounded-[28px] border p-5 sm:p-6", className)}
+      className={joinClasses("min-w-0 rounded-lg border p-4 sm:p-5", className)}
       style={{ ...defaultSectionStyle, ...style }}
     >
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
           {eyebrow && (
             <div
-              className="text-[11px] font-semibold uppercase tracking-[0.18em]"
+              className="text-xs font-medium"
               style={{ color: "var(--th-text-muted)" }}
             >
               {eyebrow}
             </div>
           )}
-          <h3 className={joinClasses(eyebrow ? "mt-1" : undefined, "text-xl font-semibold tracking-tight")} style={{ color: "var(--th-text)" }}>
+          <h3 className={joinClasses(eyebrow ? "mt-1" : undefined, "text-base font-semibold")} style={{ color: "var(--th-text)" }}>
             {title}
           </h3>
           {description && (
-            <p className="mt-2 max-w-3xl text-[13px] leading-5 sm:text-sm sm:leading-6" style={{ color: "var(--th-text-muted)" }}>
+            <p className="mt-1 max-w-3xl text-xs leading-5 [overflow-wrap:anywhere]" style={{ color: "var(--th-text-muted)" }}>
               {description}
             </p>
           )}
@@ -120,7 +119,7 @@ export function SurfaceSection({
           <div className="flex shrink-0 flex-wrap items-center gap-2">
             {badge && (
               <span
-                className="inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-medium"
+                className="inline-flex items-center rounded-md border px-2 py-1 text-xs font-medium"
                 style={{
                   borderColor: "color-mix(in srgb, var(--th-accent-primary) 30%, var(--th-border) 70%)",
                   background: "var(--th-accent-primary-soft)",
@@ -149,7 +148,7 @@ export function SurfaceCard({ children, className, style, ...rest }: SurfaceCard
   return (
     <div
       {...rest}
-      className={joinClasses("rounded-2xl border p-4", className)}
+      className={joinClasses("min-w-0 rounded-lg border p-4", className)}
       style={{ ...defaultCardStyle, ...style }}
     >
       {children}
@@ -178,7 +177,7 @@ export function SurfaceSubsection({
   return (
     <SurfaceCard
       {...rest}
-      className={joinClasses("min-w-0 w-full rounded-3xl p-4 sm:p-5", className)}
+      className={joinClasses("min-w-0 w-full p-4 sm:p-5", className)}
       style={{
         borderColor: "color-mix(in srgb, var(--th-border) 62%, transparent)",
         background: "color-mix(in srgb, var(--th-card-bg) 88%, transparent)",
@@ -191,7 +190,7 @@ export function SurfaceSubsection({
             {title}
           </h4>
           {description && (
-            <p className="mt-1 text-[13px] leading-5 sm:text-sm sm:leading-6" style={{ color: "var(--th-text-muted)" }}>
+            <p className="mt-1 text-xs leading-5 [overflow-wrap:anywhere]" style={{ color: "var(--th-text-muted)" }}>
               {description}
             </p>
           )}
@@ -273,7 +272,6 @@ export function SurfaceEmptyState({ children, className, style, ...rest }: Surfa
       {...rest}
       className={className}
       style={{
-        borderStyle: "dashed",
         borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
         color: "var(--th-text-muted)",
         ...style,
@@ -308,7 +306,7 @@ export function SurfaceNotice({
   return (
     <div
       className={joinClasses(
-        "flex items-start gap-3 rounded-2xl border",
+        "flex items-start gap-3 rounded-md border",
         compact ? "px-3 py-2 text-xs" : "px-3 py-3 text-sm",
         className,
       )}
@@ -350,17 +348,17 @@ export function SurfaceMetricPill({
 
   return (
     <div
-      className={joinClasses("inline-flex min-w-[148px] flex-col rounded-2xl border px-3 py-2", className)}
+      className={joinClasses("inline-flex min-w-0 flex-col rounded-md border px-3 py-3", className)}
       style={{
         borderColor: chrome.borderColor,
         background: chrome.background,
         ...style,
       }}
     >
-      <span className="text-[10px] font-semibold uppercase tracking-[0.14em]" style={{ color: chrome.accent }}>
+      <span className="text-xs font-medium" style={{ color: "var(--th-text-muted)" }}>
         {label}
       </span>
-      <span className="mt-1 text-xs font-medium leading-relaxed" style={{ color: "var(--th-text)" }}>
+      <span className="mt-1 break-words text-lg font-semibold leading-6 tabular-nums" style={{ color: "var(--th-text)" }}>
         {value}
       </span>
     </div>
@@ -394,7 +392,7 @@ export function SurfaceTabCard({
       onClick={onClick}
       {...buttonProps}
       className={joinClasses(
-        "w-full min-w-0 rounded-2xl border px-4 py-3 text-left transition-colors sm:w-auto sm:min-w-[180px]",
+        "min-h-11 w-full min-w-0 rounded-md border px-4 py-3 text-left transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--th-accent-primary)] sm:w-auto",
         className,
       )}
       style={{
@@ -412,7 +410,7 @@ export function SurfaceTabCard({
         </div>
         {count !== undefined && (
           <span
-            className="rounded-full px-2 py-0.5 text-[10px]"
+            className="rounded-md px-2 py-0.5 text-xs tabular-nums"
             style={{
               background: "color-mix(in srgb, var(--th-overlay-medium) 88%, transparent)",
               color: "var(--th-text-muted)",
@@ -453,7 +451,7 @@ export function SurfaceSegmentButton({
       {...rest}
       type={rest.type ?? "button"}
       onClick={onClick}
-      className={joinClasses("rounded-full px-3 py-1.5 text-xs font-medium transition-colors", className)}
+      className={joinClasses("min-h-11 min-w-11 rounded-md px-3 py-2 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--th-accent-primary)]", className)}
       style={{
         border: `1px solid ${active ? chrome.borderColor : "color-mix(in srgb, var(--th-border) 72%, transparent)"}`,
         background: active
@@ -494,8 +492,8 @@ export function SurfaceActionButton({
       disabled={disabled}
       onClick={onClick}
       className={joinClasses(
-        "inline-flex items-center justify-center rounded-xl border font-medium transition-colors disabled:cursor-not-allowed",
-        compact ? "px-2 py-1 text-[10px]" : "px-3 py-2 text-xs",
+        "inline-flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-md border font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--th-accent-primary)] disabled:cursor-not-allowed",
+        compact ? "px-2 py-2 text-xs" : "px-3 py-2 text-xs",
         className,
       )}
       style={{
@@ -545,7 +543,7 @@ export function SurfaceListItem({
         ...style,
       }}
     >
-      <div className="flex items-start justify-between gap-3">
+      <div className="flex min-w-0 flex-col items-start justify-between gap-3 sm:flex-row">
         <div className="min-w-0 flex-1">{children}</div>
         {trailing ? <div className="shrink-0">{trailing}</div> : null}
       </div>
@@ -573,7 +571,7 @@ export function SurfaceMetaBadge({
     <span
       {...rest}
       className={joinClasses(
-        "inline-flex items-center rounded-full border px-2 py-1 text-[11px] leading-none",
+        "inline-flex max-w-full items-center rounded-md border px-2 py-1 text-xs leading-4 [overflow-wrap:anywhere]",
         className,
       )}
       style={{

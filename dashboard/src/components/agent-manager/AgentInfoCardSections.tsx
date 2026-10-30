@@ -83,7 +83,7 @@ export function DetailAccordion({
       <button
         type="button"
         onClick={onToggle}
-        className="flex w-full items-start justify-between gap-3 text-left"
+        className="flex min-h-11 w-full items-start justify-between gap-3 text-left"
         aria-expanded={open}
       >
         <div className="min-w-0">

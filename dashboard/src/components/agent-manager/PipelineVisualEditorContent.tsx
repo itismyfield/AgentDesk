@@ -22,7 +22,7 @@ export default function PipelineVisualEditorContent({ ctx, actions }: Props) {
     <>
       <div className={ctx.graphGridClass}>
         <div
-          className={`min-w-0 rounded-[24px] border p-4 sm:p-5 space-y-4 ${ctx.useScrollableMobileFsmCanvas ? "order-2 xl:order-1" : ""}`}
+          className={`min-w-0 rounded-lg border p-4 sm:p-5 space-y-4 ${ctx.useScrollableMobileFsmCanvas ? "order-2 xl:order-1" : ""}`}
           style={ctx.isFsmVariant ? FSM_PANEL_STYLE : PANEL_STYLE}
         >
           {!ctx.isFsmVariant && (
@@ -58,7 +58,7 @@ export default function PipelineVisualEditorContent({ ctx, actions }: Props) {
         </div>
 
         <div
-          className={`min-w-0 rounded-[24px] border p-4 sm:p-5 space-y-4 ${ctx.useScrollableMobileFsmCanvas ? "order-1 xl:order-2" : ""}`}
+          className={`min-w-0 rounded-lg border p-4 sm:p-5 space-y-4 ${ctx.useScrollableMobileFsmCanvas ? "order-1 xl:order-2" : ""}`}
           style={ctx.isFsmVariant ? FSM_INSPECTOR_STYLE : PANEL_STYLE}
         >
           <PipelineVisualEditorInspector ctx={ctx} actions={actions} />

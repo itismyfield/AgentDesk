@@ -64,7 +64,7 @@ export default function ServerCampaignDetail({
       {view.control === "succeeded" && <button type="button" onClick={onCopy}>{tr("정의를 복사해 새 캠페인", "Copy definition to a new campaign")}</button>}
     </div>
     <ServerCampaignControls view={view} connection={connection} stopIntent={stopIntent} busy={busy} error={commandError} onCommand={(command) => onCommand(command)} tr={tr} />
-    <section className="campaign-server-check" aria-label={tr("시작 점검", "Start check")}>
+    <section className="campaign-server-check grid min-w-0 gap-2 rounded-lg border border-th-border-subtle p-4" aria-label={tr("시작 점검", "Start check")}>
       <h4>{tr("시작 점검", "Start check")}</h4>
       <p>{tr("실행 준비", "Execution readiness")}: {view.execution_readiness === "unavailable" ? tr("미제공", "unavailable") : view.execution_readiness}</p>
       {profile && <>
@@ -74,11 +74,11 @@ export default function ServerCampaignDetail({
       </>}
     </section>
     <div className={`campaign-workbench ${selected ? "has-inspector" : ""}`}>
-      <ul className="campaign-server-tasks" aria-label={tr("작업", "Tasks")}>
+      <ul className="campaign-server-tasks grid min-w-0 gap-2" aria-label={tr("작업", "Tasks")}>
         {definition.nodes.map((node) => {
           const runtime = runtimes.get(node.id)?.runtime;
           const reasons = runtimes.has(node.id) ? nodeReasons(runtimes.get(node.id)!, view.reasons) : [];
-          return <li key={node.id}><button type="button" className="campaign-server-task-row" data-node-id={node.id} aria-pressed={node.id === selectedNode} onClick={() => onSelectNode(node.id)}>
+          return <li key={node.id}><button type="button" className="campaign-server-task-row grid w-full min-w-0 gap-2 p-3 text-left [&_strong]:text-sm [&_strong]:font-medium [&_strong]:leading-6 [&_strong]:[overflow-wrap:anywhere]" data-node-id={node.id} aria-pressed={node.id === selectedNode} onClick={() => onSelectNode(node.id)}>
             <strong>{node.title}</strong>
             <span>{runtime ? <>
               <span className={`campaign-badge campaign-status-${runtime.disposition}`}>{tr(...DISPOSITION_LABELS[runtime.disposition])}</span>
@@ -90,12 +90,12 @@ export default function ServerCampaignDetail({
           </button></li>;
         })}
       </ul>
-      {selected && <aside ref={inspectorRef} className="campaign-inspector" aria-label={tr("선택 작업", "Selected task")}>
-        <div className="campaign-row campaign-inspector-header"><span>{selected.id}</span><button type="button" onClick={() => onSelectNode(null)} aria-label={tr("상세 닫기", "Close details")}>×</button></div>
+      {selected && <aside ref={inspectorRef} className="campaign-inspector min-w-0 rounded-lg border border-th-border-subtle bg-th-bg-surface p-4 [overflow-wrap:anywhere] scroll-mt-28" aria-label={tr("선택 작업", "Selected task")}>
+        <div className="campaign-row campaign-inspector-header mb-3 flex items-center justify-between gap-3 border-b border-th-border-subtle pb-3 text-xs text-th-text-muted"><span>{selected.id}</span><button type="button" onClick={() => onSelectNode(null)} aria-label={tr("상세 닫기", "Close details")}>×</button></div>
         <h4>{selected.title}</h4>
         {safeCampaignLink(selected.issue_url) && <p><a href={safeCampaignLink(selected.issue_url)} target="_blank" rel="noreferrer">{selected.issue_url}</a></p>}
         <ul aria-label={tr("수용조건", "Acceptance")}>{selected.acceptance.map((ac) => <li key={ac.id}><code>{ac.id}</code> {ac.description} · {tr(...(VERIFICATION_LABELS[ac.verification] ?? [ac.verification, ac.verification]))}</li>)}</ul>
-        {selectedView && <dl className="campaign-detail-grid">
+        {selectedView && <dl className="campaign-detail-grid grid grid-cols-1 gap-4 text-sm sm:grid-cols-2 [&_dt]:mb-1 [&_dt]:text-xs [&_dd]:[overflow-wrap:anywhere]">
           <div><dt>{tr("단계", "Stage")}</dt><dd>{tr(...STAGE_LABELS[selectedView.runtime.stage])}</dd></div>
           <div><dt>{tr("현재 시도", "Current attempt")}</dt><dd>{selectedView.runtime.current_attempt ?? "—"}</dd></div>
           <div><dt>{tr("품질 실패 · 수리 · 리뷰", "Failures · repairs · reviews")}</dt><dd>{selectedView.runtime.quality_failures} · {selectedView.runtime.repair_cycles} · {selectedView.runtime.review_rounds}</dd></div>
@@ -116,7 +116,7 @@ export default function ServerCampaignDetail({
       <summary>{tr("이벤트", "Events")} · {events?.length ?? "—"}{eventsFailed && ` · ${tr("이벤트를 갱신하지 못했습니다", "Could not refresh events")}`}</summary>
       <ol>{(events ?? []).slice().reverse().map((event) => <li key={event.sequence}>#{event.sequence} · {time(event.observed_at)} · {event.kind.event}{event.run_id && ` · ${event.run_id}`}</li>)}</ol>
     </details>
-    <label className="campaign-server-feedback">{tr("피드백용 복사", "Copy for feedback")}
+    <label className="campaign-server-feedback grid min-w-0 gap-3 [&_button]:justify-self-start">{tr("피드백용 복사", "Copy for feedback")}
       <textarea aria-label={tr("피드백용 복사", "Copy for feedback")} readOnly rows={5} value={feedback} />
       <button type="button" onClick={() => void globalThis.navigator?.clipboard?.writeText(feedback).catch(() => undefined)}>{tr("복사", "Copy")}</button>
     </label>

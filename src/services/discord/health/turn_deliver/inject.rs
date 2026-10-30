@@ -153,16 +153,13 @@ pub(super) fn mode(channel_id: u64) -> InjectMode {
     }
 }
 
-/// Codex capability is limited by the existing Discord channel gate below.
-pub(super) const CODEX_BUSY_INJECT_ENABLED: bool = true;
-
 /// Require the requested channel itself; intake permission from its parent is insufficient.
 fn codex_enabled(channel_id: u64) -> bool {
     #[cfg(test)]
     if test_hook::codex_enabled(channel_id) {
         return true;
     }
-    CODEX_BUSY_INJECT_ENABLED && live_intake_inject_covers(ChannelId::new(channel_id), None)
+    live_intake_inject_covers(ChannelId::new(channel_id), None)
 }
 
 /// Who holds the channel at one read: the mailbox claim and the durable row.

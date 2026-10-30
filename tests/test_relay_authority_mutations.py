@@ -944,7 +944,7 @@ class MutationPathFilterContractTests(unittest.TestCase):
         ]
         # Only a verified docs/comment skip can suppress the mutation runner.
         self.assertEqual(job["needs"], "changes")
-        self.assertEqual(job["if"], "${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}")
+        self.assertEqual(job["if"], "${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}")
         gated = {
             step["name"]: step["if"]
             for step in job["steps"]

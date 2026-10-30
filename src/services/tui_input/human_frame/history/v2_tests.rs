@@ -203,28 +203,38 @@ fn history_v2_five_thousand_registrations_return_slots_and_keep_old_recognition(
         .append(true)
         .open(&path)
         .unwrap();
+    // A native submit check reparses the whole history, so it runs only for the first
+    // registration, both sides of the slot capacity and the last one.
+    let submits = [0, CAPACITY as u64 - 1, CAPACITY as u64, 5000];
+    // Batches divide CAPACITY, so registration CAPACITY + 1 needs every earlier slot returned.
+    const BATCH: usize = 64;
+    let mut pending = Vec::with_capacity(BATCH);
     let started = std::time::Instant::now();
     for id in 0..5001u64 {
         let k = key(10_000 + id, &path, false);
         let frame = super::super::super::idle("ann", "7", &format!("prompt {id}"));
         history.prepare("history-test", &input(&k, &frame)).unwrap();
-        let offset = file.metadata().unwrap().len();
-        writeln!(file, "{}", json!({"type":"event_msg","payload":{"type":"item_completed","turn_id":"turn", "item":{"type":"UserMessage","id":format!("row-{id}"),"content":[{"type":"input_text","text":frame}]}}})).unwrap();
-        file.flush().unwrap();
-        let nonce = k["attempt"]["nonce"].as_str().unwrap();
-        assert_eq!(
-            with_attempt(&history, "history-test", &k, || {
-                crate::services::codex_tui::busy_inject::submitted(&path, offset, nonce)
-            })
-            .unwrap(),
-            Some(Some("turn".into()))
-        );
-        history
-            .project(&projection(None, &[], std::slice::from_ref(&k)))
-            .unwrap();
+        if submits.contains(&id) {
+            let offset = file.metadata().unwrap().len();
+            writeln!(file, "{}", json!({"type":"event_msg","payload":{"type":"item_completed","turn_id":"turn", "item":{"type":"UserMessage","id":format!("row-{id}"),"content":[{"type":"input_text","text":frame}]}}})).unwrap();
+            file.flush().unwrap();
+            let nonce = k["attempt"]["nonce"].as_str().unwrap();
+            assert_eq!(
+                with_attempt(&history, "history-test", &k, || {
+                    crate::services::codex_tui::busy_inject::submitted(&path, offset, nonce)
+                })
+                .unwrap(),
+                Some(Some("turn".into()))
+            );
+        }
+        pending.push(k);
+        if pending.len() == BATCH || id == 5000 {
+            history.project(&projection(None, &[], &pending)).unwrap();
+            pending.clear();
+        }
         if matches!(id, 0 | 32 | 256 | 1024 | 4096 | 5000) {
             println!(
-                "HISTORY_COST completed={} bytes={} elapsed_ms={}",
+                "HISTORY_COST registered={} bytes={} elapsed_ms={}",
                 id + 1,
                 std::fs::metadata(&history.path).unwrap().len(),
                 started.elapsed().as_millis()

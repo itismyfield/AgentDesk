@@ -63,6 +63,7 @@ export default function SettingsView({
   const [rcDefaults, setRcDefaults] = useState<RuntimeConfigMap>({});
   const [rcExplicitKeys, setRcExplicitKeys] = useState<Set<string>>(() => new Set());
   const [rcLoaded, setRcLoaded] = useState(false);
+  const [rcError, setRcError] = useState(false);
   const [rcSaving, setRcSaving] = useState(false);
   const [rcDirty, setRcDirty] = useState(false);
 
@@ -290,6 +291,7 @@ export default function SettingsView({
         setRcLoaded(true);
       })
       .catch(() => {
+        setRcError(true);
         setRcLoaded(true);
       });
 
@@ -401,15 +403,15 @@ export default function SettingsView({
     border: "1px solid var(--th-border)",
     color: "var(--th-text)",
   };
-  const primaryActionClass = "inline-flex min-h-[44px] shrink-0 items-center justify-center whitespace-nowrap rounded-2xl px-5 py-2.5 text-sm font-medium text-white transition-colors disabled:opacity-50";
+  const primaryActionClass = "inline-flex min-h-[44px] shrink-0 items-center justify-center whitespace-nowrap rounded-md px-4 py-2.5 text-sm font-medium text-white transition-colors disabled:opacity-50";
   const primaryActionStyle: CSSProperties = { background: "var(--th-accent-primary)" };
-  const secondaryActionClass = "inline-flex min-h-[44px] items-center justify-center whitespace-nowrap rounded-2xl border px-5 py-2.5 text-sm font-medium transition-[opacity,color,border-color] hover:opacity-100";
+  const secondaryActionClass = "inline-flex min-h-[44px] items-center justify-center whitespace-nowrap rounded-md border px-4 py-2.5 text-sm font-medium transition-[opacity,color,border-color] hover:opacity-100";
   const secondaryActionStyle: CSSProperties = {
     borderColor: "rgba(148,163,184,0.28)",
     color: "var(--th-text-secondary)",
     background: "color-mix(in srgb, var(--th-bg-surface) 94%, transparent)",
   };
-  const subtleButtonClass = "inline-flex items-center justify-center whitespace-nowrap rounded-full border px-3 py-1.5 text-[11px] font-medium transition-colors";
+  const subtleButtonClass = "inline-flex min-h-11 min-w-11 items-center justify-center whitespace-nowrap rounded-md border px-3 py-1.5 text-[11px] font-medium transition-colors";
   const subtleButtonStyle: CSSProperties = {
     borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
     color: "var(--th-text-muted)",
@@ -651,7 +653,7 @@ export default function SettingsView({
         : tr(`${args.totalCount}개`, `${args.totalCount} items`);
       return (
         <div
-          className="setting-group-card overflow-hidden rounded-[20px] border"
+          className="setting-group-card min-w-0 overflow-hidden rounded-lg border"
           style={{
             borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
             background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
@@ -670,17 +672,15 @@ export default function SettingsView({
               </div>
             </div>
             <span
-              className="settings-count-chip inline-flex shrink-0 items-center rounded-full border px-2.5 py-1 text-[10px] font-medium"
+              className="inline-flex shrink-0 items-center whitespace-nowrap px-1 text-xs tabular-nums"
               style={{
-                borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
-                background: "color-mix(in srgb, var(--th-overlay-medium) 88%, transparent)",
                 color: "var(--th-text-muted)",
               }}
             >
               {countLabel}
             </span>
           </div>
-          <div className="px-2 pb-1 pt-1 sm:px-3">
+          <div className="divide-y divide-th-border-subtle px-3 sm:px-4">
             {filteredRows.length > 0 ? (
               filteredRows
             ) : (
@@ -710,7 +710,7 @@ export default function SettingsView({
         pendingProviderLogin, providerAuthError, providerAuthLoading, providerAuthProviders,
         pendingDangerousConfigSave, pipelineAgents, pipelineMetas, pipelineRepos,
         pipelineSelectorError, pipelineSelectorLoading, primaryActionClass,
-        primaryActionStyle, rcDirty, rcLoaded, rcSaving, renderSettingGroupCard,
+        primaryActionStyle, rcDirty, rcLoaded, rcError, rcSaving, renderSettingGroupCard,
         renderSettingRow, runtimeMetas, saving, secondaryActionClass,
         secondaryActionStyle, selectedPipelineAgentId, selectedPipelineRepo,
         setActiveRuntimeCategoryId, setPanelQuery, setPendingDangerousConfigSave,

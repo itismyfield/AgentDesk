@@ -1,0 +1,82 @@
+---
+title: "AgentDesk channel session on Herdr, launch to retire, with one server crash"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Run
+    lg1: Launch
+    lg2: Stuck
+    lg3: Breaks NoDeadlock or NoOrphanPane or RowMatchesPane
+    lg4: Breaks NoDeadlock or PromptOnlyToAgent or RowMatchesPane in some cases
+    lg5: Path to the NoDeadlock or NoOrphanPane or PromptOnlyToAgent or RowMatchesPane bug
+  }
+  class lg0 blue
+  class lg1 teal
+  class lg2 pink
+  class lg3 breaks
+  class lg4 mayBreak
+  class lg5 bugPath
+  s0: No execution running
+  s1: Launch: create request sent
+  s2: Pending row with no pane
+  s3: Pending row with no pane, an unrecorded pane runs Claude
+  s4: Launch: pane made, not recorded yet
+  s5: Launch: pane recorded, Claude being checked
+  s6: Pane recorded, Claude not proven
+  s7: Launched, not bound yet
+  s8: Bound, Claude running
+  s9: Prompt checked, about to be sent
+  s10: Pane closed, row not retired yet
+  s11: Bound, Claude exited, shell left in the pane
+  [*] --> s0
+  s0 --> s1: a turn starts a launch
+  s1 --> s2: the server crashes and restarts or the create reply is lost
+  s1 --> s3: the server crashes and restarts or the create reply is lost
+  s1 --> s0: the create request never leaves
+  s1 --> s4: Herdr answers with the new pane
+  s2 --> s2: the server boots, reconcile only reads
+  s4 --> s3: the server crashes and restarts or recording the pane fails
+  s4 --> s5: the pane is recorded
+  s5 --> s6: the server crashes and restarts or Claude is not found in the pane
+  s5 --> s7: Claude is confirmed in the pane
+  s7 --> s8: the first prompt binds the execution
+  s8 --> s9: the input gate checks Claude in the pane
+  s8 --> s10: an operator terminates the pane
+  s8 --> s11: Claude exits
+  s6 --> s7: a later turn confirms Claude
+  s7 --> s0: the ended execution's row is retired
+  s6 --> s0: the ended execution's row is retired
+  s9 --> s8: the server crashes and restarts or the prompt is sent
+  s9 --> s9: Claude exits
+  s10 --> s0: the row is retired or the ended execution's row is retired
+  s11 --> s0: the ended execution's row is retired
+  s11 --> s10: an operator terminates the pane
+  s9 --> s11: the server crashes and restarts or the prompt is sent
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
+  class s0 blue
+  class s0 bugPath
+  class s1 teal
+  class s1 bugPath
+  class s2 pink
+  class s2 mayBreak
+  class s2 bugPath
+  class s3 pink
+  class s3 breaks
+  class s3 bugPath
+  class s4 teal
+  class s4 bugPath
+  class s5 teal
+  class s5 bugPath
+  class s6 blue
+  class s7 blue
+  class s7 bugPath
+  class s8 blue
+  class s8 bugPath
+  class s9 blue
+  class s9 bugPath
+  class s10 blue
+  class s10 mayBreak
+  class s11 blue
+  class s11 mayBreak
+  class s11 bugPath

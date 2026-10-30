@@ -48,7 +48,6 @@ fn expired_session(channel_name: &str) -> DiscordSession {
         history: Vec::new(),
         pending_uploads: Vec::new(),
         cleared: false,
-        remote_profile_name: None,
         channel_id: None,
         channel_name: Some(channel_name.to_string()),
         category_name: None,

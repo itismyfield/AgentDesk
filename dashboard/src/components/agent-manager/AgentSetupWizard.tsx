@@ -1,3 +1,4 @@
+import { createPortal } from "react-dom";
 import type { CliProvider } from "../../types";
 import { localeName } from "../../i18n";
 import { summarizeRollback } from "../../api/agentsSetup";
@@ -79,10 +80,11 @@ export default function AgentSetupWizard({
     </label>
   );
 
-  return (
+  return createPortal(
+    <>
+    <div aria-hidden="true" className="fixed inset-0 z-[70]" style={{ background: "var(--th-modal-overlay)" }} />
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-hidden px-3 py-4 sm:items-center sm:p-4"
-      style={{ background: "var(--th-modal-overlay)" }}
+      className="fixed inset-0 z-[80] flex items-start justify-center overflow-hidden px-3 py-4 sm:items-center sm:p-4"
       onClick={(event) => {
         if (event.currentTarget === event.target) onClose();
       }}
@@ -91,15 +93,15 @@ export default function AgentSetupWizard({
         role="dialog"
         aria-modal="true"
         aria-label={tr("에이전트 설정 마법사", "Agent setup wizard")}
-        className="w-full max-w-5xl overflow-hidden rounded-[30px] border shadow-2xl"
+        className="flex w-full max-w-5xl flex-col overflow-hidden [overflow-wrap:anywhere] rounded-lg border shadow-2xl"
         style={{
           maxHeight: "min(92vh, 860px)",
           background:
-            "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 97%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
+            "var(--th-bg-surface)",
           borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
         }}
       >
-        <div className="flex items-center justify-between gap-3 border-b px-5 py-4" style={{ borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)" }}>
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b px-5 py-4" style={{ borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)" }}>
           <div className="min-w-0">
             <div className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
               {mode === "duplicate"
@@ -112,20 +114,20 @@ export default function AgentSetupWizard({
                 : tr("에이전트 생성", "Create Agent")}
             </h3>
           </div>
-          <SurfaceActionButton onClick={onClose} tone="neutral" compact className="h-10 w-10" style={{ padding: 0 }} aria-label={tr("닫기", "Close")}>
+          <SurfaceActionButton onClick={onClose} tone="neutral" compact className="h-11 w-11" style={{ padding: 0 }} aria-label={tr("닫기", "Close")}>
             x
           </SurfaceActionButton>
         </div>
 
-        <div className="grid min-h-0 grid-cols-1 md:grid-cols-[220px_minmax(0,1fr)]">
+        <div className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto md:grid-cols-[220px_minmax(0,1fr)]">
           <aside className="border-b p-4 md:border-b-0 md:border-r" style={{ borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)" }}>
-            <div className="grid gap-2">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-1">
               {steps.map((step, index) => (
                 <button
                   key={step}
                   type="button"
                   onClick={() => setStepIndex(index)}
-                  className="flex items-center justify-between gap-3 rounded-2xl border px-3 py-2 text-left text-xs"
+                  className="flex min-h-11 items-center justify-between gap-3 rounded-md border px-3 py-2 text-left text-xs"
                   style={{
                     borderColor:
                       stepIndex === index
@@ -147,7 +149,7 @@ export default function AgentSetupWizard({
             </div>
           </aside>
 
-          <main className="min-h-0 overflow-y-auto p-5" style={{ maxHeight: "calc(min(92vh, 860px) - 73px)" }}>
+          <main className="min-w-0 p-4 sm:p-5">
             <div className="space-y-4">
               {currentStep === "role" && (
                 <SurfaceSubsection
@@ -260,7 +262,7 @@ export default function AgentSetupWizard({
                         onChange={(promptContent) => setDraft({ ...draft, promptContent })}
                         minHeight={320}
                       />
-                      <SurfaceCard className="rounded-[24px] p-4">
+                      <SurfaceCard className="rounded-lg p-4">
                         <div className="text-xs font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--th-text-muted)" }}>
                           {tr("_shared 병합 미리보기", "_shared merge preview")}
                         </div>
@@ -316,7 +318,7 @@ export default function AgentSetupWizard({
                         style={inputStyle}
                       />
                     </label>
-                    <SurfaceCard className="rounded-[24px] p-4">
+                    <SurfaceCard className="rounded-lg p-4">
                       <div className="text-xs font-medium" style={{ color: "var(--th-text-secondary)" }}>
                         {tr("작업공간", "Workspace")}
                       </div>
@@ -324,7 +326,7 @@ export default function AgentSetupWizard({
                         ~/.adk/release/config/agents/{draft.agentId || "{role_id}"}
                       </div>
                     </SurfaceCard>
-                    <SurfaceCard className="rounded-[24px] p-4">
+                    <SurfaceCard className="rounded-lg p-4">
                       <div className="text-xs font-medium" style={{ color: "var(--th-text-secondary)" }}>
                         MCP
                       </div>
@@ -342,7 +344,7 @@ export default function AgentSetupWizard({
                   description={tr("선택 항목입니다. 일정 연결은 관리 화면에서 이어서 조정합니다.", "Optional. Schedule wiring can be adjusted from management later.")}
                 >
                   <div className="space-y-4">
-                    <label className="flex items-center gap-3 text-sm" style={{ color: "var(--th-text-primary)" }}>
+                    <label className="flex min-h-11 items-center gap-3 text-sm" style={{ color: "var(--th-text-primary)" }}>
                       <input
                         type="checkbox"
                         checked={draft.cronEnabled}
@@ -366,7 +368,7 @@ export default function AgentSetupWizard({
                   description={tr("dry-run으로 파일/설정 변경을 확인한 뒤 생성합니다. 실패 시 setup rollback 결과를 확인하고 같은 화면에서 재시도합니다.", "Dry-run the file/config changes before creation. On failure, review rollback output and retry here.")}
                 >
                   <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(280px,0.8fr)]">
-                    <SurfaceCard className="rounded-[24px] p-4">
+                    <SurfaceCard className="rounded-lg p-4">
                       <div className="grid gap-2 text-xs" style={{ color: "var(--th-text-secondary)" }}>
                         <div>role_id: <span style={{ color: "var(--th-text-primary)" }}>{draft.agentId}</span></div>
                         <div>channel_id: <span style={{ color: "var(--th-text-primary)" }}>{draft.channelId || "--"}</span></div>
@@ -387,7 +389,7 @@ export default function AgentSetupWizard({
                         </div>
                       </div>
                     </SurfaceCard>
-                    <SurfaceCard className="max-h-80 overflow-auto rounded-[24px] p-4">
+                    <SurfaceCard className="max-h-80 overflow-auto rounded-lg p-4">
                       <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--th-text-muted)" }}>
                         {tr("Dry-run 결과", "Dry-run result")}
                       </div>
@@ -475,7 +477,7 @@ export default function AgentSetupWizard({
           </main>
         </div>
 
-        <div className="flex flex-col gap-2 border-t px-5 py-4 sm:flex-row sm:items-center sm:justify-between" style={{ borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)" }}>
+        <div className="flex shrink-0 flex-col gap-2 border-t px-5 py-4 sm:flex-row sm:items-center sm:justify-between" style={{ borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)" }}>
           <div className="flex flex-wrap gap-2">
             {steps.map((step, index) => (
               <SurfaceSegmentButton
@@ -520,5 +522,7 @@ export default function AgentSetupWizard({
         </div>
       </div>
     </div>
+    </>,
+    document.body,
   );
 }

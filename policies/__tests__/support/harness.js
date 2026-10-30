@@ -205,7 +205,9 @@ function createAgentdeskMock(options) {
     {
       review_enabled: true,
       max_review_rounds: 3,
-      maxEntryRetries: 3
+      maxEntryRetries: 3,
+      requested_timeout_min: 45,
+      in_progress_stale_min: 120
     },
     settings.config || {}
   );

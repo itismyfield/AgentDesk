@@ -50,6 +50,9 @@ mod scheduled_watcher_harness_tests;
 #[path = "receipt_watcher_harness_tests.rs"]
 mod receipt_watcher_harness_tests;
 
+#[path = "adopted_run_first_output_tests.rs"]
+mod adopted_run_first_output_tests;
+
 const CHILD: &str = "ADK_STREAMING_HARNESS_CHILD";
 pub(super) const STATUS_PANEL_V2: &str = "ADK_STREAMING_HARNESS_STATUS_PANEL_V2";
 const CLAUDE: ProviderKind = ProviderKind::Claude;
