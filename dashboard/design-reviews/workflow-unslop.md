@@ -31,7 +31,7 @@ PC 보드에서는 lane 최소 폭을 보장해 좁은 PC 화면의 읽기 폭�
 
 ## 검증 결과
 
-- foundation `5e2edf4b8a` 통합 후 `npm --prefix dashboard run build` 성공.
+- foundation `4c299336f0` 통합 후 `npm --prefix dashboard run build` 성공.
 - 관련 단위 테스트 23개 통과: AutoQueuePanel, PipelineVisualEditorStagePanel, useKanbanBoardModel.
 - `PLAYWRIGHT_PORT=5274 npm --prefix dashboard run test:e2e -- --grep 'kanban:|pipeline editor' --reporter=line`: 6개 통과, viewport 전용 2개 skip.
 - Playwright CLI 네 검증 스크립트 통과. 390/1440, light/dark 가로 넘침 검사와 파이프라인 버튼·select·checkbox 이외 input의 44px 검사 통과.
