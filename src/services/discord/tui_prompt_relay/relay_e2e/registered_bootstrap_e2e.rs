@@ -321,10 +321,8 @@ fn on_this_node_unmapped(scenario: impl std::future::Future<Output = ()>) {
         .block_on(scenario);
 }
 
-// A channel registered by id alone, restarted with no channel session and its Herdr mapping
-// removed: the first queued input finds the row through the channel id, moves this node's Claude
-// back and runs once on tmux; a retired execution whose move back is unfinished takes the same
-// way without an exit.
+// An id-only channel restarted with no session and its Herdr mapping removed: its first queued
+// input finds the row by channel id, moves Claude back (a retired row without an exit), runs once.
 #[test]
 fn an_id_only_channel_that_left_herdr_returns_on_its_first_queued_input_pg() {
     on_this_node_unmapped(async {
