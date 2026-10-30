@@ -179,7 +179,7 @@ export default function MeetingTimelineSection({
           return (
             <SurfaceCard
               key={meeting.id}
-              className="space-y-4 rounded-3xl p-4 sm:p-5"
+              className="space-y-4 rounded-lg p-4 sm:p-5"
               style={{
                 background:
                   "color-mix(in srgb, var(--th-card-bg) 94%, transparent)",

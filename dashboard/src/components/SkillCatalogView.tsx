@@ -3,7 +3,6 @@ import { useEffect, useMemo, useState } from "react";
 import { getSkillCatalog } from "../api/client";
 import { useI18n } from "../i18n";
 import type { SkillCatalogEntry } from "../types";
-import { SKILL_CATALOG_SHELL_STYLES } from "./SkillCatalogStyles";
 import {
   SKILL_ACTIVITY_META,
   SKILL_CATEGORY_META,
@@ -125,7 +124,7 @@ export default function SkillCatalogView({
   }
 
   const cards = (
-    <div className="skill-grid">
+    <div className="grid min-w-0 grid-cols-1 gap-3">
       {filtered.map((entry) => {
         const categoryMeta = SKILL_CATEGORY_META[entry.category];
         const activityMeta = SKILL_ACTIVITY_META[entry.activity];
@@ -134,33 +133,30 @@ export default function SkillCatalogView({
           : entry.skill.description;
 
         return (
-          <div key={entry.skill.name} className="card skill-card">
-            <div className="skill-head">
+          <div key={entry.skill.name} className="min-w-0 rounded-lg border border-th-border-subtle bg-th-bg-surface p-4">
+            <div className="flex min-w-0 flex-wrap items-start justify-between gap-2">
               <div className="min-w-0">
-                <div className="skill-name">{entry.skill.name}</div>
+                <div className="text-sm font-semibold leading-6 text-th-text-heading [overflow-wrap:anywhere]">{entry.skill.name}</div>
               </div>
               <span
-                className="chip"
+                className="inline-flex max-w-full shrink-0 items-center gap-1 text-xs leading-5 text-th-text-muted"
                 style={{
-                  fontSize: 10,
-                  borderColor: activityMeta.borderColor,
-                  background: activityMeta.background,
-                  color: activityMeta.accent,
+                  color: "var(--th-text-muted)",
                 }}
               >
-                <span className="dot" />
+                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-current" />
                 {isKo ? categoryMeta.label.ko : categoryMeta.label.en}
               </span>
             </div>
 
-            <div className="skill-desc">{description}</div>
+            <div className="mt-2 text-xs leading-5 text-th-text-secondary [overflow-wrap:anywhere]">{description}</div>
 
-            <div className="skill-foot">
-              <div className="skill-stat">
-                <div className="skill-stat-label">
+            <div className="mt-3 grid grid-cols-2 gap-4 text-xs">
+              <div className="min-w-0">
+                <div className="text-th-text-muted">
                   {t({ ko: "호출", en: "Calls" })}
                 </div>
-                <div className="skill-stat-value">
+                <div className="mt-1 font-medium tabular-nums text-th-text-primary">
                   {entry.skill.total_calls > 0
                     ? entry.skill.total_calls.toLocaleString(
                         isKo ? "ko-KR" : "en-US",
@@ -168,24 +164,24 @@ export default function SkillCatalogView({
                     : t({ ko: "미사용", en: "Unused" })}
                 </div>
               </div>
-              <div className="skill-stat">
-                <div className="skill-stat-label">
+              <div className="min-w-0">
+                <div className="text-th-text-muted">
                   {t({ ko: "마지막", en: "Last Used" })}
                 </div>
-                <div className="skill-stat-value">
+                <div className="mt-1 font-medium tabular-nums text-th-text-primary">
                   {formatDateShort(entry.skill.last_used_at, isKo)}
                 </div>
               </div>
             </div>
 
-            <div className="skill-usage">
-              <div className="skill-usage-meta">
+            <div className="mt-3">
+              <div className="flex flex-wrap justify-between gap-2 text-xs leading-5 text-th-text-muted">
                 <span>{isKo ? activityMeta.label.ko : activityMeta.label.en}</span>
                 <span>{entry.usagePercent}%</span>
               </div>
-              <div className="skill-usage-bar">
+              <div className="mt-1 h-1 overflow-hidden rounded-full bg-th-border-subtle">
                 <div
-                  className="skill-usage-fill"
+                  className="h-full rounded-full"
                   style={{
                     width: `${entry.usagePercent}%`,
                     background: activityMeta.accent,
@@ -200,7 +196,7 @@ export default function SkillCatalogView({
   );
 
   const categoryButtons = (
-    <div className="skill-tag-row">
+    <div className="flex flex-wrap gap-1 border-b border-th-border-subtle">
       {(Object.keys(SKILL_CATEGORY_META) as SkillCategoryId[]).map((categoryId) => {
         const categoryMeta = SKILL_CATEGORY_META[categoryId];
         const count =
@@ -210,7 +206,8 @@ export default function SkillCatalogView({
           <button
             key={categoryId}
             type="button"
-            className={`skill-tag${activeCategory === categoryId ? " active" : ""}`}
+            className={`inline-flex min-h-11 min-w-11 items-center gap-2 border-b-2 px-3 text-xs font-medium ${activeCategory === categoryId ? "border-th-text-primary text-th-text-primary" : "border-transparent text-th-text-muted"}`}
+            aria-pressed={activeCategory === categoryId}
             onClick={() => setActiveCategory(categoryId)}
           >
             {isKo ? categoryMeta.label.ko : categoryMeta.label.en}
@@ -225,7 +222,7 @@ export default function SkillCatalogView({
 
   const emptyState = (
     <div
-      className="card"
+      className="min-w-0 rounded-lg border border-th-border-subtle bg-th-bg-surface"
       style={{
         textAlign: "center",
         padding: "40px 20px",
@@ -243,9 +240,8 @@ export default function SkillCatalogView({
 
   if (embedded) {
     return (
-      <div className="skill-catalog-shell embedded">
-        <style>{SKILL_CATALOG_SHELL_STYLES}</style>
-        <div className="search-wrap">
+      <div className="flex min-w-0 flex-col gap-4">
+        <div className="relative min-w-0 w-full">
           <Search
             size={14}
             style={{
@@ -257,11 +253,12 @@ export default function SkillCatalogView({
             }}
           />
           <input
-            type="text"
+            type="search"
+            aria-label={t({ ko: "스킬 검색", en: "Search skills" })}
             value={search}
             onChange={(event) => setSearch(event.target.value)}
             placeholder={t({ ko: "스킬 검색…", en: "Search skills…" })}
-            className="search-input"
+            className="min-h-11 w-full min-w-0 rounded-md border border-th-input-border bg-th-input-bg pr-3 pl-8 text-sm text-th-text-primary"
           />
         </div>
         {categoryButtons}
@@ -272,17 +269,16 @@ export default function SkillCatalogView({
 
   return (
     <div
-      className="page fade-in mx-auto h-full w-full max-w-6xl min-w-0 overflow-x-hidden overflow-y-auto p-4 pb-40 sm:p-6"
-      style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
+      className="mx-auto h-full w-full max-w-[88rem] min-w-0 overflow-x-hidden overflow-y-auto p-4 pb-8 sm:p-8"
+      style={{ paddingBottom: "max(2rem, env(safe-area-inset-bottom))" }}
     >
-      <div className="page skill-catalog-shell">
-        <style>{SKILL_CATALOG_SHELL_STYLES}</style>
-        <div className="page-header">
+      <div className="flex min-w-0 flex-col gap-4">
+        <div className="flex flex-wrap items-start justify-between gap-4 border-b border-th-border-subtle pb-4">
           <div>
-            <div className="page-title">
+            <div className="text-2xl font-semibold tracking-tight text-th-text-heading">
               {t({ ko: "스킬 카탈로그", en: "Skill Catalog" })}
             </div>
-            <div className="page-sub">
+            <div className="mt-2 max-w-2xl text-xs leading-5 text-th-text-muted">
               {t({
                 ko: `에이전트가 호출할 수 있는 툴·훅. ${catalog.length}개 · 누적 ${(
                   totalCalls / 1000
@@ -291,7 +287,7 @@ export default function SkillCatalogView({
               })}
             </div>
           </div>
-          <div className="search-wrap">
+          <div className="relative min-w-0 w-full">
             <Search
               size={14}
               style={{
@@ -307,7 +303,7 @@ export default function SkillCatalogView({
               value={search}
               onChange={(event) => setSearch(event.target.value)}
               placeholder={t({ ko: "스킬 검색…", en: "Search skills…" })}
-              className="search-input"
+              className="min-h-11 w-full min-w-0 rounded-md border border-th-input-border bg-th-input-bg pr-3 pl-8 text-sm text-th-text-primary"
             />
           </div>
         </div>

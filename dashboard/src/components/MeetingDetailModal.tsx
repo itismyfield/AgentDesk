@@ -78,10 +78,10 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
         role="dialog"
         aria-modal="true"
         aria-label={meeting.agenda}
-        className="w-full max-w-2xl max-h-[85vh] rounded-2xl border shadow-2xl overflow-hidden flex flex-col"
+        className="w-full max-w-2xl max-h-[85vh] rounded-lg border shadow-lg overflow-hidden flex flex-col"
         style={{
           background:
-            "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
+            "var(--th-bg-surface)",
           borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
         }}
       >
@@ -92,7 +92,7 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
         >
           <div className="min-w-0">
             <h2
-              className="text-lg font-bold"
+              className="text-base font-semibold [overflow-wrap:anywhere]"
               style={{ color: "var(--th-text)" }}
             >
               {meeting.agenda}
@@ -158,7 +158,7 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
         {/* Body */}
         <div className="flex-1 overflow-auto p-3 sm:p-5 space-y-4">
           {(meeting.primary_provider || meeting.reviewer_provider) && (
-            <SurfaceNotice tone="info" className="rounded-3xl p-4">
+            <SurfaceNotice tone="info" className="rounded-lg p-4">
               <div className="space-y-2">
                 <MeetingProviderFlow
                   primaryProvider={meeting.primary_provider}
@@ -209,7 +209,7 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
 
           {meeting.selection_reason && (
             <div
-              className="rounded-2xl p-4 text-sm"
+              className="rounded-lg p-4 text-sm"
               style={{
                 background: "rgba(148,163,184,0.08)",
                 border: "1px solid rgba(148,163,184,0.14)",
@@ -229,7 +229,7 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
 
           {meeting.summary ? (
             <SurfaceCard
-              className="space-y-2 rounded-3xl p-4"
+              className="space-y-2 rounded-lg p-4"
               style={{
                 borderColor: "color-mix(in srgb, var(--th-accent-primary) 28%, var(--th-border) 72%)",
                 background: "color-mix(in srgb, var(--th-accent-primary-soft) 72%, var(--th-card-bg) 28%)",
@@ -243,7 +243,7 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
               <MarkdownContent content={meeting.summary} className="text-sm" />
             </SurfaceCard>
           ) : (
-            <SurfaceEmptyState className="rounded-3xl p-4 text-sm">
+            <SurfaceEmptyState className="rounded-lg p-4 text-sm">
               {meeting.status === "cancelled"
                 ? t({ ko: "취소된 회의라 요약이 생성되지 않았습니다.", en: "No summary generated for cancelled meeting." })
                 : t({ ko: "아직 요약이 저장되지 않았습니다.", en: "No summary saved yet." })}
@@ -259,7 +259,7 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
             );
 
             return (
-              <SurfaceCard key={round} className="space-y-3 rounded-3xl p-4">
+              <SurfaceCard key={round} className="space-y-3 rounded-lg p-4">
                 {/* Round divider */}
                 <div className="flex items-center gap-3 mb-3">
                   <div
@@ -296,7 +296,7 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
                       <SurfaceNotice
                         key={entry.id ?? `s-${entry.seq}`}
                         tone="accent"
-                        className="rounded-2xl text-sm"
+                        className="rounded-lg text-sm"
                       >
                         <div className="text-xs font-semibold mb-1" style={{ color: "var(--th-text-primary)" }}>
                           {entry.speaker_name}
@@ -325,7 +325,7 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
 function MetaCard({ label, value }: { label: string; value: string }) {
   return (
     <SurfaceCard
-      className="rounded-2xl px-3 py-2"
+      className="rounded-lg px-3 py-2"
       style={{
         background: "color-mix(in srgb, var(--th-bg-surface) 94%, transparent)",
         borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",

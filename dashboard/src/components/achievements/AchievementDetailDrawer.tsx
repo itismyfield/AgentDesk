@@ -35,15 +35,16 @@ export function AchievementDetailDrawer({
       onClose={onClose}
       title={selectedCard?.name}
       width="min(520px, 100vw)"
+      closeButtonClassName="min-h-11 min-w-11"
     >
       {selectedCard ? (
         <div className="space-y-5" data-testid="achievements-drawer">
           <div
-            className="rounded-[1.25rem] border p-4"
+            className="rounded-lg border p-4"
             style={{
               borderColor: getRarityTheme(selectedCard.rarity).border,
               background:
-                "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+                "var(--th-bg-surface)",
             }}
           >
             <div className="flex items-start gap-3">

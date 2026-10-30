@@ -58,40 +58,40 @@ export default function MeetingWorkbenchCard({
   }, [meetings]);
 
   return (
-    <div className="meeting-workbench card">
-      <div className="section-head">
+    <div className="p-4 sm:p-5 min-w-0 overflow-hidden rounded-lg border border-th-border-subtle bg-th-bg-surface">
+      <div className="flex min-w-0 items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="section-kicker">
+          <div className="text-xs leading-5 text-th-text-muted">
             {t({ ko: "실시간 작성", en: "Live Workbench" })}
           </div>
-          <div className="section-title">
+          <div className="mt-1 text-base font-semibold leading-6 text-th-text-heading">
             {t({
               ko: "회의 생성과 후속 흐름",
               en: "Meeting creation and follow-up flow",
             })}
           </div>
-          <div className="section-copy">
+          <div className="mt-2 text-xs leading-5 text-th-text-muted [overflow-wrap:anywhere]">
             {t({
-              ko: "기존 대시보드의 작성 워크플로우는 유지하되, Claude 시안의 카드 톤 안에서 연결합니다.",
-              en: "Keep the original authoring workflow, but attach it inside the Claude card system.",
+              ko: "회의를 시작하고 기록을 검토하거나 후속 액션을 정리합니다.",
+              en: "Start a meeting, review its record, and manage follow-up actions.",
             })}
           </div>
         </div>
-        <button type="button" className="btn sm" onClick={onLaunchMeeting}>
+        <button type="button" className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center gap-2 rounded-md border border-th-border-subtle px-3 text-xs font-medium text-th-text-primary transition-colors hover:bg-surface-subtle focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--th-accent-primary)]" onClick={onLaunchMeeting}>
           <Plus size={11} />
           {t({ ko: "열기", en: "Open" })}
         </button>
       </div>
 
-      <div className="workbench-meta">
-        <span className="chip">
+      <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1">
+        <span className="inline-flex max-w-full items-center gap-1.5 text-xs leading-5 text-th-text-muted [overflow-wrap:anywhere]">
           <Users size={11} />
           {t({
             ko: `${totalParticipants}명 누적`,
             en: `${totalParticipants} people total`,
           })}
         </span>
-        <span className="chip">
+        <span className="inline-flex max-w-full items-center gap-1.5 text-xs leading-5 text-th-text-muted [overflow-wrap:anywhere]">
           <Workflow size={11} />
           {t({
             ko: `${meetingSummary.unresolvedCount}건 미해결`,
@@ -99,14 +99,14 @@ export default function MeetingWorkbenchCard({
           })}
         </span>
         {providerCounts.slice(0, 2).map(([provider]) => (
-          <span key={provider} className="chip neutral">
-            <span className="dot" />
+          <span key={provider} className="inline-flex max-w-full items-center gap-1.5 text-xs leading-5 text-th-text-muted [overflow-wrap:anywhere]">
+            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-current" />
             {formatProvider(provider)}
           </span>
         ))}
       </div>
 
-      <div ref={meetingShellRef} className="workbench-shell">
+      <div ref={meetingShellRef} className="mt-4 min-w-0">
         <MeetingMinutesView
           meetings={meetings}
           onRefresh={onRefresh}

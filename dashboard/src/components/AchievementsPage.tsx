@@ -299,66 +299,12 @@ export default function AchievementsPage({
   return (
     <div
       data-testid="achievements-page"
-      className="mx-auto h-full w-full max-w-[1440px] min-w-0 overflow-x-hidden overflow-y-auto px-4 pb-40 pt-4 sm:px-6"
+      className="mx-auto h-full w-full max-w-[88rem] min-w-0 overflow-x-hidden overflow-y-auto p-4 pb-8 sm:p-8"
       style={{
-        paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))",
+        paddingBottom: "max(2rem, env(safe-area-inset-bottom))",
       }}
     >
-      <style>{`
-        .achievements-fidelity-page {
-          display: flex;
-          flex-direction: column;
-          gap: 18px;
-          animation: achievements-fade-in 0.28s ease-out;
-        }
-
-        .achievements-grid {
-          display: grid;
-          gap: 14px;
-          grid-template-columns: minmax(0, 1fr);
-        }
-
-        .achievements-grid.bottom {
-          grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
-        }
-
-        .achievement-card:hover {
-          transform: translateY(-1px);
-          background: color-mix(in srgb, var(--bg-2) 96%, transparent);
-        }
-
-        @media (min-width: 720px) {
-          .achievements-grid {
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-          }
-        }
-
-        @media (min-width: 1200px) {
-          .achievements-grid {
-            grid-template-columns: repeat(3, minmax(0, 1fr));
-          }
-        }
-
-        @media (max-width: 1023px) {
-          .achievements-grid.bottom {
-            grid-template-columns: minmax(0, 1fr);
-          }
-        }
-
-        @keyframes achievements-fade-in {
-          from {
-            opacity: 0;
-            transform: translateY(8px);
-          }
-
-          to {
-            opacity: 1;
-            transform: translateY(0);
-          }
-        }
-      `}</style>
-
-      <div className="achievements-fidelity-page">
+      <div className="flex flex-col gap-5">
         <AchievementsHero
           isKo={isKo}
           locale={locale}
@@ -373,8 +319,8 @@ export default function AchievementsPage({
           totalOrgXp={totalOrgXp}
           title={t({ ko: "업적", en: "Achievements" })}
           subtitle={t({
-            ko: "달성, 진행 중, 잠김 상태를 같은 문법으로 추적하고 XP 흐름과 데일리 미션을 함께 확인합니다.",
-            en: "Track unlocked, in-progress, and locked milestones together with XP flow and daily missions.",
+            ko: "획득한 업적과 다음 목표, 에이전트의 활동 기록을 확인합니다.",
+            en: "Review unlocked milestones, next goals, and agent activity.",
           })}
           boardLabel={isKo ? "업적 보드" : "Achievement Board"}
           unlockedLabel={t({ ko: "달성", en: "Unlocked" })}
@@ -405,14 +351,14 @@ export default function AchievementsPage({
           onOpen={setSelectedCard}
         />
 
-        <div className="achievements-grid bottom" data-testid="achievements-grid-bottom">
+        <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]" data-testid="achievements-grid-bottom">
           <div
             data-testid="achievements-daily-missions"
-            className="rounded-[1.15rem] border p-4 sm:p-5"
+            className="rounded-lg border p-4 sm:p-5"
             style={{
               borderColor: "var(--th-border-subtle, var(--line))",
               background:
-                "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+                "var(--th-bg-surface)",
             }}
           >
             <div className="mb-4 flex items-center justify-between gap-3">
@@ -428,8 +374,8 @@ export default function AchievementsPage({
                   style={{ color: "var(--th-text-muted, var(--fg-muted))" }}
                 >
                   {t({
-                    ko: "시안에 없는 운영 gamification은 같은 톤으로 확장했습니다.",
-                    en: "Legacy gamification items extend the same visual language.",
+                    ko: "오늘의 목표와 완료 현황입니다.",
+                    en: "Today’s goals and completion status.",
                   })}
                 </div>
               </div>
@@ -481,11 +427,11 @@ export default function AchievementsPage({
 
             <div
               data-testid="achievements-ranking"
-              className="rounded-[1.15rem] border p-4 sm:p-5"
+              className="rounded-lg border p-4 sm:p-5"
               style={{
                 borderColor: "var(--th-border-subtle, var(--line))",
                 background:
-                  "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+                  "var(--th-bg-surface)",
               }}
             >
               <div className="mb-3 flex items-center justify-between gap-3">

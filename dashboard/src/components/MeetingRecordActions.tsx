@@ -65,7 +65,7 @@ export default function MeetingRecordActions({
 
   return (
     <SurfaceCard
-      className="rounded-2xl p-3"
+      className="rounded-lg p-3"
       style={{
         background:
           "color-mix(in srgb, var(--th-bg-surface) 90%, transparent)",
