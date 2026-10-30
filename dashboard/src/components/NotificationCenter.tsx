@@ -114,7 +114,7 @@ interface ToastOverlayProps {
 export function ToastOverlay({ notifications: _notifications, onDismiss: _onDismiss }: ToastOverlayProps) {
   return (
     <Toaster
-      className="!z-[65]"
+      className="!z-[10]"
       closeButton
       expand
       richColors={false}
