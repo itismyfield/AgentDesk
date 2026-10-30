@@ -16,6 +16,7 @@ vi.mock("../../api", async (importOriginal) => ({
 let root: Root;
 let container: HTMLDivElement;
 const tr = (_ko: string, en: string) => en;
+const originalStorage = Object.getOwnPropertyDescriptor(window, "localStorage");
 
 function makeEntry(id: string, agentId: string): DispatchQueueEntry {
   return {
@@ -59,6 +60,12 @@ function makeStatus(status: AutoQueueRun["status"]): AutoQueueStatus {
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.resetAllMocks();
+  const storage = new Map<string, string>();
+  Object.defineProperty(window, "localStorage", { configurable: true, value: {
+    getItem: (key: string) => storage.get(key) ?? null,
+    setItem: (key: string, value: string) => storage.set(key, value),
+    removeItem: (key: string) => storage.delete(key),
+  } });
   vi.mocked(resetAutoQueue).mockResolvedValue({ ok: true, deleted_entries: 2, completed_runs: 1 });
   container = document.createElement("div");
   document.body.append(container);
@@ -67,6 +74,7 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
+  if (originalStorage) Object.defineProperty(window, "localStorage", originalStorage);
   vi.unstubAllGlobals();
 });
 
@@ -97,13 +105,16 @@ it.each<AutoQueueRun["status"]>(["generated", "pending", "completed", "cancelled
   },
 );
 
-// The server refuses reset on a live run (409). End only proves the header rendered.
+// A live run keeps its controls available behind the queue disclosure.
 it.each<AutoQueueRun["status"]>(["active", "paused", "restoring"])(
   "hides Reset for a %s run",
   async (status) => {
     await render(status);
 
     expect(resetButton()).toBeUndefined();
+    const toggle = container.querySelector<HTMLButtonElement>('button[aria-label="Auto queue details"]');
+    expect(toggle).not.toBeNull();
+    await act(async () => toggle!.click());
     expect(container.textContent).toContain("End queue");
   },
 );

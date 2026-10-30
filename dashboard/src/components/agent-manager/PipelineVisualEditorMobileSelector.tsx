@@ -14,7 +14,7 @@ export default function PipelineVisualEditorMobileSelector({ ctx, actions }: Pro
 
   return (
     <div
-      className="fsm-stack-mobile rounded-[20px] border p-3 space-y-4"
+      className="fsm-stack-mobile rounded-lg border p-3 space-y-4"
       style={FSM_DETAIL_PANEL_STYLE}
       data-testid="fsm-mobile-selector"
     >
@@ -56,7 +56,7 @@ export default function PipelineVisualEditorMobileSelector({ ctx, actions }: Pro
                 onClick={() => actions.setSelection({ kind: "transition", index: transition.index })}
                 aria-pressed={isSelected}
                 data-testid={`fsm-mobile-transition-button-${transition.index}`}
-                className="w-full rounded-[18px] border px-3 py-3 text-left transition-colors"
+                className="w-full rounded-lg border px-3 py-3 text-left transition-colors"
                 style={
                   isSelected
                     ? {
@@ -66,7 +66,7 @@ export default function PipelineVisualEditorMobileSelector({ ctx, actions }: Pro
                       }
                     : {
                         borderColor: "color-mix(in srgb, var(--th-border) 82%, transparent)",
-                        background: "#11141b",
+                        background: "var(--th-bg-surface)",
                         color: "var(--th-text-primary)",
                       }
                 }
@@ -118,13 +118,13 @@ export default function PipelineVisualEditorMobileSelector({ ctx, actions }: Pro
                 onClick={() => actions.setSelection({ kind: "state", stateId: state.id })}
                 aria-pressed={isSelected}
                 data-testid={`fsm-mobile-state-button-${state.id}`}
-                className="rounded-[18px] border px-3 py-3 text-left transition-colors"
+                className="rounded-lg border px-3 py-3 text-left transition-colors"
                 style={
                   isSelected
                     ? { borderColor: tone.stroke, background: tone.glow, color: "var(--th-text-primary)" }
                     : {
                         borderColor: "color-mix(in srgb, var(--th-border) 82%, transparent)",
-                        background: "#11141b",
+                        background: "var(--th-bg-surface)",
                         color: "var(--th-text-primary)",
                       }
                 }

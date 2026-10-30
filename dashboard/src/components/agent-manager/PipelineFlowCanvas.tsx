@@ -56,12 +56,12 @@ interface PipelineFlowCanvasProps {
 const FLOW_SHELL_STYLE: CSSProperties = {
   borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
   background:
-    "radial-gradient(circle at top left, color-mix(in srgb, var(--th-accent-primary-soft) 74%, transparent) 0%, transparent 42%), radial-gradient(circle at bottom right, color-mix(in srgb, var(--th-badge-sky-bg) 64%, transparent) 0%, transparent 34%), color-mix(in srgb, var(--th-card-bg) 95%, transparent)",
+    "var(--th-bg-primary)",
 };
 
 const FSM_FLOW_SHELL_STYLE: CSSProperties = {
   borderColor: "color-mix(in srgb, var(--th-border) 82%, transparent)",
-  background: "#0e1014",
+  background: "var(--th-bg-primary)",
 };
 
 const MUTED_TEXT_STYLE: CSSProperties = {
@@ -91,7 +91,7 @@ const PipelineStateNodeView = memo(function PipelineStateNodeView({
 
   return (
     <div
-      className="rounded-[18px] border px-3 py-2 shadow-sm"
+      className="rounded-md border px-3 py-2 shadow-sm"
       style={{
         width: node.width,
         minHeight: node.height,
@@ -104,7 +104,7 @@ const PipelineStateNodeView = memo(function PipelineStateNodeView({
               : "color-mix(in srgb, var(--th-border) 88%, transparent)",
         borderWidth: selected ? 2 : 1.5,
         background: isFsmVariant
-          ? "#141821"
+          ? "var(--th-bg-surface)"
           : node.terminal
             ? "color-mix(in srgb, var(--th-badge-emerald-bg) 82%, var(--th-card-bg) 18%)"
             : "color-mix(in srgb, var(--th-card-bg) 94%, transparent)",
@@ -120,7 +120,7 @@ const PipelineStateNodeView = memo(function PipelineStateNodeView({
       <Handle type="source" position={Position.Right} style={handleStyle} />
       {isFsmVariant && (
         <div
-          className="-mx-3 -mt-2 mb-2 h-[3px] rounded-t-[18px]"
+          className="-mx-3 -mt-2 mb-2 h-[3px] rounded-t-md"
           style={{ background: tone.stroke }}
         />
       )}
@@ -129,7 +129,7 @@ const PipelineStateNodeView = memo(function PipelineStateNodeView({
         title={node.id}
         style={{
           color: isFsmVariant
-            ? "rgba(148, 163, 184, 0.78)"
+            ? "var(--th-text-muted)"
             : selected
               ? "var(--th-accent-primary)"
               : "var(--th-text-muted)",
@@ -153,7 +153,7 @@ const PipelineStateNodeView = memo(function PipelineStateNodeView({
         className={`${compactGraph && !isFsmVariant ? "mt-1 text-[10px]" : "mt-2 text-[11px]"} truncate whitespace-nowrap`}
         title={meta}
         style={{
-          color: isFsmVariant ? "rgba(148, 163, 184, 0.74)" : "var(--th-text-muted)",
+          color: "var(--th-text-muted)",
         }}
       >
         {meta}
@@ -249,8 +249,8 @@ export default function PipelineFlowCanvas({
           labelBgStyle: {
             fill: isFsmVariant
               ? selected
-                ? "color-mix(in srgb, var(--th-accent-primary-soft) 44%, #151922 56%)"
-                : "#141821"
+                ? "var(--th-accent-primary-soft)"
+                : "var(--th-bg-surface)"
               : selected
                 ? "color-mix(in srgb, var(--th-accent-primary-soft) 74%, var(--th-card-bg) 26%)"
                 : "color-mix(in srgb, var(--th-card-bg) 94%, transparent)",
@@ -342,18 +342,26 @@ export default function PipelineFlowCanvas({
 
   return (
     <div className="space-y-3">
+      <label className="grid gap-1 text-xs text-th-text-muted sm:hidden">
+        {tr("편집할 상태 또는 전환", "State or transition to edit")}
+        <select aria-label={tr("편집할 상태 또는 전환", "State or transition to edit")} value={selection?.kind === "state" || selection?.kind === "transition" ? JSON.stringify(selection) : ""} onChange={event => onSelectionChange(JSON.parse(event.target.value) as Selection)} className="min-h-11 w-full min-w-0 rounded-md border border-th-border-subtle bg-th-bg-surface px-3 text-sm text-th-text-primary">
+          <option value="" disabled>{tr("선택하세요", "Choose an item")}</option>
+          <optgroup label={tr("상태", "States")}>{graph.nodes.map(node => <option key={node.id} value={JSON.stringify({ kind: "state", stateId: node.id })}>{node.label} · {node.id}</option>)}</optgroup>
+          <optgroup label={tr("전환", "Transitions")}>{graph.edges.map(edge => <option key={edge.key} value={JSON.stringify({ kind: "transition", index: edge.index })}>{edge.from} → {edge.to}</option>)}</optgroup>
+        </select>
+      </label>
       <div
-        className="overflow-hidden rounded-[24px] border p-2 sm:p-3"
+        className="overflow-hidden rounded-lg border p-2 sm:p-3"
         style={isFsmVariant ? FSM_FLOW_SHELL_STYLE : FLOW_SHELL_STYLE}
         data-testid={useScrollableMobileFsmCanvas ? "fsm-canvas-scroll" : "pipeline-flow-canvas"}
         onFocusCapture={revealMiniMap}
         onPointerMove={revealMiniMap}
       >
         <div
-          className="rounded-[20px]"
+          className="rounded-md"
           style={{
-            height: isFsmVariant ? (useScrollableMobileFsmCanvas ? 360 : 420) : compactGraph ? 460 : 520,
-            minHeight: isFsmVariant ? 340 : 420,
+            height: Math.min(420, Math.max(280, graph.height + 48)),
+            minHeight: 280,
           }}
         >
           <ReactFlow
@@ -389,17 +397,17 @@ export default function PipelineFlowCanvas({
                 pannable
                 zoomable={false}
                 position="bottom-right"
-                maskColor="rgba(2, 6, 23, 0.52)"
+                maskColor="color-mix(in srgb, var(--th-bg-primary) 76%, transparent)"
                 nodeBorderRadius={8}
-                nodeStrokeColor="rgba(226, 232, 240, 0.36)"
+                nodeStrokeColor="var(--th-border)"
                 style={{
                   width: 148,
                   height: 88,
-                  borderRadius: 18,
+                  borderRadius: 8,
                   overflow: "hidden",
                   border: "1px solid rgba(148, 163, 184, 0.24)",
-                  background: "rgba(15, 23, 42, 0.72)",
-                  boxShadow: "0 16px 36px rgba(0, 0, 0, 0.34)",
+                  background: "var(--th-bg-surface)",
+                  boxShadow: "none",
                   opacity: miniMapVisible ? 0.82 : 0,
                   pointerEvents: miniMapVisible ? "auto" : "none",
                   transform: miniMapVisible ? "translateY(0)" : "translateY(8px)",
