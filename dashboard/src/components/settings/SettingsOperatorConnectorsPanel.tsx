@@ -225,14 +225,14 @@ function isSetupState(state: ConnectorDisplayState): boolean {
 function connectorTone(state: ConnectorDisplayState | "invalid") {
   if (state === "ready") {
     return {
-      bg: "var(--th-badge-emerald-bg)",
+      bg: "var(--th-overlay-subtle)",
       fg: "var(--th-badge-emerald-text)",
       border: "var(--th-border-subtle)",
     };
   }
   if (state === "invalid" || state === "missing_path" || state === "missing_provider" || state === "invalid_config") {
     return {
-      bg: "var(--th-badge-amber-bg)",
+      bg: "var(--th-overlay-subtle)",
       fg: "var(--th-badge-amber-text)",
       border: "var(--th-border-subtle)",
     };

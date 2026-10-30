@@ -147,6 +147,10 @@ export function SettingsProvidersPanel({
         <SettingsEmptyState className="text-sm">
           {tr("프로바이더 계정을 불러오는 중입니다.", "Loading provider accounts.")}
         </SettingsEmptyState>
+      ) : providers.length === 0 ? (
+        <SettingsEmptyState className="text-sm">
+          {tr("표시할 프로바이더 계정이 없습니다. CLI 로그인 상태를 확인한 뒤 다시 불러와 주세요.", "No provider accounts available. Check CLI sign-in and reload.")}
+        </SettingsEmptyState>
       ) : (
         <div className="grid gap-3">
           {providers.map((provider) => (
