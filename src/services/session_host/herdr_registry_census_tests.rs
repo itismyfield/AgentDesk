@@ -35,6 +35,7 @@ impl HerdrTransport for CensusTransport {
                         HERDR_PROTOCOL
                     },
                     version: "0.9.3".into(),
+                    workspaces: None,
                     panes: self
                         .panes
                         .iter()

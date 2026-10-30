@@ -74,6 +74,7 @@ fn model_preserves_nonempty_fence_ack_and_action_target_for_canonical_json_stora
         .collect(),
         actions: [(action.id.clone(), action)].into_iter().collect(),
         sessions: vec![],
+        verifications: BTreeMap::new(),
     };
     let state = CampaignState {
         id: "campaign".into(),

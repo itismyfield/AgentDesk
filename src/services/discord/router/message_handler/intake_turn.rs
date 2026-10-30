@@ -2208,6 +2208,7 @@ pub(super) async fn handle_text_message(
         }
         let provider_for_blocking = provider.clone();
         let execution_pool = shared.pg_pool.clone();
+        let turn_shared = shared.clone();
         let producer_registration = original_registration.clone();
         let codex_observation = super::provider_dispatch::observe_codex_turn(
             &provider,
@@ -2236,6 +2237,7 @@ pub(super) async fn handle_text_message(
                         super::provider_dispatch::execute(
                             super::provider_dispatch::StreamingTurn {
                                 pool: execution_pool.as_ref(),
+                                shared: Some(&turn_shared),
                                 provider: &provider_for_blocking,
                                 prompt: &context_prompt,
                                 session_id: session_id_clone.as_deref(),

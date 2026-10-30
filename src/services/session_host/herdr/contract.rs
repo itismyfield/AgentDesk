@@ -157,6 +157,23 @@ pub(crate) fn snapshot_observation(
     }
 }
 
+/// A protocol-matching snapshot that also lists its workspaces; anything less is no answer.
+pub(crate) fn labeled_snapshot(
+    call: &HerdrCall,
+    outcome: HerdrOutcome,
+) -> Result<super::model::HerdrSnapshot, String> {
+    match reply_result(call, outcome) {
+        Ok(HerdrResult::SessionSnapshot { snapshot })
+            if snapshot.protocol == HERDR_PROTOCOL && snapshot.workspaces.is_some() =>
+        {
+            Ok(snapshot)
+        }
+        Ok(HerdrResult::SessionSnapshot { .. }) => Err("snapshot incomplete".into()),
+        Ok(other) => Err(format!("unexpected result {other:?}")),
+        Err(fault) => Err(format!("{:?}", HostError::from(fault))),
+    }
+}
+
 /// A root shell pid reads as Live; a null pid or any failure stays Unknown.
 pub(crate) fn with_process_info(
     observation: HerdrObservation,

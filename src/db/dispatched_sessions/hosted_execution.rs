@@ -328,28 +328,51 @@ pub(crate) async fn list_local_herdr_rows_pg(
     .fetch_all(pool)
     .await
     .map_err(|error| format!("list herdr rows: {error}"))?;
-    let observe = |row: &PgRow| -> Result<HostedObservation, sqlx::Error> {
-        let identity: [Option<String>; 4] = [
-            row.try_get("provider")?,
-            row.try_get("identity_kind")?,
-            row.try_get("discord_token_hash")?,
-            row.try_get("channel_id")?,
-        ];
-        let raw: Option<Value> = row.try_get("hosted_execution")?;
-        let record = match HostedRecord::decode(raw.as_ref()) {
-            HostedRecord::Known(known) if !owner_matches_row(&known.owner, &identity) => {
-                HostedRecord::Unknown(raw.clone().unwrap_or_default())
-            }
-            record => record,
-        };
-        Ok(HostedObservation {
-            session_id: row.try_get("id")?,
-            raw,
-            record,
-        })
-    };
-    let listed = rows.iter().map(observe).collect::<Result<_, _>>();
+    let listed = rows.iter().map(observe_listed).collect::<Result<_, _>>();
     listed.map_err(|error| format!("decode herdr rows: {error}"))
+}
+
+/// Every Pending row owned by `node` whose launch recorded no pane yet.
+pub(crate) async fn list_local_unplaced_pending_pg(
+    pool: &PgPool,
+    node: &str,
+) -> Result<Vec<HostedObservation>, String> {
+    let rows = sqlx::query(
+        "SELECT id, provider, identity_kind, discord_token_hash, channel_id, hosted_execution
+         FROM sessions
+         WHERE hosted_execution->>'state' = 'pending'
+           AND jsonb_typeof(hosted_execution->'location') = 'null'
+           AND hosted_execution->'owner'->>'owner_node' = $1
+         ORDER BY id",
+    )
+    .bind(node)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("list unplaced herdr rows: {error}"))?;
+    let listed = rows.iter().map(observe_listed).collect::<Result<_, _>>();
+    listed.map_err(|error| format!("decode unplaced herdr rows: {error}"))
+}
+
+/// A listed row's record; one naming another owner than its row reads as Unknown.
+fn observe_listed(row: &PgRow) -> Result<HostedObservation, sqlx::Error> {
+    let identity: [Option<String>; 4] = [
+        row.try_get("provider")?,
+        row.try_get("identity_kind")?,
+        row.try_get("discord_token_hash")?,
+        row.try_get("channel_id")?,
+    ];
+    let raw: Option<Value> = row.try_get("hosted_execution")?;
+    let record = match HostedRecord::decode(raw.as_ref()) {
+        HostedRecord::Known(known) if !owner_matches_row(&known.owner, &identity) => {
+            HostedRecord::Unknown(raw.clone().unwrap_or_default())
+        }
+        record => record,
+    };
+    Ok(HostedObservation {
+        session_id: row.try_get("id")?,
+        raw,
+        record,
+    })
 }
 
 fn owner_matches_row(owner: &HostedOwner, identity: &[Option<String>; 4]) -> bool {

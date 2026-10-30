@@ -286,6 +286,14 @@ pub mod home_runtime {
     pub use crate::services::tui_o::writer::host::{ManagedWriterHandle, WriterStopped};
 }
 
+/// Dormant server-campaign ADK adapter contracts; initiation stays behind the final host gate.
+pub mod campaign_adapter {
+    pub use crate::services::campaign_execution::{
+        adk_observe, adk_profile, adk_resources, adk_workspace, execution_pin, main_integration,
+        profile, verification_run, verification_runner,
+    };
+}
+
 /// Dormant iMessage reply contracts for admission and claim/ACK integration.
 pub mod imsg_reply {
     pub use crate::db::imsg_reply::{
