@@ -25,7 +25,10 @@ impl ChannelMailboxHandle {
     /// owner of another file or namespace refuses.
     pub(crate) async fn v2_ensure(&self, path: PathBuf, namespace: String) -> Result<(), String> {
         self.v2_request(move |slot| match slot {
-            Some(owner) if owner.path == path && owner.snapshot.namespace == Some(namespace) => {
+            Some(owner)
+                if owner.path == path
+                    && owner.snapshot.namespace.as_deref() == Some(namespace.as_str()) =>
+            {
                 Ok(())
             }
             Some(_) => Err("another queue file's owner holds this channel".into()),

@@ -19,7 +19,7 @@ use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem}
 type Front = (Option<String>, PendingQueueItem);
 
 /// What the owner verified about a channel's target before its turn reached dispatch.
-struct Registration {
+pub(super) struct Registration {
     mailbox: ChannelMailboxHandle,
     execution: Execution,
     origin: InputOrigin,
