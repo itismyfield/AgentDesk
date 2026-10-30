@@ -9,15 +9,17 @@ use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{
-    Arc, Mutex, OnceLock,
+    Arc, LazyLock, Mutex, OnceLock,
     atomic::{AtomicU64, Ordering},
 };
 use std::time::{Duration as StdDuration, Instant};
-use tokio::sync::Mutex as AsyncMutex;
+
+mod single_flight;
 
 use super::AppState;
 use crate::error::{AppError, AppResult};
 use crate::receipt;
+use single_flight::KeyedLocks;
 
 #[derive(Debug, Deserialize)]
 pub struct ReceiptQuery {
@@ -63,30 +65,7 @@ fn token_analytics_cache() -> &'static Mutex<HashMap<String, CachedAnalytics>> {
     TOKEN_ANALYTICS_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-struct TokenAnalyticsCollectLocks {
-    seven_day: AsyncMutex<()>,
-    thirty_day: AsyncMutex<()>,
-    ninety_day: AsyncMutex<()>,
-}
-
-static TOKEN_ANALYTICS_COLLECT_LOCKS: OnceLock<TokenAnalyticsCollectLocks> = OnceLock::new();
-
-fn token_analytics_collect_locks() -> &'static TokenAnalyticsCollectLocks {
-    TOKEN_ANALYTICS_COLLECT_LOCKS.get_or_init(|| TokenAnalyticsCollectLocks {
-        seven_day: AsyncMutex::new(()),
-        thirty_day: AsyncMutex::new(()),
-        ninety_day: AsyncMutex::new(()),
-    })
-}
-
-fn token_analytics_collect_lock(period: &str) -> &'static AsyncMutex<()> {
-    let locks = token_analytics_collect_locks();
-    match period {
-        "7d" => &locks.seven_day,
-        "90d" => &locks.ninety_day,
-        _ => &locks.thirty_day,
-    }
-}
+static TOKEN_ANALYTICS_COLLECT_LOCKS: LazyLock<KeyedLocks> = LazyLock::new(KeyedLocks::default);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TokenAnalyticsCacheState {
@@ -173,6 +152,8 @@ fn write_cached_token_analytics(
 /// while the other waits, rechecks the cache, and reuses the result. The first
 /// explicit `fresh=1` request also scans, but concurrent refreshes for the same
 /// period coalesce behind the period lock and reuse the new cache write.
+/// The locked recheck-scan-write runs in a detached task, so a request aborted
+/// mid-scan still fills the cache and later requests wait for that scan.
 ///
 /// Returns `None` only when the blocking task panics; the caller is expected
 /// to surface a graceful fallback (empty arrays + warn log) rather than 5xx.
@@ -234,12 +215,50 @@ where
     } else {
         0
     };
-    let _guard = token_analytics_collect_lock(period_id).lock().await;
+    let work = collect_token_analytics_under_lock(
+        period_id.to_string(),
+        days,
+        label.to_string(),
+        now,
+        bypass_cache,
+        refresh_generation_before_wait,
+        collect,
+    );
+    match TOKEN_ANALYTICS_COLLECT_LOCKS
+        .run_detached(period_id, work)
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::warn!(period = period_id, error = %error, "token-analytics collect task failed");
+            None
+        }
+    }
+}
 
+async fn collect_token_analytics_under_lock<Collect>(
+    period_id: String,
+    days: i64,
+    label: String,
+    now: chrono::DateTime<chrono::Utc>,
+    bypass_cache: bool,
+    refresh_generation_before_wait: u64,
+    collect: Collect,
+) -> Option<TokenAnalyticsCacheResult>
+where
+    Collect: FnOnce(
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+            String,
+            String,
+        ) -> receipt::TokenAnalyticsData
+        + Send
+        + 'static,
+{
     let cached = if bypass_cache {
-        read_cached_token_analytics_refreshed_after(period_id, refresh_generation_before_wait)
+        read_cached_token_analytics_refreshed_after(&period_id, refresh_generation_before_wait)
     } else {
-        read_cached_token_analytics(period_id)
+        read_cached_token_analytics(&period_id)
     };
     if let Some(cached) = cached {
         return Some(TokenAnalyticsCacheResult {
@@ -259,19 +278,16 @@ where
         .single()
         .map(|dt| dt.with_timezone(&chrono::Utc))
         .unwrap_or_else(|| now - chrono::Duration::days(days));
-    let label_owned = label.to_string();
-    let period_owned = period_id.to_string();
+    let period_owned = period_id.clone();
     let data =
-        match tokio::task::spawn_blocking(move || collect(start, now, label_owned, period_owned))
-            .await
-        {
+        match tokio::task::spawn_blocking(move || collect(start, now, label, period_owned)).await {
             Ok(data) => Arc::new(data),
             Err(error) => {
-                tracing::warn!(period = period_id, error = %error, "token-analytics scan failed");
+                tracing::warn!(period = %period_id, error = %error, "token-analytics scan failed");
                 return None;
             }
         };
-    write_cached_token_analytics(period_id, Arc::clone(&data), bypass_cache);
+    write_cached_token_analytics(&period_id, Arc::clone(&data), bypass_cache);
     Some(TokenAnalyticsCacheResult {
         data,
         cache_state: if bypass_cache {
@@ -648,6 +664,147 @@ mod tests {
             matches!(first_state, TokenAnalyticsCacheState::Hit)
                 || matches!(second_state, TokenAnalyticsCacheState::Hit)
         );
+    }
+
+    /// Starts a token-analytics miss whose collect blocks until `release` is
+    /// sent, and returns once the collect is running.
+    async fn spawn_blocked_token_analytics_miss(
+        period: &str,
+        collect_count: &Arc<AtomicUsize>,
+    ) -> (
+        tokio::task::JoinHandle<Option<TokenAnalyticsCacheResult>>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let count = Arc::clone(collect_count);
+        let period = period.to_string();
+        let handle = tokio::spawn(async move {
+            collect_token_analytics_with_lock_using(
+                &period,
+                1,
+                "Test Period",
+                chrono::Utc::now(),
+                false,
+                move |_start, _now, _label, period| {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    let _ = started_tx.send(());
+                    let _ = release_rx.recv();
+                    empty_token_analytics_data(&period)
+                },
+            )
+            .await
+        });
+        started_rx.await.expect("collect started");
+        (handle, release_tx)
+    }
+
+    #[tokio::test]
+    async fn aborted_token_analytics_request_still_fills_the_cache() {
+        let suffix = TEST_PERIOD_SUFFIX.fetch_add(1, Ordering::SeqCst);
+        let period = format!("test-abort-fills-cache-{suffix}");
+        let collect_count = Arc::new(AtomicUsize::new(0));
+
+        let (first, release) = spawn_blocked_token_analytics_miss(&period, &collect_count).await;
+        first.abort();
+        assert!(matches!(first.await, Err(error) if error.is_cancelled()));
+        release.send(()).expect("release collect");
+
+        let mut cached = false;
+        for _ in 0..500 {
+            if read_cached_token_analytics(&period).is_some() {
+                cached = true;
+                break;
+            }
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }
+        assert!(
+            cached,
+            "the aborted request's scan must still write the cache"
+        );
+
+        let again = collect_token_analytics_with_lock_using(
+            &period,
+            1,
+            "Test Period",
+            chrono::Utc::now(),
+            false,
+            |_start, _now, _label, period| empty_token_analytics_data(&period),
+        )
+        .await
+        .expect("second result");
+        assert_eq!(again.cache_state, TokenAnalyticsCacheState::Hit);
+        assert_eq!(collect_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn request_arriving_during_an_aborted_scan_reuses_it() {
+        let suffix = TEST_PERIOD_SUFFIX.fetch_add(1, Ordering::SeqCst);
+        let period = format!("test-abort-then-wait-{suffix}");
+        let collect_count = Arc::new(AtomicUsize::new(0));
+
+        let (first, release) = spawn_blocked_token_analytics_miss(&period, &collect_count).await;
+        first.abort();
+        assert!(matches!(first.await, Err(error) if error.is_cancelled()));
+
+        let second_count = Arc::clone(&collect_count);
+        let second_period = period.clone();
+        let second = tokio::spawn(async move {
+            collect_token_analytics_with_lock_using(
+                &second_period,
+                1,
+                "Test Period",
+                chrono::Utc::now(),
+                false,
+                move |_start, _now, _label, period| {
+                    second_count.fetch_add(1, Ordering::SeqCst);
+                    empty_token_analytics_data(&period)
+                },
+            )
+            .await
+        });
+        tokio::time::sleep(StdDuration::from_millis(50)).await;
+        release.send(()).expect("release collect");
+
+        let second = tokio::time::timeout(StdDuration::from_secs(5), second)
+            .await
+            .expect("second request finishes")
+            .expect("second task")
+            .expect("second result");
+        assert_eq!(collect_count.load(Ordering::SeqCst), 1);
+        assert_eq!(second.cache_state, TokenAnalyticsCacheState::Hit);
+    }
+
+    #[tokio::test]
+    async fn panicking_token_analytics_collect_releases_the_period() {
+        let suffix = TEST_PERIOD_SUFFIX.fetch_add(1, Ordering::SeqCst);
+        let period = format!("test-panic-releases-{suffix}");
+        let failed = collect_token_analytics_with_lock_using(
+            &period,
+            1,
+            "Test Period",
+            chrono::Utc::now(),
+            false,
+            |_start, _now, _label, _period| panic!("collect panicked"),
+        )
+        .await;
+        assert!(failed.is_none());
+
+        let next = tokio::time::timeout(
+            StdDuration::from_secs(5),
+            collect_token_analytics_with_lock_using(
+                &period,
+                1,
+                "Test Period",
+                chrono::Utc::now(),
+                false,
+                |_start, _now, _label, period| empty_token_analytics_data(&period),
+            ),
+        )
+        .await
+        .expect("the period lock must not stay held after a panic")
+        .expect("next result");
+        assert_eq!(next.cache_state, TokenAnalyticsCacheState::Miss);
     }
 
     #[tokio::test]
