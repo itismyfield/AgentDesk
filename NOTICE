@@ -3,9 +3,9 @@ Copyright 2024-2026 itismyfield
 
 This product includes software derived from the following projects:
 
-- cokacdir (https://github.com/itismyfield/cokacdir)
-  Copyright (c) itismyfield
-  Licensed under the MIT License
+- cokacdir (https://github.com/kstost/cokacdir)
+  Copyright (c) 2026 cokac
+  Licensed under the MIT License (see LICENSE)
   AgentDesk was originally forked from cokacdir's Rust-based Telegram
   relay for Claude Code sessions. Discord support, session management,
   tmux lifecycle, and turn bridge were independently developed.
