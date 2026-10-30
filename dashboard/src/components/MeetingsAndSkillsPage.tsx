@@ -39,8 +39,6 @@ import {
   type MeetingStatusFilter,
   type MobilePane,
 } from "./meetingsAndSkillsModel";
-import "./MeetingsAndSkillsPage.css";
-import "./MeetingsAndSkillsPage.detail.css";
 
 interface MeetingsAndSkillsPageProps {
   meetings: RoundTableMeeting[];
@@ -69,7 +67,7 @@ function MeetingIssueCountChip({
   const label = total > 0 ? `${created}/${total}` : "0/0";
   return (
     <span
-      className={`chip ${tone}`}
+      className={`inline-flex max-w-full items-center gap-1.5 text-xs leading-5 ${tone === "err" ? "text-[var(--th-badge-rose-text)]" : tone === "warn" ? "text-[var(--th-badge-amber-text)]" : "text-th-text-muted"}`}
       aria-label={t({ ko: `후속 액션 ${label}`, en: `Follow-up actions ${label}` })}
     >
       <Icon size={10} aria-hidden="true" />
@@ -90,7 +88,7 @@ function MeetingStatusChip({
   const Icon = meeting.status === "completed" ? Check : Clock3;
   return (
     <span
-      className={`chip ${tone}`}
+      className={`inline-flex max-w-full items-center gap-1.5 text-xs leading-5 ${tone === "err" ? "text-[var(--th-badge-rose-text)]" : tone === "warn" ? "text-[var(--th-badge-amber-text)]" : "text-th-text-muted"}`}
       aria-label={t({ ko: `회의 상태: ${label}`, en: `Meeting status: ${label}` })}
     >
       <Icon size={10} aria-hidden="true" />
@@ -188,9 +186,9 @@ export default function MeetingsAndSkillsPage({
   ];
 
   const meetingListCard = (
-    <div data-testid="meetings-page-timeline" className="meetings-list card">
-      <div className="meeting-list-toolbar">
-        <label className="meeting-search">
+    <div data-testid="meetings-page-timeline" className="min-w-0 overflow-hidden rounded-lg border border-th-border-subtle bg-th-bg-surface">
+      <div className="grid min-w-0 gap-3 border-b border-th-border-subtle p-4">
+        <label className="flex min-h-11 min-w-0 items-center gap-2 rounded-md border border-th-input-border bg-th-input-bg px-3 text-th-text-muted [&_input]:min-w-0 [&_input]:w-full [&_input]:bg-transparent [&_input]:text-sm [&_input]:text-th-text-primary [&_input]:outline-none">
           <Search size={14} />
           <input
             type="search"
@@ -200,12 +198,12 @@ export default function MeetingsAndSkillsPage({
             placeholder={t({ ko: "회의, 참석자, 후속 액션 검색", en: "Search meetings, people, actions" })}
           />
         </label>
-        <div className="meeting-filter-tabs" aria-label={t({ ko: "회의 상태 필터", en: "Meeting status filter" })}>
+        <div className="flex flex-wrap gap-1" aria-label={t({ ko: "회의 상태 필터", en: "Meeting status filter" })}>
           {meetingStatusOptions.map((option) => (
             <button
               key={option.id}
               type="button"
-              className={meetingStatusFilter === option.id ? "active" : ""}
+              className={`min-h-11 min-w-11 border-b-2 px-3 text-xs font-medium ${meetingStatusFilter === option.id ? "border-th-text-primary text-th-text-primary" : "border-transparent text-th-text-muted"}`}
               aria-pressed={meetingStatusFilter === option.id}
               onClick={() => setMeetingStatusFilter(option.id)}
             >
@@ -213,7 +211,7 @@ export default function MeetingsAndSkillsPage({
             </button>
           ))}
         </div>
-        <div className="meeting-result-count">
+        <div className="text-xs tabular-nums text-th-text-muted">
           {t({
             ko: `${filteredMeetings.length}/${sortedMeetings.length}건`,
             en: `${filteredMeetings.length}/${sortedMeetings.length} shown`,
@@ -221,14 +219,14 @@ export default function MeetingsAndSkillsPage({
         </div>
       </div>
       {sortedMeetings.length === 0 ? (
-        <div className="empty-state">
+        <div className="px-4 py-10 text-center text-sm leading-6 text-th-text-muted">
           {t({
             ko: "아직 등록된 회의가 없습니다.",
             en: "No meetings have been recorded yet.",
           })}
         </div>
       ) : filteredMeetings.length === 0 ? (
-        <div className="empty-state">
+        <div className="px-4 py-10 text-center text-sm leading-6 text-th-text-muted">
           {t({
             ko: "검색 조건에 맞는 회의가 없습니다.",
             en: "No meetings match the current filters.",
@@ -249,8 +247,8 @@ export default function MeetingsAndSkillsPage({
             <button
               key={meeting.id}
               type="button"
-              className={`meeting-item ${
-                selectedMeeting?.id === meeting.id ? "active" : ""
+              className={`block min-h-11 w-full min-w-0 border-b border-th-border-subtle p-4 text-left transition-colors last:border-b-0 hover:bg-surface-subtle focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--th-accent-primary)] ${
+                selectedMeeting?.id === meeting.id ? "bg-surface-subtle" : ""
               }`}
               aria-label={t({
                 ko: `${meeting.agenda} 회의 선택`,
@@ -259,12 +257,12 @@ export default function MeetingsAndSkillsPage({
               aria-pressed={selectedMeeting?.id === meeting.id}
               onClick={() => setSelectedMeetingId(meeting.id)}
             >
-              <div className="mi-head">
+              <div className="flex min-w-0 items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <div className="mi-title">{meeting.agenda}</div>
-                  <div className="mi-meta">
+                  <div className="text-sm font-semibold leading-6 text-th-text-heading [overflow-wrap:anywhere]">{meeting.agenda}</div>
+                  <div className="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-xs leading-5 tabular-nums text-th-text-muted">
                     <span
-                      className="mono"
+                      className="font-mono tabular-nums"
                       title={formatMeetingDate(meeting.started_at, locale)}
                     >
                       {formatRelativeTime(meeting.started_at, language, locale)}
@@ -286,17 +284,17 @@ export default function MeetingsAndSkillsPage({
                   t={t}
                 />
               </div>
-              <div className="mi-summary">
+              <div className="mt-2 text-xs leading-5 text-th-text-muted [overflow-wrap:anywhere]">
                 {meeting.summary ??
                   t({
                     ko: "요약이 아직 없습니다.",
                     en: "No summary yet.",
                   })}
               </div>
-              <div className="mi-foot">
+              <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1">
                 <MeetingStatusChip meeting={meeting} t={t} />
-                <span className="chip">
-                  <span className="dot" />
+                <span className="inline-flex max-w-full items-center gap-1.5 text-xs leading-5 text-th-text-muted [overflow-wrap:anywhere]">
+                  <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-current" />
                   {formatProvider(meeting.primary_provider)}
                 </span>
               </div>
@@ -308,19 +306,19 @@ export default function MeetingsAndSkillsPage({
   );
 
   const meetingDetailCard = (
-    <div className="meeting-detail card">
-      <div className="md-head">
+    <div className="p-4 sm:p-5 min-w-0 overflow-hidden rounded-lg border border-th-border-subtle bg-th-bg-surface">
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="section-kicker">{t({ ko: "회의록", en: "Meeting" })}</div>
+          <div className="text-xs leading-5 text-th-text-muted">{t({ ko: "회의록", en: "Meeting" })}</div>
           {selectedMeeting ? (
-            <div className="md-status-row">
+            <div className="mt-1 flex flex-wrap items-center gap-2">
               <MeetingStatusChip meeting={selectedMeeting} t={t} />
-              <span className="md-status-copy">
+              <span className="text-xs text-th-text-muted">
                 {formatMeetingDate(selectedMeeting.started_at, locale)}
               </span>
             </div>
           ) : null}
-          <h2 className="md-title">
+          <h2 className="mt-2 text-base font-semibold leading-6 text-th-text-heading [overflow-wrap:anywhere]">
             {selectedMeeting?.agenda ??
               t({
                 ko: "선택된 회의가 없습니다",
@@ -328,11 +326,11 @@ export default function MeetingsAndSkillsPage({
               })}
           </h2>
         </div>
-        <div className="md-toolbar">
-          <button type="button" className="btn sm" onClick={onRefresh}>
+        <div className="flex shrink-0 flex-wrap justify-end gap-2">
+          <button type="button" className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center gap-2 rounded-md border border-th-border-subtle px-3 text-xs font-medium text-th-text-primary transition-colors hover:bg-surface-subtle focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--th-accent-primary)]" onClick={onRefresh}>
             {t({ ko: "새로고침", en: "Refresh" })}
           </button>
-          <button type="button" className="btn sm" onClick={handleLaunchMeeting}>
+          <button type="button" className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center gap-2 rounded-md border border-th-border-subtle px-3 text-xs font-medium text-th-text-primary transition-colors hover:bg-surface-subtle focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--th-accent-primary)]" onClick={handleLaunchMeeting}>
             <Plus size={11} />
             {t({ ko: "열기", en: "Open" })}
           </button>
@@ -341,37 +339,37 @@ export default function MeetingsAndSkillsPage({
 
       {selectedMeeting ? (
         <>
-          <div className="md-meta-row">
-            <div className="md-meta">
+          <div className="mt-4 grid grid-cols-2 gap-4 border-y border-th-border-subtle py-4">
+            <div className="min-w-0 text-xs leading-5 text-th-text-muted [&_b]:font-medium [&_b]:text-th-text-primary [&_span]:block">
               <span>{t({ ko: "시작", en: "Started" })}</span>
-              <b className="mono">
+              <b className="font-mono tabular-nums">
                 {formatMeetingDate(selectedMeeting.started_at, locale)}
               </b>
             </div>
-            <div className="md-meta">
+            <div className="min-w-0 text-xs leading-5 text-th-text-muted [&_b]:font-medium [&_b]:text-th-text-primary [&_span]:block">
               <span>{t({ ko: "길이", en: "Length" })}</span>
               <b>{selectedDurationLabel}</b>
             </div>
-            <div className="md-meta">
+            <div className="min-w-0 text-xs leading-5 text-th-text-muted [&_b]:font-medium [&_b]:text-th-text-primary [&_span]:block">
               <span>{t({ ko: "프로바이더", en: "Provider" })}</span>
-              <div className="md-meta-stack">
-                <span className="chip">
-                  <span className="dot" />
+              <div className="mt-1 flex flex-wrap gap-2">
+                <span className="inline-flex max-w-full items-center gap-1.5 text-xs leading-5 text-th-text-muted [overflow-wrap:anywhere]">
+                  <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-current" />
                   {formatProvider(selectedMeeting.primary_provider)}
                 </span>
-                <span className="chip neutral">
-                  <span className="dot" />
+                <span className="inline-flex max-w-full items-center gap-1.5 text-xs leading-5 text-th-text-muted [overflow-wrap:anywhere]">
+                  <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-current" />
                   {formatProvider(selectedMeeting.reviewer_provider)}
                 </span>
               </div>
             </div>
-            <div className="md-meta">
+            <div className="min-w-0 text-xs leading-5 text-th-text-muted [&_b]:font-medium [&_b]:text-th-text-primary [&_span]:block">
               <span>{t({ ko: "참석", en: "Attendees" })}</span>
-              <div className="md-attendees">
+              <div className="mt-1 flex flex-wrap items-center">
                 {selectedMeeting.participant_names.slice(0, 4).map((name, index) => (
                   <span
                     key={`${selectedMeeting.id}-${name}-${index}`}
-                    className="md-attendee"
+                    className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-th-border-subtle bg-th-bg-primary text-[10px] text-th-text-secondary"
                     title={name}
                     style={{ marginLeft: index === 0 ? 0 : -6 }}
                   >
@@ -379,7 +377,7 @@ export default function MeetingsAndSkillsPage({
                   </span>
                 ))}
                 {selectedMeeting.participant_names.length > 4 ? (
-                  <span className="md-attendee md-attendee-count">
+                  <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-th-border-subtle bg-th-bg-primary text-[10px] text-th-text-secondary">
                     +{selectedMeeting.participant_names.length - 4}
                   </span>
                 ) : null}
@@ -387,9 +385,9 @@ export default function MeetingsAndSkillsPage({
             </div>
           </div>
 
-          <div className="md-section">
-            <div className="md-section-head">{t({ ko: "요약", en: "Summary" })}</div>
-            <p className="md-copy">
+          <div className="mt-5">
+            <div className="flex flex-wrap items-center gap-2 text-xs font-medium text-th-text-secondary">{t({ ko: "요약", en: "Summary" })}</div>
+            <p className="mt-2 text-sm leading-6 text-th-text-secondary [overflow-wrap:anywhere]">
               {selectedMeeting.summary ??
                 t({
                   ko: "요약이 아직 없습니다.",
@@ -398,10 +396,10 @@ export default function MeetingsAndSkillsPage({
             </p>
           </div>
 
-          <div className="md-section">
-            <div className="md-section-head">
+          <div className="mt-5">
+            <div className="flex flex-wrap items-center gap-2 text-xs font-medium text-th-text-secondary">
               {t({ ko: "후속 액션", en: "Follow-up Actions" })}
-              <span className="md-inline-note">
+              <span className="text-xs font-normal text-th-text-muted">
                 {t({
                   ko: `${selectedOpenIssues}/${selectedActionCount || 0} 미완료`,
                   en: `${selectedOpenIssues}/${selectedActionCount || 0} open`,
@@ -409,15 +407,15 @@ export default function MeetingsAndSkillsPage({
               </span>
             </div>
             {selectedMeeting.proposed_issues?.length ? (
-              <div className="md-actions">
+              <div className="mt-2 grid divide-y divide-th-border-subtle">
                 {selectedMeeting.proposed_issues.slice(0, 6).map((issue) => {
                   const result = getMeetingIssueResult(selectedMeeting, issue);
                   const state = getMeetingIssueState(result);
                   const tone = getMeetingIssueTone(state);
                   const stateLabel = getMeetingIssueStateLabel(state, t);
                   return (
-                    <div key={getProposedIssueKey(issue)} className="md-action">
-                      <span className={`md-action-check ${state}`}>
+                    <div key={getProposedIssueKey(issue)} className="flex min-w-0 items-start gap-2 py-3">
+                      <span className={`mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded border border-th-border-subtle ${state === "failed" ? "text-[var(--th-badge-rose-text)]" : state === "pending" ? "text-[var(--th-badge-amber-text)]" : "text-th-text-muted"}`}>
                         {state === "created" ? (
                           <Check size={10} />
                         ) : state === "failed" ? (
@@ -428,17 +426,17 @@ export default function MeetingsAndSkillsPage({
                           <Clock3 size={10} />
                         )}
                       </span>
-                      <div className="md-action-copy">
-                        <div className={`md-action-title ${state}`}>
+                      <div className="min-w-0 flex-1">
+                        <div className={`text-sm font-medium leading-6 [overflow-wrap:anywhere] ${state === "created" || state === "discarded" ? "text-th-text-muted line-through" : "text-th-text-primary"}`}>
                           {issue.title}
                         </div>
-                        <div className="md-action-sub">
+                        <div className="mt-1 text-xs leading-5 text-th-text-muted [overflow-wrap:anywhere]">
                           {issue.assignee}
                           {result?.error ? ` · ${result.error}` : ""}
                         </div>
                       </div>
-                      <span className={`chip ${tone}`}>
-                        <span className="dot" />
+                      <span className={`inline-flex max-w-full items-center gap-1.5 text-xs leading-5 ${tone === "err" ? "text-[var(--th-badge-rose-text)]" : tone === "warn" ? "text-[var(--th-badge-amber-text)]" : "text-th-text-muted"}`}>
+                        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-current" />
                         {stateLabel}
                       </span>
                     </div>
@@ -446,7 +444,7 @@ export default function MeetingsAndSkillsPage({
                 })}
               </div>
             ) : (
-              <div className="md-empty-copy">
+              <div className="mt-2 text-xs leading-5 text-th-text-muted">
                 {t({
                   ko: "후속 액션이 아직 없습니다.",
                   en: "No follow-up actions yet.",
@@ -455,21 +453,21 @@ export default function MeetingsAndSkillsPage({
             )}
           </div>
 
-          <div className="md-section">
-            <div className="md-section-head">
+          <div className="mt-5">
+            <div className="flex flex-wrap items-center gap-2 text-xs font-medium text-th-text-secondary">
               {t({ ko: "전사 (발췌)", en: "Transcript Excerpt" })}
             </div>
             {selectedTranscript.length > 0 ? (
-              <div className="md-transcript">
+              <div className="mt-2 grid divide-y divide-th-border-subtle">
                 {selectedTranscript.map((entry) => (
-                  <div key={entry.id} className="md-transcript-line">
-                    <span className="md-who">{entry.speaker_name}</span>
-                    <span className="md-said">{entry.content}</span>
+                  <div key={entry.id} className="grid min-w-0 gap-1 py-3 sm:grid-cols-[5rem_minmax(0,1fr)] sm:gap-3">
+                    <span className="min-w-0 text-xs font-medium leading-5 text-th-text-secondary [overflow-wrap:anywhere]">{entry.speaker_name}</span>
+                    <span className="min-w-0 text-sm leading-6 text-th-text-secondary [overflow-wrap:anywhere]">{entry.content}</span>
                   </div>
                 ))}
               </div>
             ) : (
-              <div className="md-empty-copy">
+              <div className="mt-2 text-xs leading-5 text-th-text-muted">
                 {t({
                   ko: "전사 내용이 아직 없습니다.",
                   en: "No transcript yet.",
@@ -479,7 +477,7 @@ export default function MeetingsAndSkillsPage({
           </div>
         </>
       ) : (
-        <div className="md-empty-copy">
+        <div className="mt-2 text-xs leading-5 text-th-text-muted">
           {t({
             ko: "회의를 선택하면 상세 카드가 갱신됩니다.",
             en: "Select a meeting to refresh the detail card.",
@@ -507,16 +505,16 @@ export default function MeetingsAndSkillsPage({
   const skillRailCard = <MeetingSkillRailCard t={t} />;
 
   const desktopDetailColumn = (
-    <div className="detail-column rail-sticky">
-      {meetingDetailCard}
+    <div className="grid min-w-0 gap-4">
+      {selectedMeeting ? meetingDetailCard : null}
       {meetingWorkbenchCard}
       {skillRailCard}
     </div>
   );
 
   const mobileDetailColumn = (
-    <div className="detail-column">
-      {meetingDetailCard}
+    <div className="grid min-w-0 gap-4">
+      {selectedMeeting ? meetingDetailCard : null}
       {meetingWorkbenchCard}
     </div>
   );
@@ -524,23 +522,23 @@ export default function MeetingsAndSkillsPage({
   return (
     <div
       data-testid="meetings-page"
-      className="mx-auto h-full w-full max-w-[1440px] min-w-0 overflow-x-hidden overflow-y-auto p-4 pb-40 sm:p-6"
+      className="mx-auto h-full w-full max-w-[88rem] min-w-0 overflow-x-hidden overflow-y-auto p-4 pb-8 sm:p-8"
       style={{
-        paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))",
+        paddingBottom: "max(2rem, env(safe-area-inset-bottom))",
       }}
     >
-      <div className="page fade-in meetings-page-shell">
-        <div className="page-header">
+      <div className="flex min-w-0 flex-col gap-5">
+        <div className="flex flex-wrap items-start justify-between gap-4 border-b border-th-border-subtle pb-5">
           <div className="min-w-0">
-            <div className="page-title">{t({ ko: "회의록", en: "Meetings" })}</div>
-            <div className="page-sub">
+            <div className="text-2xl font-semibold tracking-tight text-th-text-heading">{t({ ko: "회의록", en: "Meetings" })}</div>
+            <div className="mt-2 max-w-2xl text-xs leading-5 text-th-text-muted">
               {t({
                 ko: "회의 기록·요약·후속 액션을 칸반과 연동합니다",
                 en: "Meeting records, summaries, and follow-ups stay linked to kanban.",
               })}
             </div>
           </div>
-          <button type="button" onClick={handleLaunchMeeting} className="btn primary">
+          <button type="button" onClick={handleLaunchMeeting} className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center gap-2 rounded-md border border-th-border-subtle px-3 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--th-accent-primary)] bg-th-text-primary text-th-bg-primary hover:bg-th-text-secondary">
             <Plus size={14} />
             {t({ ko: "새 회의 기록", en: "New Meeting Record" })}
           </button>
@@ -548,12 +546,12 @@ export default function MeetingsAndSkillsPage({
 
         {!isDesktopSplit && (
           <div
-            className="meeting-pane-tabs"
+            className="flex gap-1 border-b border-th-border-subtle"
             aria-label={t({ ko: "회의 및 스킬 보기", en: "Meetings and skills views" })}
           >
             <button
               type="button"
-              className={`meeting-pane-tab ${mobilePane === "meetings" ? "active" : ""}`}
+              className={`min-h-11 min-w-11 border-b-2 px-4 text-xs font-medium ${mobilePane === "meetings" ? "border-th-text-primary text-th-text-primary" : "border-transparent text-th-text-muted"}`}
               aria-pressed={mobilePane === "meetings"}
               onClick={() => setMobilePane("meetings")}
             >
@@ -561,7 +559,7 @@ export default function MeetingsAndSkillsPage({
             </button>
             <button
               type="button"
-              className={`meeting-pane-tab ${mobilePane === "skills" ? "active" : ""}`}
+              className={`min-h-11 min-w-11 border-b-2 px-4 text-xs font-medium ${mobilePane === "skills" ? "border-th-text-primary text-th-text-primary" : "border-transparent text-th-text-muted"}`}
               aria-pressed={mobilePane === "skills"}
               onClick={() => setMobilePane("skills")}
             >
@@ -571,7 +569,7 @@ export default function MeetingsAndSkillsPage({
         )}
 
         {(isDesktopSplit || mobilePane === "meetings") && (
-          <div className="meetings-split">
+          <div className="grid min-w-0 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
             {meetingListCard}
             {isDesktopSplit ? desktopDetailColumn : mobileDetailColumn}
           </div>
