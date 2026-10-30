@@ -333,7 +333,7 @@ class TransportLegacyInventoryTests(unittest.TestCase):
         legacy_deferred_rollback deferred_restart.rs shutting_down=false restart_pending=false
         legacy_promotion_fence gateway_lease_recovery.rs restart_pending=true
         legacy_promotion_unfence gateway_lease_recovery.rs restart_pending=false
-        legacy_lease_lost gateway_lease.rs shutting_down=true restart_pending=true
+        legacy_lease_lost owner_execution.rs shutting_down=true restart_pending=true
         legacy_sigterm shutdown.rs shutting_down=true restart_pending=true
     """
 
@@ -388,6 +388,9 @@ class TransportLegacyInventoryTests(unittest.TestCase):
             self.assertEqual(self.RAW_STORE.findall(caller), [], caller_file)
             stores += len(expected)
         self.assertEqual((len(rows), stores), (7, 10))
+        # The lease-loss fence now lives behind the shared owner helper; the lease path must still reach it.
+        lease = (self.BOOTSTRAP / "gateway_lease.rs").read_text(encoding="utf-8")
+        self.assertEqual(lease.count("owner_execution::gateway_transport_lost(shared)"), 1)
 
     def assert_reader_surface(self, owner: str) -> None:
         """Audit every `impl ... ShutdownReader`; first-block-only was #5831 P1-1."""
