@@ -46,7 +46,7 @@ Playwright CLI로 Vite의 실제 React 페이지와 실행 중인 서버의 데�
 ## 검증 명령과 증거
 
 - `cd dashboard && npm run build`
-- `npm run test -- src/components/dashboard/MiniRateLimitBar src/components/dashboard/RoutinesTimelineWidget.test.ts src/components/common/overlay/overlay-primitives` — 22 passed.
+- `npm --prefix dashboard test -- MiniRateLimitBar RoutinesTimelineWidget.test overlay-primitives` — 22 passed.
 - `npm run test:e2e -- --grep 'home:|dashboard: routines timeline|routines: dedicated tab' --reporter=line` — 8 passed, 4 viewport-specific skips.
 - `git diff --check`
 - Playwright CLI `run-code --filename`으로 `verify-home.js`, `verify-scenarios.js` 실행. 12개 기본/경계 layout 점검에서 실패 0건이며, 별도 12개 긴 데이터/빈 상태 조합도 확인했다.
