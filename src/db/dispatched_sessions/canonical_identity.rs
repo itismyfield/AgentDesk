@@ -226,8 +226,7 @@ async fn upsert_hook_session_pg(
     };
     let promotion = match (identity, canonical.as_ref()) {
         (Some(identity), None) if identity.kind == SessionIdentityKind::DiscordChannel => {
-            load_unique_legacy_candidate_for_update(&mut tx, params.provider, identity, false)
-                .await?
+            load_unique_legacy_candidate(&mut tx, params.provider, identity, false, true).await?
         }
         _ => None,
     };
@@ -341,22 +340,21 @@ pub(crate) async fn resolve_session_row_pg(
         if provider.is_none()
             || identity.is_none_or(|identity| identity.kind != SessionIdentityKind::DiscordChannel)
         {
-            let rows = sqlx::query(
-                "SELECT id, session_key, provider, identity_kind, discord_token_hash, channel_id
-                 FROM sessions WHERE session_key = $1
-                    OR id IN (SELECT session_id FROM session_key_aliases WHERE session_key = $1)",
-            )
-            .bind(session_key)
-            .fetch_all(pool)
-            .await
-            .map_err(database_error)?;
-            let mut target = None;
-            for row in rows {
-                target = resolve_evidence(target, Some(decode_evidence(row)?), None, None)?;
-            }
-            return Ok(target.map(|target| (target.id, target.session_key)));
+            return read_resolved_row(pool, session_key, provider, identity).await;
         }
         let mut tx = pool.begin().await.map_err(database_error)?;
+        if let (Some(provider), Some(identity)) = (provider, identity)
+            && load_unique_legacy_candidate(&mut tx, provider, identity, true, false)
+                .await
+                .map_err(canonical_candidate_error)?
+                .is_none()
+        {
+            // Reads without a promotion candidate must not block native row writers.
+            let target =
+                read_resolved_row(&mut *tx, session_key, Some(provider), Some(identity)).await?;
+            tx.commit().await.map_err(database_error)?;
+            return Ok(target);
+        }
         if let Some(key) = session_key {
             acquire_locator_lock(&mut tx, key).await?;
         }
@@ -383,6 +381,35 @@ pub(crate) async fn resolve_session_row_pg(
         Ok(target.map(|target| (target.id, target.session_key)))
     })
     .await
+}
+
+async fn read_resolved_row<'e>(
+    executor: impl sqlx::Executor<'e, Database = Postgres>,
+    session_key: Option<&str>,
+    provider: Option<&str>,
+    identity: Option<CanonicalSessionIdentity<'_>>,
+) -> Result<Option<(i64, String)>, HookSessionUpsertError> {
+    let rows = sqlx::query(
+        "SELECT id, session_key, provider, identity_kind, discord_token_hash, channel_id
+         FROM sessions WHERE session_key = $1
+            OR id IN (SELECT session_id FROM session_key_aliases WHERE session_key = $1)
+            OR ($5::TEXT = 'discord_channel' AND provider = $2
+                AND discord_token_hash = $3 AND channel_id = $4
+                AND identity_kind = 'discord_channel')",
+    )
+    .bind(session_key)
+    .bind(provider)
+    .bind(identity.map(|value| value.discord_token_hash))
+    .bind(identity.map(|value| value.channel_id))
+    .bind(identity.map(|value| value.kind.as_str()))
+    .fetch_all(executor)
+    .await
+    .map_err(database_error)?;
+    let mut target = None;
+    for row in rows {
+        target = resolve_evidence(target, Some(decode_evidence(row)?), None, None)?;
+    }
+    Ok(target.map(|target| (target.id, target.session_key)))
 }
 
 async fn acquire_locator_lock(
@@ -489,15 +516,9 @@ async fn load_canonical_for_update(
         ));
     }
     let owner = rows.into_iter().next().map(decode_evidence).transpose()?;
-    let candidate = load_unique_legacy_candidate_for_update(tx, provider, identity, true)
+    let candidate = load_unique_legacy_candidate(tx, provider, identity, true, true)
         .await
-        .map_err(|error| match error.conflict_kind() {
-            Some(SessionIdentityConflictKind::AmbiguousLegacy) => conflict(
-                SessionIdentityConflictKind::EvidenceDivergence,
-                "canonical identity has ambiguous operational legacy candidates",
-            ),
-            _ => error,
-        })?;
+        .map_err(canonical_candidate_error)?;
     let Some(mut candidate) = candidate else {
         return Ok(owner);
     };
@@ -557,13 +578,24 @@ async fn load_canonical_for_update(
     Ok(Some(candidate))
 }
 
-async fn load_unique_legacy_candidate_for_update(
+fn canonical_candidate_error(error: HookSessionUpsertError) -> HookSessionUpsertError {
+    match error.conflict_kind() {
+        Some(SessionIdentityConflictKind::AmbiguousLegacy) => conflict(
+            SessionIdentityConflictKind::EvidenceDivergence,
+            "canonical identity has ambiguous operational legacy candidates",
+        ),
+        _ => error,
+    }
+}
+
+async fn load_unique_legacy_candidate(
     tx: &mut Transaction<'_, Postgres>,
     provider: &str,
     identity: CanonicalSessionIdentity<'_>,
     operational_only: bool,
+    lock_rows: bool,
 ) -> Result<Option<SessionEvidence>, HookSessionUpsertError> {
-    let rows = sqlx::query(
+    let mut query = sqlx::QueryBuilder::<Postgres>::new(
         "SELECT id, session_key, provider, identity_kind, discord_token_hash, channel_id
          FROM sessions
          WHERE identity_kind IS NULL
@@ -573,20 +605,28 @@ async fn load_unique_legacy_candidate_for_update(
            AND agentdesk_legacy_discord_locator_is_ordinary(session_key, $1, $3)
            AND (NOT $4 OR (closed_at IS NULL
                AND btrim(COALESCE(status, '')) <> ''
-               AND lower(status) NOT IN ('disconnected', 'aborted')))
-         FOR UPDATE",
-    )
-    .bind(provider)
-    .bind(identity.channel_id)
-    .bind(identity.discord_token_hash)
-    .bind(operational_only)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(database_error)?;
+               AND lower(status) NOT IN ('disconnected', 'aborted')))",
+    );
+    if lock_rows {
+        query.push(" FOR UPDATE");
+    }
+    let rows = query
+        .build()
+        .bind(provider)
+        .bind(identity.channel_id)
+        .bind(identity.discord_token_hash)
+        .bind(operational_only)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(database_error)?;
 
     match rows.len() {
         0 => Ok(None),
         1 => rows.into_iter().next().map(decode_evidence).transpose(),
+        _ if operational_only => Err(conflict(
+            SessionIdentityConflictKind::AmbiguousLegacy,
+            "multiple operational session rows claim the canonical Discord identity",
+        )),
         _ => {
             // Host-qualified legacy locators can leave one live row beside one
             // or more disconnected shells after a gateway moves machines. A
