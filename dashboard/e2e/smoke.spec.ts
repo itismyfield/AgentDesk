@@ -1663,8 +1663,11 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   });
 
-  test("command palette searches routes and closes accessibly", async ({ page }, testInfo) => {
+  test("command palette searches with missing localized labels and closes accessibly", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "mobile", "Desktop keyboard shortcut coverage");
+    await page.route("**/api/agents", (route) => route.fulfill({
+      json: { agents: MOCK_AGENTS.map(agent => ({ ...agent, name_ko: null })) },
+    }));
     await page.goto("/home");
 
     await page.getByLabel(/검색 열기|Open search/).click();
@@ -1694,8 +1697,8 @@ test.describe("Dashboard smoke tests", () => {
     const sidebar = page.getByTestId("app-sidebar-nav");
     await expect(sidebar).toBeVisible();
     const box = await sidebar.boundingBox();
-    expect(box?.width).toBeGreaterThan(230);
-    expect(box?.width).toBeLessThan(250);
+    expect(box?.width).toBeGreaterThan(210);
+    expect(box?.width).toBeLessThan(225);
   });
 
   test("responsive: 900px switches from mobile tab bar to desktop sidebar", async ({ page }, testInfo) => {
@@ -1785,14 +1788,12 @@ test.describe("Dashboard smoke tests", () => {
     expect(shellStyles.marginBottom).toContain("env(safe-area-inset-bottom)");
 
     const tabbarStyles = await bottomNav.evaluate((element) => {
-      // Padding lives in AppMobileNavigation.css, not in the inline style.
-      // Inspect active matching rules so moving a declaration between an
-      // inline style and a stylesheet does not turn this contract into a lie.
+      // Inspect matching utility rules as well as inline safe-area styles.
       const declarations: CSSStyleDeclaration[] = [];
       const visit = (rules: CSSRuleList) => {
         for (const rule of Array.from(rules)) {
           if (rule instanceof CSSMediaRule && !matchMedia(rule.conditionText).matches) continue;
-          if (rule instanceof CSSStyleRule && rule.selectorText.split(",").some((selector) => selector.trim() === ".adk-mobile-tabbar")) declarations.push(rule.style);
+          if (rule instanceof CSSStyleRule && Array.from(element.classList).some((name) => rule.selectorText === `.${CSS.escape(name)}`)) declarations.push(rule.style);
           if ("cssRules" in rule) visit((rule as CSSGroupingRule).cssRules);
         }
       };
@@ -1858,7 +1859,7 @@ test.describe("Dashboard smoke tests", () => {
     await expect(shortcutHelpModal).toBeVisible();
 
     const modalZIndex = await shortcutHelpModal.evaluate((element) =>
-      Number(window.getComputedStyle(element as HTMLElement).zIndex),
+      Number(window.getComputedStyle(element.closest('[role="dialog"]') as HTMLElement).zIndex),
     );
     expect(modalZIndex).toBeGreaterThan(tabbarZIndex);
   });

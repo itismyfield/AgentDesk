@@ -54,7 +54,7 @@ export function BottomSheet({
       dismissible
     >
       <VaulDrawer.Portal>
-        <VaulDrawer.Overlay className="fixed inset-0 z-[70] bg-black/45 backdrop-blur-sm" />
+        <VaulDrawer.Overlay className="fixed inset-0 z-[70] bg-black/45" />
         <VaulDrawer.Content
           aria-label={accessibleTitle}
           onEscapeKeyDown={(event) => {
@@ -64,7 +64,7 @@ export function BottomSheet({
             if (!closeOnBackdrop) event.preventDefault();
           }}
           onCloseAutoFocus={returnFocus}
-          className="fixed inset-x-0 bottom-0 z-[80] mx-auto flex max-h-[min(90vh,720px)] w-full max-w-2xl flex-col rounded-t-3xl border-t bg-[var(--th-card-bg,_#0f172a)] text-[var(--th-text,_#e2e8f0)] shadow-2xl outline-none"
+          className="fixed inset-x-0 bottom-0 z-[80] mx-auto flex max-h-[min(90dvh,720px)] w-full max-w-2xl flex-col rounded-t-xl border-t bg-[var(--th-card-bg,_#0f172a)] text-[var(--th-text,_#e2e8f0)] shadow-lg outline-none"
           style={{
             borderColor: "var(--th-border, rgba(148,163,184,0.18))",
             paddingBottom: "env(safe-area-inset-bottom)",
@@ -72,7 +72,7 @@ export function BottomSheet({
         >
           <div className="flex items-center justify-center pt-3">
             <VaulDrawer.Handle
-              className="h-1 w-10 rounded-full bg-white/20"
+              className="h-1 w-10 rounded-full bg-th-text-muted"
               aria-hidden="true"
             />
           </div>
@@ -87,7 +87,7 @@ export function BottomSheet({
               <VaulDrawer.Close asChild>
                 <button
                   type="button"
-                  className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border text-[var(--th-text-muted,_#94a3b8)] hover:bg-white/5 ${closeButtonClassName ?? ""}`}
+                  className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border text-[var(--th-text-muted,_#94a3b8)] hover:bg-white/5 ${closeButtonClassName ?? ""}`}
                   style={{ borderColor: "var(--th-border, rgba(148,163,184,0.16))" }}
                   aria-label="Close"
                 >
