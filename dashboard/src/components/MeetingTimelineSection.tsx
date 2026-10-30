@@ -57,17 +57,17 @@ function StatusBadge({
   const map: Record<string, { bg: string; color: string; label: string }> = {
     completed: {
       bg: "rgba(16,185,129,0.15)",
-      color: "#34d399",
+      color: "var(--th-badge-emerald-text)",
       label: t({ ko: "완료", en: "Completed" }),
     },
     in_progress: {
       bg: "rgba(245,158,11,0.15)",
-      color: "#fbbf24",
+      color: "var(--th-badge-amber-text)",
       label: t({ ko: "진행중", en: "In Progress" }),
     },
     cancelled: {
       bg: "rgba(239,68,68,0.15)",
-      color: "#f87171",
+      color: "var(--th-text-primary)",
       label: t({ ko: "취소", en: "Cancelled" }),
     },
   };
@@ -224,7 +224,7 @@ export default function MeetingTimelineSection({
                 <button
                   onClick={() => onDelete(meeting.id)}
                   disabled={deleting === meeting.id}
-                  className="shrink-0 rounded-lg p-1.5 transition-colors hover:bg-red-500/10"
+                  className="flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-md p-1.5 transition-colors hover:bg-red-500/10"
                   title={t({ ko: "삭제", en: "Delete" })}
                   aria-label={t({
                     ko: "회의록 삭제",
@@ -237,7 +237,7 @@ export default function MeetingTimelineSection({
                       color:
                         deleting === meeting.id
                           ? "var(--th-text-muted)"
-                          : "#f87171",
+                          : "var(--th-text-primary)",
                     }}
                   />
                 </button>

@@ -147,7 +147,7 @@ export default function MeetingRecordActions({
             <select
               value={selectedRepo}
               onChange={(event) => onRepoChange(event.target.value)}
-              className="rounded-lg px-3 py-2 text-sm"
+              className="min-h-11 min-w-0 rounded-md px-3 py-2 text-sm"
               style={inputStyle}
               disabled={loadingRepos || isSavingRepo || repoOptions.length === 0}
             >

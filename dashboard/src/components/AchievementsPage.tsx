@@ -8,6 +8,7 @@ import { AchievementDetailDrawer } from "./achievements/AchievementDetailDrawer"
 import { AchievementAvatar } from "./achievements/AchievementCard";
 import { AchievementsHero } from "./achievements/AchievementsHero";
 import { AchievementsSections } from "./achievements/AchievementsSections";
+import { SurfaceNotice } from "./common/SurfacePrimitives";
 import {
   DailyMissions,
   StreakCounter,
@@ -48,6 +49,7 @@ export default function AchievementsPage({
     daily_missions: [],
   });
   const [streaks, setStreaks] = useState<api.AgentStreak[]>([]);
+  const [loadError, setLoadError] = useState(false);
   const [selectedCard, setSelectedCard] = useState<AchievementCardModel | null>(null);
 
   useEffect(() => {
@@ -60,10 +62,12 @@ export default function AchievementsPage({
           api.getStreaks().catch(() => ({ streaks: [] })),
         ]);
         if (!alive) return;
+        setLoadError(false);
         setResponse(nextAchievements);
         setStreaks([...nextStreaks.streaks].sort((left, right) => right.streak - left.streak));
       } catch {
         if (!alive) return;
+        setLoadError(true);
         setResponse({ achievements: [], daily_missions: [] });
         setStreaks([]);
       }
@@ -326,6 +330,12 @@ export default function AchievementsPage({
           unlockedLabel={t({ ko: "달성", en: "Unlocked" })}
           agentsLabel={t({ ko: "에이전트", en: "Agents" })}
         />
+
+        {loadError && (
+          <SurfaceNotice tone="warn">
+            {t({ ko: "업적을 불러오지 못했습니다. 잠시 후 새로고침해 주세요.", en: "Could not load achievements. Refresh to retry." })}
+          </SurfaceNotice>
+        )}
 
         <AchievementsSections
           sections={[
