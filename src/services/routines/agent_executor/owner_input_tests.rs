@@ -10,7 +10,9 @@ tokio::task_local! {
     pub(super) static LEGACY_TEARDOWNS: std::cell::Cell<usize>;
 }
 
+#[cfg(unix)]
 pub(super) async fn inject(
+    executor: &RoutineAgentExecutor,
     store: &RoutineStore,
     start: &start_deferral::PendingAgentStart<'_>,
 ) -> Option<Result<StartedAgentTurn>> {
@@ -25,22 +27,27 @@ pub(super) async fn inject(
     if !step {
         return Some(Err(anyhow!("pre-admission refusal")));
     }
-    let handle = OWNER.with(Clone::clone);
+    settled_generation();
     let reservation = reserve_headless_agent_turn(poise::serenity_prelude::ChannelId::new(7272));
     let turn_id = reservation.turn_id();
-    let id = turn_id.rsplit(':').next().unwrap().parse::<u64>().unwrap();
-    let original=serde_json::from_value(json!({"author_id":1,"author_is_bot":true,"message_id":id,"channel_id":7272,"queued_generation":5,"text":start.prompt})).unwrap();
     let claimed = start.claimed;
-    let planned = json!({"status":"input_pending","turn_id":turn_id,"run_id":claimed.run_id,"routine_id":claimed.routine_id,
+    let planned = json!({"status":"started","turn_id":turn_id,"run_id":claimed.run_id,"routine_id":claimed.routine_id,
         "agent_id":start.agent_id,"attempt_kind":start.attempt_kind,"provider":"claude","execution_mode":start.execution_mode.as_str(),
-        "channel_id":"7272","parent_channel_id":"7272","target_label":start.execution_mode.session_label(claimed,start.agent_id,turn_id),
-        "discord_thread_id":claimed.discord_thread_id,"dm_user_id":start.dm_user_id,"is_dm":start.dm_user_id.is_some(),
-        "execution_strategy":claimed.execution_strategy,"prompt":start.prompt,"checkpoint":start.checkpoint,
+        "channel_id":"7272","parent_channel_id":"7272","discord_thread_id":claimed.discord_thread_id,"dm_user_id":start.dm_user_id,
+        "is_dm":start.dm_user_id.is_some(),"prompt":start.prompt,"checkpoint":start.checkpoint,
         "next_due_at":start.next_due_at,"script_ref":claimed.script_ref,"fresh_context_guaranteed":false});
-    Some(
-        owner_input::custody::start(store, start, &handle, original, "routine-tests", planned)
-            .await,
-    )
+    let owned = owner_input::custody::owned(executor, store, start, &planned).await;
+    Some(owned.and_then(|started| started.ok_or_else(|| anyhow!("owner left the start"))))
+}
+
+/// The isolated runtime root's process generation, so a synthetic original is admissible.
+#[cfg(unix)]
+pub(super) fn settled_generation() {
+    let path = crate::services::discord::runtime_store::generation_path().unwrap();
+    if !path.exists() {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "5").unwrap();
+    }
 }
 
 async fn owner() -> (

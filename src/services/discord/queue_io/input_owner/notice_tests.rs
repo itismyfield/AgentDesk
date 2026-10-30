@@ -169,3 +169,50 @@ async fn a_restart_retains_an_expired_unsettled_head_and_posts_its_notice_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+/// The backstop's one wakeup is the moment `tick` first retains the head: nothing is due for an
+/// absent or reserved head, the armed head is due at its deadline and not a millisecond before.
+#[tokio::test(flavor = "current_thread")]
+async fn the_settle_due_time_is_when_tick_first_retains_the_head() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let root = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap();
+    let file = root
+        .join("claude")
+        .join("due")
+        .join(format!("{CHANNEL}.json"));
+    let registry = ChannelMailboxRegistry::default();
+    let handle = registry.handle(ChannelId::new(CHANNEL));
+    handle.v2_adopt(file, "due".into()).await.unwrap();
+    let due = || super::super::recovery::settle_due(&handle);
+    assert_eq!(due().await, Ok(None), "no head");
+    admit(&handle, item(1, &[1], None), "due-1").await;
+    let attempt = json!({"nonce":"due","provider":"claude",
+        "target":{"host":"tmux","owner":"notice-due","root":"/test","execution_nonce":"e"},
+        "source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}});
+    let key = handle
+        .v2_request(move |slot| {
+            let owner = slot.as_mut().ok_or("no owner")?;
+            let attempt = serde_json::from_value(attempt).map_err(|e| e.to_string())?;
+            owner.reserve_unit(attempt, |item| Some((String::new(), item.text.clone())))
+        })
+        .await
+        .unwrap();
+    assert_eq!(due().await, Ok(None), "a reserved head is not due");
+    let armed = key.clone();
+    let tick = |now: u64| {
+        handle.v2_request(move |slot| {
+            let owner = slot.as_mut().ok_or("no owner")?;
+            owner.tick(now)?;
+            Ok(owner.snapshot.head_injection.is_some())
+        })
+    };
+    handle
+        .v2_request(move |slot| Ok(drop(slot.as_mut().ok_or("no owner")?.arm(&armed, 1)?)))
+        .await
+        .unwrap();
+    let at = due().await.unwrap().expect("an armed head is due");
+    assert!(at > 1, "{at}");
+    assert_eq!(tick(at - 1).await, Ok(true), "not retained before its time");
+    assert_eq!(tick(at).await, Ok(false), "retained at its time");
+    assert_eq!(due().await, Ok(None));
+}

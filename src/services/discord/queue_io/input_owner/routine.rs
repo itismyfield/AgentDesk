@@ -238,6 +238,35 @@ impl ChannelMailboxHandle {
         serde_json::from_value(value)
     }
 
+    /// A synthetic start's original and the owner's namespace when the owner takes a start on this
+    /// TUI target; `None` leaves a process target or an unowned channel to its legacy start.
+    #[cfg(unix)]
+    pub(crate) async fn owned_start(
+        &self,
+        tui: bool,
+        (turn_id, channel, text): (&str, u64, &str),
+    ) -> Result<Option<(PendingQueueItem, String)>, String> {
+        use super::origin::{Execution, InputOrigin};
+        let execution = if tui {
+            Execution::LocalTui
+        } else {
+            Execution::Process
+        };
+        if !super::start::owner_will_take(self, execution, InputOrigin::Routine).await? {
+            return Ok(None);
+        }
+        let namespace = self
+            .v2_request(|slot| {
+                (slot
+                    .as_ref()
+                    .and_then(|owner| owner.snapshot.namespace.clone()))
+                .ok_or_else(|| "owner namespace missing".into())
+            })
+            .await?;
+        let (original, _) = super::start::synthetic_original(turn_id, channel, text, 1)?;
+        Ok(Some((original, namespace)))
+    }
+
     pub(crate) async fn owner_input_mailbox(
         registry: &HealthRegistry,
         provider: &str,

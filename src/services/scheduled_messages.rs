@@ -412,22 +412,13 @@ async fn start_agent_turn(
         *target.borrow_mut() = Some((provider.clone(), owner_channel.get(), turn_channel.get()));
     });
 
-    #[cfg(test)]
-    if owner_input::OWNER.try_with(|_| ()).is_ok() {
-        let message_id = turn_id
-            .rsplit(':')
-            .next()
-            .ok_or_else(|| anyhow!("reserved source missing"))?
-            .parse::<u64>()?;
-        let original = serde_json::from_value(
-            serde_json::json!({"author_id":1,"author_is_bot":true,"message_id":message_id,
-            "channel_id":turn_channel_num,"queued_generation":5,"text":prompt}),
-        )?;
-        let mut context = metadata.clone().unwrap_or_else(|| serde_json::json!({}));
-        context["provider"] = serde_json::json!(provider.as_str());
-        context["delivery_id"] = serde_json::json!(fire.delivery_id);
-        context["origin"] = serde_json::json!("scheduled");
-        return owner_input::start_owned(pool, fire, &turn_id, original, context).await;
+    #[cfg(all(test, unix))]
+    if let Ok(handle) = owner_input::OWNER.try_with(Clone::clone) {
+        let target = (turn_id.as_str(), turn_channel_num, prompt.as_str());
+        let owned = owner_input::owned(pool, fire, &handle, target, (&provider, metadata.as_ref()));
+        if let Some(disposition) = owned.await? {
+            return Ok(disposition);
+        }
     }
 
     let outcome = start_reserved_headless_agent_turn_with_owner_channel(

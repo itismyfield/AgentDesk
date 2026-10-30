@@ -31,3 +31,11 @@ pub(crate) async fn recover(
         None => Ok(0),
     }
 }
+
+/// When the owner's head is next due to be retained, for a backstop that wakes once at that time
+/// instead of polling; `None` while nothing is due.
+pub(crate) async fn settle_due(handle: &ChannelMailboxHandle) -> Result<Option<u64>, String> {
+    handle
+        .v2_request(|slot| Ok(slot.as_ref().and_then(|owner| owner.settle_due())))
+        .await
+}

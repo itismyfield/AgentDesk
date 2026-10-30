@@ -39,16 +39,23 @@ impl Owner {
         Ok(successor)
     }
 
+    /// When `tick` next retains the head: its confirmation deadline, at once (0) for a head it
+    /// retains without one, `None` while the head is reserved, bootstrapping or absent.
+    pub(crate) fn settle_due(&self) -> Option<u64> {
+        let head = self.snapshot.head_injection.as_ref()?;
+        if head.phase == HeadPhase::Reserved {
+            return None;
+        }
+        let bootstrapping = matches!(head.payload_window, Some(PayloadWindow::Bootstrap));
+        match head.confirmation_deadline_ms {
+            Some(deadline) => Some(deadline),
+            None => (head.phase == HeadPhase::Unknown || !bootstrapping).then_some(0),
+        }
+    }
+
     pub(crate) fn tick(&mut self, now: u64) -> Result<(), String> {
         let mut next = self.snapshot.clone();
-        if next.head_injection.as_ref().is_some_and(|head| {
-            head.phase != HeadPhase::Reserved
-                && (head.confirmation_deadline_ms.map_or(
-                    head.phase == HeadPhase::Unknown
-                        || !matches!(head.payload_window, Some(PayloadWindow::Bootstrap)),
-                    |deadline| now >= deadline,
-                ))
-        }) {
+        if self.settle_due().is_some_and(|due| now >= due) {
             let input = next
                 .head_injection
                 .take()

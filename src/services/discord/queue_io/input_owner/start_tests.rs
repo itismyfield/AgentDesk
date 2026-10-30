@@ -107,3 +107,61 @@ async fn a_synthetic_start_admits_after_its_preflight_and_wakes_the_drive() {
         "the accepted original woke the drive once"
     );
 }
+
+/// A headless start asked again for the same reservation names the same ticket and original, so
+/// the owner holds it once with the provenance its caller resolved.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_repeated_headless_start_is_admitted_once_under_its_reservation() {
+    let _root = TestRuntimeRootGuard::new();
+    let registry = ChannelMailboxRegistry::default();
+    let channel = 7_272_712;
+    let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(channel));
+    let dir = crate::services::discord::runtime_store::discord_pending_queue_root()
+        .unwrap()
+        .join("claude/input-owner-start");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{channel}.json"));
+    mailbox.v2_adopt(path, "input-owner".into()).await.unwrap();
+    let generation = crate::services::discord::runtime_store::generation_path().unwrap();
+    std::fs::create_dir_all(generation.parent().unwrap()).unwrap();
+    std::fs::write(generation, "5").unwrap();
+    let turn_id = format!("discord:{channel}:9100000000000000042");
+    let woken = Arc::new(AtomicUsize::new(0));
+    let mut tickets = Vec::new();
+    for _ in 0..2 {
+        let (original, ticket) = synthetic_original(&turn_id, channel, "headless", 1).unwrap();
+        tickets.push(ticket.clone());
+        let provenance = HeadlessProvenance {
+            owner: (1, "api"),
+            source: Some("http"),
+            metadata: Some(json!({"k":"v"})),
+            channel_hint: Some("adk-cc"),
+            label: None,
+            dm: Some(false),
+        }
+        .json(&turn_id);
+        let origin = (Execution::LocalTui, InputOrigin::HttpStart);
+        let started = admit_synthetic(
+            drive(&mailbox, channel, woken.clone()),
+            origin,
+            (&original, ticket),
+            provenance,
+            async { Ok(()) },
+        );
+        assert_eq!(started.await, Some(Intake::Accepted));
+    }
+    assert_eq!(tickets[0], tickets[1]);
+    assert_eq!(
+        items(&mailbox).await,
+        1,
+        "one admission for one reservation"
+    );
+    let (original, ticket) = synthetic_original(&turn_id, channel, "headless", 1).unwrap();
+    assert_eq!(original.message_id, 9_100_000_000_000_000_042);
+    let context = mailbox.v2_admission_context(original, ticket.as_str().into());
+    let context = context.await.unwrap().unwrap();
+    assert_eq!(context["request_owner_name"], "api");
+    assert_eq!(context["channel_name_hint"], "adk-cc");
+    assert_eq!(context["metadata"]["k"], "v");
+    assert!(synthetic_original("discord:1:x", channel, "headless", 1).is_err());
+}

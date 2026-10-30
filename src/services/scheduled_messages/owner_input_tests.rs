@@ -33,6 +33,9 @@ async fn postgres_accepted_snapshot_waits_for_exact_owner_then_settles_recorded_
         .v2_adopt(path.clone(), "scheduled-owner".into())
         .await
         .unwrap();
+    let generation = crate::services::discord::runtime_store::generation_path().unwrap();
+    std::fs::create_dir_all(generation.parent().unwrap()).unwrap();
+    std::fs::write(generation, "5").unwrap();
     owner_input::OWNER.scope(handle.clone(),async {
         let result=start_agent_turn(&pool,&HealthRegistry::new(),&fire).await.unwrap();
         assert!(matches!(result,AgentTurnStartDisposition::Accepted));
@@ -68,7 +71,7 @@ async fn postgres_accepted_snapshot_waits_for_exact_owner_then_settles_recorded_
         assert_eq!(state,("sent".into(),Some("delivered".into())));
         let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM session_transcripts WHERE turn_id=$1").bind(&turn).fetch_one(&pool).await.unwrap();assert_eq!(count,0,"snapshot outcome settles without a channel transcript");
         let original=serde_json::from_value(input.original.clone()).unwrap();
-        assert!(owner_input::start_owned(&pool,&fire,&turn,original,input.context.clone()).await.is_err(),"stale claim cannot update intent or readmit");
+        assert!(owner_input::start_owned(&pool,&fire,&handle,&turn,(original,input.namespace.clone(),input.context.clone())).await.is_err(),"stale claim cannot update intent or readmit");
     }).await;
     let snapshot: serde_json::Value =
         serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();

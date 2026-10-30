@@ -146,16 +146,44 @@ pub(super) async fn may_observe(
 #[cfg(test)]
 tokio::task_local! { pub(super) static OWNER: crate::services::turn_orchestrator::ChannelMailboxHandle; }
 
-#[cfg(test)]
+/// The owner's start of a scheduled turn on its target after the launch fence, with the
+/// message's metadata as provenance; `None` leaves an unowned channel to the legacy start.
+#[cfg(all(test, unix))]
+pub(super) async fn owned(
+    pool: &PgPool,
+    fire: &ClaimedFire,
+    handle: &crate::services::turn_orchestrator::ChannelMailboxHandle,
+    (turn_id, channel, prompt): (&str, u64, &str),
+    (provider, metadata): (
+        &crate::services::provider::ProviderKind,
+        Option<&serde_json::Value>,
+    ),
+) -> anyhow::Result<Option<AgentTurnStartDisposition>> {
+    let owned = handle.owned_start(true, (turn_id, channel, prompt)).await;
+    let Some((original, namespace)) = owned.map_err(anyhow::Error::msg)? else {
+        return Ok(None);
+    };
+    let mut context = metadata.cloned().unwrap_or_else(|| serde_json::json!({}));
+    context["provider"] = serde_json::json!(provider.as_str());
+    context["delivery_id"] = serde_json::json!(fire.delivery_id);
+    context["origin"] = serde_json::json!("scheduled");
+    let started = start_owned(pool, fire, handle, turn_id, (original, namespace, context));
+    started.await.map(Some)
+}
+
+#[cfg(all(test, unix))]
 pub(super) async fn start_owned(
     pool: &PgPool,
     fire: &ClaimedFire,
+    handle: &crate::services::turn_orchestrator::ChannelMailboxHandle,
     turn_id: &str,
-    original: crate::services::turn_orchestrator::PendingQueueItem,
-    context: serde_json::Value,
+    (original, namespace, context): (
+        crate::services::turn_orchestrator::PendingQueueItem,
+        String,
+        serde_json::Value,
+    ),
 ) -> anyhow::Result<AgentTurnStartDisposition> {
     use crate::services::turn_orchestrator::ChannelMailboxHandle;
-    let handle = OWNER.with(Clone::clone);
     let provider = context["provider"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("missing scheduled provider"))?;
@@ -172,14 +200,6 @@ pub(super) async fn start_owned(
     {
         serde_json::from_str(raw)?
     } else {
-        let namespace = handle
-            .v2_request(|slot| {
-                slot.as_ref()
-                    .and_then(|o| o.snapshot.namespace.clone())
-                    .ok_or_else(|| "owner namespace missing".into())
-            })
-            .await
-            .map_err(anyhow::Error::msg)?;
         ChannelMailboxHandle::new_owner_input(&original, &namespace, provider, context.clone())
     };
     let encoded = format!("owner-input:{}", serde_json::to_string(&input)?);
@@ -191,7 +211,7 @@ pub(super) async fn start_owned(
     if updated.rows_affected() != 1 {
         anyhow::bail!("scheduled owner intent lost claim fence");
     }
-    let disposition = match input.confirm_admission(&handle).await {
+    let disposition = match input.confirm_admission(handle).await {
         Ok(true) => AgentTurnStartDisposition::Accepted,
         Ok(false) => AgentTurnStartDisposition::Pending,
         Err(reason) => {

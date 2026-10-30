@@ -178,6 +178,32 @@ pub(super) mod custody {
             .map_err(anyhow::Error::msg)
     }
 
+    /// The owner's start of a routine turn on a TUI target, from the planned run row the legacy
+    /// launch would record; `None` leaves a process target or an unowned channel to that launch.
+    #[cfg(unix)]
+    pub(in crate::services::routines::agent_executor) async fn owned(
+        executor: &RoutineAgentExecutor,
+        store: &RoutineStore,
+        start: &start_deferral::PendingAgentStart<'_>,
+        planned: &Value,
+    ) -> Result<Option<StartedAgentTurn>> {
+        let field = |name: &str| (planned[name].as_str()).ok_or_else(|| anyhow!("{name} missing"));
+        let (provider, turn_id) = (field("provider")?, field("turn_id")?);
+        let channel = field("channel_id")?.parse::<u64>()?;
+        let Ok(handle) = handle(executor, provider, channel).await else {
+            return Ok(None);
+        };
+        let tui = start.execution_mode != execution::AgentExecutionMode::Process;
+        let owned = handle
+            .owned_start(tui, (turn_id, channel, start.prompt))
+            .await;
+        let Some((original, namespace)) = owned.map_err(anyhow::Error::msg)? else {
+            return Ok(None);
+        };
+        let started = self::start(store, start, &handle, original, &namespace, planned.clone());
+        started.await.map(Some)
+    }
+
     pub(in crate::services::routines::agent_executor) async fn start(
         store: &RoutineStore,
         start: &start_deferral::PendingAgentStart<'_>,
