@@ -170,11 +170,6 @@ async fn build_app_state(with_health_registry: bool) -> Result<AppState, String>
             .map_err(|e| format!("prepare runtime layout: {e}"))?;
     }
 
-    let legacy_scan = runtime_root
-        .as_ref()
-        .map(|root| crate::services::discord_config_audit::scan_legacy_sources(root))
-        .unwrap_or_default();
-
     let loaded = if let Some(root) = runtime_root.as_ref() {
         crate::services::discord_config_audit::load_runtime_config(root)
             .map_err(|e| format!("load runtime config: {e}"))?
@@ -201,7 +196,6 @@ async fn build_app_state(with_health_registry: bool) -> Result<AppState, String>
             config,
             loaded_path,
             loaded_existed,
-            &legacy_scan,
             false,
         )
         .map_err(|e| format!("audit runtime config: {e}"))?
@@ -220,7 +214,6 @@ async fn build_app_state(with_health_registry: bool) -> Result<AppState, String>
                     loaded.config,
                     loaded.path,
                     loaded.existed,
-                    &legacy_scan,
                     false,
                 )
                 .map_err(|e| format!("persist runtime config audit after pg migration: {e}"))?

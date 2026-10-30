@@ -8,6 +8,7 @@ use crate::services::campaign_execution::{
     model::*,
 };
 
+pub mod evidence_store;
 mod read;
 mod write;
 pub use read::*;
@@ -162,7 +163,22 @@ async fn apply(
         });
     }
     let previous = read::get_in(tx, id).await?;
+    // A BeginReview may cite only the seal the server stored for that Work attempt.
+    let mut unsealed = false;
+    if let (Request::Command(Command::BeginReview { seal, .. }), Some(run)) =
+        (&request, previous.as_ref().and_then(|s| s.run.as_ref()))
+    {
+        let stored = evidence_store::sealed(tx, id, &run.id, &seal.seal_id)
+            .await
+            .map_err(|error| match error {
+                evidence_store::EvidenceStoreError::Sql(e) => StoreError::Sql(e),
+                evidence_store::EvidenceStoreError::Json(e) => StoreError::Json(e),
+                _ => StoreError::InconsistentState,
+            })?;
+        unsealed = stored.is_none_or(|stored| seal.confirm_retry(&stored).is_err());
+    }
     let decision = match (&request, &previous) {
+        _ if unsealed => Some(Err(Rejection::new(RejectionCode::StaleBinding))),
         (Request::Create(input), None) => Some(control::create_definition(
             id.to_owned(),
             (*input).clone(),
@@ -208,6 +224,8 @@ async fn apply(
 
 #[cfg(test)]
 mod recovery_tests;
+#[cfg(test)]
+mod stage_store_tests;
 #[cfg(test)]
 #[path = "storage_tests.rs"]
 mod tests;

@@ -1,60 +1,6 @@
-//! Role-map and legacy bot-settings audit: migrates what `config.yaml` lacks.
+//! Legacy bot-settings audit: migrates what the YAML configuration lacks.
 
 use super::*;
-
-pub(super) fn audit_role_map(
-    config: &Config,
-    legacy_scan: &LegacySourceScan,
-    dry_run: bool,
-    report: &mut ConfigAuditReport,
-) {
-    let Some(role_map_json) = legacy_scan.role_map_json.as_ref() else {
-        return;
-    };
-
-    let mut preview = Config::default();
-    let changed = runtime_layout::preview_role_map_merge(&mut preview, role_map_json);
-
-    if dry_run {
-        if let Some(path) = legacy_scan.role_map_path.as_ref() {
-            let verb = if changed {
-                "would migrate"
-            } else {
-                "would retire"
-            };
-            report.actions.push(format!(
-                "{} legacy role map '{}' with agentdesk.yaml as the winning source-of-truth",
-                verb,
-                path.display()
-            ));
-        }
-    }
-
-    for legacy_agent in &preview.agents {
-        let Some(yaml_agent) = config
-            .agents
-            .iter()
-            .find(|agent| agent.id == legacy_agent.id)
-        else {
-            report.warnings.push(format!(
-                "Legacy role_map defines agent '{}' but agentdesk.yaml does not contain it after startup migration",
-                legacy_agent.id
-            ));
-            continue;
-        };
-
-        let differing_fields = compare_agents(yaml_agent, legacy_agent);
-        if differing_fields.is_empty() {
-            continue;
-        }
-
-        report.warnings.push(format!(
-            "Legacy role_map defines agent '{}' differently on {}; agentdesk.yaml wins",
-            legacy_agent.id,
-            differing_fields.join(", ")
-        ));
-    }
-}
 
 pub(super) fn audit_bot_settings(
     root: &Path,

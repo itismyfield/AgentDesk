@@ -77,6 +77,7 @@ pub const FIELDS: &[FieldReload] = &[
     row("agents.*.channels.*.runtime", Restart, "`src/services/provider_hosting.rs` install_provider_hosting_config"),
     row("agents.*.channels.*.model", Live, "`src/services/discord/agentdesk_config.rs` role_binding_from_channel"),
     row("agents.*.channels.*.reasoning_effort", Live, "`src/services/discord/agentdesk_config.rs` role_binding_from_channel"),
+    row("agents.*.channels.*.thread_inherit", Live, "`src/services/discord/agentdesk_config.rs` thread_inheritance_enabled (validated snapshot per intake)"),
     row("agents.*.channels.*.peer_agents", Live, "`src/services/discord/agentdesk_config.rs` role_binding_from_channel"),
     row("agents.*.channels.*.quality_feedback_injection", Live, "`src/services/discord/agentdesk_config.rs` role_binding_from_channel"),
     row("agents.*.channels.*.dispatch_profile", Live, "`src/services/discord/agentdesk_config.rs` resolve_dispatch_profile"),

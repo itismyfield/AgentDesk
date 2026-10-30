@@ -193,7 +193,7 @@ pub(crate) fn resolve_role_binding(
             return Some(binding);
         }
     }
-    resolve_role_binding_from_role_map(channel_id, channel_name)
+    None
 }
 
 /// Resolve the prompt-cache TTL bucket (#1088) for a Discord channel.
@@ -215,10 +215,6 @@ pub(crate) fn resolve_dispatch_profile(
 
 pub(crate) fn list_registered_channel_bindings() -> Vec<RegisteredChannelBinding> {
     let mut merged = std::collections::BTreeMap::<u64, RegisteredChannelBinding>::new();
-
-    for binding in list_registered_channel_bindings_from_role_map() {
-        merged.insert(binding.channel_id, binding);
-    }
 
     if org_schema::org_schema_exists() {
         for binding in org_schema::list_registered_channel_bindings() {
@@ -245,7 +241,7 @@ pub(crate) fn resolve_workspace(
             return Some(ws);
         }
     }
-    resolve_workspace_from_role_map(channel_id, channel_name)
+    None
 }
 
 pub(crate) fn has_configured_channel_binding(
@@ -530,5 +526,109 @@ agents:
                 "a re-routable (cross-bot) row must be preserved for the owning sibling bot",
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod retirement_tests {
+    use super::*;
+
+    #[test]
+    fn yaml_and_org_bindings_win_and_legacy_role_map_is_ignored() {
+        let root = tempfile::tempdir().unwrap();
+        let lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let _live = crate::config_live_reload::test_live_guard(lock);
+        let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        crate::config_live_reload::install(crate::config::Config::default());
+        assert!(crate::config::AgentChannelConfig::default().thread_inherit);
+        let channel = ChannelId::new(73_490_101);
+        let legacy = root.path().join("config/role_map.json");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        let shared = root.path().join("legacy-shared.md");
+        std::fs::write(&shared, "legacy guidance").unwrap();
+        std::fs::write(
+            &legacy,
+            serde_json::json!({
+                "byChannelId": { channel.to_string(): {
+                    "roleId": "legacy-agent", "promptFile": "/legacy.md", "provider": "codex",
+                    "workspace": "/legacy-workspace"
+                }},
+                "sharedPromptFile": shared,
+                "meeting": {"channel_name": "legacy-meeting", "summary_agent": "legacy-agent"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(resolve_role_binding(channel, None).is_none());
+        assert!(resolve_workspace(channel, None).is_none());
+        assert!(list_registered_channel_bindings().is_empty());
+        assert!(!super::super::content::is_known_agent("legacy-agent"));
+        assert!(super::super::content::load_shared_prompt_for_profile("claude").is_none());
+        assert!(crate::services::discord::meeting_orchestrator::load_meeting_config().is_none());
+
+        let org = crate::runtime_layout::org_schema_path(root.path());
+        std::fs::write(
+            &org,
+            serde_yaml::to_string(&serde_json::json!({
+                "version": 1,
+                "agents": {"org-agent": {"display_name": "Org", "provider": "claude",
+                    "prompt_file": "/org.md", "workspace": "/org-workspace"}},
+                "channels": {"by_id": {channel.to_string(): {"agent": "org-agent"}}},
+                "meeting": {"channel_name": "org-meeting", "summary_agent": "org-agent"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_role_binding(channel, None).unwrap().role_id,
+            "org-agent"
+        );
+        assert_eq!(
+            resolve_workspace(channel, None).as_deref(),
+            Some("/org-workspace")
+        );
+        assert_eq!(
+            crate::services::discord::meeting_orchestrator::load_meeting_config()
+                .unwrap()
+                .channel_name,
+            "org-meeting"
+        );
+
+        let mut config = crate::config::Config::default();
+        config.agents = serde_json::from_value(serde_json::json!([{
+            "id": "yaml-agent", "name": "YAML", "provider": "codex", "channels": {
+                "codex": {"id": channel.to_string(), "workspace": "/yaml-workspace"}
+            }
+        }]))
+        .unwrap();
+        config.meeting = Some(
+            serde_json::from_value(serde_json::json!({
+                "channel_name": "yaml-meeting", "summary_agent": "yaml-agent"
+            }))
+            .unwrap(),
+        );
+        crate::config_live_reload::install(config);
+        assert_eq!(
+            resolve_role_binding(channel, None).unwrap().role_id,
+            "yaml-agent"
+        );
+        assert_eq!(
+            resolve_workspace(channel, None).as_deref(),
+            Some("/yaml-workspace")
+        );
+        assert_eq!(list_registered_channel_bindings().len(), 1);
+        assert_eq!(
+            list_registered_channel_bindings()[0].owner_provider,
+            ProviderKind::Codex
+        );
+        assert_eq!(
+            crate::services::discord::meeting_orchestrator::load_meeting_config()
+                .unwrap()
+                .channel_name,
+            "yaml-meeting"
+        );
     }
 }

@@ -6,12 +6,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    GhExec, PrObservation, gh_api, is_sha, sha_at, str_at, unknown, valid_branch, valid_slug,
+    GhExec, PrObservation, gh_api, is_sha, sha_at, str_at, time_at, unknown, valid_branch,
+    valid_slug,
 };
 use crate::services::campaign_execution::profile::Observation;
 
 const PLAN_ARTIFACT: &str = "nextest-plan";
 const PAGE: usize = 100;
+// The ADK profile's one judge context (scripts/ci/nextest_required.py GATE), required whatever the rules say.
+const PROFILE_JUDGE: &str = "CI required";
 
 // Same names as scripts/ci/nextest_required.py artifact_name() and the ci-pr.yml worker matrix.
 fn worker_artifact(worker: u32, attempt: u32) -> String {
@@ -54,24 +57,69 @@ pub struct WorkerAdoption {
     pub inherited: bool,
 }
 
+// GitHub enforces rulesets and classic protection together; None marks a source that was not read.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequiredSet {
+    pub ruleset: Option<Vec<String>>,
+    pub classic: Option<Vec<String>>,
+    pub profile: Vec<String>,
+}
+
+impl RequiredSet {
+    // Only a set read from every source is complete; being non-empty alone says nothing.
+    pub fn contexts(&self) -> Result<Vec<String>, String> {
+        let (Some(ruleset), Some(classic)) = (&self.ruleset, &self.classic) else {
+            return Err(
+                "required set was not read from both rulesets and branch protection".into(),
+            );
+        };
+        let mut contexts: Vec<String> = ruleset
+            .iter()
+            .chain(classic)
+            .chain(&self.profile)
+            .cloned()
+            .collect();
+        contexts.sort();
+        contexts.dedup();
+        if contexts.is_empty() {
+            return Err("required set is empty".into());
+        }
+        Ok(contexts)
+    }
+}
+
+// What the plan and worker artifacts prove was tested; a pass needs all of it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifiedTests {
+    pub tested_sha: String,
+    // Merge-ref mode only: first parent of the tested merge, checked against the recorded base.
+    pub tested_base: Option<String>,
+    pub mode: CiMode,
+    pub plan_digest: String,
+    pub workers: Vec<WorkerAdoption>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum TestProvenance {
+    Verified(VerifiedTests),
+    // Check results were observed, but what they tested could not be bound to this run.
+    Unverified { reason: String },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CiObservation {
     pub repository_identity: String,
     pub pr_number: u64,
     pub pr_head_sha: String,
     pub pr_base_ref: String,
-    pub tested_sha: String,
-    // Merge-ref mode only: first parent of the tested merge, checked against the recorded base.
-    pub tested_base: Option<String>,
-    pub mode: CiMode,
     pub workflow: WorkflowIdentity,
     pub run_id: u64,
     pub run_attempt: u32,
     pub run_conclusion: Option<String>,
-    pub required: Vec<String>,
+    pub required: RequiredSet,
     pub checks: Vec<CheckResult>,
-    pub plan_digest: String,
-    pub workers: Vec<WorkerAdoption>,
+    pub provenance: TestProvenance,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,36 +131,54 @@ pub enum CiVerdict {
 }
 
 impl CiObservation {
-    // An empty required set, a missing context, a skipped or neutral context is never a pass.
+    // A definite required failure stands on its own; a pass also needs every context and verified tests.
     pub fn verdict(&self) -> CiVerdict {
-        if self.required.is_empty() {
-            return CiVerdict::Incomplete {
-                reason: "required set is empty".into(),
-            };
-        }
+        let required = match self.required.contexts() {
+            Ok(required) => required,
+            Err(reason) => return CiVerdict::Incomplete { reason },
+        };
         let mut failed = Vec::new();
-        for context in &self.required {
+        let mut open = None;
+        for context in &required {
             let Some(check) = self.checks.iter().find(|c| &c.context == context) else {
-                return CiVerdict::Incomplete {
-                    reason: format!("required context {context} has no check in this run"),
-                };
+                if open.is_none() {
+                    open = Some(format!(
+                        "required context {context} has no check in this run"
+                    ));
+                }
+                continue;
             };
             match (check.status.as_str(), check.conclusion.as_deref()) {
                 ("completed", Some("success")) => {}
                 ("completed", Some("failure" | "cancelled" | "timed_out" | "action_required")) => {
                     failed.push(context.clone())
                 }
-                (status, conclusion) => {
-                    return CiVerdict::Incomplete {
-                        reason: format!("required context {context} is {status}/{conclusion:?}"),
-                    };
+                (status, conclusion) if open.is_none() => {
+                    open = Some(format!(
+                        "required context {context} is {status}/{conclusion:?}"
+                    ));
                 }
+                _ => {}
             }
         }
-        if failed.is_empty() {
-            CiVerdict::Passed
-        } else {
-            CiVerdict::Failed { contexts: failed }
+        if !failed.is_empty() {
+            return CiVerdict::Failed { contexts: failed };
+        }
+        if let Some(reason) = open {
+            return CiVerdict::Incomplete { reason };
+        }
+        match &self.provenance {
+            TestProvenance::Verified(_) => CiVerdict::Passed,
+            TestProvenance::Unverified { reason } => CiVerdict::Incomplete {
+                reason: format!("tests are not bound to this run: {reason}"),
+            },
+        }
+    }
+
+    pub fn tests(&self) -> Option<&VerifiedTests> {
+        match &self.provenance {
+            TestProvenance::Verified(tests) => Some(tests),
+            TestProvenance::Unverified { .. } => None,
         }
     }
 
@@ -134,48 +200,115 @@ fn page<'a>(value: &'a Value, key: &str) -> Result<&'a Vec<Value>, String> {
     Ok(items)
 }
 
-// The required set comes from the base branch rules; an unreadable set stays Unknown, never empty.
-pub async fn observe_required_set(
+async fn ruleset_required(
     gh: &dyn GhExec,
     slug: &str,
     branch: &str,
-    observed_at: DateTime<Utc>,
-) -> Observation<Vec<String>> {
-    if !valid_slug(slug) || !valid_branch(branch) {
-        return unknown(format!("invalid target {slug:?} {branch:?}"));
-    }
+) -> Result<Vec<String>, String> {
     let rules = match gh_api(
         gh,
         format!("repos/{slug}/rules/branches/{branch}?per_page={PAGE}"),
     )
-    .await
+    .await?
     {
-        Ok(Value::Array(rules)) if rules.len() < PAGE => rules,
-        Ok(_) => return unknown("branch rules are not a complete list"),
-        Err(reason) => return unknown(reason),
+        Value::Array(rules) if rules.len() < PAGE => rules,
+        _ => return Err("branch rules are not a complete list".into()),
     };
     let mut contexts = Vec::new();
     for rule in rules
         .iter()
         .filter(|r| r.get("type").and_then(Value::as_str) == Some("required_status_checks"))
     {
-        let Some(checks) = rule
+        let checks = rule
             .pointer("/parameters/required_status_checks")
             .and_then(Value::as_array)
-        else {
-            return unknown("required_status_checks rule has no check list");
-        };
+            .ok_or("required_status_checks rule has no check list")?;
         for check in checks {
-            match check.get("context").and_then(Value::as_str) {
-                Some(context) if !context.is_empty() => contexts.push(context.to_owned()),
-                _ => return unknown("required status check without a context"),
-            }
+            contexts.push(context_of(check.get("context"))?);
         }
     }
-    contexts.sort();
-    contexts.dedup();
+    Ok(contexts)
+}
+
+fn context_of(value: Option<&Value>) -> Result<String, String> {
+    match value.and_then(Value::as_str) {
+        Some(context) if !context.is_empty() => Ok(context.to_owned()),
+        _ => Err("required status check without a context".into()),
+    }
+}
+
+// An unprotected branch has no classic checks; a protected one must show its list or stay unread.
+async fn classic_required(
+    gh: &dyn GhExec,
+    slug: &str,
+    branch: &str,
+) -> Result<Vec<String>, String> {
+    let info = gh_api(gh, format!("repos/{slug}/branches/{branch}")).await?;
+    if info.get("name").and_then(Value::as_str) != Some(branch) {
+        return Err(format!("branch response does not name {branch}"));
+    }
+    match info.get("protected").and_then(Value::as_bool) {
+        Some(false) => return Ok(Vec::new()),
+        Some(true) => {}
+        None => return Err("branch response lacks protected".into()),
+    }
+    if info.pointer("/protection/enabled") == Some(&Value::Bool(false)) {
+        return Ok(Vec::new());
+    }
+    let checks = info
+        .pointer("/protection/required_status_checks")
+        .ok_or("protected branch shows no required status checks")?;
+    match checks.get("enforcement_level").and_then(Value::as_str) {
+        Some("off") => return Ok(Vec::new()),
+        Some(_) => {}
+        None => return Err("required status checks lack an enforcement level".into()),
+    }
+    let mut contexts = checks
+        .get("contexts")
+        .and_then(Value::as_array)
+        .ok_or("required status checks have no context list")?
+        .iter()
+        .map(|c| context_of(Some(c)))
+        .collect::<Result<Vec<_>, _>>()?;
+    for check in checks
+        .get("checks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        contexts.push(context_of(check.get("context"))?);
+    }
+    Ok(contexts)
+}
+
+// Rulesets, classic protection and the profile judge together; any unread source keeps the set Unknown.
+pub async fn observe_required_set(
+    gh: &dyn GhExec,
+    slug: &str,
+    branch: &str,
+    observed_at: DateTime<Utc>,
+) -> Observation<RequiredSet> {
+    if !valid_slug(slug) || !valid_branch(branch) {
+        return unknown(format!("invalid target {slug:?} {branch:?}"));
+    }
+    let mut ruleset = match ruleset_required(gh, slug, branch).await {
+        Ok(contexts) => contexts,
+        Err(reason) => return unknown(format!("rulesets: {reason}")),
+    };
+    let mut classic = match classic_required(gh, slug, branch).await {
+        Ok(contexts) => contexts,
+        Err(reason) => return unknown(format!("branch protection: {reason}")),
+    };
+    for contexts in [&mut ruleset, &mut classic] {
+        contexts.sort();
+        contexts.dedup();
+    }
     Observation::Observed {
-        evidence: contexts,
+        evidence: RequiredSet {
+            ruleset: Some(ruleset),
+            classic: Some(classic),
+            profile: vec![PROFILE_JUDGE.to_owned()],
+        },
         observed_at,
     }
 }
@@ -310,6 +443,43 @@ async fn observe_run(
         .filter(|a| *a > 0)
         .ok_or("run has no attempt")?;
 
+    // Checks bind this head and run by themselves, so a failure survives missing test artifacts.
+    let checks = observe_checks(gh, slug, &pr.head_sha, run_id).await?;
+    let provenance = match verify_tests(gh, target, &run, run_attempt).await {
+        Ok(tests) => TestProvenance::Verified(tests),
+        Err(reason) => TestProvenance::Unverified { reason },
+    };
+    Ok(Gate::Go(CiObservation {
+        repository_identity: slug.to_owned(),
+        pr_number: pr.number,
+        pr_head_sha: pr.head_sha.clone(),
+        pr_base_ref: pr.base_ref.clone(),
+        workflow: WorkflowIdentity {
+            path: str_at(&run, "/path")?.to_owned(),
+            name: str_at(&run, "/name")?.to_owned(),
+            event: str_at(&run, "/event")?.to_owned(),
+        },
+        run_id,
+        run_attempt,
+        run_conclusion: run
+            .get("conclusion")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        required: RequiredSet::default(),
+        checks,
+        provenance,
+    }))
+}
+
+async fn verify_tests(
+    gh: &dyn GhExec,
+    target: &CiTarget<'_>,
+    run: &Value,
+    run_attempt: u32,
+) -> Result<VerifiedTests, String> {
+    let CiTarget {
+        slug, pr, run_id, ..
+    } = *target;
     let artifacts_page = gh_api(
         gh,
         format!("repos/{slug}/actions/runs/{run_id}/artifacts?per_page={PAGE}"),
@@ -359,13 +529,15 @@ async fn observe_run(
         format!("repos/{slug}/actions/runs/{run_id}/attempts/{run_attempt}/jobs?per_page={PAGE}"),
     )
     .await?;
-    let jobs = page(&jobs_page, "jobs")?;
+    let earlier = earlier_attempts(gh, slug, run_id, run_attempt).await?;
     let attempt = AttemptContext {
         gh,
         target,
-        jobs,
+        jobs: page(&jobs_page, "jobs")?,
+        earlier: &earlier,
         artifacts,
         run_attempt,
+        run_started_at: time_at(run, "/run_started_at")?,
         plan_digest: &plan_digest,
         tested_sha: &tested_sha,
     };
@@ -373,65 +545,114 @@ async fn observe_run(
     for worker in 0..worker_count as u32 {
         workers.push(attempt.adopt_worker(worker).await?);
     }
-
-    let checks = observe_checks(gh, slug, &pr.head_sha, run_id).await?;
-    Ok(Gate::Go(CiObservation {
-        repository_identity: slug.to_owned(),
-        pr_number: pr.number,
-        pr_head_sha: pr.head_sha.clone(),
-        pr_base_ref: pr.base_ref.clone(),
+    Ok(VerifiedTests {
         tested_sha,
         tested_base,
         mode,
-        workflow: WorkflowIdentity {
-            path: str_at(&run, "/path")?.to_owned(),
-            name: str_at(&run, "/name")?.to_owned(),
-            event: str_at(&run, "/event")?.to_owned(),
-        },
-        run_id,
-        run_attempt,
-        run_conclusion: run
-            .get("conclusion")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        required: Vec::new(),
-        checks,
         plan_digest,
         workers,
-    }))
+    })
+}
+
+struct EarlierAttempt {
+    attempt: u32,
+    started_at: DateTime<Utc>,
+    jobs: Value,
+}
+
+// Newest first: the start time and job list of every attempt before the current one.
+async fn earlier_attempts(
+    gh: &dyn GhExec,
+    slug: &str,
+    run_id: u64,
+    run_attempt: u32,
+) -> Result<Vec<EarlierAttempt>, String> {
+    let mut earlier = Vec::new();
+    for attempt in (1..run_attempt).rev() {
+        let path = format!("repos/{slug}/actions/runs/{run_id}/attempts/{attempt}");
+        let run = gh_api(gh, path.clone()).await?;
+        if run.get("id").and_then(Value::as_u64) != Some(run_id)
+            || run.get("run_attempt").and_then(Value::as_u64) != Some(u64::from(attempt))
+        {
+            return Err(format!(
+                "attempt {attempt} of run {run_id} answers for another run"
+            ));
+        }
+        let jobs = gh_api(gh, format!("{path}/jobs?per_page={PAGE}")).await?;
+        page(&jobs, "jobs")?;
+        earlier.push(EarlierAttempt {
+            attempt,
+            started_at: time_at(&run, "/run_started_at")?,
+            jobs,
+        });
+    }
+    Ok(earlier)
+}
+
+fn unique_job<'a>(jobs: &'a [Value], name: &str, attempt: u32) -> Result<&'a Value, String> {
+    let mut found = jobs
+        .iter()
+        .filter(|j| j.get("name").and_then(Value::as_str) == Some(name));
+    match (found.next(), found.next()) {
+        (Some(job), None) => Ok(job),
+        _ => Err(format!(
+            "job {name} is absent or ambiguous in attempt {attempt}"
+        )),
+    }
 }
 
 struct AttemptContext<'a> {
     gh: &'a dyn GhExec,
     target: &'a CiTarget<'a>,
     jobs: &'a [Value],
+    earlier: &'a [EarlierAttempt],
     artifacts: &'a [Value],
     run_attempt: u32,
+    run_started_at: DateTime<Utc>,
     plan_digest: &'a str,
     tested_sha: &'a str,
 }
 
 impl AttemptContext<'_> {
-    // A rerun worker must have this attempt's artifact; a worker that was not rerun inherits only the
-    // artifact of the attempt its job reports, and only when worker.json names this run/plan/SHA/worker.
+    // GitHub lists a job that was not rerun under each later attempt number with its original times, so
+    // the attempt that ran it is the one whose start precedes those times and lists the same record.
+    fn executed_attempt(&self, name: &str, job: &Value) -> Result<u32, String> {
+        let times = |job: &Value| -> Result<_, String> {
+            Ok((time_at(job, "/started_at")?, time_at(job, "/completed_at")?))
+        };
+        let ran = times(job).map_err(|e| format!("job {name}: {e}"))?;
+        if ran.0 >= self.run_started_at {
+            return Ok(self.run_attempt);
+        }
+        for earlier in self.earlier {
+            let listed = unique_job(page(&earlier.jobs, "jobs")?, name, earlier.attempt)?;
+            if times(listed).map_err(|e| format!("job {name}: {e}"))? != ran {
+                return Err(format!(
+                    "job {name} in attempt {} is not the run attempt {} recorded",
+                    self.run_attempt, earlier.attempt
+                ));
+            }
+            if ran.0 >= earlier.started_at {
+                return Ok(earlier.attempt);
+            }
+        }
+        Err(format!(
+            "job {name} started before every attempt of this run"
+        ))
+    }
+
+    // A worker run in this attempt needs this attempt's artifact; a carried-over worker only the artifact
+    // of the attempt that ran it, and only when worker.json names this run/plan/SHA/worker.
     async fn adopt_worker(&self, worker: u32) -> Result<WorkerAdoption, String> {
         let run_attempt = self.run_attempt;
         let name = worker_job(worker);
-        let mut found = self
-            .jobs
-            .iter()
-            .filter(|j| j.get("name").and_then(Value::as_str) == Some(name.as_str()));
-        let (Some(job), None) = (found.next(), found.next()) else {
-            return Err(format!(
-                "job {name} is absent or ambiguous in attempt {run_attempt}"
-            ));
-        };
-        let attempt = job
-            .get("run_attempt")
+        let job = unique_job(self.jobs, &name, run_attempt)?;
+        job.get("run_attempt")
             .and_then(Value::as_u64)
             .and_then(|a| u32::try_from(a).ok())
             .filter(|a| (1..=run_attempt).contains(a))
             .ok_or_else(|| format!("job {name} reports no valid attempt"))?;
+        let attempt = self.executed_attempt(&name, job)?;
         let artifact_name = worker_artifact(worker, attempt);
         let artifact = unique_artifact(self.artifacts, &artifact_name)?;
         let meta = download_json(
@@ -533,6 +754,12 @@ pub async fn observe_ci(
     match observe_run(gh, target).await {
         Ok(Gate::Go(mut evidence)) => {
             evidence.required = required;
+            // Without verified tests only a definite required failure is evidence; the rest stays Unknown.
+            if let TestProvenance::Unverified { reason } = &evidence.provenance
+                && !matches!(evidence.verdict(), CiVerdict::Failed { .. })
+            {
+                return unknown(reason.clone());
+            }
             Observation::Observed {
                 evidence,
                 observed_at,

@@ -10,7 +10,7 @@ This document is the operator-side index for the three domains. The precedence a
 | --- | --- | --- | --- | --- |
 | **runtime-config** | The running AgentDesk daemon (dispatch loops, queue, providers, kanban, retros) | `agentdesk.yaml` (`runtime:`, `automation:`, `review:`, `kanban:`, `database:`) | `kv_meta['runtime-config']` JSON | Live tuning surface for behavior knobs. YAML is restart baseline; `kv_meta` is the live override. Reset-on-restart is operator-controllable. |
 | **dashboard** (company settings) | The dashboard UI and any caller that owns the merged company-settings JSON document | `kv_meta['settings']` | n/a — this surface IS the override | Full-replace contract. No YAML baseline. Hidden keys (e.g. `roomThemes`) survive only if callers re-merge them. |
-| **bot-settings** | Discord bot bindings, agent roster, channel→agent routing, default per-bot behavior | `agentdesk.yaml` (`discord:`, `agents[].channels`) | None at runtime; defaults are read-only metadata derived from the YAML | Legacy `bot_settings.json` and `role_map.json` are migration inputs only. The dashboard "bot defaults" view is read-only over this YAML. |
+| **bot-settings** | Discord bot bindings, agent roster, channel→agent routing, default per-bot behavior | `agentdesk.yaml` (`discord:`, `agents[].channels`) | None at runtime; defaults are read-only metadata derived from the YAML | Legacy `bot_settings.json` is a migration input; `role_map.json` is retired. The dashboard "bot defaults" view is read-only over this YAML. |
 
 A surface that doesn't fit one of the three domains (onboarding/secrets) is a separate, dedicated store — see the surface matrix in `adr-settings-precedence.md`.
 
@@ -62,11 +62,14 @@ A surface that doesn't fit one of the three domains (onboarding/secrets) is a se
 
 **Migration inputs (read-only)**:
 
-- `~/.adk/release/config/role_map.json` — legacy channel→role map.
 - `~/.adk/release/config/bot_settings.json` (and `.migrated` snapshots) — legacy default-bot table.
 - DB rows mirroring agent/channel data during migration.
 
-**Read path**: YAML wins. Legacy files and DB rows are migration inputs and are loaded only when YAML lacks an explicit value (see `discord_config_audit.rs`). The `.migrated` snapshots live under `~/.adk/release/config/.backups/YYYY-MM-DD/` per `source-of-truth.md`.
+**Read path**: Agent/channel YAML values win. `~/.adk/release/config/org.yaml` remains an optional organization schema for agent definitions, channel bindings, workspaces, shared prompts, meeting settings, and provider authentication/recovery policy. For role bindings, workspaces, shared prompts and meetings, readers try agentdesk YAML first, then org.yaml. Registered channels merge org.yaml first and agentdesk YAML last so the latter wins on duplicate IDs. Authentication/recovery settings retain their existing org.yaml readers. This document does not move or remove org.yaml.
+
+Thread inheritance belongs to `agents[].channels.<provider>.thread_inherit`. It defaults to `true`, including shorthand channel bindings and unmatched parents. `false` disables parent role/workspace/memory and placement-policy inheritance for threads. It is a live field: boot loads it into the validated configuration and a valid reload publishes the next value for subsequent intake. `org.yaml` and retired `role_map.json` do not override it.
+
+`role_map.json` is not a runtime or migration input. A leftover file is ignored; startup and onboarding do not create, enrich, rewrite or retire it. The existing bot-settings migration/audit remains independent.
 
 **Pitfalls**:
 

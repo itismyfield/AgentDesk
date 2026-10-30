@@ -6,28 +6,23 @@ mod skill_sync;
 #[cfg(windows)]
 mod windows_links;
 
-use config_merge::{
-    merge_role_map_into_agentdesk_yaml, update_org_yaml_prompt_paths, update_role_map_prompt_paths,
-};
+use config_merge::update_org_yaml_prompt_paths;
 use legacy_migration::{
     create_legacy_backup, migrate_legacy_layout, normalize_agent_config_channels,
     synchronize_shared_prompt,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use skill_sync::{ensure_managed_skills_manifest, migrate_legacy_skill_links};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-pub(crate) use config_merge::preview_role_map_merge;
 #[allow(unused_imports)]
 pub use paths::{
     config_dir, config_file_path, credential_dir, credential_token_path, expand_user_path,
     legacy_config_file_path, legacy_credential_dir, managed_agents_root, managed_memories_root,
     managed_skills_manifest_path, managed_skills_root, memories_archive_root, memory_backend_path,
-    org_schema_path, resolve_memory_path, role_map_path, shared_agent_knowledge_dir,
-    shared_prompt_path,
+    org_schema_path, resolve_memory_path, shared_agent_knowledge_dir, shared_prompt_path,
 };
 
 pub const MEMORY_LAYOUT_VERSION: u32 = 2;
@@ -305,8 +300,6 @@ pub fn ensure_runtime_layout(root: &Path) -> Result<LayoutReport, String> {
     ensure_credential_layout(root)?;
     normalize_agent_config_channels(root)?;
     synchronize_shared_prompt(root)?;
-    update_role_map_prompt_paths(root)?;
-    merge_role_map_into_agentdesk_yaml(root)?;
     update_org_yaml_prompt_paths(root)?;
     ensure_managed_skills_manifest(root)?;
     migrate_legacy_skill_links(root)?;

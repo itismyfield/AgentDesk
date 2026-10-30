@@ -678,25 +678,11 @@ fn checkpoint_path(
 }
 
 fn write_role_map(root: &std::path::Path, provider: &ProviderKind, channel_id: ChannelId) {
-    let config_dir = root.join("config");
-    std::fs::create_dir_all(&config_dir).expect("create config dir");
-    std::fs::write(
-        config_dir.join("role_map.json"),
-        format!(
-            r#"{{
-  "byChannelId": {{
-    "{}": {{
-      "roleId": "adk-cc",
-      "promptFile": "prompt.md",
-      "provider": "{}"
-    }}
-  }}
-}}"#,
-            channel_id.get(),
-            provider.as_str(),
-        ),
-    )
-    .expect("write role map");
+    crate::services::discord::agentdesk_config::write_bindings_for_test(
+        root,
+        serde_json::json!([{"id": "adk-cc", "name": "Catch up", "provider": provider.as_str(),
+            "channels": {provider.as_str(): {"id": channel_id.to_string(), "prompt_file": "prompt.md"}}}]),
+    );
 }
 
 type ScriptedHistoryFetches = Mutex<VecDeque<Result<Vec<serenity::Message>, String>>>;
