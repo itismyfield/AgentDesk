@@ -56,9 +56,8 @@ fn snowflake_ceiling(at: chrono::DateTime<chrono::Utc>) -> u64 {
     let ms = u64::try_from(at.timestamp_millis() - DISCORD_EPOCH_MS).unwrap_or(0);
     (ms << 22) | ((1 << 22) - 1)
 }
-/// Every attached cursor and every source the durable binding log bound past the checkpoint, with
-/// the legacy history bounds. A live source freezes to its file end; a retired one, proven stopped,
-/// only to its cursor, so its retained spool stays below the floor.
+/// Every cursor and source bound past the checkpoint, live ones to their file end and retired ones
+/// only to their cursor so a replayed spool stays below the floor, with the legacy history bounds.
 fn frozen_cohort(
     store: &crate::services::tui_o::store::ChannelStore,
     bound: &[super::super::binding::BindingEvent],
