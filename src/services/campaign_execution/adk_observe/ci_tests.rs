@@ -50,8 +50,8 @@ struct Ci {
     required: Result<Value, String>,
     classic: Result<Value, String>,
     check_conclusion: &'static str,
-    // Further check runs of this run: (context, conclusion).
-    other_checks: Vec<(&'static str, &'static str)>,
+    // Further check runs of this run: (context, status, conclusion).
+    other_checks: Vec<(&'static str, &'static str, Option<&'static str>)>,
 }
 
 impl Ci {
@@ -99,8 +99,8 @@ impl Ci {
             json!({"id": 6, "name": "CI required", "status": "completed",
                 "conclusion": self.check_conclusion, "head_sha": sha('a'), "details_url": detail(6)}),
         ];
-        for (id, (context, conclusion)) in (7..).zip(&self.other_checks) {
-            checks.push(json!({"id": id, "name": context, "status": "completed",
+        for (id, (context, status, conclusion)) in (7..).zip(&self.other_checks) {
+            checks.push(json!({"id": id, "name": context, "status": status,
                 "conclusion": conclusion, "head_sha": sha('a'), "details_url": detail(id)}));
         }
         let mut gh = FakeGh::default()
@@ -344,7 +344,7 @@ async fn ruleset_success_does_not_hide_classic_required_failure() {
     let mut ci = Ci::merge_ref();
     ci.required = Ok(rules(&["Lint runner"]));
     ci.classic = Ok(protection(&["CI required"]));
-    ci.other_checks = vec![("Lint runner", "success")];
+    ci.other_checks = vec![("Lint runner", "completed", Some("success"))];
     ci.check_conclusion = "failure";
     let observed = ci.observe().await;
     let evidence = observed.observed_evidence().expect("observed");
@@ -363,7 +363,10 @@ async fn ruleset_success_does_not_hide_classic_required_failure() {
     let mut ci = Ci::merge_ref();
     ci.required = Ok(rules(&["Lint runner"]));
     ci.classic = Ok(protection(&["Script checks"]));
-    ci.other_checks = vec![("Lint runner", "success"), ("Script checks", "failure")];
+    ci.other_checks = vec![
+        ("Lint runner", "completed", Some("success")),
+        ("Script checks", "completed", Some("failure")),
+    ];
     let observed = ci.observe().await;
     assert_eq!(
         observed.observed_evidence().expect("observed").verdict(),
@@ -488,4 +491,30 @@ async fn successful_check_without_required_provenance_never_passes() {
         reason: "plan missing".into(),
     };
     assert!(matches!(evidence.verdict(), CiVerdict::Incomplete { .. }));
+}
+
+#[tokio::test]
+async fn failed_required_check_outranks_a_missing_or_running_one() {
+    // A required context that has no check yet or is still running must not hide a definite failure.
+    for others in [vec![], vec![("A required", "in_progress", None)]] {
+        let mut ci = Ci::merge_ref();
+        ci.required = Ok(rules(&["A required", "CI required"]));
+        ci.plan = false;
+        ci.artifacts.clear();
+        ci.check_conclusion = "failure";
+        ci.other_checks = others.clone();
+        let observed = ci.observe().await;
+        let evidence = observed.observed_evidence().expect("observed failure");
+        assert_eq!(
+            evidence.verdict(),
+            CiVerdict::Failed {
+                contexts: vec!["CI required".into()]
+            },
+            "{others:?}"
+        );
+        assert!(matches!(
+            evidence.provenance,
+            TestProvenance::Unverified { .. }
+        ));
+    }
 }
