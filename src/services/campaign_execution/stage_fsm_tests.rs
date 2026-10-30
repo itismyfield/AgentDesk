@@ -590,7 +590,11 @@ fn finish_stage_keeps_the_unsealed_work_v_slots_for_the_same_work() {
     let finishing = domain::stop(&state, StopMode::FinishStage);
     let stop = finishing.run.as_ref().unwrap().stop.as_ref().unwrap();
     assert_eq!(stop.finish_grants.len(), 2);
-    assert!(stop.finish_grants.iter().all(|g| g.consumer_attempt == "work-a"));
+    assert!(
+        stop.finish_grants
+            .iter()
+            .all(|g| g.consumer_attempt == "work-a")
+    );
     let start = execution(&state, "work-a").start_executions[0].clone();
     let archive = phase_action(&finishing, &start, "archive");
     assert_eq!(action(&finishing, &archive), ActionState::Planned);
@@ -598,7 +602,10 @@ fn finish_stage_keeps_the_unsealed_work_v_slots_for_the_same_work() {
     // The output sealed after the stop fills the slot registered before it; no new V appears.
     let mut materialized = finishing.clone();
     materialize(&mut materialized, &start, &seal_of(&state, &work));
-    let claimed = apply(&materialized, advance(&start, "archive", &work, ActionState::Claimed));
+    let claimed = apply(
+        &materialized,
+        advance(&start, "archive", &work, ActionState::Claimed),
+    );
     assert_eq!(action(&claimed, &archive), ActionState::Claimed);
     assert_eq!(claimed.run.as_ref().unwrap().verifications.len(), 2);
 }
@@ -621,7 +628,10 @@ fn finish_plan_phase_may_start_after_its_gate_applied_the_stop_fence() {
             control_version: run.control_version,
         },
     );
-    let claimed = apply(&fenced, advance(&finish, "archive", &review, ActionState::Claimed));
+    let claimed = apply(
+        &fenced,
+        advance(&finish, "archive", &review, ActionState::Claimed),
+    );
     let pending = apply(
         &claimed,
         advance(&finish, "archive", &review, ActionState::StartPending),

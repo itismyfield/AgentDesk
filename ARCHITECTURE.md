@@ -290,6 +290,7 @@ src/
 │   │   ├── mod.rs
 │   │   ├── read.rs
 │   │   ├── recovery_tests.rs
+│   │   ├── stage_store_tests.rs
 │   │   ├── storage_tests.rs
 │   │   └── write.rs
 │   ├── session_observability/
@@ -803,6 +804,8 @@ src/
 │   │   ├── evidence_tests.rs
 │   │   ├── execution_pin.rs
 │   │   ├── execution_pin_tests.rs
+│   │   ├── failure_budget.rs
+│   │   ├── failure_budget_tests.rs
 │   │   ├── mod.rs
 │   │   ├── model.rs
 │   │   ├── model_tests.rs
@@ -810,6 +813,8 @@ src/
 │   │   ├── profile_tests.rs
 │   │   ├── review_gate.rs
 │   │   ├── review_gate_tests.rs
+│   │   ├── stage_fsm.rs
+│   │   ├── stage_fsm_tests.rs
 │   │   ├── verification_run.rs
 │   │   ├── verification_run_tests.rs
 │   │   ├── verification_runner.rs
