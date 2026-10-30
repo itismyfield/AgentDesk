@@ -33,18 +33,18 @@ const SPEAK_TIMEOUT_MS = 130_000;
 // Conductor: one 90 s planner call plus the agent turn starts.
 const SAY_TIMEOUT_MS = 150_000;
 
-const post = (body: unknown, timeoutMs: number) => ({
+const post = (body: unknown, timeoutMs: number, suppressErrorToast = false) => ({
   method: "POST",
   body: JSON.stringify(body),
   timeoutMs,
   maxRetries: 0,
-  suppressErrorToast: true,
+  suppressErrorToast,
 });
 
 export const transcribeVoice = (audioBase64: string, mime: string) =>
   request(
     "/api/voice/transcribe",
-    post({ audio_base64: audioBase64, mime }, TRANSCRIBE_TIMEOUT_MS),
+    post({ audio_base64: audioBase64, mime }, TRANSCRIBE_TIMEOUT_MS, true),
     z.object({ text: z.string() }),
   );
 
@@ -52,7 +52,7 @@ export const speakVoice = (text: string) =>
   request("/api/voice/speak", post({ text }, SPEAK_TIMEOUT_MS), z.object({ audio_base64: z.string(), mime: z.string() }));
 
 export const sayToConductor = (text: string) =>
-  request("/api/voice/conductor/say", post({ text }, SAY_TIMEOUT_MS), jobSchema);
+  request("/api/voice/conductor/say", post({ text }, SAY_TIMEOUT_MS, true), jobSchema);
 
 export const getConductorJob = (id: string) =>
-  request(`/api/voice/conductor/jobs/${encodeURIComponent(id)}`, { cache: "no-store", maxRetries: 0, suppressErrorToast: true }, jobSchema);
+  request(`/api/voice/conductor/jobs/${encodeURIComponent(id)}`, { cache: "no-store", maxRetries: 0 }, jobSchema);
