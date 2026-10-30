@@ -716,3 +716,7 @@ mod herdr_owner;
 #[cfg(unix)]
 #[path = "codex_replacement_tests.rs"]
 pub(super) mod codex_replacement;
+
+#[cfg(unix)]
+#[path = "read_error_fallback_tests.rs"]
+pub(super) mod read_error_fallback;
