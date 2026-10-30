@@ -38,6 +38,7 @@ const post = (body: unknown, timeoutMs: number) => ({
   body: JSON.stringify(body),
   timeoutMs,
   maxRetries: 0,
+  suppressErrorToast: true,
 });
 
 export const transcribeVoice = (audioBase64: string, mime: string) =>
@@ -54,4 +55,4 @@ export const sayToConductor = (text: string) =>
   request("/api/voice/conductor/say", post({ text }, SAY_TIMEOUT_MS), jobSchema);
 
 export const getConductorJob = (id: string) =>
-  request(`/api/voice/conductor/jobs/${encodeURIComponent(id)}`, { cache: "no-store", maxRetries: 0 }, jobSchema);
+  request(`/api/voice/conductor/jobs/${encodeURIComponent(id)}`, { cache: "no-store", maxRetries: 0, suppressErrorToast: true }, jobSchema);

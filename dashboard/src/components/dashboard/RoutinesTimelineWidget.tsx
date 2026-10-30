@@ -806,7 +806,7 @@ function RoutineRunResultPayload({
           ) : null}
           {summary.rawPreview ? (
             <details className="text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
-              <summary className="cursor-pointer select-none">
+              <summary className="flex min-h-11 min-w-11 cursor-pointer select-none items-center rounded-md text-xs focus-visible:outline-2 focus-visible:outline-[var(--th-accent-primary)]">
                 {t({ ko: "원본 JSON", en: "Raw JSON", ja: "元JSON", zh: "原始 JSON" })}
               </summary>
               <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap break-words font-mono" style={{ color: "var(--th-text-primary)" }}>

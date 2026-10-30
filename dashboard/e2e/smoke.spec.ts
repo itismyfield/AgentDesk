@@ -2185,7 +2185,18 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-pressed", "false");
   });
 
-  test("stats: mobile stacks summary cards vertically", async ({ page }, testInfo) => {
+  test("stats: failed analytics stops the loading placeholder without reporting zero", async ({ page }) => {
+    await page.route(/\/api\/token-analytics(?:\?.*)?$/, (route) =>
+      route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "Aggregation unavailable" }) }),
+    );
+    await page.goto("/stats");
+    await expect(page.getByText("일부 통계를 불러오지 못했습니다.", { exact: true })).toBeVisible();
+    await expect(page.getByTestId("stats-summary-total-tokens")).toContainText("—");
+    await expect(page.getByTestId("stats-summary-total-tokens")).not.toContainText("…");
+    await expect(page.getByTestId("stats-summary-api-spend")).toContainText("데이터 확인 불가");
+  });
+
+  test("stats: mobile pairs summary cards without horizontal overflow", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "desktop", "Mobile-only test");
     await page.goto("/stats");
 
@@ -2203,7 +2214,9 @@ test.describe("Dashboard smoke tests", () => {
 
     expect(firstBox).not.toBeNull();
     expect(secondBox).not.toBeNull();
-    expect(secondBox!.y).toBeGreaterThan(firstBox!.y + firstBox!.height - 1);
+    expect(Math.abs(secondBox!.y - firstBox!.y)).toBeLessThanOrEqual(1);
+    expect(secondBox!.x).toBeGreaterThan(firstBox!.x + firstBox!.width);
+    await expectNoHorizontalOverflow(page);
   });
 
   test("dashboard: routines timeline lists registered jobs chronologically", async ({ page }) => {

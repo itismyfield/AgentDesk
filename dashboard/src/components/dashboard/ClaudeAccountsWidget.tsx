@@ -426,10 +426,10 @@ function ClaudeAccountsWidgetImpl({ t }: ClaudeAccountsWidgetProps) {
         zh: "刷新 Claude 账号用量",
       })}
       title={t({ ko: "지금 새로고침", en: "Refresh now", ja: "今すぐ更新", zh: "立即刷新" })}
-      className="inline-flex h-7 w-7 items-center justify-center rounded-full"
+      className="inline-flex h-11 w-11 items-center justify-center rounded-md"
       style={{
-        border: "1px solid rgba(148,163,184,0.22)",
-        background: "rgba(148,163,184,0.14)",
+        border: "1px solid var(--th-border-subtle)",
+        background: "var(--th-overlay-subtle)",
         color: "var(--th-text)",
         cursor: isRefreshing ? "wait" : "pointer",
         opacity: isRefreshing ? 0.6 : 1,
@@ -590,11 +590,11 @@ function ClaudeAccountsWidgetImpl({ t }: ClaudeAccountsWidgetProps) {
                 const usageAge = formatAge(account.usageAgeSeconds);
                 const isSwitching = switchingAccount === target;
                 return (
-                  <SurfaceCard key={key} className="rounded-3xl p-5">
+                  <SurfaceCard key={key} className="rounded-lg p-4">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <div className="flex min-w-0 flex-wrap items-center gap-2">
-                          <div className="truncate text-sm font-semibold" style={{ color: "var(--th-text)" }}>
+                          <div className="min-w-0 text-sm font-medium [overflow-wrap:anywhere]" style={{ color: "var(--th-text)" }}>
                             {account.email ?? t({ ko: `계정 ${account.number ?? "-"}`, en: `Account ${account.number ?? "-"}`, ja: `アカウント ${account.number ?? "-"}`, zh: `账号 ${account.number ?? "-"}` })}
                           </div>
                           {account.active ? (

@@ -201,23 +201,34 @@ export default function VoicePage() {
   return (
     <div
       data-testid="voice-page"
-      className="flex h-full flex-col overflow-hidden px-4 pb-28 pt-4 sm:px-6 sm:pb-8"
-      style={{ background: "var(--th-bg)" }}
+      className="flex h-full min-h-0 flex-col overflow-hidden bg-th-bg-primary px-4 py-5 sm:px-8 sm:py-7"
+
     >
-      <div className="mx-auto flex w-full max-w-xl flex-1 flex-col gap-4 overflow-hidden">
-        <div className="flex flex-1 flex-col-reverse gap-2 overflow-y-auto">
+      <div className="mx-auto flex min-h-0 w-full max-w-5xl flex-1 flex-col gap-5">
+        <header className="shrink-0 border-b border-th-border-subtle pb-5">
+          <h1 className="text-2xl font-semibold tracking-tight text-th-text-heading">{t({ ko: "음성", en: "Voice" })}</h1>
+          <p className="mt-2 text-xs leading-5 text-th-text-muted">{t({ ko: "말로 작업을 맡기고 에이전트의 응답을 확인합니다.", en: "Delegate work by voice and follow the agents' responses." })}</p>
+        </header>
+        <section aria-label={t({ko:"대화와 작업",en:"Conversation and jobs"})} className="flex min-h-0 flex-1 flex-col-reverse gap-3 overflow-y-auto rounded-lg border border-th-border-subtle bg-th-bg-surface p-4 sm:p-5">
+          {entries.length === 0 && jobs.length === 0 ? (
+            <div data-testid="voice-empty" className="flex flex-1 flex-col items-center justify-center gap-2 py-6 text-center">
+              <Mic size={24} className="mb-1 text-th-text-muted" aria-hidden="true" />
+              <h2 className="text-sm font-medium text-th-text-primary">{t({ko:"무엇을 도와드릴까요?",en:"What would you like to work on?"})}</h2>
+              <p className="max-w-sm text-xs leading-5 text-th-text-muted">{t({ko:"아래 마이크를 켜고 할 일을 말하세요. 대화와 작업 진행이 여기에 표시됩니다.",en:"Turn on the microphone below and describe a task. Your conversation and job progress will appear here."})}</p>
+            </div>
+          ) : null}
           {jobs.slice(0, 3).map((job) => (
             <div
               key={job.id}
-              className="rounded-xl border p-3 text-sm"
+              className="min-w-0 shrink-0 rounded-md border p-3 text-sm"
               style={{ borderColor: "var(--th-border)", background: "var(--th-card-bg)" }}
             >
-              <div className="mb-2 truncate" style={{ color: "var(--th-text-muted)" }}>{job.request}</div>
+              <div className="mb-2 leading-6 [overflow-wrap:anywhere]" style={{ color: "var(--th-text-muted)" }}>{job.request}</div>
               <div className="flex flex-wrap gap-2">
                 {job.dispatches.map((dispatch) => (
                   <span
                     key={dispatch.agent_id}
-                    className="rounded-full px-2 py-0.5 text-xs"
+                    className="max-w-full rounded-md px-2 py-1 text-xs [overflow-wrap:anywhere]"
                     style={{
                       color: "var(--th-text-primary)",
                       background: dispatch.status === "done" ? "var(--th-badge-emerald-bg)"
@@ -236,28 +247,29 @@ export default function VoicePage() {
           {[...entries].reverse().slice(0, 12).map((entry) => (
             <p
               key={entry.id}
-              className={`max-w-[85%] rounded-2xl px-3 py-2 text-[15px] leading-6 ${entry.role === "user" ? "self-end" : "self-start"}`}
+              className={`max-w-[92%] shrink-0 rounded-md px-3 py-2 text-sm leading-6 [overflow-wrap:anywhere] ${entry.role === "user" ? "self-end" : "self-start"}`}
               style={{
                 color: "var(--th-text-primary)",
                 background: entry.role === "user" ? "var(--th-accent-primary-soft)" : "var(--th-bg-surface)",
               }}
             >
+              <span className="mb-1 block text-xs font-medium text-th-text-muted">{entry.role === "user" ? t({ko:"나",en:"You"}) : "AgentDesk"}</span>
               {entry.text}
             </p>
           ))}
-        </div>
+        </section>
 
         {error && (
-          <p className="text-center text-sm" style={{ color: "var(--th-accent-danger)" }}>{error}</p>
+          <p role="alert" className="max-h-32 shrink-0 overflow-y-auto rounded-md border border-th-border-subtle px-4 py-3 text-sm leading-6 [overflow-wrap:anywhere]" style={{ color: "var(--th-accent-danger)" }}>{error}</p>
         )}
 
-        <div className="flex flex-col items-center gap-3 pb-2">
+        <div className="flex shrink-0 flex-col items-center gap-3 pb-1">
           <p className="text-sm" style={{ color: "var(--th-text-muted)" }} aria-live="polite">{statusLabel}</p>
-          <div className="flex items-center gap-6">
+          <div className="flex flex-wrap items-center justify-center gap-4">
             <button
               type="button"
               onClick={() => setHandsFree((prev) => !prev)}
-              className="rounded-full border px-3 py-2 text-xs"
+              className="min-h-11 rounded-md border px-3 py-2 text-xs"
               style={{ borderColor: "var(--th-border)", color: "var(--th-text-secondary)" }}
               aria-pressed={handsFree}
             >
@@ -267,13 +279,12 @@ export default function VoicePage() {
               type="button"
               data-testid="voice-mic-button"
               onClick={() => void onMicPress()}
-              aria-label={capture.active ? t({ ko: "마이크 끄기", en: "Stop microphone" }) : t({ ko: "마이크 켜기", en: "Start microphone" })}
-              className="flex h-24 w-24 items-center justify-center rounded-full transition-transform"
+              aria-label={!capture.active ? t({ ko: "마이크 켜기", en: "Start microphone" }) : handsFree ? t({ ko: "마이크 끄기", en: "Stop microphone" }) : capture.recording ? t({ko:"녹음 마치기",en:"Finish recording"}) : t({ko:"녹음 시작",en:"Start recording"})}
+              className="flex h-20 w-20 shrink-0 items-center justify-center rounded-full border border-th-border-subtle transition-transform sm:h-24 sm:w-24"
               style={{
                 transform: `scale(${capture.recording ? ringScale : 1})`,
                 background: capture.active ? "var(--th-accent-primary)" : "var(--th-bg-surface)",
                 color: capture.active ? "white" : "var(--th-text-primary)",
-                boxShadow: "0 8px 24px rgba(0,0,0,0.18)",
               }}
             >
               {capture.active ? <Mic size={40} aria-hidden /> : <MicOff size={40} aria-hidden />}
@@ -282,7 +293,7 @@ export default function VoicePage() {
               type="button"
               onClick={speech.stop}
               disabled={!speaking}
-              className="rounded-full border p-3 disabled:opacity-40"
+              className="flex h-11 w-11 items-center justify-center rounded-md border disabled:opacity-40"
               style={{ borderColor: "var(--th-border)", color: "var(--th-text-secondary)" }}
               aria-label={t({ ko: "읽기 멈추기", en: "Stop speaking" })}
             >

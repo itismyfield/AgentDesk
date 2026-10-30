@@ -25,34 +25,27 @@ export function HeadlineMetricCard({
   deltaTone?: MetricDeltaTone;
 }) {
   return (
-    <article className="card min-h-[128px]">
-      <div className="card-body metric min-w-0">
+    <article className="min-w-0 overflow-hidden rounded-lg border border-th-border-subtle bg-th-bg-surface min-h-[128px]">
+      <div className="px-4 py-4 sm:px-5 flex min-w-0 flex-col min-w-0">
         <div className="flex items-start justify-between gap-3">
-          <div
-            className="card-title text-[10.5px] font-semibold uppercase tracking-[0.18em]"
-            style={{ color: "var(--th-text-muted)", cursor: "help" }}
-            data-tip={tip}
-            title={tip}
-            aria-label={`${title}: ${tip}`}
-          >
-            <span>{title}</span>
-            <Info
-              size={11}
-              style={{ color: "var(--th-text-muted)", flexShrink: 0 }}
-            />
-          </div>
+          <details className="min-w-0 flex-1">
+            <summary className="flex min-h-11 min-w-11 cursor-pointer list-none items-center gap-2 text-xs font-medium text-th-text-muted focus-visible:outline-2 focus-visible:outline-[var(--th-accent-primary)]">
+              <span>{title}</span><Info size={13} className="shrink-0" aria-hidden="true" />
+            </summary>
+            <p className="mt-1 text-xs leading-5 text-th-text-secondary">{tip}</p>
+          </details>
           {delta ? (
-            <span className={cx("delta", deltaTone ?? "flat")}>{delta}</span>
+            <span className={cx("inline-flex rounded px-1.5 py-1 font-mono text-[11px]", deltaTone === "up" ? "text-[var(--th-badge-emerald-text)]" : deltaTone === "down" ? "text-[var(--th-accent-danger)]" : "text-th-text-muted")}>{delta}</span>
           ) : null}
         </div>
         <div
-          className="metric-value mt-3"
+          className="min-w-0 text-[28px] font-semibold leading-9 tracking-tight tabular-nums [overflow-wrap:anywhere] mt-3"
           style={{ ...NUMERIC_STYLE, color: "var(--th-text-heading)" }}
         >
           {value}
         </div>
         <div
-          className="metric-sub mt-2 text-xs leading-5"
+          className="text-xs leading-5 text-th-text-muted mt-2 text-xs leading-5"
           style={{ color: "var(--th-text-muted)" }}
         >
           {sub}
@@ -72,9 +65,9 @@ export function CardHead({
   actions?: ReactNode;
 }) {
   return (
-    <div className="card-head">
+    <div className="flex flex-wrap items-start justify-between gap-3 border-b border-th-border-subtle px-4 py-4 sm:px-5">
       <div className="min-w-0">
-        <div className="card-title">{title}</div>
+        <h2 className="text-base font-semibold text-th-text-heading">{title}</h2>
         <div
           className="mt-1 text-[11px] leading-5"
           style={{ color: "var(--th-text-muted)" }}
@@ -108,7 +101,7 @@ export const numericBadgeStyle: CSSProperties = {
 export const positiveChipStyle: CSSProperties = {
   ...NUMERIC_STYLE,
   background: "color-mix(in oklch, var(--ok) 10%, transparent)",
-  color: "var(--ok)",
+  color: "var(--th-badge-emerald-text)",
   borderColor:
     "color-mix(in oklch, var(--ok) 20%, var(--th-border-subtle) 80%)",
 };

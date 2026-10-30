@@ -42,7 +42,7 @@ function DailyTokenTooltip({
 
   return (
     <div
-      className="rounded-xl border px-3 py-2 text-[11px] shadow-xl"
+      className="rounded-md border px-3 py-2 text-xs shadow-md"
       style={{
         background: "var(--th-card-bg)",
         borderColor: "var(--th-border-subtle)",

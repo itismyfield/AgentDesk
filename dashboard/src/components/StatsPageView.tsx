@@ -63,7 +63,6 @@ import {
   writePersistedAnalytics,
   writePersistedSkillRanking,
 } from "./stats/statsStorage";
-import { STATS_SHELL_STYLES } from "./stats/statsStyles";
 import {
   RefreshCw,
   ShieldAlert,
@@ -343,17 +342,16 @@ export default function StatsPageView({
   return (
     <div
       data-testid="stats-page"
-      className="page fade-in stats-shell mx-auto h-full w-full min-w-0 overflow-x-hidden overflow-y-auto animate-in fade-in duration-200"
+      className="h-full min-w-0 overflow-y-auto bg-th-bg-primary"
     >
-      <style>{STATS_SHELL_STYLES}</style>
-      <div className="page fade-in">
+      <div className="mx-auto w-full max-w-[88rem] min-w-0 px-4 py-5 sm:px-8 sm:py-7">
         <section className="space-y-[14px]">
-          <header data-testid="stats-page-header" className="page-header">
+          <header data-testid="stats-page-header" className="flex flex-wrap items-end justify-between gap-4 border-b border-th-border-subtle pb-5">
             <div className="min-w-0">
-              <h1 className="page-title">
+              <h1 className="text-2xl font-semibold tracking-tight text-th-text-heading">
                 {t(msg("통계", "Stats", "統計", "统计"))}
               </h1>
-              <p className="page-sub">
+              <p className="mt-2 text-xs leading-5 text-th-text-muted">
                 {t(
                   msg(
                     "토큰 / 비용 / 캐시 / 모델 분포를 한곳에서",
@@ -365,8 +363,8 @@ export default function StatsPageView({
               </p>
             </div>
 
-            <div className="page-controls">
-              <div className="seg" data-testid="stats-range-controls">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="inline-flex max-w-full flex-wrap gap-1 rounded-md border border-th-border-subtle p-1" data-testid="stats-range-controls">
                 {PERIOD_OPTIONS.map((option) => {
                   const active = option === period;
                   return (
@@ -374,7 +372,7 @@ export default function StatsPageView({
                       key={option}
                       data-testid={`stats-range-${option}`}
                       type="button"
-                      className={cx(active ? "active" : "", "min-w-[4.75rem]")}
+                      className={cx("min-h-11 min-w-[4.5rem] rounded px-3 text-xs text-th-text-muted", active && "bg-surface-medium text-th-text-primary")}
                       onClick={() => setPeriod(option)}
                       aria-pressed={active}
                     >
@@ -393,7 +391,7 @@ export default function StatsPageView({
               </div>
               <button
                 type="button"
-                className="chip-btn"
+                className="inline-flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-md border border-th-border-subtle bg-th-bg-surface px-3 py-2 text-xs text-th-text-primary hover:bg-surface-hover focus-visible:outline-2 focus-visible:outline-[var(--th-accent-primary)]"
                 data-testid="stats-refresh-button"
                 onClick={() => setReloadKey((value) => value + 1)}
               >
@@ -409,8 +407,8 @@ export default function StatsPageView({
           </header>
 
           {hasLoadError ? (
-            <div className="card stats-inline-alert">
-              <div className="card-body flex items-start gap-3">
+            <div className="min-w-0 overflow-hidden rounded-lg border border-th-border-subtle bg-th-bg-surface border-[var(--th-accent-warn)]">
+              <div className="px-4 py-4 sm:px-5 flex items-start gap-3">
                 <ShieldAlert
                   size={18}
                   style={{
@@ -449,6 +447,7 @@ export default function StatsPageView({
             numberFormatter={numberFormatter}
             rangeDays={rangeDays}
             summary={summary}
+            loading={loading}
             tokenMomentumDelta={tokenMomentumDelta}
             cacheSavingsDelta={cacheSavingsDelta}
           />
@@ -471,7 +470,7 @@ export default function StatsPageView({
             />
           </div>
 
-          <div className="grid grid-2 items-stretch [&>div]:flex [&>div>article]:flex-1">
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 items-stretch [&>div]:flex [&>div>article]:flex-1">
             <div data-testid="stats-model-share">
               <ModelDistributionCard
                 t={t}
@@ -511,7 +510,7 @@ export default function StatsPageView({
             <ReceiptWidget t={t} />
           </div>
 
-          <div className="grid grid-extra">
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <div data-testid="stats-provider-share">
               <ProviderDistributionCard
                 t={t}
@@ -519,7 +518,7 @@ export default function StatsPageView({
                 segments={providerSegments}
               />
             </div>
-            <div className="stack">
+            <div className="grid min-w-0 gap-4">
               <div data-testid="stats-skill-usage">
                 <SkillUsageCard
                   t={t}
