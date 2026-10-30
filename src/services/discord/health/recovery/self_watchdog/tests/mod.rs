@@ -5,6 +5,7 @@ use super::WatchdogMode;
 use super::driver;
 use super::policy::{Decision, Reason, WatchdogPolicy, WatchdogState};
 use crate::services::hang_forensics::{self, Breadcrumbs, HealthProbeOutcome};
+use std::cell::{Cell, RefCell};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -56,9 +57,20 @@ impl DumpGate {
         &self,
         calls: Arc<Mutex<usize>>,
     ) -> impl FnOnce() -> Result<(), String> + Send + 'static {
+        self.helper_started(calls, None)
+    }
+
+    fn helper_started(
+        &self,
+        calls: Arc<Mutex<usize>>,
+        started: Option<mpsc::Sender<()>>,
+    ) -> impl FnOnce() -> Result<(), String> + Send + 'static {
         let gate = self.0.clone();
         move || {
             *calls.lock().unwrap() += 1;
+            if let Some(started) = started {
+                let _ = started.send(());
+            }
             let (lock, changed) = &*gate;
             let mut released = lock.lock().unwrap();
             while !*released {
@@ -66,6 +78,48 @@ impl DumpGate {
             }
             Ok(())
         }
+    }
+}
+
+struct ManualClock {
+    at: Cell<Instant>,
+    spawn_cost: Duration,
+    dump_started: Option<mpsc::Receiver<()>>,
+    waits: RefCell<Vec<Duration>>,
+}
+
+impl driver::Clock for &ManualClock {
+    fn now(&self) -> Instant {
+        self.at.get()
+    }
+
+    fn sleep_until(&self, at: Instant) {
+        self.at.set(self.at.get().max(at));
+    }
+
+    fn spawn_dump(
+        &self,
+        dump: impl FnOnce() -> Result<(), String> + Send + 'static,
+    ) -> std::io::Result<mpsc::Receiver<Result<(), String>>> {
+        let result = driver::Clock::spawn_dump(&driver::SystemClock, dump)?;
+        self.at.set(self.at.get() + self.spawn_cost);
+        Ok(result)
+    }
+
+    fn wait_dump(
+        &self,
+        result: mpsc::Receiver<Result<(), String>>,
+        remaining: Duration,
+    ) -> Result<Result<(), String>, mpsc::RecvTimeoutError> {
+        self.dump_started
+            .as_ref()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(5))
+            .expect("dump helper must start");
+        assert!(matches!(result.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        self.waits.borrow_mut().push(remaining);
+        self.at.set(self.at.get() + remaining);
+        Err(mpsc::RecvTimeoutError::Timeout)
     }
 }
 
@@ -78,117 +132,72 @@ impl Drop for DumpGate {
 }
 
 fn deadline_crossing(late_response: bool, blocked_dump: bool) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
-    let addr = listener.local_addr().unwrap().to_string();
     let policy = policy();
     let started = Instant::now();
     let deadline = started + policy.blackout_limit;
-    let (request_tx, request_rx) = mpsc::channel();
-    let mut threads = Threads::default();
-    // Stop an unused listener before joining if a regression skips the probe.
-    let server_guard = TcpFixtureGuard::default();
-    let stopping = server_guard.0.clone();
-    threads.0.push(std::thread::spawn(move || {
-        let mut stream = loop {
-            if stopping.load(Ordering::Relaxed) {
-                return;
-            }
-            match listener.accept() {
-                Ok((stream, _)) => break stream,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                Err(error) => panic!("test listener failed: {error}"),
-            }
-        };
-        stream.set_nonblocking(false).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
-        let mut request = [0; 1024];
-        assert!(stream.read(&mut request).unwrap() > 0);
-        request_tx.send(Instant::now()).unwrap();
-        std::thread::sleep(
-            (deadline + Duration::from_millis(220)).saturating_duration_since(Instant::now()),
-        );
-        if late_response {
-            let _ = stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\n\r\n");
-        } else {
-            std::thread::sleep(Duration::from_millis(600));
-        }
-    }));
-    // Declare the dump release after thread cleanup so unwinding releases it before joining.
+    let observed_at = deadline + Duration::from_millis(220);
+    let clock = ManualClock {
+        at: Cell::new(started),
+        spawn_cost: Duration::ZERO,
+        dump_started: None,
+        waits: RefCell::new(Vec::new()),
+    };
     let gate = DumpGate::default();
     let dump_calls = Arc::new(Mutex::new(0));
     let dump = gate.helper(dump_calls.clone());
-    let (exit_tx, exit_rx) = mpsc::channel();
-    let decisions = Arc::new(Mutex::new(Vec::new()));
-    let recorded = decisions.clone();
     let mut state = WatchdogState::new(started);
     state.last_response_at = Some(started);
-    let (probe_tx, probe_rx) = mpsc::channel();
-    threads.0.push(std::thread::spawn(move || {
-        driver::run(
-            &policy,
-            WatchdogMode::Enforce,
-            state,
-            deadline - Duration::from_millis(150),
-            driver::Hooks {
-                probe: move |probe_deadline| {
-                    let _ = probe_tx.send(Instant::now());
-                    driver::tcp_probe(&addr, "127.0.0.1", probe_deadline)
-                },
-                snapshot: scheduling,
-                dump: move || {
-                    if blocked_dump { dump() } else { Ok(()) }
-                },
-                log: move |state: &WatchdogState,
-                           decision: &Decision,
-                           _: Option<&driver::Sample>,
-                           at| {
-                    recorded
-                        .lock()
-                        .unwrap()
-                        .push((*decision, at, state.fast_failures));
-                },
-                exit: move |reason, _| exit_tx.send((reason, Instant::now())).unwrap(),
+    let mut decision_at = None;
+    let mut exit = None;
+    driver::run_with_clock(
+        &policy,
+        WatchdogMode::Enforce,
+        state,
+        deadline - Duration::from_millis(150),
+        driver::Hooks {
+            probe: |probe_deadline| {
+                assert_eq!(
+                    probe_deadline, deadline,
+                    "transport receives the existing D cap"
+                );
+                assert_eq!(clock.at.get(), deadline - Duration::from_millis(150));
+                clock.at.set(observed_at);
+                let outcome = if late_response {
+                    HealthProbeOutcome::Responded { elapsed_ms: 370 }
+                } else {
+                    HealthProbeOutcome::NoResponse {
+                        elapsed_ms: 370,
+                        error: "read timeout".into(),
+                    }
+                };
+                (outcome, observed_at)
             },
-        );
-    }));
-    // The probe never connects or writes past its D-capped deadline, so a received request was
-    // started by the driver's clock; the server thread's own wake to read it may land after D.
-    let requested_at = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-    let probe_started_at = probe_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-    assert!(
-        probe_started_at < deadline,
-        "TCP request must actually start before D"
+            snapshot: scheduling,
+            dump: move || if blocked_dump { dump() } else { Ok(()) },
+            log: |state: &WatchdogState, decision: &Decision, _: Option<&driver::Sample>, at| {
+                assert_eq!(
+                    state.last_response_at,
+                    Some(started),
+                    "late bytes cannot reset D"
+                );
+                assert_eq!(
+                    *decision,
+                    Decision::Exit(Reason::HealthResponseBlackoutLimit)
+                );
+                decision_at = Some(at);
+            },
+            exit: |reason, at| exit = Some((reason, at)),
+        },
+        &clock,
     );
-    assert!(probe_started_at >= deadline - Duration::from_millis(170));
-    let (reason, exited_at) = exit_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("OS observer must see exit sink");
-    let records = decisions.lock().unwrap();
-    let (_, decided_at, _) = records
-        .iter()
-        .find(|(decision, _, _)| matches!(decision, Decision::Exit(_)))
-        .unwrap();
-    eprintln!(
-        "deadline crossing late={late_response} blocked_dump={blocked_dump}: probe_ms={} request_ms={} decision_ms={} exit_sink_ms={} D_ms=600 OS_allowance_ms=120",
-        probe_started_at.duration_since(started).as_millis(),
-        requested_at.duration_since(started).as_millis(),
-        decided_at.duration_since(started).as_millis(),
-        exited_at.duration_since(started).as_millis()
-    );
-    assert_eq!(reason, Reason::HealthResponseBlackoutLimit);
-    assert!(*decided_at >= deadline);
-    assert!(
-        *decided_at <= deadline + OS_ALLOWANCE,
-        "probe added waiting after D"
+    assert_eq!(decision_at, Some(observed_at));
+    assert_eq!(
+        exit,
+        Some((Reason::HealthResponseBlackoutLimit, observed_at))
     );
     assert!(
-        exited_at <= deadline + OS_ALLOWANCE,
-        "dump added waiting after D"
+        clock.waits.borrow().is_empty(),
+        "no additional wait after an overdue probe"
     );
     assert_eq!(
         *dump_calls.lock().unwrap(),
@@ -214,76 +223,66 @@ fn blackout_exit_skips_blocked_dump_helper() {
 
 #[test]
 fn fast_exit_waits_for_dump_only_within_remaining_blackout_budget() {
-    let policy = WatchdogPolicy {
-        dump_limit: Duration::from_secs(5),
-        ..policy()
-    };
-    let started = Instant::now();
-    let deadline = started + policy.blackout_limit;
-    let mut state = WatchdogState::new(started);
-    state.fast_failures = 2;
-    state.observed_failures = 2;
-    let (exit_tx, exit_rx) = mpsc::channel();
-    let (decision_tx, decision_rx) = mpsc::channel();
-    let mut threads = Threads::default();
-    let gate = DumpGate::default();
-    let dump_calls = Arc::new(Mutex::new(0));
-    let dump = gate.helper(dump_calls.clone());
-    // A plain timer for D gives this host's wake latency; macOS QoS coalescing can delay it.
-    let observed_d = std::thread::spawn(move || {
-        std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
-        Instant::now()
-    });
-    threads.0.push(std::thread::spawn(move || {
-        driver::run(
+    for spawn_cost in [Duration::from_millis(100), Duration::from_millis(200)] {
+        let policy = WatchdogPolicy {
+            dump_limit: Duration::from_secs(5),
+            ..policy()
+        };
+        let started = Instant::now();
+        let deadline = started + policy.blackout_limit;
+        let decision_time = deadline - Duration::from_millis(150);
+        let (sent, dump_started) = mpsc::channel();
+        let clock = ManualClock {
+            at: Cell::new(started),
+            spawn_cost,
+            dump_started: Some(dump_started),
+            waits: RefCell::new(Vec::new()),
+        };
+        let mut state = WatchdogState::new(started);
+        state.fast_failures = 2;
+        state.observed_failures = 2;
+        let gate = DumpGate::default();
+        let calls = Arc::new(Mutex::new(0));
+        let dump = gate.helper_started(calls.clone(), Some(sent));
+        let mut decision_at = None;
+        let mut exit = None;
+        driver::run_with_clock(
             &policy,
             WatchdogMode::Enforce,
             state,
-            deadline - Duration::from_millis(150),
+            decision_time,
             driver::Hooks {
-                // Socket refusal can consume the budget; this test isolates the dump wait.
                 probe: |_| {
                     (
                         HealthProbeOutcome::ConnectFailed {
                             elapsed_ms: 0,
                             error: "listener closed".into(),
                         },
-                        Instant::now(),
+                        clock.at.get(),
                     )
                 },
                 snapshot: scheduling,
                 dump,
-                log: move |_: &WatchdogState,
-                           decision: &Decision,
-                           _: Option<&driver::Sample>,
-                           at| {
-                    decision_tx.send((*decision, at)).unwrap();
+                log: |_: &WatchdogState, decision: &Decision, _: Option<&driver::Sample>, at| {
+                    assert_eq!(*decision, Decision::Exit(Reason::ListenerGone));
+                    decision_at = Some(at);
                 },
-                exit: move |reason, _| {
-                    exit_tx.send((reason, Instant::now())).unwrap();
-                },
+                exit: |reason, at| exit = Some((reason, at)),
             },
+            &clock,
         );
-    }));
-    let (decision, decided_at) = decision_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-    assert_eq!(decision, Decision::Exit(Reason::ListenerGone));
-    assert!(decided_at < deadline);
-    let (reason, exited_at) = exit_rx
-        .recv_timeout(Duration::from_millis(800))
-        .expect("dump helper cannot hold the exit sink past D");
-    let observed_d = observed_d.join().unwrap();
-    eprintln!(
-        "fast dump: decision_ms={} exit_sink_ms={} D_ms=600 D_timer_ms={} OS_allowance_ms=120",
-        decided_at.duration_since(started).as_millis(),
-        exited_at.duration_since(started).as_millis(),
-        observed_d.duration_since(started).as_millis()
-    );
-    assert_eq!(reason, Reason::ListenerGone);
-    assert_eq!(*dump_calls.lock().unwrap(), 1);
-    assert!(
-        exited_at <= observed_d + OS_ALLOWANCE,
-        "dump wait held the exit sink past the host's own wake for D"
-    );
+        let after_spawn = decision_time + spawn_cost;
+        assert_eq!(decision_at, Some(decision_time));
+        assert_eq!(
+            clock.waits.borrow().as_slice(),
+            &[deadline.saturating_duration_since(after_spawn)]
+        );
+        assert_eq!(
+            exit,
+            Some((Reason::ListenerGone, deadline.max(after_spawn)))
+        );
+        assert_eq!(*calls.lock().unwrap(), 1);
+    }
 }
 
 #[test]
