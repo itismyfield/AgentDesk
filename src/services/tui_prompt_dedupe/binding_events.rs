@@ -28,6 +28,7 @@ use claude_fold::Waiting;
 pub(crate) use claude_fold::binding_events_judged_since;
 pub(crate) mod codex;
 mod log_record;
+mod read_cache;
 use log_record::{Logged, LoggedRef};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -236,6 +237,7 @@ fn log_path(channel_id: u64) -> io::Result<Option<PathBuf>> {
     Ok(events_dir()?.map(|dir| dir.join(format!("{channel_id}.log"))))
 }
 
+#[derive(Clone)]
 struct LogRead<T = BindingEvent> {
     records: Vec<T>,
     lines: u64,
@@ -244,7 +246,11 @@ struct LogRead<T = BindingEvent> {
 }
 
 /// Complete lines only: a torn tail is left out, and a corrupt line is skipped with a warning.
-fn read_log<T: DeserializeOwned>(path: &Path) -> io::Result<LogRead<T>> {
+fn read_log<T: DeserializeOwned + Clone + Send + 'static>(path: &Path) -> io::Result<LogRead<T>> {
+    read_cache::read(path, || parse_log(path))
+}
+
+fn parse_log<T: DeserializeOwned>(path: &Path) -> io::Result<LogRead<T>> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
@@ -610,6 +616,7 @@ impl Writer {
             let file = OpenOptions::new().write(true).open(path)?;
             if read.complete_len < read.total_len {
                 // A crash mid-append left a line that was never published; drop it before appending.
+                read_cache::invalidate(path);
                 file.set_len(read.complete_len)?;
             }
             // Lines read back after a restart may predate their fsync, so make them durable before use.
@@ -916,6 +923,7 @@ impl Writer {
         published_at: Option<DateTime<Utc>>,
         codex_ownership: Option<&codex::Ownership>,
     ) -> io::Result<()> {
+        read_cache::invalidate(path);
         let logged = LoggedRef {
             event: record,
             verified,
@@ -994,6 +1002,9 @@ mod lane_tests;
 
 #[cfg(test)]
 mod codex_claim_tests;
+
+#[cfg(test)]
+mod cache_tests;
 
 #[cfg(all(test, unix))]
 mod admission_tests;
