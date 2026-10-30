@@ -218,7 +218,6 @@ impl Rig {
             allowed_tools: &[],
             cancel: Arc::new(CancelToken::new()),
             codex_observation: None,
-            remote_profile: None,
             tmux_session_name: pane,
             teardown: None,
             host: &host,
