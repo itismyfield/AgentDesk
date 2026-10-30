@@ -398,7 +398,7 @@ impl Owner {
 /// Binds follow their input: a queued index shifts with removals before it, an attempt moves with
 /// its input between head and retained, and a delivery leaves a settled bind.
 impl SnapshotV2 {
-    fn queued_digest(&self, index: usize) -> Option<String> {
+    pub(super) fn queued_digest(&self, index: usize) -> Option<String> {
         self.items.get(index).map(|item| digest(&canonical(item)))
     }
 

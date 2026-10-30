@@ -26,16 +26,15 @@ pub(crate) struct Owner {
     pub(crate) fault: Fault,
     /// Ticket admissions committed while their caller saw Pending, with the outcome owed to it.
     unacknowledged: Vec<(String, source_admission::Admitted)>,
-    /// The front message the drive handed to a turn by exact ticket and original; one claim spends it.
-    front_grant: Option<u64>,
+    /// The front the drive handed to a turn by exact ticket and original; one owner claim spends it.
+    front_grant: Option<Front>,
 }
 
-/// What a turn claim is to the owner: the granted front, a source it holds, or none of its own.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ClaimClass {
-    OwnerFront,
-    OwnerHeld,
-    NonOwner,
+/// The owner's unattempted front as the drive hands it on: its slot's ticket and the original.
+pub(crate) type Front = (Option<String>, PendingQueueItem);
+
+fn is_front(a: &Front, b: &Front) -> bool {
+    a.0 == b.0 && same(&a.1, &b.1)
 }
 
 impl Owner {
@@ -222,44 +221,50 @@ impl Owner {
         })
     }
 
-    /// The unattempted queue front and the ticket whose receipt names it.
-    pub(crate) fn front(&self) -> Option<(Ticket, PendingQueueItem)> {
-        let front = self.snapshot.items.first()?;
+    /// The unattempted queue front, named by the ticket bound to its slot; a migrated or partly
+    /// admitted front has none and still runs, without settling any ticket.
+    pub(crate) fn front(&self) -> Option<Front> {
         if self.snapshot.head_injection.is_some() {
             return None;
         }
-        let receipts = self.snapshot.admission_receipts.iter();
-        let tickets =
-            receipts.filter_map(|r| Ticket::new(r.strip_prefix("tk:")?.rsplit_once(':')?.0).ok());
-        let ticket = tickets
-            .into_iter()
-            .find(|t| self.ticket_original(t).is_some_and(|o| same(&o, front)))?;
-        Some((ticket, front.clone()))
+        let original = self.snapshot.items.first()?.clone();
+        let item = self.snapshot.queued_digest(0)?;
+        let ticket = self
+            .snapshot
+            .admission_binds
+            .iter()
+            .find_map(|b| match &b.at {
+                BindAt::Queued { index: 0, item: at } if *at == item => Some(
+                    b.receipt
+                        .strip_prefix("tk:")?
+                        .rsplit_once(':')?
+                        .0
+                        .to_string(),
+                ),
+                _ => None,
+            });
+        Some((ticket, original))
     }
 
-    /// Lets the next claim for exactly this ticket's original at the front start a turn.
-    pub(crate) fn grant_front(
-        &mut self,
-        ticket: &Ticket,
-        original: &PendingQueueItem,
-    ) -> Result<(), String> {
+    /// Lets one owner claim presenting exactly this front start a turn.
+    pub(crate) fn grant_front(&mut self, front: &Front) -> Result<(), String> {
         match self.front() {
-            Some((at, front)) if at == *ticket && same(&front, original) => {
-                self.front_grant = Some(front.message_id);
+            Some(now) if is_front(&now, front) => {
+                self.front_grant = Some(now);
                 Ok(())
             }
             _ => Err("not the owner's unattempted front".into()),
         }
     }
 
-    /// A message ID is no execution right: only the granted front starts, and any source the owner
-    /// holds, queued, attempted, retained or settled, never starts beside it.
-    pub(crate) fn claim_class(&mut self, message: u64) -> ClaimClass {
-        let front = self.front().map(|(_, front)| front.message_id);
-        if self.front_grant == Some(message) && front == Some(message) {
-            self.front_grant = None;
-            return ClaimClass::OwnerFront;
-        }
+    /// Spends the grant, in the caller's actor turn, only on the exact front it named.
+    pub(crate) fn claim_front(&mut self, front: &Front) -> bool {
+        let granted = self.front_grant.take().is_some_and(|g| is_front(&g, front));
+        granted && self.front().is_some_and(|now| is_front(&now, front))
+    }
+
+    /// Whether any source the owner holds, queued, attempted, retained or settled, is `message`.
+    fn holds(&self, message: u64) -> bool {
         let s = &self.snapshot;
         let attempts = s
             .head_injection
@@ -276,29 +281,24 @@ impl Owner {
             t.identity.primary == message
                 || t.identity.sources.iter().any(|x| x.message_id == message)
         });
-        if held.any(names) || settled {
-            ClaimClass::OwnerHeld
-        } else {
-            ClaimClass::NonOwner
-        }
+        held.any(names) || settled
     }
 
-    /// Whether this owner refuses a turn claim for `message`: its granted front starts, a source it
-    /// holds never does, and another claim keeps V1's order behind the queue and an attempted head.
+    /// Whether this owner refuses a turn claim for `message`: only an owner claim presenting its
+    /// granted front starts it, a source it holds never does, and another claim keeps V1's order.
     pub(crate) fn blocks_claim(
         &mut self,
         message: u64,
+        owner: Option<&Front>,
         order: crate::services::turn_orchestrator::TurnAdmissionOrder,
     ) -> bool {
         use crate::services::turn_orchestrator::TurnAdmissionOrder;
-        match self.claim_class(message) {
-            ClaimClass::OwnerFront => false,
-            ClaimClass::OwnerHeld => true,
-            ClaimClass::NonOwner => {
-                self.snapshot.head_injection.is_some()
-                    || (order != TurnAdmissionOrder::Immediate && !self.snapshot.items.is_empty())
-            }
+        if let Some(front) = owner {
+            return front.1.message_id != message || !self.claim_front(front);
         }
+        self.holds(message)
+            || self.snapshot.head_injection.is_some()
+            || (order != TurnAdmissionOrder::Immediate && !self.snapshot.items.is_empty())
     }
 
     pub(crate) fn json(&self) -> Result<serde_json::Value, String> {

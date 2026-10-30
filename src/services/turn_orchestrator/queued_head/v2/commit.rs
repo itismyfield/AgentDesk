@@ -17,6 +17,16 @@ impl Owner {
         if self.pending.is_some() {
             return Err("commit unknown: recovery required".into());
         }
+        // A grant names one queue front; a commit that removes or replaces queued items revokes it.
+        let (was, now) = (&self.snapshot.items, &next.items);
+        if now.len() < was.len()
+            || was
+                .first()
+                .zip(now.first())
+                .is_some_and(|(a, b)| !same(a, b))
+        {
+            self.front_grant = None;
+        }
         let candidate = serde_json::to_string_pretty(&next).map_err(|e| e.to_string())?;
         let actual = read(&self.path)?;
         if actual != self.bytes {

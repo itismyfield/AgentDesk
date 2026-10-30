@@ -368,7 +368,7 @@ fn a_v2_owner_starts_only_its_granted_front_and_never_a_held_source() {
                         let owner = slot.as_mut().ok_or("no owner")?;
                         Ok(claims
                             .into_iter()
-                            .map(|(id, order)| owner.blocks_claim(id, order))
+                            .map(|(id, order)| owner.blocks_claim(id, None, order))
                             .collect::<Vec<_>>())
                     })
                     .await
@@ -397,21 +397,27 @@ fn a_v2_owner_starts_only_its_granted_front_and_never_a_held_source() {
             blocks(&retained, vec![(300, now), (900, now)]).await,
             [true, false]
         );
-        queued
-            .v2_request(|slot| {
+        let spent = queued
+            .v2_request(move |slot| {
                 let owner = slot.as_mut().ok_or("no owner")?;
-                let (ticket, original) = owner.front().ok_or("no front")?;
-                assert_eq!(ticket, Ticket::new("front-100").unwrap());
-                let other = Ticket::new("front-101").unwrap();
-                assert!(owner.grant_front(&other, &original).is_err());
-                owner.grant_front(&ticket, &original)
+                let front = owner.front().ok_or("no front")?;
+                assert_eq!(front.0.as_deref(), Some("front-100"));
+                let other = (Some("front-101".to_string()), front.1.clone());
+                assert!(owner.grant_front(&other).is_err());
+                owner.grant_front(&front)?;
+                Ok([
+                    owner.blocks_claim(101, None, behind),
+                    owner.blocks_claim(100, None, behind),
+                    owner.blocks_claim(100, Some(&front), behind),
+                    owner.blocks_claim(100, Some(&front), behind),
+                ])
             })
             .await
             .unwrap();
         assert_eq!(
-            blocks(&queued, vec![(101, behind), (100, behind), (100, behind)]).await,
-            [true, false, true],
-            "the granted front starts once"
+            spent,
+            [true, true, false, true],
+            "a message ID never spends the grant; the exact front starts once"
         );
         let (attempted, _) = owned(&registry, 7_272_645, &[100], false).await;
         attempt_head(&attempted).await;
