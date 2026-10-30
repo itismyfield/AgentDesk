@@ -289,9 +289,12 @@ src/
 │   │   ├── postgres_tests.rs
 │   │   └── writes.rs
 │   ├── server_campaigns/
+│   │   ├── evidence_store.rs
+│   │   ├── evidence_store_tests.rs
 │   │   ├── mod.rs
 │   │   ├── read.rs
 │   │   ├── recovery_tests.rs
+│   │   ├── stage_store_tests.rs
 │   │   ├── storage_tests.rs
 │   │   └── write.rs
 │   ├── session_observability/
@@ -801,12 +804,20 @@ src/
 │   │   ├── adk_resources_tests.rs
 │   │   ├── adk_workspace.rs
 │   │   ├── adk_workspace_tests.rs
+│   │   ├── candidate_seal.rs
+│   │   ├── candidate_seal_tests.rs
 │   │   ├── control.rs
 │   │   ├── control_tests.rs
 │   │   ├── definition.rs
 │   │   ├── definition_tests.rs
+│   │   ├── evidence.rs
+│   │   ├── evidence_gate.rs
+│   │   ├── evidence_gate_tests.rs
+│   │   ├── evidence_tests.rs
 │   │   ├── execution_pin.rs
 │   │   ├── execution_pin_tests.rs
+│   │   ├── failure_budget.rs
+│   │   ├── failure_budget_tests.rs
 │   │   ├── main_integration.rs
 │   │   ├── main_integration_tests.rs
 │   │   ├── mod.rs
@@ -814,6 +825,10 @@ src/
 │   │   ├── model_tests.rs
 │   │   ├── profile.rs
 │   │   ├── profile_tests.rs
+│   │   ├── review_gate.rs
+│   │   ├── review_gate_tests.rs
+│   │   ├── stage_fsm.rs
+│   │   ├── stage_fsm_tests.rs
 │   │   ├── verification_run.rs
 │   │   ├── verification_run_tests.rs
 │   │   ├── verification_runner.rs

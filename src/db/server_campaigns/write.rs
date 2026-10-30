@@ -1,4 +1,36 @@
 use super::*;
+use crate::services::campaign_execution::verification_run::Slot;
+
+fn kept<T: PartialEq>(old: &Slot<T>, new: &Slot<T>) -> bool {
+    old.bound().is_none_or(|value| new.bound() == Some(value))
+}
+
+// V origins, filled slots, fixed prerequisites and attempt execution facts never change once stored.
+fn preserves_execution_facts(old: &Run, new: &Run) -> bool {
+    let verifications = old.verifications.iter().all(|(id, before)| {
+        new.verifications.get(id).is_some_and(|after| {
+            before.origin == after.origin
+                && kept(&before.subject, &after.subject)
+                && kept(&before.plan, &after.plan)
+                && before.phases.len() == after.phases.len()
+                && before.phases.iter().zip(&after.phases).all(|(a, b)| {
+                    (&a.id, &a.action_id) == (&b.id, &b.action_id) && kept(&a.input, &b.input)
+                })
+        })
+    });
+    let prerequisites = old
+        .prerequisites
+        .iter()
+        .all(|(id, before)| new.prerequisites.get(id) == Some(before));
+    let attempts = old.attempts.iter().all(|(id, before)| {
+        before.execution.is_none()
+            || new
+                .attempts
+                .get(id)
+                .is_some_and(|after| after.execution == before.execution)
+    });
+    verifications && prerequisites && attempts
+}
 
 fn number(value: u64) -> StoreResult<i64> {
     i64::try_from(value).map_err(|_| StoreError::InconsistentState)
@@ -15,6 +47,12 @@ pub(super) async fn persist(
     let revision = number(state.definition_revision)?;
     if decision.events.is_empty() {
         return Ok(());
+    }
+    if let (Some(old), Some(run)) = (previous.and_then(|p| p.run.as_ref()), &state.run)
+        && old.id == run.id
+        && !preserves_execution_facts(old, run)
+    {
+        return Err(StoreError::InconsistentState);
     }
     if let Some(run) = &state.run {
         sqlx::query(
