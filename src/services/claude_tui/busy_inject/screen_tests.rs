@@ -91,3 +91,36 @@ fn captured_46_column_boxes_ignore_the_cut_footer() {
         assert!(plain.ends_with("  ⏵⏵ bypass permissions on · 1 shell, 1\n"));
     }
 }
+
+#[test]
+fn measured_interrupt_footers_share_the_existing_layout_reader() {
+    let streaming = include_str!("../../../../tests/fixtures/tui_input/claude-2.1.311-c2-busy.txt");
+    let shell = include_str!("../../../../tests/fixtures/tui_input/claude-2.1.311-b2-busy.txt");
+    for capture in [streaming, shell] {
+        assert_eq!(screen::read(capture).footer, screen::Footer::Normal);
+    }
+    for footer in [
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+        "  ⏵⏵ bypass permissions on · 1 shell, 4 monitors",
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt",
+        "  ⏵⏵ bypass permissions on · 2 shells · esc to interrupt · ↓ to manage",
+    ] {
+        assert_eq!(
+            screen::read(&boxed("❯ ", footer)).footer,
+            screen::Footer::Normal,
+            "{footer}"
+        );
+    }
+    for footer in [
+        "  ⏵⏵ bypass permissions on · 1 shell, 1",
+        "  ⏵⏵ bypass permissions on · 0 shells · esc to interrupt",
+        "  ⏵⏵ bypass permissions on · esc to interrupt in prose",
+        "  ⏵⏵ bypass permissions on · esc to interrupt · unknown",
+    ] {
+        assert_eq!(
+            screen::read(&boxed("❯ ", footer)).footer,
+            screen::Footer::Unknown,
+            "{footer}"
+        );
+    }
+}

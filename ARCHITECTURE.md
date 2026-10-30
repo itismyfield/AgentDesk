@@ -3525,6 +3525,7 @@ src/
 │   ├── termination_audit/
 │   │   └── host_terminate.rs
 │   ├── tmux_common/
+│   │   ├── claude_footer.rs
 │   │   ├── host_marker.rs
 │   │   └── session_markers.rs
 │   ├── tmux_turn_liveness/

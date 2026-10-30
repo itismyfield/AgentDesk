@@ -3,6 +3,8 @@
 
 mod paste_footer;
 
+use crate::services::tmux_common::claude_footer::{self, BYPASS_FOOTER as FOOTER};
+
 /// Draft chips whose payload is not measured to survive a stash round trip.
 const UNMEASURED_CHIPS: [&str; 3] = [
     "[Image #",
@@ -11,8 +13,6 @@ const UNMEASURED_CHIPS: [&str; 3] = [
 ];
 const STASHED: &str = "\u{203a} stashed";
 const MIN_BORDER: usize = 10;
-/// The footer measured under the box with `--dangerously-skip-permissions`.
-const FOOTER: &str = "  \u{23f5}\u{23f5} bypass permissions on";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::services::claude_tui) enum Composer {
@@ -229,32 +229,7 @@ fn status_line(row: &str) -> bool {
 /// The bypass-mode footer with a measured suffix, or the folded-paste hint; a footer cut at
 /// the edge or carrying an unmeasured suffix is not.
 fn footer(row: &str) -> bool {
-    let Some(rest) = row.strip_prefix(FOOTER) else {
-        return paste_footer::recognized(row);
-    };
-    let rest = rest.strip_prefix(" (shift+tab to cycle)").unwrap_or(rest);
-    match rest.strip_prefix(" \u{b7} ") {
-        None => rest.is_empty(),
-        Some("esc to interrupt") => true,
-        Some(pill) => pill.split(", ").all(counted),
-    }
-}
-
-/// `1 monitor` or `4 monitors`: a whole count whose noun agrees with it, as Claude Code 2.1.299
-/// names background shells, monitors, local agents and mixed tasks.
-fn counted(phrase: &str) -> bool {
-    let Some((count, noun)) = phrase.split_once(' ') else {
-        return false;
-    };
-    let whole =
-        !count.is_empty() && !count.starts_with('0') && count.bytes().all(|b| b.is_ascii_digit());
-    let noun = if count == "1" {
-        Some(noun)
-    } else {
-        noun.strip_suffix('s')
-    };
-    let stems = ["shell", "monitor", "local agent", "background task"];
-    whole && noun.is_some_and(|noun| stems.contains(&noun))
+    claude_footer::bypass_interrupt(row).is_some() || paste_footer::recognized(row)
 }
 
 fn composer(rows: &[Row]) -> Composer {
