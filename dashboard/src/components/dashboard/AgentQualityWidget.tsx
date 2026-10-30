@@ -4,7 +4,7 @@ import * as api from "../../api/client";
 import { localeName } from "../../i18n";
 import AgentAvatar from "../AgentAvatar";
 import { getRankTier, type TFunction } from "./model";
-import { cx, dashboardBadge, dashboardCard, DashboardEmptyState } from "./ui";
+import { cx, dashboardBadge, DashboardEmptyState } from "./ui";
 
 // ── Agent Quality Widget ──
 

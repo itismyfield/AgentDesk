@@ -456,10 +456,6 @@ export default function StatsPageView({
             <ClaudeAccountsWidget t={t} />
           </div>
 
-          {/* Codex review (PR #1258): grid-feature uses 2fr 1fr on desktop;
-              after hiding DailyCacheHitCard the second column was empty.
-              Switch to a single-column container so the chart spans the
-              row. Re-introduce grid-feature when the cache card returns. */}
           <div data-testid="stats-daily-token-chart">
             <DailyTokenCompositionCard
               t={t}

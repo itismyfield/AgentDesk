@@ -26,7 +26,7 @@ export function HeadlineMetricCard({
 }) {
   return (
     <article className="min-w-0 overflow-hidden rounded-lg border border-th-border-subtle bg-th-bg-surface min-h-[128px]">
-      <div className="px-4 py-4 sm:px-5 flex min-w-0 flex-col min-w-0">
+      <div className="px-4 py-4 sm:px-5 flex min-w-0 flex-col">
         <div className="flex items-start justify-between gap-3">
           <details className="min-w-0 flex-1">
             <summary className="flex min-h-11 min-w-11 cursor-pointer list-none items-center gap-2 text-xs font-medium text-th-text-muted focus-visible:outline-2 focus-visible:outline-[var(--th-accent-primary)]">
@@ -45,7 +45,7 @@ export function HeadlineMetricCard({
           {value}
         </div>
         <div
-          className="text-xs leading-5 text-th-text-muted mt-2 text-xs leading-5"
+          className="mt-2 text-xs leading-5 text-th-text-muted"
           style={{ color: "var(--th-text-muted)" }}
         >
           {sub}
