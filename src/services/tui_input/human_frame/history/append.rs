@@ -263,7 +263,7 @@ pub(crate) fn bind_record(
     }
     let file = file_id(&meta);
     let stamp = incarnation(session, transcript);
-    update(|store| {
+    let apply = |store: &mut Store| {
         let candidate = |e: &Entry| {
             e.provider == "codex"
                 && e.session == session
@@ -321,16 +321,17 @@ pub(crate) fn bind_record(
             index
         };
         Ok(Some(projected(&store.entries[index])))
-    })
-    .ok()
-    .flatten()
-    .map(|attempt| Receipt {
-        session: session.into(),
-        attempt,
-        prompt,
-        row,
-        native_turn: turn,
-    })
+    };
+    super::update_append(apply)
+        .ok()
+        .flatten()
+        .map(|attempt| Receipt {
+            session: session.into(),
+            attempt,
+            prompt,
+            row,
+            native_turn: turn,
+        })
 }
 
 pub(crate) fn bind_record_at(
@@ -345,7 +346,7 @@ pub(crate) fn bind_record_at(
     {
         return None;
     }
-    let store = read(&path().ok()?).ok()?;
+    let store = super::readable_append(&path().ok()?).ok()?;
     let mut sessions = store
         .entries
         .iter()
@@ -372,7 +373,7 @@ pub(crate) fn bind_open_record(
     }
     let source = file_id(&file.metadata().ok()?);
     let (session, transcript) = {
-        let store = read(&path().ok()?).ok()?;
+        let store = super::readable_append(&path().ok()?).ok()?;
         let mut owners = store
             .entries
             .iter()
@@ -388,7 +389,7 @@ pub(crate) fn bind_open_record(
 }
 
 pub(crate) fn projection(provider: &str, session: &str, id: &str) -> Option<Projection> {
-    let store = read(&path().ok()?).ok()?;
+    let store = super::readable_append(&path().ok()?).ok()?;
     let entry = store
         .entries
         .iter()
@@ -397,25 +398,24 @@ pub(crate) fn projection(provider: &str, session: &str, id: &str) -> Option<Proj
 }
 
 pub(crate) fn settle(id: &str, session: &str, row: &str, decision: Decision) -> bool {
-    update(|store| {
-        let Some(e) = store
-            .entries
-            .iter_mut()
-            .find(|e| e.provider == "codex" && e.session == session && e.id == id && current(e))
-        else {
-            return Ok(false);
+    let apply =
+        |store: &mut Store| {
+            let Some(e) = store.entries.iter_mut().find(|e| {
+                e.provider == "codex" && e.session == session && e.id == id && current(e)
+            }) else {
+                return Ok(false);
+            };
+            let a = e.append.as_mut().expect("current append");
+            if !a.receipt.as_ref().is_some_and(|r| r.row == row) {
+                return Ok(false);
+            }
+            if let Some(previous) = a.decision {
+                return Ok(previous == decision);
+            }
+            a.decision = Some(decision);
+            Ok(true)
         };
-        let a = e.append.as_mut().expect("current append");
-        if !a.receipt.as_ref().is_some_and(|r| r.row == row) {
-            return Ok(false);
-        }
-        if let Some(previous) = a.decision {
-            return Ok(previous == decision);
-        }
-        a.decision = Some(decision);
-        Ok(true)
-    })
-    .unwrap_or(false)
+    super::update_append(apply).unwrap_or(false)
 }
 
 pub(super) fn observed(
@@ -465,16 +465,18 @@ pub(crate) fn pending_candidate(
     prompts: &[String],
     row: Option<&str>,
 ) -> bool {
-    path().and_then(|p| read(&p)).is_ok_and(|store| {
-        matches!(
-            observed(&store, provider, session, prompts, row),
-            Some(ObservedAttempt::Pending)
-        )
-    })
+    path()
+        .and_then(|p| super::readable_append(&p))
+        .is_ok_and(|store| {
+            matches!(
+                observed(&store, provider, session, prompts, row),
+                Some(ObservedAttempt::Pending)
+            )
+        })
 }
 
 pub(crate) fn replay_start(session: &str, transcript: &Path) -> Option<u64> {
-    let store = read(&path().ok()?).ok()?;
+    let store = super::readable_append(&path().ok()?).ok()?;
     store
         .entries
         .iter()

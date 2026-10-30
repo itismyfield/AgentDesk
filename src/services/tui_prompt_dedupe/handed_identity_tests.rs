@@ -550,3 +550,157 @@ fn response_native_turn_must_match_the_receipt_before_first_settlement() {
         }
     }
 }
+
+/// What the real observer and the append readers make of one V1 append state, in the V1 store or
+/// after the history migrated to V2, before and after the observer's memory restarts.
+fn migrated_append_world(v2: bool, state: &str, separator: bool) -> (Vec<String>, usize) {
+    let ledger = crate::config::runtime_root()
+        .unwrap()
+        .join("runtime/injected_frames.json");
+    let _ = std::fs::remove_file(&ledger);
+    let tmux = format!("migrated-{state}-{v2}-{}", uuid::Uuid::new_v4());
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("native.jsonl");
+    std::fs::write(&path, "").unwrap();
+    lifecycle(&path, "task_started", "t0");
+    let framed = frame("migrated body  ");
+    let prompt = if separator {
+        format!("draft note\n{framed}")
+    } else {
+        framed.clone()
+    };
+    let nonce = "mmmm7504";
+    let mut rx = subscribe_observed_prompts();
+    assert!(register_injected_steer(
+        "codex",
+        &tmux,
+        nonce,
+        "t0",
+        Some(761)
+    ));
+    register_append(&path, &tmux, nonce, "t0", &framed, separator, Some(761));
+    let turn = if state == "handed" { "t1" } else { "t0" };
+    if state == "handed" {
+        lifecycle(&path, "task_complete", "t0");
+        lifecycle(&path, "task_started", "t1");
+    }
+    if state != "admitted" {
+        bind(&path, &tmux, &prompt, "row-m", turn, false);
+    }
+    match state {
+        "joined" => assert!(append::settle(
+            nonce,
+            &tmux,
+            "row-m",
+            append::Decision::Joined
+        )),
+        "handed" => assert!(append::settle(
+            nonce,
+            &tmux,
+            "row-m",
+            append::Decision::HandedPending
+        )),
+        _ => {}
+    }
+    let restart = || {
+        let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+        state
+            .injected_steer_by_tmux
+            .remove(&PromptKey::new("codex", &tmux));
+        state
+            .native_turn_by_tmux
+            .remove(&PromptKey::new("codex", &tmux));
+    };
+    restart();
+    if v2 {
+        let empty = serde_json::json!({"namespace":"migration","head_injection":null,
+            "retained_inputs":[],"terminal_identities":[]});
+        history::v2::Registry::runtime()
+            .unwrap()
+            .project(&empty)
+            .unwrap();
+        let file = std::fs::read_to_string(&ledger).unwrap();
+        assert!(file.starts_with("{\"version\":2,"), "{file}");
+    }
+    let mut out = Vec::new();
+    let read = |out: &mut Vec<String>| {
+        let p = append::projection("codex", &tmux, nonce);
+        out.push(format!(
+            "projection={:?}",
+            p.map(|p| (
+                p.target_turn,
+                p.admitted,
+                p.bound,
+                p.row,
+                p.native_turn,
+                p.decision
+            ))
+        ));
+        out.push(format!(
+            "replay_start={:?}",
+            append::replay_start(&tmux, &path)
+        ));
+        out.push(format!(
+            "pending={}",
+            append::pending_candidate("codex", &tmux, std::slice::from_ref(&prompt), None)
+        ));
+    };
+    read(&mut out);
+    if state == "admitted" {
+        // The native observer's bind of the completion row, as the rollout reader calls it.
+        let record = serde_json::json!({"type":"event_msg","payload":{
+            "type":"item_completed","turn_id":turn,
+            "item":{"type":"UserMessage","id":"row-m","content":[{"type":"text","text":prompt,"text_elements":[]}]}
+        }});
+        let start = std::fs::metadata(&path).unwrap().len();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(file, "{record}").unwrap();
+        let bound = append::bind_record_at(&path, start, &record);
+        out.push(format!(
+            "bind={:?}",
+            bound.map(|r| (r.attempt.id, r.row, r.native_turn))
+        ));
+    }
+    let at = Utc::now();
+    for _ in 0..2 {
+        out.push(format!(
+            "observed={:?}",
+            observe_codex_prompt_in_turn_at(&tmux, &prompt, Some("row-m"), Some(turn), at)
+        ));
+        read(&mut out);
+        restart();
+    }
+    let published = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter(|event| event.tmux_session_name == tmux)
+        .count();
+    (out, published)
+}
+
+/// A V1 append migrated into V2 binds, settles, replays and is observed as in V1 for every stored
+/// state, with or without a draft before the frame, and is handed off at most once.
+#[test]
+fn a_migrated_v1_append_binds_settles_and_replays_as_in_v1() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let _serial = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    for state in ["admitted", "bound", "joined", "handed"] {
+        for separator in [false, true] {
+            let (v1, v1_published) = migrated_append_world(false, state, separator);
+            let (v2, v2_published) = migrated_append_world(true, state, separator);
+            assert_eq!(v2, v1, "{state} separator={separator}");
+            assert_eq!(v2_published, v1_published, "{state} separator={separator}");
+            assert!(
+                v2_published <= 1,
+                "{state} separator={separator}: {v2_published}"
+            );
+            assert!(
+                v1.iter()
+                    .any(|line| line.contains("bound: true")
+                        || line.contains(", true, Some(\"row-m\")")),
+                "{state} separator={separator}: the append reaches its row: {v1:?}"
+            );
+        }
+    }
+}

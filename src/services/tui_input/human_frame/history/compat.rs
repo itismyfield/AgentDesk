@@ -13,14 +13,49 @@ pub(super) enum HistoryRead {
     ReadOnlyV2(HistoryV2),
 }
 
+/// What the V2 writer always opens with (`v2::Snapshot::encode`); a V1 store opens with
+/// `entries`, and any other version or spacing takes the full read.
+const V2_PREFIX: &[u8] = b"{\"version\":2,";
+
+#[cfg(test)]
+thread_local! {
+    /// (full-document parses, prefix bytes read, envelope inspections) on this thread, for the
+    /// cost tests.
+    pub(super) static COST: std::cell::Cell<(usize, usize, usize)> =
+        const { std::cell::Cell::new((0, 0, 0)) };
+}
+
+/// The one place history text becomes a value.
+pub(super) fn parse(raw: &[u8]) -> Result<serde_json::Value, String> {
+    #[cfg(test)]
+    COST.with(|cost| {
+        let (parses, bytes, inspects) = cost.get();
+        cost.set((parses + 1, bytes, inspects));
+    });
+    serde_json::from_slice(raw).map_err(|e| e.to_string())
+}
+
+/// `inspect`'s envelope check on a parsed value: whether it is V2.
+pub(super) fn envelope(value: &serde_json::Value) -> Result<bool, String> {
+    if value.get("version").is_none() {
+        return Ok(false);
+    }
+    if value.get("version").and_then(serde_json::Value::as_u64) != Some(2)
+        || value.get("entries").is_some()
+    {
+        return Err("unsupported frame history envelope".into());
+    }
+    Ok(true)
+}
+
 pub(super) fn inspect(raw: &[u8]) -> Result<HistoryRead, String> {
-    let value: serde_json::Value = serde_json::from_slice(raw).map_err(|e| e.to_string())?;
-    if value.get("version").is_some() {
-        if value.get("version").and_then(serde_json::Value::as_u64) != Some(2)
-            || value.get("entries").is_some()
-        {
-            return Err("unsupported frame history envelope".into());
-        }
+    #[cfg(test)]
+    COST.with(|cost| {
+        let (parses, bytes, inspects) = cost.get();
+        cost.set((parses, bytes, inspects + 1));
+    });
+    let value = parse(raw)?;
+    if envelope(&value)? {
         let snapshot: HistoryV2 = serde_json::from_value(value).map_err(|e| e.to_string())?;
         return Ok(HistoryRead::ReadOnlyV2(snapshot));
     }
@@ -29,7 +64,36 @@ pub(super) fn inspect(raw: &[u8]) -> Result<HistoryRead, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Whether the file opens with the V2 writer's envelope, reading at most 16 bytes. It only
+/// refuses early what the full read refuses anyway; it never vouches for a valid V2 file.
+pub(super) fn v2_prefix(path: &Path) -> std::io::Result<bool> {
+    use std::io::Read;
+    let mut head = [0u8; 16];
+    let mut file = std::fs::File::open(path)?;
+    let mut filled = 0;
+    while filled < head.len() {
+        match file.read(&mut head[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    #[cfg(test)]
+    COST.with(|cost| {
+        let (parses, bytes, inspects) = cost.get();
+        cost.set((parses, bytes + filled, inspects));
+    });
+    Ok(head[..filled].starts_with(V2_PREFIX))
+}
+
 pub(super) fn read_legacy(path: &Path) -> Result<Store, String> {
+    match v2_prefix(path) {
+        Ok(true) => return Err("frame history V2 is read-only".into()),
+        Ok(false) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Store::default()),
+        Err(e) => return Err(e.to_string()),
+    }
     let raw = match std::fs::read(path) {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Store::default()),
@@ -46,7 +110,7 @@ pub(super) fn read_legacy(path: &Path) -> Result<Store, String> {
 }
 
 fn v2_value(path: &Path) -> Option<serde_json::Value> {
-    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    let value = parse(&std::fs::read(path).ok()?).ok()?;
     (value.get("version")?.as_u64() == Some(2) && value.get("entries").is_none()).then_some(value)
 }
 
