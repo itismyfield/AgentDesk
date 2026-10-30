@@ -1,5 +1,4 @@
 use super::*;
-use crate::services::discord::footer_retirement;
 use crate::services::discord::placeholder_live_events::footer_activity_tests::{
     START, six_tool_fixture,
 };
@@ -16,10 +15,6 @@ fn isolated(test: &str) -> bool {
         .args(["--exact", &name, "--nocapture", "--test-threads=1"])
         .env(CHILD, "1")
         .env("AGENTDESK_SINGLE_MESSAGE_PANEL", "1")
-        .env(
-            crate::services::tui_o::cutover::test_override::CHILD_ENV,
-            "1",
-        )
         .env(
             crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
             "[]",
@@ -91,7 +86,6 @@ fn retired_watcher_rollover_raw_history_keeps_rich_budget_and_visible_progress()
         let mut expected = Vec::new();
         let mut sent = 0;
         {
-            let _legacy = footer_retirement::legacy_for_test();
             while let Some((plan, split)) = plan_watcher_streaming_rollover_with_session_banner(
                 &shared,
                 fx.channel,
@@ -269,7 +263,6 @@ fn retired_watcher_failed_tail_patch_keeps_the_visible_rollover_anchor_in_cache(
             None,
         );
         let (plan, split) = {
-            let _legacy = footer_retirement::legacy_for_test();
             plan_watcher_streaming_rollover_with_session_banner(
                 &shared,
                 fx.channel,

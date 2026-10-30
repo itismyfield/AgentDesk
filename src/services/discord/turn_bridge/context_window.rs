@@ -275,8 +275,8 @@ mod tests {
     }
 }
 
-pub(super) async fn compact_lower_bound(api_port: u16) -> u64 {
-    crate::services::discord::adk_session::fetch_context_thresholds(api_port)
+pub(super) async fn compact_lower_bound(pg_pool: Option<&sqlx::PgPool>) -> u64 {
+    crate::services::discord::adk_session::fetch_context_thresholds(pg_pool)
         .await
         .compact_lower_bound_tokens
 }

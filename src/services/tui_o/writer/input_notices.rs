@@ -23,11 +23,10 @@ pub struct NoticeOrigin {
     pub execution_nonce: String,
 }
 
-/// The writer derives Claude terminal-input notices only where this build reads their ledger format
-/// and the channel's transcript turns were confirmed; other channels keep their live owner.
+/// The writer derives Claude terminal-input notices only where the channel's transcript turns
+/// were confirmed; other channels keep their live owner.
 pub(crate) fn writer_owns(channel: u64, provider: ShadowProvider) -> bool {
-    crate::services::tui_o::store::input_notice_floor::READER_SUPPORTED
-        && provider == ShadowProvider::Claude
+    provider == ShadowProvider::Claude
         && crate::services::tui_o::turn_mode::transcript_turns(channel)
 }
 

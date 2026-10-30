@@ -17,7 +17,6 @@ use crate::services::provider::{
     spawn_cancel_watchdog,
 };
 use crate::services::provider_runtime::{LineStreamEvent, spawn_line_stream_reader};
-use crate::services::remote::RemoteProfile;
 
 pub const DEFAULT_GEMINI_MODEL: &str = "gemini-2.5-flash";
 const GEMINI_RESUME_LATEST: &str = "latest";
@@ -212,17 +211,12 @@ pub fn execute_command_streaming(
     system_prompt: Option<&str>,
     allowed_tools: Option<&[String]>,
     cancel_token: Option<Arc<CancelToken>>,
-    remote_profile: Option<&RemoteProfile>,
     _tmux_session_name: Option<&str>,
     _report_channel_id: Option<u64>,
     _report_provider: Option<ProviderKind>,
     model: Option<&str>,
     _compact_percent: Option<u64>,
 ) -> Result<(), String> {
-    if remote_profile.is_some() {
-        return Err(remote_profile_not_supported_message());
-    }
-
     let (resume_selector, selector_source) = normalize_resume_selector_with_source(session_id)
         .map_err(|error| {
             log_gemini_selector_resolution(
@@ -673,10 +667,6 @@ fn finalize_gemini_attempt(
 
 fn is_cancelled(token: Option<&CancelToken>) -> bool {
     cancel_requested(token)
-}
-
-fn remote_profile_not_supported_message() -> String {
-    "NotSupported: Gemini provider does not support remote execution yet. Remove `remote_profile` or use a provider with remote support.".to_string()
 }
 
 fn compose_gemini_prompt(

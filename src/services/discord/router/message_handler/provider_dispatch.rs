@@ -11,7 +11,6 @@ use crate::services::discord::replay_policy::permit::EffectTarget;
 use crate::services::discord::router::intake_dispatch::replay_admission::ReplayStart;
 use crate::services::provider::{CancelToken, LegacyDispatchKind, ProviderKind};
 use crate::services::provider_teardown::TeardownClearance;
-use crate::services::remote::RemoteProfile;
 use crate::services::stream_json_cli::{
     ConfiguredToolPolicy, ProviderTurnRequest, execute_streaming,
 };
@@ -30,7 +29,6 @@ pub(super) struct StreamingTurn<'a> {
     pub allowed_tools: &'a [String],
     pub cancel: Arc<CancelToken>,
     pub codex_observation: Option<&'a InflightObs>,
-    pub remote_profile: Option<&'a RemoteProfile>,
     pub tmux_session_name: Option<&'a str>,
     /// Host-guard verdict for the turn's tmux teardowns, judged before spawn.
     pub teardown: Option<&'a TeardownClearance>,
@@ -54,11 +52,10 @@ pub(super) async fn observe_codex_turn(
     provider: &ProviderKind,
     channel: u64,
     tmux: Option<&str>,
-    remote: bool,
     host: &TurnHost,
     token: &Arc<CancelToken>,
 ) -> Option<InflightObs> {
-    if !matches!(provider, ProviderKind::Codex) || remote || !matches!(host, TurnHost::Tmux) {
+    if !matches!(provider, ProviderKind::Codex) || !matches!(host, TurnHost::Tmux) {
         return None;
     }
     crate::services::discord::codex_absence::observe_turn(channel, tmux?, token).await
@@ -243,12 +240,7 @@ pub(super) fn execute(
     sender: Sender<StreamMessage>,
 ) -> Result<(), String> {
     let start = if start.receipt_id().is_some() {
-        let scope = replay_scope::selected(
-            turn.provider,
-            turn.channel_id,
-            turn.remote_profile.is_some(),
-            turn.tmux_session_name,
-        );
+        let scope = replay_scope::selected(turn.provider, turn.channel_id, turn.tmux_session_name);
         start
             .in_scope(scope.driver.as_str(), scope.runtime)
             .map_err(|error| format!("replay driver scope changed: {error:?}"))?
@@ -337,7 +329,6 @@ pub(super) fn execute(
                             turn.system_prompt,
                             Some(turn.allowed_tools),
                             Some(turn.cancel),
-                            turn.remote_profile,
                             turn.tmux_session_name,
                             turn.teardown,
                             Some(turn.channel_id),
@@ -362,7 +353,7 @@ pub(super) fn execute(
                 system_prompt: turn.system_prompt,
                 allowed_tools: Some(turn.allowed_tools),
                 cancel_token: Some(turn.cancel),
-                remote_profile: turn.remote_profile,
+                remote_profile: None,
                 tmux_session_name: turn.tmux_session_name,
                 teardown: turn.teardown,
                 report_channel_id: Some(turn.channel_id),
@@ -383,7 +374,6 @@ pub(super) fn execute(
             turn.system_prompt,
             Some(turn.allowed_tools),
             Some(turn.cancel),
-            turn.remote_profile,
             turn.tmux_session_name,
             Some(turn.channel_id),
             Some(turn.provider.clone()),
@@ -398,7 +388,6 @@ pub(super) fn execute(
             turn.system_prompt,
             Some(turn.allowed_tools),
             Some(turn.cancel),
-            turn.remote_profile,
             turn.tmux_session_name,
             Some(turn.channel_id),
             Some(turn.provider.clone()),
@@ -414,7 +403,6 @@ pub(super) fn execute(
             turn.system_prompt,
             Some(turn.allowed_tools),
             Some(turn.cancel),
-            turn.remote_profile,
             turn.tmux_session_name,
             Some(turn.channel_id),
             Some(turn.provider.clone()),
@@ -714,7 +702,6 @@ fn stream_json_request(turn: &StreamingTurn<'_>) -> Result<ProviderTurnRequest, 
         turn.working_dir.into(),
         turn.session_id,
         turn.force_fresh,
-        turn.remote_profile.cloned(),
         Duration::from_secs(300),
         Some(Arc::clone(&turn.cancel)),
         Some(turn.channel_id),
@@ -801,7 +788,6 @@ pub(super) mod tests {
             allowed_tools: &tools,
             cancel: Arc::clone(&cancel),
             codex_observation: None,
-            remote_profile: None,
             tmux_session_name: None,
             teardown: None,
             host: &TurnHost::Tmux,
@@ -896,7 +882,6 @@ pub(super) mod tests {
                 allowed_tools: &[],
                 cancel: Arc::new(CancelToken::new()),
                 codex_observation: None,
-                remote_profile: None,
                 tmux_session_name: Some("AgentDesk-claude-dash"),
                 teardown: None,
                 host: &host,

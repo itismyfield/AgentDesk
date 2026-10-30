@@ -251,60 +251,6 @@ pub(crate) fn clear_failure(
     remove_injection_file(&path, &root)
 }
 
-fn consume_failure(
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    operation: DiscordFailureOperation,
-) -> bool {
-    if !channel_is_allowed(channel_id.get()) {
-        return false;
-    }
-    let Some(root) = injection_root() else {
-        return false;
-    };
-    let Some(path) = injection_path(provider, channel_id.get(), operation) else {
-        return false;
-    };
-    let _lock = INJECTION_LOCK
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    sweep_expired_locked(&root, chrono::Utc::now().timestamp());
-    let Ok(raw) = std::fs::read_to_string(&path) else {
-        return false;
-    };
-    let Ok(mut state) = serde_json::from_str::<InjectionState>(&raw) else {
-        remove_injection_file(&path, &root);
-        return false;
-    };
-    if state.expires_at_unix <= chrono::Utc::now().timestamp() || state.remaining == 0 {
-        remove_injection_file(&path, &root);
-        return false;
-    }
-    state.remaining -= 1;
-    if state.remaining == 0 {
-        remove_injection_file(&path, &root);
-    } else if let Ok(payload) = serde_json::to_string(&state)
-        && super::runtime_store::atomic_write(&path, &payload).is_err()
-    {
-        remove_injection_file(&path, &root);
-    }
-    true
-}
-
-pub(in crate::services::discord) fn consume_send_failure(
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-) -> bool {
-    consume_failure(provider, channel_id, DiscordFailureOperation::Send)
-}
-
-pub(in crate::services::discord) fn consume_delete_failure(
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-) -> bool {
-    consume_failure(provider, channel_id, DiscordFailureOperation::Delete)
-}
-
 pub(crate) async fn delete_message(
     registry: &HealthRegistry,
     provider: &ProviderKind,
@@ -406,10 +352,10 @@ mod tests {
             arm_failure(ProviderKind::Claude, 44, DiscordFailureOperation::Send, 1,),
             Err("E2E Discord controls are disabled")
         );
-        assert!(!consume_send_failure(
-            &ProviderKind::Claude,
-            ChannelId::new(44)
-        ));
+        assert!(
+            injection_path(&ProviderKind::Claude, 44, DiscordFailureOperation::Send)
+                .is_some_and(|path| !path.exists())
+        );
     }
 
     #[test]
@@ -434,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn injection_is_scoped_consumed_and_clearable() {
+    fn injection_is_scoped_persisted_and_clearable() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -448,26 +394,10 @@ mod tests {
                 .is_some_and(|path| path.exists()),
             "the injection must survive a dcserver restart in the runtime store"
         );
-        assert!(!consume_send_failure(
-            &ProviderKind::Codex,
-            ChannelId::new(44)
-        ));
-        assert!(!consume_send_failure(
-            &ProviderKind::Claude,
-            ChannelId::new(45)
-        ));
-        assert!(consume_send_failure(
-            &ProviderKind::Claude,
-            ChannelId::new(44)
-        ));
-        assert!(consume_send_failure(
-            &ProviderKind::Claude,
-            ChannelId::new(44)
-        ));
-        assert!(!consume_send_failure(
-            &ProviderKind::Claude,
-            ChannelId::new(44)
-        ));
+        assert!(
+            injection_path(&ProviderKind::Codex, 44, DiscordFailureOperation::Send)
+                .is_some_and(|path| !path.exists())
+        );
 
         arm_failure(ProviderKind::Claude, 44, DiscordFailureOperation::Delete, 1).unwrap();
         assert!(clear_failure(
@@ -475,20 +405,15 @@ mod tests {
             44,
             DiscordFailureOperation::Delete,
         ));
-        assert!(!consume_delete_failure(
+        assert!(
+            injection_path(&ProviderKind::Claude, 44, DiscordFailureOperation::Delete)
+                .is_some_and(|path| !path.exists())
+        );
+        assert!(!clear_failure(
             &ProviderKind::Claude,
-            ChannelId::new(44)
+            44,
+            DiscordFailureOperation::Delete,
         ));
-
-        arm_failure(ProviderKind::Claude, 44, DiscordFailureOperation::Delete, 1).unwrap();
-        expire_for_tests(&ProviderKind::Claude, 44, DiscordFailureOperation::Delete);
-        let expired_path =
-            injection_path(&ProviderKind::Claude, 44, DiscordFailureOperation::Delete).unwrap();
-        assert!(!consume_delete_failure(
-            &ProviderKind::Claude,
-            ChannelId::new(44)
-        ));
-        assert!(!expired_path.exists());
     }
 
     #[test]

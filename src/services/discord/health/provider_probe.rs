@@ -250,10 +250,8 @@ fn tui_output_gateway(provider_name: &str, role: ProviderRuntimeRole) -> Option<
         ProviderRuntimeRole::Standby => HostRole::Standby,
         ProviderRuntimeRole::Worker => HostRole::Runner,
     };
-    let channels = |boot: Option<&BootChannels>| {
-        let enabled = crate::services::tui_o::cutover::writer_enabled();
-        topology::gateway_only_channels(enabled, provider_name, role, boot)
-    };
+    let channels =
+        |boot: Option<&BootChannels>| topology::gateway_only_channels(provider_name, role, boot);
     #[cfg(test)]
     return crate::services::tui_o::cutover::test_override::with_channels(channels);
     #[cfg(not(test))]

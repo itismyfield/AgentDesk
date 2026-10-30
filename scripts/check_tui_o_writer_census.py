@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """E4 census gate: pin every Legacy Discord send site and every O cutover gate.
 
-While `O_TUI_WRITER` is off Legacy is the only TUI body writer. When it flips,
 O owns the body on delegated channels and Legacy must skip its body send at the
-gated funnels. This gate keeps that cut honest on every intermediate head:
+gated funnels; channels outside the boot writer selection stay on Legacy. This gate
+keeps that cut honest on every intermediate head:
 
   (a) EXPECTED_PRIMITIVES pins, per file under src/services/discord/, the exact
       production count of each send/edit primitive. A new or moved send fails.
@@ -16,8 +16,8 @@ gated funnels. This gate keeps that cut honest on every intermediate head:
       function, fails its file's pins. CUT_D/CUT_T files and UNREACH_G gate
       files need at least one claim; R-EVID files (real delivery evidence
       readers) must have none of either, so a delegated verdict can never be
-      read as Posted evidence. The `O_TUI_WRITER` token itself may appear only
-      in the O_TUI_WRITER_FILES.
+      read as Posted evidence. The retired `O_TUI_WRITER` switch token may
+      appear only in the O_TUI_WRITER_FILES.
   (d) A claim is the `claim_then_send` helper, which claims just before the
       send it runs; its closure is the transport call alone. `claim_then_send_held`
       also hands back the claimed send for a body sent in more steps. `claim_at_post`
@@ -99,7 +99,7 @@ TURN_MARK_RES = {
 }
 DEFN_RE = re.compile(r"\bfn\s+$")
 FN_RE = re.compile(r"\bfn\s+(\w+)")
-# The switch is defined in topology.rs; the intake gate and its health probe read it there.
+# The retired build switch lived in these files; the token may not reappear elsewhere.
 O_TUI_WRITER_FILES = {
     "src/services/tui_o/cutover.rs",
     "src/services/tui_o/cutover/channel_gate.rs",
@@ -183,7 +183,6 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "recovery_engine/herdr_row_end.rs": {"relay_recovered_terminal_text_to_placeholder": 2},
     "recovery_engine/restore_inflight.rs": {"relay_recovered_terminal_text_to_placeholder": 2},
     "recovery_engine/terminal_text_idempotency.rs": {"replace_long_message*": 2, "send_long_message*": 2},
-    "recovery_engine/two_message_panel.rs": {"send_channel_message*": 1},
     "recovery_paths/controller_cutover.rs": {"deliver_turn_output*": 1},
     "recovery_paths/restart.rs": {"relay_recovered_body_to_placeholder": 1},
     "router/herdr_consent.rs": {"send_channel_message*": 1},
@@ -233,7 +232,6 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "turn_bridge/mod.rs": {"TurnGateway::edit_message": 1},
     "turn_bridge/single_message_footer.rs": {".send_message": 1},
     "turn_bridge/status_panel.rs": {".edit_message": 1, "TurnGateway::edit_message": 1, "edit_channel_message*": 2},
-    "turn_bridge/status_panel/fallback.rs": {".send_message": 1, "send_channel_message*": 2},
     "turn_bridge/stream_loop/types.rs": {"replace_message_with_outcome": 1},
     "turn_bridge/stream_tick/o_panel.rs": {"TurnGateway::edit_message": 1},
     "turn_bridge/stream_tick/output.rs": {"TurnGateway::edit_message": 3, "TurnGateway::send_message": 1},
@@ -307,7 +305,6 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "recovery_engine/herdr_row_end.rs": ("1-D-notice", "KEEP_NONBODY"),
     "recovery_engine/restore_inflight.rs": ("1-D-notice", "KEEP_NONBODY"),
     "recovery_engine/terminal_text_idempotency.rs": ("W32", "COV:W32"),
-    "recovery_engine/two_message_panel.rs": ("1-D-panel", "KEEP_NONBODY"),
     "recovery_paths/controller_cutover.rs": ("W30a", "COV:W30"),
     "recovery_paths/restart.rs": ("W35", "CUT_D", "recovery_engine/terminal_text_idempotency.rs"),
     "router/herdr_consent.rs": ("HERDR-CONSENT", "KEEP_NONBODY"),
@@ -358,7 +355,6 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "turn_end_summary.rs": ("TURN-END", "KEEP_NONBODY"),
     "turn_bridge/single_message_footer.rs": ("W16", "KEEP_NONBODY"),
     "turn_bridge/status_panel.rs": ("1-B-panel", "KEEP_NONBODY"),
-    "turn_bridge/status_panel/fallback.rs": ("1-B-panel", "KEEP_NONBODY"),
     "turn_bridge/stream_loop/types.rs": ("W10e", "COV:W10"),
     "turn_bridge/stream_tick/o_panel.rs": ("1-B-panel", "KEEP_NONBODY"),
     "turn_bridge/stream_tick/output.rs": ("W14", "CUT_D"),

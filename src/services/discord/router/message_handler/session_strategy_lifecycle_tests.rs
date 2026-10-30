@@ -28,7 +28,6 @@ async fn launch_runtime_refresh_preserves_pending_reset_when_path_is_stale() {
                 history: Vec::new(),
                 pending_uploads: Vec::new(),
                 cleared: false,
-                remote_profile_name: None,
                 channel_id: Some(channel_id.get()),
                 channel_name: Some("resume-reset".to_string()),
                 category_name: None,
@@ -73,7 +72,6 @@ async fn launch_runtime_refresh_rejects_rebound_session_when_target_path_is_stal
                 history: Vec::new(),
                 pending_uploads: Vec::new(),
                 cleared: false,
-                remote_profile_name: None,
                 channel_id: Some(channel_id.get()),
                 channel_name: Some("resume-stale-target".to_string()),
                 category_name: None,
@@ -122,7 +120,6 @@ async fn claimed_runtime_refresh_adopts_late_resume_binding() {
                 history: Vec::new(),
                 pending_uploads: Vec::new(),
                 cleared: false,
-                remote_profile_name: None,
                 channel_id: Some(channel_id.get()),
                 channel_name: Some("resume-late-binding".to_string()),
                 category_name: None,
@@ -1645,7 +1642,6 @@ fn verified_codex_followup_rejects_missing_identity_before_legacy_observation_or
             &ProviderKind::Codex,
             channel,
             Some(&tmux),
-            false,
             cwd,
             id,
         )
@@ -1663,7 +1659,6 @@ fn verified_codex_followup_rejects_missing_identity_before_legacy_observation_or
             &ProviderKind::Codex,
             channel,
             Some("legacy-no-pane"),
-            false,
             None,
             None
         )
@@ -1721,7 +1716,6 @@ fn verified_codex_queued_followup_waits_before_dequeue_with_unknown_permission()
                 history: Vec::new(),
                 pending_uploads: Vec::new(),
                 cleared: false,
-                remote_profile_name: None,
                 channel_id: Some(channel.get()),
                 channel_name: Some(name.to_owned()),
                 category_name: None,

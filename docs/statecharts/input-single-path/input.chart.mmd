@@ -1,0 +1,80 @@
+---
+title: "One input path for a Claude TUI channel, issue 7272 (landed code + 4f design)"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Driving
+    lg1: Unsure
+    lg2: Waiting
+    lg3: Restart
+    lg4: Breaks DraftSafe
+    lg5: Breaks BusyInputLands or HeldNotDropped or NoDeadlock or NoSilentLoss in some cases
+    lg6: Path to the BusyInputLands or DraftSafe or HeldNotDropped or NoDeadlock or NoSilentLoss bug
+  }
+  class lg0 teal
+  class lg1 pink
+  class lg2 blue
+  class lg3 orange
+  class lg4 breaks
+  class lg5 mayBreak
+  class lg6 bugPath
+  s0: No input waiting (Claude busy)
+  s1: No input waiting (Claude idle)
+  s2: Inputs wait, no drive running (Claude busy)
+  s3: Inputs wait, no drive running (Claude idle)
+  s4: Input taken, composer being read (Claude busy)
+  s5: Input taken, composer being read (Claude idle)
+  s6: Ready to paste without C-s
+  s7: Keys started, pasting
+  s8: Pasted, Enter next
+  s9: Server restarting, line kept on disk
+  s10: Write uncertain, waits for the deadline, draft sent with an input
+  s11: Maybe sent, nobody watching it
+  [*] --> s0
+  [*] --> s1
+  s0 --> s2: a Discord input is admitted
+  s1 --> s3: a Discord input is admitted
+  s2 --> s4: the drive takes the first input
+  s3 --> s3: a Discord input is admitted
+  s3 --> s5: the drive takes the first input
+  s4 --> s6: the composer reads empty or cannot be read
+  s5 --> s5: you type a draft or a modal opens
+  s6 --> s7: the attempt is armed (C-s if parking)
+  s5 --> s6: the drive pastes behind text in the composer [unread, or no C-s allowed] or the composer reads empty or cannot be read
+  s5 --> s1: the drive is held [modal, or unread when that holds]
+  s7 --> s8: the input is pasted
+  s8 --> s0: Enter is applied, settled as sent
+  s7 --> s9: the server restarts
+  s0 --> s1: you /stop the turn
+  s9 --> s11: boot recovery runs
+  s8 --> s10: the paste or Enter is uncertain
+  s11 --> s11: the drive wakes and finds nothing it may take or 30 s pass or you type a draft or a modal opens or the modal closes
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 mayBreak
+  class s1 bugPath
+  class s2 blue
+  class s2 bugPath
+  class s3 blue
+  class s3 bugPath
+  class s4 teal
+  class s4 bugPath
+  class s5 teal
+  class s5 bugPath
+  class s6 teal
+  class s6 bugPath
+  class s7 teal
+  class s7 bugPath
+  class s8 teal
+  class s8 bugPath
+  class s9 orange
+  class s9 bugPath
+  class s10 pink
+  class s10 breaks
+  class s10 bugPath
+  class s11 pink
+  class s11 mayBreak
+  class s11 bugPath
