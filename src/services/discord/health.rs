@@ -125,12 +125,12 @@ pub(crate) use transcript_binding_stall::attach_o_stall_reasons;
 #[cfg(all(test, unix))]
 pub(crate) use transcript_binding_stall::o_verdict_for_tests;
 #[cfg(all(test, unix))]
-pub(in crate::services::discord) use turn_deliver::CodexLedger;
-#[cfg(all(test, unix))]
 pub(crate) use turn_deliver::inject_tests::{
     InjectPane, claim_kinded, end_turn, inject_hook, queue_texts, register_inject_runtime,
     send_meanwhile, start_without_gateway,
 };
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use turn_deliver::{BusyInput, CodexLedger, herdr_busy};
 pub use turn_deliver::{
     ExternalHold, HumanInputDelivery, HumanInputError, HumanInputRequest, deliver_human_input,
     external_turn_hold_for_start,
