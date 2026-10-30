@@ -901,18 +901,73 @@ async fn later_branch_migrations_upgrade_a_main_database_already_at_0161_pg() {
         assert!(row.2);
         assert_eq!(row.1.as_slice(), migration.checksum.as_ref());
     }
-    let schema: bool = sqlx::query_scalar(
-        "SELECT to_regclass('channel_home_preferences') IS NOT NULL
-            AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='intake_outbox' AND column_name='routing_plan')
-            AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='intake_session_owners' AND column_name='routing_notice_outbox_id')",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert!(
-        schema,
-        "the later files' schema must exist after the upgrade"
+    // Each later file leaves at least one object of its own, so a partial apply cannot pass.
+    let expected: [(i64, &[&str]); 5] = [
+        (
+            163,
+            &["table:channel_home_preferences", "constraint:chp_mode_home"],
+        ),
+        (
+            164,
+            &[
+                "column:intake_outbox.routing_state",
+                "constraint:intake_routing_custody_shape",
+                "function:intake_routing_bundle_pinned",
+            ],
+        ),
+        (
+            165,
+            &[
+                "column:message_outbox.output_origin",
+                "constraint:message_outbox_output_origin_object",
+            ],
+        ),
+        (
+            166,
+            &[
+                "column:intake_session_owners.routing_cleanup",
+                "constraint:execution_cleanup_shape",
+                "function:intake_routing_bundle_retention",
+            ],
+        ),
+        (
+            167,
+            &[
+                "column:intake_outbox.routing_plan",
+                "column:intake_session_owners.routing_notice_outbox_id",
+                "constraint:input_fallback_plan_object",
+                "constraint:input_fallback_notice_pointer",
+            ],
+        ),
+    ];
+    assert_eq!(
+        expected
+            .iter()
+            .map(|(version, _)| *version)
+            .collect::<Vec<_>>(),
+        later,
+        "every later file needs its own schema check"
     );
+    for (version, objects) in expected {
+        for object in objects {
+            let (kind, name) = object.split_once(':').unwrap();
+            let query = match kind {
+                "table" => "SELECT to_regclass($1) IS NOT NULL",
+                "column" => {
+                    "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name=split_part($1,'.',1) AND column_name=split_part($1,'.',2))"
+                }
+                "constraint" => "SELECT EXISTS(SELECT 1 FROM pg_constraint WHERE conname=$1)",
+                "function" => "SELECT EXISTS(SELECT 1 FROM pg_proc WHERE proname=$1)",
+                other => panic!("unknown schema object kind {other}"),
+            };
+            let present: bool = sqlx::query_scalar(query)
+                .bind(name)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert!(present, "{version:04} must leave {object}");
+        }
+    }
     let status = postgres::migration_status(&pool).await.unwrap();
     assert!(status.pending_versions.is_empty());
     assert!(status.missing_from_resolved.is_empty());
