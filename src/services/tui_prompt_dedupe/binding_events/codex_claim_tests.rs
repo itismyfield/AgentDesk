@@ -7,6 +7,31 @@ use codex::{Claim, ClaimEvidence, Decision, Fold};
 const PARENT: &str = "019e660d-4859-7522-9cee-8ba7c4e7c743";
 const OTHER: &str = "019e660d-4859-7522-9cee-8ba7c4e7c744";
 
+#[test]
+fn cached_ownership_sees_pending_and_verified_appends() {
+    let fixture = Fixture::new();
+    let source = fixture.source(PARENT);
+    let claim = fixture.claim(&source);
+    for _ in 0..3 {
+        assert!(
+            codex::read_ownership(&fixture.context)
+                .unwrap()
+                .verified
+                .is_none()
+        );
+    }
+    fixture.commit(&claim, Decision::Pending);
+    let pending = codex::read_ownership(&fixture.context).unwrap();
+    assert_eq!(pending.pending.len(), 1);
+    assert!(pending.verified.is_none());
+    fixture.commit(&claim, Decision::Verified(source.clone()));
+    for _ in 0..3 {
+        let verified = codex::read_ownership(&fixture.context).unwrap();
+        assert!(verified.pending.is_empty());
+        assert_eq!(verified.verified.unwrap().source, source);
+    }
+}
+
 struct Fixture {
     root: tempfile::TempDir,
     context: BindingContext,

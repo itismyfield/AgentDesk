@@ -31,7 +31,7 @@ export default function CampaignNeighborhood({ nodes: allNodes, selectedId, visi
   return <div className="campaign-neighborhood">
     <div className="campaign-row"><strong>{tr("선행 → 선택 작업 → 후속", "Dependencies → selected → dependents")}</strong><span>{context.visible.length}/{context.upstream.length + context.downstream.length + 1}</span></div>
     <p className="campaign-muted">{tr("선택한 작업과 직접 연결된 작업입니다. 다른 그룹·필터 밖의 연결도 함께 표시합니다.", "Direct connections to the selected task, including other groups and tasks outside your filters.")}</p>
-    <div className="campaign-graph-scroll"><div className="campaign-graph" style={{ height: Math.max(260, rows * 72 + 40) }} aria-label={tr("선택 작업 의존 관계", "Selected task dependencies")}>
+    <div className="campaign-graph-scroll"><div className="campaign-graph [&_.react-flow\_\_controls]:shadow-none [&_.react-flow\_\_controls-button]:!bg-th-bg-surface [&_.react-flow\_\_controls-button]:!text-th-text-primary [&_.react-flow\_\_controls-button]:!border-th-border-subtle [&_.react-flow\_\_attribution]:!bg-th-bg-surface [&_.react-flow\_\_attribution_a]:!text-th-text-muted" style={{ height: Math.max(260, rows * 72 + 40) }} aria-label={tr("선택 작업 의존 관계", "Selected task dependencies")}>
       <ReactFlow key={selectedId} nodes={graphNodes} edges={edges} fitView minZoom={0.65} maxZoom={1.2} nodesDraggable={false} nodesConnectable={false} onNodeClick={(_, node) => onSelect(node.id)}>
         <Background /><Controls showInteractive={false} />
       </ReactFlow>

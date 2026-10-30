@@ -214,7 +214,9 @@ pub(super) async fn handle_cancel_prompt_replace(
             preserve_inflight_for_cleanup_retry = true;
         } else if o_body_cut {
             // O posts the partial body; only the Legacy placeholder goes, the /stop lifecycle stays.
-            let _ = gateway.delete_message(channel_id, current_msg_id).await;
+            if optional_durable_current_msg_id_from_detached(current_msg_id).is_some() {
+                let _ = gateway.delete_message(channel_id, current_msg_id).await;
+            }
             status_panel_terminal_committed = true;
         } else if matches!(stop_lease_acquire, BridgeLeaseAcquire::Skip) {
             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -340,20 +342,32 @@ pub(super) async fn handle_cancel_prompt_replace(
                 BridgeLeaseAcquire::Held(lease) => Some(lease),
                 _ => None,
             };
-            let replace_committed = turn_bridge_replace_outcome_committed(
-                shared_owned.as_ref(),
-                &provider,
-                channel_id,
-                current_msg_id,
-                inflight_state.tmux_session_name.as_deref(),
-                gateway
-                    .replace_message_with_outcome(channel_id, current_msg_id, &display_response)
-                    .await,
-                dispatch_id.as_deref(),
-                adk_session_key.as_deref(),
-                Some(turn_id.as_str()),
-                "turn_bridge_prompt_too_long_replace",
-            );
+            // A turn with no anchor shows the guidance as a reply and records under that reply.
+            let anchorless = current_message_anchor::turn_mode_anchorless(channel_id, current_msg_id);
+            let (replace_committed, shown_msg_id) = if anchorless {
+                let event = "turn_bridge_prompt_too_long";
+                let reply = current_message_anchor::send_anchorless_notice(
+                    &shared_owned, channel_id, &inflight_state, &display_response, event,
+                )
+                .await;
+                (reply.is_some(), reply.unwrap_or(current_msg_id))
+            } else {
+                let committed = turn_bridge_replace_outcome_committed(
+                    shared_owned.as_ref(),
+                    &provider,
+                    channel_id,
+                    current_msg_id,
+                    inflight_state.tmux_session_name.as_deref(),
+                    gateway
+                        .replace_message_with_outcome(channel_id, current_msg_id, &display_response)
+                        .await,
+                    dispatch_id.as_deref(),
+                    adk_session_key.as_deref(),
+                    Some(turn_id.as_str()),
+                    "turn_bridge_prompt_too_long_replace",
+                );
+                (committed, current_msg_id)
+            };
             if replace_committed {
                 status_panel_terminal_committed = true;
             }
@@ -378,7 +392,7 @@ pub(super) async fn handle_cancel_prompt_replace(
                         watcher_owner_channel_id,
                         inflight_state.tmux_session_name.as_deref(),
                         lease_range,
-                        current_msg_id.get(),
+                        shown_msg_id.get(),
                         channel_id.get(),
                         &full_response,
                         Some(inflight_state.user_msg_id), // #4564 explicit inbound id (delivery channel)

@@ -196,7 +196,9 @@ async fn exit(close: &Close, gateway: &Gateway) -> bool {
         gateway,
         &close.actor,
         &close.row,
-        close.anchor(),
+        close.anchor().unwrap_or_else(|| {
+            crate::services::discord::turn_bridge::current_message_anchor::detached_current_msg_id_from_durable(0)
+        }),
         (false, false, false),
     )
     .await

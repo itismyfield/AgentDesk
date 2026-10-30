@@ -38,6 +38,7 @@ interface AgentInfoOperationsSectionsProps {
   loadingCron: boolean;
   auditLogs: AuditLog[];
   loadingAudit: boolean;
+  auditError: boolean;
   agentSkills: AgentSkill[];
   sharedSkills: AgentSkill[];
   loadingSkills: boolean;
@@ -59,6 +60,7 @@ export function AgentInfoOperationsSections({
   loadingCron,
   auditLogs,
   loadingAudit,
+  auditError,
   agentSkills,
   sharedSkills,
   loadingSkills,
@@ -126,7 +128,7 @@ export function AgentInfoOperationsSections({
                 {!job.enabled && (
                   <span
                     className="shrink-0 rounded px-1.5 py-0.5 text-xs"
-                    style={{ background: "rgba(100,116,139,0.2)", color: "#94a3b8" }}
+                    style={{ background: "rgba(100,116,139,0.2)", color: "var(--th-text-secondary)" }}
                   >
                     {tr("비활성", "Off")}
                   </span>
@@ -141,6 +143,10 @@ export function AgentInfoOperationsSections({
         {loadingAudit ? (
           <SurfaceNotice tone="neutral" compact>
             {tr("불러오는 중...", "Loading...")}
+          </SurfaceNotice>
+        ) : auditError ? (
+          <SurfaceNotice tone="warn" compact>
+            {tr("변경 로그를 불러오지 못했습니다. 상세 화면을 다시 열어 확인해 주세요.", "Could not load changes. Reopen the details to retry.")}
           </SurfaceNotice>
         ) : auditLogs.length === 0 ? (
           <SurfaceEmptyState className="text-xs">
@@ -182,7 +188,7 @@ export function AgentInfoOperationsSections({
                   {agentSkills.map((skill) => (
                     <span
                       key={skill.name}
-                      className="rounded-full px-2 py-0.5 text-xs"
+                      className="max-w-full rounded-md px-2 py-0.5 text-xs [overflow-wrap:anywhere]"
                       style={{
                         background:
                           "color-mix(in srgb, var(--th-accent-primary-soft) 78%, transparent)",
@@ -206,7 +212,7 @@ export function AgentInfoOperationsSections({
                     {sharedSkills.map((skill) => (
                       <span
                         key={skill.name}
-                        className="rounded-full px-2 py-0.5 text-xs"
+                        className="max-w-full rounded-md px-2 py-0.5 text-xs [overflow-wrap:anywhere]"
                         style={{ background: "var(--th-bg-surface)", color: "var(--th-text-muted)" }}
                         title={skill.description}
                       >
@@ -254,7 +260,7 @@ export function AgentInfoOperationsSections({
           <SurfaceCard className="overflow-hidden px-0 py-0" style={{ background: "var(--th-bg-card)" }}>
             <button
               onClick={onToggleTimeline}
-              className="flex w-full items-center justify-between px-4 py-3 text-xs font-semibold"
+              className="flex min-h-11 w-full items-center justify-between px-4 py-3 text-xs font-semibold"
               style={{ color: "var(--th-text-heading)" }}
             >
               <span>{tr("활동 타임라인", "Activity Timeline")}</span>
@@ -296,7 +302,7 @@ export function AgentInfoOperationsSections({
                             {sourceLabel}
                           </span>
                           <div className="min-w-0 flex-1">
-                            <div className="truncate" style={{ color: "var(--th-text-primary)" }}>
+                            <div className="[overflow-wrap:anywhere]" style={{ color: "var(--th-text-primary)" }}>
                               {event.title}
                             </div>
                             <div className="flex flex-wrap gap-2" style={{ color: "var(--th-text-muted)" }}>

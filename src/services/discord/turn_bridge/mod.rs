@@ -996,3 +996,5 @@ pub(in crate::services::discord) use terminal_outcome_delivery::resume_foreign_t
 
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use runtime_handoff_loop::adopt_codex_replacement_for_test;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use runtime_handoff_loop::hand_failed_followup_read_to_watcher_for_test;

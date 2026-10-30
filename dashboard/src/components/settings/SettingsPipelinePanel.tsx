@@ -141,7 +141,7 @@ export function SettingsPipelinePanel({
                     <select
                       value={selectedPipelineRepo}
                       onChange={(event) => setSelectedPipelineRepo(event.target.value)}
-                      className="w-full rounded-2xl px-3 py-2.5 text-sm"
+                      className="min-h-11 w-full min-w-0 rounded-md px-3 py-2.5 text-sm"
                       style={inputStyle}
                     >
                       {pipelineRepos.map((repo) => (
@@ -161,7 +161,7 @@ export function SettingsPipelinePanel({
                     <select
                       value={selectedPipelineAgentId ?? ""}
                       onChange={(event) => setSelectedPipelineAgentId(event.target.value || null)}
-                      className="w-full rounded-2xl px-3 py-2.5 text-sm"
+                      className="min-h-11 w-full min-w-0 rounded-md px-3 py-2.5 text-sm"
                       style={inputStyle}
                     >
                       <option value="">{tr("없음", "None")}</option>
@@ -175,7 +175,7 @@ export function SettingsPipelinePanel({
                 </div>
 
                 {selectedPipelineRepo ? (
-                  <div className="space-y-4">
+                  <div className="space-y-4" data-testid="settings-pipeline-editor">
                     <Suspense
                       fallback={(
                         <SettingsEmptyState className="text-sm">

@@ -10,6 +10,7 @@ fn disabled_floor_touches_no_paths_even_when_the_parent_is_a_file() {
     assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
 }
 
+#[cfg(unix)]
 #[test]
 fn floor_is_idempotent_and_survives_without_a_notice_entry() {
     let root = tempfile::tempdir().unwrap();
@@ -37,6 +38,7 @@ fn invalid_existing_floor_is_preserved_and_refused() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn floor_write_failure_prevents_the_preappend_step() {
     let root = tempfile::tempdir().unwrap();

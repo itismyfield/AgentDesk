@@ -5,6 +5,10 @@ import type { Agent, Department } from "../types";
 import { SurfaceEmptyState } from "./common/SurfacePrimitives";
 import AgentAvatar from "./AgentAvatar";
 
+function searchTerms(...values: Array<string | null | undefined>): string[] {
+  return values.filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+}
+
 interface PaletteRoute {
   id: string;
   labelKo: string;
@@ -67,7 +71,7 @@ export default function CommandPalette({
 
   return (
     <div
-      className="fixed inset-0 z-[100] flex items-start justify-center pt-[15vh]"
+      className="fixed inset-0 z-[100] flex items-start justify-center pt-[8dvh]"
       onClick={onClose}
     >
       <div className="fixed inset-0" style={{ background: "var(--th-modal-overlay)" }} />
@@ -77,11 +81,10 @@ export default function CommandPalette({
         aria-modal="true"
         aria-label={tr("명령 팔레트", "Command Palette")}
         label={tr("명령 팔레트", "Command Palette")}
-        className="relative w-full max-w-lg mx-4 overflow-hidden rounded-[28px] border shadow-2xl"
+        className="relative mx-4 flex max-h-[84dvh] w-full max-w-lg flex-col [&_[cmdk-group-heading]]:px-4 [&_[cmdk-group-heading]]:pt-3 [&_[cmdk-group-heading]]:pb-1 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-th-text-muted overflow-hidden rounded-lg border shadow-lg"
         style={{
           borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
-          background:
-            "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+          background: "var(--th-bg-surface)",
         }}
         onKeyDown={(event) => {
           if (event.key === "Escape") {
@@ -99,7 +102,7 @@ export default function CommandPalette({
             value={query}
             onValueChange={setQuery}
             placeholder={tr("검색... (에이전트, 메뉴, 부서)", "Search... (agents, menu, departments)")}
-            className="flex-1 bg-transparent text-sm outline-none"
+            className="min-h-11 min-w-0 flex-1 bg-transparent text-sm outline-none"
             style={{ color: "var(--th-text)" }}
           />
           <kbd className="text-xs px-1.5 py-0.5 rounded" style={{ background: "var(--th-bg-surface)", color: "var(--th-text-muted)" }}>
@@ -109,7 +112,7 @@ export default function CommandPalette({
 
         {/* Results */}
         <Command.List
-          className="max-h-64 overflow-y-auto py-2"
+          className="min-h-0 flex-1 overflow-y-auto py-2"
           label={tr("검색 결과", "Search results")}
         >
           <Command.Empty>
@@ -124,7 +127,7 @@ export default function CommandPalette({
                 key={item.id}
                 value={`nav:${item.id}:${item.label}`}
                 keywords={[item.id, item.label]}
-                className="command-palette-item"
+                className="flex min-h-11 w-full cursor-pointer items-center gap-3 px-4 py-2 text-left text-sm text-th-text-primary data-[selected=true]:bg-surface-medium"
                 onSelect={() => handleSelect({ type: "nav", ...item })}
               >
                 <span className="flex w-6 items-center justify-center text-base text-center">
@@ -133,7 +136,7 @@ export default function CommandPalette({
                 <div className="min-w-0 flex-1">
                   <div className="truncate">{item.label}</div>
                 </div>
-                <span className="text-xs command-palette-item-kind">
+                <span className="shrink-0 text-xs text-th-text-muted">
                   {tr("이동", "Go")}
                 </span>
               </Command.Item>
@@ -145,15 +148,15 @@ export default function CommandPalette({
               <Command.Item
                 key={agent.id}
                 value={`agent:${agent.id}:${agent.alias ?? ""}:${agent.name_ko}:${agent.name}`}
-                keywords={[
+                keywords={searchTerms(
                   agent.name,
                   agent.name_ko,
                   agent.alias ?? "",
                   agent.avatar_emoji,
                   agent.department_name_ko ?? "",
                   agent.status,
-                ]}
-                className="command-palette-item"
+                )}
+                className="flex min-h-11 w-full cursor-pointer items-center gap-3 px-4 py-2 text-left text-sm text-th-text-primary data-[selected=true]:bg-surface-medium"
                 onSelect={() => handleSelect({ type: "agent", agent })}
               >
                 <span className="flex w-6 items-center justify-center text-base text-center">
@@ -163,11 +166,11 @@ export default function CommandPalette({
                   <div className="truncate">
                     {agent.alias || agent.name_ko || agent.name}
                   </div>
-                  <div className="text-xs command-palette-item-meta">
+                  <div className="text-xs text-th-text-muted">
                     {agent.department_name_ko || ""} · {agent.status}
                   </div>
                 </div>
-                <span className="text-xs command-palette-item-kind">
+                <span className="shrink-0 text-xs text-th-text-muted">
                   {tr("에이전트", "Agent")}
                 </span>
               </Command.Item>
@@ -179,8 +182,8 @@ export default function CommandPalette({
               <Command.Item
                 key={dept.id}
                 value={`dept:${dept.id}:${dept.name_ko}:${dept.name}`}
-                keywords={[dept.name, dept.name_ko, dept.icon]}
-                className="command-palette-item"
+                keywords={searchTerms(dept.name, dept.name_ko, dept.icon)}
+                className="flex min-h-11 w-full cursor-pointer items-center gap-3 px-4 py-2 text-left text-sm text-th-text-primary data-[selected=true]:bg-surface-medium"
                 onSelect={() => handleSelect({ type: "dept", dept })}
               >
                 <span className="flex w-6 items-center justify-center text-base text-center">
@@ -189,7 +192,7 @@ export default function CommandPalette({
                 <div className="min-w-0 flex-1">
                   <div className="truncate">{dept.name_ko || dept.name}</div>
                 </div>
-                <span className="text-xs command-palette-item-kind">
+                <span className="shrink-0 text-xs text-th-text-muted">
                   {tr("부서", "Dept")}
                 </span>
               </Command.Item>

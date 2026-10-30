@@ -1,0 +1,66 @@
+---
+title: "Claude channel moving between tmux and Herdr with the same session, issue 7503"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Tmux
+    lg1: Herdr
+    lg2: Moving
+    lg3: Breaks NoDeadlock in some cases
+    lg4: Path to the NoDeadlock bug
+  }
+  class lg0 blue
+  class lg1 teal
+  class lg2 pink
+  class lg3 mayBreak
+  class lg4 bugPath
+  s0: On tmux, no Claude running (set to tmux)
+  s1: On tmux, Claude running (set to tmux)
+  s2: On tmux, no Claude running (set to Herdr)
+  s3: On tmux, Claude running (set to Herdr)
+  s4: Herdr launch sent, not bound yet
+  s5: On Herdr, Claude running (set to Herdr)
+  s6: On Herdr, Claude running (set to tmux), input waits, channel has no name
+  s7: On Herdr, Claude running (set to tmux)
+  s8: Herdr Claude ended, row not retired (set to tmux)
+  s9: Row retired, move back unfinished (set to tmux)
+  s10: Back on tmux, no Claude running (set to tmux)
+  s11: Back on tmux, Claude running (set to tmux)
+  [*] --> s0
+  [*] --> s1
+  s0 --> s2: the server restarts, maybe with the other host set
+  s1 --> s3: the server restarts, maybe with the other host set
+  s2 --> s2: you send a message
+  s2 --> s0: the server restarts, maybe with the other host set
+  s3 --> s1: the server restarts, maybe with the other host set
+  s0 --> s1: tmux launches with --resume of the same session
+  s2 --> s4: Herdr launches with --resume of the same session
+  s3 --> s2: the old tmux Claude gets /exit and ends
+  s4 --> s5: the launch reports its start and binds the Herdr row
+  s5 --> s6: the server restarts, maybe with the other host set
+  s5 --> s7: the server restarts, maybe with the other host set
+  s6 --> s6: you send a message
+  s7 --> s8: the Herdr Claude gets /exit and ends
+  s7 --> s6: you send a message
+  s8 --> s9: the Herdr row is retired
+  s9 --> s10: the host marker is set to tmux
+  s10 --> s11: tmux launches with --resume of the same session
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s2 blue
+  class s2 bugPath
+  class s3 blue
+  class s4 teal
+  class s4 bugPath
+  class s5 teal
+  class s5 bugPath
+  class s6 teal
+  class s6 mayBreak
+  class s6 bugPath
+  class s7 teal
+  class s8 pink
+  class s9 pink
+  class s10 blue
+  class s11 blue

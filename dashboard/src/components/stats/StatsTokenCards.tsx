@@ -37,7 +37,7 @@ export function DailyTokenCompositionCard({
   series: DailySeriesDescriptor[];
 }) {
   return (
-    <article className="card">
+    <article className="min-w-0 overflow-hidden rounded-lg border border-th-border-subtle bg-th-bg-surface">
       <CardHead
         title={t(
           msg(
@@ -67,7 +67,7 @@ export function DailyTokenCompositionCard({
         }
       />
 
-      <div className="card-body">
+      <div className="px-4 py-4 sm:px-5">
         {daily.length === 0 ? (
           <DashboardEmptyState
             icon={<BarChart3 size={18} />}
@@ -123,7 +123,7 @@ export function DailyCacheHitCard({
   averageHitRate: number;
 }) {
   return (
-    <article className="card">
+    <article className="min-w-0 overflow-hidden rounded-lg border border-th-border-subtle bg-th-bg-surface">
       <CardHead
         title={t(
           msg(
@@ -142,14 +142,14 @@ export function DailyCacheHitCard({
           ),
         )}
         actions={
-          <span className="chip" style={positiveChipStyle}>
+          <span className="inline-flex max-w-full flex-wrap items-center gap-1 rounded-md border border-th-border-subtle bg-surface-subtle px-2 py-1 text-xs tabular-nums text-th-text-secondary" style={positiveChipStyle}>
             {formatPercent(averageHitRate)}{" "}
             {t(msg("평균", "avg", "平均", "平均"))}
           </span>
         }
       />
 
-      <div className="card-body">
+      <div className="px-4 py-4 sm:px-5">
         {daily.length === 0 ? (
           <DashboardEmptyState
             icon={<Gauge size={18} />}
@@ -220,7 +220,7 @@ export function ModelDistributionCard({
   totalTokens: number;
 }) {
   return (
-    <article className="card">
+    <article className="min-w-0 overflow-hidden rounded-lg border border-th-border-subtle bg-th-bg-surface">
       <CardHead
         title={t(
           msg("모델 분포", "Model Distribution", "モデル分布", "模型分布"),
@@ -234,13 +234,13 @@ export function ModelDistributionCard({
           ),
         )}
         actions={
-          <span className="chip" style={numericBadgeStyle}>
+          <span className="inline-flex max-w-full flex-wrap items-center gap-1 rounded-md border border-th-border-subtle bg-surface-subtle px-2 py-1 text-xs tabular-nums text-th-text-secondary" style={numericBadgeStyle}>
             {formatTokens(totalTokens)} total
           </span>
         }
       />
 
-      <div className="card-body">
+      <div className="px-4 py-4 sm:px-5">
         {segments.length === 0 ? (
           <DashboardEmptyState
             icon={<Cpu size={18} />}
@@ -288,7 +288,7 @@ export function ModelDistributionCard({
                   />
                   <div className="min-w-0">
                     <div
-                      className="truncate text-sm font-semibold"
+                      className="[overflow-wrap:anywhere] text-sm font-semibold"
                       style={{ color: "var(--th-text-heading)" }}
                     >
                       {segment.label}
@@ -335,7 +335,7 @@ export function ProviderDistributionCard({
   segments: ShareSegment[];
 }) {
   return (
-    <article className="card">
+    <article className="min-w-0 overflow-hidden rounded-lg border border-th-border-subtle bg-th-bg-surface">
       <CardHead
         title={t(
           msg(
@@ -354,14 +354,14 @@ export function ProviderDistributionCard({
           ),
         )}
         actions={
-          <span className="chip" style={numericBadgeStyle}>
+          <span className="inline-flex max-w-full flex-wrap items-center gap-1 rounded-md border border-th-border-subtle bg-surface-subtle px-2 py-1 text-xs tabular-nums text-th-text-secondary" style={numericBadgeStyle}>
             {segments.length}{" "}
             {t(msg("providers", "providers", "providers", "providers"))}
           </span>
         }
       />
 
-      <div className="card-body">
+      <div className="px-4 py-4 sm:px-5">
         {segments.length === 0 ? (
           <DashboardEmptyState
             icon={<Cpu size={18} />}
@@ -384,7 +384,7 @@ export function ProviderDistributionCard({
         ) : (
           <div className="space-y-3">
             {segments.map((segment) => (
-              <div key={segment.id} className="list-card tight">
+              <div key={segment.id} className="min-w-0 border-b border-th-border-subtle py-3 last:border-b-0">
                 <div className="flex items-center justify-between gap-3">
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
@@ -393,7 +393,7 @@ export function ProviderDistributionCard({
                         style={{ background: segment.color }}
                       />
                       <span
-                        className="truncate text-sm font-semibold"
+                        className="[overflow-wrap:anywhere] text-sm font-semibold"
                         style={{ color: "var(--th-text-heading)" }}
                       >
                         {segment.label}
@@ -421,9 +421,9 @@ export function ProviderDistributionCard({
                     </div>
                   </div>
                 </div>
-                <div className="bar-track mt-3">
+                <div className="h-1.5 overflow-hidden rounded bg-surface-medium mt-3">
                   <div
-                    className="bar-fill"
+                    className="h-full rounded transition-[width] duration-300 motion-reduce:transition-none"
                     style={{
                       width: `${Math.max(segment.percentage, segment.percentage > 0 ? 4 : 0)}%`,
                       background: segment.color,

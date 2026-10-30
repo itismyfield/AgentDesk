@@ -17,7 +17,7 @@ export default function PipelineVisualEditorStatus({ ctx }: Props) {
         <div className="space-y-2">
           {ctx.error && (
             <div
-              className="rounded-[22px] border px-4 py-3 text-xs leading-6 sm:text-sm"
+              className="rounded-lg border px-4 py-3 text-xs leading-6 sm:text-sm"
               style={STATUS_ERROR_STYLE}
             >
               {ctx.error}
@@ -25,7 +25,7 @@ export default function PipelineVisualEditorStatus({ ctx }: Props) {
           )}
           {ctx.success && (
             <div
-              className="rounded-[22px] border px-4 py-3 text-xs leading-6 sm:text-sm"
+              className="rounded-lg border px-4 py-3 text-xs leading-6 sm:text-sm"
               style={STATUS_SUCCESS_STYLE}
             >
               {ctx.success}
@@ -37,7 +37,7 @@ export default function PipelineVisualEditorStatus({ ctx }: Props) {
       {ctx.loading && ctx.pipelineDraft && ctx.graph && (
         <div
           data-testid="pipeline-refresh-indicator"
-          className="flex items-center gap-2 rounded-[20px] border px-3.5 py-2 text-xs sm:text-sm"
+          className="flex items-center gap-2 rounded-lg border px-3.5 py-2 text-xs sm:text-sm"
           style={STATUS_INFO_STYLE}
         >
           <span

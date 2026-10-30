@@ -558,6 +558,10 @@ def cancelled_path_gate(expr: str, lookup) -> bool:
         return value
 
     terms = unparen(expr).split("&&")
+    draft = False
+    if terms[0].strip() == "!github.event.pull_request.draft":
+        draft = truthy(lookup("github.event.pull_request.draft"))
+        terms = terms[1:]
     status = unparen(terms[0])
     assert len(terms) == 2 and status.startswith("!"), expr
     assert re.fullmatch(r"cancelled\s*\(\s*\)", unparen(status[1:])), expr
@@ -571,7 +575,7 @@ def cancelled_path_gate(expr: str, lookup) -> bool:
     else:
         selected = str(lookup("needs.changes.outputs." + output.group(1))).lower() == "true"
         selected = not selected if output.group(2) == "!=" else selected
-    return not truthy(lookup("cancelled()")) and selected
+    return not draft and not truthy(lookup("cancelled()")) and selected
 
 
 def evaluate(expr: str, lookup) -> object:
@@ -709,6 +713,8 @@ class WorkflowSimulation:
         self.results.update(forced)
 
     def lookup(self, name: str) -> object:
+        if name == "github.event.pull_request.draft":
+            return False
         if name == "cancelled()":
             return self.run_cancelled
         parts = name.split(".")

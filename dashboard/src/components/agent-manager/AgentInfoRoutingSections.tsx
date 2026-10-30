@@ -126,7 +126,7 @@ export function AgentInfoRoutingSections({
                   </div>
                   <span
                     className="rounded px-1.5 py-0.5 text-xs"
-                    style={{ background: "rgba(88,101,242,0.15)", color: "#7289da" }}
+                    style={{ background: "rgba(88,101,242,0.15)", color: "var(--th-text-secondary)" }}
                   >
                     {sourceLabel}
                   </span>
@@ -182,7 +182,7 @@ export function AgentInfoRoutingSections({
                       className="rounded px-1.5 py-0.5 text-xs"
                       style={{
                         background: providerMeta.bg,
-                        color: providerMeta.color,
+                        color: "var(--th-text-secondary)",
                         border: `1px solid ${providerMeta.border}`,
                       }}
                     >
@@ -195,7 +195,7 @@ export function AgentInfoRoutingSections({
                           session.status === "working"
                             ? "rgba(16,185,129,0.15)"
                             : "rgba(100,116,139,0.15)",
-                        color: session.status === "working" ? "#34d399" : "#94a3b8",
+                        color: session.status === "working" ? "var(--th-badge-emerald-text)" : "var(--th-text-secondary)",
                       }}
                     >
                       {session.status === "working" ? tr("작업중", "Working") : tr("대기", "Idle")}

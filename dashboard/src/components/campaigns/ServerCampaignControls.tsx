@@ -42,7 +42,7 @@ export default function ServerCampaignControls({ view, connection, stopIntent, b
       <CommandButton view={view} command="start" connection={connection} busy={busy} onCommand={() => onCommand("start")} tr={tr} />
       <CommandButton view={view} command="resume" connection={connection} busy={busy} onCommand={() => onCommand("resume")} tr={tr} />
     </div>
-    <div className="campaign-server-stop">
+    <div className="campaign-server-stop grid gap-3 rounded-lg border border-th-border-subtle p-4">
       <h4>{tr("중단", "Stop")}</h4>
       <p className="campaign-muted">
         {tr("진행 단계", "Current stages")}: {active.length ? active.map((node) => `${node.id} ${tr(...STAGE_LABELS[node.runtime.stage])}`).join(", ") : tr("없음", "none")}

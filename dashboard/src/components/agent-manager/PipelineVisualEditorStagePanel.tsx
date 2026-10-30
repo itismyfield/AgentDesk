@@ -21,7 +21,7 @@ export default function PipelineVisualEditorStagePanel({ ctx, actions }: Props) 
   const tr = ctx.tr;
 
   return (
-    <div className="min-w-0 rounded-[24px] border p-4 sm:p-5 space-y-4" style={PANEL_STYLE}>
+    <div className="min-w-0 rounded-lg border p-4 sm:p-5 space-y-4" style={PANEL_STYLE}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h4 className="text-sm font-semibold" style={{ color: "var(--th-text-heading)" }}>
@@ -53,7 +53,7 @@ export default function PipelineVisualEditorStagePanel({ ctx, actions }: Props) 
       </div>
 
       {ctx.stageDrafts.length === 0 ? (
-        <div className="rounded-[20px] border px-4 py-6 text-center text-sm" style={EMPTY_PANEL_STYLE}>
+        <div className="rounded-lg border px-4 py-6 text-center text-sm" style={EMPTY_PANEL_STYLE}>
           {tr(
             "스테이지가 없습니다. 아래의 + 버튼으로 자동 실행 단계를 추가하세요.",
             "No stages yet. Add an automated stage with the + button.",
@@ -75,7 +75,7 @@ function StageCard({ ctx, actions, stage, index }: Props & { stage: StageDraft; 
   const assignedAgent = ctx.agents.find((agent: any) => agent.id === stage.agent_override_id);
 
   return (
-    <div className="min-w-0 rounded-[20px] border p-4 space-y-3" style={PANEL_SOFT_STYLE}>
+    <div className="min-w-0 rounded-lg border p-4 space-y-3" style={PANEL_SOFT_STYLE}>
       <div className="flex items-center gap-2">
         <span
           className="inline-flex h-7 w-7 items-center justify-center rounded-full text-xs font-semibold"

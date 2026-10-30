@@ -251,10 +251,6 @@ pub(super) async fn get_provider_session_id(
     .await
 }
 
-pub(super) async fn get_config_entries() -> Result<Value, String> {
-    request_json(Method::GET, "/api/settings/config").await
-}
-
 pub(super) async fn fetch_dispatch(dispatch_id: &str) -> Result<Value, String> {
     request_json(Method::GET, &format!("/api/dispatches/{dispatch_id}")).await
 }

@@ -1,15 +1,17 @@
 import { defineConfig } from "@playwright/test";
 
+const previewPort = Number(process.env.PLAYWRIGHT_PORT ?? 4173);
+
 export default defineConfig({
   testDir: "./e2e",
   timeout: 30_000,
   use: {
-    baseURL: "http://localhost:4173",
+    baseURL: `http://localhost:${previewPort}`,
     headless: true,
   },
   webServer: {
-    command: "npm run build && npm run preview",
-    port: 4173,
+    command: `npm run build && npm run preview -- --port ${previewPort} --strictPort`,
+    port: previewPort,
     reuseExistingServer: true,
     timeout: 30_000,
   },

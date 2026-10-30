@@ -44,9 +44,9 @@ export default function AutoQueuePanelView({ ctx }: { ctx: AutoQueuePanelCtx }) 
 
   return (
     <section
-      className="rounded-2xl border px-3 py-2 sm:px-4 sm:py-2.5 space-y-2"
+      className="min-w-0 space-y-3 rounded-lg border border-th-border-subtle bg-th-bg-surface px-4 py-3"
       style={{
-        borderColor: run ? "rgba(16,185,129,0.35)" : "rgba(148,163,184,0.22)",
+        borderColor: "var(--th-border-subtle)",
         backgroundColor: "var(--th-bg-surface)",
       }}
     >

@@ -82,7 +82,7 @@ export default function MeetingStartForm({
     >
       <div className="mt-4 space-y-3">
         <SurfaceCard
-          className="rounded-2xl p-4"
+          className="rounded-lg p-4"
           style={{
             background:
               "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
@@ -106,7 +106,7 @@ export default function MeetingStartForm({
                   ko: "Discord 채널 ID",
                   en: "Discord Channel ID",
                 })}
-                className="flex-1 rounded-lg px-3 py-1.5 font-mono text-xs"
+                className="min-h-11 min-w-0 flex-1 rounded-md px-3 py-1.5 font-mono text-xs"
                 style={inputStyle}
                 onBlur={() => {
                   if (channelId) onShowChannelEditChange(false);
@@ -142,7 +142,7 @@ export default function MeetingStartForm({
         </SurfaceCard>
 
         <SurfaceCard
-          className="rounded-2xl p-4"
+          className="rounded-lg p-4"
           style={{
             background:
               "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
@@ -188,7 +188,7 @@ export default function MeetingStartForm({
         </SurfaceCard>
 
         <SurfaceCard
-          className="rounded-2xl p-4"
+          className="rounded-lg p-4"
           style={{
             background:
               "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
@@ -210,7 +210,7 @@ export default function MeetingStartForm({
                   onChange={(event) =>
                     onPrimaryProviderChange(event.target.value)
                   }
-                  className="rounded-lg px-3 py-2 text-xs"
+                  className="min-h-11 min-w-0 rounded-md px-3 py-2 text-xs"
                   style={inputStyle}
                 >
                   {meetingProviders.map((provider) => (
@@ -232,7 +232,7 @@ export default function MeetingStartForm({
                   onChange={(event) =>
                     onReviewerProviderChange(event.target.value)
                   }
-                  className="rounded-lg px-3 py-2 text-xs"
+                  className="min-h-11 min-w-0 rounded-md px-3 py-2 text-xs"
                   style={inputStyle}
                 >
                   {reviewerOptions.map((provider) => (
@@ -250,7 +250,7 @@ export default function MeetingStartForm({
               })}
             </SurfaceNotice>
             <div
-              className="flex flex-col gap-3 rounded-2xl border p-3"
+              className="flex flex-col gap-3 rounded-lg border p-3"
               style={{
                 borderColor:
                   "color-mix(in srgb, var(--th-border) 72%, transparent)",
@@ -276,7 +276,7 @@ export default function MeetingStartForm({
                     ko: "전문 에이전트 검색 후 여러 명 선택",
                     en: "Search experts and select multiple",
                   })}
-                  className="rounded-lg px-3 py-2 text-xs"
+                  className="min-h-11 min-w-0 rounded-md px-3 py-2 text-xs"
                   style={inputStyle}
                 />
               </div>
@@ -288,7 +288,7 @@ export default function MeetingStartForm({
                       key={expert.role_id}
                       type="button"
                       onClick={() => onToggleFixedParticipant(expert)}
-                      className="min-h-11 rounded-2xl border px-3 py-2.5 text-left text-sm transition-colors"
+                      className="min-h-11 rounded-lg border px-3 py-2.5 text-left text-sm transition-colors"
                       style={{
                         borderColor: selected
                           ? "color-mix(in srgb, var(--th-accent-primary) 40%, var(--th-border) 60%)"

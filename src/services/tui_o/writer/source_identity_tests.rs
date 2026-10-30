@@ -692,3 +692,110 @@ async fn a_cursor_the_resume_preflight_continues_is_read_on_without_reposting() 
         halt(stop, task).await;
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn device_change_resume_preserves_delivery_and_legacy_pending_across_restarts() {
+    for legacy in [false, true] {
+        let pair = std::env::var_os("ADK_OBS_DEVICE_PAIR").map(PathBuf::from);
+        let backing = pair.as_ref().map(|root| {
+            let before = tempfile::tempdir_in(root.join("before")).unwrap();
+            let after = tempfile::tempdir_in(root.join("after")).unwrap();
+            for dir in [&before, &after] {
+                std::fs::write(dir.path().join("t.jsonl"), b"").unwrap();
+            }
+            (before, after)
+        });
+        let body = row("m0", "already delivered");
+        let mut original = None;
+        let harness = Harness::build(|root| {
+            let path = root.join("t.jsonl");
+            if let Some((before, _)) = &backing {
+                std::os::unix::fs::symlink(before.path().join("t.jsonl"), &path).unwrap();
+            }
+            std::fs::write(&path, &body).unwrap();
+            let source_id = source_id_for("", &path).unwrap();
+            original = Some(source_id.clone());
+            vec![InitSource {
+                source_id,
+                delivery_start: body.len() as u64,
+                prefix_hash: hex::encode(Sha256::digest(&body)),
+            }]
+        });
+        let old = original.unwrap();
+        let bindings = Arc::new(FakeBindings::new());
+        bindings.commit(bound(
+            1,
+            None,
+            BindingTarget::Source(old.clone()),
+            BindingCause::Startup,
+            None,
+        ));
+        harness.gate.acquired();
+        let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+        append(&old.path, &row("m1", "before device change"));
+        polls(3).await;
+        halt(stop, task).await;
+        let _simulated = if let Some((before, after)) = &backing {
+            let next = after.path().join("t.jsonl");
+            std::fs::copy(before.path().join("t.jsonl"), &next).unwrap();
+            std::fs::remove_file(&old.path).unwrap();
+            std::os::unix::fs::symlink(next, &old.path).unwrap();
+            None
+        } else {
+            Some(renumber::shift(&old.path, REBOOT))
+        };
+        let new = named(&old, "filled-session");
+        assert_ne!(old.dev, new.dev);
+        assert_eq!(old.ino, new.ino, "device renumbering preserves inode");
+        assert_eq!(old.path, new.path);
+        if pair.is_some() {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(std::fs::metadata(&old.path).unwrap().dev(), new.dev);
+            println!(
+                "REAL_DEVICE_CHANGE legacy={legacy} old_dev={} new_dev={} ino={}",
+                old.dev, new.dev, new.ino
+            );
+        }
+        bindings.commit(resume(2, &old, &new));
+        if legacy {
+            stored_apart(&harness, &old, &new, false);
+        }
+        for restart in 0..3 {
+            let (stop, task) =
+                spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+            if restart == 0 {
+                append(&old.path, &row("m2", "after device change"));
+            }
+            polls(3).await;
+            assert!(!task.is_finished(), "legacy={legacy} restart={restart}");
+            assert_eq!(
+                harness.port.posts(),
+                ["before device change", "after device change"]
+            );
+            let store = harness.channel();
+            assert_eq!(store.cursors().count(), if legacy { 2 } else { 1 });
+            let pending = store
+                .rotation()
+                .unwrap()
+                .links
+                .values()
+                .filter(|link| matches!(link.boundary, Boundary::Pending { .. }))
+                .count();
+            assert_eq!(pending, usize::from(legacy));
+            let alarms = harness.alarms.taken();
+            assert!(
+                !alarms
+                    .iter()
+                    .any(|alarm| matches!(alarm, WriterAlarm::Halted { .. }))
+            );
+            assert_eq!(
+                alarms
+                    .iter()
+                    .filter(|alarm| matches!(alarm, WriterAlarm::BoundaryPending { .. }))
+                    .count(),
+                usize::from(legacy)
+            );
+            halt(stop, task).await;
+        }
+    }
+}

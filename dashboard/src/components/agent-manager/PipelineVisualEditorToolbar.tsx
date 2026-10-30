@@ -18,7 +18,7 @@ interface Props {
 export default function PipelineVisualEditorToolbar({ ctx, actions }: Props) {
   return (
     <SurfaceCard
-      className="rounded-[24px] p-4 sm:p-5"
+      className="rounded-lg p-4 sm:p-5"
       style={ctx.isFsmVariant ? FSM_PANEL_STYLE : PANEL_STYLE}
     >
       {ctx.isFsmVariant ? (
@@ -67,16 +67,16 @@ function FsmToolbar({ ctx, actions }: Props) {
         </div>
 
         <div className="fsm-actions flex flex-wrap items-center justify-end gap-2">
-          <button onClick={actions.addState} className="btn rounded-lg border px-2.5 py-1.5 text-[11px] font-medium" style={BUTTON_INFO_STYLE}>
+          <button onClick={actions.addState} className="btn min-h-11 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium" style={BUTTON_INFO_STYLE}>
             + {tr("상태 추가", "State")}
           </button>
-          <button onClick={actions.addTransition} className="btn rounded-lg border px-2.5 py-1.5 text-[11px] font-medium" style={BUTTON_ACCENT_STYLE}>
+          <button onClick={actions.addTransition} className="btn min-h-11 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium" style={BUTTON_ACCENT_STYLE}>
             + {tr("전환 추가", "Edge")}
           </button>
           <button
             onClick={actions.handleExportJson}
             disabled={!ctx.pipelineDraft}
-            className="btn rounded-lg border px-2.5 py-1.5 text-[11px] font-medium"
+            className="btn min-h-11 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium"
             style={{ ...BUTTON_NEUTRAL_STYLE, opacity: ctx.pipelineDraft ? 1 : 0.45 }}
           >
             {tr("JSON 내보내기", "Export JSON")}
@@ -84,7 +84,7 @@ function FsmToolbar({ ctx, actions }: Props) {
           <button
             onClick={() => void actions.handleClearOverride()}
             disabled={ctx.saving || !ctx.overrideExists}
-            className="btn rounded-lg border px-2.5 py-1.5 text-[11px] font-medium"
+            className="btn min-h-11 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium"
             style={{ ...BUTTON_NEUTRAL_STYLE, opacity: ctx.saving || !ctx.overrideExists ? 0.45 : 1 }}
           >
             {tr("기본값", "Reset")}
@@ -116,7 +116,7 @@ function AdvancedToolbar({ ctx, actions }: Props) {
         <LevelSwitch ctx={ctx} actions={actions} />
         <button
           onClick={() => actions.setReloadKey((current: number) => current + 1)}
-          className="rounded-xl border px-3 py-1.5 text-xs font-medium"
+          className="min-h-11 rounded-md border px-3 py-1.5 text-xs font-medium"
           style={PANEL_SOFT_STYLE}
         >
           {tr("새로고침", "Refresh")}
@@ -124,7 +124,7 @@ function AdvancedToolbar({ ctx, actions }: Props) {
         <button
           onClick={() => void actions.handleClearOverride()}
           disabled={ctx.saving || !ctx.overrideExists}
-          className="rounded-xl border px-3 py-1.5 text-xs font-medium"
+          className="min-h-11 rounded-md border px-3 py-1.5 text-xs font-medium"
           style={{
             ...PANEL_SOFT_STYLE,
             borderColor: "color-mix(in srgb, var(--th-accent-warn) 30%, var(--th-border) 70%)",
@@ -166,7 +166,7 @@ function LevelSwitch({ ctx, actions }: Props) {
     >
       <button
         onClick={() => actions.setLevel("repo")}
-        className="rounded-full px-3 py-1.5 text-xs font-medium transition-colors"
+        className="min-h-11 rounded-md px-3 py-1.5 text-xs font-medium transition-colors"
         style={{
           background: ctx.level === "repo" ? "var(--th-accent-primary-soft)" : "transparent",
           color: ctx.level === "repo" ? "var(--th-text-primary)" : "var(--th-text-muted)",
@@ -177,7 +177,7 @@ function LevelSwitch({ ctx, actions }: Props) {
       <button
         onClick={() => actions.setLevel("agent")}
         disabled={!ctx.selectedAgentId}
-        className="rounded-full px-3 py-1.5 text-xs font-medium transition-colors"
+        className="min-h-11 rounded-md px-3 py-1.5 text-xs font-medium transition-colors"
         style={{
           background: ctx.level === "agent" ? "var(--th-accent-primary-soft)" : "transparent",
           color: ctx.level === "agent" ? "var(--th-text-primary)" : "var(--th-text-muted)",
@@ -196,7 +196,7 @@ function SaveControls({ ctx, actions, compact }: Props & { compact?: boolean }) 
     <div className="flex flex-wrap items-center justify-end gap-2">
       <button
         onClick={() => actions.setReloadKey((current: number) => current + 1)}
-        className="rounded-lg border px-2.5 py-1.5 text-[11px] font-medium"
+        className="min-h-11 rounded-md border px-2.5 py-1.5 text-[11px] font-medium"
         style={BUTTON_NEUTRAL_STYLE}
       >
         {tr("새로고침", "Refresh")}

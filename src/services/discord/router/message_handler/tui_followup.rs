@@ -1,3 +1,6 @@
+#[cfg(test)]
+#[path = "tui_followup/busy_refusal_reply_tests.rs"]
+mod busy_refusal_reply_tests;
 #[path = "tui_followup/codex_observation.rs"]
 mod codex_observation;
 #[path = "tui_followup/nameless_gate.rs"]
@@ -979,8 +982,7 @@ pub(super) async fn apply_tui_busy_enqueue_refusal(
     shared: &Arc<SharedData>,
     http: &Arc<serenity::http::Http>,
     provider: &crate::services::provider::ProviderKind,
-    channel_id: ChannelId,
-    placeholder_msg_id: MessageId,
+    (channel_id, user_msg_id, placeholder_msg_id): (ChannelId, MessageId, Option<MessageId>),
     session_retry_context: Option<
         &crate::services::discord::router::turn_start::FormattedSessionRetryContext,
     >,
@@ -1019,6 +1021,20 @@ pub(super) async fn apply_tui_busy_enqueue_refusal(
         refusal_reason.map(|reason| reason.as_str()),
     );
     let notice = claude_tui_busy_followup_refusal_notice(refusal_reason);
+    let Some(placeholder_msg_id) = placeholder_msg_id else {
+        // Without a placeholder the dropped input still learns why, as a reply to it.
+        let _ = crate::services::discord::outbound::serenity_reference::send_referenced_lifecycle_notice(
+            http.clone(),
+            shared.clone(),
+            channel_id,
+            user_msg_id,
+            notice,
+            format!("busy-refusal:{}", user_msg_id.get()),
+            "busy_followup_refusal".into(),
+        )
+        .await;
+        return;
+    };
     let _ = super::super::super::http::edit_channel_message(
         http,
         channel_id,

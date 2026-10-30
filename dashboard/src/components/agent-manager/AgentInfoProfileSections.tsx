@@ -73,7 +73,7 @@ export function AgentInfoProfileSections({
             value={selectedDeptId}
             onChange={(e) => onSaveDepartment(e.target.value)}
             disabled={savingDept}
-            className="min-w-0 w-full rounded-xl border px-3 py-2 text-sm outline-none sm:flex-1"
+            className="min-h-11 min-w-0 w-full rounded-md border px-3 py-2 text-sm outline-none sm:flex-1"
             style={{
               background: "var(--th-input-bg)",
               borderColor: "var(--th-input-border)",
@@ -99,7 +99,7 @@ export function AgentInfoProfileSections({
             value={selectedAuthProfile}
             onChange={(e) => onSaveAuthProfile(e.target.value)}
             disabled={savingAuthProfile}
-            className="min-w-0 w-full rounded-xl border px-3 py-2 text-sm outline-none sm:flex-1"
+            className="min-h-11 min-w-0 w-full rounded-md border px-3 py-2 text-sm outline-none sm:flex-1"
             style={{
               background: "var(--th-input-bg)",
               borderColor: "var(--th-input-border)",
@@ -126,7 +126,7 @@ export function AgentInfoProfileSections({
             value={selectedProvider}
             onChange={(e) => onSaveProvider(e.target.value)}
             disabled={savingProvider || providerSelectDisabled}
-            className="min-w-0 w-full rounded-xl border px-3 py-2 text-sm outline-none sm:flex-1"
+            className="min-h-11 min-w-0 w-full rounded-md border px-3 py-2 text-sm outline-none sm:flex-1"
             style={{
               background: "var(--th-input-bg)",
               borderColor: "var(--th-input-border)",

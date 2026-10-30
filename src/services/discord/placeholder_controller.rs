@@ -806,6 +806,15 @@ mod edit_retry_tests {
         }
     }
 
+    /// A synthetic id's edit error ends like a missing message, never as a retry.
+    #[test]
+    fn a_synthetic_id_edit_error_is_permanent() {
+        assert_eq!(
+            classify_edit_error(crate::services::discord::gateway::SYNTHETIC_MESSAGE_EDIT_ERROR),
+            EditErrorCategory::Permanent
+        );
+    }
+
     #[test]
     fn classify_edit_error_categorises_known_signatures() {
         // Discord's 429 body — what `e.error.message` looks like after
