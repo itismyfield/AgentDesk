@@ -6,6 +6,9 @@ use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::cluster::stream_relay::RelayProducer;
 use crate::services::discord::TmuxRelayCoord;
 
+/// An O lookup that spent the shared deadline still leaves the outbox read this long.
+const HEADLESS_OUTBOX_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
+
 pub(super) struct TerminalRelayPlanContext<'a> {
     pub(super) http: &'a Arc<serenity::Http>,
     pub(super) shared: &'a Arc<SharedData>,
@@ -684,6 +687,30 @@ pub(super) async fn run_terminal_relay_plan<'a>(
         } else {
             drop(o_evidence);
             None
+        };
+        // A body the legacy headless bridge posted before O booted has an outbox row, not an O
+        // receipt. The bridge marks that row sent before it clears the inflight row.
+        let o_tail_covered = match (o_tail_covered, context.evidence_source) {
+            (None, Some(file)) if orphan_facts.existing_record_required() => {
+                crate::services::discord::outbound::o_delivery_evidence::headless_outbox(
+                    shared,
+                    crate::services::discord::outbound::o_delivery_evidence::Frame {
+                        provider: watcher_provider,
+                        channel: channel_id,
+                        path: std::path::Path::new(output_path),
+                        file,
+                        range: (
+                            turn_data_start_offset,
+                            terminal_event_consumed_offset(current_offset, all_data),
+                        ),
+                        body: full_response,
+                        sent: response_sent_offset,
+                    },
+                    evidence_deadline.max(tokio::time::Instant::now() + HEADLESS_OUTBOX_BUDGET),
+                )
+                .await
+            }
+            (proof, _) => proof,
         };
         if orphan_facts.existing_record_required() && o_tail_covered.is_none() {
             tracing::warn!(

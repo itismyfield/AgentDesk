@@ -161,6 +161,58 @@ pub(super) fn build_terminal(root: &Path, query: Query<'_>, deadline: Instant) -
     Some(plan)
 }
 
+/// When the frame's last body record was written; `None` unless every body record is dated.
+pub(super) fn body_written_ms(query: Query<'_>, deadline: Instant) -> Option<i64> {
+    let (start, end) = query.range;
+    let kind = provider(query.provider)?;
+    if start >= end || Instant::now() >= deadline {
+        return None;
+    }
+    let mut file = File::open(query.path).ok()?;
+    let meta = file.metadata().ok()?;
+    if shadow::capture::file_identity(&meta) != query.file || meta.len() < end {
+        return None;
+    }
+    if start > 0 {
+        let mut preceding = [0];
+        file.seek(SeekFrom::Start(start - 1)).ok()?;
+        file.read_exact(&mut preceding).ok()?;
+        if preceding != [b'\n'] {
+            return None;
+        }
+    }
+    let mut reader = BufReader::new(file.take(end - start));
+    let mut line = Vec::new();
+    let mut written = None;
+    loop {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        line.clear();
+        let read = reader
+            .by_ref()
+            .take(SOURCE_CAP as u64 + 1)
+            .read_until(b'\n', &mut line)
+            .ok()?;
+        if read == 0 {
+            return written;
+        }
+        if read > SOURCE_CAP || line.last() != Some(&b'\n') {
+            return None;
+        }
+        let value: serde_json::Value = serde_json::from_slice(&line).ok()?;
+        if identity::classify(kind, &value).iter().any(|fact| {
+            matches!(
+                fact,
+                RecordFact::Unit(_, UnitKind::Body, UnitContent::Payload(_))
+            )
+        }) {
+            let at = chrono::DateTime::parse_from_rfc3339(value["timestamp"].as_str()?).ok()?;
+            written = written.max(Some(at.timestamp_millis()));
+        }
+    }
+}
+
 fn build_with_prefix_limit(
     root: &Path,
     query: Query<'_>,
