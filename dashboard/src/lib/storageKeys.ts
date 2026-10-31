@@ -9,7 +9,6 @@ export const STORAGE_KEYS = {
   sidebarCollapsed: "agentdesk.sidebar.collapsed",
   homeOrder: "agentdesk.home.order",
   homeEditing: "agentdesk.home.editing",
-  homeSupportOpen: "agentdesk.home.support-open",
   fsmDraft: "agentdesk.fsm.v2",
   kanbanDrawerLastId: "agentdesk.kanban.drawer.lastId",
   kanbanScopeOpen: "agentdesk.kanban.scope.open",
@@ -24,6 +23,4 @@ export const STORAGE_KEYS = {
   settingsPipelineAgentCache: "agentdesk.settings.pipeline.agent-cache.v1",
   settingsPipelineVisualCache: "agentdesk.settings.pipeline.visual-cache.v1",
   onboardingDraft: "agentdesk.onboarding.draft.v1",
-  meetingChannelId: "pcd_meeting_channel_id",
-  meetingFixedParticipants: "pcd_meeting_fixed_participants",
 } as const;

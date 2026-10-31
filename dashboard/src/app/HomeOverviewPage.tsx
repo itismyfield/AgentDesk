@@ -1,22 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { closestCenter, DndContext, KeyboardSensor, MouseSensor, useSensor, useSensors, type DragEndEvent, type DragOverEvent, type DragStartEvent } from "@dnd-kit/core";
 import { arrayMove, rectSortingStrategy, SortableContext, sortableKeyboardCoordinates } from "@dnd-kit/sortable";
-import { ChevronRight, GripVertical } from "lucide-react";
+import { GripVertical } from "lucide-react";
 
 import * as api from "../api/client";
-import type { Agent, DashboardStats, KanbanCard, RoundTableMeeting, TokenAnalyticsResponse } from "../types";
-import type { Notification } from "../components/NotificationCenter";
+import type { Agent, DashboardStats, TokenAnalyticsResponse } from "../types";
 import type { TFunction } from "../components/dashboard/model";
-import { getAgentLevelFromXp, getMissionResetCountdown, getMissionTotalXp, type DailyMissionViewModel } from "../components/gamification/GamificationShared";
 import { STORAGE_KEYS } from "../lib/storageKeys";
 import { useLocalStorage } from "../lib/useLocalStorage";
-import { countOpenMeetingIssues } from "./meetingSummary";
-import { formatRelativeTime, notificationColor } from "./shellFormatting";
-import { areStringArraysEqual, HOME_DEFAULT_WIDGETS, HOME_PRIMARY_WIDGET_SET, HOME_SUPPORT_WIDGET_SET, normalizeHomeWidgetOrder } from "./HomeOverviewConfig";
+import { formatRelativeTime } from "./shellFormatting";
+import { areStringArraysEqual, HOME_DEFAULT_WIDGETS, normalizeHomeWidgetOrder } from "./HomeOverviewConfig";
 import { HomeSortableWidget } from "./HomeOverviewWidgets";
 import { buildHomeWidgetSpecs } from "./HomeWidgetSpecs";
 import { FreshnessIndicator } from "../components/common/FreshnessIndicator";
-import { coerceTimestampMs } from "../components/agent-manager/kanban-utils";
 
 /**
  * Loads the 7d token analytics for the home page. It passes no abort signal so
@@ -52,9 +48,7 @@ export default function HomeOverviewPage({
   wsLastEventTs,
   stats,
   agents,
-  meetings,
-  notifications,
-  kanbanCards,
+  onOpenAgent,
 }: {
   isMobileViewport: boolean;
   isKo: boolean;
@@ -63,9 +57,7 @@ export default function HomeOverviewPage({
   wsLastEventTs: number | null;
   stats: DashboardStats | null;
   agents: Agent[];
-  meetings: RoundTableMeeting[];
-  notifications: Notification[];
-  kanbanCards: KanbanCard[];
+  onOpenAgent: (agent: Agent) => void;
 }) {
   const tr = useCallback((ko: string, en: string) => (isKo ? ko : en), [isKo]);
   const t: TFunction = useCallback(
@@ -74,20 +66,10 @@ export default function HomeOverviewPage({
   );
   const localeTag = isKo ? "ko-KR" : "en-US";
   const [editing, setEditing] = useLocalStorage<boolean>(STORAGE_KEYS.homeEditing, false);
-  const [supportOpen, setSupportOpen] = useLocalStorage<boolean>(
-    STORAGE_KEYS.homeSupportOpen,
-    false,
-  );
   const [activeWidgetId, setActiveWidgetId] = useState<string | null>(null);
   const [overWidgetId, setOverWidgetId] = useState<string | null>(null);
   const [analytics, setAnalytics] = useState<TokenAnalyticsResponse | null>(
     () => api.getCachedTokenAnalytics("7d")?.data ?? null,
-  );
-  const [gamification, setGamification] = useState<api.AchievementsResponse | null>(null);
-  const [streaks, setStreaks] = useState<api.AgentStreak[]>([]);
-  const defaultWidgets = useMemo(
-    () => [...HOME_DEFAULT_WIDGETS],
-    [],
   );
   const [widgets, setWidgets] = useLocalStorage<string[]>(
     STORAGE_KEYS.homeOrder,
@@ -97,126 +79,10 @@ export default function HomeOverviewPage({
     useSensor(MouseSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
-  const outstandingMeetings = meetings.filter((meeting) => countOpenMeetingIssues(meeting) > 0).length;
-  const topAgents = useMemo(
-    () =>
-      (stats?.top_agents?.length
-        ? stats.top_agents
-        : [...agents]
-            .sort(
-              (left, right) =>
-                right.stats_xp - left.stats_xp ||
-                right.stats_tasks_done - left.stats_tasks_done,
-            )
-            .map((agent) => ({
-              id: agent.id,
-              name: agent.name,
-              alias: agent.alias ?? null,
-              name_ko: agent.name_ko,
-              avatar_emoji: agent.avatar_emoji,
-              stats_tasks_done: agent.stats_tasks_done,
-              stats_xp: agent.stats_xp,
-              stats_tokens: agent.stats_tokens,
-            })))
-        .slice(0, 6),
-    [agents, stats?.top_agents],
-  );
-  const KANBAN_DONE_RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
-  const recentDoneCards = useMemo(() => {
-    const cutoff = Date.now() - KANBAN_DONE_RECENT_WINDOW_MS;
-    return kanbanCards
-      .filter(
-        (card) =>
-          card.status === "done" &&
-          (coerceTimestampMs(card.completed_at) ?? 0) >= cutoff,
-      )
-      .sort(
-        (a, b) =>
-          (coerceTimestampMs(b.completed_at) ?? 0) -
-          (coerceTimestampMs(a.completed_at) ?? 0),
-      );
-  }, [kanbanCards]);
-  const blockedCards = kanbanCards.filter((card) => card.status === "blocked").length;
-  const totalMeetings = meetings.length;
-  const reviewQueue = stats?.kanban.review_queue ?? kanbanCards.filter((card) => card.status === "review").length;
-  const agentTotal = stats?.agents.total ?? topAgents.length;
-  const liveSessions = stats?.dispatched_count ?? 0;
-  const operationalMissionRows: DailyMissionViewModel[] = [
-    {
-      id: "review",
-      label: tr("리뷰 대기 비우기", "Clear review queue"),
-      current: reviewQueue === 0 ? 1 : 0,
-      target: 1,
-      completed: reviewQueue === 0,
-      description: tr("우선 확인이 필요한 카드", "Cards waiting for reviewer action"),
-      xp: 35,
-    },
-    {
-      id: "blocked",
-      label: tr("블록 카드 줄이기", "Reduce blocked cards"),
-      current: Math.max(0, 1 - Math.min(stats?.kanban.blocked ?? blockedCards, 1)),
-      target: 1,
-      completed: blockedCards === 0,
-      description: tr("의존성/외부 응답 대기", "Waiting on dependencies or replies"),
-      xp: 30,
-    },
-    {
-      id: "dispatch",
-      label: tr("실시간 세션 유지", "Keep live sessions healthy"),
-      current: Math.min(stats?.dispatched_count ?? 0, 3),
-      target: 3,
-      completed: (stats?.dispatched_count ?? 0) >= 3 && wsConnected,
-      description: tr("현재 연결된 작업 세션", "Currently connected working sessions"),
-      xp: 40,
-    },
-    {
-      id: "meetings",
-      label: tr("회의 후속 정리", "Close meeting follow-ups"),
-      current: Math.max(0, totalMeetings - outstandingMeetings),
-      target: Math.max(totalMeetings, 1),
-      completed: outstandingMeetings === 0,
-      description: tr("정리/이슈화가 필요한 회의", "Meetings still needing wrap-up"),
-      xp: 25,
-    },
-  ];
-  const activityItems = notifications.slice(0, 4).map((notification) => ({
-    id: notification.id,
-    title: notification.message,
-    meta: formatRelativeTime(notification.ts, isKo),
-    accent: notificationColor(notification.type),
-  }));
-  const fallbackActivity = meetings.slice(0, 4).map((meeting) => ({
-    id: meeting.id,
-    title: meeting.agenda,
-    meta: meeting.status === "completed"
-      ? tr("회의 종료", "Meeting completed")
-      : tr("회의 진행 중", "Meeting in progress"),
-    accent:
-      meeting.status === "completed"
-        ? "var(--th-accent-primary)"
-        : "var(--th-accent-warn)",
-  }));
-
+  const agentTotal = stats?.agents.total ?? agents.length;
+  const workingTotal = agents.filter((agent) => agent.status === "working").length;
 
   useEffect(() => loadHomeTokenAnalytics(setAnalytics), []);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (window.localStorage.getItem(STORAGE_KEYS.homeOrder) !== null) return;
-    try {
-      const legacyRaw =
-        window.localStorage.getItem("agentdesk.widgets") ??
-        window.localStorage.getItem("agentdesk.home.widgets");
-      const parsed = legacyRaw ? (JSON.parse(legacyRaw) as unknown) : null;
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        const migrated = normalizeHomeWidgetOrder(parsed);
-        if (migrated.length > 0) {
-          setWidgets(migrated);
-        }
-      }
-    } catch {
-    }
-  }, [setWidgets]);
 
   useEffect(() => {
     const normalized = normalizeHomeWidgetOrder(widgets);
@@ -230,148 +96,52 @@ export default function HomeOverviewPage({
     setEditing(false);
   }, [editing, isMobileViewport, setEditing]);
 
-  useEffect(() => {
-    let active = true;
-    Promise.all([
-      api.getAchievements().catch(() => ({ achievements: [], daily_missions: [] })),
-      api.getStreaks().catch(() => ({ streaks: [] })),
-    ]).then(([achievementResponse, streakResponse]) => {
-      if (!active) return;
-      setGamification(achievementResponse);
-      setStreaks(
-        [...streakResponse.streaks].sort((left, right) => right.streak - left.streak),
-      );
-    });
-    return () => {
-      active = false;
-    };
-  }, []);
-
   const todayLabel = useMemo(
     () =>
-      new Intl.DateTimeFormat(isKo ? "ko-KR" : "en-US", {
+      new Intl.DateTimeFormat(localeTag, {
         timeZone: "Asia/Seoul",
         weekday: "long",
         month: "short",
         day: "numeric",
       }).format(new Date()),
-    [isKo],
+    [localeTag],
   );
-  const latestAnalyticsDay = analytics?.daily.at(-1) ?? null;
   const tokenTrend = analytics?.daily.slice(-7).map((day) => day.total_tokens) ?? [];
   const costTrend = analytics?.daily.slice(-7).map((day) => day.cost) ?? [];
-  const activityStreak = useMemo(() => {
-    const daily = [...(analytics?.daily ?? [])].sort((left, right) =>
-      left.date.localeCompare(right.date),
-    );
-    let streak = 0;
-    for (let index = daily.length - 1; index >= 0; index -= 1) {
-      if (daily[index].total_tokens <= 0) break;
-      streak += 1;
-    }
-    return streak;
-  }, [analytics]);
+  const analyticsGeneratedMs = analytics?.generated_at ? Date.parse(analytics.generated_at) : Number.NaN;
+  const analyticsAsOf = Number.isFinite(analyticsGeneratedMs)
+    ? tr(`${formatRelativeTime(analyticsGeneratedMs, true)} 기준`, `as of ${formatRelativeTime(analyticsGeneratedMs, false)}`)
+    : null;
   const formatCompact = useCallback((value: number): string => {
     if (value >= 1e9) return `${(value / 1e9).toFixed(1)}B`;
     if (value >= 1e6) return `${(value / 1e6).toFixed(1)}M`;
     if (value >= 1e3) return `${(value / 1e3).toFixed(1)}K`;
-    return Math.round(value).toString();
-  }, []);
+    return Math.round(value).toLocaleString(localeTag);
+  }, [localeTag]);
   const formatCurrency = useCallback(
     (value: number) =>
-      new Intl.NumberFormat(isKo ? "en-US" : "en-US", {
+      new Intl.NumberFormat("en-US", {
         style: "currency",
         currency: "USD",
         maximumFractionDigits: value >= 100 ? 0 : 2,
       }).format(value),
     [],
   );
-  const streakLeader = streaks[0] ?? null;
-  const gamificationLeader = topAgents[0] ?? null;
-  const gamificationLevel = getAgentLevelFromXp(gamificationLeader?.stats_xp ?? 0);
-  const dailyMissions = useMemo<DailyMissionViewModel[]>(() => {
-    if (gamification?.daily_missions?.length) {
-      return gamification.daily_missions.map((mission) => {
-        switch (mission.id) {
-          case "dispatches_today":
-            return {
-              id: mission.id,
-              label: tr("오늘 디스패치 5건 완료", "Complete 5 dispatches today"),
-              current: mission.current,
-              target: mission.target,
-              completed: mission.completed,
-              description: tr("오늘 실제 완료된 디스패치 수", "Completed dispatches today"),
-              xp: 40,
-            };
-          case "active_agents_today":
-            return {
-              id: mission.id,
-              label: tr("오늘 3명 이상 출항", "Get 3 agents shipping today"),
-              current: mission.current,
-              target: mission.target,
-              completed: mission.completed,
-              description: tr("오늘 완료 기록이 있는 에이전트 수", "Agents with completed work today"),
-              xp: 35,
-            };
-          case "review_queue_zero":
-            return {
-              id: mission.id,
-              label: tr("리뷰 큐 비우기", "Drain the review queue"),
-              current: mission.current,
-              target: mission.target,
-              completed: mission.completed,
-              description: tr("리뷰 대기 카드를 0으로 유지", "Keep the review queue empty"),
-              xp: 40,
-            };
-          default:
-            return {
-              id: mission.id,
-              label: mission.label,
-              current: mission.current,
-              target: mission.target,
-              completed: mission.completed,
-            };
-        }
-      });
-    }
-    return operationalMissionRows;
-  }, [gamification?.daily_missions, operationalMissionRows, tr]);
-  const missionReset = useMemo(() => getMissionResetCountdown(), []);
-  const missionResetLabel = tr(
-    `리셋까지 ${missionReset.hours}시간 ${missionReset.minutes}분`,
-    `Resets in ${missionReset.hours}h ${missionReset.minutes}m`,
-  );
-  const missionXpLabel = dailyMissions.length > 0 ? `+${getMissionTotalXp(dailyMissions)} XP` : undefined;
   const widgetSpecs = buildHomeWidgetSpecs({
-    activityItems,
-    activityStreak,
     agents,
     analytics,
+    analyticsAsOf,
     costTrend,
-    dailyMissions,
-    fallbackActivity,
     formatCompact,
     formatCurrency,
-    gamificationLeader,
-    gamificationLevel,
     isKo,
-    kanbanCards,
-    latestAnalyticsDay,
     localeTag,
-    missionResetLabel,
-    missionXpLabel,
-    recentDoneCards,
-    reviewQueue,
+    onOpenAgent,
     stats,
-    streakLeader,
     t,
     tokenTrend,
-    topAgents,
     tr,
   });
-  const primaryWidgets = widgets.filter((widgetId) => HOME_PRIMARY_WIDGET_SET.has(widgetId));
-  const supportWidgets = widgets.filter((widgetId) => HOME_SUPPORT_WIDGET_SET.has(widgetId));
-  const visibleWidgets = editing ? widgets : primaryWidgets;
   const homeWidgetDragEnabled = editing && !isMobileViewport;
   const handleHomeWidgetDragStart = useCallback(
     (event: DragStartEvent) => {
@@ -407,19 +177,17 @@ export default function HomeOverviewPage({
     setActiveWidgetId(null);
     setOverWidgetId(null);
   }, []);
-  const supportSummary = tr(
-    `품질·미션 ${supportWidgets.length}개`,
-    `${supportWidgets.length} quality/mission widgets`,
-  );
 
   return (
     <div data-testid="home-overview" className="h-full w-full overflow-auto bg-th-bg-primary text-th-text-primary">
-      <div className="mx-auto max-w-[88rem] px-4 py-5 pb-8 sm:px-8 sm:py-7">
-        <header className="flex flex-wrap items-start justify-between gap-4 border-b border-th-border-subtle pb-5">
+      <div className="mx-auto max-w-[88rem] px-4 py-4 pb-8 sm:px-8 sm:py-7">
+        <header className="flex flex-wrap items-start justify-between gap-3 border-b border-th-border-subtle pb-4 sm:pb-5">
           <div className="min-w-0">
-            <div className="mb-2 text-xs text-th-text-muted">{todayLabel}</div>
-            <h1 className="text-2xl font-semibold tracking-tight text-th-text-heading">{tr("운영 개요", "Overview")}</h1>
-            <p className="mt-2 text-xs leading-5 text-th-text-muted">{tr(`에이전트 ${agentTotal}명 · 활성 세션 ${liveSessions}개`, `${agentTotal} agents · ${liveSessions} active sessions`)}</p>
+            <div className="mb-1 text-xs text-th-text-muted">{todayLabel}</div>
+            <h1 className="hidden text-2xl font-semibold tracking-tight text-th-text-heading sm:block">{tr("오늘의 운영", "Today")}</h1>
+            <p className="text-xs leading-5 text-th-text-muted sm:mt-2">
+              {tr(`에이전트 ${agentTotal}명 중 ${workingTotal}명 작업 중`, `${workingTotal} of ${agentTotal} agents working`)}
+            </p>
           </div>
           <div className="flex flex-wrap items-center gap-3">
             <div className="flex items-center gap-2 text-xs text-th-text-secondary">
@@ -430,12 +198,11 @@ export default function HomeOverviewPage({
             {!isMobileViewport && editing && (
               <button
                 type="button"
-                onClick={() => setWidgets([...defaultWidgets])}
+                onClick={() => setWidgets([...HOME_DEFAULT_WIDGETS])}
                 data-testid="home-reset-order"
-                className="min-h-11 rounded-md border px-3 py-2 text-xs font-medium transition-colors hover:bg-white/5"
-                style={{ borderColor: "var(--th-border-subtle)", color: "var(--th-text-muted)" }}
+                className="min-h-11 rounded-md border border-th-border-subtle px-3 py-2 text-xs font-medium text-th-text-muted transition-colors hover:bg-surface-subtle"
               >
-                {tr("기본값", "Reset")}
+                {tr("기본 배치로", "Reset layout")}
               </button>
             )}
             {!isMobileViewport ? (
@@ -443,7 +210,7 @@ export default function HomeOverviewPage({
                 type="button"
                 onClick={() => setEditing((prev) => !prev)}
                 data-testid="home-edit-toggle"
-                className="inline-flex min-h-11 items-center gap-2 rounded-md border px-3 py-2 text-xs font-medium transition-colors hover:bg-white/5"
+                className="inline-flex min-h-11 items-center gap-2 rounded-md border px-3 py-2 text-xs font-medium transition-colors hover:bg-surface-subtle"
                 style={{
                   borderColor: editing ? "var(--th-accent-primary)" : "var(--th-border-subtle)",
                   background: editing ? "var(--th-accent-primary-soft)" : "transparent",
@@ -451,111 +218,52 @@ export default function HomeOverviewPage({
                 }}
               >
                 <GripVertical size={14} />
-                {editing ? tr("완료", "Done") : tr("편집", "Edit")}
+                {editing ? tr("배치 완료", "Done") : tr("배치 바꾸기", "Rearrange")}
               </button>
             ) : null}
           </div>
         </header>
 
-      {!isMobileViewport && editing && (
-        <div className="mt-4 rounded-lg border px-4 py-3 text-sm" style={{ borderColor: "color-mix(in srgb, var(--th-accent-primary) 26%, var(--th-border) 74%)", background: "var(--th-accent-primary-soft)", color: "var(--th-text-secondary)" }}>
-          <span className="inline-flex items-center gap-2">
-            <GripVertical size={14} />
-            {tr(
-              "위젯을 드래그해서 순서를 바꿀 수 있습니다. 완료를 누르면 현재 배치가 유지됩니다.",
-              "Drag widgets to reorder them. The current layout will persist when you press done.",
-            )}
-          </span>
-        </div>
-      )}
-
-      <DndContext
-        sensors={widgetDragSensors}
-        collisionDetection={closestCenter}
-        onDragStart={handleHomeWidgetDragStart}
-        onDragOver={handleHomeWidgetDragOver}
-        onDragEnd={handleHomeWidgetDragEnd}
-        onDragCancel={handleHomeWidgetDragCancel}
-      >
-        <SortableContext items={visibleWidgets} strategy={rectSortingStrategy}>
-          <div className="mt-5 grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-12">
-            {visibleWidgets.map((widgetId) => {
-              const spec = widgetSpecs[widgetId as keyof typeof widgetSpecs];
-              if (!spec) return null;
-              return (
-                <HomeSortableWidget
-                  key={widgetId}
-                  widgetId={widgetId}
-                  className={`${spec.className} ${widgetId === "m_tokens" || widgetId === "m_cost" ? "" : "col-span-2"}`}
-                  disabled={!homeWidgetDragEnabled}
-                  showHandle={homeWidgetDragEnabled}
-                  activeWidgetId={activeWidgetId}
-                  overWidgetId={overWidgetId}
-                  handleLabel={tr("위젯 순서 변경", "Reorder widget")}
-                >
-                  {spec.render()}
-                </HomeSortableWidget>
-              );
-            })}
-          </div>
-        </SortableContext>
-      </DndContext>
-
-      {!editing && supportWidgets.length > 0 ? (
-        <section
-          className="mt-5 rounded-lg border"
-          style={{
-            borderColor: "var(--th-border-subtle)",
-            background: "var(--th-bg-surface)",
-          }}
-          data-testid="home-support-section"
-        >
-          <button
-            type="button"
-            className="flex min-h-[52px] w-full items-center justify-between gap-3 px-4 py-3 text-left sm:px-5"
-            onClick={() => setSupportOpen((value) => !value)}
-            aria-expanded={supportOpen}
-            data-testid="home-support-toggle"
-          >
-            <span className="min-w-0">
-              <span
-                className="block truncate text-sm font-medium"
-                style={{ color: "var(--th-text-secondary)" }}
-              >
-                {tr("보조 위젯", "Supporting widgets")}
-              </span>
-              <span
-                className="mt-0.5 block truncate text-[11px]"
-                style={{ color: "var(--th-text-muted)" }}
-              >
-                {supportSummary}
-              </span>
+        {!isMobileViewport && editing && (
+          <div className="mt-4 rounded-lg border px-4 py-3 text-sm" style={{ borderColor: "color-mix(in srgb, var(--th-accent-primary) 26%, var(--th-border) 74%)", background: "var(--th-accent-primary-soft)", color: "var(--th-text-primary)" }}>
+            <span className="inline-flex items-center gap-2">
+              <GripVertical size={14} />
+              {tr("카드를 끌어서 순서를 바꿔요. 배치 완료를 누르면 그대로 유지돼요.", "Drag cards to reorder. Press done to keep the layout.")}
             </span>
-            <ChevronRight
-              size={16}
-              className={supportOpen ? "shrink-0 rotate-90 transition-transform" : "shrink-0 transition-transform"}
-              style={{ color: "var(--th-text-muted)" }}
-            />
-          </button>
-          {supportOpen ? (
-            <div
-              className="grid grid-cols-1 gap-4 border-t p-4 sm:p-5 lg:grid-cols-12"
-              style={{ borderColor: "var(--th-border-subtle)" }}
-              data-testid="home-support-grid"
-            >
-              {supportWidgets.map((widgetId) => {
-                const spec = widgetSpecs[widgetId as keyof typeof widgetSpecs];
+          </div>
+        )}
+
+        <DndContext
+          sensors={widgetDragSensors}
+          collisionDetection={closestCenter}
+          onDragStart={handleHomeWidgetDragStart}
+          onDragOver={handleHomeWidgetDragOver}
+          onDragEnd={handleHomeWidgetDragEnd}
+          onDragCancel={handleHomeWidgetDragCancel}
+        >
+          <SortableContext items={widgets} strategy={rectSortingStrategy}>
+            <div className="mt-4 grid grid-cols-2 gap-3 sm:mt-5 sm:gap-4 lg:grid-cols-12">
+              {widgets.map((widgetId) => {
+                const spec = widgetSpecs[widgetId];
                 if (!spec) return null;
                 return (
-                  <div key={widgetId} data-testid={`home-widget-${widgetId}`} className={spec.className}>
+                  <HomeSortableWidget
+                    key={widgetId}
+                    widgetId={widgetId}
+                    className={spec.className}
+                    disabled={!homeWidgetDragEnabled}
+                    showHandle={homeWidgetDragEnabled}
+                    activeWidgetId={activeWidgetId}
+                    overWidgetId={overWidgetId}
+                    handleLabel={tr("카드 순서 바꾸기", "Reorder card")}
+                  >
                     {spec.render()}
-                  </div>
+                  </HomeSortableWidget>
                 );
               })}
             </div>
-          ) : null}
-        </section>
-      ) : null}
+          </SortableContext>
+        </DndContext>
       </div>
     </div>
   );

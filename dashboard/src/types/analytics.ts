@@ -16,7 +16,6 @@ export interface DashboardStats {
     name_ko: string;
     avatar_emoji: string;
     stats_tasks_done: number;
-    stats_xp: number;
     stats_tokens: number;
   }>;
   departments: Array<{
@@ -27,7 +26,6 @@ export interface DashboardStats {
     color: string;
     total_agents: number;
     working_agents: number;
-    sum_xp?: number;
   }>;
   dispatched_count: number;
   github_closed_today?: number;

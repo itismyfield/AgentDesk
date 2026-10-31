@@ -1,18 +1,7 @@
-import type { Agent, DispatchedSession, SubAgent } from "../types";
+import type { Agent, DispatchedSession } from "../types";
 
 function sessionIsWorking(status: DispatchedSession["status"]): boolean {
   return status === "turn_active" || status === "awaiting_bg" || status === "working";
-}
-
-export function deriveSubAgents(sessions: DispatchedSession[]): SubAgent[] {
-  return sessions
-    .filter((s) => sessionIsWorking(s.status) && s.linked_agent_id)
-    .map((s) => ({
-      id: s.id,
-      parentAgentId: s.linked_agent_id!,
-      task: s.name || s.session_info || "파견 세션",
-      status: "working" as const,
-    }));
 }
 
 export function deriveDispatchedAsAgents(sessions: DispatchedSession[]): Agent[] {
@@ -26,12 +15,10 @@ export function deriveDispatchedAsAgents(sessions: DispatchedSession[]): Agent[]
       department_id: s.department_id,
       role: "intern" as const,
       avatar_emoji: s.avatar_emoji || "📡",
-      sprite_number: s.sprite_number,
       personality: null,
       status: sessionIsWorking(s.status) ? ("working" as const) : ("idle" as const),
       current_task_id: null,
       stats_tasks_done: 0,
-      stats_xp: s.stats_xp,
       stats_tokens: s.tokens || 0,
       created_at: s.connected_at,
       session_info: s.session_info,

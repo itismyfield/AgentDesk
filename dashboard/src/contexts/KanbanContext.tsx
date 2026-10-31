@@ -18,12 +18,12 @@ const KanbanContext = createContext<KanbanContextValue | null>(null);
 // ── Provider ──
 
 interface KanbanProviderProps {
-  initialCards: KanbanCard[];
-  initialDispatches: TaskDispatch[];
+  initialCards?: KanbanCard[];
+  initialDispatches?: TaskDispatch[];
   children: ReactNode;
 }
 
-export function KanbanProvider({ initialCards, initialDispatches, children }: KanbanProviderProps) {
+export function KanbanProvider({ initialCards = [], initialDispatches = [], children }: KanbanProviderProps) {
   const [kanbanCards, setKanbanCards] = useState<KanbanCard[]>(initialCards);
   const [taskDispatches, setTaskDispatches] = useState<TaskDispatch[]>(initialDispatches);
 

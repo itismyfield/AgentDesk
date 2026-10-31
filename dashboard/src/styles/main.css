@@ -25,6 +25,12 @@
   --color-th-card-border: var(--th-card-border);
   --color-th-input-border: var(--th-input-border);
   --color-th-nav-bg: var(--th-nav-bg);
+  --animate-persona-breathe: persona-breathe 2s ease-in-out infinite;
+
+  @keyframes persona-breathe {
+    0%, 100% { opacity: 0.4; }
+    50% { opacity: 1; }
+  }
 }
 
 :root {

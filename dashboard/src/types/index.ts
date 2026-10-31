@@ -105,7 +105,6 @@ export interface Agent {
   department_color?: string | null;
   avatar_emoji: string;
   avatar_seed?: number | null;
-  sprite_number?: number | null;
   personality: string | null;
   system_prompt?: string | null;
   status: AgentStatus;
@@ -113,7 +112,6 @@ export interface Agent {
   prompt_content?: string | null;
   current_task_id?: string | null;
   stats_tasks_done: number;
-  stats_xp: number;
   stats_tokens: number;
   discord_channel_id?: string | null;
   discord_channel_id_alt?: string | null;
@@ -211,32 +209,6 @@ export interface TaskLog {
   created_at: number;
 }
 
-export interface MeetingMinuteEntry {
-  id: number;
-  meeting_id: string;
-  seq: number;
-  speaker_agent_id: string | null;
-  speaker_name: string;
-  department_name: string | null;
-  role_label: string | null;
-  message_type: string;
-  content: string;
-  created_at: number;
-}
-
-export interface MeetingMinute {
-  id: string;
-  task_id: string;
-  meeting_type: "planned" | "review";
-  round: number;
-  title: string;
-  status: "in_progress" | "completed" | "revision_requested" | "failed";
-  started_at: number;
-  completed_at: number | null;
-  created_at: number;
-  entries: MeetingMinuteEntry[];
-}
-
 // Messages
 export type SenderType = "ceo" | "agent" | "system";
 export type ReceiverType = "agent" | "department" | "all";
@@ -316,7 +288,6 @@ export interface CompanyStats {
     alias?: string | null;
     avatar_emoji: string;
     stats_tasks_done: number;
-    stats_xp: number;
     stats_tokens: number;
   }>;
   tasks_by_department: Array<{
@@ -380,8 +351,6 @@ export type WSEventType =
   | "kanban_card_deleted"
   | "task_dispatch_created"
   | "task_dispatch_updated"
-  | "round_table_new"
-  | "round_table_update"
   | "connected";
 
 export interface WSEvent {
@@ -482,9 +451,7 @@ export interface DispatchedSession {
   model: string | null;
   status: DispatchedSessionStatus;
   session_info: string | null;
-  sprite_number: number | null;
   avatar_emoji: string;
-  stats_xp: number;
   tokens: number;
   connected_at: number;
   last_seen_at: number | null;
