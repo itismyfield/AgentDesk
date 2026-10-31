@@ -74,6 +74,33 @@ pub(crate) async fn execute_intake_turn_core(
     if let Some(stopped) = worker_replay_admission(shared, &request).await {
         return Ok(stopped);
     }
+    #[cfg(test)]
+    if crate::services::discord::queue_io::input_ingress::installed(
+        &shared.mailbox(request.channel_id),
+    )
+    .await
+        != Ok(false)
+    {
+        let voice = if let Some(pool) = shared.pg_pool.as_ref() {
+            crate::voice::announce_meta::load_voice_announcement_durable(pool, request.user_msg_id)
+                .await?
+        } else {
+            crate::voice::announce_meta::global_store().peek_clone(request.user_msg_id)
+        };
+        if let Some(intake) = crate::services::discord::queue_io::input_ingress::intake(
+            shared,
+            &shared.provider,
+            &request,
+            uploads.clone(),
+            voice,
+            true,
+            false,
+        )
+        .await
+        {
+            return intake.worker();
+        }
+    }
     super::handle_text_message(
         &IntakeDeps {
             http,
@@ -183,6 +210,8 @@ pub(crate) async fn start_exact_retry(
         .cloned()
         .unwrap_or_default();
     let start = execute_intake_turn_core(http, shared, &token, request, Vec::new());
+    #[cfg(test)]
+    let start = crate::services::discord::queue_io::input_ingress::existing_retry(start);
     let (result, handoff) = hand_over(retry.permit, start).await;
     if let Err(error) = result {
         tracing::warn!(channel_id = channel_id.get(), %error, "exact retry start failed");

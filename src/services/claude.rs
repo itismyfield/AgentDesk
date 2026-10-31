@@ -1537,38 +1537,16 @@ fn resolve_claude_tui_session_for_launch(
     requested_session_id: Option<&str>,
     claude_home: Option<&std::path::Path>,
 ) -> Result<ClaudeTuiSessionResolution, String> {
-    let mut session_id = match requested_session_id {
-        Some(sid) if is_valid_session_id(sid) => sid.to_string(),
-        Some(_) => return Err("Invalid session ID format".to_string()),
-        None => uuid::Uuid::new_v4().to_string(),
-    };
-    let mut resume = requested_session_id.is_some();
-    let mut transcript_path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
-        working_dir,
-        &session_id,
-        claude_home,
-    )?;
-
-    if resume && !transcript_path.exists() {
+    let (resolution, substitution) =
+        tui_session_launch::prepared::resolve(working_dir, requested_session_id, claude_home)?;
+    if let Some(substitution) = substitution {
         debug_log(&format!(
             "Claude TUI resume transcript missing for session {}; forcing fresh session (expected {})",
-            session_id,
-            transcript_path.display()
+            substitution.requested,
+            substitution.missing_transcript.display()
         ));
-        session_id = uuid::Uuid::new_v4().to_string();
-        transcript_path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
-            working_dir,
-            &session_id,
-            claude_home,
-        )?;
-        resume = false;
     }
-
-    Ok(ClaudeTuiSessionResolution {
-        session_id,
-        transcript_path,
-        resume,
-    })
+    Ok(resolution)
 }
 
 #[cfg(unix)]
@@ -1759,6 +1737,7 @@ fn execute_streaming_local_tui_tmux(
     }
 
     if session_exists && has_live_pane && resume {
+        crate::services::claude_tui::owner_input::launch_refuses_live()?;
         match guarded_outcome::warm_owned(|| {
             try_claude_tui_warm_followup(
                 resolved_session_id,
@@ -1853,7 +1832,7 @@ fn execute_streaming_local_tui_tmux(
     )
 }
 #[cfg(unix)]
-mod first_input;
+pub(crate) mod first_input;
 #[cfg(unix)]
 #[path = "claude_tui/hosting/fresh_lifecycle.rs"]
 mod fresh_lifecycle;

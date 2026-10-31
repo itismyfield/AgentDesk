@@ -17,14 +17,31 @@ pub(crate) fn inspect(content: &str) -> Result<SnapshotRead, String> {
     Ok(SnapshotRead::Legacy(items, meta.map(Box::new)))
 }
 
-/// Runs before any unlink, marker change or legacy publish, even in an adopted actor. Only a
-/// parsed non-legacy object refuses; a failed read or parse lets the write proceed as main does.
+/// /clear's guard: only a parsed non-legacy object refuses; a failed read or parse lets the clear
+/// replace the file as main does.
+pub(crate) fn require_clearable(path: &Path) -> Result<(), String> {
+    match std::fs::read(path) {
+        Ok(content) => refuse_non_legacy(path, &String::from_utf8_lossy(&content)),
+        Err(_) => Ok(()),
+    }
+}
+
+/// The legacy save's guard: a missing file or a legacy one saves, but a file it cannot read is
+/// kept, so the save never replaces a snapshot nobody read.
 pub(crate) fn require_legacy_write(path: &Path) -> Result<(), String> {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return Ok(());
-    };
+    match std::fs::read(path) {
+        Ok(content) => refuse_non_legacy(path, &String::from_utf8_lossy(&content)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "read {}: {error}; legacy save refused and the original file kept",
+            path.display()
+        )),
+    }
+}
+
+fn refuse_non_legacy(path: &Path, content: &str) -> Result<(), String> {
     if content.trim_start().starts_with('{')
-        && let Ok(value) = serde_json::from_str::<serde_json::Value>(&content)
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(content)
         && value.get("version").and_then(serde_json::Value::as_u64) != Some(1)
     {
         return Err(format!(

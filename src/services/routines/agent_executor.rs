@@ -3,6 +3,8 @@ use chrono::{DateTime, Duration, Utc};
 
 mod execution;
 mod launch;
+mod owner_input;
+use owner_input::AgentStartDisposition;
 mod owned_session;
 pub(crate) mod reliability;
 pub(crate) mod start_deferral;
@@ -142,52 +144,20 @@ impl RoutineAgentExecutor {
             )
             .await;
         match result {
-            Ok(started) if started.started => Ok(RoutineRunOutcome {
-                run_id: claimed.run_id,
-                routine_id: claimed.routine_id,
-                script_ref: claimed.script_ref,
-                action,
-                status: "running".to_string(),
-                result_json: Some(started.result_json),
-                error: None,
-                fresh_context_guaranteed: started.fresh_context_guaranteed,
-            }),
-            Ok(started) => {
-                // Prefer the dispatch label the routine script returned (e.g.
-                // "dependency update check dispatched"); fall back to the
-                // generic message only when the script omitted lastResult.
-                let consumed_last_result = last_result
-                    .as_deref()
-                    .unwrap_or("headless command consumed without starting an agent turn");
-                let closed = store
-                    .complete_agent_run(
-                        &claimed.run_id,
-                        Some(started.result_json.clone()),
+            Ok(started) => self
+                .consume_start(
+                    store,
+                    &claimed,
+                    started,
+                    None,
+                    owner_input::ConsumedRunState {
                         checkpoint,
-                        Some(consumed_last_result),
-                        match next_due_at {
-                            Some(value) => NextDueAtUpdate::Set(value),
-                            None => NextDueAtUpdate::Preserve,
-                        },
-                    )
-                    .await?;
-                if !closed {
-                    return Err(anyhow!(
-                        "routine agent run {} was already closed before consumed outcome",
-                        claimed.run_id
-                    ));
-                }
-                Ok(RoutineRunOutcome {
-                    run_id: claimed.run_id,
-                    routine_id: claimed.routine_id,
-                    script_ref: claimed.script_ref,
-                    action,
-                    status: "succeeded".to_string(),
-                    result_json: Some(started.result_json),
-                    error: None,
-                    fresh_context_guaranteed: started.fresh_context_guaranteed,
-                })
-            }
+                        next_due_at,
+                        last_result: last_result.as_deref(),
+                    },
+                )
+                .await?
+                .ok_or_else(|| anyhow!("routine run closed before consumed outcome")),
             Err(error) => {
                 let start = start_deferral::PendingAgentStart {
                     claimed: &claimed,
@@ -313,54 +283,23 @@ impl RoutineAgentExecutor {
                     )
                     .await
                 {
-                    Ok(started) if started.started => {
-                        return Ok(RoutineRunOutcome {
-                            run_id: claimed.run_id,
-                            routine_id: claimed.routine_id,
-                            script_ref: claimed.script_ref,
-                            action,
-                            status: "running".to_string(),
-                            result_json: Some(started.result_json),
-                            error: Some(message.to_string()),
-                            fresh_context_guaranteed: started.fresh_context_guaranteed,
-                        });
-                    }
                     Ok(started) => {
-                        // Preserve the routine's dispatch label across the
-                        // fallback path too; only the agent that never started
-                        // a turn reaches here, so the script's lastResult is
-                        // still the most meaningful summary.
-                        let consumed_last_result = last_result.as_deref().unwrap_or(
-                            "fallback headless command consumed without starting an agent turn",
-                        );
-                        let closed = store
-                            .complete_agent_run(
-                                &claimed.run_id,
-                                Some(started.result_json.clone()),
-                                checkpoint,
-                                Some(consumed_last_result),
-                                match next_due_at {
-                                    Some(value) => NextDueAtUpdate::Set(value),
-                                    None => NextDueAtUpdate::Preserve,
+                        return self
+                            .consume_start(
+                                store,
+                                &claimed,
+                                started,
+                                Some(message.to_string()),
+                                owner_input::ConsumedRunState {
+                                    checkpoint,
+                                    next_due_at,
+                                    last_result: Some(last_result.as_deref().unwrap_or("fallback headless command consumed without starting an agent turn")),
                                 },
                             )
-                            .await?;
-                        if !closed {
-                            return Err(anyhow!(
-                                "routine agent run {} was already closed before fallback consumed outcome",
-                                claimed.run_id
-                            ));
-                        }
-                        return Ok(RoutineRunOutcome {
-                            run_id: claimed.run_id,
-                            routine_id: claimed.routine_id,
-                            script_ref: claimed.script_ref,
-                            action,
-                            status: "succeeded".to_string(),
-                            result_json: Some(started.result_json),
-                            error: Some(message.to_string()),
-                            fresh_context_guaranteed: started.fresh_context_guaranteed,
-                        });
+                            .await?
+                            .ok_or_else(|| {
+                                anyhow!("routine run closed before fallback consumed outcome")
+                            });
                     }
                     Err(fallback_error) => {
                         let combined = format!(
@@ -404,6 +343,9 @@ impl RoutineAgentExecutor {
         let pending = store.list_running_agent_runs(limit).await?;
         let mut outcomes = Vec::new();
         for run in pending {
+            let Some(run) = owner_input::reconcile_run(self, store, run).await? else {
+                continue;
+            };
             let fresh_context_guaranteed =
                 fresh_context_guaranteed_from_result(run.result_json.as_ref());
             if run.turn_id.is_none() {
@@ -416,8 +358,12 @@ impl RoutineAgentExecutor {
                 continue;
             }
 
+            let retry_allowed = owner_input::retry_allowed(self, &run).await;
             if let Some(completion) = self.find_turn_completion(&run).await? {
                 if let Some(provider_error) = provider_error_from_completion(&completion) {
+                    if !retry_allowed {
+                        continue;
+                    }
                     let message = format!(
                         "routine provider returned an error-only response: {provider_error}"
                     );
@@ -497,6 +443,9 @@ impl RoutineAgentExecutor {
                 continue;
             }
 
+            if !retry_allowed {
+                continue;
+            }
             if let Some((status, message)) = self.fresh_run_failure(&run).await? {
                 let result_json = Some(merge_pending_result(&run, status, Some(&message), None));
                 self.teardown_fresh_agent_session(
@@ -647,40 +596,21 @@ impl RoutineAgentExecutor {
             )
             .await
         {
-            Ok(started) if started.started => Ok(Some(RoutineRunOutcome {
-                run_id: run.run_id,
-                routine_id: run.routine_id,
-                script_ref: run.script_ref,
-                action: "agent".to_string(),
-                status: "running".to_string(),
-                result_json: Some(started.result_json),
-                error: None,
-                fresh_context_guaranteed: started.fresh_context_guaranteed,
-            })),
             Ok(started) => {
-                let last_result = "retry headless command consumed without starting an agent turn";
-                let closed = store
-                    .complete_agent_run(
-                        &run.run_id,
-                        Some(started.result_json.clone()),
+                self.consume_start(
+                    store,
+                    &claimed,
+                    started,
+                    None,
+                    owner_input::ConsumedRunState {
                         checkpoint,
-                        Some(last_result),
-                        match next_due_at {
-                            Some(value) => NextDueAtUpdate::Set(value),
-                            None => NextDueAtUpdate::Preserve,
-                        },
-                    )
-                    .await?;
-                Ok(closed.then(|| RoutineRunOutcome {
-                    run_id: run.run_id,
-                    routine_id: run.routine_id,
-                    script_ref: run.script_ref,
-                    action: "agent".to_string(),
-                    status: "succeeded".to_string(),
-                    result_json: Some(started.result_json),
-                    error: None,
-                    fresh_context_guaranteed: started.fresh_context_guaranteed,
-                }))
+                        next_due_at,
+                        last_result: Some(
+                            "retry headless command consumed without starting an agent turn",
+                        ),
+                    },
+                )
+                .await
             }
             Err(error) => {
                 let start = start_deferral::PendingAgentStart {
@@ -815,44 +745,15 @@ impl RoutineAgentExecutor {
                     )
                     .await
                 {
-                    Ok(started) if started.started => {
-                        return Ok(Some(RoutineRunOutcome {
-                            run_id: run.run_id,
-                            routine_id: run.routine_id,
-                            script_ref: run.script_ref,
-                            action: "agent".to_string(),
-                            status: "running".to_string(),
-                            result_json: Some(started.result_json),
-                            error: Some(message.to_string()),
-                            fresh_context_guaranteed: started.fresh_context_guaranteed,
-                        }));
-                    }
-                    Ok(started) => {
-                        let last_result =
-                            "fallback headless command consumed without starting an agent turn";
-                        let closed = store
-                            .complete_agent_run(
-                                &run.run_id,
-                                Some(started.result_json.clone()),
-                                checkpoint,
-                                Some(last_result),
-                                match next_due_at {
-                                    Some(value) => NextDueAtUpdate::Set(value),
-                                    None => NextDueAtUpdate::Preserve,
-                                },
-                            )
-                            .await?;
-                        return Ok(closed.then(|| RoutineRunOutcome {
-                            run_id: run.run_id,
-                            routine_id: run.routine_id,
-                            script_ref: run.script_ref,
-                            action: "agent".to_string(),
-                            status: "succeeded".to_string(),
-                            result_json: Some(started.result_json),
-                            error: Some(message.to_string()),
-                            fresh_context_guaranteed: started.fresh_context_guaranteed,
-                        }));
-                    }
+                    Ok(started) => return self
+                        .consume_start(
+                            store,
+                            &claimed,
+                            started,
+                            Some(message.to_string()),
+                            owner_input::ConsumedRunState { checkpoint, next_due_at, last_result:Some("fallback headless command consumed without starting an agent turn") },
+                        )
+                        .await,
                     Err(fallback_error) => {
                         let combined = format!(
                             "{message}; fallback agent {fallback_agent_id} failed: {fallback_error}"
@@ -921,6 +822,17 @@ impl RoutineAgentExecutor {
         result_json: Option<&Value>,
         reason: &str,
     ) {
+        // Owner admission never grants routine ownership of the channel's TUI session.
+        if result_json.is_some_and(|result| result.get("owner_input").is_some()) {
+            return;
+        }
+        #[cfg(test)]
+        if owner_input_tests::LEGACY_TEARDOWNS
+            .try_with(|count| count.set(count.get() + 1))
+            .is_ok()
+        {
+            return;
+        }
         if execution::AgentExecutionMode::from_result(result_json)
             == execution::AgentExecutionMode::Process
         {
@@ -1170,7 +1082,7 @@ impl RoutineAgentExecutor {
 
 struct StartedAgentTurn {
     result_json: Value,
-    started: bool,
+    disposition: AgentStartDisposition,
     fresh_context_guaranteed: bool,
 }
 
@@ -1475,6 +1387,9 @@ fn retry_scheduled_result(
         );
     }
     preserve_pending_agent_state(&mut retry_result, run.result_json.as_ref());
+    if let Some(object) = retry_result.as_object_mut() {
+        object.remove("owner_input");
+    }
     result_with_fresh_context_guarantee(retry_result, false)
 }
 
@@ -1510,6 +1425,7 @@ fn with_started_run_routing_metadata(mut result: Value, started_result: Option<&
         "attempt_kind",
         "provider",
         "execution_mode",
+        "owner_input",
     ];
 
     let Some(started_result) = started_result else {
@@ -2405,3 +2321,6 @@ mod tests {
         assert!(!started_turn_is_dm(&json!({})));
     }
 }
+
+#[cfg(test)]
+mod owner_input_tests;

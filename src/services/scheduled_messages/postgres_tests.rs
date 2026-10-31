@@ -1806,3 +1806,6 @@ async fn postgres_recorded_turn_outcome_settles_without_transcript_evidence() {
     pool.close().await;
     pg_db.drop().await;
 }
+
+#[path = "owner_input_tests.rs"]
+mod owner_input_tests;

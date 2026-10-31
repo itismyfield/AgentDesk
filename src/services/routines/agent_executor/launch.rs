@@ -7,6 +7,10 @@ impl RoutineAgentExecutor {
         store: &RoutineStore,
         start: start_deferral::PendingAgentStart<'_>,
     ) -> Result<StartedAgentTurn> {
+        #[cfg(test)]
+        if let Some(result) = super::owner_input_tests::inject(store, &start).await {
+            return result;
+        }
         let start_deferral::PendingAgentStart {
             claimed,
             agent_id,
@@ -203,7 +207,8 @@ impl RoutineAgentExecutor {
                 outcome.turn_id
             ));
         }
-        let started = outcome.status.as_str() == "started";
+        let disposition = owner_input::disposition(outcome.status);
+        let started = disposition == AgentStartDisposition::Started;
         let provider_fresh_context = fresh_context_guaranteed(&claimed.execution_strategy, started);
         if !started && let Some(object) = result_json.as_object_mut() {
             object.insert(
@@ -271,7 +276,7 @@ impl RoutineAgentExecutor {
 
         Ok(StartedAgentTurn {
             result_json,
-            started,
+            disposition,
             fresh_context_guaranteed,
         })
     }

@@ -2,6 +2,8 @@
 //! one prompt to a launch's ready composer, its hold ending only once the hook Source is bound;
 //! a Bound pane takes each later prompt once, never over a draft or changed launch options.
 
+#[cfg(all(test, unix))]
+pub(crate) mod busy;
 mod first_input;
 
 use std::path::Path;
@@ -144,7 +146,8 @@ pub(crate) fn execute(
         return Ok(());
     }
     let result = (|| {
-        let nonce = match turn.row {
+        use crate::services::claude_tui::owner_input::Lineage;
+        let (nonce, lineage) = match turn.row {
             Some(HostedRecord::Known(record)) if record.state == HostedState::Bound => {
                 not_held(&record.execution_nonce)?;
                 return followup(&turn, ports, record, sender);
@@ -152,14 +155,15 @@ pub(crate) fn execute(
             Some(HostedRecord::Known(record)) if record.state == HostedState::Pending => {
                 not_held(&record.execution_nonce)?;
                 options_kept(&turn, &record.execution_nonce)?;
-                pending_launch(&turn, &runtime, ports, record)?
+                let nonce = pending_launch(&turn, &runtime, ports, record)?;
+                (nonce, Lineage::Pending)
             }
             Some(HostedRecord::Unknown(_)) => {
                 return Err("herdr turn: unreadable hosted record".into());
             }
-            _ => fresh_launch(&turn, &runtime, ports)?,
+            _ => (fresh_launch(&turn, &runtime, ports)?, Lineage::Created),
         };
-        first_prompt(&turn, &runtime, ports, &nonce, sender)
+        first_prompt(&turn, &runtime, ports, &nonce, lineage, sender)
     })();
     let failed = result.is_err();
     crate::services::provider::herdr_before_start::finish_execution(turn.cancel.as_deref(), failed);
@@ -383,14 +387,47 @@ fn release_closed_hold(logical: &str, nonce: &str) {
 
 /// The first prompt of execution `nonce`: one gated write on a ready composer, then its own hook
 /// Source, the attach, the hold's end and the new rollout from its start.
+/// A test's recorded Codex execution handed to the owner hook on this thread, unobserved.
+#[cfg(all(test, unix))]
+pub(crate) fn owned_first_prompt_for_tests(
+    turn: &CodexHerdrTurn<'_>,
+    record: &HostedExecution,
+    lineage: crate::services::claude_tui::owner_input::Lineage,
+) -> Result<(), String> {
+    let hook = crate::services::claude_tui::owner_input::launch_hook().ok_or("no owner hook")?;
+    first_input::submit_owned(turn, hook, lineage, record).map(drop)
+}
+
+/// A test's prepared Codex tmux argv create handed to the owner hook on this thread; it lives here
+/// because the tmux launch module is private to Codex.
+#[cfg(all(test, unix))]
+pub(crate) fn owned_spawn_for_tests(
+    context: &crate::services::tui_prompt_dedupe::binding_context::BindingContext,
+    at: (&str, &str),
+    prompt: &str,
+    command: String,
+) -> Result<std::process::Output, String> {
+    let hook = crate::services::claude_tui::owner_input::launch_hook().ok_or("no owner hook")?;
+    super::tui_session_launch::first_input::spawn_owned(hook, context, at, prompt, command)
+}
+
 fn first_prompt(
     turn: &CodexHerdrTurn<'_>,
     runtime: &Handle,
     ports: &dyn CodexHerdrPorts,
     nonce: &str,
+    lineage: crate::services::claude_tui::owner_input::Lineage,
     sender: Sender<StreamMessage>,
 ) -> Result<(), String> {
-    let Some(submitted) = first_input::submit(turn, runtime, nonce)? else {
+    let submitted = match crate::services::claude_tui::owner_input::launch_hook() {
+        // The owner waiting on this thread writes the first prompt as its own effect.
+        Some(hook) => {
+            let record = current_record(turn, runtime, nonce)?;
+            Some(first_input::submit_owned(turn, hook, lineage, &record)?)
+        }
+        None => first_input::submit(turn, runtime, nonce)?,
+    };
+    let Some(submitted) = submitted else {
         return Ok(());
     };
     first_input::observe(turn, runtime, ports, nonce, sender, submitted)
@@ -474,22 +511,85 @@ fn followup(
     options_kept(turn, nonce)?;
     empty_composer(&target, turn.cancel.as_deref())?;
     // Read before the write, so the reply is read from where this prompt's lines begin.
-    let before = std::fs::metadata(&path)
-        .map_err(|_| refused(PromptRefused::NoSource))?
-        .len();
+    let meta = std::fs::metadata(&path).map_err(|_| refused(PromptRefused::NoSource))?;
+    let before = meta.len();
+    let write = |plan: &[crate::services::codex_tui::input::TuiInputAction]| {
+        followup_write(
+            logical,
+            nonce,
+            turn.cancel.as_deref(),
+            (&path, before),
+            &target,
+            plan,
+        )
+    };
+    match crate::services::claude_tui::owner_input::launch_hook() {
+        // The owner waiting on this thread writes the prompt as its own effect.
+        Some(hook) => {
+            use std::os::unix::fs::MetadataExt;
+            let socket = record
+                .location
+                .as_ref()
+                .map(|l| (l.socket_addr.clone(), l.pane_id.clone()));
+            let (socket, pane) = socket.ok_or("herdr turn: the execution has no pane")?;
+            let attempt = serde_json::json!({"host":"herdr","owner":logical,"root":socket,
+                "execution_nonce":nonce});
+            let source = serde_json::json!({"kind":"existing","session_id":session_id,
+                "transcript":path.display().to_string(),"file":[meta.dev(), meta.ino()],
+                "offset":before});
+            let (logical, nonce, path, target) = (
+                logical.to_owned(),
+                nonce.to_owned(),
+                path.clone(),
+                target.clone(),
+            );
+            let cancel = turn.cancel.clone();
+            let submit = Box::new(move |frame: String| {
+                let plan = plan_prompt_submit(&frame)?;
+                let at = (path.as_path(), before);
+                match followup_write(&logical, &nonce, cancel.as_deref(), at, &target, &plan)? {
+                    true => Ok(()),
+                    false => Err("herdr turn: the input closed before its first key"
+                        .to_string()
+                        .into()),
+                }
+            });
+            let lineage = crate::services::claude_tui::owner_input::Lineage::Existing;
+            hook(
+                lineage,
+                attempt,
+                source,
+                Some(format!("{socket}#{pane}")),
+                submit,
+            )?;
+        }
+        None if !write(&plan)? => return Ok(()),
+        None => {}
+    }
+    read_reply(turn, &target, &path, before, session_id, sender)
+}
+
+/// A bound execution's gated prompt under the token's observation; `false` when the input closed
+/// before its first key.
+fn followup_write(
+    logical: &str,
+    nonce: &str,
+    cancel: Option<&CancelToken>,
+    (path, before): (&std::path::Path, u64),
+    target: &HerdrTarget,
+    plan: &[crate::services::codex_tui::input::TuiInputAction],
+) -> Result<bool, String> {
     hold(nonce)?;
     #[cfg(test)]
-    crate::services::provider::herdr_before_start::test_input_boundary(turn.cancel.as_deref());
+    crate::services::provider::herdr_before_start::test_input_boundary(cancel);
     let start = || {
-        let start = HerdrTurnStart::at_end_of(nonce, &path, None);
+        let start = HerdrTurnStart::at_end_of(nonce, path, None);
         Some(HerdrTurnStart {
             offset: before,
             ..start
         })
     };
-    let run = observed_input(turn.cancel.as_deref(), nonce, start, || {
-        run_herdr(&target, &plan, turn.cancel.as_deref())
-    })?;
+    let run = observed_input(cancel, nonce, start, || run_herdr(target, plan, cancel))?;
     let run = match run {
         crate::services::provider::herdr_before_start::InputRun::Ran(run) => run,
         crate::services::provider::herdr_before_start::InputRun::Closed => {
@@ -498,14 +598,14 @@ fn followup(
             ) {
                 release_closed_hold(logical, nonce);
             }
-            return Ok(());
+            return Ok(false);
         }
     };
     if run.run == InputRun::Applied || composer_untouched(&run) {
         warn_release(logical, release_hold(nonce));
     }
     legacy_result(run.run)?;
-    read_reply(turn, &target, &path, before, session_id, sender)
+    Ok(true)
 }
 
 /// The rollout from `offset` until its turn ends, then the watcher handoff.

@@ -38,6 +38,7 @@ fn payload() -> PreparedPayload {
         frame: "exact prepared frame".into(),
         digest: "digest".into(),
         attribution: json!({"author":7}),
+        followers: Vec::new(),
     }
 }
 

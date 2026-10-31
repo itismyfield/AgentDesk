@@ -3,6 +3,9 @@ use super::*;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
+mod collision;
+mod migration;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Source {
     pub(crate) target: Value,
@@ -126,6 +129,37 @@ struct Passive {
     #[serde(skip)]
     encoded: Option<String>,
 }
+impl Passive {
+    /// Settled or abandoned queue evidence keeps every key and matched field; only display text no
+    /// reader of it reads is emptied. Migrated V1 and retained entries keep everything.
+    fn compact(&mut self) {
+        if !matches!(self.state.as_str(), "settled" | collision::ABANDONED) {
+            return;
+        }
+        let Some(registration) = self.registration.as_mut() else {
+            return;
+        };
+        let frame = &mut registration.frame;
+        let mut texts = vec![
+            &mut frame.author,
+            &mut frame.body_hash,
+            &mut frame.header,
+            &mut frame.screen_prefix,
+        ];
+        if let Some(entry) = self.entry.as_mut() {
+            texts.extend([
+                &mut entry.author,
+                &mut entry.body_hash,
+                &mut entry.header,
+                &mut entry.screen_prefix,
+            ]);
+        }
+        if texts.iter().any(|text| !text.is_empty()) {
+            texts.into_iter().for_each(String::clear);
+            self.encoded = None;
+        }
+    }
+}
 #[derive(Default, Serialize, Deserialize)]
 struct Snapshot {
     version: u32,
@@ -171,15 +205,24 @@ impl Snapshot {
             )
             .find(|(r, _)| r.namespace == namespace && r.key == *key)
     }
-    fn entries(&self) -> impl Iterator<Item = (Option<&Registration>, &Entry, bool)> {
+    /// The queue proved this attempt was never sent, so no native row can be its own.
+    fn abandoned(&self, namespace: &str, key: &Value) -> bool {
+        self.passive.iter().any(|p| {
+            p.state == collision::ABANDONED
+                && p.registration
+                    .as_ref()
+                    .is_some_and(|r| r.namespace == namespace && r.key == *key)
+        })
+    }
+    fn entries(&self) -> impl Iterator<Item = (Option<&Registration>, &Entry)> {
         self.live
             .iter()
-            .map(|b| (Some(&b.registration), &b.entry, true))
-            .chain(self.passive.iter().filter_map(|p| {
-                p.entry
-                    .as_ref()
-                    .map(|e| (p.registration.as_ref(), e, p.state == "retained"))
-            }))
+            .map(|b| (Some(&b.registration), &b.entry))
+            .chain(
+                self.passive
+                    .iter()
+                    .filter_map(|p| p.entry.as_ref().map(|e| (p.registration.as_ref(), e))),
+            )
     }
 }
 
@@ -187,12 +230,17 @@ impl Snapshot {
 pub(crate) struct Registry {
     path: PathBuf,
     cached: Arc<Mutex<Option<(String, Snapshot)>>>,
+    /// (old, candidate) of a publication whose durability is unconfirmed.
+    pending: Arc<Mutex<Option<(String, String)>>>,
+    encode_fault: Arc<std::sync::atomic::AtomicBool>,
 }
 impl Registry {
     pub(crate) fn at(path: PathBuf) -> Self {
         Self {
             path,
             cached: Arc::new(Mutex::new(None)),
+            pending: Arc::new(Mutex::new(None)),
+            encode_fault: Arc::default(),
         }
     }
     pub(crate) fn runtime() -> Result<Self, String> {
@@ -202,6 +250,9 @@ impl Registry {
         &self,
         apply: impl FnOnce(&mut Snapshot) -> Result<T, String>,
     ) -> Result<T, String> {
+        use crate::services::discord::runtime_store::{
+            AtomicWriteContext, durable_publish::FlushStatus, durable_publish::*,
+        };
         let mut cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
         std::fs::create_dir_all(self.path.parent().ok_or("history parent missing")?)
             .map_err(|e| e.to_string())?;
@@ -215,67 +266,55 @@ impl Registry {
         lock.lock().map_err(|e| e.to_string())?;
         let raw = match std::fs::read_to_string(&self.path) {
             Ok(raw) => raw,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => "{\"entries\":[]}".into(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => migration::MISSING.into(),
             Err(e) => return Err(e.to_string()),
         };
-        let before_len = raw.len();
-        if cached.as_ref().is_none_or(|(bytes, _)| *bytes != raw) {
-            let state = match compat::inspect(raw.as_bytes())? {
-                compat::HistoryRead::Legacy(store) => Snapshot {
-                    version: 2,
-                    passive: store
-                        .entries
-                        .into_iter()
-                        .map(|entry| {
-                            let state = if entry.events.is_empty() {
-                                "retained"
-                            } else {
-                                "settled"
-                            };
-                            Passive {
-                                registration: None,
-                                entry: Some(entry),
-                                state: state.into(),
-                                encoded: None,
-                            }
-                        })
-                        .collect(),
-                    ..Default::default()
-                },
-                compat::HistoryRead::ReadOnlyV2(_) => {
-                    serde_json::from_str::<Snapshot>(&raw).map_err(|e| e.to_string())?
+        let context = || AtomicWriteContext::new("injected_frames_v2");
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((old, candidate)) = pending.as_ref() {
+            // The unconfirmed candidate must become durable, or the old bytes must still stand.
+            if raw == *candidate {
+                if retry_published_status(&self.path, context()) != FlushStatus::Flushed {
+                    return Err("history candidate durability unconfirmed".into());
                 }
-            };
-            *cached = Some((raw, state));
+            } else if raw != *old {
+                return Err(
+                    "history changed after an unconfirmed publication; preserve both".into(),
+                );
+            }
+            *pending = None;
+        }
+        if cached.as_ref().is_none_or(|(bytes, _)| *bytes != raw) {
+            *cached = Some((raw.clone(), migration::restore(&raw)?));
         }
         let (_, state) = cached.as_mut().ok_or("history cache unavailable")?;
-        let result = match apply(state) {
+        let encoded = apply(state).and_then(|result| {
+            if self.encode_fault.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("history encoding failed".to_string());
+            }
+            Ok((result, state.encode()?))
+        });
+        let (result, candidate) = match encoded {
             Ok(value) => value,
             Err(error) => {
                 *cached = None;
                 return Err(error);
             }
         };
-        let candidate = state.encode()?;
-        let status =
-            crate::services::discord::runtime_store::durable_publish::critical_publish_status(
-                &self.path,
-                &candidate,
-                crate::services::discord::runtime_store::AtomicWriteContext::new(
-                    "injected_frames_v2",
-                ),
-            );
-        match status {
-            Ok(crate::services::discord::runtime_store::durable_publish::FlushStatus::Flushed) => {
+        if candidate == raw {
+            return Ok(result);
+        }
+        match critical_publish_status(&self.path, &candidate, context()) {
+            Ok(FlushStatus::Flushed) => {
                 cached.as_mut().ok_or("history cache disappeared")?.0 = candidate;
                 Ok(result)
             }
-            _ => {
+            status => {
                 *cached = None;
-                Err(format!(
-                    "history publication unconfirmed; preserve registration ({})",
-                    before_len
-                ))
+                if status.is_ok() {
+                    *pending = Some((raw, candidate));
+                }
+                Err("history publication unconfirmed; preserve registration".into())
             }
         }
     }
@@ -405,11 +444,18 @@ impl Registry {
                 if same(&snapshot["head_injection"]) {
                     return None;
                 }
-                if snapshot["retained_inputs"]
+                if let Some(retained) = snapshot["retained_inputs"]
                     .as_array()
-                    .is_some_and(|xs| xs.iter().any(|x| same(&x["input"])))
+                    .and_then(|xs| xs.iter().find(|x| same(&x["input"])))
                 {
-                    return Some("retained");
+                    // Only the queue's exact not-sent proof on a Reserved input frees the candidate.
+                    let abandoned = retained["disposition"] == "known_not_sent"
+                        && retained["input"]["phase"] == "reserved";
+                    return Some(if abandoned {
+                        collision::ABANDONED
+                    } else {
+                        "retained"
+                    });
                 }
                 if snapshot["terminal_identities"]
                     .as_array()
@@ -422,12 +468,14 @@ impl Registry {
             let mut live = Vec::new();
             for bound in state.live.drain(..) {
                 if let Some(status) = disposition(&bound.registration) {
-                    state.passive.push(Passive {
+                    let mut passive = Passive {
                         registration: Some(bound.registration),
                         entry: Some(bound.entry),
                         state: status.into(),
                         encoded: None,
-                    });
+                    };
+                    passive.compact();
+                    state.passive.push(passive);
                 } else {
                     live.push(bound);
                 }
@@ -436,24 +484,33 @@ impl Registry {
             let mut planned = Vec::new();
             for registration in state.planned.drain(..) {
                 if let Some(status) = disposition(&registration) {
-                    state.passive.push(Passive {
+                    let mut passive = Passive {
                         registration: Some(registration),
                         entry: None,
                         state: status.into(),
                         encoded: None,
-                    });
+                    };
+                    passive.compact();
+                    state.passive.push(passive);
                 } else {
                     planned.push(registration);
                 }
             }
             state.planned = planned;
+            // Evidence only advances: retained to abandoned or settled, abandoned to settled.
+            let rank = |state: &str| {
+                ["retained", collision::ABANDONED, "settled"]
+                    .iter()
+                    .position(|s| *s == state)
+            };
             for passive in &mut state.passive {
                 if let Some(r) = &passive.registration
-                    && passive.state != "settled"
-                    && disposition(r) == Some("settled")
+                    && let Some(next) = disposition(r)
+                    && rank(next) > rank(&passive.state)
                 {
-                    passive.state = "settled".into();
+                    passive.state = next.into();
                     passive.encoded = None;
+                    passive.compact();
                 }
             }
             Ok(())
@@ -471,11 +528,8 @@ impl Registry {
         lock.lock().map_err(|e| e.to_string())?;
         let raw = std::fs::read_to_string(&self.path).map_err(|e| e.to_string())?;
         if cache.as_ref().is_none_or(|(bytes, _)| *bytes != raw) {
-            let snapshot = match compat::inspect(raw.as_bytes())? {
-                compat::HistoryRead::ReadOnlyV2(_) => {
-                    serde_json::from_str::<Snapshot>(&raw).map_err(|e| e.to_string())?
-                }
-                _ => return Err("V2 registration missing".into()),
+            let migration::Decoded::V2(snapshot) = migration::decode(&raw)? else {
+                return Err("V2 registration missing".into());
             };
             *cache = Some((raw, snapshot));
         }
@@ -518,6 +572,9 @@ impl Registry {
             let Some((registration, Some(entry))) = state.locate(namespace, key) else {
                 return Ok(None);
             };
+            if state.abandoned(namespace, key) {
+                return Ok(None);
+            }
             if entry.path != path
                 || entry.file != file
                 || entry.offset > offset
@@ -528,32 +585,16 @@ impl Registry {
             let event_key =
                 row.map_or_else(|| format!("{kind}:{offset}"), |row| format!("{kind}:{row}"));
             let same = |e: &Entry| e.path == path && e.file == file;
-            if let Some((owner, _, _)) = state
+            if let Some((owner, _)) = state
                 .entries()
-                .find(|(_, e, _)| same(e) && e.events.iter().any(|event| event.key == event_key))
+                .find(|(_, e)| same(e) && e.events.iter().any(|event| event.key == event_key))
             {
                 return Ok(owner
                     .is_some_and(|r| r.namespace == namespace && r.key == *key)
                     .then_some(true));
             }
-            let collision = state.entries().any(|(owner, e, retained)| {
-                let other = owner.is_none_or(|r| r.namespace != namespace || r.key != *key);
-                let completed = e
-                    .events
-                    .iter()
-                    .any(|event| matches!(event.kind.as_str(), "codex" | "user" | "command"));
-                other
-                    && same(e)
-                    && e.hash == entry.hash
-                    && e.offset <= offset
-                    && ((retained && !completed)
-                        || (matches!(kind, "command" | "user")
-                            && e.events.iter().any(|event| event.kind == "enqueue")))
-            }) || state.planned.iter().any(|r| {
-                (r.namespace != namespace || r.key != *key)
-                    && r.frame.hash == registration.frame.hash
-                    && r.key["attempt"]["target"] == key["attempt"]["target"]
-            });
+            let collision =
+                collision::contested(state, (namespace, key, registration, entry), kind, offset);
             if collision {
                 return Ok(None);
             }
@@ -596,6 +637,8 @@ struct Context {
     registry: Registry,
     namespace: String,
     key: Value,
+    /// A diagnostic receipt thread's copy: it records receipts and registers nothing.
+    receipt_only: bool,
 }
 thread_local! { static CONTEXT: std::cell::RefCell<Option<Context>> = const { std::cell::RefCell::new(None) }; }
 struct Scope(Option<Context>);
@@ -627,6 +670,7 @@ pub(crate) fn with_attempt<T>(
             registry: registry.clone(),
             namespace: namespace.into(),
             key: key.clone(),
+            receipt_only: false,
         }))
     });
     let _scope = Scope(previous);
@@ -639,6 +683,9 @@ pub(super) fn scoped_register(
     frame: &str,
 ) -> Option<Result<(), String>> {
     let c = context()?;
+    if c.receipt_only {
+        return Some(Err("a receipt scope registers nothing".into()));
+    }
     let (provider, session, nonce, _) = args;
     let registered = c.registry.registered(&c.namespace, &c.key, path, frame);
     let source = c.registry.source(&c.namespace, &c.key);
@@ -701,8 +748,9 @@ pub(super) fn scoped_observed(
     Some(
         c.registry
             .inspect(|state| {
-                let matching = state
-                    .locate(&c.namespace, &c.key)
+                let matching = (!state.abandoned(&c.namespace, &c.key))
+                    .then(|| state.locate(&c.namespace, &c.key))
+                    .flatten()
                     .and_then(|(_, e)| e)
                     .filter(|e| {
                         e.provider == provider
@@ -733,7 +781,148 @@ pub(super) fn scoped() -> bool {
     context().is_some()
 }
 
+/// The exact attempt a diagnostic receipt thread records into: its registry, namespace and key,
+/// and nothing that writes a pane (no writer lease, payload permit or content scope).
+pub(crate) struct ReceiptContext(Context);
+impl ReceiptContext {
+    pub(crate) fn capture() -> Option<Self> {
+        context().map(|c| {
+            Self(Context {
+                receipt_only: true,
+                ..c
+            })
+        })
+    }
+    /// Runs `f` with this attempt's history scope on the calling thread; a registration under it
+    /// is refused, so only the receipt of the already prepared frame is recorded.
+    pub(crate) fn enter<T>(&self, f: impl FnOnce() -> T) -> T {
+        let previous = CONTEXT.with(|slot| slot.replace(Some(self.0.clone())));
+        let _scope = Scope(previous);
+        f()
+    }
+}
+
+/// Whether the file is the V2 writer's; a missing file is not.
+pub(super) fn is_v2(path: &Path) -> Result<bool, String> {
+    match compat::v2_prefix(path) {
+        Ok(v2) => Ok(v2),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Live, unabandoned passive and stand-in unbound entries as one V1 list, each beside the passive
+/// slot of a migrated V1 append entry, the only kind a non-scoped writer may change.
+fn owned(state: &Snapshot) -> Vec<(Entry, Option<usize>)> {
+    let unbound = |r: &Registration| Entry {
+        id: r.key["attempt"]["nonce"]
+            .as_str()
+            .unwrap_or_default()
+            .into(),
+        provider: r.key["attempt"]["provider"]
+            .as_str()
+            .unwrap_or_default()
+            .into(),
+        session: (r.key["attempt"]["target"]["owner"].as_str())
+            .unwrap_or_default()
+            .into(),
+        path: PathBuf::new(),
+        file: [0, 0],
+        offset: 0,
+        author: r.frame.author.clone(),
+        hash: r.frame.hash.clone(),
+        body_hash: r.frame.body_hash.clone(),
+        class_hash: r.frame.class_hash.clone(),
+        header: r.frame.header.clone(),
+        screen_prefix: r.frame.screen_prefix.clone(),
+        events: vec![],
+        append: None,
+    };
+    let live = state.live.iter().map(|b| (b.entry.clone(), None));
+    let planned = state.planned.iter().map(|r| (unbound(r), None));
+    let passive = state.passive.iter().enumerate().filter_map(|(at, p)| {
+        if p.state == collision::ABANDONED {
+            return None;
+        }
+        match (&p.entry, &p.registration) {
+            (Some(entry), None) if entry.append.is_some() => Some((entry.clone(), Some(at))),
+            (Some(entry), _) => Some((entry.clone(), None)),
+            (None, Some(r)) => Some((unbound(r), None)),
+            (None, None) => None,
+        }
+    });
+    live.chain(planned).chain(passive).collect()
+}
+
+/// What a non-scoped reader sees in a V2 file, as one store; `None` when the file is not V2.
+/// Read and parse failures stay errors.
+pub(super) fn unscoped_store(path: &Path) -> Result<Option<Store>, String> {
+    if !is_v2(path)? {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let migration::Decoded::V2(state) = migration::decode(&raw)? else {
+        return Err("frame history envelope changed while reading".into());
+    };
+    Ok(Some(Store {
+        entries: owned(&state).into_iter().map(|(entry, _)| entry).collect(),
+    }))
+}
+
+/// The V1 append readers' store in a V2 file (`None` if not V2); they match only append entries,
+/// so a file with no `"append":` key is not parsed.
+pub(super) fn append_store(path: &Path) -> Result<Option<Store>, String> {
+    if !is_v2(path)? {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    if !raw.contains("\"append\":") {
+        return Ok(Some(Store::default()));
+    }
+    let migration::Decoded::V2(state) = migration::decode(&raw)? else {
+        return Err("frame history envelope changed while reading".into());
+    };
+    Ok(Some(Store {
+        entries: owned(&state).into_iter().map(|(entry, _)| entry).collect(),
+    }))
+}
+
+/// A V1 append mutation on a V2 history under its lock: only migrated append entries may change,
+/// and their encodings are invalidated; any other change refuses the whole transaction.
+pub(super) fn update_migrated<T>(
+    path: &Path,
+    apply: impl FnOnce(&mut Store) -> Result<T, String>,
+) -> Result<T, String> {
+    Registry::at(path.to_path_buf()).transaction(|state| {
+        let owned = owned(state);
+        let before: Vec<String> = owned
+            .iter()
+            .map(|(entry, _)| serde_json::to_string(entry).map_err(|e| e.to_string()))
+            .collect::<Result<_, _>>()?;
+        let slots: Vec<_> = owned.iter().map(|(_, slot)| *slot).collect();
+        let mut store = Store {
+            entries: owned.into_iter().map(|(entry, _)| entry).collect(),
+        };
+        let result = apply(&mut store)?;
+        if store.entries.len() != slots.len() {
+            return Err("a V2 history adds and removes no entry for a V1 append".into());
+        }
+        for ((entry, slot), before) in store.entries.into_iter().zip(slots).zip(before) {
+            if serde_json::to_string(&entry).map_err(|e| e.to_string())? == before {
+                continue;
+            }
+            let at = slot.ok_or("only a migrated V1 append entry changes in a V2 history")?;
+            let passive = &mut state.passive[at];
+            passive.entry = Some(entry);
+            passive.encoded = None;
+        }
+        Ok(result)
+    })
+}
 // Writer fixtures require Unix file identity and confirmed parent directory fsync.
+#[cfg(unix)]
+#[path = "v2_compaction_tests.rs"]
+mod compaction_tests;
 #[cfg(unix)]
 #[path = "v2_tests.rs"]
 mod tests;

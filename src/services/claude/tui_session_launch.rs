@@ -1,7 +1,7 @@
 //! Tui session launch.
 
 #[cfg(unix)]
-mod prepared;
+pub(super) mod prepared;
 
 use super::*;
 use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;

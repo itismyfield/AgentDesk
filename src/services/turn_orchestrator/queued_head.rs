@@ -90,6 +90,8 @@ pub(super) mod compat;
 mod snapshot;
 #[cfg(test)]
 mod v2;
+#[cfg(test)]
+pub(crate) use v2::source_admission::TurnBind;
 mod v2_types;
 pub(super) use snapshot::{parse_snapshot, snapshot_json};
 
@@ -101,6 +103,11 @@ fn read_snapshot_meta(path: &Path) -> Result<Option<SnapshotMeta>, String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(queue_unread(format!("read {}: {error}", path.display()))),
     };
+    // A V2 file holds the channel for a V2-capable binary: every claim and legacy mutation waits.
+    if let Ok(compat::SnapshotRead::ReadOnlyV2(_)) = compat::inspect(&content) {
+        let held = format!("{} is a read-only V2 queue", path.display());
+        return Err(queue_unread(held));
+    }
     let (_, meta) = parse_snapshot(&content)
         .map_err(|e| queue_unread(format!("parse {}: {e}", path.display())))?;
     Ok(meta.filter(SnapshotMeta::is_set))
@@ -410,12 +417,29 @@ pub(super) fn withhold_take(
     Some(withheld)
 }
 
+/// Runs after the closed gate: an actor holding a V2 owner serves or refuses every queue-changing
+/// arm there, so the V1 handlers never write beside it.
+#[cfg(test)]
+pub(super) fn route_v2(
+    state: &mut ChannelMailboxState,
+    channel_id: ChannelId,
+    msg: super::ChannelMailboxMsg,
+) -> Option<super::ChannelMailboxMsg> {
+    v2::control::route(state, channel_id, msg)
+}
+
 /// A turn claim never starts ahead of a reserved or unresolved head, nor over an unreadable record.
 pub(super) fn blocks_claims(
     state: &mut ChannelMailboxState,
     channel_id: ChannelId,
     persistence: Option<&QueuePersistenceContext>,
 ) -> bool {
+    // A V2 owner holds the file the V1 check cannot read. Until it hands an input to a turn, its
+    // attempted head (`items[0]`) and withheld queue block every claim; retained inputs do not.
+    #[cfg(test)]
+    if let Some(owner) = &state.queued_head.v2 {
+        return !owner.snapshot.items.is_empty();
+    }
     if persistence.is_some_and(|p| validate_disk(state, channel_id, p).is_err()) {
         return true;
     }

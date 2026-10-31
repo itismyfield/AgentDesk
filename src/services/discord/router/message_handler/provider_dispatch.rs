@@ -17,6 +17,8 @@ use crate::services::stream_json_cli::{
 use crate::services::turn_host::{HerdrRefusal, HerdrTurnPlan, ReturnPlan, TurnHost};
 use crate::services::{claude, claude_tui, codex, gemini, opencode, qwen};
 
+#[cfg(all(test, unix))]
+mod owner_input;
 pub(super) mod replay_scope;
 
 pub(super) struct StreamingTurn<'a> {
@@ -257,6 +259,17 @@ pub(super) fn execute(
     start
         .spend(&target, turn.prompt, &turn.cancel)
         .map_err(|refusal| format!("replay start refused: {refusal:?}"))?;
+    #[cfg(all(test, unix))]
+    match owner_input::take(&turn) {
+        Some(owner_input::Taken::Done(result)) => return result,
+        Some(owner_input::Taken::Launch(guard)) => return guard.finish(drive(turn, sender)),
+        None => {}
+    }
+    drive(turn, sender)
+}
+
+/// The turn's driver, Herdr or tmux, after its start was spent.
+fn drive(turn: StreamingTurn<'_>, sender: Sender<StreamMessage>) -> Result<(), String> {
     match turn.host {
         TurnHost::Tmux => {}
         TurnHost::Refused(refusal) => return Err(refusal.to_string()),

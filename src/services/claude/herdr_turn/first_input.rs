@@ -13,6 +13,63 @@ pub(super) fn submit(
     attached: Attached,
     sender: &Sender<StreamMessage>,
 ) -> Result<Option<Submitted>, String> {
+    let (logical, cancel) = (turn.owner.logical_key.as_str(), turn.cancel.as_deref());
+    write(logical, cancel, attached, turn.prompt, sender)
+}
+
+/// The prompt through the owner waiting on this thread: it reserves the frame on the execution
+/// the driver observed, binds its pane, and runs this write as its effect; its settlement is final.
+pub(super) fn submit_owned(
+    turn: &HerdrTurn<'_>,
+    hook: crate::services::claude_tui::owner_input::LaunchHook,
+    lineage: crate::services::claude_tui::owner_input::Lineage,
+    attached: Attached,
+    sender: &Sender<StreamMessage>,
+) -> Result<Submitted, String> {
+    let (socket, pane) = attached
+        .physical
+        .clone()
+        .ok_or("herdr turn: the execution has no pane")?;
+    let logical = turn.owner.logical_key.clone();
+    let target = serde_json::json!({"host":"herdr","owner":logical,"root":socket,
+        "execution_nonce":attached.nonce});
+    let transcript = attached.transcript.display().to_string();
+    let source = match std::fs::metadata(&attached.transcript) {
+        Ok(meta) if lineage == crate::services::claude_tui::owner_input::Lineage::Existing => {
+            use std::os::unix::fs::MetadataExt;
+            serde_json::json!({"kind":"existing","session_id":attached.session_id,
+                "transcript":transcript,"file":[meta.dev(), meta.ino()],"offset":meta.len()})
+        }
+        _ => serde_json::json!({"kind":"pre_source","expected_session_id":attached.session_id,
+            "expected_transcript":transcript,"binding_watermark":null}),
+    };
+    let slot = Arc::new(std::sync::Mutex::new(None));
+    let (ticket, cancel, sender) = (slot.clone(), turn.cancel.clone(), sender.clone());
+    let submit = Box::new(move |frame: String| {
+        let written = write(&logical, cancel.as_deref(), attached, &frame, &sender)?;
+        let closed = || "herdr turn: the input closed before its first key".to_string();
+        let submitted = written.ok_or_else(closed)?;
+        *ticket.lock().unwrap_or_else(|e| e.into_inner()) = Some(submitted);
+        Ok(())
+    });
+    hook(
+        lineage,
+        target,
+        source,
+        Some(format!("{socket}#{pane}")),
+        submit,
+    )?;
+    let submitted = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+    submitted.ok_or_else(|| "herdr turn: the owner submitted without a ticket".into())
+}
+
+fn write(
+    logical: &str,
+    cancel: Option<&CancelToken>,
+    attached: Attached,
+    prompt: &str,
+    sender: &Sender<StreamMessage>,
+) -> Result<Option<Submitted>, String> {
     let path = attached.transcript.as_path();
     let transcript = path.display().to_string();
     let length = || std::fs::metadata(path).map_or(0, |meta| meta.len());
@@ -23,10 +80,9 @@ pub(super) fn submit(
     });
     let (before, started_at) = (length(), chrono::Utc::now());
     let plan = [
-        TuiInputAction::PasteBuffer(turn.prompt.to_owned()),
+        TuiInputAction::PasteBuffer(prompt.to_owned()),
         TuiInputAction::Enter,
     ];
-    let cancel = turn.cancel.as_deref();
     let held = hold(&attached.nonce)?;
     #[cfg(test)]
     before_start::test_input_boundary(cancel);
@@ -40,7 +96,7 @@ pub(super) fn submit(
     })?
     else {
         if !before_start::mutant("closed_release_callsite_removed_claude") {
-            before_start::release_claude_hold(&turn.owner.logical_key, &held);
+            before_start::release_claude_hold(logical, &held);
         }
         return Ok(None);
     };
@@ -51,7 +107,7 @@ pub(super) fn submit(
     if composer_settled(&run)
         && let Err(error) = std::fs::remove_file(&held)
     {
-        tracing::warn!(logical = %turn.owner.logical_key, %error, "herdr turn: input hold kept");
+        tracing::warn!(logical = %logical, %error, "herdr turn: input hold kept");
     }
     run.into_legacy()?;
     Ok(Some(Submitted {

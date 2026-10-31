@@ -119,3 +119,119 @@ fn held_tmux_target_refuses_an_unscoped_argv_launch() {
     });
     assert_eq!(owner_input::argv_payload(&context, || Ok(7)), Ok(7));
 }
+
+/// A Herdr owner whose logical session is `logical` on socket `root`; its pins are recorded.
+fn herdr_scope<R>(
+    logical: &str,
+    root: &str,
+    pins: Arc<std::sync::Mutex<Vec<String>>>,
+    run: impl FnOnce() -> R,
+) -> R {
+    owner_input::with_scope(
+        "claude".into(),
+        serde_json::json!({"host":"herdr","owner":logical,"root":root,"execution_nonce":"h1"}),
+        742703,
+        Arc::new(|_| Ok(())),
+        Arc::new(move |_, key| {
+            pins.lock().unwrap().push(key);
+            Ok(())
+        }),
+        Arc::new(|_| Ok(())),
+        run,
+    )
+}
+
+fn herdr_write(physical: &str, sent: &AtomicUsize) -> Result<(), String> {
+    super::content("herdr", physical, || {
+        sent.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    })
+}
+
+/// A Herdr owner writes only the physical pane it bound, never its logical session's name or
+/// another pane; it pins that pane, not all Herdr. Unbound, its first write names the pane.
+#[test]
+fn herdr_owner_writes_only_its_bound_physical_pane() {
+    let pins = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sent = AtomicUsize::new(0);
+    herdr_scope(
+        "AgentDesk-claude-lazy",
+        "/sock/lazy",
+        Arc::default(),
+        || {
+            assert_eq!(herdr_write("/sock/lazy#w1-1", &sent), Ok(()));
+            assert!(
+                herdr_write("/sock/lazy#w1-2", &sent).is_err(),
+                "first write bound"
+            );
+            assert!(owner_input::bind_writer("/sock/lazy#w1-2").is_err());
+        },
+    );
+    herdr_scope(
+        "AgentDesk-claude-logical",
+        "/sock/only",
+        pins.clone(),
+        || {
+            owner_input::bind_writer("/sock/only#w1-1").unwrap();
+            assert!(owner_input::bind_writer("/sock/only#w1-2").is_err());
+            assert_eq!(herdr_write("/sock/only#w1-1", &sent), Ok(()));
+            assert!(
+                herdr_write("/sock/only#w1-2", &sent).is_err(),
+                "foreign pane"
+            );
+            assert!(
+                herdr_write("/sock/other#w1-1", &sent).is_err(),
+                "foreign socket"
+            );
+            assert!(
+                herdr_write("AgentDesk-claude-logical", &sent).is_err(),
+                "the logical name is no pane"
+            );
+        },
+    );
+    assert_eq!(sent.load(Ordering::SeqCst), 2);
+    assert_eq!(*pins.lock().unwrap(), ["herdr:/sock/only#w1-1"]);
+}
+
+/// One physical pane takes one Herdr owner at a time, whatever logical session names it; another
+/// pane, or the same pane id on another socket, writes meanwhile.
+#[test]
+fn herdr_physical_panes_serialize_only_themselves() {
+    let (held, release) = (
+        Arc::new(std::sync::Barrier::new(2)),
+        Arc::new(std::sync::Barrier::new(2)),
+    );
+    let (h, r) = (held.clone(), release.clone());
+    let holder = std::thread::spawn(move || {
+        let sent = AtomicUsize::new(0);
+        herdr_scope("logical-a", "/sock/a", Arc::default(), || {
+            owner_input::bind_writer("/sock/a#w1-1").unwrap();
+            let wrote = herdr_write("/sock/a#w1-1", &sent);
+            h.wait();
+            r.wait();
+            wrote
+        })
+    });
+    held.wait();
+    let sent = AtomicUsize::new(0);
+    let other = |logical: &str, root: &str, physical: &str| {
+        herdr_scope(logical, root, Arc::default(), || {
+            owner_input::bind_writer(physical).unwrap();
+            herdr_write(physical, &sent)
+        })
+    };
+    assert!(
+        other("logical-b", "/sock/a", "/sock/a#w1-1").is_err(),
+        "same pane"
+    );
+    assert_eq!(other("logical-c", "/sock/a", "/sock/a#w1-2"), Ok(()));
+    assert_eq!(other("logical-d", "/sock/b", "/sock/b#w1-1"), Ok(()));
+    release.wait();
+    assert_eq!(holder.join().unwrap(), Ok(()));
+    assert_eq!(
+        other("logical-b", "/sock/a", "/sock/a#w1-1"),
+        Ok(()),
+        "released"
+    );
+    assert_eq!(sent.load(Ordering::SeqCst), 3);
+}

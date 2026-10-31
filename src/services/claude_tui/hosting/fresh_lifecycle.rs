@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::claude_tui::owner_input::OwnedLaunch;
 
 #[cfg(test)]
 pub(crate) fn fresh_hold_for_tests(
@@ -68,6 +69,12 @@ pub(super) fn run(turn: FreshTurn<'_>) -> Result<(), String> {
         resolved_session_id,
         prompt,
     );
+    let fresh_turn_result = match fresh_turn_result {
+        // The owner settled the first prompt: the session, its marker and the input are its own.
+        Err(OwnedLaunch::Settled(error)) => return Err(error),
+        Err(OwnedLaunch::Before(error)) => Err(error),
+        Ok(result) => Ok(result),
+    };
     let (read_result, harvest, turn_read_start_offset) = match fresh_turn_result {
         Ok(result) => result,
         Err(hold @ SubmissionError::Held(_)) => return Err(hold.into_legacy()),
@@ -162,20 +169,31 @@ fn run_claude_tui_fresh_turn_with_ready_retry(
     tmux_session_name: &str,
     resolved_session_id: &str,
     prompt: &str,
-) -> Result<(ReadOutputResult, ReadHarvestStats, u64), SubmissionError> {
-    let submitted = super::first_input::submit(
-        transcript_path_string,
-        fresh_turn_start_offset,
-        cancel_token.as_deref(),
-        tmux_session_name,
-        prompt,
-    )?;
-    super::first_input::observe(
+) -> Result<(ReadOutputResult, ReadHarvestStats, u64), OwnedLaunch> {
+    let submitted = match crate::services::claude_tui::owner_input::launch_hook() {
+        // The owner waiting for this created execution writes its first prompt.
+        Some(hook) => super::first_input::submit_owned(
+            hook,
+            transcript_path_string,
+            fresh_turn_start_offset,
+            cancel_token.clone(),
+            tmux_session_name,
+            resolved_session_id,
+        )?,
+        None => super::first_input::submit(
+            transcript_path_string,
+            fresh_turn_start_offset,
+            cancel_token.as_deref(),
+            tmux_session_name,
+            prompt,
+        )?,
+    };
+    Ok(super::first_input::observe(
         transcript_path_string,
         sender,
         cancel_token,
         tmux_session_name,
         resolved_session_id,
         submitted,
-    )
+    )?)
 }

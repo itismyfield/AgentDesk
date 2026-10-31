@@ -18,6 +18,15 @@ pub(crate) struct HeadlessTurnStartOutcome {
 }
 
 impl HeadlessTurnStartOutcome {
+    #[cfg(test)]
+    pub(crate) fn accepted(turn_id: String) -> Self {
+        Self {
+            turn_id,
+            status: HeadlessTurnStartStatus::Accepted,
+            owned_session_key: None,
+        }
+    }
+
     pub(crate) fn started(turn_id: String, owned_session_key: Option<String>) -> Self {
         Self {
             turn_id,
@@ -37,6 +46,9 @@ impl HeadlessTurnStartOutcome {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HeadlessTurnStartStatus {
+    // Owner admission stays dormant until its production ingress is wired.
+    #[cfg(test)]
+    Accepted,
     Started,
     Consumed,
 }
@@ -44,8 +56,18 @@ pub(crate) enum HeadlessTurnStartStatus {
 impl HeadlessTurnStartStatus {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
+            #[cfg(test)]
+            Self::Accepted => "accepted",
             Self::Started => "started",
             Self::Consumed => "consumed",
+        }
+    }
+
+    pub(crate) fn is_accepted(self) -> bool {
+        match self {
+            #[cfg(test)]
+            Self::Accepted => true,
+            Self::Started | Self::Consumed => false,
         }
     }
 }

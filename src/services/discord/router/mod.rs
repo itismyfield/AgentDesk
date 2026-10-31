@@ -47,6 +47,7 @@ pub(super) use turn_start::claim_reserved_headless_turn;
 pub(super) use turn_start::reserve_headless_turn;
 pub(crate) use turn_start::{
     HeadlessTurnReservation, HeadlessTurnStartError, HeadlessTurnStartOutcome,
+    HeadlessTurnStartStatus,
 };
 #[cfg(test)]
 pub(crate) use turn_start::{

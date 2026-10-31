@@ -18,10 +18,14 @@ impl Owner {
             .iter()
             .map(identity)
             .chain(
-                self.snapshot
-                    .retained_inputs
-                    .iter()
-                    .map(|e| e.input.identity.clone()),
+                (self.snapshot.retained_inputs.iter())
+                    .flat_map(|e| e.input.members().skip(1).map(identity))
+                    .chain(
+                        self.snapshot
+                            .retained_inputs
+                            .iter()
+                            .map(|e| e.input.identity.clone()),
+                    ),
             )
             .chain(
                 self.snapshot
@@ -44,59 +48,7 @@ pub(super) fn restore(raw: &str, namespace: &str) -> Result<SnapshotV2, String> 
     let mut snapshot = match super::super::compat::inspect(raw)? {
         super::super::compat::SnapshotRead::ReadOnlyV2(snapshot) => *snapshot,
         super::super::compat::SnapshotRead::Legacy(items, meta) => {
-            let head = meta.as_ref().and_then(|meta| meta.head_injection.as_ref());
-            let input = head
-                .filter(|head| head.phase != HeadPhase::Reserved)
-                .map(|head| InputAttempt {
-                    identity: head.identity.clone(),
-                    original: items
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| head.original.clone()),
-                    phase: HeadPhase::Unknown,
-                    attempt: head.attempt.as_ref().map(|a| AttemptIdentity {
-                        nonce: a.nonce.clone(),
-                        provider: "claude".into(),
-                        target: TargetIdentity {
-                            host: "tmux".into(),
-                            owner: namespace.into(),
-                            root: String::new(),
-                            execution_nonce: String::new(),
-                        },
-                        source: AttemptSource::Existing {
-                            session_id: a.session_id.clone(),
-                            transcript: a.transcript.clone(),
-                            file: [a.file.0, a.file.1],
-                            offset: a.offset,
-                        },
-                    }),
-                    payload: None,
-                    confirmation_deadline_ms: None,
-                    resolved_source: None,
-                    payload_window: None,
-                    resolved_target: None,
-                    preparation_hold: None,
-                });
-            SnapshotV2 {
-                version: 2,
-                admission_receipts: vec![],
-                admission_sequence: 0,
-                items,
-                head_injection: input,
-                retained_inputs: vec![],
-                terminal_identities: meta
-                    .map(|meta| {
-                        meta.terminal_identities
-                            .into_iter()
-                            .map(|identity| TerminalIdentity {
-                                identity,
-                                settled_at_ms: u64::MAX,
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                namespace: None,
-            }
+            super::migration::legacy(items, meta)
         }
     };
     if snapshot
@@ -115,23 +67,49 @@ pub(super) fn restore(raw: &str, namespace: &str) -> Result<SnapshotV2, String> 
             return Err("original source identity mismatch".into());
         }
     }
-    if let Some(head) = &snapshot.head_injection {
-        let first = snapshot.items.first().ok_or("active original missing")?;
-        if serde_json::to_value(first).map_err(|error| error.to_string())?
-            != serde_json::to_value(&head.original).map_err(|error| error.to_string())?
-        {
+    // An unmatched reserved unit goes back to its single originals; an armed or unknown one stays held.
+    if let Some(head) = &snapshot.head_injection
+        && !super::front_holds(&snapshot.items, head)
+    {
+        if head.phase != HeadPhase::Reserved {
             return Err("active original differs from queue head".into());
         }
+        let head = snapshot.head_injection.take().ok_or("head disappeared")?;
+        ungroup(&mut snapshot, &head)?;
     }
     snapshot.namespace = Some(namespace.into());
-    if snapshot
+    // Released unarmed, every member still holds the queued bind its reserve kept.
+    snapshot
         .head_injection
-        .as_ref()
-        .is_some_and(|head| head.phase == HeadPhase::Reserved)
-    {
-        snapshot.head_injection = None;
-    }
+        .take_if(|head| head.phase == HeadPhase::Reserved);
     Ok(snapshot)
+}
+
+/// Puts an unmatched reserved unit back as single queued originals in member order, lost members
+/// included; a member whose body differs from its queue copy refuses rather than guess.
+fn ungroup(snapshot: &mut SnapshotV2, head: &InputAttempt) -> Result<(), String> {
+    let mut front = Vec::new();
+    for member in head.members() {
+        let wanted = identity(member);
+        match snapshot
+            .items
+            .iter()
+            .position(|item| identity(item) == wanted)
+        {
+            Some(at) => {
+                let kept = snapshot.items.remove(at);
+                if !super::source_admission::same_original(&kept, member) {
+                    return Err("a reserved member differs from its queue copy".into());
+                }
+                front.push(kept);
+            }
+            None => front.push(member.clone()),
+        }
+    }
+    front.append(&mut snapshot.items);
+    snapshot.items = front;
+    snapshot.rebind_queued(head);
+    Ok(())
 }
 
 /// Parked without positive evidence of no attempt is retained, never rejected or retried.
@@ -163,6 +141,7 @@ pub(super) fn migrate_parked(
             payload_window: None,
             resolved_target: None,
             preparation_hold: None,
+            legacy_attempt: None,
         },
         reason: RetainedReason::Unconfirmed,
         disposition: None,

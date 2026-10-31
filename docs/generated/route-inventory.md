@@ -320,9 +320,9 @@
 | `POST` | `/api/turn-lease/release` | `turn_lease::release` | `src/server/routes/turn_lease.rs:32` | `src/server/routes/domains/runtime.rs:20` |
 | `GET` | `/api/turn-lease/{provider}/{channel_id}` | `turn_lease::inspect` | `src/server/routes/turn_lease.rs:14` | `src/server/routes/domains/runtime.rs:16` |
 | `POST` | `/api/turns/{channel_id}/cancel` | `queue_api::cancel_turn` | `src/server/routes/queue_api.rs:209` | `src/server/routes/domains/runtime.rs:122` |
-| `GET` | `/api/voice/conductor/jobs` | `voice_conductor::list_jobs` | `src/server/routes/voice_conductor.rs:86` | `src/server/routes/domains/runtime.rs:148` |
-| `GET` | `/api/voice/conductor/jobs/{id}` | `voice_conductor::get_job` | `src/server/routes/voice_conductor.rs:91` | `src/server/routes/domains/runtime.rs:149` |
-| `POST` | `/api/voice/conductor/say` | `voice_conductor::say` | `src/server/routes/voice_conductor.rs:21` | `src/server/routes/domains/runtime.rs:147` |
+| `GET` | `/api/voice/conductor/jobs` | `voice_conductor::list_jobs` | `src/server/routes/voice_conductor.rs:93` | `src/server/routes/domains/runtime.rs:148` |
+| `GET` | `/api/voice/conductor/jobs/{id}` | `voice_conductor::get_job` | `src/server/routes/voice_conductor.rs:98` | `src/server/routes/domains/runtime.rs:149` |
+| `POST` | `/api/voice/conductor/say` | `voice_conductor::say` | `src/server/routes/voice_conductor.rs:24` | `src/server/routes/domains/runtime.rs:147` |
 | `GET` | `/api/voice/config` | `voice_config::get_voice_config` | `src/server/routes/voice_config.rs:155` | `src/server/routes/domains/admin.rs:85` |
 | `PUT` | `/api/voice/config` | `voice_config::put_voice_config` | `src/server/routes/voice_config.rs:165` | `src/server/routes/domains/admin.rs:85` |
 | `POST` | `/api/voice/speak` | `voice_audio::speak` | `src/server/routes/voice_audio.rs:73` | `src/server/routes/domains/runtime.rs:146` |

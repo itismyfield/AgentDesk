@@ -12,6 +12,9 @@ use crate::services::voice_conductor::{self, ConductorJob, StartedTurn};
 
 const LISTED_JOBS: usize = 20;
 
+#[cfg(test)]
+mod accepted_tests;
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct SayBody {
     pub(crate) text: String,
@@ -56,10 +59,7 @@ pub(crate) async fn say(
                 None,
             )
             .await
-            .map(|(turn_id, status)| StartedTurn {
-                turn_id,
-                consumed: status == "consumed",
-            })
+            .map(started_turn)
             .map_err(|error| match error {
                 crate::services::discord::HeadlessTurnStartError::Conflict(error)
                 | crate::services::discord::HeadlessTurnStartError::InvalidTarget(error)
@@ -80,6 +80,13 @@ pub(crate) async fn say(
         ));
     }
     Ok(Json(job))
+}
+
+fn started_turn((turn_id, status): (String, &str)) -> StartedTurn {
+    StartedTurn {
+        turn_id,
+        consumed: status == "consumed",
+    }
 }
 
 /// GET /api/voice/conductor/jobs

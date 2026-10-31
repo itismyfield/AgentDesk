@@ -16,7 +16,7 @@ use crate::services::provider::ProviderKind;
 
 pub(super) mod queued_recovery;
 mod snapshot_io;
-pub(crate) use queued_recovery::load_pending_queues_checked;
+pub(crate) use queued_recovery::{load_pending_queues_checked, v2_held_sources};
 
 const STALE_PENDING_QUEUE_TMP_AGE: Duration = Duration::from_secs(60);
 

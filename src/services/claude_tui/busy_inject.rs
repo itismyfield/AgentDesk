@@ -26,12 +26,14 @@ pub(crate) use receipt::exact as exact_receipt;
 pub(crate) use receipt::pasted_inner;
 #[cfg(test)]
 mod receipt_interleave_tests;
+#[cfg(all(test, unix))]
+mod receipt_scope_tests;
 pub(in crate::services::claude_tui) mod screen;
 #[cfg(test)]
 mod screen_identity_tests;
 #[cfg(test)]
 mod screen_tests;
-pub(in crate::services::claude_tui) mod stash;
+pub(crate) mod stash;
 #[cfg(all(test, unix))]
 mod stash_tests;
 #[cfg(all(test, unix))]
@@ -486,6 +488,8 @@ pub(crate) fn collect_receipt(request: &Request<'_>, report: &Report, timing: &T
     };
     let (path, nonce) = (request.transcript.to_path_buf(), request.nonce.to_string());
     let (window, poll) = (timing.confirm_window, timing.confirm_poll);
+    // The thread records into the same attempt's history, never another's.
+    let scope = crate::services::tui_input::human_frame::history::ReceiptScope::capture();
     let _ = std::thread::Builder::new()
         .name("claude-receipt".into())
         .spawn(move || {
@@ -495,7 +499,7 @@ pub(crate) fn collect_receipt(request: &Request<'_>, report: &Report, timing: &T
                 nonce.as_str(),
                 sent.text.as_str(),
             );
-            let result = await_receipt(receipt, Instant::now() + window, poll);
+            let result = scope.enter(|| await_receipt(receipt, Instant::now() + window, poll));
             tracing::debug!(%nonce, ?result, "Claude injection receipt diagnostic");
         });
 }

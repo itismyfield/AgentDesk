@@ -7,6 +7,8 @@ mod inject_codex_tests;
 #[cfg(all(test, unix))]
 pub(crate) mod inject_tests;
 mod prepared;
+#[cfg(test)]
+mod start_outcome_tests;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -24,6 +26,10 @@ use crate::services::turn_orchestrator::{
     Intervention, InterventionMode, SourceMessageQueuedGeneration,
 };
 use inject::InjectMode;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use inject::{
+    CodexLedger, Input as BusyInput, herdr::run as herdr_busy,
+};
 pub(crate) use inject::{
     InjectAttempt, Origin as InjectOrigin, SOURCE_OWNED, attempt as inject_human_input,
 };
@@ -115,10 +121,33 @@ pub(crate) async fn preflight_human_input(
 }
 
 enum StartAttempt {
+    Accepted(String),
     Started(String),
     Busy,
     Unavailable(String),
     InvalidTarget(String),
+}
+
+impl From<Result<router::HeadlessTurnStartOutcome, router::HeadlessTurnStartError>>
+    for StartAttempt
+{
+    fn from(
+        result: Result<router::HeadlessTurnStartOutcome, router::HeadlessTurnStartError>,
+    ) -> Self {
+        match result {
+            Ok(outcome) => {
+                if outcome.status.is_accepted() {
+                    Self::Accepted(outcome.turn_id)
+                } else {
+                    // Command consumption keeps the legacy delivery response.
+                    Self::Started(outcome.turn_id)
+                }
+            }
+            Err(router::HeadlessTurnStartError::Conflict(_)) => Self::Busy,
+            Err(router::HeadlessTurnStartError::InvalidTarget(error)) => Self::InvalidTarget(error),
+            Err(router::HeadlessTurnStartError::Internal(error)) => Self::Unavailable(error),
+        }
+    }
 }
 
 /// What holds the mailbox slot when a start was refused.
@@ -253,6 +282,13 @@ async fn deliver_with_ports<P: DeliveryPorts>(
     }
     if ports.external_hold().await.is_none() {
         match ports.try_start().await {
+            StartAttempt::Accepted(turn_id) => {
+                return Ok(HumanInputDelivery::Queued {
+                    turn_id,
+                    reason: "accepted".to_string(),
+                    inject_veto,
+                });
+            }
             StartAttempt::Started(turn_id) => return Ok(HumanInputDelivery::Started { turn_id }),
             StartAttempt::Unavailable(error) => {
                 return Err(HumanInputError::RuntimeUnavailable(error));
@@ -275,6 +311,13 @@ async fn deliver_with_ports<P: DeliveryPorts>(
         // A refused start with an empty slot is a session transition or a turn
         // that just ended; one more start attempt avoids queueing behind nothing.
         (MailboxHolder::Nothing, None) => match ports.try_start().await {
+            StartAttempt::Accepted(turn_id) => {
+                return Ok(HumanInputDelivery::Queued {
+                    turn_id,
+                    reason: "accepted".to_string(),
+                    inject_veto,
+                });
+            }
             StartAttempt::Started(turn_id) => return Ok(HumanInputDelivery::Started { turn_id }),
             StartAttempt::Unavailable(error) => {
                 return Err(HumanInputError::RuntimeUnavailable(error));
@@ -337,7 +380,7 @@ impl DeliveryPorts for LivePorts {
             return StartAttempt::Unavailable(imsg_reply::UNBOUND.to_string());
         }
         match self.start_reserved(reservation).await {
-            StartAttempt::Started(turn_id) => StartAttempt::Started(turn_id),
+            committed @ (StartAttempt::Started(_) | StartAttempt::Accepted(_)) => committed,
             _ if !reply.release_episode(&episode).await => {
                 StartAttempt::Unavailable(imsg_reply::UNBOUND.to_string())
             }
@@ -438,16 +481,7 @@ impl LivePorts {
             reservation,
         )
         .await;
-        match result {
-            Ok(outcome) => StartAttempt::Started(outcome.turn_id),
-            Err(router::HeadlessTurnStartError::Conflict(_)) => StartAttempt::Busy,
-            Err(router::HeadlessTurnStartError::InvalidTarget(error)) => {
-                StartAttempt::InvalidTarget(error)
-            }
-            Err(router::HeadlessTurnStartError::Internal(error)) => {
-                StartAttempt::Unavailable(error)
-            }
-        }
+        result.into()
     }
 }
 

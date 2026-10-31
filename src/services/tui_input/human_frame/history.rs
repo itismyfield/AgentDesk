@@ -116,6 +116,61 @@ fn read(path: &Path) -> Result<Store, String> {
     compat::read_legacy(path)
 }
 
+/// What a non-scoped reader matches against: the V1 store, or a V2 history's owned entries.
+fn readable(path: &Path) -> Result<Store, String> {
+    #[cfg(test)]
+    if let Some(store) = v2::unscoped_store(path)? {
+        return Ok(store);
+    }
+    read(path)
+}
+
+/// What the V1 append readers match against: the V1 store, or a V2 history's owned entries when
+/// it holds any migrated append entry.
+fn readable_append(path: &Path) -> Result<Store, String> {
+    #[cfg(test)]
+    if let Some(store) = v2::append_store(path)? {
+        return Ok(store);
+    }
+    read(path)
+}
+
+/// A V1 append mutation: on the V1 store, or on a V2 history's migrated append entries.
+fn update_append<T>(apply: impl FnOnce(&mut Store) -> Result<T, String>) -> Result<T, String> {
+    #[cfg(test)]
+    {
+        let path = path()?;
+        if v2::is_v2(&path)? {
+            return v2::update_migrated(&path, apply);
+        }
+    }
+    update(apply)
+}
+
+/// The exact history attempt a diagnostic receipt thread records into; no pane write right
+/// travels with it, and outside an owner's attempt it carries nothing.
+pub(crate) struct ReceiptScope {
+    #[cfg(test)]
+    context: Option<v2::ReceiptContext>,
+}
+
+impl ReceiptScope {
+    pub(crate) fn capture() -> Self {
+        Self {
+            #[cfg(test)]
+            context: v2::ReceiptContext::capture(),
+        }
+    }
+
+    pub(crate) fn enter<T>(&self, f: impl FnOnce() -> T) -> T {
+        #[cfg(test)]
+        if let Some(context) = &self.context {
+            return context.enter(f);
+        }
+        f()
+    }
+}
+
 fn update<T>(apply: impl FnOnce(&mut Store) -> Result<T, String>) -> Result<T, String> {
     let path = path()?;
     std::fs::create_dir_all(path.parent().ok_or("frame ledger parent missing")?)
@@ -227,6 +282,8 @@ fn register_inner(
 }
 
 pub(crate) fn withdraw(id: &str, transcript: &Path) {
+    // A scoped attempt keeps its registration and writes nothing; only the queue's exact
+    // not-sent proof, projected as abandoned, releases its collision candidate.
     #[cfg(test)]
     if v2::scoped() {
         return;
@@ -280,7 +337,7 @@ pub(crate) fn allows_legacy(id: &str, transcript: &Path) -> bool {
 }
 
 pub(crate) fn known(frame: &str) -> bool {
-    #[cfg(test)]
+    // A rolled-back binary still recognizes frames a V2 history records; it never rewrites them.
     if let Some(known) = path()
         .ok()
         .and_then(|p| compat::known_v2(&p, &class_hashes(frame)))
@@ -425,7 +482,7 @@ fn observed_at_checked(
     if let Some(observed) = v2::scoped_observed(provider, session, prompts, row) {
         return Ok(observed);
     }
-    let store = path.and_then(|path| read(&path))?;
+    let store = path.and_then(|path| readable(&path))?;
     let hashes: Vec<_> = prompts
         .iter()
         .flat_map(|prompt| class_hashes(prompt))

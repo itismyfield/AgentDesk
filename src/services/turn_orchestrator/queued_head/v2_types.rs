@@ -15,6 +15,36 @@ pub(crate) struct SnapshotV2 {
     pub(crate) admission_receipts: Vec<String>,
     #[serde(default)]
     pub(crate) admission_sequence: u64,
+    /// Which admission ticket each queued, attempted or settled input came in under.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) admission_binds: Vec<AdmissionBind>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct AdmissionBind {
+    pub(crate) receipt: String,
+    pub(crate) at: BindAt,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) context: Option<AdmissionContext>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum BindAt {
+    /// The queued item at `index`, whose canonical digest is `item`.
+    Queued { index: usize, item: String },
+    /// A retained input that was never attempted.
+    Opaque,
+    Attempt {
+        identity: QueueIdentity,
+        attempt: AttemptIdentity,
+    },
+    /// Delivered; dropped with the terminal identities after the same window.
+    Settled {
+        attempt: String,
+        source: Option<serde_json::Value>,
+        settled_at_ms: u64,
+    },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -33,6 +63,9 @@ pub(crate) struct InputAttempt {
     pub(crate) resolved_target: Option<crate::services::tui_input::target_epoch::PaneEpoch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) preparation_hold: Option<serde_json::Value>,
+    /// The attempt a legacy snapshot recorded, kept verbatim because it names no provider or target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) legacy_attempt: Option<super::mend::HeadAttempt>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -79,6 +112,9 @@ pub(crate) struct PreparedPayload {
     pub(crate) frame: String,
     pub(crate) digest: String,
     pub(crate) attribution: serde_json::Value,
+    /// Queue items after the head original that this one frame carries, in arrival order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) followers: Vec<PendingQueueItem>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -114,4 +150,13 @@ pub(crate) struct NoticeIntent {
 pub(crate) struct TerminalIdentity {
     pub(crate) identity: QueueIdentity,
     pub(crate) settled_at_ms: u64,
+}
+
+/// Caller provenance follows the ticket through reservation and settlement.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct AdmissionContext {
+    #[serde(default)]
+    pub(crate) original: Option<serde_json::Value>,
+    #[serde(default)]
+    pub(crate) execution: Option<serde_json::Value>,
 }
