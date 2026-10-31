@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
     let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
-    let pool = pg_db.connect_and_migrate().await;
+    let pool = pg_db.connect_and_migrate_with_max_connections(16).await;
     let engine = test_engine_with_pg(pool.clone());
     seed_agent_pg(&pool).await;
     let reviewed_commit =
@@ -136,6 +136,12 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
         .unwrap();
         eprintln!("recovery pass {pass}: tick returned");
         crate::kanban::drain_hook_side_effects_with_backends(&engine);
+        eprintln!(
+            "recovery pass {pass}: pool size={}, idle={}, closed={}",
+            pool.size(),
+            pool.num_idle(),
+            pool.is_closed()
+        );
         crate::reconcile::reconcile_completed_queue_review_drift_pg(&pool, &engine)
             .await
             .unwrap();
