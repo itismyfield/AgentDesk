@@ -194,12 +194,34 @@ class SourceTreeStabilityTests(unittest.TestCase):
             'fn f() { #[cfg(test)] x = if tests::bypass() { false } else { env_flag("ADK_TEST_HIDDEN", false) }; std::env::var("AGENTDESK_PROD_LIST"); }',
             'fn f(k: K) -> bool { match k { #[cfg(test)] K::T => if tests::bypass() { false } else { env_flag("ADK_TEST_HIDDEN", false) }, _ => std::env::var("AGENTDESK_PROD_LIST").is_ok() } }',
             'fn f(k: K) -> bool { match k { #[cfg(test)] K::T { .. } if tests::bypass() => env_flag("ADK_TEST_HIDDEN", false), _ => std::env::var("AGENTDESK_PROD_LIST").is_ok() } }',
+            'fn f() { #[cfg(test)] \'b: { false }.probe(env_flag("ADK_TEST_HIDDEN", false))?; std::env::var("AGENTDESK_PROD_LIST"); }',
+            'fn f() { #[cfg(test)] hook(); if live { std::env::var("AGENTDESK_PROD_LIST"); } }',
+            'fn f() { #[cfg(test)] if c { hook(); } if live { std::env::var("AGENTDESK_PROD_LIST"); } }',
+            'fn f() { K { #[cfg(test)] probe: { false }, ..std::env::var("AGENTDESK_PROD_LIST") }; }',
+            'fn f() { #[cfg(test)] \'b: { false }; std::env::var("AGENTDESK_PROD_LIST"); }',
         ):
             with self.subTest(source=source):
                 self.write("src/list.rs", source)
                 output = self.render()
                 self.assertIn("AGENTDESK_PROD_LIST", output)
                 self.assertNotIn("ADK_TEST_HIDDEN", output)
+
+    def test_cfg_boundary_errors_abort_generation(self) -> None:
+        for gated, message in (
+            ('K::T => if c { a } else { TEST } &K::U => PROD, _ => 0', 'multiple match arms'),
+            ("K::T => 'b: loop { break TEST; } &K::U => PROD, _ => 0", 'multiple match arms'),
+            ('K::T => { TEST }.probe(PROD), _ => 0', 'before continuation'),
+            ('K::T => { #[cfg(not(test))] PROD }, _ => 0', 'production cfg'),
+        ):
+            with self.subTest(gated=gated):
+                self.write('src/boundary.rs', 'fn f() { match k { #[cfg(test)] ' + gated + ' } }')
+                destination = self.root / 'env.md'
+                destination.write_text('previous reference')
+                with mock.patch.object(gen, 'REPO_ROOT', self.root), mock.patch.object(
+                    gen, 'SRC_ROOT', self.root / 'src'
+                ), self.assertRaisesRegex(gen.ParseError, message):
+                    gen.main(['--output', str(destination)])
+                self.assertEqual(destination.read_text(), 'previous reference')
 
     def test_external_helper_names_survive_parser_migration(self) -> None:
         self.write("src/external.rs", '''

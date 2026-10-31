@@ -26,7 +26,30 @@ from __future__ import annotations
 import re
 
 
+class ParseError(ValueError):
+    pass
+
+
 def cfg_item_end(code: str, start: int, scan_balanced) -> int:
+    """Accept a gated range only when its boundary invariants hold."""
+    end = _cfg_item_end(code, start, scan_balanced)
+    if re.match(r"\s*(?:else\b|=>|\.(?!\.)|\?)", code[end:]):
+        raise ParseError(f"cfg range ends before continuation at offset {end}")
+    span = code[start:end]
+    if re.search(r"#\[\s*cfg\s*\(\s*not\s*\(\s*test\s*\)\s*\)\s*\]", span):
+        raise ParseError(f"cfg range includes production cfg at offset {start}")
+    depth = arrows = 0
+    for match in re.finditer(r"=>|[(){}\[\]]", span):
+        token = match[0]
+        if token == "=>" and depth == 0:
+            arrows += 1
+        depth += (token in "([{") - (token in ")]}")
+    if arrows > 1:
+        raise ParseError(f"cfg range includes multiple match arms at offset {start}")
+    return end
+
+
+def _cfg_item_end(code: str, start: int, scan_balanced) -> int:
     """Find a gated item/list element's end without consuming its parent delimiter."""
     pos = start
     while attr := re.match(r"\s*#\[", code[pos:]):
@@ -45,7 +68,7 @@ def cfg_item_end(code: str, start: int, scan_balanced) -> int:
                 comma = re.match(r"\s*,", code[pos:])
                 if comma:
                     return pos + comma.end()
-                continuation = r"else\b" if statement else r"(?:else\b|if\b|=>|[|.?+*/%&^<>-]|as\b|==|!=)"
+                continuation = r"(?:else\b|[.?])" if statement else r"(?:else\b|if\b|=>|[|.?+*/%&^<>-]|as\b|==|!=)"
                 if block_element or not re.match(r"\s*" + continuation, code[pos:]):
                     return pos
         elif char in "})]":
