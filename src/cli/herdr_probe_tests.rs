@@ -149,15 +149,17 @@ fn probe_user_default_reports_the_reason_without_config_database_or_writes() {
         ),
         (
             &json!(false),
-            &json!("next_restart_policy_unverified:Peer"),
+            &json!("next_restart_policy_unverified:Unsupported"),
             &json!(socket_arg)
         ),
         "probe_default_socket_reports_the_policy_reason_contract: {report}"
     );
+    // The fixture answers a readable pong of protocol 21: an unsupported server, named as seen.
+    assert_eq!(report["server"], "herdr 0.9.3 / protocol 21", "{report}");
     assert!(
         report["action"]
             .as_str()
-            .is_some_and(|action| action.contains("start bare herdr")),
+            .is_some_and(|action| action.contains("protocol 22")),
         "probe_reports_the_same_action_as_health_contract: {report}"
     );
 
