@@ -106,10 +106,20 @@ export function formatTokens(value: number): string {
 }
 
 export function formatCurrency(value: number): string {
-  if (value >= 100) return `$${value.toFixed(0)}`;
+  if (value >= 100) return `$${Math.round(value).toLocaleString("en-US")}`;
   if (value >= 1) return `$${value.toFixed(2)}`;
   if (value >= 0.01) return `$${value.toFixed(3)}`;
   return `$${value.toFixed(4)}`;
+}
+
+/** Catalog descriptions are markdown; a stats row needs one plain line. */
+export function plainSkillDescription(text: string): string {
+  const firstLine = text.split("\n").map((line) => line.trim()).find(Boolean) ?? "";
+  return firstLine
+    .replace(/^#+\s*/, "")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/(\*\*|__|\*|_|`)/g, "")
+    .trim();
 }
 
 export function formatPercent(value: number, digits = 1): string {
@@ -262,7 +272,7 @@ export function buildSkillRows(
     return {
       id: row.skill_name,
       name: row.skill_name,
-      description,
+      description: plainSkillDescription(description),
       windowCalls: row.calls,
     };
   });
@@ -293,7 +303,7 @@ export function buildAgentSkillRows(
       id: `${row.agent_role_id}-${row.skill_name}-${index}`,
       agentName: row.agent_name,
       skillName: row.skill_name,
-      description,
+      description: plainSkillDescription(description),
       calls: row.calls,
     };
   });

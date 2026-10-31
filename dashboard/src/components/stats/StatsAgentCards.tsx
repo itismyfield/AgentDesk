@@ -188,7 +188,7 @@ export function SkillUsageCard({
         actions={
           <span className="inline-flex max-w-full flex-wrap items-center gap-1 rounded-md border border-th-border-subtle bg-surface-subtle px-2 py-1 text-xs tabular-nums text-th-text-secondary" style={numericBadgeStyle}>
             {windowCalls.toLocaleString()}{" "}
-            {t(msg("calls", "calls", "calls", "calls"))}
+            {t(msg("회", "calls", "回", "次"))}
           </span>
         }
       />
@@ -249,7 +249,7 @@ export function SkillUsageCard({
                           className="text-[10.5px]"
                           style={{ color: "var(--th-text-muted)" }}
                         >
-                          {t(msg("calls", "calls", "calls", "calls"))}
+                          {t(msg("회", "calls", "回", "次"))}
                         </div>
                       </div>
                     </div>
@@ -329,7 +329,7 @@ export function SkillUsageCard({
                             className="text-[10.5px]"
                             style={{ color: "var(--th-text-muted)" }}
                           >
-                            {t(msg("calls", "calls", "calls", "calls"))}
+                            {t(msg("회", "calls", "回", "次"))}
                           </div>
                         </div>
                       </div>
