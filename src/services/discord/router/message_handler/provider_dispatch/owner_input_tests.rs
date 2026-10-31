@@ -1125,6 +1125,55 @@ fn a_busy_front_is_written_into_the_pane_its_running_turn_names() {
     assert!(pasted.contains(PROMPT), "{pasted}");
 }
 
+/// A busy front carries its whole original into the running turn: its upload and reply context
+/// reach the pane once with its text, and uploads that cannot be prepared leave it queued, unsent.
+#[test]
+fn a_busy_front_carries_its_uploads_and_reply_into_the_pane() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig("hb-whole", 7_272_595, "normal", view("", false), BUSY);
+    running_row(&rig, &rig.name);
+    let hand = |front: Front| {
+        let owner = (rig.mailbox.clone(), None);
+        let handed = hand_busy(owner, ProviderKind::Claude, (rig.channel, front));
+        rig.runtime.block_on(handed)
+    };
+    assert_eq!(hand(rig.granted_front()), Ok(()));
+    let next = |offset: u64, uploads: Vec<&str>| {
+        let mut item = rig.original.clone();
+        item.message_id += offset;
+        item.source_message_ids = vec![item.message_id];
+        item.reply_context = Some("REPLY-CONTEXT".into());
+        item.pending_uploads = uploads.into_iter().map(Into::into).collect();
+        let admitted = rig
+            .runtime
+            .block_on(admit(&rig.mailbox, &item, AdmissionTicket::new()));
+        assert!(matches!(
+            admitted,
+            crate::services::discord::queue_io::input_owner::admission::Admission::Accepted(_)
+        ));
+    };
+    next(1, vec!["UPLOAD-RECORD"]);
+    assert_eq!(hand(rig.granted_front()), Ok(()));
+    let pasted = fs::read_to_string(rig.renderer.join("body")).unwrap();
+    for part in ["UPLOAD-RECORD", "REPLY-CONTEXT", PROMPT] {
+        assert_eq!(pasted.matches(part).count(), 1, "{part}: {pasted}");
+    }
+    let too_many = crate::services::cluster::attachment_transfer::store::MAX_FILES + 1;
+    next(2, vec!["UPLOAD-RECORD"; too_many]);
+    let events = rig.events().len();
+    let failed = hand(rig.granted_front());
+    assert_eq!(
+        failed,
+        Err("NotSent(\"upload_materialization_failed\")".into())
+    );
+    assert_eq!(rig.events().len(), events, "no key");
+    assert_eq!(
+        rig.snapshot()["items"].as_array().unwrap().len(),
+        1,
+        "it stays queued"
+    );
+}
+
 /// With no turn running the drive hands each front to the idle start, never into a pane.
 #[test]
 fn an_idle_channel_hands_its_front_to_the_turn_start() {

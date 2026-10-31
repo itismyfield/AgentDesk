@@ -134,9 +134,23 @@ pub(in crate::services::discord) fn owned_original(
     original
 }
 
+/// A queued original's body for a running turn, its uploads prepared first; a voice original or a
+/// failed preparation leaves it queued, unsent.
+pub(in crate::services::discord) async fn busy_body(
+    channel: u64,
+    item: &crate::services::turn_orchestrator::PendingQueueItem,
+    pool: Option<&sqlx::PgPool>,
+) -> Result<String, String> {
+    if item.voice_announcement.is_some() {
+        return Err("NotSent(\"voice_claim_deferred\")".into());
+    }
+    let uploads = prepare_busy_uploads(ChannelId::new(channel), &item.pending_uploads, pool).await;
+    let uploads = uploads.map_err(|_| "NotSent(\"upload_materialization_failed\")".to_string())?;
+    Ok(member_body(item, &uploads))
+}
+
 /// One queued original's prompt body as a single dispatch builds it before any channel prelude is
 /// selected: its uploads, the restored reply context, then its text.
-#[cfg(test)]
 pub(in crate::services::discord) fn member_body(
     item: &crate::services::turn_orchestrator::PendingQueueItem,
     uploads: &[String],

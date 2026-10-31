@@ -206,6 +206,7 @@ pub(in crate::services::discord) async fn hand_busy(
     if owner.phase != target::Phase::Busy {
         return Err(unobserved());
     }
+    let payload = super::super::input_payload::busy_body(channel, &front.1, pool.as_ref()).await?;
     let claim = claim_turn(&mailbox, front.1.message_id, &front).await?;
     let claim = claim.ok_or("NotSent(\"front_not_granted\")")?;
     let (settled, answer) = tokio::sync::oneshot::channel();
@@ -214,7 +215,7 @@ pub(in crate::services::discord) async fn hand_busy(
             pool: pool.as_ref(),
             shared: None,
             provider: &provider,
-            prompt: &front.1.text,
+            prompt: &payload,
             session_id: None,
             working_dir: "",
             system_prompt: None,
