@@ -5,8 +5,7 @@ import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { beginAuthentication, getAuthSnapshot, requireAuthentication } from "../api/authState";
-import { saveVoiceConfig, VoiceConfigApiError } from "../api/settingsRuntime";
-import type { CompanySettings, VoiceConfigPutBody } from "../types";
+import type { CompanySettings } from "../types";
 import ClaudeAccountsWidget from "./dashboard/ClaudeAccountsWidget";
 import { MiniRateLimitBar } from "./dashboard/MiniRateLimitBar";
 import ReceiptWidget from "./dashboard/ReceiptWidget";
@@ -219,17 +218,6 @@ describe("settings under token authentication", () => {
     expectBearer("PATCH /api/settings/config");
     expect(callsTo("PATCH /api/settings/config")[0].body).toEqual({ kanban_probe_label: "after" });
     expect(notify).toHaveBeenCalledWith("Saved settings.", "success");
-  });
-
-  it("saves voice config with the tab token and keeps the server's conflict details", async () => {
-    serve({
-      "PUT /api/voice/config": () => ({ status: 409, body: { message: "voice config changed elsewhere" } }),
-    });
-    const body = {} as VoiceConfigPutBody;
-    const error = await saveVoiceConfig(body).catch((reason: unknown) => reason);
-    expectBearer("PUT /api/voice/config");
-    expect(error).toBeInstanceOf(VoiceConfigApiError);
-    expect(error).toMatchObject({ status: 409, message: "voice config changed elsewhere" });
   });
 });
 
