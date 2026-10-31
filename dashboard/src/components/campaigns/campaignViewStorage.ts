@@ -1,5 +1,5 @@
 import { subscribeToLocalStorageKey } from "../../lib/useLocalStorage";
-import { NO_TIES, type CampaignGraphView, type GraphViewSettings, type ViewScope } from "./campaignGraphRouting";
+import { NO_TIES, rawEdgeId, type CampaignGraphView, type GraphViewSettings, type ViewScope } from "./campaignGraphRouting";
 
 /**
  * Tie layout per browser profile, apart from the campaign definition: nothing here reaches the server.
@@ -29,7 +29,28 @@ const isPoint = (value: unknown) => {
   return typeof point === "object" && point !== null && Number.isFinite(point.x) && Number.isFinite(point.y);
 };
 
-/** A stored view is used only when it matches this schema and scope and every route names a stored tie. */
+/** Each tie's members and the routes through it name the same edges, once each, and no tie is empty. */
+function consistent(ties: CampaignGraphView["ties"], routes: CampaignGraphView["routes"]): boolean {
+  const members = new Set<string>();
+  for (const tie of ties) {
+    if (tie.strandOrder.length === 0) return false;
+    for (const edge of tie.strandOrder) {
+      const pair = JSON.stringify([tie.id, rawEdgeId(edge)]);
+      if (members.has(pair)) return false;
+      members.add(pair);
+    }
+  }
+  const routed = new Set<string>();
+  const passes = new Set<string>();
+  for (const route of routes) {
+    if (route.via.length === 0 || routed.has(rawEdgeId(route.edge)) || new Set(route.via).size !== route.via.length) return false;
+    routed.add(rawEdgeId(route.edge));
+    for (const id of route.via) passes.add(JSON.stringify([id, rawEdgeId(route.edge)]));
+  }
+  return passes.size === members.size && [...passes].every((pair) => members.has(pair));
+}
+
+/** A stored view is used only when it matches this schema and scope and its routes agree with tie membership. */
 function parseView(raw: string, scope: ViewScope): GraphViewSettings | null {
   let value: Partial<CampaignGraphView>;
   try {
@@ -49,7 +70,7 @@ function parseView(raw: string, scope: ViewScope): GraphViewSettings | null {
   for (const route of value.routes) {
     if (!route || !isEdge(route.edge) || !Array.isArray(route.via) || !route.via.every((id) => isText(id) && ids.has(id))) return null;
   }
-  return { ties: value.ties, routes: value.routes, showOriginal: value.showOriginal };
+  return consistent(value.ties, value.routes) ? { ties: value.ties, routes: value.routes, showOriginal: value.showOriginal } : null;
 }
 
 export function readStoredRaw(scope: ViewScope): string | null {

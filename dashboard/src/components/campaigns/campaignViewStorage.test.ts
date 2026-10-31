@@ -28,6 +28,13 @@ it("falls back to the original lines for a damaged, other-version or inconsisten
     JSON.stringify({ ...stored, routes: [{ edge: ["a", "b"], via: ["missing"] }] }),
     JSON.stringify({ ...stored, ties: [{ id: "t1", position: { x: "4", y: 8 }, strandOrder: [] }] }),
     JSON.stringify({ ...stored, ties: [{ id: "t1", position: { x: 4, y: 8 }, strandOrder: ["a:b"] }] }),
+    // Membership and routes must say the same thing.
+    JSON.stringify({ ...stored, ties: [{ id: "t1", position: { x: 4, y: 8 }, strandOrder: [] }] }),
+    JSON.stringify({ ...stored, ties: [{ id: "t1", position: { x: 4, y: 8 }, strandOrder: [["b", "c"]] }] }),
+    JSON.stringify({ ...stored, routes: [] }),
+    JSON.stringify({ ...stored, routes: [{ edge: ["a", "b"], via: ["t1"] }, { edge: ["a", "b"], via: ["t1"] }] }),
+    JSON.stringify({ ...stored, routes: [{ edge: ["a", "b"], via: ["t1", "t1"] }] }),
+    JSON.stringify({ ...stored, ties: [{ id: "t1", position: { x: 4, y: 8 }, strandOrder: [["a", "b"], ["a", "b"]] }] }),
   ];
   for (const raw of damaged) {
     localStorage.setItem(campaignViewKey(scope), raw);

@@ -1,3 +1,4 @@
+import { Position, getSmoothStepPath } from "@xyflow/react";
 import { rawEdgeId, type CableTie, type DisplayEdge } from "./campaignGraphRouting";
 
 export type Point = { x: number; y: number };
@@ -21,7 +22,18 @@ export function tieSlots(ties: readonly CableTie[], lines: readonly DisplayEdge[
   return slots;
 }
 
-/** The drawn path of a line: straight through its ties, an orthogonal step when untied. */
+/** Points of an SVG path from React Flow's path builders, in order (M/L ends and Q corners). */
+function svgPoints(d: string): Point[] {
+  const numbers = d.match(/-?\d+(?:\.\d+)?(?:e-?\d+)?/gi)?.map(Number) ?? [];
+  const points: Point[] = [];
+  for (let index = 0; index + 1 < numbers.length; index += 2) points.push({ x: numbers[index], y: numbers[index + 1] });
+  return points;
+}
+
+/**
+ * The drawn path of a line: straight segments through its ties, otherwise the same smoothstep path React Flow
+ * renders for an untied line, so selection follows what is on screen, backward lines included.
+ */
 export function linePath(line: DisplayEdge, boxes: ReadonlyMap<string, Box>, ties: ReadonlyMap<string, CableTie>, slots: ReadonlyMap<string, string[]>): Point[] {
   const source = boxes.get(line.source);
   const target = boxes.get(line.target);
@@ -36,17 +48,22 @@ export function linePath(line: DisplayEdge, boxes: ReadonlyMap<string, Box>, tie
     return [{ x: tie.position.x, y }, { x: tie.position.x + TIE_WIDTH, y }];
   });
   if (via.length > 0) return [start, ...via, end];
-  const middle = (start.x + end.x) / 2;
-  return [start, { x: middle, y: start.y }, { x: middle, y: end.y }, end];
+  const [d] = getSmoothStepPath({ sourceX: start.x, sourceY: start.y, sourcePosition: Position.Right, targetX: end.x, targetY: end.y, targetPosition: Position.Left });
+  return svgPoints(d);
 }
 
 function cross(a: Point, b: Point, c: Point) {
   return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
 }
 
+const within = (a: Point, b: Point, point: Point) =>
+  Math.min(a.x, b.x) <= point.x && point.x <= Math.max(a.x, b.x) && Math.min(a.y, b.y) <= point.y && point.y <= Math.max(a.y, b.y);
+
+/** Proper crossings and touches both count, so a stroke through a joint between two segments selects the line. */
 function segmentsIntersect(a: Point, b: Point, c: Point, d: Point): boolean {
   const d1 = cross(c, d, a), d2 = cross(c, d, b), d3 = cross(a, b, c), d4 = cross(a, b, d);
-  return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+  if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return true;
+  return (d1 === 0 && within(c, d, a)) || (d2 === 0 && within(c, d, b)) || (d3 === 0 && within(a, b, c)) || (d4 === 0 && within(a, b, d));
 }
 
 /** Whether a stroke from `a` to `b` crosses the drawn path. */

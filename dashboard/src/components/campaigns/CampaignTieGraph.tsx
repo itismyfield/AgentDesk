@@ -1,4 +1,4 @@
-import { Fragment, useRef, useState, type PointerEvent } from "react";
+import { Fragment, useEffect, useRef, useState, type PointerEvent } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { tieHeight, tieSlotTop, type Point } from "./campaignTieGeometry";
 
@@ -25,9 +25,11 @@ type Stroke = { screen: Point; local: Point };
  * Tie mode's drawing surface over the graph: a stroke across lines selects them, and it takes the pointer
  * from pan so drawing never moves the view. Mouse, pen and touch share the pointer path.
  */
-export function CrossingOverlay({ label, toFlow, onStroke }: {
+export function CrossingOverlay({ label, toFlow, onActive, onStroke }: {
   label: string;
   toFlow: (screen: Point) => Point;
+  /** True from pointer down until release or cancel, so the stroke counts as an action in progress. */
+  onActive: (active: boolean) => void;
   /** `done` is false while drawing (preview), true on release; a cancelled stroke reports null. */
   onStroke: (stroke: { from: Point; to: Point } | null, done: boolean) => void;
 }) {
@@ -43,10 +45,15 @@ export function CrossingOverlay({ label, toFlow, onStroke }: {
     const to = read(event);
     if (done) { start.current = null; setLine(null); } else setLine({ a: from.local, b: to.local });
     onStroke({ from: toFlow(from.screen), to: toFlow(to.screen) }, done);
+    if (done) onActive(false);
   };
-  const cancel = () => { if (start.current) { start.current = null; setLine(null); onStroke(null, true); } };
+  const cancel = () => { if (start.current) { start.current = null; setLine(null); onStroke(null, true); onActive(false); } };
+  // Leaving tie mode mid-stroke unmounts the surface; the stroke must not stay in progress.
+  const activeRef = useRef(onActive);
+  activeRef.current = onActive;
+  useEffect(() => () => { if (start.current) activeRef.current(false); }, []);
   return <div className="campaign-tie-stroke nopan nodrag nowheel" role="presentation" aria-label={label}
-    onPointerDown={(event) => { event.currentTarget.setPointerCapture?.(event.pointerId); start.current = read(event); }}
+    onPointerDown={(event) => { event.currentTarget.setPointerCapture?.(event.pointerId); start.current = read(event); onActive(true); }}
     onPointerMove={(event) => report(event, false)} onPointerUp={(event) => report(event, true)} onPointerCancel={cancel} onLostPointerCapture={cancel}>
     {line && <svg aria-hidden><line x1={line.a.x} y1={line.a.y} x2={line.b.x} y2={line.b.y} /></svg>}
   </div>;

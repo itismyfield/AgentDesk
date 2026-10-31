@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { GraphViewSettings, RawEdgeKey, ViewScope } from "./campaignGraphRouting";
+import { rawEdgeId, type GraphViewSettings, type RawEdgeKey, type ViewScope } from "./campaignGraphRouting";
 import { UNDO_LIMIT, commitTie, pruneTies, undoTie, type TieCommand, type TieHistory } from "./campaignTieEditor";
 import { campaignViewKey, loadCampaignView, readStoredRaw, saveCampaignView, subscribeCampaignView } from "./campaignViewStorage";
 
@@ -19,9 +19,15 @@ function initialState(scope: ViewScope): TieViewState {
   return { key: campaignViewKey(scope), history: { view: stored.view, undo: [] }, recovered: stored.recovered, saveFailed: false, pending: null, lastRaw: stored.raw };
 }
 
-/** Tie layout of one graph scope: commands, undo and a save that reports failure while keeping the shown view. */
-export function useCampaignTieView(scope: ViewScope, present: readonly RawEdgeKey[]) {
+const sameView = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
+/**
+ * Tie layout of one graph scope: commands, undo and a save that reports failure while keeping the shown view.
+ * `present` is every raw edge of the full definition (not the filtered drawing); null while no task is known.
+ */
+export function useCampaignTieView(scope: ViewScope, present: readonly RawEdgeKey[] | null) {
   const key = campaignViewKey(scope);
+  const presentKey = present === null ? null : present.map(rawEdgeId).sort().join("\n");
   const [state, setState] = useState(() => initialState(scope));
   const stateRef = useRef(state);
   const scopeRef = useRef(scope);
@@ -37,9 +43,12 @@ export function useCampaignTieView(scope: ViewScope, present: readonly RawEdgeKe
     setState(next);
   }, []);
 
-  const persist = useCallback((history: TieHistory) => {
+  /** Drops members that left the definition; with no known definition nothing is dropped. */
+  const clean = useCallback((view: GraphViewSettings) => presentRef.current ? pruneTies(view, presentRef.current) : view, []);
+
+  const persist = useCallback((history: TieHistory, pending: GraphViewSettings | null = null) => {
     const result = saveCampaignView(scopeRef.current, history.view);
-    const base = { ...stateRef.current, history, pending: null };
+    const base = { ...stateRef.current, history, pending };
     update(result.ok ? { ...base, saveFailed: false, recovered: false, lastRaw: result.raw } : { ...base, saveFailed: true });
   }, [update]);
 
@@ -55,23 +64,38 @@ export function useCampaignTieView(scope: ViewScope, present: readonly RawEdgeKe
     if (raw === s.lastRaw) return;
     const stored = loadCampaignView(scopeRef.current, raw);
     if (stored.recovered) return;
-    if (busyRef.current || s.saveFailed) update({ ...s, pending: stored.view, lastRaw: raw });
-    else adopt(stored.view, raw);
-  }), [key, adopt, update]);
+    if (busyRef.current || s.saveFailed) update({ ...s, pending: clean(stored.view), lastRaw: raw });
+    else adopt(clean(stored.view), raw);
+  }), [key, adopt, clean, update]);
+
+  // A changed edge set (not a status-only refresh) removes deleted members from the view, the undo steps and
+  // a held view, and saves the cleaned view so a dependency added back later is not tied again.
+  useEffect(() => {
+    if (presentKey === null) return;
+    const s = stateRef.current;
+    const view = clean(s.history.view);
+    const undo = s.history.undo.map(clean);
+    const pending = s.pending && clean(s.pending);
+    if (sameView(view, s.history.view)) {
+      if (!sameView(undo, s.history.undo) || !sameView(pending, s.pending)) update({ ...s, history: { view: s.history.view, undo }, pending });
+    } else persist({ view, undo }, pending);
+  }, [presentKey, key, clean, persist, update]);
 
   const commit = useCallback((command: TieCommand) => {
     const s = stateRef.current;
-    const base = pruneTies(s.pending ?? s.history.view, presentRef.current);
+    const base = clean(s.pending ?? s.history.view);
     const history = commitTie(s.history, command, base);
     if (history === s.history) return null;
     persist(history);
     return history.view;
-  }, [persist]);
+  }, [clean, persist]);
 
   const undo = useCallback(() => {
     const s = stateRef.current;
-    if (s.history.undo.length > 0) persist(undoTie(s.history));
-  }, [persist]);
+    if (s.history.undo.length === 0) return;
+    const history = undoTie(s.history);
+    persist({ ...history, view: clean(history.view) });
+  }, [clean, persist]);
 
   const setShowOriginal = useCallback((showOriginal: boolean) => {
     const s = stateRef.current;
@@ -84,7 +108,7 @@ export function useCampaignTieView(scope: ViewScope, present: readonly RawEdgeKe
     if (s.pending) adopt(s.pending, s.lastRaw);
   }, [adopt]);
 
-  /** A drag or selection draft in progress holds back another tab's view until it ends. */
+  /** A drag, a stroke being drawn or a selection draft holds back another tab's view until it ends. */
   const setBusy = useCallback((busy: boolean) => {
     busyRef.current = busy;
     const s = stateRef.current;

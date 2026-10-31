@@ -50,22 +50,37 @@ export function buildCampaignGroupOverview(nodes: CampaignNode[], settings: Grap
 export default function CampaignGroupOverview({ campaignId, nodes, onSelectGroup, tr }: Props) {
   const scope = useMemo<ViewScope>(() => ({ mode: "legacy", campaignId, projection: "groups", taskScope: "all" }), [campaignId]);
   const rawEdges = useMemo(() => campaignRawEdges(nodes), [nodes]);
-  const ties = useCampaignTieView(scope, rawEdges);
+  const ties = useCampaignTieView(scope, nodes.length > 0 ? rawEdges : null);
   const { setBusy } = ties;
   const [tieMode, setTieMode] = useState(false);
   const [draft, setDraft] = useState<ReadonlySet<string>>(NONE);
   const [stroke, setStroke] = useState<{ ids: ReadonlySet<string>; anchor: Point | null }>({ ids: NONE, anchor: null });
   /** A dragged tie's position until release; only the release becomes an undo step. */
   const [drag, setDrag] = useState<{ tieId: string; position: Point } | null>(null);
+  const [stroking, setStroking] = useState(false);
   const [selectedTie, setSelectedTie] = useState<string | null>(null);
   const [focused, setFocused] = useState<string | null>(null);
   const flow = useRef<ReactFlowInstance | null>(null);
-  useEffect(() => setBusy(drag !== null || draft.size > 0), [drag, draft, setBusy]);
+  useEffect(() => setBusy(drag !== null || stroking || draft.size > 0), [drag, stroking, draft, setBusy]);
   const view = useMemo(() => drag ? { ...ties.view, ties: ties.view.ties.map((tie) => tie.id === drag.tieId ? { ...tie, position: drag.position } : tie) } : ties.view, [ties.view, drag]);
   const overview = useMemo(() => buildCampaignGroupOverview(nodes, view), [nodes, view]);
   const showOriginal = view.showOriginal;
-  const lines = useMemo(() => overview.connections.map((line) => showOriginal ? { ...line, via: [] } : line), [overview.connections, showOriginal]);
   const shownTies = useMemo(() => showOriginal ? [] : overview.ties.filter((tie) => tie.strandOrder.length > 0), [overview.ties, showOriginal]);
+  const selected = shownTies.find((tie) => tie.id === selectedTie);
+  /** The chosen original, only while it is still a member of the selected tie. */
+  const focusedEdge = selected && focused && selected.strandOrder.some((edge) => rawEdgeId(edge) === focused) ? focused : null;
+  /** What the graph lights: lines being chosen in tie mode, else the one chosen original, else the selected tie's members. */
+  const highlight = useMemo<ReadonlySet<string>>(() => tieMode ? new Set([...draft, ...stroke.ids])
+    : focusedEdge ? new Set([focusedEdge])
+      : selected ? new Set(selected.strandOrder.map(rawEdgeId)) : NONE, [tieMode, draft, stroke.ids, focusedEdge, selected]);
+  /** A lit original sharing a line with unlit ones is drawn as its own line, so only it lights. */
+  const lines = useMemo(() => overview.connections.flatMap((connection) => {
+    const line = showOriginal ? { ...connection, via: [] } : connection;
+    const lit = line.edges.filter((edge) => highlight.has(rawEdgeId(edge)));
+    if (lit.length === 0 || lit.length === line.edges.length) return [{ ...line, lit: lit.length > 0 }];
+    const rest = line.edges.filter((edge) => !highlight.has(rawEdgeId(edge)));
+    return [{ ...line, id: `${line.id}:lit`, edges: lit, count: lit.length, lit: true }, { ...line, edges: rest, count: rest.length, lit: false }];
+  }), [overview.connections, showOriginal, highlight]);
   const tieById = useMemo(() => new Map<string, CableTie>(shownTies.map((tie) => [tie.id, tie])), [shownTies]);
   const slots = useMemo(() => tieSlots(shownTies, lines), [shownTies, lines]);
   const paths = useCallback(() => {
@@ -86,8 +101,12 @@ export default function CampaignGroupOverview({ campaignId, nodes, onSelectGroup
     return { id: tie.id, label: tr(`타이 ${number}`, `Tie ${number}`), strands: tie.strandOrder.map(strandOf) };
   }), [shownTies, view.ties, strandOf, tr]);
 
-  const highlight = new Set([...draft, ...stroke.ids, ...(focused ? [focused] : [])]);
-  const focusedEnds = new Set(nodes.filter((node) => focused !== null && (JSON.parse(focused) as string[]).includes(node.id)).map((node) => groupNodeId(campaignGroup(node))));
+  const focusedEnds = new Map<string, string>();
+  if (focusedEdge) {
+    const [from, to] = (JSON.parse(focusedEdge) as string[]).map((id) => nodes.find((node) => node.id === id));
+    if (from) focusedEnds.set(groupNodeId(campaignGroup(from)), tr(`선행 · ${from.title}`, `Dependency · ${from.title}`));
+    if (to) focusedEnds.set(groupNodeId(campaignGroup(to)), tr(`후속 · ${to.title}`, `Dependent · ${to.title}`));
+  }
   const graphNodes: Node[] = overview.groups.map((group) => {
     const label = group.key || tr("미분류", "Ungrouped");
     const { counts, percent, total } = group.progress;
@@ -105,6 +124,7 @@ export default function CampaignGroupOverview({ campaignId, nodes, onSelectGroup
           <progress value={percent} max={100} aria-label={tr(`${label} 완료율`, `${label} completion`)} style={{ width: "100%", height: 6, accentColor: "var(--th-accent-info)" }} />
           <div className="campaign-row"><span>{tr(`진행 ${counts.running}`, `${counts.running} running`)}</span><span>{tr(`막힘 ${counts.blocked}`, `${counts.blocked} blocked`)}</span></div>
           <small className="campaign-muted">{tr(`그룹 내부 연결 ${group.internalDependencies}개`, `${group.internalDependencies} internal dependencies`)}</small>
+          {focusedEnds.has(group.id) && <small className="campaign-tie-end">{focusedEnds.get(group.id)}</small>}
         </div>,
       },
       style: { width: GROUP_WIDTH, minHeight: GROUP_HEIGHT, padding: 14, border: `1px solid ${counts.blocked ? "#d97706" : "var(--th-border)"}`, borderRadius: 10, background: "var(--th-card-bg)", color: "var(--th-text-primary)", cursor: "pointer", boxShadow: focusedEnds.has(group.id) ? "0 0 0 2px var(--th-accent-info)" : undefined },
@@ -120,8 +140,7 @@ export default function CampaignGroupOverview({ campaignId, nodes, onSelectGroup
     });
   }
   const edges: Edge[] = lines.flatMap((line) => {
-    const lit = line.edges.some((edge) => highlight.has(rawEdgeId(edge))) || (selectedTie !== null && line.via.includes(selectedTie));
-    const style = { stroke: lit ? "var(--th-accent-info)" : "var(--th-text-muted)", strokeWidth: lit ? 3 : 1.5 };
+    const style = { stroke: line.lit ? "var(--th-accent-info)" : "var(--th-text-muted)", strokeWidth: line.lit ? 3 : 1.5 };
     const chain = [line.source, ...line.via.map(tieNodeId), line.target];
     const slotOf = (index: number) => slots.get(line.via[index - 1])?.indexOf(line.id) ?? 0;
     return chain.slice(1).map((target, index) => {
@@ -160,7 +179,6 @@ export default function CampaignGroupOverview({ campaignId, nodes, onSelectGroup
     if (created) setSelectedTie(created.ties.at(-1)?.id ?? null);
   };
   const tieOf = (node: Node) => node.type === "campaignTie" ? String(node.data.tieId) : null;
-  const selected = shownTies.find((tie) => tie.id === selectedTie);
 
   const crossDependencies = overview.connections.reduce((total, connection) => total + connection.count, 0);
   return <section className="campaign-neighborhood" aria-label={tr("그룹별 전체 관계", "All campaign group relationships")}>
@@ -189,7 +207,7 @@ export default function CampaignGroupOverview({ campaignId, nodes, onSelectGroup
           onNodeDragStop={(_, node) => { const tie = tieOf(node); if (!tie) return; ties.commit({ kind: "move", tieId: tie, position: { x: Math.round(node.position.x), y: Math.round(node.position.y) } }); setDrag(null); setSelectedTie(tie); }}>
           <Background /><Controls showInteractive={false} />
           {tieMode && <CrossingOverlay label={tr("선을 가로질러 드래그해 묶을 선 고르기", "Drag across lines to choose them")}
-            toFlow={(point) => flow.current?.screenToFlowPosition(point) ?? point}
+            toFlow={(point) => flow.current?.screenToFlowPosition(point) ?? point} onActive={setStroking}
             onStroke={(line, done) => {
               const ids = line ? crossed(line.from, line.to) : NONE;
               if (!done) setStroke({ ids, anchor: null });

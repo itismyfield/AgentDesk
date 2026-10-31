@@ -12,12 +12,13 @@ export type TieHistory = { view: GraphViewSettings; undo: GraphViewSettings[] };
 
 export const UNDO_LIMIT = 50;
 
-/** The tie id is derived from the view it is applied to, so a command replayed on another tab's view cannot collide. */
-function nextTieId(view: GraphViewSettings): string {
-  const used = new Set(view.ties.map((tie) => tie.id));
-  let index = view.ties.length + 1;
-  while (used.has(`tie-${index}`)) index++;
-  return `tie-${index}`;
+/**
+ * A fresh random id per tie, never derived from the ties present: a removed tie's id coming back would let
+ * a stale move from another tab land on a different tie. getRandomValues also works outside secure contexts.
+ */
+function newTieId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(8));
+  return `tie-${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
 /** Drops members that left the definition and ties left without members; hidden edges stay because `present` is the full definition. */
@@ -40,7 +41,7 @@ export function applyTieCommand(view: GraphViewSettings, command: TieCommand): G
     case "create": {
       const edges = [...new Map(command.edges.map((edge) => [rawEdgeId(edge), [edge[0], edge[1]] as RawEdgeKey])).values()];
       if (edges.length === 0) return view;
-      const id = nextTieId(view);
+      const id = newTieId();
       const selected = new Set(edges.map(rawEdgeId));
       const routes = view.routes.map((route) => selected.has(rawEdgeId(route.edge)) ? { ...route, via: [...route.via, id] } : route);
       const routed = new Set(view.routes.map((route) => rawEdgeId(route.edge)));
