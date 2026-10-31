@@ -365,6 +365,7 @@ src/
 │   ├── dispatch_snapshot_tests.rs
 │   ├── dispatch_status.rs
 │   ├── dispatch_summary.rs
+│   ├── fresh_worktree_pg_tests.rs
 │   ├── mod.rs
 │   ├── test_support.rs
 │   └── types.rs
@@ -3256,6 +3257,7 @@ src/
 │   │   ├── repo_resolver.rs
 │   │   ├── repo_resolver_snapshot_tests.rs
 │   │   ├── runner.rs
+│   │   ├── test_origin_fixture.rs
 │   │   └── worktree_resolver.rs
 │   ├── hang_forensics/
 │   │   └── tests/

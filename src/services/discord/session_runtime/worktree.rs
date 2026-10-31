@@ -99,6 +99,9 @@ pub(in crate::services::discord) fn create_git_worktree(
 }
 
 fn git_upstream_base_ref(repo_path: &str) -> String {
+    if let Some(branch) = crate::services::git::commit_resolver::origin_default_branch(repo_path) {
+        return format!("origin/{branch}");
+    }
     if GitCommand::new()
         .repo(repo_path)
         .args(["rev-parse", "--verify", "origin/main"])
