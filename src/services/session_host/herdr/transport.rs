@@ -207,6 +207,7 @@ impl<F: HerdrFraming> HerdrTransport for HerdrSocketTransport<F> {
             witness,
             started,
             version: hello.version,
+            protocol: hello.protocol,
             connected_at: dialled.connected_at,
         })
     }

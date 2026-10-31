@@ -318,8 +318,10 @@ fn off_elsewhere(_: &dyn HerdrTransport, endpoint: &HerdrEndpoint) -> RestoreRes
 fn audited_version(transport: &dyn HerdrTransport, _: &HerdrEndpoint) -> RestoreResume {
     match transport.hello() {
         Ok(hello)
-            if crate::services::session_host::herdr::model::VERIFIED_HERDR_VERSIONS
-                .contains(&hello.version.as_str()) =>
+            if crate::services::session_host::herdr::model::supported_herdr_server(
+                &hello.version,
+                hello.protocol,
+            ) =>
         {
             RestoreResume::Off {
                 witness: hello.witness,

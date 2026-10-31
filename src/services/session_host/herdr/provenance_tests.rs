@@ -65,6 +65,7 @@ fn hello(version: &str, connected_at: SystemTime) -> ServerHello {
         witness: server(77, 1_000),
         started: at(1_000),
         version: version.to_string(),
+        protocol: 22,
         connected_at,
     }
 }
@@ -364,6 +365,38 @@ fn procargs2_environment_starts_after_the_exec_path_and_every_argument() {
 }
 
 // A command name may hold ") " itself; the parent is the field after the last one's state.
+// E7 judges the pong through the same gate as the user-default peer.
+#[test]
+fn e7_admits_a_newer_release_of_its_protocol_and_refuses_another_protocol() {
+    if cfg!(windows) {
+        return;
+    }
+    let seen = |version: &str, protocol| {
+        let hello = ServerHello {
+            protocol,
+            ..hello(version, at(2_000))
+        };
+        reading(
+            (Ok(hello), Ok(server(77, 1_000))),
+            bootstrapped(),
+            Some(HOME),
+        )
+    };
+    assert_eq!(
+        seen("0.9.5", 22),
+        RestoreResume::Off {
+            witness: server(77, 1_000)
+        }
+    );
+    for (version, protocol) in [("0.9.5", 23), ("0.9.2", 22), ("0.9.5-preview.1", 22), ("", 22)] {
+        assert_eq!(
+            seen(version, protocol),
+            RestoreResume::Unverified(RestoreUnverified::VersionNotVerified),
+            "{version:?} / {protocol}"
+        );
+    }
+}
+
 #[test]
 fn parent_and_exec_path_parse_from_each_platform_record() {
     assert_eq!(
@@ -543,6 +576,7 @@ fn e7_os_reads_prove_off_for_a_real_bootstrapped_process_only() {
             witness: witness.clone(),
             started: start.wall_clock,
             version: "0.9.3".into(),
+            protocol: 22,
             connected_at: SystemTime::now(),
         };
         Ok((hello, witness))

@@ -73,12 +73,13 @@ impl ServerWitness {
 pub(crate) type Witnessed = Result<ServerWitness, RestoreUnverified>;
 
 /// What a ping on its own connection showed: that server, its wall-clock start, the
-/// version it reported and when the connection was made.
+/// version and protocol it reported and when the connection was made.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ServerHello {
     pub witness: ServerWitness,
     pub started: SystemTime,
     pub version: String,
+    pub protocol: u32,
     pub connected_at: SystemTime,
 }
 

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime};
 use super::contract::{HerdrOutcome, HerdrTransport, ServerWitness, Witnessed};
 use super::model::{
     ExecutionState, HERDR_PROTOCOL, HerdrCall, HerdrEndpoint, HerdrObservation, HerdrRequest,
-    HerdrResult, VERIFIED_HERDR_VERSIONS,
+    HerdrResult, supported_herdr_server,
 };
 use super::provenance::ProcessStart;
 use crate::services::session_host::model::HostError;
@@ -117,7 +117,9 @@ fn prove_restore_off<T: HerdrTransport + ?Sized>(
     if hello.started > hello.connected_at {
         return Err(Why::ProcessChanged);
     }
-    if !VERIFIED_HERDR_VERSIONS.contains(&hello.version.as_str()) {
+    if !supported_herdr_server(&hello.version, hello.protocol) {
+        tracing::warn!(socket = %witness.socket.display(), version = %hello.version,
+            protocol = hello.protocol, "herdr dedicated server version or protocol unsupported");
         return Err(Why::VersionNotVerified);
     }
     let home = endpoint.herdr_home().ok_or(Why::NotBootstrapped)?;
