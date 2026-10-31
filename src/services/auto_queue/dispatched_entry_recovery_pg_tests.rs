@@ -141,6 +141,14 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
             ).bind(&card_id).fetch_one(&pool).await.unwrap();
             assert_eq!(status, "review", "{name}, pass {pass}");
             assert_eq!(review_count, 1, "{name}, pass {pass}: one review dispatch");
+            let entry = service
+                .entry_json_with_pg(&pool, &format!("entry-recover-{name}"), None)
+                .await
+                .unwrap();
+            assert_eq!(
+                entry["status"], "dispatched",
+                "entry remains bound through review"
+            );
             sqlx::query(
                 "UPDATE auto_queue_runs SET created_at = NOW() + INTERVAL '1 minute' WHERE id = $1",
             )
