@@ -18,6 +18,7 @@ interface SettingsViewLayoutProps {
   queryActive: boolean;
   setQuery: Dispatch<SetStateAction<string>>;
   showNoMatches: boolean;
+  loadFailed: boolean;
   children: ReactNode;
   saveBar: ReactNode;
   pendingDangerousSave: PendingDangerousConfigSave | null;
@@ -32,7 +33,7 @@ interface SettingsViewLayoutProps {
 
 export function SettingsViewLayout({
   activePanel, activeNavItem, navItems, matchingCount, onPanelChange, query, queryActive, setQuery,
-  showNoMatches, children, saveBar, pendingDangerousSave, saving, onCancelDangerousSave,
+  showNoMatches, loadFailed, children, saveBar, pendingDangerousSave, saving, onCancelDangerousSave,
   onConfirmDangerousSave, showOnboarding, onCloseOnboarding, isKo, tr,
 }: SettingsViewLayoutProps) {
   const dangerousLabels = pendingDangerousSave?.keys.map((key) => getDangerousConfigLabel(key, isKo)).join(", ") ?? "";
@@ -73,6 +74,14 @@ export function SettingsViewLayout({
             <p className="mt-1 text-xs leading-5 break-keep text-th-text-muted">{activeNavItem.detail}</p>
           </div>
           <div className="mt-5 min-w-0">
+            {loadFailed ? (
+              <p role="alert" className="mb-5 rounded-lg border border-th-border-subtle px-4 py-4 text-sm leading-6 break-keep text-th-text-secondary">
+                {tr(
+                  "일부 설정을 불러오지 못했어요. 불러오지 못한 항목은 숨겼으니 페이지를 새로고침해 다시 확인해 주세요.",
+                  "Some settings could not be loaded and are hidden. Refresh the page to try again.",
+                )}
+              </p>
+            ) : null}
             {showNoMatches ? (
               <p role="status" className="rounded-lg border border-th-border-subtle px-4 py-6 text-sm break-keep text-th-text-muted">
                 {tr(`이 탭에는 “${query.trim()}” 검색 결과가 없어요. 남은 탭에서 찾아보세요.`, `Nothing in this tab matches “${query.trim()}”. Try one of the remaining tabs.`)}

@@ -12,11 +12,12 @@ interface SettingsRowSectionProps {
   extraFor?: (meta: SettingRowMeta) => ReactNode;
 }
 
-/** A titled group of setting rows; hidden when a search leaves it empty. */
+/** A titled group of setting rows; hidden when a search leaves it empty or its source failed (the page shows one alert). */
 export function SettingsRowSection({ ctx, panel, section, status = "ready", extraFor }: SettingsRowSectionProps) {
   const copy = SECTION_COPY[`${panel}.${section}`];
   const rows = ctx.rowsFor(panel, section);
-  if (status !== "ready" && ctx.queryActive) return null;
+  if (status === "error") return null;
+  if (status === "loading" && ctx.queryActive) return null;
   if (status === "ready" && rows.length === 0) return null;
   return (
     <SettingsSection
@@ -26,10 +27,6 @@ export function SettingsRowSection({ ctx, panel, section, status = "ready", extr
     >
       {status === "loading" ? (
         <SettingsStatusMessage>{ctx.tr("불러오는 중…", "Loading…")}</SettingsStatusMessage>
-      ) : status === "error" ? (
-        <SettingsStatusMessage tone="error">
-          {ctx.tr("이 설정을 불러오지 못했어요. 페이지를 새로고침해 다시 확인해 주세요.", "These settings could not be loaded. Refresh the page to try again.")}
-        </SettingsStatusMessage>
       ) : (
         rows.map((meta) => ctx.renderRow(meta, { extra: extraFor?.(meta) }))
       )}

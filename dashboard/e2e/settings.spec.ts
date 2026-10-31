@@ -621,6 +621,19 @@ test.describe("settings", () => {
     await shotOf(page, page.getByTestId("pipeline-selection-title"), testInfo, "workflow-editor-open");
   });
 
+  test("a failed settings source shows one alert instead of empty editable defaults", async ({ page }) => {
+    await mockSettings(page);
+    await page.route(/\/api\/settings\/runtime-config$/, (route) => route.fulfill({ status: 503, json: { error: "unavailable" } }));
+    await openSettings(page, "workflow");
+    const panel = page.locator("#settings-panel-content");
+    await expect(panel.getByRole("alert")).toHaveCount(1);
+    await expect(panel.getByRole("alert")).toContainText("일부 설정을 불러오지 못했어요");
+    await expect(panel.getByText("작업 재시도 횟수", { exact: true })).toHaveCount(0);
+    await expect(panel.getByText("접수 후 대기 경고 (분)", { exact: true })).toBeVisible();
+    await tabs(page).nth(0).click();
+    await expect(panel.getByRole("alert")).toHaveCount(0);
+  });
+
   test("connections shows setup status, channel names and honest connector counts", async ({ page }, testInfo) => {
     await mockSettings(page);
     await openSettings(page, "connections");

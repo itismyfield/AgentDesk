@@ -105,6 +105,8 @@ export default function SettingsView({ settings, onSave, isKo, onNotify }: Setti
 
   const runtimeStatus = sourceStatus(runtime.loaded, runtime.error);
   const configStatus = sourceStatus(config.loaded, config.error);
+  const loadFailed = activePanel !== "general"
+    && (config.error || (runtime.error && (activePanel === "workflow" || activePanel === "ai")));
   const statusRows = useMemo(
     () => connectionStatusRows(connection.onboarding, connection.health, tr),
     [connection.health, connection.onboarding, tr],
@@ -264,6 +266,7 @@ export default function SettingsView({ settings, onSave, isKo, onNotify }: Setti
       queryActive={catalog.queryActive}
       setQuery={setQuery}
       showNoMatches={catalog.queryActive && !catalog.filteredNavItems.some((item) => item.id === activePanel)}
+      loadFailed={loadFailed}
       saveBar={(
         <SettingsSaveBar
           changeCount={changeCount}
