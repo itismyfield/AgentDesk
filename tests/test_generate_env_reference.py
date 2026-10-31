@@ -185,6 +185,7 @@ class SourceTreeStabilityTests(unittest.TestCase):
             'fn f() { #[cfg(test)] loop { break; } std::env::var("AGENTDESK_PROD_LIST"); }',
             'fn f() { #[cfg(test)] K { field: 0 }.probe(env_flag("ADK_TEST_HIDDEN", false))?; std::env::var("AGENTDESK_PROD_LIST"); }',
             'fn f() { #[cfg(test)] K { field: 0 } + env_flag("ADK_TEST_HIDDEN", false); std::env::var("AGENTDESK_PROD_LIST"); }',
+            'fn f(k: i32) -> bool { match k { #[cfg(test)] 1 => { false } -1 => std::env::var("AGENTDESK_PROD_LIST").is_ok(), _ => false } }',
         ):
             with self.subTest(source=source):
                 self.write("src/list.rs", source)

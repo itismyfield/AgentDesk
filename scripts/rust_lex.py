@@ -37,6 +37,7 @@ def cfg_item_end(code: str, start: int, scan_balanced) -> int:
     while pos < len(code):
         char = code[pos]
         if char in "([{":
+            block_element = char == "{" and re.search(r"(?:=>|!)\s*$", code[start:pos])
             _, pos = scan_balanced(code, pos, char, {"(": ")", "[": "]", "{": "}"}[char])
             if item and char == "{":
                 return pos
@@ -45,7 +46,7 @@ def cfg_item_end(code: str, start: int, scan_balanced) -> int:
                 if comma:
                     return pos + comma.end()
                 continuation = r"else\b" if statement else r"(?:=>|[|.?+*/%&^<>-]|as\b|==|!=)"
-                if not re.match(r"\s*" + continuation, code[pos:]):
+                if block_element or not re.match(r"\s*" + continuation, code[pos:]):
                     return pos
         elif char in "})]":
             return pos

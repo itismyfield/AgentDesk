@@ -99,6 +99,7 @@ class EnvFlagGuardTests(unittest.TestCase):
                     'std::env::var("FLAG").is_ok_and(|v| ["1", "true"].contains(&v.as_str()))',
                     '#[cfg(test)] if tests::bypass() { return false; } std::env::var("FLAG").as_deref() == Ok("1")',
                     '#[cfg(test)] { if tests::bypass() { return false; } } #[cfg(not(test))] { std::env::var("FLAG").as_deref() == Ok("1") }',
+                    'match 0 { #[cfg(test)] 1 => { false } -1 => std::env::var("FLAG").as_deref() == Ok("1"), _ => false }',
                 ]:
                     with self.subTest(expression=expression):
                         source.write_text('fn enabled() -> bool { ' + expression + ' }')
