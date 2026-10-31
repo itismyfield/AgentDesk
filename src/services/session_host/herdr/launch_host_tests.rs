@@ -446,6 +446,47 @@ fn process_info(shell: Value, foreground: Option<&[u32]>) -> Value {
     json!({"type": "pane_process_info", "process_info": info})
 }
 
+#[test]
+fn launch_evidence_waits_for_unreported_foreground_to_be_listed() {
+    use crate::services::session_host::herdr::pane_probe::tests::{
+        FakeOs, NONCE, context, env_naming,
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let reads = AtomicU32::new(0);
+    let server = serve(Box::new(move |request, _| {
+        if request["method"] != "pane.process_info" {
+            return json!({"type": "ok"});
+        }
+        let foreground = (reads.fetch_add(1, Ordering::SeqCst) > 0).then_some(&[20][..]);
+        process_info(json!(10), foreground)
+    }));
+    let mut host = launch_host(&server);
+    host.provider_window = Duration::from_secs(2);
+    host.os = Box::new(FakeOs::launched(env_naming(&context(NONCE))));
+    let probe = EvidenceProbe {
+        location: HostedLocation {
+            host: "herdr".into(),
+            execution_node: "mac-mini".into(),
+            endpoint_config_key: "pilot".into(),
+            socket_addr: server.path.display().to_string(),
+            named_session: "adk".into(),
+            pane_id: "w1:p1".into(),
+        },
+        provider: "claude".into(),
+        execution_nonce: NONCE.into(),
+        launched_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
+        witness: host
+            .restore_resume(&launch_endpoint(&server))
+            .admitted_witness()
+            .unwrap(),
+    };
+    assert_eq!(
+        host.launch_evidence(&probe)
+            .map(|e| (e.binding_nonce, e.root.pid, e.provider_process.pid)),
+        Ok((NONCE.into(), 10, 20))
+    );
+}
+
 // The probe reads the located pane on its own connections, each from the launch's server.
 #[test]
 fn launch_evidence_probes_the_located_pane_on_the_launch_server() {
@@ -492,6 +533,7 @@ fn launch_evidence_probes_the_located_pane_on_the_launch_server() {
     for (reply, expected) in cases {
         let server = serve(Box::new(move |_, _| reply.clone()));
         let mut host = launch_host(&server);
+        host.provider_window = Duration::from_millis(700);
         host.os = Box::new(FakeOs::launched(environ.clone()));
         let probed = host.launch_evidence(&probe_on(&server, &host));
         match expected {

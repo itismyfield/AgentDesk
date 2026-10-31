@@ -1090,24 +1090,30 @@ fn collect_dispatch_commits(dispatches: &[Value]) -> Vec<String> {
 }
 
 fn commit_merged_to_main(repo_dir: &str, commit: &str) -> Result<bool, String> {
-    let has_origin_main = match GitCommand::new()
-        .repo(repo_dir)
-        .args(["rev-parse", "--verify", "origin/main"])
-        .run_output()
-    {
-        Ok(_) => true,
-        Err(error) if error.status_code().is_some() => false,
-        Err(error) => return Err(format!("git rev-parse origin/main: {error}")),
-    };
-    let base = if has_origin_main {
-        "origin/main"
-    } else {
-        "main"
+    let base = match crate::services::git::commit_resolver::origin_default_branch(repo_dir) {
+        Some(branch) => format!("origin/{branch}"),
+        None => {
+            let has_origin_main = match GitCommand::new()
+                .repo(repo_dir)
+                .args(["rev-parse", "--verify", "origin/main"])
+                .run_output()
+            {
+                Ok(_) => true,
+                Err(error) if error.status_code().is_some() => false,
+                Err(error) => return Err(format!("git rev-parse origin/main: {error}")),
+            };
+            if has_origin_main {
+                "origin/main"
+            } else {
+                "main"
+            }
+            .to_string()
+        }
     };
 
     match GitCommand::new()
         .repo(repo_dir)
-        .args(["merge-base", "--is-ancestor", commit, base])
+        .args(["merge-base", "--is-ancestor", commit, &base])
         .run_output()
     {
         Ok(_) => Ok(true),
