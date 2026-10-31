@@ -551,7 +551,11 @@ mod claim {
         msg: HeadMsg,
     ) {
         match msg {
-            HeadMsg::V2(msg) => msg.run(&mut state.queued_head.v2),
+            HeadMsg::V2(msg) => {
+                let v1_holds =
+                    !state.intervention_queue.is_empty() || state.pending_user_dispatch.is_some();
+                msg.run(&mut state.queued_head.v2, v1_holds)
+            }
             HeadMsg::Claim {
                 expected,
                 persistence,

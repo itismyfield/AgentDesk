@@ -277,8 +277,10 @@ pub(in crate::services::discord) async fn admit_start(
     if !execution.owner_takes(InputOrigin::HttpStart) {
         return None;
     }
-    if let Err(error) = ingress::adopt(shared, &shared.provider, channel).await {
-        return Some(Intake::Rejected(error));
+    match ingress::adopt(shared, &shared.provider, channel).await {
+        Ok(true) => {}
+        Ok(false) => return None,
+        Err(error) => return Some(Intake::Rejected(error)),
     }
     let (original, ticket) = match routine::synthetic_original(turn_id, channel.get(), text, 1) {
         Ok(original) => original,

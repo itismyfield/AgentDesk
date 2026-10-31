@@ -96,3 +96,41 @@ async fn an_owner_channel_http_start_is_admitted_by_the_owner_pg() {
         "the legacy start typed nothing"
     );
 }
+
+/// A channel whose legacy queue still holds input stays legacy until that backlog drains: the
+/// owner never adopts over it, so the legacy kickoff takes A then B and the next ingress adopts.
+#[tokio::test(flavor = "current_thread")]
+async fn a_v1_backlog_drains_through_the_legacy_kickoff_before_the_owner_adopts_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let fixture = Fixture::new(7_272_583, "all").await;
+    let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
+    let before = fixture.queue().await;
+    let adopt_now = || {
+        let adopted = adopt(&fixture.shared, &ProviderKind::Claude, fixture.channel);
+        ADOPTS.scope(true, adopted)
+    };
+    for left in [1, 0] {
+        assert_eq!(
+            adopt_now().await,
+            Ok(false),
+            "no owner over a legacy backlog"
+        );
+        ADOPTS.scope(true, fixture.kick()).await;
+        assert_eq!(
+            fixture.queue().await.len(),
+            left,
+            "the legacy kickoff took its head"
+        );
+    }
+    let terminal = fixture.disk()["terminal_identities"].clone();
+    let taken: Vec<u64> = (terminal.as_array().unwrap().iter())
+        .map(|identity| identity["primary"].as_u64().unwrap())
+        .collect();
+    let queued: Vec<u64> = before.iter().map(|item| item.message_id.get()).collect();
+    assert_eq!(taken, queued, "A then B");
+    assert_eq!(
+        adopt_now().await,
+        Ok(true),
+        "the drained channel's next ingress adopts"
+    );
+}
