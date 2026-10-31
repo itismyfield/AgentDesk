@@ -325,9 +325,8 @@ pub(crate) fn upstream_base_ref(repo_dir: &str) -> String {
 /// policy hooks with a 5s default deadline, so a slow remote must not use it all.
 const REMOTE_REFRESH_BUDGET: Duration = Duration::from_secs(2);
 
-/// [`upstream_base_ref`] for a worktree about to be created. Fetches origin's default branch;
-/// when it is unknown, fetches origin first and then learns origin/HEAD from it.
-/// Remote failures or an exhausted budget are logged and the existing refs are used.
+/// Fetches origin's default branch before worktree creation, learning origin/HEAD after fetching if unknown.
+/// Remote failures or an exhausted refresh budget are logged and fall back to the existing refs.
 pub(crate) fn refreshed_upstream_base_ref(repo_dir: &str) -> String {
     if git_command()
         .args(["config", "--get", "remote.origin.url"])
