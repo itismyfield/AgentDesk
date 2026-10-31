@@ -854,8 +854,16 @@ async fn changed_or_replaced_fresh_bytes_are_never_resolved() {
                 std::fs::write(&ops.fresh_path, text).unwrap();
             }
             "inode_replaced" => {
-                std::fs::remove_file(&ops.fresh_path).unwrap();
-                std::fs::write(&ops.fresh_path, &bytes).unwrap();
+                // Written while the old file is still linked, so no filesystem can reuse its inode.
+                let swap = ops.fresh_path.with_extension("swap");
+                std::fs::write(&swap, &bytes).unwrap();
+                std::fs::rename(&swap, &ops.fresh_path).unwrap();
+                let replacement = source_id_for(&ops.fresh.session_id, &ops.fresh_path).unwrap();
+                assert_ne!(
+                    (replacement.dev, replacement.ino),
+                    (ops.fresh.dev, ops.fresh.ino),
+                    "fixture replaced the inode"
+                );
             }
             _ => std::fs::write(&ops.fresh_path, &bytes[..bytes.len() - 10]).unwrap(),
         }
