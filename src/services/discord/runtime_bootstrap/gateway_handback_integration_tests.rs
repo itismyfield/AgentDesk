@@ -569,13 +569,17 @@ async fn idle_expired_holder_loses_the_lease_to_a_peer_and_self_fences_pg() {
 async fn gateway_snapshot_first_lease_uses_prepared_boot_config_pg() {
     const CHILD: &str = "ADK_TEST_GATEWAY_SNAPSHOT_BOOT_CHILD";
     if std::env::var_os(CHILD).is_none() {
+        if postgres::postgres_test_database_url_base().is_none() {
+            eprintln!("SKIP: isolated PostgreSQL fixture is not configured");
+            return;
+        }
         let root = tempfile::tempdir().unwrap();
         let qualified = format!(
             "{}::gateway_snapshot_first_lease_uses_prepared_boot_config_pg",
             module_path!().split_once("::").unwrap().1
         );
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", &qualified, "--nocapture", "--test-threads=1"])
+            .args(["--exact", &qualified, "--nocapture"])
             .env(CHILD, "1")
             .env("AGENTDESK_ROOT_DIR", root.path())
             .env_remove("AGENTDESK_CONFIG")

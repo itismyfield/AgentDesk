@@ -1656,6 +1656,63 @@ mod tests {
         assert_eq!(enforcing["warning_count"], 0);
     }
 
+    #[test]
+    fn rollout_health_uses_production_names_defaults_and_first_read_cache() {
+        const CHILD: &str = "ADK_TEST_DELIVERY_RECORD_ROLLOUT_CHILD";
+        const SHADOW: &str = "AGENTDESK_DELIVERY_RECORD_SHADOW";
+        const AUTHORITY: &str = "AGENTDESK_DELIVERY_RECORD_AUTHORITY";
+        if let Ok(case) = std::env::var(CHILD) {
+            let (shadow, authority, source) = match case.as_str() {
+                "defaults" => (false, true, "compiled_default"),
+                "shadow" => (true, false, "env_override"),
+                "authority" => (false, true, "env_override"),
+                _ => panic!("unknown rollout child case"),
+            };
+            let health = delivery_record_rollout_health_json();
+            assert_eq!(health["shadow_enabled"], shadow);
+            assert_eq!(health["authority_enabled"], authority);
+            assert_eq!(health["flag_source"]["shadow"], source);
+            assert_eq!(health["flag_source"]["authority"], source);
+            // This exact test owns the isolated child's environment.
+            unsafe {
+                std::env::set_var(SHADOW, if shadow { "0" } else { "1" });
+                std::env::set_var(AUTHORITY, if authority { "0" } else { "1" });
+            }
+            assert_eq!(delivery_record_rollout_health_json(), health);
+            return;
+        }
+        let qualified = format!(
+            "{}::rollout_health_uses_production_names_defaults_and_first_read_cache",
+            module_path!().split_once("::").unwrap().1
+        );
+        for (case, flags) in [
+            ("defaults", None),
+            ("shadow", Some(("1", "0"))),
+            ("authority", Some(("0", "1"))),
+        ] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args(["--exact", &qualified, "--nocapture"])
+                .env(CHILD, case)
+                .env_remove(SHADOW)
+                .env_remove(AUTHORITY);
+            if let Some((shadow, authority)) = flags {
+                child.env(SHADOW, shadow).env(AUTHORITY, authority);
+            }
+            let output = child.output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "{case}: {stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                stdout.contains("1 passed; 0 failed; 0 ignored;"),
+                "{stdout}"
+            );
+        }
+    }
+
     fn resolve_test_flag(name: &'static str, raw: Option<&str>, default: bool) -> FlagResolution {
         let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let _restore = crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock(name);

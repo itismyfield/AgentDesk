@@ -126,6 +126,44 @@ class SourceTreeStabilityTests(unittest.TestCase):
     def row(self, rendered: str, name: str) -> str:
         return next(line for line in rendered.splitlines() if line.startswith(f"| `{name}` |"))
 
+    def test_cfg_test_item_does_not_enter_production_reference(self) -> None:
+        self.write("src/items.rs", '''
+            #[cfg(test)]
+            fn only_test() { let _ = std::env::var("ADK_TEST_ITEM"); }
+            #[cfg(all(unix, test))]
+            pub(crate) async fn helper() { env_flag("ADK_TEST_HELPER", false); }
+            #[cfg(test)] const NAME: &str = "ADK_TEST_CONST";
+            #[cfg(test)] static VALUE: &str = "ADK_TEST_STATIC";
+            #[cfg(not(test))]
+            fn prod() { env_flag("AGENTDESK_ITEM_PROD", false); }
+            #[cfg(any(test, unix))]
+            fn shared() { env_flag("AGENTDESK_ITEM_SHARED", false); }
+            struct Fields { #[cfg(test)] probe: bool, live: bool }
+            fn after_field() { env_flag("AGENTDESK_AFTER_FIELD", false); }
+        ''')
+        output = self.render()
+        self.assertIn("AGENTDESK_ITEM_PROD", output)
+        self.assertIn("AGENTDESK_ITEM_SHARED", output)
+        self.assertIn("AGENTDESK_AFTER_FIELD", output)
+        for name in ("ADK_TEST_ITEM", "ADK_TEST_HELPER", "ADK_TEST_CONST", "ADK_TEST_STATIC"):
+            self.assertNotIn(name, output)
+
+    def test_named_helper_argument_records_the_reader_file(self) -> None:
+        self.write("src/names.rs", 'pub const FLAG_ENV: &str = "AGENTDESK_DYNAMIC";')
+        self.write("src/consumer.rs", 'fn read() -> bool { crate::utils::env_flag(FLAG_ENV, false) }')
+        row = self.row(self.render(), "AGENTDESK_DYNAMIC")
+        self.assertIn("`src/names.rs`", row)
+        self.assertIn("`src/consumer.rs`", row)
+
+    def test_external_helper_names_survive_parser_migration(self) -> None:
+        self.write("src/external.rs", '''
+            fn read() { env_flag("COKACDIR_DEBUG", false); env_flag("REQUIRE_WAKE_WORD", true); }
+        ''')
+        output = self.render()
+        for name in ("COKACDIR_DEBUG", "REQUIRE_WAKE_WORD"):
+            self.assertIn(f"| `{name}` |", output)
+            self.assertIn("`src/external.rs`", self.row(output, name))
+
     def test_line_shift_in_source_files_leaves_output_unchanged(self) -> None:
         before = self.render()
         self.assertEqual(

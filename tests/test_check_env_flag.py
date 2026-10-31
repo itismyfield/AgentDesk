@@ -90,7 +90,18 @@ class EnvFlagGuardTests(unittest.TestCase):
                 red = registered_command()
                 self.assertEqual(red.returncode, 1, red.stdout + red.stderr)
                 self.assertIn('ENV_FLAG FAIL', red.stdout)
-                source.write_text('fn new() { env_flag("NEW", true); }')
+                for expression in [
+                    'let Ok(value) = std::env::var("FLAG") else { return true; }; !matches!(value.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no")',
+                    'let Some(value) = std::env::var("FLAG").ok() else { return false; }; value.eq("1")',
+                    'let Ok(mut value) = std::env::var("FLAG") else { return false; }; value.make_ascii_lowercase(); value.eq("true")',
+                    'std::env::var("FLAG").is_ok_and(|v| v.eq_ignore_ascii_case("true"))',
+                ]:
+                    with self.subTest(expression=expression):
+                        source.write_text('fn enabled() -> bool { ' + expression + ' }')
+                        rejected = registered_command()
+                        self.assertEqual(rejected.returncode, 1, rejected.stdout + rejected.stderr)
+                        self.assertIn('added=1', rejected.stdout)
+                source.write_text('fn new() { env_flag("NEW", true); } #[cfg(test)] fn fixture() { std::env::var("ADK_TEST_FIXTURE").is_ok_and(|v| v.eq("1")); }')
                 self.assertEqual(guard.main(['--root', tmp, '--base-ref', 'HEAD']), 0)
                 green = registered_command()
                 self.assertEqual(green.returncode, 0, green.stdout + green.stderr)

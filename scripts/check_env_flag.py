@@ -18,7 +18,7 @@ LITERAL = re.compile(r"""//[^\n]*|/\*.*?\*/|(?:br|r)(?P<hashes>\#*)".*?"(?P=hash
 BOOL_VALUES = {'0', '1', 'true', 'false', 'yes', 'no', 'on', 'off'}
 CFG = re.compile(r'#\[\s*(?:cfg\s*\((.*?)\)|(?:[\w:]+::)?test(?:\([^]]*\))?)\s*\]', re.S)
 FUNCTION = re.compile(r'\bfn\s+(\w+)[^{;]*\{')
-BIND = re.compile(r'\blet\s+(?:mut\s+)?(\w+)\s*(?::[^=;]+)?=')
+BIND = re.compile(r'\blet\s+(?:mut\s+)?(?:(?:Ok|Some)\s*\(\s*(?:mut\s+)?(\w+)\s*\)|(\w+))\s*(?::[^=;]+)?=')
 
 
 def production_code(text):
@@ -113,15 +113,16 @@ def sites(text):
                 reads.add((function, argument, text.count('\n', 0, pos) + 1, pos))
             for name in re.findall(r'\b\w+\b', statement):
                 reads.update(tainted.get(name, ()))
-            comparison = (re.search(r'\bB\b', statement) and re.search(r'==|!=|\bmatches\s*!|\bmatch\b', statement)) or re.search(r'\.\s*parse\s*::\s*<\s*bool\s*>', statement)
+            comparison = (re.search(r'\bB\b', statement) and re.search(r'==|!=|\bmatches\s*!|\bmatch\b|\.\s*eq(?:_ignore_ascii_case)?\s*\(', statement)) or re.search(r'\.\s*parse\s*::\s*<\s*bool\s*>', statement)
             if reads and comparison:
                 for site in reads:
                     found[site[3]] = site[:3]
             for binding in BIND.finditer(statement):
+                name = binding[1] or binding[2]
                 if reads:
-                    tainted[binding[1]] = reads.copy()
+                    tainted[name] = reads.copy()
                 else:
-                    tainted.pop(binding[1], None)
+                    tainted.pop(name, None)
             cursor += len(statement) + 1
     return sorted(found.values())
 
