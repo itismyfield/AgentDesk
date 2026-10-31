@@ -1,4 +1,4 @@
-//! Against a real Herdr 0.9.3 run from its own home under `/private/tmp/herdr-093-p9a`:
+//! Against a real protocol-22 Herdr run from its own home under `/private/tmp/herdr-093-p9a`:
 //! E7, create, input bytes, the provider env, and refusals that leave no effect.
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -262,7 +262,7 @@ fn unconfirmed(outcome: &HerdrCreateOutcome) -> String {
 }
 
 #[test]
-#[ignore = "needs ADK_TEST_HERDR_BIN: an isolated Herdr 0.9.3 binary"]
+#[ignore = "needs ADK_TEST_HERDR_BIN: an isolated protocol-22 Herdr binary"]
 fn herdr_real_server_launch_input_bytes_and_refusals() {
     let server = RealServer::start("r2", CANONICAL_CONFIG);
     let dir = server.dir.clone();

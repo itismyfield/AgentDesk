@@ -318,8 +318,10 @@ fn off_elsewhere(_: &dyn HerdrTransport, endpoint: &HerdrEndpoint) -> RestoreRes
 fn audited_version(transport: &dyn HerdrTransport, _: &HerdrEndpoint) -> RestoreResume {
     match transport.hello() {
         Ok(hello)
-            if crate::services::session_host::herdr::model::VERIFIED_HERDR_VERSIONS
-                .contains(&hello.version.as_str()) =>
+            if crate::services::session_host::herdr::model::supported_herdr_server(
+                &hello.version,
+                hello.protocol,
+            ) =>
         {
             RestoreResume::Off {
                 witness: hello.witness,
@@ -1075,7 +1077,7 @@ fn m0_close_unknown_version_refused() {
     }
     let rig = rig();
     let _switch = LiveTerminateSwitch::new();
-    *rig.server.version.lock().unwrap() = "0.9.4".into();
+    *rig.server.version.lock().unwrap() = "0.9.2".into();
     let target = hosted_target(&rig, vec![SERVER], audited_version, launched_os(&rig));
     let result = terminate(&target);
     assert!(rig.server.mutations().is_empty());
@@ -1163,7 +1165,7 @@ fn m1_production_e7_rejects_unaudited_version_before_provenance() {
     let rig = rig();
     let endpoint = endpoint(&rig.server);
     let transport = transport(&rig.server, vec![SERVER]);
-    *rig.server.version.lock().unwrap() = "0.9.4".into();
+    *rig.server.version.lock().unwrap() = "0.9.2".into();
     assert_eq!(
         observe::read_restore_resume_with(transport.as_ref(), &endpoint, &NoReads),
         RestoreResume::Unverified(RestoreUnverified::VersionNotVerified)
