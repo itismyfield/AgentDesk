@@ -11,6 +11,10 @@ struct Live {
 }
 /// Input fallback active for one pilot channel, with the pair the snapshot fixture registers.
 fn fallback_live() -> Live {
+    fallback_live_for(CHANNEL, ["mac-a".into(), "mac-b".into()])
+}
+
+fn fallback_live_for(channel: &str, pair: [String; 2]) -> Live {
     let live = crate::config_live_reload::test_live_guard(
         crate::config::test_env_lock::acquire_shared_test_env_lock(),
     );
@@ -27,8 +31,8 @@ fn fallback_live() -> Live {
     routing.enabled = true;
     routing.mode = crate::config::ClusterIntakeRoutingMode::Enforce;
     routing.input_fallback_enabled = true;
-    routing.input_fallback_pilot_channel_ids = vec![CHANNEL.into()];
-    routing.input_fallback_pair_instance_ids = vec!["mac-a".into(), "mac-b".into()];
+    routing.input_fallback_pilot_channel_ids = vec![channel.into()];
+    routing.input_fallback_pair_instance_ids = pair.into();
     crate::config_live_reload::install(config);
     Live {
         _guards: guards,
@@ -114,6 +118,207 @@ async fn queued_local_upload_on_fallback_switch_is_rejected_without_custody_pg()
             serde_json::json!([reference])
         )
     );
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn queued_local_upload_waits_for_held_only_input_through_promotion_pg() {
+    use crate::services::cluster::intake_router_hook::owner_record::{
+        OwnerIdentity, cleanup, custody, output, plan,
+    };
+
+    const LOCAL: &str = "73369503";
+    let gateway =
+        crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
+    let live = fallback_live_for(LOCAL, [gateway.clone(), "mac-b".into()]);
+    let f = Fixture::new(LOCAL).await;
+    sqlx::query("INSERT INTO worker_nodes(instance_id,status,last_heartbeat_at,capabilities) SELECT $1,status,NOW(),capabilities FROM worker_nodes WHERE instance_id='mac-a'")
+        .bind(&gateway).execute(&f.pool).await.unwrap();
+    sqlx::query("UPDATE agents SET default_execution_node_id=$1")
+        .bind(&gateway)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let id = OwnerIdentity::new("claude", LOCAL);
+    let mut tx = f.pool.begin().await.unwrap();
+    custody::lock(&mut tx, &id).await.unwrap();
+    crate::services::cluster::intake_router_hook::owner_record::acquire_owner_in_tx(
+        &mut tx,
+        &id,
+        &gateway,
+        |_| true,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let earlier = custody::stage(
+        &f.pool,
+        custody::StageRequest {
+            payload: &output::tests::payload(LOCAL, "73369530", &gateway),
+            home_revision: 0,
+            wait_generation: Some(0),
+            grace_seconds: 0,
+        },
+    )
+    .await
+    .unwrap();
+    let mut context = f.context();
+    context.pair = [gateway.clone(), "mac-b".into()];
+    context.gateway = Some(gateway.clone());
+    let observation = f.observe(&id, &context).await;
+    let mut tx = f.pool.begin().await.unwrap();
+    plan::save_on_tx(&mut tx, &id, earlier, &observation)
+        .await
+        .unwrap()
+        .expect("R0 has a plan for periodic promotion");
+    tx.commit().await.unwrap();
+    let held: (String, String) =
+        sqlx::query_as("SELECT status,routing_state FROM intake_outbox WHERE id=$1")
+            .bind(earlier)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(held, ("unknown".into(), "held".into()));
+    let open = format!(
+        "SELECT COUNT(*) FROM intake_outbox WHERE status IN ({})",
+        crate::db::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL
+    );
+    let open_count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(open))
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(open_count, 0, "R0 is held with no open route to mask it");
+
+    let file = live._root.path().join("held-only-attachment.txt");
+    let bytes = b"local bytes wait for held input";
+    std::fs::write(&file, bytes).unwrap();
+    let mut local = queued_intervention(
+        73_369_531,
+        vec![Upload::Local(file.to_string_lossy().into_owned())],
+    );
+    local.source_message_ids = vec![MessageId::new(73_369_529), MessageId::new(73_369_531)];
+    local.reply_context = Some("held-only reply".into());
+    local.has_reply_boundary = true;
+    let assert_original = |item: &Intervention| {
+        assert_eq!(
+            (
+                item.message_id,
+                &item.text,
+                &item.source_message_ids,
+                &item.pending_uploads,
+                &item.reply_context,
+                item.has_reply_boundary,
+            ),
+            (
+                local.message_id,
+                &local.text,
+                &local.source_message_ids,
+                &local.pending_uploads,
+                &local.reply_context,
+                local.has_reply_boundary,
+            ),
+            "R1 keeps its original identity, body, uploads and reply context"
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), bytes);
+    };
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(f.pool.clone()));
+    let http = Arc::new(serenity::Http::new("Bot intake-dispatch-test"));
+    let deps = deps(&http, &shared);
+    let channel = ChannelId::new(LOCAL.parse().unwrap());
+    let mailbox = shared.mailbox(channel);
+    let persistence = crate::services::discord::queue_persistence_context(
+        &shared,
+        &ProviderKind::Claude,
+        channel,
+    );
+    mailbox
+        .replace_queue(vec![local.clone()], persistence.clone())
+        .await;
+    for phase in ["held only", "promoted but unfinished"] {
+        let dequeued = mailbox.take_next_soft(persistence.clone()).await;
+        let item = dequeued
+            .intervention
+            .expect("R1 is retried from the mailbox");
+        assert_original(&item);
+        let admission = admit_queued_intake(
+            &deps,
+            ProviderKind::Claude,
+            channel,
+            &item,
+            item.author_id,
+            "fallback-owner".into(),
+            false,
+            false,
+            "fallback_attachment_test",
+            dequeued.dispatch_lease,
+        )
+        .await;
+        assert!(
+            matches!(admission, QueuedAdmissionDisposition::Deferred),
+            "R1 must defer without local admission or permanent rejection while R0 is {phase}"
+        );
+        let queue = mailbox.snapshot().await.intervention_queue;
+        assert_eq!(queue.len(), 1, "R1 is restored exactly once while {phase}");
+        assert_original(&queue[0]);
+        if phase == "held only" {
+            cleanup::advance_pending(&f.pool, "claude").await.unwrap();
+            let promoted: (String, String, String) = sqlx::query_as(
+                "SELECT status,routing_state,target_instance_id FROM intake_outbox WHERE id=$1",
+            )
+            .bind(earlier)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                promoted,
+                ("pending".into(), "admitted".into(), gateway.clone())
+            );
+        }
+    }
+
+    sqlx::query("UPDATE intake_outbox SET status='done' WHERE id=$1")
+        .bind(earlier)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let dequeued = mailbox.take_next_soft(persistence.clone()).await;
+    let item = dequeued.intervention.expect("R1 survived both deferrals");
+    assert_original(&item);
+    let QueuedAdmissionDisposition::Admitted(admitted) = admit_queued_intake(
+        &deps,
+        ProviderKind::Claude,
+        channel,
+        &item,
+        item.author_id,
+        "fallback-owner".into(),
+        false,
+        false,
+        "fallback_attachment_test",
+        dequeued.dispatch_lease,
+    )
+    .await
+    else {
+        panic!("R1 is admitted after R0 finishes");
+    };
+    assert_eq!(
+        admitted.local_uploads().expect("R1 is admitted locally"),
+        &local.pending_uploads
+    );
+    assert!(mailbox.snapshot().await.intervention_queue.is_empty());
+    assert!(
+        mailbox
+            .take_next_soft(persistence)
+            .await
+            .intervention
+            .is_none()
+    );
+    let r1_routes: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM intake_outbox WHERE user_msg_id='73369531'")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(r1_routes, 0, "R1 never enters remote custody");
     f.finish().await;
 }
 
