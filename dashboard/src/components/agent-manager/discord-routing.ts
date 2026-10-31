@@ -40,7 +40,7 @@ function parseDiscordChannelUrl(
   return guildId && channelId ? { guildId, channelId } : null;
 }
 
-function formatDiscordWebUrl(guildId: string, channelId: string): string {
+export function formatDiscordWebUrl(guildId: string, channelId: string): string {
   return `https://discord.com/channels/${guildId}/${channelId}`;
 }
 

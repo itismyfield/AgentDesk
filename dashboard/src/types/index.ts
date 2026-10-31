@@ -119,13 +119,6 @@ export interface Agent {
   created_at: number;
 }
 
-export interface SubAgent {
-  id: string;
-  parentAgentId: string;
-  task: string;
-  status: "working" | "done";
-}
-
 // Task
 export type TaskStatus =
   | "inbox"

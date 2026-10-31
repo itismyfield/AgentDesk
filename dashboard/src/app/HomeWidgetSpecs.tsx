@@ -97,7 +97,7 @@ export function buildHomeWidgetSpecs(ctx: HomeWidgetContext): Record<string, Hom
     routines: {
       className: "col-span-2 min-w-0 lg:col-span-12",
       render: () => (
-        <RoutinesTimelineWidget variant="home" t={t} localeTag={localeTag} language={isKo ? "ko" : "en"} />
+        <RoutinesTimelineWidget compact t={t} localeTag={localeTag} language={isKo ? "ko" : "en"} />
       ),
     },
   };

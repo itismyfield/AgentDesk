@@ -1,4 +1,4 @@
-import type { Agent, DispatchedSession, SubAgent } from "./types";
+import type { Agent, DispatchedSession } from "./types";
 
 const STALE_LINKED_SESSION_MS = 10 * 60_000;
 
@@ -20,24 +20,10 @@ function cleanText(value: string | null | undefined): string | null {
   return trimmed ? trimmed : null;
 }
 
-export function getWorkingSubTasks(agentId: string, subAgents: SubAgent[] = []): string[] {
-  const seen = new Set<string>();
-  const tasks: string[] = [];
-  for (const sub of subAgents) {
-    if (sub.parentAgentId !== agentId || sub.status !== "working") continue;
-    const text = cleanText(sub.task);
-    if (!text || seen.has(text)) continue;
-    seen.add(text);
-    tasks.push(text);
-  }
-  return tasks;
-}
-
 export function getAgentWorkSummary(
   agent: Agent,
   opts?: {
     activeTaskTitle?: string | null;
-    subAgents?: SubAgent[];
     linkedSessions?: DispatchedSession[];
   },
 ): string | null {
@@ -52,9 +38,6 @@ export function getAgentWorkSummary(
     const sessionText = cleanText(session.session_info) ?? cleanText(session.name);
     if (sessionText) return sessionText;
   }
-
-  const subTask = getWorkingSubTasks(agent.id, opts?.subAgents)[0];
-  if (subTask) return subTask;
 
   if (agent.status !== "working") return null;
 
@@ -86,7 +69,6 @@ export function getAgentWarnings(
   opts?: {
     hasDiscordBindings?: boolean;
     activeTaskTitle?: string | null;
-    subAgents?: SubAgent[];
     linkedSessions?: DispatchedSession[];
   },
 ): AgentWarning[] {
@@ -98,7 +80,6 @@ export function getAgentWarnings(
     ?? linkedSessions
       .map((session) => cleanText(session.session_info) ?? cleanText(session.name))
       .find((value): value is string => Boolean(value))
-    ?? getWorkingSubTasks(agent.id, opts?.subAgents)[0]
     ?? null;
 
   if (!agent.department_id) {

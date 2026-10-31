@@ -24,14 +24,13 @@ export default function RoutinesPageView() {
             style={{ color: "var(--th-text-muted)" }}
           >
             {t({
-              ko: "등록된 자동 작업을 다음 실행 시간 기준으로 정리합니다.",
-              en: "Registered jobs are sorted by the next scheduled run.",
+              ko: "예약된 자동 작업과 최근 결과를 봐요. 행 오른쪽 말풍선을 누르면 디스코드 스레드가 열려요.",
+              en: "Scheduled jobs and their latest results. The bubble on each row opens its Discord thread.",
             })}
           </p>
         </header>
 
         <RoutinesTimelineWidget
-          variant="home"
           t={t}
           localeTag={locale}
           language={language}
