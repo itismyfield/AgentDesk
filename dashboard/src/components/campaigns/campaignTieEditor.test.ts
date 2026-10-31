@@ -85,4 +85,7 @@ it("selects a line by a stroke through any point of its drawn path, including se
   // A backward line leaves its source's right side before turning back, as React Flow draws it.
   const backward = linePath({ id: "b", source: "g4", target: "g1", via: [], edges: [bd] }, boxes, new Map(), new Map());
   expect(strokeCrosses(backward, { x: 255, y: 270 }, { x: 255, y: 295 })).toBe(true);
+  // The rounded corner after that turn is a curve: (262.75, 281.25) is on it, the corner's control point is not.
+  expect(strokeCrosses(backward, { x: 262.75, y: 281 }, { x: 262.75, y: 281.5 })).toBe(true);
+  expect(strokeCrosses(backward, { x: 263.5, y: 282.3 }, { x: 263.5, y: 282.4 })).toBe(false);
 });

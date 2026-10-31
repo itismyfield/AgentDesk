@@ -12,6 +12,8 @@ import CampaignAutoQueueToggle from "./CampaignAutoQueueToggle";
 import { campaignProgress } from "./campaignModel";
 import { Badge, type Tr } from "./campaignPresentation";
 import CampaignExplorer from "./CampaignExplorer";
+import { campaignRawEdges } from "./campaignGraphRouting";
+import { groupViewScope, pruneStoredView, storedGroupViewCampaigns } from "./campaignViewStorage";
 import type { CampaignDraft } from "./CampaignNodeDetails";
 import type { ControlCommand } from "./ServerCampaignControls";
 import ServerCampaignDetail from "./ServerCampaignDetail";
@@ -51,6 +53,13 @@ export default function CampaignsPanel({ language }: { language: string }) {
   const [error, setError] = useState<string | null>(null);
   const [refreshedAt, setRefreshedAt] = useState<number | null>(null);
   const [checkedRead, setCheckedRead] = useState<number | null>(null);
+  // Saved tie layouts follow every loaded definition, even while no graph is open, a campaign has no tasks or
+  // the campaign is gone (an id created again must not bring old ties back). Only after a successful load.
+  useEffect(() => {
+    if (refreshedAt === null) return;
+    const loaded = new Map(campaigns.map((value) => [value.id, campaignRawEdges(value.nodes)]));
+    for (const id of new Set([...loaded.keys(), ...storedGroupViewCampaigns()])) pruneStoredView(groupViewScope(id), loaded.get(id) ?? []);
+  }, [campaigns, refreshedAt]);
   const mounted = useRef(false);
   const requestId = useRef(0);
   const refresh = useCallback(async () => {

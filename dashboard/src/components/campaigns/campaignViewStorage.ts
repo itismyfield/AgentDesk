@@ -1,5 +1,6 @@
 import { subscribeToLocalStorageKey } from "../../lib/useLocalStorage";
-import { NO_TIES, rawEdgeId, type CampaignGraphView, type GraphViewSettings, type ViewScope } from "./campaignGraphRouting";
+import { NO_TIES, rawEdgeId, type CampaignGraphView, type GraphViewSettings, type RawEdgeKey, type ViewScope } from "./campaignGraphRouting";
+import { pruneTies } from "./campaignTieEditor";
 
 /**
  * Tie layout per browser profile, apart from the campaign definition: nothing here reaches the server.
@@ -9,6 +10,9 @@ const KEY_PREFIX = "agentdesk.campaign-graph-view.v1:";
 
 export type StoredView = { view: GraphViewSettings; raw: string | null; recovered: boolean };
 export type SaveResult = { ok: true; raw: string } | { ok: false; reason: string };
+
+/** The legacy campaign's all-task group graph, the one drawing that has ties today. */
+export const groupViewScope = (campaignId: string): ViewScope => ({ mode: "legacy", campaignId, projection: "groups", taskScope: "all" });
 
 export function campaignViewKey(scope: ViewScope): string {
   return KEY_PREFIX + JSON.stringify([scope.mode, scope.campaignId, scope.projection, scope.taskScope]);
@@ -99,6 +103,36 @@ export function saveCampaignView(scope: ViewScope, view: GraphViewSettings): Sav
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.name : "write failed" };
   }
+}
+
+/**
+ * Removes members that left `present` (the full definition) from the stored view and saves it, so a dependency
+ * deleted while the graph was closed is not tied again when it comes back. Returns the raw value now stored.
+ */
+export function pruneStoredView(scope: ViewScope, present: readonly RawEdgeKey[], raw = readStoredRaw(scope)): string | null {
+  const stored = loadCampaignView(scope, raw);
+  if (raw === null || stored.recovered) return raw;
+  const view = pruneTies(stored.view, present);
+  if (JSON.stringify(view) === JSON.stringify(stored.view)) return raw;
+  const saved = saveCampaignView(scope, view);
+  return saved.ok ? saved.raw : raw;
+}
+
+/** Campaign ids that have a saved group-graph layout in this browser. */
+export function storedGroupViewCampaigns(): string[] {
+  const target = storage();
+  const ids: string[] = [];
+  try {
+    for (let index = 0; target && index < target.length; index++) {
+      const name = target.key(index);
+      if (!name?.startsWith(KEY_PREFIX)) continue;
+      const [mode, campaignId, projection, taskScope] = JSON.parse(name.slice(KEY_PREFIX.length)) as unknown[];
+      if (typeof campaignId === "string" && campaignViewKey(groupViewScope(campaignId)) === campaignViewKey({ mode, campaignId, projection, taskScope } as ViewScope)) ids.push(campaignId);
+    }
+  } catch {
+    // An unreadable storage or a foreign key under the prefix leaves the list as found so far.
+  }
+  return ids;
 }
 
 /** Fires when another tab changes this scope's value. */

@@ -3,19 +3,21 @@ import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { Edge, Node } from "@xyflow/react";
 import { afterEach, beforeEach, expect, it, onTestFinished, vi } from "vitest";
-import { setCampaignAutoQueue, updateCampaignNode, type Campaign } from "../../api/campaigns";
+import { getCampaigns, setCampaignAutoQueue, updateCampaignNode, type Campaign } from "../../api/campaigns";
 import { createServerCampaign, editServerCampaignDefinition, sendServerCampaignCommand } from "../../api/serverCampaigns";
 import { campaignRawEdges, type RawEdgeKey } from "./campaignGraphRouting";
 import { campaignViewKey } from "./campaignViewStorage";
 import CampaignExplorer from "./CampaignExplorer";
+import CampaignsPanel from "./CampaignsPanel";
 import { installMemoryStorage, makeCampaignNode } from "./campaignTestFixtures";
 
 vi.mock("../../api/campaigns", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../api/campaigns")>()), updateCampaignNode: vi.fn(), setCampaignAutoQueue: vi.fn(),
+  ...(await importOriginal<typeof import("../../api/campaigns")>()), updateCampaignNode: vi.fn(), setCampaignAutoQueue: vi.fn(), getCampaigns: vi.fn(),
 }));
 vi.mock("../../api/serverCampaigns", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../api/serverCampaigns")>()),
   createServerCampaign: vi.fn(), editServerCampaignDefinition: vi.fn(), sendServerCampaignCommand: vi.fn(),
+  getServerCampaigns: vi.fn().mockResolvedValue([]),
 }));
 
 type FlowProps = {
@@ -388,4 +390,112 @@ it("ends a stroke when tie mode closes mid-stroke, so later saves from another t
   });
   expect(ties()).toEqual([{ x: -300, y: -300 }]);
   expect(container.textContent).not.toContain("Another tab changed this view");
+});
+
+it("forgets every tie when all tasks are deleted, in the saved view and undo, so the same tasks added back stay untied", async () => {
+  await openGraph();
+  await tieBoth();
+  await click(button("Move tie right"));
+  await render({ ...campaign, nodes: [] });
+  expect(JSON.parse(localStorage.getItem(key)!).ties).toEqual([]);
+  await render(campaign);
+  await click(button("Undo"));
+  expect(ties()).toEqual([]);
+  expect(JSON.parse(localStorage.getItem(key)!).ties).toEqual([]);
+  await act(async () => root.unmount());
+  root = createRoot(container);
+  await openGraph();
+  expect(ties()).toEqual([]);
+  expect(pathOf("A->C")).toEqual(["campaign-group:G1", "campaign-group:G2"]);
+});
+
+it("forgets ties of dependencies deleted while the graph is closed or every task is gone", async () => {
+  const load = (shown: Campaign) => vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [shown], live: {}, read: 1 });
+  load(campaign);
+  await act(async () => root.render(<CampaignsPanel language="en" />));
+  await click(button("Connections"));
+  await tieBoth();
+  await click(button("Grouped list"));
+  load({ ...campaign, nodes: campaign.nodes.map((node) => node.id === "D" ? { ...node, dependencies: [] } : node) });
+  await click(button("Refresh"));
+  expect(localStorage.getItem(key)).not.toContain('"D"');
+  load({ ...campaign, nodes: [] });
+  await click(button("Refresh"));
+  expect(JSON.parse(localStorage.getItem(key)!).ties).toEqual([]);
+  load(campaign);
+  await click(button("Refresh"));
+  await click(button("Connections"));
+  expect(ties()).toEqual([]);
+  expect(pathOf("B->D")).toEqual(["campaign-group:G1", "campaign-group:G2"]);
+});
+
+it("writes back another tab's stale view without the members this definition already deleted", async () => {
+  await openGraph();
+  await tieBoth();
+  const stale = localStorage.getItem(key)!;
+  await render({ ...campaign, nodes: campaign.nodes.map((node) => node.id === "D" ? { ...node, dependencies: [] } : node) });
+  await act(async () => {
+    localStorage.setItem(key, stale);
+    window.dispatchEvent(new StorageEvent("storage", { key, storageArea: localStorage }));
+  });
+  expect(localStorage.getItem(key)).not.toContain('"D"');
+});
+
+it("keeps lines in place while a stroke previews them, so release selects what the preview showed", async () => {
+  await openGraph();
+  await tieBoth();
+  const [tie] = ties();
+  await click(button("Tie lines"));
+  await click(checkbox("A → C"));
+  const shape = () => segments().map(({ source, target, sourceHandle, targetHandle, edges }) => [source, target, sourceHandle, targetHandle, edges.join()].join("|"));
+  const before = shape();
+  const surface = container.querySelector<HTMLElement>(".campaign-tie-stroke")!;
+  // Just right of G1 the B→D strand runs to the tie's second slot, below A→C's first slot.
+  const x = tie.x - 5;
+  const pointer = (type: string, y: number) => surface.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerId: 5, clientX: x, clientY: y }));
+  await act(async () => { pointer("pointerdown", 76); pointer("pointermove", 80); });
+  expect(lit()).toEqual(new Set(["A->C", "B->D"]));
+  expect(shape()).toEqual(before);
+  await act(async () => { pointer("pointerup", 80); });
+  expect(checkbox("A → C").checked).toBe(true);
+  expect(checkbox("B → D").checked).toBe(true);
+});
+
+it("judges a stroke against the lines drawn when it began, even if the draft changes mid-stroke", async () => {
+  await openGraph();
+  await tieBoth();
+  const [tie] = ties();
+  await click(button("Tie lines"));
+  await click(checkbox("A → C"));
+  const surface = container.querySelector<HTMLElement>(".campaign-tie-stroke")!;
+  const pointer = (type: string, y: number) => surface.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerId: 6, clientX: tie.x - 5, clientY: y }));
+  await act(async () => { pointer("pointerdown", 76); pointer("pointermove", 80); });
+  // A second finger unticks A→C, which would merge the strands and move B→D away from the stroke.
+  await click(checkbox("A → C"));
+  await act(async () => { pointer("pointerup", 80); });
+  expect(checkbox("B → D").checked).toBe(true);
+  expect(checkbox("A → C").checked).toBe(false);
+});
+
+it("keeps saved ties until the campaign list loads, then clears those of a campaign that is gone", async () => {
+  const load = (...shown: Campaign[]) => vi.mocked(getCampaigns).mockResolvedValue({ campaigns: shown, live: {}, read: 1 });
+  await openGraph();
+  await tieBoth();
+  await act(async () => root.unmount());
+  root = createRoot(container);
+  load(campaign);
+  await act(async () => root.render(<CampaignsPanel language="en" />));
+  await click(button("Connections"));
+  expect(ties()).toHaveLength(1);
+  load({ ...campaign, id: "other-campaign" });
+  await click(button("Refresh"));
+  expect(JSON.parse(localStorage.getItem(key)!).ties).toEqual([]);
+  load(campaign, { ...campaign, id: "other-campaign" });
+  await click(button("Refresh"));
+  const selector = container.querySelector<HTMLSelectElement>('select[aria-label="Select campaign"]')!;
+  await act(async () => { selector.value = campaign.id; selector.dispatchEvent(new Event("change", { bubbles: true })); });
+  expect(selector.value).toBe(campaign.id);
+  await click(button("Connections"));
+  expect(ties()).toEqual([]);
+  expect(pathOf("A->C")).toEqual(["campaign-group:G1", "campaign-group:G2"]);
 });

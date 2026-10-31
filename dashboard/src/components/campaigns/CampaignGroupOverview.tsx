@@ -2,12 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Background, Controls, MarkerType, Position, ReactFlow, type Edge, type Node, type ReactFlowInstance } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { CampaignNode } from "../../api/campaigns";
-import { NO_TIES, campaignRawEdges, rawEdgeId, routeEdges, type CableTie, type GraphViewSettings, type ViewScope } from "./campaignGraphRouting";
+import { NO_TIES, campaignRawEdges, rawEdgeId, routeEdges, type CableTie, type GraphViewSettings, type RawEdgeKey } from "./campaignGraphRouting";
 import { campaignGroup, groupCampaignNodes } from "./campaignModel";
 import { TIE_WIDTH, linePath, pathMiddle, strokeCrosses, tieHeight, tieSlots, type Box, type Point } from "./campaignTieGeometry";
 import { CampaignTieNode, CrossingOverlay } from "./CampaignTieGraph";
 import CampaignTiePanel, { type TieStrand } from "./CampaignTiePanel";
 import { useCampaignTieView } from "./useCampaignTieView";
+import { groupViewScope } from "./campaignViewStorage";
 
 type Props = {
   campaignId: string;
@@ -48,9 +49,9 @@ export function buildCampaignGroupOverview(nodes: CampaignNode[], settings: Grap
 }
 
 export default function CampaignGroupOverview({ campaignId, nodes, onSelectGroup, tr }: Props) {
-  const scope = useMemo<ViewScope>(() => ({ mode: "legacy", campaignId, projection: "groups", taskScope: "all" }), [campaignId]);
+  const scope = useMemo(() => groupViewScope(campaignId), [campaignId]);
   const rawEdges = useMemo(() => campaignRawEdges(nodes), [nodes]);
-  const ties = useCampaignTieView(scope, nodes.length > 0 ? rawEdges : null);
+  const ties = useCampaignTieView(scope, rawEdges);
   const { setBusy } = ties;
   const [tieMode, setTieMode] = useState(false);
   const [draft, setDraft] = useState<ReadonlySet<string>>(NONE);
@@ -58,6 +59,8 @@ export default function CampaignGroupOverview({ campaignId, nodes, onSelectGroup
   /** A dragged tie's position until release; only the release becomes an undo step. */
   const [drag, setDrag] = useState<{ tieId: string; position: Point } | null>(null);
   const [stroking, setStroking] = useState(false);
+  /** The lines as drawn when a stroke began; preview and release both judge against them. */
+  const strokePaths = useRef<{ line: { edges: RawEdgeKey[] }; path: Point[] }[] | null>(null);
   const [selectedTie, setSelectedTie] = useState<string | null>(null);
   const [focused, setFocused] = useState<string | null>(null);
   const flow = useRef<ReactFlowInstance | null>(null);
@@ -73,14 +76,19 @@ export default function CampaignGroupOverview({ campaignId, nodes, onSelectGroup
   const highlight = useMemo<ReadonlySet<string>>(() => tieMode ? new Set([...draft, ...stroke.ids])
     : focusedEdge ? new Set([focusedEdge])
       : selected ? new Set(selected.strandOrder.map(rawEdgeId)) : NONE, [tieMode, draft, stroke.ids, focusedEdge, selected]);
-  /** A lit original sharing a line with unlit ones is drawn as its own line, so only it lights. */
+  /**
+   * A lit original sharing a line with unlit ones is drawn as its own line, so only it lights. In tie mode only
+   * the confirmed draft splits lines: a stroke in progress colours lines but never moves them under the pointer.
+   */
+  const separated = tieMode ? draft : highlight;
   const lines = useMemo(() => overview.connections.flatMap((connection) => {
     const line = showOriginal ? { ...connection, via: [] } : connection;
-    const lit = line.edges.filter((edge) => highlight.has(rawEdgeId(edge)));
-    if (lit.length === 0 || lit.length === line.edges.length) return [{ ...line, lit: lit.length > 0 }];
-    const rest = line.edges.filter((edge) => !highlight.has(rawEdgeId(edge)));
-    return [{ ...line, id: `${line.id}:lit`, edges: lit, count: lit.length, lit: true }, { ...line, edges: rest, count: rest.length, lit: false }];
-  }), [overview.connections, showOriginal, highlight]);
+    const lit = (edges: RawEdgeKey[]) => edges.some((edge) => highlight.has(rawEdgeId(edge)));
+    const apart = line.edges.filter((edge) => separated.has(rawEdgeId(edge)));
+    if (apart.length === 0 || apart.length === line.edges.length) return [{ ...line, lit: lit(line.edges) }];
+    const rest = line.edges.filter((edge) => !separated.has(rawEdgeId(edge)));
+    return [{ ...line, id: `${line.id}:lit`, edges: apart, count: apart.length, lit: lit(apart) }, { ...line, edges: rest, count: rest.length, lit: lit(rest) }];
+  }), [overview.connections, showOriginal, highlight, separated]);
   const tieById = useMemo(() => new Map<string, CableTie>(shownTies.map((tie) => [tie.id, tie])), [shownTies]);
   const slots = useMemo(() => tieSlots(shownTies, lines), [shownTies, lines]);
   const paths = useCallback(() => {
@@ -168,7 +176,7 @@ export default function CampaignGroupOverview({ campaignId, nodes, onSelectGroup
   });
 
   const finishDraft = () => { setDraft(NONE); setStroke({ ids: NONE, anchor: null }); };
-  const crossed = (from: Point, to: Point) => new Set(paths().filter(({ path }) => strokeCrosses(path, from, to)).flatMap(({ line }) => line.edges.map(rawEdgeId)));
+  const crossed = (from: Point, to: Point) => new Set((strokePaths.current ?? paths()).filter(({ path }) => strokeCrosses(path, from, to)).flatMap(({ line }) => line.edges.map(rawEdgeId)));
   const confirm = () => {
     const chosen = rawEdges.filter((edge) => draft.has(rawEdgeId(edge)));
     const middles = paths().filter(({ line }) => line.edges.some((edge) => draft.has(rawEdgeId(edge)))).map(({ path }) => pathMiddle(path)).filter((point): point is Point => point !== null);
@@ -207,7 +215,7 @@ export default function CampaignGroupOverview({ campaignId, nodes, onSelectGroup
           onNodeDragStop={(_, node) => { const tie = tieOf(node); if (!tie) return; ties.commit({ kind: "move", tieId: tie, position: { x: Math.round(node.position.x), y: Math.round(node.position.y) } }); setDrag(null); setSelectedTie(tie); }}>
           <Background /><Controls showInteractive={false} />
           {tieMode && <CrossingOverlay label={tr("선을 가로질러 드래그해 묶을 선 고르기", "Drag across lines to choose them")}
-            toFlow={(point) => flow.current?.screenToFlowPosition(point) ?? point} onActive={setStroking}
+            toFlow={(point) => flow.current?.screenToFlowPosition(point) ?? point} onActive={(active) => { strokePaths.current = active ? paths() : null; setStroking(active); }}
             onStroke={(line, done) => {
               const ids = line ? crossed(line.from, line.to) : NONE;
               if (!done) setStroke({ ids, anchor: null });

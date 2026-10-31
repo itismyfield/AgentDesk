@@ -22,11 +22,30 @@ export function tieSlots(ties: readonly CableTie[], lines: readonly DisplayEdge[
   return slots;
 }
 
-/** Points of an SVG path from React Flow's path builders, in order (M/L ends and Q corners). */
+/** Largest gap between a rounded corner and the segments standing in for it. */
+const CURVE_TOLERANCE = 0.1;
+/** A stroke this close to a path selects it; it exceeds CURVE_TOLERANCE, so touching the drawn curve always counts. */
+const HIT_DISTANCE = 0.25;
+
+/**
+ * Points of a React Flow path (M, L and Q commands). Each quadratic corner becomes enough straight pieces to stay
+ * within CURVE_TOLERANCE of the curve; its control point is never a vertex.
+ */
 function svgPoints(d: string): Point[] {
-  const numbers = d.match(/-?\d+(?:\.\d+)?(?:e-?\d+)?/gi)?.map(Number) ?? [];
   const points: Point[] = [];
-  for (let index = 0; index + 1 < numbers.length; index += 2) points.push({ x: numbers[index], y: numbers[index + 1] });
+  for (const [, command, args] of d.matchAll(/([MLQ])([^MLQ]*)/g)) {
+    const n = args.match(/-?\d+(?:\.\d+)?(?:e-?\d+)?/gi)?.map(Number) ?? [];
+    if (command !== "Q") { points.push({ x: n[0], y: n[1] }); continue; }
+    const start = points[points.length - 1];
+    const control = { x: n[0], y: n[1] }, end = { x: n[2], y: n[3] };
+    // A quadratic's chord error over 1/k of its range is |p0 - 2c + p2| / (4k²).
+    const bend = Math.hypot(start.x - 2 * control.x + end.x, start.y - 2 * control.y + end.y);
+    const pieces = Math.max(1, Math.ceil(Math.sqrt(bend / (4 * CURVE_TOLERANCE))));
+    for (let step = 1; step <= pieces; step++) {
+      const t = step / pieces, u = 1 - t;
+      points.push({ x: u * u * start.x + 2 * u * t * control.x + t * t * end.x, y: u * u * start.y + 2 * u * t * control.y + t * t * end.y });
+    }
+  }
   return points;
 }
 
@@ -66,9 +85,21 @@ function segmentsIntersect(a: Point, b: Point, c: Point, d: Point): boolean {
   return (d1 === 0 && within(c, d, a)) || (d2 === 0 && within(c, d, b)) || (d3 === 0 && within(a, b, c)) || (d4 === 0 && within(a, b, d));
 }
 
-/** Whether a stroke from `a` to `b` crosses the drawn path. */
+function pointToSegment(point: Point, a: Point, b: Point): number {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const length = dx * dx + dy * dy;
+  const t = length === 0 ? 0 : Math.max(0, Math.min(1, ((point.x - a.x) * dx + (point.y - a.y) * dy) / length));
+  return Math.hypot(point.x - (a.x + t * dx), point.y - (a.y + t * dy));
+}
+
+function segmentGap(a: Point, b: Point, c: Point, d: Point): number {
+  if (segmentsIntersect(a, b, c, d)) return 0;
+  return Math.min(pointToSegment(a, c, d), pointToSegment(b, c, d), pointToSegment(c, a, b), pointToSegment(d, a, b));
+}
+
+/** Whether a stroke from `a` to `b` crosses or touches the drawn path. */
 export function strokeCrosses(path: readonly Point[], a: Point, b: Point): boolean {
-  return path.some((point, index) => index > 0 && segmentsIntersect(path[index - 1], point, a, b));
+  return path.some((point, index) => index > 0 && segmentGap(path[index - 1], point, a, b) <= HIT_DISTANCE);
 }
 
 /** Middle of a drawn path, used to place a tie created from the connection list. */
