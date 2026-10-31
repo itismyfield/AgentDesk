@@ -206,9 +206,13 @@ pub(in crate::services::discord) async fn hand_busy(
     if owner.phase != target::Phase::Busy {
         return Err(unobserved());
     }
-    let payload = super::super::input_payload::busy_body(channel, &front.1, pool.as_ref()).await?;
     let claim = claim_turn(&mailbox, front.1.message_id, &front).await?;
     let claim = claim.ok_or("NotSent(\"front_not_granted\")")?;
+    let mut bodies = Vec::new();
+    for item in std::iter::once(&front.1).chain(claim.followers()) {
+        bodies.push(super::super::input_payload::busy_body(channel, item, pool.as_ref()).await?);
+    }
+    let payload = bodies.join("\n\n");
     let (settled, answer) = tokio::sync::oneshot::channel();
     let thread = tokio::task::spawn_blocking(move || {
         let turn = StreamingTurn {
@@ -359,7 +363,14 @@ async fn start_idle(
     };
     let now = (std::time::SystemTime::now(), std::time::Instant::now());
     let restore = crate::services::turn_orchestrator::pending_queue_item_to_intervention;
-    let intervention = restore(front.1, now.0, now.1);
+    let mut intervention = restore(front.1, now.0, now.1);
+    // The merged originals start as one input, joined as the legacy queue joins them.
+    for item in owner.claim.followers() {
+        intervention.text = format!("{}\n{}", intervention.text, item.text);
+        intervention
+            .pending_uploads
+            .extend(item.pending_uploads.iter().cloned());
+    }
     let owner_name = crate::services::discord::queue_dispatch::kickoff::queued_owner_name;
     let name = owner_name(deps.http, intervention.author_id).await;
     let at = (shared.provider.clone(), channel);

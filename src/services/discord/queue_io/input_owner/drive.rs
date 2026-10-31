@@ -13,13 +13,18 @@ use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem}
 
 /// The owner's granted front: its slot's ticket and the original.
 pub(crate) type Front = (Option<String>, PendingQueueItem);
-/// The right to reserve one front, spent from its grant by the owner's turn claim; it moves, never
-/// copies, from that claim to the reserve.
-pub(crate) struct FrontClaim(Front);
+/// The right to reserve one front with the originals merged behind it when it was claimed, spent
+/// from its grant by the owner's turn claim; it moves, never copies, from that claim to the reserve.
+pub(crate) struct FrontClaim(Front, Vec<PendingQueueItem>);
 
 impl FrontClaim {
     pub(crate) fn front(&self) -> &Front {
         &self.0
+    }
+
+    /// The queued originals behind the front that its one prompt carries, in arrival order.
+    pub(crate) fn followers(&self) -> &[PendingQueueItem] {
+        &self.1
     }
 }
 
@@ -31,12 +36,11 @@ pub(crate) async fn claim_turn(
 ) -> Result<Option<FrontClaim>, String> {
     let front = front.clone();
     let claimed = mailbox.v2_request(move |slot| {
-        Ok(slot
-            .as_mut()
-            .ok_or("V2 not adopted")?
-            .claim_turn(message, &front))
+        let owner = slot.as_mut().ok_or("V2 not adopted")?;
+        let claimed = owner.claim_turn(message, &front);
+        Ok(claimed.map(|front| FrontClaim(front, owner.followers())))
     });
-    Ok(claimed.await?.map(FrontClaim))
+    Ok(claimed.await?)
 }
 
 /// Runs one granted front to its local settlement; the AI's completion is not awaited.

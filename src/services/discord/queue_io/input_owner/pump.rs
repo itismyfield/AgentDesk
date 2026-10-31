@@ -54,10 +54,12 @@ pub(crate) async fn submit_front(
         sources,
         attempt,
     } = prepared;
+    let followers = claim.as_ref().map_or(&[][..], FrontClaim::followers);
     let payload = serde_json::json!({
         "digest": format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(frame.as_bytes())),
         "frame": frame,
         "attribution": {"sources": sources},
+        "followers": followers,
     });
     mailbox
         .v2_request(move |slot| {

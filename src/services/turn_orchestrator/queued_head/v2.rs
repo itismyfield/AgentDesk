@@ -256,6 +256,21 @@ impl Owner {
         Some((ticket, original))
     }
 
+    /// The queued originals behind the front that join its one prompt, merged as the legacy queue
+    /// merges consecutive input: one author, no reply boundary, one route.
+    pub(crate) fn followers(&self) -> Vec<PendingQueueItem> {
+        use crate::services::turn_orchestrator::pending_queue_item_to_intervention as soft;
+        let (now, instant) = (std::time::SystemTime::now(), std::time::Instant::now());
+        let mut items = self.snapshot.items.iter();
+        let Some(head) = items.next() else {
+            return Vec::new();
+        };
+        let head = soft(head.clone(), now, instant);
+        let merges =
+            |item: &&PendingQueueItem| head.merges_with(&soft((*item).clone(), now, instant));
+        items.take_while(merges).cloned().collect()
+    }
+
     /// Lets one owner claim presenting exactly this front start a turn.
     pub(crate) fn grant_front(&mut self, front: &Front) -> Result<(), String> {
         match self.front() {

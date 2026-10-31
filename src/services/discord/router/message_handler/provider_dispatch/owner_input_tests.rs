@@ -1174,6 +1174,74 @@ fn a_busy_front_carries_its_uploads_and_reply_into_the_pane() {
     );
 }
 
+/// One author's consecutive input waiting at the front goes into a busy turn as one prompt in
+/// arrival order and settles as one attempt; input that never merges, or arrives after the claim,
+/// waits for the next.
+#[test]
+fn consecutive_input_goes_into_a_busy_turn_as_one_prompt() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = &rig("hb-unit", 7_272_596, "normal", view("", false), BUSY);
+    running_row(rig, &rig.name);
+    let hand = |front: Front| {
+        let owner = (rig.mailbox.clone(), None);
+        let handed = hand_busy(owner, ProviderKind::Claude, (rig.channel, front));
+        rig.runtime.block_on(handed)
+    };
+    assert_eq!(hand(rig.granted_front()), Ok(()));
+    let queue = |offset: u64, text: &str, merge: bool| {
+        let mut item = rig.original.clone();
+        item.message_id += offset;
+        item.source_message_ids = vec![item.message_id];
+        (item.text, item.merge_consecutive) = (text.into(), merge);
+        let ticket = AdmissionTicket::new();
+        let admitted = rig
+            .runtime
+            .block_on(admit(&rig.mailbox, &item, ticket.clone()));
+        assert!(matches!(
+            admitted,
+            crate::services::discord::queue_io::input_owner::admission::Admission::Accepted(_)
+        ));
+        move || {
+            rig.runtime
+                .block_on(exact_turn(&rig.mailbox, &ticket, &item))
+                .unwrap()
+        }
+    };
+    let (a, b) = (queue(1, "UNIT-A", true), queue(2, "UNIT-B", true));
+    queue(3, "UNIT-C", false);
+    assert_eq!(hand(rig.granted_front()), Ok(()));
+    let pasted = fs::read_to_string(rig.renderer.join("body")).unwrap();
+    let at = |part: &str| (pasted.matches(part).count(), pasted.find(part));
+    assert!(
+        matches!((at("UNIT-A"), at("UNIT-B")), ((1, Some(x)), (1, Some(y))) if x < y),
+        "{pasted}"
+    );
+    assert!(!pasted.contains("UNIT-C"), "{pasted}");
+    assert!(matches!(a(), TurnBind::Settled(_)), "{:?}", a());
+    assert_eq!(a(), b(), "one attempt settles both");
+    assert_eq!(
+        hand(rig.granted_front()),
+        Ok(()),
+        "the unmerged input goes next"
+    );
+    let f = queue(4, "UNIT-F", true);
+    let claim = rig.claim(&rig.granted_front()).unwrap();
+    let g = queue(5, "UNIT-G", true);
+    let transcript = rig.transcript();
+    let busy = target::Phase::Busy;
+    assert_eq!(
+        rig.execute(claim, ProviderKind::Claude, busy, &transcript),
+        Ok(())
+    );
+    assert!(matches!(f(), TurnBind::Settled(_)), "{:?}", f());
+    assert_eq!(
+        g(),
+        TurnBind::NotArmed,
+        "input after the claim waits for the next unit"
+    );
+    assert_eq!(rig.snapshot()["items"].as_array().unwrap().len(), 1);
+}
+
 /// With no turn running the drive hands each front to the idle start, never into a pane.
 #[test]
 fn an_idle_channel_hands_its_front_to_the_turn_start() {
