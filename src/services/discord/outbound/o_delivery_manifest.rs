@@ -161,8 +161,8 @@ pub(super) fn build_terminal(root: &Path, query: Query<'_>, deadline: Instant) -
     Some(plan)
 }
 
-/// When the frame's last body record was written; `None` unless every body record is dated.
-pub(super) fn body_written_ms(query: Query<'_>, deadline: Instant) -> Option<i64> {
+/// When the range's last body record was written, only if its dated body records compose `body`.
+pub(super) fn body_written_ms(query: Query<'_>, body: &str, deadline: Instant) -> Option<i64> {
     let (start, end) = query.range;
     let kind = provider(query.provider)?;
     if start >= end || Instant::now() >= deadline {
@@ -184,6 +184,7 @@ pub(super) fn body_written_ms(query: Query<'_>, deadline: Instant) -> Option<i64
     let mut reader = BufReader::new(file.take(end - start));
     let mut line = Vec::new();
     let mut written = None;
+    let mut composed = String::new();
     loop {
         if Instant::now() >= deadline {
             return None;
@@ -195,20 +196,26 @@ pub(super) fn body_written_ms(query: Query<'_>, deadline: Instant) -> Option<i64
             .read_until(b'\n', &mut line)
             .ok()?;
         if read == 0 {
-            return written;
+            return written.filter(|_| composed == body);
         }
         if read > SOURCE_CAP || line.last() != Some(&b'\n') {
             return None;
         }
         let value: serde_json::Value = serde_json::from_slice(&line).ok()?;
-        if identity::classify(kind, &value).iter().any(|fact| {
-            matches!(
-                fact,
-                RecordFact::Unit(_, UnitKind::Body, UnitContent::Payload(_))
-            )
-        }) {
+        for fact in identity::classify(kind, &value) {
+            let RecordFact::Unit(_, UnitKind::Body, UnitContent::Payload(text)) = fact else {
+                continue;
+            };
             let at = chrono::DateTime::parse_from_rfc3339(value["timestamp"].as_str()?).ok()?;
             written = written.max(Some(at.timestamp_millis()));
+            if !composed.is_empty()
+                && super::super::semantic_boundaries::semantic_chunk_separator_needed(
+                    &composed, &text,
+                )
+            {
+                composed.push_str("\n\n");
+            }
+            composed.push_str(&text);
         }
     }
 }

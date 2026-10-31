@@ -854,7 +854,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 turn_data_start_offset,
                 all_data: &all_data,
                 full_response: &full_response,
-                current_response,
+                restored_response_seed: &restored_response_seed,
                 response_sent_offset,
                 has_assistant_response,
                 terminal_kind,

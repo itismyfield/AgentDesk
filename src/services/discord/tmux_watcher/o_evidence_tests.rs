@@ -28,6 +28,7 @@ struct EvidenceFrame {
     turn_start: u64,
     batch_start: u64,
     tail: String,
+    seed: RestoredResponseSeed,
 }
 
 impl From<(u64, u64)> for EvidenceFrame {
@@ -36,6 +37,7 @@ impl From<(u64, u64)> for EvidenceFrame {
             turn_start,
             batch_start,
             tail: String::new(),
+            seed: RestoredResponseSeed::default(),
         }
     }
 }
@@ -54,6 +56,7 @@ async fn plan(
         turn_start,
         batch_start,
         tail,
+        seed,
     } = frame.into();
     let authorized = before.as_ref().is_some_and(|row| {
         row.turn_nonce == f.row.turn_nonce
@@ -116,7 +119,7 @@ async fn plan(
         turn_data_start_offset: turn_start,
         all_data: &tail,
         full_response: &f.body,
-        current_response: &f.body,
+        restored_response_seed: &seed,
         response_sent_offset: 0,
         has_assistant_response: true,
         terminal_kind: Some(WatcherTerminalKind::SoftStopHookSummary),
@@ -1147,46 +1150,96 @@ async fn i7441r1_duration_missing_late_body_remains_recorded_pg() {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum HeadlessOutbox {
     Sent,
     SessionBanner,
+    FrameBody,
     Missing,
     EarlierTurn,
     Pending,
     OtherBody,
     OtherSource,
     UntimedBody,
+    SeedSourceUnknown,
+    SeedRangeOtherBody,
+    GenerationChanged,
 }
 
-/// Restart's first headless turn: the bridge posted via the outbox and cleared its row before the
-/// watcher framed the late body O never captured; only that turn's sent row replaces the record.
+/// Restart's first headless turn: the bridge's restored seed body was written before the frame,
+/// which holds only Claude's request records; only that turn's sent outbox row replaces the record.
 async fn headless_restart_frame(pool: &sqlx::PgPool, channel: u64, outbox: HeadlessOutbox) {
     let mut f = Fixture::new(channel, ProviderKind::Claude, &["[E2E:E1:OK]"]).await;
     let body = f.body.clone();
+    let session = f.row.tmux_session_name.clone().unwrap();
+    let marker = crate::services::tmux_common::session_temp_path(&session, "generation");
+    std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+    std::fs::write(&marker, "1").unwrap();
     let written = chrono::Utc::now() - chrono::Duration::seconds(1);
-    let mut late = serde_json::json!({"type":"assistant","uuid":"a-late","apiBlockIndex":0,
-        "message":{"id":"body-late","content":[{"type":"text","text":body}]}});
-    if !matches!(outbox, HeadlessOutbox::UntimedBody) {
-        late["timestamp"] = written.to_rfc3339().into();
+    let answer_text = match outbox {
+        HeadlessOutbox::SeedRangeOtherBody => "[E2E:E0:OK]",
+        _ => body.as_str(),
+    };
+    let mut answer = serde_json::json!({"type":"assistant","uuid":"a-1","apiBlockIndex":0,
+        "message":{"id":"body-1","content":[{"type":"text","text":answer_text}]}});
+    if outbox != HeadlessOutbox::UntimedBody {
+        answer["timestamp"] = written.to_rfc3339().into();
     }
-    let bridge_range = [
+    let line = |record: serde_json::Value| format!("{record}\n");
+    let seed_range = [
         serde_json::json!({"type":"user","uuid":"input","sessionId":"native-session","message":{"content":"E1"}}),
-        serde_json::json!({"type":"system","subtype":"stop_hook_summary"}),
+        answer.clone(),
+        serde_json::json!({"type":"system","subtype":"stop_hook_summary","timestamp":written.to_rfc3339()}),
+        serde_json::json!({"type":"system","subtype":"turn_duration","durationMs":1189,"timestamp":written.to_rfc3339()}),
     ]
-    .map(|record| format!("{record}\n"))
+    .map(line)
     .concat();
-    let next = format!(
-        "{}\n",
-        serde_json::json!({"type":"user","uuid":"next","sessionId":"native-session","message":{"content":"E2"}})
+    let frame = if outbox == HeadlessOutbox::FrameBody {
+        line(answer)
+    } else {
+        [
+            serde_json::json!({"type":"file-history-snapshot","messageId":"m","snapshot":{"trackedFileBackups":{}},"isSnapshotUpdate":false}),
+            serde_json::json!({"type":"api-request-blob","sessionId":"native-session","message":{"role":"user","content":"E2"}}),
+            serde_json::json!({"type":"api-request-blob","sessionId":"native-session","message":{"role":"system","content":[{"type":"text","text":"tools"}]}}),
+            serde_json::json!({"type":"api-request","sessionId":"native-session","timestamp":chrono::Utc::now().to_rfc3339()}),
+        ]
+        .map(line)
+        .concat()
+    };
+    let next = line(
+        serde_json::json!({"type":"user","uuid":"next","sessionId":"native-session","message":{"content":"E2"}}),
     );
     let path = f.root.join(format!("restart-{channel}.jsonl"));
-    std::fs::write(&path, format!("{bridge_range}{late}\n{next}")).unwrap();
+    let prefix = if outbox == HeadlessOutbox::FrameBody {
+        ""
+    } else {
+        &seed_range
+    };
+    std::fs::write(&path, format!("{prefix}{frame}{next}")).unwrap();
     f.source =
         crate::services::tui_o::shadow::binding_reader::source_id_for("native-session", &path)
             .unwrap();
-    f.row.turn_start_offset = Some(bridge_range.len() as u64);
-    f.row.last_offset = (bridge_range.len() + late.to_string().len() + 1) as u64;
+    let frame_start = prefix.len() as u64;
+    f.row.turn_start_offset = Some(frame_start);
+    f.row.last_offset = frame_start + frame.len() as u64;
+    let generation = dr::current_generation_mtime_ns(&session);
+    assert_ne!(generation, 0);
+    let seed = RestoredResponseSeed {
+        body: body.clone(),
+        source: Some(((0, frame_start), generation)),
+    };
+    let seed = match outbox {
+        HeadlessOutbox::FrameBody => RestoredResponseSeed::default(),
+        HeadlessOutbox::SeedSourceUnknown => RestoredResponseSeed {
+            source: None,
+            ..seed
+        },
+        HeadlessOutbox::GenerationChanged => RestoredResponseSeed {
+            source: Some(((0, frame_start), generation + 1)),
+            ..seed
+        },
+        _ => seed,
+    };
     let banner = format!("⚙ session restored\n\n{body}");
     let (content, source, status, age) = match outbox {
         HeadlessOutbox::SessionBanner => (Some(banner.as_str()), "headless_turn", "sent", 0),
@@ -1195,9 +1248,7 @@ async fn headless_restart_frame(pool: &sqlx::PgPool, channel: u64, outbox: Headl
         HeadlessOutbox::Pending => (Some(body.as_str()), "headless_turn", "pending", 0),
         HeadlessOutbox::OtherBody => (Some("[E2E:E0:OK]"), "headless_turn", "sent", 0),
         HeadlessOutbox::OtherSource => (Some(body.as_str()), "system", "sent", 0),
-        HeadlessOutbox::Sent | HeadlessOutbox::UntimedBody => {
-            (Some(body.as_str()), "headless_turn", "sent", 0)
-        }
+        _ => (Some(body.as_str()), "headless_turn", "sent", 0),
     };
     if let Some(content) = content {
         let target = format!("channel:{channel}");
@@ -1233,7 +1284,6 @@ async fn headless_restart_frame(pool: &sqlx::PgPool, channel: u64, outbox: Headl
     let (http, _http) = f.http().await;
     let shared =
         crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
-    let turn_start = f.row.turn_start_offset.unwrap();
     plan(
         &f,
         &shared,
@@ -1243,9 +1293,10 @@ async fn headless_restart_frame(pool: &sqlx::PgPool, channel: u64, outbox: Headl
         &mut None,
         false,
         EvidenceFrame {
-            turn_start,
-            batch_start: turn_start,
+            turn_start: frame_start,
+            batch_start: frame_start,
             tail: next,
+            seed,
         },
     )
     .await;
@@ -1255,15 +1306,16 @@ async fn headless_restart_frame(pool: &sqlx::PgPool, channel: u64, outbox: Headl
             .fetch_all(pool)
             .await
             .unwrap();
-    let expected = match outbox {
-        HeadlessOutbox::Sent | HeadlessOutbox::SessionBanner => Vec::new(),
-        _ => vec![body],
-    };
+    let delivered = matches!(
+        outbox,
+        HeadlessOutbox::Sent | HeadlessOutbox::SessionBanner | HeadlessOutbox::FrameBody
+    );
+    let expected = if delivered { Vec::new() } else { vec![body] };
     assert_eq!(rows, expected, "{outbox:?}");
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn i7441r3_headless_bridge_delivery_before_late_frame_needs_its_sent_outbox_row_pg() {
+async fn i7441r3_headless_bridge_seed_body_before_late_frame_needs_its_sent_outbox_row_pg() {
     let root = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(root.path());
     let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
@@ -1275,12 +1327,16 @@ async fn i7441r3_headless_bridge_delivery_before_late_frame_needs_its_sent_outbo
     for (index, outbox) in [
         HeadlessOutbox::Sent,
         HeadlessOutbox::SessionBanner,
+        HeadlessOutbox::FrameBody,
         HeadlessOutbox::Missing,
         HeadlessOutbox::EarlierTurn,
         HeadlessOutbox::Pending,
         HeadlessOutbox::OtherBody,
         HeadlessOutbox::OtherSource,
         HeadlessOutbox::UntimedBody,
+        HeadlessOutbox::SeedSourceUnknown,
+        HeadlessOutbox::SeedRangeOtherBody,
+        HeadlessOutbox::GenerationChanged,
     ]
     .into_iter()
     .enumerate()

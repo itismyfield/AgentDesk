@@ -37,7 +37,7 @@ pub(super) struct TerminalRelayPlanLocals<'a> {
     pub(super) turn_data_start_offset: u64,
     pub(super) all_data: &'a String,
     pub(super) full_response: &'a String,
-    pub(super) current_response: &'a str,
+    pub(super) restored_response_seed: &'a RestoredResponseSeed,
     pub(super) response_sent_offset: usize,
     pub(super) has_assistant_response: bool,
     pub(super) terminal_kind: Option<WatcherTerminalKind>,
@@ -153,7 +153,7 @@ pub(super) async fn run_terminal_relay_plan<'a>(
         turn_data_start_offset,
         all_data,
         full_response,
-        current_response,
+        restored_response_seed,
         response_sent_offset,
         has_assistant_response,
         terminal_kind,
@@ -164,6 +164,7 @@ pub(super) async fn run_terminal_relay_plan<'a>(
         placeholder_msg_id,
         status_panel_msg_id,
     } = locals;
+    let current_response = full_response.get(response_sent_offset..).unwrap_or("");
     let mut all_data_session_bound_relay_ack =
         std::mem::take(state.all_data_session_bound_relay_ack);
     let mut monitor_auto_turn_claimed = *state.monitor_auto_turn_claimed;
@@ -689,9 +690,20 @@ pub(super) async fn run_terminal_relay_plan<'a>(
             None
         };
         // A body the legacy headless bridge posted before O booted has an outbox row, not an O
-        // receipt. The bridge marks that row sent before it clears the inflight row.
-        let o_tail_covered = match (o_tail_covered, context.evidence_source) {
-            (None, Some(file)) if orphan_facts.existing_record_required() => {
+        // receipt; its records lie in this frame, or in the restored seed's own range.
+        let consumed_end = terminal_event_consumed_offset(current_offset, all_data);
+        let body_source = if restored_response_seed.body.is_empty() {
+            Some((turn_data_start_offset, consumed_end))
+        } else {
+            restored_response_seed
+                .source
+                .filter(|(_, generation)| {
+                    *generation == dr::current_generation_mtime_ns(tmux_session_name)
+                })
+                .map(|(range, _)| range)
+        };
+        let o_tail_covered = match (o_tail_covered, context.evidence_source, body_source) {
+            (None, Some(file), Some(range)) if orphan_facts.existing_record_required() => {
                 crate::services::discord::outbound::o_delivery_evidence::headless_outbox(
                     shared,
                     crate::services::discord::outbound::o_delivery_evidence::Frame {
@@ -699,10 +711,7 @@ pub(super) async fn run_terminal_relay_plan<'a>(
                         channel: channel_id,
                         path: std::path::Path::new(output_path),
                         file,
-                        range: (
-                            turn_data_start_offset,
-                            terminal_event_consumed_offset(current_offset, all_data),
-                        ),
+                        range,
                         body: full_response,
                         sent: response_sent_offset,
                     },
@@ -710,7 +719,7 @@ pub(super) async fn run_terminal_relay_plan<'a>(
                 )
                 .await
             }
-            (proof, _) => proof,
+            (proof, _, _) => proof,
         };
         if orphan_facts.existing_record_required() && o_tail_covered.is_none() {
             tracing::warn!(

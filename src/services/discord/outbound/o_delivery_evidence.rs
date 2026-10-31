@@ -340,7 +340,7 @@ fn headless_content_matches(content: &str, bodies: &[&str]) -> bool {
 }
 
 /// A headless bridge body leaves a sent `message_outbox` row, not an O receipt; only a row with
-/// this body queued after the frame's last body record covers it, never an earlier turn's answer.
+/// this body queued after the records that wrote it covers it, never an earlier turn's answer.
 pub(in crate::services::discord) async fn headless_outbox(
     shared: &SharedData,
     frame: Frame<'_>,
@@ -349,6 +349,7 @@ pub(in crate::services::discord) async fn headless_outbox(
     let pool = shared.pg_pool.as_ref()?;
     let (provider, path) = (frame.provider.clone(), frame.path.to_path_buf());
     let (channel, file, range) = (frame.channel.get(), frame.file, frame.range);
+    let body = frame.body.to_string();
     let written = tokio::time::timeout_at(
         deadline,
         tokio::task::spawn_blocking(move || {
@@ -360,6 +361,7 @@ pub(in crate::services::discord) async fn headless_outbox(
                     file,
                     range,
                 },
+                &body,
                 deadline,
             )
         }),
