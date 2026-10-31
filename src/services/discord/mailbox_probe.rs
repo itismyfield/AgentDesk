@@ -3,6 +3,9 @@ use serenity::ChannelId;
 
 use super::SharedData;
 
+// Every probe here looks up without creating: a purged channel stays purged, and
+// an absent mailbox holds no turn, as a freshly spawned actor would report.
+
 /// Unreachable reads as idle: a dead actor admits no turn either way, the one
 /// reclaim caller (session idle cleanup) has independent liveness guards, and
 /// "busy" would permanently hold a live parent channel or voice path.
@@ -10,11 +13,10 @@ pub(in crate::services::discord) async fn mailbox_has_active_turn(
     shared: &SharedData,
     channel_id: ChannelId,
 ) -> bool {
-    shared
-        .mailbox(channel_id)
-        .has_active_turn()
-        .await
-        .unwrap_or(false)
+    let Some(mailbox) = shared.mailbox_peek(channel_id) else {
+        return false;
+    };
+    mailbox.has_active_turn().await.unwrap_or(false)
 }
 
 /// #3167 — true only when a *real* (non-background) active turn holds the
@@ -26,11 +28,10 @@ pub(in crate::services::discord) async fn mailbox_has_blocking_active_turn(
     shared: &SharedData,
     channel_id: ChannelId,
 ) -> bool {
-    shared
-        .mailbox(channel_id)
-        .has_blocking_active_turn()
-        .await
-        .unwrap_or(false)
+    let Some(mailbox) = shared.mailbox_peek(channel_id) else {
+        return false;
+    };
+    mailbox.has_blocking_active_turn().await.unwrap_or(false)
 }
 
 /// Unreachable reads as busy: for callers that must not act on a channel
@@ -40,11 +41,10 @@ pub(in crate::services::discord) async fn mailbox_has_active_turn_or_unreachable
     shared: &SharedData,
     channel_id: ChannelId,
 ) -> bool {
-    shared
-        .mailbox(channel_id)
-        .has_active_turn()
-        .await
-        .unwrap_or(true)
+    let Some(mailbox) = shared.mailbox_peek(channel_id) else {
+        return false;
+    };
+    mailbox.has_active_turn().await.unwrap_or(true)
 }
 
 /// Gate for the watcher-direct session-idle commit. An unreachable actor warns
@@ -56,7 +56,10 @@ pub(in crate::services::discord) async fn mailbox_blocks_session_idle_commit(
     tmux_session_name: &str,
     provider: &crate::services::provider::ProviderKind,
 ) -> bool {
-    match shared.mailbox(channel_id).cancel_token().await {
+    let Some(mailbox) = shared.mailbox_peek(channel_id) else {
+        return false;
+    };
+    match mailbox.cancel_token().await {
         Ok(None) => false,
         Ok(Some(_)) => {
             tracing::debug!(
@@ -84,11 +87,10 @@ pub(in crate::services::discord) async fn mailbox_has_blocking_active_turn_or_un
     shared: &SharedData,
     channel_id: ChannelId,
 ) -> bool {
-    shared
-        .mailbox(channel_id)
-        .has_blocking_active_turn()
-        .await
-        .unwrap_or(true)
+    let Some(mailbox) = shared.mailbox_peek(channel_id) else {
+        return false;
+    };
+    mailbox.has_blocking_active_turn().await.unwrap_or(true)
 }
 
 /// Waits for the channel's turn to end; an unreachable actor never counts as ended.
@@ -98,7 +100,9 @@ pub(in crate::services::discord) async fn wait_for_turn_end(
     timeout: std::time::Duration,
 ) -> bool {
     let start = tokio::time::Instant::now();
-    while shared.mailbox(channel_id).has_active_turn().await != Ok(false) {
+    while let Some(mailbox) = shared.mailbox_peek(channel_id)
+        && mailbox.has_active_turn().await != Ok(false)
+    {
         if start.elapsed() >= timeout {
             return false;
         }
