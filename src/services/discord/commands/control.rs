@@ -14,6 +14,7 @@ use super::super::{Context, Error, SharedData, check_auth, saturating_decrement_
 use clear_teardown::stop_released_turn;
 mod clear_report;
 mod clear_teardown;
+pub(in crate::services::discord) use clear_teardown::execution_cleanup;
 #[cfg(unix)]
 mod herdr_recovery;
 pub(in crate::services::discord) use clear_report::ClearReport;

@@ -171,9 +171,12 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "outbound/o_writer_io.rs": {".send_message": 1},
     "outbound/serenity_reference.rs": {".send_message": 2},
     "outbound/transport.rs": {".send_message": 1},
-    "outbound/turn_output_controller.rs": {"deliver_turn_output*": 1},
+    "outbound/turn_output_controller.rs": {"deliver_turn_output*": 3},
     "outbound/turn_output_controller/fresh_send.rs": {".send_message": 1},
-    "outbound/turn_output_controller/transport.rs": {".send_message": 1, "send_long_message*": 2},
+    "outbound/turn_output_controller/transport.rs": {
+        ".edit_message": 1, ".send_message": 2, ".send_notice_once": 1,
+        "replace_message_with_outcome": 1, "send_long_message*": 3,
+    },
     "placeholder_controller.rs": {".edit_message": 1},
     "placeholder_controller/queued_card_gate.rs": {"edit_channel_message*": 1},
     "placeholder_sweeper.rs": {"edit_outbound_message": 1},
@@ -391,7 +394,7 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
     ),
     "src/services/discord/outbound/completed_turn_ledger/o_pending.rs": ("capture:peek",),
     "src/services/discord/outbound/turn_output_controller.rs": (
-        "deliver_turn_output_with_fallback_revalidation:claim",
+        "deliver_turn_output_inner:claim",
     ),
     "src/services/discord/outbound/turn_output_controller/fresh_send.rs": (
         "deliver:claim",

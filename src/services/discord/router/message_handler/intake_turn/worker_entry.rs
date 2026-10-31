@@ -116,6 +116,13 @@ async fn worker_replay_admission(
         request.source_message_ids.iter().map(|source| source.get()),
         &request.user_text,
     );
+    // Physical adapters must consume the owner permit before this producer can be enabled.
+    if crate::services::discord::router::intake_gate::input_start::has_custody(pool, &input)
+        .await
+        .unwrap_or(true)
+    {
+        return Some(IntakeExecution::Deferred);
+    }
     let instance =
         crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
     let ctx = ReplayAdmissionContext::production(pool, &instance, admission::incarnation())
@@ -182,3 +189,6 @@ pub(crate) async fn start_exact_retry(
     }
     handoff
 }
+
+#[cfg(test)]
+mod custody_pg_tests;

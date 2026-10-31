@@ -17,6 +17,8 @@ mod intake_delivery_reconciler;
 mod intake_delivery_sweep;
 mod o_writer_host;
 mod orphan_recovery;
+mod owner_cleanup;
+mod owner_execution;
 mod queued_placeholders;
 mod queued_recovery;
 
@@ -258,6 +260,14 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 .map(|id| (ChannelId::new(id), instance_id.clone()))
         })
         .collect();
+    health::inspect_channel_home_seed_at_boot(
+        &health_registry,
+        &provider,
+        &token_hash,
+        pg_pool.as_ref(),
+        &restored_node_overrides,
+    )
+    .await;
     let restored_fast_mode_channels =
         restored_fast_mode_enabled_channels_for_provider(&bot_settings, &provider);
     let restored_fast_mode_reset_entries = restored_fast_mode_reset_entries(&bot_settings);
@@ -265,6 +275,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     let restored_codex_goals_channels = restored_codex_goals_enabled_channels(&bot_settings);
     let restored_codex_goals_reset_channels = restored_codex_goals_reset_channels(&bot_settings);
 
+    owner_execution::prepare(&provider, pg_pool.as_ref()).await;
     let shared = run_bot_build_shared_data(
         bot_settings,
         &provider,
@@ -337,6 +348,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             .await;
         spawns::run_bot_spawn_execution_runtime_tasks(&shared, &provider);
         run_bot_spawn_sigterm_handler(&shared, provider.clone());
+        o_writer_host::spawn_execution(&shared, &provider, boot_config.tui_o.as_ref());
         // REST workers persist the same mailbox state as Gateway runtimes.
         // Restore it before polling new intake; never replay Discord history.
         queued_recovery::restore_worker_queues(&shared, &provider).await;
@@ -394,6 +406,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             // a routing/config race fail closed instead of restoring the old
             // health-blind empty registry.
             register_standby_and_settle_reconcile(&health_registry, &provider, &shared).await;
+            o_writer_host::spawn_execution(&shared, &provider, boot_config.tui_o.as_ref());
             // Standby intake can execute a full turn, so it gets the same
             // marker fence and acknowledgement path as a gateway runtime.
             spawns::run_bot_spawn_execution_runtime_tasks(&shared, &provider);

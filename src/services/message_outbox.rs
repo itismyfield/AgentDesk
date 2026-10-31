@@ -32,6 +32,15 @@ pub(crate) struct OutboxMessage<'a> {
     pub session_key: Option<&'a str>,
 }
 
+fn encoded_output_origin(
+    origin: Option<&crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
+) -> Result<Option<serde_json::Value>, OutboxEnqueueError> {
+    origin
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|error| OutboxEnqueueError::Database(sqlx::Error::Encode(Box::new(error))))
+}
+
 #[derive(Debug)]
 pub(crate) enum OutboxEnqueueError {
     SourceNotAllowed { source: String },
@@ -255,6 +264,15 @@ pub(crate) async fn enqueue_outbox_pg_with_attachment_on_tx(
     message: OutboxMessage<'_>,
     attachment: Option<OutboxAttachment<'_>>,
 ) -> Result<i64, OutboxEnqueueError> {
+    enqueue_outbox_with_origin_on_tx(tx, message, attachment, None).await
+}
+
+pub(crate) async fn enqueue_outbox_with_origin_on_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    message: OutboxMessage<'_>,
+    attachment: Option<OutboxAttachment<'_>>,
+    origin: Option<&crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
+) -> Result<i64, OutboxEnqueueError> {
     validate_outbox_source(message.source)?;
     let (filename, content_type, data) = attachments::parts(attachment);
     let reason_code = normalized_reason_code(message.reason_code);
@@ -270,11 +288,12 @@ pub(crate) async fn enqueue_outbox_pg_with_attachment_on_tx(
     sqlx::query_scalar::<_, i64>(
         "INSERT INTO message_outbox
          (target, content, bot, source, reason_code, session_key, dedupe_key, dedupe_expires_at,
-          attachment_filename, attachment_content_type, attachment_data, session_notice)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, $10, $11)
+          attachment_filename, attachment_content_type, attachment_data, session_notice, output_origin)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, $10, $11, $12)
          ON CONFLICT (dedupe_key)
              WHERE dedupe_key IS NOT NULL AND status NOT IN ('failed', 'cancelled')
          DO UPDATE SET dedupe_expires_at = NULL
+           WHERE (message_outbox.output_origin->'origin') IS NOT DISTINCT FROM (excluded.output_origin->'origin')
          RETURNING id",
     )
     .bind(message.target)
@@ -288,6 +307,7 @@ pub(crate) async fn enqueue_outbox_pg_with_attachment_on_tx(
     .bind(content_type)
     .bind(data)
     .bind(notice)
+    .bind(encoded_output_origin(origin)?)
     .fetch_one(&mut **tx)
     .await
     .map_err(Into::into)
@@ -323,6 +343,18 @@ pub(crate) async fn enqueue_outbox_pg_with_exact_dedupe_and_attachment(
     cancel_token: Option<&CancelToken>,
     attachment: Option<OutboxAttachment<'_>>,
 ) -> Result<OutboxEnqueueOutcome, OutboxEnqueueError> {
+    enqueue_outbox_pg_with_exact_origin(pool, message, dedupe_key, cancel_token, attachment, None)
+        .await
+}
+
+pub(crate) async fn enqueue_outbox_pg_with_exact_origin(
+    pool: &PgPool,
+    message: OutboxMessage<'_>,
+    dedupe_key: &str,
+    cancel_token: Option<&CancelToken>,
+    attachment: Option<OutboxAttachment<'_>>,
+    origin: Option<&crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
+) -> Result<OutboxEnqueueOutcome, OutboxEnqueueError> {
     validate_outbox_source(message.source)?;
     let (filename, content_type, data) = attachments::parts(attachment);
     if cancel_requested(cancel_token) {
@@ -339,11 +371,12 @@ pub(crate) async fn enqueue_outbox_pg_with_exact_dedupe_and_attachment(
     let id = sqlx::query_scalar::<_, i64>(
         "INSERT INTO message_outbox
          (target, content, bot, source, reason_code, session_key, dedupe_key, dedupe_expires_at,
-          attachment_filename, attachment_content_type, attachment_data, session_notice)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW() + INTERVAL '30 days', $8, $9, $10, $11)
+          attachment_filename, attachment_content_type, attachment_data, session_notice, output_origin)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW() + INTERVAL '30 days', $8, $9, $10, $11, $12)
          ON CONFLICT (dedupe_key)
              WHERE dedupe_key IS NOT NULL AND status NOT IN ('failed', 'cancelled')
          DO UPDATE SET dedupe_key = EXCLUDED.dedupe_key
+          WHERE (message_outbox.output_origin->'origin') IS NOT DISTINCT FROM (excluded.output_origin->'origin')
          RETURNING id",
     )
     .bind(message.target)
@@ -357,6 +390,7 @@ pub(crate) async fn enqueue_outbox_pg_with_exact_dedupe_and_attachment(
     .bind(content_type)
     .bind(data)
     .bind(notice)
+    .bind(encoded_output_origin(origin)?)
     .fetch_one(pool)
     .await?;
     Ok(OutboxEnqueueOutcome::Enqueued { id })
@@ -367,6 +401,16 @@ pub(crate) async fn enqueue_outbox_pg_returning_outcome_with_ttl_and_cancel(
     message: OutboxMessage<'_>,
     dedupe_ttl_secs: i64,
     cancel_token: Option<&CancelToken>,
+) -> Result<OutboxEnqueueOutcome, OutboxEnqueueError> {
+    enqueue_outbox_pg_with_ttl_origin(pool, message, dedupe_ttl_secs, cancel_token, None).await
+}
+
+pub(crate) async fn enqueue_outbox_pg_with_ttl_origin(
+    pool: &PgPool,
+    message: OutboxMessage<'_>,
+    dedupe_ttl_secs: i64,
+    cancel_token: Option<&CancelToken>,
+    origin: Option<&crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
 ) -> Result<OutboxEnqueueOutcome, OutboxEnqueueError> {
     validate_outbox_source(message.source)?;
     let reason_code = normalized_reason_code(message.reason_code);
@@ -411,7 +455,9 @@ pub(crate) async fn enqueue_outbox_pg_returning_outcome_with_ttl_and_cancel(
     }
 
     let mut tx = pool.begin().await?;
-    let outbox_id = enqueue_outbox_pg_on_tx_with_ttl(&mut tx, message, dedupe_ttl_secs).await?;
+    let outbox_id =
+        enqueue_outbox_pg_on_tx_with_ttl_origin(&mut tx, message, dedupe_ttl_secs, None, origin)
+            .await?;
     tx.commit().await?;
 
     match outbox_id {
@@ -461,6 +507,16 @@ pub(crate) async fn enqueue_outbox_pg_on_tx_with_ttl_and_attachment(
     dedupe_ttl_secs: i64,
     attachment: Option<OutboxAttachment<'_>>,
 ) -> Result<Option<i64>, OutboxEnqueueError> {
+    enqueue_outbox_pg_on_tx_with_ttl_origin(tx, message, dedupe_ttl_secs, attachment, None).await
+}
+
+async fn enqueue_outbox_pg_on_tx_with_ttl_origin(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    message: OutboxMessage<'_>,
+    dedupe_ttl_secs: i64,
+    attachment: Option<OutboxAttachment<'_>>,
+    origin: Option<&crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
+) -> Result<Option<i64>, OutboxEnqueueError> {
     validate_outbox_source(message.source)?;
     let (filename, content_type, data) = attachments::parts(attachment);
     let reason_code = normalized_reason_code(message.reason_code);
@@ -481,12 +537,12 @@ pub(crate) async fn enqueue_outbox_pg_on_tx_with_ttl_and_attachment(
     Ok(sqlx::query_scalar::<_, i64>(
         "INSERT INTO message_outbox
          (target, content, bot, source, reason_code, session_key, dedupe_key, dedupe_expires_at,
-          attachment_filename, attachment_content_type, attachment_data, session_notice)
+          attachment_filename, attachment_content_type, attachment_data, session_notice, output_origin)
          VALUES ($1, $2, $3, $4, $5, $6, $7,
                  CASE WHEN $8::BIGINT > 0
                       THEN NOW() + ($8::BIGINT * INTERVAL '1 second')
                       ELSE NULL
-                 END, $9, $10, $11, $12)
+                 END, $9, $10, $11, $12, $13)
          ON CONFLICT (dedupe_key)
              WHERE dedupe_key IS NOT NULL AND status NOT IN ('failed', 'cancelled')
          DO NOTHING
@@ -504,6 +560,7 @@ pub(crate) async fn enqueue_outbox_pg_on_tx_with_ttl_and_attachment(
     .bind(content_type)
     .bind(data)
     .bind(notice)
+    .bind(encoded_output_origin(origin)?)
     .fetch_optional(&mut **tx)
     .await?)
 }
@@ -673,14 +730,27 @@ pub(crate) async fn gc_stale_outbox_rows(pool: &PgPool) -> Result<(u64, u64, u64
     .execute(pool)
     .await?
     .rows_affected();
-    let failed = sqlx::query(
-        "DELETE FROM message_outbox
-          WHERE status IN ('failed', 'cancelled')
-            AND created_at < NOW() - INTERVAL '7 days'",
-    )
-    .execute(pool)
-    .await?
-    .rows_affected();
+    // A routing notice row stays the historical identity of its owner generation.
+    let failed = "DELETE FROM message_outbox m
+          WHERE m.status IN ('failed', 'cancelled')
+            AND m.created_at < NOW() - INTERVAL '7 days'
+            AND NOT EXISTS (SELECT 1 FROM intake_session_owners o
+                             WHERE o.routing_notice_outbox_id = m.id)";
+    #[cfg(test)]
+    let failed = sqlx::AssertSqlSafe(
+        if crate::services::cluster::intake_router_hook::owner_record::cleanup::tests::mutant(
+            "gc-notice",
+        ) {
+            failed
+                .split("AND NOT EXISTS")
+                .next()
+                .unwrap_or(failed)
+                .to_owned()
+        } else {
+            failed.to_owned()
+        },
+    );
+    let failed = sqlx::query(failed).execute(pool).await?.rows_affected();
     let sent = sqlx::query(
         "DELETE FROM message_outbox
           WHERE status = 'sent'

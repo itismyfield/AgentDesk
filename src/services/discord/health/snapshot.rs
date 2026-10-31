@@ -978,6 +978,10 @@ pub(super) async fn build_health_snapshot_with_options(
         status = status.worsen(HealthStatus::Degraded);
         degraded_reasons.push(reason);
     }
+    for reason in super::channel_home_seed::health_reasons(registry).await {
+        status = status.worsen(HealthStatus::Degraded);
+        degraded_reasons.push(reason);
+    }
 
     DiscordHealthSnapshot {
         status,

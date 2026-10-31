@@ -45,6 +45,10 @@ pub enum LedgerEntry {
         at: DateTime<Utc>,
     },
     /// Written before the POST; `epoch` is the gateway ownership the POST was admitted under.
+    OutputOrigin {
+        serial: u64,
+        artifact: crate::services::cluster::intake_router_hook::owner_record::output::Artifact,
+    },
     Prepared {
         serial: u64,
         unit_key: UnitKey,
@@ -163,6 +167,8 @@ pub struct LedgerState {
     next_serial: u64,
     open_serial: Option<u64>,
     pieces: BTreeMap<u64, PieceRecord>,
+    output_origins:
+        BTreeMap<u64, crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
     latest: HashMap<(UnitKey, u32), u64>,
     excluded: BTreeMap<UnitKey, String>,
     gc: HashMap<SourceId, Vec<(u64, u64)>>,
@@ -180,6 +186,13 @@ impl LedgerState {
             floor: initial_anchor,
             ..Self::default()
         }
+    }
+
+    pub(crate) fn output_origin(
+        &self,
+        serial: u64,
+    ) -> Option<&crate::services::cluster::intake_router_hook::owner_record::output::Artifact> {
+        self.output_origins.get(&serial)
     }
 
     pub fn anchor(&self) -> u64 {
@@ -429,6 +442,19 @@ impl LedgerState {
                     self.violate("unsupported exact ledger evidence".into());
                 }
                 self.exact_evidence.push(*metadata);
+            }
+            LedgerEntry::OutputOrigin { serial, artifact } => {
+                if serial != self.next_serial
+                    || self.open_serial.is_some()
+                    || self
+                        .output_origins
+                        .get(&serial)
+                        .is_some_and(|old| old != &artifact)
+                {
+                    self.violate("output origin cannot replace an existing artifact".into());
+                } else {
+                    self.output_origins.entry(serial).or_insert(artifact);
+                }
             }
             LedgerEntry::Prepared {
                 serial,

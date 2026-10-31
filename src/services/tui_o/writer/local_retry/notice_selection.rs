@@ -24,6 +24,7 @@ pub(super) fn at(ledger: &LedgerState, serial: u64) -> Option<Pending> {
     Some(Pending {
         root_serial: serial,
         piece: PieceWork {
+            output_origin: ledger.output_origin(serial).cloned(),
             unit_key: root.unit_key.clone(),
             index: root.piece_index,
             payload: root.payload.clone(),

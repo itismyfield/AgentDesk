@@ -311,6 +311,30 @@ pub struct ClusterIntakeRoutingConfig {
     pub max_attempts_per_message: u32,
     #[serde(default = "default_intake_retry_authorization_secs")]
     pub retry_authorization_secs: u64,
+    /// Global kill switch for new home/peer fallback selection.
+    #[serde(default)]
+    pub input_fallback_enabled: bool,
+    #[serde(default, skip_serializing_if = "InputFallbackScope::is_default")]
+    pub input_fallback_scope: InputFallbackScope,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_fallback_pilot_channel_ids: Vec<String>,
+    /// The two approved Mac instance IDs; anything else leaves fallback off.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_fallback_pair_instance_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InputFallbackScope {
+    #[default]
+    Pilot,
+    Derived,
+}
+
+impl InputFallbackScope {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 impl Default for ClusterIntakeRoutingConfig {
@@ -324,6 +348,10 @@ impl Default for ClusterIntakeRoutingConfig {
             stale_claim_recovery_secs: default_intake_stale_claim_recovery_secs(),
             max_attempts_per_message: default_intake_max_attempts_per_message(),
             retry_authorization_secs: default_intake_retry_authorization_secs(),
+            input_fallback_enabled: false,
+            input_fallback_scope: InputFallbackScope::default(),
+            input_fallback_pilot_channel_ids: Vec::new(),
+            input_fallback_pair_instance_ids: Vec::new(),
         }
     }
 }

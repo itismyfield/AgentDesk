@@ -56,7 +56,7 @@ where
     };
     let run = tokio::spawn(async move {
         let service = async {
-            match terminate_scoped(request, shared, &pool, Some(expected)).await {
+            match terminate_scoped(request, shared, &pool, Some(expected), false).await {
                 Ok(exclusion) => {
                     #[cfg(test)]
                     super::run_probe(&super::BEFORE_POSTLUDE).await;

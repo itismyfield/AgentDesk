@@ -291,6 +291,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                 continue;
             };
             let piece = PieceWork {
+                output_origin: None,
                 unit_key,
                 payload,
                 index: 0,

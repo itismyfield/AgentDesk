@@ -25,7 +25,6 @@ use super::o_piece_delivery::{
 use super::projection::ReceiptOverlay;
 use super::provenance::{ProvenanceEntry, ProvenanceLog};
 use super::send::BoundedTransport;
-use crate::services::tui_o::ownership::GatewayOwnership;
 use crate::services::tui_o::store::ledger::{LedgerState, PieceOutcome, PieceRecord};
 
 /// How long a granted slot stays open before another holder may settle it as abandoned.
@@ -229,7 +228,7 @@ impl Runner {
         let Some(lease) = writer.try_lease() else {
             return Ok(Admission::GuardRejected(GuardReason::LeaseBusy));
         };
-        if !matches!(writer.gate().current(), GatewayOwnership::Owned { .. }) {
+        if writer.gate().current().epoch().is_none() {
             return Ok(Admission::GuardRejected(GuardReason::NoGateway));
         }
         let (row, expected_revision, intent) = match intent {

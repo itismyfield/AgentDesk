@@ -50,6 +50,7 @@ enum StaticSendSource {
     System,
     Timeouts,
     LifecycleNotifier,
+    RoutingTransition,
     RoutineRuntime,
     ScheduledMessage,
     HeadlessTurn,
@@ -106,6 +107,7 @@ const POLICIES: &[SourcePolicy] = &[
     policy!(System, "system", LOOPBACK),
     policy!(Timeouts, "timeouts", LOOPBACK),
     policy!(LifecycleNotifier, "lifecycle_notifier", LOOPBACK),
+    policy!(RoutingTransition, "routing_transition", LOOPBACK),
     policy!(RoutineRuntime, "routine-runtime", LOOPBACK),
     policy!(ScheduledMessage, "scheduled_message", LOOPBACK),
     policy!(HeadlessTurn, "headless_turn", LOOPBACK),
@@ -208,6 +210,7 @@ mod tests {
         "stall_watchdog",
         "tui_o_alarm",
         "adopt_fence_forward_notice",
+        "routing_transition",
     ];
 
     #[test]

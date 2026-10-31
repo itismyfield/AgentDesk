@@ -13,6 +13,10 @@ async fn execution_capacity_routes_concurrent_channels_without_overflow_pg() {
             crate::config_live_reload::install(self.0.clone());
         }
     }
+    // Serialize with other tests that install a live config before this one does.
+    let _live = crate::config_live_reload::test_live_guard(
+        crate::config::test_env_lock::acquire_shared_test_env_lock(),
+    );
     let previous = crate::config_live_reload::current()
         .map(|c| (*c).clone())
         .unwrap_or_default();

@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 
 use super::Wake;
 use crate::services::tui_o::channel_policy::{Adoption, Candidate};
-use crate::services::tui_o::ownership::{GatewayOwnership, OwnershipGate};
+use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
 use crate::services::tui_o::store::{InitSource, OStore};
 use crate::services::tui_o::writer::activation;
@@ -232,7 +232,7 @@ impl<I: HostIo> Takeover<'_, I> {
         prefix: &Prefix,
     ) -> Result<(), Taken> {
         let (io, channel) = (self.io, self.channel);
-        let GatewayOwnership::Owned { epoch: expected } = self.gate.current() else {
+        let Some(expected) = self.gate.current().epoch() else {
             return Err(Taken::Retry(
                 "gateway ownership changed before O activation".into(),
             ));
