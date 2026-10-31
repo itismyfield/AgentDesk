@@ -72,12 +72,6 @@ export interface KanbanCardMetadata {
   redispatch_count?: number;
   redispatch_reason?: string;
   review_checklist?: KanbanReviewChecklistItem[];
-  reward?: {
-    granted_at: number;
-    agent_id: string;
-    xp: number;
-    tasks_done: number;
-  };
   manual_review?: boolean;
   deferred_dod?: Array<{
     id: string;

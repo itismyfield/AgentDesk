@@ -13,18 +13,6 @@ const MOCK_DASHBOARD_STATS = {
     break: 0,
     offline: 0,
   },
-  top_agents: [
-    {
-      id: "agent-ada",
-      name: "Ada Dashboard",
-      alias: "ada",
-      name_ko: "아다 대시보드",
-      avatar_emoji: "🛠️",
-      stats_tasks_done: 48,
-      stats_xp: 1620,
-      stats_tokens: 124000,
-    },
-  ],
   departments: [
     {
       id: "dept-platform",
@@ -34,7 +22,6 @@ const MOCK_DASHBOARD_STATS = {
       color: "#38bdf8",
       total_agents: 1,
       working_agents: 1,
-      sum_xp: 1620,
     },
     {
       id: "dept-product",
@@ -44,7 +31,6 @@ const MOCK_DASHBOARD_STATS = {
       color: "#f97316",
       total_agents: 1,
       working_agents: 0,
-      sum_xp: 980,
     },
   ],
   dispatched_count: 1,
@@ -125,7 +111,6 @@ const MOCK_AGENTS = [
     current_task_id: "#786",
     workflow_pack_key: "development",
     stats_tasks_done: 48,
-    stats_xp: 1620,
     stats_tokens: 124000,
     activity_source: "agentdesk",
     created_at: AGENTS_HUB_NOW - 604_800_000,
@@ -147,7 +132,6 @@ const MOCK_AGENTS = [
     current_task_id: null,
     workflow_pack_key: "development",
     stats_tasks_done: 31,
-    stats_xp: 980,
     stats_tokens: 88000,
     activity_source: "idle",
     created_at: AGENTS_HUB_NOW - 518_400_000,
@@ -386,7 +370,6 @@ async function mockShell(page: Page) {
   await page.route(/\/api\/dispatches(?:\?.*)?$/, (route) => route.fulfill({ json: { dispatches: [] } }));
   await page.route(/\/api\/kanban-cards(?:\?.*)?$/, (route) => route.fulfill({ json: { cards: [] } }));
   await page.route(/\/api\/kanban-repos$/, (route) => route.fulfill({ json: { repos: [] } }));
-  await page.route(/\/api\/round-table-meetings(?:\?.*)?$/, (route) => route.fulfill({ json: { meetings: [] } }));
   await page.route(/\/api\/health(?:\/detail)?$/, (route) => route.fulfill({ json: HEALTH }));
 }
 

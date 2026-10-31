@@ -157,10 +157,7 @@ export function useSettingsMetaCatalog({
   }, [runtime.changedKeys, runtime.defaults, runtime.ready, runtime.values]);
 
   const configMetas = useMemo<SettingRowMeta[]>(
-    () => configEntries.flatMap((entry) => {
-      const placement = configEntryPlacement(entry);
-      return placement ? [metaFromConfigEntry(entry, configEdits, placement)] : [];
-    }),
+    () => configEntries.map((entry) => metaFromConfigEntry(entry, configEdits, configEntryPlacement(entry))),
     [configEdits, configEntries],
   );
 

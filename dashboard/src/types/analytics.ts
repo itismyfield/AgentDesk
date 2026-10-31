@@ -9,15 +9,6 @@ export interface DashboardStats {
     break: number;
     offline: number;
   };
-  top_agents: Array<{
-    id: string;
-    name: string;
-    alias?: string | null;
-    name_ko: string;
-    avatar_emoji: string;
-    stats_tasks_done: number;
-    stats_tokens: number;
-  }>;
   departments: Array<{
     id: string;
     name: string;

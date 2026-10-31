@@ -204,43 +204,6 @@ export interface CliToolStatus {
 
 export type CliStatusMap = Record<CliProvider, CliToolStatus>;
 
-// Company Stats (matches server GET /api/stats response)
-export interface CompanyStats {
-  tasks: {
-    total: number;
-    done: number;
-    in_progress: number;
-    inbox: number;
-    planned: number;
-    collaborating: number;
-    review: number;
-    cancelled: number;
-    completion_rate: number;
-  };
-  agents: {
-    total: number;
-    working: number;
-    idle: number;
-  };
-  top_agents: Array<{
-    id: string;
-    name: string;
-    alias?: string | null;
-    avatar_emoji: string;
-    stats_tasks_done: number;
-    stats_tokens: number;
-  }>;
-  tasks_by_department: Array<{
-    id: string;
-    name: string;
-    icon: string;
-    color: string;
-    total_tasks: number;
-    done_tasks: number;
-  }>;
-  recent_activity: Array<Record<string, unknown>>;
-}
-
 // SubTask
 export type SubTaskStatus = "pending" | "in_progress" | "done" | "blocked";
 

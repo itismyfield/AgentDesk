@@ -136,9 +136,8 @@ export function isReadOnlyConfigKey(key: string): boolean {
   return READ_ONLY_CONFIG_KEYS.has(key);
 }
 
-/** Where a /api/settings/config entry lives in the 5-tab layout; agent-quality keys stay hidden. */
-export function configEntryPlacement(entry: ConfigEntry): { panel: SettingsPanel; section: string } | null {
-  if (entry.category === "quality") return null;
+/** Where a /api/settings/config entry lives in the 5-tab layout. */
+export function configEntryPlacement(entry: ConfigEntry): { panel: SettingsPanel; section: string } {
   if (entry.key === "server_port") return { panel: "machine", section: "server" };
   if (entry.key.startsWith("context_")) return { panel: "ai", section: "context" };
   if (entry.key.endsWith("_channel_id")) return { panel: "connections", section: "channels" };

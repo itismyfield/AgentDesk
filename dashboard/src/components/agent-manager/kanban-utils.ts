@@ -299,7 +299,6 @@ export function stringifyCardMetadata(metadata: KanbanCardMetadata): string | nu
   }
   if (metadata.redispatch_count) payload.redispatch_count = metadata.redispatch_count;
   if (metadata.redispatch_reason) payload.redispatch_reason = metadata.redispatch_reason;
-  if (metadata.reward) payload.reward = metadata.reward;
   return Object.keys(payload).length > 0 ? JSON.stringify(payload) : null;
 }
 

@@ -54,84 +54,6 @@ async function getHomeWidgetOrder(page: Page) {
   );
 }
 
-const MOCK_MEETINGS = [
-  {
-    id: "meeting-smoke-1",
-    agenda: "로드밸런서 경고 플로우 리뷰",
-    summary:
-      "경고 bubble 노출 기준과 모바일 disclosure 상호작용을 정리했습니다.",
-    selection_reason: "Office 경고 플로우 확인 필요",
-    status: "completed",
-    primary_provider: "claude",
-    reviewer_provider: "codex",
-    participant_names: ["adk-dashboard", "project-agentdesk"],
-    total_rounds: 2,
-    issues_created: 1,
-    proposed_issues: [
-      {
-        title: "Fix office warning disclosure copy",
-        body: "Adjust copy and add coverage.",
-        assignee: "adk-dashboard",
-      },
-    ],
-    issue_creation_results: null,
-    issue_repo: "itismyfield/AgentDesk",
-    started_at: 1760918400000,
-    completed_at: 1760919300000,
-    created_at: 1760918400000,
-    entries: [],
-  },
-  {
-    id: "meeting-smoke-2",
-    agenda: "Meetings hub read-only QA",
-    summary: "회의 상세 drawer와 스킬 카탈로그 병행 노출을 점검했습니다.",
-    selection_reason: null,
-    status: "in_progress",
-    primary_provider: "codex",
-    reviewer_provider: "gemini",
-    participant_names: ["adk-dashboard"],
-    total_rounds: 1,
-    issues_created: 0,
-    proposed_issues: null,
-    issue_creation_results: null,
-    issue_repo: null,
-    started_at: 1760922000000,
-    completed_at: null,
-    created_at: 1760922000000,
-    entries: [],
-  },
-];
-
-const MOCK_MEETING_DETAIL = {
-  ...MOCK_MEETINGS[0],
-  meeting_hash: "abcd1234",
-  thread_hash: "efgh5678",
-  entries: [
-    {
-      id: 1,
-      meeting_id: "meeting-smoke-1",
-      seq: 1,
-      round: 1,
-      speaker_role_id: "adk-dashboard",
-      speaker_name: "adk-dashboard",
-      content: "모바일에서 warning disclosure는 별도 버튼으로 분리합니다.",
-      is_summary: 0,
-      created_at: 1760918460000,
-    },
-    {
-      id: 2,
-      meeting_id: "meeting-smoke-1",
-      seq: 2,
-      round: 1,
-      speaker_role_id: "project-agentdesk",
-      speaker_name: "project-agentdesk",
-      content: "hover/focus desktop bubble은 유지하고 tap persistent를 허용합니다.",
-      is_summary: 0,
-      created_at: 1760918520000,
-    },
-  ],
-};
-
 const MOCK_SKILLS = [
   {
     name: "office-warning-disclosure",
@@ -255,18 +177,6 @@ const MOCK_DASHBOARD_STATS = {
     break: 0,
     offline: 0,
   },
-  top_agents: [
-    {
-      id: "agent-ada",
-      name: "Ada Dashboard",
-      alias: "ada",
-      name_ko: "아다 대시보드",
-      avatar_emoji: "🛠️",
-      stats_tasks_done: 48,
-      stats_xp: 1620,
-      stats_tokens: 124000,
-    },
-  ],
   departments: [
     {
       id: "dept-platform",
@@ -276,7 +186,6 @@ const MOCK_DASHBOARD_STATS = {
       color: "#38bdf8",
       total_agents: 1,
       working_agents: 1,
-      sum_xp: 1620,
     },
     {
       id: "dept-product",
@@ -286,7 +195,6 @@ const MOCK_DASHBOARD_STATS = {
       color: "#f97316",
       total_agents: 1,
       working_agents: 0,
-      sum_xp: 980,
     },
   ],
   dispatched_count: 1,
@@ -511,7 +419,6 @@ const MOCK_AGENTS = [
     current_task_id: "#786",
     workflow_pack_key: "development",
     stats_tasks_done: 48,
-    stats_xp: 1620,
     stats_tokens: 124000,
     activity_source: "agentdesk",
     created_at: AGENTS_HUB_NOW - 604_800_000,
@@ -533,7 +440,6 @@ const MOCK_AGENTS = [
     current_task_id: null,
     workflow_pack_key: "development",
     stats_tasks_done: 31,
-    stats_xp: 980,
     stats_tokens: 88000,
     activity_source: "idle",
     created_at: AGENTS_HUB_NOW - 518_400_000,
@@ -760,56 +666,6 @@ const MOCK_GITHUB_ISSUES = [
   },
 ];
 
-const MOCK_ACHIEVEMENTS = [
-  {
-    id: "achievement-first-task-ada",
-    agent_id: "agent-ada",
-    type: "first_task",
-    name: "첫 번째 태스크",
-    description: "첫 번째 dashboard milestone unlock",
-    earned_at: AGENTS_HUB_NOW - 259_200_000,
-    agent_name: "Ada Dashboard",
-    agent_name_ko: "에이다 대시보드",
-    avatar_emoji: "📊",
-    rarity: "rare",
-    progress: null,
-  },
-];
-
-const MOCK_STREAKS = [
-  {
-    agent_id: "agent-ada",
-    name: "Ada Dashboard",
-    avatar_emoji: "📊",
-    streak: 12,
-    last_active: "2026-04-21",
-  },
-];
-
-const MOCK_DAILY_MISSIONS = [
-  {
-    id: "dispatches_today",
-    label: "Complete 5 dispatches today",
-    current: 3,
-    target: 5,
-    completed: false,
-  },
-  {
-    id: "active_agents_today",
-    label: "Get 3 agents shipping today",
-    current: 2,
-    target: 3,
-    completed: false,
-  },
-  {
-    id: "review_queue_zero",
-    label: "Drain the review queue",
-    current: 0,
-    target: 1,
-    completed: true,
-  },
-];
-
 const MOCK_SETTINGS_FSM_PIPELINE = {
   name: "agentdesk-default",
   version: 1,
@@ -891,48 +747,6 @@ const MOCK_SETTINGS_CONFIG_ENTRIES = [
     label_en: "Max Review Rounds",
   },
 ];
-
-async function mockMeetingsHubApis(page: Page) {
-  await page.route(/\/api\/round-table-meetings\/channels$/, async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ channels: [] }),
-    });
-  });
-
-  await page.route(/\/api\/github-repos$/, async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ viewer_login: "", repos: [] }),
-    });
-  });
-
-  await page.route(/\/api\/skills\/catalog$/, async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ catalog: MOCK_SKILLS }),
-    });
-  });
-
-  await page.route(/\/api\/round-table-meetings\/meeting-smoke-1$/, async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ meeting: MOCK_MEETING_DETAIL }),
-    });
-  });
-
-  await page.route(/\/api\/round-table-meetings$/, async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ meetings: MOCK_MEETINGS }),
-    });
-  });
-}
 
 async function mockAgentsHubApis(page: Page) {
   await page.route(/\/api\/agents\/[^/]+\/execution-node$/, async (route) => {
@@ -1204,22 +1018,6 @@ async function mockDashboardBootstrap(page: Page) {
     });
   });
 
-  await page.route(/\/api\/streaks$/, async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ streaks: MOCK_STREAKS }),
-    });
-  });
-
-  await page.route(/\/api\/achievements(?:\?.*)?$/, async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ achievements: MOCK_ACHIEVEMENTS, daily_missions: MOCK_DAILY_MISSIONS }),
-    });
-  });
-
   await page.route(/\/api\/skills\/catalog$/, async (route) => {
     await route.fulfill({
       status: 200,
@@ -1281,43 +1079,11 @@ async function mockDashboardBootstrap(page: Page) {
     });
   });
 
-  await page.route(/\/api\/agents\/quality\/ranking(?:\?.*)?$/, async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ generatedAt: "2026-05-15T01:00:00.000Z", agents: [] }),
-    });
-  });
-
-  await page.route(/\/api\/round-table-meetings\/channels$/, async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ channels: [] }),
-    });
-  });
-
   await page.route(/\/api\/github-repos$/, async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({ viewer_login: "", repos: [] }),
-    });
-  });
-
-  await page.route(/\/api\/round-table-meetings\/meeting-smoke-1$/, async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ meeting: MOCK_MEETING_DETAIL }),
-    });
-  });
-
-  await page.route(/\/api\/round-table-meetings$/, async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ meetings: MOCK_MEETINGS }),
     });
   });
 

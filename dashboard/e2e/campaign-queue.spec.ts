@@ -6,7 +6,7 @@ const NOW = "2026-10-31T08:00:00.000Z";
 const agent = (id: string, name: string, nameKo: string) => ({
   id, role_id: id, name, alias: null, name_ko: nameKo, name_ja: null, name_zh: null, department_id: null, cli_provider: "codex",
   avatar_emoji: "🛠️", sprite_number: 3, personality: null, status: "idle", current_task_id: null, workflow_pack_key: "development",
-  stats_tasks_done: 0, stats_xp: 0, stats_tokens: 0, activity_source: "agentdesk", created_at: 1_790_000_000_000,
+  stats_tasks_done: 0, stats_tokens: 0, activity_source: "agentdesk", created_at: 1_790_000_000_000,
 });
 const AGENTS = [agent("agent-ada", "Ada Dashboard", "아다 대시보드"), agent("agent-luna", "Luna Ops", "루나 옵스")];
 
@@ -76,7 +76,6 @@ async function mockApi(page: Page) {
   await json(page, /\/api\/settings$/, { language: "ko", theme: "dark" });
   await json(page, /\/api\/audit-logs(?:\?.*)?$/, { logs: [] });
   await json(page, /\/api\/dispatches(?:\?.*)?$/, { dispatches: [] });
-  await json(page, /\/api\/round-table-meetings$/, { meetings: [] });
   await json(page, /\/api\/kanban-cards(?:\?.*)?$/, { cards: CARDS });
   await page.route(/\/api\/kanban-cards\/[^/?]+$/, (route) => {
     const id = decodeURIComponent(new URL(route.request().url()).pathname.split("/").pop() ?? "");

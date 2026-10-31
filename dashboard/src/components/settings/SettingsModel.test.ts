@@ -19,7 +19,9 @@ describe("settings panels", () => {
     expect(configEntryPlacement(entry("context_compact_percent", "context"))).toEqual({ panel: "ai", section: "context" });
     expect(configEntryPlacement(entry("requested_timeout_min", "timeout"))).toEqual({ panel: "workflow", section: "timeouts" });
     expect(configEntryPlacement(entry("review_enabled", "review"))).toEqual({ panel: "workflow", section: "review" });
-    expect(configEntryPlacement(entry("agent_quality_monitoring_channel_id", "quality"))).toBeNull();
+    // The old quality category now only holds live alert settings, so they show like any other key.
+    expect(configEntryPlacement(entry("agent_quality_monitoring_channel_id", "quality"))).toEqual({ panel: "connections", section: "channels" });
+    expect(configEntryPlacement(entry("kanban_relay_alert_threshold", "quality"))).toEqual({ panel: "workflow", section: "other" });
   });
 
   it("replaces internal server labels and marks pending edits", () => {
