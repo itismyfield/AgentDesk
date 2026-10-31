@@ -16,7 +16,7 @@ use crate::services::discord::queue_io::input_owner::origin::{Execution, InputOr
 use crate::services::discord::queue_io::input_owner::{pump, target};
 use crate::services::platform::tmux::PaneLiveness;
 use crate::services::provider::{CancelToken, ProviderKind};
-use crate::services::session_host::HerdrTarget;
+use crate::services::session_host::{HerdrTarget, herdr_endpoints};
 use crate::services::turn_host::{HerdrTurnPlan, TurnHost};
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};
 use serde_json::{Value, json};
@@ -121,7 +121,7 @@ fn bound_herdr(plan: &HerdrTurnPlan) -> Option<(HerdrTarget, String, Value)> {
         return None;
     };
     let at = (record.location.as_ref()).filter(|_| record.state == HostedState::Bound)?;
-    let pane = crate::services::session_host::herdr_endpoints().target(record)?;
+    let pane = herdr_endpoints().target(record)?;
     let target = json!({"host":"herdr","owner":record.owner.logical_key,"root":at.socket_addr,
         "execution_nonce":record.execution_nonce});
     Some((pane, format!("{}#{}", at.socket_addr, at.pane_id), target))
