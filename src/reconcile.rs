@@ -1152,6 +1152,21 @@ async fn reset_broken_auto_queue_entries_pg(pool: &PgPool) -> Result<usize> {
              WHERE r.id = e.run_id
                AND r.status = 'cancelled'
            )
+           AND NOT EXISTS (
+             SELECT 1 FROM task_dispatches live
+             WHERE live.kanban_card_id = e.kanban_card_id AND live.status IN ('pending', 'dispatched')
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM pr_tracking p
+             WHERE p.card_id = e.kanban_card_id AND p.pr_number IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM task_dispatches td WHERE td.id = e.dispatch_id AND td.status IN ('failed', 'cancelled'))
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM sessions s
+             WHERE (s.active_dispatch_id = e.dispatch_id OR s.active_dispatch_id IN (
+               SELECT id FROM task_dispatches WHERE kanban_card_id = e.kanban_card_id
+             )) AND COALESCE(s.status, '') NOT IN ('disconnected', 'aborted', 'completed', 'failed', 'cancelled')
+           )
            AND (
              e.dispatch_id IS NULL
              OR TRIM(e.dispatch_id) = ''
@@ -1159,7 +1174,7 @@ async fn reset_broken_auto_queue_entries_pg(pool: &PgPool) -> Result<usize> {
                SELECT 1
                FROM task_dispatches td
                WHERE td.id = e.dispatch_id
-                 AND td.status NOT IN ('cancelled', 'failed', 'completed')
+                 AND td.status NOT IN ('cancelled', 'failed')
              )
            )",
     )
