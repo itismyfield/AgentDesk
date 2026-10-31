@@ -25,6 +25,10 @@ pub async fn list_cards_pg(
         query.push_bind(status.to_string());
     }
 
+    if filter.exclude_done {
+        query.push(" AND kc.status <> 'done'");
+    }
+
     if let Some(repo_id) = filter.repo_id.as_deref() {
         query.push(" AND kc.repo_id = ");
         query.push_bind(repo_id.to_string());

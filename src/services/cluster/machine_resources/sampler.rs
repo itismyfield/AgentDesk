@@ -14,6 +14,8 @@ pub(super) struct Sampler {
     network: network::NetworkSampler,
     physical_cores: Option<usize>,
     primed: bool,
+    #[cfg(target_os = "macos")]
+    host: libc::mach_port_t,
 }
 
 impl Sampler {
@@ -26,6 +28,8 @@ impl Sampler {
             network: network::NetworkSampler::new(advertised_ip, wired),
             physical_cores: System::physical_core_count(),
             primed: false,
+            #[cfg(target_os = "macos")]
+            host: super::memory::host_port(),
         }
     }
 
@@ -53,12 +57,7 @@ impl Sampler {
         };
         self.primed = true;
         let total = self.system.total_memory();
-        let available = self.system.available_memory().min(total);
-        let memory = (total > 0).then_some(MemoryResources {
-            total_bytes: total,
-            used_bytes: total - available,
-            available_bytes: available,
-        });
+        let memory = (total > 0).then(|| self.memory(total)).flatten();
         let mut disks: Vec<_> = self
             .disks
             .iter()
@@ -95,6 +94,26 @@ impl Sampler {
             gpus: Vec::new(),
             network: self.network.collect(),
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn memory(&self, total: u64) -> Option<MemoryResources> {
+        use super::memory;
+        Some(memory::activity_monitor(
+            total,
+            memory::page_bytes()?,
+            memory::vm_pages(self.host)?,
+        ))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn memory(&self, total: u64) -> Option<MemoryResources> {
+        let available = self.system.available_memory().min(total);
+        Some(MemoryResources {
+            total_bytes: total,
+            used_bytes: total - available,
+            available_bytes: available,
+        })
     }
 }
 

@@ -486,7 +486,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/routines",
             "routines",
-            "List durable routines with optional agent/status filters.",
+            "List durable routines with optional agent/status filters. Each routine carries `last_run`: its newest run in the `/api/routines/{id}/runs` record shape, or null before the first run.",
         )
         .with_params([
             (
@@ -500,7 +500,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         ])
         .with_example(
             json!({"query": {"status": "enabled"}}),
-            json!({"routines": [{"id": "routine-1", "script_ref": "daily-summary.js", "status": "enabled", "fallback_agent_id": "claude", "max_retries": 1}], "default_timeout_secs": 1800}),
+            json!({"routines": [{"id": "routine-1", "script_ref": "daily-summary.js", "status": "enabled", "fallback_agent_id": "claude", "max_retries": 1, "last_run": {"id": "run-1", "routine_id": "routine-1", "status": "succeeded", "started_at": "2026-10-31T03:00:00Z", "finished_at": "2026-10-31T03:00:04Z"}}], "default_timeout_secs": 1800}),
         ),
         ep(
             "GET",

@@ -22,11 +22,13 @@ use super::{
 };
 use crate::api_caller_observability::RequestPrincipal;
 use crate::error::{AppError, AppResult, ErrorCode};
+use crate::services::routines::store::{RoutineRecord, RoutineRunRecord};
 use crate::services::routines::{
     NewRoutine, RoutineLifecycleEvent, RoutineScriptLoader, RoutineSessionCommand,
     execute_claimed_script_run, is_migrated_launchd_script_ref,
     validate_migrated_launchd_activation,
 };
+use std::collections::HashMap;
 
 pub async fn list_routines(
     State(state): State<AppState>,
@@ -37,10 +39,71 @@ pub async fn list_routines(
         .list_routines(query.agent_id.as_deref(), query.status.as_deref())
         .await
         .map_err(store_error)?;
+    let ids: Vec<String> = routines.iter().map(|routine| routine.id.clone()).collect();
+    let mut last_runs: HashMap<String, RoutineRunRecord> = store
+        .latest_runs(&ids)
+        .await
+        .map_err(store_error)?
+        .into_iter()
+        .map(|run| (run.routine_id.clone(), run))
+        .collect();
+    let routines: Vec<RoutineListItem> = routines
+        .into_iter()
+        .map(|routine| RoutineListItem {
+            last_run: last_runs.remove(&routine.id),
+            routine,
+        })
+        .collect();
     Ok(Json(json!({
         "routines": routines,
         "default_timeout_secs": state.config.routines.agent_timeout_secs,
     })))
+}
+
+/// A listed routine with its newest run (`null` before the first run).
+#[derive(serde::Serialize)]
+struct RoutineListItem {
+    #[serde(flatten)]
+    routine: RoutineRecord,
+    last_run: Option<RoutineRunRecord>,
+}
+
+#[cfg(test)]
+mod list_item_tests {
+    use super::*;
+
+    #[test]
+    fn listed_routine_keeps_its_fields_beside_last_run() {
+        let now = chrono::Utc::now();
+        let routine = RoutineRecord {
+            id: "routine-1".into(),
+            agent_id: None,
+            fallback_agent_id: None,
+            max_retries: 0,
+            script_ref: "a.js".into(),
+            name: "a".into(),
+            status: "enabled".into(),
+            execution_strategy: "persistent".into(),
+            schedule: None,
+            next_due_at: None,
+            last_run_at: None,
+            last_result: None,
+            checkpoint: None,
+            discord_thread_id: None,
+            timeout_secs: None,
+            in_flight_run_id: None,
+            pause_reason: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let mut expected = json!(routine);
+        expected["last_run"] = Value::Null;
+        let listed = RoutineListItem {
+            routine,
+            last_run: None,
+        };
+        assert_eq!(json!(listed), expected);
+    }
 }
 
 pub async fn routine_metrics(

@@ -557,3 +557,40 @@ async fn fresh_terminal_turn_error_ends_run_as_failure_before_timeout_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+#[tokio::test]
+async fn latest_runs_return_each_routines_newest_run_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let store = store(&pool);
+    let ran = store
+        .attach_routine(new_routine("ran-twice", None, None))
+        .await
+        .unwrap();
+    let idle = store
+        .attach_routine(new_routine("never-ran", None, None))
+        .await
+        .unwrap();
+    for (run_id, minutes_ago) in [("run-old", 10), ("run-new", 1)] {
+        sqlx::query(
+            "INSERT INTO routine_runs (id, routine_id, status, started_at)
+             VALUES ($1, $2, 'succeeded', NOW() - ($3::bigint * INTERVAL '1 minute'))",
+        )
+        .bind(run_id)
+        .bind(&ran.id)
+        .bind(minutes_ago)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let latest = store
+        .latest_runs(&[ran.id.clone(), idle.id.clone()])
+        .await
+        .unwrap();
+    assert_eq!(latest, store.list_runs(&ran.id, 1).await.unwrap());
+    assert_eq!(latest[0].id, "run-new");
+
+    pool.close().await;
+    db.drop().await;
+}

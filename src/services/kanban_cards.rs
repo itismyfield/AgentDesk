@@ -117,6 +117,7 @@ pub struct ListCardsInput {
     pub status: Option<String>,
     pub repo_id: Option<String>,
     pub assigned_agent_id: Option<String>,
+    pub exclude_done: bool,
 }
 
 impl KanbanService {
@@ -144,6 +145,7 @@ impl KanbanService {
                 status: input.status,
                 repo_id: input.repo_id,
                 assigned_agent_id: input.assigned_agent_id,
+                exclude_done: input.exclude_done,
             },
             &registered_repo_ids,
         )
