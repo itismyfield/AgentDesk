@@ -207,6 +207,26 @@ async fn observable(handle: &ChannelMailboxHandle, attempt: &str) -> Result<bool
         .await
 }
 
+/// A synthetic start's original: its reservation's message as a bot input of this process's
+/// generation, and the ticket that turn names on every re-request.
+pub(crate) fn synthetic_original(
+    turn_id: &str,
+    channel: u64,
+    text: &str,
+    author: u64,
+) -> Result<(PendingQueueItem, AdmissionTicket), String> {
+    let message = (turn_id.rsplit(':').next())
+        .and_then(|id| id.parse::<u64>().ok())
+        .ok_or("reserved source missing")?;
+    let generation = crate::services::discord::runtime_store::process_generation();
+    let original = serde_json::from_value(serde_json::json!({"author_id":author,
+        "author_is_bot":true,"message_id":message,"source_message_ids":[message],
+        "channel_id":channel,"queued_generation":generation,"text":text}))
+    .map_err(|error| error.to_string())?;
+    let ticket = AdmissionTicket::stored(&format!("turn-{channel}-{message}"));
+    Ok((original, ticket))
+}
+
 pub(crate) async fn mailbox(
     registry: &HealthRegistry,
     provider: &str,
@@ -240,7 +260,6 @@ impl ChannelMailboxHandle {
 
     /// A synthetic start's original and the owner's namespace when the owner takes a start on this
     /// TUI target; `None` leaves a process target or an unowned channel to its legacy start.
-    #[cfg(unix)]
     pub(crate) async fn owned_start(
         &self,
         tui: bool,
@@ -252,7 +271,7 @@ impl ChannelMailboxHandle {
         } else {
             Execution::Process
         };
-        if !super::start::owner_will_take(self, execution, InputOrigin::Routine).await? {
+        if !super::ingress::owner_will_take(self, execution, InputOrigin::Routine).await? {
             return Ok(None);
         }
         let namespace = self
@@ -263,7 +282,7 @@ impl ChannelMailboxHandle {
                 .ok_or_else(|| "owner namespace missing".into())
             })
             .await?;
-        let (original, _) = super::start::synthetic_original(turn_id, channel, text, 1)?;
+        let (original, _) = synthetic_original(turn_id, channel, text, 1)?;
         Ok(Some((original, namespace)))
     }
 

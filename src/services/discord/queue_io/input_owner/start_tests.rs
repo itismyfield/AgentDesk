@@ -1,5 +1,6 @@
 //! A synthetic start from its entry: a start the owner does not take is left untouched, a refused
 //! preflight admits nothing, and an accepted original keeps its provenance and wakes the drive.
+use super::super::routine::synthetic_original;
 use super::*;
 use crate::config::TestRuntimeRootGuard;
 use crate::services::turn_orchestrator::ChannelMailboxRegistry;

@@ -5,18 +5,9 @@ use std::sync::Arc;
 
 use super::admission::{Admission, AdmissionTicket, admit_with_context};
 use super::drive::{Drive, wake};
-use super::ingress::{Intake, OwnerPending};
+use super::ingress::{Intake, OwnerPending, owner_will_take};
 use super::origin::{Execution, InputOrigin};
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};
-
-/// Whether the owner takes a start on this target; it reads only and never adopts or admits.
-pub(crate) async fn owner_will_take(
-    handle: &ChannelMailboxHandle,
-    execution: Execution,
-    origin: InputOrigin,
-) -> Result<bool, String> {
-    Ok(execution.owner_takes(origin) && super::ingress::installed(handle).await?)
-}
 
 /// `None` leaves the start to its legacy path. Otherwise the preflight refuses before any
 /// admission, and Pending stays its own non-success answer with the caller's ticket.
@@ -45,26 +36,6 @@ pub(crate) async fn admit_synthetic(
             Admission::Rejected(reason) => Intake::Rejected(reason),
         },
     )
-}
-
-/// A synthetic start's original: its reservation's message as a bot input of this process's
-/// generation, and the ticket that turn names on every re-request.
-pub(crate) fn synthetic_original(
-    turn_id: &str,
-    channel: u64,
-    text: &str,
-    author: u64,
-) -> Result<(PendingQueueItem, AdmissionTicket), String> {
-    let message = (turn_id.rsplit(':').next())
-        .and_then(|id| id.parse::<u64>().ok())
-        .ok_or("reserved source missing")?;
-    let generation = crate::services::discord::runtime_store::process_generation();
-    let original = serde_json::from_value(serde_json::json!({"author_id":author,
-        "author_is_bot":true,"message_id":message,"source_message_ids":[message],
-        "channel_id":channel,"queued_generation":generation,"text":text}))
-    .map_err(|error| error.to_string())?;
-    let ticket = AdmissionTicket::stored(&format!("turn-{channel}-{message}"));
-    Ok((original, ticket))
 }
 
 /// What a headless start's caller resolved before it, kept with the original it admits.

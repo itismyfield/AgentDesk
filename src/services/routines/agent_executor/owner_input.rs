@@ -180,7 +180,6 @@ pub(super) mod custody {
 
     /// The owner's start of a routine turn on a TUI target, from the planned run row the legacy
     /// launch would record; `None` leaves a process target or an unowned channel to that launch.
-    #[cfg(unix)]
     pub(in crate::services::routines::agent_executor) async fn owned(
         executor: &RoutineAgentExecutor,
         store: &RoutineStore,

@@ -202,6 +202,15 @@ pub(crate) async fn installed(handle: &ChannelMailboxHandle) -> Result<bool, Str
     handle.v2_request(|owner| Ok(owner.is_some())).await
 }
 
+/// Whether the owner takes a start on this target; it reads only and never adopts or admits.
+pub(crate) async fn owner_will_take(
+    handle: &ChannelMailboxHandle,
+    execution: super::origin::Execution,
+    origin: super::origin::InputOrigin,
+) -> Result<bool, String> {
+    Ok(execution.owner_takes(origin) && installed(handle).await?)
+}
+
 /// The live and worker seam: the owner admits the exact original, never a callback.
 pub(crate) async fn intake(
     shared: &SharedData,

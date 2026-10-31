@@ -412,7 +412,7 @@ async fn start_agent_turn(
         *target.borrow_mut() = Some((provider.clone(), owner_channel.get(), turn_channel.get()));
     });
 
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     if let Ok(handle) = owner_input::OWNER.try_with(Clone::clone) {
         let target = (turn_id.as_str(), turn_channel_num, prompt.as_str());
         let owned = owner_input::owned(pool, fire, &handle, target, (&provider, metadata.as_ref()));

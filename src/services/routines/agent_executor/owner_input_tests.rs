@@ -10,7 +10,6 @@ tokio::task_local! {
     pub(super) static LEGACY_TEARDOWNS: std::cell::Cell<usize>;
 }
 
-#[cfg(unix)]
 pub(super) async fn inject(
     executor: &RoutineAgentExecutor,
     store: &RoutineStore,
@@ -41,7 +40,6 @@ pub(super) async fn inject(
 }
 
 /// The isolated runtime root's process generation, so a synthetic original is admissible.
-#[cfg(unix)]
 pub(super) fn settled_generation() {
     let path = crate::services::discord::runtime_store::generation_path().unwrap();
     if !path.exists() {
