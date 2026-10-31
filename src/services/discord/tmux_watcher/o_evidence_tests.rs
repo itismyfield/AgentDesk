@@ -1200,13 +1200,26 @@ async fn headless_restart_frame(pool: &sqlx::PgPool, channel: u64, outbox: Headl
         }
     };
     if let Some(content) = content {
-        sqlx::query(
-            "INSERT INTO message_outbox (target, content, bot, source, status, created_at, sent_at)
-             VALUES ($1, $2, 'claude', $3, $4, NOW() - make_interval(secs => $5), NOW())",
+        let target = format!("channel:{channel}");
+        let id = crate::services::message_outbox::enqueue_outbox_pg_returning_id(
+            pool,
+            crate::services::message_outbox::OutboxMessage {
+                target: &target,
+                content,
+                bot: "claude",
+                source,
+                reason_code: Some("headless.delivery"),
+                session_key: None,
+            },
         )
-        .bind(format!("channel:{channel}"))
-        .bind(content)
-        .bind(source)
+        .await
+        .unwrap()
+        .unwrap();
+        sqlx::query(
+            "UPDATE message_outbox SET status = $2, sent_at = NOW(),
+                created_at = NOW() - make_interval(secs => $3) WHERE id = $1",
+        )
+        .bind(id)
         .bind(status)
         .bind(age as f64)
         .execute(pool)
