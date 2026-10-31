@@ -385,7 +385,11 @@ fn parts(
             alarms,
             self_id_wait: SELF_ID_WAIT,
             configured_id,
-            turn: config.map_or_else(TurnConfig::off, |c| c.turn.clone()),
+            // Turn edits apply at restart, so a host made later keeps the boot selection.
+            turn: boot.as_ref().map_or_else(
+                || config.map_or_else(TurnConfig::off, |c| c.turn.clone()),
+                |boot| boot.turn().clone(),
+            ),
             #[cfg(test)]
             rest: None,
             boot: config.cloned(),

@@ -620,3 +620,31 @@ async fn routing_owner_rest_publishes_only_a_prepared_local_client_pg() {
     }
     f.finish().await;
 }
+
+#[test]
+fn late_owner_host_confirms_turns_by_the_boot_selection_not_the_live_config() {
+    use crate::services::tui_o::turn_mode::{TestConfirmation, transcript_turns};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let config = |channel: u64, all_owned: bool| -> crate::config::Config {
+        serde_json::from_value(json!({"server":{},
+            "agents":[{"id":"turn-agent","name":"fixture","channels":{"claude":{"id":channel.to_string(),"runtime":"tui"}}}],
+            "tui_o":{"writer":{"channels":[channel]},"turn":{"all_owned":all_owned}}})).unwrap()
+    };
+    for (channel, boot_on) in [(63_761_801, false), (63_761_802, true)] {
+        let _boot = cutover::test_override::force_boot(
+            BootChannels::validate(&config(channel, boot_on)).unwrap(),
+        );
+        let live = config(channel, !boot_on);
+        let io = parts(&shared, &ProviderKind::Claude, live.tui_o.as_ref()).io;
+        io.adopted(channel, ShadowProvider::Claude);
+        assert_eq!(
+            transcript_turns(channel),
+            boot_on,
+            "a turn edit after boot must not change confirmation (boot all_owned={boot_on})"
+        );
+        if boot_on {
+            drop(TestConfirmation::confirmed(channel));
+        }
+    }
+}
