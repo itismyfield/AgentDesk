@@ -200,6 +200,7 @@ pub(crate) fn managed_worktrees_root(repo_dir: &str) -> Option<PathBuf> {
     crate::config::runtime_root().map(|root| root.join("worktrees").join(repo_name))
 }
 
+#[cfg(test)]
 pub fn ensure_worktree_for_issue(
     repo_dir: &str,
     issue_number: i64,

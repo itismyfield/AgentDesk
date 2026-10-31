@@ -26,9 +26,8 @@ pub use repo_resolver::{
 pub use runner::{GitCommand, GitCommandError};
 pub use worktree_resolver::{
     ManagedWorktreeCleanup, automation_branch_name, cleanup_managed_worktree,
-    ensure_automation_worktree, ensure_worktree_for_issue, ensure_worktree_for_issue_async,
-    find_automation_worktree, find_worktree_for_issue, find_worktree_for_issue_async,
-    remove_automation_worktree,
+    ensure_automation_worktree, ensure_worktree_for_issue_async, find_automation_worktree,
+    find_worktree_for_issue, find_worktree_for_issue_async, remove_automation_worktree,
 };
 
 pub(crate) fn git_command() -> std::process::Command {
