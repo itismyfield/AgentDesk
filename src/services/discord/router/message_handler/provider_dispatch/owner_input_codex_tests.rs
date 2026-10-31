@@ -361,7 +361,8 @@ fn holds_capacity_to_the_turn_end(enter_fails: bool) {
         let wait = async { tokio::time::timeout(std::time::Duration::from_secs(20), answer).await };
         let answered = rig.runtime.block_on(wait);
         let (held, refused) = (leases(), other(7_272_540).err());
-        release.send(()).unwrap();
+        let waiting = release.send(()).is_ok();
+        assert!(waiting, "the capacity holder still waits for the AI turn");
         let settled = match enter_fails {
             true => Err("WriteUncertain(\"enter_failed\")".to_string()),
             false => Ok(()),
