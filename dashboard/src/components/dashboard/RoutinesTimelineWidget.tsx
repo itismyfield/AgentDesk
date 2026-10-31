@@ -875,7 +875,7 @@ function DetailField({
   return (
     <div className="min-w-0 rounded-lg border border-th-border-subtle px-3 py-2">
       <div className="text-xs text-th-text-muted">{label}</div>
-      <div className={cx("mt-1 min-w-0 break-words text-sm", mono ? "font-mono text-xs leading-5" : "font-medium")} style={{ color: "var(--th-text-primary)" }}>
+      <div className={cx("mt-1 min-w-0 [overflow-wrap:anywhere] text-sm", mono ? "font-mono text-xs leading-5" : "font-medium")} style={{ color: "var(--th-text-primary)" }}>
         {value ?? "-"}
       </div>
     </div>
@@ -973,7 +973,7 @@ function RoutineDetailDrawer({
             </section>
           ) : null}
 
-          <section className="grid gap-2 sm:grid-cols-2">
+          <section className="grid grid-cols-2 gap-2">
             <DetailField label={t({ ko: "다음 실행", en: "Next run", ja: "次回実行", zh: "下次运行" })} value={formatDateTime(routine.next_due_at, localeTag)} />
             <DetailField label={t({ ko: "최근 실행", en: "Last run", ja: "前回実行", zh: "上次运行" })} value={formatDateTime(routine.last_run_at, localeTag)} />
             <DetailField label={t({ ko: "담당", en: "Agent", ja: "担当", zh: "负责" })} value={routine.agent_id ?? "-"} />

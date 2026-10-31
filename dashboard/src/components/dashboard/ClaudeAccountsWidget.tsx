@@ -1,7 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { ApiRequestError, request } from "../../api/httpClient";
-import TooltipLabel from "../common/TooltipLabel";
 import { SurfaceCard, SurfaceSection } from "../common/SurfacePrimitives";
 import { StatusBadge } from "../common/StatusBadge";
 import { WidgetState } from "../common/WidgetState";
@@ -290,13 +289,6 @@ function ClaudeAccountsWidgetImpl({ t }: ClaudeAccountsWidgetProps) {
     </button>
   );
 
-  const tooltip = t({
-    ko: "이 맥에 등록된 Claude 계정과 5시간·7일 사용량이에요. 사용 중인 계정은 '사용 중'으로 표시돼요.",
-    en: "Claude accounts registered on this Mac with their 5-hour and 7-day usage. The account in use is marked.",
-    ja: "このMacに登録された Claude アカウントと5時間・7日の使用量です。",
-    zh: "此 Mac 上注册的 Claude 账号及其 5 小时、7 天用量。",
-  });
-
   const sectionActions = (
     <>
       {nodeLabel ? (
@@ -304,11 +296,6 @@ function ClaudeAccountsWidgetImpl({ t }: ClaudeAccountsWidgetProps) {
           {nodeLabel}
         </StatusBadge>
       ) : null}
-      <TooltipLabel
-        text={t({ ko: "설명", en: "About", ja: "説明", zh: "说明" })}
-        tooltip={tooltip}
-        className="max-w-fit text-sm"
-      />
       {refreshButton}
     </>
   );

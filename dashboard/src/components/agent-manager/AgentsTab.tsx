@@ -104,8 +104,9 @@ export default function AgentsTab({
     };
   }, []);
 
+  const countedAgents = includeTests ? agents : agents.filter((candidate) => !isTestAgent(candidate));
   const deptCounts = new Map<string, { total: number; working: number }>();
-  for (const agent of includeTests ? agents : agents.filter((candidate) => !isTestAgent(candidate))) {
+  for (const agent of countedAgents) {
     const key = agent.department_id || "__none";
     const count = deptCounts.get(key) ?? { total: 0, working: 0 };
     count.total += 1;
@@ -137,7 +138,7 @@ export default function AgentsTab({
             <label className="min-w-0 flex-1 sm:flex-none">
               <span className="sr-only">{tr("소속 부서", "Department")}</span>
               <select value={deptTab} onChange={event => setDeptTab(event.target.value)} className="min-h-11 w-full max-w-full rounded-md border border-th-input-border bg-th-input-bg px-3 text-xs text-th-text-primary sm:w-56">
-                <option value="all">{tr(`전체 부서 · ${agents.length}명`, `All departments · ${agents.length} agents`)}</option>
+                <option value="all">{tr(`전체 부서 · ${countedAgents.length}명`, `All departments · ${countedAgents.length} agents`)}</option>
                 {departments.map(department => <option key={department.id} value={department.id}>{localeName(locale, department)} · {deptCounts.get(department.id)?.total ?? 0}</option>)}
               </select>
             </label>

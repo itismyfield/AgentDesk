@@ -73,6 +73,7 @@ export function HomeRoutinesTimeline({
               : t({ ko: "다음 실행 시간이 가까운 순서예요", en: "Ordered by next run", ja: "次回実行時刻順", zh: "按下次运行时间排序" })}
           </p>
         </div>
+        <div className="flex shrink-0 items-center gap-1">
         {compact ? (
           <Link
             to="/routines"
@@ -89,6 +90,7 @@ export function HomeRoutinesTimeline({
         >
           <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
         </button>
+        </div>
       </header>
 
       <div className="px-4 sm:px-5">

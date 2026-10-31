@@ -175,6 +175,9 @@ export function describeDegradedReason(reason: string, isKo: boolean): string {
   if (relay) return tr(`${relay[1]} 응답 전달 확인 안 됨`, `${relay[1]} relay delivery unconfirmed`);
   if (reason.startsWith("tui_o:boundary_pending")) return tr("TUI 출력 마무리 대기", "TUI output waiting to finish");
   if (reason.startsWith("tui_o:unresolved")) return tr("TUI 출력 확인 필요", "TUI output unresolved");
+  if (reason.startsWith("tui_o:cleanup_retired")) return tr("끝난 TUI 출력 정리 대기", "Retired TUI output awaiting cleanup");
+  // Other TUI writer alarms share one readable title; the exact key stays in the tooltip.
+  if (reason.startsWith("tui_o:")) return tr("TUI 출력 경보", "TUI output alarm");
   const presence = reason.match(/^turn_presence_unknown:([^:]+):([^:]+)/);
   if (presence) return tr(`${presence[2]} 턴 상태 확인 불가 (${presence[1]})`, `${presence[2]} turn state unknown (${presence[1]})`);
   // Unknown keys: keep the leading segment and drop channel ids and counters.

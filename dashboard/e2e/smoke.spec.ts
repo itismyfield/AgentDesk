@@ -1002,7 +1002,7 @@ async function mockAgentsHubApis(page: Page) {
     });
   });
 
-  await page.route(/\/api\/kanban-cards$/, async (route) => {
+  await page.route(/\/api\/kanban-cards(?:\?.*)?$/, async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -1154,7 +1154,7 @@ async function mockDashboardBootstrap(page: Page) {
     });
   });
 
-  await page.route(/\/api\/kanban-cards$/, async (route) => {
+  await page.route(/\/api\/kanban-cards(?:\?.*)?$/, async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",

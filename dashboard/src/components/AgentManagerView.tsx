@@ -151,12 +151,14 @@ export default function AgentManagerView({
     { key: "departments", panelId: "agents-departments-tab-panel", label: tr(`부서 ${departments.length}`, `Departments ${departments.length}`) },
     { key: "skills", panelId: "agents-skills-tab-panel", label: tr("스킬", "Skills") },
   ];
+  // Aborted sessions are finished work, not something to attach to an agent.
+  const liveSessions = sessions?.filter((session) => session.status !== "aborted");
   // Header actions stay the same on every tab so the header never shifts.
   const headerActions = (
     <div className="flex shrink-0 flex-wrap items-center gap-2">
       {canShowDispatch && (
         <SurfaceActionButton tone="neutral" compact onClick={() => setDispatchOpen((prev) => !prev)} aria-expanded={dispatchOpen}>
-          {dispatchOpen ? tr("실행 중 세션 닫기", "Hide live sessions") : tr(`실행 중 세션 ${sessions?.length ?? 0}`, `Live sessions ${sessions?.length ?? 0}`)}
+          {dispatchOpen ? tr("실행 중 세션 닫기", "Hide live sessions") : tr(`실행 중 세션 ${liveSessions?.length ?? 0}`, `Live sessions ${liveSessions?.length ?? 0}`)}
         </SurfaceActionButton>
       )}
       <SurfaceActionButton compact onClick={openCreateAgent}>
@@ -298,14 +300,14 @@ export default function AgentManagerView({
         </div>
       )}
 
-      {canShowDispatch && dispatchOpen && sessions && onAssign && (
+      {canShowDispatch && dispatchOpen && liveSessions && onAssign && (
         <SurfaceSection
           title={tr("실행 중 세션", "Live sessions")}
           description={tr(
             "에이전트에 연결되지 않은 세션이에요. 부서나 에이전트에 붙일 수 있어요.",
             "Sessions not linked to an agent yet. Attach them to a department or agent.",
           )}
-          badge={`${sessions.length}`}
+          badge={`${liveSessions.length}`}
           className="rounded-[30px] p-4 sm:p-5"
           actions={(
             <SurfaceActionButton tone="neutral" compact onClick={() => setDispatchOpen(false)}>
@@ -315,7 +317,7 @@ export default function AgentManagerView({
         >
           <div className="mt-4">
             <SessionPanel
-              sessions={sessions}
+              sessions={liveSessions}
               departments={departments}
               agents={agents}
               onAssign={onAssign}

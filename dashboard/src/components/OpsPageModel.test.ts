@@ -10,6 +10,8 @@ describe("describeDegradedReason", () => {
 
   it("hides channel ids and session internals behind readable labels", () => {
     expect(describeDegradedReason("tui_o:boundary_pending:1509350778043895902", true)).toBe("TUI 출력 마무리 대기");
+    expect(describeDegradedReason("tui_o:cleanup_retired:1478248518950060183", true)).toBe("끝난 TUI 출력 정리 대기");
+    expect(describeDegradedReason("tui_o:spool_full", true)).toBe("TUI 출력 경보");
     expect(describeDegradedReason("relay_verdict_unknown_claude_1490141479707086938", true)).toBe("claude 응답 전달 확인 안 됨");
     expect(
       describeDegradedReason("turn_presence_unknown:codex:adk-dashboard:session_identity_unresolved:exact_canonical_mismatch:1:11328", true),

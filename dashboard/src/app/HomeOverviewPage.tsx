@@ -6,6 +6,7 @@ import { GripVertical } from "lucide-react";
 import * as api from "../api/client";
 import type { Agent, DashboardStats, TokenAnalyticsResponse } from "../types";
 import type { TFunction } from "../components/dashboard/model";
+import { isTestAgent } from "../lib/agentHelpers";
 import { STORAGE_KEYS } from "../lib/storageKeys";
 import { useLocalStorage } from "../lib/useLocalStorage";
 import { formatRelativeTime } from "./shellFormatting";
@@ -79,8 +80,13 @@ export default function HomeOverviewPage({
     useSensor(MouseSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
-  const agentTotal = stats?.agents.total ?? agents.length;
-  const workingTotal = agents.filter((agent) => agent.status === "working").length;
+  // E2E fixture agents stay out of the headcount unless they are actually busy.
+  const rosterAgents = useMemo(
+    () => agents.filter((agent) => !isTestAgent(agent) || agent.status === "working"),
+    [agents],
+  );
+  const agentTotal = rosterAgents.length;
+  const workingTotal = rosterAgents.filter((agent) => agent.status === "working").length;
 
   useEffect(() => loadHomeTokenAnalytics(setAnalytics), []);
 
@@ -128,7 +134,7 @@ export default function HomeOverviewPage({
     [],
   );
   const widgetSpecs = buildHomeWidgetSpecs({
-    agents,
+    agents: rosterAgents,
     analytics,
     analyticsAsOf,
     costTrend,
