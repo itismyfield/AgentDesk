@@ -18,7 +18,7 @@ use super::send::{
     BoundedTransport, DispatchCounts, DispatchReport, RepostEnvelope, RepostIds, WireOutcome,
     hand_over,
 };
-use crate::services::tui_o::ownership::{GatewayOwnership, OwnershipGate};
+use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::writer::deliver::POST_TIMEOUT;
 
 /// What the channel's writer lends a re-post turn. The original path, Auto and an operator
@@ -30,6 +30,13 @@ pub(crate) trait RepostWriter {
     fn settle_open(&mut self) -> impl Future<Output = bool> + Send;
     /// Writer stop, violation, exclusion, delivery_allowed, s3act availability and drain.
     fn guard(&self) -> Result<(), String>;
+    fn output_origin(
+        &self,
+        _key: &PieceKey,
+    ) -> Option<crate::services::cluster::intake_router_hook::owner_record::output::Artifact> {
+        None
+    }
+
     fn try_lease(&self) -> Option<Self::Lease>;
     fn gate(&self) -> Arc<OwnershipGate>;
     /// Whether holder and run still let a request leave; read without the gate lock.
@@ -162,17 +169,17 @@ pub(crate) async fn start<W: RepostWriter>(
         return withdrawn(permit, "too little time left before the deadline");
     }
     let channel = permit.key().unit().channel_id;
-    let envelope = RepostEnvelope::additional(channel, permit.payload.clone(), ids);
+    let mut envelope = RepostEnvelope::additional(channel, permit.payload.clone(), ids);
+    envelope.output_origin = writer.output_origin(permit.key());
     let gate = writer.gate();
     let admitted = Arc::new(AtomicU64::new(0));
     let (observed, writer_live, deadline) = (gate.subscribe(), writer.live(), permit.deadline);
     let epoch = Arc::clone(&admitted);
     // Checked before every request leaves; the gate is observed, never locked again.
     let live = Arc::new(move || {
-        let owned = GatewayOwnership::Owned {
-            epoch: epoch.load(Ordering::SeqCst),
-        };
-        *observed.borrow() == owned && writer_live() && Instant::now() < deadline
+        observed.borrow().epoch() == Some(epoch.load(Ordering::SeqCst))
+            && writer_live()
+            && Instant::now() < deadline
     });
     let (request, counts) = hand_over(transport, &envelope, live);
     let mut handed = Some(request);
@@ -242,7 +249,9 @@ impl Started {
                 WireOutcome::Created(_) => AttemptResult::Created,
                 WireOutcome::Refused(_) => AttemptResult::Rejected,
                 WireOutcome::Throttled | WireOutcome::Unsent(_) => AttemptResult::NotSent,
-                WireOutcome::Uncertain(_) | WireOutcome::TimedOut => AttemptResult::Uncertain,
+                WireOutcome::Withheld(_) | WireOutcome::Uncertain(_) | WireOutcome::TimedOut => {
+                    AttemptResult::Uncertain
+                }
             },
         };
         if let DispatchEnd::Sent(report) = &end {
@@ -268,6 +277,7 @@ impl Started {
                 WireOutcome::Refused(_) => ("refused", None),
                 WireOutcome::Throttled => ("throttled", None),
                 WireOutcome::Uncertain(_) => ("uncertain", None),
+                WireOutcome::Withheld(_) => ("withheld", None),
                 WireOutcome::Unsent(_) => ("unsent", None),
                 WireOutcome::TimedOut => ("timed_out", None),
             };

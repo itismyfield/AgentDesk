@@ -557,6 +557,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                 }
                 (
                     PieceWork {
+                        output_origin: ledger.output_origin(rejected_serial).cloned(),
                         unit_key: original.unit_key.clone(),
                         index: original.piece_index,
                         payload: original.payload.clone(),
@@ -648,6 +649,14 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                             local_retry: local_retry.clone(),
                         };
                         // Returning here comes before `port.post`, so this piece's POST was never created.
+                        if let Some(artifact) = &piece.output_origin {
+                            store
+                                .append_ledger(LedgerEntry::OutputOrigin {
+                                    serial,
+                                    artifact: artifact.clone(),
+                                })
+                                .map_err(|e| Refusal::Violation(format!("output origin: {e:?}")))?;
+                        }
                         store
                             .append_ledger(prepared())
                             .map_err(|error| Refusal::Store {
@@ -664,7 +673,11 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                         let running = posts.take().map(Running::start);
                         #[cfg(test)]
                         boot.constructing(serial, epoch);
-                        let post = port.post(channel, piece.payload.clone());
+                        let post = port.post_origin(
+                            channel,
+                            piece.payload.clone(),
+                            piece.output_origin.clone(),
+                        );
                         // `map` forwards each poll to the request; the count ends when it is ready or dropped.
                         let mut request: Request = match running {
                             Some(running) => Box::pin(post.map(move |outcome| {
@@ -769,6 +782,15 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                     serial,
                     msg_id: message.id,
                 }
+            }
+            PostOutcome::Withheld(reason) => {
+                if let Err(step) = self.record(LedgerEntry::Unresolved {
+                    serial,
+                    reason: reason.clone(),
+                }) {
+                    return step;
+                }
+                return self.stop(WriterAlarm::Unresolved { serial, reason });
             }
             PostOutcome::Refused(status) => {
                 let reason = if self.store.ledger().piece(serial).is_some_and(|piece| {
@@ -941,12 +963,27 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> RepostWriter for ChannelWri
         )
     }
 
+    fn output_origin(
+        &self,
+        key: &crate::services::tui_o::repost::identity::PieceKey,
+    ) -> Option<crate::services::cluster::intake_router_hook::owner_record::output::Artifact> {
+        let ledger = self.store.ledger();
+        let (serial, _) = ledger.latest_piece(key.unit(), key.piece_index())?;
+        ledger.output_origin(serial).cloned()
+    }
+
     fn prepare(&mut self, epoch: u64, permit: &DispatchPermit) -> Result<(), String> {
         if self.exclude_tool_result(permit.key().unit()).is_some() {
             return Err(super::pieces::TOOL_RESULT_INTERNAL.into());
         }
         let ledger = self.store.ledger();
         let (serial, anchor_id) = (ledger.next_serial(), ledger.anchor());
+        let origin = self.output_origin(permit.key());
+        if let Some(artifact) = origin {
+            self.store
+                .append_ledger(LedgerEntry::OutputOrigin { serial, artifact })
+                .map_err(|e| format!("output origin: {e:?}"))?;
+        }
         let prepared = || LedgerEntry::Prepared {
             notice_origin: None,
             serial,
@@ -983,6 +1020,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> RepostWriter for ChannelWri
                 content: created.content.clone(),
             }),
             WireOutcome::Refused(status) => PostOutcome::Refused(*status),
+            WireOutcome::Withheld(reason) => PostOutcome::Withheld(reason.clone()),
             other => PostOutcome::Uncertain(format!("{other:?}")),
         };
         async move {
@@ -990,6 +1028,13 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> RepostWriter for ChannelWri
             let Some((serial, open)) = self.store.ledger().unresolved() else {
                 return;
             };
+            #[cfg(test)]
+            if super::super::ownership::execution::tests::mutant("repost-record")
+                && matches!(report.outcome, WireOutcome::Withheld(_))
+            {
+                let _ = self.record(LedgerEntry::NotSent { serial });
+                return;
+            }
             if matches!(
                 report.outcome,
                 WireOutcome::Unsent(_) | WireOutcome::Throttled

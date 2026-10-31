@@ -15,7 +15,7 @@ export type EdgeRoute = {
 };
 
 /** Which drawing a view belongs to: tie positions only mean something inside that drawing. */
-export type ViewScope = { campaignId: string; projection: "groups" };
+export type ViewScope = { mode: "legacy" | "server"; campaignId: string; projection: "groups"; taskScope: string };
 
 export type CampaignGraphView = {
   schemaVersion: 1;
@@ -23,6 +23,8 @@ export type CampaignGraphView = {
   ties: CableTie[];
   routes: EdgeRoute[];
   showOriginal: boolean;
+  /** Definition revision that judged the tie membership; absent in values saved before it was recorded. */
+  revision?: number;
 };
 
 export type GraphViewSettings = Pick<CampaignGraphView, "ties" | "routes" | "showOriginal">;

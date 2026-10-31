@@ -85,6 +85,17 @@ pub(super) fn check_reviewed_calls() {
                     1,
                     CLEAR,
                 ),
+                // Normal end validates the original nonce/root/channel under SourceAuthority.
+                (
+                    "src/services/discord/commands/control/managed_reset.rs",
+                    1,
+                    ENTRY,
+                ),
+                (
+                    "src/services/discord/commands/control/clear_teardown/execution_cleanup.rs",
+                    1,
+                    ENTRY,
+                ),
             ],
         ),
         (
@@ -153,6 +164,25 @@ pub(super) fn check_reviewed_calls() {
         violations.is_empty(),
         "name-only teardown calls: {violations:?}"
     );
+    for file in [
+        "src/services/discord/commands/control/managed_reset.rs",
+        "src/services/discord/commands/control/clear_teardown/execution_cleanup.rs",
+        "src/services/unreviewed_cleanup.rs",
+    ] {
+        let mut extra = sources.clone();
+        extra.entry(file.into()).or_default().push_str(
+            "\nfn extra() { crate::services::tmux_common::cleanup_session_temp_files_under_source_authority(); }",
+        );
+        assert!(
+            listed_call_violations(&extra, CALLS)
+                .iter()
+                .any(|violation| {
+                    violation.contains(file)
+                        && violation.contains("cleanup_session_temp_files_under_source_authority")
+                }),
+            "duplicate or unreviewed caller: {file}"
+        );
+    }
 }
 
 /// Why a spawn-time sweep of a session's temp files keeps the name.

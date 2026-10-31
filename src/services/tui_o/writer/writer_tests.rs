@@ -418,6 +418,7 @@ pub(crate) async fn post_codex_records_for_test(channel: u64, raw: &str) -> (Vec
 
 fn piece(native_key: &str, payload: &str) -> Derived {
     Derived::Piece(PieceWork {
+        output_origin: None,
         unit_key: unit(native_key),
         index: 0,
         payload: payload.into(),

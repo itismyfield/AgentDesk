@@ -243,7 +243,24 @@ pub(super) async fn deliver_short_replace_via_controller(
         );
         true
     };
-    let outcome = toc::deliver_turn_output(
+    let output_origin =
+        match crate::services::cluster::intake_router_hook::owner_record::output::source_artifact(
+            shared.pg_pool.as_ref(),
+            provider.as_str(),
+            &channel_id.get().to_string(),
+            &turn.user_msg_id.to_string(),
+            None,
+            relay_text,
+        )
+        .await
+        {
+            Ok(origin) => origin,
+            Err(error) => {
+                tracing::warn!(%error, "original bridge output held");
+                return toc::DeliveryOutcome::Unknown { fell_back: false };
+            }
+        };
+    let outcome = toc::deliver_turn_output_with_origin(
         gateway,
         toc::TurnOutputCtx {
             turn,
@@ -291,6 +308,9 @@ pub(super) async fn deliver_short_replace_via_controller(
             heartbeat: Some(&heartbeat),
             body_claim,
         },
+        shared.pg_pool.as_ref(),
+        provider.as_str(),
+        output_origin.as_ref(),
     )
     .await;
     // #3089 B2a: shadow-mirror durable delivered frontier — flag-gated, observe-only,
@@ -368,7 +388,24 @@ pub(super) async fn deliver_long_chunks_via_controller(
         true
     };
     let chunk_count = super::super::formatting::split_message(relay_text).len();
-    let outcome = toc::deliver_turn_output(
+    let output_origin =
+        match crate::services::cluster::intake_router_hook::owner_record::output::source_artifact(
+            shared.pg_pool.as_ref(),
+            provider.as_str(),
+            &channel_id.get().to_string(),
+            &turn.user_msg_id.to_string(),
+            None,
+            relay_text,
+        )
+        .await
+        {
+            Ok(origin) => origin,
+            Err(error) => {
+                tracing::warn!(%error, "original bridge output held");
+                return toc::DeliveryOutcome::Unknown { fell_back: false };
+            }
+        };
+    let outcome = toc::deliver_turn_output_with_origin(
         gateway,
         toc::TurnOutputCtx {
             turn,
@@ -399,6 +436,9 @@ pub(super) async fn deliver_long_chunks_via_controller(
             heartbeat: Some(&heartbeat),
             body_claim,
         },
+        shared.pg_pool.as_ref(),
+        provider.as_str(),
+        output_origin.as_ref(),
     )
     .await;
     if let toc::DeliveryOutcome::Delivered {

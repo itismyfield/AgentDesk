@@ -24,3 +24,18 @@ export function makeLargeCampaign(): Campaign {
     })),
   };
 }
+
+/** happy-dom here exposes no window.localStorage; installs an in-memory one and returns it. */
+export function installMemoryStorage(): Storage {
+  const items = new Map<string, string>();
+  const storage = {
+    get length() { return items.size; },
+    key: (index: number) => [...items.keys()][index] ?? null,
+    getItem: (name: string) => items.get(name) ?? null,
+    setItem: (name: string, value: string) => { items.set(name, String(value)); },
+    removeItem: (name: string) => { items.delete(name); },
+    clear: () => items.clear(),
+  } as Storage;
+  Object.defineProperty(window, "localStorage", { configurable: true, value: storage });
+  return storage;
+}

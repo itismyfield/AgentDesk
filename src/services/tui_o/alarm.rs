@@ -805,6 +805,7 @@ mod postgres_tests {
             router.clone(),
         );
         let piece = Derived::Piece(PieceWork {
+            output_origin: None,
             unit_key: UnitKey {
                 channel_id: CHANNEL,
                 provider: ShadowProvider::Claude,

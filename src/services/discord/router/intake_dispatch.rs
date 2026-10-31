@@ -21,6 +21,8 @@ impl std::fmt::Display for QueuedTransitionBusyHandoff {
 }
 impl std::error::Error for QueuedTransitionBusyHandoff {}
 
+pub(crate) use crate::services::cluster::intake_router_hook::owner_record::custody as routed;
+
 mod attachment;
 #[cfg(test)]
 mod home_order_tests;
@@ -232,6 +234,28 @@ pub(crate) async fn admit_text_intake(
             request.source_message_ids.iter().map(|id| id.get()),
             &request.user_text,
         );
+        match routed::lookup_source(pool, &input).await {
+            Ok(Some(stored)) if stored.routing_state == "admitted" => {
+                return IntakeAdmission::Forwarded {
+                    target_instance_id: stored.target_instance_id,
+                    outbox_id: stored.id,
+                };
+            }
+            Ok(Some(_)) => return IntakeAdmission::ConsumedToHold,
+            // A changed source body is permanent; an unreadable lookup is the replay retry case below.
+            Err(sqlx::Error::Protocol(detail)) => {
+                return IntakeAdmission::Blocked {
+                    reason: IntakeBlockedReason::RoutingDependencyFailed { detail },
+                };
+            }
+            Err(error) => {
+                tracing::warn!(%error, "[intake_dispatch] routed source lookup failed; deferring for retry");
+                return IntakeAdmission::ReplayDeferred(
+                    replay_admission::ReplayDefer::LookupFailed,
+                );
+            }
+            Ok(None) => {}
+        }
         let instance =
             crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
         let ctx = replay_admission::ReplayAdmissionContext::production(
@@ -335,8 +359,19 @@ pub(crate) async fn admit_text_intake(
     let self_instance_id =
         crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
     let request_owner_id = request.request_owner.get().to_string();
-    let node_override =
-        super::super::commands::channel_node_override(deps.shared, request.channel_id);
+    let node_override = match super::super::commands::channel_node_override(
+        deps.shared,
+        request.channel_id,
+    )
+    .await
+    {
+        Ok(home) => home,
+        Err(detail) => {
+            return IntakeAdmission::Blocked {
+                reason: IntakeBlockedReason::RoutingDependencyFailed { detail },
+            };
+        }
+    };
     let turn_kind = match request.turn_kind {
         super::TurnKind::Foreground => "foreground",
         super::TurnKind::BackgroundTrigger => "background_trigger",

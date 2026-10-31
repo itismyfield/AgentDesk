@@ -22,12 +22,19 @@ fn node_choices_use_installed_lease_ttl_pg() {
                 .execute(&pool).await.unwrap();
             let shared = crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
             let before = list_online_node_choices(&shared, &ProviderKind::Claude).await.unwrap();
-            assert!(!before.iter().any(|node| node.instance_id == "snapshot-ttl-worker"));
+            // The picker keeps registered homes even when offline; the installed lease decides which.
+            let status = |nodes: &[NodeChoice]| {
+                nodes
+                    .iter()
+                    .find(|node| node.instance_id == "snapshot-ttl-worker")
+                    .map(|node| node.status.clone())
+            };
+            assert_eq!(status(&before).as_deref(), Some("offline"));
             fixture.reload();
             sqlx::query("UPDATE worker_nodes SET last_heartbeat_at = NOW() - INTERVAL '5 seconds' WHERE instance_id = 'snapshot-ttl-worker'")
                 .execute(&pool).await.unwrap();
             let after = list_online_node_choices(&shared, &ProviderKind::Claude).await.unwrap();
-            assert!(after.iter().any(|node| node.instance_id == "snapshot-ttl-worker"));
+            assert_eq!(status(&after).as_deref(), Some("online"));
             pool.close().await;
             db.drop().await;
         });

@@ -219,6 +219,7 @@ async fn production_readiness_fallback_withholds_real_writer_effects() {
     let before_bytes = std::fs::read(&ledger_path).unwrap();
     let before_serial = writer.store().ledger().next_serial();
     let piece = Derived::Piece(PieceWork {
+        output_origin: None,
         unit_key: UnitKey {
             channel_id: channel,
             provider: ShadowProvider::Codex,

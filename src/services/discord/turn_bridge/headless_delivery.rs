@@ -284,9 +284,34 @@ pub(super) async fn enqueue_headless_delivery(
         delivery_bot,
         provider,
         born_generation,
+        intake_outbox_id,
         content,
         cancel_token,
     } = arguments.into_runtime_arguments();
+    if should_suppress_headless_delivery_for_cancel(cancel_token) {
+        return HeadlessDeliveryOutcome::Cancelled;
+    }
+    let output_origin =
+        match crate::services::cluster::intake_router_hook::owner_record::output::source_artifact(
+            shared.pg_pool.as_ref(),
+            provider.as_str(),
+            &channel_id.get().to_string(),
+            &owning_user_msg_id
+                .map(|id| id.get())
+                .unwrap_or(0)
+                .to_string(),
+            intake_outbox_id,
+            content,
+        )
+        .await
+        {
+            Ok(origin) => origin,
+            Err(error) => {
+                return HeadlessDeliveryOutcome::Ambiguous {
+                    surfaced_error: Some(error),
+                };
+            }
+        };
     let target = format!("channel:{}", channel_id.get());
     let bot = headless_delivery_bot_alias(delivery_bot, provider);
 
@@ -310,6 +335,7 @@ pub(super) async fn enqueue_headless_delivery(
             provider,
             born_generation,
             delivery_cancel_token,
+            output_origin.as_ref(),
         )
         .await
         {
@@ -435,6 +461,11 @@ pub(super) async fn enqueue_headless_delivery(
         }
     }
 
+    if output_origin.is_some() {
+        return HeadlessDeliveryOutcome::Ambiguous {
+            surfaced_error: Some("original output remains held in PG".into()),
+        };
+    }
     let suppress_for_cancel = should_suppress_headless_delivery_for_cancel(cancel_token);
     if suppress_for_cancel {
         tracing::info!(
@@ -481,9 +512,19 @@ pub(super) async fn enqueue_headless_delivery(
                     channel_id.get()
                 )
             })?;
-        send_long_message_raw(&http, channel_id, content, shared)
-            .await
-            .map_err(|error| format!("headless direct delivery failed: {error}"))?;
+        use crate::services::cluster::intake_router_hook::owner_record::output;
+        let scope = shared.pg_pool.as_ref().map(|pool| output::Scope {
+            pool: pool.clone(),
+            provider: provider.as_str().into(),
+        });
+        crate::services::discord::outbound::raw_output::scope(
+            scope,
+            None,
+            content,
+            send_long_message_raw(&http, channel_id, content, shared),
+        )
+        .await
+        .map_err(|error| format!("headless direct delivery failed: {error}"))?;
         Ok(())
     };
     run_headless_direct_fallback(suppress_for_cancel, || direct_fallback).await

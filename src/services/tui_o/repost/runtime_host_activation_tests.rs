@@ -311,6 +311,7 @@ async fn f6_default_host_reaches_repost_pg_statements_pg() {
         crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
     let io = Arc::new(RealHost {
         gateway: GatewayHost {
+            execution: Default::default(),
             shared,
             alarms: Arc::new(AlarmRouter::for_process(None, None)),
             self_id_wait: Duration::ZERO,
@@ -568,6 +569,7 @@ async fn d4act_host_stop_during_pending_finish_prevents_retry_pg() {
             crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
         let io = Arc::new(RealHost {
             gateway: GatewayHost {
+                execution: Default::default(),
                 shared,
                 alarms: Arc::new(AlarmRouter::for_process(None, None)),
                 self_id_wait: Duration::ZERO,
@@ -994,6 +996,7 @@ async fn d4act2_gateway_repost_host_stop_and_rollback_quiescence_pg() {
             crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
         let io = Arc::new(RealHost {
             gateway: GatewayHost {
+                execution: Default::default(),
                 shared,
                 alarms: Arc::new(AlarmRouter::for_process(None, None)),
                 self_id_wait: Duration::ZERO,

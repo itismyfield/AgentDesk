@@ -10,6 +10,16 @@ use crate::db::intake_outbox_status::IntakeOutboxStatus;
 use sqlx::{PgPool, Postgres, Transaction};
 use std::future::Future;
 
+pub(crate) mod adoption;
+pub(crate) mod cleanup;
+pub(crate) mod custody;
+pub(crate) mod event;
+pub(crate) mod fallback;
+pub(crate) mod input_start;
+pub(crate) mod output;
+pub(crate) mod plan;
+pub(crate) mod snapshot;
+
 /// Canonical identity uses Rust trim/lowercase; queries and advisory keys use these same bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct OwnerIdentity {
@@ -150,13 +160,14 @@ pub(crate) enum AdmissionKind {
     Local,
     /// A foreign owner will claim + execute: the row starts `pending`.
     Forwarded,
+    Held,
 }
 
 impl AdmissionKind {
     fn as_str(self) -> &'static str {
         match self {
             AdmissionKind::Local => "local",
-            AdmissionKind::Forwarded => "forwarded",
+            AdmissionKind::Forwarded | AdmissionKind::Held => "forwarded",
         }
     }
 
@@ -164,6 +175,7 @@ impl AdmissionKind {
         match self {
             AdmissionKind::Local => IntakeOutboxStatus::Spawned,
             AdmissionKind::Forwarded => IntakeOutboxStatus::Pending,
+            AdmissionKind::Held => IntakeOutboxStatus::Unknown,
         }
     }
 }
@@ -573,8 +585,8 @@ pub(crate) async fn insert_admission_savepoint(
         .bind(payload.preserve_on_cancel)
         .bind(&payload.agent_id)
         .bind(&payload.provider)
-        .bind(owner_instance_id)
-        .bind(owner_generation)
+        .bind((kind != AdmissionKind::Held).then_some(owner_instance_id))
+        .bind((kind != AdmissionKind::Held).then_some(owner_generation))
         .bind(kind.as_str())
         .bind(idempotency_key)
         .bind(kind.initial_status())
