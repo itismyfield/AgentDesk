@@ -616,9 +616,9 @@ async fn readers_s1a_restore_flushes_init_only_eof_pending() {
     );
 }
 
-async fn reader_tend(
+async fn reader_tend<A: AlarmSink>(
     sources: &mut super::super::super::rotation::Sources<FakeBindings>,
-    writer: &mut Writer,
+    writer: &mut ChannelWriter<FakePort, Arc<FakeLease>, A>,
     now: std::time::SystemTime,
 ) -> Result<(), WriterAlarm> {
     use super::super::super::rotation::probe;
@@ -631,6 +631,93 @@ async fn reader_tend(
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     panic!("bounded prefix validation did not finish");
+}
+
+#[tokio::test(start_paused = true)]
+async fn cleanup_retirement_keeps_health_and_notifications_clear_but_missing_undrained_halts() {
+    use super::super::super::{ReaderConfig, rotation::Sources};
+    use crate::services::tui_o::alarm::{
+        AlarmHealth, AlarmNotification, AlarmNotifier, AlarmRouter, NotificationAttempt,
+    };
+    use std::time::{Duration, Instant, SystemTime};
+
+    #[derive(Default)]
+    struct Notices(AtomicUsize);
+    impl AlarmNotifier for Notices {
+        fn notify(&self, _: u64, _: AlarmNotification, _: NotificationAttempt) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let health = Arc::new(AlarmHealth::default());
+    let notices = Arc::new(Notices::default());
+    let router = Arc::new(AlarmRouter::new(
+        Some(900),
+        Some(notices.clone()),
+        health.clone(),
+    ));
+    for _ in 0..2 {
+        router.raise(CHANNEL, WriterAlarm::NotFound { serial: 1 });
+    }
+    for undrained in [false, false, false, true] {
+        let (harness, path, old, bindings) = started(&row("before", "before"));
+        let (_, new) = transcript(&path, "next.jsonl", "s2", b"");
+        let now = SystemTime::now();
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_modified(now - Duration::from_secs(48 * 3600))
+            .unwrap();
+        bindings.commit(hop_at(2, "tmux", Some(&old), &new, BindingCause::Clear, ""));
+        let mut writer = ChannelWriter::new(
+            harness.channel(),
+            harness.gate.clone(),
+            harness.port.clone(),
+            harness.lease.clone(),
+            router.clone(),
+        );
+        let mut sources = Sources::new(CHANNEL, ShadowProvider::Claude, bindings)
+            .with_readers(ReaderConfig { dormant: true });
+        let mut deriver = UnitDeriver::new(CHANNEL, ShadowProvider::Claude);
+        let mut owed = VecDeque::new();
+        sources
+            .resume_at(&mut writer, &mut deriver, &mut owed, now)
+            .unwrap();
+        sources.follow(&mut writer).unwrap();
+        sources
+            .capture(&mut writer, &mut deriver, &mut owed)
+            .unwrap();
+        reader_tend(&mut sources, &mut writer, now).await.unwrap();
+        if undrained {
+            append(&path, b"partial record");
+            sources
+                .capture(&mut writer, &mut deriver, &mut owed)
+                .unwrap();
+        }
+        std::fs::remove_file(&path).unwrap();
+        let result = sources.tend_at(&mut writer, now);
+        if undrained {
+            let alarm = result.unwrap_err();
+            assert!(
+                matches!(&alarm, WriterAlarm::Halted { detail }
+                if detail.contains("no fresh drained cleanup evidence")),
+                "{alarm:?}"
+            );
+            writer.stop(alarm);
+            assert!(!writer.store().cursor(&old).unwrap().retired);
+            assert_eq!(health.current_at(Instant::now()), ["tui_o:halted:7"]);
+            assert_eq!(notices.0.load(Ordering::SeqCst), 1);
+        } else {
+            result.unwrap();
+            assert!(writer.store().cursor(&old).unwrap().retired);
+            assert_eq!(health.current_at(Instant::now()), Vec::<String>::new());
+            assert_eq!(notices.0.load(Ordering::SeqCst), 0);
+        }
+    }
+    router.raise(CHANNEL, WriterAlarm::NotFound { serial: 2 });
+    assert_eq!(
+        health.current_at(Instant::now()),
+        ["tui_o:halted:7", "tui_o:not_found_frequent:7"]
+    );
+    assert_eq!(notices.0.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test(start_paused = true)]

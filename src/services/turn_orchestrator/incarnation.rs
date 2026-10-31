@@ -8,9 +8,21 @@ use std::sync::Arc;
 use poise::serenity_prelude::ChannelId;
 
 use super::{
-    ChannelMailboxHandle, ChannelMailboxRegistry, GLOBAL_CHANNEL_MAILBOXES,
-    GLOBAL_RECOVERY_DONE_SIGNALS, RecoveryDoneSignal, spawn_channel_mailbox,
+    ChannelMailboxHandle, ChannelMailboxRegistry, ChannelMailboxState, GLOBAL_CHANNEL_MAILBOXES,
+    GLOBAL_RECOVERY_DONE_SIGNALS, RecoveryDoneSignal, claim_observation, remint_fence,
+    spawn_channel_mailbox,
 };
+
+impl ChannelMailboxState {
+    /// The state a newly spawned actor starts from, sharing the channel's fence.
+    pub(super) fn spawned(channel_id: ChannelId, fence: remint_fence::FenceCell) -> Self {
+        Self {
+            claim_log: claim_observation::ClaimLog::spawned(channel_id),
+            remint_fence: fence,
+            ..Default::default()
+        }
+    }
+}
 
 impl ChannelMailboxHandle {
     pub(crate) fn recovery_done(&self) -> &Arc<RecoveryDoneSignal> {
