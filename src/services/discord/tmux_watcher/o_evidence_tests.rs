@@ -1401,8 +1401,8 @@ async fn headless_restart_frame(pool: &sqlx::PgPool, channel: u64, outbox: Headl
     if outbox == O::LateBodyDelivered {
         rows.push((body.as_str(), "headless_turn", "sent", 59));
     }
-    for (content, source, status, age) in rows {
-        let target = format!("channel:{channel}");
+    for (index, (content, source, status, age)) in rows.into_iter().enumerate() {
+        let (target, reason) = (format!("channel:{channel}"), format!("headless.{index}"));
         let id = crate::services::message_outbox::enqueue_outbox_pg_returning_id(
             pool,
             crate::services::message_outbox::OutboxMessage {
@@ -1410,7 +1410,7 @@ async fn headless_restart_frame(pool: &sqlx::PgPool, channel: u64, outbox: Headl
                 content,
                 bot: "claude",
                 source,
-                reason_code: Some("headless.delivery"),
+                reason_code: Some(&reason),
                 session_key: None,
             },
         )
