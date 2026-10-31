@@ -39,7 +39,7 @@ class DeadlineEntrypointsTest(unittest.TestCase):
         for filename in (
             "generate_inventory_docs.py", "giant_file_progress.py", "ratchet_admission.py",
             "generate_env_reference.py", "generate_cli_reference.py", "check_hotfile_ratchet.py",
-            "audit_maintainability.py",
+            "audit_maintainability.py", "rust_lex.py",
         ):
             shutil.copy2(ROOT / "scripts" / filename, scripts / filename)
         shutil.copytree(ROOT / "scripts/audit_maintainability", scripts / "audit_maintainability",
