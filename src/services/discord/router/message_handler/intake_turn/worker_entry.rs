@@ -74,9 +74,10 @@ pub(crate) async fn execute_intake_turn_core(
     if let Some(stopped) = worker_replay_admission(shared, &request).await {
         return Ok(stopped);
     }
-    #[cfg(test)]
-    if crate::services::discord::queue_io::input_ingress::installed(
-        &shared.mailbox(request.channel_id),
+    if crate::services::discord::queue_io::input_ingress::adopt(
+        shared,
+        &shared.provider,
+        request.channel_id,
     )
     .await
         != Ok(false)
@@ -111,7 +112,7 @@ pub(crate) async fn execute_intake_turn_core(
         },
         request.preserve_on_cancel,
         request,
-        (false, None),
+        (false, None, None),
         uploads,
         // Worker dispatch has no in-process gate carry-forward; it re-resolves
         // the durable announcement row for its `user_msg_id` (#3905).
@@ -203,7 +204,6 @@ pub(crate) async fn start_exact_retry(
         .cloned()
         .unwrap_or_default();
     let start = execute_intake_turn_core(http, shared, &token, request, Vec::new());
-    #[cfg(test)]
     let start = crate::services::discord::queue_io::input_ingress::existing_retry(start);
     let (result, handoff) = hand_over(retry.permit, start).await;
     if let Err(error) = result {

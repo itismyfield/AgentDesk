@@ -828,7 +828,9 @@ pub async fn start_agent_turn(
         Ok(target) => target,
         Err(response) => return response,
     };
+    // A start the owner takes queues behind an external turn instead of refusing it.
     if dm_user_id_num.is_none()
+        && !crate::services::discord::owner_takes_start(&provider, channel_id_num)
         && let Some(conflict) = super::agents_turn_target::external_turn_conflict(
             state.health_registry.as_deref(),
             &provider,

@@ -42,6 +42,7 @@ pub(crate) enum AdmissionState {
 /// Where a committed ticket's original stands in the owner: the owner's own single definition.
 pub(crate) use crate::services::turn_orchestrator::TurnBind;
 
+#[cfg(test)]
 pub(crate) async fn admit(
     handle: &ChannelMailboxHandle,
     original: &PendingQueueItem,
@@ -97,5 +98,6 @@ pub(crate) async fn admit_with_context(
     }
 }
 
+#[cfg(test)]
 #[path = "admission_tests.rs"]
 mod tests;

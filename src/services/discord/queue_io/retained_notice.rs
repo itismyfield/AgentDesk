@@ -53,10 +53,12 @@ pub(crate) async fn enqueue(
 }
 
 impl crate::services::turn_orchestrator::ChannelMailboxHandle {
+    #[cfg(test)]
     pub(crate) fn v2_notice_is_non_turn(text: &str) -> bool {
         super::super::dispatch_policy::has_non_turn_provenance(text)
             && !super::super::dispatch_policy::should_process_allowed_bot_turn_text(text)
     }
+    #[cfg(test)]
     pub(crate) async fn v2_notice(
         pool: &sqlx::PgPool,
         provider: &str,

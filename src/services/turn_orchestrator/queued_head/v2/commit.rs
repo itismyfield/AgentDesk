@@ -5,6 +5,7 @@ use crate::services::discord::runtime_store;
 pub(crate) enum Fault {
     None,
     Before,
+    #[cfg(test)]
     AfterRename,
     Third,
     Read,

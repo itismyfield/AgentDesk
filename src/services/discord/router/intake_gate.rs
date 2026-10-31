@@ -716,6 +716,7 @@ pub(in crate::services::discord) async fn handle_event(
                     attachments: attachments.clone(),
                     preloaded_uploads: Vec::new(),
                     voice_announcement: resolved_voice_announcement.clone(),
+                    owner: None,
                 };
                 let admission = super::admit_text_intake(&deps, &submission).await;
                 match super::resolve_attachment_admission(admission) {
@@ -1419,11 +1420,9 @@ pub(in crate::services::discord) async fn handle_event(
             // A replay-deferred direct dispatch checkpoints only once its custody is settled.
             let settle_checkpoint = attachment_local_permit.is_none()
                 && super::live_checkpoint_waits(&data.provider, channel_id);
-            #[cfg(test)]
             let owner_custody =
-                queue_io::input_ingress::installed(&data.shared.mailbox(channel_id)).await
+                queue_io::input_ingress::adopt(&data.shared, &data.provider, channel_id).await
                     != Ok(false);
-            #[cfg(test)]
             let settle_checkpoint = settle_checkpoint || owner_custody;
             if !settle_checkpoint {
                 checkpoint();
@@ -1499,11 +1498,11 @@ pub(in crate::services::discord) async fn handle_event(
                     // #3905: carry the gate's already-authorized, non-consuming
                     // voice resolution into direct dispatch.
                     voice_announcement: resolved_voice_announcement,
+                    owner: None,
                 }
             };
             if let Some(permit) = attachment_local_permit {
                 super::finish_admitted_text_intake(&deps, permit, submission).await?;
-                #[cfg(test)]
                 if owner_custody {
                     checkpoint();
                 }

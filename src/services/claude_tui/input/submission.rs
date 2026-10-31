@@ -77,14 +77,15 @@ fn submit(
         Some((_, context)) if !context.available || context.target != session => {
             InputRun::Refused(InputRefusal::IdentityMismatch)
         }
-        Some((fence, context)) => run(
-            &ManagedAuthority {
+        Some((fence, context)) => {
+            let stash =
+                fence.stash_any_channel() || busy_inject::stash_enabled(Some(context.channel));
+            let authority = ManagedAuthority {
                 fence,
                 session: session.into(),
-            },
-            busy_inject::stash_enabled(Some(context.channel)),
-            (&request, &modal),
-        ),
+            };
+            run(&authority, stash, (&request, &modal))
+        }
         // No channel is known here, so a visible draft is never parked; a pane held for draft
         // recovery still takes no automatic write.
         None => {

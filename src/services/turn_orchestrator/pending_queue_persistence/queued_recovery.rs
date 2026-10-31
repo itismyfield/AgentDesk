@@ -73,6 +73,14 @@ pub(crate) fn load_pending_queues_checked(
     recovery
 }
 
+/// Channels whose queue file the V2 owner wrote, for the boot recovery that re-adopts them.
+#[cfg(unix)]
+pub(crate) fn v2_channels(provider: &ProviderKind, token_hash: &str) -> Vec<ChannelId> {
+    let snapshots = read_catalog(provider, token_hash).snapshots.into_iter();
+    let v2 = snapshots.filter(|(_, snapshot)| matches!(snapshot, SnapshotRead::ReadOnlyV2(_)));
+    v2.map(|(channel, _)| channel).collect()
+}
+
 /// Source ids a read-only V2 queue file keeps, queued, attempted, retained or settled, so a binary
 /// that cannot write V2 never takes them again; a legacy, missing or unreadable file keeps none.
 pub(crate) fn v2_held_sources(

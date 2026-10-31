@@ -127,6 +127,7 @@ async fn one_drive_per_channel_hands_each_front_on_once_in_order() {
         channel,
         handoff: handoff(mailbox.clone(), channel, before, |_| Completion::Submitted),
         recheck: Duration::from_millis(20),
+        settled: None,
     });
     for _ in 0..3 {
         let drive = drive.clone();
@@ -189,6 +190,7 @@ async fn a_front_that_moved_after_its_grant_is_never_reserved() {
             channel,
             handoff: handoff(mailbox.clone(), channel, before, answer),
             recheck: Duration::from_millis(20),
+            settled: None,
         });
         wake(drive);
         let after = settled(&mailbox).await;
@@ -234,6 +236,7 @@ async fn a_modal_front_is_held_and_delivered_after_release_without_new_input() {
         channel,
         handoff: handoff(mailbox.clone(), channel, none, answer),
         recheck: Duration::from_millis(50),
+        settled: None,
     });
     wake(drive);
     let after = settled(&mailbox).await;
@@ -352,6 +355,7 @@ async fn identical_migrated_inputs_are_each_handed_on_once() {
         channel,
         handoff: handoff(mailbox.clone(), channel, none, answer),
         recheck: Duration::from_millis(20),
+        settled: None,
     });
     wake(drive);
     let after = settled(&mailbox).await;

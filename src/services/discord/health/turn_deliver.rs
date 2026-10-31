@@ -25,7 +25,7 @@ use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::{
     Intervention, InterventionMode, SourceMessageQueuedGeneration,
 };
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 pub(in crate::services::discord) use inject::CodexLedger;
 use inject::InjectMode;
 pub(crate) use inject::{
@@ -243,6 +243,10 @@ trait DeliveryPorts: Send + Sync {
     async fn enqueue(&self) -> Result<String, String>;
     fn inject_mode(&self) -> InjectMode;
     async fn try_inject(&self) -> InjectAttempt;
+    /// Whether the channel's input owner takes this input; then no pane is written here.
+    async fn owner_takes(&self) -> bool {
+        false
+    }
 }
 
 async fn deliver_with_ports<P: DeliveryPorts>(
@@ -250,7 +254,7 @@ async fn deliver_with_ports<P: DeliveryPorts>(
 ) -> Result<HumanInputDelivery, HumanInputError> {
     // A busy TUI pane takes the input whoever holds it; a veto keeps the start-or-queue below.
     let mut inject_veto = None;
-    if ports.inject_mode() != InjectMode::Off {
+    if ports.inject_mode() != InjectMode::Off && !ports.owner_takes().await {
         match ports.try_inject().await {
             InjectAttempt::NotSent(veto) => inject_veto = Some(veto.to_string()),
             InjectAttempt::Injected { turn_id } => {
@@ -422,6 +426,12 @@ impl DeliveryPorts for LivePorts {
 
     fn inject_mode(&self) -> InjectMode {
         inject::mode(self.request.channel_id.get())
+    }
+
+    async fn owner_takes(&self) -> bool {
+        let (provider, channel) = (&self.request.provider, self.request.channel_id);
+        super::super::queue_io::input_ingress::adopt(&self.shared, provider, channel).await
+            != Ok(false)
     }
 
     async fn try_inject(&self) -> InjectAttempt {
@@ -714,6 +724,7 @@ mod tests {
         mode: InjectMode,
         inject: InjectAttempt,
         injects: AtomicUsize,
+        owner: bool,
     }
 
     fn ports(starts: Vec<StartAttempt>, holder: MailboxHolder) -> FakePorts {
@@ -727,6 +738,7 @@ mod tests {
             mode: InjectMode::Off,
             inject: InjectAttempt::Injected { turn_id: None },
             injects: AtomicUsize::new(0),
+            owner: false,
         }
     }
 
@@ -754,6 +766,20 @@ mod tests {
             self.injects.fetch_add(1, Ordering::SeqCst);
             self.inject.clone()
         }
+        async fn owner_takes(&self) -> bool {
+            self.owner
+        }
+    }
+
+    /// A channel its input owner holds takes no health pane write: the input goes to the start,
+    /// which the owner admits.
+    #[tokio::test]
+    async fn an_owner_channel_skips_the_pane_injection() {
+        let accepted = StartAttempt::Accepted("discord:7:2".into());
+        let mut fake = ports(vec![accepted], MailboxHolder::Turn);
+        (fake.mode, fake.owner) = (InjectMode::All, true);
+        assert_eq!(run(&fake).await, "queued discord:7:2 accepted enqueue=0");
+        assert_eq!(fake.injects.load(Ordering::SeqCst), 0);
     }
 
     /// `<delivery> <turn_id> [reason] [veto=..] enqueue=N` for compact expectations.

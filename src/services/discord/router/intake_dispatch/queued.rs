@@ -80,43 +80,9 @@ pub(crate) async fn admit_queued_intake(
     backstop_reason: &'static str,
     dispatch_lease: Option<std::sync::Arc<crate::services::turn_orchestrator::DispatchLease>>,
 ) -> QueuedAdmissionDisposition {
-    let retry_identity = super::super::super::busy_followup_retry_store::resolve_identity(
-        &provider,
-        channel_id.get(),
-        intervention.message_id.get(),
-        &intervention.source_message_ids,
-    );
-    let submission = IntakeSubmission {
-        provider,
-        request: super::super::message_handler::IntakeRequest {
-            intake_outbox_id: None,
-            channel_id,
-            user_msg_id: intervention.message_id,
-            source_message_ids: intervention.source_message_ids.clone(),
-            busy_followup_retry_user_msg_id: serenity::MessageId::new(retry_identity.user_msg_id),
-            request_owner,
-            request_owner_name,
-            user_text: intervention.text.clone(),
-            reply_to_user_message: true,
-            defer_watcher_resume,
-            wait_for_completion,
-            merge_consecutive: intervention.merge_consecutive,
-            reply_context: intervention.reply_context.clone(),
-            has_reply_boundary: intervention.has_reply_boundary,
-            dm_hint: None,
-            turn_kind: super::super::TurnKind::Foreground,
-            preserve_on_cancel: intervention.preserve_on_cancel(),
-        },
-        origin: IntakeOrigin::QueuedDrain(intervention.queued_route()),
-        preserve_on_cancel: intervention.preserve_on_cancel(),
-        has_nonportable_uploads: intervention
-            .pending_uploads
-            .iter()
-            .any(|upload| upload.is_local()),
-        attachments: Vec::new(),
-        preloaded_uploads: intervention.pending_uploads.clone(),
-        voice_announcement: None,
-    };
+    let owner = (request_owner, request_owner_name);
+    let flags = (defer_watcher_resume, wait_for_completion);
+    let submission = queued_submission(provider, channel_id, intervention, owner, flags);
     let admission = admit_text_intake(deps, &submission).await;
     let local_permit = match admission {
         #[cfg(unix)]
@@ -242,6 +208,73 @@ pub(crate) async fn admit_queued_intake(
         local_permit,
         restore_owner,
     })
+}
+
+/// An owner front's start: the owner keeps its original, so no V1 lease or restore applies and
+/// only a local admission runs it, presenting the owner's claim.
+pub(crate) async fn start_owner_front(
+    deps: &super::super::message_handler::IntakeDeps<'_>,
+    (provider, channel_id): (ProviderKind, serenity::ChannelId),
+    intervention: &Intervention,
+    request_owner_name: String,
+    owner: super::super::message_handler::OwnerTurn,
+) -> Result<super::super::IntakeExecution, super::super::super::Error> {
+    let at = (intervention.author_id, request_owner_name);
+    let mut submission = queued_submission(provider, channel_id, intervention, at, (false, false));
+    match admit_text_intake(deps, &submission).await {
+        IntakeAdmission::Local(permit) => {
+            submission.owner = Some(owner);
+            finish_admitted_local(deps, permit, submission).await
+        }
+        _ => Err("NotSent(\"owner_front_not_admitted\")".into()),
+    }
+}
+
+fn queued_submission(
+    provider: ProviderKind,
+    channel_id: serenity::ChannelId,
+    intervention: &Intervention,
+    (request_owner, request_owner_name): (serenity::UserId, String),
+    (defer_watcher_resume, wait_for_completion): (bool, bool),
+) -> IntakeSubmission {
+    let retry_identity = super::super::super::busy_followup_retry_store::resolve_identity(
+        &provider,
+        channel_id.get(),
+        intervention.message_id.get(),
+        &intervention.source_message_ids,
+    );
+    IntakeSubmission {
+        provider,
+        request: super::super::message_handler::IntakeRequest {
+            intake_outbox_id: None,
+            channel_id,
+            user_msg_id: intervention.message_id,
+            source_message_ids: intervention.source_message_ids.clone(),
+            busy_followup_retry_user_msg_id: serenity::MessageId::new(retry_identity.user_msg_id),
+            request_owner,
+            request_owner_name,
+            user_text: intervention.text.clone(),
+            reply_to_user_message: true,
+            defer_watcher_resume,
+            wait_for_completion,
+            merge_consecutive: intervention.merge_consecutive,
+            reply_context: intervention.reply_context.clone(),
+            has_reply_boundary: intervention.has_reply_boundary,
+            dm_hint: None,
+            turn_kind: super::super::TurnKind::Foreground,
+            preserve_on_cancel: intervention.preserve_on_cancel(),
+        },
+        origin: IntakeOrigin::QueuedDrain(intervention.queued_route()),
+        preserve_on_cancel: intervention.preserve_on_cancel(),
+        has_nonportable_uploads: intervention
+            .pending_uploads
+            .iter()
+            .any(|upload| upload.is_local()),
+        attachments: Vec::new(),
+        preloaded_uploads: intervention.pending_uploads.clone(),
+        voice_announcement: None,
+        owner: None,
+    }
 }
 
 pub(crate) async fn finish_admitted_queued_intake(

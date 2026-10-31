@@ -215,7 +215,6 @@ async fn fire_agent(pool: &PgPool, health_registry: Option<&HealthRegistry>, fir
         return;
     };
     match start_agent_turn(pool, health_registry, fire).await {
-        #[cfg(test)]
         Ok(AgentTurnStartDisposition::Accepted | AgentTurnStartDisposition::Pending) => {}
         Ok(AgentTurnStartDisposition::Started) => {
             // Delivery stays running; poll_agent_delivery owns completion.
@@ -412,13 +411,10 @@ async fn start_agent_turn(
         *target.borrow_mut() = Some((provider.clone(), owner_channel.get(), turn_channel.get()));
     });
 
-    #[cfg(test)]
-    if let Ok(handle) = owner_input::OWNER.try_with(Clone::clone) {
-        let target = (turn_id.as_str(), turn_channel_num, prompt.as_str());
-        let owned = owner_input::owned(pool, fire, &handle, target, (&provider, metadata.as_ref()));
-        if let Some(disposition) = owned.await? {
-            return Ok(disposition);
-        }
+    let target = (turn_id.as_str(), turn_channel_num, prompt.as_str());
+    let owned = owner_input::owned(pool, fire, target, (&provider, metadata.as_ref()));
+    if let Some(disposition) = owned.await? {
+        return Ok(disposition);
     }
 
     let outcome = start_reserved_headless_agent_turn_with_owner_channel(

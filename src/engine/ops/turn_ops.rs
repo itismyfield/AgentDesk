@@ -25,7 +25,7 @@ pub fn set_global_health_registry(registry: &std::sync::Arc<HealthRegistry>) {
     }
 }
 
-fn get_health_registry() -> Option<std::sync::Arc<HealthRegistry>> {
+pub(crate) fn health_registry() -> Option<std::sync::Arc<HealthRegistry>> {
     GLOBAL_HEALTH_REGISTRY
         .lock()
         .ok()?
@@ -168,7 +168,7 @@ fn start_turn_raw(
         return err_json("postgres backend is unavailable", "unavailable");
     };
 
-    let Some(registry) = get_health_registry() else {
+    let Some(registry) = health_registry() else {
         return err_json("Discord not available (standalone mode)", "unavailable");
     };
 

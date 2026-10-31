@@ -12,7 +12,6 @@ mod compat_tests;
 mod screen;
 #[cfg(test)]
 mod screen_tests;
-#[cfg(test)]
 pub(crate) mod v2;
 
 const CAPACITY: usize = 4096;
@@ -118,7 +117,6 @@ fn read(path: &Path) -> Result<Store, String> {
 
 /// What a non-scoped reader matches against: the V1 store, or a V2 history's owned entries.
 fn readable(path: &Path) -> Result<Store, String> {
-    #[cfg(test)]
     if let Some(store) = v2::unscoped_store(path)? {
         return Ok(store);
     }
@@ -128,7 +126,6 @@ fn readable(path: &Path) -> Result<Store, String> {
 /// What the V1 append readers match against: the V1 store, or a V2 history's owned entries when
 /// it holds any migrated append entry.
 fn readable_append(path: &Path) -> Result<Store, String> {
-    #[cfg(test)]
     if let Some(store) = v2::append_store(path)? {
         return Ok(store);
     }
@@ -137,7 +134,6 @@ fn readable_append(path: &Path) -> Result<Store, String> {
 
 /// A V1 append mutation: on the V1 store, or on a V2 history's migrated append entries.
 fn update_append<T>(apply: impl FnOnce(&mut Store) -> Result<T, String>) -> Result<T, String> {
-    #[cfg(test)]
     {
         let path = path()?;
         if v2::is_v2(&path)? {
@@ -150,20 +146,17 @@ fn update_append<T>(apply: impl FnOnce(&mut Store) -> Result<T, String>) -> Resu
 /// The attempt a diagnostic receipt thread records into, with no pane write right. A receipt is
 /// evidence that the native record was observed, not that the provider ran the input.
 pub(crate) struct ReceiptScope {
-    #[cfg(test)]
     context: Option<v2::ReceiptContext>,
 }
 
 impl ReceiptScope {
     pub(crate) fn capture() -> Self {
         Self {
-            #[cfg(test)]
             context: v2::ReceiptContext::capture(),
         }
     }
 
     pub(crate) fn enter<T>(&self, f: impl FnOnce() -> T) -> T {
-        #[cfg(test)]
         if let Some(context) = &self.context {
             return context.enter(f);
         }
@@ -208,7 +201,6 @@ pub(crate) fn register(
     offset: u64,
     frame: &str,
 ) -> Result<(), String> {
-    #[cfg(test)]
     if let Some(result) =
         v2::scoped_register((provider, session, id, author), transcript, offset, frame)
     {
@@ -284,7 +276,6 @@ fn register_inner(
 pub(crate) fn withdraw(id: &str, transcript: &Path) {
     // A scoped attempt keeps its registration and writes nothing; only the queue's exact
     // not-sent proof, projected as abandoned, releases its collision candidate.
-    #[cfg(test)]
     if v2::scoped() {
         return;
     }
@@ -305,7 +296,6 @@ pub(crate) fn withdraw(id: &str, transcript: &Path) {
 }
 
 pub(crate) fn registered(id: &str, transcript: &Path, frame: &str) -> bool {
-    #[cfg(test)]
     if let Some(registered) = v2::scoped_registered(id, transcript, frame) {
         return registered;
     }
@@ -324,7 +314,6 @@ pub(crate) fn registered(id: &str, transcript: &Path, frame: &str) -> bool {
 }
 
 pub(crate) fn allows_legacy(id: &str, transcript: &Path) -> bool {
-    #[cfg(test)]
     if v2::scoped() {
         return false;
     }
@@ -367,7 +356,6 @@ pub(crate) fn receipt(
     row: Option<&str>,
     frame: &str,
 ) -> Option<bool> {
-    #[cfg(test)]
     if let Some(receipt) = v2::scoped_receipt(id, transcript, offset, kind, row, frame) {
         return receipt;
     }
@@ -478,7 +466,6 @@ fn observed_at_checked(
     prompts: &[String],
     row: Option<&str>,
 ) -> Result<ObservedAttempt, String> {
-    #[cfg(test)]
     if let Some(observed) = v2::scoped_observed(provider, session, prompts, row) {
         return Ok(observed);
     }
@@ -515,7 +502,6 @@ fn observed_at_checked(
 }
 
 pub(crate) fn receipt_row(id: &str, transcript: &Path) -> Option<String> {
-    #[cfg(test)]
     if let Some(row) = v2::scoped_receipt_row(id, transcript) {
         return row;
     }

@@ -254,6 +254,7 @@ pub(in crate::services::discord) use recovery_engine as recovery;
 // #3038 S1: re-export the extracted cluster type so the `SharedData` field
 // declaration and constructor literals reference it without a module-qualified
 // path (surface freeze, #3294/#3295 pattern).
+pub(crate) use queue_io::input_ingress::takes_start as owner_takes_start;
 pub(crate) use restart_mode::InflightRestartMode;
 pub(crate) use router::{
     HeadlessTurnStartError, HeadlessTurnStartOutcome, HeadlessTurnStartStatus, IntakeExecution,

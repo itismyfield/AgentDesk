@@ -50,7 +50,11 @@ mod intake_outbox_state_builder_tests {
                 &'static IntakeDeps<'static>,
                 bool,
                 IntakeRequest,
-                (bool, Option<adk_thread::Route>),
+                (
+                    bool,
+                    Option<adk_thread::Route>,
+                    Option<super::super::OwnerTurn>,
+                ),
                 crate::services::cluster::attachment_transfer::uploads::PendingUploads,
                 Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
                 bool,
@@ -163,7 +167,7 @@ pub(super) async fn handle_text_message(
     deps: &IntakeDeps<'_>,
     preserve_on_cancel: bool,
     request: IntakeRequest,
-    (_queued_drain, queued): (bool, Option<adk_thread::Route>),
+    (_queued_drain, queued, owner): (bool, Option<adk_thread::Route>, Option<super::OwnerTurn>),
     preloaded_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     gate_resolved_voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
     durable_reply_context: bool,
@@ -1114,6 +1118,7 @@ pub(super) async fn handle_text_message(
                     &mut memento_context_loaded,
                     &mut session_strategy_reason,
                 ),
+                owner.as_ref().map(|owner| owner.front().clone()),
             ))
             .await;
         // The claim owns the route: publish it before this turn can be observed.
@@ -2265,6 +2270,7 @@ pub(super) async fn handle_text_message(
                             },
                             replay_start,
                             tx.clone(),
+                            owner,
                         )
                     }))
                 },

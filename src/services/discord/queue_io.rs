@@ -1,12 +1,9 @@
 use super::*;
 mod backstop;
-#[cfg(test)]
 pub(in crate::services::discord) mod input_owner;
 #[cfg(test)]
-pub(in crate::services::discord) use input_owner::{
-    admission as input_admission, ingress as input_ingress,
-};
-#[cfg(test)]
+pub(in crate::services::discord) use input_owner::admission as input_admission;
+pub(in crate::services::discord) use input_owner::ingress as input_ingress;
 pub(crate) mod retained_notice;
 pub(in crate::services) use backstop::BackstopSlot;
 pub(in crate::services::discord) use backstop::spawn_turn_completion_idle_queue_listener;
@@ -31,7 +28,7 @@ pub(in crate::services::discord) mod cancel_backstop_test_support;
 
 pub(in crate::services::discord) mod auto_queue_eligibility;
 pub(in crate::services::discord) mod queued_head_inject;
-mod transport;
+pub(in crate::services::discord) mod transport;
 mod turn_admission;
 use queue_dispatch::kickoff::{KickoffLane, kickoff_queue_channel};
 use transport::QueueTransport;

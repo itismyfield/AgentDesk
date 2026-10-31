@@ -17,9 +17,25 @@ use crate::services::stream_json_cli::{
 use crate::services::turn_host::{HerdrRefusal, HerdrTurnPlan, TurnHost};
 use crate::services::{claude, claude_tui, codex, gemini, opencode, qwen};
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 mod owner_input;
+#[cfg(unix)]
+pub(in crate::services::discord) use owner_input::{
+    OwnerTurn, admit_start as owner_admit_start, recover as owner_recover, wake as owner_wake,
+};
 pub(super) mod replay_scope;
+
+/// No input owner runs a turn off unix.
+#[cfg(not(unix))]
+pub(in crate::services::discord) enum OwnerTurn {}
+#[cfg(not(unix))]
+impl OwnerTurn {
+    pub(in crate::services::discord) fn front(
+        &self,
+    ) -> &crate::services::turn_orchestrator::OwnerFront {
+        match *self {}
+    }
+}
 
 pub(super) struct StreamingTurn<'a> {
     pub pool: Option<&'a sqlx::PgPool>,
@@ -242,6 +258,7 @@ pub(super) fn execute(
     turn: StreamingTurn<'_>,
     start: ReplayStart,
     sender: Sender<StreamMessage>,
+    owner: Option<OwnerTurn>,
 ) -> Result<(), String> {
     let start = if start.receipt_id().is_some() {
         let scope = replay_scope::selected(turn.provider, turn.channel_id, turn.tmux_session_name);
@@ -259,6 +276,14 @@ pub(super) fn execute(
     start
         .spend(&target, turn.prompt, &turn.cancel)
         .map_err(|refusal| format!("replay start refused: {refusal:?}"))?;
+    #[cfg(unix)]
+    if let Some(owner) = owner {
+        return owner_input::execute_owned(turn, sender, owner);
+    }
+    #[cfg(not(unix))]
+    if let Some(owner) = owner {
+        match owner {}
+    }
     #[cfg(all(test, unix))]
     match owner_input::take(&turn) {
         Some(owner_input::Taken::Done(result)) => return result,
@@ -935,7 +960,7 @@ pub(super) mod tests {
                 submission: None,
             };
             tokio::task::block_in_place(|| {
-                execute(turn, crate::services::discord::router::intake_dispatch::replay_admission::dormant_start("test").unwrap(), sender)
+                execute(turn, crate::services::discord::router::intake_dispatch::replay_admission::dormant_start("test").unwrap(), sender, None)
             })
         };
 

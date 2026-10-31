@@ -12,7 +12,6 @@ pub(super) enum AgentStartDisposition {
 
 pub(super) fn disposition(status: HeadlessTurnStartStatus) -> AgentStartDisposition {
     match status {
-        #[cfg(test)]
         HeadlessTurnStartStatus::Accepted => AgentStartDisposition::Accepted,
         HeadlessTurnStartStatus::Started => AgentStartDisposition::Started,
         HeadlessTurnStartStatus::Consumed => AgentStartDisposition::Consumed,
@@ -43,28 +42,19 @@ pub(super) async fn reconcile_run(
     if !needs_owner(&run) {
         return Ok(Some(run));
     }
-    #[cfg(test)]
-    {
-        match custody::may_observe(executor, store, &run).await {
-            Ok(true) => {}
-            Ok(false) => return Ok(None),
-            Err(error) => {
-                tracing::warn!(run_id=%run.run_id,%error,"owner run held without blocking the remaining poll batch");
-                return Ok(None);
-            }
+    match custody::may_observe(executor, store, &run).await {
+        Ok(true) => {}
+        Ok(false) => return Ok(None),
+        Err(error) => {
+            tracing::warn!(run_id=%run.run_id,%error,"owner run held without blocking the remaining poll batch");
+            return Ok(None);
         }
-        let mut bound = run;
-        bound.started_at = intent_started_at(&bound);
-        Ok(Some(bound))
     }
-    #[cfg(not(test))]
-    {
-        let _ = (executor, store);
-        Ok(None)
-    }
+    let mut bound = run;
+    bound.started_at = intent_started_at(&bound);
+    Ok(Some(bound))
 }
 
-#[cfg(test)]
 fn intent_started_at(run: &RunningAgentRoutineRun) -> DateTime<Utc> {
     run.attempts
         .as_array()
@@ -86,20 +76,12 @@ pub(super) async fn retry_allowed(
     if !needs_owner(run) {
         return true;
     }
-    #[cfg(test)]
-    {
-        match custody::retry_allowed(executor, run).await {
-            Ok(allowed) => allowed,
-            Err(error) => {
-                tracing::warn!(run_id=%run.run_id,%error,"owner retry held until the exact attempt settles");
-                false
-            }
+    match custody::retry_allowed(executor, run).await {
+        Ok(allowed) => allowed,
+        Err(error) => {
+            tracing::warn!(run_id=%run.run_id,%error,"owner retry held until the exact attempt settles");
+            false
         }
-    }
-    #[cfg(not(test))]
-    {
-        let _ = executor;
-        false
     }
 }
 
@@ -156,7 +138,6 @@ impl RoutineAgentExecutor {
     }
 }
 
-#[cfg(test)]
 pub(super) mod custody {
     use super::*;
     use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};
@@ -166,6 +147,7 @@ pub(super) mod custody {
         provider: &str,
         channel: u64,
     ) -> Result<ChannelMailboxHandle> {
+        #[cfg(test)]
         if let Ok(handle) = super::super::owner_input_tests::OWNER.try_with(Clone::clone) {
             return Ok(handle);
         }
@@ -192,15 +174,27 @@ pub(super) mod custody {
         let Ok(handle) = handle(executor, provider, channel).await else {
             return Ok(None);
         };
-        let tui = start.execution_mode != execution::AgentExecutionMode::Process;
+        let process = start.execution_mode == execution::AgentExecutionMode::Process;
+        let execution = ChannelMailboxHandle::owner_input_execution(provider, channel, process);
         let owned = handle
-            .owned_start(tui, (turn_id, channel, start.prompt))
+            .owned_start(execution, (turn_id, channel, start.prompt))
             .await;
         let Some((original, namespace)) = owned.map_err(anyhow::Error::msg)? else {
             return Ok(None);
         };
         let started = self::start(store, start, &handle, original, &namespace, planned.clone());
-        started.await.map(Some)
+        let started = started.await?;
+        if started.disposition == AgentStartDisposition::Accepted {
+            wake(executor, provider, channel).await;
+        }
+        Ok(Some(started))
+    }
+
+    /// The owner runs an accepted start once its drive looks at the queue.
+    async fn wake(executor: &RoutineAgentExecutor, provider: &str, channel: u64) {
+        if let Some(registry) = executor.health_registry.as_deref() {
+            ChannelMailboxHandle::owner_input_wake(registry, provider, channel).await;
+        }
     }
 
     pub(in crate::services::routines::agent_executor) async fn start(
@@ -338,6 +332,7 @@ pub(super) mod custody {
                     &accepted,
                 )
                 .await?;
+            wake(executor, &input.provider, input.channel).await;
         }
         Ok(may_observe)
     }

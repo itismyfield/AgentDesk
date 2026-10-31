@@ -13,7 +13,7 @@ mod receipt;
 mod submit;
 #[cfg(test)]
 pub(crate) use submit::inject;
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 pub(crate) use submit::inject_owned;
 #[cfg(all(test, unix))]
 use submit::{inject_gated, inject_listed};

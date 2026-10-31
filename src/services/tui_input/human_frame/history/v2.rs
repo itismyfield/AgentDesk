@@ -931,10 +931,10 @@ pub(super) fn update_migrated<T>(
     })
 }
 // Writer fixtures require Unix file identity and confirmed parent directory fsync.
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 #[path = "v2_compaction_tests.rs"]
 mod compaction_tests;
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 #[path = "v2_tests.rs"]
 mod tests;
 

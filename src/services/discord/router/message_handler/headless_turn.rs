@@ -182,6 +182,22 @@ async fn start_reserved_headless_turn_admitted(
             reservation.turn_id(channel_id),
         ));
     }
+    #[cfg(unix)]
+    if let Some(outcome) = owner_start(
+        (shared, channel_id, &reservation),
+        prompt,
+        (request_owner.get(), request_owner_name),
+        (source, metadata.as_ref()),
+        (
+            channel_name_hint.as_deref(),
+            tmux_session_label.as_deref(),
+            is_dm_hint,
+        ),
+    )
+    .await
+    {
+        return outcome;
+    }
     let identity = (
         provider.clone(),
         role_binding.as_ref().map(|b| b.role_id.clone()),
@@ -1027,6 +1043,7 @@ async fn start_reserved_headless_turn_admitted(
                             },
                             replay_start,
                             tx.clone(),
+                            None,
                         )
                     }))
                 },
@@ -1094,6 +1111,47 @@ async fn start_reserved_headless_turn_admitted(
     );
 
     Ok(HeadlessTurnStartOutcome::started(turn_id, receipt))
+}
+
+/// A start whose target the owner takes is admitted as an original with its resolved provenance;
+/// a routine or scheduled start already met its own owner seam and keeps the legacy path here.
+#[cfg(unix)]
+async fn owner_start(
+    (shared, channel, reservation): (&Arc<SharedData>, ChannelId, &HeadlessTurnReservation),
+    prompt: &str,
+    owner: (u64, &str),
+    (source, metadata): (Option<&str>, Option<&serde_json::Value>),
+    (channel_hint, label, dm): (Option<&str>, Option<&str>, Option<bool>),
+) -> Option<Result<HeadlessTurnStartOutcome, HeadlessTurnStartError>> {
+    use crate::services::discord::queue_io::input_ingress::Intake;
+    use crate::services::discord::queue_io::input_owner::start::HeadlessProvenance;
+    let seamed = |key| metadata.is_some_and(|metadata| metadata.get(key).is_some());
+    if seamed("routine_id") || seamed("scheduled_message_id") {
+        return None;
+    }
+    let turn_id = reservation.turn_id(channel);
+    let metadata = metadata.cloned();
+    let provenance = HeadlessProvenance {
+        owner,
+        source,
+        metadata,
+        channel_hint,
+        label,
+        dm,
+    };
+    let admit = super::provider_dispatch::owner_admit_start;
+    let intake = admit(
+        shared,
+        channel,
+        (&turn_id, prompt),
+        provenance.json(&turn_id),
+    )
+    .await?;
+    Some(match intake {
+        Intake::Accepted => Ok(HeadlessTurnStartOutcome::accepted(turn_id)),
+        Intake::Pending(pending) => Err(HeadlessTurnStartError::Conflict(pending.to_string())),
+        Intake::Rejected(reason) => Err(HeadlessTurnStartError::Conflict(reason)),
+    })
 }
 
 #[cfg(test)]

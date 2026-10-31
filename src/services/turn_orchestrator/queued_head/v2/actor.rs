@@ -13,6 +13,7 @@ impl Message {
 }
 
 impl ChannelMailboxHandle {
+    #[cfg(test)]
     pub(crate) async fn v2_adopt(&self, path: PathBuf, namespace: String) -> Result<(), String> {
         self.v2_request(move |slot| {
             *slot = Some(Owner::adopt(path, namespace)?);
@@ -40,6 +41,16 @@ impl ChannelMailboxHandle {
         .await
     }
 
+    /// Adopts the channel's own queue file under its bot's namespace unless its owner holds it.
+    pub(crate) async fn v2_ensure_channel(
+        &self,
+        persistence: &crate::services::turn_orchestrator::QueuePersistenceContext,
+        channel: poise::serenity_prelude::ChannelId,
+    ) -> Result<(), String> {
+        let (path, namespace) = v2_queue(persistence, channel)?;
+        self.v2_ensure(path, namespace).await
+    }
+
     pub(crate) async fn v2_request<T: Send + 'static>(
         &self,
         f: impl FnOnce(&mut Option<Owner>) -> Result<T, String> + Send + 'static,
@@ -55,4 +66,18 @@ impl ChannelMailboxHandle {
         .await
         .map_err(|_| "mailbox unreachable".to_string())?
     }
+}
+
+/// The channel's own queue file and its bot's namespace, as the owner adopts them.
+pub(crate) fn v2_queue(
+    persistence: &crate::services::turn_orchestrator::QueuePersistenceContext,
+    channel: poise::serenity_prelude::ChannelId,
+) -> Result<(std::path::PathBuf, String), String> {
+    let (provider, token) = (&persistence.provider, persistence.token_hash.as_str());
+    let path =
+        crate::services::turn_orchestrator::pending_queue_persistence::pending_queue_file_path(
+            provider, token, channel,
+        );
+    let namespace = format!("{}/{token}", provider.as_str());
+    Ok((path.ok_or("pending queue root unavailable")?, namespace))
 }

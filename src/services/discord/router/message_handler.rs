@@ -63,12 +63,15 @@ mod watchdog;
 pub(in crate::services::discord) use watchdog::incident_attach;
 
 use self::goal_lifecycle::*;
+pub(in crate::services::discord) use self::provider_dispatch::OwnerTurn;
 #[cfg(test)]
 pub(in crate::services::discord) use self::provider_dispatch::producer_error_test_support::producer_error_frame;
 #[cfg(test)]
 pub(in crate::services::discord) use self::provider_dispatch::{
     CLAUDE_LEGACY_PROBE, INPUT_EFFECT_PROBE, InputEffectProbe,
 };
+#[cfg(unix)]
+pub(in crate::services::discord) use self::provider_dispatch::{owner_recover, owner_wake};
 use self::provider_isolation::*;
 use self::tui_followup::*;
 pub(in crate::services::discord) use self::turn_lifecycle::mailbox_try_start_turn_with_terminal_marker_cleanup;
@@ -92,6 +95,7 @@ async fn try_start_turn_with_stale_busy_heal(
     request_owner: serenity::UserId,
     user_msg_id: serenity::MessageId,
     context: IntakeClaimContext<'_, '_, '_, '_>,
+    front: Option<crate::services::turn_orchestrator::OwnerFront>,
 ) -> bool {
     let ((session_key, provider, tmux_session_name), mut launch) = context;
     let started = mailbox_try_start_turn_with_terminal_marker_cleanup(
@@ -100,7 +104,7 @@ async fn try_start_turn_with_stale_busy_heal(
         cancel_token.clone(),
         request_owner,
         user_msg_id,
-        session_key,
+        (session_key, front.clone()),
     )
     .await;
 
@@ -122,7 +126,7 @@ async fn try_start_turn_with_stale_busy_heal(
             cancel_token,
             request_owner,
             user_msg_id,
-            session_key,
+            (session_key, front),
         )
         .await
     } else {
@@ -289,8 +293,11 @@ pub(super) async fn finish_admitted_local(
     deps: &IntakeDeps<'_>,
     request: IntakeRequest,
     preserve_on_cancel: bool,
-    queued_drain: bool,
-    queued: Option<crate::services::turn_orchestrator::QueuedRoute>,
+    queued: (
+        bool,
+        Option<crate::services::turn_orchestrator::QueuedRoute>,
+        Option<OwnerTurn>,
+    ),
     preloaded_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> Result<IntakeExecution, Error> {
@@ -298,7 +305,7 @@ pub(super) async fn finish_admitted_local(
         deps,
         preserve_on_cancel,
         request,
-        (queued_drain, queued),
+        queued,
         preloaded_uploads,
         voice_announcement,
         false,

@@ -130,22 +130,6 @@ impl RoutineAgentExecutor {
             "checkpoint": checkpoint,
             "next_due_at": next_due_at.map(|value| value.to_rfc3339()),
         });
-        let updated = store
-            .mark_agent_turn_started(
-                &claimed.run_id,
-                &turn_id,
-                Some(result_json.clone()),
-                agent_id,
-                attempt_kind,
-            )
-            .await?;
-        if !updated {
-            return Err(anyhow!(
-                "routine agent run {} vanished before turn_id could be stored",
-                claimed.run_id
-            ));
-        }
-
         let metadata = Some(json!({
             "agent_id": agent_id,
             "delivery_bot": delivery_bot,
@@ -162,6 +146,34 @@ impl RoutineAgentExecutor {
             "dm_user_id": dm_user_id,
             "is_dm": dm_user_id.is_some(),
         }));
+        let process = execution_mode == execution::AgentExecutionMode::Process;
+        let channel_name_hint = dm_user_id_num.is_none().then(|| primary_channel.clone());
+        let tmux_session_label = (dm_user_id_num.is_none() || process)
+            .then(|| execution_mode.session_label(claimed, agent_id, &turn_id));
+        // The owner keeps what the legacy start resolves here, so its turn resolves the same way.
+        let mut planned = result_json.clone();
+        planned["metadata"] = json!(metadata);
+        planned["channel_name_hint"] = json!(channel_name_hint);
+        planned["synthetic_label"] = json!(tmux_session_label);
+        if let Some(started) = owner_input::custody::owned(self, store, &start, &planned).await? {
+            return Ok(started);
+        }
+        let updated = store
+            .mark_agent_turn_started(
+                &claimed.run_id,
+                &turn_id,
+                Some(result_json.clone()),
+                agent_id,
+                attempt_kind,
+            )
+            .await?;
+        if !updated {
+            return Err(anyhow!(
+                "routine agent run {} vanished before turn_id could be stored",
+                claimed.run_id
+            ));
+        }
+
         let outcome = if let Some(dm_user_id_num) = dm_user_id_num {
             start_reserved_headless_agent_turn_in_dm(
                 registry,
@@ -172,8 +184,7 @@ impl RoutineAgentExecutor {
                 prompt.to_string(),
                 Some("routine".to_string()),
                 metadata,
-                (execution_mode == execution::AgentExecutionMode::Process)
-                    .then(|| execution_mode.session_label(claimed, agent_id, &turn_id)),
+                tmux_session_label,
                 reservation,
             )
             .await
@@ -181,9 +192,6 @@ impl RoutineAgentExecutor {
             // #5: the agent's REAL primary channel/alias is the workspace hint so
             // `resolve_workspace` resolves alias/by-name routine agents; the
             // synthetic session name rides the tmux label (#3463 name-first).
-            let channel_name_hint = Some(primary_channel.clone());
-            let tmux_session_label =
-                Some(execution_mode.session_label(claimed, agent_id, &turn_id));
             start_reserved_headless_agent_turn_with_owner_channel(
                 registry,
                 channel_id,

@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use super::StreamingTurn;
 use crate::services::claude_tui::{busy_inject, owner_input as scope};
 use crate::services::discord::queue_io::input_owner::drive::{
-    Drive, Front, FrontClaim, Handoff, claim_turn,
+    Drive, Front, FrontClaim, Handoff, Settled as Owed, claim_turn,
 };
 use crate::services::discord::queue_io::input_owner::effect::{
     self, BusyClaude, BusyClaudeHerdr, BusyCodex, BusyCodexHerdr, Clock, CodexInput, Completion,
@@ -14,6 +14,7 @@ use crate::services::discord::queue_io::input_owner::effect::{
 };
 use crate::services::discord::queue_io::input_owner::origin::{Execution, InputOrigin};
 use crate::services::discord::queue_io::input_owner::{pump, target};
+use crate::services::platform::tmux::PaneLiveness;
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::session_host::HerdrTarget;
 use crate::services::turn_host::{HerdrTurnPlan, TurnHost};
@@ -39,8 +40,11 @@ pub(super) struct Registration {
     clock: Clock,
     timing: &'static busy_inject::Timing,
     /// The provider's observer of the AI turn an idle submit starts; returns once that turn ends.
-    until_done: Option<Box<dyn FnOnce() + Send>>,
+    until_done: Option<UntilDone>,
 }
+
+/// Reads an idle submit's AI turn to its end on the turn's sender and returns its outcome.
+pub(super) type UntilDone = Box<dyn FnOnce() -> Result<(), String> + Send>;
 
 impl Registration {
     /// A front's registration read from what its turn observes: host verdict, tmux spawn marker or
@@ -50,14 +54,19 @@ impl Registration {
         (provider, origin, busy): (&str, InputOrigin, bool),
         (host, session, live): (&TurnHost, &str, Option<(&str, Option<&str>)>),
         original: &PendingQueueItem,
-        until_done: Option<Box<dyn FnOnce() + Send>>,
+        until_done: Option<UntilDone>,
     ) -> Result<Self, String> {
         let herdr = match host {
             TurnHost::Herdr(plan) => bound_herdr(plan),
             _ => None,
         };
+        // A pane kept after its process exited is no live execution; an unknown answer refuses.
         let alive = match host {
-            TurnHost::Tmux => crate::services::platform::tmux::has_session(session),
+            TurnHost::Tmux => match crate::services::platform::tmux::pane_liveness(session) {
+                PaneLiveness::Live => true,
+                PaneLiveness::DeadOrAbsent => false,
+                PaneLiveness::ProbeError => return Err("NotSent(\"pane_unobserved\")".into()),
+            },
             _ => herdr.is_some(),
         };
         let phase = match (alive, busy) {
@@ -125,7 +134,11 @@ pub(in crate::services::discord) fn owner_drive(
     (provider, channel): (ProviderKind, u64),
     idle: Handoff,
 ) -> std::sync::Arc<Drive> {
-    let busy = mailbox.clone();
+    let (busy, owed) = (
+        mailbox.clone(),
+        (mailbox.clone(), provider.as_str().to_string()),
+    );
+    let drains = pool.clone();
     let handoff: Handoff = std::sync::Arc::new(move |front| {
         let (mailbox, pool, provider, idle) =
             (busy.clone(), pool.clone(), provider.clone(), idle.clone());
@@ -138,11 +151,25 @@ pub(in crate::services::discord) fn owner_drive(
         })
     });
     let recheck = std::time::Duration::from_secs(5);
+    let settled: Option<Owed> = drains.map(|pool| {
+        let settled: Owed = std::sync::Arc::new(move || {
+            let (pool, (mailbox, provider)) = (pool.clone(), owed.clone());
+            Box::pin(async move {
+                let drain = crate::services::discord::queue_io::input_owner::notice::drain;
+                let drain = drain(&pool, &mailbox, &provider, channel).await;
+                if let Err(error) = drain {
+                    tracing::warn!(channel_id = channel, %error, "owner notices stay owed");
+                }
+            })
+        });
+        settled
+    });
     std::sync::Arc::new(Drive {
         mailbox,
         channel,
         handoff,
         recheck,
+        settled,
     })
 }
 
@@ -204,6 +231,179 @@ pub(in crate::services::discord) async fn hand_busy(
     }
 }
 
+/// A front the drive granted and the owner claimed, carried by value to the turn that starts it,
+/// with the drive's answer once that input settled.
+pub(in crate::services::discord) struct OwnerTurn {
+    mailbox: ChannelMailboxHandle,
+    claim: FrontClaim,
+    settled: Settled,
+}
+
+impl OwnerTurn {
+    pub(in crate::services::discord) fn front(&self) -> &Front {
+        self.claim.front()
+    }
+}
+
+type Shared = std::sync::Arc<crate::services::discord::SharedData>;
+type ChannelId = poise::serenity_prelude::ChannelId;
+
+/// The channel's owner drive: a front goes into the running turn, else starts its own.
+fn drive(shared: &Shared, channel: ChannelId) -> std::sync::Arc<Drive> {
+    let starts = std::sync::Arc::clone(shared);
+    let idle: Handoff = std::sync::Arc::new(move |front| {
+        Box::pin(start_idle(std::sync::Arc::clone(&starts), channel, front))
+    });
+    let at = (shared.mailbox(channel), shared.pg_pool.clone());
+    owner_drive(at, (shared.provider.clone(), channel.get()), idle)
+}
+
+/// Wakes the channel's owner drive.
+pub(in crate::services::discord) fn wake(shared: &Shared, channel: ChannelId) {
+    crate::services::discord::queue_io::input_owner::drive::wake(drive(shared, channel));
+}
+
+/// A headless start on a target the owner takes: its reservation's original is admitted under
+/// that turn's ticket, then the drive wakes; `None` leaves the start to its legacy path.
+pub(in crate::services::discord) async fn admit_start(
+    shared: &Shared,
+    channel: ChannelId,
+    (turn_id, text): (&str, &str),
+    provenance: serde_json::Value,
+) -> Option<crate::services::discord::queue_io::input_ingress::Intake> {
+    use crate::services::discord::queue_io::input_ingress::{self as ingress, Intake};
+    use crate::services::discord::queue_io::input_owner::{routine, start};
+    let execution = ingress::execution(&shared.provider, channel.get());
+    if !execution.owner_takes(InputOrigin::HttpStart) {
+        return None;
+    }
+    if let Err(error) = ingress::adopt(shared, &shared.provider, channel).await {
+        return Some(Intake::Rejected(error));
+    }
+    let (original, ticket) = match routine::synthetic_original(turn_id, channel.get(), text, 1) {
+        Ok(original) => original,
+        Err(error) => return Some(Intake::Rejected(error)),
+    };
+    let at = (execution, InputOrigin::HttpStart);
+    let ready = std::future::ready(Ok(()));
+    start::admit_synthetic(
+        drive(shared, channel),
+        at,
+        (&original, ticket),
+        provenance,
+        ready,
+    )
+    .await
+}
+
+/// A restarted owner re-adopts the channel's V2 queue, settles a head whose window passed,
+/// projects history and posts owed notices, then wakes its drive.
+pub(in crate::services::discord) async fn recover(shared: &Shared, channel: ChannelId) {
+    use crate::services::discord::queue_io::input_owner::recovery;
+    use crate::services::tui_input::human_frame::history::v2::Registry;
+    let persistence = crate::services::discord::queue_dispatch::persistence_context;
+    let queue = crate::services::turn_orchestrator::v2_queue;
+    let queue = queue(&persistence(shared, &shared.provider, channel), channel);
+    let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let recovered = match (queue, Registry::runtime()) {
+        (Ok(queue), Ok(history)) => {
+            let at = (shared.provider.as_str(), channel.get(), now);
+            let pool = shared.pg_pool.as_ref();
+            recovery::recover(&shared.mailbox(channel), queue, history, pool, at).await
+        }
+        (Err(error), _) | (_, Err(error)) => Err(error),
+    };
+    match recovered {
+        Ok(_) => wake(shared, channel),
+        Err(error) => tracing::warn!(channel_id = channel.get(), %error, "owner recovery held"),
+    }
+}
+
+/// An idle channel's front: the owner claims it, then a queued start presenting that claim runs
+/// it; the drive hears the input's settlement, never the AI turn's.
+async fn start_idle(
+    shared: std::sync::Arc<crate::services::discord::SharedData>,
+    channel: poise::serenity_prelude::ChannelId,
+    front: Front,
+) -> Result<(), String> {
+    use crate::services::discord::queue_io::transport::QueueTransport;
+    let transport = QueueTransport::from_runtime(&shared);
+    let deps = transport
+        .as_ref()
+        .map(|transport| transport.intake_deps(&shared));
+    let deps = deps.ok_or("NotSent(\"discord_unavailable\")")?;
+    let mailbox = shared.mailbox(channel);
+    let claim = claim_turn(&mailbox, front.1.message_id, &front).await?;
+    let claim = claim.ok_or("NotSent(\"front_not_granted\")")?;
+    let (settled, answer) = tokio::sync::oneshot::channel();
+    let owner = OwnerTurn {
+        mailbox,
+        claim,
+        settled,
+    };
+    let now = (std::time::SystemTime::now(), std::time::Instant::now());
+    let restore = crate::services::turn_orchestrator::pending_queue_item_to_intervention;
+    let intervention = restore(front.1, now.0, now.1);
+    let owner_name = crate::services::discord::queue_dispatch::kickoff::queued_owner_name;
+    let name = owner_name(deps.http, intervention.author_id).await;
+    let at = (shared.provider.clone(), channel);
+    let start = crate::services::discord::router::start_owner_front;
+    let started = start(&deps, at, &intervention, name, owner).await;
+    match (answer.await, started) {
+        (Ok(settlement), _) => settlement,
+        (Err(_), Err(error)) => Err(format!("NotSent({:?})", error.to_string())),
+        (Err(_), Ok(_)) => Err("NotSent(\"turn_not_started\")".into()),
+    }
+}
+
+/// An owner front's turn: its registration is read from this turn's own host and pane, and an
+/// idle pane's AI turn is read on this turn's sender until it ends.
+pub(super) fn execute_owned(
+    turn: StreamingTurn<'_>,
+    sender: std::sync::mpsc::Sender<crate::services::agent_protocol::StreamMessage>,
+    owner: OwnerTurn,
+) -> Result<(), String> {
+    use crate::services::platform::tmux::pane_liveness;
+    let OwnerTurn {
+        mailbox,
+        claim,
+        settled,
+    } = owner;
+    let session = turn.tmux_session_name.unwrap_or_default();
+    let live = matches!(turn.host, TurnHost::Tmux) && pane_liveness(session) == PaneLiveness::Live;
+    let observer = live.then(|| observer(&turn, &sender)).flatten();
+    let kind = (turn.provider.as_str(), InputOrigin::Discord, false);
+    let at = (turn.host, session, None);
+    match Registration::observed(mailbox, kind, at, &claim.front().1, observer) {
+        Ok(owner) => execute_front(turn, sender, claim, owner, settled),
+        Err(error) => {
+            let _ = settled.send(Err(error.clone()));
+            Err(error)
+        }
+    }
+}
+
+/// The provider's own observer of the AI turn an idle submit starts, set up before that submit.
+fn observer(
+    turn: &StreamingTurn<'_>,
+    sender: &std::sync::mpsc::Sender<crate::services::agent_protocol::StreamMessage>,
+) -> Option<UntilDone> {
+    let at = (turn.tmux_session_name?, turn.prompt, turn.channel_id);
+    let session = (turn.session_id, std::path::Path::new(turn.working_dir));
+    let (sender, cancel) = (sender.clone(), std::sync::Arc::clone(&turn.cancel));
+    match turn.provider {
+        ProviderKind::Claude => {
+            use crate::services::claude_tui::hosting::owner_observer;
+            owner_observer(at, session, sender, cancel)
+        }
+        ProviderKind::Codex => {
+            use crate::services::codex_tui::warm_followup::owner_observer;
+            owner_observer(at, session, sender, cancel)
+        }
+        _ => None,
+    }
+}
+
 /// The drive's answer for one front: its local settlement, never its AI completion.
 pub(super) type Settled = tokio::sync::oneshot::Sender<Result<(), String>>;
 type Reply = std::sync::Arc<dyn Fn(&Result<(), String>) + Send + Sync>;
@@ -217,9 +417,11 @@ fn reply_once(settled: Option<Settled>) -> Reply {
     })
 }
 
+#[cfg(test)]
 static REGISTERED: Mutex<Vec<(u64, Registration)>> = Mutex::new(Vec::new());
 
 /// The next turn on `channel` goes to the owner.
+#[cfg(test)]
 fn register(channel: u64, registration: Registration) {
     let mut registered = REGISTERED.lock().unwrap_or_else(|e| e.into_inner());
     registered.retain(|(id, _)| *id != channel);
@@ -236,6 +438,7 @@ pub(super) enum Taken {
 
 /// `None` leaves the turn to its driver: the channel is not registered, or its execution is not
 /// one the owner takes.
+#[cfg(test)]
 pub(super) fn take(turn: &StreamingTurn<'_>) -> Option<Taken> {
     let registration = {
         let mut registered = REGISTERED.lock().unwrap_or_else(|e| e.into_inner());
@@ -296,7 +499,12 @@ fn take_owned(
     }
     // An idle pane runs a new turn, so it holds the node's execution capacity until that AI turn
     // ends; a busy pane writes into the turn that already holds it.
-    let until_done = registration.until_done.take();
+    let idle = matches!(route, target::Route::ClaudeIdle | target::Route::CodexIdle);
+    // An idle submit starts an AI turn only its provider's observer reads, so none is sent without it.
+    let until_done = match (idle, registration.until_done.take()) {
+        (true, None) => return Some(Taken::Done(Err("NotSent(\"idle_unobserved\")".into()))),
+        (_, until_done) => until_done,
+    };
     let capacity = match route {
         target::Route::ClaudeIdle | target::Route::CodexIdle => {
             let cancel = std::sync::Arc::clone(&turn.cancel);
@@ -313,12 +521,12 @@ fn take_owned(
         }
         _ => None,
     };
-    let idle = matches!(route, target::Route::ClaudeIdle | target::Route::CodexIdle);
     let result = run(turn, route, registration, front);
     reply(&result);
-    if let (true, Ok(()), Some(until_done)) = (idle, &result, until_done) {
-        until_done();
-    }
+    let result = match (result, until_done) {
+        (Ok(()), Some(until_done)) => until_done(),
+        (result, _) => result,
+    };
     drop(capacity);
     Some(Taken::Done(result))
 }

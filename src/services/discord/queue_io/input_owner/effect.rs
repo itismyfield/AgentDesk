@@ -194,6 +194,7 @@ pub(crate) fn created(submit: owner_input::CreatedSubmit, writer: Option<String>
 
 /// The first prompt of a Claude tmux execution the launch just created; `ticket` keeps what the
 /// provider's observer reads next.
+#[cfg(test)]
 pub(crate) fn cold_claude(
     session: String,
     transcript: String,

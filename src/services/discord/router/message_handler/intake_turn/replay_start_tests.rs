@@ -1593,6 +1593,7 @@ mod worker_entry_tests {
             let submission = IntakeSubmission {
                 provider: ProviderKind::Claude,request: request(channel,message,BODY),origin: IntakeOrigin::LiveMessage,
                 preserve_on_cancel: true,has_nonportable_uploads: false,attachments: Vec::new(),preloaded_uploads: Vec::new(),voice_announcement: None,
+                owner: None,
             };
             let deps = IntakeDeps { http:&host.api.http,cache:None,ctx_for_chained_dispatch:None,shared:&host.shared,token:"test-token" };
             let IntakeAdmission::Forwarded { outbox_id,target_instance_id } = admit_text_intake(&deps,&submission).await else {
@@ -1762,6 +1763,7 @@ mod worker_entry_tests {
                 provider:ProviderKind::Claude,request:leader_request,origin:IntakeOrigin::LiveMessage,
                 preserve_on_cancel:true,has_nonportable_uploads:false,attachments:Vec::new(),
                 preloaded_uploads:bundle_refs.into_iter().map(Upload::Bundle).collect(),voice_announcement:None,
+                owner: None,
             };
             let deps = IntakeDeps { http:&host.api.http,cache:None,ctx_for_chained_dispatch:None,shared:&leader,token:"test-token" };
 

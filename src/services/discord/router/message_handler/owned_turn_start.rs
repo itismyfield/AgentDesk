@@ -117,6 +117,6 @@ impl OwnedTurnStart {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 #[path = "owned_turn_start_tests.rs"]
 mod tests;

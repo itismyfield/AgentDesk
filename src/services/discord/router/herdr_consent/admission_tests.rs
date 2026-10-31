@@ -127,6 +127,7 @@ fn submission(id: u64, origin: IntakeOrigin) -> IntakeSubmission {
         attachments: Vec::new(),
         preloaded_uploads: Vec::new(),
         voice_announcement: None,
+        owner: None,
     }
 }
 fn voice() -> crate::voice::prompt::VoiceTranscriptAnnouncement {

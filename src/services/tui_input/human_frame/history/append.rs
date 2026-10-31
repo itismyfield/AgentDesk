@@ -70,7 +70,6 @@ pub(super) struct State {
 
 impl State {
     /// Where the bound native row starts, once one is bound.
-    #[cfg(test)]
     pub(super) fn receipt_start(&self) -> Option<u64> {
         self.receipt.as_ref().map(|r| r.start)
     }
@@ -135,7 +134,6 @@ pub(crate) fn register(
     message_id: Option<u64>,
     separator: bool,
 ) -> Result<(), String> {
-    #[cfg(test)]
     if let Some(result) =
         super::v2::scoped_register(("codex", session, id, author), transcript, offset, frame)
     {
@@ -169,7 +167,6 @@ pub(crate) fn register(
 }
 
 pub(crate) fn mark(id: &str, transcript: &Path, admission: Admission) -> Result<(), String> {
-    #[cfg(test)]
     if super::v2::scoped() {
         return Ok(());
     }

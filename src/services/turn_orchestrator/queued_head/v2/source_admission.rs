@@ -1,5 +1,6 @@
 //! A caller keeps custody until its exact candidate is confirmed, including synthetic inputs.
 use super::*;
+#[cfg(test)]
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -143,10 +144,12 @@ pub(crate) enum TurnBind {
 }
 
 impl TurnBind {
+    #[cfg(test)]
     pub(crate) fn armed(&self) -> bool {
         matches!(self, Self::Armed(_))
     }
 
+    #[cfg(test)]
     pub(crate) fn settled(&self) -> bool {
         matches!(self, Self::Settled(_))
     }
@@ -706,6 +709,7 @@ impl Owner {
 }
 
 impl super::super::super::ChannelMailboxHandle {
+    #[cfg(test)]
     pub(crate) async fn v2_admit(
         &self,
         custody: Arc<Mutex<Custody>>,
@@ -723,6 +727,7 @@ impl super::super::super::ChannelMailboxHandle {
 
     /// Admits `original` under the caller's ticket; repeat it with the same ticket after Pending
     /// or a restart. An invalid ticket refuses before the owner is asked.
+    #[cfg(test)]
     pub(crate) async fn v2_admit_ticket(
         &self,
         original: PendingQueueItem,

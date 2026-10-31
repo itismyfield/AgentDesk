@@ -30,7 +30,6 @@ pub(crate) fn tmux_key_name(key: HostKey) -> &'static str {
         HostKey::Escape => "Escape",
         HostKey::CtrlU => "C-u",
         HostKey::CtrlE => "C-e",
-        #[cfg(test)]
         HostKey::CtrlS => "C-s",
         HostKey::Left => "Left",
         HostKey::Right => "Right",

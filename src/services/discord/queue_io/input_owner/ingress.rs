@@ -1,5 +1,7 @@
 //! Raw custody at the existing ingress seams; an installed actor owns admission, never a callback.
-use super::admission::{Admission, AdmissionTicket};
+#[cfg(test)]
+use super::admission::Admission;
+use super::admission::AdmissionTicket;
 use crate::services::discord::router::IntakeExecution;
 use crate::services::discord::{Intervention, MailboxEnqueueOutcome, SharedData};
 use crate::services::provider::ProviderKind;
@@ -9,6 +11,17 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 tokio::task_local! { static EXISTING_RETRY: bool; }
+// A test adopts only inside this scope; any other test keeps the channel unadopted.
+#[cfg(test)]
+tokio::task_local! { pub(crate) static ADOPTS: bool; }
+
+/// Whether a local TUI channel's seams adopt its queue: always in production.
+fn adopts() -> bool {
+    #[cfg(test)]
+    return ADOPTS.try_with(|adopts| *adopts).unwrap_or(false);
+    #[cfg(not(test))]
+    true
+}
 
 pub(crate) async fn existing_retry<F: std::future::Future>(future: F) -> F::Output {
     EXISTING_RETRY.scope(true, future).await
@@ -67,16 +80,22 @@ impl Intake {
 /// Why an arrival waits in the queue instead of joining the running input; only these notify.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Hold {
+    #[cfg(test)]
     SessionSwitch,
     RestartRecovery,
     Uploads,
+    #[cfg(test)]
     ScreenMissing,
+    #[cfg(test)]
     Modal,
+    #[cfg(test)]
     ScreenContention,
+    #[cfg(test)]
     OwnerChange,
 }
 
 impl Hold {
+    #[cfg(test)]
     pub(crate) const ALL: [Self; 7] = [
         Self::SessionSwitch,
         Self::RestartRecovery,
@@ -89,12 +108,17 @@ impl Hold {
 
     fn reason(self) -> &'static str {
         match self {
+            #[cfg(test)]
             Self::SessionSwitch => "세션 전환(/clear·/resume·헤드리스 시작) 처리",
             Self::RestartRecovery => "재시작 직후 복구 대기",
             Self::Uploads => "첨부 업로드 미완료·실패",
+            #[cfg(test)]
             Self::ScreenMissing => "TUI 화면·대화 기록 확인 불가",
+            #[cfg(test)]
             Self::Modal => "모달 창 표시",
+            #[cfg(test)]
             Self::ScreenContention => "같은 화면 주입 충돌",
+            #[cfg(test)]
             Self::OwnerChange => "턴 주인 변경 충돌",
         }
     }
@@ -163,6 +187,7 @@ impl Original {
         Self { item, ticket }
     }
 
+    #[cfg(test)]
     pub(crate) async fn admit(&self, handle: &ChannelMailboxHandle) -> Admission {
         super::admission::admit(handle, &self.item, self.ticket.clone()).await
     }
@@ -202,6 +227,43 @@ pub(crate) async fn installed(handle: &ChannelMailboxHandle) -> Result<bool, Str
     handle.v2_request(|owner| Ok(owner.is_some())).await
 }
 
+/// How this node runs the channel's turns: a Claude or Codex channel whose hosting resolves to
+/// the TUI is a local TUI target; any other runs its own path.
+pub(crate) fn execution(provider: &ProviderKind, channel: u64) -> super::origin::Execution {
+    use crate::services::provider_hosting::{
+        ProviderSessionDriver, resolve_provider_session_selection_with_channel as select,
+    };
+    let tui = matches!(provider, ProviderKind::Claude | ProviderKind::Codex)
+        && select(provider, true, Some(channel)).driver == ProviderSessionDriver::TuiHosting;
+    match tui {
+        true => super::origin::Execution::LocalTui,
+        false => super::origin::Execution::NonTuiProvider,
+    }
+}
+
+/// Whether this node's owner takes a start on the channel's target; it reads that target only.
+pub(crate) fn takes_start(provider: &ProviderKind, channel: u64) -> bool {
+    use super::origin::InputOrigin;
+    cfg!(unix) && adopts() && execution(provider, channel).owner_takes(InputOrigin::HttpStart)
+}
+
+/// Adopts a local TUI channel's queue file in one actor turn; whether an owner then holds it.
+pub(crate) async fn adopt(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel: ChannelId,
+) -> Result<bool, String> {
+    let handle = shared.mailbox(channel);
+    let local = execution(provider, channel.get()) == super::origin::Execution::LocalTui;
+    if cfg!(unix) && adopts() && local {
+        let persistence = crate::services::discord::queue_dispatch::persistence_context(
+            shared, provider, channel,
+        );
+        handle.v2_ensure_channel(&persistence, channel).await?;
+    }
+    installed(&handle).await
+}
+
 /// Whether the owner takes a start on this target; it reads only and never adopts or admits.
 pub(crate) async fn owner_will_take(
     handle: &ChannelMailboxHandle,
@@ -213,7 +275,7 @@ pub(crate) async fn owner_will_take(
 
 /// The live and worker seam: the owner admits the exact original, never a callback.
 pub(crate) async fn intake(
-    shared: &SharedData,
+    shared: &std::sync::Arc<SharedData>,
     provider: &ProviderKind,
     request: &crate::services::discord::IntakeRequest,
     uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
@@ -243,14 +305,14 @@ pub(crate) async fn intake(
 }
 
 async fn admit_raw(
-    shared: &SharedData,
+    shared: &std::sync::Arc<SharedData>,
     provider: &ProviderKind,
     channel: ChannelId,
     raw: &Intervention,
     uploads_pending: bool,
 ) -> Option<Intake> {
     let handle = shared.mailbox(channel);
-    match installed(&handle).await {
+    match adopt(shared, provider, channel).await {
         Ok(false) => return None,
         Ok(true) => {}
         Err(error) => return Some(Intake::Rejected(error)),
@@ -267,6 +329,10 @@ async fn admit_raw(
     let (intake, first) = original.admit_first(&handle).await;
     if first && let Some(hold) = ingress_hold(shared, uploads_pending) {
         held(shared, &handle, channel, &original, hold).await;
+    }
+    #[cfg(unix)]
+    if intake == Intake::Accepted {
+        crate::services::discord::router::message_handler::owner_wake(shared, channel);
     }
     Some(intake)
 }
@@ -346,7 +412,7 @@ pub(crate) fn original(
 /// The common queue seam. Its outcome type has no Pending case, so Pending is reported as the
 /// typed [`OwnerPending`] text; every caller keeps its custody on it and re-enters the same ticket.
 pub(crate) async fn enqueue(
-    shared: &SharedData,
+    shared: &std::sync::Arc<SharedData>,
     provider: &ProviderKind,
     channel: ChannelId,
     intervention: &Intervention,

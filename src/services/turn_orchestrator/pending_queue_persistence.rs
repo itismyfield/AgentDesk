@@ -16,6 +16,8 @@ use crate::services::provider::ProviderKind;
 
 pub(super) mod queued_recovery;
 mod snapshot_io;
+#[cfg(unix)]
+pub(crate) use queued_recovery::v2_channels;
 pub(crate) use queued_recovery::{load_pending_queues_checked, v2_held_sources};
 
 const STALE_PENDING_QUEUE_TMP_AGE: Duration = Duration::from_secs(60);
@@ -618,7 +620,7 @@ pub(crate) fn remove_channel_pending_queue_files_all_tokens(
     }
     removed
 }
-pub(super) fn pending_queue_item_to_intervention(
+pub(crate) fn pending_queue_item_to_intervention(
     item: PendingQueueItem,
     reference_wall_time: SystemTime,
     reference_instant: Instant,

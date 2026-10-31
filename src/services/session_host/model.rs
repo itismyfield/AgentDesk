@@ -111,7 +111,6 @@ pub(crate) enum HostKey {
     CtrlU,
     CtrlE,
     /// Claude's stash: parks a visible draft before the owner's paste.
-    #[cfg(test)]
     CtrlS,
     Left,
     Right,

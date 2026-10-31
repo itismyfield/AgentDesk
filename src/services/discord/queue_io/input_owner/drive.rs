@@ -18,7 +18,7 @@ pub(crate) type Front = (Option<String>, PendingQueueItem);
 pub(crate) struct FrontClaim(Front);
 
 impl FrontClaim {
-    pub(super) fn front(&self) -> &Front {
+    pub(crate) fn front(&self) -> &Front {
         &self.0
     }
 }
@@ -43,18 +43,24 @@ pub(crate) async fn claim_turn(
 pub(crate) type Handoff =
     Arc<dyn Fn(Front) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>;
 
+/// Runs once a pass found no front left to hand; the notices the owner owes post here.
+pub(crate) type Settled = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
 pub(crate) struct Drive {
     pub(crate) mailbox: ChannelMailboxHandle,
     pub(crate) channel: u64,
     pub(crate) handoff: Handoff,
     /// How long a front held under a modal waits before the drive looks at it again.
     pub(crate) recheck: Duration,
+    pub(crate) settled: Option<Settled>,
 }
 
 #[derive(Default)]
 struct Lane {
     running: AtomicBool,
     again: AtomicBool,
+    /// A head's confirmation deadline is already awaited.
+    armed: AtomicBool,
 }
 
 fn lane(channel: u64) -> Arc<Lane> {
@@ -100,12 +106,47 @@ async fn run(lane: Arc<Lane>, drive: Arc<Drive>) {
                 tracing::info!(channel_id = drive.channel, %error, "owner front not delivered");
             }
         }
+        if let Some(settled) = &drive.settled {
+            settled().await;
+        }
         lane.running.store(false, Ordering::SeqCst);
         // A wake that landed after the last look starts the loop again here, never twice.
         if !lane.again.load(Ordering::SeqCst) || lane.running.swap(true, Ordering::SeqCst) {
+            settle_at_deadline(lane, drive);
             return;
         }
     }
+}
+
+/// The head's confirmation window ends once at its deadline: the owner settles it there, then the
+/// drive looks again. Nothing polls before that deadline.
+fn settle_at_deadline(lane: Arc<Lane>, drive: Arc<Drive>) {
+    if lane.armed.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    tokio::spawn(async move {
+        let now = || chrono::Utc::now().timestamp_millis().max(0) as u64;
+        let due = super::recovery::settle_due(&drive.mailbox).await;
+        let ticked = match due {
+            Ok(Some(due)) => {
+                tokio::time::sleep(Duration::from_millis(due.saturating_sub(now()))).await;
+                let at = now();
+                let ticked = drive
+                    .mailbox
+                    .v2_request(move |slot| slot.as_mut().ok_or("V2 not adopted")?.tick(at));
+                Some(ticked.await)
+            }
+            _ => None,
+        };
+        lane.armed.store(false, Ordering::SeqCst);
+        match ticked {
+            Some(Ok(())) => wake(drive),
+            Some(Err(error)) => {
+                tracing::warn!(channel_id = drive.channel, %error, "owner deadline unsettled")
+            }
+            None => {}
+        }
+    });
 }
 
 /// The owner's unattempted front, granted in the same actor turn that read it. After a failed

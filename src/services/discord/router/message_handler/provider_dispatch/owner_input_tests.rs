@@ -190,7 +190,7 @@ impl Rig {
                     "test",
                 )
                 .unwrap();
-            execute(turn, start, sender)
+            execute(turn, start, sender, None)
         })
     }
 
@@ -229,10 +229,12 @@ impl Rig {
         claim: FrontClaim,
         (provider, phase, transcript): (ProviderKind, target::Phase, &Path),
         settled: Settled,
-        until_done: Option<Box<dyn FnOnce() + Send>>,
+        until_done: Option<super::UntilDone>,
     ) -> Result<(), String> {
         let mut owner = self.registration(&provider, phase, transcript, Execution::LocalTui);
-        owner.until_done = until_done;
+        if until_done.is_some() {
+            owner.until_done = until_done;
+        }
         self.with_turn(&provider, Some(&self.name), |turn, sender| {
             execute_front(turn, sender, claim, owner, settled)
         })
@@ -284,7 +286,8 @@ impl Rig {
             name: NAME.into(),
             clock: Arc::new(|| 10_000),
             timing: &OWNER_TIMING,
-            until_done: None,
+            // The rig's AI turn ends as soon as it is read.
+            until_done: Some(Box::new(|| Ok(()))),
         }
     }
 
@@ -564,9 +567,10 @@ fn an_idle_handoff_ends_at_settlement_while_its_ai_turn_runs() {
         // Inside the scope, so a failed assertion drops it and ends the held AI turn.
         let (release, turn) = std::sync::mpsc::channel::<()>();
         let observed = done.clone();
-        let until_done: Box<dyn FnOnce() + Send> = Box::new(move || {
+        let until_done: super::UntilDone = Box::new(move || {
             let _ = turn.recv();
             *observed.lock().unwrap() += 1;
+            Ok(())
         });
         let first = scope.spawn(|| {
             let how = (
@@ -739,6 +743,42 @@ fn owner_idle_claude_parks_a_listed_draft_under_the_owner_scope() {
     assert_eq!(result, Ok(()));
     assert_eq!(rig.events(), ["C-s", "paste", "Enter"]);
     rig.delivered();
+}
+
+/// The owner parks a visible draft before its idle submit on any channel, listed or not.
+#[test]
+fn owner_idle_claude_parks_an_unlisted_draft() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig("oi-unlisted", 7_272_560, "normal", view("js", false), IDLE);
+    let result = rig.dispatch(ProviderKind::Claude, target::Phase::Idle, &rig.transcript());
+    assert_eq!(result, Ok(()));
+    assert_eq!(rig.events(), ["C-s", "paste", "Enter"]);
+    rig.delivered();
+}
+
+/// An idle submit starts an AI turn only its provider's observer reads: without one the front is
+/// refused before any key and no head is reserved.
+#[test]
+fn owner_idle_front_without_an_observer_sends_nothing() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig("oi-unobserved", 7_272_561, "normal", view("", false), IDLE);
+    let (provider, transcript) = (ProviderKind::Claude, rig.transcript());
+    let mut owner = rig.registration(
+        &provider,
+        target::Phase::Idle,
+        &transcript,
+        Execution::LocalTui,
+    );
+    owner.until_done = None;
+    register(rig.channel, owner);
+    let result = rig.with_turn(&provider, Some(&rig.name), |turn, sender| {
+        let start =
+            crate::services::discord::router::intake_dispatch::replay_admission::dormant_start;
+        execute(turn, start("test").unwrap(), sender, None)
+    });
+    assert_eq!(result, Err("NotSent(\"idle_unobserved\")".into()));
+    assert!(rig.events().is_empty(), "no key: {:?}", rig.events());
+    assert!(rig.snapshot()["head_injection"].is_null());
 }
 
 /// A refusal that writes nothing needs no pane: a remote placement and an unsupported provider

@@ -243,7 +243,7 @@ impl CatchUpDiscordApi for StrictApi {
                 let owner = serenity::UserId::new(HUMAN_ID);
                 // The Discord text-intake claim: it waits behind anything already queued.
                 let start = discord::queue_io::mailbox_try_start_turn_behind_queue;
-                let started = start(shared, channel_id, token, owner, message_id);
+                let started = start(shared, channel_id, token, owner, message_id, None);
                 assert!(started.await, "{message_id} claims its turn");
                 enqueue(intervention).await
             }

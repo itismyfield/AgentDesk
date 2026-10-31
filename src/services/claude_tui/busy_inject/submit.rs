@@ -26,7 +26,7 @@ pub(crate) fn inject_report_any_turn(
 }
 
 /// The input owner's busy entry: a person's draft is parked whichever channel the input names.
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 pub(crate) fn inject_owned(pane: &Pane, request: &Request<'_>, timing: &Timing) -> Report {
     inject_gated_with(
         pane,
@@ -38,7 +38,7 @@ pub(crate) fn inject_owned(pane: &Pane, request: &Request<'_>, timing: &Timing) 
 }
 
 /// A draft as Herdr's owner reads it: an injected frame or an existing stash is never parked.
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 fn person_draft(capture: &str) -> bool {
     draft_sighting(capture)
         == crate::services::claude_tui::composer_lock::DraftSighting::PersonDraft

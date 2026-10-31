@@ -6,6 +6,7 @@ pub(crate) enum InputOrigin {
     Discord,
     HttpStart,
     Routine,
+    #[cfg(test)]
     DirectHeadless,
 }
 
@@ -20,6 +21,7 @@ pub(crate) enum Execution {
 }
 
 impl InputOrigin {
+    #[cfg(test)]
     pub(crate) const ALL: [Self; 4] = [
         Self::Discord,
         Self::HttpStart,
@@ -29,6 +31,7 @@ impl InputOrigin {
 }
 
 impl Execution {
+    #[cfg(test)]
     pub(crate) const ALL: [Self; 4] = [
         Self::LocalTui,
         Self::RemoteTui,

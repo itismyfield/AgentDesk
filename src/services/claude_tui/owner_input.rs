@@ -102,7 +102,7 @@ pub(crate) fn load_failed() {
 
 /// The leaf's typed veto came before any key; a key already sent keeps it from proving unsent,
 /// and a refusal the scope already recorded keeps its own reason.
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 pub(crate) fn vetoed(reason: &str) {
     if let Some(scope) = current()
         && !scope.keyed.load(Ordering::SeqCst)
@@ -114,7 +114,7 @@ pub(crate) fn vetoed(reason: &str) {
 
 /// The first payload key, with no C-s before it, was held before tmux ran it: nothing reached
 /// the pane, so the attempt still proves not-sent.
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 pub(crate) fn first_key_held(reason: &str) {
     if let Some(scope) = current() {
         scope.allowed.store(false, Ordering::SeqCst);
@@ -149,7 +149,7 @@ pub(crate) fn hold_content(host: &str, physical: &str, key: &str) -> Option<Resu
 
 /// Couples a Herdr owner to the physical writer its launch or binding observed, once; another
 /// writer later is refused. Without an owner it does nothing.
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 pub(crate) fn bind_writer(physical: &str) -> Result<(), String> {
     let Some(scope) = current() else {
         return Ok(());
@@ -239,6 +239,9 @@ impl submission_fence::SubmissionFence for Scope {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+    fn stash_any_channel(&self) -> bool {
+        true
     }
     fn idle_stash_context(&self) -> Option<submission_fence::IdleStashContext> {
         Some(submission_fence::IdleStashContext {
@@ -375,14 +378,14 @@ pub(crate) fn created_tmux_target(
 }
 
 /// Hands this thread's next created first prompt to `hook` until the guard drops.
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 pub(crate) fn install_launch(hook: LaunchHook) -> LaunchGuard {
     LAUNCH.with(|slot| *slot.borrow_mut() = Some(hook));
     LaunchGuard
 }
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 pub(crate) struct LaunchGuard;
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 impl LaunchGuard {
     /// A driver that ended well without handing its first prompt over wrote nothing owned.
     pub(crate) fn finish(self, driven: Result<(), String>) -> Result<(), String> {
@@ -394,14 +397,14 @@ impl LaunchGuard {
         }
     }
 }
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 impl Drop for LaunchGuard {
     fn drop(&mut self) {
         LAUNCH.with(|slot| *slot.borrow_mut() = None);
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 pub(crate) fn capture_scope<R>(
     provider: String,
     target: serde_json::Value,
@@ -575,12 +578,10 @@ fn pin_key(record: &PaneEpoch) -> Result<String, String> {
     ))
     .map_err(|e| e.to_string())
 }
-#[cfg(test)]
 pub(crate) struct NotSentProof {
     attempt: serde_json::Value,
     reason: String,
 }
-#[cfg(test)]
 impl NotSentProof {
     pub(crate) fn into_reason(self, key: &serde_json::Value) -> Result<String, String> {
         if self.attempt != *key {

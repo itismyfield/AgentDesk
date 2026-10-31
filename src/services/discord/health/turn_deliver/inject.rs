@@ -3,7 +3,7 @@
 //! Herdr pane's gate (`herdr`) or, once enabled, `codex_tui::busy_inject`.
 
 mod catch_up_race;
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 mod first_input;
 pub(in crate::services::discord) mod herdr;
 mod names;

@@ -28,6 +28,7 @@ fn lane(key: TargetKey) -> Arc<Lane> {
 
 /// Reserves the owner's head for `prepared` and runs `leaf` on its frame, unsplit. The owner,
 /// not the pump, picks which original the attempt carries.
+#[cfg(test)]
 pub(crate) async fn submit(
     mailbox: &ChannelMailboxHandle,
     prepared: PreparedPayload,

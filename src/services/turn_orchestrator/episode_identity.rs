@@ -105,6 +105,7 @@ impl ChannelMailboxHandle {
             turn_kind,
             admission_order: TurnAdmissionOrder::Immediate,
             fence_episode: Some(episode_nonce),
+            owner_front: None,
             persistence: Some(persistence),
             reply,
         })

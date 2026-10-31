@@ -3,6 +3,7 @@ use super::*;
 impl Owner {
     /// Positive no-content ends this attempt; the original keeps its queue slot and receipt.
     /// Only the distinct successor may acquire a new effect permit.
+    #[cfg(test)]
     pub(crate) fn successor_not_sent(
         &mut self,
         key: &AttemptRef,

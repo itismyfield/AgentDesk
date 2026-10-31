@@ -60,7 +60,6 @@ impl RoutineStore {
     }
 }
 
-#[cfg(test)]
 impl RoutineStore {
     pub(crate) async fn agent_input_intent(
         &self,

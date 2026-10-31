@@ -246,3 +246,20 @@ async fn original_bot_and_human_rights_survive_the_real_queue_entry() {
         );
     }
 }
+
+/// A local TUI channel's seam adopts its own queue file, again as a no-op; a channel whose
+/// provider is not TUI-hosted stays unadopted and keeps its legacy path.
+#[tokio::test]
+async fn a_local_tui_channel_is_adopted_once_and_a_non_tui_one_never() {
+    let _root = TestRuntimeRootGuard::new();
+    let shared = make_shared_data_for_tests();
+    let (claude, codex) = (ChannelId::new(7_272_563), ChannelId::new(7_272_564));
+    let adopted = ADOPTS.scope(true, async {
+        let first = super::adopt(&shared, &ProviderKind::Claude, claude).await;
+        let again = super::adopt(&shared, &ProviderKind::Claude, claude).await;
+        let other = super::adopt(&shared, &ProviderKind::Codex, codex).await;
+        (first, again, other)
+    });
+    assert_eq!(adopted.await, (Ok(true), Ok(true), Ok(false)));
+    assert_eq!(installed(&shared.mailbox(codex)).await, Ok(false));
+}

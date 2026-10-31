@@ -46,6 +46,7 @@ pub(crate) async fn dispatch_skill_intake(
         attachments: Vec::new(),
         preloaded_uploads,
         voice_announcement: None,
+        owner: None,
     };
     if let Some(permit) = admitted_local {
         finish_admitted_local(deps, permit, submission)

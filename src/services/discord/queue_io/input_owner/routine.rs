@@ -1,8 +1,10 @@
 //! A caller keeps its owner address, original and ticket together until an exact observer binds.
 use super::admission::{self, Admission, AdmissionState, AdmissionTicket, TurnBind};
+use super::origin::Execution;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};
+use poise::serenity_prelude::ChannelId;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -227,20 +229,38 @@ pub(crate) fn synthetic_original(
     Ok((original, ticket))
 }
 
+/// The runtime that serves `provider` on `channel`.
+async fn runtime(
+    registry: &HealthRegistry,
+    provider: &str,
+    channel: u64,
+) -> Result<
+    (
+        std::sync::Arc<crate::services::discord::SharedData>,
+        ChannelId,
+    ),
+    String,
+> {
+    let provider = ProviderKind::from_str(provider).ok_or("owner provider invalid")?;
+    if channel == 0 {
+        return Err("owner channel invalid".into());
+    }
+    let channel = ChannelId::new(channel);
+    let shared = registry
+        .shared_for_provider_on_channel(&provider, channel)
+        .await
+        .ok_or("owner runtime unavailable")?;
+    Ok((shared, channel))
+}
+
+/// The channel's mailbox, its local TUI queue adopted first as at any other ingress seam.
 pub(crate) async fn mailbox(
     registry: &HealthRegistry,
     provider: &str,
     channel: u64,
 ) -> Result<ChannelMailboxHandle, String> {
-    let provider = ProviderKind::from_str(provider).ok_or("owner provider invalid")?;
-    if channel == 0 {
-        return Err("owner channel invalid".into());
-    }
-    let channel = poise::serenity_prelude::ChannelId::new(channel);
-    let shared = registry
-        .shared_for_provider_on_channel(&provider, channel)
-        .await
-        .ok_or("owner runtime unavailable")?;
+    let (shared, channel) = runtime(registry, provider, channel).await?;
+    super::ingress::adopt(&shared, &shared.provider, channel).await?;
     Ok(shared.mailbox(channel))
 }
 
@@ -259,18 +279,13 @@ impl ChannelMailboxHandle {
     }
 
     /// A synthetic start's original and the owner's namespace when the owner takes a start on this
-    /// TUI target; `None` leaves a process target or an unowned channel to its legacy start.
+    /// target; `None` leaves a process target or an unowned channel to its legacy start.
     pub(crate) async fn owned_start(
         &self,
-        tui: bool,
+        execution: super::origin::Execution,
         (turn_id, channel, text): (&str, u64, &str),
     ) -> Result<Option<(PendingQueueItem, String)>, String> {
-        use super::origin::{Execution, InputOrigin};
-        let execution = if tui {
-            Execution::LocalTui
-        } else {
-            Execution::Process
-        };
+        use super::origin::InputOrigin;
         if !super::ingress::owner_will_take(self, execution, InputOrigin::Routine).await? {
             return Ok(None);
         }
@@ -292,6 +307,26 @@ impl ChannelMailboxHandle {
         channel: u64,
     ) -> Result<Self, String> {
         mailbox(registry, provider, channel).await
+    }
+
+    /// How the owner runs a start on this channel; a process routine never reaches the TUI owner.
+    pub(crate) fn owner_input_execution(provider: &str, channel: u64, process: bool) -> Execution {
+        match ProviderKind::from_str(provider) {
+            Some(_) if process => Execution::Process,
+            Some(provider) => super::ingress::execution(&provider, channel),
+            None => Execution::NonTuiProvider,
+        }
+    }
+
+    /// Wakes the owner drive of a channel whose start the owner just accepted.
+    pub(crate) async fn owner_input_wake(registry: &HealthRegistry, provider: &str, channel: u64) {
+        let Ok((shared, channel)) = runtime(registry, provider, channel).await else {
+            return;
+        };
+        #[cfg(unix)]
+        crate::services::discord::router::message_handler::owner_wake(&shared, channel);
+        #[cfg(not(unix))]
+        let _ = (shared, channel);
     }
 }
 

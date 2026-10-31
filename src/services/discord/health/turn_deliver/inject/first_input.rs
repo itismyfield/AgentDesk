@@ -1,12 +1,14 @@
-//! Test-only cold effect boundary; the owner retains settlement and observer custody.
+//! The owner's cold effect boundary; the owner retains settlement and observer custody.
 use crate::services::tui_input::human_frame::history::v2 as history;
 use crate::services::turn_orchestrator::ChannelMailboxHandle;
 
+#[cfg(test)]
 pub(super) struct Completion<K, O> {
     pub attempt: K,
     pub outcome: Result<O, String>,
 }
 
+#[cfg(test)]
 pub(super) async fn submit<O: Send + 'static>(
     mailbox: &ChannelMailboxHandle,
     now: u64,
@@ -64,6 +66,7 @@ pub(crate) struct ColdOutcome<O> {
     pub(crate) not_sent: Option<crate::services::claude_tui::owner_input::NotSentProof>,
 }
 impl ChannelMailboxHandle {
+    #[cfg(test)]
     pub(crate) async fn v2_cold_bootstrap<O: Send + 'static>(
         &self,
         now: u64,

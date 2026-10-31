@@ -1304,6 +1304,7 @@ fn dispatch(switch: Option<bool>) -> Result<(), String> {
         crate::services::discord::router::intake_dispatch::replay_admission::dormant_start("test")
             .unwrap(),
         sender,
+        None,
     )
 }
 

@@ -98,6 +98,7 @@ fn live(channel: ChannelId, message: u64, text: &str) -> IntakeSubmission {
         attachments: Vec::new(),
         preloaded_uploads: Vec::new(),
         voice_announcement: None,
+        owner: None,
     }
 }
 

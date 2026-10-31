@@ -3,7 +3,7 @@
 use super::super::routine::synthetic_original;
 use super::*;
 use crate::config::TestRuntimeRootGuard;
-use crate::services::turn_orchestrator::ChannelMailboxRegistry;
+use crate::services::turn_orchestrator::{ChannelMailboxHandle, ChannelMailboxRegistry};
 use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -25,6 +25,7 @@ fn drive(mailbox: &ChannelMailboxHandle, channel: u64, woken: Arc<AtomicUsize>) 
         channel,
         handoff,
         recheck: Duration::from_secs(60),
+        settled: None,
     })
 }
 

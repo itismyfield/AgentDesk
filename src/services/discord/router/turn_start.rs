@@ -18,7 +18,6 @@ pub(crate) struct HeadlessTurnStartOutcome {
 }
 
 impl HeadlessTurnStartOutcome {
-    #[cfg(test)]
     pub(crate) fn accepted(turn_id: String) -> Self {
         Self {
             turn_id,
@@ -47,7 +46,6 @@ impl HeadlessTurnStartOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HeadlessTurnStartStatus {
     // Owner admission stays dormant until its production ingress is wired.
-    #[cfg(test)]
     Accepted,
     Started,
     Consumed,
@@ -56,7 +54,6 @@ pub(crate) enum HeadlessTurnStartStatus {
 impl HeadlessTurnStartStatus {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
-            #[cfg(test)]
             Self::Accepted => "accepted",
             Self::Started => "started",
             Self::Consumed => "consumed",
@@ -65,7 +62,6 @@ impl HeadlessTurnStartStatus {
 
     pub(crate) fn is_accepted(self) -> bool {
         match self {
-            #[cfg(test)]
             Self::Accepted => true,
             Self::Started | Self::Consumed => false,
         }
@@ -225,7 +221,7 @@ pub(in crate::services::discord) async fn claim_reserved_headless_turn(
             }
             TurnAdmissionOrder::BehindQueue => {
                 let start = super::super::queue_io::mailbox_try_start_turn_behind_queue;
-                start(shared, channel_id, token, request_owner, message).await
+                start(shared, channel_id, token, request_owner, message, None).await
             }
         }
     };

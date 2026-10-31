@@ -1,5 +1,4 @@
 //! Shared preparation leaves raw provenance and file lifetimes with the caller.
-#[cfg(test)]
 use super::super::response_format::retry_prompt_context::RetryPromptContext;
 #[cfg(test)]
 pub(in crate::services::discord) use super::intake_turn::session_preparation::selected_reply;
@@ -90,7 +89,6 @@ pub(in crate::services::discord) fn fresh_source(
     Ok(original)
 }
 
-#[cfg(test)]
 pub(in crate::services::discord) fn owned_original(
     request: &crate::services::discord::IntakeRequest,
     author_is_bot: bool,

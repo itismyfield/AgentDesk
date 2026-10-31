@@ -155,7 +155,7 @@ async fn a_v2_queue_channel_refuses_every_legacy_claim_and_keeps_its_file() {
     let token = Arc::new(crate::services::provider::CancelToken::new());
     let owner = serenity::UserId::new(HUMAN_ID);
     let start = crate::services::discord::queue_io::mailbox_try_start_turn_behind_queue;
-    assert!(!start(&fx.shared, channel_id, token, owner, id(3, 100)).await);
+    assert!(!start(&fx.shared, channel_id, token, owner, id(3, 100), None).await);
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 

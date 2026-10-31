@@ -86,12 +86,14 @@ use pending_queue_persistence::channel_queue_files_present;
 use pending_queue_persistence::load_channel_pending_queue;
 #[cfg(test)]
 pub(crate) use pending_queue_persistence::save_channel_queue;
+#[cfg(unix)]
+pub(crate) use pending_queue_persistence::v2_channels;
 pub(crate) use pending_queue_persistence::{
     PendingQueueItem, cleanup_stale_pending_queue_tmp_files_all_tokens,
     load_channel_pending_dispatch_marker, load_channel_pending_dispatch_marker_checked,
     load_channel_pending_queue_checked, load_pending_dispatch_markers, load_pending_queues,
-    remove_channel_pending_queue_files_all_tokens, save_channel_pending_dispatch_marker,
-    v2_held_sources, warn_legacy_pending_queue_files,
+    pending_queue_item_to_intervention, remove_channel_pending_queue_files_all_tokens,
+    save_channel_pending_dispatch_marker, v2_held_sources, warn_legacy_pending_queue_files,
 };
 #[cfg(test)]
 use pending_queue_persistence::{
@@ -108,9 +110,10 @@ use queue_cancellation::{
 use queue_enqueue::enqueue_behind;
 #[cfg(test)]
 pub(crate) use queue_enqueue::enqueue_intervention;
-#[cfg(test)]
-pub(crate) use queued_head::TurnBind;
 pub(crate) use queued_head::{HeadOutcome, HeadSettle, QueueIdentity, QueuedHeadClaim, prefix};
+pub(crate) use queued_head::{TurnBind, v2_queue};
+/// An owner's queue front: its slot's ticket and the original.
+pub(crate) type OwnerFront = (Option<String>, PendingQueueItem);
 #[derive(Clone, Debug)]
 pub(crate) enum TakeHeadCondition {
     #[cfg(test)]
@@ -704,7 +707,30 @@ impl ChannelMailboxHandle {
             turn_kind,
             admission_order,
             fence_episode: None,
+            owner_front: None,
             persistence,
+            reply,
+        })
+        .await
+        .unwrap_or_default()
+    }
+
+    /// The owner's claimed front starting its turn behind queued inbound work.
+    pub(crate) async fn try_start_owner_front(
+        &self,
+        (cancel_token, request_owner): (Arc<CancelToken>, UserId),
+        front: OwnerFront,
+        persistence: QueuePersistenceContext,
+    ) -> TryStartTurnResult {
+        self.request(|reply| ChannelMailboxMsg::TryStartTurn {
+            cancel_token,
+            request_owner,
+            user_message_id: MessageId::new(front.1.message_id),
+            turn_kind: ActiveTurnKind::UserOrAgent,
+            admission_order: TurnAdmissionOrder::BehindQueue,
+            fence_episode: None,
+            owner_front: Some(front),
+            persistence: Some(persistence),
             reply,
         })
         .await
@@ -1290,6 +1316,8 @@ enum ChannelMailboxMsg {
         /// `Some(n)`: refuse, in this same step, when `remint_fence` refuses
         /// episode `(user_message_id, n)` — the row's, not the token installed.
         fence_episode: Option<Option<String>>,
+        /// The owner's claimed front this start presents; only it passes a V2 owner's check.
+        owner_front: Option<OwnerFront>,
         persistence: Option<QueuePersistenceContext>,
         reply: oneshot::Sender<TryStartTurnResult>,
     },
@@ -1750,7 +1778,6 @@ fn input_mailbox_step(
     let Some(msg) = registry_purge::gate_closed_arm(&state, channel_id, msg) else {
         return state;
     };
-    #[cfg(test)]
     let Some(msg) = queued_head::route_v2(&mut state, channel_id, msg) else {
         return state;
     };
@@ -1923,6 +1950,7 @@ fn input_mailbox_step(
             turn_kind,
             admission_order,
             fence_episode,
+            owner_front,
             persistence,
             reply,
         } => {
@@ -1936,8 +1964,11 @@ fn input_mailbox_step(
                 && !refused_released_episode
                 && !state.remint_fence.refuses_discarded(&[user_message_id]);
             let yields = idle
-                && (queued_head::blocks_claims(&mut state, channel_id, persistence.as_ref())
-                    || claim_yields(&mut state, turn_kind, user_message_id, admission_order));
+                && (queued_head::blocks_claims(
+                    &mut state,
+                    (channel_id, persistence.as_ref()),
+                    (user_message_id.get(), admission_order, owner_front.as_ref()),
+                ) || claim_yields(&mut state, turn_kind, user_message_id, admission_order));
             let mut queue_exit_events = Vec::new();
             let mut persistence_error = None;
             let can_start = idle && !yields;

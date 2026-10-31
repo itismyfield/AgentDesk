@@ -113,6 +113,7 @@ fn ungroup(snapshot: &mut SnapshotV2, head: &InputAttempt) -> Result<(), String>
 }
 
 /// Parked without positive evidence of no attempt is retained, never rejected or retried.
+#[cfg(test)]
 pub(super) fn migrate_parked(
     owner: &mut Owner,
     item: &PendingQueueItem,
@@ -171,6 +172,7 @@ impl Owner {
             &serde_json::to_value(input).map_err(|e| e.to_string())?,
         )
     }
+    #[cfg(test)]
     pub(crate) fn bind_source(
         &mut self,
         key: &super::AttemptRef,

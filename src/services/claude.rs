@@ -1528,7 +1528,7 @@ pub(crate) struct ClaudeTuiSessionResolution {
 }
 
 #[cfg(unix)]
-fn resolve_claude_tui_session_for_launch(
+pub(crate) fn resolve_claude_tui_session_for_launch(
     working_dir: &std::path::Path,
     requested_session_id: Option<&str>,
     claude_home: Option<&std::path::Path>,

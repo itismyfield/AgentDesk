@@ -7,7 +7,7 @@ use super::admission::{Admission, AdmissionTicket, admit_with_context};
 use super::drive::{Drive, wake};
 use super::ingress::{Intake, OwnerPending, owner_will_take};
 use super::origin::{Execution, InputOrigin};
-use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};
+use crate::services::turn_orchestrator::PendingQueueItem;
 
 /// `None` leaves the start to its legacy path. Otherwise the preflight refuses before any
 /// admission, and Pending stays its own non-success answer with the caller's ticket.

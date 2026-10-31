@@ -684,7 +684,7 @@ fn p4_final_dispatch_refuses_a_changed_driver_scope_pg() {
             cache_ttl_minutes: None, dispatch_type: None, force_fresh: false, submission: None,
         };
         let (sender, _receiver) = std::sync::mpsc::channel();
-        let error = provider_dispatch::execute(turn, start, sender).unwrap_err();
+        let error = provider_dispatch::execute(turn, start, sender, None).unwrap_err();
         assert!(error.contains("replay driver scope changed"), "{error}");
         assert!(token.replay_attempt().is_none(), "gate precedes permit spend and native input");
         assert_eq!(host.starts(), 0);

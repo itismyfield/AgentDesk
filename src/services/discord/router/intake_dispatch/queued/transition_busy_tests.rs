@@ -753,6 +753,7 @@ async fn t2_fresh_busy_keeps_tail_order() {
             turn_kind: crate::services::discord::router::TurnKind::Foreground,
             preserve_on_cancel: true,
         },
+        owner: None,
     };
     let deps = f.deps();
     let IntakeAdmission::Local(permit) = admit_text_intake(&deps, &submission).await else {

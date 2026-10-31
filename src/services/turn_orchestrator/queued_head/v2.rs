@@ -1,6 +1,7 @@
 //! V2 owner foundation, reachable through the mailbox only in tests until admission is wired.
 use super::v2_types::*;
 use super::{HeadPhase, PendingQueueItem, QueueIdentity};
+#[cfg(test)]
 use sha2::Digest;
 use std::path::PathBuf;
 
@@ -15,6 +16,7 @@ pub(crate) mod source_admission;
 mod sources;
 pub(crate) use attempt::AttemptRef;
 pub(crate) use commit::Fault;
+#[cfg(test)]
 use source_admission::AdmitError;
 pub(crate) use source_admission::Ticket;
 
@@ -84,6 +86,7 @@ impl Owner {
         Ok(owner)
     }
 
+    #[cfg(test)]
     fn enqueue(&mut self, item: &PendingQueueItem) -> Result<bool, AdmitError> {
         if self.pending.is_some() {
             return Err(AdmitError::NotCommitted("owner recovery required".into()));
@@ -156,6 +159,7 @@ impl Owner {
 
     /// Reserves the prepared queue front as one unit: `prepared` gives each original's shown name
     /// and single-input body; the first original it does not know starts the next unit.
+    #[cfg(test)]
     pub(crate) fn reserve_unit(
         &mut self,
         attempt: AttemptIdentity,
@@ -167,6 +171,7 @@ impl Owner {
 
     /// Rebuilds a reserved unit whose write permit is not handed over yet over the current front,
     /// keeping originals, tickets and order; the old key can no longer arm, so it never writes.
+    #[cfg(test)]
     pub(crate) fn reprepare(
         &mut self,
         key: &AttemptRef,
@@ -193,6 +198,7 @@ impl Owner {
     }
 
     /// The one ordered member list a unit is made of, and the frame and digest rendered from it.
+    #[cfg(test)]
     fn unit(
         &self,
         prepared: &impl Fn(&PendingQueueItem) -> Option<(String, String)>,
@@ -277,6 +283,16 @@ impl Owner {
         self.front_claim.clone()
     }
 
+    /// Whether this exact front, claimed by the owner's turn, is still the front `message` names.
+    pub(crate) fn claimed(&self, message: u64, front: &Front) -> bool {
+        front.1.message_id == message
+            && self
+                .front_claim
+                .as_ref()
+                .is_some_and(|c| is_front(c, front))
+            && self.front().is_some_and(|now| is_front(&now, front))
+    }
+
     /// Reserves the front a turn claimed, once, without spending a grant again; a front the queue
     /// moved since the claim reserves nothing.
     pub(crate) fn reserve_claimed(
@@ -354,6 +370,7 @@ impl InputAttempt {
 }
 
 /// One queued original as the caller prepared it for a unit: its shown name and prompt body.
+#[cfg(test)]
 struct MemberView {
     original: PendingQueueItem,
     name: String,
@@ -362,6 +379,7 @@ struct MemberView {
 
 /// The unit's body without the busy header the leaf adds for the first author: each original's
 /// body in arrival order, with an author line only where the author changes after the first.
+#[cfg(test)]
 fn render(views: &[MemberView]) -> String {
     let mut author = None;
     let bodies = views.iter().map(|view| {

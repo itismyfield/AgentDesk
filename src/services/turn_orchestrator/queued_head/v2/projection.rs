@@ -1,19 +1,22 @@
 //! What the V1 paths may know of a V2 queue: a boot/catalog plan, read-only state views, and the
 //! checked purge's compare-and-commit. Reading never writes; boot wiring that acts on a plan is not here.
 use super::*;
+use crate::services::turn_orchestrator::ChannelMailboxState;
 #[cfg(unix)]
 use crate::services::turn_orchestrator::checked_purge::V2PurgeStop as PurgeStop;
+#[cfg(test)]
 use crate::services::turn_orchestrator::pending_queue_persistence::{
     load_channel_pending_dispatch_marker_checked, pending_queue_file_path,
     queued_recovery::read_catalog,
 };
-use crate::services::turn_orchestrator::{
-    ChannelMailboxRegistry, ChannelMailboxState, QueuePersistenceContext,
-};
+#[cfg(test)]
+use crate::services::turn_orchestrator::{ChannelMailboxRegistry, QueuePersistenceContext};
+#[cfg(test)]
 use poise::serenity_prelude::ChannelId;
 
 /// Boot recovery runs every channel's queue before any inflight, marker or placeholder step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg(test)]
 pub(crate) enum Phase {
     Queue,
     Inflight,
@@ -22,6 +25,7 @@ pub(crate) enum Phase {
 }
 
 #[derive(Debug, PartialEq)]
+#[cfg(test)]
 pub(crate) enum Step {
     /// Adopt the channel's file, metadata-only included.
     Adopt(ChannelId),
@@ -35,6 +39,7 @@ pub(crate) enum Step {
     Placeholder(ChannelId, Vec<QueueIdentity>),
 }
 
+#[cfg(test)]
 impl Step {
     pub(crate) fn phase(&self) -> Phase {
         match self {
@@ -55,6 +60,7 @@ impl Step {
 
 /// Every catalog channel as the adoption under `namespace` would see it, phase by phase; a scan
 /// error is an error, never a shorter plan. A missing namespace is an empty plan.
+#[cfg(test)]
 pub(crate) fn plan(
     persistence: &QueuePersistenceContext,
     namespace: &str,
@@ -105,6 +111,7 @@ pub(crate) fn plan(
 
 /// Adopts every planned channel whose actor holds no owner, so a mailbox the registry dropped
 /// keeps its retained inputs and notices; returns the channels adopted, or the plan's scan error.
+#[cfg(test)]
 pub(crate) async fn readopt(
     registry: &ChannelMailboxRegistry,
     persistence: &QueuePersistenceContext,

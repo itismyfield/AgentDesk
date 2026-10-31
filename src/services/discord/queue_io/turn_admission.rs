@@ -33,14 +33,21 @@ pub(in crate::services::discord) async fn mailbox_try_start_turn_behind_queue(
     cancel_token: Arc<CancelToken>,
     request_owner: UserId,
     user_message_id: MessageId,
+    front: Option<crate::services::turn_orchestrator::OwnerFront>,
 ) -> bool {
+    let claim = match front {
+        Some(front) => AdmissionClaim::Owner(front),
+        None => {
+            AdmissionClaim::Kinded(ActiveTurnKind::UserOrAgent, TurnAdmissionOrder::BehindQueue)
+        }
+    };
     mailbox_try_start_turn_ordered(
         shared,
         channel_id,
         cancel_token,
         request_owner,
         user_message_id,
-        AdmissionClaim::Kinded(ActiveTurnKind::UserOrAgent, TurnAdmissionOrder::BehindQueue),
+        claim,
     )
     .await
     .started
@@ -92,11 +99,13 @@ pub(in crate::services::discord) async fn mailbox_try_start_turn_adopting(
 }
 
 /// The mailbox claim an admitted turn issues.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 enum AdmissionClaim {
     Kinded(ActiveTurnKind, TurnAdmissionOrder),
     /// An immediate claim the actor's recovery fence may refuse for the named episode.
     Adopt(ActiveTurnKind, Option<String>),
+    /// The owner's claimed front, which only that exact front passes.
+    Owner(crate::services::turn_orchestrator::OwnerFront),
 }
 
 async fn mailbox_try_start_turn_ordered(
@@ -127,7 +136,18 @@ async fn mailbox_try_start_turn_ordered(
     let mailbox = shared.mailbox(channel_id);
     let persistence = queue_persistence_context(shared, &shared.provider, channel_id);
     let turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
+    let logged = match &claim {
+        AdmissionClaim::Kinded(kind, order) => format!("Kinded({kind:?}, {order:?})"),
+        AdmissionClaim::Adopt(kind, episode) => format!("Adopt({kind:?}, {episode:?})"),
+        AdmissionClaim::Owner(_) => "Owner".to_string(),
+    };
     let result = match claim {
+        AdmissionClaim::Owner(front) => {
+            let claimant = (cancel_token, request_owner);
+            mailbox
+                .try_start_owner_front(claimant, front, persistence)
+                .await
+        }
         AdmissionClaim::Kinded(turn_kind, admission_order) => {
             mailbox
                 .try_start_turn_kinded_with_persistence(
@@ -188,7 +208,7 @@ async fn mailbox_try_start_turn_ordered(
             provider = shared.provider.as_str(),
             channel_id = channel_id.get(),
             user_message_id = user_message_id.get(),
-            claim = ?claim,
+            claim = %logged,
             error = %error,
             "mailbox try-start failed durable active-source queue purge"
         );
@@ -280,7 +300,6 @@ pub(in crate::services::discord) async fn mailbox_enqueue_observed_intervention(
     intervention: Intervention,
     observed: Option<ClaimObservation>,
 ) -> MailboxEnqueueOutcome {
-    #[cfg(test)]
     if let Some(outcome) =
         super::input_owner::ingress::enqueue(shared, provider, channel_id, &intervention).await
     {

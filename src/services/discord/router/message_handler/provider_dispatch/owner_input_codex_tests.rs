@@ -329,8 +329,9 @@ fn an_idle_owner_turn_holds_its_capacity_until_its_ai_turn_ends_pg() {
     std::thread::scope(|scope| {
         // Inside the scope, so a failed assertion drops it and ends the held AI turn.
         let (release, turn) = std::sync::mpsc::channel::<()>();
-        let until_done: Box<dyn FnOnce() + Send> = Box::new(move || {
+        let until_done: super::UntilDone = Box::new(move || {
             let _ = turn.recv();
+            Ok(())
         });
         let first = scope.spawn(|| {
             let how = (

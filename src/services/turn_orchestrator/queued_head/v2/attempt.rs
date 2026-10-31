@@ -78,6 +78,7 @@ impl Owner {
             attempt: head.attempt.clone().ok_or("unnamed attempt")?,
         })
     }
+    #[cfg(test)]
     pub(crate) fn arm(&mut self, key: &AttemptRef, now: u64) -> Result<EffectPermit, String> {
         self.arm_phase(key, now, false)
     }

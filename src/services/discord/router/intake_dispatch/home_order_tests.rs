@@ -90,6 +90,7 @@ fn submission(channel: u64, message: u64) -> IntakeSubmission {
         attachments: Vec::new(),
         preloaded_uploads: Vec::new(),
         voice_announcement: None,
+        owner: None,
     }
 }
 
