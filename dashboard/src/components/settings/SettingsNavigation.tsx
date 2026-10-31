@@ -40,7 +40,7 @@ export function SettingsNavigation<TPanel extends string>({
         {tr(`현재 패널 ${matchingCount}개 항목 일치`, `${matchingCount} matches in this panel`)}
       </p> : null}
       <div role="tablist" aria-label={tr("설정 패널", "Settings panels")}
-        className="grid grid-cols-4 gap-1 border-b border-th-border-subtle pb-3 md:grid-cols-1 md:border-b-0 md:pb-0">
+        className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,7rem),1fr))] gap-1 border-b border-th-border-subtle pb-3 md:grid-cols-1 md:border-b-0 md:pb-0">
         {items.length ? items.map(item => {
           const active = activePanel === item.id;
           return <button key={item.id} id={`settings-tab-${item.id}`} type="button" role="tab"
@@ -50,7 +50,7 @@ export function SettingsNavigation<TPanel extends string>({
             <span className="min-w-0 [overflow-wrap:anywhere]">{item.title}</span>
             {item.count ? <span className="hidden shrink-0 font-normal tabular-nums text-th-text-muted md:inline">{item.count}</span> : null}
           </button>;
-        }) : <SettingsEmptyState className="col-span-4 text-sm md:col-span-1">{tr("검색 결과가 없습니다.", "No groups match the search.")}</SettingsEmptyState>}
+        }) : <SettingsEmptyState className="col-span-full text-sm">{tr("검색 결과가 없습니다.", "No groups match the search.")}</SettingsEmptyState>}
       </div>
     </aside>
   );
