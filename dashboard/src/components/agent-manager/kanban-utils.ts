@@ -206,6 +206,11 @@ export function hasManualInterventionReason(card: Pick<KanbanCard, "blocked_reas
   return Boolean(reason) && !isBenignBlockedReason(reason);
 }
 
+/** Done and cancelled cards are closed; every other status still needs work. */
+export function isOpenKanbanCard(card: Pick<KanbanCard, "status">): boolean {
+  return card.status !== "done" && card.status !== "cancelled";
+}
+
 export function isManualInterventionCard(
   card: Pick<KanbanCard, "review_status" | "blocked_reason">,
 ): boolean {

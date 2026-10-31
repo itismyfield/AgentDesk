@@ -4,7 +4,7 @@ import type { KanbanCard } from "../../types";
 import { cardTitle } from "../agent-manager/kanban-utils";
 import { campaignTaskNumber, campaignTaskTitle } from "./campaignModel";
 import {
-  EMPTY_QUEUE_FILTERS, campaignNodeFromCard, filterQueueCards, parseQueueLocation, queueCards, queueLocationQuery,
+  EMPTY_QUEUE_FILTERS, campaignNodeFromCard, cardWithBody, filterQueueCards, parseQueueLocation, queueCards, queueLocationQuery,
 } from "./campaignQueueModel";
 import { makeCampaignNode } from "./campaignTestFixtures";
 
@@ -41,6 +41,15 @@ it("queues open cards no open task holds, matching tasks by issue link, title nu
     campaign("finished", [makeCampaignNode("d", { issue_url: "https://github.com/itismyfield/AgentDesk/issues/14" })], "completed"),
   ];
   expect(queueCards(cards, campaigns).map((value) => value.id)).toEqual(["other-repo", "closed-task", "closed-campaign", "no-issue"]);
+});
+
+it("leaves out cancelled cards and the issues server campaigns hold", () => {
+  const cards = [
+    card("cancelled", { github_issue_number: 20, status: "cancelled" }),
+    card("server-held", { github_issue_number: 21 }),
+    card("free", { github_issue_number: 22 }),
+  ];
+  expect(queueCards(cards, [], ["https://github.com/itismyfield/AgentDesk/issues/21"]).map((value) => value.id)).toEqual(["free"]);
 });
 
 it("sorts by priority then most recent change, and filters by text, status and repository", () => {
@@ -84,4 +93,12 @@ it("round-trips the queue deep link", () => {
   expect(queueLocationQuery(null)).toBe("?tab=queue");
   expect(parseQueueLocation(queueLocationQuery("card-1"))).toEqual({ card: "card-1" });
   expect(parseQueueLocation("?mode=legacy&campaign=x")).toBeNull();
+});
+
+it("keeps the body of the last full read when the list swaps in a summary", () => {
+  const full = card("c", { description: "long body", title: "old" });
+  const { description: _dropped, ...summary } = card("c", { title: "renamed" });
+  expect(cardWithBody(summary as KanbanCard, full)).toMatchObject({ title: "renamed", description: "long body" });
+  expect(cardWithBody(card("c", { description: null }), full)?.description).toBeNull();
+  expect(cardWithBody(summary as KanbanCard, card("other", { description: "x" }))).toBeUndefined();
 });

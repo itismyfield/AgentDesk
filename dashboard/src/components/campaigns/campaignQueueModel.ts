@@ -1,6 +1,6 @@
 import type { Campaign, CampaignNode } from "../../api/campaigns";
 import type { KanbanCard } from "../../types";
-import { cardTitle } from "../agent-manager/kanban-utils";
+import { cardTitle, isOpenKanbanCard } from "../agent-manager/kanban-utils";
 import { campaignTaskNumber } from "./campaignModel";
 
 const QUEUE_TAB = "queue";
@@ -21,10 +21,15 @@ const CLOSED_NODES = new Set<CampaignNode["status"]>(["completed", "skipped"]);
 const ISSUE_URL = /github\.com\/([^/]+\/[^/]+)\/issues\/(\d+)/i;
 
 /** Whether an open task of an open campaign already holds the card's issue. A task without an issue link
- * still names its issue by its "#123" title or "i123" id; that number matches any repository. */
-export function campaignCardMatcher(campaigns: Campaign[]): (card: KanbanCard) => boolean {
+ * still names its issue by its "#123" title or "i123" id; that number matches any repository.
+ * `heldIssueUrls` adds the issues server campaigns hold. */
+export function campaignCardMatcher(campaigns: Campaign[], heldIssueUrls: readonly string[] = []): (card: KanbanCard) => boolean {
   const linked = new Set<string>();
   const numbered = new Set<number>();
+  for (const url of heldIssueUrls) {
+    const match = url.match(ISSUE_URL);
+    if (match) linked.add(`${match[1].toLowerCase()}#${match[2]}`);
+  }
   for (const campaign of campaigns) {
     if (CLOSED_CAMPAIGNS.has(campaign.status)) continue;
     for (const node of campaign.nodes) {
@@ -43,9 +48,22 @@ export function campaignCardMatcher(campaigns: Campaign[]): (card: KanbanCard) =
 }
 
 /** Open cards no campaign holds: the queue a person hands to ready or puts into a campaign. */
-export function queueCards(cards: KanbanCard[], campaigns: Campaign[]): KanbanCard[] {
-  const inCampaign = campaignCardMatcher(campaigns);
-  return cards.filter((card) => card.status !== "done" && !inCampaign(card));
+export function queueCards(cards: KanbanCard[], campaigns: Campaign[], heldIssueUrls: readonly string[] = []): KanbanCard[] {
+  const inCampaign = campaignCardMatcher(campaigns, heldIssueUrls);
+  return cards.filter((card) => isOpenKanbanCard(card) && !inCampaign(card));
+}
+
+/** The list's summary view drops the description key; full reads and write answers carry it (null when empty). */
+export function isFullCard(card: KanbanCard): boolean {
+  return Object.prototype.hasOwnProperty.call(card, "description");
+}
+
+/** The card to edit: a full card as it is, or a summary carrying the body and metadata of the last full read of it,
+ * so a list refresh never empties the editor and the next save cannot wipe the body. */
+export function cardWithBody(card: KanbanCard | undefined, full: KanbanCard | null): KanbanCard | undefined {
+  if (!card) return undefined;
+  if (isFullCard(card)) return card;
+  return full?.id === card.id ? { ...card, description: full.description, metadata: full.metadata } : undefined;
 }
 
 export type QueueSort = "priority" | "recent" | "oldest" | "number";

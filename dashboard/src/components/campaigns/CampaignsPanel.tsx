@@ -22,6 +22,7 @@ import {
 } from "./serverCampaignModel";
 import { queueLocationQuery, parseQueueLocation } from "./campaignQueueModel";
 import { useLegacyCampaigns } from "./useLegacyCampaigns";
+import { useServerCampaignHolds } from "./useServerCampaignHolds";
 import { useServerCampaignReads } from "./useServerCampaignReads";
 import "./campaigns.css";
 
@@ -33,6 +34,8 @@ const SERVER_OPTION = "server:";
 const NEW_DRAFT = "create";
 const editKey = (id: string) => `edit:${id}`;
 const POLL_MS = 15_000;
+// Both campaign lists are re-read on this slower beat; a failed list read is retried on the next poll.
+const LIST_POLL_MS = 60_000;
 // Route paths match without regard to a trailing slash or case.
 const samePage = (a: string, b: string) => a.replace(/\/+$/, "").toLowerCase() === b.replace(/\/+$/, "").toLowerCase();
 
@@ -83,20 +86,29 @@ export default function CampaignsPanel({ language }: { language: string }) {
   }, [refreshList, refreshDetail]);
   const refreshAll = () => { void legacy.refresh(); refreshServer(mode === "server" ? serverSelected : null); };
 
-  // The list of every campaign is read once; each poll reads only the campaign on screen, and none while hidden.
+  // Each poll reads the campaign on screen; the lists come on a slower beat. Nothing is read while hidden.
+  const listsReadAt = useRef(0);
+  const readListsIfDue = () => {
+    if (Date.now() - listsReadAt.current < LIST_POLL_MS && !legacy.error && !listError) return false;
+    listsReadAt.current = Date.now();
+    void legacy.refresh(true); void refreshList(true);
+    return true;
+  };
   const poll = useRef<(visible: boolean) => void>(() => {});
   poll.current = (visible) => {
     const watching = visible && tab === "campaigns";
     server.tick(watching);
+    if (visible && readListsIfDue()) return;
     if (watching && mode === "legacy" && selectedId) void legacy.refreshCampaign(selectedId);
   };
   const resume = useRef<() => void>(() => {});
   resume.current = () => {
-    if (tab !== "campaigns") return;
+    if (readListsIfDue() || tab !== "campaigns") return;
     if (mode === "server") server.resume();
     else if (selectedId) void legacy.refreshCampaign(selectedId);
   };
   useEffect(() => {
+    listsReadAt.current = Date.now();
     void legacy.refresh(); void refreshList(true);
     const interval = window.setInterval(() => poll.current(document.visibilityState === "visible"), POLL_MS);
     const onVisibility = () => { if (document.visibilityState === "visible") resume.current(); };
@@ -206,6 +218,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
       refreshServer(id);
     }} />;
 
+  const holds = useServerCampaignHolds(summaries, listLoaded, tab === "queue");
   const campaign = campaigns.find((value) => value.id === selectedId);
   const selectorTitle = tr("캠페인 선택", "Select campaign");
   const selector = <label className="campaign-selector"><span>{selectorTitle}</span><Select aria-label={selectorTitle} className="font-semibold" value={mode === "server" ? `${SERVER_OPTION}${serverSelected}` : campaign?.id ?? ""} onChange={(event) => {
@@ -227,8 +240,10 @@ export default function CampaignsPanel({ language }: { language: string }) {
     <CampaignPageHeader tab={tab} onTab={setTab} actions={actions} tr={tr} />
     {tab === "queue" ? <div id="campaign-panel-queue" role="tabpanel" aria-labelledby="campaign-tab-queue" className="min-w-0">
       <Suspense fallback={<WidgetState kind="loading" title={tr("대기열을 불러오고 있습니다.", "Loading the queue.")} />}>
-        <CampaignQueueTab language={language} tr={tr} campaigns={campaigns} campaignsLoaded={refreshedAt !== null}
-          campaignsError={refreshedAt === null ? error : null} onRetryCampaigns={() => void legacy.refresh()} selectedCardId={queueCard} onSelectCard={setQueueCard} onCampaignSaved={onSaved} />
+        <CampaignQueueTab language={language} tr={tr} campaigns={campaigns} campaignsLoaded={refreshedAt !== null && holds.loaded}
+          campaignsError={refreshedAt === null ? error : null} onRetryCampaigns={() => { void legacy.refresh(); void refreshList(); }}
+          heldIssueUrls={holds.issueUrls} serverHoldsIncomplete={!!listError || holds.failed > 0}
+          selectedCardId={queueCard} onSelectCard={setQueueCard} onCampaignSaved={onSaved} />
       </Suspense>
     </div> : <div id="campaign-panel-campaigns" role="tabpanel" aria-labelledby="campaign-tab-campaigns" className="grid min-w-0 gap-4 sm:gap-6">
       {error && <WidgetState kind={campaigns.length ? "stale" : "error"} title={tr("캠페인을 갱신하지 못했습니다.", "Could not refresh campaigns.")} description={error + (campaigns.length ? tr(" · 이전 내용을 표시 중입니다.", " · Showing the previous snapshot.") : "")} action={<button onClick={() => void legacy.refresh()}>{tr("다시 시도", "Retry")}</button>} />}

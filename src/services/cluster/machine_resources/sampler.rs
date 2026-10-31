@@ -96,6 +96,8 @@ impl Sampler {
         }
     }
 
+    /// No sysinfo fallback: its macOS available figure is the one that read 0 B, so a failed host
+    /// read hides the row rather than showing that number.
     #[cfg(target_os = "macos")]
     fn memory(&self, total: u64) -> Option<MemoryResources> {
         use super::memory;

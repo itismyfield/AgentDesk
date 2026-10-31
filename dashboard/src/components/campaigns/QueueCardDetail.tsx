@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { Campaign } from "../../api/campaigns";
 import { useTaskDispatches } from "../../contexts/KanbanContext";
 import type { Agent, KanbanCard, UiLanguage } from "../../types";
@@ -9,6 +9,7 @@ import { Drawer } from "../common/overlay/Drawer";
 import { Modal } from "../common/overlay/Modal";
 import { WidgetState } from "../common/WidgetState";
 import type { Tr } from "./campaignPresentation";
+import { cardWithBody, isFullCard } from "./campaignQueueModel";
 import QueueAddToCampaign from "./QueueAddToCampaign";
 import type { useQueueCardActions } from "./useQueueCardActions";
 
@@ -19,23 +20,32 @@ export default function QueueCardDetail({ cardId, card, agents, campaigns, local
   cardId: string; card: KanbanCard | undefined; agents: Agent[]; campaigns: Campaign[]; locale: UiLanguage; tr: Tr; actions: Actions;
   onClose: () => void; onNeedsAssignee: (card: KanbanCard) => void; onCampaignSaved: (campaign: Campaign) => void;
 }) {
-  // The list holds summaries without a description, so the drawer waits for the full card.
+  // The list holds summaries without a description, so the drawer waits for the full card and keeps it.
   const [loaded, setLoaded] = useState<{ id: string; error: string | null } | null>(null);
+  const [full, setFull] = useState<KanbanCard | null>(null);
+  const [reads, setReads] = useState(0);
   useEffect(() => {
     let current = true;
     actions.load(cardId).then(
-      () => { if (current) setLoaded({ id: cardId, error: null }); },
-      (cause) => { if (current) setLoaded({ id: cardId, error: cause instanceof Error ? cause.message : String(cause) }); },
+      (value) => { if (current) { setFull(value); setLoaded({ id: cardId, error: null }); } },
+      // A failed re-read keeps the card already on screen.
+      (cause) => { if (current && reads === 0) setLoaded({ id: cardId, error: cause instanceof Error ? cause.message : String(cause) }); },
     );
     return () => { current = false; };
-  }, [cardId, actions]);
-  const ready = loaded?.id === cardId && !loaded.error && card;
+  }, [cardId, actions, reads]);
+  // Writes and WS events bring full cards; keep the newest one.
+  useEffect(() => { if (card && isFullCard(card)) setFull(card); }, [card]);
+  // A newer summary means the body may have changed too, so the full card is read again.
+  const summaryIsNewer = !!card && !isFullCard(card) && !!full && full.id === card.id && card.updated_at !== full.updated_at;
+  useEffect(() => { if (summaryIsNewer) setReads((value) => value + 1); }, [summaryIsNewer]);
+  const shown = useMemo(() => cardWithBody(card, full), [card, full]);
+  const ready = loaded?.id === cardId && !loaded.error && shown;
   if (!ready) return <Drawer open onClose={onClose} title={tr("카드 상세", "Card details")} width="min(820px, 100vw)">
     {loaded?.id === cardId && loaded.error
       ? <WidgetState kind="error" title={tr("카드를 불러오지 못했습니다.", "Could not load the card.")} description={loaded.error} />
       : <WidgetState kind="loading" title={tr("카드를 불러오고 있습니다.", "Loading the card.")} />}
   </Drawer>;
-  return <LoadedCardDetail card={card} agents={agents} campaigns={campaigns} locale={locale} tr={tr} actions={actions}
+  return <LoadedCardDetail card={shown} agents={agents} campaigns={campaigns} locale={locale} tr={tr} actions={actions}
     onClose={onClose} onNeedsAssignee={onNeedsAssignee} onCampaignSaved={onCampaignSaved} />;
 }
 

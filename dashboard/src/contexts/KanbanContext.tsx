@@ -28,6 +28,7 @@ interface KanbanProviderProps {
 }
 
 const DISPATCH_LIMIT = 200;
+const CARD_RETRY_MS = 30_000;
 
 /** A fetched list overlaid with what WS events changed while it was in flight (null: deleted). */
 function overlay(fetched: KanbanCard[], touched: Map<string, KanbanCard | null>): KanbanCard[] {
@@ -116,10 +117,21 @@ export function KanbanProvider({ initialCards, initialDispatches, children }: Ka
     );
   }, []);
 
+  // A failed card read is tried again until one succeeds.
+  useEffect(() => {
+    if (kanbanCardsState !== "error") return;
+    const timer = window.setTimeout(reloadKanbanCards, CARD_RETRY_MS);
+    return () => window.clearTimeout(timer);
+  }, [kanbanCardsState, reloadKanbanCards]);
+
   useEffect(() => {
     function handleWs(e: Event) {
       const event = (e as CustomEvent<WSEvent>).detail;
       switch (event.type) {
+        case "connected":
+          // A reconnect may have outlived the server's replay window, so read the cards again unless a read is already out.
+          if (cardsRequested.current && touchedDuringRead.current === null) reloadKanbanCards();
+          break;
         case "kanban_card_created":
         case "kanban_card_updated":
           upsertKanbanCard(event.payload as KanbanCard);
@@ -135,7 +147,7 @@ export function KanbanProvider({ initialCards, initialDispatches, children }: Ka
     }
     window.addEventListener("pcd-ws-event", handleWs);
     return () => window.removeEventListener("pcd-ws-event", handleWs);
-  }, [upsertKanbanCard, upsertTaskDispatch, deleteKanbanCard]);
+  }, [upsertKanbanCard, upsertTaskDispatch, deleteKanbanCard, reloadKanbanCards]);
 
   return (
     <KanbanContext.Provider value={{

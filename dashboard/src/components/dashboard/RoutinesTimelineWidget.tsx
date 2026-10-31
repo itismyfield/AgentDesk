@@ -1077,12 +1077,16 @@ export function RoutinesTimelineWidget({
     };
 
     void load();
-    const timer = window.setInterval(() => {
+    // Background tabs skip the poll and catch up as soon as they become visible, like the other home widgets.
+    const onVisible = () => {
       if (!document.hidden) void load();
-    }, 60_000);
+    };
+    const timer = window.setInterval(onVisible, 60_000);
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       mounted = false;
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [filter, reloadKey]);
 

@@ -3,7 +3,7 @@ import { Link } from "react-router";
 import { ArrowUpRight, CheckCircle2 } from "lucide-react";
 import type { DashboardStats, KanbanCard } from "../types";
 import { useKanban } from "../contexts/KanbanContext";
-import { isManualInterventionCard } from "../components/agent-manager/kanban-utils";
+import { isManualInterventionCard, isOpenKanbanCard } from "../components/agent-manager/kanban-utils";
 import { HomeWidgetShell } from "./HomeOverviewWidgets";
 
 const QUEUE_PATH = "/campaigns?tab=queue";
@@ -20,7 +20,7 @@ export function HomeAttention({ stats, isKo }: { stats: DashboardStats | null; i
   const { kanbanCards, kanbanCardsState } = useKanban();
   const cardsReady = kanbanCardsState === "ready";
   const { blockedCards, reviewCards } = useMemo(() => {
-    const open = kanbanCards.filter((card) => card.status !== "done" && card.status !== "cancelled");
+    const open = kanbanCards.filter(isOpenKanbanCard);
     const blocked = open.filter((card) => isManualInterventionCard(card));
     return {
       blockedCards: blocked,
@@ -42,7 +42,7 @@ export function HomeAttention({ stats, isKo }: { stats: DashboardStats | null; i
   const total = rows.reduce((sum, row) => sum + row.count, 0);
   const subtitle = !cardsReady
     ? kanbanCardsState === "error"
-      ? tr("카드를 불러오지 못했어요. 대기열에서 다시 확인해 주세요.", "Could not load cards. Check the queue.")
+      ? tr("카드를 불러오지 못했어요. 잠시 뒤 다시 불러와요.", "Could not load cards. Trying again shortly.")
       : tr("확인할 카드를 불러오는 중이에요.", "Loading cards…")
     : total > 0
       ? tr(`사람이 봐야 다음 단계로 넘어가는 작업 ${total}건`, `${total} items waiting on a person`)

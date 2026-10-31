@@ -21,8 +21,10 @@ const SORTS: Array<[QueueSort, [string, string]]> = [
 ];
 
 /** Open cards no campaign holds yet: hand them to ready, or put them into a campaign. */
-export default function CampaignQueueTab({ language, tr, campaigns, campaignsLoaded, campaignsError, onRetryCampaigns, selectedCardId, onSelectCard, onCampaignSaved }: {
+export default function CampaignQueueTab({ language, tr, campaigns, campaignsLoaded, campaignsError, onRetryCampaigns, heldIssueUrls, serverHoldsIncomplete, selectedCardId, onSelectCard, onCampaignSaved }: {
   language: string; tr: Tr; campaigns: Campaign[]; campaignsLoaded: boolean; campaignsError: string | null; onRetryCampaigns: () => void;
+  /** Issue links server campaigns hold; incomplete when a server campaign could not be read. */
+  heldIssueUrls: readonly string[]; serverHoldsIncomplete: boolean;
   selectedCardId: string | null; onSelectCard: (id: string | null) => void; onCampaignSaved: (campaign: Campaign) => void;
 }) {
   const locale = language as UiLanguage;
@@ -34,7 +36,7 @@ export default function CampaignQueueTab({ language, tr, campaigns, campaignsLoa
   const [busyCard, setBusyCard] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const agents = useMemo(() => new Map(allAgents.map((agent) => [agent.id, agent])), [allAgents]);
-  const queued = useMemo(() => queueCards(kanbanCards, campaigns), [kanbanCards, campaigns]);
+  const queued = useMemo(() => queueCards(kanbanCards, campaigns, heldIssueUrls), [kanbanCards, campaigns, heldIssueUrls]);
   const shown = useMemo(() => filterQueueCards(queued, filters), [queued, filters]);
   const statuses = useMemo(() => [...new Set(queued.map((card) => card.status))], [queued]);
   const repos = useMemo(() => [...new Set(queued.flatMap((card) => card.github_repo ? [card.github_repo] : []))].sort(), [queued]);
@@ -84,6 +86,9 @@ export default function CampaignQueueTab({ language, tr, campaigns, campaignsLoa
       : shown.length === queued.length ? tr(`캠페인 밖 카드 ${queued.length}장`, `${queued.length} cards outside campaigns`)
         : tr(`캠페인 밖 카드 ${queued.length}장 중 ${shown.length}장`, `${shown.length} of ${queued.length} cards outside campaigns`)}</p>
     {error && <p role="alert" className="campaign-filter-note">{error}</p>}
+    {serverHoldsIncomplete && !loading && <WidgetState kind="stale" title={tr("서버 캠페인 일부를 읽지 못했습니다.", "Some server campaigns did not load.")}
+      description={tr("여기 보이는 카드 가운데 서버 캠페인이 이미 맡은 것이 있을 수 있습니다.", "Some cards shown here may already belong to a server campaign.")}
+      action={<button type="button" onClick={onRetryCampaigns}>{tr("다시 시도", "Retry")}</button>} />}
     {campaignsError ? <WidgetState kind="error" title={tr("캠페인을 읽지 못해 어느 카드가 캠페인 밖인지 알 수 없습니다.", "Campaigns did not load, so the queue cannot tell which cards they hold.")}
       description={campaignsError} action={<button type="button" onClick={onRetryCampaigns}>{tr("다시 시도", "Retry")}</button>} />
       : kanbanCardsState === "error" ? <WidgetState kind="error" title={tr("카드를 불러오지 못했습니다.", "Could not load cards.")} action={<button type="button" onClick={reloadKanbanCards}>{tr("다시 시도", "Retry")}</button>} />
@@ -94,7 +99,7 @@ export default function CampaignQueueTab({ language, tr, campaigns, campaignsLoa
             {shown.map((card) => <QueueCardRow key={card.id} card={card} agent={card.assignee_agent_id ? agents.get(card.assignee_agent_id) : undefined} locale={locale}
               selected={card.id === selectedCardId} busy={busyCard === card.id} tr={tr} onOpen={() => onSelectCard(card.id)} onReady={() => requestReady(card)} />)}
           </ul>}
-    {selectedCardId && <QueueCardDetail cardId={selectedCardId} card={kanbanCards.find((card) => card.id === selectedCardId)} agents={allAgents} campaigns={campaigns}
+    {selectedCardId && <QueueCardDetail key={selectedCardId} cardId={selectedCardId} card={kanbanCards.find((card) => card.id === selectedCardId)} agents={allAgents} campaigns={campaigns}
       locale={locale} tr={tr} actions={actions} onClose={() => onSelectCard(null)} onNeedsAssignee={setNeedsAssignee} onCampaignSaved={onCampaignSaved} />}
     {needsAssignee && <QueueReadyDialog card={needsAssignee} agents={allAgents} locale={locale} tr={tr} onCancel={() => setNeedsAssignee(null)}
       onConfirm={(agentId) => { const card = needsAssignee; setNeedsAssignee(null); void moveToReady(card, agentId); }} />}

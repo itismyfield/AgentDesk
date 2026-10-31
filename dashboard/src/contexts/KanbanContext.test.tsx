@@ -54,3 +54,17 @@ it("uses cards it is given without reading, and reads dispatches only for a disp
   expect(api.getTaskDispatches).toHaveBeenCalledExactlyOnceWith({ limit: 200 });
   expect(container.querySelector("i")?.textContent).toBe("1");
 });
+
+it("reads the cards again after a failed read and after the socket reconnects", async () => {
+  vi.useFakeTimers();
+  try {
+    vi.mocked(api.getKanbanCards).mockRejectedValueOnce(new Error("down")).mockResolvedValue([card("a")]);
+    await act(async () => root.render(<KanbanProvider><Cards /></KanbanProvider>));
+    expect(container.querySelector("p")?.getAttribute("data-state")).toBe("error");
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(container.querySelector("p")?.getAttribute("data-state")).toBe("ready");
+    expect(api.getKanbanCards).toHaveBeenCalledTimes(2);
+    await act(async () => emit("connected", null));
+    expect(api.getKanbanCards).toHaveBeenCalledTimes(3);
+  } finally { vi.useRealTimers(); }
+});

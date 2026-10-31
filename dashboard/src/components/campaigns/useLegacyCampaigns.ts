@@ -11,7 +11,7 @@ function newest(current: Campaign[], values: Campaign[]): Campaign[] {
   });
 }
 
-/** Ledger campaigns: the whole list once (and on refresh), then only the shown campaign on each poll. */
+/** Ledger campaigns: the whole list on mount, on refresh and on the panel's slower list beat; the shown campaign on each poll. */
 export function useLegacyCampaigns() {
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [live, setLive] = useState<CampaignLive>({});
@@ -38,9 +38,10 @@ export function useLegacyCampaigns() {
     }
   }, [campaigns, refreshedAt]);
 
-  const refresh = useCallback(async () => {
+  /** `quiet` reads in the background without putting the panel into its loading state. */
+  const refresh = useCallback(async (quiet = false) => {
     const id = ++listRequest.current;
-    setLoading(true);
+    if (!quiet) setLoading(true);
     try {
       const { campaigns: values, live: nextLive, read } = await getCampaigns();
       if (!mounted.current || id !== listRequest.current) return;
