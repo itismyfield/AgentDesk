@@ -2833,6 +2833,15 @@ async fn canonical_identity_foreign_handoff_resolver_and_hook_converge_pg() {
     test_db.drop().await;
 }
 
+async fn wait_for_two_active_identity_transactions(mut sample: impl AsyncFnMut() -> i64) {
+    loop {
+        if sample().await == 2 {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
 async fn assert_concurrent_identity_promotion(
     control_pool: &PgPool,
     race_pool: &PgPool,
@@ -2840,6 +2849,26 @@ async fn assert_concurrent_identity_promotion(
     channel: &str,
     original_id: i64,
 ) {
+    let mut delayed = [1, 2].into_iter();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        wait_for_two_active_identity_transactions(async || delayed.next().unwrap()),
+    )
+    .await
+    .expect("delayed activity publication must be retried");
+    assert!(delayed.next().is_none());
+    let mut samples = 0;
+    let stalled = tokio::time::timeout(
+        std::time::Duration::from_millis(60),
+        wait_for_two_active_identity_transactions(async || {
+            samples += 1;
+            1
+        }),
+    )
+    .await;
+    assert!(stalled.is_err(), "one active transaction must time out");
+    assert!(samples > 0);
+    eprintln!("IDENTITY_ACTIVITY_SAMPLES delayed=[1, 2] stalled=timeout samples={samples}");
     let backend_pids = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         let mut first = race_pool.begin().await.unwrap();
         let mut second = race_pool.begin().await.unwrap();
@@ -2889,16 +2918,22 @@ async fn assert_concurrent_identity_promotion(
                 .unwrap();
                 if waiting.iter().map(|row| row.0).collect::<Vec<_>>() == backend_pids {
                     assert_ne!(waiting[0].1, waiting[1].1);
-                    let active: i64 = sqlx::query_scalar(
-                        "SELECT count(*) FROM pg_stat_activity WHERE pid = ANY($1)
-                         AND xact_start IS NOT NULL AND state = 'active'
-                         AND wait_event_type = 'Lock'",
-                    )
-                    .bind(&backend_pids)
-                    .fetch_one(&mut *barrier)
-                    .await
-                    .unwrap();
-                    assert_eq!(active, 2, "both production transactions must overlap");
+                    wait_for_two_active_identity_transactions(async || {
+                        sqlx::query("SELECT pg_stat_clear_snapshot()")
+                            .execute(&mut *barrier)
+                            .await
+                            .unwrap();
+                        sqlx::query_scalar(
+                            "SELECT count(*) FROM pg_stat_activity WHERE pid = ANY($1)
+                             AND xact_start IS NOT NULL AND state = 'active'
+                             AND wait_event_type = 'Lock'",
+                        )
+                        .bind(&backend_pids)
+                        .fetch_one(&mut *barrier)
+                        .await
+                        .unwrap()
+                    })
+                    .await;
                     eprintln!("CANONICAL_IDENTITY_RACE waiting={waiting:?}");
                     break;
                 }
