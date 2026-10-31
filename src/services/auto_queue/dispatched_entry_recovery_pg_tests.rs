@@ -572,7 +572,9 @@ async fn periodic_queue_review_recovery_does_not_reopen_issued_reviews_pg() {
                      WHEN $1 = 'fallback-work' THEN NOW() - INTERVAL '20 minutes'
                      ELSE NOW() - INTERVAL '5 minutes' END,
                 NOW() - INTERVAL '5 minutes',
-                CASE WHEN $1 = 'issued-recent' THEN NOW() ELSE NOW() - INTERVAL '5 minutes' END
+                CASE WHEN $1 = 'issued-recent' THEN NOW()
+                     WHEN $1 = 'fallback-work' THEN NOW() - INTERVAL '20 minutes'
+                     ELSE NOW() - INTERVAL '5 minutes' END
             FROM task_dispatches WHERE id = $1")
             .bind(card).bind(kind).bind(status).bind(result).execute(&pool).await.unwrap();
     }
@@ -627,10 +629,13 @@ async fn periodic_queue_review_recovery_does_not_reopen_issued_reviews_pg() {
     .unwrap();
     assert_eq!(passed, (None, Some("pr:creating".to_string())));
     for card in ["newer-work", "fallback-work"] {
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = $1 AND dispatch_type = 'review'")
+        let state: (i64, i64) = sqlx::query_as(
+            "SELECT review_round::BIGINT, (SELECT COUNT(*) FROM task_dispatches d WHERE d.kanban_card_id = c.id AND d.dispatch_type = 'review')
+             FROM kanban_cards c WHERE c.id = $1")
             .bind(card).fetch_one(&pool).await.unwrap();
         assert_eq!(
-            count, 2,
+            state,
+            (2, 2),
             "review history older than latest completed work must not block {card}"
         );
     }
