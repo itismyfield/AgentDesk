@@ -4,14 +4,10 @@ use std::path::{Path, PathBuf};
 use poise::serenity_prelude::ChannelId;
 
 use super::DispatchProfile;
-use super::meeting::{MeetingAgentConfig, MeetingConfig, SummaryAgentConfig, SummaryAgentRule};
 use super::settings::{
     PeerAgentInfo, RegisteredChannelBinding, RoleBinding, resolve_agent_memory_settings,
 };
-use crate::config::{
-    AgentChannel, AgentChannelConfig, AgentChannels, AgentDef, Config, MeetingAgentEntry,
-    MeetingSummaryAgentDef,
-};
+use crate::config::{AgentChannel, AgentChannelConfig, AgentChannels, AgentDef, Config};
 use crate::services::agent_identity::{identity_from_parts, identity_label};
 use crate::services::provider::ProviderKind;
 use crate::utils::format::expand_tilde_string as expand_tilde;
@@ -418,77 +414,6 @@ pub(super) fn dm_default_agent_allows_outbound_source(
             .unwrap_or(false)
 }
 
-fn meeting_agent_from_entry(
-    config: &Config,
-    entry: &MeetingAgentEntry,
-) -> Option<MeetingAgentConfig> {
-    match entry {
-        MeetingAgentEntry::RoleId(role_id) => {
-            let agent = config.agents.iter().find(|agent| agent.id == *role_id);
-            Some(MeetingAgentConfig {
-                role_id: role_id.clone(),
-                display_name: agent
-                    .map(agent_display_name)
-                    .unwrap_or_else(|| role_id.clone()),
-                keywords: agent
-                    .map(|agent| agent.keywords.clone())
-                    .unwrap_or_default(),
-                prompt_file: default_prompt_path(role_id).unwrap_or_default(),
-                domain_summary: None,
-                strengths: Vec::new(),
-                task_types: Vec::new(),
-                anti_signals: Vec::new(),
-                provider_hint: agent.map(|agent| agent.provider.clone()),
-                provider: agent.and_then(|agent| ProviderKind::from_str(&agent.provider)),
-                model: None,
-                reasoning_effort: None,
-                workspace: default_workspace(role_id),
-                peer_agents_enabled: true,
-                memory: resolve_agent_memory_settings(agent),
-            })
-        }
-        MeetingAgentEntry::Detailed(def) => {
-            let agent = config.agents.iter().find(|agent| agent.id == def.role_id);
-            Some(MeetingAgentConfig {
-                role_id: def.role_id.clone(),
-                display_name: def
-                    .display_name
-                    .clone()
-                    .filter(|value| !value.trim().is_empty())
-                    .or_else(|| agent.map(agent_display_name))
-                    .unwrap_or_else(|| def.role_id.clone()),
-                keywords: if def.keywords.is_empty() {
-                    agent
-                        .map(|agent| agent.keywords.clone())
-                        .unwrap_or_default()
-                } else {
-                    def.keywords.clone()
-                },
-                prompt_file: def
-                    .prompt_file
-                    .as_deref()
-                    .map(expand_tilde)
-                    .or_else(|| default_prompt_path(&def.role_id))
-                    .unwrap_or_default(),
-                domain_summary: def.domain_summary.clone(),
-                strengths: def.strengths.clone(),
-                task_types: def.task_types.clone(),
-                anti_signals: def.anti_signals.clone(),
-                provider_hint: def
-                    .provider_hint
-                    .clone()
-                    .or_else(|| agent.map(|agent| agent.provider.clone())),
-                provider: agent.and_then(|agent| ProviderKind::from_str(&agent.provider)),
-                model: None,
-                reasoning_effort: None,
-                workspace: default_workspace(&def.role_id),
-                peer_agents_enabled: true,
-                memory: resolve_agent_memory_settings(agent),
-            })
-        }
-    }
-}
-
 pub(super) fn resolve_role_binding(
     channel_id: ChannelId,
     channel_name: Option<&str>,
@@ -767,67 +692,6 @@ pub(super) fn peer_agents_from_config(config: &Config) -> Vec<PeerAgentInfo> {
         .collect::<Vec<_>>();
     peers.sort_by(|left, right| left.role_id.cmp(&right.role_id));
     peers
-}
-
-pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
-    let config = load_agentdesk_config()?;
-    let meeting = config.meeting.as_ref()?;
-    let summary_agent = match meeting.summary_agent.as_ref()? {
-        MeetingSummaryAgentDef::Static(agent) => SummaryAgentConfig::Static(agent.clone()),
-        MeetingSummaryAgentDef::Dynamic { rules, default } => SummaryAgentConfig::Dynamic {
-            rules: rules
-                .iter()
-                .map(|rule| SummaryAgentRule {
-                    keywords: rule.keywords.clone(),
-                    agent: rule.agent.clone(),
-                })
-                .collect(),
-            default: default.clone(),
-        },
-    };
-
-    let explicit_empty_available_agents = config
-        .runtime_source
-        .as_ref()
-        .is_some_and(|source| source.meeting_available_agents_explicitly_empty);
-    let available_agents =
-        if meeting.available_agents.is_empty() && !explicit_empty_available_agents {
-            config
-                .agents
-                .iter()
-                .map(|agent| MeetingAgentConfig {
-                    role_id: agent.id.clone(),
-                    display_name: agent_display_name(agent),
-                    keywords: agent.keywords.clone(),
-                    prompt_file: default_prompt_path(&agent.id).unwrap_or_default(),
-                    domain_summary: None,
-                    strengths: Vec::new(),
-                    task_types: Vec::new(),
-                    anti_signals: Vec::new(),
-                    provider_hint: Some(agent.provider.clone()),
-                    provider: ProviderKind::from_str(&agent.provider),
-                    model: None,
-                    reasoning_effort: None,
-                    workspace: default_workspace(&agent.id),
-                    peer_agents_enabled: true,
-                    memory: resolve_agent_memory_settings(Some(agent)),
-                })
-                .collect()
-        } else {
-            meeting
-                .available_agents
-                .iter()
-                .filter_map(|entry| meeting_agent_from_entry(&config, entry))
-                .collect()
-        };
-
-    Some(MeetingConfig {
-        channel_name: meeting.channel_name.clone(),
-        max_rounds: meeting.max_rounds.unwrap_or(3),
-        max_participants: meeting.max_participants.unwrap_or(5).clamp(2, 5),
-        summary_agent,
-        available_agents,
-    })
 }
 
 pub(super) fn list_registered_channel_bindings() -> Vec<RegisteredChannelBinding> {

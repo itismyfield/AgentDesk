@@ -204,13 +204,6 @@ pub struct AnalyticsQuery {
 }
 
 #[derive(Debug, Default, Deserialize)]
-pub struct QualityEventsQuery {
-    pub agent_id: Option<String>,
-    pub days: Option<i64>,
-    pub limit: Option<usize>,
-}
-
-#[derive(Debug, Default, Deserialize)]
 pub struct InvariantsQuery {
     pub provider: Option<String>,
     #[serde(rename = "channelId")]
@@ -234,12 +227,6 @@ pub struct PolicyHooksQuery {
     #[serde(rename = "lastMinutes")]
     pub last_minutes: Option<i64>,
     pub limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AchievementsQuery {
-    #[serde(rename = "agentId")]
-    agent_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -312,41 +299,6 @@ pub async fn analytics(
     }
 }
 
-/// GET /api/quality/events
-pub async fn quality_events(
-    State(state): State<AppState>,
-    Query(params): Query<QualityEventsQuery>,
-) -> Response {
-    let filters = crate::services::observability::AgentQualityFilters {
-        agent_id: params.agent_id.clone(),
-        days: params.days.unwrap_or(7),
-        limit: params.limit.unwrap_or(200),
-    };
-    let cache_key = format!(
-        "quality_events|{}|{}|{}",
-        filters.agent_id.as_deref().unwrap_or(""),
-        filters.days,
-        filters.limit,
-    );
-    if let Some(entry) = read_analytics_cache(&cache_key) {
-        return build_analytics_response(&entry, "hit");
-    }
-
-    let Some(pool) = state.pg_pool_ref() else {
-        return analytics_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "postgres pool unavailable".to_string(),
-        );
-    };
-    match analytics_service::query_agent_quality_events_pg(pool, &filters).await {
-        Ok(body) => cache_miss_response(cache_key, body),
-        Err(error) => analytics_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("query agent quality events: {error}"),
-        ),
-    }
-}
-
 /// GET /api/analytics/observability
 pub async fn observability(Query(params): Query<ObservabilityQuery>) -> (StatusCode, Json<Value>) {
     json_response(
@@ -402,43 +354,6 @@ pub async fn invariants(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("query invariant analytics: {error}"),
         ),
-    }
-}
-
-/// GET /api/streaks
-pub async fn streaks(State(state): State<AppState>) -> Response {
-    let cache_key = "streaks".to_string();
-    if let Some(entry) = read_analytics_cache(&cache_key) {
-        return build_analytics_response(&entry, "hit");
-    }
-
-    let Some(pool) = state.pg_pool_ref() else {
-        return analytics_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "postgres pool unavailable".to_string(),
-        );
-    };
-    match analytics_service::streaks_pg(pool).await {
-        Ok(body) => cache_miss_response(cache_key, body),
-        Err(error) => analytics_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("query prepare failed: {error}"),
-        ),
-    }
-}
-
-/// GET /api/achievements
-pub async fn achievements(
-    State(state): State<AppState>,
-    Query(params): Query<AchievementsQuery>,
-) -> (StatusCode, Json<Value>) {
-    let Some(pool) = state.pg_pool_ref() else {
-        return analytics_json_error(StatusCode::SERVICE_UNAVAILABLE, "postgres pool unavailable");
-    };
-
-    match analytics_service::achievements_pg(pool, params.agent_id.as_deref()).await {
-        Ok(body) => json_response(StatusCode::OK, body),
-        Err(error) => analytics_json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("{error}")),
     }
 }
 

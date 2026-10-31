@@ -45,25 +45,6 @@ pub struct TranscriptQuery {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct AgentQualityQuery {
-    pub days: Option<i64>,
-    pub limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AgentQualityRankingQuery {
-    pub limit: Option<usize>,
-    /// Which metric to rank by. One of `turn_success_rate` (default) or
-    /// `review_pass_rate`.
-    pub metric: Option<String>,
-    /// Which rolling window to use. One of `7d` (default) or `30d`.
-    pub window: Option<String>,
-    /// Override the minimum sample_size threshold. Defaults to 5
-    /// (`QUALITY_SAMPLE_GUARD`).
-    pub min_sample_size: Option<i64>,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct StartAgentTurnBody {
     pub prompt: String,
     #[serde(default)]
@@ -137,50 +118,6 @@ fn pg_required_response() -> (StatusCode, Json<serde_json::Value>) {
         StatusCode::SERVICE_UNAVAILABLE,
         Json(json!({"error": "postgres pool unavailable"})),
     )
-}
-
-/// GET /api/agents/{id}/quality
-pub async fn agent_quality(
-    Path(id): Path<String>,
-    Query(query): Query<AgentQualityQuery>,
-    State(state): State<AppState>,
-) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
-    crate::services::observability::query_agent_quality_summary(
-        state.pg_pool_ref(),
-        &id,
-        query.days.unwrap_or(30),
-        query.limit.unwrap_or(60),
-    )
-    .await
-    .map(|summary| (StatusCode::OK, Json(json!(summary))))
-    .map_err(|error| {
-        AppError::internal(format!("query agent quality summary: {error}"))
-            .with_code(ErrorCode::Database)
-    })
-}
-
-/// GET /api/agents/quality/ranking
-pub async fn agents_quality_ranking(
-    Query(query): Query<AgentQualityRankingQuery>,
-    State(state): State<AppState>,
-) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
-    use crate::services::observability::{QualityRankingMetric, QualityRankingWindow};
-    let metric = QualityRankingMetric::parse(query.metric.as_deref());
-    let window = QualityRankingWindow::parse(query.window.as_deref());
-    let min_sample_size = query.min_sample_size.unwrap_or(5);
-    crate::services::observability::query_agent_quality_ranking_with(
-        state.pg_pool_ref(),
-        query.limit.unwrap_or(50),
-        metric,
-        window,
-        min_sample_size,
-    )
-    .await
-    .map(|ranking| (StatusCode::OK, Json(json!(ranking))))
-    .map_err(|error| {
-        AppError::internal(format!("query agent quality ranking: {error}"))
-            .with_code(ErrorCode::Database)
-    })
 }
 
 fn resolve_channel_identifier(value: &str) -> Option<u64> {

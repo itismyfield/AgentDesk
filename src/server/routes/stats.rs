@@ -18,41 +18,17 @@ pub struct MementoStatsQuery {
     pub hours: Option<usize>,
 }
 
-#[derive(Clone)]
 struct AgentStatsRow {
     id: String,
-    name: String,
-    name_ko: Option<String>,
-    avatar_emoji: Option<String>,
-    xp: i64,
     department_id: Option<String>,
     status: Option<String>,
-    sprite_number: Option<i64>,
-    tasks_done: i64,
-    tokens: i64,
 }
 
 async fn load_agent_stats_pg(pool: &PgPool) -> Result<Vec<AgentStatsRow>, String> {
     let sql = "
         SELECT a.id,
-               a.name,
-               a.name_ko,
-               a.avatar_emoji,
-               COALESCE(a.xp, 0)::BIGINT AS xp,
                a.department,
-               a.status,
-               a.sprite_number::BIGINT AS sprite_number,
-               (
-                   SELECT COUNT(DISTINCT kc.id)::BIGINT
-                     FROM kanban_cards kc
-                    WHERE kc.assigned_agent_id = a.id
-                      AND kc.status = 'done'
-               ) AS tasks_done,
-               (
-                   SELECT COALESCE(SUM(s.tokens), 0)::BIGINT
-                     FROM sessions s
-                    WHERE s.agent_id = a.id
-               ) AS total_tokens
+               a.status
           FROM agents a
          ORDER BY a.id";
 
@@ -65,32 +41,11 @@ async fn load_agent_stats_pg(pool: &PgPool) -> Result<Vec<AgentStatsRow>, String
         .into_iter()
         .map(|row| AgentStatsRow {
             id: row.try_get::<String, _>("id").unwrap_or_default(),
-            name: row.try_get::<String, _>("name").unwrap_or_default(),
-            name_ko: row.try_get::<Option<String>, _>("name_ko").ok().flatten(),
-            avatar_emoji: row
-                .try_get::<Option<String>, _>("avatar_emoji")
-                .ok()
-                .flatten(),
-            xp: row.try_get::<i64, _>("xp").unwrap_or(0),
             department_id: row
                 .try_get::<Option<String>, _>("department")
                 .ok()
                 .flatten(),
             status: row.try_get::<Option<String>, _>("status").ok().flatten(),
-            sprite_number: row
-                .try_get::<Option<i64>, _>("sprite_number")
-                .ok()
-                .flatten(),
-            tasks_done: row
-                .try_get::<Option<i64>, _>("tasks_done")
-                .ok()
-                .flatten()
-                .unwrap_or(0),
-            tokens: row
-                .try_get::<Option<i64>, _>("total_tokens")
-                .ok()
-                .flatten()
-                .unwrap_or(0),
         })
         .collect())
 }
@@ -147,14 +102,13 @@ async fn load_departments_pg(
     agent_rows: &[AgentStatsRow],
     working_session_agents: &HashSet<String>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let mut stats_by_dept: HashMap<String, (i64, i64, i64)> = HashMap::new();
+    let mut stats_by_dept: HashMap<String, (i64, i64)> = HashMap::new();
     for agent in agent_rows {
         let Some(dept_id) = agent.department_id.as_ref() else {
             continue;
         };
-        let entry = stats_by_dept.entry(dept_id.clone()).or_insert((0, 0, 0));
+        let entry = stats_by_dept.entry(dept_id.clone()).or_insert((0, 0));
         entry.0 += 1;
-        entry.2 += agent.xp;
         let effective_working = working_session_agents.contains(&agent.id)
             || agent.status.as_deref().is_some_and(is_active_status);
         if effective_working {
@@ -176,7 +130,7 @@ async fn load_departments_pg(
         .into_iter()
         .map(|row| {
             let dept_id = row.try_get::<String, _>("id").unwrap_or_default();
-            let stats = stats_by_dept.get(&dept_id).copied().unwrap_or((0, 0, 0));
+            let stats = stats_by_dept.get(&dept_id).copied().unwrap_or((0, 0));
             json!({
                 "id": dept_id,
                 "name": row.try_get::<Option<String>, _>("name").ok().flatten(),
@@ -185,7 +139,6 @@ async fn load_departments_pg(
                 "color": row.try_get::<Option<String>, _>("color").ok().flatten(),
                 "total_agents": stats.0,
                 "working_agents": stats.1,
-                "sum_xp": stats.2,
             })
         })
         .collect())
@@ -381,25 +334,6 @@ async fn get_stats_pg(pool: &PgPool) -> Result<serde_json::Value, String> {
         }
     }
 
-    let mut top_agents_src = agent_rows.clone();
-    top_agents_src.sort_by(|a, b| b.xp.cmp(&a.xp).then_with(|| a.id.cmp(&b.id)));
-    let top_agents = top_agents_src
-        .into_iter()
-        .take(10)
-        .map(|agent| {
-            json!({
-                "id": agent.id,
-                "name": agent.name,
-                "name_ko": agent.name_ko,
-                "avatar_emoji": agent.avatar_emoji,
-                "sprite_number": agent.sprite_number,
-                "stats_xp": agent.xp,
-                "stats_tasks_done": agent.tasks_done,
-                "stats_tokens": agent.tokens,
-            })
-        })
-        .collect::<Vec<_>>();
-
     let departments = load_departments_pg(pool, &agent_rows, &working_session_agents).await?;
     let kanban = load_kanban_stats_pg(pool).await?;
     let github_closed_today = load_github_closed_today_pg(pool).await?;
@@ -412,7 +346,6 @@ async fn get_stats_pg(pool: &PgPool) -> Result<serde_json::Value, String> {
             "break": on_break,
             "offline": offline,
         },
-        "top_agents": top_agents,
         "departments": departments,
         "dispatched_count": dispatched_count,
         "kanban": kanban,

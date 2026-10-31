@@ -329,12 +329,6 @@ pub(super) async fn submit_review_verdict(
     request_body(Method::POST, "/api/reviews/verdict", &body).await
 }
 
-pub(super) async fn upsert_meeting(
-    body: crate::services::discord::meeting_artifact_store::UpsertMeetingBody,
-) -> Result<Value, String> {
-    request_body(Method::POST, "/api/round-table-meetings", &body).await
-}
-
 pub(crate) fn set_kv_value(key: &str, value: &str) -> Result<(), String> {
     let ctx = load_context()?;
     let Some(pool) = ctx.pg_pool.as_ref() else {

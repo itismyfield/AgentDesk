@@ -815,6 +815,11 @@
       "path": "migrations/postgres/0167_input_fallback_plan.sql",
       "sha256": "44777c95d6244770298d7ca9d7efbef721ebe7b4b389e2069b39a31ed8d026e6",
       "version": 167
+    },
+    {
+      "path": "migrations/postgres/0168_drop_meetings_quality_rollups_xp.sql",
+      "sha256": "91f50ded9d7b8e382eb34d2c4abffe660957f6dd7f4b533ae5e6ef6c80fc1bee",
+      "version": 168
     }
   ],
   "version": 1

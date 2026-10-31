@@ -261,12 +261,8 @@ A React-based dashboard served from the same binary:
 
 - **Kanban Board** — Drag-and-drop card management with column filters
 - **Agent Manager** — Agent configuration, skills, timeline, sessions, kanban tab
-- **Analytics** — Streaks, achievements, activity heatmaps, audit logs
-- **Meeting Minutes** — Round-table meeting transcripts with issue extraction
+- **Analytics** — Activity heatmaps, audit logs
 - **Settings** — Runtime configuration, onboarding re-run, policy management
-
-### Round-Table Meetings
-Coordinate multi-agent discussions with structured rounds, automatic transcript recording, and post-meeting issue extraction to GitHub.
 
 ### Turn Orchestration
 Agent turn lifecycle is managed by a dedicated orchestration layer (`src/services/turn_orchestrator.rs`, extracted from the Discord adapter):
@@ -699,7 +695,6 @@ AgentDesk exposes 270 REST API endpoints. Key groups:
 | `/api/dispatches` | CRUD + cancel | Task assignment tracking |
 | `/api/queue` | Generate, dispatch-next, reorder, status, slots | Batch-phased work queuing |
 | `/api/sessions` | List, update, cleanup | Agent runtime sessions |
-| `/api/round-table-meetings` | Start, transcript, issues | Multi-agent meetings |
 | `/api/departments` | CRUD + ordering | Department management |
 | `/api/pipeline` | Stages, config, graphs, card history | Pipeline configuration |
 | `/api/settings` | Company + config/runtime subroutes | Platform configuration surfaces |

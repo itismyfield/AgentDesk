@@ -190,10 +190,6 @@ pub(super) fn shared_agent_knowledge_path() -> Option<PathBuf> {
     agentdesk_root().map(|root| crate::runtime_layout::shared_agent_knowledge_path(&root))
 }
 
-pub(super) fn long_term_memory_root() -> Option<PathBuf> {
-    agentdesk_root().map(|root| crate::runtime_layout::long_term_memory_root(&root))
-}
-
 /// Path to the generation counter file.
 pub fn generation_path() -> Option<PathBuf> {
     agentdesk_root().map(|root| root.join("runtime").join("generation"))

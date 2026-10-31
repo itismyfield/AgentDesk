@@ -567,7 +567,6 @@ mod retirement_tests {
         assert!(list_registered_channel_bindings().is_empty());
         assert!(!super::super::content::is_known_agent("legacy-agent"));
         assert!(super::super::content::load_shared_prompt_for_profile("claude").is_none());
-        assert!(crate::services::discord::meeting_orchestrator::load_meeting_config().is_none());
 
         let org = crate::runtime_layout::org_schema_path(root.path());
         std::fs::write(
@@ -590,12 +589,6 @@ mod retirement_tests {
             resolve_workspace(channel, None).as_deref(),
             Some("/org-workspace")
         );
-        assert_eq!(
-            crate::services::discord::meeting_orchestrator::load_meeting_config()
-                .unwrap()
-                .channel_name,
-            "org-meeting"
-        );
 
         let mut config = crate::config::Config::default();
         config.agents = serde_json::from_value(serde_json::json!([{
@@ -604,12 +597,6 @@ mod retirement_tests {
             }
         }]))
         .unwrap();
-        config.meeting = Some(
-            serde_json::from_value(serde_json::json!({
-                "channel_name": "yaml-meeting", "summary_agent": "yaml-agent"
-            }))
-            .unwrap(),
-        );
         crate::config_live_reload::install(config);
         assert_eq!(
             resolve_role_binding(channel, None).unwrap().role_id,
@@ -623,12 +610,6 @@ mod retirement_tests {
         assert_eq!(
             list_registered_channel_bindings()[0].owner_provider,
             ProviderKind::Codex
-        );
-        assert_eq!(
-            crate::services::discord::meeting_orchestrator::load_meeting_config()
-                .unwrap()
-                .channel_name,
-            "yaml-meeting"
         );
     }
 }

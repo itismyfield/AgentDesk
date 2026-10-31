@@ -1262,7 +1262,6 @@ mod tests {
         Arc::new(super::super::SharedData {
             core: tokio::sync::Mutex::new(super::super::CoreState {
                 sessions: std::collections::HashMap::new(),
-                active_meetings: std::collections::HashMap::new(),
             }),
             mailboxes: crate::services::turn_orchestrator::ChannelMailboxRegistry::default(),
             session_transition_locks: dashmap::DashMap::new(),

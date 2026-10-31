@@ -38,10 +38,7 @@ pub(crate) fn is_non_turn_operational_alert(source: &str, reason_code: Option<&s
         || (source == "lifecycle_notifier" && reason_code == Some("stale_replay_withheld"))
         || matches!(
             source,
-            "stall_watchdog"
-                | "quality_regression_alerter"
-                | "queue_overflow_notice"
-                | "tui_o_alarm"
+            "stall_watchdog" | "queue_overflow_notice" | "tui_o_alarm"
         )
         || (source == "auto-queue-monitor"
             && reason_code.is_some_and(|reason| reason.starts_with("auto_queue.monitor_")))

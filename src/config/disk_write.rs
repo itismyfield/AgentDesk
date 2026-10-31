@@ -127,7 +127,6 @@ fn differing_section(expected: &Config, actual: &Config) -> &'static str {
         mcp_servers,
         review_mcp_allowlist,
         agents,
-        meeting,
         github,
         policies,
         data,

@@ -258,11 +258,6 @@
       "count": 2
     },
     {
-      "path": "src/services/discord/meeting_orchestrator/rounds.rs",
-      "lint": "too_many_arguments",
-      "count": 1
-    },
-    {
       "path": "src/services/discord/mod.rs",
       "lint": "too_many_arguments",
       "count": 1
@@ -791,11 +786,6 @@
       "path": "src/services/provider/output_reader.rs",
       "lint": "too_many_arguments",
       "count": 1
-    },
-    {
-      "path": "src/services/provider_exec.rs",
-      "lint": "too_many_arguments",
-      "count": 2
     },
     {
       "path": "src/services/qwen.rs",

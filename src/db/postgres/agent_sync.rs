@@ -234,7 +234,6 @@ async fn copy_runtime_fields_from_legacy_pg(
     sqlx::query(
         "UPDATE agents
          SET status = legacy.status,
-             xp = legacy.xp,
              skills = legacy.skills,
              created_at = COALESCE(legacy.created_at, agents.created_at),
              sprite_number = COALESCE(legacy.sprite_number, agents.sprite_number),
@@ -279,7 +278,6 @@ async fn move_legacy_agent_references_pg(
         "UPDATE task_dispatches SET from_agent_id = $1 WHERE from_agent_id = $2",
         "UPDATE task_dispatches SET to_agent_id = $1 WHERE to_agent_id = $2",
         "UPDATE sessions SET agent_id = $1 WHERE agent_id = $2",
-        "UPDATE meeting_transcripts SET speaker_agent_id = $1 WHERE speaker_agent_id = $2",
         "UPDATE skill_usage SET agent_id = $1 WHERE agent_id = $2",
         "UPDATE turns SET agent_id = $1 WHERE agent_id = $2",
         "UPDATE dispatch_outbox SET agent_id = $1 WHERE agent_id = $2",

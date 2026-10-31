@@ -33,7 +33,6 @@ pub(crate) mod kakao_calendar;
 pub mod kanban;
 pub mod kanban_repos;
 mod maintenance;
-pub mod meetings;
 pub mod memory_api;
 pub mod message_outbox;
 pub mod messages;

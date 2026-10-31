@@ -54,15 +54,6 @@ pub enum IssueCreationMode {
     GithubOnly,
 }
 
-impl IssueCreationMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Standard => "standard",
-            Self::GithubOnly => "github_only",
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitHubIssueCreateRequest {
     pub origin: String,

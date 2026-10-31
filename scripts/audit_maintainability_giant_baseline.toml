@@ -487,7 +487,6 @@
 # and execute_intake_turn_core entry into `intake_turn/worker_entry.rs`; root source
 # assertions follow the already-extracted busy_retry helper. 2706 -> 2622.
 "src/services/discord/router/message_handler/intake_turn.rs" = 2622
-"src/services/discord/meeting_orchestrator.rs" = 3227
 # #3293: +3 for the `registry_purge` child-module declaration (peek +
 # operator-gated idle-entry purge live outside the frozen root); lowered
 # 3090 -> 3089 to lock the net position.
@@ -797,7 +796,6 @@
 "src/server/routes/escalation.rs" = 1361
 "src/server/routes/health_api.rs" = 1738
 "src/server/routes/kanban.rs" = 2420
-"src/server/routes/meetings.rs" = 1245
 "src/server/routes/resume.rs" = 1227
 "src/server/routes/v1.rs" = 1737
 "src/services/auto_queue.rs" = 1545

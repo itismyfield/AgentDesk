@@ -95,7 +95,6 @@ pub(super) fn run_bot_build_shared_data(
     Arc::new(SharedData {
         core: Mutex::new(CoreState {
             sessions: HashMap::new(),
-            active_meetings: HashMap::new(),
         }),
         mailboxes: ChannelMailboxRegistry::default(),
         session_transition_locks: dashmap::DashMap::new(),

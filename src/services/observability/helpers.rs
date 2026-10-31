@@ -5,9 +5,7 @@
 
 use super::{
     AGENT_QUALITY_EVENT_TYPES, AnalyticsCounterSnapshot, AnalyticsFilters, CounterValues,
-    DEFAULT_COUNTER_LIMIT, DEFAULT_QUALITY_DAILY_LIMIT, DEFAULT_QUALITY_DAYS,
-    DEFAULT_QUALITY_RANKING_LIMIT, MAX_COUNTER_LIMIT, MAX_QUALITY_DAILY_LIMIT, MAX_QUALITY_DAYS,
-    MAX_QUALITY_RANKING_LIMIT,
+    DEFAULT_COUNTER_LIMIT, MAX_COUNTER_LIMIT,
 };
 
 pub(super) fn counter_snapshot_from_values(
@@ -94,27 +92,6 @@ pub(super) fn normalized_counter_limit(limit: usize) -> usize {
     match limit {
         0 => DEFAULT_COUNTER_LIMIT,
         value => value.min(MAX_COUNTER_LIMIT),
-    }
-}
-
-pub(super) fn normalized_quality_daily_limit(limit: usize) -> usize {
-    match limit {
-        0 => DEFAULT_QUALITY_DAILY_LIMIT,
-        value => value.min(MAX_QUALITY_DAILY_LIMIT),
-    }
-}
-
-pub(super) fn normalized_quality_ranking_limit(limit: usize) -> usize {
-    match limit {
-        0 => DEFAULT_QUALITY_RANKING_LIMIT,
-        value => value.min(MAX_QUALITY_RANKING_LIMIT),
-    }
-}
-
-pub(super) fn normalized_quality_days(days: i64) -> i64 {
-    match days {
-        value if value <= 0 => DEFAULT_QUALITY_DAYS,
-        value => value.min(MAX_QUALITY_DAYS),
     }
 }
 

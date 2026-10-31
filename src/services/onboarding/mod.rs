@@ -1940,8 +1940,8 @@ async fn persist_onboarding_pg(
 
     for mapping in resolved_channels {
         sqlx::query(
-            "INSERT INTO agents (id, name, provider, discord_channel_id, description, system_prompt, status, xp)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 0)
+            "INSERT INTO agents (id, name, provider, discord_channel_id, description, system_prompt, status)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT (id) DO UPDATE SET
                name = COALESCE(EXCLUDED.name, agents.name),
                provider = COALESCE(EXCLUDED.provider, agents.provider),

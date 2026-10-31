@@ -354,13 +354,6 @@ agents:
     keywords: ["e2e", "orchestrator", "전체"]
     department: devsecops
 
-meeting:
-  channel_name: "round-table"
-  max_rounds: 3
-  summary_agent: "ch-td"
-  available_agents:
-    - "ch-td"
-
 github:
   repos:
     - "owner/repo"

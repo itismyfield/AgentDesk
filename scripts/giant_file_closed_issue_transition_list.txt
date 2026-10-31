@@ -57,7 +57,6 @@ src/server/routes/agents_setup.rs
 src/server/routes/escalation.rs
 src/server/routes/health_api.rs
 src/server/routes/kanban.rs
-src/server/routes/meetings.rs
 src/server/routes/resume.rs
 src/services/claude.rs
 src/services/claude_tui/input.rs
@@ -65,7 +64,6 @@ src/services/codex.rs
 src/services/codex_tmux_wrapper.rs
 src/services/codex_tui/input.rs
 src/services/gemini.rs
-src/services/memory/memento.rs
 src/services/onboarding/mod.rs
 src/services/opencode.rs
 src/services/platform/binary_resolver.rs

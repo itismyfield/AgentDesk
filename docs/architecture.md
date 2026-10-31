@@ -69,13 +69,13 @@ invariant 위반은 별도의 hard gate다.
 
 ### 1. Discord Runtime (`src/services/discord/`)
 
-Serenity/Poise 기반 Discord gateway, message router, turn bridge, tmux watcher, recovery, meeting orchestration이 이 트리에 모여 있다. 세부 파일 목록과 giant-file 현황은 generated module inventory를 참고한다.
+Serenity/Poise 기반 Discord gateway, message router, turn bridge, tmux watcher, recovery가 이 트리에 모여 있다. 세부 파일 목록과 giant-file 현황은 generated module inventory를 참고한다.
 
 핵심 역할:
 - Discord 이벤트 수신과 명령 처리
 - provider turn lifecycle과 tmux/process backend handoff
 - restart recovery, inflight restore, watcher cleanup
-- round-table meeting orchestration과 Discord side-effect delivery
+- Discord side-effect delivery
 
 Turn bridge decomposition anchors:
 - `turn_bridge/completion_postlude.rs` — status-panel completion, final ADK

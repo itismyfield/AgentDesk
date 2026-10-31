@@ -27,8 +27,8 @@ const INJECTED_REACTION: char = '⏳';
 const UNCONFIRMED_REACTION: char = '❓';
 const UNCONFIRMED_NOTICE: &str = "❓ 터미널 입력을 확인하지 못했습니다. 중복이면 무시하세요.";
 const QUEUE_UNKNOWN_NOTICE: &str = "⚠️ 메시지 큐 저장 중 오류가 감지되어 접수 표시를 생략했어.";
-/// Prefixes intake handles as dispatches or meetings, never as typed input.
-const NOT_TYPED: [&str; 2] = ["DISPATCH:", "/meeting "];
+/// Prefixes intake handles as dispatches, never as typed input.
+const NOT_TYPED: [&str; 1] = ["DISPATCH:"];
 
 #[derive(Debug, PartialEq, Eq)]
 enum Gate {

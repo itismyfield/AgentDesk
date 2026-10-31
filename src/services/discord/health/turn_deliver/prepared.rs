@@ -3,7 +3,7 @@
 use super::{
     DeliveryPorts, HealthRegistry, HumanInputDelivery, HumanInputError, HumanInputRequest,
     InjectMode, LivePorts, author_allowed_for_human_input, deliver_with_ports, inject,
-    resolve_direct_meeting_shared,
+    resolve_direct_channel_shared,
 };
 
 impl HealthRegistry {
@@ -15,7 +15,7 @@ impl HealthRegistry {
         impl std::future::Future<Output = Result<HumanInputDelivery, HumanInputError>> + Send + 'static,
         HumanInputError,
     > {
-        let shared = resolve_direct_meeting_shared(self, request.channel_id, &request.provider)
+        let shared = resolve_direct_channel_shared(self, request.channel_id, &request.provider)
             .await
             .map_err(HumanInputError::RuntimeUnavailable)?;
         let allowed = {
