@@ -543,6 +543,7 @@ async fn periodic_queue_review_recovery_does_not_reopen_issued_reviews_pg() {
     for (card, kind, status, result) in [
         ("issued-recent", "review", "completed", Some("{}")),
         ("issued-failed", "review", "failed", None),
+        ("issued-null-time", "review", "failed", None),
         (
             "issued-pass-pr",
             "review",
@@ -569,6 +570,7 @@ async fn periodic_queue_review_recovery_does_not_reopen_issued_reviews_pg() {
         sqlx::query("INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, result, created_at, updated_at, completed_at)
             SELECT $1 || '-review', $1, 'agent-1', $2, $3, $4,
                 CASE WHEN $1 = 'issued-equal' THEN completed_at
+                     WHEN $1 = 'issued-null-time' THEN NULL
                      WHEN $1 = 'fallback-work' THEN NOW() - INTERVAL '20 minutes'
                      ELSE NOW() - INTERVAL '5 minutes' END,
                 NOW() - INTERVAL '5 minutes',
@@ -610,6 +612,7 @@ async fn periodic_queue_review_recovery_does_not_reopen_issued_reviews_pg() {
             ("issued-decision".to_string(), 0),
             ("issued-equal".to_string(), 1),
             ("issued-failed".to_string(), 1),
+            ("issued-null-time".to_string(), 1),
             ("issued-pass-pr".to_string(), 1),
             ("issued-recent".to_string(), 1),
         ],

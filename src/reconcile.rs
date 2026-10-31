@@ -1475,18 +1475,33 @@ async fn missing_review_dispatch_candidates_pg(
                      AND COALESCE(s.status, '') NOT IN ('disconnected', 'aborted', 'completed', 'failed', 'cancelled')
                  )
            ))
+           AND (NOT $1 OR NOT EXISTS (
+               SELECT 1 FROM task_dispatches rv
+               WHERE rv.kanban_card_id = c.id
+                 AND rv.dispatch_type IN ('review', 'review-decision')
+                 AND COALESCE(rv.created_at, 'infinity'::timestamptz) >= COALESCE((
+                     SELECT MAX(COALESCE(w.completed_at, w.updated_at))
+                     FROM task_dispatches w
+                     WHERE w.kanban_card_id = c.id
+                       AND w.dispatch_type IN ('implementation', 'rework')
+                       AND w.status = 'completed'
+                 ), '-infinity'::timestamptz)
+           ))
            AND NOT EXISTS (
                SELECT 1 FROM task_dispatches td
                WHERE td.kanban_card_id = c.id
                  AND td.dispatch_type IN ('review', 'review-decision')
                  AND td.status IN ('pending', 'dispatched')
-           )";
+           )
+         ORDER BY CASE WHEN $1 THEN c.id END
+         LIMIT CASE WHEN $1 THEN $3::BIGINT END";
     #[cfg(test)]
     let sql =
         sqlx::AssertSqlSafe(dispatch_delivery_reconcile_tests::mutate_queue_recovery_sql(sql));
     sqlx::query_as(sql)
         .bind(only_dispatched_queue)
         .bind(AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_GRACE.as_secs() as i64)
+        .bind(COMPLETED_QUEUE_REVIEW_DRIFT_BATCH_LIMIT)
         .fetch_all(pool)
         .await
         .map_err(anyhow::Error::from)
@@ -1685,6 +1700,16 @@ mod dispatch_delivery_reconcile_tests {
     pub(super) fn mutate_queue_recovery_sql(sql: &str) -> String {
         let mut query = sql.to_string();
         for (mode, from, to) in [
+            (
+                "issued_review",
+                "AND COALESCE(rv.created_at, 'infinity'::timestamptz) >=",
+                "AND FALSE AND COALESCE(rv.created_at, 'infinity'::timestamptz) >=",
+            ),
+            (
+                "batch_unbounded",
+                "LIMIT CASE WHEN $1 THEN $3::BIGINT END",
+                "LIMIT CASE WHEN $1 THEN NULLIF($3::BIGINT, $3::BIGINT) END",
+            ),
             (
                 "manual_wait",
                 "AND (NOT $1 OR COALESCE(c.review_status, 'reviewing') = 'reviewing')",
