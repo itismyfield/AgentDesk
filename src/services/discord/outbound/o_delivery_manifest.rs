@@ -215,7 +215,8 @@ impl BodyComposer {
             return Some(wrote);
         }
         let line = std::str::from_utf8(line).ok()?.trim_end_matches('\n');
-        crate::services::session_backend::process_stream_line(
+        // Bridge reader `read_claude_tui_output_file_until_result_with_harvest` uses this parser.
+        crate::services::session_backend::process_claude_transcript_line(
             line,
             &self.messages.0,
             &mut self.stream,

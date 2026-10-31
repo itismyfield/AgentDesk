@@ -1177,6 +1177,11 @@ enum HeadlessOutbox {
     GenerationChanged,
     OtherFile,
     StaleSeedAfterDiscard,
+    ThinkingThenText,
+    ThinkingThenTextUnsent,
+    MultiTextBlock,
+    ToolThenTextOneRecord,
+    BlankThinking,
 }
 
 /// The watcher's terminal order: preflight may strip the restored seed before the planner reads it.
@@ -1253,15 +1258,45 @@ async fn headless_restart_frame(pool: &sqlx::PgPool, channel: u64, outbox: Headl
             serde_json::json!({"type":"user","uuid":id,"sessionId":"native-session","message":{"content":id}}),
         )
     };
-    let assistant = |id: &str, block: serde_json::Value, age: Option<i64>| {
+    let blocks = |id: &str, blocks: serde_json::Value, age: Option<i64>| {
         let mut record = serde_json::json!({"type":"assistant","uuid":id,"apiBlockIndex":0,
-            "message":{"id":id,"role":"assistant","content":[block]}});
+            "message":{"id":id,"role":"assistant","content":blocks}});
         if let Some(age) = age {
             record["timestamp"] = at(age).into();
         }
         line(record)
     };
+    let assistant = |id: &str, block: serde_json::Value, age: Option<i64>| {
+        blocks(id, serde_json::json!([block]), age)
+    };
     let text = |text: &str| serde_json::json!({"type":"text","text":text});
+    let thinking =
+        |text: &str| serde_json::json!({"type":"thinking","thinking":text,"signature":"s"});
+    let tool = serde_json::json!({"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"true"}});
+    // The bridge's body: its reader's parser over the turn's records, then its Text/ToolUse arms.
+    let bridge_body = |records: &str| {
+        use crate::services::agent_protocol::StreamMessage;
+        let (sender, messages) = std::sync::mpsc::channel();
+        let mut state = crate::services::session_backend::StreamLineState::new();
+        let mut body = String::new();
+        for record in records.lines() {
+            crate::services::session_backend::process_claude_transcript_line(
+                record, &sender, &mut state,
+            );
+            for message in messages.try_iter() {
+                match message {
+                    StreamMessage::Text { content } if !content.is_empty() => {
+                        chunk_compose::compose_streamed_text_chunk(&mut body, &content)
+                    }
+                    StreamMessage::ToolUse { .. } => {
+                        chunk_compose::compose_tool_boundary_separator(&mut body, true)
+                    }
+                    _ => {}
+                }
+            }
+        }
+        body
+    };
     let ended = |age: i64| {
         line(serde_json::json!({"type":"system","subtype":"stop_hook_summary","timestamp":at(age)}))
             + &line(
@@ -1284,17 +1319,45 @@ async fn headless_restart_frame(pool: &sqlx::PgPool, channel: u64, outbox: Headl
             } else {
                 "\ndone"
             };
-            let tool = serde_json::json!({"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"true"}});
             let result = serde_json::json!({"type":"user","uuid":"result","timestamp":at(1),
                 "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"ok"}]}});
-            let mut seed_body = String::new();
-            chunk_compose::compose_streamed_text_chunk(&mut seed_body, "checking");
-            chunk_compose::compose_tool_boundary_separator(&mut seed_body, true);
-            chunk_compose::compose_streamed_text_chunk(&mut seed_body, after);
             let records = assistant("checking", text("checking"), Some(2))
-                + &assistant("tool", tool, Some(2))
+                + &assistant("tool", tool.clone(), Some(2))
                 + &line(result)
                 + &assistant("done", text(after), Some(1));
+            let seed_body = bridge_body(&records);
+            (records, seed_body)
+        }
+        O::ThinkingThenText | O::ThinkingThenTextUnsent => {
+            let records = blocks(
+                "answer",
+                serde_json::json!([thinking("T_BODY"), text("X_BODY")]),
+                Some(1),
+            );
+            let seed_body = bridge_body(&records);
+            (records, seed_body)
+        }
+        O::MultiTextBlock => {
+            let records = blocks(
+                "answer",
+                serde_json::json!([text("X_BODY"), text("Y_BODY")]),
+                Some(1),
+            );
+            let seed_body = bridge_body(&records);
+            (records, seed_body)
+        }
+        O::ToolThenTextOneRecord => {
+            let records = blocks("answer", serde_json::json!([tool, text("X_BODY")]), Some(1));
+            let seed_body = bridge_body(&records);
+            (records, seed_body)
+        }
+        O::BlankThinking => {
+            let records = blocks(
+                "answer",
+                serde_json::json!([thinking(""), text("X_BODY")]),
+                Some(1),
+            );
+            let seed_body = bridge_body(&records);
             (records, seed_body)
         }
         O::FrameBody => (String::new(), String::new()),
@@ -1305,7 +1368,10 @@ async fn headless_restart_frame(pool: &sqlx::PgPool, channel: u64, outbox: Headl
                 body.as_str()
             };
             let age = (outbox != O::UntimedBody).then_some(answer_age);
-            (assistant("answer", text(recorded), age), body.clone())
+            let records = assistant("answer", text(recorded), age);
+            // A seed that claims another body than its range carries the bridge's real body.
+            let seed_body = bridge_body(&assistant("answer", text(&body), age));
+            (records, seed_body)
         }
     };
     let turn = user("E1") + &answer + &ended(answer_age);
@@ -1387,14 +1453,17 @@ async fn headless_restart_frame(pool: &sqlx::PgPool, channel: u64, outbox: Headl
     let mut rows = vec![(previous_body.as_str(), "headless_turn", "sent", 119)];
     rows.extend(match outbox {
         O::SessionBanner => Some((banner.as_str(), "headless_turn", "sent", 0)),
-        O::Missing => None,
+        O::Missing | O::ThinkingThenTextUnsent => None,
         O::EarlierTurn => Some((body.as_str(), "headless_turn", "sent", 3600)),
         O::Pending => Some((body.as_str(), "headless_turn", "pending", 0)),
         O::OtherBody => Some(("[E2E:E0:OK]", "headless_turn", "sent", 0)),
         O::OtherSource => Some((body.as_str(), "system", "sent", 0)),
-        O::ToolTurn | O::ToolTurnLeadingNewline => {
-            Some((seed_body.as_str(), "headless_turn", "sent", 0))
-        }
+        O::ToolTurn
+        | O::ToolTurnLeadingNewline
+        | O::ThinkingThenText
+        | O::MultiTextBlock
+        | O::ToolThenTextOneRecord
+        | O::BlankThinking => Some((seed_body.as_str(), "headless_turn", "sent", 0)),
         O::StaleSeedAfterDiscard => Some((body.as_str(), "headless_turn", "sent", 59)),
         _ => Some((body.as_str(), "headless_turn", "sent", 0)),
     });
@@ -1442,7 +1511,11 @@ async fn headless_restart_frame(pool: &sqlx::PgPool, channel: u64, outbox: Headl
         | O::ToolTurn
         | O::ToolTurnLeadingNewline
         | O::FrameBody
-        | O::LateBodyDelivered => Vec::new(),
+        | O::LateBodyDelivered
+        | O::ThinkingThenText
+        | O::MultiTextBlock
+        | O::ToolThenTextOneRecord
+        | O::BlankThinking => Vec::new(),
         _ => vec![full_response.clone()],
     };
     let expected = if late && expected.len() == 1 {
@@ -1503,6 +1576,11 @@ async fn i7441r3_headless_bridge_seed_body_before_late_frame_needs_its_sent_outb
         O::GenerationChanged,
         O::OtherFile,
         O::StaleSeedAfterDiscard,
+        O::ThinkingThenText,
+        O::ThinkingThenTextUnsent,
+        O::MultiTextBlock,
+        O::ToolThenTextOneRecord,
+        O::BlankThinking,
     ]
     .into_iter()
     .enumerate()
