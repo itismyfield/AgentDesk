@@ -1,7 +1,7 @@
 use super::*;
 
 // Restore the turn seed before initializing the collector's response and render state.
-pub(super) fn restore_stream_seed(
+pub(in crate::services::discord::tmux::tmux_watcher) fn restore_stream_seed(
     pending_terminal_rewind_seed: &mut Option<RestoredWatcherTurn>,
     restored_turn: &mut Option<RestoredWatcherTurn>,
     watcher_turn_identity: &Option<crate::services::discord::inflight::InflightTurnIdentity>,
@@ -14,8 +14,7 @@ pub(super) fn restore_stream_seed(
         take_pending_or_restored_rewind_seed(pending_terminal_rewind_seed, restored_turn);
     let seed_source = restored_turn_seed
         .as_ref()
-        .and_then(|seed| seed.delivery_source.as_ref())
-        .map(|source| (source.range, source.generation_mtime_ns));
+        .and_then(|seed| seed.body_source);
     let prompt_anchor_for_seed_discard =
         crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
             watcher_provider.as_str(),

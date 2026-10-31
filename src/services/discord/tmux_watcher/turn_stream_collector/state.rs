@@ -115,11 +115,11 @@ pub(in crate::services::discord::tmux::tmux_watcher) struct ActiveReadState {
     pub(in crate::services::discord::tmux::tmux_watcher) fresh_ready_for_input_idle: bool,
 }
 
-/// A body restored from an inflight row, with the transcript range and generation that wrote it.
+/// A body restored from an inflight row, with the producer read that wrote it when known.
 #[derive(Clone, Debug, Default)]
 pub(in crate::services::discord::tmux::tmux_watcher) struct RestoredResponseSeed {
     pub(in crate::services::discord::tmux::tmux_watcher) body: String,
-    pub(in crate::services::discord::tmux::tmux_watcher) source: Option<((u64, u64), i64)>,
+    pub(in crate::services::discord::tmux::tmux_watcher) source: Option<SeedBodySource>,
 }
 
 #[derive(Clone)]

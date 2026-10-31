@@ -494,7 +494,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             source_authority,
             split_trailing_turn_follows,
             state,
-            restored_response_seed,
+            mut restored_response_seed,
             mut full_response,
             tool_state,
             mut placeholder_msg_id,
@@ -710,7 +710,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 terminal_kind,
                 fresh_assistant_text_seen,
                 tool_state: &tool_state,
-                restored_response_seed: &restored_response_seed,
                 turn_is_external_input_for_session,
                 task_notification_kind,
                 data_start_offset,
@@ -725,6 +724,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 full_response: &mut full_response,
                 response_sent_offset: &mut response_sent_offset,
                 last_edit_text: &mut last_edit_text,
+                restored_response_seed: &mut restored_response_seed,
             };
             #[cfg(test)]
             crate::services::discord::inflight::o_seed_observation::record_event(

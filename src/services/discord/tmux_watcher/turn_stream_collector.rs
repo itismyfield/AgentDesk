@@ -22,7 +22,7 @@ mod o_test;
 pub(super) use entry::collect_turn_stream_until_terminal;
 
 #[path = "turn_stream_collector/stream_seed.rs"]
-mod stream_seed;
+pub(super) mod stream_seed;
 
 #[path = "turn_stream_collector/stream_chunk.rs"]
 mod stream_chunk;

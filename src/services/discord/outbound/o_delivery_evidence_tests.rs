@@ -1618,3 +1618,59 @@ async fn i7441r_oversized_or_malformed_source_records_fail_closed() {
         );
     }
 }
+
+/// A body re-read proves only the bytes and file it began with: a truncate or a path swap mid-read
+/// leaves no proof even when the records read so far composed the body.
+#[test]
+fn body_reread_rejects_a_file_changed_mid_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("turn.jsonl");
+    let written = chrono::Utc::now().to_rfc3339();
+    let answer = json!({"type":"assistant","uuid":"a","apiBlockIndex":0,"timestamp":written,
+        "message":{"id":"a","role":"assistant","content":[{"type":"text","text":"[E2E:E1:OK]"}]}});
+    let ended = json!({"type":"system","subtype":"turn_duration","timestamp":written});
+    let records = format!("{answer}\n{ended}\n");
+    let first = answer.to_string().len() as u64 + 1;
+    for change in ["none", "truncate", "replace"] {
+        for producer in [
+            manifest::BodyProducer::Watcher,
+            manifest::BodyProducer::Bridge,
+        ] {
+            std::fs::write(&path, &records).unwrap();
+            let file = crate::services::tui_o::shadow::capture::file_identity(
+                &std::fs::metadata(&path).unwrap(),
+            );
+            let (hook_path, replacement) = (path.clone(), records.clone());
+            manifest::AFTER_BODY_RECORD.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || match change {
+                    "truncate" => std::fs::File::options()
+                        .write(true)
+                        .open(&hook_path)
+                        .unwrap()
+                        .set_len(first)
+                        .unwrap(),
+                    "replace" => {
+                        let other = hook_path.with_extension("swap");
+                        std::fs::write(&other, &replacement).unwrap();
+                        std::fs::rename(&other, &hook_path).unwrap();
+                    }
+                    _ => {}
+                }));
+            });
+            let read = manifest::body_written_ms(
+                manifest::Query {
+                    provider: &ProviderKind::Claude,
+                    channel: 1,
+                    path: &path,
+                    file,
+                    range: (0, records.len() as u64),
+                },
+                "[E2E:E1:OK]",
+                producer,
+                Instant::now() + std::time::Duration::from_secs(1),
+            );
+            manifest::AFTER_BODY_RECORD.with(|hook| hook.borrow_mut().take());
+            assert_eq!(read.is_some(), change == "none", "{change} {producer:?}");
+        }
+    }
+}

@@ -161,16 +161,110 @@ pub(super) fn build_terminal(root: &Path, query: Query<'_>, deadline: Instant) -
     Some(plan)
 }
 
-/// When the range's last body record was written, only if its dated body records compose `body`.
-pub(super) fn body_written_ms(query: Query<'_>, body: &str, deadline: Instant) -> Option<i64> {
+/// Which producer composed a body, so a re-read joins its records by that producer's rules.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::services::discord) enum BodyProducer {
+    /// The watcher joins transcript body units across semantic chunk boundaries.
+    Watcher,
+    /// The headless bridge joins its producer's `Text` messages around `ToolUse` separators.
+    Bridge,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Runs after each record `body_written_ms` reads, so a test can change the file mid-read.
+    pub(super) static AFTER_BODY_RECORD: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// One range's body as its producer composed it. The bridge's tool separator form depends on its
+/// stream ownership at each `ToolUse`, so both uniform forms are kept and either may match.
+struct BodyComposer {
+    producer: BodyProducer,
+    kind: ShadowProvider,
+    stream: crate::services::session_backend::StreamLineState,
+    messages: (
+        std::sync::mpsc::Sender<crate::services::agent_protocol::StreamMessage>,
+        std::sync::mpsc::Receiver<crate::services::agent_protocol::StreamMessage>,
+    ),
+    bodies: [String; 2],
+}
+
+impl BodyComposer {
+    /// Whether the record wrote body text; None when the bridge's reader could not take it.
+    fn record(&mut self, line: &[u8], value: &serde_json::Value) -> Option<bool> {
+        use crate::services::agent_protocol::StreamMessage;
+        use crate::services::discord::turn_bridge::chunk_compose;
+        let mut wrote = false;
+        if self.producer == BodyProducer::Watcher {
+            for fact in identity::classify(self.kind, value) {
+                let RecordFact::Unit(_, UnitKind::Body, UnitContent::Payload(text)) = fact else {
+                    continue;
+                };
+                let composed = &mut self.bodies[0];
+                if !composed.is_empty()
+                    && super::super::semantic_boundaries::semantic_chunk_separator_needed(
+                        composed, &text,
+                    )
+                {
+                    composed.push_str("\n\n");
+                }
+                composed.push_str(&text);
+                wrote = true;
+            }
+            return Some(wrote);
+        }
+        let line = std::str::from_utf8(line).ok()?.trim_end_matches('\n');
+        crate::services::session_backend::process_stream_line(
+            line,
+            &self.messages.0,
+            &mut self.stream,
+        );
+        for message in self.messages.1.try_iter() {
+            match message {
+                StreamMessage::Text { content } if !content.is_empty() => {
+                    for body in &mut self.bodies {
+                        chunk_compose::compose_streamed_text_chunk(body, &content);
+                    }
+                    wrote = true;
+                }
+                StreamMessage::ToolUse { .. } => {
+                    for (body, preserve) in self.bodies.iter_mut().zip([true, false]) {
+                        chunk_compose::compose_tool_boundary_separator(body, preserve);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Some(wrote)
+    }
+
+    fn composes(&self, body: &str) -> bool {
+        match self.producer {
+            BodyProducer::Watcher => self.bodies[0] == body,
+            BodyProducer::Bridge => self.bodies.iter().any(|composed| composed == body),
+        }
+    }
+}
+
+/// When the range's last body record was written, only if the whole range, still that file at
+/// that path, composes `body` the way `producer` did.
+pub(super) fn body_written_ms(
+    query: Query<'_>,
+    body: &str,
+    producer: BodyProducer,
+    deadline: Instant,
+) -> Option<i64> {
     let (start, end) = query.range;
     let kind = provider(query.provider)?;
     if start >= end || Instant::now() >= deadline {
         return None;
     }
+    let matches = |meta: std::fs::Metadata| {
+        shadow::capture::file_identity(&meta) == query.file && meta.len() >= end
+    };
     let mut file = File::open(query.path).ok()?;
-    let meta = file.metadata().ok()?;
-    if shadow::capture::file_identity(&meta) != query.file || meta.len() < end {
+    if !matches(file.metadata().ok()?) {
         return None;
     }
     if start > 0 {
@@ -181,10 +275,17 @@ pub(super) fn body_written_ms(query: Query<'_>, body: &str, deadline: Instant) -
             return None;
         }
     }
-    let mut reader = BufReader::new(file.take(end - start));
+    let mut composer = BodyComposer {
+        producer,
+        kind,
+        stream: Default::default(),
+        messages: std::sync::mpsc::channel(),
+        bodies: Default::default(),
+    };
+    let mut reader = BufReader::new((&mut file).take(end - start));
     let mut line = Vec::new();
     let mut written = None;
-    let mut composed = String::new();
+    let mut consumed = 0;
     loop {
         if Instant::now() >= deadline {
             return None;
@@ -196,28 +297,28 @@ pub(super) fn body_written_ms(query: Query<'_>, body: &str, deadline: Instant) -
             .read_until(b'\n', &mut line)
             .ok()?;
         if read == 0 {
-            return written.filter(|_| composed == body);
+            break;
         }
         if read > SOURCE_CAP || line.last() != Some(&b'\n') {
             return None;
         }
+        consumed += read as u64;
         let value: serde_json::Value = serde_json::from_slice(&line).ok()?;
-        for fact in identity::classify(kind, &value) {
-            let RecordFact::Unit(_, UnitKind::Body, UnitContent::Payload(text)) = fact else {
-                continue;
-            };
+        if composer.record(&line, &value)? {
             let at = chrono::DateTime::parse_from_rfc3339(value["timestamp"].as_str()?).ok()?;
             written = written.max(Some(at.timestamp_millis()));
-            if !composed.is_empty()
-                && super::super::semantic_boundaries::semantic_chunk_separator_needed(
-                    &composed, &text,
-                )
-            {
-                composed.push_str("\n\n");
-            }
-            composed.push_str(&text);
         }
+        #[cfg(test)]
+        AFTER_BODY_RECORD.with(|hook| hook.borrow_mut().as_mut().map(|hook| hook()));
     }
+    drop(reader);
+    if consumed != end - start
+        || !matches(file.metadata().ok()?)
+        || !matches(std::fs::metadata(query.path).ok()?)
+    {
+        return None;
+    }
+    written.filter(|_| composer.composes(body))
 }
 
 fn build_with_prefix_limit(

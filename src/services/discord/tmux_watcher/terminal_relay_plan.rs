@@ -5,6 +5,7 @@ use self::rowless_delivery_authority::{RowlessDeliveryAuthority, read_rowless_de
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::cluster::stream_relay::RelayProducer;
 use crate::services::discord::TmuxRelayCoord;
+use crate::services::discord::outbound::o_delivery_evidence;
 
 /// An O lookup that spent the shared deadline still leaves the outbox read this long.
 const HEADLESS_OUTBOX_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
@@ -689,24 +690,31 @@ pub(super) async fn run_terminal_relay_plan<'a>(
             drop(o_evidence);
             None
         };
-        // A body the legacy headless bridge posted before O booted has an outbox row, not an O
-        // receipt; its records lie in this frame, or in the restored seed's own range.
+        // A legacy headless bridge body has an outbox row, not an O receipt. The watcher composed
+        // this frame; a restored seed was composed by the bridge from its producer's read range.
         let consumed_end = terminal_event_consumed_offset(current_offset, all_data);
         let body_source = if restored_response_seed.body.is_empty() {
-            Some((turn_data_start_offset, consumed_end))
+            Some((
+                (turn_data_start_offset, consumed_end),
+                o_delivery_evidence::BodyProducer::Watcher,
+            ))
         } else {
             restored_response_seed
                 .source
-                .filter(|(_, generation)| {
-                    *generation == dr::current_generation_mtime_ns(tmux_session_name)
+                .filter(|source| {
+                    Some(source.file) == context.evidence_source
+                        && source.generation_mtime_ns
+                            == dr::current_generation_mtime_ns(tmux_session_name)
                 })
-                .map(|(range, _)| range)
+                .map(|source| (source.range, o_delivery_evidence::BodyProducer::Bridge))
         };
         let o_tail_covered = match (o_tail_covered, context.evidence_source, body_source) {
-            (None, Some(file), Some(range)) if orphan_facts.existing_record_required() => {
-                crate::services::discord::outbound::o_delivery_evidence::headless_outbox(
+            (None, Some(file), Some((range, producer)))
+                if orphan_facts.existing_record_required() =>
+            {
+                o_delivery_evidence::headless_outbox(
                     shared,
-                    crate::services::discord::outbound::o_delivery_evidence::Frame {
+                    o_delivery_evidence::Frame {
                         provider: watcher_provider,
                         channel: channel_id,
                         path: std::path::Path::new(output_path),
@@ -715,6 +723,7 @@ pub(super) async fn run_terminal_relay_plan<'a>(
                         body: full_response,
                         sent: response_sent_offset,
                     },
+                    producer,
                     evidence_deadline.max(tokio::time::Instant::now() + HEADLESS_OUTBOX_BUDGET),
                 )
                 .await

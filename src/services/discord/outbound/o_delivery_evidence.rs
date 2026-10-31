@@ -15,6 +15,8 @@ use poise::serenity_prelude::{self as serenity, ChannelId, MessageId};
 use std::{path::Path, sync::Arc};
 use tokio::time::Instant;
 
+pub(in crate::services::discord) use super::o_delivery_manifest::BodyProducer;
+
 #[derive(Debug)]
 pub(in crate::services::discord) struct TailCovered {
     _private: (),
@@ -344,6 +346,7 @@ fn headless_content_matches(content: &str, bodies: &[&str]) -> bool {
 pub(in crate::services::discord) async fn headless_outbox(
     shared: &SharedData,
     frame: Frame<'_>,
+    producer: manifest::BodyProducer,
     deadline: Instant,
 ) -> Option<TailCovered> {
     let pool = shared.pg_pool.as_ref()?;
@@ -362,6 +365,7 @@ pub(in crate::services::discord) async fn headless_outbox(
                     range,
                 },
                 &body,
+                producer,
                 deadline,
             )
         }),
