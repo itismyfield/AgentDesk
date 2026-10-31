@@ -21,7 +21,7 @@ export default function CampaignPageHeader({ tab, onTab, actions, tr }: {
     <div role="tablist" aria-label={tr("캠페인 화면", "Campaign views")} className="flex gap-1">
       {tabs.map(([key, label]) => <button key={key} type="button" role="tab" id={`campaign-tab-${key}`} aria-selected={tab === key} aria-controls={`campaign-panel-${key}`}
         onClick={() => onTab(key)}
-        className={`!rounded-full !px-4 text-sm ${tab === key ? "!border-[var(--th-accent-info)] !bg-[color-mix(in_srgb,var(--th-accent-info)_14%,var(--th-card-bg))] font-semibold" : "!border-th-border-subtle text-th-text-muted"}`}>
+        className={`!rounded-full !px-4 ${tab === key ? "!border-[var(--th-accent-info)] !bg-[color-mix(in_srgb,var(--th-accent-info)_14%,var(--th-card-bg))] font-semibold" : "!border-th-border-subtle text-th-text-muted"}`}>
         {label}
       </button>)}
     </div>

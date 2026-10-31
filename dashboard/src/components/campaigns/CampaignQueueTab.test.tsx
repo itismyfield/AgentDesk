@@ -47,7 +47,7 @@ const buttonIn = (scope: ParentNode | null, text: string) => [...(scope?.querySe
 
 async function renderQueue(cards: KanbanCard[]) {
   await act(async () => root.render(<KanbanProvider initialCards={cards} initialDispatches={[]}>
-    <CampaignQueueTab language="en" tr={tr} campaigns={[campaign]} campaignsLoaded selectedCardId={null} onSelectCard={vi.fn()} onCampaignSaved={vi.fn()} />
+    <CampaignQueueTab language="en" tr={tr} campaigns={[campaign]} campaignsLoaded campaignsError={null} onRetryCampaigns={vi.fn()} selectedCardId={null} onSelectCard={vi.fn()} onCampaignSaved={vi.fn()} />
   </KanbanProvider>));
 }
 
@@ -91,4 +91,15 @@ it("puts a card into the newest revision of a campaign as a pending task", async
   });
   expect(onAdded).toHaveBeenCalledWith(expect.objectContaining({ revision: 6 }));
   expect(container.querySelector('[role="status"]')?.textContent).toBe("Added to 'Open issues DAG'.");
+});
+
+it("says it cannot tell which cards are free when the campaigns did not load", async () => {
+  const retry = vi.fn();
+  await act(async () => root.render(<KanbanProvider initialCards={[card("free", { github_issue_number: 11 })]} initialDispatches={[]}>
+    <CampaignQueueTab language="en" tr={tr} campaigns={[]} campaignsLoaded={false} campaignsError="Failed to fetch" onRetryCampaigns={retry} selectedCardId={null} onSelectCard={vi.fn()} onCampaignSaved={vi.fn()} />
+  </KanbanProvider>));
+  expect(container.querySelector("[data-card-id]")).toBeNull();
+  expect(container.textContent).toContain("Campaigns did not load");
+  await act(async () => buttonIn(container, "Retry").click());
+  expect(retry).toHaveBeenCalledOnce();
 });

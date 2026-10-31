@@ -21,8 +21,8 @@ const SORTS: Array<[QueueSort, [string, string]]> = [
 ];
 
 /** Open cards no campaign holds yet: hand them to ready, or put them into a campaign. */
-export default function CampaignQueueTab({ language, tr, campaigns, campaignsLoaded, selectedCardId, onSelectCard, onCampaignSaved }: {
-  language: string; tr: Tr; campaigns: Campaign[]; campaignsLoaded: boolean;
+export default function CampaignQueueTab({ language, tr, campaigns, campaignsLoaded, campaignsError, onRetryCampaigns, selectedCardId, onSelectCard, onCampaignSaved }: {
+  language: string; tr: Tr; campaigns: Campaign[]; campaignsLoaded: boolean; campaignsError: string | null; onRetryCampaigns: () => void;
   selectedCardId: string | null; onSelectCard: (id: string | null) => void; onCampaignSaved: (campaign: Campaign) => void;
 }) {
   const locale = language as UiLanguage;
@@ -53,7 +53,7 @@ export default function CampaignQueueTab({ language, tr, campaigns, campaignsLoa
     else setNeedsAssignee(card);
   };
 
-  const loading = kanbanCardsState === "idle" || kanbanCardsState === "loading" || !campaignsLoaded;
+  const loading = kanbanCardsState === "idle" || kanbanCardsState === "loading" || (!campaignsLoaded && !campaignsError);
   return <div className="grid min-w-0 gap-3">
     <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_repeat(3,minmax(0,11rem))_auto] sm:items-end">
       <label className="grid min-w-0 gap-1 text-xs text-th-text-muted"><span className="max-sm:sr-only">{tr("카드 검색", "Search cards")}</span>
@@ -84,7 +84,9 @@ export default function CampaignQueueTab({ language, tr, campaigns, campaignsLoa
       : shown.length === queued.length ? tr(`캠페인 밖 카드 ${queued.length}장`, `${queued.length} cards outside campaigns`)
         : tr(`캠페인 밖 카드 ${queued.length}장 중 ${shown.length}장`, `${shown.length} of ${queued.length} cards outside campaigns`)}</p>
     {error && <p role="alert" className="campaign-filter-note">{error}</p>}
-    {kanbanCardsState === "error" ? <WidgetState kind="error" title={tr("카드를 불러오지 못했습니다.", "Could not load cards.")} action={<button type="button" onClick={reloadKanbanCards}>{tr("다시 시도", "Retry")}</button>} />
+    {campaignsError ? <WidgetState kind="error" title={tr("캠페인을 읽지 못해 어느 카드가 캠페인 밖인지 알 수 없습니다.", "Campaigns did not load, so the queue cannot tell which cards they hold.")}
+      description={campaignsError} action={<button type="button" onClick={onRetryCampaigns}>{tr("다시 시도", "Retry")}</button>} />
+      : kanbanCardsState === "error" ? <WidgetState kind="error" title={tr("카드를 불러오지 못했습니다.", "Could not load cards.")} action={<button type="button" onClick={reloadKanbanCards}>{tr("다시 시도", "Retry")}</button>} />
       : loading ? <WidgetState kind="loading" title={tr("대기열을 불러오고 있습니다.", "Loading the queue.")} />
         : shown.length === 0 ? <WidgetState kind="empty" title={queued.length ? tr("조건에 맞는 카드가 없습니다.", "No cards match.") : tr("캠페인 밖에 남은 카드가 없습니다.", "Every open card is in a campaign.")}
           action={queued.length ? <button type="button" onClick={() => setFilters(EMPTY_QUEUE_FILTERS)}>{tr("필터 초기화", "Reset filters")}</button> : undefined} />

@@ -223,11 +223,12 @@ export default function CampaignsPanel({ language }: { language: string }) {
     <button type="button" disabled={serverDown} onClick={() => openDraft(NEW_DRAFT, () => createDraft(null))}>{tr("새 캠페인", "New campaign")}</button>
     <button type="button" disabled={loading} onClick={refreshAll}>{loading ? tr("불러오는 중…", "Refreshing…") : tr("새로고침", "Refresh")}</button>
   </>;
-  return <section className="campaigns-panel [&_[data-widget-state]]:!rounded-lg min-w-0 gap-4 text-th-text-primary sm:gap-6 [&_button]:min-h-11 [&_button]:min-w-11 [&_input:not([type=checkbox])]:min-h-11 [&_select]:min-h-11 [&_summary]:min-h-11 [&_summary]:py-3 [&_label:has(input[type=checkbox])]:min-h-11 [&_h2]:text-2xl [&_h2]:font-semibold [&_h2]:tracking-tight [&_h3]:font-semibold [&_h4]:text-xs [&_h4]:font-medium [&_a]:inline-flex [&_a]:min-h-11 [&_a]:max-w-full [&_a]:items-center [&_a]:py-2 [&_a]:[overflow-wrap:anywhere]">
+  return <section className="campaigns-panel [&_[data-widget-state]]:!rounded-lg min-w-0 gap-4 text-sm text-th-text-primary sm:gap-6 [&_button]:min-h-11 [&_button]:min-w-11 [&_input:not([type=checkbox])]:min-h-11 [&_select]:min-h-11 [&_summary]:min-h-11 [&_summary]:py-3 [&_label:has(input[type=checkbox])]:min-h-11 [&_h2]:text-2xl [&_h2]:font-semibold [&_h2]:tracking-tight [&_h3]:font-semibold [&_h4]:text-xs [&_h4]:font-medium [&_a]:inline-flex [&_a]:min-h-11 [&_a]:max-w-full [&_a]:items-center [&_a]:py-2 [&_a]:[overflow-wrap:anywhere]">
     <CampaignPageHeader tab={tab} onTab={setTab} actions={actions} tr={tr} />
     {tab === "queue" ? <div id="campaign-panel-queue" role="tabpanel" aria-labelledby="campaign-tab-queue" className="min-w-0">
       <Suspense fallback={<WidgetState kind="loading" title={tr("대기열을 불러오고 있습니다.", "Loading the queue.")} />}>
-        <CampaignQueueTab language={language} tr={tr} campaigns={campaigns} campaignsLoaded={refreshedAt !== null} selectedCardId={queueCard} onSelectCard={setQueueCard} onCampaignSaved={onSaved} />
+        <CampaignQueueTab language={language} tr={tr} campaigns={campaigns} campaignsLoaded={refreshedAt !== null}
+          campaignsError={refreshedAt === null ? error : null} onRetryCampaigns={() => void legacy.refresh()} selectedCardId={queueCard} onSelectCard={setQueueCard} onCampaignSaved={onSaved} />
       </Suspense>
     </div> : <div id="campaign-panel-campaigns" role="tabpanel" aria-labelledby="campaign-tab-campaigns" className="grid min-w-0 gap-4 sm:gap-6">
       {error && <WidgetState kind={campaigns.length ? "stale" : "error"} title={tr("캠페인을 갱신하지 못했습니다.", "Could not refresh campaigns.")} description={error + (campaigns.length ? tr(" · 이전 내용을 표시 중입니다.", " · Showing the previous snapshot.") : "")} action={<button onClick={() => void legacy.refresh()}>{tr("다시 시도", "Retry")}</button>} />}
