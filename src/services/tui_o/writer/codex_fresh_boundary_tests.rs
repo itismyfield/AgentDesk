@@ -408,7 +408,12 @@ async fn the_store_refuses_a_second_resolution_its_handle_has_not_read() {
 async fn missing_or_mismatched_fresh_evidence_keeps_the_source_held() {
     let _env = env();
     let before = Utc::now() - chrono::TimeDelta::seconds(60);
-    let cases: [(&str, fn(&mut BindingContext), Option<chrono::DateTime<Utc>>); 9] = [
+    type Case = (
+        &'static str,
+        fn(&mut BindingContext),
+        Option<chrono::DateTime<Utc>>,
+    );
+    let cases: [Case; 9] = [
         ("context_missing", |_| {}, None),
         ("resume_mode", |c| c.launch_mode = "resume".into(), None),
         (
