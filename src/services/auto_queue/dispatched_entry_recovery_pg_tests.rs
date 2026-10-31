@@ -223,16 +223,30 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
             }
         }
         for name in ["live", "running", "fresh", "fresh-dispatch", "successor"] {
-            let (status, dispatch): (String, String) =
-                sqlx::query_as("SELECT status, dispatch_id FROM auto_queue_entries WHERE id = $1")
-                    .bind(format!("entry-recover-{name}"))
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap();
+            let (status, dispatch, card_status, reviews): (String, String, String, i64) = sqlx::query_as(
+                "SELECT e.status, COALESCE(e.dispatch_id, ''), c.status,
+                        (SELECT COUNT(*) FROM task_dispatches d WHERE d.kanban_card_id = c.id AND d.dispatch_type = 'review')
+                 FROM auto_queue_entries e JOIN kanban_cards c ON c.id = e.kanban_card_id WHERE e.id = $1"
+            ).bind(format!("entry-recover-{name}")).fetch_one(&pool).await.unwrap();
             assert_eq!(status, "dispatched", "{name} must remain untouched");
             assert_eq!(dispatch, format!("dispatch-recover-{name}"));
+            assert_eq!(card_status, "in_progress", "{name}: no review transition");
+            assert_eq!(reviews, 0, "{name}: no review dispatch");
         }
     }
+    let live_session: (String, String) = sqlx::query_as(
+        "SELECT status, active_dispatch_id FROM sessions WHERE session_key = 'recover-live'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        live_session,
+        (
+            "turn_active".to_string(),
+            "dispatch-recover-live".to_string()
+        )
+    );
     eprintln!("recovery: repeated ticks verified; checking restart");
     crate::reconcile::reconcile_boot_db_pg(&pool, "recovery-restart", None)
         .await
