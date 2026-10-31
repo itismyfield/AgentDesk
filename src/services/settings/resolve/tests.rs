@@ -825,17 +825,5 @@ fn env_flag_value_and_presence_share_one_snapshot() {
                 }
             );
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::ffi::OsStringExt;
-            unsafe { std::env::set_var(NAME, std::ffi::OsString::from_vec(vec![0xff])) };
-            assert_eq!(
-                resolve_env_flag(NAME, default),
-                Resolved {
-                    value: default,
-                    source: SettingSource::Default
-                }
-            );
-        }
     }
 }

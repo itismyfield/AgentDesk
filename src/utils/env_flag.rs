@@ -91,6 +91,13 @@ mod tests {
                 use std::os::unix::ffi::OsStringExt;
                 unsafe { std::env::set_var(NAME, std::ffi::OsString::from_vec(vec![0xff])) };
                 assert_eq!(env_flag(NAME, default), default);
+                assert_eq!(
+                    crate::services::settings::resolve_env_flag(NAME, default),
+                    crate::services::settings::Resolved {
+                        value: default,
+                        source: crate::services::settings::SettingSource::Default
+                    }
+                );
             }
         }
     }
