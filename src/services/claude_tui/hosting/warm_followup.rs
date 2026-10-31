@@ -563,6 +563,7 @@ pub(crate) fn owner_observer(
     sender: Sender<StreamMessage>,
     cancel: std::sync::Arc<CancelToken>,
 ) -> Option<Box<dyn FnOnce() -> Result<(), String> + Send>> {
+    cancel.bind_claude_tmux_session(tmux);
     let resolved = crate::services::claude::resolve_claude_tui_session_for_launch(
         working_dir,
         session_id,

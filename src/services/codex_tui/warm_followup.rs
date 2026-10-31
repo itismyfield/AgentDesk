@@ -675,6 +675,7 @@ pub(crate) fn owner_observer(
     sender: Sender<StreamMessage>,
     cancel: std::sync::Arc<CancelToken>,
 ) -> Option<Box<dyn FnOnce() -> Result<(), String> + Send>> {
+    crate::services::codex::wire_cancel_token_to_tmux_session(Some(&cancel), tmux);
     let selection = super::session::resolve_codex_tui_session(session_id, working_dir, None, false);
     let (rollout, session) = (selection.rollout_path?, selection.selected_session_id?);
     let start = std::fs::metadata(&rollout).ok()?.len();

@@ -1154,5 +1154,42 @@ fn an_idle_channel_hands_its_front_to_the_turn_start() {
     assert!(rig.events().is_empty(), "no key: {:?}", rig.events());
 }
 
+/// An owner idle turn binds its fresh cancel token to the pane it submits into, as the warm
+/// follow-up does: a non-force stop reads only that binding to reach the native AI.
+#[test]
+fn an_owner_idle_turn_binds_its_cancel_token_to_its_pane() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let providers = [
+        (ProviderKind::Claude, 7_272_591),
+        (ProviderKind::Codex, 7_272_592),
+    ];
+    for (provider, channel) in providers {
+        let rig = rig(
+            &format!("oi-bind-{channel}"),
+            channel,
+            "normal",
+            view("", false),
+            IDLE,
+        );
+        let claim = rig.claim(&rig.granted_front()).unwrap();
+        let (settled, _) = tokio::sync::oneshot::channel();
+        let mailbox = rig.mailbox.clone();
+        let owner = OwnerTurn {
+            mailbox,
+            claim,
+            settled,
+        };
+        let mut bound = None;
+        let _ = rig.with_turn(&provider, Some(&rig.name), |turn, sender| {
+            let cancel = Arc::clone(&turn.cancel);
+            assert_eq!(cancel.tmux_session_name(), None, "a fresh token");
+            let _ = execute_owned(turn, sender, owner);
+            bound = cancel.tmux_session_name();
+            Ok(())
+        });
+        assert_eq!(bound.as_deref(), Some(rig.name.as_str()), "{provider:?}");
+    }
+}
+
 #[path = "owner_input_not_sent_tests.rs"]
 mod not_sent;
