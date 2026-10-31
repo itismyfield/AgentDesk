@@ -63,7 +63,7 @@ admission은 해당 프로세스의 공통 스위치다. 특정 채널만 멈추
 - 관리 대상 서버를 사용자 개인 Herdr 환경과 분리한다. named session 이름만으로 설정까지 분리된다고 가정하지 않는다.
 - 관리 config를 손으로 고치거나 `reload-config`를 복구 수단으로 쓰지 않는다. 관리 config는 아래 자동 보장만 고치며, 고친 내용은 실행 중 서버에 적용되지 않는다.
 
-현재 adapter의 protocol은 22다. restore 설정 검증인 E7과 사용자 기본 서버 판정은 같은 판정 함수(`supported_herdr_server`)로 서버를 받는다. 조건은 pong의 `protocol=22`와 `MAJOR.MINOR.PATCH` 안정판 버전 **0.9.3 이상**이다. protocol 22만으로는 restore 동작을 측정하기 전인 0.9.0~0.9.2를 가를 수 없어 최소 버전을 둔다. 사전 배포판(`0.9.5-preview.…`)·빈 값·해석할 수 없는 버전은 거부한다. 일반 ping handshake는 protocol만 확인한다. 새 herdr를 따라갈 때는 0.9.4·0.9.5 때처럼 변경 기록에서 pane 환경·ansi 렌더·`pane.close`·restore 설정이 바뀌었는지 보고, 실제 바이너리 시험(`ADK_TEST_HERDR_BIN`)을 그 버전으로 돌린다. protocol이 바뀌면 adapter 변경이 먼저다.
+현재 adapter의 protocol은 22다. restore 설정 검증인 E7과 사용자 기본 서버 판정은 같은 판정 함수(`supported_herdr_server`)로 서버를 받는다. 조건은 pong의 `protocol=22`와 `MAJOR.MINOR.PATCH` 안정판 버전 **0.9.3 이상**이다. protocol 22만으로는 restore 동작을 측정하기 전인 0.9.0~0.9.2를 가를 수 없어 최소 버전을 둔다. 사전 배포판(`0.9.5-preview.…`)·빈 값·해석할 수 없는 버전은 거부한다. 일반 ping handshake는 protocol만 확인하며, 읽힌 pong의 protocol이 다르면 서버 부재가 아니라 지원하지 않는 서버(E7 `VersionNotVerified`, 사용자 기본 서버 `Unsupported`)로 거부한다. 새 herdr를 따라갈 때는 0.9.4·0.9.5 때처럼 변경 기록에서 pane 환경·ansi 렌더·`pane.close`·restore 설정이 바뀌었는지 보고, 실제 바이너리 시험(`ADK_TEST_HERDR_BIN`)을 그 버전으로 돌린다. protocol이 바뀌면 adapter 변경이 먼저다.
 
 근거: `src/services/session_host/herdr/model.rs:13`, `:17`; `src/services/session_host/herdr/observe.rs:120`, `:163`.
 
