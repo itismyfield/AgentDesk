@@ -627,6 +627,7 @@ src/
 │   │   ├── hooks.rs
 │   │   ├── kakao_calendar.rs
 │   │   ├── kanban.rs
+│   │   ├── kanban_list_view_tests.rs
 │   │   ├── kanban_repos.rs
 │   │   ├── kanban_snapshot_tests.rs
 │   │   ├── maintenance.rs
@@ -1029,6 +1030,7 @@ src/
 │   │   │   │   └── other.rs
 │   │   │   ├── command.rs
 │   │   │   ├── gpu.rs
+│   │   │   ├── memory.rs
 │   │   │   ├── network.rs
 │   │   │   ├── sampler.rs
 │   │   │   ├── store.rs

@@ -58,21 +58,15 @@ seconds with content comparison, independently of native filesystem notification
 | `agents.*.channels.*.reasoning_effort` | live | `src/services/discord/agentdesk_config.rs` role_binding_from_channel |
 | `agents.*.channels.*.thread_inherit` | live | `src/services/discord/agentdesk_config.rs` thread_inheritance_enabled (validated snapshot per intake) |
 | `agents.*.channels.*.peer_agents` | live | `src/services/discord/agentdesk_config.rs` role_binding_from_channel |
-| `agents.*.channels.*.quality_feedback_injection` | live | `src/services/discord/agentdesk_config.rs` role_binding_from_channel |
 | `agents.*.channels.*.dispatch_profile` | live | `src/services/discord/agentdesk_config.rs` resolve_dispatch_profile |
 | `agents.*.channels.*.isolate_override` | live | `src/services/discord/agentdesk_config.rs` resolve_worktree_isolation_policy |
 | `agents.*.channels.*.cache_ttl_minutes` | live | `src/services/discord/agentdesk_config.rs` resolve_cache_ttl_minutes |
-| `agents.*.keywords` | live | `src/services/discord/agentdesk_config.rs` load_meeting_config fallback |
+| `agents.*.keywords` | live | `src/config/agent_memory.rs` AgentDef (still parsed; nothing reads it since voice aliases and meetings were removed) |
 | `agents.*.peer_keywords` | live | `src/services/discord/agentdesk_config.rs` load_peer_agents (directory only; validated snapshot per prompt) |
 | `agents.*.peer_directory` | live | `src/services/discord/agentdesk_config.rs` load_peer_agents (validated snapshot per prompt) |
 | `agents.*.department` | seeded-at-boot | `src/db/postgres/agent_sync.rs` upsert_agent_from_config_pg (agents.department) |
 | `agents.*.avatar_emoji` | seeded-at-boot | `src/db/postgres/agent_sync.rs` upsert_agent_from_config_pg (agents.avatar_emoji) |
 | `agents.*.preferred_intake_node_labels` | seeded-at-boot | `src/db/postgres/agent_sync.rs` upsert_agent_from_config_pg (COALESCE: absent key keeps DB value) |
-| `meeting.channel_name` | live | `src/services/discord/agentdesk_config.rs` load_meeting_config (validated snapshot per meeting start) |
-| `meeting.max_rounds` | live | `src/services/discord/agentdesk_config.rs` load_meeting_config (validated snapshot per meeting start) |
-| `meeting.max_participants` | live | `src/services/discord/agentdesk_config.rs` load_meeting_config (validated snapshot per meeting start) |
-| `meeting.summary_agent` | live | `src/services/discord/agentdesk_config.rs` load_meeting_config (validated snapshot per meeting start) |
-| `meeting.available_agents` | live | `src/services/discord/agentdesk_config.rs` meeting_agent_from_entry via load_meeting_config (validated values and presence metadata per meeting) |
 | `github.repos` | seeded-at-boot | `src/db/postgres/shared_config.rs` startup_reseed (register_repo INSERT ... ON CONFLICT DO NOTHING into github_repos) |
 | `github.repo_dirs` | restart | `src/services/cluster/readiness.rs` collect (config captured by readiness::spawn_probe at node_registry::bootstrap) |
 | `github.sync_interval_minutes` | restart | `src/server/worker_registry/registry.rs` start_worker (GithubSync arm captures sync_interval) |
