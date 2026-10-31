@@ -1,6 +1,6 @@
 use super::*;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
     let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
@@ -271,6 +271,8 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
         ("dispatched".to_string(), true),
         "same run advances after recovered review"
     );
+    drop(service);
+    drop(engine);
     pool.close().await;
     pg_db.drop().await;
 }
