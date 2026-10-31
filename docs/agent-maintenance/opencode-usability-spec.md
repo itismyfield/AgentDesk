@@ -538,7 +538,7 @@ Required behavior:
    OpenCode, keeping type definitions and option arrays in sync
    (`dashboard/src/components/OnboardingWizard.tsx`,
    `dashboard/src/components/onboardingDraft.ts`,
-   `dashboard/src/components/MeetingMinutesView.tsx`).
+   `dashboard/src/components/MeetingMinutesView.tsx` (removed)).
 6. Add OpenCode to the rate-limit unsupported-provider path unless a real
    OpenCode telemetry source is implemented first
    (`src/server/routes/analytics.rs`).

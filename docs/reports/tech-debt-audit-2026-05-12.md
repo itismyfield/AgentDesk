@@ -201,7 +201,7 @@
 | `policies/auto-queue.js` | 1,582 | Phase gate + dispatch + lifecycle + error recovery | phase-gate-verdict / dispatch-activation / lifecycle / error-recovery | P0 |
 | `policies/merge-automation.js` | 2,501 | PR merge check + conflict + GitHub API + Discord notify | github-pr-adapter / merge-conflict-resolver / notification-dispatcher | P0 |
 | `dashboard/src/components/SettingsView.tsx` | 3,832 | UI + API + validation + state + persistence | `SettingsForm` / `SettingsValidator` / `useSettingsPersistence` | P1 |
-| `dashboard/src/components/agent-manager/KanbanTab.tsx` | 3,882 | Kanban + card + dispatch + timeline + auto-queue panel | `KanbanBoardController` / `CardEditor` / `DispatchTracker` / `TimelineRenderer` | P1 |
+| `dashboard/src/components/agent-manager/KanbanTab.tsx` (removed) | 3,882 | Kanban + card + dispatch + timeline + auto-queue panel | `KanbanBoardController` / `CardEditor` / `DispatchTracker` / `TimelineRenderer` | P1 |
 | `scripts/deploy-release.sh` | 1,048 | Build + sign + copy + health-check + cluster + manifest + cleanup | `binary-signer` / `artifact-promoter` / `health-verifier` / `cluster-deployer` | P1 |
 
 **핵심 부채:** 정책 파일 26개에서 `agentdesk.db.query()` 126회 직접 호출 (DB facade 부재), `deploy.sh`/`deploy-release.sh` 중복 로직, 하드코딩 (`com.itismyfield.agentdesk`, `$HOME/ObsidianVault/...`), e2e 테스트가 정책/대시보드 배포 검증 안 함.
