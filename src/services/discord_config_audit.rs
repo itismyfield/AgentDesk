@@ -167,15 +167,7 @@ pub(crate) fn precheck_voice_alias_collisions(config: &mut Config) -> Result<(),
         Err(collision) => collision,
     };
 
-    let require = std::env::var("AGENTDESK_VOICE_REQUIRE_ALIASES")
-        .ok()
-        .map(|raw| {
-            matches!(
-                raw.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false);
+    let require = crate::utils::env_flag("AGENTDESK_VOICE_REQUIRE_ALIASES", false);
 
     if require {
         return Err(format!(

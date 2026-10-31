@@ -10,7 +10,7 @@ const STOP_FILE: [&str; 2] = ["herdr", "admission-off"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StopCause {
-    /// The env value is `off` or anything other than `on`.
+    /// The environment switch disables admission.
     Env,
     /// The stop file exists now or existed earlier in this process.
     File,
@@ -38,13 +38,18 @@ pub(crate) struct Admission {
 }
 
 impl Admission {
-    /// An unset env value admits; `on` admits; any other value, a typo included, stops.
-    pub(crate) fn new(env: Option<&std::ffi::OsStr>, stop_file: Option<PathBuf>) -> Self {
+    /// A resolved environment switch decides admission independently of the stop file.
+    pub(crate) fn new(enabled: bool, stop_file: Option<PathBuf>) -> Self {
         Self {
-            env_stopped: env.is_some_and(|value| value != "on"),
+            env_stopped: !enabled,
             stop_file,
             latched: AtomicBool::new(false),
         }
+    }
+
+    fn from_env(stop_file: impl FnOnce() -> Option<PathBuf>) -> Self {
+        let enabled = crate::utils::env_flag(ADMISSION_ENV, true);
+        Self::new(enabled, stop_file())
     }
 
     /// Admits only while no switch stops. A seen stop file latches; a failed check stops this call only.
@@ -89,9 +94,7 @@ pub(crate) fn check() -> Result<(), StopCause> {
         return forced.check();
     }
     PROCESS
-        .get_or_init(|| {
-            Admission::new(std::env::var_os(ADMISSION_ENV).as_deref(), stop_file_path())
-        })
+        .get_or_init(|| Admission::from_env(stop_file_path))
         .check()
 }
 

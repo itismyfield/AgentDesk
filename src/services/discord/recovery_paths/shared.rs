@@ -240,10 +240,7 @@ pub(in crate::services::discord) fn anchor_repost_send_new_permitted(
 pub(in crate::services::discord) fn recovery_anchor_repost_enabled() -> bool {
     static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {
-        let on = std::env::var("AGENTDESK_RECOVERY_ANCHOR_REPOST")
-            .ok()
-            .map(|v| v.trim().to_ascii_lowercase())
-            .is_some_and(|v| v == "1" || v == "true");
+        let on = crate::utils::env_flag("AGENTDESK_RECOVERY_ANCHOR_REPOST", false);
         if on {
             tracing::info!("  ✓ recovery_anchor_repost: enabled");
         }

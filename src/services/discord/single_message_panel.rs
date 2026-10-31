@@ -30,26 +30,16 @@ pub(in crate::services::discord) fn single_message_panel_spinner_frame(
 pub(in crate::services::discord) fn enabled() -> bool {
     static CACHED: OnceLock<bool> = OnceLock::new();
     *CACHED.get_or_init(|| {
-        let raw = std::env::var("AGENTDESK_SINGLE_MESSAGE_PANEL").ok();
-        let enabled = parse_single_message_panel_flag(raw.as_deref());
+        let enabled = configured_enabled();
         let state = if enabled { "enabled" } else { "disabled" };
         tracing::info!("  ✓ single_message_panel: {state}");
         enabled
     })
 }
 
-fn parse_single_message_panel_flag(raw: Option<&str>) -> bool {
-    // #3560: default-ON (opt-out). The rollout gate previously short-circuited a
-    // missing env var to `false`, so any environment without an explicit
-    // `AGENTDESK_SINGLE_MESSAGE_PANEL=1` silently fell back to the legacy panel.
-    // Mirror the original explicit truthy-allowlist as an explicit disable-list:
-    // only the documented opt-out tokens "0" / case-insensitive "false" disable
-    // the feature. Everything else — unset, empty, or garbage — stays enabled so
-    // a default-ON feature is never quietly switched off by an empty env value.
-    match raw.map(str::trim) {
-        None => true,
-        Some(value) => value != "0" && !value.eq_ignore_ascii_case("false"),
-    }
+/// Default ON; standard false tokens disable the live panel.
+fn configured_enabled() -> bool {
+    crate::utils::env_flag("AGENTDESK_SINGLE_MESSAGE_PANEL", true)
 }
 
 // Footer writes are retired; callers keep the flag arguments until the legacy panel path goes.

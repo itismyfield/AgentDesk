@@ -77,12 +77,7 @@ pub(crate) fn execute_command_streaming_observed(
         #[cfg(unix)]
         {
             let requested_remote_tmux = tmux_session_name.is_some()
-                && std::env::var("AGENTDESK_CODEX_REMOTE_TMUX")
-                    .map(|value| {
-                        let normalized = value.trim().to_ascii_lowercase();
-                        normalized == "1" || normalized == "true" || normalized == "yes"
-                    })
-                    .unwrap_or(false);
+                && crate::utils::env_flag("AGENTDESK_CODEX_REMOTE_TMUX", false);
             if requested_remote_tmux {
                 tracing::warn!(
                     provider = "codex",

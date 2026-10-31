@@ -1170,10 +1170,30 @@ fn validate_fixture_lane(fixture: &PreflightFixture) -> Result<(), String> {
 }
 
 fn live_preflight_allowed() -> bool {
-    env::var("AGENTDESK_AUTO_QUEUE_PREFLIGHT_ALLOW_LIVE")
-        .ok()
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false)
+    crate::utils::env_flag("AGENTDESK_AUTO_QUEUE_PREFLIGHT_ALLOW_LIVE", false)
+}
+
+#[test]
+fn live_preflight_flag_uses_the_shared_bool_contract() {
+    const NAME: &str = "AGENTDESK_AUTO_QUEUE_PREFLIGHT_ALLOW_LIVE";
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let _restore = crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock(NAME);
+    for (raw, expected) in [
+        (None, false),
+        (Some("true"), true),
+        (Some(" YES "), true),
+        (Some("on"), true),
+        (Some("off"), false),
+        (Some("typo"), false),
+    ] {
+        unsafe {
+            match raw {
+                Some(raw) => std::env::set_var(NAME, raw),
+                None => std::env::remove_var(NAME),
+            }
+        }
+        assert_eq!(live_preflight_allowed(), expected, "{raw:?}");
+    }
 }
 
 async fn generate_fixture_run(
