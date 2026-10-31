@@ -43,7 +43,6 @@ pub(in crate::services::discord) use spawns::{
     ORPHAN_RETRY_CADENCE_FOR_TESTS, run_bot_spawn_execution_runtime_tasks,
 };
 mod startup_doctor;
-mod voice;
 
 pub(in crate::services::discord) use self::framework_setup::run_bot_build_slash_commands;
 use self::framework_setup::run_bot_framework_setup;
@@ -65,9 +64,6 @@ use self::shared_data::{
     run_bot_build_shared_data,
 };
 use self::shutdown::{run_bot_run_gateway_backend, run_bot_spawn_sigterm_handler};
-#[cfg(test)]
-use self::voice::voice_auto_join_provider_map;
-use self::voice::{run_bot_init_voice_workers, run_bot_rehydrate_voice_handoffs};
 #[allow(unused_imports)]
 use self::{orphan_recovery::*, restored_state::*, session_gc::*, startup_doctor::*};
 
@@ -92,7 +88,6 @@ pub(crate) struct RunBotContext {
 pub(super) fn discord_gateway_intents() -> serenity::GatewayIntents {
     serenity::GatewayIntents::GUILDS
         | serenity::GatewayIntents::GUILD_MESSAGES
-        | serenity::GatewayIntents::GUILD_VOICE_STATES
         | serenity::GatewayIntents::DIRECT_MESSAGES
         | serenity::GatewayIntents::MESSAGE_CONTENT
 }
@@ -223,13 +218,6 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
 
     let boot_config = bot_boot_settings();
     let modules = boot_config.cluster.runtime_profile.modules();
-    let voice_config = boot_config.voice;
-    let voice_barge_in = Arc::new(if modules.voice {
-        run_bot_rehydrate_voice_handoffs(&pg_pool).await;
-        voice_barge_in::VoiceBargeInRuntime::from_voice_config(&voice_config)
-    } else {
-        voice_barge_in::VoiceBargeInRuntime::disabled()
-    });
 
     // Cleanup stale Discord uploads on process start
     cleanup_old_uploads(UPLOAD_MAX_AGE);
@@ -283,7 +271,6 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             initial_skills,
             token_hash: token_hash.clone(),
             api_port,
-            voice_barge_in: voice_barge_in.clone(),
             health_registry: health_registry.clone(),
             pg_pool,
             engine,
@@ -364,9 +351,6 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         // Its poller or SIGTERM handler takes the shutdown slot once; it takes no gateway lease.
         return;
     }
-
-    let voice_receiver =
-        run_bot_init_voice_workers(&voice_config, &voice_barge_in, &shared, &provider);
 
     // Resolve the gateway role before spawning the intake worker. Both gateway
     // and confirmed-standby runtimes start it in observe/enforce mode, while an
@@ -451,8 +435,6 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         health_registry_for_client_start,
         api_port,
         shared,
-        voice_config,
-        voice_receiver,
         gateway_lease,
         gateway_waiter,
         handback_breaker,
@@ -692,7 +674,6 @@ mod bootstrap_tests {
 
         let expected = serenity::GatewayIntents::GUILDS
             | serenity::GatewayIntents::GUILD_MESSAGES
-            | serenity::GatewayIntents::GUILD_VOICE_STATES
             | serenity::GatewayIntents::DIRECT_MESSAGES
             | serenity::GatewayIntents::MESSAGE_CONTENT;
         assert_eq!(intents, expected);
@@ -818,40 +799,6 @@ mod bootstrap_tests {
         );
         assert!(pending.contains(&fast_mode_reset_channel));
         assert!(pending.contains(&goals_reset_channel));
-    }
-
-    #[test]
-    fn voice_auto_join_provider_map_includes_agent_voice_channel() {
-        let cfg: crate::config::Config = serde_yaml::from_str(
-            r#"
-server:
-  port: 8791
-agents:
-- id: project-agentdesk
-  name: AgentDesk
-  provider: claude
-  voice:
-    channel_id: '999'
-    foreground:
-      provider: codex
-  channels:
-    codex:
-      id: '123'
-      name: adk-cdx
-      provider: codex
-"#,
-        )
-        .expect("config parses");
-
-        let map = voice_auto_join_provider_map(&cfg);
-
-        assert_eq!(map.get("123").map(|value| value.0.as_str()), Some("codex"));
-        assert_eq!(map.get("123").and_then(|value| value.1.as_deref()), None);
-        assert_eq!(map.get("999").map(|value| value.0.as_str()), Some("codex"));
-        assert_eq!(
-            map.get("999").and_then(|value| value.1.as_deref()),
-            Some("project-agentdesk")
-        );
     }
 
     #[test]
@@ -1066,7 +1013,6 @@ mod restart_lifecycle_characterization_tests {
     fn build_shared_with_injected_shutdown_remaining(
         shutdown_remaining: &Arc<AtomicUsize>,
     ) -> Arc<SharedData> {
-        let voice = Arc::new(voice_barge_in::VoiceBargeInRuntime::disabled());
         let health_registry = Arc::new(health::HealthRegistry::new());
         run_bot_build_shared_data(
             DiscordBotSettings::default(),
@@ -1075,7 +1021,6 @@ mod restart_lifecycle_characterization_tests {
                 initial_skills: Vec::new(),
                 token_hash: "s3-restart-characterization-token-hash".to_string(),
                 api_port: 9,
-                voice_barge_in: voice,
                 health_registry,
                 pg_pool: None,
                 engine: None,

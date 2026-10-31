@@ -78,7 +78,6 @@ async fn worker_profile_routes_preserve_execution_auth_and_remove_admin_methods(
             ("GET", "/agents/example/execution-node"),
             ("PUT", "/agents/example/execution-node"),
             ("POST", "/onboarding/complete"),
-            ("PUT", "/voice/config"),
             ("POST", "/queue/reset-global"),
             ("POST", "/provider-auth-profiles/codex/login-start"),
         ] {

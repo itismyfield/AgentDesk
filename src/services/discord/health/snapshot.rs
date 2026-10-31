@@ -2467,7 +2467,6 @@ mod tests {
                         active_turn_nonce: Some(nonce),
                         observed_before: std::time::Instant::now(),
                         allow_completion_cleanup: true,
-                        drain_voice: true,
                         terminal_was_cancel: false,
                     },
                 );

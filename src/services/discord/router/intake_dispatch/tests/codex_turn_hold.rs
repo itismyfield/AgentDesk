@@ -284,13 +284,10 @@ async fn a_gateway_attachment_moves_the_checkpoint_once_turn_mode_holds_it_pg() 
     mock.allow_channel(CHANNEL);
     let (proxy, gateway_url, server) = discord_mock::start(mock).await;
     let ctx = discord_mock::serenity_context(proxy, gateway_url).await;
-    let voice_config = crate::voice::VoiceConfig::default();
     let data = Arc::new(crate::services::discord::Data {
         shared: shared.clone(),
         token: "test-token".to_string(),
         provider: ProviderKind::Codex,
-        voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
-        voice_config,
     });
     let channel = ChannelId::new(CHANNEL);
     let checkpoint = || shared.last_message_ids.get(&channel).map(|id| *id);

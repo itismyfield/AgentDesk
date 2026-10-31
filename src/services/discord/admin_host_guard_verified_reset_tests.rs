@@ -65,7 +65,6 @@ pub(crate) async fn seed_accepted_queue(shared: &Arc<SharedData>, channel: Chann
         has_reply_boundary: false,
         merge_consecutive: false,
         pending_uploads: vec![],
-        voice_announcement: None,
     };
     let persistence = QueuePersistenceContext::new(&ProviderKind::Codex, &shared.token_hash, None);
     assert!(

@@ -13,9 +13,8 @@ pub(super) async fn bootstrap_claimed_turn(
     // caller's stale-dispatch guard passed. A message that merely QUEUES behind
     // an active turn (`started == false`) must NOT touch that active turn's
     // anchor — it records its own anchor when later dequeued/promoted and
-    // re-enters intake with `started == true`. Synthetic voice ids back no real
-    // Discord message → `None` (no fake link); headless turns never reach this
-    // interactive intake path.
+    // re-enters intake with `started == true`. Internal ids back no real
+    // Discord message → `None` (no fake link).
     if started {
         shared
             .ui
@@ -23,10 +22,8 @@ pub(super) async fn bootstrap_claimed_turn(
             .resolve_turn_request_anchor(
                 http,
                 channel_id,
-                (!crate::services::discord::voice_barge_in::is_synthetic_voice_message_id(
-                    user_msg_id,
-                ))
-                .then(|| user_msg_id.get()),
+                (!crate::services::discord::is_internal_message_id(user_msg_id))
+                    .then(|| user_msg_id.get()),
             )
             .await;
     }

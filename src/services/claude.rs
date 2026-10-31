@@ -338,29 +338,6 @@ pub fn execute_command_simple_cancellable(
     execute_command_simple_with_model_and_cancel(prompt, None, cancel_token, None)
 }
 
-/// Cancel-aware variant of the model-override simple execution path.
-///
-/// Threads the supplied `CancelToken` into the spawned Claude child so that a
-/// mid-flight cancel (e.g. voice barge-in) terminates the process tree
-/// instead of letting it run to natural exit. Required by ADR #2175 for all
-/// non-foreground entry points — call sites that hold a `CancelToken` from
-/// the surrounding turn MUST use this variant.
-///
-/// This is a blocking function — call from `tokio::task::spawn_blocking`.
-pub fn execute_command_simple_cancellable_with_model(
-    prompt: &str,
-    model_override: Option<&str>,
-    cancel_token: Option<std::sync::Arc<CancelToken>>,
-) -> Result<String, String> {
-    let borrow = cancel_token.as_deref();
-    execute_command_simple_with_model_and_cancel(
-        prompt,
-        model_override,
-        borrow,
-        cancel_token.clone(),
-    )
-}
-
 fn execute_command_simple_with_model_and_cancel(
     prompt: &str,
     model_override: Option<&str>,

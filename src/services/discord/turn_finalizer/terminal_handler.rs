@@ -172,7 +172,7 @@ pub(super) async fn handle_terminal(
     };
     // #3866/#4048: `do_finalize` is the single chokepoint for finalize
     // side-effects (inflight clear, mailbox token release, `global_active`
-    // decrement, voice drain, completion-event publish). Contain a panic HERE
+    // decrement, completion-event publish). Contain a panic HERE
     // rather than only at the actor loop so the Finalizing->Finalized flip below
     // STILL runs on a caught panic.
     // That matters: the entry was just flipped to `Finalizing`, and reconcile GC

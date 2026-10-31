@@ -40,7 +40,6 @@ pub(super) async fn handle_stream_content_message(
     let channel_id = ctx.channel_id;
     let provider = ctx.provider.clone();
     let expected_identity = ctx.expected_identity;
-    let voice_progress_playback_channel_id = ctx.voice_progress_playback_channel_id;
     let watcher_owns_assistant_relay = ctx.watcher_owns_assistant_relay;
     let watcher_relay_available_for_turn = ctx.watcher_relay_available_for_turn;
     let standby_relay_owns_output = ctx.standby_relay_owns_output;
@@ -174,19 +173,6 @@ pub(super) async fn handle_stream_content_message(
                             state_dirty = true;
                         }
         StreamContentArmMessage::Text { content } => {
-                            let (content, progress_markers) =
-                                if inflight_state.source == crate::dispatch::Source::Voice {
-                                    crate::voice::progress::extract_progress_markers(&content)
-                                } else {
-                                    (content, Vec::new())
-                                };
-                            for marker in progress_markers {
-                                shared_owned.voice_barge_in.publish_progress_for_playback(
-                                    channel_id,
-                                    voice_progress_playback_channel_id,
-                                    marker,
-                                );
-                            }
                             if content.is_empty() {
                                 finish!(StreamContentArmOutcome::SkipRemainderOfDrainIteration);
                             }
@@ -252,13 +238,6 @@ pub(super) async fn handle_stream_content_message(
                                 channel_id,
                                 vec![StatusEvent::Heartbeat],
                             );
-                            if inflight_state.source == crate::dispatch::Source::Voice {
-                                shared_owned.voice_barge_in.publish_progress_for_playback(
-                                    channel_id,
-                                    voice_progress_playback_channel_id,
-                                    "thinking",
-                                );
-                            }
                             // #1113 implicit-terminate: a Thinking event after an
                             // unfinished ToolUse means the agent moved on without
                             // emitting a ToolResult. Promote the orphaned tool to

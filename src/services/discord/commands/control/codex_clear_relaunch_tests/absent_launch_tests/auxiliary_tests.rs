@@ -29,7 +29,6 @@ pub(in crate::services::discord) fn instruction(message: u64, text: &str) -> Int
         has_reply_boundary: false,
         merge_consecutive: false,
         pending_uploads: Vec::new(),
-        voice_announcement: None,
     }
 }
 

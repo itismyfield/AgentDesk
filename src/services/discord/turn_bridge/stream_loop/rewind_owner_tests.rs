@@ -80,7 +80,6 @@ async fn rejected_error_rewind_reloads_the_owner_and_next_tick_loses_authority()
             cancel_token: &cancel,
             recovery_lease: None,
             expected_identity: &expected,
-            voice_progress_playback_channel_id: None,
             watcher_owns_assistant_relay: true,
             watcher_relay_available_for_turn: true,
             standby_relay_owns_output: false,

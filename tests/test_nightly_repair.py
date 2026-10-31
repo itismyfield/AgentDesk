@@ -70,10 +70,10 @@ def nightly_contract_problems(text: str) -> list[str]:
                 value = (step.get("env") or {}).get(key)
                 need(value in (None, "0"), f"{name}/{step.get('name')!r} overrides {key}")
 
-    opus = statements((step_of(jobs, "full_macos", "Install Opus on macOS") or {}).get("run", ""))
-    need(any(line.startswith("brew install ") and "tmux" in line.split() for line in opus),
+    tmux = statements((step_of(jobs, "full_macos", "Install tmux on macOS") or {}).get("run", ""))
+    need(any(line.startswith("brew install ") and "tmux" in line.split() for line in tmux),
          "full_macos does not actually brew install tmux")
-    need("tmux -V" in opus, "full_macos prints no tmux provisioning evidence")
+    need("tmux -V" in tmux, "full_macos prints no tmux provisioning evidence")
 
     for name, platform in (("full_macos", "macos"), ("full_windows", "windows")):
         run = (step_of(jobs, name, "cargo test (non-PG, non-lib targets)") or {}).get("run", "")
@@ -119,8 +119,8 @@ STRUCTURAL_MUTANTS = (
                          '      CARGO_PROFILE_DEV_DEBUG: "0"\n'
                          '      CARGO_PROFILE_TEST_DEBUG: "0"\n')),
     ("strips tmux from the brew install",
-     lambda t: t.replace("brew install opus pkg-config tmux",
-                         "brew install opus pkg-config\n          # tmux")),
+     lambda t: t.replace("brew install tmux",
+                         "brew install pkg-config\n          # tmux")),
     ("removes the tmux version evidence",
      lambda t: t.replace("          tmux -V\n", "")),
     ("leaves no PostgreSQL job budget for cleanup",

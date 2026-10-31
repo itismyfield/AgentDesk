@@ -68,8 +68,8 @@ is fresh or resumed.
 
 ## Long-running and CI
 
-Headless callers (CI agents, batch probes, voice barge-in) can produce
-long-running Codex turns. The policy for these:
+Headless callers (CI agents, batch probes) can produce long-running Codex
+turns. The policy for these:
 
 - Streaming callers (`execute_command_streaming` -> direct headless / wrapper
   fallback / ProcessBackend) already propagate the dispatch `CancelToken`
@@ -90,12 +90,6 @@ long-running Codex turns. The policy for these:
     `execute_command_simple` call. Per this policy it must be reimplemented
     to thread a `CancelToken` and kill the child on timeout (mirror
     `provider_exec::execute_simple_with_timeout`).
-  - Voice barge-in, voice channel text replies, and the background voice
-    summary path call `execute_command_simple_with_model` and rely on
-    `tokio::time::timeout` around `spawn_blocking`, which does not abort
-    the spawned Codex child. These call sites must migrate to the
-    cancellable entrypoint before `execute_command_simple_with_timeout` is
-    fixed, otherwise they will silently keep using the unsafe helper.
 - Headless CI / non-interactive batch use cases route through one of the
   two entrypoints above. There is no separate "headless CI" runtime kind:
   CI is a *caller*, not a runtime. CI-specific behavior (no TTY, fixed

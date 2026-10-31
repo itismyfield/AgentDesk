@@ -2,7 +2,7 @@
 //!
 //! Moved from the post-finalizer terminal delivery block of `spawn_turn_bridge`:
 //! cancel/prompt-too-long/recovery/empty-response delivery, bridge terminal
-//! delivery lease commits, terminal-controller cutover, voice completion,
+//! delivery lease commits, terminal-controller cutover,
 //! TUI completion gate, dispatch completion/fail, watcher-delivered mark,
 //! `tv_done`, and terminal status readiness.
 use super::output_lifecycle::BridgeOutputOwner;
@@ -238,7 +238,7 @@ pub(super) async fn run_terminal_outcome_delivery(
     let mut epilogue_response = None;
     if already_receipted {
         (terminal_delivery_committed, terminal_body_visible) = (true, true);
-        epilogue_response = Some((full_response.clone(), full_response.clone()));
+        epilogue_response = Some(full_response.clone());
     } else if !may_publish {
         bridge_should_emit_completion = false;
     } else if cancelled || is_prompt_too_long {
@@ -874,9 +874,9 @@ pub(super) async fn run_terminal_outcome_delivery(
             }
         }
 
-        epilogue_response = Some((delivery_response, spoken_delivery_response));
+        epilogue_response = Some(delivery_response);
     }
-    if let Some((delivery_response, spoken_delivery_response)) = epilogue_response {
+    if let Some(delivery_response) = epilogue_response {
         handle_delivery_epilogue(
             DeliveryEpilogueMessage::PostCommit,
             DeliveryEpilogueContext {
@@ -891,12 +891,9 @@ pub(super) async fn run_terminal_outcome_delivery(
                 adk_cwd: &adk_cwd,
                 dispatch_id: &dispatch_id,
                 turn_id: &turn_id,
-                user_text_owned: &user_text_owned,
                 full_response: &full_response,
                 delivery_response: &delivery_response,
-                spoken_delivery_response: &spoken_delivery_response,
                 cancelled,
-                is_prompt_too_long,
                 transport_error,
                 provider_failure,
                 recovery_retry,

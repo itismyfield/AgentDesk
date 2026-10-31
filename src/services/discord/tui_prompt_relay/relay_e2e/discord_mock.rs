@@ -721,7 +721,6 @@ pub(in crate::services::discord) async fn serenity_context_over(
             shard_index: 0,
             shard_init: 0,
             shard_total: 1,
-            voice_manager: None,
             ws_url: ws_url.clone(),
             cache: cache.clone(),
             http: http.clone(),
@@ -748,7 +747,6 @@ pub(in crate::services::discord) async fn serenity_context_over(
         framework: Some(Arc::new(NoopFramework)),
         manager,
         shard,
-        voice_manager: None,
         cache: cache.clone(),
         http: http.clone(),
     });

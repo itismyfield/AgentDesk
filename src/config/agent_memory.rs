@@ -13,23 +13,13 @@ pub struct AgentDef {
     pub name: String,
     #[serde(default)]
     pub name_ko: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub aliases: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wake_word: Option<String>,
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
-    pub voice_enabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sensitivity_mode: Option<BargeInSensitivity>,
-    #[serde(default, skip_serializing_if = "AgentVoiceConfig::is_default")]
-    pub voice: AgentVoiceConfig,
     #[serde(default = "default_provider")]
     pub provider: String,
     #[serde(default, skip_serializing_if = "AgentChannels::is_empty")]
     pub channels: AgentChannels,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keywords: Vec<String>,
-    /// Peer discovery terms, separate from the voice aliases in keywords.
+    /// Peer discovery terms, separate from `keywords`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub peer_keywords: Vec<String>,
     #[serde(default = "default_true", skip_serializing_if = "is_true")]

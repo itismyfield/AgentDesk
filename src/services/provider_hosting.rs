@@ -404,8 +404,7 @@ pub fn provider_tui_hosting_driver_available(provider: &ProviderKind) -> bool {
 mod tests {
     use super::*;
     use crate::config::{
-        AgentChannel, AgentChannelConfig, AgentChannels, AgentDef, AgentVoiceConfig, Config,
-        ProviderConfig,
+        AgentChannel, AgentChannelConfig, AgentChannels, AgentDef, Config, ProviderConfig,
     };
 
     #[test]
@@ -895,11 +894,6 @@ mod tests {
             id: "adk-dashboard-e2e".to_string(),
             name: "ADK Dashboard E2E".to_string(),
             name_ko: None,
-            aliases: Vec::new(),
-            wake_word: None,
-            voice_enabled: true,
-            sensitivity_mode: None,
-            voice: AgentVoiceConfig::default(),
             provider: "codex".to_string(),
             channels: AgentChannels::new().with(
                 "claude",
@@ -924,11 +918,6 @@ mod tests {
             id: "adk-dashboard-e2e".to_string(),
             name: "ADK Dashboard E2E".to_string(),
             name_ko: None,
-            aliases: Vec::new(),
-            wake_word: None,
-            voice_enabled: true,
-            sensitivity_mode: None,
-            voice: AgentVoiceConfig::default(),
             provider: "codex".to_string(),
             channels: AgentChannels::new().with(
                 "claude",

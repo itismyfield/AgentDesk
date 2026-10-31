@@ -234,7 +234,7 @@ pub(super) async fn do_finalize_with_probe(
     // the live active turn, so `removed_token` is `None` — a DIFFERENT (newer)
     // turn owns the channel. Running these would clear the newer turn's
     // watchdog override, drop its `dispatch_thread_parents` / `dispatch_role_
-    // overrides`, and drain its voice deferrals, corrupting a turn this stale
+    // overrides`, corrupting a turn this stale
     // terminal does not own (Codex P2). So when the guard was used and missed,
     // skip the channel cleanup entirely — exactly as we already skip the token
     // release and counter decrement. (An id-0 orphan keeps today's behaviour.)
@@ -256,7 +256,6 @@ pub(super) async fn do_finalize_with_probe(
                     active_turn_nonce: active_snapshot.active_turn_nonce.clone(),
                     observed_before: std::time::Instant::now(),
                     allow_completion_cleanup: ctx.allow_completion_cleanup,
-                    drain_voice: ctx.drain_voice,
                     terminal_was_cancel: matches!(event, TerminalEvent::Cancel),
                 },
             );
@@ -299,9 +298,9 @@ pub(super) async fn do_finalize_with_probe(
         relay_owner_kind,
     );
 
-    let has_pending_after_voice = if mute_settlement {
+    let has_pending = if mute_settlement {
         // A successor can be admitted after the operator CAS. Preserve its
-        // channel-scoped routing, watchdog and voice state.
+        // channel-scoped routing and watchdog state.
         finish.has_pending
     } else if guarded_finish_missed {
         // No-op finalize on a stale terminal: leave the live newer turn's
@@ -318,16 +317,7 @@ pub(super) async fn do_finalize_with_probe(
         //     Moved here so they cannot diverge between the routed paths.
         super::cleanup::kick_thread_parents_after_turn_release(shared, &provider, channel_id).await;
 
-        let voice_deferred_enqueued = if ctx.drain_voice {
-            shared
-                .voice_barge_in
-                .drain_deferred_after_turn(shared, &provider, channel_id)
-                .await
-        } else {
-            false
-        };
-        let has_pending_after_voice = finish.has_pending || voice_deferred_enqueued;
-        if !has_pending_after_voice {
+        if !finish.has_pending {
             super::cleanup::remove_owned_role_override(shared, channel_id, owned_role_override);
         }
 
@@ -341,11 +331,11 @@ pub(super) async fn do_finalize_with_probe(
             shared,
             &provider,
             channel_id,
-            has_pending_after_voice,
+            finish.has_pending,
             "turn_finalizer_mailbox_release",
         )
         .await;
-        has_pending_after_voice
+        finish.has_pending
     };
 
     // (F) relay-miss observability — emitted from inside the finalizer so the
@@ -360,14 +350,14 @@ pub(super) async fn do_finalize_with_probe(
             "relay_miss_finalized",
             serde_json::json!({
                 "removed_token": finish.removed_token.is_some(),
-                "has_pending": has_pending_after_voice,
+                "has_pending": has_pending,
             }),
         );
     }
 
     FinalizeOutcome::Finalized {
         removed_token: finish.removed_token,
-        has_pending: has_pending_after_voice,
+        has_pending,
         mailbox_online: finish.mailbox_online,
     }
 }

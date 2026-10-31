@@ -122,11 +122,10 @@ jobs:
 
       # #6006: three macOS failures reported `start tmux fixture: ... NotFound`.
       # `tmux -V` is direct provisioning evidence in the log, not an assumption.
-      - name: Install Opus on macOS
+      - name: Install tmux on macOS
         run: |
-          brew install opus pkg-config tmux
+          brew install tmux
           tmux -V
-          echo "PKG_CONFIG_PATH=$(brew --prefix opus)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
 
       - name: Setup sccache
         if: runner.os != 'macOS'

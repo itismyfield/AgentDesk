@@ -51,7 +51,6 @@ fn input(id: u64, text: &str) -> Intervention {
         has_reply_boundary: false,
         merge_consecutive: false,
         pending_uploads: Vec::new(),
-        voice_announcement: None,
     }
 }
 
@@ -64,7 +63,6 @@ struct Overlap {
     registry: Arc<HealthRegistry>,
     text: Arc<Text>,
     gateway: tokio::task::JoinHandle<()>,
-    _voice: tempfile::TempDir,
     _switches: herdr::LiveSwitches,
 }
 
@@ -114,16 +112,10 @@ impl Overlap {
             discord_mock::start(discord_mock::DiscordMockState::new()).await;
         let rest = format!("http://127.0.0.1:{}", api.port);
         let ctx = discord_mock::serenity_context(rest, gateway_url).await;
-        let voice = tempfile::tempdir().unwrap();
-        let mut voice_config = crate::voice::VoiceConfig::default();
-        voice_config.audio.recordings_dir = voice.path().to_path_buf();
-        voice_config.keep_recordings = true;
         let data = Data {
             shared: shared.clone(),
             token: "c2-clear-overlap".into(),
             provider,
-            voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
-            voice_config,
         };
         Self {
             db,
@@ -132,7 +124,6 @@ impl Overlap {
             registry,
             text: Arc::new(Text { api, ctx, data }),
             gateway,
-            _voice: voice,
             _switches: switches,
         }
     }

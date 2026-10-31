@@ -18,8 +18,6 @@ pub(super) async fn run_bot_start_gateway_runtime(
     health_registry_for_client_start: Arc<health::HealthRegistry>,
     api_port: u16,
     shared: Arc<SharedData>,
-    voice_config: crate::voice::VoiceConfig,
-    voice_receiver: crate::voice::VoiceReceiver,
     gateway_lease: Option<crate::db::postgres::AdvisoryLockLease>,
     gateway_waiter: Option<GatewayWaiterGuard>,
     handback_breaker: GatewayHandbackBreaker,
@@ -48,8 +46,6 @@ pub(super) async fn run_bot_start_gateway_runtime(
 
     let token_owned = token.to_string();
     let shared_clone = shared.clone();
-    let voice_config_for_setup = voice_config.clone();
-    let voice_receiver_for_setup = voice_receiver.clone();
 
     let slash_commands = run_bot_build_slash_commands();
     let framework = poise::Framework::builder()
@@ -59,8 +55,6 @@ pub(super) async fn run_bot_start_gateway_runtime(
             let health_registry_for_setup = health_registry.clone();
             let provider_for_setup = provider_for_framework.clone();
             let token_for_ready = token_owned.clone();
-            let voice_config_for_setup = voice_config_for_setup.clone();
-            let voice_receiver_for_setup = voice_receiver_for_setup.clone();
             Box::pin(run_bot_framework_setup(
                 ctx,
                 _ready,
@@ -71,8 +65,6 @@ pub(super) async fn run_bot_start_gateway_runtime(
                 provider_for_setup,
                 token_for_ready,
                 token_owned,
-                voice_config_for_setup,
-                voice_receiver_for_setup,
                 startup_reconcile_remaining,
                 startup_doctor_started,
                 api_port,
@@ -82,7 +74,7 @@ pub(super) async fn run_bot_start_gateway_runtime(
 
     let intents = discord_gateway_intents();
 
-    let client = commands::register_songbird(serenity::ClientBuilder::new(token, intents))
+    let client = serenity::ClientBuilder::new(token, intents)
         .framework(framework)
         .await
         .expect("Failed to create Discord client");

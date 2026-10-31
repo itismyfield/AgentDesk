@@ -176,7 +176,6 @@ async fn rest_queue_rejected_by_changed_policy_keeps_durable_head_and_lease_free
         has_reply_boundary: false,
         merge_consecutive: false,
         pending_uploads: Vec::new(),
-        voice_announcement: None,
     };
     shared
         .mailbox(channel)

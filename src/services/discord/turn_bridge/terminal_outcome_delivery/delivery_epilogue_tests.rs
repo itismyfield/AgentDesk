@@ -270,12 +270,10 @@ async fn terminal_delivery_epilogue_routes_identity_mismatch_to_warn() {
     let gateway: Arc<dyn TurnGateway> = Arc::new(NoopGateway);
     let full_response = "delivered body".to_string();
     let delivery_response = full_response.clone();
-    let spoken_delivery_response = full_response.clone();
     let adk_session_key = None;
     let adk_cwd = None;
     let dispatch_id = None;
     let turn_id = "terminal-delivery-epilogue-test".to_string();
-    let user_text = "user prompt".to_string();
     let mut response_sent_offset = 0;
     let mut terminal_full_replay_cleanup_msg_ids = Vec::new();
     let mut bridge_should_emit_completion = false;
@@ -306,12 +304,9 @@ async fn terminal_delivery_epilogue_routes_identity_mismatch_to_warn() {
             adk_cwd: &adk_cwd,
             dispatch_id: &dispatch_id,
             turn_id: &turn_id,
-            user_text_owned: &user_text,
             full_response: &full_response,
             delivery_response: &delivery_response,
-            spoken_delivery_response: &spoken_delivery_response,
             cancelled: false,
-            is_prompt_too_long: false,
             transport_error: false,
             provider_failure: false,
             recovery_retry: false,
@@ -1018,17 +1013,8 @@ async fn driver_publish_panic_unwinds_and_leaves_the_watcher_unmarked_5191() {
 /// call): the publish resolves on poll 2, and the single post-success
 /// non-completing drop point is poll 2 — the epilogue's stale-prefix drain.
 ///
-/// MEASURED CONSTRAINT (#5191 U7). A spin-polled task cannot resolve the
-/// epilogue's voice-completion lookup: `voice_channel_for_background` awaits
-/// `cached_config`, which awaits a `tokio::task::spawn_blocking` config load
-/// that never resolves while the polling task itself monopolises the
-/// current-thread runtime. The sweep therefore drives the production shape that
-/// skips it — a turn with no anchored user message, which the epilogue already
-/// documents as a real recovery shape ("A recovery turn with no anchored user
-/// message (user_msg_id == 0) is never a voice turn"). This is an ordinary
-/// production input, not a test-only bypass: the publish, the stale-prefix
-/// drain and the post-commit marker store all still run. The `.await`-driven
-/// tests above cover the anchored-user-message shape.
+/// The sweep drives a recovery turn with no anchored user message; the
+/// `.await`-driven tests above cover the anchored-user-message shape.
 #[tokio::test]
 async fn driver_drop_sweep_measures_the_current_marker_at_every_suspension_5191() {
     let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);

@@ -37,7 +37,6 @@ async fn a_clear_superseded_restore_owner_consumes_protected_instead_of_retrying
         has_reply_boundary: false,
         merge_consecutive: false,
         pending_uploads: Vec::new(),
-        voice_announcement: None,
     };
     let mailbox = shared.mailbox(channel);
     assert!(

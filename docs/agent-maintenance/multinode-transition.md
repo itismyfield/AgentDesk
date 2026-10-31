@@ -1,5 +1,7 @@
 # Multinode Transition
 
+<!-- doc-path-refs: removed src/services/discord/commands/voice.rs src/services/discord/voice_barge_in/progress_playback.rs src/services/discord/voice_lifecycle.rs src/voice/cancel_tombstone.rs src/voice/metrics.rs src/voice/receiver.rs src/voice/tts/edge.rs -->
+
 > Last refreshed: 2026-08-15 (against #5071 T2-W S-W3 intake-delivery sweep).
 
 ### Audited touches

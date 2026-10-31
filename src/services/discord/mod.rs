@@ -24,7 +24,7 @@ mod footer_retirement;
 mod footer_view_reconciler;
 pub(crate) mod formatting;
 mod gateway;
-mod gateway_voice_queue;
+mod gateway_queue_owner;
 pub(crate) mod health;
 pub(crate) mod host_defer_gate;
 pub(crate) mod host_key_derivation;
@@ -193,14 +193,6 @@ mod turn_bridge;
 mod turn_finalizer;
 pub(crate) mod turn_lease;
 mod turn_view_reconciler;
-mod voice_acknowledgement;
-mod voice_background_driver;
-mod voice_barge_in;
-mod voice_config_cache;
-mod voice_id_sequences;
-mod voice_lifecycle;
-mod voice_routing;
-mod voice_sensitivity;
 #[path = "watchers/lifecycle_decision.rs"]
 mod watcher_lifecycle_decision;
 pub(crate) mod zombie_foreground_release; // #5176 cancel/mailbox-release authority
@@ -377,6 +369,9 @@ pub(super) const DISCORD_MSG_LIMIT: usize = 2000;
 #[cfg(test)]
 pub(in crate::services::discord) use synthetic_headless_message_id::SYNTHETIC_HEADLESS_MESSAGE_ID_FLOOR;
 pub(in crate::services::discord) use synthetic_headless_message_id::is_synthetic_headless_message_id_raw;
+pub(in crate::services::discord) use synthetic_headless_message_id::{
+    INTERNAL_MESSAGE_ID_START, is_internal_message_id,
+};
 const UPLOAD_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const UPLOAD_MAX_AGE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
 const SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60); // 1 hour
@@ -998,13 +993,6 @@ pub(crate) struct SharedData {
     /// Field declarations and docs live on `shared_state::DispatchRoutingState`;
     /// call sites access the members via `shared.dispatch.<original field name>`.
     pub(super) dispatch: DispatchRoutingState,
-    /// Runtime bridge from songbird receive events and STT transcript sidecars
-    /// into live playback cuts, explicit-stop cancellation, and deferred prompts.
-    pub(in crate::services::discord) voice_barge_in: Arc<voice_barge_in::VoiceBargeInRuntime>,
-    /// Persistent mapping from Discord voice channel IDs to their text control
-    /// channels so voice turns can enter the same Kanban/session routing path
-    /// as typed Discord turns.
-    pub(in crate::services::discord) voice_pairings: Arc<voice_routing::VoiceChannelPairingStore>,
     /// Set to true after Discord gateway ready event fires.
     pub(super) bot_connected: std::sync::atomic::AtomicBool,
     /// ISO 8601 timestamp of the last completed turn (for health reporting).
@@ -1313,8 +1301,6 @@ pub(super) fn make_shared_data_for_tests_with_storage(
             thread_parents: dashmap::DashMap::new(),
             role_overrides: dashmap::DashMap::new(),
         },
-        voice_barge_in: Arc::new(voice_barge_in::VoiceBargeInRuntime::disabled()),
-        voice_pairings: Arc::new(voice_routing::VoiceChannelPairingStore::load_default()),
         bot_connected: std::sync::atomic::AtomicBool::new(false),
         last_turn_at: std::sync::Mutex::new(None),
         overrides: SessionOverrideState {
@@ -1361,22 +1347,7 @@ async fn mailbox_snapshot(shared: &SharedData, channel_id: ChannelId) -> Channel
 }
 
 mod mailbox_stop;
-pub(crate) use mailbox_stop::mailbox_cancel_active_turn_if_handoff_user_message_with_reason;
-use mailbox_stop::{mailbox_cancel_active_turn, mailbox_cancel_active_turn_with_reason};
-
-/// #2374 Codex round-1 fix (HIGH-2) — record the voice handoff
-/// cancel-tombstone unconditionally when a cancel is observed for a
-/// known `handoff_message_id`. The original PR only recorded a
-/// tombstone when the target mailbox cancel returned a live token,
-/// missing the cases where the target turn had not yet started (intake
-/// race) or had already finalized. In both cases a later retry for the
-/// same handoff must still observe the tombstone and discard itself.
-pub(crate) fn record_voice_handoff_cancel_tombstone(
-    handoff_message_id: MessageId,
-    reason: impl Into<String>,
-) {
-    crate::voice::cancel_tombstone::global_store().record(handoff_message_id, reason);
-}
+use mailbox_stop::mailbox_cancel_active_turn;
 
 fn infer_inflight_tmux_session_for_channel(channel_id: ChannelId) -> Option<String> {
     [
@@ -1674,7 +1645,6 @@ mod queue_exit_feedback_reconciler_tests {
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         }
     }
 
@@ -2030,7 +2000,6 @@ pub(in crate::services::discord) async fn enqueue_internal_followup(
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         },
     )
     .await;
@@ -2274,7 +2243,6 @@ mod followup_retry_requeue_tests {
                     "attachment-b",
                 ),
             ],
-            None,
             preserve_on_cancel,
         );
         state
@@ -2338,7 +2306,6 @@ mod followup_retry_requeue_tests {
                     )
                 ]
             );
-            assert!(intervention.voice_announcement.is_none());
         });
     }
 
@@ -2427,7 +2394,6 @@ mod followup_retry_requeue_tests {
                 has_reply_boundary: false,
                 merge_consecutive: false,
                 pending_uploads: Vec::new(),
-                voice_announcement: None,
             };
             mailbox_enqueue_intervention(&shared, &provider, channel_id, later.clone()).await;
 
@@ -2565,8 +2531,6 @@ pub(super) struct Data {
     pub(super) shared: Arc<SharedData>,
     pub(super) token: String,
     pub(super) provider: ProviderKind,
-    pub(super) voice_config: crate::voice::VoiceConfig,
-    pub(super) voice_receiver: crate::voice::VoiceReceiver,
 }
 
 pub(super) fn mark_reconcile_complete(shared: &SharedData) {
@@ -2744,7 +2708,6 @@ mod idle_queue_background_supersede_tests {
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         }
     }
 

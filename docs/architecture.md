@@ -103,7 +103,7 @@ Turn bridge decomposition anchors:
   response auto-retry/recovery, late response shaping, and silent-turn delivery
   lease commit.
 - `turn_bridge/terminal_outcome_delivery/delivery_epilogue.rs` — post-commit
-  voice/TUI completion, dispatch completion/failure, watcher-delivered mark,
+  TUI completion, dispatch completion/failure, watcher-delivered mark,
   `tv_done`, and terminal status readiness.
 
 ### 2. Session + Provider Runtime (`src/services/`, `src/dispatch/`)

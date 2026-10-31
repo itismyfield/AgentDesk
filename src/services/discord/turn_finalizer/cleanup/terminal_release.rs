@@ -90,8 +90,7 @@ pub(in crate::services::discord) async fn release_restored_watcher_active_turn_b
     // claimed yet, since a follow-up needs cancel_token.is_none() which this
     // release just produced), so it cannot clobber a follow-up's channel state.
     // Mirrors the finalizer non-miss branch (finalize.rs D-section) and the
-    // recovery release bundle (health/recovery.rs); voice drain is omitted
-    // because the watcher finalize path sets drain_voice=false.
+    // recovery release bundle (health/recovery.rs).
     token.cancelled.store(true, Ordering::Relaxed);
     crate::services::discord::saturating_decrement_global_active(shared);
 

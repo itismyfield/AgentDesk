@@ -710,7 +710,6 @@ async fn recovery_first_timeout_requeues_original_input_and_unwinds_only_its_act
         true,
         false,
         Vec::new(),
-        None,
         true,
     );
     assert!(

@@ -1,4 +1,3 @@
-use crate::voice::{VoiceConfig, barge_in::BargeInSensitivity};
 use anyhow::{Context, Result};
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
@@ -76,8 +75,6 @@ pub struct Config {
     pub discord: DiscordConfig,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub providers: BTreeMap<String, ProviderConfig>,
-    #[serde(default, skip_serializing_if = "VoiceConfig::is_default")]
-    pub voice: VoiceConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -347,46 +344,6 @@ where
                 .collect::<Vec<_>>()
         }),
     )
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct AgentVoiceConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub channel_id: Option<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "AgentVoiceForegroundConfig::is_default"
-    )]
-    pub foreground: AgentVoiceForegroundConfig,
-}
-
-impl AgentVoiceConfig {
-    pub fn is_default(&self) -> bool {
-        self.channel_id.as_deref().unwrap_or("").trim().is_empty() && self.foreground.is_default()
-    }
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct AgentVoiceForegroundConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_chars: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout_ms: Option<u64>,
-}
-
-impl AgentVoiceForegroundConfig {
-    pub fn is_default(&self) -> bool {
-        self.provider.as_deref().unwrap_or("").trim().is_empty()
-            && self.model.as_deref().unwrap_or("").trim().is_empty()
-            && self.max_chars.is_none()
-            && self.timeout_ms.is_none()
-    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -1691,6 +1648,30 @@ mod runtime_hook_registry_config_tests {
         );
     }
 
+    // Deployed yaml may still carry the removed voice section and per-agent voice keys.
+    #[test]
+    fn retired_voice_keys_load_on_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agentdesk.yaml");
+        std::fs::write(
+            &path,
+            concat!(
+                "server: {}\nvoice: {enabled: true, lobby_channel_id: '1'}\n",
+                "agents:\n  - id: a\n    name: A\n    aliases: [x]\n    wake_word: w\n",
+                "    voice_enabled: false\n    sensitivity_mode: conservative\n    voice: {channel_id: '2'}\n",
+                "    channels:\n      claude: {id: '41'}\n",
+            ),
+        )
+        .unwrap();
+        let loaded = load_from_path(&path).expect("retired voice keys must not fail config load");
+        assert_eq!(loaded.agents.len(), 1);
+        assert!(
+            !render_config_for_path(&path, &loaded)
+                .unwrap()
+                .contains("voice")
+        );
+    }
+
     #[test]
     fn intake_delivery_sweep_cutoffs_clamp_before_chrono_conversion() {
         let runtime = RuntimeSettingsConfig {
@@ -2451,7 +2432,6 @@ impl Default for Config {
             server: ServerConfig::default(),
             discord: DiscordConfig::default(),
             providers: std::collections::BTreeMap::new(),
-            voice: VoiceConfig::default(),
             shared_prompt: None,
             mcp_servers: std::collections::BTreeMap::new(),
             review_mcp_allowlist: Vec::new(),

@@ -137,7 +137,6 @@ pub(super) struct LiveText<'a> {
     pub(super) reply_context: Option<&'a str>,
     pub(super) has_reply_boundary: bool,
     pub(super) uploads: &'a [crate::services::cluster::attachment_transfer::uploads::Upload],
-    pub(super) voice_announcement: Option<&'a crate::voice::prompt::VoiceTranscriptAnnouncement>,
     pub(super) merge_consecutive: bool,
 }
 
@@ -154,12 +153,6 @@ fn offerable(live: &LiveText<'_>, shared: &SharedData) -> bool {
 
 fn readiness(live: &LiveText<'_>) -> Option<&'static str> {
     use crate::services::cluster::attachment_transfer::uploads::Upload;
-    if live.voice_announcement.is_some()
-        || crate::voice::prompt::is_readable_voice_transcript_announcement(live.text)
-        || crate::voice::prompt::is_voice_transcript_announcement_candidate(live.text)
-    {
-        return Some("voice_claim_deferred");
-    }
     let completed: u64 = live
         .uploads
         .iter()

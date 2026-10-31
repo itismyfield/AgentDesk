@@ -31,7 +31,7 @@ pub(super) fn payload_snapshot(
             "source_message_queued_generations": sources, "source_text_segments": segments,
             "text": item.text, "mode": format!("{:?}", item.mode), "reply_context": item.reply_context,
             "has_reply_boundary": item.has_reply_boundary, "merge_consecutive": item.merge_consecutive,
-            "pending_uploads": item.pending_uploads, "voice_announcement": item.voice_announcement,
+            "pending_uploads": item.pending_uploads,
         }))
     }).collect()
 }

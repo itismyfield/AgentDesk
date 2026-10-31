@@ -64,4 +64,4 @@ pub use dispatch_status::{
     set_dispatch_status_on_pg_async, set_dispatch_status_with_backends,
 };
 pub(crate) use dispatch_summary::{summarize_dispatch_from_text, summarize_dispatch_result};
-pub use types::{DispatchCreateOptions, Source};
+pub use types::DispatchCreateOptions;
