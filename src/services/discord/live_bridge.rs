@@ -62,6 +62,7 @@ fn claude_enabled() -> bool {
 }
 
 fn configured_claude_enabled() -> bool {
+    // Disabling the guard lets watcher respawn take over a live original.
     crate::utils::env_flag("AGENTDESK_CLAUDE_LIVE_BRIDGE_GUARD", true)
 }
 

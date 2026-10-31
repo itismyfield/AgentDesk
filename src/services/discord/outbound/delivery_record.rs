@@ -1663,7 +1663,7 @@ mod tests {
             Some(raw) => unsafe { std::env::set_var(name, raw) },
             None => unsafe { std::env::remove_var(name) },
         }
-        rollout::resolve_flag(name, default)
+        rollout::resolve_env_flag(name, default)
     }
 
     fn resolve_shadow_flag(raw: Option<&str>) -> FlagResolution {

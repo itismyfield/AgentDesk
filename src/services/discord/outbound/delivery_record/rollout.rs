@@ -40,7 +40,7 @@ impl FlagResolution {
     }
 }
 
-pub(super) fn resolve_flag(name: &str, default: bool) -> FlagResolution {
+pub(super) fn resolve_env_flag(name: &str, default: bool) -> FlagResolution {
     let resolved = crate::services::settings::resolve_env_flag(name, default);
     if resolved.source == crate::services::settings::SettingSource::EnvOverride {
         FlagResolution::env_override(resolved.value)
@@ -62,7 +62,7 @@ fn delivery_record_shadow_resolution() -> FlagResolution {
     }
     static CACHED: OnceLock<FlagResolution> = OnceLock::new();
     *CACHED.get_or_init(|| {
-        let resolution = resolve_flag("AGENTDESK_DELIVERY_RECORD_SHADOW", false);
+        let resolution = resolve_env_flag("AGENTDESK_DELIVERY_RECORD_SHADOW", false);
         if resolution.enabled {
             tracing::info!(target: "agentdesk::services::discord::outbound::delivery_record","  ✓ delivery_record_shadow: enabled");
         }
@@ -96,7 +96,7 @@ fn delivery_record_authority_resolution() -> FlagResolution {
     }
     static CACHED: OnceLock<FlagResolution> = OnceLock::new();
     *CACHED.get_or_init(|| {
-        let resolution = resolve_flag("AGENTDESK_DELIVERY_RECORD_AUTHORITY", true);
+        let resolution = resolve_env_flag("AGENTDESK_DELIVERY_RECORD_AUTHORITY", true);
         if resolution.enabled {
             tracing::info!(target: "agentdesk::services::discord::outbound::delivery_record","  ✓ delivery_record_authority: enabled");
         }

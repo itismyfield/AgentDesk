@@ -37,6 +37,7 @@ pub(in crate::services::discord) fn enabled() -> bool {
     })
 }
 
+/// Default ON; standard false tokens disable the live panel.
 fn configured_enabled() -> bool {
     crate::utils::env_flag("AGENTDESK_SINGLE_MESSAGE_PANEL", true)
 }
