@@ -5,6 +5,7 @@ use std::path::Path;
 
 use poise::serenity_prelude::{ChannelId, MessageId};
 
+use super::closed_verdict::MailboxRefusal;
 use super::pending_queue_persistence::{
     load_channel_pending_dispatch_marker_checked, load_channel_pending_queue_checked,
     pending_queue_file_path, remove_channel_pending_dispatch_marker,
@@ -28,11 +29,44 @@ pub(super) fn dispatch(
     active: ActivePolicy,
     reply: super::closed_verdict::VerdictReply<ClearChannelResult>,
 ) {
+    let _ = reply.send(clear_and_signal(state, channel_id, persistence, active));
+}
+
+/// Clears the state and, unless a read-only queue refused it, frees turn-finished waiters.
+fn clear_and_signal(
+    state: &mut ChannelMailboxState,
+    channel_id: ChannelId,
+    persistence: QueuePersistenceContext,
+    active: ActivePolicy,
+) -> ClearChannelResult {
     let result = clear_channel_state(state, channel_id, persistence, active);
     if active == ActivePolicy::Release && !result.persistence.failed.contains(&"queue_read_only") {
         super::mark_turn_finished_signal_done(channel_id);
     }
-    let _ = reply.send(result);
+    result
+}
+
+impl super::ChannelMailboxRegistry {
+    /// Clears through the registered actor. With none, runs a new actor's clear on a scratch state
+    /// while the vacant entry blocks a racing spawn, so the files are cleared and no mailbox is minted.
+    pub(crate) async fn clear_without_spawn(
+        &self,
+        channel_id: ChannelId,
+        persistence: QueuePersistenceContext,
+    ) -> Result<(ClearChannelResult, Option<super::ChannelMailboxHandle>), MailboxRefusal> {
+        let handle = match self.handles.entry(channel_id) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
+            dashmap::mapref::entry::Entry::Vacant(_spawn_blocked) => {
+                let mut state =
+                    ChannelMailboxState::spawned(channel_id, self.fence_cell(channel_id));
+                let result =
+                    clear_and_signal(&mut state, channel_id, persistence, ActivePolicy::Release);
+                return Ok((result, None));
+            }
+        };
+        let result = handle.clear_or_refused(persistence).await?;
+        Ok((result, Some(handle)))
+    }
 }
 
 /// What a clear could not write: each write runs again once after a failure.
