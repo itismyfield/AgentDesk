@@ -18,7 +18,7 @@ pub fn env_flag(name: &str, default: bool) -> bool {
     }
 }
 
-fn parse_value(name: &str, value: &str, default: bool) -> bool {
+pub(super) fn parse_value(name: &str, value: &str, default: bool) -> bool {
     match value.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => true,
         "0" | "false" | "no" | "off" => false,
