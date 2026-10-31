@@ -410,13 +410,26 @@ pub(crate) async fn reconcile_boot_runtime(
     Ok(stats)
 }
 
+pub(crate) async fn reconcile_missing_queue_review_dispatches_pg(
+    pool: &PgPool,
+    engine: &PolicyEngine,
+) -> Result<usize> {
+    let recovered = refire_missing_review_dispatches_pg(pool, engine, true).await?;
+    if recovered > 0 {
+        tracing::info!(
+            recovered,
+            "[policy-tick] missing queue review dispatches recovered"
+        );
+    }
+    Ok(recovered)
+}
+
 pub(crate) async fn reconcile_completed_queue_review_drift_pg(
     pool: &PgPool,
     engine: &PolicyEngine,
 ) -> Result<usize> {
-    let refired = refire_missing_review_dispatches_pg(pool, engine, true).await?;
     let drift_candidates = completed_queue_review_drift_candidates_pg(pool).await?;
-    Ok(refired + recover_completed_queue_review_drift_pg(pool, engine, drift_candidates).await?)
+    recover_completed_queue_review_drift_pg(pool, engine, drift_candidates).await
 }
 
 pub(crate) async fn reconcile_dispatch_delivery_events_pg(
@@ -1139,8 +1152,7 @@ async fn reset_broken_auto_queue_entries_pg(pool: &PgPool) -> Result<usize> {
     .await?
     .rows_affected() as usize;
 
-    let reset = sqlx::query(
-        "UPDATE auto_queue_entries e
+    let sql = "UPDATE auto_queue_entries e
          SET status = 'pending',
              dispatch_id = NULL,
              slot_index = NULL,
@@ -1175,13 +1187,15 @@ async fn reset_broken_auto_queue_entries_pg(pool: &PgPool) -> Result<usize> {
                SELECT 1
                FROM task_dispatches td
                WHERE td.id = e.dispatch_id
-                 AND td.status NOT IN ('cancelled', 'failed')
+                 AND (td.status NOT IN ('cancelled', 'failed', 'completed')
+                      OR (td.status = 'completed' AND td.dispatch_type IN ('implementation', 'rework')))
              )
-           )",
-    )
-    .execute(pool)
-    .await?
-    .rows_affected() as usize;
+           )";
+    #[cfg(test)]
+    let mutated_sql = dispatch_delivery_reconcile_tests::mutate_queue_recovery_sql(sql);
+    #[cfg(test)]
+    let sql = mutated_sql.as_str();
+    let reset = sqlx::query(sql).execute(pool).await?.rows_affected() as usize;
 
     Ok(terminalized + reset)
 }
@@ -1437,10 +1451,10 @@ async fn missing_review_dispatch_candidates_pg(
     pool: &PgPool,
     only_dispatched_queue: bool,
 ) -> Result<Vec<ReviewDispatchCandidate>> {
-    sqlx::query_as(
-        "SELECT c.id, c.status, c.repo_id, c.assigned_agent_id
+    let sql = "SELECT c.id, c.status, c.repo_id, c.assigned_agent_id
          FROM kanban_cards c
          WHERE c.status NOT IN ('done', 'backlog', 'ready')
+           AND (NOT $1 OR COALESCE(c.review_status, 'reviewing') = 'reviewing')
            AND (NOT $1 OR EXISTS (
                SELECT 1 FROM auto_queue_entries e
                JOIN auto_queue_runs r ON r.id = e.run_id
@@ -1467,13 +1481,17 @@ async fn missing_review_dispatch_candidates_pg(
                WHERE td.kanban_card_id = c.id
                  AND td.dispatch_type IN ('review', 'review-decision')
                  AND td.status IN ('pending', 'dispatched')
-           )",
-    )
-    .bind(only_dispatched_queue)
-    .bind(AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_GRACE.as_secs() as i64)
-    .fetch_all(pool)
-    .await
-    .map_err(anyhow::Error::from)
+           )";
+    #[cfg(test)]
+    let mutated_sql = dispatch_delivery_reconcile_tests::mutate_queue_recovery_sql(sql);
+    #[cfg(test)]
+    let sql = mutated_sql.as_str();
+    sqlx::query_as(sql)
+        .bind(only_dispatched_queue)
+        .bind(AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_GRACE.as_secs() as i64)
+        .fetch_all(pool)
+        .await
+        .map_err(anyhow::Error::from)
 }
 
 async fn refire_missing_review_dispatches_pg(
@@ -1656,8 +1674,43 @@ async fn active_review_dispatch_exists_pg(pool: &PgPool, card_id: &str) -> Resul
 }
 
 #[cfg(test)]
+pub(crate) use dispatch_delivery_reconcile_tests::queue_recovery_mutant_is;
+
+#[cfg(test)]
 mod dispatch_delivery_reconcile_tests {
     use super::*;
+
+    pub(crate) fn queue_recovery_mutant_is(name: &str) -> bool {
+        std::env::var("AGENTDESK_TEST_QUEUE_RECOVERY_MUTANT").as_deref() == Ok(name)
+    }
+
+    pub(super) fn mutate_queue_recovery_sql(sql: &str) -> String {
+        let mut query = sql.to_string();
+        for (mode, from, to) in [
+            (
+                "manual_wait",
+                "AND (NOT $1 OR COALESCE(c.review_status, 'reviewing') = 'reviewing')",
+                "AND TRUE",
+            ),
+            (
+                "drop_impl_preservation",
+                "OR (td.status = 'completed' AND td.dispatch_type IN ('implementation', 'rework'))",
+                "",
+            ),
+            (
+                "preserve_all_completed",
+                "td.status NOT IN ('cancelled', 'failed', 'completed')",
+                "td.status NOT IN ('cancelled', 'failed')",
+            ),
+        ] {
+            if queue_recovery_mutant_is(mode) && query.contains(from) {
+                query = query.replace(from, to);
+                eprintln!("MUTANT_APPLIED={mode}");
+            }
+        }
+        query
+    }
+
     use std::{
         io::{self, Write},
         sync::{Arc, Mutex},

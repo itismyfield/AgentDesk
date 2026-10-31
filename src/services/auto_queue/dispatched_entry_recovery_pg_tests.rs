@@ -147,7 +147,10 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
             pool.num_idle(),
             pool.is_closed()
         );
-        crate::server::fire_five_min_policy_hook_for_test(&pool, &engine)
+        crate::reconcile::reconcile_missing_queue_review_dispatches_pg(&pool, &engine)
+            .await
+            .unwrap();
+        crate::reconcile::reconcile_completed_queue_review_drift_pg(&pool, &engine)
             .await
             .unwrap();
         for name in ["completed", "pr", "orphan-pr", "null-age", "review-orphan"] {
@@ -399,7 +402,7 @@ async fn periodic_queue_review_recovery_preserves_operator_wait_pg() {
             .bind(status).execute(&pool).await.unwrap();
     }
     for _ in 0..2 {
-        crate::server::fire_five_min_policy_hook_for_test(&pool, &engine)
+        crate::server::run_five_min_policy_tiers_for_test(&pool, &engine)
             .await
             .unwrap();
         let after: (String, String, i64, i64) = sqlx::query_as(
@@ -438,7 +441,7 @@ async fn periodic_queue_review_recovery_precedes_orphan_timeout_pg() {
     seed_agent_pg(&pool).await;
     seed_completed_queue_work(&pool, "old-orphan", "implementation", "review").await;
     for _ in 0..2 {
-        crate::server::fire_five_min_policy_hook_for_test(&pool, &engine)
+        crate::server::run_five_min_policy_tiers_for_test(&pool, &engine)
             .await
             .unwrap();
         let state: (String, Option<String>, i64) = sqlx::query_as(

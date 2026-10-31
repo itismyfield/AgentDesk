@@ -677,18 +677,14 @@ async fn policy_tick_loop(
 }
 
 #[cfg(test)]
-pub(crate) async fn fire_five_min_policy_hook_for_test(
+pub(crate) async fn run_five_min_policy_tiers_for_test(
     pool: &PgPool,
     engine: &PolicyEngine,
 ) -> Result<()> {
-    fire_tick_hook_by_name_with_pg(
-        engine,
-        Some(pool),
-        &mut policy_tick_logging::TickLogging::default(),
-        "OnTick5min",
-        "5min",
-    )
-    .await;
+    let mut logging = policy_tick_logging::TickLogging::default();
+    for (hook, label) in [("OnTick1min", "1min"), ("OnTick5min", "5min")] {
+        fire_tick_hook_by_name_with_pg(engine, Some(pool), &mut logging, hook, label).await;
+    }
     crate::reconcile::reconcile_completed_queue_review_drift_pg(pool, engine).await?;
     Ok(())
 }
@@ -700,6 +696,19 @@ async fn fire_tick_hook_by_name_with_pg(
     hook_name: &str,
     label: &str,
 ) {
+    #[cfg(not(test))]
+    let recovery_after_timeout = false;
+    #[cfg(test)]
+    let recovery_after_timeout = crate::reconcile::queue_recovery_mutant_is("timeout_first");
+    // The orphan review timeout runs on the one-minute tier, including five-minute cycles.
+    if hook_name == "OnTick1min"
+        && !recovery_after_timeout
+        && let Some(pool) = pg_pool.or_else(|| engine.pg_pool())
+        && let Err(error) =
+            crate::reconcile::reconcile_missing_queue_review_dispatches_pg(pool, engine).await
+    {
+        tracing::warn!("[policy-tick] missing queue review dispatch reconcile failed: {error}");
+    }
     let execution =
         fire_tick_hook_by_name_with_timeout(engine, hook_name, label, POLICY_TICK_HOOK_TIMEOUT)
             .await;
@@ -707,6 +716,16 @@ async fn fire_tick_hook_by_name_with_pg(
         record_tick_hook_execution_pg(pool, tick_logging, label, &execution).await;
     }
     crate::kanban::drain_hook_side_effects_with_backends(engine);
+    #[cfg(test)]
+    if hook_name == "OnTick1min" && recovery_after_timeout {
+        eprintln!("MUTANT_APPLIED=timeout_first");
+        crate::reconcile::reconcile_missing_queue_review_dispatches_pg(
+            pg_pool.or_else(|| engine.pg_pool()).unwrap(),
+            engine,
+        )
+        .await
+        .unwrap();
+    }
 }
 
 async fn fire_tick_hook_by_name_with_timeout(
