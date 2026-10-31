@@ -239,8 +239,8 @@ pub(crate) fn probe(
     }
 }
 
-/// Gaps from an unreported foreground list or root-shell startup children, before the
-/// launch command execs with its binding context.
+/// Gaps before the launch command execs with its binding context are retried within the window.
+/// Herdr 0.9.x omits empty foreground lists, so Unreported can mean no foreground job yet.
 fn before_provider(gap: &EvidenceGap) -> bool {
     matches!(
         gap,

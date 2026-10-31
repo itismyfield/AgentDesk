@@ -279,7 +279,7 @@ pub(crate) struct HerdrProcessInfo {
     pub pane_id: String,
     pub shell_pid: Option<u32>,
     pub foreground_process_group_id: Option<u32>,
-    /// `None` when the server sent no list, which is not the same as an empty one.
+    /// Herdr 0.9.x omits empty lists; preserve `None` for absent/unreadable jobs and old-server diagnosis.
     #[serde(default)]
     pub foreground_processes: Option<Vec<HerdrForegroundProcess>>,
 }

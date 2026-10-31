@@ -342,7 +342,7 @@ pub(crate) fn created_result(call: &HerdrCall, outcome: HerdrOutcome) -> Created
     }
 }
 
-/// The pane's foreground processes; a reply without the list is not an empty list.
+/// Herdr 0.9.x omits empty lists: Unreported means no foreground job yet or an unreadable list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ForegroundProcesses {
     Unreported,
