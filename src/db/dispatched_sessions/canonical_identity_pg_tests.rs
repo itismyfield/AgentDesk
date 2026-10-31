@@ -2833,6 +2833,99 @@ async fn canonical_identity_foreign_handoff_resolver_and_hook_converge_pg() {
     test_db.drop().await;
 }
 
+async fn assert_concurrent_identity_promotion(
+    control_pool: &PgPool,
+    race_pool: &PgPool,
+    live: &str,
+    channel: &str,
+    original_id: i64,
+) {
+    let backend_pids = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut first = race_pool.begin().await.unwrap();
+        let mut second = race_pool.begin().await.unwrap();
+        let mut pids = Vec::new();
+        for tx in [&mut first, &mut second] {
+            pids.push(
+                sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+                    .fetch_one(&mut **tx)
+                    .await
+                    .unwrap(),
+            );
+        }
+        assert_ne!(pids[0], pids[1], "race needs two independent backends");
+        first.commit().await.unwrap();
+        second.commit().await.unwrap();
+        pids.sort_unstable();
+        pids
+    })
+    .await
+    .expect("race pool must admit two simultaneous transactions");
+    let mut barrier = control_pool.begin().await.unwrap();
+    // Hold only the identity fence so neither call can hide behind a shared locator.
+    sqlx::query("SELECT pg_advisory_xact_lock($1, hashtext($2))")
+        .bind(super::ADVISORY_LOCK_NAMESPACE)
+        .bind(format!("identity:discord_channel:claude:{TOKEN}:{channel}"))
+        .execute(&mut *barrier)
+        .await
+        .unwrap();
+    let overlap = async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let waiting: Vec<(i32, String)> = sqlx::query_as(
+                    "SELECT waiting.pid, waiting.virtualtransaction
+                     FROM pg_locks waiting JOIN pg_locks held
+                       ON waiting.locktype = held.locktype
+                       AND waiting.database IS NOT DISTINCT FROM held.database
+                       AND waiting.classid = held.classid AND waiting.objid = held.objid
+                       AND waiting.objsubid = held.objsubid
+                     WHERE held.pid = pg_backend_pid() AND held.locktype = 'advisory'
+                       AND held.granted AND NOT waiting.granted
+                       AND waiting.pid = ANY($1) AND waiting.virtualtransaction IS NOT NULL
+                     ORDER BY waiting.pid",
+                )
+                .bind(&backend_pids)
+                .fetch_all(&mut *barrier)
+                .await
+                .unwrap();
+                if waiting.iter().map(|row| row.0).collect::<Vec<_>>() == backend_pids {
+                    assert_ne!(waiting[0].1, waiting[1].1);
+                    let active: i64 = sqlx::query_scalar(
+                        "SELECT count(*) FROM pg_stat_activity WHERE pid = ANY($1)
+                         AND xact_start IS NOT NULL AND state = 'active'
+                         AND wait_event_type = 'Lock'",
+                    )
+                    .bind(&backend_pids)
+                    .fetch_one(&mut *barrier)
+                    .await
+                    .unwrap();
+                    assert_eq!(active, 2, "both production transactions must overlap");
+                    eprintln!("CANONICAL_IDENTITY_RACE waiting={waiting:?}");
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("tuple read and named hook must both wait on the identity fence");
+        barrier.rollback().await.unwrap();
+    };
+    let work = async {
+        tokio::join!(
+            super::resolve_session_row_pg(race_pool, None, Some("claude"), Some(identity(channel))),
+            upsert_hook_session_with_identity_pg(
+                race_pool,
+                params(live, channel),
+                Some(identity(channel))
+            ),
+        )
+    };
+    let ((read, hook), ()) = tokio::join!(work, overlap);
+    assert_eq!(read.unwrap().unwrap(), (original_id, live.to_owned()));
+    let hook = hook.unwrap();
+    assert!(!hook.inserted);
+    assert_eq!(hook.session_key, live);
+}
+
 #[tokio::test]
 async fn canonical_identity_missing_owner_promotes_operational_row_and_refuses_ambiguity_pg() {
     let Some(db) = CanonicalIdentityPgDatabase::create().await else {
@@ -2949,21 +3042,23 @@ async fn canonical_identity_missing_owner_promotes_operational_row_and_refuses_a
             .unwrap();
             assert_eq!(outcome.session_key, live);
         } else if entry == 3 {
-            let (read, hook) = tokio::join!(
-                super::resolve_session_row_pg(
-                    &pool,
-                    Some(live),
-                    Some("claude"),
-                    Some(identity(channel))
-                ),
-                upsert_hook_session_with_identity_pg(
-                    &pool,
-                    params(live, channel),
-                    Some(identity(channel))
-                ),
-            );
-            assert_eq!(read.unwrap().unwrap().1, live);
-            assert_eq!(hook.unwrap().session_key, live);
+            let race_pool =
+                crate::db::postgres::connect_test_pool_with_max_connections_and_migrate(
+                    &db.database_url,
+                    "canonical identity read hook race",
+                    2,
+                )
+                .await
+                .expect("connect two-backend identity race pool");
+            Box::pin(assert_concurrent_identity_promotion(
+                &pool,
+                &race_pool,
+                live,
+                channel,
+                before[1]["id"].as_i64().unwrap(),
+            ))
+            .await;
+            race_pool.close().await;
         } else {
             let key = (entry == 1).then_some(live);
             let resolved =
