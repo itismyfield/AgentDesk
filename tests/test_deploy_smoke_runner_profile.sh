@@ -55,8 +55,8 @@ export ADK_DEFAULT_LOOPBACK REL_PORT POST_DEPLOY_SMOKE_READY POST_DEPLOY_SMOKE_H
 mkdir -p "$POST_DEPLOY_SMOKE_TMP_DIR"
 : > "$POST_DEPLOY_SMOKE_EVIDENCE"
 
-RUNNER_MODULES='{"gateway":false,"voice":false,"dashboard":false,"admin_api":false,"leader_services":false}'
-FULL_MODULES='{"gateway":true,"voice":true,"dashboard":true,"admin_api":true,"leader_services":true}'
+RUNNER_MODULES='{"gateway":false,"dashboard":false,"admin_api":false,"leader_services":false}'
+FULL_MODULES='{"gateway":true,"dashboard":true,"admin_api":true,"leader_services":true}'
 HEALTH_JSON=""
 HEALTH_STATUS=200
 ADMIN_STATUS=404

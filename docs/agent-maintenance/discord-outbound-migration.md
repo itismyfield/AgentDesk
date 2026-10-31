@@ -524,9 +524,9 @@ button hits the manual outbound API, which is covered under §3.A
   verifies `/api/discord/send-dm` short text uses v3 DM target semantics and preserves
   the manual duplicate response contract.
 - `src/services/discord/outbound/manual_delivery.rs`:
-  `api_send_rejects_user_supplied_voice_delivery_id_namespace` verifies manual
-  `/api/discord/send` callers cannot forge the reserved `voice:` correlation
-  namespace used by voice announce delivery ids.
+  `api_send_rejects_user_supplied_message_outbox_delivery_id_namespace` verifies manual
+  `/api/discord/send` callers cannot forge the reserved `message_outbox:` correlation
+  namespace used by internal outbox delivery ids.
 - `src/services/discord/outbound/manual_delivery.rs`:
   #3807 keeps the manual over-limit notification path on the compatibility
   chunk shim while adding compact continuation context to each split message.

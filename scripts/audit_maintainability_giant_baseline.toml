@@ -224,7 +224,6 @@
 # #3038 turn_bridge S1 child modules, frozen at landed production LoC.
 "src/services/discord/turn_bridge/headless_delivery.rs" = 415
 "src/services/discord/turn_bridge/status_panel.rs" = 437
-"src/services/discord/turn_bridge/voice_completion.rs" = 385
 # #3038 S1: lowered 5188 -> 4987 (-201) as `QueuedPlaceholderState` (cluster C:
 # 3 fields + 9 inherent methods) moved to the `shared_state` sibling module.
 # Locks in the shrink win (ratchet down only).
