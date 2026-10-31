@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 
-use poise::serenity_prelude::ChannelId;
+use poise::serenity_prelude::{ChannelId, MessageId};
 
 use super::{cleanup_expired_sessions, mark_session_disconnected_for_idle_cleanup};
 use crate::db::dispatched_sessions::hosted_execution::tests::{future_schema, owner, record, wire};
@@ -106,6 +106,7 @@ async fn idle_cleanup_expires_only_legacy_tmux_sessions_pg() {
         "herdr-elsewhere",
         "split",
         "probefail",
+        "busy",
     ];
     let channel = |n: &str| {
         (1_500_600_700_800_900_000 + names.iter().position(|m| *m == n).unwrap() as u64).to_string()
@@ -145,6 +146,10 @@ async fn idle_cleanup_expires_only_legacy_tmux_sessions_pg() {
         let session = expired_session(&format!("idle-guard-{n}"));
         shared.core.lock().await.sessions.insert(id, session);
     }
+    let busy = ChannelId::new(channel("busy").parse().unwrap());
+    let cancel = std::sync::Arc::new(crate::services::provider::CancelToken::new());
+    let (user, msg) = (poise::serenity_prelude::UserId::new(7), MessageId::new(77));
+    assert!(shared.mailbox(busy).try_start_turn(cancel, user, msg).await);
     let marker = crate::services::tmux_common::session_temp_path(&tmux("traced"), "host_kind");
     std::fs::write(marker, "herdr").unwrap();
     // Every in-memory session is now past the idle limit.
@@ -170,6 +175,14 @@ async fn idle_cleanup_expires_only_legacy_tmux_sessions_pg() {
         .map(|n| channel(n).parse().unwrap())
         .collect();
     assert_eq!(remaining, kept, "only legacy tmux sessions leave memory");
+    // The active-turn probe leaves a mailbox-less channel without one.
+    for n in names
+        .iter()
+        .filter(|n| !expired.contains(n) && **n != "busy")
+    {
+        let id = ChannelId::new(channel(n).parse().unwrap());
+        assert!(shared.mailboxes.peek(id).is_none(), "{n} gained a mailbox");
+    }
     let status = |key: String| {
         let pool = pool.clone();
         async move {
