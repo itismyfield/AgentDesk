@@ -147,7 +147,7 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
             pool.num_idle(),
             pool.is_closed()
         );
-        crate::reconcile::reconcile_completed_queue_review_drift_pg(&pool, &engine)
+        crate::server::fire_five_min_policy_hook_for_test(&pool, &engine)
             .await
             .unwrap();
         for name in ["completed", "pr", "orphan-pr", "null-age", "review-orphan"] {
@@ -330,4 +330,202 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
     resumed_policy_pool.close().await;
     pool.close().await;
     pg_db.drop().await;
+}
+
+async fn seed_completed_queue_work(pool: &sqlx::PgPool, name: &str, kind: &str, status: &str) {
+    seed_card_pg(pool, name, status).await;
+    let commit = crate::services::platform::git_head_commit(env!("CARGO_MANIFEST_DIR")).unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (id, agent_id, status) VALUES ($1, 'agent-1', 'active')",
+    )
+    .bind(name)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, result, context, created_at, updated_at, completed_at)
+        VALUES ($1, $1, 'agent-1', $2, 'completed', '{}', $3::jsonb, NOW() - INTERVAL '10 minutes', NOW() - INTERVAL '10 minutes', NOW() - INTERVAL '10 minutes')")
+        .bind(name).bind(kind).bind(json!({"reviewed_commit": commit, "branch": "test-autoqueue-recovery"}))
+        .execute(pool).await.unwrap();
+    sqlx::query("UPDATE kanban_cards SET latest_dispatch_id = $1, review_status = 'reviewing', review_entered_at = NOW() - INTERVAL '10 minutes' WHERE id = $1")
+        .bind(name).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at)
+        VALUES ($1, $1, $1, 'agent-1', 'dispatched', $1, NOW() - INTERVAL '10 minutes')")
+        .bind(name).execute(pool).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn periodic_queue_review_recovery_preserves_operator_wait_pg() {
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate_with_max_connections(16).await;
+    let policy_pool = db.connect_and_migrate_with_max_connections(16).await;
+    let engine = test_engine_with_pg(policy_pool.clone());
+    seed_agent_pg(&pool).await;
+    seed_completed_queue_work(&pool, "manual-review", "implementation", "review").await;
+    sqlx::query("UPDATE kanban_cards SET review_round = 2 WHERE id = 'manual-review'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, result, context, completed_at)
+        VALUES ('manual-r1', 'manual-review', 'agent-1', 'review', 'completed', '{\"verdict\":\"improve\"}', '{\"review_round\":1}', NOW() - INTERVAL '5 minutes'),
+               ('manual-r2', 'manual-review', 'agent-1', 'review', 'completed', '{\"verdict\":\"reject\"}', '{\"review_round\":2}', NOW())")
+        .execute(&pool).await.unwrap();
+    let verdict_engine = engine.clone();
+    tokio::task::spawn_blocking(move || {
+        verdict_engine.try_fire_hook_by_name(
+            "OnReviewVerdict",
+            json!({
+                "card_id":"manual-review", "dispatch_id":"manual-r2", "verdict":"reject"
+            }),
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    crate::kanban::drain_hook_side_effects_with_backends(&engine);
+    let before: (String, String, i64, i64) = sqlx::query_as(
+        "SELECT review_status, blocked_reason, review_round::BIGINT,
+            (SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = c.id AND dispatch_type = 'review')
+         FROM kanban_cards c WHERE id = 'manual-review'")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        before.0, "dilemma_pending",
+        "actual R2 verdict must request an operator decision"
+    );
+    assert!(!before.1.is_empty());
+    assert_eq!((before.2, before.3), (2, 2));
+    for status in ["suggestion_pending", "rework_pending"] {
+        seed_completed_queue_work(&pool, status, "implementation", "review").await;
+        sqlx::query("UPDATE kanban_cards SET review_status = $1, blocked_reason = 'keep operator decision', review_round = 2 WHERE id = $1")
+            .bind(status).execute(&pool).await.unwrap();
+    }
+    for _ in 0..2 {
+        crate::server::fire_five_min_policy_hook_for_test(&pool, &engine)
+            .await
+            .unwrap();
+        let after: (String, String, i64, i64) = sqlx::query_as(
+            "SELECT review_status, COALESCE(blocked_reason, ''), review_round::BIGINT,
+                (SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = c.id AND dispatch_type = 'review')
+             FROM kanban_cards c WHERE id = 'manual-review'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            after, before,
+            "periodic recovery must retain the R2 operator decision"
+        );
+        for status in ["suggestion_pending", "rework_pending"] {
+            let state: (String, String, i64) = sqlx::query_as(
+                "SELECT review_status, COALESCE(blocked_reason, ''),
+                    (SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = c.id AND dispatch_type = 'review')
+                 FROM kanban_cards c WHERE id = $1")
+                .bind(status).fetch_one(&pool).await.unwrap();
+            assert_eq!(
+                state,
+                (status.to_string(), "keep operator decision".to_string(), 0)
+            );
+        }
+    }
+    drop(engine);
+    policy_pool.close().await;
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn periodic_queue_review_recovery_precedes_orphan_timeout_pg() {
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate_with_max_connections(16).await;
+    let policy_pool = db.connect_and_migrate_with_max_connections(16).await;
+    let engine = test_engine_with_pg(policy_pool.clone());
+    seed_agent_pg(&pool).await;
+    seed_completed_queue_work(&pool, "old-orphan", "implementation", "review").await;
+    for _ in 0..2 {
+        crate::server::fire_five_min_policy_hook_for_test(&pool, &engine)
+            .await
+            .unwrap();
+        let state: (String, Option<String>, i64) = sqlx::query_as(
+            "SELECT review_status, blocked_reason,
+                (SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = c.id AND dispatch_type = 'review')
+             FROM kanban_cards c WHERE id = 'old-orphan'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            state,
+            ("reviewing".to_string(), None, 1),
+            "repair a real orphan before the timeout escalates it"
+        );
+    }
+    drop(engine);
+    policy_pool.close().await;
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn boot_queue_recovery_preserves_impl_but_resumes_completed_plan_pg() {
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate_with_max_connections(16).await;
+    let policy_pool = db.connect_and_migrate_with_max_connections(16).await;
+    let engine = test_engine_with_pg(policy_pool.clone());
+    seed_agent_pg(&pool).await;
+    seed_completed_queue_work(&pool, "boot-impl", "implementation", "in_progress").await;
+    seed_completed_queue_work(&pool, "boot-plan", "plan", "in_progress").await;
+    sqlx::query("UPDATE kanban_cards SET metadata = '{\"scope_depth\":\"plan_only\",\"scope_assessment_status\":\"completed\",\"sandbox_preflight\":true,\"production_mutation_allowed\":false}'::jsonb WHERE id = 'boot-plan'")
+        .execute(&pool).await.unwrap();
+    let backing: (i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM pr_tracking),
+                (SELECT COUNT(*) FROM task_dispatches WHERE status IN ('pending', 'dispatched')),
+                (SELECT COUNT(*) FROM sessions)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        backing,
+        (0, 0, 0),
+        "boot evidence must not be masked by PR, successor or session guards"
+    );
+    crate::reconcile::reconcile_boot_db_pg(&pool, "recovery-before-first-tick", None)
+        .await
+        .unwrap();
+    let implementation: (String, Option<String>) =
+        sqlx::query_as("SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'boot-impl'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        implementation,
+        ("dispatched".to_string(), Some("boot-impl".to_string())),
+        "completed implementation must retain its original dispatch before any review exists"
+    );
+    let plan: (String, Option<String>) =
+        sqlx::query_as("SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'boot-plan'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        plan,
+        ("pending".to_string(), None),
+        "completed plan must retain its pre-existing reset path"
+    );
+    let tick_engine = engine.clone();
+    tokio::task::spawn_blocking(move || tick_engine.try_fire_hook_by_name("OnTick1min", json!({})))
+        .await
+        .unwrap()
+        .unwrap();
+    crate::kanban::drain_hook_side_effects_with_backends(&engine);
+    let resumed: (String, String, i64) = sqlx::query_as(
+        "SELECT e.status, d.dispatch_type,
+            (SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = e.kanban_card_id AND dispatch_type = 'review')
+         FROM auto_queue_entries e JOIN task_dispatches d ON d.id = e.dispatch_id WHERE e.id = 'boot-plan'")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        resumed,
+        ("dispatched".to_string(), "implementation".to_string(), 0),
+        "plan_only resumes implementation without review"
+    );
+    let reviews: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'boot-impl' AND dispatch_type = 'review'")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(reviews, 1);
+    drop(engine);
+    policy_pool.close().await;
+    pool.close().await;
+    db.drop().await;
 }

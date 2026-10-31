@@ -676,6 +676,23 @@ async fn policy_tick_loop(
     }
 }
 
+#[cfg(test)]
+pub(crate) async fn fire_five_min_policy_hook_for_test(
+    pool: &PgPool,
+    engine: &PolicyEngine,
+) -> Result<()> {
+    fire_tick_hook_by_name_with_pg(
+        engine,
+        Some(pool),
+        &mut policy_tick_logging::TickLogging::default(),
+        "OnTick5min",
+        "5min",
+    )
+    .await;
+    crate::reconcile::reconcile_completed_queue_review_drift_pg(pool, engine).await?;
+    Ok(())
+}
+
 async fn fire_tick_hook_by_name_with_pg(
     engine: &PolicyEngine,
     pg_pool: Option<&PgPool>,
