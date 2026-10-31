@@ -1,4 +1,4 @@
-import type { ClusterNode } from "../../api/clusterNodes";
+import type { ClusterNode, ClusterNodesResponse } from "../../api/clusterNodes";
 import type { SettingsTr } from "./SettingsPanelTypes";
 import type { SystemHealthTone } from "../../theme/statusTokens";
 
@@ -19,6 +19,12 @@ export function machineOnline(node: ClusterNode, now: number, leaseTtlSeconds?: 
   const heartbeat = Date.parse(node.last_heartbeat_at ?? "");
   return !leaseTtlSeconds || !Number.isFinite(heartbeat)
     || now - heartbeat < leaseTtlSeconds * MILLISECONDS_PER_SECOND;
+}
+
+/** Machines the settings tab badge should point at: registered but not currently online. */
+export function machinesNeedingAttention(data: ClusterNodesResponse | undefined, now: number): number {
+  if (!data?.cluster.enabled) return 0;
+  return data.nodes.filter((node) => !machineOnline(node, now, data.cluster.lease_ttl_secs)).length;
 }
 
 export type MachineConnection = { tone: SystemHealthTone; label: string; detail: string };

@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it } from "vitest";
 import { machineResourcesSchema, type MachineResources } from "../../api/machineResources";
-import { SettingsMachineResources, resourceBytes } from "./SettingsMachineResources";
+import { SettingsMachineResources, meaningfulAvailableBytes, resourceBytes } from "./SettingsMachineResources";
 
 const now = 1_000_000;
 const gib = 1024 ** 3;
@@ -63,4 +63,15 @@ it("rejects invalid telemetry without treating it as zero and formats bytes cons
   expect(resourceBytes(null)).toBe("—");
   expect(resourceBytes(Number.NaN)).toBe("—");
   expect(resourceBytes(16 * gib)).toBe("16 GiB");
+});
+
+it("flags high CPU and memory and hides an available figure that only repeats total minus used", () => {
+  const busy = { ...resources, cpu: { ...resources.cpu, usage_percent: 99.1 }, memory: { total_bytes: 32 * gib, used_bytes: 31 * gib, available_bytes: gib } };
+  const html = render(busy);
+  expect(html.match(/data-level="high"/g)).toHaveLength(2);
+  expect(html).toContain("High");
+  expect(html).not.toContain("Available");
+  expect(meaningfulAvailableBytes(busy.memory)).toBeNull();
+  expect(meaningfulAvailableBytes({ total_bytes: 32 * gib, used_bytes: 20 * gib, available_bytes: 18 * gib })).toBe(18 * gib);
+  expect(render({ ...resources, memory: { total_bytes: 32 * gib, used_bytes: 20 * gib, available_bytes: 18 * gib } })).toContain("Available");
 });

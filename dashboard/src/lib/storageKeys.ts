@@ -17,7 +17,6 @@ export const STORAGE_KEYS = {
   dashboardActiveTab: "agentdesk.dashboard.active-tab",
   dashboardActiveCampaign: "agentdesk.dashboard.active-campaign",
   settingsPanel: "agentdesk.settings.active-panel",
-  settingsRuntimeCategory: "agentdesk.settings.runtime-category",
   settingsPipelineRepoCache: "agentdesk.settings.pipeline.repo-cache.v1",
   settingsPipelineAgentCache: "agentdesk.settings.pipeline.agent-cache.v1",
   settingsPipelineVisualCache: "agentdesk.settings.pipeline.visual-cache.v1",

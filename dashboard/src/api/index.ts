@@ -15,8 +15,6 @@ export {
   deleteDepartment,
   getSettings,
   saveSettings,
-  getVoiceConfig,
-  saveVoiceConfig,
   getSettingsConfig,
   patchSettingsConfig,
   getStats,
@@ -86,7 +84,7 @@ export {
   getCardGitHubComments,
   onApiError,
   ApiRequestError,
-  VoiceConfigApiError,
+
   // #2050 P3 finding 16 — surface helpers some components were importing
   // from "../api/client" directly. Re-exporting here lets the dashboard
   // converge on a single import path.
@@ -145,8 +143,7 @@ export type {
   TokenAnalyticsResponse,
   TimelineEvent,
   PipelineConfigResponse,
-  VoiceConfigPutBody,
-  VoiceConfigResponse,
+
   // #2050 P3 finding 16 — type companions to getHomeKpiTrends.
   HomeKpiTrendsResponse,
   HomeKpiSeries,

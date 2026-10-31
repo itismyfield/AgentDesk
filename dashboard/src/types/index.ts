@@ -31,58 +31,6 @@ export type CliProvider =
 
 export type ActivitySource = "idle" | "agentdesk";
 
-export type VoiceSensitivityMode = "normal" | "conservative";
-
-export interface VoiceGlobalConfig {
-  lobby_channel_id: string | null;
-  active_agent_ttl_seconds: number;
-  default_sensitivity_mode: VoiceSensitivityMode;
-}
-
-export interface VoiceAgentConfig {
-  id: string;
-  name: string;
-  name_ko: string | null;
-  voice_enabled: boolean;
-  wake_word: string;
-  aliases: string[];
-  sensitivity_mode: VoiceSensitivityMode;
-}
-
-export type VoiceSttProvider = "whisper-cli" | "openai-compatible";
-export type VoiceTtsBackend = "edge" | "openai-compatible";
-
-export interface VoiceOpenAiEndpoint {
-  base_url: string;
-  model: string;
-  api_key_env: string;
-}
-
-export interface VoiceModels {
-  stt_provider: VoiceSttProvider;
-  stt: VoiceOpenAiEndpoint;
-  language: string;
-  tts_backend: VoiceTtsBackend;
-  tts: VoiceOpenAiEndpoint & { voice: string };
-  edge_voice: string;
-}
-
-export interface VoiceConfigResponse {
-  global: VoiceGlobalConfig;
-  models: VoiceModels;
-  agents: VoiceAgentConfig[];
-  version: string;
-  source_path?: string | null;
-}
-
-export interface VoiceConfigPutBody {
-  version?: string;
-  actor?: string;
-  global: VoiceGlobalConfig;
-  models?: VoiceModels;
-  agents: VoiceAgentConfig[];
-}
-
 export interface Agent {
   id: string;
   name: string;

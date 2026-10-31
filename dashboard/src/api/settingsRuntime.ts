@@ -1,6 +1,6 @@
-import type { CompanySettings, VoiceConfigPutBody, VoiceConfigResponse } from "../types";
+import type { CompanySettings } from "../types";
 import type { ConfigEditValue, ConfigEntry } from "../components/settings/SettingsModel";
-import { ApiRequestError, clearCachedGet, readCachedGet, request, type CachedGetEntry } from "./httpClient";
+import { readCachedGet, request, type CachedGetEntry } from "./httpClient";
 
 export async function getSettings(): Promise<Partial<CompanySettings>> {
   return request("/api/settings");
@@ -13,49 +13,6 @@ export async function saveSettings(
     method: "PUT",
     body: JSON.stringify(settings),
   });
-}
-
-export class VoiceConfigApiError extends Error {
-  status: number;
-  payload: unknown;
-
-  constructor(status: number, payload: unknown) {
-    const message =
-      typeof payload === "object" &&
-      payload !== null &&
-      "message" in payload &&
-      typeof (payload as { message?: unknown }).message === "string"
-        ? (payload as { message: string }).message
-        : `HTTP ${status}`;
-    super(message);
-    this.name = "VoiceConfigApiError";
-    this.status = status;
-    this.payload = payload;
-  }
-}
-
-export async function getVoiceConfig(): Promise<VoiceConfigResponse> {
-  return request("/api/voice/config");
-}
-
-export async function saveVoiceConfig(
-  body: VoiceConfigPutBody,
-): Promise<VoiceConfigResponse> {
-  let payload: VoiceConfigResponse;
-  try {
-    payload = await request<VoiceConfigResponse>("/api/voice/config", {
-      method: "PUT",
-      body: JSON.stringify(body),
-      suppressErrorToast: true,
-    });
-  } catch (error) {
-    if (error instanceof ApiRequestError) {
-      throw new VoiceConfigApiError(error.status, error.body ?? { error: "unknown" });
-    }
-    throw error;
-  }
-  clearCachedGet("/api/voice/config");
-  return payload;
 }
 
 export async function getSettingsConfig(): Promise<{ entries?: ConfigEntry[] }> {
@@ -136,6 +93,27 @@ export interface OperatorConnectorsResponse {
 
 export async function getOperatorConnectors(): Promise<OperatorConnectorsResponse> {
   return request("/api/settings/operator-connectors");
+}
+
+/** The subset of /api/onboarding/status the settings page shows as connection rows. */
+export interface OnboardingConnectionStatus {
+  completed?: boolean;
+  guild_id?: string | null;
+  owner_id?: string | null;
+  bot_providers?: { command?: string | null; command2?: string | null };
+}
+
+export async function getOnboardingConnectionStatus(): Promise<OnboardingConnectionStatus> {
+  return request("/api/onboarding/status", { suppressErrorToast: true, maxRetries: 0 });
+}
+
+/** Resolves a Discord channel ID to its name; a miss is shown inline, not as a toast. */
+export async function getSettingsChannelName(channelId: string): Promise<string | null> {
+  const info = await request<{ name?: string | null }>(`/api/discord/channels/${encodeURIComponent(channelId)}`, {
+    suppressErrorToast: true,
+    maxRetries: 0,
+  });
+  return info.name ?? null;
 }
 
 // ── Runtime Health ──

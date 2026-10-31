@@ -4,8 +4,6 @@ export type {
   KanbanCard,
   KanbanRepoSource,
   TokenAnalyticsResponse,
-  VoiceConfigPutBody,
-  VoiceConfigResponse,
 } from "../types";
 
 export * from "./httpClient";

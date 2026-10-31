@@ -1,245 +1,118 @@
 import { AlertTriangle, CheckCircle2, CircleSlash, RefreshCw } from "lucide-react";
-import type { CSSProperties } from "react";
 import type { OperatorConnectorStatus, OperatorConnectorsResponse } from "../../api";
-import { SurfaceEmptyState as SettingsEmptyState } from "../common/SurfacePrimitives";
+import { connectorCopy, connectorReason } from "./SettingsCopy";
+import { SETTINGS_SECONDARY_BUTTON, SettingsStatusMessage } from "./SettingsPanels";
+
+type Tr = (ko: string, en: string) => string;
 
 interface SettingsOperatorConnectorsPanelProps {
-  connectors: OperatorConnectorsResponse | null;
-  error: string | null;
+  connectors: OperatorConnectorsResponse | undefined;
+  error: boolean;
   loading: boolean;
   onReload: () => void;
-  secondaryActionClass: string;
-  secondaryActionStyle: CSSProperties;
-  tr: (ko: string, en: string) => string;
+  isKo: boolean;
+  tr: Tr;
 }
 
-export function SettingsOperatorConnectorsPanel({
-  connectors,
-  error,
-  loading,
-  onReload,
-  secondaryActionClass,
-  secondaryActionStyle,
-  tr,
-}: SettingsOperatorConnectorsPanelProps) {
+export function SettingsOperatorConnectorsPanel({ connectors, error, loading, onReload, isKo, tr }: SettingsOperatorConnectorsPanelProps) {
   const rows = connectors?.connectors ?? [];
-  const summary = connectors?.summary;
+  const ready = connectors?.summary?.ready ?? rows.filter((row) => row.state === "ready").length;
+  const needsSetup = connectors?.summary?.invalid ?? 0;
 
   return (
-    <div className="space-y-4" data-testid="settings-operator-connectors-panel">
+    <div className="space-y-3" data-testid="settings-operator-connectors-panel">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap gap-2">
-          <SummaryPill label={tr("준비", "Ready")} value={summary?.ready ?? 0} tone="ready" />
-          <SummaryPill
-            label={tr("미설정", "Not configured")}
-            value={summary?.missing_config ?? 0}
-            tone="skipped"
-          />
-          <SummaryPill label={tr("건너뜀", "Skipped")} value={summary?.skipped ?? 0} tone="skipped" />
-          <SummaryPill label={tr("확인 필요", "Needs setup")} value={summary?.invalid ?? 0} tone="invalid" />
-        </div>
-        <button
-          type="button"
-          onClick={onReload}
-          disabled={loading}
-          className={secondaryActionClass}
-          style={secondaryActionStyle}
-        >
-          <RefreshCw size={13} />
-          {loading ? tr("확인 중...", "Checking...") : tr("다시 확인", "Recheck")}
+        <p className="min-w-0 flex-1 text-sm break-keep text-th-text-secondary" data-testid="settings-connectors-summary">
+          {rows.length === 0
+            ? null
+            : needsSetup > 0
+              ? tr(`${rows.length}개 중 ${ready}개 준비됐고, ${needsSetup}개는 확인이 필요해요.`, `${ready} of ${rows.length} ready; ${needsSetup} need attention.`)
+              : tr(`${rows.length}개 중 ${ready}개 준비됐어요.`, `${ready} of ${rows.length} ready.`)}
+        </p>
+        <button type="button" onClick={onReload} disabled={loading} className={SETTINGS_SECONDARY_BUTTON}>
+          <RefreshCw size={13} aria-hidden className={loading ? "animate-spin" : undefined} />
+          {loading ? tr("확인 중…", "Checking…") : tr("다시 확인", "Check again")}
         </button>
       </div>
 
       {error ? (
-        <div
-          className="rounded-lg border px-4 py-3 text-sm"
-          style={{
-            borderColor: "rgba(248, 113, 113, 0.38)",
-            background: "rgba(248, 113, 113, 0.10)",
-            color: "var(--th-text)",
-          }}
-        >
-          {error}
-        </div>
-      ) : null}
-
-      {loading && rows.length === 0 ? (
-        <SettingsEmptyState className="text-sm">
-          {tr("커넥터 상태를 확인 중입니다.", "Checking connector status.")}
-        </SettingsEmptyState>
+        <SettingsStatusMessage tone="error">{tr("커넥터 상태를 불러오지 못했어요.", "Could not load connector status.")}</SettingsStatusMessage>
+      ) : loading && rows.length === 0 ? (
+        <SettingsStatusMessage>{tr("커넥터 상태를 확인하는 중…", "Checking connectors…")}</SettingsStatusMessage>
       ) : rows.length === 0 ? (
-        <SettingsEmptyState className="text-sm">
-          {tr("표시할 커넥터가 없습니다.", "No connectors to show.")}
-        </SettingsEmptyState>
+        <SettingsStatusMessage>{tr("표시할 커넥터가 없어요.", "No connectors to show.")}</SettingsStatusMessage>
       ) : (
-        <div className="grid gap-3">
-          {rows.map((connector) => (
-            <ConnectorRow key={connector.id} connector={connector} tr={tr} />
-          ))}
+        <div className="divide-y divide-th-border-subtle">
+          {rows.map((connector) => <ConnectorRow key={connector.id} connector={connector} isKo={isKo} tr={tr} />)}
         </div>
       )}
     </div>
   );
 }
 
-function SummaryPill({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: number;
-  tone: "ready" | "skipped" | "invalid";
-}) {
-  const colors = connectorTone(tone);
-  return (
-    <span
-      className="inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium"
-      style={{
-        borderColor: colors.border,
-        background: colors.bg,
-        color: colors.fg,
-      }}
-    >
-      <span>{label}</span>
-      <span>{value}</span>
-    </span>
-  );
+type ConnectorTone = "ready" | "setup" | "off";
+
+function connectorTone(state: string): ConnectorTone {
+  if (state === "ready") return "ready";
+  if (state === "skipped" || state === "missing_config") return "off";
+  return "setup";
 }
 
-function ConnectorRow({
-  connector,
-  tr,
-}: {
-  connector: OperatorConnectorStatus;
-  tr: (ko: string, en: string) => string;
-}) {
-  const state = normalizedState(connector.state);
-  const colors = connectorTone(state);
-  const Icon = state === "ready" ? CheckCircle2 : isSetupState(state) ? AlertTriangle : CircleSlash;
+function stateLabel(state: string, tr: Tr): string {
+  if (state === "ready") return tr("준비됨", "Ready");
+  if (state === "skipped") return tr("꺼짐", "Off");
+  if (state === "missing_config") return tr("설정 안 함", "Not set up");
+  if (state === "missing_path") return tr("폴더 없음", "Folder missing");
+  if (state === "missing_provider") return tr("제공자 없음", "Provider missing");
+  return tr("설정 오류", "Setup error");
+}
+
+function ConnectorRow({ connector, isKo, tr }: { connector: OperatorConnectorStatus; isKo: boolean; tr: Tr }) {
+  const tone = connectorTone(connector.state);
+  const copy = connectorCopy(connector.id, connector.name);
+  const Icon = tone === "ready" ? CheckCircle2 : tone === "setup" ? AlertTriangle : CircleSlash;
+  const color = tone === "ready" ? "var(--th-badge-emerald-text)" : tone === "setup" ? "var(--th-badge-amber-text)" : "var(--th-text-muted)";
 
   return (
-    <div
-      className="rounded-lg border px-4 py-4"
-      style={{
-        borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
-        background: "color-mix(in srgb, var(--th-bg-surface) 88%, transparent)",
-      }}
-      data-testid={`settings-connector-${connector.id}`}
-    >
+    <div className="py-4 first:pt-1 last:pb-1" data-testid={`settings-connector-${connector.id}`}>
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="text-sm font-semibold [overflow-wrap:anywhere]" style={{ color: "var(--th-text)" }}>
-            {connector.name}
-          </div>
-          <div className="mt-1 text-xs leading-5 [overflow-wrap:anywhere]" style={{ color: "var(--th-text-muted)" }}>
-            {connector.capabilities.join(", ")}
-          </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-medium break-keep text-th-text-primary">{isKo ? copy.labelKo : copy.labelEn}</div>
+          {copy.hintKo ? <p className="mt-1 text-xs leading-5 break-keep text-th-text-muted">{isKo ? copy.hintKo : copy.hintEn}</p> : null}
         </div>
         <span
-          className="inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium"
-          style={{
-            borderColor: colors.border,
-            background: colors.bg,
-            color: colors.fg,
-          }}
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-th-border-subtle px-2.5 py-1 text-xs font-medium"
+          style={{ color, background: "var(--th-overlay-subtle)" }}
         >
-          <Icon size={12} />
-          {stateLabel(state, tr)}
+          <Icon size={12} aria-hidden />
+          {stateLabel(connector.state, tr)}
         </span>
       </div>
-
-      <div className="mt-3 grid gap-2 text-[12px] leading-5" style={{ color: "var(--th-text-muted)" }}>
-        <FieldLine label={tr("환경변수", "Env var")} value={connector.env_var} />
-        <FieldLine label={tr("소스", "Source")} value={connector.source ?? tr("미확인", "Unavailable")} />
-        {connector.reason ? <FieldLine label={tr("사유", "Reason")} value={connector.reason} /> : null}
-      </div>
-
+      {connector.reason && tone !== "ready" ? (
+        <p className="mt-2 text-xs leading-5 break-keep text-th-text-secondary">{connectorReason(connector.reason, tr)}</p>
+      ) : null}
+      <dl className="mt-2 grid gap-1 text-xs leading-5 text-th-text-muted sm:grid-cols-[7rem_minmax(0,1fr)]">
+        <dt>{tr("환경 변수", "Environment variable")}</dt>
+        <dd className="min-w-0 font-mono text-th-text-primary [overflow-wrap:anywhere]">{connector.env_var}</dd>
+        {connector.source ? <>
+          <dt>{tr("읽는 곳", "Reads from")}</dt>
+          <dd className="min-w-0 font-mono text-th-text-primary [overflow-wrap:anywhere]">{connector.source}</dd>
+        </> : null}
+      </dl>
       {connector.setup_actions.length > 0 ? (
-        <div className="mt-3 space-y-2">
-          <div className="text-[11px] font-semibold uppercase" style={{ color: "var(--th-text-muted)" }}>
-            {tr("설정 작업", "Setup actions")}
-          </div>
-          <ul className="space-y-1.5 text-[12px] leading-5" style={{ color: "var(--th-text)" }}>
+        <details className="mt-2 text-xs">
+          <summary className="inline-flex min-h-11 cursor-pointer items-center font-medium text-th-text-secondary">
+            {tr("설정 방법 보기", "How to set up")}
+          </summary>
+          <ul className="mt-1 space-y-1.5 leading-5 text-th-text-primary">
             {connector.setup_actions.map((action) => (
-              <li key={action} className="rounded-md border px-3 py-2" style={{
-                borderColor: "color-mix(in srgb, var(--th-border) 62%, transparent)",
-                background: "color-mix(in srgb, var(--th-overlay-medium) 70%, transparent)",
-              }}>
+              <li key={action} className="rounded-md border border-th-border-subtle px-3 py-2 font-mono [overflow-wrap:anywhere]" lang="en">
                 {action}
               </li>
             ))}
           </ul>
-        </div>
+        </details>
       ) : null}
     </div>
   );
-}
-
-function FieldLine({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="grid gap-1 sm:grid-cols-[96px_minmax(0,1fr)]">
-      <span>{label}</span>
-      <span className="min-w-0 break-all font-mono" style={{ color: "var(--th-text)" }}>
-        {value}
-      </span>
-    </div>
-  );
-}
-
-type ConnectorDisplayState =
-  | "ready"
-  | "skipped"
-  | "missing_config"
-  | "missing_path"
-  | "missing_provider"
-  | "invalid_config";
-
-function normalizedState(state: string): ConnectorDisplayState {
-  if (
-    state === "ready" ||
-    state === "skipped" ||
-    state === "missing_config" ||
-    state === "missing_path" ||
-    state === "missing_provider" ||
-    state === "invalid_config"
-  ) {
-    return state;
-  }
-  return "invalid_config";
-}
-
-function stateLabel(state: ConnectorDisplayState, tr: (ko: string, en: string) => string): string {
-  if (state === "ready") return tr("준비됨", "Ready");
-  if (state === "missing_config") return tr("미설정", "Not configured");
-  if (state === "missing_path") return tr("경로 없음", "Missing path");
-  if (state === "missing_provider") return tr("제공자 없음", "Missing provider");
-  if (state === "invalid_config") return tr("설정 오류", "Invalid config");
-  return tr("건너뜀", "Skipped");
-}
-
-function isSetupState(state: ConnectorDisplayState): boolean {
-  return state === "missing_path" || state === "missing_provider" || state === "invalid_config";
-}
-
-function connectorTone(state: ConnectorDisplayState | "invalid") {
-  if (state === "ready") {
-    return {
-      bg: "var(--th-overlay-subtle)",
-      fg: "var(--th-badge-emerald-text)",
-      border: "var(--th-border-subtle)",
-    };
-  }
-  if (state === "invalid" || state === "missing_path" || state === "missing_provider" || state === "invalid_config") {
-    return {
-      bg: "var(--th-overlay-subtle)",
-      fg: "var(--th-badge-amber-text)",
-      border: "var(--th-border-subtle)",
-    };
-  }
-  return {
-    bg: "var(--th-overlay-subtle)",
-    fg: "var(--th-text-muted)",
-    border: "var(--th-border-subtle)",
-  };
 }

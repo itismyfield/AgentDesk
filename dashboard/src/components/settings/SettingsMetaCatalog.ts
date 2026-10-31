@@ -1,580 +1,224 @@
 import { useCallback, useMemo } from "react";
-import { useMachineNodes } from "./useMachineNodes";
 import type { RuntimeConfigMap } from "../../api";
-import type { CompanySettings, VoiceConfigResponse } from "../../types";
+import type { CompanySettings } from "../../types";
+import { PANEL_COPY, RUNTIME_APPLY_NOTE, RUNTIME_FIELDS } from "./SettingsCopy";
 import {
-  CATEGORIES,
-  SETTING_GROUPS,
-  SYSTEM_CATEGORY_META,
-  VOICE_SENSITIVITY_OPTIONS,
-  findVoiceAliasConflict,
+  SETTINGS_PANELS,
+  configEntryPlacement,
   metaFromConfigEntry,
-  voiceConfigComparable,
   type ConfigEditValue,
   type ConfigEntry,
   type SettingRowMeta,
   type SettingsPanel,
 } from "./SettingsModel";
+import type { GeneralField } from "./useSettingsDrafts";
+
+type Tr = (ko: string, en: string) => string;
+
+export interface SettingsNavItem {
+  id: SettingsPanel;
+  title: string;
+  detail: string;
+  attention: number;
+}
 
 type UseSettingsMetaCatalogArgs = {
   activePanel: SettingsPanel;
-  ceoName: string;
-  ceoNameError: string | null;
-  companyName: string;
-  companyNameError: string | null;
+  attention: Partial<Record<SettingsPanel, number>>;
   configEdits: Record<string, ConfigEditValue>;
   configEntries: ConfigEntry[];
-  language: CompanySettings["language"];
-  panelQuery: string;
-  rcDefaults: RuntimeConfigMap;
-  rcValues: RuntimeConfigMap;
-  settings: CompanySettings;
-  theme: CompanySettings["theme"];
-  tr: (ko: string, en: string) => string;
-  voiceConfig: VoiceConfigResponse | null;
-  voiceDraft: VoiceConfigResponse | null;
+  general: {
+    values: Pick<CompanySettings, GeneralField>;
+    changedFields: GeneralField[];
+    companyNameError: string | null;
+    ceoNameError: string | null;
+  };
+  query: string;
+  runtime: {
+    values: RuntimeConfigMap;
+    defaults: RuntimeConfigMap;
+    changedKeys: Set<string>;
+    ready: boolean;
+  };
+  tr: Tr;
 };
+
+function validation(error: string | null): SettingRowMeta["validation"] {
+  return error ? { ok: false, messageKo: error, messageEn: error } : { ok: true };
+}
+
+function rowHaystack(meta: SettingRowMeta): string {
+  return `${meta.key} ${meta.labelKo} ${meta.labelEn} ${meta.hintKo ?? ""} ${meta.hintEn ?? ""}`.toLowerCase();
+}
 
 export function useSettingsMetaCatalog({
   activePanel,
-  ceoName,
-  ceoNameError,
-  companyName,
-  companyNameError,
+  attention,
   configEdits,
   configEntries,
-  language,
-  panelQuery,
-  rcDefaults,
-  rcValues,
-  settings,
-  theme,
+  general,
+  query,
+  runtime,
   tr,
-  voiceConfig,
-  voiceDraft,
 }: UseSettingsMetaCatalogArgs) {
-  const machines = useMachineNodes();
-  const machineCount = machines.data ? String(machines.data.nodes.length) : "—";
-  const voiceAliasConflict = useMemo(() => findVoiceAliasConflict(voiceDraft), [voiceDraft]);
-  const voiceDirty = useMemo(
-    () => JSON.stringify(voiceConfigComparable(voiceConfig)) !== JSON.stringify(voiceConfigComparable(voiceDraft)),
-    [voiceConfig, voiceDraft],
-  );
-  const visibleConfigEntries = useMemo(() => configEntries, [configEntries]);
-
-  const groupedConfigEntries = useMemo(
-    () =>
-      (Object.keys(SYSTEM_CATEGORY_META) as Array<keyof typeof SYSTEM_CATEGORY_META>).reduce<Record<string, ConfigEntry[]>>(
-        (acc, categoryKey) => {
-          acc[categoryKey] = visibleConfigEntries.filter((entry) => entry.category === categoryKey);
-          return acc;
-        },
-        {},
-      ),
-    [visibleConfigEntries],
-  );
-
-  const generalMetas = useMemo<SettingRowMeta[]>(
-    () => [
+  const generalMetas = useMemo<SettingRowMeta[]>(() => {
+    const base = { panel: "general" as const, section: "identity", editable: true, restartRequired: false, flags: [] };
+    return [
       {
+        ...base,
         key: "companyName",
-        group: "general",
-        source: "kv_meta",
-        editable: true,
-        restartRequired: false,
-        defaultValue: settings.companyName,
-        effectiveValue: companyName,
-        validation: companyNameError
-          ? { ok: false, messageKo: companyNameError, messageEn: companyNameError }
-          : { ok: true },
-        flags: [],
+        effectiveValue: general.values.companyName,
+        changed: general.changedFields.includes("companyName"),
+        validation: validation(general.companyNameError),
         labelKo: "회사 이름",
         labelEn: "Company name",
-        hintKo: "대시보드와 주요 헤더에 표시되는 이름입니다.",
-        hintEn: "Shown in the dashboard and primary headers.",
+        hintKo: "대시보드 위쪽과 주요 화면에 보이는 이름이에요.",
+        hintEn: "Shown at the top of the dashboard and on main screens.",
         inputKind: "text",
       },
       {
+        ...base,
         key: "ceoName",
-        group: "general",
-        source: "kv_meta",
-        editable: true,
-        restartRequired: false,
-        defaultValue: settings.ceoName,
-        effectiveValue: ceoName,
-        validation: ceoNameError
-          ? { ok: false, messageKo: ceoNameError, messageEn: ceoNameError }
-          : { ok: true },
-        flags: [],
-        labelKo: "CEO 이름",
-        labelEn: "CEO name",
-        hintKo: "대표 인물(CEO)의 이름입니다.",
-        hintEn: "Name of the representative persona (CEO).",
+        effectiveValue: general.values.ceoName,
+        changed: general.changedFields.includes("ceoName"),
+        validation: validation(general.ceoNameError),
+        labelKo: "내 이름",
+        labelEn: "Your name",
+        hintKo: "대시보드와 에이전트가 부를 이름이에요.",
+        hintEn: "What the dashboard and agents call you.",
         inputKind: "text",
       },
       {
+        ...base,
         key: "language",
-        group: "general",
-        source: "kv_meta",
-        editable: true,
-        restartRequired: false,
-        defaultValue: settings.language,
-        effectiveValue: language,
-        flags: [],
+        effectiveValue: general.values.language,
+        changed: general.changedFields.includes("language"),
         labelKo: "언어",
         labelEn: "Language",
-        hintKo: "대시보드 전반의 기본 언어와 로캘을 정합니다.",
-        hintEn: "Sets the default language and locale across the dashboard.",
+        hintKo: "대시보드에 쓰는 언어예요.",
+        hintEn: "Language used across the dashboard.",
         inputKind: "select",
         selectOptions: [
-          { value: "ko", labelKo: "한국어", labelEn: "Korean" },
-          { value: "en", labelKo: "영어", labelEn: "English" },
-          { value: "ja", labelKo: "일본어", labelEn: "Japanese" },
-          { value: "zh", labelKo: "중국어", labelEn: "Chinese" },
+          { value: "ko", labelKo: "한국어", labelEn: "한국어 (Korean)" },
+          { value: "en", labelKo: "English (영어)", labelEn: "English" },
+          { value: "ja", labelKo: "日本語 (일본어)", labelEn: "日本語 (Japanese)" },
+          { value: "zh", labelKo: "中文 (중국어)", labelEn: "中文 (Chinese)" },
         ],
       },
       {
+        ...base,
         key: "theme",
-        group: "general",
-        source: "kv_meta",
-        editable: true,
-        restartRequired: false,
-        defaultValue: settings.theme,
-        effectiveValue: theme,
-        flags: [],
+        effectiveValue: general.values.theme,
+        changed: general.changedFields.includes("theme"),
         labelKo: "테마",
         labelEn: "Theme",
-        hintKo: "대시보드의 기본 분위기를 정합니다.",
-        hintEn: "Sets the base look and feel for the dashboard.",
+        hintKo: "화면을 어둡게 또는 밝게 보여요.",
+        hintEn: "Show the dashboard dark or light.",
         inputKind: "select",
         selectOptions: [
-          { value: "dark", labelKo: "다크", labelEn: "Dark" },
-          { value: "light", labelKo: "라이트", labelEn: "Light" },
-          { value: "auto", labelKo: "자동 (시스템)", labelEn: "Auto (System)" },
+          { value: "dark", labelKo: "어둡게", labelEn: "Dark" },
+          { value: "light", labelKo: "밝게", labelEn: "Light" },
+          { value: "auto", labelKo: "시스템 설정 따르기", labelEn: "Match system" },
         ],
       },
-    ],
-    [
-      ceoName,
-      ceoNameError,
-      companyName,
-      companyNameError,
-      language,
-      settings.ceoName,
-      settings.companyName,
-      settings.language,
-      settings.theme,
-      theme,
-    ],
-  );
-
-  const runtimeMetas = useMemo<SettingRowMeta[]>(
-    () =>
-      CATEGORIES.flatMap((category) =>
-        category.fields.map<SettingRowMeta>((field) => {
-          const fallback = field.inputKind === "toggle" ? false : 0;
-          const current = rcValues[field.key] ?? rcDefaults[field.key] ?? fallback;
-          const def = rcDefaults[field.key] ?? fallback;
-          const overrideActive = current !== def;
-          const range =
-            field.inputKind === "toggle" || field.min === undefined || field.max === undefined || field.step === undefined
-              ? undefined
-              : { min: field.min, max: field.max, step: field.step };
-          const rangeText = range ? ` · ${range.min}-${range.max}${field.unit ?? ""}` : "";
-          return {
-            key: field.key,
-            group: "runtime",
-            source: overrideActive ? "live_override" : "runtime_config",
-            editable: true,
-            restartRequired: false,
-            defaultValue: def,
-            effectiveValue: current,
-            flags: overrideActive ? ["live_override"] : [],
-            labelKo: field.labelKo,
-            labelEn: field.labelEn,
-            hintKo: `${field.descriptionKo}${rangeText}`,
-            hintEn: `${field.descriptionEn}${rangeText}`,
-            inputKind: field.inputKind ?? "number",
-            valueUnit: field.unit,
-            numericRange: range,
-            restartNoteKo: "저장 즉시 반영, 재시작 없이 다음 폴링 주기에 적용됩니다.",
-            restartNoteEn: "Applies on the next poll without restart.",
-          };
-        }),
-      ),
-    [rcValues, rcDefaults],
-  );
-
-  const pipelineMetas = useMemo<SettingRowMeta[]>(
-    () => configEntries.map((entry) => metaFromConfigEntry(entry, configEdits)),
-    [configEntries, configEdits],
-  );
-
-  const onboardingMetas = useMemo<SettingRowMeta[]>(
-    () => [
-      {
-        key: "greeting_template",
-        group: "onboarding",
-        source: "legacy_readonly",
-        editable: false,
-        restartRequired: false,
-        defaultValue: "welcome to AgentDesk",
-        effectiveValue: tr("자동 관리", "Managed"),
-        flags: ["read_only"],
-        labelKo: "첫 인사 메시지",
-        labelEn: "Greeting template",
-        hintKo: "새 에이전트가 처음 인사할 때 사용하는 메시지입니다.",
-        hintEn: "Message used when a new agent greets for the first time.",
-        inputKind: "readonly",
-      },
-      {
-        key: "trial_card_count",
-        group: "onboarding",
-        source: "legacy_readonly",
-        editable: false,
-        restartRequired: false,
-        defaultValue: 2,
-        effectiveValue: tr("자동 관리", "Managed"),
-        flags: ["read_only"],
-        labelKo: "시작 카드 수",
-        labelEn: "Trial card count",
-        hintKo: "새 워크스페이스에 처음 준비되는 연습 카드 수입니다.",
-        hintEn: "Practice cards allocated to a new workspace.",
-        inputKind: "readonly",
-      },
-      {
-        key: "onboarding_bot_token",
-        group: "onboarding",
-        source: "legacy_readonly",
-        editable: false,
-        restartRequired: false,
-        effectiveValue: tr("연결됨", "Connected"),
-        flags: ["read_only"],
-        labelKo: "봇 연결",
-        labelEn: "Bot connection",
-        hintKo: "대시보드가 사용할 Discord 봇 연결 상태입니다.",
-        hintEn: "Connection status for the Discord bot used by the dashboard.",
-        inputKind: "readonly",
-      },
-      {
-        key: "onboarding_guild_id",
-        group: "onboarding",
-        source: "legacy_readonly",
-        editable: false,
-        restartRequired: false,
-        effectiveValue: tr("연결됨", "Connected"),
-        flags: ["read_only"],
-        labelKo: "서버 연결",
-        labelEn: "Server connection",
-        hintKo: "작업을 받을 Discord 서버 연결 상태입니다.",
-        hintEn: "Connection status for the Discord server that receives work.",
-        inputKind: "readonly",
-      },
-      {
-        key: "onboarding_owner_id",
-        group: "onboarding",
-        source: "legacy_readonly",
-        editable: false,
-        restartRequired: false,
-        effectiveValue: tr("설정됨", "Configured"),
-        flags: ["read_only"],
-        labelKo: "소유자",
-        labelEn: "Owner",
-        hintKo: "주요 운영 알림과 승인 기준이 되는 소유자입니다.",
-        hintEn: "Owner used for primary operation notices and approvals.",
-        inputKind: "readonly",
-      },
-      {
-        key: "onboarding_provider",
-        group: "onboarding",
-        source: "legacy_readonly",
-        editable: false,
-        restartRequired: false,
-        effectiveValue: tr("설정됨", "Configured"),
-        flags: ["read_only"],
-        labelKo: "AI 연결",
-        labelEn: "AI connection",
-        hintKo: "에이전트가 사용할 AI provider 연결 상태입니다.",
-        hintEn: "AI provider connection status used by agents.",
-        inputKind: "readonly",
-      },
-    ],
-    [tr],
-  );
-
-  const voiceMetas = useMemo<SettingRowMeta[]>(() => {
-    const global = voiceDraft?.global;
-    const metas: SettingRowMeta[] = [
-      {
-        key: "voice.global.lobby_channel_id",
-        group: "voice",
-        source: "repo_canonical",
-        editable: true,
-        restartRequired: false,
-        effectiveValue: global?.lobby_channel_id ?? "",
-        flags: [],
-        labelKo: "음성 채널 ID",
-        labelEn: "Voice channel ID",
-        hintKo: "음성 입력을 받을 Discord 채널입니다.",
-        hintEn: "Discord channel that receives voice input.",
-        inputKind: "text",
-        storageLayerKo: "agentdesk.yaml voice.lobby_channel_id",
-        storageLayerEn: "agentdesk.yaml voice.lobby_channel_id",
-      },
-      {
-        key: "voice.global.active_agent_ttl_seconds",
-        group: "voice",
-        source: "repo_canonical",
-        editable: true,
-        restartRequired: false,
-        defaultValue: 180,
-        effectiveValue: global?.active_agent_ttl_seconds ?? 180,
-        flags: [],
-        labelKo: "대화 유지 시간",
-        labelEn: "Conversation handoff time",
-        hintKo: "이름을 다시 부르지 않아도 같은 에이전트에게 이어 말할 수 있는 시간입니다.",
-        hintEn: "How long follow-up speech keeps talking to the same agent without repeating a name.",
-        inputKind: "number",
-        valueUnit: "s",
-        numericRange: { min: 30, max: 1800, step: 30 },
-        storageLayerKo: "agentdesk.yaml voice.active_agent_ttl_seconds",
-        storageLayerEn: "agentdesk.yaml voice.active_agent_ttl_seconds",
-      },
-      {
-        key: "voice.global.default_sensitivity_mode",
-        group: "voice",
-        source: "repo_canonical",
-        editable: true,
-        restartRequired: false,
-        defaultValue: "normal",
-        effectiveValue: global?.default_sensitivity_mode ?? "normal",
-        flags: [],
-        labelKo: "기본 민감도",
-        labelEn: "Default sensitivity",
-        hintKo: "말이 겹칠 때 새 발화로 얼마나 쉽게 인식할지 정합니다.",
-        hintEn: "Controls how readily overlapping speech is treated as a new utterance.",
-        inputKind: "select",
-        selectOptions: VOICE_SENSITIVITY_OPTIONS,
-        storageLayerKo: "agentdesk.yaml voice.default_sensitivity_mode",
-        storageLayerEn: "agentdesk.yaml voice.default_sensitivity_mode",
-      },
-      {
-        key: "voice.models.stt",
-        group: "voice",
-        source: "repo_canonical",
-        editable: true,
-        restartRequired: false,
-        effectiveValue: voiceDraft?.models.stt_provider ?? "whisper-cli",
-        flags: [],
-        labelKo: "받아쓰기(STT) 모델",
-        labelEn: "Speech-to-text model",
-        hintKo: "로컬 whisper 또는 OpenAI 호환 서버를 고릅니다.",
-        hintEn: "Local whisper or an OpenAI-compatible server.",
-        inputKind: "select",
-        storageLayerKo: "agentdesk.yaml voice.stt",
-        storageLayerEn: "agentdesk.yaml voice.stt",
-      },
-      {
-        key: "voice.models.tts",
-        group: "voice",
-        source: "repo_canonical",
-        editable: true,
-        restartRequired: false,
-        effectiveValue: voiceDraft?.models.tts_backend ?? "edge",
-        flags: [],
-        labelKo: "읽어주기(TTS) 모델",
-        labelEn: "Text-to-speech model",
-        hintKo: "Edge 음성 또는 OpenAI 호환 서버를 고릅니다.",
-        hintEn: "Edge voices or an OpenAI-compatible server.",
-        inputKind: "select",
-        storageLayerKo: "agentdesk.yaml voice.tts",
-        storageLayerEn: "agentdesk.yaml voice.tts",
-      },
     ];
-    for (const agent of voiceDraft?.agents ?? []) {
-      metas.push(
-        {
-          key: `voice.agent.${agent.id}.enabled`,
-          group: "voice",
-          source: "repo_canonical",
-          editable: true,
-          restartRequired: false,
-          effectiveValue: agent.voice_enabled,
-          flags: [],
-          labelKo: `${agent.name_ko ?? agent.name} 음성 사용`,
-          labelEn: `${agent.name} voice enabled`,
-          hintKo: "이 에이전트가 음성 호출을 받을지 결정합니다.",
-          hintEn: "Controls whether this agent responds to voice calls.",
-          inputKind: "toggle",
-          storageLayerKo: `agentdesk.yaml agents.${agent.id}.voice_enabled`,
-          storageLayerEn: `agentdesk.yaml agents.${agent.id}.voice_enabled`,
-        },
-        {
-          key: `voice.agent.${agent.id}.wake_word`,
-          group: "voice",
-          source: "repo_canonical",
-          editable: true,
-          restartRequired: false,
-          effectiveValue: agent.wake_word,
-          flags: [],
-          labelKo: `${agent.name_ko ?? agent.name} 호출어`,
-          labelEn: `${agent.name} wake word`,
-          hintKo: "비워 두면 호출 이름만으로 연결합니다.",
-          hintEn: "When empty, spoken names are enough.",
-          inputKind: "text",
-          storageLayerKo: `agentdesk.yaml agents.${agent.id}.wake_word`,
-          storageLayerEn: `agentdesk.yaml agents.${agent.id}.wake_word`,
-        },
-        {
-          key: `voice.agent.${agent.id}.aliases`,
-          group: "voice",
-          source: "repo_canonical",
-          editable: true,
-          restartRequired: false,
-          effectiveValue: agent.aliases.join(", "),
-          validation: voiceAliasConflict &&
-            (voiceAliasConflict.firstAgent.id === agent.id || voiceAliasConflict.secondAgent.id === agent.id)
-            ? {
-                ok: false,
-                messageKo: "호출 이름이 겹칩니다.",
-                messageEn: "Spoken names overlap.",
-              }
-            : { ok: true },
-          flags: voiceAliasConflict &&
-            (voiceAliasConflict.firstAgent.id === agent.id || voiceAliasConflict.secondAgent.id === agent.id)
-            ? ["alert"]
-            : [],
-          labelKo: `${agent.name_ko ?? agent.name} 추가 호출 이름`,
-          labelEn: `${agent.name} additional spoken names`,
-          hintKo: "쉼표 또는 줄바꿈으로 여러 호출명을 입력합니다.",
-          hintEn: "Enter multiple spoken aliases separated by commas or new lines.",
-          inputKind: "text",
-          storageLayerKo: `agentdesk.yaml agents.${agent.id}.aliases`,
-          storageLayerEn: `agentdesk.yaml agents.${agent.id}.aliases`,
-        },
-        {
-          key: `voice.agent.${agent.id}.sensitivity`,
-          group: "voice",
-          source: "repo_canonical",
-          editable: true,
-          restartRequired: false,
-          effectiveValue: agent.sensitivity_mode,
-          flags: [],
-          labelKo: `${agent.name_ko ?? agent.name} 민감도`,
-          labelEn: `${agent.name} sensitivity`,
-          hintKo: "이 에이전트만 다르게 인식하도록 조정합니다.",
-          hintEn: "Tune recognition for this agent only.",
-          inputKind: "select",
-          selectOptions: VOICE_SENSITIVITY_OPTIONS,
-          storageLayerKo: `agentdesk.yaml agents.${agent.id}.sensitivity_mode`,
-          storageLayerEn: `agentdesk.yaml agents.${agent.id}.sensitivity_mode`,
-        },
-      );
-    }
-    return metas;
-  }, [voiceAliasConflict, voiceDraft]);
+  }, [general.ceoNameError, general.changedFields, general.companyNameError, general.values]);
 
-  const providersMetas = useMemo<SettingRowMeta[]>(
-    () => [
-      {
-        key: "providers.extra_accounts",
-        group: "providers",
-        source: "computed",
-        editable: false,
+  const runtimeMetas = useMemo<SettingRowMeta[]>(() => {
+    if (!runtime.ready) return [];
+    return RUNTIME_FIELDS.map<SettingRowMeta>((field) => {
+      const fallback = field.inputKind === "toggle" ? false : 0;
+      const current = runtime.values[field.key] ?? runtime.defaults[field.key] ?? fallback;
+      const defaultValue = runtime.defaults[field.key] ?? fallback;
+      return {
+        key: field.key,
+        panel: field.panel,
+        section: field.section,
+        editable: true,
         restartRequired: false,
-        effectiveValue: "",
-        flags: ["read_only"],
-        labelKo: "프로바이더 extra 계정",
-        labelEn: "Provider extra accounts",
-        hintKo: "시스템 기본 홈은 유지하고 extra 계정은 빈 격리 홈에 누적합니다.",
-        hintEn: "Keep the system default home and accumulate extra accounts in empty isolated homes.",
-        inputKind: "readonly",
-      },
-    ],
-    [],
+        defaultValue,
+        effectiveValue: current,
+        changed: runtime.changedKeys.has(field.key),
+        resettable: current !== defaultValue,
+        flags: [],
+        labelKo: field.labelKo,
+        labelEn: field.labelEn,
+        hintKo: field.hintKo,
+        hintEn: field.hintEn,
+        inputKind: field.inputKind,
+        valueUnit: field.unit,
+        numericRange: field.min !== undefined && field.max !== undefined && field.step !== undefined
+          ? { min: field.min, max: field.max, step: field.step }
+          : undefined,
+        applyNoteKo: RUNTIME_APPLY_NOTE.ko,
+        applyNoteEn: RUNTIME_APPLY_NOTE.en,
+      };
+    });
+  }, [runtime.changedKeys, runtime.defaults, runtime.ready, runtime.values]);
+
+  const configMetas = useMemo<SettingRowMeta[]>(
+    () => configEntries.flatMap((entry) => {
+      const placement = configEntryPlacement(entry);
+      return placement ? [metaFromConfigEntry(entry, configEdits, placement)] : [];
+    }),
+    [configEdits, configEntries],
   );
 
-  const allMetas = useMemo<SettingRowMeta[]>(
-    () => [...pipelineMetas, ...runtimeMetas, ...providersMetas, ...voiceMetas, ...onboardingMetas, ...generalMetas],
-    [pipelineMetas, runtimeMetas, providersMetas, voiceMetas, onboardingMetas, generalMetas],
+  const allMetas = useMemo(
+    () => [...generalMetas, ...runtimeMetas, ...configMetas],
+    [configMetas, generalMetas, runtimeMetas],
   );
-  const groupCounts = useMemo(() => {
-    const counts: Record<string, number> = {
-      pipeline: 0,
-      runtime: 0,
-      providers: 0,
-      connectors: 0,
-      voice: 0,
-      onboarding: 0,
-      general: 0,
-    };
-    for (const meta of allMetas) {
-      const group = String(meta.group);
-      counts[group] = (counts[group] ?? 0) + 1;
-    }
-    return counts;
-  }, [allMetas]);
-  const navItems = useMemo(
-    () =>
-      SETTING_GROUPS.map((group) => ({
-        id: group.id,
-        title: tr(group.nameKo, group.nameEn),
-        detail: tr(group.descKo, group.descEn),
-        count: group.id === "machine" ? machineCount : String(groupCounts[group.id] ?? 0),
-      })),
-    [groupCounts, machineCount, tr],
+
+  const queryNormalized = query.trim().toLowerCase();
+  const queryActive = queryNormalized.length > 0;
+  const matches = useCallback(
+    (...texts: string[]) => !queryActive || texts.join(" ").toLowerCase().includes(queryNormalized),
+    [queryActive, queryNormalized],
   );
-  const panelQueryNormalized = panelQuery.trim().toLowerCase();
+  const visibleKeys = useMemo(
+    () => new Set(allMetas.filter((meta) => !queryActive || rowHaystack(meta).includes(queryNormalized)).map((meta) => meta.key)),
+    [allMetas, queryActive, queryNormalized],
+  );
+
+  const rowsFor = useCallback(
+    (panel: SettingsPanel, section: string) =>
+      allMetas.filter((meta) => meta.panel === panel && meta.section === section && visibleKeys.has(meta.key)),
+    [allMetas, visibleKeys],
+  );
+
+  const navItems = useMemo<SettingsNavItem[]>(
+    () => SETTINGS_PANELS.map((panel) => ({
+      id: panel,
+      title: tr(PANEL_COPY[panel].titleKo, PANEL_COPY[panel].titleEn),
+      detail: tr(PANEL_COPY[panel].detailKo, PANEL_COPY[panel].detailEn),
+      attention: attention[panel] ?? 0,
+    })),
+    [attention, tr],
+  );
+
+  const panelMatches = useCallback((panel: SettingsPanel) => {
+    if (!queryActive) return true;
+    const copy = PANEL_COPY[panel];
+    return matches(copy.titleKo, copy.titleEn, copy.detailKo, copy.detailEn, copy.keywords)
+      || allMetas.some((meta) => meta.panel === panel && visibleKeys.has(meta.key));
+  }, [allMetas, matches, queryActive, visibleKeys]);
+
   const filteredNavItems = useMemo(
-    () =>
-      navItems.filter((item) => {
-        if (!panelQueryNormalized) return true;
-        if (`${item.title} ${item.detail}`.toLowerCase().includes(panelQueryNormalized)) {
-          return true;
-        }
-        return allMetas.some((meta) => {
-          if (meta.group !== item.id) return false;
-          const haystack =
-            `${meta.key} ${meta.labelKo ?? ""} ${meta.labelEn ?? ""} ${meta.hintKo ?? ""} ${meta.hintEn ?? ""}`.toLowerCase();
-          return haystack.includes(panelQueryNormalized);
-        });
-      }),
-    [allMetas, navItems, panelQueryNormalized],
+    () => navItems.filter((item) => panelMatches(item.id)),
+    [navItems, panelMatches],
   );
-  const matchingKeysInActivePanel = useMemo<Set<string>>(() => {
-    const set = new Set<string>();
-    if (!panelQueryNormalized) return set;
-    for (const meta of allMetas) {
-      if (meta.group !== activePanel) continue;
-      const haystack =
-        `${meta.key} ${meta.labelKo ?? ""} ${meta.labelEn ?? ""} ${meta.hintKo ?? ""} ${meta.hintEn ?? ""}`.toLowerCase();
-      if (haystack.includes(panelQueryNormalized)) {
-        set.add(meta.key);
-      }
-    }
-    return set;
-  }, [activePanel, allMetas, panelQueryNormalized]);
-  const isRowVisible = useCallback(
-    (key: string) => {
-      if (!panelQueryNormalized) return true;
-      return matchingKeysInActivePanel.has(key);
-    },
-    [matchingKeysInActivePanel, panelQueryNormalized],
+  const activeMatchCount = useMemo(
+    () => allMetas.filter((meta) => meta.panel === activePanel && visibleKeys.has(meta.key)).length,
+    [activePanel, allMetas, visibleKeys],
   );
   const activeNavItem = navItems.find((item) => item.id === activePanel) ?? navItems[0];
 
   return {
+    activeMatchCount,
     activeNavItem,
     filteredNavItems,
-    generalMetas,
-    groupedConfigEntries,
-    isRowVisible,
-    matchingKeysInActivePanel,
-    onboardingMetas,
-    panelQueryNormalized,
-    pipelineMetas,
-    runtimeMetas,
-    voiceAliasConflict,
-    voiceDirty,
+    matches,
+    queryActive,
+    rowsFor,
   };
 }
