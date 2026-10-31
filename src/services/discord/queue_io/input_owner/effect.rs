@@ -73,7 +73,8 @@ pub(crate) async fn run(
                     false => owner.retain_not_sent(&parse(identity)?, proof),
                 }
             })
-            .await?;
+            .await
+            .map_err(unsent)?;
         return Ok(match completion {
             Completion::NotSent(reason) => Completion::NotSent(reason),
             other => Completion::NotSent(format!("{other:?}")),

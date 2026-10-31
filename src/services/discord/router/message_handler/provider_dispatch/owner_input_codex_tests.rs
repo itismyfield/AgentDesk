@@ -2,6 +2,7 @@
 //! captured busy Codex screen under a traced tmux, the owner's actor, and the pane's own record.
 use super::tests::{AUTHOR, NAME, PROMPT, Rig, owned};
 use super::*;
+use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::claude_tui::input::submission::tests::wait;
 use crate::services::discord::queue_io::input_owner::admission::TurnBind;
 use crate::services::provider::ProviderKind;
@@ -298,7 +299,7 @@ fn an_idle_owner_turn_holds_its_capacity_until_its_ai_turn_ends_pg() {
     let path = module_path!().split_once("::").unwrap().1;
     let test = format!("{path}::an_idle_owner_turn_holds_its_capacity_until_its_ai_turn_ends_pg");
     if crate::services::discord::admin_host_guard::tests::api_child(&test) {
-        holds_capacity_to_the_turn_end(false);
+        holds_capacity_to_the_turn_end(Fault::None);
     }
 }
 
@@ -309,37 +310,83 @@ fn an_uncertain_idle_write_holds_its_capacity_until_its_ai_turn_ends_pg() {
     let test =
         format!("{path}::an_uncertain_idle_write_holds_its_capacity_until_its_ai_turn_ends_pg");
     if crate::services::discord::admin_host_guard::tests::api_child(&test) {
-        holds_capacity_to_the_turn_end(true);
+        holds_capacity_to_the_turn_end(Fault::Enter);
     }
 }
 
-fn holds_capacity_to_the_turn_end(enter_fails: bool) {
-    use crate::services::cluster::execution_capacity::acquire;
-    let _root = crate::config::TestRuntimeRootGuard::new();
+/// A turn whose Enter went but whose settlement could not be stored holds the slot the same way.
+#[test]
+fn a_sent_idle_turn_whose_settlement_fails_holds_its_capacity_until_its_ai_turn_ends_pg() {
+    let path = module_path!().split_once("::").unwrap().1;
+    let name =
+        "a_sent_idle_turn_whose_settlement_fails_holds_its_capacity_until_its_ai_turn_ends_pg";
+    if crate::services::discord::admin_host_guard::tests::api_child(&format!("{path}::{name}")) {
+        holds_capacity_to_the_turn_end(Fault::Settle);
+    }
+}
+
+/// A refusal before the first key whose not-sent custody cannot be stored either still proves
+/// nothing went: no AI turn is awaited and the slot returns at once.
+#[test]
+fn an_unsent_idle_write_whose_custody_fails_returns_its_capacity_at_once_pg() {
+    let path = module_path!().split_once("::").unwrap().1;
+    let name = "an_unsent_idle_write_whose_custody_fails_returns_its_capacity_at_once_pg";
+    if crate::services::discord::admin_host_guard::tests::api_child(&format!("{path}::{name}")) {
+        unsent_returns_its_capacity_at_once();
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Fault {
+    None,
+    Enter,
+    Settle,
+}
+
+/// A one-slot node with a database for its leases, and an idle Codex owner on `channel`.
+fn slot_rig(name: &str, channel: u64) -> (tempfile::TempDir, Rig, TestPostgresDb, sqlx::PgPool) {
     let data = tempfile::tempdir().unwrap();
     let mut config = crate::config::Config::default();
     config.data.dir = data.path().to_path_buf();
     config.cluster.enabled = true;
     config.cluster.execution_slots = Some(1);
     crate::config_live_reload::install(config);
-    let rig = codex_rig_on("oc-slot", 7_272_539, true);
-    if enter_fails {
-        rig.mark("swap-after", "paste");
-    }
-    let db = rig
-        .runtime
-        .block_on(crate::db::auto_queue::test_support::TestPostgresDb::create());
+    let rig = codex_rig_on(name, channel, true);
+    let db = rig.runtime.block_on(TestPostgresDb::create());
     let pool = rig.runtime.block_on(db.connect_and_migrate());
     rig.pool.set(pool.clone()).unwrap();
-    let leases = || {
-        let count = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM node_execution_leases");
-        rig.runtime.block_on(count.fetch_one(&pool)).unwrap()
-    };
-    let other = |channel| {
-        let _entered = rig.runtime.enter();
-        let cancel = std::sync::Arc::new(crate::services::provider::CancelToken::new());
-        acquire(Some(&pool), "codex", channel, cancel)
-    };
+    (data, rig, db, pool)
+}
+
+fn leases(rig: &Rig, pool: &sqlx::PgPool) -> i64 {
+    let count = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM node_execution_leases");
+    rig.runtime.block_on(count.fetch_one(pool)).unwrap()
+}
+
+type Capacity =
+    Result<Option<crate::services::cluster::execution_capacity::ExecutionGuard>, String>;
+
+fn other_run(rig: &Rig, pool: &sqlx::PgPool, channel: u64) -> Capacity {
+    let _entered = rig.runtime.enter();
+    let cancel = std::sync::Arc::new(crate::services::provider::CancelToken::new());
+    crate::services::cluster::execution_capacity::acquire(Some(pool), "codex", channel, cancel)
+}
+
+/// A shell line that changes the owner's snapshot file behind it, so each later commit fails.
+fn outside_write(channel: u64) -> String {
+    let root = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap();
+    let path = root.join(format!("claude/input-owner-dispatch/{channel}.json"));
+    format!("printf '\\n' >> '{}'", path.display())
+}
+
+fn holds_capacity_to_the_turn_end(fault: Fault) {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (_data, rig, db, pool) = slot_rig("oc-slot", 7_272_539);
+    match fault {
+        Fault::None => {}
+        Fault::Enter => rig.mark("swap-after", "paste"),
+        Fault::Settle => rig.mark("after-Enter", &outside_write(7_272_539)),
+    }
     let (settled, answer) = tokio::sync::oneshot::channel();
     let claim = rig.claim(&rig.granted_front()).unwrap();
     let transcript = rig.transcript();
@@ -360,28 +407,65 @@ fn holds_capacity_to_the_turn_end(enter_fails: bool) {
         });
         let wait = async { tokio::time::timeout(std::time::Duration::from_secs(20), answer).await };
         let answered = rig.runtime.block_on(wait);
-        let (held, refused) = (leases(), other(7_272_540).err());
+        let (held, refused) = (leases(&rig, &pool), other_run(&rig, &pool, 7_272_540).err());
         let waiting = release.send(()).is_ok();
         assert!(waiting, "the capacity holder still waits for the AI turn");
-        let settled = match enter_fails {
-            true => Err("WriteUncertain(\"enter_failed\")".to_string()),
-            false => Ok(()),
-        };
-        assert_eq!(first.join().unwrap(), settled);
-        assert_eq!(answered.map(Result::ok), Ok(Some(settled)));
+        let first = first.join().unwrap();
+        match fault {
+            Fault::None => assert_eq!(first, Ok(())),
+            Fault::Enter => assert_eq!(first, Err("WriteUncertain(\"enter_failed\")".into())),
+            // The store's refusal after the Enter, never read as a write that surely did not land.
+            Fault::Settle => assert!(
+                first.as_ref().is_err_and(|e| !effect::surely_unsent(e)),
+                "{first:?}"
+            ),
+        }
+        assert_eq!(answered.map(Result::ok), Ok(Some(first)));
         assert_eq!(held, 1, "the lease stays while the AI turn runs");
         assert!(
             refused.is_some_and(|e| e.contains("exhausted")),
             "the slot stays taken"
         );
     });
-    assert_eq!(leases(), 0, "released once the turn ended");
-    let next = other(7_272_540).expect("the returned slot");
+    if fault == Fault::Settle {
+        assert_eq!(rig.events(), ["paste", "Enter"], "the turn was sent");
+    }
+    assert_eq!(leases(&rig, &pool), 0, "released once the turn ended");
+    let next = other_run(&rig, &pool, 7_272_540).expect("the returned slot");
     assert!(next.is_some());
     assert!(
-        other(7_272_546).is_err(),
+        other_run(&rig, &pool, 7_272_546).is_err(),
         "returned once: one slot, now taken"
     );
+    drop(next);
+    rig.runtime.block_on(db.drop());
+}
+
+fn unsent_returns_its_capacity_at_once() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (_data, rig, db, pool) = slot_rig("oc-unsent", 7_272_547);
+    // After the buffer loads and before the payload commit, so no key ever follows.
+    rig.mark("after-load", &outside_write(7_272_547));
+    let observed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = observed.clone();
+    let until_done: super::UntilDone = Box::new(move || {
+        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    });
+    let (settled, _answer) = tokio::sync::oneshot::channel();
+    let claim = rig.claim(&rig.granted_front()).unwrap();
+    let how = (ProviderKind::Codex, target::Phase::Idle, rig.transcript());
+    let result = rig.execute_until(claim, (how.0, how.1, &how.2), settled, Some(until_done));
+    let observed = observed.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(observed, 0, "no AI turn is awaited: {result:?}");
+    assert!(
+        result.as_ref().is_err_and(|e| effect::surely_unsent(e)),
+        "{result:?}"
+    );
+    assert!(!rig.events().contains(&"paste".to_string()), "no content");
+    assert_eq!(leases(&rig, &pool), 0, "returned at once");
+    let next = other_run(&rig, &pool, 7_272_540).expect("the returned slot");
+    assert!(next.is_some());
     drop(next);
     rig.runtime.block_on(db.drop());
 }

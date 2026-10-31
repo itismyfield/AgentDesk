@@ -383,30 +383,43 @@ async fn bootstrap_held_by_modal<T>(
     during
 }
 
-/// An attempt still in its bootstrap window is no observer's: the poll there binds nothing, a modal
-/// ends it unsent, and the retry of the same admission is the attempt bound and completed.
+/// The observer bind a routine run records, Null while none is bound.
+#[cfg(unix)]
+async fn bound(pool: &sqlx::PgPool, run_id: &str) -> Value {
+    let result: Value = sqlx::query_scalar("SELECT result_json FROM routine_runs WHERE id=$1")
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    result["owner_input"]["bind"].clone()
+}
+
+/// An attempt still in its bootstrap window is no observer's: the poll there binds nothing.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn owner_observer_skips_a_bootstrapping_attempt_and_completes_its_retry_pg() {
+async fn owner_observer_binds_nothing_in_a_bootstrap_window_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (db, pool, store, executor, run, handle) = accepted_fixture().await;
+    let poll = OWNER.scope(handle.clone(), executor.poll_agent_runs(&store, 10, false));
+    let during = bootstrap_held_by_modal(&handle, "bootstrap-a", poll).await;
+    assert!(during.unwrap().is_empty());
+    let bind = bound(&pool, &run.run_id).await;
+    assert_eq!(bind, Value::Null, "nothing bound in the bootstrap window");
+    pool.close().await;
+    db.drop().await;
+}
+
+/// A modal ends attempt A unsent: a completion recorded under its turn completes nothing, and the
+/// retry of the same admission is the attempt bound and completed.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn owner_observer_ignores_a_held_attempts_completion_and_completes_its_retry_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let (db, pool, store, executor, run, handle) = accepted_fixture().await;
     let turn = run.turn_id.as_deref().unwrap();
     let poll = || OWNER.scope(handle.clone(), executor.poll_agent_runs(&store, 10, false));
-    let during = bootstrap_held_by_modal(&handle, "bootstrap-a", poll()).await;
-    assert!(during.unwrap().is_empty());
-    let bind = || async {
-        let result: Value = sqlx::query_scalar("SELECT result_json FROM routine_runs WHERE id=$1")
-            .bind(&run.run_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        result["owner_input"]["bind"].clone()
-    };
-    assert_eq!(
-        bind().await,
-        Value::Null,
-        "nothing bound in the bootstrap window"
-    );
+    bootstrap_held_by_modal(&handle, "bootstrap-a", async {}).await;
+    let bind = || bound(&pool, &run.run_id);
     // A completion recorded while only the unsent A was attempted completes nothing.
     sqlx::query("INSERT INTO session_transcripts(turn_id,assistant_message) VALUES($1,'retried')")
         .bind(turn)
