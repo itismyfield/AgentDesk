@@ -1,6 +1,7 @@
 use regex::Regex;
 use std::collections::{BTreeSet, HashSet};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use super::{GitCommand, git_command};
 
@@ -57,7 +58,7 @@ pub(crate) fn origin_default_branch(repo_dir: &str) -> Option<String> {
 
 /// `preferred` followed by `fallbacks` without duplicates, so a known default branch is tried first.
 pub(crate) fn default_first_candidates(
-    preferred: Option<String>,
+    preferred: impl IntoIterator<Item = String>,
     fallbacks: &[&str],
 ) -> Vec<String> {
     let mut candidates: Vec<String> = preferred.into_iter().collect();
@@ -69,9 +70,18 @@ pub(crate) fn default_first_candidates(
     candidates
 }
 
+/// Local default branch, then its origin tracking ref, ahead of the fixed `fallbacks`.
+fn local_default_first_candidates(repo_dir: &str, fallbacks: &[&str]) -> Vec<String> {
+    let preferred = match origin_default_branch(repo_dir) {
+        Some(branch) => vec![branch.clone(), format!("origin/{branch}")],
+        None => Vec::new(),
+    };
+    default_first_candidates(preferred, fallbacks)
+}
+
 fn mainline_ref_for_range_search(repo_dir: &str) -> Option<String> {
-    default_first_candidates(
-        origin_default_branch(repo_dir),
+    local_default_first_candidates(
+        repo_dir,
         &["main", "master", "origin/main", "origin/master"],
     )
     .into_iter()
@@ -311,29 +321,60 @@ pub(crate) fn upstream_base_ref(repo_dir: &str) -> String {
     "main".to_string()
 }
 
-/// [`upstream_base_ref`] for a worktree about to be created: learns an unset origin/HEAD once,
-/// then fetches that branch. Remote failures are logged and the existing tracking ref is used.
+/// Total time the pre-creation remote refresh may spend. Issue worktrees are created inside
+/// policy hooks with a 5s default deadline, so a slow remote must not use it all.
+const REMOTE_REFRESH_BUDGET: Duration = Duration::from_secs(2);
+
+/// [`upstream_base_ref`] for a worktree about to be created. Fetches origin's default branch;
+/// when it is unknown, fetches origin first and then learns origin/HEAD from it.
+/// Remote failures or an exhausted budget are logged and the existing refs are used.
 pub(crate) fn refreshed_upstream_base_ref(repo_dir: &str) -> String {
-    if origin_default_branch(repo_dir).is_none() {
-        if let Err(error) = GitCommand::new()
-            .repo(repo_dir)
-            .args(["remote", "set-head", "origin", "--auto"])
-            .run_output()
-        {
-            tracing::info!(repo_dir, %error, "origin/HEAD unresolved; using fallback base ref");
+    if git_command()
+        .args(["config", "--get", "remote.origin.url"])
+        .current_dir(repo_dir)
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        let deadline = Instant::now() + REMOTE_REFRESH_BUDGET;
+        match origin_default_branch(repo_dir) {
+            Some(branch) => {
+                refresh_from_origin(repo_dir, deadline, &["fetch", "origin", &branch]);
+            }
+            None => {
+                if refresh_from_origin(repo_dir, deadline, &["fetch", "origin"]) {
+                    refresh_from_origin(
+                        repo_dir,
+                        deadline,
+                        &["remote", "set-head", "origin", "--auto"],
+                    );
+                }
+            }
         }
     }
-    let base_ref = upstream_base_ref(repo_dir);
-    if let Some(branch) = base_ref.strip_prefix("origin/") {
-        if let Err(error) = GitCommand::new()
+    upstream_base_ref(repo_dir)
+}
+
+fn refresh_from_origin(repo_dir: &str, deadline: Instant, args: &[&str]) -> bool {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let result = if remaining.is_zero() {
+        Err("remote refresh budget exhausted".to_string())
+    } else {
+        GitCommand::new()
             .repo(repo_dir)
-            .args(["fetch", "origin", branch])
+            .args(args)
+            .timeout(remaining)
             .run_output()
-        {
-            tracing::warn!(repo_dir, %error, "fetch before worktree creation failed; using existing {base_ref}");
-        }
+            .map_err(|error| error.to_string())
+    };
+    if let Err(error) = &result {
+        tracing::warn!(
+            repo_dir,
+            command = ?args,
+            %error,
+            "remote refresh before worktree creation failed; using existing refs"
+        );
     }
-    base_ref
+    result.is_ok()
 }
 
 /// Find the newest mainline commit whose subject references the given issue number.
@@ -383,14 +424,14 @@ pub fn find_latest_commit_for_issue(repo_dir: &str, issue_number: i64) -> Option
     None
 }
 
-/// Collect issue numbers referenced by commit subjects on the local branch named
-/// by origin/HEAD, falling back to `main`, then `master`.
+/// Collect issue numbers referenced by commit subjects on the branch named by origin/HEAD
+/// (local, then its origin tracking ref), falling back to `main`, then `master`.
 pub fn git_mainline_issue_numbers(repo_dir: &str) -> Result<Vec<i64>, String> {
     static ISSUE_RE: OnceLock<Regex> = OnceLock::new();
     let regex = ISSUE_RE.get_or_init(|| Regex::new(r"#(\d+)").expect("valid issue regex"));
 
     let mut last_error: Option<String> = None;
-    for branch in default_first_candidates(origin_default_branch(repo_dir), &["main", "master"]) {
+    for branch in local_default_first_candidates(repo_dir, &["main", "master"]) {
         let output = git_command()
             .args(["log", "--format=%s", "--first-parent", &branch])
             .current_dir(repo_dir)

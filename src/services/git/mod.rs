@@ -5,6 +5,8 @@ pub mod commit_resolver;
 pub mod remote;
 pub mod repo_resolver;
 pub mod runner;
+#[cfg(test)]
+pub(crate) mod test_origin_fixture;
 pub mod worktree_resolver;
 
 pub(crate) use branch_resolver::is_mainlike_branch;

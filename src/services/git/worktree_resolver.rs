@@ -1,6 +1,8 @@
 use super::commit_resolver::{refreshed_upstream_base_ref, upstream_base_ref};
 use super::git_command;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Worktree info: (path, branch, commit).
 #[derive(Clone)]
@@ -202,6 +204,15 @@ pub fn ensure_worktree_for_issue(
     repo_dir: &str,
     issue_number: i64,
 ) -> Result<EnsuredWorktreeInfo, String> {
+    ensure_worktree_for_issue_unless_abandoned(repo_dir, issue_number, &AtomicBool::new(false))
+}
+
+/// `abandoned` is checked after the remote refresh so a caller that gave up gets no worktree.
+fn ensure_worktree_for_issue_unless_abandoned(
+    repo_dir: &str,
+    issue_number: i64,
+    abandoned: &AtomicBool,
+) -> Result<EnsuredWorktreeInfo, String> {
     if let Some(existing) = find_worktree_for_issue(repo_dir, issue_number) {
         return Ok(existing.into());
     }
@@ -215,6 +226,11 @@ pub fn ensure_worktree_for_issue(
     let branch = format!("adk/auto/issue-{issue_number}-{timestamp}");
     let path = root.join(format!("issue-{issue_number}-{timestamp}"));
     let base_ref = refreshed_upstream_base_ref(repo_dir);
+    if abandoned.load(Ordering::Acquire) {
+        return Err(format!(
+            "issue #{issue_number} worktree creation abandoned by its caller"
+        ));
+    }
     let output = git_command()
         .args([
             "worktree",
@@ -272,11 +288,23 @@ pub async fn find_worktree_for_issue_async(
 }
 
 /// [`ensure_worktree_for_issue`] for async callers; `git worktree add` can block until timeout.
+/// Dropping the future (e.g. a policy deadline) stops the blocking task before it creates a worktree.
 pub async fn ensure_worktree_for_issue_async(
     repo_dir: String,
     issue_number: i64,
 ) -> Result<EnsuredWorktreeInfo, String> {
-    off_worker(move || ensure_worktree_for_issue(&repo_dir, issue_number)).await?
+    struct AbandonOnDrop(Arc<AtomicBool>);
+    impl Drop for AbandonOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    let abandoned = Arc::new(AtomicBool::new(false));
+    let _abandon_on_drop = AbandonOnDrop(abandoned.clone());
+    off_worker(move || {
+        ensure_worktree_for_issue_unless_abandoned(&repo_dir, issue_number, &abandoned)
+    })
+    .await?
 }
 
 // ── Automation-candidate worktree helpers ────────────────────────────────────
@@ -504,82 +532,10 @@ mod automation_worktree_tests {
 #[cfg(test)]
 mod issue_worktree_origin_base_tests {
     use super::*;
-    use std::process::Command;
+    use crate::services::git::test_origin_fixture::{OriginFixture, git};
 
-    fn git(dir: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
-            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
-            .args([
-                "-c",
-                "commit.gpgsign=false",
-                "-c",
-                "init.defaultBranch=main",
-            ])
-            .args(args)
-            .current_dir(dir)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .output()
-            .expect("spawn git");
-        assert!(
-            output.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    }
-
-    fn commit(dir: &Path, message: &str) -> String {
-        git(dir, &["commit", "--allow-empty", "-m", message]);
-        git(dir, &["rev-parse", "HEAD"])
-    }
-
-    /// A bare origin whose HEAD is `default_branch`, a pusher clone, and the desk clone.
-    struct Fixture {
-        _tmp: tempfile::TempDir,
-        seed: PathBuf,
-        desk: PathBuf,
-        main_tip: String,
-        default_tip: String,
-    }
-
-    fn fixture(default_branch: &str) -> Fixture {
-        let tmp = tempfile::tempdir().unwrap();
-        let origin = tmp.path().join("origin.git");
-        let origin_str = origin.to_str().unwrap();
-        git(
-            tmp.path(),
-            &["init", "--bare", "-b", default_branch, origin_str],
-        );
-        let seed = tmp.path().join("seed");
-        git(tmp.path(), &["clone", origin_str, seed.to_str().unwrap()]);
-        git(&seed, &["checkout", "-b", "main"]);
-        let main_tip = commit(&seed, "base");
-        git(&seed, &["push", "origin", "main"]);
-        let mut default_tip = main_tip.clone();
-        if default_branch != "main" {
-            git(&seed, &["checkout", "-b", default_branch]);
-            default_tip = commit(&seed, "default branch work");
-            git(&seed, &["push", "origin", default_branch]);
-        }
-        let unique = tmp
-            .path()
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
-        let desk = tmp.path().join(format!("desk{unique}"));
-        git(tmp.path(), &["clone", origin_str, desk.to_str().unwrap()]);
-        Fixture {
-            _tmp: tmp,
-            seed,
-            desk,
-            main_tip,
-            default_tip,
-        }
-    }
-
-    fn create(fixture: &Fixture, issue_number: i64) -> EnsuredWorktreeInfo {
-        let info = ensure_worktree_for_issue(fixture.desk.to_str().unwrap(), issue_number)
+    fn create(fixture: &OriginFixture, issue_number: i64) -> EnsuredWorktreeInfo {
+        let info = ensure_worktree_for_issue(fixture.desk_dir(), issue_number)
             .expect("issue worktree is created");
         assert!(info.created);
         let head = git(Path::new(&info.path), &["rev-parse", "HEAD"]);
@@ -588,11 +544,17 @@ mod issue_worktree_origin_base_tests {
         info
     }
 
+    /// Re-registers origin so the desk has no `refs/remotes/origin/*` at all.
+    fn forget_remote_tracking_refs(fixture: &OriginFixture) {
+        git(&fixture.desk, &["remote", "remove", "origin"]);
+        let origin = fixture.origin.to_str().unwrap();
+        git(&fixture.desk, &["remote", "add", "origin", origin]);
+    }
+
     #[test]
     fn new_issue_worktree_starts_from_latest_origin_commit_when_local_main_is_behind() {
-        let fixture = fixture("main");
-        let latest = commit(&fixture.seed, "landed after the desk cloned");
-        git(&fixture.seed, &["push", "origin", "main"]);
+        let fixture = OriginFixture::new("main");
+        let latest = fixture.push_new_commit("landed after the desk cloned");
 
         let info = create(&fixture, 761_201);
         assert_eq!(info.commit, latest);
@@ -601,7 +563,7 @@ mod issue_worktree_origin_base_tests {
 
     #[test]
     fn new_issue_worktree_follows_origin_head_default_branch() {
-        let fixture = fixture("develop");
+        let fixture = OriginFixture::new("develop");
         assert_ne!(fixture.default_tip, fixture.main_tip);
 
         assert_eq!(create(&fixture, 761_202).commit, fixture.default_tip);
@@ -609,7 +571,7 @@ mod issue_worktree_origin_base_tests {
 
     #[test]
     fn new_issue_worktree_restores_missing_origin_head_from_the_remote() {
-        let fixture = fixture("develop");
+        let fixture = OriginFixture::new("develop");
         git(&fixture.desk, &["remote", "set-head", "origin", "-d"]);
 
         assert_eq!(create(&fixture, 761_203).commit, fixture.default_tip);
@@ -617,16 +579,81 @@ mod issue_worktree_origin_base_tests {
 
     #[test]
     fn new_issue_worktree_uses_existing_remote_ref_when_origin_is_unreachable() {
-        let fixture = fixture("main");
+        let fixture = OriginFixture::new("main");
         git(&fixture.desk, &["remote", "set-head", "origin", "-d"]);
         let missing = fixture.desk.with_file_name("missing-origin.git");
         git(
             &fixture.desk,
             &["remote", "set-url", "origin", missing.to_str().unwrap()],
         );
-        commit(&fixture.seed, "unreachable from the desk");
-        git(&fixture.seed, &["push", "origin", "main"]);
+        fixture.push_new_commit("unreachable from the desk");
 
         assert_eq!(create(&fixture, 761_204).commit, fixture.main_tip);
+    }
+
+    #[test]
+    fn new_issue_worktree_fetches_origin_when_tracking_refs_are_missing() {
+        let fixture = OriginFixture::new("main");
+        forget_remote_tracking_refs(&fixture);
+        let latest = fixture.push_new_commit("landed while the desk had no tracking refs");
+
+        assert_eq!(create(&fixture, 761_205).commit, latest);
+        assert_eq!(git(&fixture.desk, &["rev-parse", "main"]), fixture.main_tip);
+    }
+
+    #[test]
+    fn new_issue_worktree_finds_non_main_default_when_tracking_refs_are_missing() {
+        let fixture = OriginFixture::new("develop");
+        forget_remote_tracking_refs(&fixture);
+        let latest = fixture.push_new_commit("newer develop work");
+
+        assert_eq!(create(&fixture, 761_206).commit, latest);
+    }
+
+    #[test]
+    fn slow_origin_falls_back_to_existing_ref_within_the_refresh_budget() {
+        let fixture = OriginFixture::new("main");
+        fixture.push_new_commit("not fetched in time");
+        fixture.delay_desk_fetches(6);
+
+        let started = std::time::Instant::now();
+        let info = create(&fixture, 761_207);
+        assert!(started.elapsed() < std::time::Duration::from_secs(4));
+        assert_eq!(info.commit, fixture.main_tip);
+    }
+
+    #[tokio::test]
+    async fn abandoned_async_creation_leaves_no_worktree_behind() {
+        let fixture = OriginFixture::new("main");
+        fixture.delay_desk_fetches(6);
+
+        let creation = ensure_worktree_for_issue_async(fixture.desk_dir().to_string(), 761_208);
+        let gave_up = tokio::time::timeout(std::time::Duration::from_millis(300), creation).await;
+        assert!(gave_up.is_err(), "the slow fetch outlives the caller");
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+        let worktrees = git(&fixture.desk, &["worktree", "list", "--porcelain"]);
+        assert_eq!(worktrees.matches("worktree ").count(), 1, "{worktrees}");
+    }
+
+    #[test]
+    fn mainline_lookups_use_origin_default_when_the_local_branch_is_missing() {
+        let fixture = OriginFixture::new("develop");
+        let issue_commit = fixture.push_new_commit("land the feature (#761209)");
+        git(&fixture.desk, &["fetch", "origin"]);
+        git(&fixture.desk, &["checkout", "--detach"]);
+        git(&fixture.desk, &["branch", "-D", "develop"]);
+        let desk = fixture.desk_dir();
+
+        let head = crate::services::git::git_mainline_head_commit(desk);
+        assert_eq!(head.as_deref(), Some(issue_commit.as_str()));
+        let since = crate::services::git::git_mainline_commit_for_issue_since(
+            desk,
+            &fixture.main_tip,
+            761_209,
+        );
+        assert_eq!(since.as_deref(), Some(issue_commit.as_str()));
+        let issues = crate::services::git::git_mainline_issue_numbers(desk).expect("issue scan");
+        assert!(issues.contains(&761_209), "{issues:?}");
     }
 }
