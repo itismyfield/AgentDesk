@@ -15,7 +15,7 @@ export type EdgeRoute = {
 };
 
 /** Which drawing a view belongs to: tie positions only mean something inside that drawing. */
-export type ViewScope = { campaignId: string; projection: "groups" };
+export type ViewScope = { mode: "legacy" | "server"; campaignId: string; projection: "groups"; taskScope: string };
 
 export type CampaignGraphView = {
   schemaVersion: 1;
