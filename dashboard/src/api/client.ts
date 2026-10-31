@@ -16,5 +16,5 @@ export * from "./kanban";
 export * from "./agentActivity";
 export * from "./analytics";
 export * from "./communication";
-export * from "./autoQueue";
+export * from "./pipelineConfig";
 export * from "./routines";

@@ -160,20 +160,13 @@ describe("dashboard widgets under token authentication", () => {
     expect(getAuthSnapshot().phase).toBe("required");
   });
 
-  it("claude accounts load and switch send the tab token and render the results", async () => {
-    serve({
-      "GET /api/claude-accounts": ok(accounts),
-      "POST /api/claude-accounts/switch": ok({ status: "ok", switched: true, hostname: "node-a" }),
-    });
+  it("claude accounts load with the tab token and offer no account switch", async () => {
+    serve({ "GET /api/claude-accounts": ok(accounts) });
     const view = await render(<ClaudeAccountsWidget t={t} />);
     expectBearer("GET /api/claude-accounts");
     expect(view.textContent).toContain("spare@example.com");
-
-    await act(async () => { buttonByText(view, "Switch").click(); });
-    await settle();
-    expectBearer("POST /api/claude-accounts/switch");
-    expect(callsTo("POST /api/claude-accounts/switch")[0].body).toEqual({ account: "spare@example.com" });
-    expect(view.textContent).toContain("Applied on node-a");
+    expect(view.textContent).not.toContain("Switch");
+    expect(callsTo("POST /api/claude-accounts/switch")).toHaveLength(0);
   });
 
   it("claude accounts keep rendering the server's failure body", async () => {

@@ -90,17 +90,21 @@ export function queueLabel(live: CampaignNodeLive, tr: Tr) {
   return label(QUEUE_STATUSES, live.queue_status, tr);
 }
 
-/** One phrase for what the issue card is doing now: working or open dispatch, then queue wait, then board column.
+// A card waiting in the backlog or already done adds nothing beside the task status.
+const QUIET_CARD_STATUSES = new Set(["backlog", "done"]);
+
+/** One phrase for what the issue card is doing now: working or open dispatch, then queue wait, then the card's step.
  * Only a dispatch a session is working on right now reads as running. */
 export function LiveChip({ live, tr }: { live: CampaignNodeLive | undefined; tr: Tr }) {
   if (!live) return null;
   const working = liveIsWorking(live);
   const open = live.dispatch_status === "pending" || live.dispatch_status === "dispatched";
+  if (!working && !open && live.queue_status !== "pending" && QUIET_CARD_STATUSES.has(live.card_status)) return null;
   const text =
     working || open
       ? dispatchLabel(live, tr)
       : live.queue_status === "pending"
         ? queueLabel(live, tr)
-        : `${tr("보드", "Board")}: ${cardStatusLabel(live.card_status, tr)}`;
-  return <span className={`campaign-live${working ? " is-working" : ""}`}>{text}</span>;
+        : `${tr("카드", "Card")} ${cardStatusLabel(live.card_status, tr)}`;
+  return <span className={`campaign-live${working ? " is-working" : ""}`} title={tr("연결된 이슈 카드의 지금 상태", "What the linked issue card is doing now")}>{text}</span>;
 }

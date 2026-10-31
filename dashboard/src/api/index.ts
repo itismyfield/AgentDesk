@@ -61,19 +61,7 @@ export {
   sendMessage,
   getSkillCatalog,
   getCachedSkillCatalog,
-  generateAutoQueue,
-  activateAutoQueue,
-  getAutoQueueStatus,
-  getAutoQueueHistory,
-  skipAutoQueueEntry,
-  updateAutoQueueEntry,
-  updateAutoQueueRun,
-  startAutoQueueRun,
-  pauseAutoQueueRun,
-  resumeAutoQueueRun,
-  endAutoQueueRun,
   getPipelineStages,
-  getPipelineStagesForAgent,
   savePipelineStages,
   deletePipelineStages,
   getCardPipelineStatus,
@@ -81,8 +69,6 @@ export {
   getRuntimeConfig,
   saveRuntimeConfig,
   getOperatorConnectors,
-  reorderAutoQueueEntries,
-  resetAutoQueue,
   getDefaultPipeline,
   getEffectivePipeline,
   getRepoPipeline,
@@ -104,25 +90,13 @@ export {
   // #2050 P3 finding 16 — surface helpers some components were importing
   // from "../api/client" directly. Re-exporting here lets the dashboard
   // converge on a single import path.
-  resetGlobalAutoQueue,
   getHomeKpiTrends,
-  getPhaseGateCatalog,
   getRoutines,
   getRoutineRuns,
   getRoutineMetrics,
 } from "./client";
-
 export type {
   AutoQueueThreadLink,
-  AutoQueueRun,
-  AutoQueueStatus,
-  AutoQueueHistoryRun,
-  PhaseGateKind,
-  PhaseGateCatalog,
-  GenerateAutoQueueResponse,
-  AutoQueueHistorySummary,
-  AutoQueueHistoryResponse,
-  DispatchQueueEntry,
   CronJob,
   CronSchedule,
   CronJobState,
@@ -171,8 +145,6 @@ export type {
   TokenAnalyticsResponse,
   TimelineEvent,
   PipelineConfigResponse,
-  PhaseGateInfo,
-  ThreadGroupStatus,
   VoiceConfigPutBody,
   VoiceConfigResponse,
   // #2050 P3 finding 16 — type companions to getHomeKpiTrends.
@@ -185,7 +157,6 @@ export type {
   RoutineStatus,
   RoutineMetrics,
 } from "./client";
-
 export {
   getProviderAuthProfiles,
   startProviderAuthLogin,
@@ -200,7 +171,6 @@ export {
 // code. Now treats `instanceof ApiRequestError` *or* any error-like with a
 // `string` code as a match (the latter for HMR-boundary safety).
 import { ApiRequestError as ApiRequestErrorClass } from "./client";
-
 export function isApiRequestError(e: unknown): e is ApiRequestErrorClass {
   if (e instanceof ApiRequestErrorClass) return true;
   return (

@@ -1,3 +1,6 @@
+import type { ReactNode } from "react";
+import { ActionMenu } from "../common/ActionMenu";
+import { Select } from "../common/Select";
 import { Drawer } from "../common/overlay/Drawer";
 import type {
   CardAuditLogEntry,
@@ -29,6 +32,7 @@ import {
   STATUS_TRANSITIONS,
   TRANSITION_STYLE,
   buildGitHubIssueUrl,
+  cardTitle,
   formatIso,
   labelForStatus,
   parseCardMetadata,
@@ -105,6 +109,8 @@ export interface KanbanCardDetailProps {
   ) => Promise<void>;
   onDeleteCard: (id: string) => Promise<void>;
   invalidateCardActivity: (cardId: string) => void;
+  /** Shown under the card heading, e.g. putting the card into a campaign. */
+  extra?: ReactNode;
 }
 
 // ---------------------------------------------------------------------------
@@ -146,6 +152,7 @@ export default function KanbanCardDetail({
   onRedispatchCard,
   onDeleteCard,
   invalidateCardActivity,
+  extra,
 }: KanbanCardDetailProps) {
 
   const agentMap = new Map(agents.map((agent) => [agent.id, agent]));
@@ -213,8 +220,6 @@ export default function KanbanCardDetail({
   };
 
   const handleDeleteCard = async () => {
-    const confirmed = window.confirm(tr("이 카드를 삭제할까요?", "Delete this card?"));
-    if (!confirmed) return;
     setSavingCard(true);
     setActionError(null);
     try {
@@ -253,15 +258,37 @@ export default function KanbanCardDetail({
               {selectedCard.github_repo ? <span className="[overflow-wrap:anywhere]">{selectedCard.github_repo}</span> : null}
             </div>
             <h3 className="mt-3 text-xl font-semibold leading-7 [overflow-wrap:anywhere]" style={{ color: "var(--th-text-heading)" }}>
-              {selectedCard.title}
+              {selectedCard.github_issue_number ? <span className="mr-2 text-base font-normal tabular-nums text-th-text-muted">#{selectedCard.github_issue_number}</span> : null}
+              {cardTitle(selectedCard.title)}
             </h3>
           </div>
+          <ActionMenu
+            label={tr("카드 메뉴", "Card menu")}
+            items={[
+              ...(selectedCard.status !== "done" ? [{
+                key: "cancel",
+                label: tr("카드 취소", "Cancel card"),
+                disabled: savingCard,
+                onSelect: () => setCancelConfirm({ cardIds: [selectedCard.id], source: "single" }),
+              }] : []),
+              {
+                key: "delete",
+                label: tr("카드 삭제", "Delete card"),
+                danger: true,
+                disabled: savingCard,
+                onSelect: handleDeleteCard,
+                confirm: {
+                  title: tr("이 카드를 삭제할까요?", "Delete this card?"),
+                  description: tr("카드가 대시보드에서 사라집니다. GitHub 이슈는 그대로 남습니다.", "The card leaves the dashboard. The GitHub issue stays."),
+                  confirmLabel: tr("삭제", "Delete"),
+                  cancelLabel: tr("취소", "Cancel"),
+                },
+              },
+            ]}
+          />
         </div>
 
-        {/* Pipeline progress - removed with PipelineConfigView */}
-        {false && selectedCard.pipeline_stage_id && (
-          <div />
-        )}
+        {extra}
 
         {actionError && (
           <SurfaceNotice tone="danger">
@@ -328,30 +355,26 @@ export default function KanbanCardDetail({
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           <label className="space-y-1">
             <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("담당자", "Assignee")}</span>
-            <select
+            <Select
               value={editor.assignee_agent_id}
               onChange={(event) => setEditor((prev) => ({ ...prev, assignee_agent_id: event.target.value }))}
-              className="min-h-11 w-full rounded-md border border-th-border-subtle bg-th-bg-surface px-3 py-2 text-sm"
-              style={inputChrome}
             >
               <option value="">{tr("없음", "None")}</option>
               {agents.map((agent) => (
                 <option key={agent.id} value={agent.id}>{getAgentLabel(agent.id)}</option>
               ))}
-            </select>
+            </Select>
           </label>
           <label className="space-y-1">
             <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("우선순위", "Priority")}</span>
-            <select
+            <Select
               value={editor.priority}
               onChange={(event) => setEditor((prev) => ({ ...prev, priority: event.target.value as KanbanCardPriority }))}
-              className="min-h-11 w-full rounded-md border border-th-border-subtle bg-th-bg-surface px-3 py-2 text-sm"
-              style={inputChrome}
             >
               {PRIORITY_OPTIONS.map((priority) => (
                 <option key={priority} value={priority}>{priorityLabel(priority, tr)}</option>
               ))}
-            </select>
+            </Select>
           </label>
           <SurfaceCard className="p-3" style={{ background: "color-mix(in srgb, var(--th-card-bg) 88%, transparent)" }}>
             <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("GitHub", "GitHub")}</div>
@@ -463,16 +486,14 @@ export default function KanbanCardDetail({
               </p>
             </div>
             <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
-              <select
+              <Select
                 value={retryAssigneeId}
                 onChange={(event) => setRetryAssigneeId(event.target.value)}
-                className="min-h-11 w-full rounded-md border border-th-border-subtle bg-th-bg-surface px-3 py-2 text-sm"
-                style={inputChrome}
               >
                 {agents.map((agent) => (
                   <option key={agent.id} value={agent.id}>{getAgentLabel(agent.id)}</option>
                 ))}
-              </select>
+              </Select>
               <SurfaceActionButton
                 type="button"
                 onClick={() => void handleRetryCard()}
@@ -512,28 +533,7 @@ export default function KanbanCardDetail({
           onRefresh={() => invalidateCardActivity(selectedCard.id)}
         />
 
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex gap-2">
-            <SurfaceActionButton
-              onClick={handleDeleteCard}
-              disabled={savingCard}
-              tone="danger"
-              className="text-sm"
-              style={{ color: "#fecaca" }}
-            >
-              {tr("카드 삭제", "Delete card")}
-            </SurfaceActionButton>
-            {selectedCard.status !== "done" && (
-              <SurfaceActionButton
-                onClick={() => setCancelConfirm({ cardIds: [selectedCard.id], source: "single" })}
-                disabled={savingCard}
-                tone="neutral"
-                className="text-sm"
-              >
-                {tr("카드 취소", "Cancel card")}
-              </SurfaceActionButton>
-            )}
-          </div>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
           <div className="flex flex-col-reverse gap-2 sm:flex-row">
             <SurfaceActionButton
               onClick={onClose}

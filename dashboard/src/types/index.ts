@@ -104,7 +104,6 @@ export interface Agent {
   department_name_ko?: string | null;
   department_color?: string | null;
   avatar_emoji: string;
-  avatar_seed?: number | null;
   personality: string | null;
   system_prompt?: string | null;
   status: AgentStatus;
