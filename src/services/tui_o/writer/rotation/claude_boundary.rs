@@ -74,6 +74,8 @@ impl<B: BindingEvents> Sources<B> {
         owed: &mut impl Owe,
         replay: bool,
     ) -> Result<(), WriterAlarm> {
+        #[cfg(unix)]
+        self.settle_codex_fresh(writer, deriver, owed, replay)?;
         let pending: Vec<_> = self
             .rotation
             .links

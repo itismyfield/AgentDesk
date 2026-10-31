@@ -11,6 +11,9 @@ mod clear_end_proof_tests;
 #[cfg(unix)]
 #[path = "codex_end_proof_tests.rs"]
 mod codex_end_proof_tests;
+#[cfg(unix)]
+#[path = "codex_fresh_boundary_tests.rs"]
+mod codex_fresh_boundary_tests;
 #[path = "legacy_hop_retry_tests.rs"]
 mod legacy_hop_retry_tests;
 #[path = "transition_actor_tests.rs"]
