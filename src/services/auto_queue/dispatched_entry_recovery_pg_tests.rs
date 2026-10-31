@@ -2,6 +2,10 @@ use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_test_writer()
+        .try_init();
     let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate_with_max_connections(16).await;
     let policy_pool = pg_db.connect_and_migrate_with_max_connections(16).await;
