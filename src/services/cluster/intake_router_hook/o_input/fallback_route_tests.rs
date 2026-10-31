@@ -22,16 +22,20 @@ fn install(edit: impl FnOnce(&mut crate::config::ClusterIntakeRoutingConfig)) ->
         set("AGENTDESK_ROOT_DIR", root.path()),
         set("AGENTDESK_CONFIG", &path),
     ];
-    let mut config = crate::config::Config::default();
-    config.cluster.intake_routing.enabled = true;
-    config.cluster.intake_routing.mode = crate::config::ClusterIntakeRoutingMode::Enforce;
-    edit(&mut config.cluster.intake_routing);
-    crate::config_live_reload::install(config);
+    reinstall(edit);
     Config {
         _guards: guards,
         _live: live,
         _root: root,
     }
+}
+/// Swaps the live config under the env lock `install` already holds.
+fn reinstall(edit: impl FnOnce(&mut crate::config::ClusterIntakeRoutingConfig)) {
+    let mut config = crate::config::Config::default();
+    config.cluster.intake_routing.enabled = true;
+    config.cluster.intake_routing.mode = crate::config::ClusterIntakeRoutingMode::Enforce;
+    edit(&mut config.cluster.intake_routing);
+    crate::config_live_reload::install(config);
 }
 fn active(channel: &str) -> impl FnOnce(&mut crate::config::ClusterIntakeRoutingConfig) {
     let channel = channel.to_owned();
@@ -111,6 +115,13 @@ async fn input_fallback_off_runtime_never_enters_and_keeps_existing_placement_pg
                 entries, 1,
                 "the active control must reach the new path, or 0 proves nothing"
             );
+            assert_eq!(
+                (shape(&decision).as_str(), effects.1),
+                ("forwarded:mac-a:NodeOverride", 1),
+                "a managed same-target input is admitted under a PG owner"
+            );
+            f.finish().await;
+            continue;
         } else {
             assert_eq!(entries, 0, "{name}: off must never enter availability/CAS");
             assert_eq!(
@@ -425,5 +436,226 @@ async fn input_fallback_rejects_local_upload_before_custody_pg() {
         "{decision:?}"
     );
     assert_eq!(routing_effects(&f.pool).await, (0, 0, 0, 0));
+    f.finish().await;
+}
+
+async fn row(f: &Fixture, id: i64) -> (String, String, Option<i64>) {
+    sqlx::query_as(
+        "SELECT routing_state,target_instance_id,owner_generation FROM intake_outbox WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap()
+}
+async fn done(f: &Fixture, id: i64) {
+    sqlx::query("UPDATE intake_outbox SET status='done' WHERE id=$1")
+        .bind(id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+}
+async fn open_route(f: &Fixture, channel: &str, message: &str) -> i64 {
+    crate::db::intake_outbox::insert_pending(
+        &f.pool,
+        &owner_record::output::tests::payload(channel, message, "mac-b"),
+        1,
+        None,
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn input_fallback_queued_followers_resume_in_order_without_new_input_pg() {
+    const CHANNEL: &str = "73369408";
+    let _config = install(active(CHANNEL));
+    let f = Fixture::new(CHANNEL).await;
+    offline(&f, "mac-a").await;
+    let open = open_route(&f, CHANNEL, "7336940801").await;
+    let mut ctx = ctx_for_channel(IntakeRoutingMode::Enforce, CHANNEL);
+    ctx.leader_instance_id = "mac-b";
+    let first = forwarded(&f, &ctx).await;
+    let bundle = f.bundle_ref(CHANNEL, "10001").await;
+    let refs = [bundle.clone()];
+    let sources = vec!["10000".to_string(), "10001".to_string()];
+    ctx.user_msg_id = "10001";
+    ctx.user_text = "queued follower";
+    ctx.reply_context = Some("follower reply");
+    ctx.replay_source_message_ids = Some(&sources);
+    ctx.attachment_refs = &refs;
+    let second = forwarded(&f, &ctx).await;
+    let planned: Vec<(i64, Option<String>)> = sqlx::query_as("SELECT id,routing_plan->>'target' FROM intake_outbox WHERE routing_state='held' ORDER BY id")
+        .fetch_all(&f.pool).await.unwrap();
+    assert_eq!(
+        planned,
+        vec![
+            (first, Some("mac-b".into())),
+            (second, Some("mac-b".into()))
+        ],
+        "every held input carries its own plan"
+    );
+    done(&f, open).await;
+    cleanup::advance_pending(&f.pool, "claude").await.unwrap();
+    assert_eq!(row(&f, first).await.0, "admitted");
+    assert_eq!(
+        row(&f, second).await.0,
+        "held",
+        "the follower waits its turn"
+    );
+    done(&f, first).await;
+    cleanup::advance_pending(&f.pool, "claude").await.unwrap();
+    let follower: (String, String, Option<String>, Option<Vec<String>>, serde_json::Value) = sqlx::query_as("SELECT routing_state,target_instance_id,reply_context,replay_source_message_ids,attachment_refs FROM intake_outbox WHERE id=$1")
+        .bind(second).fetch_one(&f.pool).await.unwrap();
+    assert_eq!(
+        (follower.0.as_str(), follower.1.as_str()),
+        ("admitted", "mac-b"),
+        "a queued follower resumes without another user input"
+    );
+    assert_eq!(follower.2.as_deref(), Some("follower reply"));
+    assert_eq!(follower.3, Some(sources.clone()));
+    assert_eq!(follower.4, serde_json::json!([bundle]));
+    assert_eq!(notices(&f).await, 1);
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn input_fallback_cleanup_heads_never_promote_plan_less_custody_pg() {
+    const CHANNEL: &str = "73369409";
+    let _config = install(active(CHANNEL));
+    let f = Fixture::new(CHANNEL).await;
+    offline(&f, "mac-a").await;
+    let mut ctx = ctx_for_channel(IntakeRoutingMode::Enforce, CHANNEL);
+    ctx.leader_instance_id = "mac-b";
+    let first = forwarded(&f, &ctx).await;
+    done(&f, first).await;
+    sqlx::query("UPDATE worker_nodes SET last_heartbeat_at=NOW() WHERE instance_id='mac-a'")
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    ctx.user_msg_id = "10000";
+    let second = forwarded(&f, &ctx).await;
+    sqlx::query("UPDATE intake_session_owners SET routing_cleanup_deadline=NOW()-INTERVAL '1 second' WHERE generation=0")
+        .execute(&f.pool).await.unwrap();
+    cleanup::advance_pending(&f.pool, "claude").await.unwrap();
+    assert_eq!(
+        row(&f, second).await,
+        ("admitted".into(), "mac-a".into(), Some(1))
+    );
+    let payload = owner_record::output::tests::payload(CHANNEL, "7336940902", "mac-a");
+    let bare = owner_record::custody::stage(
+        &f.pool,
+        owner_record::custody::StageRequest {
+            payload: &payload,
+            home_revision: 0,
+            wait_generation: Some(1),
+            grace_seconds: 0,
+        },
+    )
+    .await
+    .unwrap();
+    done(&f, second).await;
+    cleanup::advance_pending(&f.pool, "claude").await.unwrap();
+    assert_eq!(
+        row(&f, bare).await.0,
+        "held",
+        "custody without a saved plan is never promoted by cleanup history"
+    );
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn input_fallback_replans_held_after_raw_home_revision_change_pg() {
+    const CHANNEL: &str = "73369410";
+    let _config = install(active(CHANNEL));
+    let f = Fixture::new(CHANNEL).await;
+    let id = OwnerIdentity::new("claude", CHANNEL);
+    offline(&f, "mac-a").await;
+    let open = open_route(&f, CHANNEL, "7336941001").await;
+    let mut ctx = ctx_for_channel(IntakeRoutingMode::Enforce, CHANNEL);
+    ctx.leader_instance_id = "mac-b";
+    let held = forwarded(&f, &ctx).await;
+    f.home(&id, Some("mac-b")).await;
+    done(&f, open).await;
+    cleanup::advance_pending(&f.pool, "claude").await.unwrap();
+    let (state, plan_home): (String, Option<String>) =
+        sqlx::query_as("SELECT routing_state,routing_plan->>'home' FROM intake_outbox WHERE id=$1")
+            .bind(held)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        (state.as_str(), plan_home.as_deref()),
+        ("admitted", Some("mac-b")),
+        "a /node change re-plans held custody instead of leaving it waiting"
+    );
+    assert_eq!(
+        notices(&f).await,
+        0,
+        "admission on the new home is not a fallback"
+    );
+
+    // Once fallback no longer places the channel, held input is released with a notice.
+    done(&f, held).await;
+    ctx.user_msg_id = "10000";
+    let open = open_route(&f, CHANNEL, "7336941002").await;
+    let queued = forwarded(&f, &ctx).await;
+    reinstall(active("other-channel"));
+    f.home(&id, Some("mac-a")).await;
+    done(&f, open).await;
+    cleanup::advance_pending(&f.pool, "claude").await.unwrap();
+    let released: (String, String) = sqlx::query_as("SELECT d.routing_state,r.replay_disposition FROM intake_outbox d JOIN intake_outbox r ON r.id=d.routing_receipt_id WHERE d.id=$1")
+        .bind(queued).fetch_one(&f.pool).await.unwrap();
+    assert_eq!(released, ("superseded".into(), "withheld".into()));
+    let notice: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM message_outbox WHERE reason_code='routing.held_released'",
+    )
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(notice, 1, "a released input tells the channel once");
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn input_fallback_same_target_keeps_pg_owner_over_stale_session_pg() {
+    const CHANNEL: &str = "73369411";
+    let _config = install(active(CHANNEL));
+    let f = Fixture::new(CHANNEL).await;
+    let id = OwnerIdentity::new("claude", CHANNEL);
+    let mut tx = f.pool.begin().await.unwrap();
+    owner_record::custody::lock(&mut tx, &id).await.unwrap();
+    owner_record::acquire_owner_in_tx(&mut tx, &id, "mac-b", |_| true)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    sqlx::query("INSERT INTO sessions(session_key,provider,channel_id,instance_id,status) VALUES('claude/token/mac-a:deferred-owner','claude',$1,'mac-a','idle')")
+        .bind(CHANNEL).execute(&f.pool).await.unwrap();
+    offline(&f, "mac-a").await;
+    let first = open_route(&f, CHANNEL, "7336941101").await;
+    let mut ctx = ctx_for_channel(IntakeRoutingMode::Enforce, CHANNEL);
+    ctx.leader_instance_id = "mac-b";
+    let decision = try_route_intake(&f.pool, &ctx).await;
+    let next = match decision {
+        IntakeRouterDecision::Forwarded {
+            target_instance_id,
+            outbox_id,
+            ..
+        } if target_instance_id == "mac-b" => outbox_id,
+        other => panic!("the PG owner must keep the same-target input: {other:?}"),
+    };
+    assert_eq!(row(&f, next).await.0, "held");
+    done(&f, first).await;
+    cleanup::advance_pending(&f.pool, "claude").await.unwrap();
+    assert_eq!(
+        row(&f, next).await,
+        ("admitted".into(), "mac-b".into(), Some(0))
+    );
+    let owners: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM intake_session_owners")
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(owners, 1, "same-owner admission keeps its generation");
+    assert_eq!(notices(&f).await, 0, "same-owner input is not a transition");
     f.finish().await;
 }

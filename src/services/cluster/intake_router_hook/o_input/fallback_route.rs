@@ -10,7 +10,7 @@ pub(super) static BEFORE_PLAN: std::sync::Mutex<Option<String>> = std::sync::Mut
 #[cfg(test)]
 pub(super) static ENTERED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
-/// `None` keeps the existing placement path: fallback off, same target, or an unadopted session.
+/// `None` keeps the existing placement path: fallback off, out of scope, or an unadopted session.
 pub(super) async fn route(
     pool: &PgPool,
     ctx: &IntakeRouterContext<'_>,
@@ -30,12 +30,7 @@ pub(super) async fn route(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .push(ctx.channel_id.to_owned());
-    let timeout = i32::try_from(
-        effective_intake_routing_config()
-            .forward_pre_claim_timeout_secs
-            .max(1),
-    )
-    .unwrap_or(i32::MAX);
+    let timeout = super::super::switch_timeout();
     match switch(pool, ctx, pair, timeout).await {
         Ok(decision) => decision,
         Err(error) => Some(required_block(format!("input fallback: {error}"))),
@@ -118,8 +113,6 @@ async fn switch(
     };
     let mut tx = pool.begin().await?;
     let shared = snapshot::read_on_tx(&mut tx, &id, &context).await?;
-    let queued: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM intake_outbox WHERE provider=$1 AND channel_id=$2 AND routing_state='held')")
-        .bind(id.provider()).bind(id.raw_channel_id()).fetch_one(&mut *tx).await?;
     tx.commit().await?;
     let target = match shared.target() {
         Target::Selected(target) => target.to_owned(),
@@ -129,12 +122,15 @@ async fn switch(
             ))));
         }
     };
-    let active = shared.owner.as_ref().filter(|o| o.status == "active");
-    let same = active.map_or(shared.home.as_deref() == Some(target.as_str()), |o| {
-        o.owner_instance_id == target
-    });
-    if same && !queued {
-        return Ok(None);
+    // A managed channel keeps its PG owner even for the same target; placement never re-picks it.
+    #[cfg(test)]
+    if owner_record::cleanup::tests::mutant("same-target-shortcut") {
+        let active = shared.owner.as_ref().filter(|o| o.status == "active");
+        if active.map_or(shared.home.as_deref() == Some(target.as_str()), |o| {
+            o.owner_instance_id == target
+        }) {
+            return Ok(None);
+        }
     }
     // A local path cannot cross Macs; the queue's explicit rejection notice applies instead.
     #[cfg(test)]
@@ -160,43 +156,17 @@ async fn switch(
         },
     )
     .await?;
-    let head: i64 = sqlx::query_scalar("SELECT id FROM intake_outbox WHERE provider=$1 AND channel_id=$2 AND routing_state='held' ORDER BY id LIMIT 1")
-        .bind(id.provider()).bind(id.raw_channel_id()).fetch_one(pool).await?;
     #[cfg(test)]
     let hook = BEFORE_PLAN.lock().unwrap_or_else(|e| e.into_inner()).take();
     #[cfg(test)]
     if let Some(sql) = hook {
         sqlx::query(sqlx::AssertSqlSafe(sql)).execute(pool).await?;
     }
-    // Only a saved plan may move the head; otherwise it stays in custody for the next observation.
-    let Some(planned) = plan_head(pool, &id, head, &shared, &context).await? else {
+    // Every held row gets a plan; only the head may move, otherwise it waits for advance_pending.
+    let Some((head, planned)) = plan::replan_held(pool, &id, &context).await? else {
         return Ok(Some(forwarded(target, pending)));
     };
-    let expected = planned.expected.as_ref();
-    match expected {
-        Some((owner, generation, status)) if status == "active" && *owner != planned.target => {
-            cleanup::request(
-                pool,
-                &id,
-                (owner, *generation),
-                head,
-                &planned.target,
-                timeout,
-            )
-            .await?;
-        }
-        _ => {
-            // False keeps the head held; advance_pending resumes the stored plan.
-            custody::promote(
-                pool,
-                head,
-                &planned.target,
-                expected.map(|(owner, generation, _)| (owner.as_str(), *generation)),
-                custody::SwitchReadiness::Wait,
-            )
-            .await?;
-        }
-    }
+    cleanup::resume_head(pool, &id, head, &planned, timeout).await?;
     let target = if head == pending {
         planned.target
     } else {
@@ -211,41 +181,6 @@ fn forwarded(target: String, pending: i64) -> IntakeRouterDecision {
         outbox_id: pending,
         basis: IntakeRoutingBasis::NodeOverride,
     }
-}
-
-/// The first observation is tried once; a rejected save re-observes the head under its lock.
-async fn plan_head(
-    pool: &PgPool,
-    id: &OwnerIdentity,
-    head: i64,
-    first: &snapshot::Shared,
-    context: &snapshot::Context,
-) -> Result<Option<plan::Plan>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    if let Some(saved) = plan::save_on_tx(&mut tx, id, head, first).await? {
-        tx.commit().await?;
-        return Ok(Some(saved));
-    }
-    #[cfg(test)]
-    if owner_record::cleanup::tests::mutant("plan-ignored") {
-        let Target::Selected(target) = first.target() else {
-            return Ok(None);
-        };
-        return Ok(Some(plan::Plan {
-            version: 1,
-            home: first.home.clone().unwrap_or_default(),
-            target: target.into(),
-            home_proof: first.proof.clone(),
-            expected: first
-                .owner
-                .as_ref()
-                .map(|o| (o.owner_instance_id.clone(), o.generation, o.status.clone())),
-        }));
-    }
-    let fresh = snapshot::read_on_tx(&mut tx, id, context).await?;
-    let saved = plan::save_on_tx(&mut tx, id, head, &fresh).await?;
-    tx.commit().await?;
-    Ok(saved)
 }
 
 #[cfg(test)]

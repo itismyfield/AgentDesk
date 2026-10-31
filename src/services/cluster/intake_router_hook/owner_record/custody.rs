@@ -278,7 +278,11 @@ pub(crate) async fn promote(
         let skip = super::cleanup::tests::mutant("notice-skip");
         #[cfg(not(test))]
         let skip = false;
-        if !skip {
+        // Input admitted to the owner that already held the channel is not a transition.
+        let unchanged = prior_generation == Some(generation);
+        #[cfg(test)]
+        let unchanged = unchanged && !super::cleanup::tests::mutant("notice-same-owner");
+        if !skip && !unchanged {
             super::event::reserve_on_tx(
                 &mut tx,
                 &id,

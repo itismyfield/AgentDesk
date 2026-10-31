@@ -54,6 +54,16 @@ pub(crate) use model::{
 };
 use placement::route_by_preference;
 
+/// How long a fallback switch waits for the old owner before its cleanup fallback.
+fn switch_timeout() -> i32 {
+    i32::try_from(
+        effective_intake_routing_config()
+            .forward_pre_claim_timeout_secs
+            .max(1),
+    )
+    .unwrap_or(i32::MAX)
+}
+
 fn worker_heartbeat_lease_secs() -> u64 {
     crate::config::snapshot()
         .map(|config| config.cluster.lease_ttl_secs)

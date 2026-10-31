@@ -245,8 +245,23 @@ pub(crate) async fn advance_pending(pool: &PgPool, provider: &str) -> Result<(),
     for id in ids {
         advance(pool, id).await?;
     }
-    let heads:Vec<(i64,String,String,i64)>=sqlx::query_as("SELECT d.id,d.target_instance_id,o.owner_instance_id,o.generation FROM intake_outbox d JOIN intake_session_owners o ON o.provider=d.provider AND o.raw_channel_id=d.channel_id AND o.status='active' AND o.generation=d.routing_wait_owner_generation AND o.owner_instance_id=d.target_instance_id WHERE d.provider=$1 AND d.routing_state='held' AND NOT EXISTS(SELECT 1 FROM intake_outbox h WHERE h.provider=d.provider AND h.channel_id=d.channel_id AND h.routing_state='held' AND h.id<d.id) AND EXISTS(SELECT 1 FROM intake_session_owners history WHERE history.provider=d.provider AND history.raw_channel_id=d.channel_id AND history.routing_cleanup IS NOT NULL) ORDER BY d.id LIMIT 32")
+    // A /node change after staging leaves held plans on an old revision; re-plan or release them.
+    let stale:Vec<(String,serde_json::Value)>=sqlx::query_as("SELECT d.channel_id,d.routing_plan->'home_proof' FROM intake_outbox d WHERE d.provider=$1 AND d.routing_state='held' AND d.routing_plan IS NOT NULL AND d.routing_home_revision<>COALESCE((SELECT revision FROM channel_home_preferences h WHERE h.provider=d.provider AND h.raw_channel_id=d.channel_id),0) AND NOT EXISTS(SELECT 1 FROM intake_outbox h WHERE h.provider=d.provider AND h.channel_id=d.channel_id AND h.routing_state='held' AND h.id<d.id) ORDER BY d.id LIMIT 32")
         .bind(provider).fetch_all(pool).await?;
+    #[cfg(test)]
+    let stale = if tests::mutant("stale-replan") {
+        Vec::new()
+    } else {
+        stale
+    };
+    for (channel, proof) in stale {
+        let id = OwnerIdentity::new(provider, &channel);
+        if let Some((head, plan)) = super::plan::replan_stale(pool, &id, &proof).await? {
+            resume_head(pool, &id, head, &plan, super::super::switch_timeout()).await?;
+        }
+    }
+    let heads:Vec<(i64,String,String,i64)>=sqlx::query_as("SELECT d.id,d.target_instance_id,o.owner_instance_id,o.generation FROM intake_outbox d JOIN intake_session_owners o ON o.provider=d.provider AND o.raw_channel_id=d.channel_id AND o.status='active' AND o.generation=d.routing_wait_owner_generation AND o.owner_instance_id=d.target_instance_id WHERE d.provider=$1 AND d.routing_state='held' AND NOT EXISTS(SELECT 1 FROM intake_outbox h WHERE h.provider=d.provider AND h.channel_id=d.channel_id AND h.routing_state='held' AND h.id<d.id) AND (d.routing_plan->>'target'=d.target_instance_id OR $2::BOOLEAN) AND EXISTS(SELECT 1 FROM intake_session_owners history WHERE history.provider=d.provider AND history.raw_channel_id=d.channel_id AND history.routing_cleanup IS NOT NULL) ORDER BY d.id LIMIT 32")
+        .bind(provider).bind(plan_less_head()).fetch_all(pool).await?;
     for (id, target, owner, generation) in heads {
         custody::promote(
             pool,
@@ -275,6 +290,42 @@ pub(crate) async fn advance_pending(pool: &PgPool, provider: &str) -> Result<(),
         .await?;
     }
     Ok(())
+}
+
+/// The planned head either asks the active other owner to close or is admitted to its target.
+pub(crate) async fn resume_head(
+    pool: &PgPool,
+    id: &OwnerIdentity,
+    head: i64,
+    plan: &super::plan::Plan,
+    timeout: i32,
+) -> Result<(), sqlx::Error> {
+    match plan.expected.as_ref() {
+        Some((owner, generation, status)) if status == "active" && *owner != plan.target => {
+            request(pool, id, (owner, *generation), head, &plan.target, timeout).await?;
+        }
+        expected => {
+            // False keeps the head held; advance_pending resumes the stored plan.
+            custody::promote(
+                pool,
+                head,
+                &plan.target,
+                expected.map(|(owner, generation, _)| (owner.as_str(), *generation)),
+                custody::SwitchReadiness::Wait,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn plan_less_head() -> bool {
+    tests::mutant("plan-less-head")
+}
+#[cfg(not(test))]
+fn plan_less_head() -> bool {
+    false
 }
 
 fn control_seconds() -> i32 {
