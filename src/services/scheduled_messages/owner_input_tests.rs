@@ -57,7 +57,8 @@ async fn postgres_accepted_snapshot_waits_for_exact_owner_then_settles_recorded_
         assert!(!poll_agent_delivery(&pool,running.clone()).await,"recorded output alone cannot bypass the owner bind");
         #[cfg(unix)]
         assert!(!bootstrap_held_by_modal(&handle,"bootstrap-attempt",poll_agent_delivery(&pool,running.clone())).await,"an attempt in its bootstrap window is no observer's");
-        handle.v2_arm_head_for_tests("actual-scheduled-attempt").await.unwrap();
+        let (attempt,frames)=retry_leaf(&handle,"actual-scheduled-attempt").await;
+        assert_eq!(frames,["frame-actual-scheduled-attempt"],"the retry's own payload, once");
         assert!(!poll_agent_delivery(&pool,running.clone()).await,"the observer binds the armed attempt before it reads");
         let error:String=sqlx::query_scalar("SELECT error FROM scheduled_message_deliveries WHERE id=$1").bind(&fire.delivery_id).fetch_one(&pool).await.unwrap();
         assert!(error.contains("actual-scheduled-attempt"),"{error}");
@@ -65,7 +66,7 @@ async fn postgres_accepted_snapshot_waits_for_exact_owner_then_settles_recorded_
         assert!(owner_input::bind_observer(&mut *pool.acquire().await.unwrap(),&running,&handle,"actual-scheduled-attempt",None).await.unwrap());
         assert!(!poll_agent_delivery(&pool,running.clone()).await,"a listing from before the observer bind cannot start its timeout clock");
         let running=db::list_running_agent_deliveries_pg(&pool,"owner-poller",LEASE_SECS,10).await.unwrap().pop().unwrap();
-        handle.v2_request(|slot|{let owner=slot.as_mut().ok_or("owner absent")?;let key=owner.active_attempt()?;owner.settle(&key,true,1000)}).await.unwrap();
+        handle.v2_request(move|slot|{let owner=slot.as_mut().ok_or("owner absent")?;let key=serde_json::from_value(attempt).map_err(|e|e.to_string())?;owner.settle(&key,true,1000)}).await.unwrap();
         assert!(poll_agent_delivery(&pool,running).await);
         let state:(String,Option<String>)=sqlx::query_as("SELECT status,turn_outcome FROM scheduled_message_deliveries WHERE id=$1").bind(&fire.delivery_id).fetch_one(&pool).await.unwrap();
         assert_eq!(state,("sent".into(),Some("delivered".into())));
@@ -78,6 +79,41 @@ async fn postgres_accepted_snapshot_waits_for_exact_owner_then_settles_recorded_
     assert_eq!(snapshot["admission_sequence"], 1);
     pool.close().await;
     db.drop().await;
+}
+
+/// The retry as the owner runs it: the head reserved as `nonce` with its own frame and its leaf
+/// run in the owner scope past the payload start; the attempt and the frames the leaf was given.
+#[cfg(unix)]
+async fn retry_leaf(
+    handle: &ChannelMailboxHandle,
+    nonce: &str,
+) -> (serde_json::Value, Vec<String>) {
+    let attempt = serde_json::json!({"nonce":nonce,"provider":"claude","target":{"host":"tmux","owner":"bootstrap-pane","root":"/test","execution_nonce":"execution"},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}});
+    let frame = format!("frame-{nonce}");
+    let reserved = handle.v2_request(move |slot| {
+        let payload = serde_json::json!({"frame":frame,"digest":"digest","attribution":{}});
+        let attempt = serde_json::from_value(attempt).map_err(|e| e.to_string())?;
+        let payload = serde_json::from_value(payload).map_err(|e| e.to_string())?;
+        slot.as_mut()
+            .ok_or("no owner")?
+            .reserve(attempt, payload)
+            .map(drop)
+    });
+    reserved.await.unwrap();
+    let frames = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = frames.clone();
+    let effect = move |frame: String| {
+        crate::services::claude_tui::owner_input::start_payload()?;
+        crate::services::claude_tui::owner_input::keyed();
+        seen.lock().unwrap().push(frame);
+        Ok::<(), String>(())
+    };
+    let cold = handle.v2_cold_observed(1, std::sync::Arc::new(|| 1), effect);
+    let (identity, outcome) = cold.await.unwrap();
+    assert_eq!(outcome.result, Ok(()));
+    assert!(outcome.not_sent.is_none());
+    let frames = frames.lock().unwrap().clone();
+    (identity, frames)
 }
 
 /// Reserves the head as `nonce` and arms it in its bootstrap window, runs `poll` there, then a
