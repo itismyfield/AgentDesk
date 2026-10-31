@@ -289,7 +289,7 @@ fn probe_refuses_a_process_whose_start_changed_between_readings() {
     }
 }
 
-// Only the shell: read again until the window closes; a provider showing up in time is taken.
+// Empty or unreported foreground: retry within the window; take a provider that appears in time.
 #[test]
 fn probe_waits_for_the_provider_only_within_its_window() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -300,6 +300,16 @@ fn probe_waits_for_the_provider_only_within_its_window() {
     let started = Instant::now();
     assert_eq!(run(&pane, &os, window), Err(EvidenceGap::NoneYet));
     assert!(started.elapsed() < window + PROVIDER_POLL * 2);
+    assert!(pane.reads.get() >= 3, "read {} times", pane.reads.get());
+
+    let pane = Pane::new(vec![(
+        Ok((Some(SHELL), ForegroundProcesses::Unreported)),
+        Ok(witness(1)),
+    )]);
+    let started = Instant::now();
+    assert_eq!(run(&pane, &os, window), Err(EvidenceGap::Unreported));
+    let elapsed = started.elapsed();
+    assert!(elapsed < window + PROVIDER_POLL * 2, "elapsed {elapsed:?}");
     assert!(pane.reads.get() >= 3, "read {} times", pane.reads.get());
 
     let pane = Pane::new(vec![
