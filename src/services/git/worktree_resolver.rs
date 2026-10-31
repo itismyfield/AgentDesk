@@ -1,4 +1,4 @@
-use super::commit_resolver::upstream_base_ref;
+use super::commit_resolver::{refreshed_upstream_base_ref, upstream_base_ref};
 use super::git_command;
 use std::path::{Path, PathBuf};
 
@@ -91,8 +91,8 @@ fn parse_worktree_list(repo_dir: &str) -> Vec<WorktreeInfo> {
 /// Scans `git worktree list --porcelain`, then checks each non-main worktree for
 /// commits mentioning `#<issue_number>` not reachable from the upstream base ref.
 ///
-/// Uses `origin/main` (not local `main`) as the base ref so that worktrees remain
-/// discoverable even after local main fast-forwards past their commits.
+/// Uses origin's default branch (not the local branch) as the base ref so that worktrees
+/// remain discoverable even after the local branch fast-forwards past their commits.
 ///
 /// When multiple worktrees match, disambiguates by:
 /// 1. Preferring branches whose name contains the issue number
@@ -214,7 +214,7 @@ pub fn ensure_worktree_for_issue(
     let timestamp = chrono::Utc::now().format("%Y%m%d%H%M%S").to_string();
     let branch = format!("adk/auto/issue-{issue_number}-{timestamp}");
     let path = root.join(format!("issue-{issue_number}-{timestamp}"));
-    let base_ref = upstream_base_ref(repo_dir);
+    let base_ref = refreshed_upstream_base_ref(repo_dir);
     let output = git_command()
         .args([
             "worktree",
@@ -498,5 +498,135 @@ mod automation_worktree_tests {
             automation_branch_name("550e8400-e29b-41d4-a716-446655440000", 7),
             "automation/550e8400-e29b-41d4-a716-446655440000/iter-7"
         );
+    }
+}
+
+#[cfg(test)]
+mod issue_worktree_origin_base_tests {
+    use super::*;
+    use std::process::Command;
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "init.defaultBranch=main",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .expect("spawn git");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn commit(dir: &Path, message: &str) -> String {
+        git(dir, &["commit", "--allow-empty", "-m", message]);
+        git(dir, &["rev-parse", "HEAD"])
+    }
+
+    /// A bare origin whose HEAD is `default_branch`, a pusher clone, and the desk clone.
+    struct Fixture {
+        _tmp: tempfile::TempDir,
+        seed: PathBuf,
+        desk: PathBuf,
+        main_tip: String,
+        default_tip: String,
+    }
+
+    fn fixture(default_branch: &str) -> Fixture {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = tmp.path().join("origin.git");
+        let origin_str = origin.to_str().unwrap();
+        git(
+            tmp.path(),
+            &["init", "--bare", "-b", default_branch, origin_str],
+        );
+        let seed = tmp.path().join("seed");
+        git(tmp.path(), &["clone", origin_str, seed.to_str().unwrap()]);
+        git(&seed, &["checkout", "-b", "main"]);
+        let main_tip = commit(&seed, "base");
+        git(&seed, &["push", "origin", "main"]);
+        let mut default_tip = main_tip.clone();
+        if default_branch != "main" {
+            git(&seed, &["checkout", "-b", default_branch]);
+            default_tip = commit(&seed, "default branch work");
+            git(&seed, &["push", "origin", default_branch]);
+        }
+        let unique = tmp
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let desk = tmp.path().join(format!("desk{unique}"));
+        git(tmp.path(), &["clone", origin_str, desk.to_str().unwrap()]);
+        Fixture {
+            _tmp: tmp,
+            seed,
+            desk,
+            main_tip,
+            default_tip,
+        }
+    }
+
+    fn create(fixture: &Fixture, issue_number: i64) -> EnsuredWorktreeInfo {
+        let info = ensure_worktree_for_issue(fixture.desk.to_str().unwrap(), issue_number)
+            .expect("issue worktree is created");
+        assert!(info.created);
+        let head = git(Path::new(&info.path), &["rev-parse", "HEAD"]);
+        let _ = std::fs::remove_dir_all(&info.path);
+        assert_eq!(head, info.commit);
+        info
+    }
+
+    #[test]
+    fn new_issue_worktree_starts_from_latest_origin_commit_when_local_main_is_behind() {
+        let fixture = fixture("main");
+        let latest = commit(&fixture.seed, "landed after the desk cloned");
+        git(&fixture.seed, &["push", "origin", "main"]);
+
+        let info = create(&fixture, 761_201);
+        assert_eq!(info.commit, latest);
+        assert_eq!(git(&fixture.desk, &["rev-parse", "main"]), fixture.main_tip);
+    }
+
+    #[test]
+    fn new_issue_worktree_follows_origin_head_default_branch() {
+        let fixture = fixture("develop");
+        assert_ne!(fixture.default_tip, fixture.main_tip);
+
+        assert_eq!(create(&fixture, 761_202).commit, fixture.default_tip);
+    }
+
+    #[test]
+    fn new_issue_worktree_restores_missing_origin_head_from_the_remote() {
+        let fixture = fixture("develop");
+        git(&fixture.desk, &["remote", "set-head", "origin", "-d"]);
+
+        assert_eq!(create(&fixture, 761_203).commit, fixture.default_tip);
+    }
+
+    #[test]
+    fn new_issue_worktree_uses_existing_remote_ref_when_origin_is_unreachable() {
+        let fixture = fixture("main");
+        git(&fixture.desk, &["remote", "set-head", "origin", "-d"]);
+        let missing = fixture.desk.with_file_name("missing-origin.git");
+        git(
+            &fixture.desk,
+            &["remote", "set-url", "origin", missing.to_str().unwrap()],
+        );
+        commit(&fixture.seed, "unreachable from the desk");
+        git(&fixture.seed, &["push", "origin", "main"]);
+
+        assert_eq!(create(&fixture, 761_204).commit, fixture.main_tip);
     }
 }
