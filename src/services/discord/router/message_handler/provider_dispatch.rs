@@ -965,14 +965,14 @@ pub(super) mod tests {
             })
         };
 
-        let off = force_admission(Admission::new(Some("off".as_ref()), None));
+        let off = force_admission(Admission::new(false, None));
         assert_eq!(
             run().await.unwrap_err(),
             "herdr turn refused: admission_stopped(env)"
         );
         drop(off);
         let absent = root.path().join("no-stop-file");
-        let _open = force_admission(Admission::new(Some("on".as_ref()), Some(absent)));
+        let _open = force_admission(Admission::new(true, Some(absent)));
         assert_eq!(
             run().await.unwrap_err(),
             "herdr turn refused: o_writer_not_ready"

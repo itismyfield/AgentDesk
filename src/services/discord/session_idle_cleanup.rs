@@ -1,8 +1,8 @@
 use crate::services::discord::adk_session;
+use crate::services::discord::mailbox_finish::mailbox_clear_channel_without_spawn;
 use crate::services::discord::session_runtime::cleanup_git_worktree;
 use crate::services::discord::{
-    SESSION_CLEANUP_INTERVAL, SESSION_MAX_IDLE, SharedData, mailbox_clear_channel,
-    saturating_decrement_global_active,
+    SESSION_CLEANUP_INTERVAL, SESSION_MAX_IDLE, SharedData, saturating_decrement_global_active,
 };
 use poise::serenity_prelude::{self as serenity, ButtonKind, ChannelId, MessageId};
 use sqlx::PgPool;
@@ -173,7 +173,8 @@ async fn cleanup_expired_sessions(shared: &Arc<SharedData>) {
     // 저장 경로는 없다; resume 실패 복구만 auto_retry_with_history가 별도로 저장한다.)
     // 명시적 세션 초기화는 !clear 또는 /clear 명령으로 한다.
     for expired_session in &expired {
-        let cleared = mailbox_clear_channel(shared, &provider, expired_session.channel_id).await;
+        let channel_id = expired_session.channel_id;
+        let cleared = mailbox_clear_channel_without_spawn(shared, &provider, channel_id).await;
         if cleared.removed_token.is_some() {
             saturating_decrement_global_active(shared);
         }

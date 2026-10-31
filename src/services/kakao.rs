@@ -79,7 +79,7 @@ pub struct KakaoEnvironment {
 
 impl KakaoEnvironment {
     pub fn from_process(account_id: Option<&str>) -> Result<Self, KakaoError> {
-        if !parse_enabled(std::env::var(ENABLED_ENV).ok().as_deref())? {
+        if !crate::utils::env_flag(ENABLED_ENV, false) {
             return Err(KakaoError::Disabled);
         }
         let mut environment = Self::auth_from_process(account_id)?;
@@ -478,20 +478,6 @@ struct SelfSendResponse {
     result_code: i64,
 }
 
-fn parse_enabled(raw: Option<&str>) -> Result<bool, KakaoError> {
-    let normalized = raw
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_ascii_lowercase);
-    match normalized.as_deref() {
-        None | Some("0" | "false" | "no" | "off") => Ok(false),
-        Some("1" | "true" | "yes" | "on") => Ok(true),
-        Some(_) => Err(KakaoError::InvalidConfiguration(
-            "AGENTDESK_KAKAO_ENABLED must be a boolean",
-        )),
-    }
-}
-
 fn configured_accounts(raw: Option<&str>) -> Result<BTreeSet<String>, KakaoError> {
     let raw = raw.unwrap_or("default");
     let accounts = raw
@@ -611,11 +597,43 @@ mod tests {
 
     #[test]
     fn feature_is_disabled_by_default_and_parses_explicit_values() {
-        assert!(!parse_enabled(None).unwrap());
-        assert!(parse_enabled(Some("true")).unwrap());
-        assert!(parse_enabled(Some("TRUE")).unwrap());
-        assert!(!parse_enabled(Some("off")).unwrap());
-        assert!(parse_enabled(Some("sometimes")).is_err());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let _enabled =
+            crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock(ENABLED_ENV);
+        let _accounts = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+            ACCOUNTS_ENV,
+            "default".as_ref(),
+        );
+        let _account = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+            DEFAULT_ACCOUNT_ENV,
+            "default".as_ref(),
+        );
+        let _landing = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+            LANDING_URL_ENV,
+            "https://example.com".as_ref(),
+        );
+        unsafe { std::env::remove_var(ENABLED_ENV) };
+        assert!(matches!(
+            KakaoEnvironment::from_process(None),
+            Err(KakaoError::Disabled)
+        ));
+        for value in ["", " OFF ", "sometimes"] {
+            unsafe { std::env::set_var(ENABLED_ENV, value) };
+            assert!(
+                matches!(
+                    KakaoEnvironment::from_process(None),
+                    Err(KakaoError::Disabled)
+                ),
+                "{value}"
+            );
+        }
+        for value in ["1", "true", " TRUE ", "yes", "On"] {
+            unsafe { std::env::set_var(ENABLED_ENV, value) };
+            assert_eq!(
+                KakaoEnvironment::from_process(None).unwrap().account_id,
+                "default"
+            );
+        }
     }
 
     #[test]

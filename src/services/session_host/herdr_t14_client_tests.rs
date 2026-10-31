@@ -1,4 +1,4 @@
-//! Pinned scratch-only Herdr server and native terminal client for the ignored T14 scenarios.
+//! Scratch-only Herdr server and native terminal client for the ignored T14 scenarios.
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
@@ -15,7 +15,6 @@ use crate::config::session_hosts::BootSessionHosts;
 use crate::services::session_host::herdr::{observe, pane_probe::start_text, provenance};
 use crate::services::session_host::herdr_registry::{self, HerdrRegistry};
 
-const PINNED_SHA256: &str = "5173a3e0ae42d5d1ab7ebfa5d5e6329f7c3d23f8e1a3677c7ce3231da2884157";
 const FAKE_TEMPLATE: &str = include_str!("../../../tests/fixtures/herdr_t14_fake_provider.py");
 const PTY_DRIVER: &str = r####"#!/usr/bin/python3
 """Native Herdr terminal attach driven through a real OS PTY, never socket input RPC."""
@@ -225,6 +224,8 @@ impl Ledger {
 pub(crate) struct RealServer {
     root: PathBuf,
     bin: PathBuf,
+    /// The scratch copy's bytes when the test began; the server must run exactly these.
+    image_sha: String,
     dir: PathBuf,
     home: PathBuf,
     provider: &'static str,
@@ -258,7 +259,7 @@ impl RealServer {
             root.join("bin/herdr"),
             "T14 executes the approved scratch copy only"
         );
-        assert_eq!(sha(&bin), PINNED_SHA256, "T14 pinned 0.9.3 image");
+        let image_sha = sha(&bin);
         let path = read("ADK_TEST_HERDR_PIDS");
         assert_eq!(path.parent().unwrap().canonicalize().unwrap(), root);
         for file in std::fs::read_dir(&root).unwrap() {
@@ -331,6 +332,7 @@ impl RealServer {
         Self {
             root,
             bin,
+            image_sha,
             dir,
             home,
             provider,
@@ -506,7 +508,7 @@ impl RealServer {
             .canonicalize()
             .unwrap();
         assert_eq!(exe, self.bin, "T14 W3 peer is the copied image");
-        assert_eq!(sha(&exe), PINNED_SHA256);
+        assert_eq!(sha(&exe), self.image_sha, "T14 scratch copy unchanged");
         (pid, start_text(start.identity))
     }
 

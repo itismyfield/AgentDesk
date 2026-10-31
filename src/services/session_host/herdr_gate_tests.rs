@@ -318,8 +318,10 @@ fn off_elsewhere(_: &dyn HerdrTransport, endpoint: &HerdrEndpoint) -> RestoreRes
 fn audited_version(transport: &dyn HerdrTransport, _: &HerdrEndpoint) -> RestoreResume {
     match transport.hello() {
         Ok(hello)
-            if crate::services::session_host::herdr::model::VERIFIED_HERDR_VERSIONS
-                .contains(&hello.version.as_str()) =>
+            if crate::services::session_host::herdr::model::supported_herdr_server(
+                &hello.version,
+                hello.protocol,
+            ) =>
         {
             RestoreResume::Off {
                 witness: hello.witness,
@@ -410,7 +412,7 @@ fn rig() -> Rig {
     Rig {
         server: serve(),
         context: context(NONCE),
-        _admission: herdr_admission::force_for_test(Admission::new(None, Some(stop_file))),
+        _admission: herdr_admission::force_for_test(Admission::new(true, Some(stop_file))),
         _root: root,
     }
 }
@@ -614,7 +616,7 @@ fn a_marker_not_naming_herdr_refuses_every_write() {
 fn stopped_admission_refuses_input_but_lets_a_cancel_key_through() {
     let rig = rig();
     let target = hosted_target(&rig, vec![SERVER], off_where_dialled, launched_os(&rig));
-    let _off = herdr_admission::force_for_test(Admission::new(Some("off".as_ref()), None));
+    let _off = herdr_admission::force_for_test(Admission::new(false, None));
     let stopped =
         HerdrGateRefusal::AdmissionStopped(crate::services::herdr_admission::StopCause::Env);
     assert_eq!(
@@ -915,7 +917,7 @@ fn m0_terminate_admission_off_still_judges() {
     }
     let rig = rig();
     let _switch = LiveTerminateSwitch::new();
-    let _off = herdr_admission::force_for_test(Admission::new(Some("off".as_ref()), None));
+    let _off = herdr_admission::force_for_test(Admission::new(false, None));
     let target = hosted_target(&rig, vec![SERVER], off_where_dialled, launched_os(&rig));
     let result = terminate(&target);
     assert_eq!(rig.server.mutations().len(), 1);
@@ -1075,7 +1077,7 @@ fn m0_close_unknown_version_refused() {
     }
     let rig = rig();
     let _switch = LiveTerminateSwitch::new();
-    *rig.server.version.lock().unwrap() = "0.9.4".into();
+    *rig.server.version.lock().unwrap() = "0.9.2".into();
     let target = hosted_target(&rig, vec![SERVER], audited_version, launched_os(&rig));
     let result = terminate(&target);
     assert!(rig.server.mutations().is_empty());
@@ -1163,7 +1165,7 @@ fn m1_production_e7_rejects_unaudited_version_before_provenance() {
     let rig = rig();
     let endpoint = endpoint(&rig.server);
     let transport = transport(&rig.server, vec![SERVER]);
-    *rig.server.version.lock().unwrap() = "0.9.4".into();
+    *rig.server.version.lock().unwrap() = "0.9.2".into();
     assert_eq!(
         observe::read_restore_resume_with(transport.as_ref(), &endpoint, &NoReads),
         RestoreResume::Unverified(RestoreUnverified::VersionNotVerified)

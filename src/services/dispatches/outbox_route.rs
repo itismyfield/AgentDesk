@@ -185,10 +185,13 @@ fn git_ref_exists(repo_dir: &str, git_ref: &str) -> bool {
 }
 
 fn resolve_upstream_base_ref(repo_dir: &str) -> Option<String> {
-    ["origin/main", "main", "origin/master", "master"]
-        .into_iter()
-        .find(|candidate| git_ref_exists(repo_dir, candidate))
-        .map(str::to_string)
+    use crate::services::git::commit_resolver::{default_first_candidates, origin_default_branch};
+    default_first_candidates(
+        origin_default_branch(repo_dir).map(|branch| format!("origin/{branch}")),
+        &["origin/main", "main", "origin/master", "master"],
+    )
+    .into_iter()
+    .find(|candidate| git_ref_exists(repo_dir, candidate))
 }
 
 fn git_diff_stats(repo_dir: &str, diff_spec: &str) -> Result<DispatchChangeStats, String> {

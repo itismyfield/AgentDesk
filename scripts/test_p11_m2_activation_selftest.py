@@ -18,7 +18,7 @@ activation = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(activation)
 
 BIN = "/scratch/x12/bin/herdr"
-SHA = activation.PINNED_SHA256
+SHA = "5" * 64
 TEST_PID = "500"
 HEAD = "c0ffee" + "0" * 34
 
@@ -108,7 +108,7 @@ def compact(panes: list[dict]) -> str:
 
 
 def judged(name: str, output: str, logs: dict[str, str], returncode: int | None = 0) -> list[str]:
-    return activation.judge(name, output, bin_path=BIN, returncode=returncode,
+    return activation.judge(name, output, bin_path=BIN, image_sha=SHA, returncode=returncode,
                             read_log=lambda path: logs.get(path, ""))
 
 
@@ -151,7 +151,7 @@ def main() -> int:
     output, logs = fixture("x2")
     output = replace(output, f"sha256={SHA}", "sha256=" + "0" * 64)
     expect("binary sha mismatch fails", judged("x2", output, logs),
-           [f"W3: binary sha256 {'0' * 64} is not the pinned 0.9.3"])
+           [f"W3: binary sha256 {'0' * 64} is not the scratch copy {SHA}"])
 
     expect("x1 only fails", activation.judge_all({"x1": real["x1"]}, heads, HEAD), ["x2: not run"])
 

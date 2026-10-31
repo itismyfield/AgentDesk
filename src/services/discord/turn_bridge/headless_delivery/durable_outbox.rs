@@ -106,18 +106,21 @@ pub(super) async fn wait_for_headless_delivery_outbox_visible(
     }
 }
 
-fn durable_headless_outbox_enabled_value(value: Option<&str>) -> bool {
-    value.is_some_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "on" | "yes" | "enable" | "enabled"
-        )
-    })
+#[cfg(test)]
+fn durable_headless_outbox_enabled_value(raw: Option<&str>) -> bool {
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let _restore = crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock(
+        DURABLE_HEADLESS_OUTBOX_ENV,
+    );
+    match raw {
+        Some(raw) => unsafe { std::env::set_var(DURABLE_HEADLESS_OUTBOX_ENV, raw) },
+        None => unsafe { std::env::remove_var(DURABLE_HEADLESS_OUTBOX_ENV) },
+    }
+    durable_headless_outbox_enabled()
 }
 
 fn durable_headless_outbox_enabled() -> bool {
-    let value = std::env::var(DURABLE_HEADLESS_OUTBOX_ENV).ok();
-    durable_headless_outbox_enabled_value(value.as_deref())
+    crate::utils::env_flag(DURABLE_HEADLESS_OUTBOX_ENV, false)
 }
 
 pub(super) async fn enqueue_headless_outbox(
@@ -416,10 +419,10 @@ mod tests {
     #[test]
     fn durable_rollout_defaults_off_and_requires_an_explicit_true_value() {
         assert!(!durable_headless_outbox_enabled_value(None));
-        for value in ["", "0", "false", "off", "unexpected"] {
+        for value in ["", "0", "false", "off", "unexpected", "enable", "enabled"] {
             assert!(!durable_headless_outbox_enabled_value(Some(value)));
         }
-        for value in ["1", "true", "TRUE", "on", "yes", "enabled"] {
+        for value in ["1", "true", "TRUE", "on", "yes"] {
             assert!(durable_headless_outbox_enabled_value(Some(value)));
         }
     }

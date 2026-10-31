@@ -523,7 +523,7 @@ mod herdr_env_tests {
         );
         let id = "11111111-1111-4111-8111-111111111111";
         let system_prompt = "keep this\nexec rm -rf /tmp/never";
-        // What Herdr 0.9.3 hands every process in the pane, the launch command included.
+        // What Herdr hands every process in the pane (same set through 0.9.5), launch command included.
         const PANE_ENV: [&str; 7] = [
             "HERDR_ENV",
             "HERDR_PANE_ID",

@@ -688,6 +688,9 @@ async fn create_dispatch_core_internal(
         obj.entry("target_repo".to_string())
             .or_insert_with(|| json!(target_repo));
     }
+    let caller_baseline = context_with_session_strategy
+        .get("baseline_commit")
+        .is_some();
     inject_work_dispatch_baseline_commit(dispatch_type, &mut context_with_session_strategy);
     let context_str = if dispatch_type == "review" {
         build_review_context(
@@ -707,14 +710,14 @@ async fn create_dispatch_core_internal(
         let worktree_target = if let Some((wt_path, wt_branch)) =
             dispatch_context_worktree_target(&context_with_session_strategy)?
         {
-            Some((wt_path, wt_branch, false))
+            Some((wt_path, wt_branch, None))
         } else if phase_gate_sidecar {
             None
         } else if dispatch_type_requires_fresh_worktree(Some(dispatch_type)) {
             if sandbox_preflight_without_external_side_effects {
                 None
             } else {
-                let (wt_path, wt_branch, _, created) = ensure_card_worktree(
+                let (wt_path, wt_branch, wt_commit, created) = ensure_card_worktree(
                     pg_pool,
                     kanban_card_id,
                     Some(&context_with_session_strategy),
@@ -727,7 +730,7 @@ async fn create_dispatch_core_internal(
                         kanban_card_id
                     )
                 })?;
-                Some((wt_path, Some(wt_branch), created))
+                Some((wt_path, Some(wt_branch), created.then_some(wt_commit)))
             }
         } else {
             resolve_card_worktree(
@@ -736,18 +739,25 @@ async fn create_dispatch_core_internal(
                 Some(&context_with_session_strategy),
             )
             .await?
-            .map(|(wt_path, wt_branch, _)| (wt_path, Some(wt_branch), false))
+            .map(|(wt_path, wt_branch, _)| (wt_path, Some(wt_branch), None))
         };
 
-        if let Some((wt_path, wt_branch, managed_created)) = worktree_target {
+        if let Some((wt_path, wt_branch, fresh_start_commit)) = worktree_target {
             if let Some(obj) = context_with_session_strategy.as_object_mut() {
                 obj.insert("worktree_path".to_string(), json!(wt_path.clone()));
                 if let Some(wt_branch) = wt_branch {
                     obj.insert("worktree_branch".to_string(), json!(wt_branch));
                 }
-                if managed_created {
+                if fresh_start_commit.is_some() {
                     obj.insert("managed_worktree".to_string(), json!(true));
                     obj.insert("managed_worktree_cleanup".to_string(), json!("terminal"));
+                }
+                // A new worktree starts from freshly fetched origin, which can be newer than the
+                // baseline read before it was created.
+                if let Some(start_commit) =
+                    fresh_start_commit.filter(|commit| !caller_baseline && !commit.is_empty())
+                {
+                    obj.insert("baseline_commit".to_string(), json!(start_commit));
                 }
             }
             tracing::info!(

@@ -192,15 +192,7 @@ impl TailReader {
 }
 pub(super) fn enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| match std::env::var_os("ADK_TURN_PRESENCE_TAIL") {
-        None => true,
-        Some(value) if value == "1" => true,
-        Some(value) if value == "0" => false,
-        Some(_) => {
-            tracing::warn!("invalid ADK_TURN_PRESENCE_TAIL; cold Tail disabled until restart");
-            false
-        }
-    })
+    *ENABLED.get_or_init(|| crate::utils::env_flag("ADK_TURN_PRESENCE_TAIL", true))
 }
 pub(super) fn limits(channel: u64) -> Limits {
     #[cfg(test)]

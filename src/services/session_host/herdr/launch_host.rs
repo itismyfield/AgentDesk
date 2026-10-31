@@ -126,7 +126,12 @@ fn peer_source(socket: &Path, transport: &Arc<HerdrSocketTransport>) -> Arc<dyn 
     let (hello, witness) = (transport.clone(), transport.clone());
     let source = SocketPeerSource::new(
         socket.into(),
-        move || hello.hello().map_err(|_| Unverified::Peer),
+        move || {
+            hello.hello().map_err(|why| match why {
+                RestoreUnverified::VersionNotVerified => Unverified::Unsupported,
+                _ => Unverified::Peer,
+            })
+        },
         move || witness.server_witness().map_err(|_| Unverified::Peer),
     );
     #[cfg(target_os = "macos")]

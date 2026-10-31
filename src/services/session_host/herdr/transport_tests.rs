@@ -496,14 +496,21 @@ fn herdr_socket_hello_checks_protocol_not_version() {
     assert_eq!(hello.version, "1.4.0-dev");
     assert_eq!(hello.witness, witness(&server, 7, 1_000));
     assert_eq!(server.methods(), ["ping"]);
-    for reply in [
-        json!({"type": "pong", "version": "0.9.1", "protocol": 21}),
-        json!({"type": "pong", "version": "0.9.1"}),
-        json!({"type": "ok"}),
+    // A readable pong of another protocol is an unsupported server; a malformed one is none.
+    for (reply, refused) in [
+        (
+            json!({"type": "pong", "version": "0.9.1", "protocol": 21}),
+            RestoreUnverified::VersionNotVerified,
+        ),
+        (
+            json!({"type": "pong", "version": "0.9.1"}),
+            RestoreUnverified::NoPeer,
+        ),
+        (json!({"type": "ok"}), RestoreUnverified::NoPeer),
     ] {
         let server = serve(vec![Turn::Result(reply.clone())]);
         let rejected = transport_with(&server, config(), vec![SEVEN]);
-        assert_eq!(rejected.hello(), Err(RestoreUnverified::NoPeer), "{reply}");
+        assert_eq!(rejected.hello(), Err(refused), "{reply}");
         assert_eq!(server.methods(), ["ping"], "{reply}");
     }
     let server = serve(vec![pong("0.9.3")]);

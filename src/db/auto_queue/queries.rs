@@ -62,6 +62,7 @@ pub struct StatusEntryRecord {
     pub dispatch_created_at: Option<i64>,
     pub dispatch_updated_at: Option<i64>,
     pub live_session_count: i64,
+    pub has_active_followup: bool,
     pub priority_rank: i64,
     pub reason: Option<String>,
     pub status: String,
@@ -180,6 +181,11 @@ pub async fn get_status_entry_pg(
                 e.dispatch_id,
                 td.dispatch_type AS dispatch_type,
                 td.status AS dispatch_status,
+                EXISTS (SELECT 1 FROM task_dispatches followup
+                        WHERE followup.kanban_card_id = e.kanban_card_id
+                          AND followup.id IS DISTINCT FROM e.dispatch_id
+                          AND followup.dispatch_type IN ('review', 'review-decision', 'rework', 'create-pr')
+                          AND followup.status IN ('pending', 'dispatched')) AS has_active_followup,
                 CASE WHEN td.created_at IS NOT NULL
                     THEN EXTRACT(EPOCH FROM td.created_at)::BIGINT * 1000
                 END AS dispatch_created_at,
@@ -246,6 +252,11 @@ pub async fn list_status_entries_pg(
                 e.dispatch_id,
                 td.dispatch_type AS dispatch_type,
                 td.status AS dispatch_status,
+                EXISTS (SELECT 1 FROM task_dispatches followup
+                        WHERE followup.kanban_card_id = e.kanban_card_id
+                          AND followup.id IS DISTINCT FROM e.dispatch_id
+                          AND followup.dispatch_type IN ('review', 'review-decision', 'rework', 'create-pr')
+                          AND followup.status IN ('pending', 'dispatched')) AS has_active_followup,
                 CASE WHEN td.created_at IS NOT NULL
                     THEN EXTRACT(EPOCH FROM td.created_at)::BIGINT * 1000
                 END AS dispatch_created_at,
@@ -515,6 +526,7 @@ fn status_entry_record_from_pg_row(
         dispatch_created_at: row.try_get("dispatch_created_at")?,
         dispatch_updated_at: row.try_get("dispatch_updated_at")?,
         live_session_count: row.try_get("live_session_count")?,
+        has_active_followup: row.try_get("has_active_followup")?,
         priority_rank: row.try_get("priority_rank")?,
         reason: row.try_get("reason")?,
         status: row.try_get("status")?,

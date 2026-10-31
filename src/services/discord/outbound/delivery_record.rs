@@ -108,15 +108,13 @@ use owner_context::{
     watcher_owner_channel_from_context_at, write_watcher_owner_context_at,
 };
 pub(super) use rollout::delivery_record_rollout_health_json;
+#[cfg(test)]
+use rollout::delivery_record_rollout_health_json_for_flags;
 pub(in crate::services::discord) use rollout::{
     FlagResolution, FlagSource, delivery_record_authority_enabled, delivery_record_shadow_enabled,
     outcome_is_shadow_delivered,
 };
 use rollout::{delivered_frontier_end_diverged, should_shadow_mirror};
-#[cfg(test)]
-use rollout::{
-    delivery_record_rollout_health_json_for_flags, resolve_authority_flag, resolve_shadow_flag,
-};
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use store::write_proven_gone_equal_range_frontier;
 #[cfg(all(test, unix))]
@@ -914,7 +912,7 @@ pub(in crate::services::discord) fn record_recovery_terminal_delivery(
 mod relay_state_contract_refs {
     #[test]
     fn contract_symbols_exist() {
-        use super::range_committed_after_edit_failure as _;
+        let _ = super::range_committed_after_edit_failure;
     }
 }
 
@@ -1659,6 +1657,81 @@ mod tests {
     }
 
     #[test]
+    fn rollout_health_uses_production_names_defaults_and_first_read_cache() {
+        const CHILD: &str = "ADK_TEST_DELIVERY_RECORD_ROLLOUT_CHILD";
+        const SHADOW: &str = "AGENTDESK_DELIVERY_RECORD_SHADOW";
+        const AUTHORITY: &str = "AGENTDESK_DELIVERY_RECORD_AUTHORITY";
+        if let Ok(case) = std::env::var(CHILD) {
+            let (shadow, authority, source) = match case.as_str() {
+                "defaults" => (false, true, "compiled_default"),
+                "shadow" => (true, false, "env_override"),
+                "authority" => (false, true, "env_override"),
+                _ => panic!("unknown rollout child case"),
+            };
+            let health = delivery_record_rollout_health_json();
+            assert_eq!(health["shadow_enabled"], shadow);
+            assert_eq!(health["authority_enabled"], authority);
+            assert_eq!(health["flag_source"]["shadow"], source);
+            assert_eq!(health["flag_source"]["authority"], source);
+            // This exact test owns the isolated child's environment.
+            unsafe {
+                std::env::set_var(SHADOW, if shadow { "0" } else { "1" });
+                std::env::set_var(AUTHORITY, if authority { "0" } else { "1" });
+            }
+            assert_eq!(delivery_record_rollout_health_json(), health);
+            return;
+        }
+        let qualified = format!(
+            "{}::rollout_health_uses_production_names_defaults_and_first_read_cache",
+            module_path!().split_once("::").unwrap().1
+        );
+        for (case, flags) in [
+            ("defaults", None),
+            ("shadow", Some(("1", "0"))),
+            ("authority", Some(("0", "1"))),
+        ] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args(["--exact", &qualified, "--nocapture"])
+                .env(CHILD, case)
+                .env_remove(SHADOW)
+                .env_remove(AUTHORITY);
+            if let Some((shadow, authority)) = flags {
+                child.env(SHADOW, shadow).env(AUTHORITY, authority);
+            }
+            let output = child.output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "{case}: {stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                stdout.contains("1 passed; 0 failed; 0 ignored;"),
+                "{stdout}"
+            );
+        }
+    }
+
+    fn resolve_test_flag(name: &'static str, raw: Option<&str>, default: bool) -> FlagResolution {
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let _restore = crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock(name);
+        match raw {
+            Some(raw) => unsafe { std::env::set_var(name, raw) },
+            None => unsafe { std::env::remove_var(name) },
+        }
+        rollout::resolve_env_flag(name, default)
+    }
+
+    fn resolve_shadow_flag(raw: Option<&str>) -> FlagResolution {
+        resolve_test_flag("AGENTDESK_DELIVERY_RECORD_SHADOW", raw, false)
+    }
+
+    fn resolve_authority_flag(raw: Option<&str>) -> FlagResolution {
+        resolve_test_flag("AGENTDESK_DELIVERY_RECORD_AUTHORITY", raw, true)
+    }
+
+    #[test]
     fn rollout_flag_resolvers_separate_provenance_from_value() {
         // #5071 T1 S8-1r2 gate (a): absence and an explicit off are the SAME
         // value and DIFFERENT provenance. #5071 T1 S8-2 flipped the authority
@@ -1679,8 +1752,6 @@ mod tests {
             FlagResolution::env_override(false)
         );
 
-        // The two axes now diverge on absence ONLY: shadow keeps its compiled
-        // default OFF, and its present-value parsing is unchanged.
         assert_eq!(
             resolve_shadow_flag(None),
             FlagResolution::compiled_default(false)
@@ -1694,8 +1765,6 @@ mod tests {
             FlagResolution::env_override(false)
         );
 
-        // Value parsing is unchanged from the pre-extraction inline reads: trimmed,
-        // case-insensitive, and ON only for `1`/`true`.
         assert_eq!(
             resolve_authority_flag(Some(" TRUE ")),
             FlagResolution::env_override(true)
@@ -1704,16 +1773,20 @@ mod tests {
             resolve_authority_flag(Some(" 1 ")),
             FlagResolution::env_override(true)
         );
-        // Every other present value is off BUT still an override, including the
-        // empty string that an exported-but-blank `launchd.env` line produces.
-        // Against the S8-2 ON default this is load-bearing in a way it was not
-        // before: such a line is now a silent ROLLBACK, not a no-op, and
-        // `flag_source: env_override` is the only signal that names it.
-        for raw in ["", "  ", "yes", "false", "2"] {
+        for (raw, expected) in [
+            ("", true),
+            ("  ", true),
+            ("yes", true),
+            ("on", true),
+            ("2", true),
+            ("false", false),
+            (" NO ", false),
+            ("off", false),
+        ] {
             assert_eq!(
                 resolve_authority_flag(Some(raw)),
-                FlagResolution::env_override(false),
-                "present value {raw:?} must stay an override"
+                FlagResolution::env_override(expected),
+                "presence is independent of fallback: {raw:?}"
             );
         }
     }

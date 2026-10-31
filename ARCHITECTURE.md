@@ -365,6 +365,7 @@ src/
 │   ├── dispatch_snapshot_tests.rs
 │   ├── dispatch_status.rs
 │   ├── dispatch_summary.rs
+│   ├── fresh_worktree_pg_tests.rs
 │   ├── mod.rs
 │   ├── test_support.rs
 │   └── types.rs
@@ -774,6 +775,7 @@ src/
 │   │   ├── dispatch_assignment_command.rs
 │   │   ├── dispatch_command.rs
 │   │   ├── dispatch_query.rs
+│   │   ├── dispatched_entry_recovery_pg_tests.rs
 │   │   ├── fsm.rs
 │   │   ├── lifecycle_routes.rs
 │   │   ├── order_routes.rs
@@ -3255,6 +3257,7 @@ src/
 │   │   ├── repo_resolver.rs
 │   │   ├── repo_resolver_snapshot_tests.rs
 │   │   ├── runner.rs
+│   │   ├── test_origin_fixture.rs
 │   │   └── worktree_resolver.rs
 │   ├── hang_forensics/
 │   │   └── tests/
@@ -4321,6 +4324,7 @@ src/
 │   ├── auth.rs
 │   ├── dag.rs
 │   ├── discord.rs
+│   ├── env_flag.rs
 │   ├── format.rs
 │   ├── github_links.rs
 │   ├── input_validation.rs
