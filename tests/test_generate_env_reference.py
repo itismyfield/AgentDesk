@@ -186,6 +186,14 @@ class SourceTreeStabilityTests(unittest.TestCase):
             'fn f() { #[cfg(test)] K { field: 0 }.probe(env_flag("ADK_TEST_HIDDEN", false))?; std::env::var("AGENTDESK_PROD_LIST"); }',
             'fn f() { #[cfg(test)] K { field: 0 } + env_flag("ADK_TEST_HIDDEN", false); std::env::var("AGENTDESK_PROD_LIST"); }',
             'fn f(k: i32) -> bool { match k { #[cfg(test)] 1 => { false } -1 => std::env::var("AGENTDESK_PROD_LIST").is_ok(), _ => false } }',
+            'fn f(x: &mut bool) { #[cfg(test)] \'outer: loop { break; } *x = std::env::var("AGENTDESK_PROD_LIST").is_ok(); }',
+            'fn f() { #[cfg(test)] \'b: {} &std::env::var("AGENTDESK_PROD_LIST"); }',
+            'fn f(k: &K) -> bool { match k { #[cfg(test)] K::T => unsafe { false } &K::U => std::env::var("AGENTDESK_PROD_LIST").is_ok(), _ => false } }',
+            'fn f(k: i32) -> bool { match k { #[cfg(test)] 1 => \'a: { false } -1 => std::env::var("AGENTDESK_PROD_LIST").is_ok(), _ => false } }',
+            'fn f() { K { #[cfg(test)] probe: if tests::bypass() { false } else { env_flag("ADK_TEST_HIDDEN", false) }, live: std::env::var("AGENTDESK_PROD_LIST") }; }',
+            'fn f() { #[cfg(test)] x = if tests::bypass() { false } else { env_flag("ADK_TEST_HIDDEN", false) }; std::env::var("AGENTDESK_PROD_LIST"); }',
+            'fn f(k: K) -> bool { match k { #[cfg(test)] K::T => if tests::bypass() { false } else { env_flag("ADK_TEST_HIDDEN", false) }, _ => std::env::var("AGENTDESK_PROD_LIST").is_ok() } }',
+            'fn f(k: K) -> bool { match k { #[cfg(test)] K::T { .. } if tests::bypass() => env_flag("ADK_TEST_HIDDEN", false), _ => std::env::var("AGENTDESK_PROD_LIST").is_ok() } }',
         ):
             with self.subTest(source=source):
                 self.write("src/list.rs", source)

@@ -33,11 +33,11 @@ def cfg_item_end(code: str, start: int, scan_balanced) -> int:
         _, pos = scan_balanced(code, pos + attr.end() - 1, "[", "]")
     item = re.match(r"\s*(?:pub(?:\([^)]*\))?\s+)?(?:fn|const|static|struct|enum|union|impl|mod|use|type|trait|macro_rules|async|unsafe|extern)\b", code[pos:])
     binding = re.match(r"\s*let\b", code[pos:])
-    statement = re.match(r"\s*(?:(?:if|match|for|while|loop)\b|\{)", code[pos:])
+    statement = re.match(r"\s*(?:'\w+\s*:\s*)?(?:(?:if|match|for|while|loop)\b|\{)", code[pos:])
     while pos < len(code):
         char = code[pos]
         if char in "([{":
-            block_element = char == "{" and re.search(r"(?:=>|!)\s*$", code[start:pos])
+            block_element = char == "{" and re.search(r"(?:=>\s*(?:unsafe\s*|'\w+\s*:\s*)?|!)\s*$", code[start:pos])
             _, pos = scan_balanced(code, pos, char, {"(": ")", "[": "]", "{": "}"}[char])
             if item and char == "{":
                 return pos
@@ -45,7 +45,7 @@ def cfg_item_end(code: str, start: int, scan_balanced) -> int:
                 comma = re.match(r"\s*,", code[pos:])
                 if comma:
                     return pos + comma.end()
-                continuation = r"else\b" if statement else r"(?:=>|[|.?+*/%&^<>-]|as\b|==|!=)"
+                continuation = r"else\b" if statement else r"(?:else\b|if\b|=>|[|.?+*/%&^<>-]|as\b|==|!=)"
                 if block_element or not re.match(r"\s*" + continuation, code[pos:]):
                     return pos
         elif char in "})]":
