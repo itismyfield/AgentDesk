@@ -40,13 +40,13 @@ export function SettingsNavigation<TPanel extends string>({
         {tr(`현재 패널 ${matchingCount}개 항목 일치`, `${matchingCount} matches in this panel`)}
       </p> : null}
       <div role="tablist" aria-label={tr("설정 패널", "Settings panels")}
-        className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,7rem),1fr))] gap-1 border-b border-th-border-subtle pb-3 md:grid-cols-1 md:border-b-0 md:pb-0">
+        className="grid grid-cols-2 gap-1 border-b border-th-border-subtle pb-3 min-[23.5rem]:grid-cols-3 min-[28.75rem]:grid-cols-4 md:grid-cols-1 md:border-b-0 md:pb-0">
         {items.length ? items.map(item => {
           const active = activePanel === item.id;
           return <button key={item.id} id={`settings-tab-${item.id}`} type="button" role="tab"
             aria-selected={active} aria-current={active ? "page" : undefined} aria-controls="settings-panel-content"
             title={item.detail} onClick={() => onPanelChange(item.id)}
-            className={`flex min-h-11 min-w-0 items-center justify-center gap-2 rounded-md px-2 py-2 text-xs transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--th-accent-primary)] md:justify-between md:px-3 ${active ? "bg-surface-medium font-semibold text-th-text-primary" : "font-medium text-th-text-muted hover:bg-surface-subtle hover:text-th-text-primary"}`}>
+            className={`flex min-h-11 min-w-0 items-center justify-center gap-2 rounded-md px-2 py-2 text-xs transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--th-accent-primary)] min-[28.75rem]:px-1 md:justify-between md:px-3 ${active ? "bg-surface-medium font-semibold text-th-text-primary" : "font-medium text-th-text-muted hover:bg-surface-subtle hover:text-th-text-primary"}`}>
             <span className="min-w-0 [overflow-wrap:anywhere]">{item.title}</span>
             {item.count ? <span className="hidden shrink-0 font-normal tabular-nums text-th-text-muted md:inline">{item.count}</span> : null}
           </button>;
