@@ -233,9 +233,8 @@ impl Engine {
     }
 }
 
-/// The disk the 10-27 incident left: an old source O, the fresh source F an Unknown bind held
-/// with its four answers spooled, retired after a proven hop to N. The execution context of F
-/// was unreadable while it was bound, so the held start came from the code as it was.
+/// The incident disk: old source O, then F held by an Unknown bind while its context was
+/// unreadable, its four answers spooled, retired after a proven hop to N.
 struct Ops {
     harness: Harness,
     bindings: Arc<FakeBindings>,
