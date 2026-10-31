@@ -1072,6 +1072,7 @@ async fn residual_frame_with_duration(
             },
             batch_start,
             tail,
+            seed: Default::default(),
         },
     )
     .await;
