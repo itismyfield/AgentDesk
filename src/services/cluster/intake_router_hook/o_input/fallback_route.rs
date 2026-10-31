@@ -132,7 +132,7 @@ async fn switch(
             return Ok(None);
         }
     }
-    // A local file on its own owner (or unowned home) runs here as before, unless custody queues first.
+    // A local file on its own owner (or unowned home) runs here as before, after earlier input.
     if ctx.has_nonportable_uploads
         && target == ctx.leader_instance_id
         && shared
@@ -141,16 +141,15 @@ async fn switch(
             .map_or(shared.home.as_deref() == Some(target.as_str()), |o| {
                 o.status == "active" && o.owner_instance_id == target
             })
-        && !held_any(pool, &id).await?
     {
         #[cfg(test)]
         let keep = !owner_record::cleanup::tests::mutant("same-target-upload-reject");
         #[cfg(not(test))]
         let keep = true;
         if keep {
-            return Ok(Some(IntakeRouterDecision::RanLocal {
-                reason: RanLocalReason::NodeOverrideIsLeader,
-            }));
+            return local_after_earlier_input(pool, ctx, &id, target)
+                .await
+                .map(Some);
         }
     }
     // A local path cannot cross Macs; the queue's explicit rejection notice applies instead.
@@ -194,6 +193,44 @@ async fn switch(
         target
     };
     Ok(Some(forwarded(target, pending)))
+}
+
+/// Earlier open or held input runs first; the queued item is restored, never consumed, meanwhile.
+async fn local_after_earlier_input(
+    pool: &PgPool,
+    ctx: &IntakeRouterContext<'_>,
+    id: &OwnerIdentity,
+    target: String,
+) -> Result<IntakeRouterDecision, sqlx::Error> {
+    // NoOwner keeps the stale-pending local exception from running past the earlier input.
+    let resolved_owner = ResolvedSessionOwner::NoOwner;
+    let open = existing_open_route(pool, ctx.channel_id).await?;
+    #[cfg(test)]
+    let open = open.filter(|_| !owner_record::cleanup::tests::mutant("local-open-route"));
+    if let Some((route, open_target, message, status, age)) = open {
+        if message == ctx.user_msg_id {
+            return Ok(IntakeRouterDecision::SkippedDuplicate { resolved_owner });
+        }
+        return Ok(IntakeRouterDecision::DeferredOpenRoute {
+            target_instance_id: open_target,
+            open_route_status: Some(status),
+            open_route_id: Some(route),
+            open_route_age_secs: age.map(|age| age.max(0) as u64),
+            resolved_owner,
+        });
+    }
+    if held_any(pool, id).await? {
+        return Ok(IntakeRouterDecision::DeferredOpenRoute {
+            target_instance_id: target,
+            open_route_status: None,
+            open_route_id: None,
+            open_route_age_secs: None,
+            resolved_owner,
+        });
+    }
+    Ok(IntakeRouterDecision::RanLocal {
+        reason: RanLocalReason::NodeOverrideIsLeader,
+    })
 }
 
 async fn held_any(pool: &PgPool, id: &OwnerIdentity) -> Result<bool, sqlx::Error> {
