@@ -1,7 +1,7 @@
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
@@ -102,7 +102,11 @@ pub async fn list(
     ))
 }
 
-pub async fn get(State(state): State<AppState>, Path(id): Path<String>) -> AppResult<Json<Value>> {
+pub async fn get(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> AppResult<Response> {
     let pool = pool(&state)?;
     let campaign = campaigns::get(pool, &id).await.map_err(error)?;
     let mut live = campaigns::live_status(pool, std::slice::from_ref(&campaign))
@@ -110,9 +114,34 @@ pub async fn get(State(state): State<AppState>, Path(id): Path<String>) -> AppRe
         .map_err(error)?;
     let live = live.remove(&campaign.id).unwrap_or_default();
     let issue_drift = drift_entries(&campaign);
-    Ok(Json(
-        json!({ "campaign": campaign, "live": live, "issue_drift": issue_drift }),
-    ))
+    let body = json!({ "campaign": campaign, "live": live, "issue_drift": issue_drift });
+    Ok(revalidated_json(&headers, &body))
+}
+
+/// `live` and `issue_drift` change without a new revision, so the ETag hashes the
+/// whole body (object keys serialize sorted); a matching If-None-Match gets 304.
+fn revalidated_json(headers: &HeaderMap, body: &Value) -> Response {
+    let body = body.to_string();
+    let etag = format!("\"{}\"", blake3::hash(body.as_bytes()).to_hex());
+    let unchanged = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|tags| {
+            tags.split(',')
+                .map(|tag| tag.trim().trim_start_matches("W/"))
+                .any(|tag| tag == etag || tag == "*")
+        });
+    let mut response = if unchanged {
+        StatusCode::NOT_MODIFIED.into_response()
+    } else {
+        ([(header::CONTENT_TYPE, "application/json")], body).into_response()
+    };
+    let response_headers = response.headers_mut();
+    response_headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    if let Ok(etag) = HeaderValue::from_str(&etag) {
+        response_headers.insert(header::ETAG, etag);
+    }
+    response
 }
 
 pub async fn history(
@@ -327,6 +356,81 @@ mod tests {
                 .0,
             StatusCode::NOT_FOUND
         );
+        drop(app);
+        pool.close().await;
+        fixture.drop().await;
+    }
+
+    async fn conditional_get(
+        app: &Router,
+        if_none_match: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Vec<u8>) {
+        let mut request = Request::builder()
+            .uri("/campaigns/etag")
+            .header(header::AUTHORIZATION, "Bearer campaign-test-token");
+        if let Some(tag) = if_none_match {
+            request = request.header(header::IF_NONE_MATCH, tag);
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let (parts, body) = response.into_parts();
+        let bytes = to_bytes(body, 1_000_000).await.unwrap().to_vec();
+        (parts.status, parts.headers, bytes)
+    }
+
+    #[tokio::test]
+    async fn postgres_campaign_get_revalidates_with_a_body_etag_pg() {
+        let fixture = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = fixture.connect_and_migrate().await;
+        let app = app(pool.clone());
+        let body =
+            json!({"id": "etag", "title": "ETag", "status": "active", "round": 1, "nodes": []});
+        assert_eq!(
+            request(&app, Method::POST, "/campaigns", Some(body), true)
+                .await
+                .0,
+            StatusCode::CREATED
+        );
+
+        let (status, headers, bytes) = conditional_get(&app, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[header::CACHE_CONTROL], "no-cache");
+        assert_eq!(headers[header::CONTENT_TYPE], "application/json");
+        let etag = headers[header::ETAG].to_str().unwrap().to_string();
+        let read: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(read["campaign"]["revision"], 1);
+
+        let (status, headers, bytes) = conditional_get(&app, Some(&etag)).await;
+        assert_eq!(status, StatusCode::NOT_MODIFIED);
+        assert!(bytes.is_empty());
+        assert_eq!(headers[header::ETAG], etag.as_str());
+        let weak_list = format!("\"other\", W/{etag}");
+        let (status, _, _) = conditional_get(&app, Some(&weak_list)).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_MODIFIED,
+            "weak comparison, any listed tag"
+        );
+        let (status, _, _) = conditional_get(&app, Some("\"other\"")).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let mut update = read["campaign"].clone();
+        update["expected_revision"] = json!(1);
+        update["status"] = json!("paused");
+        assert_eq!(
+            request(&app, Method::PUT, "/campaigns/etag", Some(update), true)
+                .await
+                .0,
+            StatusCode::OK
+        );
+        let (status, headers, bytes) = conditional_get(&app, Some(&etag)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_ne!(headers[header::ETAG], etag.as_str());
+        let changed: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(changed["campaign"]["status"], "paused");
         drop(app);
         pool.close().await;
         fixture.drop().await;
