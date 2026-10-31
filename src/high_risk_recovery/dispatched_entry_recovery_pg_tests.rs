@@ -23,6 +23,7 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
         ("live", "completed", Some("{}"), 10),
         ("running", "dispatched", Some("{}"), 10),
         ("fresh", "completed", Some("{}"), 0),
+        ("fresh-dispatch", "completed", Some("{}"), 10),
         ("successor", "completed", Some("{}"), 10),
     ] {
         let card_id = format!("card-recover-{name}");
@@ -53,6 +54,8 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
         ).bind(format!("entry-recover-{name}")).bind(format!("run-recover-{name}"))
             .bind(&card_id).bind(&dispatch_id).bind(age as f64).execute(&pool).await.unwrap();
     }
+    sqlx::query("UPDATE task_dispatches SET updated_at = NOW() WHERE id = 'dispatch-recover-fresh-dispatch'")
+        .execute(&pool).await.unwrap();
     sqlx::query(
         "UPDATE auto_queue_entries SET retry_count = 2 WHERE id = 'entry-recover-exhausted'",
     )
@@ -165,7 +168,7 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
                 );
             }
         }
-        for name in ["live", "running", "fresh", "successor"] {
+        for name in ["live", "running", "fresh", "fresh-dispatch", "successor"] {
             let (status, dispatch): (String, String) =
                 sqlx::query_as("SELECT status, dispatch_id FROM auto_queue_entries WHERE id = $1")
                     .bind(format!("entry-recover-{name}"))
@@ -189,6 +192,16 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
         retained, "dispatched",
         "restart must retain work awaiting its review"
     );
+    sqlx::raw_sql(
+        "UPDATE auto_queue_entries SET status = 'skipped', dispatch_id = NULL, slot_index = NULL
+         WHERE run_id != 'run-recover-completed';
+         UPDATE task_dispatches SET status = 'cancelled'
+         WHERE kanban_card_id != 'card-recover-completed' AND status IN ('pending', 'dispatched');
+         UPDATE sessions SET status = 'disconnected', active_dispatch_id = NULL;",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     seed_card_pg(&pool, "card-recover-next", "requested").await;
     sqlx::query(
         "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank)
