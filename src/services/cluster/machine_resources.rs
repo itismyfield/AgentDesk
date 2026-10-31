@@ -8,6 +8,8 @@ use serde_json::{Map, Value};
 
 mod command;
 mod gpu;
+#[cfg(any(test, target_os = "macos"))]
+mod memory;
 mod network;
 mod sampler;
 pub(crate) mod store;

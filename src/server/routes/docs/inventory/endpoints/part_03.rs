@@ -288,6 +288,18 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                     "assigned_agent_id",
                     query_param("string", false, "Filter cards by assigned agent id"),
                 ),
+                (
+                    "view",
+                    query_param(
+                        "string",
+                        false,
+                        "full (default) or summary; summary omits `description` and `metadata` (keeps `metadata_json`). GET /api/kanban-cards/{id} returns the full card",
+                    ),
+                ),
+                (
+                    "exclude_done",
+                    query_param("boolean", false, "When true, omit cards whose status is done"),
+                ),
             ])
             .with_example(
                 json!({"query": {"status": "ready"}}),
