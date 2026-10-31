@@ -101,9 +101,7 @@ fn decide_warm_eligibility(signals: WarmEligibilitySignals) -> WarmEligibilityDe
 }
 
 pub(crate) fn codex_tui_warm_followup_enabled() -> bool {
-    std::env::var(WARM_FOLLOWUP_ENV)
-        .ok()
-        .is_none_or(|value| value.trim() != "0")
+    crate::utils::env_flag(WARM_FOLLOWUP_ENV, true)
 }
 
 fn hash_field(hasher: &mut Sha256, label: &str, value: &str) {
@@ -973,8 +971,10 @@ mod tests {
         assert!(codex_tui_warm_followup_enabled());
         unsafe { std::env::set_var(WARM_FOLLOWUP_ENV, "0") };
         assert!(!codex_tui_warm_followup_enabled());
-        unsafe { std::env::set_var(WARM_FOLLOWUP_ENV, "false") };
-        assert!(codex_tui_warm_followup_enabled());
+        for value in ["false", " NO ", "Off"] {
+            unsafe { std::env::set_var(WARM_FOLLOWUP_ENV, value) };
+            assert!(!codex_tui_warm_followup_enabled(), "{value}");
+        }
     }
 
     #[cfg(unix)]

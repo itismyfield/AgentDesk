@@ -23,9 +23,13 @@ fn s1_tail_setting_is_exact_and_frozen_on_first_read() {
         (None, true),
         (Some("1".into()), true),
         (Some("0".into()), false),
-        (Some("true".into()), false),
-        (Some(" 1".into()), false),
-        (Some(std::ffi::OsString::from_vec(vec![0xff])), false),
+        (Some(" NO ".into()), false),
+        (Some("Off".into()), false),
+        (Some("".into()), true),
+        (Some("invalid".into()), true),
+        (Some("true".into()), true),
+        (Some(" 1".into()), true),
+        (Some(std::ffi::OsString::from_vec(vec![0xff])), true),
     ] {
         for supervisor_first in [false, true] {
             let mut child = Command::new(std::env::current_exe().unwrap());

@@ -25,6 +25,38 @@ from __future__ import annotations
 
 import re
 
+
+def cfg_item_end(code: str, start: int, scan_balanced) -> int:
+    """Find a gated item/list element's end without consuming its parent delimiter."""
+    pos = start
+    while attr := re.match(r"\s*#\[", code[pos:]):
+        _, pos = scan_balanced(code, pos + attr.end() - 1, "[", "]")
+    item = re.match(r"\s*(?:pub(?:\([^)]*\))?\s+)?(?:fn|const|static|struct|enum|union|impl|mod|use|type|trait|macro_rules|async|unsafe|extern)\b", code[pos:])
+    binding = re.match(r"\s*let\b", code[pos:])
+    statement = re.match(r"\s*(?:'\w+\s*:\s*)?(?:(?:if|match|for|while|loop)\b|\{)", code[pos:])
+    while pos < len(code):
+        char = code[pos]
+        if char in "([{":
+            block_element = char == "{" and re.search(r"(?:=>\s*(?:unsafe\s*|'\w+\s*:\s*)?|!)\s*$", code[start:pos])
+            _, pos = scan_balanced(code, pos, char, {"(": ")", "[": "]", "{": "}"}[char])
+            if item and char == "{":
+                return pos
+            if char == "{" and not binding:
+                comma = re.match(r"\s*,", code[pos:])
+                if comma:
+                    return pos + comma.end()
+                continuation = r"else\b" if statement else r"(?:else\b|if\b|=>|[|.?+*/%&^<>-]|as\b|==|!=)"
+                if block_element or not re.match(r"\s*" + continuation, code[pos:]):
+                    return pos
+        elif char in "})]":
+            return pos
+        elif char == ";" or (not (item or binding) and char == ","):
+            return pos + 1
+        else:
+            pos += 1
+    return pos
+
+
 # Char literal (so `'"'` / `'{'` cannot desync the scanners). Lifetimes (`'a`)
 # do not match and fall through harmlessly.
 _CHAR_LITERAL = re.compile(r"'(\\.|[^'\\])'")

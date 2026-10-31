@@ -17,7 +17,7 @@ pub(super) fn headless_delivery_nonce(
 pub(super) fn headless_discord_nonce_enabled(authorized_outbox_path: bool) -> bool {
     resolve_rollout_enabled(
         authorized_outbox_path,
-        resolve_opt_in_flag(std::env::var(HEADLESS_DISCORD_NONCE_FLAG).ok().as_deref()),
+        crate::utils::env_flag(HEADLESS_DISCORD_NONCE_FLAG, false),
     )
 }
 
@@ -55,11 +55,17 @@ pub(super) fn image_delivery_nonce(
     ]))
 }
 
+#[cfg(test)]
 fn resolve_opt_in_flag(raw: Option<&str>) -> bool {
-    raw.is_some_and(|value| {
-        let value = value.trim();
-        value == "1" || value.eq_ignore_ascii_case("true")
-    })
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let _restore = crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock(
+        HEADLESS_DISCORD_NONCE_FLAG,
+    );
+    match raw {
+        Some(raw) => unsafe { std::env::set_var(HEADLESS_DISCORD_NONCE_FLAG, raw) },
+        None => unsafe { std::env::remove_var(HEADLESS_DISCORD_NONCE_FLAG) },
+    }
+    headless_discord_nonce_enabled(true)
 }
 
 fn durable_headless_outbox_row_id(

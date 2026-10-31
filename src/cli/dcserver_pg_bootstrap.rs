@@ -162,9 +162,7 @@ where
 
 /// Whether the launchd environment leaves the schema-ahead hold on (default on).
 pub(crate) fn schema_ahead_hold_enabled() -> bool {
-    std::env::var(SCHEMA_AHEAD_HOLD_ENV)
-        .map(|value| value.trim() != "0")
-        .unwrap_or(true)
+    crate::utils::env_flag(SCHEMA_AHEAD_HOLD_ENV, true)
 }
 
 /// Describes a database whose applied migrations are all newer than this

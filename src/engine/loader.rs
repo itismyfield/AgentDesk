@@ -53,21 +53,15 @@ unsafe impl Sync for LoadedPolicy {}
 pub type PolicyStore = Arc<Mutex<Vec<LoadedPolicy>>>;
 
 fn policy_trust_override_enabled() -> bool {
-    std::env::var("AGENTDESK_POLICY_TRUST_OVERRIDE")
-        .ok()
-        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+    crate::utils::env_flag("AGENTDESK_POLICY_TRUST_OVERRIDE", false)
 }
 
 fn policy_trust_enforce_enabled() -> bool {
-    std::env::var("AGENTDESK_POLICY_TRUST_ENFORCE")
-        .ok()
-        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+    crate::utils::env_flag("AGENTDESK_POLICY_TRUST_ENFORCE", false)
 }
 
 fn policy_hardening_disabled() -> bool {
-    std::env::var("AGENTDESK_POLICY_HARDENING")
-        .ok()
-        .is_some_and(|value| matches!(value.trim(), "0" | "off" | "OFF" | "false" | "FALSE"))
+    !crate::utils::env_flag("AGENTDESK_POLICY_HARDENING", true)
 }
 
 #[cfg(unix)]

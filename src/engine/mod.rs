@@ -321,9 +321,7 @@ impl PolicyEngine {
         let supervisor_bridge = crate::supervisor::BridgeHandle::new();
         let runtime =
             Runtime::new().map_err(|e| anyhow::anyhow!("QuickJS runtime creation failed: {e}"))?;
-        let policy_hardening_disabled = std::env::var("AGENTDESK_POLICY_HARDENING")
-            .ok()
-            .is_some_and(|value| matches!(value.trim(), "0" | "off" | "OFF" | "false" | "FALSE"));
+        let policy_hardening_disabled = !crate::utils::env_flag("AGENTDESK_POLICY_HARDENING", true);
         if !policy_hardening_disabled && config.policies.memory_limit_bytes > 0 {
             runtime.set_memory_limit(config.policies.memory_limit_bytes);
         }

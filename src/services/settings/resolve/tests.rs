@@ -795,3 +795,35 @@ fn production_view_blanks_test_only_statements_and_rejects_unbounded_forms() {
         "an unterminated #[cfg(test)] form must fail closed"
     );
 }
+
+#[test]
+fn env_flag_value_and_presence_share_one_snapshot() {
+    const NAME: &str = "ADK_SETTINGS_ENV_FLAG_TEST";
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let _restore = crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock(NAME);
+    for default in [false, true] {
+        unsafe { std::env::remove_var(NAME) };
+        assert_eq!(
+            resolve_env_flag(NAME, default),
+            Resolved {
+                value: default,
+                source: SettingSource::Default
+            }
+        );
+        for (raw, expected) in [
+            ("", default),
+            ("invalid", default),
+            (" YeS ", true),
+            ("Off", false),
+        ] {
+            unsafe { std::env::set_var(NAME, raw) };
+            assert_eq!(
+                resolve_env_flag(NAME, default),
+                Resolved {
+                    value: expected,
+                    source: SettingSource::EnvOverride
+                }
+            );
+        }
+    }
+}

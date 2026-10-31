@@ -721,7 +721,7 @@ async fn a_configured_channel_refuses_a_dispatch_reset_before_any_change_pg() {
         Some("mac-mini"),
         &[(thread.get(), "mac-mini")],
     );
-    let stopped = crate::services::herdr_admission::Admission::new(Some("off".as_ref()), None);
+    let stopped = crate::services::herdr_admission::Admission::new(false, None);
     let _off = crate::services::herdr_admission::force_for_test(stopped);
     tmux.take_calls();
     api.take();

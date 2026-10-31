@@ -38,8 +38,7 @@ pub(in crate::services::discord) fn queued_head_enabled(channel: u64) -> bool {
     {
         static PROCESS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let _ = channel;
-        *PROCESS
-            .get_or_init(|| std::env::var("ADK_QUEUED_HEAD_INJECT").is_ok_and(|value| value == "1"))
+        *PROCESS.get_or_init(|| crate::utils::env_flag("ADK_QUEUED_HEAD_INJECT", false))
     }
 }
 

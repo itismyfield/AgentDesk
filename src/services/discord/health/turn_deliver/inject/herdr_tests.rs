@@ -31,7 +31,7 @@ const FOOTER: &str = "  ⏵⏵ bypass permissions on (shift+tab to cycle)";
 fn runtime() -> tokio::runtime::Runtime {
     let open = || {
         let stop = std::env::temp_dir().join(format!("adk-bi-none-{}", uuid::Uuid::new_v4()));
-        std::mem::forget(force_for_test(Admission::new(None, Some(stop))));
+        std::mem::forget(force_for_test(Admission::new(true, Some(stop))));
     };
     open();
     let mut runtime = tokio::runtime::Builder::new_current_thread();
