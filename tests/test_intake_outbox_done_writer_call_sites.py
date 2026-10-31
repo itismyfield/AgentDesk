@@ -391,6 +391,7 @@ class TransportLegacyInventoryTests(unittest.TestCase):
         # The lease-loss fence now lives behind the shared owner helper; the lease path must still reach it.
         lease = (self.BOOTSTRAP / "gateway_lease.rs").read_text(encoding="utf-8")
         self.assertEqual(lease.count("owner_execution::gateway_transport_lost(shared)"), 1)
+        self.assertEqual(self.RAW_STORE.findall(lease), [], "gateway_lease.rs")
 
     def assert_reader_surface(self, owner: str) -> None:
         """Audit every `impl ... ShutdownReader`; first-block-only was #5831 P1-1."""
