@@ -1174,9 +1174,8 @@ fn a_busy_front_carries_its_uploads_and_reply_into_the_pane() {
     );
 }
 
-/// One author's consecutive input waiting at the front goes into a busy turn as one prompt in
-/// arrival order and settles as one attempt; input that never merges, or arrives after the claim,
-/// waits for the next.
+/// One author's consecutive input at the front goes into a busy turn as one prompt in order and one
+/// attempt; input that never merges, or arrives after the claim, waits for the next.
 #[test]
 fn consecutive_input_goes_into_a_busy_turn_as_one_prompt() {
     let _root = crate::config::TestRuntimeRootGuard::new();
