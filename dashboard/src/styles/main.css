@@ -37,7 +37,6 @@
   --font-sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", "Segoe UI", system-ui, sans-serif;
   --font-display: "Inter", -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", "SFMono-Regular", "SF Mono", Menlo, Consolas, monospace;
-  --font-pixel: "Silkscreen", -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", system-ui, sans-serif;
   --r-sm: 0.625rem;
   --r-md: 0.875rem;
   --r-lg: 1rem;
@@ -262,25 +261,10 @@ textarea {
   font-family: var(--font-display);
 }
 
-.font-pixel {
-  font-family: var(--font-pixel);
-}
-
 /* Scrollbar */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--th-text-muted); border-radius: 3px; }
-
-/* ── CE Dashboard Classes ── */
-.game-panel {
-  background:
-    linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 94%, white) 0%, var(--th-card-bg) 100%);
-  border: 1px solid color-mix(in srgb, var(--th-card-border) 84%, var(--th-border) 16%);
-  border-radius: var(--r-md);
-  box-shadow:
-    inset 0 1px 0 var(--th-overlay-subtle),
-    var(--shadow-sm);
-}
 
 .dash-card {
   border: 1px solid var(--th-border);

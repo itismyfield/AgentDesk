@@ -1,7 +1,6 @@
 import type { Agent, Department } from "../../types";
 import { localeName } from "../../i18n";
 import { getCurrentTaskSummary } from "../../lib/agentHelpers";
-import { getFontFamilyForText } from "../../lib/fonts";
 import { getProviderMeta } from "../../app/providerTheme";
 import AgentPersona from "../AgentPersona";
 import { ActionMenu } from "../common/ActionMenu";
@@ -40,7 +39,6 @@ export default function AgentCard({
   const secondaryLabel = locale === "en" ? agent.name_ko || agent.name : agent.name;
   const providerMeta = getProviderMeta(agent.cli_provider);
   const task = getCurrentTaskSummary(agent, tr);
-  const contentFont = getFontFamilyForText(task.value, "sans");
 
   return (
     <SurfaceCard
@@ -70,7 +68,7 @@ export default function AgentCard({
       </div>
       <div className="min-w-0">
         <div className="text-xs text-th-text-muted">{task.label}</div>
-        <div className="mt-1 text-sm leading-6 text-th-text-primary [overflow-wrap:anywhere]" style={{fontFamily:contentFont}}>{task.value}</div>
+        <div className="mt-1 text-sm leading-6 text-th-text-primary [overflow-wrap:anywhere]">{task.value}</div>
         <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs leading-5 text-th-text-muted">
           {topSkills.length ? topSkills.map(skill => <span key={`${agent.id}-${skill}`} className="[overflow-wrap:anywhere]">{skill}</span>) : <span>{tr("최근 스킬 데이터 없음", "No recent skill data")}</span>}
         </div>
