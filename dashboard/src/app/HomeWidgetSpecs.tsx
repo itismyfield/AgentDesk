@@ -90,6 +90,9 @@ export function buildHomeWidgetSpecs(ctx: HomeWidgetContext): Record<string, Hom
             <Gauge size={14} />
             {tr("계정 사용량", "Account usage")}
           </div>
+          <p className="mt-1 text-[11px] leading-4 text-th-text-muted">
+            {tr("한도 창마다 얼마나 썼는지, 지금 속도면 초기화 때 몇 %가 될지 보여줘요.", "How much of each limit window is used, and where the current pace ends at reset.")}
+          </p>
           <MiniRateLimitBar isKo={isKo} layout="homeSummary" />
         </section>
       ),
