@@ -22,6 +22,17 @@ pub(crate) struct AdmittedQueuedIntake {
     local_permit: Option<LocalAdmissionPermit>,
     restore_owner: Option<QueuedRestoreOwner>,
 }
+#[cfg(test)]
+impl AdmittedQueuedIntake {
+    /// The uploads the local execution body receives, and whether it runs here.
+    pub(crate) fn local_uploads(
+        &self,
+    ) -> Option<&crate::services::cluster::attachment_transfer::uploads::PendingUploads> {
+        self.local_permit
+            .as_ref()
+            .map(|_| &self.submission.preloaded_uploads)
+    }
+}
 struct QueuedRestoreOwner {
     original: Intervention,
     provider: ProviderKind,

@@ -124,6 +124,8 @@ pub(in crate::services::discord) fn dm_default_agent_authorizes_unmapped_private
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ManualOutboundOptions {
+    pub(crate) output_origin:
+        Option<crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
     pub(crate) allow_unbound_internal_channel: bool,
     /// Grants the durable message-outbox producer access to its reserved
     /// delivery-id namespace and inline Discord nonce rollout. This is
@@ -151,6 +153,26 @@ async fn resolve_manual_bot_http(
         .map_err(|error| ("503 Service Unavailable", error));
     }
     resolve_bot_http(registry, bot).await
+}
+
+/// The durable routing cursor owns retries; this only resolves the bot and posts once.
+pub(crate) async fn post_routing_notice(
+    registry: &HealthRegistry,
+    channel_id: u64,
+    content: &str,
+    bot: &str,
+    nonce: &str,
+) -> Result<String, (&'static str, String)> {
+    let channel = ChannelId::new(channel_id);
+    let http = resolve_manual_bot_http(registry, bot, channel, &Default::default()).await?;
+    super::manual_delivery::post_with_stored_nonce(
+        &production_manual_outbound_client(http),
+        channel,
+        content,
+        nonce,
+    )
+    .await
+    .map_err(|error| ("500 Internal Server Error", error))
 }
 
 #[allow(clippy::too_many_arguments)]

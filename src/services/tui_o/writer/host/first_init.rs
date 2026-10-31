@@ -44,7 +44,28 @@ pub(super) async fn start<I: HostIo>(
 ) -> Option<Started<I::Bindings>> {
     let alarms = io.alarms();
     let log = io.bindings(channel, provider);
-    if candidate.late_adopt_origin() {
+    let owner_fresh = io.execution_permit(channel).is_some_and(|permit| {
+        permit.is_ok_and(|permit| {
+            matches!(
+                permit.session_ref,
+                crate::services::tui_o::ownership::execution::SessionRef::Fresh
+            )
+        })
+    });
+    if owner_fresh {
+        if !Box::pin(activate_owner(
+            io,
+            (channel, provider),
+            &fresh,
+            candidate,
+            &*log,
+            (gate, stopping),
+        ))
+        .await?
+        {
+            return None;
+        }
+    } else if candidate.late_adopt_origin() {
         let late = late_adopt::activate(&**io, channel, provider, &fresh, &*log, candidate, gate);
         if unless_stopped(stopping, late).await != Some(true) {
             return None;
@@ -258,4 +279,50 @@ fn metadata_only(source: &SourceId, budget: &mut u64) -> Result<Scanned, String>
         ));
     }
     Ok(scanned)
+}
+
+async fn activate_owner<I: HostIo>(
+    io: &Arc<I>,
+    (channel, provider): (u64, ShadowProvider),
+    store: &OStore,
+    candidate: &Candidate,
+    log: &I::Bindings,
+    (gate, stopping): (&Arc<OwnershipGate>, &watch::Receiver<bool>),
+) -> Option<bool> {
+    unless_stopped(stopping, until_owned(gate)).await?;
+    let fenced = unless_stopped(stopping, io.intake_fence(channel, provider)).await?;
+    let fenced = match fenced {
+        Ok(fenced) => fenced,
+        Err(reason) => {
+            hold(&io.alarms(), channel, &reason);
+            return Some(false);
+        }
+    };
+    let sources = || {
+        let events = log.binding_events_since(channel, 0)?;
+        if events.is_empty() {
+            Ok(Vec::new())
+        } else if provider == ShadowProvider::Codex {
+            codex_sources(log, channel)
+        } else {
+            activation::empty_sources(log, channel)
+        }
+    };
+    let local = || Ok(io.local_custody(channel, provider)? != Custody::Free);
+    let created = admitted(channel, gate, || {
+        activation::activate_with(store, channel, Ok(fenced.facts), local, candidate, sources)
+    });
+    let released = fenced.hold.release().await;
+    match (created, released) {
+        (Some(Ok(())), Ok(())) => Some(true),
+        (result, released) => {
+            let reason = released
+                .err()
+                .map(|e| e.to_string())
+                .or_else(|| result.and_then(Result::err))
+                .unwrap_or_else(|| "execution gate closed before init".into());
+            hold(&io.alarms(), channel, &reason);
+            Some(false)
+        }
+    }
 }

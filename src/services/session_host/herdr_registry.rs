@@ -391,6 +391,24 @@ impl HerdrRegistry {
         };
         view
     }
+
+    #[cfg(unix)]
+    pub(crate) fn retired_probe(
+        &self,
+        stored: &HostedExecution,
+    ) -> Option<super::herdr_gate::legacy_return::RetiredProbe> {
+        use super::herdr_gate::legacy_return::RetiredProbe;
+        let probe = self.endpoints.iter().find_map(|registered| {
+            let transport: Arc<dyn HerdrTransport> = Arc::new(registered.transport.clone());
+            RetiredProbe::new(registered.endpoint.clone(), transport, stored)
+        });
+        #[cfg(test)]
+        let probe = match &self.reads {
+            Some((_, os)) => probe.map(|probe| probe.with_os(os.clone())),
+            None => probe,
+        };
+        probe
+    }
 }
 
 impl Registered {

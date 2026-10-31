@@ -54,7 +54,6 @@ impl PgWireProxy {
             let release = release.clone();
             tokio::spawn(async move {
                 while let Ok((client, _)) = listener.accept().await {
-                    shared.accepted.fetch_add(1, Ordering::SeqCst);
                     let Ok(server) = TcpStream::connect((upstream.0.as_str(), upstream.1)).await
                     else {
                         continue;
@@ -120,12 +119,12 @@ impl PgWireProxy {
         self.shared.executions.lock().unwrap().clear();
     }
 
-    /// Client connections accepted since the proxy started.
+    /// PostgreSQL v3 startups accepted since the proxy started.
     pub(crate) fn accepted(&self) -> usize {
         self.shared.accepted.load(Ordering::SeqCst)
     }
 
-    /// Client connections still being relayed.
+    /// PostgreSQL connections still being relayed.
     pub(crate) fn open(&self) -> usize {
         self.shared.open.load(Ordering::SeqCst)
     }
@@ -142,6 +141,32 @@ fn stalled(shared: &Shared, sql: &str) -> bool {
 
 type Queued = (tokio::time::Instant, Vec<u8>, Option<String>);
 
+async fn read_startup(
+    from_client: &mut (impl tokio::io::AsyncRead + Unpin),
+) -> std::io::Result<Vec<u8>> {
+    let length = from_client.read_u32().await?;
+    // PostgreSQL caps the startup payload at 10,000 bytes, excluding its length word.
+    if !(8..=10_000 + 4).contains(&length) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid PostgreSQL startup length",
+        ));
+    }
+    let protocol = from_client.read_u32().await?;
+    // Pools returned by this fixture disable TLS and send a plain protocol 3.0 startup.
+    if protocol != 3 << 16 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unsupported PostgreSQL startup protocol",
+        ));
+    }
+    let mut startup = length.to_be_bytes().to_vec();
+    startup.extend_from_slice(&protocol.to_be_bytes());
+    startup.resize(length as usize, 0);
+    from_client.read_exact(&mut startup[8..]).await?;
+    Ok(startup)
+}
+
 /// Reads client frames, stamping each with its due time and the SQL an Execute or Query runs.
 async fn read_client(
     mut from_client: tokio::net::tcp::OwnedReadHalf,
@@ -149,10 +174,9 @@ async fn read_client(
     shared: Arc<Shared>,
 ) -> std::io::Result<()> {
     let delay = || *shared.delay.lock().unwrap();
-    let length = from_client.read_u32().await?;
-    let mut startup = length.to_be_bytes().to_vec();
-    startup.resize(length as usize, 0);
-    from_client.read_exact(&mut startup[4..]).await?;
+    let startup = read_startup(&mut from_client).await?;
+    shared.accepted.fetch_add(1, Ordering::SeqCst);
+    let _open = OpenConnection::count(&shared);
     let _ = queue.send((tokio::time::Instant::now() + delay(), startup, None));
     let mut statements = HashMap::<Vec<u8>, String>::new();
     let mut portals = HashMap::<Vec<u8>, String>::new();
@@ -212,7 +236,6 @@ async fn relay(
     shared: Arc<Shared>,
     release: watch::Receiver<u64>,
 ) {
-    let _open = OpenConnection::count(&shared);
     let (from_client, mut to_client) = client.into_split();
     let (mut from_server, to_server) = server.into_split();
     let (queue, queued) = tokio::sync::mpsc::unbounded_channel();
@@ -241,5 +264,65 @@ impl OpenConnection {
 impl Drop for OpenConnection {
     fn drop(&mut self) {
         self.0.open.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn only_postgres_startups_are_forwarded_and_counted() {
+        let malformed = [
+            10_005u32.to_be_bytes().to_vec(),
+            b"GET ".to_vec(),
+            7u32.to_be_bytes().to_vec(),
+            [8u32.to_be_bytes(), (2u32 << 16).to_be_bytes()].concat(),
+        ];
+        for bytes in malformed {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut client = TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            let (peer, _) = listener.accept().await.unwrap();
+            let (from_client, _) = peer.into_split();
+            client.write_all(&bytes).await.unwrap();
+            client.shutdown().await.unwrap();
+            let (queue, mut queued) = tokio::sync::mpsc::unbounded_channel();
+            let shared = Arc::new(Shared::default());
+            let error = read_client(from_client, queue, shared.clone())
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{bytes:?}");
+            assert!(
+                queued.try_recv().is_err(),
+                "rejected bytes never reach PostgreSQL"
+            );
+            assert_eq!(shared.accepted.load(Ordering::SeqCst), 0);
+            assert_eq!(shared.open.load(Ordering::SeqCst), 0);
+        }
+
+        for length in [8u32, 10_004] {
+            let mut packet = [length.to_be_bytes(), (3u32 << 16).to_be_bytes()].concat();
+            packet.resize(length as usize, 0);
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut client = TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            let (peer, _) = listener.accept().await.unwrap();
+            let (from_client, _) = peer.into_split();
+            client.write_all(&packet).await.unwrap();
+            client.shutdown().await.unwrap();
+            let (queue, mut queued) = tokio::sync::mpsc::unbounded_channel();
+            let shared = Arc::new(Shared::default());
+            let error = read_client(from_client, queue, shared.clone())
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+            assert_eq!(queued.recv().await.unwrap().1, packet);
+            assert!(queued.try_recv().is_err());
+            assert_eq!(shared.accepted.load(Ordering::SeqCst), 1);
+            assert_eq!(shared.open.load(Ordering::SeqCst), 0);
+        }
     }
 }

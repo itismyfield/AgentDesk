@@ -103,10 +103,7 @@ impl VoiceConfig {
         if !has_usable_wake_word {
             return false;
         }
-        std::env::var("REQUIRE_WAKE_WORD")
-            .ok()
-            .and_then(|value| parse_bool_env(&value))
-            .unwrap_or(has_usable_wake_word)
+        crate::utils::env_flag("REQUIRE_WAKE_WORD", has_usable_wake_word)
     }
 
     pub(crate) fn lobby_channel_id_u64(&self) -> Option<u64> {
@@ -128,14 +125,7 @@ impl VoiceConfig {
     /// segment / transcript sidecar 를 보존할지 결정한다 (#2156). 환경변수가 명시적으로
     /// 설정된 경우 config 값을 덮어쓴다.
     pub(crate) fn keep_voice_recordings(&self) -> bool {
-        if let Some(env_value) = std::env::var("ADK_VOICE_KEEP_WAV")
-            .ok()
-            .as_deref()
-            .and_then(parse_bool_env)
-        {
-            return env_value;
-        }
-        self.keep_recordings
+        crate::utils::env_flag("ADK_VOICE_KEEP_WAV", self.keep_recordings)
     }
 
     pub(crate) fn auto_join_channel_ids_with_lobby(&self) -> Vec<String> {
@@ -158,14 +148,6 @@ impl VoiceConfig {
         }
 
         channel_ids
-    }
-}
-
-fn parse_bool_env(value: &str) -> Option<bool> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
     }
 }
 

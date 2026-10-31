@@ -68,6 +68,8 @@ pub enum PostOutcome {
     Created(SeenMessage),
     /// 400, 403 or 404: the channel refuses the post and a retry changes nothing.
     Refused(u16),
+    /// The original execution cannot authorize a request; no request left.
+    Withheld(String),
     /// 5xx, timeout or a transport failure: the message may exist.
     Uncertain(String),
 }
@@ -82,6 +84,23 @@ pub trait DiscordPort: Send + Sync + 'static {
         channel: u64,
         content: String,
     ) -> impl Future<Output = PostOutcome> + Send + 'static;
+    fn post_origin(
+        &self,
+        channel: u64,
+        content: String,
+        origin: Option<
+            crate::services::cluster::intake_router_hook::owner_record::output::Artifact,
+        >,
+    ) -> impl Future<Output = PostOutcome> + Send + 'static {
+        let request = origin.is_none().then(|| self.post(channel, content));
+        async move {
+            match request {
+                Some(request) => request.await,
+                None => PostOutcome::Withheld("writer has no execution owner scope".into()),
+            }
+        }
+    }
+
     /// Up to `confirm::HISTORY_PAGE` messages with ids above `after`, in any order.
     fn history_after(
         &self,
@@ -217,6 +236,8 @@ pub trait AlarmSink: Send + Sync {
 mod historical_hops;
 mod past_bind;
 mod renumbered;
+#[cfg(unix)]
+pub(crate) use renumbered::claude_cursor_continues;
 mod transition_cleanup;
 /// Only the periodic retention sweep sends production cleanup requests.
 pub(crate) mod transition_port;

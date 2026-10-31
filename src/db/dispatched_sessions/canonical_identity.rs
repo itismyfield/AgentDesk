@@ -226,7 +226,7 @@ async fn upsert_hook_session_pg(
     };
     let promotion = match (identity, canonical.as_ref()) {
         (Some(identity), None) if identity.kind == SessionIdentityKind::DiscordChannel => {
-            load_unique_legacy_candidate_for_update(&mut tx, params.provider, identity).await?
+            load_unique_legacy_candidate(&mut tx, params.provider, identity, false, true).await?
         }
         _ => None,
     };
@@ -327,63 +327,89 @@ pub(crate) async fn resolve_session_key_with_identity_pg(
         .map(|row| row.map(|(_, key)| key))
 }
 
-/// Same convergence rule as the key resolver; a `None` key resolves only by the
-/// exact canonical tuple.
+/// Converge exact locators and the canonical tuple through locked operational
+/// promotion, with disconnected foreign owners released only for legacy records.
 pub(crate) async fn resolve_session_row_pg(
     pool: &PgPool,
     session_key: Option<&str>,
     provider: Option<&str>,
     identity: Option<CanonicalSessionIdentity<'_>>,
 ) -> Result<Option<(i64, String)>, HookSessionUpsertError> {
+    // Keep transactional resolver futures off callers' stacks.
+    Box::pin(async move {
+        if provider.is_none()
+            || identity.is_none_or(|identity| identity.kind != SessionIdentityKind::DiscordChannel)
+        {
+            return read_resolved_row(pool, session_key, provider, identity).await;
+        }
+        let mut tx = pool.begin().await.map_err(database_error)?;
+        if let (Some(provider), Some(identity)) = (provider, identity)
+            && load_unique_legacy_candidate(&mut tx, provider, identity, true, false)
+                .await
+                .map_err(canonical_candidate_error)?
+                .is_none()
+        {
+            // Reads without a promotion candidate must not block native row writers.
+            let target =
+                read_resolved_row(&mut *tx, session_key, Some(provider), Some(identity)).await?;
+            tx.commit().await.map_err(database_error)?;
+            return Ok(target);
+        }
+        if let Some(key) = session_key {
+            acquire_locator_lock(&mut tx, key).await?;
+        }
+        if let (Some(provider), Some(identity)) = (provider, identity) {
+            acquire_identity_lock(&mut tx, provider, identity).await?;
+        }
+        let (exact, alias) = match session_key {
+            Some(key) => (
+                load_exact_key_for_update(&mut tx, key).await?,
+                load_alias_for_update(&mut tx, key).await?,
+            ),
+            None => (None, None),
+        };
+        let canonical = match (provider, identity) {
+            (Some(provider), Some(identity))
+                if identity.kind == SessionIdentityKind::DiscordChannel =>
+            {
+                load_canonical_for_update(&mut tx, provider, identity).await?
+            }
+            _ => None,
+        };
+        let target = resolve_evidence(exact, alias, canonical, None)?;
+        tx.commit().await.map_err(database_error)?;
+        Ok(target.map(|target| (target.id, target.session_key)))
+    })
+    .await
+}
+
+async fn read_resolved_row<'e>(
+    executor: impl sqlx::Executor<'e, Database = Postgres>,
+    session_key: Option<&str>,
+    provider: Option<&str>,
+    identity: Option<CanonicalSessionIdentity<'_>>,
+) -> Result<Option<(i64, String)>, HookSessionUpsertError> {
     let rows = sqlx::query(
-        "SELECT id, session_key, source_rank
-         FROM (
-             SELECT s.id, s.session_key, 1 AS source_rank
-             FROM sessions s
-             WHERE s.session_key = $1
-             UNION ALL
-             SELECT s.id, s.session_key, 2 AS source_rank
-             FROM session_key_aliases a
-             JOIN sessions s ON s.id = a.session_id
-             WHERE a.session_key = $1
-             UNION ALL
-             SELECT s.id, s.session_key, 3 AS source_rank
-             FROM sessions s
-             WHERE $2::TEXT IS NOT NULL
-               AND $3::TEXT IS NOT NULL
-               AND $4::TEXT IS NOT NULL
-               AND $5::TEXT = 'discord_channel'
-               AND s.provider = $2
-               AND s.discord_token_hash = $3
-               AND s.channel_id = $4
-               AND s.identity_kind = 'discord_channel'
-         ) evidence
-         ORDER BY source_rank",
+        "SELECT id, session_key, provider, identity_kind, discord_token_hash, channel_id
+         FROM sessions WHERE session_key = $1
+            OR id IN (SELECT session_id FROM session_key_aliases WHERE session_key = $1)
+            OR ($5::TEXT = 'discord_channel' AND provider = $2
+                AND discord_token_hash = $3 AND channel_id = $4
+                AND identity_kind = 'discord_channel')",
     )
     .bind(session_key)
     .bind(provider)
     .bind(identity.map(|value| value.discord_token_hash))
     .bind(identity.map(|value| value.channel_id))
     .bind(identity.map(|value| value.kind.as_str()))
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await
     .map_err(database_error)?;
-
-    let mut resolved: Option<(i64, String)> = None;
+    let mut target = None;
     for row in rows {
-        let id: i64 = row.try_get("id").map_err(database_error)?;
-        let key: String = row.try_get("session_key").map_err(database_error)?;
-        if let Some((resolved_id, _)) = resolved.as_ref()
-            && *resolved_id != id
-        {
-            return Err(conflict(
-                SessionIdentityConflictKind::EvidenceDivergence,
-                "session locator resolves to multiple rows",
-            ));
-        }
-        resolved = Some((id, key));
+        target = resolve_evidence(target, Some(decode_evidence(row)?), None, None)?;
     }
-    Ok(resolved)
+    Ok(target.map(|target| (target.id, target.session_key)))
 }
 
 async fn acquire_locator_lock(
@@ -489,15 +515,87 @@ async fn load_canonical_for_update(
             "canonical Discord identity is ambiguous",
         ));
     }
-    rows.into_iter().next().map(decode_evidence).transpose()
+    let owner = rows.into_iter().next().map(decode_evidence).transpose()?;
+    let candidate = load_unique_legacy_candidate(tx, provider, identity, true, true)
+        .await
+        .map_err(canonical_candidate_error)?;
+    let Some(mut candidate) = candidate else {
+        return Ok(owner);
+    };
+    let records_absent: bool = sqlx::query_scalar(
+        "SELECT NOT EXISTS (SELECT 1 FROM sessions
+         WHERE id IN ($1, $2) AND hosted_execution IS NOT NULL)",
+    )
+    .bind(owner.as_ref().map(|owner| owner.id))
+    .bind(candidate.id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    if !records_absent {
+        return Err(conflict(
+            SessionIdentityConflictKind::EvidenceDivergence,
+            "automatic identity convergence requires absent hosted records",
+        ));
+    }
+    if let Some(owner) = owner {
+        let disconnected: bool = sqlx::query_scalar(
+            "SELECT lower(COALESCE(status, '')) = 'disconnected' FROM sessions WHERE id = $1",
+        )
+        .bind(owner.id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(database_error)?;
+        let hosts = [owner.session_key.as_str(), candidate.session_key.as_str()].map(|key| {
+            crate::services::discord::session_identity::SessionIdentity::parse(key)
+                .map(|parsed| parsed.host.to_ascii_lowercase())
+        });
+        let foreign = matches!(&hosts, [Some(old), Some(live)]
+            if old.trim_end_matches(".local") != live.trim_end_matches(".local"));
+        if !disconnected || !foreign {
+            return Err(conflict(
+                SessionIdentityConflictKind::EvidenceDivergence,
+                "canonical and legacy rows lack a disconnected foreign-host handoff",
+            ));
+        }
+        // Release the old tuple before claiming it; both rows stay locked until commit.
+        sqlx::query(
+            "UPDATE sessions SET identity_kind = NULL, discord_token_hash = NULL WHERE id = $1",
+        )
+        .bind(owner.id)
+        .execute(&mut **tx)
+        .await
+        .map_err(database_error)?;
+    }
+    sqlx::query("UPDATE sessions SET identity_kind = $2, discord_token_hash = $3 WHERE id = $1")
+        .bind(candidate.id)
+        .bind(identity.kind.as_str())
+        .bind(identity.discord_token_hash)
+        .execute(&mut **tx)
+        .await
+        .map_err(database_error)?;
+    candidate.identity_kind = Some(identity.kind.as_str().to_owned());
+    candidate.discord_token_hash = Some(identity.discord_token_hash.to_owned());
+    Ok(Some(candidate))
 }
 
-async fn load_unique_legacy_candidate_for_update(
+fn canonical_candidate_error(error: HookSessionUpsertError) -> HookSessionUpsertError {
+    match error.conflict_kind() {
+        Some(SessionIdentityConflictKind::AmbiguousLegacy) => conflict(
+            SessionIdentityConflictKind::EvidenceDivergence,
+            "canonical identity has ambiguous operational legacy candidates",
+        ),
+        _ => error,
+    }
+}
+
+async fn load_unique_legacy_candidate(
     tx: &mut Transaction<'_, Postgres>,
     provider: &str,
     identity: CanonicalSessionIdentity<'_>,
+    operational_only: bool,
+    lock_rows: bool,
 ) -> Result<Option<SessionEvidence>, HookSessionUpsertError> {
-    let rows = sqlx::query(
+    let mut query = sqlx::QueryBuilder::<Postgres>::new(
         "SELECT id, session_key, provider, identity_kind, discord_token_hash, channel_id
          FROM sessions
          WHERE identity_kind IS NULL
@@ -505,18 +603,30 @@ async fn load_unique_legacy_candidate_for_update(
            AND provider = $1
            AND channel_id = $2
            AND agentdesk_legacy_discord_locator_is_ordinary(session_key, $1, $3)
-         FOR UPDATE",
-    )
-    .bind(provider)
-    .bind(identity.channel_id)
-    .bind(identity.discord_token_hash)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(database_error)?;
+           AND (NOT $4 OR (closed_at IS NULL
+               AND btrim(COALESCE(status, '')) <> ''
+               AND lower(status) NOT IN ('disconnected', 'aborted')))",
+    );
+    if lock_rows {
+        query.push(" FOR UPDATE");
+    }
+    let rows = query
+        .build()
+        .bind(provider)
+        .bind(identity.channel_id)
+        .bind(identity.discord_token_hash)
+        .bind(operational_only)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(database_error)?;
 
     match rows.len() {
         0 => Ok(None),
         1 => rows.into_iter().next().map(decode_evidence).transpose(),
+        _ if operational_only => Err(conflict(
+            SessionIdentityConflictKind::AmbiguousLegacy,
+            "multiple operational session rows claim the canonical Discord identity",
+        )),
         _ => {
             // Host-qualified legacy locators can leave one live row beside one
             // or more disconnected shells after a gateway moves machines. A

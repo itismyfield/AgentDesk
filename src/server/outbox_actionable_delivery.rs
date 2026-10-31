@@ -14,6 +14,8 @@ use super::PendingMessageOutboxRow;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::outbound::source_registry::RETIRED_SEND_SOURCES;
 
+#[path = "outbox_actionable_delivery/routing_notice.rs"]
+mod routing_notice;
 #[path = "outbox_actionable_delivery/session_notice.rs"]
 mod session_notice;
 
@@ -65,10 +67,28 @@ async fn deliver_with_bot(
     row: &PendingMessageOutboxRow,
     bot: &str,
 ) -> (&'static str, String) {
-    let options = match delivery_options(row) {
+    let mut options = match delivery_options(row) {
         Ok(options) => options,
         Err(error) => return ("400 Bad Request", error.to_string()),
     };
+    if row.source == "headless_turn" {
+        let stored: Result<Option<serde_json::Value>, _> = sqlx::query_scalar(
+            "SELECT output_origin FROM message_outbox WHERE id=$1 AND target=$2 AND content=$3",
+        )
+        .bind(row.id)
+        .bind(&row.target)
+        .bind(&row.content)
+        .fetch_one(pg_pool)
+        .await;
+        options.output_origin = match stored {
+            Ok(Some(stamp)) => match serde_json::from_value(stamp) {
+                Ok(origin) => Some(origin),
+                Err(error) => return ("409 Conflict", error.to_string()),
+            },
+            Ok(None) => None,
+            Err(error) => return ("503 Service Unavailable", error.to_string()),
+        };
+    }
     let (correlation_id, semantic_event_id) = row.delivery_ids();
     let content = delivery_content(&row.content, &row.source, row.reason_code.as_deref());
     crate::services::discord::health::send_message_with_backends_and_delivery_options(
@@ -96,6 +116,16 @@ pub(super) async fn deliver(
     if RETIRED_SEND_SOURCES.contains(&row.source.as_str()) {
         return ("retired_source".into(), "retired_source".into());
     }
+    let routing =
+        row.source == crate::services::cluster::intake_router_hook::owner_record::event::SOURCE;
+    #[cfg(test)]
+    let routing = routing
+        && !crate::services::cluster::intake_router_hook::owner_record::cleanup::tests::mutant(
+            "notice-branch",
+        );
+    if routing {
+        return routing_notice::deliver(registry, pg_pool, row).await;
+    }
     if let Some(result) = session_notice::deliver(registry, pg_pool, row).await {
         return result;
     }
@@ -105,6 +135,13 @@ pub(super) async fn deliver(
         row.session_key.as_deref(),
     );
     let (status, error) = deliver_with_bot(registry, pg_pool, row, primary_bot.as_ref()).await;
+    if row.source == "headless_turn" && status == "409 Conflict" {
+        if let Err(error) = sqlx::query("UPDATE message_outbox SET status='held',error=$2,claim_owner=NULL,claimed_at=NULL WHERE id=$1 AND status='processing' AND claim_owner=$3 AND claimed_at=$4")
+            .bind(row.id).bind(format!("output origin withheld: {error}")).bind(&row.claim_owner).bind(row.claimed_at)
+            .execute(pg_pool).await {
+            return ("503 Service Unavailable".into(), error.to_string());
+        }
+    }
     if !should_fallback_to_notify(
         status,
         primary_bot.as_ref(),
@@ -139,12 +176,35 @@ pub(super) fn failure_action(
     if row.attachment.is_err()
         || (row.attachment.as_ref().is_ok_and(Option::is_some) && status == "400 Bad Request")
         || RETIRED_SEND_SOURCES.contains(&row.source.as_str())
+        || (row.source == crate::services::cluster::intake_router_hook::owner_record::event::SOURCE
+            && status == routing_notice::UNRESOLVED)
     {
         super::MessageOutboxFailureAction::Fail {
             retry_count: row.retry_count,
         }
     } else {
-        super::message_outbox_failure_action(row.retry_count)
+        let action = super::message_outbox_failure_action(row.retry_count);
+        #[cfg(test)]
+        let action_stays =
+            crate::services::cluster::intake_router_hook::owner_record::cleanup::tests::mutant(
+                "notice-retry",
+            );
+        #[cfg(not(test))]
+        let action_stays = false;
+        match action {
+            // A failed routing POST must resume while its stored nonce still deduplicates.
+            super::MessageOutboxFailureAction::Retry { retry_count, .. }
+                if !action_stays
+                    && row.source
+                        == crate::services::cluster::intake_router_hook::owner_record::event::SOURCE =>
+            {
+                super::MessageOutboxFailureAction::Retry {
+                    retry_count,
+                    backoff_secs: crate::services::cluster::intake_router_hook::owner_record::event::RETRY_SECONDS,
+                }
+            }
+            action => action,
+        }
     }
 }
 

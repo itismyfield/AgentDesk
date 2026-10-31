@@ -300,6 +300,24 @@ fn a_queued_notification_is_settled_by_its_own_drain() {
     assert!(!closed_with(&own_turn).pending_receipt());
 }
 
+/// A meta row inside an already open turn runs one queued input with its body; of two queued with
+/// the same body, as plain text and as a text block, in either order, the other stays owed.
+#[test]
+fn a_meta_row_inside_an_open_turn_runs_one_queued_input_with_its_body() {
+    let note = "<task-notification>done</task-notification>";
+    let meta = json!({"type":"user", "isMeta":true, "origin":{"kind":"task-notification"},
+        "message":{"content":note}});
+    let alone = closed_with(&[user("a", "first"), enqueue(note), meta.clone(), idle()]);
+    assert_eq!((alone.pending_receipt(), alone.owed_inputs()), (false, 0));
+    let human = enqueue(note);
+    let queued_note = json!({"type":"queue-operation", "operation":"enqueue",
+        "content":[{"type":"text", "text":note}]});
+    for (first, second) in [(human.clone(), queued_note.clone()), (queued_note, human)] {
+        let both = closed_with(&[user("a", "first"), first, second, meta.clone(), idle()]);
+        assert_eq!(both.owed_inputs(), 1);
+    }
+}
+
 /// The dequeue Claude writes after an absorption is that absorption's: it takes no other input.
 #[test]
 fn a_dequeue_after_an_absorption_takes_no_other_input() {

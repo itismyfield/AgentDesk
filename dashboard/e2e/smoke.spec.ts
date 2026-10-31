@@ -2663,6 +2663,9 @@ test.describe("Dashboard smoke tests", () => {
           clientWidth: node.clientWidth,
           scrollWidth: node.scrollWidth,
           overflowX: window.getComputedStyle(node).overflowX,
+          columns: new Set(
+            buttons.map((button) => Math.round(button.getBoundingClientRect().left)),
+          ).size,
           maxButtonHeight: Math.max(
             0,
             ...buttons.map((button) => button.getBoundingClientRect().height),
@@ -2670,6 +2673,7 @@ test.describe("Dashboard smoke tests", () => {
         };
       });
     expect(navMetrics.scrollWidth).toBeLessThanOrEqual(navMetrics.clientWidth + 1);
+    expect(navMetrics.columns).toBeGreaterThanOrEqual(2);
     expect(navMetrics.maxButtonHeight).toBeGreaterThanOrEqual(44);
     expect(navMetrics.maxButtonHeight).toBeLessThan(64);
 

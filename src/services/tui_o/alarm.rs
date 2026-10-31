@@ -200,7 +200,7 @@ pub(crate) fn gateway_resumed(channel: u64) {
     PROCESS_HEALTH.resume_gateway(channel);
 }
 
-/// Reason slug for an alarm; NotFound has none because only its frequency is an alarm.
+/// Routine cleanup and individual NotFound events have no alarm reason.
 fn alarm_kind(alarm: &WriterAlarm) -> Option<&'static str> {
     Some(match alarm {
         WriterAlarm::Blocked { .. } => "blocked",
@@ -220,12 +220,11 @@ fn alarm_kind(alarm: &WriterAlarm) -> Option<&'static str> {
         WriterAlarm::SourceStillGrowing { .. } => "source_still_growing",
         WriterAlarm::TooManyReaders { .. } => "too_many_readers",
         WriterAlarm::RetiredSourceGrew { .. } => "retired_source_grew",
-        WriterAlarm::CleanupRetired { .. } => "cleanup_retired",
         WriterAlarm::BindingLogUnavailable { .. } => "binding_log_unavailable",
         WriterAlarm::RotationStalled { .. } => "rotation_stalled",
         WriterAlarm::SelectionMissing => "selection_missing",
         WriterAlarm::WaitingTooLong { .. } => WAITING_TOO_LONG,
-        WriterAlarm::NotFound { .. } => return None,
+        WriterAlarm::NotFound { .. } | WriterAlarm::CleanupRetired { .. } => return None,
     })
 }
 
@@ -275,7 +274,11 @@ impl AlarmRouter {
                 }
                 kind
             }
-            None if self.health.record_not_found(channel, now) => NOT_FOUND_FREQUENT,
+            None if matches!(alarm, WriterAlarm::NotFound { .. })
+                && self.health.record_not_found(channel, now) =>
+            {
+                NOT_FOUND_FREQUENT
+            }
             None => return,
         };
         let reason = format!("tui_o:{kind}:{channel}");
@@ -805,6 +808,7 @@ mod postgres_tests {
             router.clone(),
         );
         let piece = Derived::Piece(PieceWork {
+            output_origin: None,
             unit_key: UnitKey {
                 channel_id: CHANNEL,
                 provider: ShadowProvider::Claude,

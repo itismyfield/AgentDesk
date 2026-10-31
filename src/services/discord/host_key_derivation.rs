@@ -43,12 +43,21 @@ pub(super) async fn derive_hosted_lookup(
     let mut lookups = Vec::with_capacity(hashes.len() * 2);
     for hash in hashes {
         let key = super::adk_session::build_namespaced_session_key(hash, provider, tmux_name);
-        lookups.push(load_hosted_execution_pg(pool, HostedLookupKey::SessionKey(&key)).await);
         let identity = CanonicalSessionIdentity {
             kind: SessionIdentityKind::DiscordChannel,
             discord_token_hash: hash,
             channel_id: &channel,
         };
+        if let Err(error) =
+            resolve_session_row_pg(pool, Some(&key), Some(provider.as_str()), Some(identity)).await
+        {
+            lookups.push(error.conflict_kind().map_or_else(
+                || HostedLookup::Unknown(format!("{error:?}")),
+                HostedLookup::Conflict,
+            ));
+            continue;
+        }
+        lookups.push(load_hosted_execution_pg(pool, HostedLookupKey::SessionKey(&key)).await);
         let canonical = HostedLookupKey::Canonical {
             provider: provider.as_str(),
             identity,
@@ -99,6 +108,18 @@ pub(super) async fn derive_channel_session_name(
     provider: &ProviderKind,
     channel_id: u64,
 ) -> Result<String, HostedLookup> {
+    let key = derive_channel_session_key(pool, hashes, provider, channel_id).await?;
+    super::session_identity::tmux_name_from_session_key(&key)
+        .ok_or_else(|| HostedLookup::Unknown(format!("row key {key} names no tmux session")))
+}
+
+/// The key of that one row, answered as [`derive_channel_session_name`] answers.
+pub(super) async fn derive_channel_session_key(
+    pool: &PgPool,
+    hashes: &[String],
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> Result<String, HostedLookup> {
     let hashes: Vec<&String> = hashes
         .iter()
         .filter(|hash| !hash.trim().is_empty())
@@ -138,8 +159,7 @@ pub(super) async fn derive_channel_session_name(
             SessionIdentityConflictKind::EvidenceDivergence,
         ));
     }
-    super::session_identity::tmux_name_from_session_key(key)
-        .ok_or_else(|| HostedLookup::Unknown(format!("row key {key} names no tmux session")))
+    Ok(key.clone())
 }
 
 /// Whether a routine probe's failure on `tmux_name` may stand: the row behind a registered

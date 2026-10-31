@@ -175,6 +175,7 @@ fn summary(report: &DispatchReport) -> Summary {
         WireOutcome::Refused(_) => "refused",
         WireOutcome::Throttled => "throttled",
         WireOutcome::Uncertain(_) => "uncertain",
+        WireOutcome::Withheld(_) => "withheld",
         WireOutcome::Unsent(_) => "unsent",
         WireOutcome::TimedOut => "timed_out",
     };
@@ -427,7 +428,9 @@ async fn repost_sends_keep_one_nonce_and_marker_outside_the_content() {
         .proxy(mock.base.clone())
         .ratelimiter_disabled(true)
         .build();
-    let legacy_message = serenity::CreateMessage::new().content(content.clone());
+    let legacy_message = serenity::CreateMessage::new()
+        .content(content.clone())
+        .allowed_mentions(crate::services::discord::http::relay_allowed_mentions());
     // The mock's reply is not a full Message, so only the request it recorded matters here.
     let _ = ChannelId::new(CHANNEL)
         .send_message(&legacy, legacy_message)
@@ -781,6 +784,7 @@ mod settle_over_http {
         let unit_key = unit(channel, 99);
         let payload = PAYLOAD.to_owned();
         let piece = Derived::Piece(PieceWork {
+            output_origin: None,
             unit_key: unit_key.clone(),
             index: 0,
             payload,
@@ -950,3 +954,6 @@ mod settle_over_http {
 #[cfg(unix)]
 #[path = "local_retry_io_tests.rs"]
 mod local_retry_io_tests;
+
+#[path = "o_writer_repost_io_tests/owner_tests.rs"]
+mod owner_tests;

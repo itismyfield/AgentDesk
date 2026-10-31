@@ -67,13 +67,19 @@ pub(crate) enum PaneReading {
     },
 }
 
+#[derive(Debug)]
+enum WitnessChanged {
+    Snapshot,
+    Processes,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PaneProvider {
     /// The root shell is the only foreground process.
     Exited,
     /// The one foreground child of the root shell, its environment naming this execution.
     Execution(ProcessStamp),
-    Unverified(String),
+    Unverified(EvidenceGap),
 }
 
 /// What an input does to the pane: a cancel key only stops work, so admission lets it through.
@@ -189,6 +195,14 @@ impl ExecutionFence {
         Ok(MutationPermit {
             fence: self.clone(),
         })
+    }
+
+    fn exclude_termination(self: &Arc<Self>) -> Result<TerminationFence, HerdrGateRefusal> {
+        let permit = self.acquire(Mutation::Terminate)?;
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let was_closing = state.1;
+        state.1 = true;
+        Ok(TerminationFence(permit, was_closing))
     }
 }
 
@@ -378,16 +392,7 @@ impl HerdrTarget {
 
     /// Keeps this nonce closed and excludes all pane writes through settlement.
     pub(crate) fn termination_fence(&self) -> Result<TerminationFence, HerdrGateRefusal> {
-        let permit = self.0.fence.acquire(Mutation::Terminate)?;
-        let mut state = self
-            .0
-            .fence
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let was_closing = state.1;
-        state.1 = true;
-        Ok(TerminationFence(permit, was_closing))
+        self.0.fence.exclude_termination()
     }
 
     pub(crate) fn revalidate_termination_reads(&self) -> Result<ServerWitness, HerdrGateRefusal> {
@@ -736,6 +741,20 @@ impl HerdrPaneView {
     }
 
     fn read_execution_on(&self, witness: &ServerWitness) -> PaneReading {
+        self.read_execution_on_checked(witness)
+            .unwrap_or_else(|change| {
+                let why = match change {
+                    WitnessChanged::Snapshot => "snapshot from another server",
+                    WitnessChanged::Processes => "processes from another server",
+                };
+                PaneReading::Unreadable(format!("{why:?}"))
+            })
+    }
+
+    fn read_execution_on_checked(
+        &self,
+        witness: &ServerWitness,
+    ) -> Result<PaneReading, WitnessChanged> {
         let unreadable = |why: &dyn std::fmt::Debug| PaneReading::Unreadable(format!("{why:?}"));
         let reads = Reads {
             transport: self.transport.as_ref(),
@@ -744,28 +763,32 @@ impl HerdrPaneView {
         };
         let call = next_call(&self.next_id, HerdrRequest::SessionSnapshot {});
         let (outcome, answered) = self.transport.call(&call);
-        if answered.as_ref() != Ok(witness) {
-            return unreadable(&"snapshot from another server");
+        match answered.as_ref() {
+            Ok(answered) if answered != witness => return Err(WitnessChanged::Snapshot),
+            Err(why) => return Ok(unreadable(why)),
+            _ => {}
         }
         match contract::snapshot_observation(&call, outcome, &self.pane).presence() {
             HostPresence::Present => {}
-            HostPresence::Missing => return PaneReading::Missing,
-            other => return unreadable(&other),
+            HostPresence::Missing => return Ok(PaneReading::Missing),
+            other => return Ok(unreadable(&other)),
         }
         let (read, answered) = reads.processes();
-        if answered.as_ref() != Ok(witness) {
-            return unreadable(&"processes from another server");
+        match answered.as_ref() {
+            Ok(answered) if answered != witness => return Err(WitnessChanged::Processes),
+            Err(why) => return Ok(unreadable(why)),
+            _ => {}
         }
         let (root, foreground) = match read {
             Ok((Some(root), ForegroundProcesses::Listed(foreground))) => (root, foreground),
-            other => return unreadable(&other),
+            other => return Ok(unreadable(&other)),
         };
         let root = match self.os.start(root) {
             Ok(start) => ProcessStamp {
                 pid: root,
                 start: pane_probe::start_text(start.identity),
             },
-            Err(why) => return unreadable(&why),
+            Err(why) => return Ok(unreadable(&why)),
         };
         let provider = if foreground == [root.pid] {
             PaneProvider::Exited
@@ -778,11 +801,11 @@ impl HerdrPaneView {
                 Duration::ZERO,
             ) {
                 Ok(now) if now.root == root => PaneProvider::Execution(now.provider_process),
-                Ok(_) => PaneProvider::Unverified("root shell changed between readings".into()),
-                Err(gap) => PaneProvider::Unverified(format!("{gap:?}")),
+                Ok(_) => PaneProvider::Unverified(EvidenceGap::Replaced),
+                Err(gap) => PaneProvider::Unverified(gap),
             }
         };
-        PaneReading::Present { root, provider }
+        Ok(PaneReading::Present { root, provider })
     }
 
     /// `confirmed_ended` of `reading` over this view's process reads.

@@ -453,7 +453,7 @@ impl Drop for Fixture {
 
 fn open_admission() -> ForcedAdmission {
     let stop = std::env::temp_dir().join(format!("adk-cx-none-{}", uuid::Uuid::new_v4()));
-    force_for_test(Admission::new(None, Some(stop)))
+    force_for_test(Admission::new(true, Some(stop)))
 }
 
 /// `false` once the executor ended first; its result then tells why.
@@ -1066,7 +1066,7 @@ async fn each_provider_follows_only_its_own_herdr_switch_at_intake_and_dispatch_
         (CODEX_CHANNEL, CodexTui),
     ]);
     let _writer = crate::services::herdr_launch::force_writer_accepts(Some(true));
-    let _admission = force_for_test(Admission::new(Some("on".as_ref()), Some(absent)));
+    let _admission = force_for_test(Admission::new(true, Some(absent)));
     let judge = |provider: ProviderKind, claude: bool, codex: bool| {
         let pool = &pool;
         async move {

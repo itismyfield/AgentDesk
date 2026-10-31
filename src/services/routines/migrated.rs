@@ -616,7 +616,7 @@ const MIGRATED_RESOLVER_ENV_KEYS: &[&str] = &[
 ];
 
 fn migrated_zprofile_env() -> HashMap<String, String> {
-    if std::env::var("AGENTDESK_SOURCE_ZPROFILE").ok().as_deref() == Some("0") {
+    if !crate::utils::env_flag("AGENTDESK_SOURCE_ZPROFILE", true) {
         return HashMap::new();
     }
     let Some(home) = migrated_home_dir() else {

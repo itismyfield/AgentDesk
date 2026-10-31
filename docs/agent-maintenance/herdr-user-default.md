@@ -24,7 +24,7 @@ session_hosts:
 
 socket을 생략하면 **실행 노드**의 실행 사용자 HOME에서 `.config/herdr/herdr.sock`을 선택한다. gateway의 HOME으로 원격 경로를 채우지 않는다. 원격 endpoint의 생략된 경로는 실행 노드가 해석한다. 기본 selector는 `default`다. named/비표준 socket은 `socket_path` 절대경로와 `herdr_session`을 명시한다. `~`나 `$HOME` 문자열을 직접 넣지 않는다. `herdr_home`은 dedicated 모드의 필드이며 UserDefault config를 대신 지정하지 않는다.
 
-config는 socket peer의 실제 HOME/XDG/config 환경과 실행 파일 identity를 확인한 뒤 선택한다. 기본 config와 다른 override, 미검증 버전, 불명확한 peer는 거부한다. 최초 지원은 herdr0.9.3/protocol22다. macOS loaded-image identity adapter는 native arm64 단일 아키텍처·기본 pagezero 레이아웃·APFS의 실행 파일만 판정한다. 근거는 매핑 vnode `(dev, ino)`, 한 관측 안의 같은 exec 세대, 실행 파일 ctime(ns) ≤ 서버 시작(µs)이다. 그 밖의 레이아웃·파일시스템, 서버 시작 뒤 실행 파일 변경, 시작 µs 안의 순서 불명은 원인별 `reason`으로 거부한다. 설치 경로의 stat이나 버전 문자열로 이 판정을 풀지 않는다.
+config는 socket peer의 실제 HOME/XDG/config 환경과 실행 파일 identity를 확인한 뒤 선택한다. 기본 config와 다른 override, 지원하지 않는 서버, 불명확한 peer는 거부한다. 지원 서버는 protocol 22의 0.9.3 이상 안정판이다(E7과 같은 `supported_herdr_server`). 버전이 낮거나 protocol이 다른 서버가 pong에 답하면 `reason`은 `next_restart_policy_unverified:Unsupported`이고, 진단의 `server`에 그 socket이 마지막 pong에 답한 버전·protocol이 남는다. 연결·응답 형식이 깨진 경우만 `Peer`다. macOS loaded-image identity adapter는 native arm64 단일 아키텍처·기본 pagezero 레이아웃·APFS의 실행 파일만 판정한다. 근거는 매핑 vnode `(dev, ino)`, 한 관측 안의 같은 exec 세대, 실행 파일 ctime(ns) ≤ 서버 시작(µs)이다. 그 밖의 레이아웃·파일시스템, 서버 시작 뒤 실행 파일 변경, 시작 µs 안의 순서 불명은 원인별 `reason`으로 거부한다. 설치 경로의 stat이나 버전 문자열로 이 판정을 풀지 않는다.
 
 설정 validator는 실행 노드가 이 노드(`cluster.instance_id`가 없거나 비어 원격임을 확인할 수 없으면 이 노드로 본다)이고 이 플랫폼에 loaded-image adapter가 없을 때(linux·macOS 밖)만 UserDefault를 `이 플랫폼 미지원`으로 거부한다. 다른 노드의 endpoint는 그 노드의 부팅 검증이 판정한다. 이 해제는 코드 동작일 뿐이다. 운영 설정의 `mode`는 기본값 `legacy_dedicated`로 남으며, 바꾸는 일은 카나리 승인 사항이다.
 
@@ -68,6 +68,6 @@ owner가 실행 노드 gateway의 해당 채널에서 실행한다. 원격 gatew
 
 복구: 채택 기록이 저장되지 못한 채 종료 전에 legacy 매핑을 다른 endpoint로 바꾸면, 반환 입력이 현재 승인 매핑과 달라 종료되지 않고 UserDefault 재전환이 계속 보류된다. 이때는 원래 legacy 매핑으로 다시 부팅하고 같은 `!herdr consent return`으로 종료한다. clear로는 풀리지 않는다.
 
-E 구현 레인의 읽기 전용 전제 조사는 보고서에 남긴다. 해당 관측에서 사용자 기본 socket은 있었지만 `~/.local/bin/herdr`는 없었다. Homebrew 설치 경로의0.9.3 문자열은 peer 증명이 아니다. 실제 사용자 서버나 운영 설정을 시험 대상으로 사용하지 않았다. T19는 고정 SHA 사본과 fake provider만 사용하는 별도 scratch에서 수행한다.
+E 구현 레인의 읽기 전용 전제 조사는 보고서에 남긴다. 해당 관측에서 사용자 기본 socket은 있었지만 `~/.local/bin/herdr`는 없었다. Homebrew 설치 경로의0.9.3 문자열은 peer 증명이 아니다. 실제 사용자 서버나 운영 설정을 시험 대상으로 사용하지 않았다. T19는 시험 시작 때 해시를 잰 scratch 사본과 fake provider만 사용하는 별도 scratch에서 수행한다.
 
 드문 drain 중 release 창과 startup queue merge 재시도 뒤 재생은 후속 #7261이다. 이 후속 상태를 자동 성공으로 처리하지 않는다.

@@ -188,11 +188,11 @@ async fn runtime(
         session.current_path = Some(workspace.display().to_string());
         session.session_id = Some("route-claim-existing".into());
     }
-    let path = crate::services::discord::runtime_store::role_map_path().unwrap();
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let role = serde_json::json!({"roleId": "route-claim-reviewer", "promptFile": "", "provider": "codex"});
-    let roles = serde_json::json!({"byChannelId": {alt.get().to_string(): role}});
-    std::fs::write(&path, roles.to_string()).unwrap();
+    crate::services::discord::agentdesk_config::write_bindings_for_test(
+        &crate::config::runtime_root().unwrap(),
+        serde_json::json!([{"id": "route-claim-reviewer", "name": "Reviewer", "provider": "codex",
+            "channels": {"codex": {"id": alt.to_string(), "prompt_file": ""}}}]),
+    );
     *SHARED.lock().unwrap() = Some(shared.clone());
     let http = api.http.clone();
     (shared, api, http)

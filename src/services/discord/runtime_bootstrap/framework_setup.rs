@@ -66,9 +66,6 @@ pub(super) async fn run_bot_framework_setup(
         .register_http(provider_for_setup.as_str().to_string(), ctx.http.clone())
         .await;
 
-    // Enrich role_map.json with channelId for reliable name→ID resolution
-    enrich_role_map_with_channel_ids();
-
     let shared_for_tmux = shared_for_migrate.clone();
 
     super::footer_retirement::enqueue_completed_singletons(
@@ -271,9 +268,7 @@ async fn audit_or_prune_global_slash_commands(
         return;
     }
 
-    let prune_enabled = std::env::var("AGENTDESK_PRUNE_GLOBAL_SLASH_COMMANDS")
-        .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false);
+    let prune_enabled = crate::utils::env_flag("AGENTDESK_PRUNE_GLOBAL_SLASH_COMMANDS", false);
 
     for command in globals {
         let command_name = command.name.clone();

@@ -335,6 +335,8 @@ pub struct AutoQueueStatusEntryView {
     pub dispatch_updated_at: Option<i64>,
     #[serde(skip)]
     pub live_session_count: i64,
+    #[serde(skip)]
+    pub has_active_followup: bool,
     pub priority_rank: i64,
     pub reason: Option<String>,
     pub status: String,
@@ -743,6 +745,7 @@ impl AutoQueueStatusEntryView {
             dispatch_created_at: record.dispatch_created_at,
             dispatch_updated_at: record.dispatch_updated_at,
             live_session_count: record.live_session_count,
+            has_active_followup: record.has_active_followup,
             priority_rank: record.priority_rank,
             reason: record.reason,
             status: record.status,
@@ -1049,7 +1052,10 @@ fn collect_entry_dispatch_delivery_mismatches(
         .iter()
         .filter(|entry| entry.status == "dispatched")
         .filter(|entry| {
-            entry.dispatch_status.as_deref() != Some("dispatched") || entry.live_session_count <= 0
+            !(matches!(entry.dispatch_status.as_deref(), None | Some("completed"))
+                && entry.has_active_followup)
+                && (entry.dispatch_status.as_deref() != Some("dispatched")
+                    || entry.live_session_count <= 0)
         })
         .map(|entry| {
             let age_start_ms = entry.dispatched_at.unwrap_or(entry.created_at);
@@ -1594,6 +1600,7 @@ mod tests {
             dispatch_created_at: dispatch_id.map(|_| 1_000),
             dispatch_updated_at: dispatch_id.map(|_| 1_000),
             live_session_count: if dispatch_id.is_some() { 1 } else { 0 },
+            has_active_followup: false,
             priority_rank: 0,
             reason: None,
             status: status.to_string(),
@@ -1630,6 +1637,7 @@ mod tests {
                 dispatch_created_at: None,
                 dispatch_updated_at: None,
                 live_session_count: 0,
+                has_active_followup: false,
                 priority_rank: 0,
                 reason: None,
                 status: "pending".to_string(),

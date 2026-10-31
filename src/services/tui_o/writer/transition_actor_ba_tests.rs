@@ -148,6 +148,7 @@ impl HostObservation {
             context,
             current: self.sources.last().unwrap().clone(),
             events: log.events,
+            settled_companions: log.settled_companions,
             tail: log.tail,
             log_digest: log.digest,
             census_digest: if delta == Some("census") {

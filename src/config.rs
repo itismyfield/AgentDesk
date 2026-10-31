@@ -585,11 +585,7 @@ pub fn normalize_dispatch_profile(value: Option<String>) -> Option<String> {
     }
 }
 
-pub fn is_valid_dispatch_profile(value: &str) -> bool {
-    normalize_dispatch_profile(Some(value.to_string())).is_some()
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AgentChannelConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -618,6 +614,9 @@ pub struct AgentChannelConfig {
     pub reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_agents: Option<bool>,
+    /// Whether threads inherit this channel's role and placement policy.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub thread_inherit: bool,
     #[serde(
         default,
         alias = "qualityFeedbackInjection",
@@ -649,6 +648,29 @@ pub struct AgentChannelConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub cache_ttl_minutes: Option<u32>,
+}
+
+impl Default for AgentChannelConfig {
+    fn default() -> Self {
+        Self {
+            id: None,
+            name: None,
+            prompt_file: None,
+            workspace: None,
+            provider: None,
+            tui_hosting: None,
+            runtime: None,
+            model: None,
+            reasoning_effort: None,
+            peer_agents: None,
+            quality_feedback_injection: None,
+            dispatch_profile: None,
+            isolate_override: None,
+            cache_ttl_minutes: None,
+            aliases: Vec::new(),
+            thread_inherit: true,
+        }
+    }
 }
 
 impl AgentChannelConfig {

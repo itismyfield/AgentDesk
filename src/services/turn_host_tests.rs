@@ -41,7 +41,7 @@ fn refusal(host: TurnHost) -> HerdrRefusal {
 #[tokio::test]
 async fn configured_turn_refuses_provider_and_remote_endpoint_before_the_row_and_an_unread_row() {
     let _hosts = force_hosts(Some("mac-mini"), &[(CHANNEL, "mac-mini"), (7, "mac-book")]);
-    let _open = force_admission(Admission::new(Some("on".as_ref()), None));
+    let _open = force_admission(Admission::new(true, None));
     let judge = |provider: ProviderKind, channel| async move {
         refusal(for_turn(None, &provider, channel, Some(SESSION_KEY)).await)
     };
@@ -113,7 +113,7 @@ async fn unconfigured_channel_with_a_herdr_row_is_refused_and_a_configured_one_n
     }
 
     let _hosts = force_hosts(Some("mac-mini"), &[(CHANNEL, "mac-mini")]);
-    let _off = force_admission(Admission::new(Some("off".as_ref()), None));
+    let _off = force_admission(Admission::new(false, None));
     assert!(matches!(
         refusal(judge().await),
         HerdrRefusal::HostedRowUnreadable { .. }
@@ -125,6 +125,61 @@ async fn unconfigured_channel_with_a_herdr_row_is_refused_and_a_configured_one_n
             cause: StopCause::Env
         }
     );
+    pool.close().await;
+    db.drop().await;
+}
+
+// An unmapped channel's Bound Claude row on this node returns to tmux, as does a retired one
+// whose move back is unfinished; a Pending, another node's or another provider's row refuses.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unmapped_local_claude_row_returns_to_tmux_until_its_move_back_finishes_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let _local = force_hosts(Some("test-node"), &[]);
+    let judge = |provider: ProviderKind| {
+        let pool = pool.clone();
+        async move { for_turn(Some(&pool), &provider, CHANNEL, Some(SESSION_KEY)).await }
+    };
+    let logical = owner(&CHANNEL.to_string()).logical_key;
+    let marker = crate::services::tmux_common::session_temp_path(&logical, "host_kind");
+
+    seed(&pool, recorded(HostedState::Bound)).await;
+    assert!(matches!(
+        judge(ProviderKind::Claude).await,
+        TurnHost::Return(_)
+    ));
+    assert!(matches!(
+        refusal(judge(ProviderKind::Codex).await),
+        HerdrRefusal::HostedHerdrUnconfigured { .. }
+    ));
+    seed(&pool, recorded(HostedState::Pending)).await;
+    assert!(matches!(
+        refusal(judge(ProviderKind::Claude).await),
+        HerdrRefusal::HostedHerdrUnconfigured { .. }
+    ));
+
+    seed(&pool, recorded(HostedState::Retired)).await;
+    std::fs::write(&marker, "herdr").unwrap();
+    assert!(matches!(
+        judge(ProviderKind::Claude).await,
+        TurnHost::Return(_)
+    ));
+    std::fs::write(&marker, "tmux").unwrap();
+    crate::services::tui_prompt_dedupe::install_herdr_execution(&logical, "nonce-1");
+    assert!(matches!(
+        judge(ProviderKind::Claude).await,
+        TurnHost::Return(_)
+    ));
+    crate::services::tui_prompt_dedupe::release_herdr_execution(&logical, "nonce-1");
+    assert!(matches!(judge(ProviderKind::Claude).await, TurnHost::Tmux));
+
+    seed(&pool, recorded(HostedState::Bound)).await;
+    let _elsewhere = force_hosts(Some("another-node"), &[]);
+    assert!(matches!(
+        refusal(judge(ProviderKind::Claude).await),
+        HerdrRefusal::HostedHerdrUnconfigured { .. }
+    ));
     pool.close().await;
     db.drop().await;
 }

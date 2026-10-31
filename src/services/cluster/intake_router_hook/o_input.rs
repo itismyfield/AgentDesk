@@ -2,7 +2,12 @@
 
 use super::*;
 
+mod fallback_route;
+
 pub(super) async fn route(pool: &PgPool, ctx: &IntakeRouterContext<'_>) -> IntakeRouterDecision {
+    if let Some(decision) = fallback_route::route(pool, ctx).await {
+        return decision;
+    }
     // The actual Discord destination decides O ownership, never the policy channel.
     match intake_route::text_for_input_placement(ctx.provider, ctx.channel_id).await {
         IntakeRoute::Unselected => route_intake(pool, ctx).await,

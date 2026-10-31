@@ -1,5 +1,7 @@
 //! A committed clear's writes and teardown: each failure is reported, none undoes the clear.
 
+pub(in crate::services::discord) mod execution_cleanup;
+
 use std::sync::Arc;
 
 use poise::serenity_prelude as serenity;

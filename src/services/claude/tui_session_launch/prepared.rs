@@ -10,6 +10,8 @@ pub(super) struct Prepare<'a> {
     pub hook_endpoint: String,
     pub resume: bool,
     pub auth_env_lines: &'a str,
+    /// The account's own Claude home, whose projects dir the launched child writes under.
+    pub claude_home: Option<&'a std::path::Path>,
     pub channel_id: Option<u64>,
 }
 
@@ -29,15 +31,23 @@ pub(super) fn prepare(
         hook_endpoint,
         resume,
         auth_env_lines,
+        claude_home,
         channel_id,
     } = input;
-    let prepared = PreparedIncarnation::prepare(
-        "claude",
-        tmux_session_name,
-        channel_id,
-        Some(resolved_session_id),
-        resume,
-    )?;
+    let expected = Some(resolved_session_id);
+    let prepared = match claude_home {
+        Some(home) => PreparedIncarnation::prepare_at(
+            "claude",
+            tmux_session_name,
+            channel_id,
+            expected,
+            resume,
+            Some(home.join("projects")),
+        ),
+        None => {
+            PreparedIncarnation::prepare("claude", tmux_session_name, channel_id, expected, resume)
+        }
+    }?;
     mark_host();
     let exe =
         std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;

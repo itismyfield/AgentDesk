@@ -124,6 +124,11 @@ pub(crate) mod test_support {
             std::fs::write(self.dir.path().join("missing"), "").unwrap();
         }
 
+        /// The flag `mark_missing` writes, for a session another fake ends.
+        pub(crate) fn missing_flag(&self) -> std::path::PathBuf {
+            self.dir.path().join("missing")
+        }
+
         pub(crate) fn mark_present(&self) {
             let _ = std::fs::remove_file(self.dir.path().join("missing"));
         }

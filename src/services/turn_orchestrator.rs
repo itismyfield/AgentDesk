@@ -1753,11 +1753,7 @@ fn spawn_channel_mailbox(
     let (tx, mut rx) = mpsc::unbounded_channel();
     let own_recovery_done = recovery_done.clone();
     tokio::spawn(async move {
-        let mut state = ChannelMailboxState {
-            claim_log: claim_observation::ClaimLog::spawned(channel_id),
-            remint_fence: fence,
-            ..Default::default()
-        };
+        let mut state = ChannelMailboxState::spawned(channel_id, fence);
         while let Some(msg) = rx.recv().await {
             state = input_mailbox_step(state, channel_id, msg, &own_recovery_done);
         }

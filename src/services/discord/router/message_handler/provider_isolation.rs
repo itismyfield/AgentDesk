@@ -32,7 +32,7 @@ fn inheritable_thread_parent(
     thread_parent: Option<&(ChannelId, Option<String>)>,
 ) -> Option<&(ChannelId, Option<String>)> {
     thread_parent.filter(|(parent_id, parent_name)| {
-        super::super::super::role_map::thread_inheritance_enabled(
+        super::super::super::agentdesk_config::thread_inheritance_enabled(
             *parent_id,
             parent_name.as_deref(),
         )
@@ -1094,18 +1094,17 @@ mod thread_role_inheritance_tests {
         workspace: &std::path::Path,
         thread_inherit: Option<bool>,
     ) {
-        let path = crate::runtime_layout::role_map_path(root);
-        std::fs::create_dir_all(path.parent().expect("role-map parent")).unwrap();
-        let mut entry = serde_json::json!({
-            "roleId": "parent-role",
-            "promptFile": prompt,
-            "workspace": workspace,
+        let mut channel = serde_json::json!({
+            "id": id.to_string(), "prompt_file": prompt, "workspace": workspace,
         });
         if let Some(enabled) = thread_inherit {
-            entry["threadInherit"] = serde_json::Value::Bool(enabled);
+            channel["thread_inherit"] = serde_json::Value::Bool(enabled);
         }
-        let json = serde_json::json!({ "byChannelId": { (id.get().to_string()): entry } });
-        std::fs::write(path, json.to_string()).unwrap();
+        crate::services::discord::agentdesk_config::write_bindings_for_test(
+            root,
+            serde_json::json!([{"id": "parent-role", "name": "Parent", "provider": "claude",
+                "channels": {"claude": channel}}]),
+        );
     }
     #[test]
     fn thread_inherits_parent_role_workspace_and_memory_scope_by_default() {

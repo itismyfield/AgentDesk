@@ -171,7 +171,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             return Vec::new();
         }
         let mut fresh = Vec::new();
-        for evidence in self.deriver.take_notice_evidence() {
+        for mut evidence in self.deriver.take_notice_evidence() {
             if super::super::input_notices::evidence::before_migration_floor(
                 self.writer.store().ledger().input_notices(),
                 &evidence,
@@ -186,16 +186,20 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                 evidence.record.start,
                 evidence.record.end,
             );
-            if self
+            if let Some(kept) = self
                 .writer
                 .store()
                 .ledger()
                 .input_notices()
                 .evidence
                 .get(&id)
-                .is_some_and(|kept| covers(kept, &evidence))
             {
-                continue;
+                if kept.raw_record == evidence.raw_record && kept.payload.is_some() {
+                    evidence.payload = kept.payload.clone();
+                }
+                if covers(kept, &evidence) {
+                    continue;
+                }
             }
             if self
                 .writer
@@ -207,6 +211,25 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                 .is_err()
             {
                 break;
+            }
+        }
+        if !fresh.is_empty() {
+            let state = self.writer.store().ledger().input_notices();
+            // Queued replay pieces must use the same persisted rendering as their evidence.
+            for item in &mut self.owed {
+                if let Derived::Piece(piece) = item
+                    && let Some(origin) = &piece.notice_origin
+                    && let Some(kept) = state.evidence.get(&(
+                        origin.record.source.clone(),
+                        origin.record.start,
+                        origin.record.end,
+                    ))
+                    && kept.unit_key.as_ref() == Some(&piece.unit_key)
+                    && kept.origin.as_ref() == Some(origin)
+                    && let Some(payload) = &kept.payload
+                {
+                    piece.payload.clone_from(payload);
+                }
             }
         }
         fresh
@@ -268,6 +291,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                 continue;
             };
             let piece = PieceWork {
+                output_origin: None,
                 unit_key,
                 payload,
                 index: 0,

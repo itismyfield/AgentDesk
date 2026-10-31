@@ -56,8 +56,12 @@ mod backend_routing;
 #[cfg(test)]
 mod c1_teardown_tests;
 #[cfg(unix)]
+pub(crate) mod herdr_return;
+#[cfg(unix)]
 pub(crate) mod herdr_turn;
 pub(crate) mod host_gate;
+#[cfg(unix)]
+pub(crate) mod session_handoff;
 mod stream_result;
 use self::active_usage::{AssistantUsageState, observe_assistant_usage};
 #[cfg(unix)]
@@ -84,16 +88,9 @@ const CLAUDE_TUI_TRANSCRIPT_INITIAL_WAIT_MAX_INTERVAL: Duration = Duration::from
 
 const CLAUDE_TUI_FOLLOWUP_REQUEUE_ENV: &str = "AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE";
 
-/// Default ON; set `AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE` to `0`, `false`,
-/// `off`, `no`, `disable`, or `disabled` for emergency opt-out.
+/// Default ON; `0`, `false`, `off` or `no` disables follow-up requeue.
 pub(crate) fn claude_tui_followup_requeue_enabled() -> bool {
-    let Ok(value) = std::env::var(CLAUDE_TUI_FOLLOWUP_REQUEUE_ENV) else {
-        return true;
-    };
-    !matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "0" | "false" | "off" | "no" | "disable" | "disabled"
-    )
+    crate::utils::env_flag(CLAUDE_TUI_FOLLOWUP_REQUEUE_ENV, true)
 }
 
 #[cfg(test)]
@@ -142,7 +139,7 @@ mod claude_tui_followup_requeue_flag_tests {
 
     #[test]
     fn followup_requeue_respects_emergency_opt_out_values() {
-        for value in ["0", "false", "FALSE", "off", "no", "disable", "disabled"] {
+        for value in ["0", "false", "FALSE", "off", "no"] {
             with_requeue_env(Some(value), || {
                 assert!(
                     !claude_tui_followup_requeue_enabled(),
@@ -154,7 +151,16 @@ mod claude_tui_followup_requeue_flag_tests {
 
     #[test]
     fn followup_requeue_keeps_legacy_opt_in_and_invalid_values_enabled() {
-        for value in ["1", "true", "TRUE", "on", "yes", "unexpected"] {
+        for value in [
+            "1",
+            "true",
+            "TRUE",
+            "on",
+            "yes",
+            "unexpected",
+            "disable",
+            "disabled",
+        ] {
             with_requeue_env(Some(value), || {
                 assert!(
                     claude_tui_followup_requeue_enabled(),
@@ -270,9 +276,7 @@ static DEBUG_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 
 /// Initialize debug flag from environment variable (call once at startup).
 pub fn init_debug_from_env() {
-    let enabled = std::env::var("COKACDIR_DEBUG")
-        .map(|v| v == "1")
-        .unwrap_or(false);
+    let enabled = crate::utils::env_flag("COKACDIR_DEBUG", false);
     if enabled {
         DEBUG_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
     }
@@ -1676,6 +1680,8 @@ fn execute_streaming_local_tui_tmux(
     )?;
     let auth_env_lines =
         crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay);
+    // The account's own home holds its sessions; the selector and the launch context read it.
+    let claude_home = auth_overlay.home.as_deref();
     let session_exists = host_gate::session_exists(tmux_session_name)?;
     let profile_matches = crate::services::tmux_common::tmux_session_auth_profile_matches(
         tmux_session_name,
@@ -1697,7 +1703,7 @@ fn execute_streaming_local_tui_tmux(
     let session_id = profile_matches.then_some(session_id).flatten();
     let working_dir_path = std::path::Path::new(working_dir);
     let session_resolution =
-        resolve_claude_tui_session_for_launch(working_dir_path, session_id, None)?;
+        resolve_claude_tui_session_for_launch(working_dir_path, session_id, claude_home)?;
     let mut resolved_session_id = session_resolution.session_id;
     let mut transcript_path = session_resolution.transcript_path;
     let mut transcript_path_string = transcript_path.display().to_string();
@@ -1759,13 +1765,17 @@ fn execute_streaming_local_tui_tmux(
                 resume = updated.resume;
             }
         }
-    } else if session_exists {
+    } else if session_exists && !host_gate::returned_dead_pane(tmux_session_name, teardown)? {
         cleanup_stale_claude_tui_session(tmux_session_name, teardown)?;
     }
 
     if let Some(ref token) = cancel_token {
         token.bind_claude_tmux_session(tmux_session_name);
     }
+    // A returned resume waits for its own resumed start; subscribed before the launch.
+    let returned = matches!(teardown, Some(TeardownClearance::Returned));
+    let mut starts =
+        (returned && resume).then(crate::services::claude_tui::hook_server::subscribe_hook_events);
     let (owner_path, prepared) = prepare_and_create_claude_tui_session(
         tmux_session_name,
         working_dir,
@@ -1776,10 +1786,17 @@ fn execute_streaming_local_tui_tmux(
         hook_endpoint,
         resume,
         &auth_env_lines,
+        claude_home,
         report_channel_id,
+        returned && session_exists,
     )?;
     crate::services::tmux_common::write_tmux_session_auth_profile(
         tmux_session_name,
+        &auth_overlay.profile_id,
+    )?;
+    crate::services::tmux_common::write_claude_session_auth(
+        tmux_session_name,
+        &resolved_session_id,
         &auth_overlay.profile_id,
     )?;
     if let Some(channel_id) = report_channel_id {
@@ -1791,6 +1808,11 @@ fn execute_streaming_local_tui_tmux(
         tmux_session_name,
         Some(&prepared),
     ))?;
+    if let Some(starts) = starts.as_mut() {
+        let nonce = &prepared.context.execution_nonce;
+        let cancel = cancel_token.as_deref();
+        session_handoff::await_resumed_start(starts, &resolved_session_id, nonce, cancel)?;
+    }
 
     let _ = sender.send(StreamMessage::Init {
         session_id: resolved_session_id.clone(),
@@ -1816,6 +1838,35 @@ pub(crate) mod first_input;
 mod fresh_lifecycle;
 #[cfg(all(test, unix))]
 pub(crate) use fresh_lifecycle::fresh_hold_for_tests;
+
+/// A tmux Claude TUI turn as dispatch runs it, for tests outside this module.
+#[cfg(all(test, unix))]
+pub(crate) fn tmux_tui_turn_for_tests(
+    working_dir: &str,
+    session_id: Option<&str>,
+    cancel_token: std::sync::Arc<CancelToken>,
+    tmux_session_name: &str,
+    teardown: &TeardownClearance,
+    report_channel_id: u64,
+) -> Result<(), String> {
+    let (sender, _receiver) = std::sync::mpsc::channel();
+    let endpoint = "http://127.0.0.1:9".to_string();
+    let (channel, cancel) = (Some(report_channel_id), Some(cancel_token));
+    execute_streaming_local_tui_tmux(
+        "hello",
+        session_id,
+        working_dir,
+        sender,
+        cancel,
+        tmux_session_name,
+        Some(teardown),
+        channel,
+        None,
+        None,
+        None,
+        endpoint,
+    )
+}
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 fn run_claude_tui_fresh_turn_and_finalize(

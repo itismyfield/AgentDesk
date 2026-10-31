@@ -14,7 +14,7 @@ use crate::services::provider_teardown::TeardownClearance;
 use crate::services::stream_json_cli::{
     ConfiguredToolPolicy, ProviderTurnRequest, execute_streaming,
 };
-use crate::services::turn_host::{HerdrRefusal, HerdrTurnPlan, TurnHost};
+use crate::services::turn_host::{HerdrRefusal, HerdrTurnPlan, ReturnPlan, TurnHost};
 use crate::services::{claude, claude_tui, codex, gemini, opencode, qwen};
 
 #[cfg(unix)]
@@ -304,7 +304,18 @@ fn drive(turn: StreamingTurn<'_>, sender: Sender<StreamMessage>) -> Result<(), S
                 herdr_turn(&turn, plan, sender)
             });
         }
+        // The session comes back from Herdr, then runs on tmux under a clearance that tears
+        // nothing down.
+        TurnHost::Return(plan) => return_to_tmux(&turn, plan)?,
     }
+    let returned = TeardownClearance::Returned;
+    let turn = match turn.host {
+        TurnHost::Return(_) => StreamingTurn {
+            teardown: Some(&returned),
+            ..turn
+        },
+        _ => turn,
+    };
     #[cfg(test)]
     count_dispatch(turn.channel_id)?;
     #[cfg(test)]
@@ -464,6 +475,32 @@ fn drive(turn: StreamingTurn<'_>, sender: Sender<StreamMessage>) -> Result<(), S
     }
 }
 
+/// Hands the channel's Herdr execution back to tmux before its tmux turn runs.
+#[cfg(unix)]
+fn return_to_tmux(turn: &StreamingTurn<'_>, plan: &ReturnPlan) -> Result<(), String> {
+    use crate::services::claude::herdr_return::{ProductionPorts, ReturnTurn, execute};
+    let pool = turn.pool.ok_or("herdr return: no database")?;
+    let back = ReturnTurn {
+        pool,
+        channel_id: turn.channel_id,
+        working_dir: turn.working_dir,
+        session_id: turn.session_id,
+        force_fresh: turn.force_fresh,
+    };
+    execute(
+        &back,
+        plan,
+        &tokio::runtime::Handle::current(),
+        &ProductionPorts,
+    )
+}
+
+#[cfg(not(unix))]
+fn return_to_tmux(_turn: &StreamingTurn<'_>, plan: &ReturnPlan) -> Result<(), String> {
+    let _ = (&plan.row, &plan.record);
+    Err("herdr return: unix only".into())
+}
+
 /// The switch is read first; off, the turn is refused before any I/O.
 #[cfg_attr(not(unix), allow(unused_variables))]
 fn herdr_turn(
@@ -553,6 +590,8 @@ mod herdr {
             row: plan.row.as_ref().map(|observed| &observed.record),
             prompt: turn.prompt,
             working_dir: turn.working_dir,
+            session_id: turn.session_id,
+            force_fresh: turn.force_fresh,
             system_prompt: turn.system_prompt.filter(|prompt| !prompt.is_empty()),
             model: turn.model,
             hook_endpoint: crate::services::claude_tui::hook_server::current_hook_endpoint(),
@@ -964,14 +1003,14 @@ pub(super) mod tests {
             })
         };
 
-        let off = force_admission(Admission::new(Some("off".as_ref()), None));
+        let off = force_admission(Admission::new(false, None));
         assert_eq!(
             run().await.unwrap_err(),
             "herdr turn refused: admission_stopped(env)"
         );
         drop(off);
         let absent = root.path().join("no-stop-file");
-        let _open = force_admission(Admission::new(Some("on".as_ref()), Some(absent)));
+        let _open = force_admission(Admission::new(true, Some(absent)));
         assert_eq!(
             run().await.unwrap_err(),
             "herdr turn refused: o_writer_not_ready"

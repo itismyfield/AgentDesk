@@ -92,6 +92,7 @@ seconds with content comparison, independently of native filesystem notification
 | `agents.*.channels.*.runtime` | restart | `src/services/provider_hosting.rs` install_provider_hosting_config |
 | `agents.*.channels.*.model` | live | `src/services/discord/agentdesk_config.rs` role_binding_from_channel |
 | `agents.*.channels.*.reasoning_effort` | live | `src/services/discord/agentdesk_config.rs` role_binding_from_channel |
+| `agents.*.channels.*.thread_inherit` | live | `src/services/discord/agentdesk_config.rs` thread_inheritance_enabled (validated snapshot per intake) |
 | `agents.*.channels.*.peer_agents` | live | `src/services/discord/agentdesk_config.rs` role_binding_from_channel |
 | `agents.*.channels.*.quality_feedback_injection` | live | `src/services/discord/agentdesk_config.rs` role_binding_from_channel |
 | `agents.*.channels.*.dispatch_profile` | live | `src/services/discord/agentdesk_config.rs` resolve_dispatch_profile |
@@ -147,6 +148,10 @@ seconds with content comparison, independently of native filesystem notification
 | `cluster.intake_routing.stale_claim_recovery_secs` | live | `src/services/cluster/intake_routing_config.rs` EffectiveIntakeRoutingConfig::status_json |
 | `cluster.intake_routing.max_attempts_per_message` | live | `src/services/cluster/node_registry.rs` current_intake_retry_config (per heartbeat tick) |
 | `cluster.intake_routing.retry_authorization_secs` | live | `src/services/cluster/node_registry.rs` current_intake_retry_config (per heartbeat tick) |
+| `cluster.intake_routing.input_fallback_enabled` | live | `src/services/cluster/input_fallback_config.rs` current (config::snapshot per input) |
+| `cluster.intake_routing.input_fallback_scope` | live | `src/services/cluster/input_fallback_config.rs` current (config::snapshot per input) |
+| `cluster.intake_routing.input_fallback_pilot_channel_ids` | live | `src/services/cluster/input_fallback_config.rs` current (config::snapshot per input) |
+| `cluster.intake_routing.input_fallback_pair_instance_ids` | live | `src/services/cluster/input_fallback_config.rs` current (config::snapshot per input) |
 | `cluster.semaphores.*.capacity` | live | `src/server/task_dispatch_claims/config_read.rs` claim_task_dispatches (config::snapshot per claim) |
 | `cluster.semaphores.*.scope` | live | `src/server/task_dispatch_claims/config_read.rs` claim_task_dispatches (config::snapshot per claim) |
 | `cluster.session_bound_relay_enabled` | restart | `src/server/worker_registry/registry.rs` start_worker (WatcherSupervisor spawn gate) |

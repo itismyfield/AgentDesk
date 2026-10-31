@@ -480,6 +480,88 @@ mod cases {
         fx.assert_kept("waiting").await;
     }
 
+    /// The hold diagnostics each pass logs for the channel, with `prepare(pass)` run before it.
+    async fn held_lines(fx: &Fixture, passes: usize, prepare: impl Fn(usize)) -> Vec<Vec<String>> {
+        let channel = format!("channel_id={}", fx.channel.get());
+        let logs = Logs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(logs.clone())
+            .finish();
+        crate::logging::test_capture::pin_callsite_interest();
+        let guard = tracing::subscriber::set_default(subscriber);
+        let mut per_pass = Vec::new();
+        for pass in 0..passes {
+            prepare(pass);
+            let before = logs.text().len();
+            fx.pass().await;
+            let text = logs.text();
+            let held = text[before..]
+                .lines()
+                .filter(|line| line.contains(&channel) && line.contains("carried-over turn"))
+                .filter(|line| !line.contains("turn closed"))
+                .map(str::to_owned)
+                .collect();
+            per_pass.push(held);
+        }
+        drop(guard);
+        per_pass
+    }
+
+    /// Rewrites the channel's inflight row with the next save generation, as a concurrent save.
+    fn bump_save_generation(channel: u64) {
+        let file = inflight::inflight_state_path(
+            &inflight::inflight_runtime_root().unwrap(),
+            &PROVIDER,
+            channel,
+        );
+        let mut row: InflightTurnState =
+            serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        row.save_generation += 1;
+        std::fs::write(&file, serde_json::to_vec(&row).unwrap()).unwrap();
+    }
+
+    /// An archived turn whose episode stays open warns once per change: a first reason is named,
+    /// the same reason next pass is not, a changed reason is named again.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_open_episode_after_the_archive_is_logged_once_per_change() {
+        let fx = Fixture::new(7_533_397, 9_100_095_491_915_388_077, Options::default()).await;
+        let channel = fx.channel.get();
+        WITHHOLD.with(|withhold| withhold.borrow_mut().extend([channel, channel]));
+        let held = held_lines(&fx, 3, |pass| {
+            // The third pass finds an input queued after the end: another reason to keep it.
+            if pass == 2 {
+                append(&fx.path, &[&enqueue("later")]);
+            }
+        })
+        .await;
+        assert_eq!(
+            held.iter().map(Vec::len).collect::<Vec<_>>(),
+            [1, 0, 1],
+            "{held:?}"
+        );
+        assert!(held[0][0].trim_start().starts_with("WARN"), "{held:?}");
+    }
+
+    /// A row that changes before each archive names that hold once; the open episode a later
+    /// archive leaves is a changed reason, named again.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_repeated_archive_failure_is_logged_once_per_change() {
+        let fx = Fixture::new(7_533_398, 9_100_095_491_915_388_078, Options::default()).await;
+        let channel = fx.channel.get();
+        let held = held_lines(&fx, 3, |pass| match pass {
+            2 => WITHHOLD.with(|withhold| withhold.borrow_mut().push(channel)),
+            _ => on("archive", channel, move || bump_save_generation(channel)),
+        })
+        .await;
+        assert_eq!(
+            held.iter().map(Vec::len).collect::<Vec<_>>(),
+            [1, 0, 1],
+            "{held:?}"
+        );
+    }
+
     #[derive(Clone, Default)]
     struct Logs(Arc<Mutex<Vec<u8>>>);
 
@@ -625,17 +707,7 @@ mod cases {
     async fn archive_pin_drift_blocks_finalize() {
         let fx = Fixture::new(7_533_351, 9_100_095_491_915_388_031, Options::default()).await;
         let channel = fx.channel.get();
-        on("archive", channel, move || {
-            let file = inflight::inflight_state_path(
-                &inflight::inflight_runtime_root().unwrap(),
-                &PROVIDER,
-                channel,
-            );
-            let mut row: InflightTurnState =
-                serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
-            row.save_generation += 1;
-            std::fs::write(&file, serde_json::to_vec(&row).unwrap()).unwrap();
-        });
+        on("archive", channel, move || bump_save_generation(channel));
         fx.pass().await;
         fx.assert_kept("pin drifted").await;
     }

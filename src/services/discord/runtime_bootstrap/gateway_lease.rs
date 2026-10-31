@@ -506,7 +506,7 @@ async fn self_fence_gateway(
     shared
         .bot_connected
         .store(false, std::sync::atomic::Ordering::SeqCst);
-    shared.restart.legacy_lease_lost();
+    super::owner_execution::gateway_transport_lost(shared);
 
     for entry in shared.tmux_watchers.iter() {
         entry

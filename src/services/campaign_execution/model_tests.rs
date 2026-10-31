@@ -61,6 +61,7 @@ fn model_preserves_nonempty_fence_ack_and_action_target_for_canonical_json_stora
             }],
             finish_attempts: ["attempt".into()].into_iter().collect(),
             confirmed_event: None,
+            finish_grants: Vec::new(),
         }),
         attempts: [(
             "attempt".into(),
@@ -68,6 +69,7 @@ fn model_preserves_nonempty_fence_ack_and_action_target_for_canonical_json_stora
                 binding: binding.clone(),
                 started: true,
                 outcome: None,
+                execution: None,
             },
         )]
         .into_iter()
@@ -75,6 +77,8 @@ fn model_preserves_nonempty_fence_ack_and_action_target_for_canonical_json_stora
         actions: [(action.id.clone(), action)].into_iter().collect(),
         sessions: vec![],
         verifications: BTreeMap::new(),
+        prerequisites: BTreeMap::new(),
+        fences: BTreeMap::new(),
     };
     let state = CampaignState {
         id: "campaign".into(),

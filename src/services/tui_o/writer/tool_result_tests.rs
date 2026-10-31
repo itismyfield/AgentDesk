@@ -185,6 +185,7 @@ async fn legacy_tool_result_retries_and_refusals_are_excluded_across_restart() {
                 .unwrap();
         }
         let old = Derived::Piece(PieceWork {
+            output_origin: None,
             unit_key: key("legacy"),
             index: 0,
             payload: "legacy private traceback".into(),

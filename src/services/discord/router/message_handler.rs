@@ -73,6 +73,20 @@ pub(in crate::services::discord) use self::provider_dispatch::{
 #[cfg(unix)]
 pub(in crate::services::discord) use self::provider_dispatch::{owner_recover, owner_wake};
 use self::provider_isolation::*;
+
+#[cfg(test)]
+pub(in crate::services::discord) fn thread_inheritance_for_tests(
+    child: ChannelId,
+    child_name: Option<&str>,
+    parent: &(ChannelId, Option<String>),
+) -> (bool, Option<String>, ChannelId) {
+    let role = resolve_thread_role_binding(child, child_name, Some(parent));
+    (
+        role.role_binding.is_some(),
+        resolve_thread_workspace(child, child_name, Some(parent)),
+        role.memory_channel_id(child),
+    )
+}
 use self::tui_followup::*;
 pub(in crate::services::discord) use self::turn_lifecycle::mailbox_try_start_turn_with_terminal_marker_cleanup;
 use self::turn_lifecycle::{

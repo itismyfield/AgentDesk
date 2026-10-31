@@ -106,7 +106,6 @@ scripts/voice-channel-migrate.sh \
 `--apply` updates:
 
 - `~/.adk/release/config/agentdesk.yaml`, with a timestamped backup next to it
-- legacy `~/.adk/release/config/role_map.json` if present and if it contains the old channel id
 - release agent prompts, memories, and skills that contain the old channel id, with timestamped backups
 - `agents.discord_channel_id`, `agents.discord_channel_alt`, `agents.discord_channel_cc`, and `agents.discord_channel_cdx`
 - the old Discord text channel archive state, unless `--skip-archive` is passed

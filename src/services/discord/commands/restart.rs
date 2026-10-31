@@ -433,7 +433,7 @@ mod host_guard_tests {
         let alive = process(&name, 68_900);
         let configured = [(channel.get(), "mac-mini")];
         let _hosts = crate::config::session_hosts::force_for_test(Some("mac-mini"), &configured);
-        let _off = force_for_test(Admission::new(Some("off".as_ref()), None));
+        let _off = force_for_test(Admission::new(false, None));
         tmux.take_calls();
         let warned = AtomicBool::new(false);
         let warn = || {

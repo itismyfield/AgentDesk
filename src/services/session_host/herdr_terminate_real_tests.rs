@@ -1,4 +1,4 @@
-//! `agentdesk herdr terminate` against real Herdr 0.9.3 scratch servers, judged by
+//! `agentdesk herdr terminate` against real protocol-22 Herdr scratch servers, judged by
 //! `scripts/test_p11_m2_activation.py` from printed lines; X1 reuses these servers, CLI and API.
 #![cfg(unix)]
 

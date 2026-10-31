@@ -45,7 +45,7 @@ impl Isolation {
     }
 }
 
-struct Discord {
+pub(crate) struct Discord {
     notify: Arc<Http>,
     provider: Arc<Http>,
     seen: Seen,
@@ -53,7 +53,7 @@ struct Discord {
 }
 
 impl Discord {
-    async fn new() -> Self {
+    pub(crate) async fn new() -> Self {
         use axum::body::Body;
         use axum::http::{Method, Request, StatusCode};
         use axum::response::IntoResponse;
@@ -108,7 +108,7 @@ impl Discord {
         }
     }
 
-    fn posts(&self) -> Vec<(String, serde_json::Value)> {
+    pub(crate) fn posts(&self) -> Vec<(String, serde_json::Value)> {
         self.seen
             .lock()
             .unwrap()
@@ -118,7 +118,7 @@ impl Discord {
             .collect()
     }
 
-    async fn registry(&self) -> Arc<HealthRegistry> {
+    pub(crate) async fn registry(&self) -> Arc<HealthRegistry> {
         let registry = Arc::new(HealthRegistry::new());
         registry
             .set_utility_bot_http_for_tests(UtilityBotRole::Notify, self.notify.clone())

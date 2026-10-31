@@ -2,7 +2,7 @@ use super::*;
 
 // ─── Config Parsing ──────────────────────────────────────────────────────────
 
-/// Load meeting config from agentdesk.yaml, then org.yaml, then role_map.json.
+/// Load meeting config from agentdesk.yaml, then org.yaml.
 pub(in crate::services::discord) fn load_meeting_config() -> Option<MeetingConfig> {
     if let Some(cfg) = agentdesk_config::load_meeting_config() {
         return Some(cfg);
@@ -12,7 +12,7 @@ pub(in crate::services::discord) fn load_meeting_config() -> Option<MeetingConfi
             return Some(cfg);
         }
     }
-    load_meeting_config_from_role_map()
+    None
 }
 
 // ─── Meeting Lifecycle ───────────────────────────────────────────────────────
@@ -49,7 +49,7 @@ async fn start_meeting_with_reviewer(
     shared: &Arc<SharedData>,
 ) -> Result<Option<String>, Error> {
     let config =
-        load_meeting_config().ok_or("Meeting config not found in org.yaml or role_map.json")?;
+        load_meeting_config().ok_or("Meeting config not found in agentdesk.yaml or org.yaml")?;
 
     let meeting_id = generate_meeting_id();
 
@@ -345,7 +345,7 @@ pub(in crate::services::discord) async fn spawn_direct_start(
     }
 
     let config = load_meeting_config()
-        .ok_or_else(|| "Meeting config not found in org.yaml or role_map.json".to_string())?;
+        .ok_or_else(|| "Meeting config not found in agentdesk.yaml or org.yaml".to_string())?;
     let max_participants = clamp_max_participants(config.max_participants);
     validate_fixed_participants(&config, &fixed_participants, max_participants)?;
 

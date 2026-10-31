@@ -173,7 +173,7 @@ async fn confirm_selected(
         push_fence(&mut sql, row, &stamp);
         if matches!(stamp, Stamp::Owned(_)) {
             sql.push(
-                " AND io.admission_kind='forwarded' AND io.target_instance_id=io.owner_instance_id",
+                " AND (io.admission_kind='forwarded' OR (io.admission_kind='local' AND io.routing_receipt_id IS NOT NULL AND io.routing_state='admitted')) AND io.target_instance_id=io.owner_instance_id",
             );
         }
         sql.push(" RETURNING io.*");

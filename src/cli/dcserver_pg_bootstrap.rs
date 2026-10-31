@@ -162,9 +162,7 @@ where
 
 /// Whether the launchd environment leaves the schema-ahead hold on (default on).
 pub(crate) fn schema_ahead_hold_enabled() -> bool {
-    std::env::var(SCHEMA_AHEAD_HOLD_ENV)
-        .map(|value| value.trim() != "0")
-        .unwrap_or(true)
+    crate::utils::env_flag(SCHEMA_AHEAD_HOLD_ENV, true)
 }
 
 /// Describes a database whose applied migrations are all newer than this
@@ -271,7 +269,6 @@ pub(crate) async fn initialize_postgres_for_bootstrap(
     pool: &sqlx::PgPool,
     mut config: crate::config::Config,
     runtime_root: Option<&Path>,
-    legacy_scan: &crate::services::discord_config_audit::LegacySourceScan,
 ) -> Result<crate::config::Config, PgConnectFailure> {
     let initialized = crate::db::postgres::with_startup_advisory_lock(pool, || async {
         crate::db::postgres::migrate(pool).await?;
@@ -282,7 +279,6 @@ pub(crate) async fn initialize_postgres_for_bootstrap(
                 loaded.config,
                 loaded.path,
                 loaded.existed,
-                legacy_scan,
                 false,
             )?
             .config;
@@ -715,14 +711,9 @@ mod tests {
                 .execute(&pool)
                 .await
                 .expect("insert unknown migration row");
-                initialize_postgres_for_bootstrap(
-                    &pool,
-                    crate::config::Config::default(),
-                    None,
-                    &crate::services::discord_config_audit::LegacySourceScan::default(),
-                )
-                .await
-                .expect_err("an unknown applied migration must fail startup")
+                initialize_postgres_for_bootstrap(&pool, crate::config::Config::default(), None)
+                    .await
+                    .expect_err("an unknown applied migration must fail startup")
             }
         };
 

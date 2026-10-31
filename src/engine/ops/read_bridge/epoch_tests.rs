@@ -3,6 +3,8 @@
 
 use std::time::{Duration, Instant};
 
+use futures::FutureExt;
+
 use super::contract_tests::{seed, until, write};
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::health_diagnostics::pg_wire_proxy::PgWireProxy;
@@ -57,7 +59,7 @@ fn rerun_alone(test: &str) -> bool {
     let name = format!("{}::{test}", module_path!().split_once("::").unwrap().1);
     let log = tempfile::NamedTempFile::new().unwrap();
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", &name, "--test-threads=1", "--nocapture"])
+        .args(["--exact", &name, "--nocapture"])
         .env(RERUN_ENV, "1")
         .stdout(log.reopen().unwrap())
         .stderr(log.reopen().unwrap())
@@ -137,10 +139,23 @@ async fn policy_read_bridge_returns_connections_and_threads_across_engine_epochs
         );
         std::fs::write(&file, policy_source(epoch) + "// changed\n").unwrap();
         let reloaded = vec![format!("amp-s1-reload{epoch}")];
-        until("both reload Contexts to read the new value", || {
-            names(&main) == reloaded && names(&tick) == reloaded
-        })
+        let waited = std::panic::AssertUnwindSafe(until(
+            "both reload Contexts to read the new value",
+            || names(&main) == reloaded && names(&tick) == reloaded,
+        ))
+        .catch_unwind()
         .await;
+        if let Err(panic) = waited {
+            eprintln!(
+                "epoch {epoch}: expected {reloaded:?}, main={:?}, tick={:?}, accepted={}, open={}, SQL={:?}",
+                names(&main),
+                names(&tick),
+                proxy.accepted(),
+                proxy.open(),
+                proxy.executions()
+            );
+            std::panic::resume_unwind(panic);
+        }
         let opened = proxy.accepted() - accepted;
         assert_eq!(
             opened, READING_CONTEXTS,

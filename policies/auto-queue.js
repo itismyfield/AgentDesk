@@ -33,6 +33,27 @@ var _normalizeAutoQueueLogContext = _autoQueueLogLib.normalizeLogContext;
 var _formatAutoQueueLogContext = _autoQueueLogLib.formatLogContext;
 var autoQueueLog = _autoQueueLogLib.autoQueueLog;
 
+// Reuse the completion transition; review-enabled work stays dispatched until review finishes.
+function recoverCompletedEntry(entry) {
+  if (!entry.result && !entry.has_pr) {
+    var failure = agentdesk.autoQueue.recordDispatchFailure(entry.id, configuredAutoQueueMaxEntryRetries(), "tick_delivery_mismatch");
+    notifyAutoQueueEntryFailure(entry, failure);
+    return failure.changed ? failure.to : null;
+  }
+  var card = agentdesk.cards.get(entry.kanban_card_id);
+  if (!card) return null;
+  var cfg = agentdesk.pipeline.resolveForCard(card.id);
+  if (agentdesk.pipeline.isTerminal(card.status, cfg) || entry.review_mode === "disabled") {
+    var terminal = agentdesk.autoQueue.updateEntryStatus(entry.id, "done", "tick_delivery_mismatch");
+    return terminal.changed ? "done" : null;
+  }
+  var inProgress = agentdesk.pipeline.nextGatedTarget(agentdesk.pipeline.kickoffState(cfg), cfg);
+  if (card.status !== inProgress) return null;
+  var review = agentdesk.pipeline.nextGatedTarget(inProgress, cfg);
+  var transition = agentdesk.kanban.setStatus(card.id, review, !entry.dispatch_status && !!entry.has_pr);
+  return transition.changed ? review : null;
+}
+
 // ── runtime config readers ────────────────────────────────────────────
 var configuredAutoQueueMaxEntryRetries = _autoQueueConfigLib.maxEntryRetries;
 var configuredStaleDispatchedGraceMinutes = _autoQueueConfigLib.staleDispatchedGraceMinutes;
@@ -502,13 +523,20 @@ var autoQueue = {
     var staleDispatchedGraceMinutes = configuredStaleDispatchedGraceMinutes();
     var staleDispatchedConditions = staleDispatchedRecoveryConditionsSql();
     var stuckDispatched = agentdesk.db.query(
-      "SELECT e.id, e.agent_id, e.dispatch_id, e.kanban_card_id " +
+      "SELECT e.id, e.agent_id, e.dispatch_id, e.kanban_card_id, e.run_id, " +
+      "td.status AS dispatch_status, td.result, COALESCE(r.review_mode, 'enabled') AS review_mode, " +
+      "EXISTS (SELECT 1 FROM pr_tracking p WHERE p.card_id = e.kanban_card_id AND p.pr_number IS NOT NULL) AS has_pr " +
       "FROM auto_queue_entries e " +
       "JOIN auto_queue_runs r ON e.run_id = r.id " +
+      "LEFT JOIN task_dispatches td ON td.id = e.dispatch_id " +
       "WHERE e.status = 'dispatched' AND r.status = 'active' " +
-      "AND e.dispatched_at IS NOT NULL " +
-      "AND e.dispatched_at < datetime('now', '-" + staleDispatchedGraceMinutes + " minutes') " +
-      "AND (" + staleDispatchedConditions + ") " +
+      "AND COALESCE(e.dispatched_at, e.created_at) < datetime('now', '-" + staleDispatchedGraceMinutes + " minutes') " +
+      "AND ((" + staleDispatchedConditions + ") OR (td.status = 'completed' AND td.dispatch_type IN ('implementation', 'rework'))) " +
+      "AND (td.id IS NULL OR COALESCE(td.updated_at, td.completed_at, td.created_at) < datetime('now', '-" + staleDispatchedGraceMinutes + " minutes')) " +
+      "AND NOT EXISTS (SELECT 1 FROM task_dispatches live WHERE live.kanban_card_id = e.kanban_card_id AND live.status IN ('pending', 'dispatched')) " +
+      "AND NOT EXISTS (SELECT 1 FROM sessions s WHERE " +
+      "(s.active_dispatch_id = e.dispatch_id OR s.active_dispatch_id IN (SELECT id FROM task_dispatches WHERE kanban_card_id = e.kanban_card_id)) " +
+      "AND COALESCE(s.status, '') NOT IN ('disconnected', 'aborted', 'completed', 'failed', 'cancelled')) " +
       "ORDER BY e.dispatched_at ASC LIMIT 50",
       []
     );
@@ -520,6 +548,19 @@ var autoQueue = {
 
     for (var j = 0; j < stuckDispatched.length; j++) {
       var stuck = stuckDispatched[j];
+      if (stuck.dispatch_status === "completed" || (!stuck.dispatch_status && stuck.has_pr)) {
+        try {
+          var recovered = recoverCompletedEntry(stuck);
+          if (recovered) autoQueueLog("info", "Recovered completed dispatch delivery mismatch -> " + recovered, {
+            run_id: stuck.run_id, entry_id: stuck.id, card_id: stuck.kanban_card_id, dispatch_id: stuck.dispatch_id
+          });
+        } catch (e) {
+          autoQueueLog("warn", "Completed dispatch delivery mismatch recovery deferred: " + e, {
+            run_id: stuck.run_id, entry_id: stuck.id, dispatch_id: stuck.dispatch_id
+          });
+        }
+        continue;
+      }
       var failure = agentdesk.autoQueue.recordDispatchFailure(
         stuck.id,
         configuredAutoQueueMaxEntryRetries(),

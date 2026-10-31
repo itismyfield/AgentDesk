@@ -13,6 +13,7 @@ use tokio::sync::watch;
 
 use super::TuiRuntimeBinding;
 use super::binding_context::{SpawnNonceMarker, launch_mode, observe_spawn_nonce_marker};
+mod herdr_resume;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 #[cfg(test)]
 use crate::services::claude_tui::source_verify::n2b_mutant;
@@ -22,6 +23,8 @@ use crate::services::claude_tui::source_verify::{
 use crate::services::discord::runtime_store::fsync_parent_dir;
 pub(crate) use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::file_identity;
+use herdr_resume::resumes_under_new_execution;
+pub(crate) use herdr_resume::{herdr_resume_launch, logged_by};
 pub(crate) const BINDING_EVENTS_DIR: &str = "binding_events";
 mod claude_fold;
 use claude_fold::Waiting;
@@ -41,7 +44,8 @@ pub(crate) enum BindingCause {
     Fork,
     Unknown,
 }
-/// `Resolved` completes the `Pending` record `pending_seq`; `Rejected` is audit only.
+/// `Resolved` completes the named Pending; bare `Rejected` is audit only.
+/// Codex typed ownership can name the exact Pending a rejection closes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum BindingTarget {
@@ -820,6 +824,7 @@ impl Writer {
             .is_some_and(|current| same_source(current, session, p.path, file))
             && !unsettled
             && !reclaim
+            && !resumes_under_new_execution(p, pane.nonce.as_deref())
         {
             return Planned::Keep(Committed::Unchanged);
         } else {

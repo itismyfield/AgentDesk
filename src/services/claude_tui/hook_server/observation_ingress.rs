@@ -13,6 +13,7 @@ use axum::http::{HeaderMap, StatusCode};
 use serde_json::{Value, json};
 
 use super::HookEventKind;
+mod resume_start;
 use super::adoption_retry::{self, AdoptionHttp, DurableKind, NotDurableReason};
 use super::relay_receipts::{RELAY_PUBLISHED_AT_HEADER, RelayReceiptLedger, RelayReceiptTicket};
 use crate::services::tui_prompt_dedupe::AdoptSkip;
@@ -196,6 +197,7 @@ pub(crate) fn observe_binding_hook(
         if provider == "claude"
             && let Err(reason) =
                 adoption_retry::observe_launch_hook(command, &hook, envelope.as_ref(), prompt)
+                    .and_then(|()| resume_start::record(payload_session, &hook, envelope.as_ref()))
         {
             return IngressOutcome::NotDurable(reason);
         }

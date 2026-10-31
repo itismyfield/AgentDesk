@@ -31,6 +31,19 @@ impl HerdrTransport for MissingPane {
         )
     }
 }
+struct ChangedPane;
+impl HerdrTransport for ChangedPane {
+    fn call_with_witness(&self, _: &HerdrCall, _: &ServerWitness) -> HerdrOutcome {
+        panic!("retired observation must never mutate Herdr")
+    }
+    fn server_witness(&self) -> Witnessed {
+        MissingPane.server_witness()
+    }
+    fn call(&self, call: &HerdrCall) -> (HerdrOutcome, Witnessed) {
+        let (reply, _) = MissingPane.call(call);
+        (reply, Ok(ServerWitness::for_test(100)))
+    }
+}
 struct Os(Result<bool, RestoreUnverified>);
 impl ProcessOs for Os {
     fn exists(&self, pid: u32) -> Result<bool, RestoreUnverified> {
@@ -99,6 +112,17 @@ pub(crate) fn provider_alive(record: &HostedExecution) -> Result<RetiredEnd, Ret
 fn legacy_return_end_requires_both_observations() {
     let r = retired_record();
     assert!(ended(&r).matches(&r));
+    assert_eq!(
+        RetiredEnd::observe_with_os(
+            &endpoint(),
+            Arc::new(ChangedPane),
+            &r,
+            Arc::new(Os(Ok(false)))
+        )
+        .unwrap_err(),
+        ReturnEndRefusal::EndpointMismatch,
+        "changed witness is a permanent identity refusal"
+    );
     assert!(HerdrTarget::new(endpoint(), Arc::new(MissingPane), &r).is_none());
     for (exists, process) in [
         (Ok(true), pane_probe::RecordedProcess::Replaced),
@@ -115,7 +139,11 @@ fn legacy_return_end_requires_both_observations() {
                 Arc::new(Os(exists))
             )
             .unwrap_err(),
-            ReturnEndRefusal::ProviderUnverified(process)
+            if process == pane_probe::RecordedProcess::Unreadable {
+                ReturnEndRefusal::ReadUnavailable
+            } else {
+                ReturnEndRefusal::ProviderUnverified(process)
+            }
         );
     }
     let mut live = r.clone();
@@ -139,9 +167,14 @@ fn legacy_return_end_requires_both_observations() {
             ),
         },
     ] {
+        let expected = if matches!(pane, PaneReading::Unreadable(_)) {
+            ReturnEndRefusal::ReadUnavailable
+        } else {
+            ReturnEndRefusal::PaneUnverified
+        };
         assert_eq!(
             RetiredEnd::from_reads(&r, pane, &Os(Ok(false))).unwrap_err(),
-            ReturnEndRefusal::PaneUnverified
+            expected
         );
     }
     let pane = PaneReading::Present {
@@ -149,6 +182,32 @@ fn legacy_return_end_requires_both_observations() {
         provider: PaneProvider::Exited,
     };
     assert!(RetiredEnd::from_reads(&r, pane, &Os(Ok(false))).is_ok());
+    for (gap, temporary) in [
+        (EvidenceGap::ReadFailed("EIO".into()), true),
+        (EvidenceGap::ProcessUnreadable(101), true),
+        (EvidenceGap::EnvUnreadable, true),
+        (EvidenceGap::OtherNonce("successor".into()), false),
+        (EvidenceGap::Replaced, false),
+    ] {
+        let pane = PaneReading::Present {
+            root: r.expected.as_ref().unwrap().root.clone(),
+            provider: PaneProvider::Unverified(gap),
+        };
+        assert_eq!(
+            RetiredEnd::from_reads(&r, pane, &Os(Ok(false))).unwrap_err(),
+            if temporary {
+                ReturnEndRefusal::ReadUnavailable
+            } else {
+                ReturnEndRefusal::PaneUnverified
+            }
+        );
+    }
+    #[cfg(unix)]
+    {
+        assert!(RetiredProbeRefusal::Gate(HerdrGateRefusal::MutationBusy).retryable());
+        assert!(!RetiredProbeRefusal::Gate(HerdrGateRefusal::ServerChanged).retryable());
+        assert!(!RetiredProbeRefusal::Observation(ReturnEndRefusal::EndpointMismatch).retryable());
+    }
     // The production OS entry is exercised with a PID outside its signed platform range.
     let mut unobservable = r.clone();
     unobservable.expected.as_mut().unwrap().provider_process.pid = u32::MAX;
@@ -293,11 +352,11 @@ fn root_replaced_requires_two_proven_absences() {
         assert!(!ended(ProvenAbsent, kept, &restored).0, "provider {kept:?}");
     }
     let provider = r.expected.as_ref().unwrap().provider_process.clone();
-    let other_nonce = format!("{:?}", EvidenceGap::OtherNonce("n2".into()));
+    let other_nonce = EvidenceGap::OtherNonce("n2".into());
     for pane in [
         other_shell(PaneProvider::Execution(provider)),
         other_shell(PaneProvider::Unverified(other_nonce)),
-        other_shell(PaneProvider::Unverified("NoneYet".into())),
+        other_shell(PaneProvider::Unverified(EvidenceGap::NoneYet)),
         PaneReading::Unreadable("snapshot from another server".into()),
     ] {
         assert!(!ended(ProvenAbsent, ProvenAbsent, &pane).0, "{pane:?}");

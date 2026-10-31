@@ -1,8 +1,8 @@
-//! Writer membership is fixed for the process. The configured O home carries adoption state
-//! for selected or locally committed channels; other nodes only report their local store state.
+//! Writer membership is fixed for the process. Gateway placement seeds legacy adoption;
+//! PG execution authority is read separately before foreign-store diagnostics.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Instant;
 
 use anyhow::{Context, Result, ensure};
@@ -35,6 +35,9 @@ pub(crate) struct BootChannels {
     site: Site,
     configured_id: Option<String>,
     candidates: BTreeMap<u64, Candidate>,
+    foreign_stores: BTreeSet<u64>,
+    execution: Arc<Mutex<BTreeMap<u64, super::ownership::execution::View>>>,
+    execution_install: Arc<Mutex<()>>,
 }
 
 /// Membership as configured; the adoption states and kept committed channels are process state.
@@ -231,6 +234,9 @@ impl BootChannels {
             site,
             configured_id,
             candidates: BTreeMap::new(),
+            foreign_stores: BTreeSet::new(),
+            execution: Arc::default(),
+            execution_install: Arc::default(),
         })
     }
 
@@ -270,14 +276,33 @@ impl BootChannels {
             }
             Site::Foreign { home } => {
                 let states = stored(&self.selected, false)?;
-                let detail = format!("non-home node ignores its local O store; O home is {home}");
-                let alarm = WriterAlarm::Halted { detail };
-                for (&channel, _) in states.iter().filter(|(_, s)| **s != Adoption::Pending) {
-                    alarms.raise_at(channel, &alarm, Instant::now());
+                self.foreign_stores = states
+                    .iter()
+                    .filter(|(_, state)| **state != Adoption::Pending)
+                    .map(|(&channel, _)| channel)
+                    .collect();
+                #[cfg(test)]
+                if super::ownership::execution::tests::mutant("diagnostic-early") {
+                    for &channel in &self.foreign_stores {
+                        self.foreign_store_alarm(channel);
+                    }
                 }
+                let _ = home;
             }
         }
         Ok(self)
+    }
+
+    fn foreign_store_alarm(&self, channel: u64) {
+        if let Site::Foreign { home } = &self.site {
+            AlarmRouter::for_process(None, None).raise_at(
+                channel,
+                &WriterAlarm::Halted {
+                    detail: format!("non-home node ignores its local O store; O home is {home}"),
+                },
+                Instant::now(),
+            );
+        }
     }
 
     fn seed_candidate(&self, channel: u64, state: Adoption) -> Candidate {
@@ -331,6 +356,173 @@ impl BootChannels {
     /// The adoption of a selected channel; none off the home or while the writer is off.
     pub(crate) fn candidate(&self, channel: u64) -> Option<&Candidate> {
         self.candidates.get(&channel)
+    }
+
+    pub(crate) fn execution(&self, channel: u64) -> Option<super::ownership::execution::View> {
+        #[cfg(test)]
+        if super::ownership::execution::tests::mutant("gateway") {
+            return None;
+        }
+        self.execution
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&channel)
+            .cloned()
+    }
+
+    pub(crate) fn output_candidate(&self, channel: u64) -> Option<Candidate> {
+        self.execution(channel)
+            .map(|view| view.candidate)
+            .or_else(|| self.candidate(channel).cloned())
+    }
+
+    pub(crate) fn install_execution(
+        &self,
+        channel: u64,
+        permit: Option<Result<Arc<super::ownership::execution::OwnerPermit>, String>>,
+    ) {
+        use super::ownership::execution::View;
+        if self.foreign_stores.contains(&channel) && !matches!(&permit, Some(Ok(_))) {
+            self.foreign_store_alarm(channel);
+        }
+
+        #[cfg(test)]
+        let permit = if super::ownership::execution::tests::mutant("unknown")
+            && matches!(permit.as_ref(), Some(Err(_)))
+        {
+            None
+        } else {
+            permit
+        };
+        let _install = self
+            .execution_install
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let old = self.execution(channel);
+        if let (Some(old), Some(Ok(new))) = (&old, &permit)
+            && let Ok(old) = &old.permit
+            && old.same_execution(new)
+        {
+            return;
+        }
+        if let (Some(old), Some(Ok(new))) = (&old, &permit)
+            && let Ok(prior) = &old.permit
+            && let Some(bound) = prior.first_binding(new)
+        {
+            self.execution
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(
+                    channel,
+                    View {
+                        permit: Ok(bound),
+                        candidate: old.candidate.clone(),
+                        retained: None,
+                    },
+                );
+            return;
+        }
+        if let Some(old) = old
+            && let Ok(old) = old.permit
+        {
+            old.gate().close();
+        }
+        let view = match permit {
+            None => {
+                self.execution
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&channel);
+                return;
+            }
+            Some(Err(reason)) => View::held(reason),
+            Some(Ok(permit)) => {
+                let selected = BTreeSet::from([channel]);
+                let state =
+                    adoption::stored(crate::config::runtime_root().as_deref(), &selected)[&channel];
+                View {
+                    permit: Ok(permit),
+                    candidate: self.seed_candidate(channel, state),
+                    retained: None,
+                }
+            }
+        };
+        self.execution
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(channel, view);
+    }
+
+    pub(crate) fn suspend_execution(&self, channel: u64, reason: String, temporary: bool) {
+        use super::ownership::execution::View;
+        let _install = self
+            .execution_install
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let old = self.execution(channel);
+        let prior = old.as_ref().and_then(View::verified);
+        if let Some(prior) = &prior {
+            if temporary {
+                prior.gate().uncertain();
+            } else {
+                prior.gate().close();
+            }
+        }
+        let candidate = old
+            .map(|view| view.candidate)
+            .unwrap_or_else(|| View::held(reason.clone()).candidate);
+        self.execution
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                channel,
+                View {
+                    permit: Err(reason),
+                    candidate,
+                    retained: prior.filter(|_| temporary),
+                },
+            );
+    }
+
+    pub(crate) fn resume_execution(
+        &self,
+        channel: u64,
+        next: &Arc<super::ownership::execution::OwnerPermit>,
+    ) -> bool {
+        use super::ownership::execution::View;
+        let _install = self
+            .execution_install
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(old) = self.execution(channel) else {
+            return false;
+        };
+        let Some(prior) = old.verified() else {
+            return false;
+        };
+        let restored = if prior.same_execution(next) {
+            Some(prior)
+        } else {
+            prior.first_binding(next)
+        };
+        let Some(restored) = restored else {
+            return false;
+        };
+        if restored.gate().current().epoch().is_none() && restored.gate().reacquired().is_none() {
+            return false;
+        }
+        self.execution
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                channel,
+                View {
+                    permit: Ok(restored),
+                    candidate: old.candidate,
+                    retained: None,
+                },
+            );
+        true
     }
 
     /// Every selected channel starts in `state`, as `seeded` would leave it on the home.

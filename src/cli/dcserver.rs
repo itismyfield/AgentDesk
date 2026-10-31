@@ -886,11 +886,6 @@ pub fn handle_dcserver(token: Option<String>) {
     kill_existing_dcserver_processes();
 
     let runtime_root = agentdesk_runtime_root();
-    let legacy_scan = runtime_root
-        .as_ref()
-        .map(|root| crate::services::discord_config_audit::scan_legacy_sources(root))
-        .unwrap_or_default();
-
     if let Some(root) = runtime_root.as_ref() {
         match crate::runtime_layout::ensure_runtime_layout(&root) {
             Ok(report) => {
@@ -986,32 +981,6 @@ pub fn handle_dcserver(token: Option<String>) {
 
             for workspace in crate::services::discord::agentdesk_config::configured_workspaces() {
                 workspaces.insert(workspace);
-            }
-
-            // Fall back to role_map.json while older installs are still migrating.
-            if workspaces.is_empty()
-                && let Some(rm_path) = agentdesk_runtime_root()
-                    .map(|r| r.join("config").join("role_map.json"))
-                    .filter(|p| p.exists())
-                && let Ok(content) = std::fs::read_to_string(&rm_path)
-                && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
-            {
-                for section in ["byChannelId", "byChannelName"] {
-                    if let Some(map) = json.get(section).and_then(|v| v.as_object()) {
-                        for (_key, entry) in map {
-                            if let Some(ws) = entry.get("workspace").and_then(|v| v.as_str()) {
-                                let expanded = if ws.starts_with('~') {
-                                    crate::runtime_layout::expand_user_path(ws)
-                                        .map(|p| p.to_string_lossy().into_owned())
-                                        .unwrap_or_else(|| ws.to_string())
-                                } else {
-                                    ws.to_string()
-                                };
-                                workspaces.insert(expanded);
-                            }
-                        }
-                    }
-                }
             }
 
             for ws in &workspaces {
@@ -1130,7 +1099,6 @@ pub fn handle_dcserver(token: Option<String>) {
                 || {
                     let cfg = connect_cfg.clone();
                     let root = runtime_root.clone();
-                    let scan = legacy_scan.clone();
                     async move {
                         let Some(startup_pool) =
                             crate::db::postgres::connect_for_bootstrap(&cfg).await?
@@ -1141,7 +1109,6 @@ pub fn handle_dcserver(token: Option<String>) {
                             &startup_pool,
                             cfg,
                             root.as_deref(),
-                            &scan,
                         )
                         .await?;
                         drop(startup_pool);

@@ -123,6 +123,7 @@ impl HerdrTransport for Peer {
             started: at(1000),
             connected_at: at(2000),
             version: "0.9.3".into(),
+            protocol: 22,
         })
     }
     fn server_witness(&self) -> Witnessed {

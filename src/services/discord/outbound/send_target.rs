@@ -218,21 +218,13 @@ mod send_target_parse_tests {
             std::fs::create_dir_all(&config_dir).is_ok(),
             "create target contract test config directory"
         );
-        assert!(
-            std::fs::write(
-                config_dir.join("role_map.json"),
-                serde_json::json!({
-                    "byChannelName": {
-                        "supported-alias": { "channelId": "4225000" },
-                        "user:4225": { "channelId": "4225001" },
-                        "role:backend-dev": { "channelId": "4225002" }
-                    },
-                    "byChannelId": {}
-                })
-                .to_string(),
-            )
-            .is_ok(),
-            "write alias-collision role map"
+        crate::services::discord::agentdesk_config::write_bindings_for_test(
+            root.path(),
+            serde_json::json!([
+                {"id": "supported", "name": "Supported", "provider": "claude", "channels": {"claude": {"id": "4225000", "name": "supported-alias"}}},
+                {"id": "user-alias", "name": "User alias", "provider": "claude", "channels": {"claude": {"id": "4225001", "name": "user:4225"}}},
+                {"id": "role-alias", "name": "Role alias", "provider": "claude", "channels": {"claude": {"id": "4225002", "name": "role:backend-dev"}}}
+            ]),
         );
 
         assert_eq!(resolve_channel_target("channel:123"), Ok(123));

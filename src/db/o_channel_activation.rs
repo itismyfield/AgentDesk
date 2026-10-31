@@ -1,6 +1,8 @@
 //! Read-only rows that keep a channel out of its first O activation: open intake routes and
 //! sessions owned by another node.
 
+pub(crate) mod owner;
+
 use super::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL;
 use sqlx::{AssertSqlSafe, PgConnection, PgPool, Postgres, Transaction};
 
