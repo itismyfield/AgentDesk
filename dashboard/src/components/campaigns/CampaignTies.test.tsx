@@ -429,16 +429,25 @@ it("forgets ties of dependencies deleted while the graph is closed or every task
   expect(pathOf("B->D")).toEqual(["campaign-group:G1", "campaign-group:G2"]);
 });
 
-it("writes back another tab's stale view without the members this definition already deleted", async () => {
+it("leaves another tab's tie on a dependency this tab does not know yet, in storage and on that tab's screen", async () => {
+  // Tab B still shows the definition before B→D was added; tab A has the newer one and ties B→D.
+  const older = { ...campaign, nodes: campaign.nodes.map((node) => node.id === "D" ? { ...node, dependencies: [] } : node) };
+  const otherTab = document.createElement("div");
+  document.body.appendChild(otherTab);
+  const otherRoot = createRoot(otherTab);
+  onTestFinished(async () => { await act(async () => otherRoot.unmount()); otherTab.remove(); });
+  await act(async () => otherRoot.render(<CampaignExplorer campaign={older} live={{}} tr={(_, en) => en} onSaved={vi.fn()} drafts={{}} onDraftChange={vi.fn()} />));
+  await act(async () => [...otherTab.querySelectorAll("button")].find((element) => element.textContent === "Connections")!.click());
   await openGraph();
-  await tieBoth();
-  const stale = localStorage.getItem(key)!;
-  await render({ ...campaign, nodes: campaign.nodes.map((node) => node.id === "D" ? { ...node, dependencies: [] } : node) });
-  await act(async () => {
-    localStorage.setItem(key, stale);
-    window.dispatchEvent(new StorageEvent("storage", { key, storageArea: localStorage }));
-  });
-  expect(localStorage.getItem(key)).not.toContain('"D"');
+  await click(button("Tie lines"));
+  await click(checkbox("B → D"));
+  await click(button("Tie 1 lines"));
+  const deliver = () => act(async () => { window.dispatchEvent(new StorageEvent("storage", { key, storageArea: localStorage })); });
+  await deliver();
+  expect(JSON.parse(localStorage.getItem(key)!).ties.map((tie: { strandOrder: unknown }) => tie.strandOrder)).toEqual([[["B", "D"]]]);
+  await deliver();
+  expect(ties()).toHaveLength(1);
+  expect(pathOf("B->D")[1]).toMatch(/^campaign-tie:/);
 });
 
 it("keeps lines in place while a stroke previews them, so release selects what the preview showed", async () => {

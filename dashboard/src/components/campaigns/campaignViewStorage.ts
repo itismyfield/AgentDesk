@@ -107,15 +107,15 @@ export function saveCampaignView(scope: ViewScope, view: GraphViewSettings): Sav
 
 /**
  * Removes members that left `present` (the full definition) from the stored view and saves it, so a dependency
- * deleted while the graph was closed is not tied again when it comes back. Returns the raw value now stored.
+ * deleted while the graph was closed is not tied again when it comes back. Only for a definition this tab just
+ * loaded from the server, never for a value another tab wrote.
  */
-export function pruneStoredView(scope: ViewScope, present: readonly RawEdgeKey[], raw = readStoredRaw(scope)): string | null {
+export function pruneStoredView(scope: ViewScope, present: readonly RawEdgeKey[]): void {
+  const raw = readStoredRaw(scope);
   const stored = loadCampaignView(scope, raw);
-  if (raw === null || stored.recovered) return raw;
+  if (raw === null || stored.recovered) return;
   const view = pruneTies(stored.view, present);
-  if (JSON.stringify(view) === JSON.stringify(stored.view)) return raw;
-  const saved = saveCampaignView(scope, view);
-  return saved.ok ? saved.raw : raw;
+  if (JSON.stringify(view) !== JSON.stringify(stored.view)) saveCampaignView(scope, view);
 }
 
 /** Campaign ids that have a saved group-graph layout in this browser. */

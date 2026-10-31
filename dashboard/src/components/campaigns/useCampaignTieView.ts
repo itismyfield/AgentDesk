@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { rawEdgeId, type GraphViewSettings, type RawEdgeKey, type ViewScope } from "./campaignGraphRouting";
 import { UNDO_LIMIT, commitTie, pruneTies, undoTie, type TieCommand, type TieHistory } from "./campaignTieEditor";
-import { campaignViewKey, loadCampaignView, pruneStoredView, readStoredRaw, saveCampaignView, subscribeCampaignView } from "./campaignViewStorage";
+import { campaignViewKey, loadCampaignView, readStoredRaw, saveCampaignView, subscribeCampaignView } from "./campaignViewStorage";
 
 type TieViewState = {
   key: string;
@@ -60,10 +60,10 @@ export function useCampaignTieView(scope: ViewScope, present: readonly RawEdgeKe
   // Resubscribes when the key names another scope; the listener reads the latest scope through the ref.
   useEffect(() => subscribeCampaignView(scopeRef.current, () => {
     const s = stateRef.current;
-    const written = readStoredRaw(scopeRef.current);
-    if (written === s.lastRaw) return;
-    // A tab with an older definition may still list members deleted here; store the view without them.
-    const raw = pruneStoredView(scopeRef.current, presentRef.current, written);
+    const raw = readStoredRaw(scopeRef.current);
+    if (raw === s.lastRaw) return;
+    // Taken as written and never saved back: this tab's definition may be older than the writer's. Members it
+    // does not know are left out of the drawing by routeEdges and kept for when its definition catches up.
     const stored = loadCampaignView(scopeRef.current, raw);
     if (stored.recovered) return;
     if (busyRef.current || s.saveFailed) update({ ...s, pending: stored.view, lastRaw: raw });
