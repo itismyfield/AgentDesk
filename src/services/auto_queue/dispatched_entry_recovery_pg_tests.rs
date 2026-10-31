@@ -126,9 +126,15 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
         1
     );
     for pass in 0..2 {
-        engine
-            .fire_hook_by_name_blocking("OnTick1min", json!({}))
-            .unwrap();
+        eprintln!("recovery pass {pass}: tick");
+        let tick_engine = engine.clone();
+        tokio::task::spawn_blocking(move || {
+            tick_engine.try_fire_hook_by_name("OnTick1min", json!({}))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        eprintln!("recovery pass {pass}: tick returned");
         crate::kanban::drain_hook_side_effects_with_backends(&engine);
         crate::reconcile::reconcile_completed_queue_review_drift_pg(&pool, &engine)
             .await
@@ -220,6 +226,7 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
             assert_eq!(dispatch, format!("dispatch-recover-{name}"));
         }
     }
+    eprintln!("recovery: repeated ticks verified; checking restart");
     crate::reconcile::reconcile_boot_db_pg(&pool, "recovery-restart", None)
         .await
         .unwrap();
@@ -252,6 +259,7 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
         "UPDATE task_dispatches SET status = 'completed', result = '{\"verdict\":\"pass\"}', completed_at = NOW(), updated_at = NOW()
          WHERE kanban_card_id = 'card-recover-completed' AND dispatch_type = 'review'"
     ).execute(&pool).await.unwrap();
+    eprintln!("recovery: completing review and advancing the run");
     crate::kanban::transition_status_with_opts_pg(
         &pool,
         &engine,
@@ -271,6 +279,7 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
         ("dispatched".to_string(), true),
         "same run advances after recovered review"
     );
+    eprintln!("recovery: next entry dispatched");
     drop(service);
     drop(engine);
     pool.close().await;
