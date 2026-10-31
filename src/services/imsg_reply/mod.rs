@@ -110,19 +110,14 @@ pub(crate) fn with_started_contract(
     ))
 }
 
-pub(crate) fn parse_enabled(value: Option<&str>) -> bool {
-    value.is_some_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "on"
-        )
-    })
+fn enabled_from_env() -> bool {
+    crate::utils::env_flag("ADK_IMSG_OBLIGATIONS", false)
 }
 
 /// Cache the kill switch once so activation requires a process restart.
 pub(crate) fn is_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| parse_enabled(std::env::var("ADK_IMSG_OBLIGATIONS").ok().as_deref()))
+    *ENABLED.get_or_init(enabled_from_env)
 }
 
 pub(crate) fn enabled_for_source(enabled: bool, source: &str) -> bool {
@@ -154,11 +149,25 @@ mod tests {
 
     #[test]
     fn obligations_flag_defaults_off_and_only_imessage_uses_it() {
-        for value in [None, Some(""), Some("off"), Some("false"), Some("garbage")] {
-            assert!(!parse_enabled(value));
-        }
-        for value in ["1", "true", " on ", "TRUE"] {
-            assert!(parse_enabled(Some(value)));
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let _restore = crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock(
+            "ADK_IMSG_OBLIGATIONS",
+        );
+        for (value, expected) in [
+            (None, false),
+            (Some(""), false),
+            (Some("off"), false),
+            (Some("garbage"), false),
+            (Some("1"), true),
+            (Some("TRUE"), true),
+            (Some(" on "), true),
+            (Some("yes"), true),
+        ] {
+            match value {
+                Some(value) => unsafe { std::env::set_var("ADK_IMSG_OBLIGATIONS", value) },
+                None => unsafe { std::env::remove_var("ADK_IMSG_OBLIGATIONS") },
+            }
+            assert_eq!(enabled_from_env(), expected);
         }
         assert!(enabled_for_source(true, " imessage "));
         assert!(!enabled_for_source(false, "imessage"));

@@ -13,7 +13,7 @@ when the code has none).
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
 - AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 139
-- Platform and third-party variables: 30
+- Platform and third-party variables: 28
 
 ## AgentDesk variables
 
@@ -38,7 +38,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_GITHUB_SYNC_ALERT_CHANNEL` | `src/github/sync.rs` |  |
 | `ADK_HERDR_ADMISSION` | `src/services/herdr_admission.rs` | Herdr admission kill switch: `ADK_HERDR_ADMISSION`, read once, and a stop file that, once seen, keeps admission stopped until restart. |
 | `ADK_HERDR_ROW_END_MUTANT` | `src/services/discord/inflight/clear_store/herdr_row_end.rs`, `src/services/discord/recovery_engine/herdr_row_end.rs` | The receipt recheck, which only a test build's mutant turns off. |
-| `ADK_IMSG_OBLIGATIONS` | `src/services/imsg_reply/mod.rs` | Cache the kill switch once so activation requires a process restart. |
+| `ADK_IMSG_OBLIGATIONS` | `src/services/imsg_reply/mod.rs` |  |
 | `ADK_INTAKE_ROUTING_MODE` | `src/services/cluster/intake_routing_config.rs`, `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs` |  |
 | `ADK_OBSERVABILITY_COUNTER_SNAPSHOT_RETENTION_DAYS` | `src/services/observability/retention.rs` |  |
 | `ADK_OBSERVABILITY_EVENTS_PATH` | `src/services/observability/events.rs` | Honors `ADK_OBSERVABILITY_EVENTS_PATH` for tests. |
@@ -72,7 +72,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_CLAUDE_LIVE_BRIDGE_GUARD` | `src/services/discord/live_bridge.rs` | `0` lets watcher respawn take over a live Claude original again. |
 | `AGENTDESK_CLAUDE_PATH` | `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs` | Dispatched turns must not reach a host `claude` or host config: a real CLI rejects the synthetic resume id and triggers a stale-resume re-dispatch. |
 | `AGENTDESK_CLAUDE_SUBMIT_GUARD_CHANNEL_IDS` | `src/config/session_hosts.rs` |  |
-| `AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE` | `src/services/claude.rs` | Default ON; set `AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE` to `0`, `false`, `off`, `no`, `disable`, or `disabled` for emergency opt-out. |
+| `AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE` | `src/services/claude.rs` |  |
 | `AGENTDESK_CLUSTER_API_BASE_URL` | `src/services/cluster/session_routing.rs` |  |
 | `AGENTDESK_CODEX_DIRECT_TUI_HOOKS` | `src/services/codex.rs` | Direct TUI hooks are on unless `AGENTDESK_CODEX_DIRECT_TUI_HOOKS` is "0", "false", "off" or "no". |
 | `AGENTDESK_CODEX_DIRECT_TUI_SOURCE_MODE` | `src/services/codex_tui/session/source_observation.rs` | Validated once at startup; no active nonce or new launch reparses mutable env. |
@@ -141,7 +141,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_REQUIRE_PG` | `src/db/postgres.rs` | Every fixture that creates a database must use this authority; callers that can skip return `None`, while required lanes still get the hard failure below when… |
 | `AGENTDESK_REVIEW_MCP_ALLOWLIST` | `src/services/mcp_config.rs` |  |
 | `AGENTDESK_ROOT_DIR` | `src/cli/dcserver.rs`, `src/config.rs`, `src/config/runtime_root_guard.rs`, `src/config/test_env/teardown_probe.rs`, `src/services/campaign_execution/verification_runner.rs`, `src/services/claude.rs`, `src/services/claude_tui/hook_relay/ordered_queue.rs`, `src/services/codex.rs`, `src/services/discord/runtime_store.rs`, `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs`, `src/services/discord/watchers/lifecycle/watcher_install_fixture.rs`, `src/services/qwen/session_lifecycle.rs`, `src/services/routines/migrated.rs`, `src/services/tui_prompt_dedupe/handoff.rs` | Write a debug message to a specific log file under $AGENTDESK_ROOT_DIR/debug/. |
-| `AGENTDESK_SCHEMA_AHEAD_HOLD` | `src/cli/dcserver_pg_bootstrap.rs` | Whether the launchd environment leaves the schema-ahead hold on (default on). |
+| `AGENTDESK_SCHEMA_AHEAD_HOLD` | `src/cli/dcserver_pg_bootstrap.rs` | `0` restores the plain retry-then-exit path for a schema-ahead database. |
 | `AGENTDESK_SELF_WATCHDOG_MODE` | `src/services/discord/health/recovery/self_watchdog.rs` |  |
 | `AGENTDESK_SINGLE_MESSAGE_PANEL` | `src/services/discord/single_message_panel.rs` | The rollout gate previously short-circuited a missing env var to `false`, so any environment without an explicit `AGENTDESK_SINGLE_MESSAGE_PANEL=1` silently fe… |
 | `AGENTDESK_SOURCE_ZPROFILE` | `src/services/routines/migrated.rs` |  |
@@ -168,7 +168,6 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `CARGO_MANIFEST_DIR` | `src/services/maintenance/jobs/target_sweep.rs` | Order matters: `CARGO_MANIFEST_DIR` is set by cargo during dev/test runs (resolving the actual checkout) but is UNSET in the deployed release binary, so it cle… |
 | `CLAUDE_CONFIG_DIR` | `src/services/claude_tui/hook_output_guard.rs`, `src/services/claude_tui/transcript_tail.rs`, `src/services/discord/mcp_credential_watcher.rs`, `src/services/discord/recovery_engine/manual_rebind_override.rs` | The Claude home this host reads rollout transcripts under, honouring the `CLAUDE_CONFIG_DIR` override. |
 | `CODEX_HOME` | `src/services/codex_tui/rollout_tail/discovery.rs` | The Codex home this host reads rollouts under, honouring the `CODEX_HOME` override. |
-| `COKACDIR_DEBUG` | `src/services/claude.rs` | Global runtime debug flag — set by COKACDIR_DEBUG=1 at startup. |
 | `COMPUTERNAME` | `src/services/tmux_common.rs` |  |
 | `DATABASE_URL` | `src/db/postgres.rs` |  |
 | `GEMINI_CLIENT_ID` | `src/server/mod.rs` | Gemini CLI OAuth app credentials, from env vars or the installed CLI bundle. |
@@ -185,7 +184,6 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `QWEN_CODE_SYSTEM_DEFAULTS_PATH` | `src/cli/doctor/orchestrator.rs`, `src/services/discord/model_catalog.rs` |  |
 | `QWEN_CODE_SYSTEM_SETTINGS_PATH` | `src/cli/doctor/orchestrator.rs`, `src/services/discord/model_catalog.rs` |  |
 | `QWEN_HOME` | `src/cli/doctor/orchestrator.rs`, `src/services/mcp_config.rs`, `src/services/qwen.rs` |  |
-| `REQUIRE_WAKE_WORD` | `src/voice/config.rs` | A live yaml with `wake_words: []` plus `REQUIRE_WAKE_WORD=1` would otherwise make EVERY utterance fail the (impossible-to-satisfy) gate and be silently dropped. |
 | `RUST_LOG` | `src/logging.rs` | The directive every shipped dcserver process adds on top of `RUST_LOG`. |
 | `SHELL` | `src/services/platform/binary_resolver.rs` |  |
 | `TMUX` | `src/services/claude/host_gate.rs`, `src/services/platform/tmux/session_inventory.rs` | The server socket tmux itself connects to with no `-L`/`-S`: `$TMUX`, else `$TMUX_TMPDIR` (or `/tmp`) `/tmux-<uid>/default`. |

@@ -411,12 +411,7 @@ fn codex_resume_help_mentions_hook_trust_bypass(help_text: &str) -> bool {
 
 /// Direct TUI hooks are on unless `AGENTDESK_CODEX_DIRECT_TUI_HOOKS` is "0", "false", "off" or "no".
 pub(crate) fn codex_direct_tui_hook_overrides_enabled() -> bool {
-    std::env::var("AGENTDESK_CODEX_DIRECT_TUI_HOOKS").map_or(true, |value| {
-        !matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "off" | "no"
-        )
-    })
+    crate::utils::env_flag("AGENTDESK_CODEX_DIRECT_TUI_HOOKS", true)
 }
 
 fn codex_config_overrides(options: &CodexLaunchOptions) -> Vec<String> {

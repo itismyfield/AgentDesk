@@ -3,6 +3,8 @@ pub mod async_bridge;
 pub mod auth;
 pub mod dag;
 pub mod discord;
+mod env_flag;
+pub use env_flag::env_flag;
 pub mod format;
 pub mod github_links;
 pub(crate) mod input_validation;
