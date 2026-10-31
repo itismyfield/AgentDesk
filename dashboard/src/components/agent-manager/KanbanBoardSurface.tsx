@@ -1,4 +1,3 @@
-import AutoQueuePanel from "./AutoQueuePanel";
 import KanbanColumn, { type KanbanColumnProps } from "./KanbanColumn";
 import { SurfaceCard, SurfaceEmptyState } from "../common/SurfacePrimitives";
 import { COLUMN_DEFS } from "./kanban-utils";
@@ -9,7 +8,6 @@ interface KanbanBoardSurfaceProps {
 
 export default function KanbanBoardSurface({ ctx }: KanbanBoardSurfaceProps) {
   const {
-    agents,
     assigningIssue,
     backlogIssues,
     cardsByStatus,
@@ -34,7 +32,6 @@ export default function KanbanBoardSurface({ ctx }: KanbanBoardSurfaceProps) {
     recentDoneOpen,
     recentDonePage,
     resolveAgentFromLabels,
-    selectedAgentId,
     selectedRepo,
     setActionError,
     setRecentDoneOpen,
@@ -46,29 +43,6 @@ export default function KanbanBoardSurface({ ctx }: KanbanBoardSurfaceProps) {
 
   return (
     <>
-      {selectedRepo && (() => {
-        // #2128: ready 카드(`status = requested`) 중 assignee + GH 이슈 번호가 있는 것만
-        // 큐 생성 후보로 전달. 그 외 카드는 활성화 카운트에서도 빠진다.
-        const readyCards = cardsByStatus.get("requested") ?? [];
-        const readyEntries = readyCards
-          .filter((card: any) => Boolean(card.assignee_agent_id) && Boolean(card.github_issue_number))
-          .map((card: any) => ({
-            repo: card.github_repo || selectedRepo,
-            agentId: card.assignee_agent_id as string,
-            issueNumber: card.github_issue_number as number,
-          }));
-        return (
-          <AutoQueuePanel
-            tr={tr}
-            locale={locale}
-            agents={agents}
-            selectedRepo={selectedRepo}
-            selectedAgentId={selectedAgentId}
-            readyEntries={readyEntries}
-          />
-        );
-      })()}
-
       <div className="min-w-0">
         <div className="min-w-0 space-y-4">
           {!selectedRepo ? (

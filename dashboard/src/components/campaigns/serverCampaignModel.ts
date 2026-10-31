@@ -87,7 +87,7 @@ export function rejectionText(code: string, tr: Tr): string {
   return REJECTION_LABELS[code] ? tr(...REJECTION_LABELS[code]) : code;
 }
 
-export function displayText(view: View, tr: Tr): string {
+export function displayText(view: Pick<View, "display" | "stop_mode" | "failed_count" | "blocked_count">, tr: Tr): string {
   const parts = [tr(...DISPLAY_LABELS[view.display])];
   if (view.display === "stopping" && view.stop_mode) parts[0] += ` · ${tr(...STOP_MODES[view.stop_mode])}`;
   if (view.failed_count > 0) parts.push(tr(`실패 ${view.failed_count}`, `${view.failed_count} failed`));

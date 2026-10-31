@@ -16,7 +16,7 @@ vi.mock("../../api/campaigns", () => ({
 // Server campaigns have their own tests; here the panel shows legacy campaigns only.
 vi.mock("../../api/serverCampaigns", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../api/serverCampaigns")>()),
-  getServerCampaigns: vi.fn().mockResolvedValue([]),
+  getServerCampaignSummaries: vi.fn().mockResolvedValue([]),
 }));
 vi.mock("@xyflow/react", () => ({
   ReactFlow: ({ nodes, onNodeClick }: { nodes: Array<{ id: string; data: { group?: string } }>; onNodeClick?: (event: unknown, node: unknown) => void }) => (

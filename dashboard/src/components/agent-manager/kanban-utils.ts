@@ -553,3 +553,8 @@ export function labelForStatus(
   const legacy = LEGACY_STATUS_LABELS[String(status)];
   return legacy ? tr(legacy.labelKo, legacy.labelEn) : status;
 }
+
+/** Imported titles can carry newlines or a literal "\n"; a title reads as one line. */
+export function cardTitle(title: string): string {
+  return title.replace(/\\[nrt]|[\r\n\t]+/g, " ").replace(/\s{2,}/g, " ").trim();
+}
