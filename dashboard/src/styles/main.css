@@ -224,13 +224,6 @@ body {
   padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
 }
 
-button,
-input,
-select,
-textarea {
-  font: inherit;
-}
-
 :where(
   a[href],
   button,
@@ -247,6 +240,13 @@ textarea {
 
 @media (max-width: 899px) {
   body { overflow-x: hidden; overflow-y: auto; }
+}
+
+/* iOS Safari zooms into fields under 16px on focus, so phones keep them at 16px. */
+@media (max-width: 899px) {
+  input:not([type="checkbox"]):not([type="radio"]),
+  select,
+  textarea { font-size: 16px; }
 }
 
 #root {
