@@ -1446,6 +1446,7 @@ async fn missing_review_dispatch_candidates_pg(
                JOIN auto_queue_runs r ON r.id = e.run_id
                LEFT JOIN task_dispatches d ON d.id = e.dispatch_id
                WHERE e.kanban_card_id = c.id AND e.status = 'dispatched' AND r.status = 'active'
+                 AND COALESCE(r.review_mode, 'enabled') != 'disabled'
                  AND COALESCE(e.dispatched_at, e.created_at) < NOW() - ($2::BIGINT * INTERVAL '1 second')
                  AND (d.id IS NULL OR (d.status = 'completed' AND d.dispatch_type IN ('implementation', 'rework')))
                  AND (d.id IS NULL OR COALESCE(d.updated_at, d.completed_at, d.created_at) < NOW() - ($2::BIGINT * INTERVAL '1 second'))

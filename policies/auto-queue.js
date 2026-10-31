@@ -33,7 +33,7 @@ var _normalizeAutoQueueLogContext = _autoQueueLogLib.normalizeLogContext;
 var _formatAutoQueueLogContext = _autoQueueLogLib.formatLogContext;
 var autoQueueLog = _autoQueueLogLib.autoQueueLog;
 
-// Reuse the completion transition; the entry stays dispatched until review finishes.
+// Reuse the completion transition; review-enabled work stays dispatched until review finishes.
 function recoverCompletedEntry(entry) {
   if (!entry.result && !entry.has_pr) {
     var failure = agentdesk.autoQueue.recordDispatchFailure(entry.id, configuredAutoQueueMaxEntryRetries(), "tick_delivery_mismatch");
