@@ -14,6 +14,7 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
             10,
         ),
         ("pr", "completed", None, 10),
+        ("review-orphan", "completed", Some("{}"), 10),
         ("disabled", "completed", Some("{}"), 10),
         ("orphan-pr", "completed", None, 10),
         ("empty", "completed", None, 10),
@@ -57,6 +58,12 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
     }
     sqlx::query("UPDATE task_dispatches SET updated_at = NOW() WHERE id = 'dispatch-recover-fresh-dispatch'")
         .execute(&pool).await.unwrap();
+    sqlx::query(
+        "UPDATE kanban_cards SET status = 'review' WHERE id = 'card-recover-review-orphan'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     sqlx::query(
         "UPDATE auto_queue_runs SET review_mode = 'disabled' WHERE id = 'run-recover-disabled'",
     )
@@ -116,7 +123,10 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
             .fire_hook_by_name_blocking("OnTick1min", json!({}))
             .unwrap();
         crate::kanban::drain_hook_side_effects_with_backends(&engine);
-        for name in ["completed", "pr", "orphan-pr", "null-age"] {
+        crate::reconcile::reconcile_completed_queue_review_drift_pg(&pool, &engine)
+            .await
+            .unwrap();
+        for name in ["completed", "pr", "orphan-pr", "null-age", "review-orphan"] {
             let card_id = format!("card-recover-{name}");
             let (status, review_count): (String, i64) = sqlx::query_as(
                 "SELECT status, (SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = c.id AND dispatch_type = 'review')
