@@ -132,6 +132,27 @@ async fn switch(
             return Ok(None);
         }
     }
+    // A local file on its own owner (or unowned home) runs here as before, unless custody queues first.
+    if ctx.has_nonportable_uploads
+        && target == ctx.leader_instance_id
+        && shared
+            .owner
+            .as_ref()
+            .map_or(shared.home.as_deref() == Some(target.as_str()), |o| {
+                o.status == "active" && o.owner_instance_id == target
+            })
+        && !held_any(pool, &id).await?
+    {
+        #[cfg(test)]
+        let keep = !owner_record::cleanup::tests::mutant("same-target-upload-reject");
+        #[cfg(not(test))]
+        let keep = true;
+        if keep {
+            return Ok(Some(IntakeRouterDecision::RanLocal {
+                reason: RanLocalReason::NodeOverrideIsLeader,
+            }));
+        }
+    }
     // A local path cannot cross Macs; the queue's explicit rejection notice applies instead.
     #[cfg(test)]
     let local_upload =
@@ -173,6 +194,11 @@ async fn switch(
         target
     };
     Ok(Some(forwarded(target, pending)))
+}
+
+async fn held_any(pool: &PgPool, id: &OwnerIdentity) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM intake_outbox WHERE provider=$1 AND channel_id=$2 AND routing_state='held')")
+        .bind(id.provider()).bind(id.raw_channel_id()).fetch_one(pool).await
 }
 
 fn forwarded(target: String, pending: i64) -> IntakeRouterDecision {

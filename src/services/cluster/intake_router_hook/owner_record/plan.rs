@@ -93,6 +93,19 @@ pub(crate) async fn read_on_tx(
         .transpose()
 }
 
+/// Lets a test change shared state from another connection right after a stale refresh.
+#[cfg(test)]
+pub(crate) static AFTER_REFRESH: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// The home proof a fallback channel last planned with; `None` marks custody fallback never planned.
+pub(crate) async fn channel_proof(
+    pool: &sqlx::PgPool,
+    id: &OwnerIdentity,
+) -> Result<Option<Value>, sqlx::Error> {
+    sqlx::query_scalar("SELECT routing_plan->'home_proof' FROM intake_outbox WHERE provider=$1 AND channel_id=$2 AND routing_plan IS NOT NULL ORDER BY id DESC LIMIT 1")
+        .bind(id.provider()).bind(id.raw_channel_id()).fetch_optional(pool).await
+}
+
 /// Re-plans every held row from one fresh observation, refreshing rows a /node change or owner
 /// switch left on an old revision; returns the head and its plan when a target is selected.
 pub(crate) async fn replan_held(
@@ -106,7 +119,7 @@ pub(crate) async fn replan_held(
     let Some(observed) = build(&fresh)? else {
         return Ok(None);
     };
-    let held: Vec<(i64, i64, Option<i64>)> = sqlx::query_as("SELECT id,routing_home_revision,routing_wait_owner_generation FROM intake_outbox WHERE provider=$1 AND channel_id=$2 AND routing_state='held' ORDER BY id")
+    let held: Vec<(i64, i64, Option<i64>)> = sqlx::query_as("SELECT d.id,d.routing_home_revision,d.routing_wait_owner_generation FROM intake_outbox d JOIN intake_outbox r ON r.id=d.routing_receipt_id WHERE d.provider=$1 AND d.channel_id=$2 AND d.routing_state='held' AND d.status='unknown' AND d.claim_owner IS NULL AND r.replay_disposition='registered_not_started' ORDER BY d.id")
         .bind(id.provider()).bind(id.raw_channel_id()).fetch_all(&mut *tx).await?;
     let expected = fresh
         .owner
@@ -131,10 +144,26 @@ pub(crate) async fn replan_held(
                 0,
             )
             .await?;
+            #[cfg(test)]
+            let hook = AFTER_REFRESH
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
+            #[cfg(test)]
+            if let Some(sql) = hook {
+                sqlx::query(sqlx::AssertSqlSafe(sql)).execute(pool).await?;
+            }
         }
-        let saved = save_on_tx(&mut tx, id, delivery, &fresh).await?;
+        // A changed observation rolls back every refresh, so the next tick still sees stale rows.
+        let Some(saved) = save_on_tx(&mut tx, id, delivery, &fresh).await? else {
+            #[cfg(test)]
+            if super::cleanup::tests::mutant("replan-partial") {
+                tx.commit().await?;
+            }
+            return Ok(None);
+        };
         if index == 0 {
-            head = saved.map(|plan| (delivery, plan));
+            head = Some((delivery, saved));
         }
     }
     tx.commit().await?;
@@ -177,7 +206,7 @@ async fn release_held(pool: &sqlx::PgPool, id: &OwnerIdentity) -> Result<(), sql
     }
     let mut tx = pool.begin().await?;
     custody::lock(&mut tx, id).await?;
-    let held: Vec<(i64, i64)> = sqlx::query_as("SELECT d.id,d.routing_receipt_id FROM intake_outbox d JOIN intake_outbox r ON r.id=d.routing_receipt_id WHERE d.provider=$1 AND d.channel_id=$2 AND d.routing_state='held' AND d.routing_plan IS NOT NULL AND r.replay_disposition='registered_not_started' ORDER BY d.id FOR UPDATE OF d")
+    let held: Vec<(i64, i64)> = sqlx::query_as("SELECT d.id,d.routing_receipt_id FROM intake_outbox d JOIN intake_outbox r ON r.id=d.routing_receipt_id WHERE d.provider=$1 AND d.channel_id=$2 AND d.routing_state='held' AND r.replay_disposition='registered_not_started' ORDER BY d.id FOR UPDATE OF d")
         .bind(id.provider()).bind(id.raw_channel_id()).fetch_all(&mut *tx).await?;
     let target = format!("channel:{}", id.raw_channel_id());
     for (delivery, receipt) in held {

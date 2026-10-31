@@ -557,9 +557,9 @@ async fn input_fallback_cleanup_heads_never_promote_plan_less_custody_pg() {
     done(&f, second).await;
     cleanup::advance_pending(&f.pool, "claude").await.unwrap();
     assert_eq!(
-        row(&f, bare).await.0,
-        "held",
-        "custody without a saved plan is never promoted by cleanup history"
+        (row(&f, bare).await.0, planned_target(&f, bare).await),
+        ("admitted".into(), Some("mac-a".into())),
+        "custody without a saved plan is planned before cleanup history promotes it"
     );
     f.finish().await;
 }
@@ -657,5 +657,205 @@ async fn input_fallback_same_target_keeps_pg_owner_over_stale_session_pg() {
         .unwrap();
     assert_eq!(owners, 1, "same-owner admission keeps its generation");
     assert_eq!(notices(&f).await, 0, "same-owner input is not a transition");
+    f.finish().await;
+}
+
+async fn planned_target(f: &Fixture, id: i64) -> Option<String> {
+    sqlx::query_scalar("SELECT routing_plan->>'target' FROM intake_outbox WHERE id=$1")
+        .bind(id)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap()
+}
+async fn expire_cleanup(f: &Fixture, generation: i64) {
+    sqlx::query("UPDATE intake_session_owners SET routing_cleanup_deadline=NOW()-INTERVAL '1 second' WHERE generation=$1")
+        .bind(generation).execute(&f.pool).await.unwrap();
+}
+async fn acquire(f: &Fixture, id: &OwnerIdentity, instance: &str) {
+    let mut tx = f.pool.begin().await.unwrap();
+    owner_record::custody::lock(&mut tx, id).await.unwrap();
+    owner_record::acquire_owner_in_tx(&mut tx, id, instance, |_| true)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn input_fallback_switch_resumes_retired_pending_and_announces_once_pg() {
+    for (channel, placed) in [("73369412", true), ("73369413", false)] {
+        let _config = install(active(channel));
+        let f = Fixture::new(channel).await;
+        let id = OwnerIdentity::new("claude", channel);
+        let mut ctx = ctx_for_channel(IntakeRoutingMode::Enforce, channel);
+        ctx.leader_instance_id = "mac-a";
+        // R0 is unstarted on the old owner, either from existing placement or from fallback.
+        let r0 = if placed {
+            acquire(&f, &id, "mac-a").await;
+            crate::db::intake_outbox::insert_pending(
+                &f.pool,
+                &owner_record::output::tests::payload(channel, "7336941201", "mac-a"),
+                1,
+                None,
+            )
+            .await
+            .unwrap()
+        } else {
+            forwarded(&f, &ctx).await
+        };
+        let before: (String, Option<Vec<String>>) = sqlx::query_as(
+            "SELECT user_text,replay_source_message_ids FROM intake_outbox WHERE id=$1",
+        )
+        .bind(r0)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        let base = notices(&f).await;
+        offline(&f, "mac-a").await;
+        ctx.leader_instance_id = "mac-b";
+        ctx.user_msg_id = "10001";
+        ctx.user_text = "switch input";
+        let r1 = forwarded(&f, &ctx).await;
+        expire_cleanup(&f, 0).await;
+        cleanup::advance_pending(&f.pool, "claude").await.unwrap();
+        assert_eq!(
+            row(&f, r0).await,
+            ("admitted".into(), "mac-b".into(), Some(1)),
+            "{channel}: the retired input resumes first without another user input"
+        );
+        assert_eq!(row(&f, r1).await.0, "held");
+        let after: (String, Option<Vec<String>>) = sqlx::query_as(
+            "SELECT user_text,replay_source_message_ids FROM intake_outbox WHERE id=$1",
+        )
+        .bind(r0)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            after, before,
+            "{channel}: body and sources survive retirement"
+        );
+        done(&f, r0).await;
+        cleanup::advance_pending(&f.pool, "claude").await.unwrap();
+        assert_eq!(
+            row(&f, r1).await,
+            ("admitted".into(), "mac-b".into(), Some(1))
+        );
+        assert_eq!(
+            notices(&f).await - base,
+            1,
+            "{channel}: the move to mac-b is announced exactly once"
+        );
+        f.finish().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn input_fallback_replan_rolls_back_refresh_when_observation_moves_pg() {
+    const CHANNEL: &str = "73369414";
+    let _config = install(active(CHANNEL));
+    let f = Fixture::new(CHANNEL).await;
+    let id = OwnerIdentity::new("claude", CHANNEL);
+    offline(&f, "mac-a").await;
+    let open = open_route(&f, CHANNEL, "7336941401").await;
+    let mut ctx = ctx_for_channel(IntakeRoutingMode::Enforce, CHANNEL);
+    ctx.leader_instance_id = "mac-b";
+    let held = forwarded(&f, &ctx).await;
+    f.home(&id, Some("mac-a")).await;
+    *owner_record::plan::AFTER_REFRESH.lock().unwrap() =
+        Some("UPDATE worker_nodes SET last_heartbeat_at=NOW() WHERE instance_id='mac-a'".into());
+    done(&f, open).await;
+    cleanup::advance_pending(&f.pool, "claude").await.unwrap();
+    assert_eq!(row(&f, held).await.0, "held");
+    cleanup::advance_pending(&f.pool, "claude").await.unwrap();
+    assert_eq!(
+        (row(&f, held).await, planned_target(&f, held).await),
+        (
+            ("admitted".into(), "mac-a".into(), Some(0)),
+            Some("mac-a".into())
+        ),
+        "a rejected re-plan stays stale, so the next tick plans the recovered home"
+    );
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn input_fallback_cleanup_advance_plans_head_before_promotion_pg() {
+    const CHANNEL: &str = "73369415";
+    let _config = install(active(CHANNEL));
+    let f = Fixture::new(CHANNEL).await;
+    let id = OwnerIdentity::new("claude", CHANNEL);
+    offline(&f, "mac-a").await;
+    let mut ctx = ctx_for_channel(IntakeRoutingMode::Enforce, CHANNEL);
+    ctx.leader_instance_id = "mac-b";
+    let first = forwarded(&f, &ctx).await;
+    done(&f, first).await;
+    sqlx::query("UPDATE worker_nodes SET last_heartbeat_at=NOW() WHERE instance_id='mac-a'")
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    ctx.user_msg_id = "10000";
+    let switch = forwarded(&f, &ctx).await;
+    let receipt: i64 =
+        sqlx::query_scalar("SELECT routing_receipt_id FROM intake_outbox WHERE id=$1")
+            .bind(switch)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    let mut tx = f.pool.begin().await.unwrap();
+    owner_record::custody::lock(&mut tx, &id).await.unwrap();
+    crate::db::replay_disposition::write::withhold_owner_loss_on_tx(&mut tx, receipt)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let payload = owner_record::output::tests::payload(CHANNEL, "7336941502", "mac-a");
+    let bare = owner_record::custody::stage(
+        &f.pool,
+        owner_record::custody::StageRequest {
+            payload: &payload,
+            home_revision: 0,
+            wait_generation: Some(0),
+            grace_seconds: 0,
+        },
+    )
+    .await
+    .unwrap();
+    expire_cleanup(&f, 0).await;
+    cleanup::advance_pending(&f.pool, "claude").await.unwrap();
+    assert_eq!(
+        (row(&f, bare).await, planned_target(&f, bare).await),
+        (
+            ("admitted".into(), "mac-a".into(), Some(1)),
+            Some("mac-a".into())
+        ),
+        "the cleanup advance plans a plan-less head before it switches the owner"
+    );
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn input_fallback_same_target_local_upload_runs_on_its_owner_pg() {
+    const CHANNEL: &str = "73369416";
+    let _config = install(active(CHANNEL));
+    let f = Fixture::new(CHANNEL).await;
+    let id = OwnerIdentity::new("claude", CHANNEL);
+    acquire(&f, &id, "mac-a").await;
+    let mut ctx = ctx_for_channel(IntakeRoutingMode::Enforce, CHANNEL);
+    ctx.leader_instance_id = "mac-a";
+    ctx.has_nonportable_uploads = true;
+    let decision = try_route_intake(&f.pool, &ctx).await;
+    assert!(
+        matches!(
+            &decision,
+            IntakeRouterDecision::RanLocal {
+                reason: RanLocalReason::NodeOverrideIsLeader
+            }
+        ),
+        "a local file on its own owner runs locally: {decision:?}"
+    );
+    assert_eq!(
+        routing_effects(&f.pool).await,
+        (0, 1, 0, 0),
+        "no custody, the same single owner, no notice"
+    );
     f.finish().await;
 }
