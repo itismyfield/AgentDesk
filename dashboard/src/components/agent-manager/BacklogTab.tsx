@@ -6,8 +6,9 @@ import {
   SurfaceCard,
   SurfaceEmptyState,
 } from "../common/SurfacePrimitives";
-import AgentAvatar from "../AgentAvatar";
+import AgentPersona from "../AgentPersona";
 import {
+  cardTitle,
   coerceTimestampMs,
   formatAgeLabel,
   getCardStateEnteredAt,
@@ -170,8 +171,8 @@ export default function BacklogTab({
   const [providerFilter, setProviderFilter] = useState<ProviderFilter>("all");
   const [severityFilter, setSeverityFilter] = useState<SeverityFilter>("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
-  const [sortKey, setSortKey] = useState<BacklogSortKey>("age");
-  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+  const [sortKey, setSortKey] = useState<BacklogSortKey>("severity");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
   const [selectedCard, setSelectedCard] = useState<KanbanCard | null>(null);
 
   const providerOptions = useMemo(() => {
@@ -407,14 +408,14 @@ export default function BacklogTab({
                     </div>
                     <div className="min-w-0">
                       <div className="truncate text-sm font-semibold" style={{ color: "var(--th-text-heading)" }}>
-                        {card.title}
+                        {cardTitle(card.title)}
                       </div>
                     </div>
                     <div className="truncate text-xs font-mono" style={{ color: "var(--th-text-muted)" }}>
                       {card.github_repo ?? tr("레포 없음", "No repo")}
                     </div>
                     <div className="flex min-w-0 items-center gap-2">
-                      <AgentAvatar agent={assignee ?? undefined} size={28} rounded="xl" />
+                      <AgentPersona agent={assignee ?? undefined} size={28} />
                       <div className="min-w-0">
                         <div className="truncate text-sm" style={{ color: "var(--th-text-primary)" }}>
                           {assignee ? localeName(locale, assignee) : tr("미할당", "Unassigned")}
@@ -472,7 +473,7 @@ export default function BacklogTab({
                         {card.github_issue_number ? `#${card.github_issue_number}` : card.id.slice(0, 8)}
                       </div>
                       <div className="mt-1 line-clamp-2 text-sm font-semibold" style={{ color: "var(--th-text-heading)" }}>
-                        {card.title}
+                        {cardTitle(card.title)}
                       </div>
                     </div>
                     <span
@@ -488,7 +489,7 @@ export default function BacklogTab({
                   </div>
 
                   <div className="flex items-center gap-2">
-                    <AgentAvatar agent={assignee ?? undefined} size={30} rounded="xl" />
+                    <AgentPersona agent={assignee ?? undefined} size={30} />
                     <div className="min-w-0">
                       <div className="truncate text-sm" style={{ color: "var(--th-text-primary)" }}>
                         {assignee ? localeName(locale, assignee) : tr("미할당", "Unassigned")}

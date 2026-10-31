@@ -7,11 +7,12 @@ import {
   SurfaceActionButton,
   SurfaceCard,
 } from "../common/SurfacePrimitives";
-import AgentAvatar from "../AgentAvatar";
+import AgentPersona from "../AgentPersona";
 import {
   formatAgeLabel,
   formatIso,
   buildGitHubIssueUrl,
+  cardTitle,
   getCardStateEnteredAt,
   labelForStatus,
   parseCardMetadata,
@@ -89,7 +90,7 @@ export default function BacklogCardDrawer({
   ];
 
   return (
-    <Drawer open onClose={onClose} title={card.title} width="min(820px, 100vw)" closeButtonClassName="min-h-11 min-w-11">
+    <Drawer open onClose={onClose} title={cardTitle(card.title)} width="min(820px, 100vw)" closeButtonClassName="min-h-11 min-w-11">
       <div data-testid="agents-backlog-drawer" className="min-w-0 space-y-5 pb-4">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
@@ -225,7 +226,7 @@ export default function BacklogCardDrawer({
                   </div>
                   {item.agent ? (
                     <div className="ml-auto flex min-w-0 items-center gap-2">
-                      <AgentAvatar agent={item.agent} size={28} rounded="xl" />
+                      <AgentPersona agent={item.agent} size={28} />
                       <div className="min-w-0">
                         <div className="truncate text-sm" style={{ color: "var(--th-text-primary)" }}>
                           {localeName(locale, item.agent)}
