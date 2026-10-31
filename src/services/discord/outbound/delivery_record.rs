@@ -912,7 +912,7 @@ pub(in crate::services::discord) fn record_recovery_terminal_delivery(
 mod relay_state_contract_refs {
     #[test]
     fn contract_symbols_exist() {
-        use super::range_committed_after_edit_failure as _;
+        let _ = super::range_committed_after_edit_failure;
     }
 }
 
