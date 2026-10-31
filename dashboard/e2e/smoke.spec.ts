@@ -21,7 +21,7 @@ const LEGACY_REDIRECTS = [
 // Mirrors HOME_DEFAULT_WIDGETS in src/app/HomeOverviewConfig.ts.
 const DEFAULT_HOME_WIDGET_ORDER = ["working", "attention", "m_tokens", "m_cost", "m_rate_limit", "routines"];
 const CUSTOM_HOME_WIDGET_ORDER = [...DEFAULT_HOME_WIDGET_ORDER].reverse();
-const DRAGGED_HOME_WIDGET_ORDER = ["attention", "working", "m_tokens", "m_cost", "m_rate_limit", "routines"];
+const DRAGGED_HOME_WIDGET_ORDER = ["routines", "working", "attention", "m_tokens", "m_cost", "m_rate_limit"];
 
 async function openAppearancePanel(page: Page, isMobile: boolean) {
   if (isMobile) {
@@ -1811,18 +1811,21 @@ test.describe("Dashboard smoke tests", () => {
 
     await page.goto("/home");
 
-    await expect(page.getByTestId("home-widget-attention")).toBeVisible({ timeout: 15000 });
+    await expect(page.getByTestId("home-widget-routines")).toBeVisible({ timeout: 15000 });
     await page.getByTestId("home-edit-toggle").click();
 
-    const sourceBox = await page.getByTestId("home-drag-handle-attention").boundingBox();
+    const sourceBox = await page.getByTestId("home-drag-handle-routines").boundingBox();
+    const sourceWidgetBox = await page.getByTestId("home-widget-routines").boundingBox();
     const targetBox = await page.getByTestId("home-widget-working").boundingBox();
     expect(sourceBox).not.toBeNull();
+    expect(sourceWidgetBox).not.toBeNull();
     expect(targetBox).not.toBeNull();
 
+    // closestCenter compares the dragged widget's centre, so aim that centre (not the handle) at the target.
     const sourceX = sourceBox!.x + sourceBox!.width / 2;
     const sourceY = sourceBox!.y + sourceBox!.height / 2;
-    const targetX = targetBox!.x + targetBox!.width / 4;
-    const targetY = targetBox!.y + targetBox!.height / 2;
+    const targetX = targetBox!.x + targetBox!.width / 2 + (sourceX - (sourceWidgetBox!.x + sourceWidgetBox!.width / 2));
+    const targetY = targetBox!.y + targetBox!.height / 2 + (sourceY - (sourceWidgetBox!.y + sourceWidgetBox!.height / 2));
 
     await page.mouse.move(sourceX, sourceY);
     await page.mouse.down();
@@ -2091,7 +2094,7 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("agents-tab-button-agents")).toHaveAttribute("aria-selected", "true");
     await expect(page.getByTestId("agents-tab")).toBeVisible();
     await expect(page.getByTestId("agents-view-grid")).toBeVisible();
-    await expect(page.getByRole("img", { name: /Ada Dashboard/ })).toBeVisible();
+    await expect(page.getByRole("img", { name: /아다 대시보드|Ada Dashboard/ }).first()).toBeVisible();
 
     await page.getByRole("button", { name: /리스트|List/ }).click();
     await expect(page.getByTestId("agents-view-list")).toBeVisible();

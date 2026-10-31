@@ -387,7 +387,7 @@ async function mockShell(page: Page) {
   await page.route(/\/api\/kanban-cards(?:\?.*)?$/, (route) => route.fulfill({ json: { cards: [] } }));
   await page.route(/\/api\/kanban-repos$/, (route) => route.fulfill({ json: { repos: [] } }));
   await page.route(/\/api\/round-table-meetings(?:\?.*)?$/, (route) => route.fulfill({ json: { meetings: [] } }));
-  await page.route(/\/api\/health$/, (route) => route.fulfill({ json: HEALTH }));
+  await page.route(/\/api\/health(?:\/detail)?$/, (route) => route.fulfill({ json: HEALTH }));
 }
 
 async function mockSettings(page: Page, overrides: { onboarding?: unknown } = {}) {
