@@ -14,6 +14,7 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
             10,
         ),
         ("pr", "completed", None, 10),
+        ("disabled", "completed", Some("{}"), 10),
         ("orphan-pr", "completed", None, 10),
         ("empty", "completed", None, 10),
         ("failed", "failed", None, 10),
@@ -56,6 +57,12 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
     }
     sqlx::query("UPDATE task_dispatches SET updated_at = NOW() WHERE id = 'dispatch-recover-fresh-dispatch'")
         .execute(&pool).await.unwrap();
+    sqlx::query(
+        "UPDATE auto_queue_runs SET review_mode = 'disabled' WHERE id = 'run-recover-disabled'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     sqlx::query(
         "UPDATE auto_queue_entries SET retry_count = 2 WHERE id = 'entry-recover-exhausted'",
     )
@@ -154,6 +161,15 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
         .await
         .unwrap();
         assert_eq!(exhausted, "failed", "existing retry limit is preserved");
+        let disabled: (String, i64) = sqlx::query_as(
+            "SELECT status, (SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = e.kanban_card_id AND dispatch_type = 'review')
+             FROM auto_queue_entries e WHERE id = 'entry-recover-disabled'"
+        ).fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            disabled,
+            ("done".to_string(), 0),
+            "disabled reviews retain normal completion policy"
+        );
         if pass == 0 {
             for name in ["empty", "failed", "cancelled"] {
                 let status: String =

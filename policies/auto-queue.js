@@ -532,7 +532,7 @@ var autoQueue = {
       "WHERE e.status = 'dispatched' AND r.status = 'active' " +
       "AND COALESCE(e.dispatched_at, e.created_at) < datetime('now', '-" + staleDispatchedGraceMinutes + " minutes') " +
       "AND ((" + staleDispatchedConditions + ") OR (td.status = 'completed' AND td.dispatch_type IN ('implementation', 'rework'))) " +
-      "AND (td.id IS NULL OR td.updated_at < datetime('now', '-" + staleDispatchedGraceMinutes + " minutes')) " +
+      "AND (td.id IS NULL OR COALESCE(td.updated_at, td.completed_at, td.created_at) < datetime('now', '-" + staleDispatchedGraceMinutes + " minutes')) " +
       "AND NOT EXISTS (SELECT 1 FROM task_dispatches live WHERE live.kanban_card_id = e.kanban_card_id AND live.status IN ('pending', 'dispatched')) " +
       "AND NOT EXISTS (SELECT 1 FROM sessions s WHERE " +
       "(s.active_dispatch_id = e.dispatch_id OR s.active_dispatch_id IN (SELECT id FROM task_dispatches WHERE kanban_card_id = e.kanban_card_id)) " +
