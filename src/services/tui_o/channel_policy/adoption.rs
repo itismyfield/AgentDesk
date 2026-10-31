@@ -66,9 +66,8 @@ pub(crate) struct TurnMark {
     pub(crate) order: u64,
 }
 
-/// A late reservation's floors, fixed by its first host's first read: the deferred handoff's
-/// `baseline` (0 unless that read was clean), and `takeover_after` with the Legacy sends read just
-/// before it, so only a later bind with no Legacy body since may be taken over.
+/// A late reservation's floors from its first read: the deferred `baseline` (0 unless clean), and
+/// `takeover_after` with the Legacy sends read before it, the floor a takeover judges from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LateBoundary {
     pub(crate) baseline: u64,

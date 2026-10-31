@@ -227,9 +227,8 @@ fn latest_progress<I: HostIo>(waiting: &Waiting<'_, I>) -> Option<Progress> {
     Progress::read(waiting, current.as_ref())
 }
 
-/// Retries until the channel commits or is left to Legacy for good; a late reservation whose source
-/// moves rebases instead. `refused` is the last refusal and `seq` the binding log entry its read
-/// ended at.
+/// Retries until the channel commits or is left to Legacy; a late reservation whose source moves
+/// rebases. `refused` is the last refusal and `seq` the log entry its read ended at.
 pub(super) async fn retry<I: HostIo>(
     waiting: Waiting<'_, I>,
     refused: Refused,

@@ -70,9 +70,8 @@ pub(super) fn baseline(events: &[BindingEvent], boundary: u64) -> Option<(Source
     bound.map(|(source, seq)| (source.clone(), seq))
 }
 
-/// The reservation's boundary: the end of its first read when this process's Legacy had started
-/// no body and held no custody for the channel, else 0 so the whole log is the baseline. A
-/// takeover only judges binds after that read, against `sends` as read before it.
+/// The reservation's boundary: its first read's end if Legacy had sent no body and held no custody,
+/// else 0 so the whole log is the baseline; a takeover only judges binds after that read.
 fn reservation_boundary<I: HostIo>(
     io: &I,
     (channel, provider): (u64, ShadowProvider),

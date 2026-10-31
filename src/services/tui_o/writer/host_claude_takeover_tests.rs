@@ -1,6 +1,5 @@
-//! A store-less Claude channel reserved for late adoption, taken over through the real host: a
-//! transcript bound after the floor commits before its first output, and a source that moves
-//! while the deferred handoff waits rebases only on proof that Legacy delivered the old one.
+//! A reserved store-less Claude channel through the real host: a transcript bound after the floor
+//! commits before its first output; a moved source rebases on proof the old one was delivered.
 
 use super::super::late_host::Legacy;
 use super::*;
@@ -240,9 +239,8 @@ async fn late_claude_takeover_skips_when_legacy_sent_since_baseline() {
     );
 }
 
-/// Old transcript delivered and sampled; a new Discord turn's claim makes Legacy busy, the tmux
-/// generation turns over (current frontier 0) and a cleared transcript binds: O takes it while
-/// busy, by the sample alone.
+/// Old transcript delivered and sampled; a new turn makes Legacy busy, the generation's frontier
+/// drops to 0 and a cleared transcript binds: O takes it while busy, by the sample alone.
 #[tokio::test(start_paused = true)]
 async fn late_claude_rotation_rebases_with_new_discord_turn_busy() {
     const CH: u64 = 63_761_903;
