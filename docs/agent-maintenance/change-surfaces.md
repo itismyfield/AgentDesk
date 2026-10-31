@@ -1,5 +1,7 @@
 # Change Surfaces
 
+<!-- doc-path-refs: removed src/services/discord/router/message_handler/voice_announcement_scope.rs src/services/discord/router/message_handler/voice_announcement_route.rs src/services/discord/runtime_bootstrap/voice.rs src/voice/turn_link.rs -->
+
 > Source: [`docs/agent-maintenance/index.md`](index.md). For every "where do I
 > add this?" question, consult this page first. The giant-file list is the
 > auto-generated inventory in `docs/generated/module-inventory.md` and the
@@ -1713,16 +1715,6 @@ test or turning it `#[ignore]` needs an exact ID and kind row in
     `audit_maintainability_config.toml`; the root is no longer a prod giant and
     was removed from `giant_file_registry.toml`; #3038 S5 locked the final
     root ratchet at 274 production lines).
-  - `src/services/discord/voice_barge_in.rs` was decomposed in #4713: the root retains the public facade, shared runtime state, and test harness, while `runtime_lifecycle.rs`, `turn_dispatch.rs`, `utterance_pipeline.rs`, and `utility.rs` own cohesive method/helper clusters; every production module is below the giant threshold.
-    voice STT/TTS, lobby routing, progress mirroring, and barge-in orchestration surface.
-  - `src/voice/receiver.rs` was decomposed in #4713: the root retains the
-    receiver state machine and timers, while `receiver/recording.rs` owns WAV
-    recording lifecycle and cleanup helpers. Both modules remain below the
-    production giant threshold.
-  - `src/voice/announce_meta.rs` was decomposed in #4713: the root retains the
-    process-local metadata store and `announce_meta/durable.rs` owns the durable
-    PostgreSQL announcement and handoff persistence helpers. Both modules remain
-    below the production giant threshold.
   - `src/services/discord/{discord_config_audit.rs, router/intake_gate.rs}`
     (both 1000+ production lines).
 - active_callsite_coverage: n/a.

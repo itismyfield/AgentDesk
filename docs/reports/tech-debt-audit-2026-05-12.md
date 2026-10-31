@@ -2,6 +2,7 @@
 
 <!-- doc-path-refs: removed src/server/routes/routes_tests.rs src/integration_tests.rs src/services/onboarding.rs src/server/auth.rs policies/merge-automation.js -->
 <!-- doc-path-refs: proposed watchdog_prealert.rs tmux_stall_detection.rs envvars.rs tmux_output_parser.rs migrations/POLICY.md -->
+<!-- doc-path-refs: removed src/voice src/voice/commands.rs src/voice/metrics.rs src/voice/receiver.rs src/voice/stt.rs src/voice/tts/edge.rs src/voice/tts/mod.rs src/services/discord/voice_barge_in/runtime_lifecycle.rs src/services/discord/voice_barge_in/stt.rs -->
 
 > 2026-10-25 주: 2026-05-12 시점 기록이다. 그 뒤 삭제된 파일과 제안만 되고 만들어지지 않은 파일은 이 문서 머리의 `doc-path-refs` 주석에 적었다.
 

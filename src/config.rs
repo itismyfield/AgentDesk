@@ -1738,8 +1738,8 @@ mod runtime_hook_registry_config_tests {
             &path,
             concat!(
                 "server: {}\nvoice: {enabled: true, lobby_channel_id: '1'}\n",
-                "agents:\n  - id: a\n    name: A\n    wake_word: w\n    voice_enabled: false\n",
-                "    sensitivity_mode: conservative\n    voice: {channel_id: '2'}\n",
+                "agents:\n  - id: a\n    name: A\n    aliases: [x]\n    wake_word: w\n",
+                "    voice_enabled: false\n    sensitivity_mode: conservative\n    voice: {channel_id: '2'}\n",
                 "    channels:\n      claude: {id: '41'}\n",
             ),
         )
