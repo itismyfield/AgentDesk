@@ -1192,9 +1192,8 @@ async fn reset_broken_auto_queue_entries_pg(pool: &PgPool) -> Result<usize> {
              )
            )";
     #[cfg(test)]
-    let mutated_sql = dispatch_delivery_reconcile_tests::mutate_queue_recovery_sql(sql);
-    #[cfg(test)]
-    let sql = mutated_sql.as_str();
+    let sql =
+        sqlx::AssertSqlSafe(dispatch_delivery_reconcile_tests::mutate_queue_recovery_sql(sql));
     let reset = sqlx::query(sql).execute(pool).await?.rows_affected() as usize;
 
     Ok(terminalized + reset)
@@ -1483,9 +1482,8 @@ async fn missing_review_dispatch_candidates_pg(
                  AND td.status IN ('pending', 'dispatched')
            )";
     #[cfg(test)]
-    let mutated_sql = dispatch_delivery_reconcile_tests::mutate_queue_recovery_sql(sql);
-    #[cfg(test)]
-    let sql = mutated_sql.as_str();
+    let sql =
+        sqlx::AssertSqlSafe(dispatch_delivery_reconcile_tests::mutate_queue_recovery_sql(sql));
     sqlx::query_as(sql)
         .bind(only_dispatched_queue)
         .bind(AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_GRACE.as_secs() as i64)

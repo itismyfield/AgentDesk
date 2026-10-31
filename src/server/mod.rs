@@ -717,14 +717,16 @@ async fn fire_tick_hook_by_name_with_pg(
     }
     crate::kanban::drain_hook_side_effects_with_backends(engine);
     #[cfg(test)]
-    if hook_name == "OnTick1min" && recovery_after_timeout {
+    if hook_name == "OnTick1min"
+        && recovery_after_timeout
+        && let Some(pool) = pg_pool.or_else(|| engine.pg_pool())
+    {
         eprintln!("MUTANT_APPLIED=timeout_first");
-        crate::reconcile::reconcile_missing_queue_review_dispatches_pg(
-            pg_pool.or_else(|| engine.pg_pool()).unwrap(),
-            engine,
-        )
-        .await
-        .unwrap();
+        if let Err(error) =
+            crate::reconcile::reconcile_missing_queue_review_dispatches_pg(pool, engine).await
+        {
+            tracing::warn!("[policy-tick] missing queue review dispatch reconcile failed: {error}");
+        }
     }
 }
 
