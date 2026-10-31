@@ -44,8 +44,8 @@ function recoverCompletedEntry(entry) {
   if (!card) return null;
   var cfg = agentdesk.pipeline.resolveForCard(card.id);
   if (agentdesk.pipeline.isTerminal(card.status, cfg) || entry.review_mode === "disabled") {
-    agentdesk.autoQueue.updateEntryStatus(entry.id, "done", "tick_delivery_mismatch");
-    return "done";
+    var terminal = agentdesk.autoQueue.updateEntryStatus(entry.id, "done", "tick_delivery_mismatch");
+    return terminal.changed ? "done" : null;
   }
   var inProgress = agentdesk.pipeline.nextGatedTarget(agentdesk.pipeline.kickoffState(cfg), cfg);
   if (card.status !== inProgress) return null;

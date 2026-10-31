@@ -1295,4 +1295,5 @@ async fn completed_queue_review_drift_reconcile_promotes_only_stale_done_entries
     pg_db.drop().await;
 }
 
+#[path = "services/auto_queue/dispatched_entry_recovery_pg_tests.rs"]
 mod dispatched_entry_recovery_pg_tests;
