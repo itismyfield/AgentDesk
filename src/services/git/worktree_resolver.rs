@@ -288,8 +288,8 @@ pub async fn find_worktree_for_issue_async(
     off_worker(move || find_worktree_for_issue(&repo_dir, issue_number)).await
 }
 
-/// [`ensure_worktree_for_issue`] for async callers; `git worktree add` can block until timeout.
-/// Dropping the future (e.g. a policy deadline) stops the blocking task before it creates a worktree.
+/// Creates an issue worktree on the blocking pool; `git worktree add` can block until timeout.
+/// Cancellation during the remote refresh stops the blocking task before it creates a worktree.
 pub async fn ensure_worktree_for_issue_async(
     repo_dir: String,
     issue_number: i64,
