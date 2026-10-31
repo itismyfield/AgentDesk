@@ -774,6 +774,7 @@ src/
 │   │   ├── dispatch_assignment_command.rs
 │   │   ├── dispatch_command.rs
 │   │   ├── dispatch_query.rs
+│   │   ├── dispatched_entry_recovery_pg_tests.rs
 │   │   ├── fsm.rs
 │   │   ├── lifecycle_routes.rs
 │   │   ├── order_routes.rs
