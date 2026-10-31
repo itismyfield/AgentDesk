@@ -50,7 +50,7 @@ impl MemoryBackend {
 /// 2. Memento runtime config is active → Memento.
 /// 3. Otherwise → Local.
 pub(crate) fn detect_memory_backend() -> MemoryBackend {
-    if env_flag_true("ADK_FORCE_LOCAL_MEMORY") {
+    if crate::utils::env_flag("ADK_FORCE_LOCAL_MEMORY", false) {
         return MemoryBackend::Local;
     }
 
@@ -61,13 +61,6 @@ pub(crate) fn detect_memory_backend() -> MemoryBackend {
     } else {
         MemoryBackend::Local
     }
-}
-
-fn env_flag_true(name: &str) -> bool {
-    std::env::var(name)
-        .ok()
-        .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
-        .unwrap_or(false)
 }
 
 // ── Request / response bodies ────────────────────────────────────

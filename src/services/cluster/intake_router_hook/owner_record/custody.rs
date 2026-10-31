@@ -188,6 +188,20 @@ pub(crate) async fn promote(
     if readiness == SwitchReadiness::Wait && closing {
         return Ok(false);
     }
+    // A planned switch proves its home before it may retire, transfer or admit anything.
+    let plan = super::plan::read_on_tx(&mut tx, &id, delivery).await?;
+    if let Some(plan) = plan.as_ref() {
+        #[cfg(test)]
+        let unchecked = super::cleanup::tests::mutant("plan-proof");
+        #[cfg(not(test))]
+        let unchecked = false;
+        if plan.target != target
+            || (!unchecked
+                && !super::snapshot::proof_holds_on_tx(&mut tx, &id, &plan.home_proof).await?)
+        {
+            return Ok(false);
+        }
+    }
     let prior_generation = owner.as_ref().map(|owner| owner.generation);
     if readiness != SwitchReadiness::Wait && owner.is_some() {
         retire_open_on_tx(&mut tx, &id, target).await?;
@@ -243,6 +257,16 @@ pub(crate) async fn promote(
         .bind(generation)
         .execute(&mut *tx)
         .await?;
+    // Retired inputs that now head the queue are re-planned by advance_pending before promotion.
+    if let Some(plan) = plan.as_ref() {
+        #[cfg(test)]
+        let late = super::cleanup::tests::mutant("notice-at-admission");
+        #[cfg(not(test))]
+        let late = false;
+        if !late {
+            announce_on_tx(&mut tx, &id, plan, target, prior_generation, generation).await?;
+        }
+    }
     let head:Option<i64> = sqlx::query_scalar("SELECT id FROM intake_outbox WHERE provider=$1 AND channel_id=$2 AND routing_state='held' ORDER BY id LIMIT 1")
         .bind(id.provider()).bind(id.raw_channel_id()).fetch_optional(&mut *tx).await?;
     if head != Some(delivery) {
@@ -260,44 +284,55 @@ pub(crate) async fn promote(
     if admitted.rows_affected() != 1 {
         return Ok(false);
     }
-    if let Some(plan) = super::plan::read_on_tx(&mut tx, &id, delivery).await? {
-        #[cfg(test)]
-        let unchecked = super::cleanup::tests::mutant("plan-proof");
-        #[cfg(not(test))]
-        let unchecked = false;
-        if plan.target != target
-            || (!unchecked
-                && !super::snapshot::proof_holds_on_tx(&mut tx, &id, &plan.home_proof).await?)
-        {
-            return Ok(false);
-        }
-        // An earlier event's home tells a /node change apart from a home that came back.
-        let previous_home: Option<String> = sqlx::query_scalar("SELECT COALESCE(routing_notice->>'home',owner_instance_id) FROM intake_session_owners WHERE provider=$1 AND raw_channel_id=$2 AND generation<$3 ORDER BY generation DESC LIMIT 1")
-            .bind(id.provider()).bind(id.raw_channel_id()).bind(generation).fetch_optional(&mut *tx).await?;
-        #[cfg(test)]
-        let skip = super::cleanup::tests::mutant("notice-skip");
-        #[cfg(not(test))]
-        let skip = false;
-        if !skip {
-            super::event::reserve_on_tx(
-                &mut tx,
-                &id,
-                generation,
-                super::event::Description {
-                    home: &plan.home,
-                    home_label: &plan.home,
-                    target_label: target,
-                    new_session: false,
-                    home_changed: target == plan.home
-                        && previous_home.is_some_and(|home| home != plan.home),
-                    bot: super::event::BOT,
-                },
-            )
-            .await?;
-        }
+    #[cfg(test)]
+    if let Some(plan) = plan.as_ref()
+        && super::cleanup::tests::mutant("notice-at-admission")
+    {
+        announce_on_tx(&mut tx, &id, plan, target, prior_generation, generation).await?;
     }
     tx.commit().await?;
     Ok(true)
+}
+
+/// The routing notice rides the owner change itself, so an early commit cannot drop it.
+async fn announce_on_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &OwnerIdentity,
+    plan: &super::plan::Plan,
+    target: &str,
+    prior_generation: Option<i64>,
+    generation: i64,
+) -> Result<(), sqlx::Error> {
+    #[cfg(test)]
+    let skip = super::cleanup::tests::mutant("notice-skip");
+    #[cfg(not(test))]
+    let skip = false;
+    // Input admitted to the owner that already held the channel is not a transition.
+    let unchanged = prior_generation == Some(generation);
+    #[cfg(test)]
+    let unchanged = unchanged && !super::cleanup::tests::mutant("notice-same-owner");
+    if skip || unchanged {
+        return Ok(());
+    }
+    // An earlier event's home tells a /node change apart from a home that came back.
+    let previous_home: Option<String> = sqlx::query_scalar("SELECT COALESCE(routing_notice->>'home',owner_instance_id) FROM intake_session_owners WHERE provider=$1 AND raw_channel_id=$2 AND generation<$3 ORDER BY generation DESC LIMIT 1")
+        .bind(id.provider()).bind(id.raw_channel_id()).bind(generation).fetch_optional(&mut **tx).await?;
+    super::event::reserve_on_tx(
+        tx,
+        id,
+        generation,
+        super::event::Description {
+            home: &plan.home,
+            home_label: &plan.home,
+            target_label: target,
+            new_session: false,
+            home_changed: target == plan.home
+                && previous_home.is_some_and(|home| home != plan.home),
+            bot: super::event::BOT,
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 #[derive(sqlx::FromRow)]

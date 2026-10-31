@@ -11,6 +11,8 @@ pub(crate) fn legacy_config_file_path(root: &Path) -> PathBuf {
     root.join("agentdesk.yaml")
 }
 
+/// `$AGENTDESK_CONFIG` selects an explicit config path before the normal root search.
+/// An unset or empty value leaves the normal search in effect.
 pub(super) fn explicit_env() -> Option<PathBuf> {
     std::env::var_os("AGENTDESK_CONFIG")
         .filter(|value| !value.is_empty())

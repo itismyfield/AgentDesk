@@ -57,9 +57,7 @@ static TEST_ALLOWED_CHANNELS_OVERRIDE: LazyLock<Mutex<Option<HashSet<u64>>>> =
     LazyLock::new(|| Mutex::new(None));
 
 fn enabled_from_env() -> bool {
-    std::env::var(ENABLE_ENV)
-        .ok()
-        .is_some_and(|value| value.trim() == "1")
+    crate::utils::env_flag(ENABLE_ENV, false)
 }
 
 fn allowed_channels_from_env() -> HashSet<u64> {

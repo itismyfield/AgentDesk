@@ -172,11 +172,21 @@ pub(crate) async fn advance(pool: &PgPool, id: i64) -> Result<bool, sqlx::Error>
         _ => return Ok(false),
     };
     tx.rollback().await?;
-    let pending:Option<(i64,String)>=sqlx::query_as("SELECT d.id,d.target_instance_id FROM intake_outbox d JOIN intake_outbox r ON r.id=d.routing_receipt_id WHERE d.provider=$1 AND d.channel_id=$2 AND d.routing_state='held' AND d.routing_wait_owner_generation=$3 AND r.replay_disposition='registered_not_started' ORDER BY d.id LIMIT 1")
+    let pending:Option<(i64,String,bool)>=sqlx::query_as("SELECT d.id,d.target_instance_id,d.routing_plan->>'target' IS NOT DISTINCT FROM d.target_instance_id FROM intake_outbox d JOIN intake_outbox r ON r.id=d.routing_receipt_id WHERE d.provider=$1 AND d.channel_id=$2 AND d.routing_state='held' AND d.routing_wait_owner_generation=$3 AND r.replay_disposition='registered_not_started' ORDER BY d.id LIMIT 1")
         .bind(&row.provider).bind(&row.raw_channel_id).bind(row.generation).fetch_optional(pool).await?;
-    let Some((pending, target)) = pending else {
+    let Some((pending, mut target, planned)) = pending else {
         return Ok(false);
     };
+    #[cfg(test)]
+    let planned = planned || tests::mutant("advance-plan-skip");
+    if !planned {
+        let identity = OwnerIdentity::new(&row.provider, &row.raw_channel_id);
+        match replan_head(pool, &identity, pending).await? {
+            Replan::Legacy => {}
+            Replan::Ready(plan) if plan.target != row.owner_instance_id => target = plan.target,
+            Replan::Ready(_) | Replan::Wait => return Ok(false),
+        }
+    }
 
     custody::promote(
         pool,
@@ -245,9 +255,43 @@ pub(crate) async fn advance_pending(pool: &PgPool, provider: &str) -> Result<(),
     for id in ids {
         advance(pool, id).await?;
     }
-    let heads:Vec<(i64,String,String,i64)>=sqlx::query_as("SELECT d.id,d.target_instance_id,o.owner_instance_id,o.generation FROM intake_outbox d JOIN intake_session_owners o ON o.provider=d.provider AND o.raw_channel_id=d.channel_id AND o.status='active' AND o.generation=d.routing_wait_owner_generation AND o.owner_instance_id=d.target_instance_id WHERE d.provider=$1 AND d.routing_state='held' AND NOT EXISTS(SELECT 1 FROM intake_outbox h WHERE h.provider=d.provider AND h.channel_id=d.channel_id AND h.routing_state='held' AND h.id<d.id) AND EXISTS(SELECT 1 FROM intake_session_owners history WHERE history.provider=d.provider AND history.raw_channel_id=d.channel_id AND history.routing_cleanup IS NOT NULL) ORDER BY d.id LIMIT 32")
+    // A /node change after staging leaves held plans on an old revision; re-plan or release them.
+    let stale:Vec<(String,serde_json::Value)>=sqlx::query_as("SELECT d.channel_id,d.routing_plan->'home_proof' FROM intake_outbox d WHERE d.provider=$1 AND d.routing_state='held' AND d.routing_plan IS NOT NULL AND d.routing_home_revision<>COALESCE((SELECT revision FROM channel_home_preferences h WHERE h.provider=d.provider AND h.raw_channel_id=d.channel_id),0) AND NOT EXISTS(SELECT 1 FROM intake_outbox h WHERE h.provider=d.provider AND h.channel_id=d.channel_id AND h.routing_state='held' AND h.id<d.id) ORDER BY d.id LIMIT 32")
         .bind(provider).fetch_all(pool).await?;
-    for (id, target, owner, generation) in heads {
+    #[cfg(test)]
+    let stale = if tests::mutant("stale-replan") {
+        Vec::new()
+    } else {
+        stale
+    };
+    for (channel, proof) in stale {
+        let id = OwnerIdentity::new(provider, &channel);
+        if let Some((head, plan)) = super::plan::replan_stale(pool, &id, &proof).await? {
+            resume_head(pool, &id, head, &plan, super::super::switch_timeout()).await?;
+        }
+    }
+    let heads:Vec<(i64,String,String,i64,bool)>=sqlx::query_as("SELECT d.id,d.target_instance_id,o.owner_instance_id,o.generation,d.routing_plan->>'target' IS NOT DISTINCT FROM d.target_instance_id FROM intake_outbox d JOIN intake_session_owners o ON o.provider=d.provider AND o.raw_channel_id=d.channel_id AND o.status='active' AND o.generation=d.routing_wait_owner_generation AND o.owner_instance_id=d.target_instance_id WHERE d.provider=$1 AND d.routing_state='held' AND NOT EXISTS(SELECT 1 FROM intake_outbox h WHERE h.provider=d.provider AND h.channel_id=d.channel_id AND h.routing_state='held' AND h.id<d.id) AND EXISTS(SELECT 1 FROM intake_session_owners history WHERE history.provider=d.provider AND history.raw_channel_id=d.channel_id AND history.routing_cleanup IS NOT NULL) ORDER BY d.id LIMIT 32")
+        .bind(provider).fetch_all(pool).await?;
+    for (id, target, owner, generation, planned) in heads {
+        #[cfg(test)]
+        let planned = planned || tests::mutant("plan-less-head");
+        // Custody without a matching plan is planned afresh first; legacy custody stays put.
+        #[cfg(test)]
+        if !planned && tests::mutant("heads-replan-skip") {
+            continue;
+        }
+        if !planned {
+            let channel =
+                sqlx::query_scalar::<_, String>("SELECT channel_id FROM intake_outbox WHERE id=$1")
+                    .bind(id)
+                    .fetch_one(pool)
+                    .await?;
+            let identity = OwnerIdentity::new(provider, &channel);
+            if let Replan::Ready(plan) = replan_head(pool, &identity, id).await? {
+                resume_head(pool, &identity, id, &plan, super::super::switch_timeout()).await?;
+            }
+            continue;
+        }
         custody::promote(
             pool,
             id,
@@ -275,6 +319,51 @@ pub(crate) async fn advance_pending(pool: &PgPool, provider: &str) -> Result<(),
         .await?;
     }
     Ok(())
+}
+
+/// The planned head either asks the active other owner to close or is admitted to its target.
+pub(crate) async fn resume_head(
+    pool: &PgPool,
+    id: &OwnerIdentity,
+    head: i64,
+    plan: &super::plan::Plan,
+    timeout: i32,
+) -> Result<(), sqlx::Error> {
+    match plan.expected.as_ref() {
+        Some((owner, generation, status)) if status == "active" && *owner != plan.target => {
+            request(pool, id, (owner, *generation), head, &plan.target, timeout).await?;
+        }
+        expected => {
+            // False keeps the head held; advance_pending resumes the stored plan.
+            custody::promote(
+                pool,
+                head,
+                &plan.target,
+                expected.map(|(owner, generation, _)| (owner.as_str(), *generation)),
+                custody::SwitchReadiness::Wait,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+enum Replan {
+    /// Fallback never planned this channel; shared custody keeps its own promotion rules.
+    Legacy,
+    Ready(super::plan::Plan),
+    Wait,
+}
+
+/// A fallback head without a matching plan is re-planned (or released) before any promotion.
+async fn replan_head(pool: &PgPool, id: &OwnerIdentity, head: i64) -> Result<Replan, sqlx::Error> {
+    let Some(proof) = super::plan::channel_proof(pool, id).await? else {
+        return Ok(Replan::Legacy);
+    };
+    Ok(match super::plan::replan_stale(pool, id, &proof).await? {
+        Some((planned, plan)) if planned == head => Replan::Ready(plan),
+        _ => Replan::Wait,
+    })
 }
 
 fn control_seconds() -> i32 {

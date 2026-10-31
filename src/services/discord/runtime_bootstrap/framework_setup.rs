@@ -254,9 +254,7 @@ async fn audit_or_prune_global_slash_commands(
         return;
     }
 
-    let prune_enabled = std::env::var("AGENTDESK_PRUNE_GLOBAL_SLASH_COMMANDS")
-        .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false);
+    let prune_enabled = crate::utils::env_flag("AGENTDESK_PRUNE_GLOBAL_SLASH_COMMANDS", false);
 
     for command in globals {
         let command_name = command.name.clone();

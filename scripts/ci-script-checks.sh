@@ -446,6 +446,11 @@ if run_check guards "Const bool switch ratchet"; then
 "$PYTHON" -m unittest tests.test_const_bool_switch_ratchet
 fi
 
+if run_check guards "Environment bool single parser"; then
+"$PYTHON" scripts/check_env_flag.py
+"$PYTHON" -m unittest tests.test_check_env_flag
+fi
+
 if run_check guards "Discord log field-key drift guard (#4218)"; then
 "$PYTHON" scripts/check_log_key_drift.py
 "$PYTHON" -m unittest tests.test_log_key_drift

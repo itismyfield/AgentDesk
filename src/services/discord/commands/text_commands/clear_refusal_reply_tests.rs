@@ -217,7 +217,7 @@ async fn a_text_clear_of_an_unsettled_herdr_channel_runs_and_warns_pg() {
     let _hosts = crate::config::session_hosts::force_for_test(Some(NODE), &[(id, NODE)]);
     let _switch = crate::services::turn_host::force_switch_for_test(Some(true));
     let stop = std::env::temp_dir().join(format!("adk-text-clear-{}", uuid::Uuid::new_v4()));
-    let open = crate::services::herdr_admission::Admission::new(None, Some(stop));
+    let open = crate::services::herdr_admission::Admission::new(true, Some(stop));
     let _admission = crate::services::herdr_admission::force_for_test(open);
     let runtime_root = crate::config::runtime_root().expect("a runtime root");
     let (store, era) = crate::services::herdr_launch::o_store_for_test(&runtime_root, &[id]);

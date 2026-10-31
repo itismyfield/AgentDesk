@@ -88,16 +88,9 @@ const CLAUDE_TUI_TRANSCRIPT_INITIAL_WAIT_MAX_INTERVAL: Duration = Duration::from
 
 const CLAUDE_TUI_FOLLOWUP_REQUEUE_ENV: &str = "AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE";
 
-/// Default ON; set `AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE` to `0`, `false`,
-/// `off`, `no`, `disable`, or `disabled` for emergency opt-out.
+/// Default ON; `0`, `false`, `off` or `no` disables follow-up requeue.
 pub(crate) fn claude_tui_followup_requeue_enabled() -> bool {
-    let Ok(value) = std::env::var(CLAUDE_TUI_FOLLOWUP_REQUEUE_ENV) else {
-        return true;
-    };
-    !matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "0" | "false" | "off" | "no" | "disable" | "disabled"
-    )
+    crate::utils::env_flag(CLAUDE_TUI_FOLLOWUP_REQUEUE_ENV, true)
 }
 
 #[cfg(test)]
@@ -146,7 +139,7 @@ mod claude_tui_followup_requeue_flag_tests {
 
     #[test]
     fn followup_requeue_respects_emergency_opt_out_values() {
-        for value in ["0", "false", "FALSE", "off", "no", "disable", "disabled"] {
+        for value in ["0", "false", "FALSE", "off", "no"] {
             with_requeue_env(Some(value), || {
                 assert!(
                     !claude_tui_followup_requeue_enabled(),
@@ -158,7 +151,16 @@ mod claude_tui_followup_requeue_flag_tests {
 
     #[test]
     fn followup_requeue_keeps_legacy_opt_in_and_invalid_values_enabled() {
-        for value in ["1", "true", "TRUE", "on", "yes", "unexpected"] {
+        for value in [
+            "1",
+            "true",
+            "TRUE",
+            "on",
+            "yes",
+            "unexpected",
+            "disable",
+            "disabled",
+        ] {
             with_requeue_env(Some(value), || {
                 assert!(
                     claude_tui_followup_requeue_enabled(),
@@ -274,9 +276,7 @@ static DEBUG_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 
 /// Initialize debug flag from environment variable (call once at startup).
 pub fn init_debug_from_env() {
-    let enabled = std::env::var("COKACDIR_DEBUG")
-        .map(|v| v == "1")
-        .unwrap_or(false);
+    let enabled = crate::utils::env_flag("COKACDIR_DEBUG", false);
     if enabled {
         DEBUG_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
     }

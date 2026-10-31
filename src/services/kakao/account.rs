@@ -3,14 +3,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
 
-use super::{KakaoClient, KakaoEnvironment, KakaoError, configured_accounts, parse_enabled};
+use super::{KakaoClient, KakaoEnvironment, KakaoError, configured_accounts};
 
 pub(crate) fn calendar_enabled() -> Result<bool, KakaoError> {
-    parse_enabled(
-        std::env::var("AGENTDESK_KAKAO_CALENDAR_ENABLED")
-            .ok()
-            .as_deref(),
-    )
+    Ok(crate::utils::env_flag(
+        "AGENTDESK_KAKAO_CALENDAR_ENABLED",
+        false,
+    ))
 }
 
 pub(crate) fn calendar_accounts() -> Result<Vec<String>, KakaoError> {

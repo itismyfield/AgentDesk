@@ -163,33 +163,22 @@ fn push_finished_and_running_background_tasks(
 #[test]
 fn single_message_panel_flag_defaults_on_when_unset() {
     // #3560: missing env var means default-ON (opt-out), not the legacy OFF.
-    assert!(super::parse_single_message_panel_flag(None));
+    assert!(panel_flag(None));
 }
 
 #[test]
 fn single_message_panel_flag_treats_non_optout_values_as_enabled() {
-    // #3560: only "0" / "false" disable the gate. Everything else — including
-    // an empty string or garbage — keeps the default-ON feature enabled so it
-    // is never quietly switched off by an unintended env value.
     for raw in [
         "1", "true", "TRUE", "TrUe", " true ", "", "yes", "on", "garbage",
     ] {
-        assert!(
-            super::parse_single_message_panel_flag(Some(raw)),
-            "{raw:?} should enable the flag"
-        );
+        assert!(panel_flag(Some(raw)), "{raw:?} should enable the flag");
     }
 }
 
 #[test]
 fn single_message_panel_flag_rejects_documented_optout_values() {
-    // #3560: the disable-list mirrors the original truthy-allowlist — only the
-    // documented opt-out tokens "0" and case-insensitive "false" turn it off.
-    for raw in ["0", "false", "FALSE"] {
-        assert!(
-            !super::parse_single_message_panel_flag(Some(raw)),
-            "{raw:?} should disable the flag"
-        );
+    for raw in ["0", "false", "FALSE", " NO ", "Off"] {
+        assert!(!panel_flag(Some(raw)), "{raw:?} should disable the flag");
     }
 }
 
@@ -2379,4 +2368,16 @@ fn reclaim_tail_footer_ignores_mid_body_quote_with_trailing_marker() {
         None,
         "mid-body footer quote must never be stripped"
     );
+}
+
+fn panel_flag(raw: Option<&str>) -> bool {
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let _restore = crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock(
+        "AGENTDESK_SINGLE_MESSAGE_PANEL",
+    );
+    match raw {
+        Some(raw) => unsafe { std::env::set_var("AGENTDESK_SINGLE_MESSAGE_PANEL", raw) },
+        None => unsafe { std::env::remove_var("AGENTDESK_SINGLE_MESSAGE_PANEL") },
+    }
+    super::configured_enabled()
 }

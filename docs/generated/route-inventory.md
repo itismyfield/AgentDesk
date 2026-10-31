@@ -182,9 +182,9 @@
 | `POST` | `/api/kanban-reviews/{id}/trigger-rework` | `reviews::trigger_rework` | `src/server/routes/reviews.rs:628` | `src/server/routes/domains/reviews.rs:17` |
 | `GET` | `/api/machine-status` | `analytics::machine_status` | `src/server/routes/analytics.rs:411` | `src/server/routes/domains/analytics.rs:18` |
 | `GET` | `/api/maintenance/jobs` | `maintenance::list_jobs` | `src/server/routes/maintenance.rs:7` | `src/server/routes/domains/ops.rs:158` |
-| `POST` | `/api/memory/forget` | `memory_api::memory_forget` | `src/server/routes/memory_api.rs:214` | `src/server/routes/domains/agents.rs:50` |
-| `POST` | `/api/memory/recall` | `memory_api::memory_recall` | `src/server/routes/memory_api.rs:108` | `src/server/routes/domains/agents.rs:48` |
-| `POST` | `/api/memory/remember` | `memory_api::memory_remember` | `src/server/routes/memory_api.rs:131` | `src/server/routes/domains/agents.rs:49` |
+| `POST` | `/api/memory/forget` | `memory_api::memory_forget` | `src/server/routes/memory_api.rs:207` | `src/server/routes/domains/agents.rs:50` |
+| `POST` | `/api/memory/recall` | `memory_api::memory_recall` | `src/server/routes/memory_api.rs:101` | `src/server/routes/domains/agents.rs:48` |
+| `POST` | `/api/memory/remember` | `memory_api::memory_remember` | `src/server/routes/memory_api.rs:124` | `src/server/routes/domains/agents.rs:49` |
 | `GET` | `/api/message-outbox/failed` | `message_outbox::list_failed` | `src/server/routes/message_outbox.rs:201` | `src/server/routes/domains/ops.rs:27` |
 | `POST` | `/api/message-outbox/failed/redrive` | `message_outbox::redrive_failed` | `src/server/routes/message_outbox.rs:236` | `src/server/routes/domains/ops.rs:32` |
 | `POST` | `/api/message-outbox/monitor-alerts` | `message_outbox::enqueue_monitor_alert` | `src/server/routes/message_outbox.rs:144` | `src/server/routes/domains/ops.rs:28` |

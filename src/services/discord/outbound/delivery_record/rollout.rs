@@ -2,24 +2,7 @@
 
 use super::*;
 
-// ---------------------------------------------------------------------------
-// #3089 B1 / #4911 Phase A — persist confirmed delivery authority.
-//
-// A confirmed `Delivered` commit always persists the generation-scoped frontier
-// and, when complete turn/destination identity is available, an exact receipt.
-// The legacy shadow flag now controls only the durable-END divergence signal;
-// read-authority rollout remains separately gated below.
-// ---------------------------------------------------------------------------
-
-/// #5071 T1 S8-1r2: where a rollout flag's value came from, which is a different
-/// question from what the value is. `CompiledDefault` means `std::env::var` did not
-/// yield a Unicode value (absent and non-Unicode values both take this path), so the
-/// compiled value was used. `EnvOverride` means a Unicode value was present —
-/// whatever it said — so a
-/// node-local untracked `launchd.env`, not the repository, decided it. #5262's
-/// completion contract asks for repo-owned flags, which is a claim about
-/// provenance that `shadow_enabled`/`authority_enabled` alone cannot answer: once
-/// the compiled default matches the pin, the two are indistinguishable by value.
+/// The legacy health labels distinguish a Unicode override from the compiled default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) enum FlagSource {
     CompiledDefault,
@@ -35,7 +18,6 @@ impl FlagSource {
     }
 }
 
-/// A rollout flag's resolved value paired with its provenance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) struct FlagResolution {
     pub(in crate::services::discord) enabled: bool,
@@ -58,44 +40,12 @@ impl FlagResolution {
     }
 }
 
-/// The opt-in reading: absent → compiled default OFF, present → `EnvOverride`
-/// whose value is ON only for `1`/`true` (trimmed, case-insensitive). Provenance
-/// is decided by presence ALONE, so an explicit `=0` still reports `EnvOverride`
-/// — that is the whole point of the distinction, since a pin that agrees with the
-/// compiled default is otherwise invisible. Only the shadow flag still reads
-/// this: #5071 T1 S8-2 moved the authority axis to a compiled default ON, which
-/// is exactly the per-flag divergence the two named wrappers below were split to
-/// allow.
-fn resolve_opt_in_flag(raw: Option<&str>) -> FlagResolution {
-    match raw {
-        Some(value) => {
-            let normalized = value.trim().to_ascii_lowercase();
-            FlagResolution::env_override(normalized == "1" || normalized == "true")
-        }
-        None => FlagResolution::compiled_default(false),
-    }
-}
-
-/// Pure resolver for `AGENTDESK_DELIVERY_RECORD_SHADOW` (compiled default OFF).
-pub(super) fn resolve_shadow_flag(raw: Option<&str>) -> FlagResolution {
-    resolve_opt_in_flag(raw)
-}
-
-/// Pure resolver for `AGENTDESK_DELIVERY_RECORD_AUTHORITY` (compiled default ON
-/// since #5071 T1 S8-2). Value parsing is identical to [`resolve_opt_in_flag`] —
-/// a present value is ON only for `1`/`true` (trimmed, case-insensitive) and is
-/// ALWAYS `EnvOverride`, including an explicit `=0` — but ABSENCE now resolves to
-/// `compiled_default(true)`. That is the promotion: the durable delivered
-/// frontier is the repo-owned dedup authority (#5262), so a node needs no
-/// `launchd.env` pin to get it, and `=0` is the rollback rather than the pin
-/// being the rollout.
-pub(super) fn resolve_authority_flag(raw: Option<&str>) -> FlagResolution {
-    match raw {
-        Some(value) => {
-            let normalized = value.trim().to_ascii_lowercase();
-            FlagResolution::env_override(normalized == "1" || normalized == "true")
-        }
-        None => FlagResolution::compiled_default(true),
+pub(super) fn resolve_env_flag(name: &str, default: bool) -> FlagResolution {
+    let resolved = crate::services::settings::resolve_env_flag(name, default);
+    if resolved.source == crate::services::settings::SettingSource::EnvOverride {
+        FlagResolution::env_override(resolved.value)
+    } else {
+        FlagResolution::compiled_default(resolved.value)
     }
 }
 
@@ -112,11 +62,7 @@ fn delivery_record_shadow_resolution() -> FlagResolution {
     }
     static CACHED: OnceLock<FlagResolution> = OnceLock::new();
     *CACHED.get_or_init(|| {
-        let resolution = resolve_shadow_flag(
-            std::env::var("AGENTDESK_DELIVERY_RECORD_SHADOW")
-                .ok()
-                .as_deref(),
-        );
+        let resolution = resolve_env_flag("AGENTDESK_DELIVERY_RECORD_SHADOW", false);
         if resolution.enabled {
             tracing::info!(target: "agentdesk::services::discord::outbound::delivery_record","  ✓ delivery_record_shadow: enabled");
         }
@@ -150,11 +96,7 @@ fn delivery_record_authority_resolution() -> FlagResolution {
     }
     static CACHED: OnceLock<FlagResolution> = OnceLock::new();
     *CACHED.get_or_init(|| {
-        let resolution = resolve_authority_flag(
-            std::env::var("AGENTDESK_DELIVERY_RECORD_AUTHORITY")
-                .ok()
-                .as_deref(),
-        );
+        let resolution = resolve_env_flag("AGENTDESK_DELIVERY_RECORD_AUTHORITY", true);
         if resolution.enabled {
             tracing::info!(target: "agentdesk::services::discord::outbound::delivery_record","  ✓ delivery_record_authority: enabled");
         }
