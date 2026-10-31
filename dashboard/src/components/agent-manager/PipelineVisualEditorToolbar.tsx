@@ -59,8 +59,8 @@ function FsmToolbar({ ctx, actions }: Props) {
             )}
             {ctx.pipelineDraft && (
               <Badge>
-                {ctx.pipelineDraft.states.length} {tr("states", "states")} ·{" "}
-                {ctx.pipelineDraft.transitions.length} {tr("edges", "edges")}
+                {ctx.pipelineDraft.states.length} {tr("단계", "states")} ·{" "}
+                {ctx.pipelineDraft.transitions.length} {tr("연결", "edges")}
               </Badge>
             )}
           </div>

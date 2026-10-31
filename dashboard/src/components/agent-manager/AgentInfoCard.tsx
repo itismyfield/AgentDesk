@@ -394,7 +394,7 @@ export default function AgentInfoCard({
       ? discordChannelInfoById[channelInfo.parent_id] ?? null
       : null;
   const sourceOfTruthRows: Array<{ label: string; value: string; tone?: string }> = [
-    { label: tr("Agent ID", "Agent ID"), value: agent.id },
+    { label: tr("에이전트 ID", "Agent ID"), value: agent.id },
     { label: tr("이름", "Name"), value: agent.name },
   ];
   const primaryName = localeName(locale, agent);

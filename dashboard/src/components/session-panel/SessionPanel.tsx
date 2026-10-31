@@ -54,7 +54,7 @@ export function SessionPanel({ sessions, departments, agents, onAssign }: Props)
         </SurfaceMetaBadge>
         {staleIdleCount > 0 && (
           <SurfaceMetaBadge tone="warn" className="shrink-0">
-            {staleIdleCount} {t({ ko: "stale", en: "stale" })}
+            {staleIdleCount} {t({ ko: "오래 멈춤", en: "stale" })}
           </SurfaceMetaBadge>
         )}
       </div>
