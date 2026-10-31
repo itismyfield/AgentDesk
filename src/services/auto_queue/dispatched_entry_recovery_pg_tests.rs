@@ -6,6 +6,8 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
     let pool = pg_db.connect_and_migrate().await;
     let engine = test_engine_with_pg(pool.clone());
     seed_agent_pg(&pool).await;
+    let reviewed_commit =
+        crate::services::platform::git_head_commit(env!("CARGO_MANIFEST_DIR")).unwrap();
     for (name, dispatch_status, result, age) in [
         (
             "completed",
@@ -39,10 +41,10 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, result, created_at, updated_at)
-             VALUES ($1, $2, 'agent-1', 'implementation', $3, $4::jsonb,
-                     NOW() - ($5 * INTERVAL '1 minute'), NOW() - ($5 * INTERVAL '1 minute'))"
-        ).bind(&dispatch_id).bind(&card_id).bind(dispatch_status).bind(result).bind(age as f64)
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, result, context, created_at, updated_at)
+             VALUES ($1, $2, 'agent-1', 'implementation', $3, $4::jsonb, $5::jsonb,
+                     NOW() - ($6 * INTERVAL '1 minute'), NOW() - ($6 * INTERVAL '1 minute'))"
+        ).bind(&dispatch_id).bind(&card_id).bind(dispatch_status).bind(result).bind(json!({"reviewed_commit": reviewed_commit, "branch": "test-autoqueue-recovery"})).bind(age as f64)
             .execute(&pool).await.unwrap();
         sqlx::query("UPDATE kanban_cards SET latest_dispatch_id = $1 WHERE id = $2")
             .bind(&dispatch_id)
@@ -103,6 +105,11 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
     .execute(&pool)
     .await
     .unwrap();
+    sqlx::query("UPDATE pr_tracking SET head_sha = $1, branch = 'test-autoqueue-recovery'")
+        .bind(&reviewed_commit)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("DELETE FROM task_dispatches WHERE id = 'dispatch-recover-orphan-pr'")
         .execute(&pool)
         .await
