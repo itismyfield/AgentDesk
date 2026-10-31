@@ -239,12 +239,13 @@ pub(crate) fn probe(
     }
 }
 
-/// Gaps root-shell children that are not yet the provider leave: login-startup tools (a pipeline
-/// runs several) and the launch command before its exec, with a hidden or context-free environment.
+/// Gaps from an unreported foreground list or root-shell startup children, before the
+/// launch command execs with its binding context.
 fn before_provider(gap: &EvidenceGap) -> bool {
     matches!(
         gap,
-        EvidenceGap::NoneYet
+        EvidenceGap::Unreported
+            | EvidenceGap::NoneYet
             | EvidenceGap::Ambiguous(_)
             | EvidenceGap::ProcessUnreadable(_)
             | EvidenceGap::Replaced
