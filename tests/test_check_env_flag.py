@@ -27,6 +27,19 @@ class EnvFlagGuardTests(unittest.TestCase):
         self.assertEqual(len(guard.sites('fn f() { let raw = std::env::var("FLAG").ok(); let normalized = raw.as_deref(); matches!(normalized, Some("yes")) }')), 1)
         self.assertEqual(len(guard.sites('fn f() { std::env::var("F") == Ok("1") || std::env::var("F") == Ok("1") }')), 2)
 
+    def test_import_aliases_cannot_bypass_the_reader_guard(self):
+        for imports, call in [
+            ('use std::env::var;', 'var'),
+            ('use std::env::var as flag;', 'flag'),
+            ('use std::env::{var as flag, var_os};', 'flag'),
+            ('use std::{env::{var_os as flag}};', 'flag'),
+            ('use std::env as process_env;', 'process_env::var'),
+            ('use std::{env as process_env};', 'process_env::var_os'),
+            ('use std::env::{self as process_env};', 'process_env::var'),
+        ]:
+            with self.subTest(imports=imports):
+                self.assertEqual(len(guard.sites(imports + ' fn f() { ' + call + '("FLAG").as_deref() == Ok("1"); }')), 1)
+
     def test_cfg_and_prose_and_data_presence_are_not_bool_flags(self):
         text = '''
         // std::env::var("FLAG").as_deref() == Ok("1")
@@ -36,6 +49,9 @@ class EnvFlagGuardTests(unittest.TestCase):
         #[cfg(test)] mod tests { fn test() { let _ = std::env::var("FLAG") == Ok("1"); } }
         fn credential() { std::env::var("TOKEN").is_ok_and(|v| !v.is_empty()); }
         fn url() { std::env::var("URL").unwrap_or_default() == "https://example.com"; }
+        #[test] fn standalone() { std::env::var("FLAG") == Ok("1"); }
+        #[tokio::test(flavor = "current_thread")]
+        async fn asynchronous() { std::env::var("FLAG") == Ok("1"); }
         fn wrapper() { env_flag("FLAG", false); }
         fn branch() { #[cfg(test)] env_flag("TEST", false) }
         struct Fields { #[cfg(test)] value: bool, live: bool }

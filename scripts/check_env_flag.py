@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 READ = re.compile(r'\b(?:std\s*::\s*)?env\s*::\s*var(?:_os)?\s*\(')
 LITERAL = re.compile(r"""//[^\n]*|/\*.*?\*/|(?:br|r)(?P<hashes>\#*)".*?"(?P=hashes)|b?"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])'""", re.S)
 BOOL_VALUES = {'0', '1', 'true', 'false', 'yes', 'no', 'on', 'off'}
-CFG = re.compile(r'#\[\s*cfg\s*\((.*?)\)\s*\]', re.S)
+CFG = re.compile(r'#\[\s*(?:cfg\s*\((.*?)\)|(?:[\w:]+::)?test(?:\([^]]*\))?)\s*\]', re.S)
 FUNCTION = re.compile(r'\bfn\s+(\w+)[^{;]*\{')
 BIND = re.compile(r'\blet\s+(?:mut\s+)?(\w+)\s*(?::[^=;]+)?=')
 
@@ -36,7 +36,7 @@ def production_code(text):
     code = '\n'.join(strip_line(line, state).ljust(len(line)) for line in marked.split('\n'))
     blanked = list(code)
     for match in CFG.finditer(code):
-        if not cfg_requires_test(match[1]):
+        if match[1] is not None and not cfg_requires_test(match[1]):
             continue
         rest = code[match.end():]
         field = re.match(r'\s*(?:pub(?:\([^)]*\))?\s+)?\w+\s*(?::(?!:)|,)', rest)
@@ -49,10 +49,48 @@ def production_code(text):
     return ''.join(blanked)
 
 
+def read_pattern(code):
+    aliases = {"std": "std"}
+    patterns = [READ.pattern]
+
+    def visit(prefix, item):
+        item = item.strip()
+        if not item:
+            return
+        if "{" in item:
+            head, tail = item.split("{", 1)
+            body = tail.rsplit("}", 1)[0]
+            depth, start = 0, 0
+            for index, char in enumerate(body + ","):
+                depth += (char == "{") - (char == "}")
+                if char == "," and depth == 0:
+                    visit(prefix + head, body[start:index])
+                    start = index + 1
+            return
+        parts = re.split(r"\s+as\s+", item)
+        path = re.sub(r"\s+", "", prefix + parts[0]).lstrip(":")
+        if path.endswith("::self"):
+            path = path[:-6]
+        first, *rest = path.split("::")
+        path = "::".join([aliases.get(first, first), *rest])
+        name = parts[-1].strip() if len(parts) > 1 else path.split("::")[-1]
+        if path in ("std", "std::env"):
+            aliases[name] = path
+            suffix = r"\s*::\s*env" if path == "std" else ""
+            patterns.append(r"\b" + re.escape(name) + suffix + r"\s*::\s*var(?:_os)?\s*\(")
+        elif path in ("std::env::var", "std::env::var_os"):
+            patterns.append(r"(?<![\w:.])" + re.escape(name) + r"\s*\(")
+
+    for imported in re.finditer(r"\buse\s+([^;]+);", code):
+        visit("", imported[1])
+    return re.compile("|".join(patterns))
+
+
 def sites(text):
-    if not READ.search(text):
+    if not READ.search(text) and not re.search(r'\buse\s+(?:::)?std[^;]*\benv\b', text):
         return []
     code = production_code(text)
+    reads_pattern = read_pattern(code)
     bodies = []
     outside = list(code)
     for match in FUNCTION.finditer(code):
@@ -67,7 +105,7 @@ def sites(text):
         cursor = 0
         for statement in body.split(';'):
             reads = set()
-            for match in READ.finditer(statement):
+            for match in reads_pattern.finditer(statement):
                 pos = offset + cursor + match.start()
                 arg_start = offset + cursor + match.end() - 1
                 _, arg_end = scan_balanced(code, arg_start)
