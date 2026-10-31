@@ -34,6 +34,8 @@ impl<B: BindingEvents> Sources<B> {
         }
         self.check_scoped_metadata(writer.store())?;
         self.refined.clear();
+        #[cfg(unix)]
+        self.codex_fresh_tried.clear();
         let suspension = self.suspension.clone();
         let resolved = if suspension.is_empty() {
             writer.store().apply_resolved_boundaries()

@@ -3848,6 +3848,7 @@ src/
 │   │   │   │   ├── claude_boundary.rs
 │   │   │   │   ├── clear_end.rs
 │   │   │   │   ├── codex_end.rs
+│   │   │   │   ├── codex_fresh.rs
 │   │   │   │   ├── owe.rs
 │   │   │   │   ├── provenance.rs
 │   │   │   │   ├── readers.rs
@@ -3876,6 +3877,7 @@ src/
 │   │   │   ├── clear_launch_tests.rs
 │   │   │   ├── codex_adoption.rs
 │   │   │   ├── codex_end_proof_tests.rs
+│   │   │   ├── codex_fresh_boundary_tests.rs
 │   │   │   ├── codex_herdr_drive_tests.rs
 │   │   │   ├── codex_launch_cause_tests.rs
 │   │   │   ├── codex_snapshot.rs
