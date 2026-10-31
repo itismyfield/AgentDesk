@@ -7,12 +7,31 @@ use serde::{Deserialize, Serialize};
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct TurnConfig {
     pub channels: BTreeSet<u64>,
-    pub all_owned: bool,
+    /// Selects every channel O owns; unset means on unless `channels` lists the selection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub all_owned: Option<bool>,
 }
 
 impl TurnConfig {
+    /// Explicitly off: no channel is selected.
+    pub(crate) fn off() -> Self {
+        Self {
+            channels: BTreeSet::new(),
+            all_owned: Some(false),
+        }
+    }
+
+    pub(crate) fn all_owned(&self) -> bool {
+        self.all_owned.unwrap_or(self.channels.is_empty())
+    }
+
+    /// Whether any channel can be selected.
+    pub(crate) fn selects_any(&self) -> bool {
+        self.all_owned() || !self.channels.is_empty()
+    }
+
     pub(crate) fn selects(&self, channel: u64) -> bool {
-        channel != 0 && (self.all_owned || self.channels.contains(&channel))
+        channel != 0 && (self.all_owned() || self.channels.contains(&channel))
     }
 }
 
@@ -70,14 +89,14 @@ pub(crate) fn confirm(channel: u64) -> bool {
             .insert(channel)
 }
 
-/// Confirms each selected channel of `owned` only after `retire` reports it fully retired. An empty
-/// selection returns before `owned` or `retire` runs, so an unconfigured process reads nothing.
+/// Confirms each selected channel of `owned` only after `retire` reports it fully retired. No config
+/// or an explicitly empty selection returns before `owned` or `retire` runs.
 pub(crate) fn confirm_selected(
     config: Option<&TurnConfig>,
     owned: impl FnOnce() -> Vec<u64>,
     mut retire: impl FnMut(u64) -> bool,
 ) -> Vec<u64> {
-    let Some(config) = config.filter(|c| c.all_owned || !c.channels.is_empty()) else {
+    let Some(config) = config.filter(|c| c.selects_any()) else {
         return Vec::new();
     };
     let mut confirmed = Vec::new();

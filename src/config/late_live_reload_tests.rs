@@ -8,9 +8,10 @@ fn config(on: bool) -> Config {
 }
 
 #[test]
-fn default_off_omits_key_and_config_changes_do_not_replace_boot_capability() {
+fn default_on_omits_key_and_config_changes_do_not_replace_boot_capability() {
     let config: Config = serde_json::from_value(serde_json::json!({"server": {}})).unwrap();
-    assert!(!config.tui_o.as_ref().is_some_and(|c| c.writer.late_adopt));
+    let tui_o = crate::services::tui_o::shadow::tap::TuiOConfig::of(&config);
+    assert!(tui_o.writer.late_adopt());
     assert!(
         !serde_yaml::to_string(&config)
             .unwrap()

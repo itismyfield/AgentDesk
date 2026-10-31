@@ -415,7 +415,7 @@ async fn owner_http_unregistered_runtime_is_not_advertised_as_ready_pg() {
 #[test]
 fn owner_host_boot_wires_every_runtime_role_without_native_end_on_transport_loss() {
     let boot = include_str!("../../../runtime_bootstrap.rs");
-    let spawn = "o_writer_host::spawn_execution(&shared, &provider, boot_config.tui_o.as_ref());";
+    let spawn = "o_writer_host::spawn_execution(&shared, &provider, Some(tui_o));";
     assert!(
         boot[boot.find("if !modules.gateway {").unwrap()..boot.find("let voice_receiver").unwrap()]
             .contains(spawn)

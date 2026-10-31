@@ -22,11 +22,8 @@ pub(super) fn spawn(shared: &Arc<SharedData>, provider: &ProviderKind) {
                 }
                 super::owner_execution::refresh(&provider, Some(&pool)).await;
                 if let Some(config) = crate::config_live_reload::current() {
-                    super::o_writer_host::spawn_execution(
-                        &shared,
-                        &provider,
-                        config.tui_o.as_ref(),
-                    );
+                    let tui_o = crate::services::tui_o::shadow::tap::TuiOConfig::of(&config);
+                    super::o_writer_host::spawn_execution(&shared, &provider, Some(tui_o));
                 }
                 let configured = crate::services::tui_o::cutover::boot_snapshot()
                     .and_then(|s| s.configured_id().map(str::to_owned));

@@ -25,7 +25,7 @@ pub(in crate::services::discord) fn confirm_codex_channels(
     config: Option<&TurnConfig>,
     owned: impl FnOnce() -> Vec<u64>,
 ) -> Vec<u64> {
-    let Some(config) = config.filter(|c| c.all_owned || !c.channels.is_empty()) else {
+    let Some(config) = config.filter(|c| c.selects_any()) else {
         return Vec::new();
     };
     let confirmed = |&channel: &u64| match confirm_current(channel, config) {

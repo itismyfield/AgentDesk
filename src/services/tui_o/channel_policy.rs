@@ -11,6 +11,7 @@ use crate::config::{AgentChannel, Config};
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::provider_hosting::RuntimeMode;
 use crate::services::tui_o::alarm::AlarmRouter;
+use crate::services::tui_o::shadow::tap::TuiOConfig;
 use crate::services::tui_o::writer::WriterAlarm;
 
 mod adoption;
@@ -62,24 +63,45 @@ static BOOT: OnceLock<BootChannels> = OnceLock::new();
 
 /// The channels the config selects: the explicit list, or with `all_tui` every TUI binding.
 pub(crate) fn configured_channels(config: &Config) -> BTreeSet<u64> {
-    let Some(writer) = config.tui_o.as_ref().map(|config| &config.writer) else {
-        return BTreeSet::new();
-    };
-    if !writer.all_tui {
+    let writer = &TuiOConfig::of(config).writer;
+    if !writer.all_tui() {
         return writer.channels.clone();
     }
-    all_tui_kinds(config)
+    selected_kinds(config, false)
         .map(|kinds| kinds.into_keys().collect())
         .unwrap_or_default()
 }
 
 /// Dormant membership as configured; only validation decides whether these writers are selected.
 pub(crate) fn configured_dormant_channels(config: &Config) -> BTreeSet<u64> {
-    config
-        .tui_o
-        .as_ref()
-        .map(|config| config.writer.dormant_channels.clone())
-        .unwrap_or_default()
+    TuiOConfig::of(config).writer.dormant_channels.clone()
+}
+
+/// The selected channels' kinds. An unset `all_tui` that cannot apply here (no cluster ids, or a
+/// binding it would reject) selects nothing instead of failing the boot.
+fn selected_kinds(config: &Config, warn: bool) -> Result<BTreeMap<u64, RuntimeHandoffKind>> {
+    let writer = &TuiOConfig::of(config).writer;
+    if writer.all_tui.is_none() && writer.all_tui() {
+        let kinds = site(config, true).and_then(|_| all_tui_kinds(config));
+        return Ok(kinds.unwrap_or_else(|error| {
+            if warn {
+                tracing::warn!(%error, "[tui_o] default writer selection is off on this node");
+            }
+            BTreeMap::new()
+        }));
+    }
+    if writer.all_tui() {
+        ensure!(
+            writer.channels.is_empty(),
+            "tui_o.writer.all_tui cannot be combined with a non-empty tui_o.writer.channels"
+        );
+        return all_tui_kinds(config);
+    }
+    ensure!(
+        !writer.channels.contains(&0),
+        "tui_o.writer.channels rejects channel 0"
+    );
+    listed_kinds(config, "tui_o.writer.channels", &writer.channels)
 }
 
 /// The TUI kind `channel` runs as. The inner error names why it is not a TUI; the outer one is a
@@ -198,21 +220,8 @@ fn all_tui_kinds(config: &Config) -> Result<BTreeMap<u64, RuntimeHandoffKind>> {
 
 impl BootChannels {
     pub(crate) fn validate(config: &Config) -> Result<Self> {
-        let writer = config.tui_o.as_ref().map(|config| &config.writer);
-        let kinds = if writer.is_some_and(|writer| writer.all_tui) {
-            ensure!(
-                writer.is_some_and(|writer| writer.channels.is_empty()),
-                "tui_o.writer.all_tui cannot be combined with a non-empty tui_o.writer.channels"
-            );
-            all_tui_kinds(config)?
-        } else {
-            let channels = configured_channels(config);
-            ensure!(
-                !channels.contains(&0),
-                "tui_o.writer.channels rejects channel 0"
-            );
-            listed_kinds(config, "tui_o.writer.channels", &channels)?
-        };
+        let tui_o = TuiOConfig::of(config);
+        let kinds = selected_kinds(config, true)?;
         let channels: BTreeSet<u64> = kinds.keys().copied().collect();
         let dormant_channels = configured_dormant_channels(config);
         ensure!(
@@ -227,8 +236,8 @@ impl BootChannels {
         Ok(Self {
             selected: channels.clone(),
             dormant_channels,
-            late_adopt_capable: config.tui_o.as_ref().is_some_and(|c| c.writer.late_adopt),
-            turn: (config.tui_o.as_ref()).map_or_else(Default::default, |c| c.turn.clone()),
+            late_adopt_capable: tui_o.writer.late_adopt(),
+            turn: tui_o.turn.clone(),
             channels,
             kinds,
             site,

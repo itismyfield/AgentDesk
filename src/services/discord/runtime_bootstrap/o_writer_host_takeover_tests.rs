@@ -280,7 +280,7 @@ async fn gateway_takeover() {
     assert_eq!(custody, Ok(Custody::PendingStart), "Legacy's start is kept");
     let turn = TurnConfig {
         channels: [fenced_channel].into(),
-        all_owned: false,
+        all_owned: Some(false),
     };
     assert!(confirm_codex_channels(Some(&turn), || vec![fenced_channel]).is_empty());
     delete(&record);

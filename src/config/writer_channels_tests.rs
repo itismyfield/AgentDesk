@@ -277,7 +277,7 @@ fn readers_s1b_dormant_disk_loader_rejects_zero_invalid_and_unselected_ids() {
     assert!(
         load_fixture(
             root.path(),
-            "tui_o: {writer: {dormant_channels: [41]}}",
+            "tui_o: {writer: {all_tui: false, dormant_channels: [41]}}",
             BINDINGS,
             "{}",
         )
@@ -307,6 +307,87 @@ fn readers_s1b_dormant_disk_loader_validates_actual_all_tui_selection() {
         assert!(
             load_fixture(root.path(), &writer, bindings, "{}").is_err(),
             "all_tui must reject non-selected dormant IDs: {dormant}"
+        );
+    }
+}
+
+/// What the boot selection hands the writer and turn mode: selected channels, late adoption, and
+/// the owned channels turn confirmation would offer to retirement.
+fn boot_selection(config: &Config) -> (Vec<u64>, bool, Vec<u64>) {
+    use crate::services::tui_o::{channel_policy::BootChannels, turn_mode};
+    let boot = BootChannels::validate(config).unwrap();
+    let channels: Vec<u64> = boot.channels().iter().copied().collect();
+    let mut offered = Vec::new();
+    let turn = crate::services::tui_o::shadow::tap::TuiOConfig::of(config)
+        .turn
+        .clone();
+    assert_eq!(&turn, boot.turn());
+    turn_mode::confirm_selected(
+        Some(&turn),
+        || channels.clone(),
+        |channel| {
+            offered.push(channel);
+            false
+        },
+    );
+    (channels, boot.late_adopt_capable(), offered)
+}
+
+// Unset writer and turn flags select every TUI binding; a list or an explicit false keeps its mode.
+#[test]
+fn tui_o_defaults_select_every_tui_binding_unless_a_list_or_false_says_otherwise() {
+    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let bindings = "claude: {id: '41', runtime: tui}\n      codex: {id: '42', runtime: tui}\n      \
+                    gemini: {id: '43'}";
+    let select =
+        |writer: &str| boot_selection(&load_fixture(root.path(), writer, bindings, "{}").unwrap());
+    let all = (vec![41, 42], true, vec![41, 42]);
+    for writer in [
+        "",
+        "tui_o: {tool_cards: {enabled: false}}",
+        "tui_o: {writer: {channels: []}}",
+    ] {
+        assert_eq!(select(writer), all, "{writer:?}");
+    }
+    let cases = [
+        ("tui_o: {writer: {all_tui: false}}", (vec![], true, vec![])),
+        (
+            "tui_o: {writer: {channels: [41]}}",
+            (vec![41], true, vec![41]),
+        ),
+        (
+            "tui_o: {writer: {late_adopt: false}}",
+            (vec![41, 42], false, vec![41, 42]),
+        ),
+        (
+            "tui_o: {turn: {all_owned: false}}",
+            (vec![41, 42], true, vec![]),
+        ),
+        (
+            "tui_o: {turn: {channels: [42]}}",
+            (vec![41, 42], true, vec![42]),
+        ),
+    ];
+    for (writer, expected) in cases {
+        assert_eq!(select(writer), expected, "{writer:?}");
+    }
+}
+
+// A cluster node without both ids keeps booting with the default selection off; an explicit
+// selection still refuses the boot.
+#[test]
+fn tui_o_default_selection_turns_off_on_a_cluster_node_without_ids() {
+    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let cluster = "cluster: {enabled: true, instance_id: a}\ntui_o:";
+    let load =
+        |writer: &str| load_fixture(root.path(), &format!("{cluster} {writer}"), BINDINGS, "{}");
+    let (channels, _, offered) = boot_selection(&load("{}").expect("default selection boots"));
+    assert_eq!((channels, offered), (vec![], vec![]));
+    for writer in ["{writer: {all_tui: true}}", "{writer: {channels: [41]}}"] {
+        let error = load(writer).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("cluster.gateway_preferred_instance_id"),
+            "{writer}: {error:#}"
         );
     }
 }

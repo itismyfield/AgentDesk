@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::config::Config;
 use crate::services::tui_o::channel_policy;
+use crate::services::tui_o::shadow::tap::TuiOConfig;
 
 /// `server.auth_token` is `skip_serializing`; compare it here, report only the path.
 pub(super) fn server_auth_token(old: &Config, new: &Config) -> bool {
@@ -43,6 +44,6 @@ pub(super) fn tui_o_writer_dormant_channels(old: &Config, new: &Config) -> bool 
 pub(super) fn tui_o_writer_late_adopt(old: &Config, new: &Config) -> bool {
     let capable = channel_policy::boot()
         .map(|boot| boot.late_adopt_capable())
-        .unwrap_or_else(|| old.tui_o.as_ref().is_some_and(|c| c.writer.late_adopt));
-    new.tui_o.as_ref().is_some_and(|c| c.writer.late_adopt) && !capable
+        .unwrap_or_else(|| TuiOConfig::of(old).writer.late_adopt());
+    TuiOConfig::of(new).writer.late_adopt() && !capable
 }

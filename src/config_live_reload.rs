@@ -978,9 +978,10 @@ mod tests {
 
         let mut runtime_changed = old.clone();
         runtime_changed.agents[0] = test_agent_with_claude_channel("123", Some(false), Some("tui"));
+        // The channel becoming a TUI also joins the default writer selection.
         assert_eq!(
             restart_required_changes(&old, &runtime_changed),
-            vec!["agents.*.channels.*.runtime"]
+            vec!["agents.*.channels.*.runtime", "tui_o.writer.channels"]
         );
 
         let mut tui_changed = old.clone();

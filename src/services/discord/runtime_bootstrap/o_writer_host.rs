@@ -166,8 +166,8 @@ impl HostIo for GatewayHost {
 
     fn late_adopt_enabled(&self) -> bool {
         crate::config_live_reload::current()
-            .map(|config| config.tui_o.as_ref().is_some_and(|o| o.writer.late_adopt))
-            .unwrap_or_else(|| self.boot.as_ref().is_some_and(|o| o.writer.late_adopt))
+            .map(|config| TuiOConfig::of(&config).writer.late_adopt())
+            .unwrap_or_else(|| self.boot.as_ref().is_some_and(|o| o.writer.late_adopt()))
     }
 
     /// Open intake, sessions of other nodes and node overrides.
@@ -381,7 +381,7 @@ fn parts(
             alarms,
             self_id_wait: SELF_ID_WAIT,
             configured_id,
-            turn: config.map(|c| c.turn.clone()).unwrap_or_default(),
+            turn: config.map_or_else(TurnConfig::off, |c| c.turn.clone()),
             #[cfg(test)]
             rest: None,
             boot: config.cloned(),
@@ -434,7 +434,7 @@ pub(super) mod test_host {
             alarms,
             self_id_wait,
             configured_id: configured_id.map(str::to_owned),
-            turn: TurnConfig::default(),
+            turn: TurnConfig::off(),
             rest: None,
             boot: None,
             execution: BTreeMap::new(),
@@ -532,7 +532,7 @@ mod fence_tests {
                 .get()
                 .cloned()
                 .or_else(|| Some("fence-local".into())),
-            turn: TurnConfig::default(),
+            turn: TurnConfig::off(),
             rest: None,
             boot: None,
             execution: BTreeMap::new(),
@@ -601,7 +601,7 @@ mod repost_tests {
                 alarms: Arc::new(AlarmRouter::for_process(None, None)),
                 self_id_wait: Duration::ZERO,
                 configured_id: None,
-                turn: TurnConfig::default(),
+                turn: TurnConfig::off(),
                 rest: None,
                 boot: None,
                 execution: BTreeMap::new(),
