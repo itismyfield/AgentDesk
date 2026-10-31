@@ -41,7 +41,7 @@ fn refusal(host: TurnHost) -> HerdrRefusal {
 #[tokio::test]
 async fn configured_turn_refuses_provider_and_remote_endpoint_before_the_row_and_an_unread_row() {
     let _hosts = force_hosts(Some("mac-mini"), &[(CHANNEL, "mac-mini"), (7, "mac-book")]);
-    let _open = force_admission(Admission::new(Some("on".as_ref()), None));
+    let _open = force_admission(Admission::new(true, None));
     let judge = |provider: ProviderKind, channel| async move {
         refusal(for_turn(None, &provider, channel, Some(SESSION_KEY)).await)
     };
@@ -113,7 +113,7 @@ async fn unconfigured_channel_with_a_herdr_row_is_refused_and_a_configured_one_n
     }
 
     let _hosts = force_hosts(Some("mac-mini"), &[(CHANNEL, "mac-mini")]);
-    let _off = force_admission(Admission::new(Some("off".as_ref()), None));
+    let _off = force_admission(Admission::new(false, None));
     assert!(matches!(
         refusal(judge().await),
         HerdrRefusal::HostedRowUnreadable { .. }

@@ -1,13 +1,21 @@
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 
-use poise::serenity_prelude::ChannelId;
+use poise::serenity_prelude::{ChannelId, MessageId};
 
 use super::{cleanup_expired_sessions, mark_session_disconnected_for_idle_cleanup};
 use crate::db::dispatched_sessions::hosted_execution::tests::{future_schema, owner, record, wire};
 use crate::db::dispatched_sessions::hosted_execution::{HostedOwner, HostedState};
-use crate::services::discord::{DiscordSession, SESSION_MAX_IDLE, adk_session};
+use crate::services::discord::relay_recovery::tests::orphan_token_finish::queued;
+use crate::services::discord::{
+    DiscordSession, SESSION_MAX_IDLE, adk_session, mailbox_finish_turn,
+};
 use crate::services::provider::ProviderKind;
+use crate::services::turn_orchestrator::registry_purge::MailboxPurgeOutcome::Removed;
+use crate::services::turn_orchestrator::{
+    load_channel_pending_dispatch_marker_checked, load_channel_pending_queue_checked,
+    save_channel_pending_dispatch_marker, save_channel_queue,
+};
 
 /// Fake tmux that logs each call: `probefail` targets fail the probe, `revived` ones wait for `go`,
 /// and every other is gone.
@@ -106,6 +114,8 @@ async fn idle_cleanup_expires_only_legacy_tmux_sessions_pg() {
         "herdr-elsewhere",
         "split",
         "probefail",
+        "busy",
+        "purged",
     ];
     let channel = |n: &str| {
         (1_500_600_700_800_900_000 + names.iter().position(|m| *m == n).unwrap() as u64).to_string()
@@ -145,6 +155,27 @@ async fn idle_cleanup_expires_only_legacy_tmux_sessions_pg() {
         let session = expired_session(&format!("idle-guard-{n}"));
         shared.core.lock().await.sessions.insert(id, session);
     }
+    let busy = ChannelId::new(channel("busy").parse().unwrap());
+    let cancel = std::sync::Arc::new(crate::services::provider::CancelToken::new());
+    let (user, msg) = (poise::serenity_prelude::UserId::new(7), MessageId::new(77));
+    assert!(shared.mailbox(busy).try_start_turn(cancel, user, msg).await);
+    // A finished turn's idle mailbox is purged; its leftover files must still be cleared.
+    let purged = ChannelId::new(channel("purged").parse().unwrap());
+    let cancel = std::sync::Arc::new(crate::services::provider::CancelToken::new());
+    let mailbox = shared.mailbox(purged);
+    assert!(
+        mailbox
+            .try_start_turn(cancel, user, MessageId::new(78))
+            .await
+    );
+    let finished = mailbox_finish_turn(&shared, &provider, purged).await;
+    assert!(finished.removed_token.is_some());
+    assert_eq!(shared.mailboxes.remove_idle_entry(purged).await, Removed);
+    for n in ["legacy", "purged"] {
+        let id = ChannelId::new(channel(n).parse().unwrap());
+        save_channel_queue(&provider, &token, id, &[queued(81)], None).unwrap();
+        save_channel_pending_dispatch_marker(&provider, &token, id, &queued(82), None).unwrap();
+    }
     let marker = crate::services::tmux_common::session_temp_path(&tmux("traced"), "host_kind");
     std::fs::write(marker, "herdr").unwrap();
     // Every in-memory session is now past the idle limit.
@@ -154,7 +185,7 @@ async fn idle_cleanup_expires_only_legacy_tmux_sessions_pg() {
 
     cleanup_expired_sessions(&shared).await;
 
-    let expired = ["legacy", "noncanonical"];
+    let expired = ["legacy", "noncanonical", "purged"];
     let mut remaining: Vec<u64> = shared
         .core
         .lock()
@@ -170,6 +201,19 @@ async fn idle_cleanup_expires_only_legacy_tmux_sessions_pg() {
         .map(|n| channel(n).parse().unwrap())
         .collect();
     assert_eq!(remaining, kept, "only legacy tmux sessions leave memory");
+    // Neither the active-turn probe nor the expiry clear gives a mailbox-less channel one.
+    for n in names.iter().filter(|n| **n != "busy") {
+        let id = ChannelId::new(channel(n).parse().unwrap());
+        assert!(shared.mailboxes.peek(id).is_none(), "{n} gained a mailbox");
+    }
+    // The expiry clear still empties the queue file and drops the dispatch marker without an actor.
+    for n in ["legacy", "purged"] {
+        let id = ChannelId::new(channel(n).parse().unwrap());
+        let (queue, _) = load_channel_pending_queue_checked(&provider, &token, id).unwrap();
+        assert!(queue.is_empty(), "{n} queue survived");
+        let marker = load_channel_pending_dispatch_marker_checked(&provider, &token, id).unwrap();
+        assert!(marker.is_none(), "{n} dispatch marker survived");
+    }
     let status = |key: String| {
         let pool = pool.clone();
         async move {
@@ -194,7 +238,7 @@ async fn idle_cleanup_expires_only_legacy_tmux_sessions_pg() {
     let calls = std::fs::read_to_string(tmux_dir.path().join("calls")).unwrap_or_default();
     let mut probed: Vec<&str> = calls.lines().collect();
     probed.sort();
-    let mut expected: Vec<String> = ["legacy", "noncanonical", "probefail"]
+    let mut expected: Vec<String> = ["legacy", "noncanonical", "probefail", "purged"]
         .map(|n| format!("has-session -t ={}:", tmux(n)))
         .into();
     expected.sort();

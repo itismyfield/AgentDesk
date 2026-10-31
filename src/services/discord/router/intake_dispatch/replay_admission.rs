@@ -496,11 +496,8 @@ pub(crate) mod test_activation {
 
     pub(crate) fn active(channel: &str) -> bool {
         let channels = ACTIVE.lock().unwrap().join(",");
-        crate::services::discord::replay_policy::activation::Settings::parse(
-            Some("1"),
-            Some(&channels),
-        )
-        .selected(channel)
+        crate::services::discord::replay_policy::activation::Settings::parse(true, Some(&channels))
+            .selected(channel)
     }
 
     pub(crate) struct Activated(String);

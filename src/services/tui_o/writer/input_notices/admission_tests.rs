@@ -135,6 +135,7 @@ impl Fixture {
             execution_nonce: NONCE.into(),
         };
         let piece = PieceWork {
+            output_origin: None,
             unit_key: UnitKey {
                 channel_id: CHANNEL,
                 provider: ShadowProvider::Claude,

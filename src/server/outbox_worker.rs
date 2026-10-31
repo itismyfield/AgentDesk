@@ -116,3 +116,48 @@ mod attachment_pg_tests;
 
 #[cfg(test)]
 mod session_notice_pg_tests;
+
+#[cfg(test)]
+pub(crate) mod origin_fixture {
+    pub(crate) use super::session_notice_pg_tests::Discord;
+
+    #[tokio::test]
+    async fn output_origin_stampless_current_owner_outbox_pg() {
+        use crate::services::cluster::intake_router_hook::owner_record::output::tests::fixture;
+        use crate::services::message_outbox::{self, OutboxMessage};
+        use std::sync::Arc;
+        let (_db, pool, _origin) = fixture("72280700").await;
+        let mut tx = pool.begin().await.unwrap();
+        let id = message_outbox::enqueue_outbox_pg_on_tx(
+            &mut tx,
+            OutboxMessage {
+                target: "channel:72280700",
+                content: "legacy answer",
+                bot: "notify",
+                source: "headless_turn",
+                reason_code: Some("headless.delivery"),
+                session_key: None,
+            },
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        let mock = Discord::new().await;
+        let registry = mock.registry().await;
+        let pool = Arc::new(pool);
+        assert_eq!(
+            super::drain_message_outbox_once(&pool, &registry, "stampless-consumer").await,
+            1
+        );
+        let status: String = sqlx::query_scalar("SELECT status FROM message_outbox WHERE id=$1")
+            .bind(id)
+            .fetch_one(pool.as_ref())
+            .await
+            .unwrap();
+        assert_eq!(status, "held");
+        assert!(mock.posts().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod guard_retry_pg_tests;

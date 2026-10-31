@@ -334,9 +334,37 @@ pub(in crate::services::discord) async fn mailbox_clear_channel(
 ) -> ClearChannelResult {
     let handle = shared.mailbox(channel_id);
     let persistence = queue_persistence_context(shared, provider, channel_id);
+    let cleared = handle.clear_or_refused(persistence).await;
+    settle_clear(
+        shared,
+        channel_id,
+        cleared.map(|result| (result, Some(handle))),
+    )
+    .await
+}
+
+/// Idle cleanup's clear: an absent mailbox gets the same durable clear without being recreated.
+pub(in crate::services::discord) async fn mailbox_clear_channel_without_spawn(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> ClearChannelResult {
+    let persistence = queue_persistence_context(shared, provider, channel_id);
+    let cleared = shared
+        .mailboxes
+        .clear_without_spawn(channel_id, persistence)
+        .await;
+    settle_clear(shared, channel_id, cleared).await
+}
+
+async fn settle_clear(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    cleared: Result<(ClearChannelResult, Option<ChannelMailboxHandle>), MailboxRefusal>,
+) -> ClearChannelResult {
     // A purge-closed actor held nothing to clear; an unreachable one may have held anything.
-    let result = match handle.clear_or_refused(persistence).await {
-        Ok(result) => result,
+    let (result, handle) = match cleared {
+        Ok(cleared) => cleared,
         Err(refusal) => {
             let mut nothing = ClearChannelResult::default();
             nothing.persistence.count_unknown = refusal == MailboxRefusal::Unreachable;
@@ -346,8 +374,10 @@ pub(in crate::services::discord) async fn mailbox_clear_channel(
     apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
     // #2443 — `Clear` is the cancel/teardown exit path. Mark recovery_done so
     // a watcher that subscribed to the recovery latch is freed even when
-    // recovery is aborted rather than completed.
-    handle.recovery_done().mark_done();
+    // recovery is aborted rather than completed. An absent actor has no latch.
+    if let Some(handle) = handle {
+        handle.recovery_done().mark_done();
+    }
     result
 }
 

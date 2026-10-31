@@ -842,6 +842,139 @@ async fn execution_stays_unavailable_and_legacy_crud_cas_issue_sync_unchanged_pg
     h.close().await;
 }
 
+/// A production database that already ran main through 0161 takes only this branch's later files.
+#[tokio::test]
+async fn later_branch_migrations_upgrade_a_main_database_already_at_0161_pg() {
+    use crate::db::postgres;
+    use sqlx::migrate::Migrator;
+
+    type MigrationRow = (i64, Vec<u8>, bool, DateTime<Utc>, i64);
+    const RECORDS: &str = "SELECT version, checksum, success, installed_on, execution_time FROM _sqlx_migrations ORDER BY version";
+    let fixture = TestPostgresDb::create().await;
+    let pool = postgres::connect_test_pool(&fixture.database_url, "main at 0161 upgrade")
+        .await
+        .unwrap();
+    let embedded = sqlx::migrate!("./migrations/postgres");
+    let campaigns = 161;
+    let main = Migrator::with_migrations(
+        embedded
+            .iter()
+            .filter(|m| m.version <= campaigns)
+            .cloned()
+            .collect(),
+    );
+    main.run(&pool).await.unwrap();
+    let before = sqlx::query_as::<_, MigrationRow>(RECORDS)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(before.last().unwrap().0, campaigns);
+    let mut later: Vec<i64> = embedded
+        .iter()
+        .map(|m| m.version)
+        .filter(|v| *v > campaigns)
+        .collect();
+    later.dedup();
+    assert!(!later.is_empty());
+    assert_eq!(
+        postgres::migration_status(&pool)
+            .await
+            .unwrap()
+            .pending_versions,
+        later
+    );
+
+    postgres::migrate(&pool).await.unwrap();
+    let after = sqlx::query_as::<_, MigrationRow>(RECORDS)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        after[..before.len()],
+        before[..],
+        "main's journal stays as it was"
+    );
+    let appended: Vec<i64> = after[before.len()..].iter().map(|row| row.0).collect();
+    assert_eq!(appended, later, "later files apply after 0161, in order");
+    for row in &after[before.len()..] {
+        let migration = embedded.iter().find(|m| m.version == row.0).unwrap();
+        assert!(row.2);
+        assert_eq!(row.1.as_slice(), migration.checksum.as_ref());
+    }
+    // Each later file leaves at least one object of its own, so a partial apply cannot pass.
+    let expected: [(i64, &[&str]); 5] = [
+        (
+            163,
+            &["table:channel_home_preferences", "constraint:chp_mode_home"],
+        ),
+        (
+            164,
+            &[
+                "column:intake_outbox.routing_state",
+                "constraint:intake_routing_custody_shape",
+                "function:intake_routing_bundle_pinned",
+            ],
+        ),
+        (
+            165,
+            &[
+                "column:message_outbox.output_origin",
+                "constraint:message_outbox_output_origin_object",
+            ],
+        ),
+        (
+            166,
+            &[
+                "column:intake_session_owners.routing_cleanup",
+                "constraint:execution_cleanup_shape",
+                "function:intake_routing_bundle_retention",
+            ],
+        ),
+        (
+            167,
+            &[
+                "column:intake_outbox.routing_plan",
+                "column:intake_session_owners.routing_notice_outbox_id",
+                "constraint:input_fallback_plan_object",
+                "constraint:input_fallback_notice_pointer",
+            ],
+        ),
+    ];
+    assert_eq!(
+        expected
+            .iter()
+            .map(|(version, _)| *version)
+            .collect::<Vec<_>>(),
+        later,
+        "every later file needs its own schema check"
+    );
+    for (version, objects) in expected {
+        for object in objects {
+            let (kind, name) = object.split_once(':').unwrap();
+            let query = match kind {
+                "table" => "SELECT to_regclass($1) IS NOT NULL",
+                "column" => {
+                    "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name=split_part($1,'.',1) AND column_name=split_part($1,'.',2))"
+                }
+                "constraint" => "SELECT EXISTS(SELECT 1 FROM pg_constraint WHERE conname=$1)",
+                "function" => "SELECT EXISTS(SELECT 1 FROM pg_proc WHERE proname=$1)",
+                other => panic!("unknown schema object kind {other}"),
+            };
+            let present: bool = sqlx::query_scalar(query)
+                .bind(name)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert!(present, "{version:04} must leave {object}");
+        }
+    }
+    let status = postgres::migration_status(&pool).await.unwrap();
+    assert!(status.pending_versions.is_empty());
+    assert!(status.missing_from_resolved.is_empty());
+    pool.close().await;
+    fixture.drop().await;
+}
+
 #[tokio::test]
 async fn migration_upgrades_main_schema_and_preserves_legacy_records_pg() {
     use crate::db::{campaigns as legacy, postgres};
@@ -856,7 +989,7 @@ async fn migration_upgrades_main_schema_and_preserves_legacy_records_pg() {
     let main = Migrator::with_migrations(
         embedded
             .iter()
-            .filter(|m| m.version != version)
+            .filter(|m| m.version < version)
             .cloned()
             .collect(),
     );
@@ -889,12 +1022,18 @@ async fn migration_upgrades_main_schema_and_preserves_legacy_records_pg() {
             .unwrap(),
         0
     );
+    let mut pending: Vec<i64> = embedded
+        .iter()
+        .map(|m| m.version)
+        .filter(|v| *v >= version)
+        .collect();
+    pending.dedup();
     assert_eq!(
         postgres::migration_status(&pool)
             .await
             .unwrap()
             .pending_versions,
-        vec![version]
+        pending
     );
 
     // Run the production migrator over real main records, without editing its journal.
@@ -906,7 +1045,7 @@ async fn migration_upgrades_main_schema_and_preserves_legacy_records_pg() {
     assert_eq!(
         after
             .iter()
-            .filter(|row| row.0 != version)
+            .filter(|row| row.0 < version)
             .cloned()
             .collect::<Vec<_>>(),
         before
@@ -915,7 +1054,7 @@ async fn migration_upgrades_main_schema_and_preserves_legacy_records_pg() {
     let migration = embedded.iter().find(|m| m.version == version).unwrap();
     assert!(added.2);
     assert_eq!(added.1.as_slice(), migration.checksum.as_ref());
-    assert_eq!(after.len(), before.len() + 1);
+    assert_eq!(after.len(), before.len() + pending.len());
     assert_eq!(
         sqlx::query_scalar::<_, i64>(TABLES)
             .fetch_one(&pool)

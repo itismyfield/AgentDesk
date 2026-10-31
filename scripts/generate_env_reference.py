@@ -11,8 +11,7 @@ rows for variables nothing reads). This generator derives the table from
 * ``const FOO_ENV: &str = "AGENTDESK_..."`` style name constants (``AGENTDESK_``
   and ``ADK_`` prefixes), including the indirect reads that pass such a
   constant to ``env::var``.
-* ``some_env_helper("AGENTDESK_...")`` calls — helper functions whose name
-  contains ``env`` and that take the literal name as an argument.
+* Helper functions whose name contains ``env``, with literal or constant names.
 * ``tracing_subscriber::EnvFilter::from_default_env()`` (reads ``RUST_LOG``)
   and ``EnvFilter::from_env("NAME")``.
 
@@ -21,7 +20,7 @@ same file that names the variable (nearest to the site), the comment adjacent
 to the site, or the doc comment of the enclosing ``fn``.
 
 Test-only code is excluded: ``tests.rs`` / ``integration_tests.rs`` modules,
-``src/**/tests/`` directories, and ``#[cfg(test)] mod ... { ... }`` blocks
+``src/**/tests/`` directories, and ``#[cfg(test)]`` items
 (blanked in place so line numbers stay stable). ``target/`` is never scanned.
 
 Output is deterministic: files are visited in sorted order, rows are sorted by
@@ -42,11 +41,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from generate_inventory_docs import (  # noqa: E402
-    _CFG_MOD_RE,
     cfg_requires_test,
     is_test_file,
     scan_balanced,
 )
+from rust_lex import StripState, cfg_item_end, strip_line  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_ROOT = REPO_ROOT / "src"
@@ -63,7 +62,7 @@ _LITERAL_READ_RE = re.compile(
 )
 # `env::var(SOME_CONST)` — resolved through the constant table below.
 _CONST_READ_RE = re.compile(
-    r"(?<![A-Za-z0-9_])(?:std::)?env::var(?:_os)?\(\s*(?P<ident>[A-Z][A-Z0-9_]*)\s*\)"
+    r"(?<![A-Za-z0-9_])(?:std::)?env::var(?:_os)?\(\s*(?:(?:crate|super|self)::(?:\w+::)*)?(?P<ident>[A-Z][A-Z0-9_]*)\s*\)"
 )
 # `const FOO: &str = "AGENTDESK_..."` (also `pub`, `pub(crate)`, `static`,
 # `&'static str`; the literal may sit on the next line after a rustfmt wrap).
@@ -72,8 +71,12 @@ _CONST_DEF_RE = re.compile(
 )
 # `explicit_env_path("AGENTDESK_X")`, `migrated_env_path("AGENTDESK_X")`, ...
 _HELPER_READ_RE = re.compile(
-    r"(?<![A-Za-z0-9_])(?P<helper>[a-z_]*env[a-z_]*)\(\s*[^()\"]*?\"(?P<name>(?:AGENTDESK|ADK)_[A-Z0-9_]*)\""
+    r"(?<![A-Za-z0-9_])(?P<helper>[a-z_]*env[a-z_]*)\(\s*[^()\"]*?\"(?P<name>" + ENV_NAME + r")\""
 )
+_HELPER_CONST_READ_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?P<helper>[a-z_]*env[a-z_]*)\(\s*(?:(?:crate|super|self)::(?:\w+::)*)?(?P<ident>[A-Z][A-Z0-9_]*)\s*[,)]"
+)
+_CFG_ITEM_RE = re.compile(r"#\[\s*cfg\s*\((?P<predicate>[^]]*?)\)\s*\]")
 _HELPER_EXCLUDE = {"set_var", "remove_var", "env_remove", "env"}
 # `tracing_subscriber::EnvFilter::from_default_env()` reads `RUST_LOG` without
 # naming it; `EnvFilter::from_env("NAME")` names its variable explicitly.
@@ -151,30 +154,22 @@ def production_rust_files() -> list[Path]:
 
 
 def blank_test_modules(text: str) -> str:
-    """Replace ``#[cfg(test)] mod x { ... }`` bodies with newlines.
-
-    Line numbers of the surrounding code are preserved because every removed
-    character that is not a newline is dropped while newlines are kept.
-    """
-
-    result: list[str] = []
+    """Blank test-only items while preserving source offsets and line numbers."""
+    state = StripState()
+    code = "\n".join(strip_line(line, state).ljust(len(line)) for line in text.split("\n"))
+    result = list(text)
     cursor = 0
-    for match in _CFG_MOD_RE.finditer(text):
+    for match in _CFG_ITEM_RE.finditer(code):
         if match.start() < cursor:
             continue
         if not cfg_requires_test(match.group("predicate")):
             continue
-        open_index = match.end() - 1
         try:
-            _body, close_index = scan_balanced(text, open_index, "{", "}")
+            index = cfg_item_end(code, match.end(), scan_balanced)
         except Exception as error:  # pragma: no cover - defensive
-            raise ParseError(f"unbalanced test module at offset {open_index}: {error}") from error
-        result.append(text[cursor : match.start()])
-        # ``scan_balanced`` returns the index just past the closing brace.
-        removed = text[match.start() : close_index]
-        result.append("\n" * removed.count("\n"))
-        cursor = close_index
-    result.append(text[cursor:])
+            raise ParseError(f"unbalanced test item at offset {match.end()}: {error}") from error
+        result[match.start():index] = ["\n" if c == "\n" else " " for c in text[match.start():index]]
+        cursor = index
     return "".join(result)
 
 
@@ -350,6 +345,14 @@ def collect_variables(files: list[Path]) -> dict[str, Variable]:
                 continue
             line = offset_to_line(text, match.start())
             add(match.group("name"), Site(rel, line, "helper", describe_site(lines, line, match.group("name"))))
+        for match in _HELPER_CONST_READ_RE.finditer(text):
+            if match.group("helper") in _HELPER_EXCLUDE:
+                continue
+            ident = match.group("ident")
+            name = per_file_consts[path].get(ident) or global_consts.get(ident)
+            if name is not None:
+                line = offset_to_line(text, match.start())
+                add(name, Site(rel, line, "helper", describe_site(lines, line, name)))
         for match in _ENV_FILTER_DEFAULT_RE.finditer(text):
             line = offset_to_line(text, match.start())
             add(
@@ -389,7 +392,7 @@ def render(variables: dict[str, Variable]) -> str:
         f"<!-- Generated by `{GENERATOR_COMMAND}`. Do not edit by hand. -->",
         "",
         "Environment variables read by the AgentDesk binary, derived from `src/`.",
-        "Test-only modules and `#[cfg(test)]` blocks are excluded. `Defined at`",
+        "Test-only modules and `#[cfg(test)]` items are excluded. `Defined at`",
         "lists each source file once: the file defining the name constant first when",
         "one exists, then the other files that read the variable, in path order.",
         "Line numbers are left out so edits that only shift lines do not change this",

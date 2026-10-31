@@ -410,7 +410,7 @@ fn rig() -> Rig {
     Rig {
         server: serve(),
         context: context(NONCE),
-        _admission: herdr_admission::force_for_test(Admission::new(None, Some(stop_file))),
+        _admission: herdr_admission::force_for_test(Admission::new(true, Some(stop_file))),
         _root: root,
     }
 }
@@ -614,7 +614,7 @@ fn a_marker_not_naming_herdr_refuses_every_write() {
 fn stopped_admission_refuses_input_but_lets_a_cancel_key_through() {
     let rig = rig();
     let target = hosted_target(&rig, vec![SERVER], off_where_dialled, launched_os(&rig));
-    let _off = herdr_admission::force_for_test(Admission::new(Some("off".as_ref()), None));
+    let _off = herdr_admission::force_for_test(Admission::new(false, None));
     let stopped =
         HerdrGateRefusal::AdmissionStopped(crate::services::herdr_admission::StopCause::Env);
     assert_eq!(
@@ -915,7 +915,7 @@ fn m0_terminate_admission_off_still_judges() {
     }
     let rig = rig();
     let _switch = LiveTerminateSwitch::new();
-    let _off = herdr_admission::force_for_test(Admission::new(Some("off".as_ref()), None));
+    let _off = herdr_admission::force_for_test(Admission::new(false, None));
     let target = hosted_target(&rig, vec![SERVER], off_where_dialled, launched_os(&rig));
     let result = terminate(&target);
     assert_eq!(rig.server.mutations().len(), 1);
@@ -1323,6 +1323,7 @@ mod service {
     pub(super) struct ScriptedOs {
         inner: Mutex<Arc<dyn ProcessOs>>,
         exists: Result<bool, RestoreUnverified>,
+        next_exists: Mutex<Option<Result<bool, RestoreUnverified>>>,
         on_exists: Mutex<Option<CloseHook>>,
     }
 
@@ -1334,6 +1335,7 @@ mod service {
             Arc::new(Self {
                 inner: Mutex::new(inner),
                 exists,
+                next_exists: Mutex::new(None),
                 on_exists: Mutex::new(None),
             })
         }
@@ -1343,6 +1345,9 @@ mod service {
         /// Runs once, inside the next read of whether the recorded provider still exists.
         pub(super) fn on_exists(&self, hook: CloseHook) {
             *self.on_exists.lock().unwrap() = Some(hook);
+        }
+        pub(super) fn fail_next_read(&self) {
+            *self.next_exists.lock().unwrap() = Some(Err(RestoreUnverified::ProcessUnreadable));
         }
         fn os(&self) -> Arc<dyn ProcessOs> {
             self.inner.lock().unwrap().clone()
@@ -1354,7 +1359,11 @@ mod service {
             if let Some(hook) = self.on_exists.lock().unwrap().take() {
                 hook();
             }
-            self.exists
+            self.next_exists
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or(self.exists)
         }
         fn parent(&self, pid: u32) -> Result<u32, RestoreUnverified> {
             self.os().parent(pid)
@@ -2247,6 +2256,10 @@ pub(crate) mod p11 {
                 let _ = wait.recv_timeout(Duration::from_secs(60));
             }));
             EndCheckPause { arrived, release }
+        }
+
+        pub(crate) fn fail_next_process_read(&self) {
+            self.os.fail_next_read();
         }
 
         /// A restarted server restored the pane as shell `FRESH` alone.

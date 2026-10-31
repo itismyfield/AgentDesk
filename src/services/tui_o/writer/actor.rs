@@ -495,6 +495,12 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                 (
                     rejected,
                     super::pieces::PieceWork {
+                        output_origin: self
+                            .writer
+                            .store()
+                            .ledger()
+                            .output_origin(rejected)
+                            .cloned(),
                         unit_key: piece.unit_key.clone(),
                         index: piece.piece_index,
                         payload: piece.payload.clone(),

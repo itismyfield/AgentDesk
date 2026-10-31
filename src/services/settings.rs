@@ -11,6 +11,7 @@ use sqlx::Row;
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 
 mod resolve;
+pub(crate) use resolve::resolve_env_flag;
 mod runtime_config_put;
 #[cfg(test)]
 pub use resolve::clamp_retry_limit;

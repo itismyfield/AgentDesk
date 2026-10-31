@@ -56,6 +56,8 @@ pub(crate) struct RepostEnvelope {
     content: String,
     ids: RepostIds,
     additional: bool,
+    pub(crate) output_origin:
+        Option<crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
 }
 
 impl RepostEnvelope {
@@ -66,6 +68,7 @@ impl RepostEnvelope {
             content,
             ids,
             additional: false,
+            output_origin: None,
         }
     }
 
@@ -77,10 +80,15 @@ impl RepostEnvelope {
         }
     }
 
+    pub(crate) fn payload(&self) -> &str {
+        &self.content
+    }
+
     pub(crate) fn message(&self) -> CreateMessage {
         let nonce = serenity::model::channel::Nonce::String(self.ids.nonce.clone());
         let message = CreateMessage::new()
             .content(self.content.clone())
+            .allowed_mentions(crate::services::discord::http::relay_allowed_mentions())
             .nonce(nonce)
             .enforce_nonce(true);
         if !self.additional {
@@ -111,6 +119,7 @@ pub(crate) struct CreatedMessage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum WireOutcome {
     Created(CreatedMessage),
+    Withheld(String),
     /// 400, 403 or 404: the channel refuses the bot.
     Refused(u16),
     /// Only confirmed 429s without a usable retry time: Discord created nothing.

@@ -126,6 +126,90 @@ class SourceTreeStabilityTests(unittest.TestCase):
     def row(self, rendered: str, name: str) -> str:
         return next(line for line in rendered.splitlines() if line.startswith(f"| `{name}` |"))
 
+    def test_cfg_test_item_does_not_enter_production_reference(self) -> None:
+        self.write("src/items.rs", '''
+            #[cfg(test)]
+            fn only_test() { let _ = std::env::var("ADK_TEST_ITEM"); }
+            #[cfg(all(unix, test))]
+            pub(crate) async fn helper() { env_flag("ADK_TEST_HELPER", false); }
+            #[cfg(test)] const NAME: &str = "ADK_TEST_CONST";
+            #[cfg(test)] static VALUE: &str = "ADK_TEST_STATIC";
+            #[cfg(not(test))]
+            fn prod() { env_flag("AGENTDESK_ITEM_PROD", false); }
+            #[cfg(any(test, unix))]
+            fn shared() { env_flag("AGENTDESK_ITEM_SHARED", false); }
+            struct Fields { #[cfg(test)] probe: bool, live: bool }
+            fn after_field() { env_flag("AGENTDESK_AFTER_FIELD", false); }
+        ''')
+        output = self.render()
+        self.assertIn("AGENTDESK_ITEM_PROD", output)
+        self.assertIn("AGENTDESK_ITEM_SHARED", output)
+        self.assertIn("AGENTDESK_AFTER_FIELD", output)
+        for name in ("ADK_TEST_ITEM", "ADK_TEST_HELPER", "ADK_TEST_CONST", "ADK_TEST_STATIC"):
+            self.assertNotIn(name, output)
+
+    def test_named_helper_argument_records_the_reader_file(self) -> None:
+        self.write("src/names.rs", 'pub const FLAG_ENV: &str = "AGENTDESK_DYNAMIC";')
+        self.write("src/consumer.rs", 'fn read() -> bool { crate::utils::env_flag(FLAG_ENV, false) }')
+        for prefix in ("crate::names::", "super::", "self::"):
+            suffix = prefix.split("::")[0]
+            self.write(f"src/direct_{suffix}.rs", f'fn read() {{ std::env::var({prefix}FLAG_ENV); }}')
+            self.write(f"src/helper_{suffix}.rs", f'fn read() {{ env_flag({prefix}FLAG_ENV, false); }}')
+        row = self.row(self.render(), "AGENTDESK_DYNAMIC")
+        self.assertIn("`src/names.rs`", row)
+        self.assertIn("`src/consumer.rs`", row)
+        for suffix in ("crate", "super", "self"):
+            self.assertIn(f"`src/direct_{suffix}.rs`", row)
+            self.assertIn(f"`src/helper_{suffix}.rs`", row)
+
+    def test_cfg_test_list_elements_preserve_production_readers(self) -> None:
+        for source in (
+            'fn f(k: K) { match k { #[cfg(test)] K::T => true, _ => std::env::var("AGENTDESK_PROD_LIST").is_ok() } }',
+            'fn f(#[cfg(test)] mut p: u8) { std::env::var("AGENTDESK_PROD_LIST"); }',
+            'fn f() { K::Pair(#[cfg(test)] K::T, || std::env::var("AGENTDESK_PROD_LIST")); }',
+            'fn f(k: K) { match k { #[cfg(test)] K::T => { env_flag("ADK_TEST_HIDDEN", false) }, _ => std::env::var("AGENTDESK_PROD_LIST").is_ok() } }',
+            'fn f(k: K) { match k { #[cfg(test)] K::T => { env_flag("ADK_TEST_HIDDEN", false) } _ => std::env::var("AGENTDESK_PROD_LIST").is_ok() } }',
+            '#[cfg(test)] #[inline] fn gone() { env_flag("ADK_TEST_HIDDEN", false); } fn kept() { std::env::var("AGENTDESK_PROD_LIST"); }',
+            '#[cfg(test)] union Probe { byte: u8 } fn kept() { std::env::var("AGENTDESK_PROD_LIST"); }',
+            '#[cfg(test)] gone! { env_flag("ADK_TEST_HIDDEN", false); } fn kept() { std::env::var("AGENTDESK_PROD_LIST"); }',
+            'fn f() { #[cfg(test)] if tests::bypass() { return; } std::env::var("AGENTDESK_PROD_LIST"); }',
+            'fn f() { #[cfg(test)] if let Some(p) = tests::probe() { return; } std::env::var("AGENTDESK_PROD_LIST"); }',
+            'fn f() { #[cfg(test)] { env_flag("ADK_TEST_HIDDEN", false); } #[cfg(not(test))] { std::env::var("AGENTDESK_PROD_LIST"); } }',
+            'fn f() { #[cfg(test)] match tests::probe() { _ => {} } std::env::var("AGENTDESK_PROD_LIST"); }',
+            'struct Fields { #[cfg(test)] pub probe: bool, live: field_type!(std::env::var("AGENTDESK_PROD_LIST")), }',
+            'fn f() { #[cfg(test)] if tests::bypass() {} else if tests::probe() {} else { env_flag("ADK_TEST_HIDDEN", false); } std::env::var("AGENTDESK_PROD_LIST"); }',
+            'fn f() { #[cfg(test)] let probe = if tests::bypass() {} else { env_flag("ADK_TEST_HIDDEN", false); }; std::env::var("AGENTDESK_PROD_LIST"); }',
+            'fn f(k: K) { match k { #[cfg(test)] K::T { field: _ } | K::U => env_flag("ADK_TEST_HIDDEN", false), _ => std::env::var("AGENTDESK_PROD_LIST").is_ok() } }',
+            'fn f() { #[cfg(test)] for p in tests::probes() {} std::env::var("AGENTDESK_PROD_LIST"); }',
+            'fn f() { #[cfg(test)] while tests::bypass() {} std::env::var("AGENTDESK_PROD_LIST"); }',
+            'fn f() { #[cfg(test)] loop { break; } std::env::var("AGENTDESK_PROD_LIST"); }',
+            'fn f() { #[cfg(test)] K { field: 0 }.probe(env_flag("ADK_TEST_HIDDEN", false))?; std::env::var("AGENTDESK_PROD_LIST"); }',
+            'fn f() { #[cfg(test)] K { field: 0 } + env_flag("ADK_TEST_HIDDEN", false); std::env::var("AGENTDESK_PROD_LIST"); }',
+            'fn f(k: i32) -> bool { match k { #[cfg(test)] 1 => { false } -1 => std::env::var("AGENTDESK_PROD_LIST").is_ok(), _ => false } }',
+            'fn f(x: &mut bool) { #[cfg(test)] \'outer: loop { break; } *x = std::env::var("AGENTDESK_PROD_LIST").is_ok(); }',
+            'fn f() { #[cfg(test)] \'b: {} &std::env::var("AGENTDESK_PROD_LIST"); }',
+            'fn f(k: &K) -> bool { match k { #[cfg(test)] K::T => unsafe { false } &K::U => std::env::var("AGENTDESK_PROD_LIST").is_ok(), _ => false } }',
+            'fn f(k: i32) -> bool { match k { #[cfg(test)] 1 => \'a: { false } -1 => std::env::var("AGENTDESK_PROD_LIST").is_ok(), _ => false } }',
+            'fn f() { K { #[cfg(test)] probe: if tests::bypass() { false } else { env_flag("ADK_TEST_HIDDEN", false) }, live: std::env::var("AGENTDESK_PROD_LIST") }; }',
+            'fn f() { #[cfg(test)] x = if tests::bypass() { false } else { env_flag("ADK_TEST_HIDDEN", false) }; std::env::var("AGENTDESK_PROD_LIST"); }',
+            'fn f(k: K) -> bool { match k { #[cfg(test)] K::T => if tests::bypass() { false } else { env_flag("ADK_TEST_HIDDEN", false) }, _ => std::env::var("AGENTDESK_PROD_LIST").is_ok() } }',
+            'fn f(k: K) -> bool { match k { #[cfg(test)] K::T { .. } if tests::bypass() => env_flag("ADK_TEST_HIDDEN", false), _ => std::env::var("AGENTDESK_PROD_LIST").is_ok() } }',
+        ):
+            with self.subTest(source=source):
+                self.write("src/list.rs", source)
+                output = self.render()
+                self.assertIn("AGENTDESK_PROD_LIST", output)
+                self.assertNotIn("ADK_TEST_HIDDEN", output)
+
+    def test_external_helper_names_survive_parser_migration(self) -> None:
+        self.write("src/external.rs", '''
+            fn read() { env_flag("COKACDIR_DEBUG", false); env_flag("REQUIRE_WAKE_WORD", true); }
+        ''')
+        output = self.render()
+        for name in ("COKACDIR_DEBUG", "REQUIRE_WAKE_WORD"):
+            self.assertIn(f"| `{name}` |", output)
+            self.assertIn("`src/external.rs`", self.row(output, name))
+
     def test_line_shift_in_source_files_leaves_output_unchanged(self) -> None:
         before = self.render()
         self.assertEqual(
@@ -160,6 +244,12 @@ class SourceTreeStabilityTests(unittest.TestCase):
 
 
 class RepositoryTests(unittest.TestCase):
+    def test_explicit_config_override_has_a_reference_description(self) -> None:
+        variables = gen.collect_variables([REPO_ROOT / "src/config/config_path/selection.rs"])
+        row = next(line for line in gen.render(variables).splitlines()
+                   if line.startswith("| `AGENTDESK_CONFIG` |"))
+        self.assertTrue(row.rsplit("|", 2)[1].strip(), row)
+
     def test_generated_doc_is_deterministic_and_covers_known_variables(self) -> None:
         variables = gen.collect_variables(gen.production_rust_files())
         first = gen.render(variables)

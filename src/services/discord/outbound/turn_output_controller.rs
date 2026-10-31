@@ -667,6 +667,36 @@ where
     }
 }
 
+pub(in crate::services::discord) async fn deliver_turn_output_with_origin<G, L>(
+    gateway: &G,
+    ctx: TurnOutputCtx<'_, L>,
+    pool: Option<&sqlx::PgPool>,
+    provider: &str,
+    origin: Option<&crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
+) -> DeliveryOutcome
+where
+    G: TurnGateway + ?Sized,
+    L: DeliveryLease + ?Sized,
+{
+    use crate::services::cluster::intake_router_hook::owner_record::output;
+    let scope = pool.map(|pool| output::Scope {
+        pool: pool.clone(),
+        provider: provider.into(),
+    });
+    let guarded = transport::OriginGateway {
+        inner: gateway,
+        scope,
+        origin,
+        body: ctx.body,
+    };
+    match deliver_turn_output_inner(&guarded, ctx, None).await {
+        RevalidatedDeliveryOutcome::Delivery(outcome) => outcome,
+        RevalidatedDeliveryOutcome::AlreadyCommittedAfterEditFailure { .. } => {
+            unreachable!("no fallback callback")
+        }
+    }
+}
+
 /// Keep fresh-send routing in the controller owner; ordinary transport lives in the child.
 async fn drive_transport<G: TurnGateway + ?Sized, L: DeliveryLease + ?Sized>(
     gateway: &G,
@@ -696,6 +726,58 @@ where
     G: TurnGateway + ?Sized,
     L: DeliveryLease + ?Sized,
 {
+    if matches!(&ctx.plan, OutputPlan::NoOp) || ctx.body.is_empty() {
+        return RevalidatedDeliveryOutcome::Delivery(DeliveryOutcome::Skipped);
+    }
+    use crate::services::cluster::intake_router_hook::owner_record::output;
+    let (scope, origin) = if let Some(pool) = gateway.output_pool() {
+        let Some(provider) = gateway.output_provider() else {
+            return RevalidatedDeliveryOutcome::Delivery(DeliveryOutcome::Unknown {
+                fell_back: false,
+            });
+        };
+        let origin = match output::source_artifact(
+            Some(pool),
+            provider.as_str(),
+            &ctx.channel_id.get().to_string(),
+            &ctx.turn.user_msg_id.to_string(),
+            None,
+            ctx.body,
+        )
+        .await
+        {
+            Ok(origin) => origin,
+            Err(error) => {
+                tracing::warn!(%error,"original controller output held");
+                return RevalidatedDeliveryOutcome::Delivery(DeliveryOutcome::Unknown {
+                    fell_back: false,
+                });
+            }
+        };
+        (
+            Some(output::Scope {
+                pool: pool.clone(),
+                provider: provider.as_str().into(),
+            }),
+            origin,
+        )
+    } else {
+        (None, None)
+    };
+    let guarded = transport::OriginGateway {
+        inner: gateway,
+        scope,
+        origin: origin.as_ref(),
+        body: ctx.body,
+    };
+    deliver_turn_output_inner(&guarded, ctx, fallback_revalidation).await
+}
+
+async fn deliver_turn_output_inner<L: DeliveryLease + ?Sized>(
+    gateway: &dyn TurnGateway,
+    ctx: TurnOutputCtx<'_, L>,
+    fallback_revalidation: Option<&(dyn Fn() -> bool + Send + Sync)>,
+) -> RevalidatedDeliveryOutcome {
     if matches!(&ctx.plan, OutputPlan::SendFresh { .. }) {
         return RevalidatedDeliveryOutcome::Delivery(fresh_send::deliver(gateway, ctx).await);
     }
@@ -982,6 +1064,145 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn output_origin_legacy_post_edit_delete_guard_pg() {
+        use crate::services::cluster::intake_router_hook::owner_record::output::tests::{
+            fixture, revoke,
+        };
+        for chunks in [true, false] {
+            let (_db, pool, origin) = fixture(if chunks { "7336904" } else { "7336905" }).await;
+            let shared = crate::services::discord::make_shared_data_for_tests_with_storage(Some(
+                pool.clone(),
+            ));
+            let real = crate::services::discord::gateway::DiscordGateway::new(
+                Arc::new(poise::serenity_prelude::Http::new("Bot fixture")),
+                shared,
+                ProviderKind::Claude,
+                None,
+            );
+            assert!(real.bot_owner_provider().is_none());
+            assert_eq!(
+                real.output_provider(),
+                Some(ProviderKind::Claude),
+                "Legacy output does not need a live gateway turn"
+            );
+            let artifact = origin.seal("answer");
+            assert_eq!(crate::services::cluster::intake_router_hook::owner_record::output::source_artifact(Some(&pool),"claude",if chunks {"7336904"} else {"7336905"},"90001",None,"answer").await.unwrap(),Some(artifact));
+            let single = _db.single_pool().await;
+            let channel = ChannelId::new(if chunks { 7336904 } else { 7336905 });
+            for stale in [false, true] {
+                if stale {
+                    revoke(&pool, &origin).await;
+                }
+                let lease = Arc::new(RecordingLease::new(channel));
+                let mut gateway = ObservingGateway::new(
+                    lease.clone() as Arc<dyn DeliveryLease + Send + Sync>,
+                    true,
+                );
+                gateway.source_pool = Some(single.clone());
+                let controller = PlaceholderController::default();
+                let msg = MessageId::new(700);
+                if !chunks {
+                    prime_active(&controller, &gateway, placeholder_key(channel, msg)).await;
+                    gateway.fail_edits_from_now();
+                }
+                let advance = |_: (u64, u64)| {
+                    let key=crate::services::cluster::intake_router_hook::owner_record::OwnerIdentity::new("claude",&channel.get().to_string()).advisory_key();
+                    let free = crate::utils::async_bridge::block_on_pg_result(
+                        &pool,
+                        move |pool| async move {
+                            let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+                            let free: bool =
+                                sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+                                    .bind(key)
+                                    .fetch_one(&mut *tx)
+                                    .await
+                                    .map_err(|e| e.to_string())?;
+                            tx.rollback().await.map_err(|e| e.to_string())?;
+                            Ok(free)
+                        },
+                        |error| error,
+                    )
+                    .unwrap();
+                    assert!(
+                        free,
+                        "state callback must run outside the raw request owner guard"
+                    );
+                    true
+                };
+                let outcome = deliver_turn_output(
+                    &gateway,
+                    TurnOutputCtx {
+                        turn: TurnKey::new(channel, 90001, 1),
+                        lease_key: Some(lease_key(channel)),
+                        owner: RelayOwnerKind::Watcher,
+                        holder: LeaseHolder::Watcher { instance_id: 1 },
+                        lease: lease.as_ref(),
+                        channel_id: channel,
+                        placeholder_controller: &controller,
+                        placeholder: PlaceholderSlot::Active {
+                            message_id: msg,
+                            key: placeholder_key(channel, msg),
+                        },
+                        body: "answer",
+                        send_range: (0, 6),
+                        plan: if chunks {
+                            OutputPlan::SendNewChunks {
+                                chunk_count: 1,
+                                delete_anchor: true,
+                            }
+                        } else {
+                            OutputPlan::Replace {
+                                lifecycle: PlaceholderLifecycle::Completed,
+                            }
+                        },
+                        edit_fail_policy: EditFailPlaceholderPolicy::DeleteIfProvenStale,
+                        fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
+                        acquire_failure_mode: AcquireFailureMode::Transient,
+                        advance: Some(&advance),
+                        heartbeat: None,
+                        body_claim: None,
+                    },
+                )
+                .await;
+                let deletes = gateway.delete_calls.load(Ordering::SeqCst);
+                let calls = gateway.send_step.load(Ordering::SeqCst)
+                    + gateway.post_count.load(Ordering::SeqCst)
+                    + deletes
+                    + usize::from(gateway.post_send_await_seen.load(Ordering::SeqCst));
+                if stale {
+                    assert_eq!(calls, 0, "revoked Legacy POST/EDIT/DELETE must all be zero");
+                    assert!(!matches!(
+                        outcome,
+                        DeliveryOutcome::Delivered { .. } | DeliveryOutcome::FreshDelivered { .. }
+                    ));
+                    let artifact = origin.seal("answer");
+                    let guarded = transport::OriginGateway {
+                        inner: &gateway,
+                        scope: Some(crate::services::cluster::intake_router_hook::owner_record::output::Scope {
+                            pool: single.clone(),
+                            provider: "claude".into(),
+                        }),
+                        origin: Some(&artifact),
+                        body: "answer",
+                    };
+                    assert!(guarded.send_message(channel, "answer").await.is_err());
+                    assert!(guarded.edit_message(channel, msg, "answer").await.is_err());
+                    assert!(guarded.delete_message(channel, msg).await.is_err());
+                    assert_eq!(gateway.send_step.load(Ordering::SeqCst), 0);
+                    assert_eq!(gateway.delete_calls.load(Ordering::SeqCst), 0);
+                    assert!(!gateway.post_send_await_seen.load(Ordering::SeqCst));
+                } else {
+                    assert!(calls > 0);
+                    assert_eq!(
+                        deletes, 1,
+                        "must exercise the actual anchor or post-finalize DELETE"
+                    );
+                }
+            }
+        }
+    }
+
     /// M4 commit recorder: a `DeliveryLease` that wraps the real
     /// `DeliveryLeaseCell` and counts EVERY `commit` and `release` call (with
     /// the committed outcome). Because the controller takes the lease behind the
@@ -1151,6 +1372,7 @@ mod tests {
     /// the lease BEFORE the inline commit, and the post-send `edit_message`
     /// await observes it AFTER.
     struct ObservingGateway {
+        source_pool: Option<sqlx::PgPool>,
         /// Shared with the controller (same object) so a gateway await reads the
         /// exact lease state the controller is driving. Held behind the
         /// `DeliveryLease` trait so the recorder-wrapping `RecordingLease` and
@@ -1207,6 +1429,7 @@ mod tests {
     impl ObservingGateway {
         fn new(lease: Arc<dyn DeliveryLease + Send + Sync>, transport_ok: bool) -> Self {
             Self {
+                source_pool: None,
                 lease,
                 clock: Arc::new(AtomicUsize::new(1)),
                 committed_at_send: AtomicBool::new(false),
@@ -1303,6 +1526,12 @@ mod tests {
     }
 
     impl TurnGateway for ObservingGateway {
+        fn output_pool(&self) -> Option<&sqlx::PgPool> {
+            self.source_pool.as_ref()
+        }
+        fn output_provider(&self) -> Option<ProviderKind> {
+            Some(ProviderKind::Claude)
+        }
         fn send_message<'a>(
             &'a self,
             _c: ChannelId,
@@ -3403,3 +3632,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod raw_request_tests;

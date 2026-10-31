@@ -57,6 +57,18 @@ pub(in crate::services::discord) const SYNTHETIC_MESSAGE_EDIT_ERROR: &str =
     "Unknown Message: synthetic id has no Discord message";
 
 pub(super) trait TurnGateway: Send + Sync {
+    fn output_pool(&self) -> Option<&sqlx::PgPool> {
+        None
+    }
+
+    fn has_raw_output_boundaries(&self) -> bool {
+        false
+    }
+
+    fn output_provider(&self) -> Option<ProviderKind> {
+        self.bot_owner_provider()
+    }
+
     fn send_message<'a>(
         &'a self,
         channel_id: ChannelId,
@@ -317,16 +329,18 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
     {
         let channel_id = parse_channel_id(target_channel)?;
         rate_limit_wait(&self.shared, channel_id).await;
-        channel_id
-            .send_message(
+        super::outbound::raw_output::request(
+            channel_id,
+            channel_id.send_message(
                 &self.http,
                 serenity::CreateMessage::new()
                     .content(content)
                     .allowed_mentions(super::http::relay_allowed_mentions()),
-            )
-            .await
-            .map(|message| message.id.get().to_string())
-            .map_err(dispatch_post_error)
+            ),
+        )
+        .await
+        .map(|message| message.id.get().to_string())
+        .map_err(dispatch_post_error)
     }
 
     async fn post_message_with_reference(
@@ -349,8 +363,9 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
         // Degrade to a normal (non-reply) send when the referenced message no
         // longer exists. This also hardens every reply against a since-deleted
         // target.
-        channel_id
-            .send_message(
+        super::outbound::raw_output::request(
+            channel_id,
+            channel_id.send_message(
                 &self.http,
                 serenity::CreateMessage::new()
                     .reference_message(
@@ -362,10 +377,11 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
                     )
                     .content(content)
                     .allowed_mentions(super::http::relay_allowed_mentions()),
-            )
-            .await
-            .map(|message| message.id.get().to_string())
-            .map_err(dispatch_post_error)
+            ),
+        )
+        .await
+        .map(|message| message.id.get().to_string())
+        .map_err(dispatch_post_error)
     }
 
     async fn post_message_with_nonce(
@@ -436,17 +452,19 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
             )
         })?;
         rate_limit_wait(&self.shared, channel_id).await;
-        channel_id
-            .edit_message(
+        super::outbound::raw_output::request(
+            channel_id,
+            channel_id.edit_message(
                 &self.http,
                 message_id,
                 serenity::EditMessage::new()
                     .content(content)
                     .allowed_mentions(super::http::relay_allowed_mentions()),
-            )
-            .await
-            .map(|message| message.id.get().to_string())
-            .map_err(dispatch_post_error)
+            ),
+        )
+        .await
+        .map(|message| message.id.get().to_string())
+        .map_err(dispatch_post_error)
     }
 }
 
@@ -560,6 +578,18 @@ fn next_headless_message_id() -> MessageId {
 }
 
 impl TurnGateway for DiscordGateway {
+    fn has_raw_output_boundaries(&self) -> bool {
+        true
+    }
+
+    fn output_pool(&self) -> Option<&sqlx::PgPool> {
+        self.shared.pg_pool.as_ref()
+    }
+
+    fn output_provider(&self) -> Option<ProviderKind> {
+        Some(self.provider.clone())
+    }
+
     fn send_notice_once<'a>(
         &'a self,
         channel_id: ChannelId,
@@ -677,10 +707,12 @@ impl TurnGateway for DiscordGateway {
     ) -> GatewayFuture<'a, Result<(), String>> {
         Box::pin(async move {
             rate_limit_wait(&self.shared, channel_id).await;
-            channel_id
-                .delete_message(&self.http, message_id)
-                .await
-                .map_err(|e| e.to_string())
+            super::outbound::raw_output::request(
+                channel_id,
+                channel_id.delete_message(&self.http, message_id),
+            )
+            .await
+            .map_err(|e| e.to_string())
         })
     }
 

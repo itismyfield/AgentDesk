@@ -1,4 +1,4 @@
-//! Which nodes may run TUI intake once the O writer owns output: only the gateway posts to Discord.
+//! Gateway and PG execution-owner roles for TUI intake and output.
 
 use super::channel_policy::BootChannels;
 use crate::services::agent_protocol::RuntimeHandoffKind;
@@ -34,7 +34,17 @@ pub(crate) fn gateway_only_channels(
     let owned = boot
         .channels()
         .iter()
-        .filter(|id| boot.kind(**id) == Some(kind));
+        .filter(|id| boot.kind(**id) == Some(kind))
+        .filter(|id| {
+            !boot.execution(**id).is_some_and(|view| {
+                view.permit.is_ok_and(|permit| {
+                    matches!(
+                        permit.gate().current(),
+                        super::ownership::GatewayOwnership::ExecutionOwned { .. }
+                    )
+                })
+            })
+        });
     Some(owned.count())
 }
 

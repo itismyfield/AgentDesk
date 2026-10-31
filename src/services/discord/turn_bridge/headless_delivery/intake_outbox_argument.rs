@@ -15,8 +15,6 @@ pub(in crate::services::discord::turn_bridge) struct HeadlessDeliveryArguments<'
     owning_user_msg_id: Option<MessageId>,
     session_key: Option<&'a str>,
     delivery_bot: Option<&'a str>,
-    // Parked for the follow-up slice that will bind delivery rows to their
-    // intake outbox owner. It has no runtime effect in this slice.
     _intake_outbox_id: IntakeOutboxArgument,
     provider: &'a ProviderKind,
     born_generation: u64,
@@ -42,6 +40,7 @@ pub(super) struct HeadlessDeliveryRuntimeArguments<'a> {
     pub(super) delivery_bot: Option<&'a str>,
     pub(super) provider: &'a ProviderKind,
     pub(super) born_generation: u64,
+    pub(super) intake_outbox_id: Option<i64>,
     pub(super) content: &'a str,
     pub(super) cancel_token: Option<&'a CancelToken>,
 }
@@ -49,7 +48,6 @@ pub(super) struct HeadlessDeliveryRuntimeArguments<'a> {
 impl<'a> HeadlessDeliveryArguments<'a> {
     pub(super) fn into_runtime_arguments(self) -> HeadlessDeliveryRuntimeArguments<'a> {
         let IntakeOutboxArgument(intake_outbox_id) = self._intake_outbox_id;
-        let _ = intake_outbox_id;
         HeadlessDeliveryRuntimeArguments {
             shared: self.shared,
             channel_id: self.channel_id,
@@ -58,6 +56,7 @@ impl<'a> HeadlessDeliveryArguments<'a> {
             delivery_bot: self.delivery_bot,
             provider: self.provider,
             born_generation: self.born_generation,
+            intake_outbox_id,
             content: self.content,
             cancel_token: self.cancel_token,
         }

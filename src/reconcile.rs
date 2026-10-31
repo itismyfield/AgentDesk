@@ -14,7 +14,7 @@ use std::{
 use crate::engine::PolicyEngine;
 
 const COMPLETED_QUEUE_REVIEW_DRIFT_GRACE: Duration = Duration::from_secs(5 * 60);
-const COMPLETED_QUEUE_REVIEW_DRIFT_BATCH_LIMIT: i64 = 50;
+pub(crate) const COMPLETED_QUEUE_REVIEW_DRIFT_BATCH_LIMIT: i64 = 50;
 const AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_GRACE: Duration = Duration::from_secs(2 * 60);
 const AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_STALE_CLAIM: Duration = Duration::from_secs(5 * 60);
 const AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_BATCH_LIMIT: i64 = 50;
@@ -382,7 +382,7 @@ pub(crate) async fn reconcile_boot_runtime(
     };
 
     stats.missing_review_dispatches_refired = if let Some(pool) = pg_pool {
-        refire_missing_review_dispatches_pg(pool, engine).await?
+        refire_missing_review_dispatches_pg(pool, engine, false).await?
     } else {
         0
     };
@@ -408,6 +408,20 @@ pub(crate) async fn reconcile_boot_runtime(
     }
 
     Ok(stats)
+}
+
+pub(crate) async fn reconcile_missing_queue_review_dispatches_pg(
+    pool: &PgPool,
+    engine: &PolicyEngine,
+) -> Result<usize> {
+    let recovered = refire_missing_review_dispatches_pg(pool, engine, true).await?;
+    if recovered > 0 {
+        tracing::info!(
+            recovered,
+            "[policy-tick] missing queue review dispatches recovered"
+        );
+    }
+    Ok(recovered)
 }
 
 pub(crate) async fn reconcile_completed_queue_review_drift_pg(
@@ -1138,8 +1152,7 @@ async fn reset_broken_auto_queue_entries_pg(pool: &PgPool) -> Result<usize> {
     .await?
     .rows_affected() as usize;
 
-    let reset = sqlx::query(
-        "UPDATE auto_queue_entries e
+    let sql = "UPDATE auto_queue_entries e
          SET status = 'pending',
              dispatch_id = NULL,
              slot_index = NULL,
@@ -1152,6 +1165,21 @@ async fn reset_broken_auto_queue_entries_pg(pool: &PgPool) -> Result<usize> {
              WHERE r.id = e.run_id
                AND r.status = 'cancelled'
            )
+           AND NOT EXISTS (
+             SELECT 1 FROM task_dispatches live
+             WHERE live.kanban_card_id = e.kanban_card_id AND live.status IN ('pending', 'dispatched')
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM pr_tracking p
+             WHERE p.card_id = e.kanban_card_id AND p.pr_number IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM task_dispatches td WHERE td.id = e.dispatch_id AND td.status IN ('failed', 'cancelled'))
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM sessions s
+             WHERE (s.active_dispatch_id = e.dispatch_id OR s.active_dispatch_id IN (
+               SELECT id FROM task_dispatches WHERE kanban_card_id = e.kanban_card_id
+             )) AND COALESCE(s.status, '') NOT IN ('disconnected', 'aborted', 'completed', 'failed', 'cancelled')
+           )
            AND (
              e.dispatch_id IS NULL
              OR TRIM(e.dispatch_id) = ''
@@ -1159,13 +1187,14 @@ async fn reset_broken_auto_queue_entries_pg(pool: &PgPool) -> Result<usize> {
                SELECT 1
                FROM task_dispatches td
                WHERE td.id = e.dispatch_id
-                 AND td.status NOT IN ('cancelled', 'failed', 'completed')
+                 AND (td.status NOT IN ('cancelled', 'failed', 'completed')
+                      OR (td.status = 'completed' AND td.dispatch_type IN ('implementation', 'rework')))
              )
-           )",
-    )
-    .execute(pool)
-    .await?
-    .rows_affected() as usize;
+           )";
+    #[cfg(test)]
+    let sql =
+        sqlx::AssertSqlSafe(dispatch_delivery_reconcile_tests::mutate_queue_recovery_sql(sql));
+    let reset = sqlx::query(sql).execute(pool).await?.rows_affected() as usize;
 
     Ok(terminalized + reset)
 }
@@ -1419,29 +1448,72 @@ type ReviewDispatchCandidate = (String, String, Option<String>, Option<String>);
 
 async fn missing_review_dispatch_candidates_pg(
     pool: &PgPool,
+    only_dispatched_queue: bool,
 ) -> Result<Vec<ReviewDispatchCandidate>> {
-    sqlx::query_as(
-        "SELECT c.id, c.status, c.repo_id, c.assigned_agent_id
+    let sql = "SELECT c.id, c.status, c.repo_id, c.assigned_agent_id
          FROM kanban_cards c
          WHERE c.status NOT IN ('done', 'backlog', 'ready')
+           AND (NOT $1 OR COALESCE(c.review_status, 'reviewing') = 'reviewing')
+           AND (NOT $1 OR EXISTS (
+               SELECT 1 FROM auto_queue_entries e
+               JOIN auto_queue_runs r ON r.id = e.run_id
+               LEFT JOIN task_dispatches d ON d.id = e.dispatch_id
+               WHERE e.kanban_card_id = c.id AND e.status = 'dispatched' AND r.status = 'active'
+                 AND COALESCE(r.review_mode, 'enabled') != 'disabled'
+                 AND COALESCE(e.dispatched_at, e.created_at) < NOW() - ($2::BIGINT * INTERVAL '1 second')
+                 AND (d.id IS NULL OR (d.status = 'completed' AND d.dispatch_type IN ('implementation', 'rework')))
+                 AND (d.id IS NULL OR COALESCE(d.updated_at, d.completed_at, d.created_at) < NOW() - ($2::BIGINT * INTERVAL '1 second'))
+                 AND (d.result IS NOT NULL OR EXISTS (
+                     SELECT 1 FROM pr_tracking p WHERE p.card_id = c.id AND p.pr_number IS NOT NULL
+                 ))
+                 AND NOT EXISTS (
+                     SELECT 1 FROM task_dispatches live WHERE live.kanban_card_id = c.id AND live.status IN ('pending', 'dispatched')
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1 FROM sessions s WHERE
+                     (s.active_dispatch_id = e.dispatch_id OR s.active_dispatch_id IN (SELECT id FROM task_dispatches WHERE kanban_card_id = c.id))
+                     AND COALESCE(s.status, '') NOT IN ('disconnected', 'aborted', 'completed', 'failed', 'cancelled')
+                 )
+           ))
+           AND (NOT $1 OR NOT EXISTS (
+               SELECT 1 FROM task_dispatches rv
+               WHERE rv.kanban_card_id = c.id
+                 AND rv.dispatch_type IN ('review', 'review-decision')
+                 AND COALESCE(rv.created_at, 'infinity'::timestamptz) >= COALESCE((
+                     SELECT MAX(COALESCE(w.completed_at, w.updated_at))
+                     FROM task_dispatches w
+                     WHERE w.kanban_card_id = c.id
+                       AND w.dispatch_type IN ('implementation', 'rework')
+                       AND w.status = 'completed'
+                 ), '-infinity'::timestamptz)
+           ))
            AND NOT EXISTS (
                SELECT 1 FROM task_dispatches td
                WHERE td.kanban_card_id = c.id
                  AND td.dispatch_type IN ('review', 'review-decision')
                  AND td.status IN ('pending', 'dispatched')
-           )",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(anyhow::Error::from)
+           )
+         ORDER BY CASE WHEN $1 THEN c.id END
+         LIMIT CASE WHEN $1 THEN $3::BIGINT END";
+    #[cfg(test)]
+    let sql =
+        sqlx::AssertSqlSafe(dispatch_delivery_reconcile_tests::mutate_queue_recovery_sql(sql));
+    sqlx::query_as(sql)
+        .bind(only_dispatched_queue)
+        .bind(AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_GRACE.as_secs() as i64)
+        .bind(COMPLETED_QUEUE_REVIEW_DRIFT_BATCH_LIMIT)
+        .fetch_all(pool)
+        .await
+        .map_err(anyhow::Error::from)
 }
 
 async fn refire_missing_review_dispatches_pg(
     pool: &PgPool,
     engine: &PolicyEngine,
+    only_dispatched_queue: bool,
 ) -> Result<usize> {
     crate::pipeline::ensure_loaded();
-    let cards = missing_review_dispatch_candidates_pg(pool).await?;
+    let cards = missing_review_dispatch_candidates_pg(pool, only_dispatched_queue).await?;
 
     let mut candidates = Vec::new();
     for (card_id, status, repo_id, agent_id) in cards {
@@ -1462,7 +1534,7 @@ async fn refire_missing_review_dispatches_pg(
             engine.fire_hook_by_name_blocking("OnReviewEnter", json!({ "card_id": card_id }))
         {
             tracing::warn!(
-                "[boot-reconcile] failed to re-fire OnReviewEnter for card {}: {e}",
+                "[review-reconcile] failed to re-fire OnReviewEnter for card {}: {e}",
                 card_id
             );
             continue;
@@ -1474,7 +1546,7 @@ async fn refire_missing_review_dispatches_pg(
             refired += 1;
         } else {
             tracing::warn!(
-                "[boot-reconcile] OnReviewEnter re-fired for card {} but no active review dispatch was created",
+                "[review-reconcile] OnReviewEnter re-fired for card {} but no active review dispatch was created",
                 card_id
             );
         }
@@ -1615,8 +1687,53 @@ async fn active_review_dispatch_exists_pg(pool: &PgPool, card_id: &str) -> Resul
 }
 
 #[cfg(test)]
+pub(crate) use dispatch_delivery_reconcile_tests::queue_recovery_mutant_is;
+
+#[cfg(test)]
 mod dispatch_delivery_reconcile_tests {
     use super::*;
+
+    pub(crate) fn queue_recovery_mutant_is(name: &str) -> bool {
+        std::env::var("AGENTDESK_TEST_QUEUE_RECOVERY_MUTANT").as_deref() == Ok(name)
+    }
+
+    pub(super) fn mutate_queue_recovery_sql(sql: &str) -> String {
+        let mut query = sql.to_string();
+        for (mode, from, to) in [
+            (
+                "issued_review",
+                "AND COALESCE(rv.created_at, 'infinity'::timestamptz) >=",
+                "AND FALSE AND COALESCE(rv.created_at, 'infinity'::timestamptz) >=",
+            ),
+            (
+                "batch_unbounded",
+                "LIMIT CASE WHEN $1 THEN $3::BIGINT END",
+                "LIMIT CASE WHEN $1 THEN NULLIF($3::BIGINT, $3::BIGINT) END",
+            ),
+            (
+                "manual_wait",
+                "AND (NOT $1 OR COALESCE(c.review_status, 'reviewing') = 'reviewing')",
+                "AND TRUE",
+            ),
+            (
+                "drop_impl_preservation",
+                "OR (td.status = 'completed' AND td.dispatch_type IN ('implementation', 'rework'))",
+                "",
+            ),
+            (
+                "preserve_all_completed",
+                "td.status NOT IN ('cancelled', 'failed', 'completed')",
+                "td.status NOT IN ('cancelled', 'failed')",
+            ),
+        ] {
+            if queue_recovery_mutant_is(mode) && query.contains(from) {
+                query = query.replace(from, to);
+                eprintln!("MUTANT_APPLIED={mode}");
+            }
+        }
+        query
+    }
+
     use std::{
         io::{self, Write},
         sync::{Arc, Mutex},
@@ -1828,7 +1945,7 @@ mod dispatch_delivery_reconcile_tests {
             .await
             .unwrap();
         }
-        let mut ids: Vec<_> = missing_review_dispatch_candidates_pg(&pool)
+        let mut ids: Vec<_> = missing_review_dispatch_candidates_pg(&pool, false)
             .await
             .unwrap()
             .into_iter()

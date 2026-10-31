@@ -52,7 +52,7 @@ fn direct_fallback_notify_http_preference_is_caller_supplied_only() {
 }
 
 #[tokio::test]
-async fn outbox_enqueue_error_reaches_cancel_check_then_direct_fallback() {
+async fn source_lookup_error_preserves_for_retry_and_cancellation_precedes_lookup() {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .acquire_timeout(std::time::Duration::from_millis(150))
         .connect_lazy("postgresql://postgres@127.0.0.1:1/agentdesk_headless_pg_error")
@@ -69,13 +69,23 @@ async fn outbox_enqueue_error_reaches_cancel_check_then_direct_fallback() {
     assert_eq!(
         outcome,
         HeadlessDeliveryOutcome::Ambiguous {
-            surfaced_error: Some(
-                "headless delivery unavailable for channel 5191: no outbox storage or discord http"
-                    .to_string(),
-            ),
+            surfaced_error: Some(sqlx::Error::PoolTimedOut.to_string()),
         },
-        "a PostgreSQL enqueue error must fall through the production cancel check into the direct fallback"
+        "an unknown original admission cannot authorize the direct fallback"
     );
+    let cancel = CancelToken::new();
+    cancel
+        .cancelled
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let outcome = enqueue_headless_delivery(test_delivery_arguments(
+        &shared,
+        &state,
+        &provider,
+        "answer",
+        Some(&cancel),
+    ))
+    .await;
+    assert_eq!(outcome, HeadlessDeliveryOutcome::Cancelled);
 }
 
 #[tokio::test]

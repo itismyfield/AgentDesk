@@ -555,6 +555,7 @@ async fn a_withheld_notice_keeps_debt_without_stalling_or_falsely_draining_body(
     actor
         .owed
         .push_back(Derived::Piece(super::super::super::pieces::PieceWork {
+            output_origin: None,
             unit_key: key(
                 "held",
                 crate::services::tui_o::shadow::UnitKind::InputNotice,
@@ -568,6 +569,7 @@ async fn a_withheld_notice_keeps_debt_without_stalling_or_falsely_draining_body(
         actor
             .owed
             .push_back(Derived::Piece(super::super::super::pieces::PieceWork {
+                output_origin: None,
                 unit_key: key(
                     &format!("body-{pass}"),
                     crate::services::tui_o::shadow::UnitKind::Body,
@@ -768,6 +770,7 @@ async fn refilter_after_notice_settlement_ends_the_pass_before_any_later_body_st
     actor
         .owed
         .push_back(Derived::Piece(super::super::super::pieces::PieceWork {
+            output_origin: None,
             unit_key: key,
             index: 0,
             payload: "-# ⌨️ open".into(),
@@ -776,6 +779,7 @@ async fn refilter_after_notice_settlement_ends_the_pass_before_any_later_body_st
     actor
         .owed
         .push_back(Derived::Piece(super::super::super::pieces::PieceWork {
+            output_origin: None,
             unit_key: UnitKey {
                 channel_id: CHANNEL,
                 provider: ShadowProvider::Claude,
