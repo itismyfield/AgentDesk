@@ -259,7 +259,10 @@ fn wait_ends_only_when_the_whole_process_group_is_gone() {
 
 #[test]
 fn list_and_test_outputs_are_parsed_from_the_artifacts_the_phase_wrote() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempfile::Builder::new()
+        .prefix("verification artifacts ' ")
+        .tempdir()
+        .unwrap();
     let logs = temp.path().join("logs");
     let universe = temp.path().join("universe.json");
     // List prints the universe; the runner hands its stdout to the declared artifact.
@@ -306,7 +309,7 @@ fn list_and_test_outputs_are_parsed_from_the_artifacts_the_phase_wrote() {
         "</testsuite></testsuites>"
     );
     let mut input = bound(sh(
-        &format!("printf '%s' '{xml}' > {}; exit 100", junit.display()),
+        &format!("printf '%s' '{xml}' > junit.xml; exit 100"),
         temp.path(),
     ));
     input.input.outputs.push(expected("junit", &junit));
@@ -326,7 +329,7 @@ fn list_and_test_outputs_are_parsed_from_the_artifacts_the_phase_wrote() {
     assert!(matches!(executed[2].outcome, TestOutcome::Skipped { .. }));
     assert_eq!(failed.receipt, format!("test:{failed_pid}:{failed_nonce}"));
     let mut broken = bound(sh(
-        &format!("printf '%s' '{xml}' > {}; exit 101", junit.display()),
+        &format!("printf '%s' '{xml}' > junit.xml; exit 101"),
         temp.path(),
     ));
     broken.input.outputs.push(expected("junit", &junit));
