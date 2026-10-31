@@ -255,8 +255,11 @@ export function MiniRateLimitBar({
       }
     };
     load();
-    const timer = setInterval(load, 30_000);
-    return () => { mounted = false; clearInterval(timer); };
+    // Hidden tabs skip the poll and refresh once they are visible again.
+    const timer = setInterval(() => { if (!document.hidden) load(); }, 30_000);
+    const onVisible = () => { if (!document.hidden) load(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { mounted = false; clearInterval(timer); document.removeEventListener("visibilitychange", onVisible); };
   }, []);
 
   if (layout === "homeSummary") {

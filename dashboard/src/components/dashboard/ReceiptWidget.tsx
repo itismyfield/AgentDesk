@@ -196,7 +196,9 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
     };
 
     void load();
-    const timer = setInterval(() => void load(), 60_000);
+    const timer = setInterval(() => {
+      if (!document.hidden) void load();
+    }, 60_000);
     return () => {
       mounted = false;
       clearInterval(timer);

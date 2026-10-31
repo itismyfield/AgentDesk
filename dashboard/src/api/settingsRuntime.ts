@@ -207,18 +207,10 @@ function normalizeHealth(raw: unknown): HealthResponse {
   };
 }
 
-export async function getHealth(): Promise<HealthResponse> {
-  const raw = await request<unknown>("/api/health");
+/** Protected variant with provider, uptime and queue metrics; the public `/api/health` omits them. */
+export async function getHealthDetail(): Promise<HealthResponse> {
+  const raw = await request<unknown>("/api/health/detail");
   return normalizeHealth(raw);
-}
-
-export function getCachedHealth(): CachedGetEntry<HealthResponse> | null {
-  const cached = readCachedGet<unknown>("/api/health");
-  if (!cached) return null;
-  return {
-    data: normalizeHealth(cached.data),
-    fetchedAt: cached.fetchedAt,
-  };
 }
 
 export interface PromptManifestRetentionStatus {
