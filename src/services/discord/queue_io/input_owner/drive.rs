@@ -40,7 +40,7 @@ pub(crate) async fn claim_turn(
         let claimed = owner.claim_turn(message, &front);
         Ok(claimed.map(|front| FrontClaim(front, owner.followers())))
     });
-    Ok(claimed.await?)
+    claimed.await
 }
 
 /// Runs one granted front to its local settlement; the AI's completion is not awaited.

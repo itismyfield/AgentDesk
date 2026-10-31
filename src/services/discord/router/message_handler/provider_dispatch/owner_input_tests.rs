@@ -1207,7 +1207,7 @@ fn consecutive_input_goes_into_a_busy_turn_as_one_prompt() {
         }
     };
     let (a, b) = (queue(1, "UNIT-A", true), queue(2, "UNIT-B", true));
-    queue(3, "UNIT-C", false);
+    let _never_merges = queue(3, "UNIT-C", false);
     assert_eq!(hand(rig.granted_front()), Ok(()));
     let pasted = fs::read_to_string(rig.renderer.join("body")).unwrap();
     let at = |part: &str| (pasted.matches(part).count(), pasted.find(part));
