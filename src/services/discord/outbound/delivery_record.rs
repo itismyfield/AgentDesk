@@ -108,15 +108,13 @@ use owner_context::{
     watcher_owner_channel_from_context_at, write_watcher_owner_context_at,
 };
 pub(super) use rollout::delivery_record_rollout_health_json;
+#[cfg(test)]
+use rollout::delivery_record_rollout_health_json_for_flags;
 pub(in crate::services::discord) use rollout::{
     FlagResolution, FlagSource, delivery_record_authority_enabled, delivery_record_shadow_enabled,
     outcome_is_shadow_delivered,
 };
 use rollout::{delivered_frontier_end_diverged, should_shadow_mirror};
-#[cfg(test)]
-use rollout::{
-    delivery_record_rollout_health_json_for_flags, resolve_authority_flag, resolve_shadow_flag,
-};
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use store::write_proven_gone_equal_range_frontier;
 #[cfg(all(test, unix))]
@@ -1658,6 +1656,24 @@ mod tests {
         assert_eq!(enforcing["warning_count"], 0);
     }
 
+    fn resolve_test_flag(name: &'static str, raw: Option<&str>, default: bool) -> FlagResolution {
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let _restore = crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock(name);
+        match raw {
+            Some(raw) => unsafe { std::env::set_var(name, raw) },
+            None => unsafe { std::env::remove_var(name) },
+        }
+        rollout::resolve_flag(name, default)
+    }
+
+    fn resolve_shadow_flag(raw: Option<&str>) -> FlagResolution {
+        resolve_test_flag("AGENTDESK_DELIVERY_RECORD_SHADOW", raw, false)
+    }
+
+    fn resolve_authority_flag(raw: Option<&str>) -> FlagResolution {
+        resolve_test_flag("AGENTDESK_DELIVERY_RECORD_AUTHORITY", raw, true)
+    }
+
     #[test]
     fn rollout_flag_resolvers_separate_provenance_from_value() {
         // #5071 T1 S8-1r2 gate (a): absence and an explicit off are the SAME
@@ -1679,8 +1695,6 @@ mod tests {
             FlagResolution::env_override(false)
         );
 
-        // The two axes now diverge on absence ONLY: shadow keeps its compiled
-        // default OFF, and its present-value parsing is unchanged.
         assert_eq!(
             resolve_shadow_flag(None),
             FlagResolution::compiled_default(false)
@@ -1694,8 +1708,6 @@ mod tests {
             FlagResolution::env_override(false)
         );
 
-        // Value parsing is unchanged from the pre-extraction inline reads: trimmed,
-        // case-insensitive, and ON only for `1`/`true`.
         assert_eq!(
             resolve_authority_flag(Some(" TRUE ")),
             FlagResolution::env_override(true)
@@ -1704,16 +1716,20 @@ mod tests {
             resolve_authority_flag(Some(" 1 ")),
             FlagResolution::env_override(true)
         );
-        // Every other present value is off BUT still an override, including the
-        // empty string that an exported-but-blank `launchd.env` line produces.
-        // Against the S8-2 ON default this is load-bearing in a way it was not
-        // before: such a line is now a silent ROLLBACK, not a no-op, and
-        // `flag_source: env_override` is the only signal that names it.
-        for raw in ["", "  ", "yes", "false", "2"] {
+        for (raw, expected) in [
+            ("", true),
+            ("  ", true),
+            ("yes", true),
+            ("on", true),
+            ("2", true),
+            ("false", false),
+            (" NO ", false),
+            ("off", false),
+        ] {
             assert_eq!(
                 resolve_authority_flag(Some(raw)),
-                FlagResolution::env_override(false),
-                "present value {raw:?} must stay an override"
+                FlagResolution::env_override(expected),
+                "presence is independent of fallback: {raw:?}"
             );
         }
     }

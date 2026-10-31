@@ -79,7 +79,7 @@ fn herdr_claude_entry_holds_draft_modal_busy_and_failed_capture_without_paste_or
             .store(true, std::sync::atomic::Ordering::SeqCst);
     });
     let _admission = crate::services::herdr_admission::force_for_test(
-        crate::services::herdr_admission::Admission::new(None, Some(root.path().join("no-stop"))),
+        crate::services::herdr_admission::Admission::new(true, Some(root.path().join("no-stop"))),
     );
     let endpoint = crate::services::herdr_launch::HerdrLaunchEndpoint {
         execution_node: NODE.into(),
@@ -211,7 +211,7 @@ fn herdr_claude_composer_waits_from_busy_to_ready_before_exactly_one_submit() {
     .unwrap();
     let (_owner, target) = bound_target(&rig, logical);
     let _admission = crate::services::herdr_admission::force_for_test(
-        crate::services::herdr_admission::Admission::new(None, Some(root.path().join("no-stop"))),
+        crate::services::herdr_admission::Admission::new(true, Some(root.path().join("no-stop"))),
     );
     let plan = [
         TuiInputAction::PasteBuffer("cold start input".into()),

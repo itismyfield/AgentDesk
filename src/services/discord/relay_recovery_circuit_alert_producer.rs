@@ -19,7 +19,7 @@ use sqlx::PgPool;
 const CIRCUIT_STAMP_ENV: &str = "AGENTDESK_RELAY_CIRCUIT_STAMP";
 
 fn stamp_enabled() -> bool {
-    std::env::var(CIRCUIT_STAMP_ENV).as_deref() == Ok("1")
+    crate::utils::env_flag(CIRCUIT_STAMP_ENV, false)
 }
 
 fn legacy_message(request: &CircuitAlertRequest) -> OutboxMessage<'_> {

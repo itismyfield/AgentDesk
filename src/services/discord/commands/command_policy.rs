@@ -183,12 +183,7 @@ pub(in crate::services::discord) fn evaluate_policy(
 /// variable being unset — means high-risk `ShellOrToolGrant` commands stay
 /// disabled even for the owner.
 pub(in crate::services::discord) fn high_risk_enabled_via_env() -> bool {
-    std::env::var("AGENTDESK_DISCORD_HIGH_RISK_ENABLED")
-        .map(|raw| {
-            let v = raw.trim().to_ascii_lowercase();
-            matches!(v.as_str(), "1" | "true" | "yes" | "on")
-        })
-        .unwrap_or(false)
+    crate::utils::env_flag("AGENTDESK_DISCORD_HIGH_RISK_ENABLED", false)
 }
 
 /// Risk tier of every registered slash command.

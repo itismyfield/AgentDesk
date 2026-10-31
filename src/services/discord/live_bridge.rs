@@ -48,7 +48,7 @@ fn enabled() -> bool {
 }
 
 fn configured_enabled() -> bool {
-    std::env::var("AGENTDESK_CODEX_LIVE_BRIDGE_GUARD").as_deref() != Ok("0")
+    crate::utils::env_flag("AGENTDESK_CODEX_LIVE_BRIDGE_GUARD", true)
 }
 
 fn claude_enabled() -> bool {
@@ -62,8 +62,7 @@ fn claude_enabled() -> bool {
 }
 
 fn configured_claude_enabled() -> bool {
-    // `0` lets watcher respawn take over a live Claude original again.
-    std::env::var("AGENTDESK_CLAUDE_LIVE_BRIDGE_GUARD").as_deref() != Ok("0")
+    crate::utils::env_flag("AGENTDESK_CLAUDE_LIVE_BRIDGE_GUARD", true)
 }
 
 /// Claude originals register too, but only watcher respawn waits for them (see `try_respawn_recovery`).

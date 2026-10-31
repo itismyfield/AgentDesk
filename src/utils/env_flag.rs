@@ -4,21 +4,26 @@ use std::sync::{LazyLock, Mutex};
 
 /// Read a boolean env override, falling back on empty, missing or invalid values.
 pub fn env_flag(name: &str, default: bool) -> bool {
-    #[cfg(test)]
-    if tests::parser_bypassed() {
-        return default;
-    }
+    read_env_flag(name, default).0
+}
+
+/// Pair the value with Unicode presence from the same environment read.
+pub(crate) fn read_env_flag(name: &str, default: bool) -> (bool, bool) {
     match std::env::var(name) {
-        Ok(value) => parse_value(name, &value, default),
-        Err(VarError::NotPresent) => default,
+        Ok(value) => (parse_value(name, &value, default), true),
+        Err(VarError::NotPresent) => (default, false),
         Err(VarError::NotUnicode(_)) => {
             warn_invalid(name);
-            default
+            (default, false)
         }
     }
 }
 
 pub(super) fn parse_value(name: &str, value: &str, default: bool) -> bool {
+    #[cfg(test)]
+    if tests::parser_bypassed() {
+        return default;
+    }
     match value.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => true,
         "0" | "false" | "no" | "off" => false,

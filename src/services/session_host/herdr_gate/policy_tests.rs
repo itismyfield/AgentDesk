@@ -260,7 +260,7 @@ fn policy_legacy_admission_and_terminate_version_refusals_stay_exact() {
         counted_invalid,
         launched_os(&rig),
     );
-    let _off = herdr_admission::force_for_test(Admission::new(Some("off".as_ref()), None));
+    let _off = herdr_admission::force_for_test(Admission::new(false, None));
     assert_eq!(
         target.pin(Mutation::Input),
         Err(HerdrGateRefusal::AdmissionStopped(

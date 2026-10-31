@@ -168,7 +168,7 @@ mod tests {
         assert_eq!(herdr(&live), quiet);
 
         let _hosts = force_for_test(Some("mac-mini"), &[(41, "mac-mini"), (42, "mac-book")]);
-        let _off = force_admission(Admission::new(Some("off".as_ref()), None));
+        let _off = force_admission(Admission::new(false, None));
         let mut booted = live.clone();
         booted.session_hosts = with_boot(|boot| boot.unwrap().config().clone());
         let endpoint =

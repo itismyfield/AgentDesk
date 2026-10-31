@@ -663,7 +663,7 @@ impl Drop for Fixture {
 
 fn open_admission() -> ForcedAdmission {
     let stop = std::env::temp_dir().join(format!("adk-ht-none-{}", uuid::Uuid::new_v4()));
-    force_for_test(Admission::new(None, Some(stop)))
+    force_for_test(Admission::new(true, Some(stop)))
 }
 
 /// `false` once the executor ended first; its result then tells why.

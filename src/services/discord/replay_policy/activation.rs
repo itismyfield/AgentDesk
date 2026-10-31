@@ -7,8 +7,8 @@ pub(crate) struct Settings {
     channels: BTreeSet<u64>,
 }
 impl Settings {
-    pub(crate) fn parse(flag: Option<&str>, channels: Option<&str>) -> Self {
-        if !flag.is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true")) {
+    pub(crate) fn parse(enabled: bool, channels: Option<&str>) -> Self {
+        if !enabled {
             return Self::default();
         }
         let Some(channels) = channels.filter(|v| !v.trim().is_empty()) else {
@@ -36,7 +36,7 @@ impl Settings {
 }
 static PROCESS: LazyLock<Settings> = LazyLock::new(|| {
     Settings::parse(
-        std::env::var("AGENTDESK_STALE_REPLAY_V1").ok().as_deref(),
+        crate::utils::env_flag("AGENTDESK_STALE_REPLAY_V1", false),
         std::env::var("AGENTDESK_STALE_REPLAY_CHANNELS")
             .ok()
             .as_deref(),
@@ -68,9 +68,7 @@ mod tests {
     use super::*;
     #[test]
     fn p5_activation_parser_is_closed_and_channel_scoped() {
-        for flag in [None, Some("0"), Some("false"), Some("invalid"), Some("")] {
-            assert!(!Settings::parse(flag, Some("42")).selected("42"));
-        }
+        assert!(!Settings::parse(false, Some("42")).selected("42"));
         for channels in [
             None,
             Some(""),
@@ -80,9 +78,9 @@ mod tests {
             Some("-1"),
             Some("18446744073709551616"),
         ] {
-            assert!(!Settings::parse(Some("1"), channels).selected("42"));
+            assert!(!Settings::parse(true, channels).selected("42"));
         }
-        let s = Settings::parse(Some("true"), Some("42, 43,42"));
+        let s = Settings::parse(true, Some("42, 43,42"));
         assert!(s.selected("42") && s.selected("43"));
         assert!(!s.selected("44"));
     }
