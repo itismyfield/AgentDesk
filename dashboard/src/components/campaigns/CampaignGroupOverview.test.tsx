@@ -74,7 +74,7 @@ afterEach(async () => { await act(async () => root.unmount()); container.remove(
 it("renders counts and aggregated edges and selects null groups through the empty-string callback", async () => {
   const select = vi.fn();
   const nodes = [node("a1", "A", [], "completed"), node("a2", "A", [], "running"), node("b1", null, ["a1", "a2"], "blocked")];
-  await act(async () => root.render(<CampaignGroupOverview campaignId="c1" nodes={nodes} onSelectGroup={select} tr={(_, en) => en} />));
+  await act(async () => root.render(<CampaignGroupOverview campaignId="c1" revision={1} nodes={nodes} onSelectGroup={select} tr={(_, en) => en} />));
   expect(container.textContent).toContain("2 groups · 3 tasks");
   expect(container.textContent).toContain("2 cross-group dependencies");
   expect(container.querySelectorAll("output")).toHaveLength(1);
@@ -90,7 +90,7 @@ it("renders counts and aggregated edges and selects null groups through the empt
 });
 
 it("renders an empty state without mounting the graph", async () => {
-  await act(async () => root.render(<CampaignGroupOverview campaignId="c1" nodes={[]} onSelectGroup={vi.fn()} tr={(_, en) => en} />));
+  await act(async () => root.render(<CampaignGroupOverview campaignId="c1" revision={1} nodes={[]} onSelectGroup={vi.fn()} tr={(_, en) => en} />));
   expect(container.textContent).toContain("No tasks to display.");
   expect(container.querySelector('[data-testid="group-graph"]')).toBeNull();
 });
@@ -114,7 +114,7 @@ it("splits an aggregate line by its ties without touching the task graph, the ne
     { via: ["t1"], edges: [["a1", "b1"]] },
     { via: [], edges: [["a2", "b1"]] },
   ]);
-  await act(async () => root.render(<CampaignGroupOverview campaignId="c1" nodes={nodes} onSelectGroup={vi.fn()} tr={(_, en) => en} />));
+  await act(async () => root.render(<CampaignGroupOverview campaignId="c1" revision={1} nodes={nodes} onSelectGroup={vi.fn()} tr={(_, en) => en} />));
   expect(nodes).toEqual(snapshot);
   expect(campaignRawEdges(nodes)).toEqual([["a1", "b1"], ["a2", "b1"]]);
   expect(fetchSpy).not.toHaveBeenCalled();

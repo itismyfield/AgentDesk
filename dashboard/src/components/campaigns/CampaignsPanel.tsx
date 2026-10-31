@@ -57,8 +57,11 @@ export default function CampaignsPanel({ language }: { language: string }) {
   // the campaign is gone (an id created again must not bring old ties back). Only after a successful load.
   useEffect(() => {
     if (refreshedAt === null) return;
-    const loaded = new Map(campaigns.map((value) => [value.id, campaignRawEdges(value.nodes)]));
-    for (const id of new Set([...loaded.keys(), ...storedGroupViewCampaigns()])) pruneStoredView(groupViewScope(id), loaded.get(id) ?? []);
+    const loaded = new Map(campaigns.map((value) => [value.id, value]));
+    for (const id of new Set([...loaded.keys(), ...storedGroupViewCampaigns()])) {
+      const shown = loaded.get(id);
+      pruneStoredView(groupViewScope(id), shown ? campaignRawEdges(shown.nodes) : [], shown?.revision ?? null);
+    }
   }, [campaigns, refreshedAt]);
   const mounted = useRef(false);
   const requestId = useRef(0);

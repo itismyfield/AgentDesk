@@ -12,6 +12,8 @@ import { groupViewScope } from "./campaignViewStorage";
 
 type Props = {
   campaignId: string;
+  /** Definition revision of `nodes`, recorded with the saved tie layout. */
+  revision: number;
   nodes: CampaignNode[];
   onSelectGroup: (group: string) => void;
   tr: (ko: string, en: string) => string;
@@ -48,10 +50,10 @@ export function buildCampaignGroupOverview(nodes: CampaignNode[], settings: Grap
   };
 }
 
-export default function CampaignGroupOverview({ campaignId, nodes, onSelectGroup, tr }: Props) {
+export default function CampaignGroupOverview({ campaignId, revision, nodes, onSelectGroup, tr }: Props) {
   const scope = useMemo(() => groupViewScope(campaignId), [campaignId]);
   const rawEdges = useMemo(() => campaignRawEdges(nodes), [nodes]);
-  const ties = useCampaignTieView(scope, rawEdges);
+  const ties = useCampaignTieView(scope, rawEdges, revision);
   const { setBusy } = ties;
   const [tieMode, setTieMode] = useState(false);
   const [draft, setDraft] = useState<ReadonlySet<string>>(NONE);

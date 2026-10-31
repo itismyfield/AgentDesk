@@ -76,8 +76,8 @@ async function openGraph(shown = campaign) {
   await render(shown);
   await click(button("Connections"));
 }
-const button = (name: string) => [...container.querySelectorAll("button")].find((element) => element.textContent?.trim() === name || element.getAttribute("aria-label") === name)!;
-const checkbox = (label: string) => [...container.querySelectorAll("label")].find((element) => element.textContent?.startsWith(label))!.querySelector("input")!;
+const button = (name: string, scope: ParentNode = container) => [...scope.querySelectorAll("button")].find((element) => element.textContent?.trim() === name || element.getAttribute("aria-label") === name)!;
+const checkbox = (label: string, scope: ParentNode = container) => [...scope.querySelectorAll("label")].find((element) => element.textContent?.startsWith(label))!.querySelector("input")!;
 const click = (element: HTMLElement) => act(async () => element.click());
 const ties = () => [...container.querySelectorAll<HTMLElement>('[data-type="campaignTie"]')].map((element) => ({ x: Number(element.dataset.x), y: Number(element.dataset.y) }));
 /** Every original edge behind the drawn lines, as dependency→dependent pairs. */
@@ -507,4 +507,112 @@ it("keeps saved ties until the campaign list loads, then clears those of a campa
   await click(button("Connections"));
   expect(ties()).toEqual([]);
   expect(pathOf("A->C")).toEqual(["campaign-group:G1", "campaign-group:G2"]);
+});
+
+/** A definition of the tie campaign at `revision` with the given dependencies. */
+const define = (revision: number, dependencies: Record<string, string[]>): Campaign =>
+  ({ ...campaign, revision, nodes: campaign.nodes.map((node) => ({ ...node, dependencies: dependencies[node.id] ?? [] })) });
+/** Another tab of this browser: the same storage, its own screen. */
+function otherTab() {
+  const tab = document.createElement("div");
+  document.body.appendChild(tab);
+  const tabRoot = createRoot(tab);
+  onTestFinished(async () => { await act(async () => tabRoot.unmount()); tab.remove(); });
+  return { tab, show: (node: ReactNode) => act(async () => tabRoot.render(node)) };
+}
+const explorer = (shown: Campaign) => <CampaignExplorer campaign={shown} live={{}} tr={(_, en) => en} onSaved={vi.fn()} drafts={{}} onDraftChange={vi.fn()} />;
+const deliver = () => act(async () => { window.dispatchEvent(new StorageEvent("storage", { key, storageArea: localStorage })); });
+const stored = () => JSON.parse(localStorage.getItem(key)!) as { revision?: number; ties: { strandOrder: RawEdgeKey[] }[] };
+const members = () => stored().ties.map((tie) => tie.strandOrder);
+
+it("keeps the newest tab's tie when an older tab, after receiving it, moves to another definition that still lacks it", async () => {
+  // The older tab follows revisions 5 and 6, neither with B→D; this tab has revision 7 and ties B→D.
+  const older = otherTab();
+  await older.show(explorer(define(5, { D: ["A"] })));
+  await click(button("Connections", older.tab));
+  await openGraph();
+  await click(button("Tie lines")); await click(checkbox("B → D")); await click(button("Tie 1 lines"));
+  await deliver();
+  await older.show(explorer(define(6, { C: ["A"] })));
+  await deliver();
+  expect(members()).toEqual([[["B", "D"]]]);
+  expect(stored().revision).toBe(7);
+  expect(pathOf("B->D")[1]).toMatch(/^campaign-tie:/);
+});
+
+it("cleans members the newest definition deleted and records that definition's revision", async () => {
+  await openGraph();
+  await tieBoth();
+  expect(stored().revision).toBe(7);
+  await render(define(8, { C: ["A"] }));
+  expect(members()).toEqual([[["A", "C"]]]);
+  expect(stored().revision).toBe(8);
+  await click(button("Undo"));
+  expect(members()).toEqual([]);
+  expect(stored().revision).toBe(8);
+});
+
+it("lets a campaign poll answered before another tab's newer tie keep that tie, and a newer poll clean it", async () => {
+  const answer = (shown: Campaign) => ({ campaigns: [shown], live: {}, read: 1 });
+  let late!: (value: ReturnType<typeof answer>) => void;
+  vi.mocked(getCampaigns).mockResolvedValueOnce(answer(campaign)).mockReturnValueOnce(new Promise((resolve) => { late = resolve; }));
+  const panel = otherTab();
+  await panel.show(<CampaignsPanel language="en" />);
+  await click(button("Refresh", panel.tab));
+  // Revision 8 adds A→D; this tab ties it while the panel's poll still carries revision 7.
+  await openGraph(define(8, { C: ["A"], D: ["B", "A"] }));
+  await click(button("Tie lines")); await click(checkbox("A → D")); await click(button("Tie 1 lines"));
+  await act(async () => late(answer(campaign)));
+  await deliver();
+  expect(members()).toEqual([[["A", "D"]]]);
+  expect(pathOf("A->D")[1]).toMatch(/^campaign-tie:/);
+  vi.mocked(getCampaigns).mockResolvedValue(answer(define(9, { C: ["A"], D: ["B"] })));
+  await click(button("Refresh", panel.tab));
+  expect(members()).toEqual([]);
+  expect(stored().revision).toBe(9);
+});
+
+it("keeps the newest tab's tie through an older tab's own tie and its undo", async () => {
+  const older = otherTab();
+  await older.show(explorer(define(6, { C: ["A"] })));
+  await click(button("Connections", older.tab));
+  await openGraph();
+  await click(button("Tie lines")); await click(checkbox("B → D")); await click(button("Tie 1 lines"));
+  await deliver();
+  await click(button("Tie lines", older.tab)); await click(checkbox("A → C", older.tab)); await click(button("Tie 1 lines", older.tab));
+  expect(members()).toEqual([[["B", "D"]], [["A", "C"]]]);
+  await deliver();
+  expect(pathOf("B->D")[1]).toMatch(/^campaign-tie:/);
+  expect(pathOf("A->C")[1]).toMatch(/^campaign-tie:/);
+  await click(button("Undo", older.tab));
+  expect(members()).toEqual([[["B", "D"]]]);
+  expect(stored().revision).toBe(7);
+  await deliver();
+  expect(pathOf("B->D")[1]).toMatch(/^campaign-tie:/);
+});
+
+it("cleans a view saved before revisions were recorded as if the oldest definition had judged it", async () => {
+  const scope = { mode: "legacy", campaignId: campaign.id, projection: "groups", taskScope: "all" };
+  localStorage.setItem(key, JSON.stringify({ schemaVersion: 1, scope, ties: [{ id: "t1", position: { x: 100, y: 100 }, strandOrder: [["A", "C"], ["B", "D"]] }], routes: [{ edge: ["A", "C"], via: ["t1"] }, { edge: ["B", "D"], via: ["t1"] }], showOriginal: false }));
+  await openGraph(define(1, { C: ["A"] }));
+  expect(members()).toEqual([[["A", "C"]]]);
+  expect(stored().revision).toBe(1);
+});
+
+it("lets a campaign created again under a gone campaign's id clean its own ties from a lower revision", async () => {
+  const load = (...shown: Campaign[]) => vi.mocked(getCampaigns).mockResolvedValue({ campaigns: shown, live: {}, read: 1 });
+  await openGraph();
+  await tieBoth();
+  await act(async () => root.unmount());
+  root = createRoot(container);
+  load({ ...campaign, id: "other-campaign" });
+  await act(async () => root.render(<CampaignsPanel language="en" />));
+  load(define(1, { C: ["A"], D: ["B"] }));
+  await click(button("Refresh"));
+  await click(button("Connections"));
+  await tieBoth();
+  load(define(2, { C: ["A"] }));
+  await click(button("Refresh"));
+  expect(members()).toEqual([[["A", "C"]]]);
+  expect(stored().revision).toBe(2);
 });

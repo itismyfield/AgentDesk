@@ -23,6 +23,8 @@ export type CampaignGraphView = {
   ties: CableTie[];
   routes: EdgeRoute[];
   showOriginal: boolean;
+  /** Definition revision that judged the tie membership; absent in values saved before it was recorded. */
+  revision?: number;
 };
 
 export type GraphViewSettings = Pick<CampaignGraphView, "ties" | "routes" | "showOriginal">;
