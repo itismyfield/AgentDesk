@@ -66,12 +66,15 @@ pub(crate) async fn submit_front(
             let owner = slot.as_mut().ok_or("V2 not adopted")?;
             let (attempt, payload) = (parse(attempt)?, parse(payload)?);
             match claim {
-                Some(claim) => owner.reserve_claimed(claim.front(), attempt, payload),
+                Some(claim) => {
+                    owner.reserve_claimed((claim.front(), claim.number()), attempt, payload)
+                }
                 None => owner.reserve(attempt, payload),
             }
             .map(drop)
         })
-        .await?;
+        .await
+        .map_err(effect::unsent)?;
     effect::run(mailbox, clock, leaf).await
 }
 

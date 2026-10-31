@@ -32,6 +32,8 @@ pub(crate) struct Owner {
     front_grant: Option<Front>,
     /// The front a turn claimed from its grant; one reserve takes it.
     front_claim: Option<Front>,
+    /// The current claim's process-unique number: another owner's or an earlier claim never reserves.
+    claim_number: u64,
 }
 
 /// The owner's unattempted front as the drive hands it on: its slot's ticket and the original.
@@ -71,6 +73,7 @@ impl Owner {
             unacknowledged: Vec::new(),
             front_grant: None,
             front_claim: None,
+            claim_number: 0,
         };
         // A restored bootstrap is possibly sent; missing deadline never proves NotSent.
         let mut restored = owner.snapshot.clone();
@@ -152,8 +155,9 @@ impl Owner {
         }
         next.head_injection = Some(head);
         next.bind_reserved();
-        self.revoke_front();
+        // A reserve that did not commit leaves the drive's right in place, so the drive stops.
         self.commit(next)?;
+        self.revoke_front();
         Ok(key)
     }
 
@@ -294,8 +298,14 @@ impl Owner {
         if !granted {
             return None;
         }
+        static CLAIMS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        self.claim_number = CLAIMS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.front_claim = self.front_grant.take();
         self.front_claim.clone()
+    }
+
+    pub(crate) fn claim_number(&self) -> u64 {
+        self.claim_number
     }
 
     /// Whether this exact front, claimed by the owner's turn, is still the front `message` names.
@@ -312,11 +322,12 @@ impl Owner {
     /// moved since the claim reserves nothing.
     pub(crate) fn reserve_claimed(
         &mut self,
-        front: &Front,
+        (front, number): (&Front, u64),
         attempt: AttemptIdentity,
         payload: PreparedPayload,
     ) -> Result<AttemptRef, String> {
-        let claimed = self.front_claim.take().is_some_and(|c| is_front(&c, front))
+        let claimed = number == self.claim_number
+            && (self.front_claim.as_ref()).is_some_and(|c| is_front(c, front))
             && self.front().is_some_and(|now| is_front(&now, front));
         if !claimed {
             return Err("NotSent(\"front_not_granted\")".into());

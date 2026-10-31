@@ -295,12 +295,26 @@ fn an_idle_owner_front_needs_execution_capacity_before_any_key() {
 /// channel finds the node full meanwhile; the slot returns once, and only then may another run.
 #[test]
 fn an_idle_owner_turn_holds_its_capacity_until_its_ai_turn_ends_pg() {
-    use crate::services::cluster::execution_capacity::acquire;
     let path = module_path!().split_once("::").unwrap().1;
     let test = format!("{path}::an_idle_owner_turn_holds_its_capacity_until_its_ai_turn_ends_pg");
-    if !crate::services::discord::admin_host_guard::tests::api_child(&test) {
-        return;
+    if crate::services::discord::admin_host_guard::tests::api_child(&test) {
+        holds_capacity_to_the_turn_end(false);
     }
+}
+
+/// A write that may have landed, its Enter failing after the paste, holds the slot the same way.
+#[test]
+fn an_uncertain_idle_write_holds_its_capacity_until_its_ai_turn_ends_pg() {
+    let path = module_path!().split_once("::").unwrap().1;
+    let test =
+        format!("{path}::an_uncertain_idle_write_holds_its_capacity_until_its_ai_turn_ends_pg");
+    if crate::services::discord::admin_host_guard::tests::api_child(&test) {
+        holds_capacity_to_the_turn_end(true);
+    }
+}
+
+fn holds_capacity_to_the_turn_end(enter_fails: bool) {
+    use crate::services::cluster::execution_capacity::acquire;
     let _root = crate::config::TestRuntimeRootGuard::new();
     let data = tempfile::tempdir().unwrap();
     let mut config = crate::config::Config::default();
@@ -309,6 +323,9 @@ fn an_idle_owner_turn_holds_its_capacity_until_its_ai_turn_ends_pg() {
     config.cluster.execution_slots = Some(1);
     crate::config_live_reload::install(config);
     let rig = codex_rig_on("oc-slot", 7_272_539, true);
+    if enter_fails {
+        rig.mark("swap-after", "paste");
+    }
     let db = rig
         .runtime
         .block_on(crate::db::auto_queue::test_support::TestPostgresDb::create());
@@ -345,8 +362,12 @@ fn an_idle_owner_turn_holds_its_capacity_until_its_ai_turn_ends_pg() {
         let answered = rig.runtime.block_on(wait);
         let (held, refused) = (leases(), other(7_272_540).err());
         release.send(()).unwrap();
-        assert_eq!(first.join().unwrap(), Ok(()));
-        assert_eq!(answered.map(Result::ok), Ok(Some(Ok(()))));
+        let settled = match enter_fails {
+            true => Err("WriteUncertain(\"enter_failed\")".to_string()),
+            false => Ok(()),
+        };
+        assert_eq!(first.join().unwrap(), settled);
+        assert_eq!(answered.map(Result::ok), Ok(Some(settled)));
         assert_eq!(held, 1, "the lease stays while the AI turn runs");
         assert!(
             refused.is_some_and(|e| e.contains("exhausted")),

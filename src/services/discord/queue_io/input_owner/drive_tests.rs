@@ -362,3 +362,109 @@ async fn identical_migrated_inputs_are_each_handed_on_once() {
     assert!(after["items"].as_array().unwrap().is_empty(), "{after}");
     assert_eq!(handed.load(Ordering::SeqCst), 2, "{after}");
 }
+
+/// A reserve the owner cannot commit is no progress: the wake hands the front on once and stops
+/// with it still queued, and a wake after the store recovers delivers it once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reserve_that_did_not_commit_stops_the_drive_until_the_next_wake() {
+    let _root = TestRuntimeRootGuard::new();
+    let registry = ChannelMailboxRegistry::default();
+    let channel = 7_272_711;
+    let mailbox = owner(&registry, channel, 1).await;
+    let path = crate::services::discord::runtime_store::discord_pending_queue_root()
+        .unwrap()
+        .join(format!("claude/input-owner-drive/{channel}.json"));
+    let bytes = std::fs::read(&path).unwrap();
+    // A file changed outside the owner refuses every commit until it is back.
+    std::fs::write(&path, [&bytes[..], b"\n"].concat()).unwrap();
+    let (handed, sent) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let (h, n) = (handed.clone(), sent.clone());
+    let before = move |_: &Front| {
+        h.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async {}) as Pin<Box<dyn Future<Output = ()> + Send>>
+    };
+    let answer = move |_: &str| {
+        n.fetch_add(1, Ordering::SeqCst);
+        Completion::Submitted
+    };
+    let drive = Arc::new(Drive {
+        mailbox: mailbox.clone(),
+        channel,
+        handoff: handoff(mailbox.clone(), channel, before, answer),
+        recheck: Duration::from_millis(20),
+        settled: None,
+    });
+    wake(drive.clone());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let counts = (handed.load(Ordering::SeqCst), sent.load(Ordering::SeqCst));
+    assert_eq!(counts, (1, 0), "one handoff for the wake, no content");
+    std::fs::write(&path, &bytes).unwrap();
+    assert_eq!(
+        snapshot(&mailbox).await["items"].as_array().unwrap().len(),
+        1
+    );
+    wake(drive);
+    let after = settled(&mailbox).await;
+    assert!(after["items"].as_array().unwrap().is_empty(), "{after}");
+    assert_eq!(sent.load(Ordering::SeqCst), 1);
+}
+
+/// A claim reserves only on the owner that issued it and only while it is that owner's current
+/// claim: another owner's claim on an equal front, or an earlier one, sends nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_claim_reserves_only_as_its_owners_current_claim() {
+    let _root = TestRuntimeRootGuard::new();
+    let registry = ChannelMailboxRegistry::default();
+    let (a, b) = (
+        owner(&registry, 7_272_712, 0).await,
+        owner(&registry, 7_272_713, 0).await,
+    );
+    let (item, ticket) = (original(7_272_712, 0), AdmissionTicket::new());
+    for mailbox in [&a, &b] {
+        let admitted = admit(mailbox, &item, ticket.clone()).await;
+        assert!(matches!(
+            admitted,
+            super::super::admission::Admission::Accepted(_)
+        ));
+    }
+    let claim = |mailbox: ChannelMailboxHandle| async move {
+        let granted = mailbox.v2_request(|slot| {
+            let owner = slot.as_mut().ok_or("no owner")?;
+            let front = owner.front().ok_or("no front")?;
+            owner.grant_front(&front).map(|()| front)
+        });
+        let front = granted.await.unwrap();
+        claim_turn(&mailbox, front.1.message_id, &front)
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    let sent = Arc::new(AtomicUsize::new(0));
+    let submit = |mailbox: ChannelMailboxHandle, claim: FrontClaim| {
+        let counted = sent.clone();
+        let leaf: Leaf = Box::new(move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(Completion::Submitted)
+        });
+        let prepared = prepared(7_272_713, "x");
+        async move {
+            pump::submit_front(&mailbox, Some(claim), prepared, Arc::new(|| 10_000), leaf).await
+        }
+    };
+    let (of_a, earlier) = (claim(a.clone()).await, claim(b.clone()).await);
+    let current = claim(b.clone()).await;
+    let refused = Err("NotSent(\"front_not_granted\")".to_string());
+    assert_eq!(
+        submit(b.clone(), of_a).await,
+        refused,
+        "another owner's claim"
+    );
+    assert_eq!(
+        submit(b.clone(), earlier).await,
+        refused,
+        "an earlier claim"
+    );
+    assert_eq!(sent.load(Ordering::SeqCst), 0);
+    assert_eq!(submit(b.clone(), current).await, Ok(Completion::Submitted));
+    assert_eq!(sent.load(Ordering::SeqCst), 1);
+}

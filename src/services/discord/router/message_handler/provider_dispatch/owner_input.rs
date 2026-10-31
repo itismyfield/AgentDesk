@@ -552,6 +552,10 @@ fn take_owned(
     reply(&result);
     let result = match (result, until_done) {
         (Ok(()), Some(until_done)) => until_done(),
+        // A write that may have landed starts an AI turn, so the capacity is held to its end too.
+        (Err(error), Some(until_done)) if !effect::surely_unsent(&error) => {
+            until_done().and(Err(error))
+        }
         (result, _) => result,
     };
     drop(capacity);
@@ -623,7 +627,10 @@ fn run(
     front: Option<FrontClaim>,
 ) -> Result<(), String> {
     let nonce = r.attempt["nonce"].as_str().unwrap_or_default().to_string();
-    let session = || turn.tmux_session_name.ok_or("owner input without a pane");
+    let session = || {
+        turn.tmux_session_name
+            .ok_or("NotSent(\"owner input without a pane\")")
+    };
     let (frame, leaf) = match route {
         // The busy frame carries main's header, so the prepared bytes are the ones pasted.
         target::Route::ClaudeBusy => (
@@ -652,7 +659,9 @@ fn run(
             ),
         ),
         target::Route::ClaudeHerdrBusy => {
-            let (target, writer) = r.herdr.ok_or("owner Herdr input without a pane")?;
+            let (target, writer) = r
+                .herdr
+                .ok_or("NotSent(\"owner Herdr input without a pane\")")?;
             (
                 busy_inject::frame("discord", &r.author, &r.name, &nonce, turn.prompt),
                 BusyClaudeHerdr {
@@ -703,7 +712,7 @@ fn run(
                     input,
                 }
                 .leaf(),
-                (_, None) => return Err("owner Herdr input without a pane".into()),
+                (_, None) => return Err("NotSent(\"owner Herdr input without a pane\")".into()),
             };
             (frame, leaf)
         }

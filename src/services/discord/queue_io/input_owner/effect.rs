@@ -30,6 +30,19 @@ pub(crate) enum Completion {
 /// The refusal of a pane showing a modal: the original is held at the front, not retained.
 pub(crate) const MODAL: &str = "Modal";
 
+/// A refusal before any key, marked so a caller never takes it for a write that may have landed.
+pub(crate) fn unsent(error: String) -> String {
+    match error.starts_with("NotSent(") {
+        true => error,
+        false => format!("NotSent({error:?})"),
+    }
+}
+
+/// Whether a failed attempt surely put no content in the pane; anything else may have.
+pub(crate) fn surely_unsent(error: &str) -> bool {
+    error.starts_with("NotSent(") || error.starts_with("Failed(")
+}
+
 pub(crate) type Leaf = Box<dyn FnOnce(String) -> Result<Completion, String> + Send>;
 pub(crate) type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
@@ -40,9 +53,15 @@ pub(crate) async fn run(
     clock: Clock,
     leaf: Leaf,
 ) -> Result<Completion, String> {
-    let (identity, outcome) = mailbox
-        .v2_cold_observed(clock(), clock.clone(), leaf)
-        .await?;
+    // Only a panicked effect may have written; every other refusal here comes before the leaf.
+    let (identity, outcome) = (mailbox.v2_cold_observed(clock(), clock.clone(), leaf).await)
+        .map_err(|e| {
+            if e.starts_with("cold effect ") {
+                e
+            } else {
+                unsent(e)
+            }
+        })?;
     let completion = outcome.result.unwrap_or_else(Completion::WriteUncertain);
     if let Some(proof) = outcome.not_sent {
         let held = completion == Completion::NotSent(MODAL.into());
