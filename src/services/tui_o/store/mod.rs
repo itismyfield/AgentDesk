@@ -73,6 +73,9 @@ pub enum InitOrigin {
     Fresh,
     /// A Codex takeover of the rollout Legacy was running, whose turn turn mode waits for.
     LateCodexTakeover,
+    /// A Claude takeover of a transcript bound before its first output; turn mode waits for that
+    /// execution to end.
+    LateClaudeTakeover,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,7 +216,7 @@ impl OStore {
             return;
         };
         let origin = self.read_init_origin(channel);
-        let Ok(InitOrigin::LateCodexTakeover) = origin else {
+        let Ok(InitOrigin::LateCodexTakeover | InitOrigin::LateClaudeTakeover) = origin else {
             return;
         };
         let Ok(Some(init)) = self.read_init(channel) else {

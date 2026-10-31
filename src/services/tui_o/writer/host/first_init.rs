@@ -140,7 +140,8 @@ pub(super) async fn start<I: HostIo>(
                                 late: false,
                             };
                             let retried = deferred::retry(waiting, refused, seq);
-                            if unless_stopped(stopping, retried).await != Some(true) {
+                            let retried = unless_stopped(stopping, retried).await;
+                            if !matches!(retried, Some(deferred::Retried::Committed)) {
                                 return None;
                             }
                             break 'held Some(Ok(()));

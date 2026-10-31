@@ -15,7 +15,7 @@ use crate::services::tui_o::shadow::tap::TuiOConfig;
 use crate::services::tui_o::writer::WriterAlarm;
 
 mod adoption;
-pub(crate) use adoption::{Adoption, BodyClaimed, Candidate, LegacySend, Site};
+pub(crate) use adoption::{Adoption, BodyClaimed, Candidate, LateBoundary, LegacySend, Site};
 #[cfg(test)]
 pub(crate) use adoption::{
     body_check::{BodyCheck, SinkOp},
