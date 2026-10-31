@@ -159,6 +159,7 @@ impl ToolCardRun {
         }
         self.rows.clear();
         vec![Derived::Piece(PieceWork {
+            output_origin: None,
             unit_key,
             index: 0,
             payload,

@@ -22,6 +22,22 @@ F4는 #7272 S4 착지 뒤 진행한다. `auto_queue/**`, `phase_gate.rs`, review
 배포 스크립트와 relay dead letter는 이번 묶음의 편집 대상이 아니다.
 자동큐 배타 소유권 통합은 #7349 담당 코디네이터와 순서를 맞춘 후 별도로 착지한다.
 
+### 운영 원칙
+
+#7438 본문의 운영 원칙(2026-10-31)을 이 계약의 전제로 둔다. 아래 절과 어긋나면 이 원칙이 우선한다.
+
+- 리뷰 보내기·판정 읽기·PR 또는 수리 라운드 같은 기본 흐름은 서버가 LLM 호출 없이 결정적으로 처리한다.
+  TUI 에이전트는 판정이 모호하거나 예외일 때만 개입한다.
+- 판단이 필요한 상태는 고정 목록이 아니다. 반복 사례의 기준이 명확해지면 결정적 규칙으로 옮겨 AI 개입 영역을 줄인다.
+- 효율 장치(예: 리뷰 통과 N개마다 배포 후 E2E, 묶음·델타 리뷰, P2를 머지 직전에 모아 처리)는 예시다.
+  구현 목표가 아니라, 낭비 없이 돌도록 파이프라인 기능을 계속 정비·확장·제거한다는 원칙이다.
+- 단계와 전이 조건은 확장 가능한 정의다(§4). 사람 승인 게이트는 선택 기능이며 범위 안이다.
+- 노드 사이 순서는 DAG다.
+- 자동 부분은 herdr core(#7583)가 실행하고, 판단이 필요할 때만 TUI 에이전트에게 넘긴다.
+  오케스트레이션 세션은 주기적으로 캠페인을 능동 점검해 개선점을 찾는다.
+- run 수명 규칙(F4/F5 수용 기준): run 종료는 세션 생존이 아니라 명시적 완료·실패 신호로 판정한다.
+  같은 에이전트에 run이 있으면 새 항목은 거절하지 않고 그 run의 대기열에 붙인다.
+
 ## 2. 현재 코드와 재사용 경계
 
 모든 좌표는 위 조사 SHA 기준이다. 아래 코드는 새 실행 계약을 이미 구현하지 않는다.
@@ -81,9 +97,13 @@ F1은 위 레코드를 서버 전용 행으로 저장한다. 별도 DB/메시지
 최종 stop 확정 event 및 미대사 action을 가진다. 실패만 남아도 Succeeded가 되지 않는다.
 실행의 일시 대기/진행 불가는 control state가 아니라 서버 조회 판정이다.
 
-`Stage = Requirements | Design | DesignReview | Implementation | Review | Landing |
-MainVerification | FinalVerification | Complete`를 코드 버전 `campaign-v1`로 고정한다.
-수리도 Implementation/Review의 새 attempt이고 별도 workflow DSL은 없다.
+단계표는 프로젝트·부서(기획/개발/아트)별로 등록하는 확장 가능한 정의다. 정의는 ID·버전과
+단계, 단계별 게이트, 다음 단계를 담고, run은 시작할 때 쓸 단계표를 pin한다.
+첫 등록 표는 개발 단계표 `campaign-v1`이며 단계는 `Requirements | Design | DesignReview |
+Implementation | Review | Landing | MainVerification | FinalVerification | Complete`다.
+지금 코드는 이 표 하나(`WORKFLOW_VERSION`)만 가진다. 두 번째 표가 필요해지면 상수 대신
+등록된 정의에서 단계와 전이를 읽도록 바꾼다. 범용 편집기·DSL은 만들지 않는다.
+수리도 Implementation/Review의 새 attempt다.
 `AttemptOutcome = Passed | QualityFailed | UserInterrupted | EnvironmentWait | Superseded`.
 `NodeDisposition = Pending | Assigned | Running | Verifying | Failed | Blocked | Interrupted | Complete`.
 `main_integrated`와 `acceptance_complete`는 별도 사실이다.
@@ -119,8 +139,10 @@ FinishStage에서는 중단 경계에서 마무리가 허용된 기존 attempt�
 LLM용 claim/resume/submit API는 F4에서 session binding과 함께 붙인다.
 F1 공개 제어 요청의 미구현 동작은 409와 `execution_unavailable`로 응답한다.
 
-단계 전이는 다음 표로 고정한다. 모든 행은 현재 binding의 채택된 증거를 필요로 한다.
+`campaign-v1`의 단계 전이는 다음 표와 같다. 모든 행은 현재 binding의 채택된 증거를 필요로 한다.
 stopping에서는 이미 개시한 현재 단계 결과 저장까지만 허용하며 다음 행을 실행하지 않는다.
+사람 승인 게이트는 어느 전이에나 선택적으로 붙일 수 있다(기본 꺼짐). 켜진 게이트는 승인 사건이
+있어야 다음 단계로 가며, 승인 대기는 EnvironmentWait처럼 품질 실패에 세지 않는다.
 
 | 현재 단계 | 다음 단계 | 게이트/실패 |
 |---|---|---|
@@ -191,7 +213,8 @@ FinishStage는 stop 확정 전에 시작한 stage의 같은 attempt와 그 자�
 품질 수리 기본 한도 3회, 독립 설계 리뷰 최대 2라운드. 계수는 attempt 결과를 처음 확정하는 transaction에서만 증가한다.
 중복 제출은 계수를 늘리지 않는다. 자원/쿼터/host 대기는 EnvironmentWait, 사용자 stop은 UserInterrupted다.
 한도 도달은 해당 node Failed, 아직 시작하지 않은 후속은 Blocked(선행 ID), 독립 가지는 계속 진행한다.
-한도 이후 자동 조사/재설계/코디네이터 dispatch를 만들지 않는다. 일반 Resume은 실패 예산을 초기화하지 않는다.
+한도 이후 서버는 자동 수리를 반복하지 않는다. 한도 도달·모호한 판정·예외는 판단 필요 상태로
+오케스트레이션 TUI에 넘긴다(§1 운영 원칙). 일반 Resume은 실패 예산을 초기화하지 않는다.
 PrepareRetry는 새 series를 준비하고 이후 Resume+스케줄러만 발사한다.
 
 ## 7. 증거와 저장소 공통 인터페이스

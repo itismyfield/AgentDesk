@@ -130,22 +130,24 @@ pub(super) async fn enqueue_headless_outbox(
     provider: &ProviderKind,
     born_generation: u64,
     cancel_token: Option<&CancelToken>,
+    origin: Option<&crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
 ) -> Result<
     crate::services::message_outbox::OutboxEnqueueOutcome,
     crate::services::message_outbox::OutboxEnqueueError,
 > {
-    enqueue_headless_outbox_with_rollout(
+    enqueue_headless_outbox_with_origin(
         pool,
         message,
         owning_user_msg_id,
         provider,
         born_generation,
         cancel_token,
-        durable_headless_outbox_enabled(),
+        (durable_headless_outbox_enabled(), origin),
     )
     .await
 }
 
+#[cfg(test)]
 pub(super) async fn enqueue_headless_outbox_with_rollout(
     pool: &sqlx::PgPool,
     message: crate::services::message_outbox::OutboxMessage<'_>,
@@ -154,6 +156,33 @@ pub(super) async fn enqueue_headless_outbox_with_rollout(
     born_generation: u64,
     cancel_token: Option<&CancelToken>,
     durable_enabled: bool,
+) -> Result<
+    crate::services::message_outbox::OutboxEnqueueOutcome,
+    crate::services::message_outbox::OutboxEnqueueError,
+> {
+    enqueue_headless_outbox_with_origin(
+        pool,
+        message,
+        owning_user_msg_id,
+        provider,
+        born_generation,
+        cancel_token,
+        (durable_enabled, None),
+    )
+    .await
+}
+
+async fn enqueue_headless_outbox_with_origin(
+    pool: &sqlx::PgPool,
+    message: crate::services::message_outbox::OutboxMessage<'_>,
+    owning_user_msg_id: Option<MessageId>,
+    provider: &ProviderKind,
+    born_generation: u64,
+    cancel_token: Option<&CancelToken>,
+    (durable_enabled, origin): (
+        bool,
+        Option<&crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
+    ),
 ) -> Result<
     crate::services::message_outbox::OutboxEnqueueOutcome,
     crate::services::message_outbox::OutboxEnqueueError,
@@ -180,20 +209,23 @@ pub(super) async fn enqueue_headless_outbox_with_rollout(
     let identity =
         identity.filter(|_| message.session_key.is_none() || bounded_session_key.is_some());
     let Some(identity) = identity else {
-        return crate::services::message_outbox::enqueue_outbox_pg_returning_outcome_with_ttl_and_cancel(
+        return crate::services::message_outbox::enqueue_outbox_pg_with_ttl_origin(
             pool,
             message,
             0,
             cancel_token,
+            origin,
         )
         .await;
     };
 
-    crate::services::message_outbox::enqueue_outbox_pg_returning_outcome_with_exact_dedupe_and_cancel(
+    crate::services::message_outbox::enqueue_outbox_pg_with_exact_origin(
         pool,
         message,
         &identity.persistent_dedupe_key(),
         cancel_token,
+        None,
+        origin,
     )
     .await
 }
@@ -201,6 +233,188 @@ pub(super) async fn enqueue_headless_outbox_with_rollout(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn output_origin_delayed_producer_consumer_restore_and_old_format_pg() {
+        use crate::server::outbox_worker::{drain_message_outbox_once, origin_fixture::Discord};
+        use crate::services::cluster::intake_router_hook::owner_record::output::{
+            self,
+            tests::{fixture, revoke},
+        };
+        let (_db, pool, origin) = fixture("72280700").await;
+        let artifact =
+            output::source_artifact(Some(&pool), "claude", "72280700", "90001", None, "answer")
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(artifact, origin.seal("answer"));
+        let message = crate::services::message_outbox::OutboxMessage {
+            target: "channel:72280700",
+            content: "answer",
+            bot: "notify",
+            source: "headless_turn",
+            reason_code: Some("headless.delivery"),
+            session_key: None,
+        };
+        let id = match enqueue_headless_outbox(
+            &pool,
+            message,
+            Some(MessageId::new(90001)),
+            &ProviderKind::Claude,
+            1,
+            None,
+            Some(&artifact),
+        )
+        .await
+        .unwrap()
+        {
+            crate::services::message_outbox::OutboxEnqueueOutcome::Enqueued { id } => id,
+            other => panic!("real producer must enqueue: {other:?}"),
+        };
+        let stored: Option<serde_json::Value> =
+            sqlx::query_scalar("SELECT output_origin FROM message_outbox WHERE id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            stored,
+            Some(serde_json::to_value(&artifact).unwrap()),
+            "the first insert must durably carry the original stamp"
+        );
+        let mock = Discord::new().await;
+        let registry = mock.registry().await;
+        let pool = Arc::new(pool);
+        assert_eq!(
+            drain_message_outbox_once(&pool, &registry, "origin-consumer").await,
+            1
+        );
+        let status: String = sqlx::query_scalar("SELECT status FROM message_outbox WHERE id=$1")
+            .bind(id)
+            .fetch_one(pool.as_ref())
+            .await
+            .unwrap();
+        assert_eq!(status, "sent");
+        assert_eq!(mock.posts().len(), 1);
+        revoke(&pool, &origin).await;
+        for stamp in [
+            stored,
+            None,
+            Some(serde_json::json!({"old":"unrecognized"})),
+        ] {
+            sqlx::query("UPDATE message_outbox SET status='pending',output_origin=$2,claimed_at=NULL,claim_owner=NULL,next_attempt_at=NULL WHERE id=$1")
+                .bind(id).bind(stamp).execute(pool.as_ref()).await.unwrap();
+            assert_eq!(
+                drain_message_outbox_once(&pool, &registry, "restored-consumer").await,
+                1
+            );
+            let status: String =
+                sqlx::query_scalar("SELECT status FROM message_outbox WHERE id=$1")
+                    .bind(id)
+                    .fetch_one(pool.as_ref())
+                    .await
+                    .unwrap();
+            assert_eq!(
+                status, "held",
+                "revoked, legacy, or malformed artifacts remain held"
+            );
+            assert_eq!(
+                mock.posts().len(),
+                1,
+                "restoring old output must not emit another POST"
+            );
+        }
+        sqlx::query("UPDATE message_outbox SET status='pending',claimed_at=NULL,claim_owner=NULL,next_attempt_at=NULL WHERE id=$1").bind(id).execute(pool.as_ref()).await.unwrap();
+        sqlx::query("ALTER TABLE message_outbox RENAME COLUMN output_origin TO unavailable_origin")
+            .execute(pool.as_ref())
+            .await
+            .unwrap();
+        assert_eq!(
+            drain_message_outbox_once(&pool, &registry, "lookup-error-consumer").await,
+            1
+        );
+        assert_eq!(
+            mock.posts().len(),
+            1,
+            "PG stamp read error must emit zero raw effects"
+        );
+        let status: String = sqlx::query_scalar("SELECT status FROM message_outbox WHERE id=$1")
+            .bind(id)
+            .fetch_one(pool.as_ref())
+            .await
+            .unwrap();
+        assert_ne!(status, "sent");
+        sqlx::query("ALTER TABLE message_outbox RENAME COLUMN unavailable_origin TO output_origin")
+            .execute(pool.as_ref())
+            .await
+            .unwrap();
+        // The explicit rollout branch must also keep its existing dedupe authority and original stamp.
+        let result = enqueue_headless_outbox_with_origin(
+            &pool,
+            message,
+            Some(MessageId::new(90001)),
+            &ProviderKind::Claude,
+            2,
+            None,
+            (true, Some(&artifact)),
+        )
+        .await
+        .unwrap();
+        let id = match result {
+            crate::services::message_outbox::OutboxEnqueueOutcome::Enqueued { id } => id,
+            other => panic!("{other:?}"),
+        };
+        let saved: serde_json::Value =
+            sqlx::query_scalar("SELECT output_origin FROM message_outbox WHERE id=$1")
+                .bind(id)
+                .fetch_one(pool.as_ref())
+                .await
+                .unwrap();
+        assert_eq!(saved, serde_json::to_value(&artifact).unwrap());
+        let changed_message = crate::services::message_outbox::OutboxMessage {
+            content: "changed answer",
+            ..message
+        };
+        let changed_artifact = origin.seal(changed_message.content);
+        let reused = enqueue_headless_outbox_with_origin(
+            &pool,
+            changed_message,
+            Some(MessageId::new(90001)),
+            &ProviderKind::Claude,
+            2,
+            None,
+            (true, Some(&changed_artifact)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reused,
+            crate::services::message_outbox::OutboxEnqueueOutcome::Enqueued { id }
+        );
+        let stored: (String, serde_json::Value) =
+            sqlx::query_as("SELECT content,output_origin FROM message_outbox WHERE id=$1")
+                .bind(id)
+                .fetch_one(pool.as_ref())
+                .await
+                .unwrap();
+        assert_eq!(stored, (message.content.to_string(), saved));
+        let mut wrong = serde_json::to_value(&artifact).unwrap();
+        wrong["origin"]["nonce"] = serde_json::json!("different-episode");
+        let wrong: output::Artifact = serde_json::from_value(wrong).unwrap();
+        assert!(
+            enqueue_headless_outbox_with_origin(
+                &pool,
+                message,
+                Some(MessageId::new(90001)),
+                &ProviderKind::Claude,
+                2,
+                None,
+                (true, Some(&wrong)),
+            )
+            .await
+            .is_err()
+        );
+    }
 
     #[test]
     fn durable_rollout_defaults_off_and_requires_an_explicit_true_value() {

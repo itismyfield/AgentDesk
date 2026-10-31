@@ -3321,6 +3321,10 @@ fn terminate_entry_violations(sources: &BTreeMap<String, String>) -> Vec<String>
                 &[
                     (TERMINATE_SERVICE, 1),
                     ("src/services/discord/commands/control/clear_teardown.rs", 1),
+                    (
+                        "src/services/discord/commands/control/clear_teardown/execution_cleanup.rs",
+                        1,
+                    ),
                 ],
             ),
             (
@@ -3551,6 +3555,22 @@ fn act_terminate_entry_census() {
     let violations = terminate_entry_violations(&sources);
     assert!(violations.is_empty(), "{violations:?}");
     assert!(close_owner_violations(&sources).is_empty());
+    for file in [
+        "src/services/discord/commands/control/clear_teardown/execution_cleanup.rs",
+        "src/services/unreviewed_terminate.rs",
+    ] {
+        let mut extra = sources.clone();
+        extra.entry(file.into()).or_default().push_str(
+            "\nasync fn extra() { crate::services::discord::herdr_terminate::terminate_explicit_herdr(); }",
+        );
+        assert!(
+            terminate_entry_violations(&extra)
+                .iter()
+                .any(|violation| violation.contains(file)
+                    && violation.contains("terminate_explicit_herdr")),
+            "duplicate or unreviewed caller: {file}"
+        );
+    }
 }
 
 #[test]

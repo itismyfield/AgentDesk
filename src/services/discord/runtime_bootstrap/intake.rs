@@ -8,6 +8,7 @@ use super::*;
 /// invokes this only after a gateway or confirmed-standby role is registered.
 /// Every role keeps its worker; the worker itself leaves O channels to their gateway row by row.
 pub(super) fn run_bot_maybe_spawn_intake_worker(shared: &Arc<SharedData>, provider: &ProviderKind) {
+    super::owner_cleanup::spawn(shared, provider);
     let intake_routing =
         crate::services::cluster::intake_router_hook::effective_intake_routing_config();
     if intake_routing.worker_consumer_should_spawn() {

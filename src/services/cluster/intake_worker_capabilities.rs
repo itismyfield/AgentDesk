@@ -10,6 +10,22 @@ static ACTIVE_INTAKE_WORKER_PROVIDERS: LazyLock<RwLock<BTreeSet<String>>> =
 const PRESERVE_ON_CANCEL_V1: &str = "preserve_on_cancel_v1";
 const SCHEDULED_MESSAGE_DISCORD_MENTION_CONSUMER_V1: &str = "discord_mention_consumer_v1";
 
+/// Providers whose resident owner control loop runs here, and whose owner REST credentials are loaded.
+static ROUTING_OWNER: LazyLock<RwLock<[BTreeSet<String>; 2]>> =
+    LazyLock::new(|| RwLock::new([BTreeSet::new(), BTreeSet::new()]));
+
+/// Only this runtime publishes its own capability; a gateway never fills it for another node.
+pub(crate) fn publish_routing_owner(provider: &str, rest_ready: bool) {
+    let provider = provider.trim().to_ascii_lowercase();
+    let mut owner = ROUTING_OWNER.write().unwrap_or_else(|e| e.into_inner());
+    owner[0].insert(provider.clone());
+    if rest_ready {
+        owner[1].insert(provider);
+    } else {
+        owner[1].remove(&provider);
+    }
+}
+
 // Count live gateway owners so one bot stopping does not hide another bot's intent.
 static GATEWAY_WAITER_PROVIDERS: LazyLock<RwLock<BTreeMap<String, usize>>> =
     LazyLock::new(|| RwLock::new(BTreeMap::new()));
@@ -107,6 +123,14 @@ pub(crate) fn capabilities_with_runtime_state(base: &Value) -> Value {
             "features": [PRESERVE_ON_CANCEL_V1, "execution_requirements_v1", super::attachment_transfer::CAPABILITY],
         }),
     );
+    let owner = ROUTING_OWNER.read().unwrap_or_else(|e| e.into_inner());
+    if !owner[0].is_empty() {
+        capabilities.insert(
+            "routing_owner".to_string(),
+            json!({ "control": owner[0], "rest": owner[1] }),
+        );
+    }
+    drop(owner);
     let gateway_waiters = active_gateway_waiter_providers();
     capabilities.insert(
         "discord_gateway".to_string(),

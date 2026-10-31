@@ -35,16 +35,27 @@ pub(crate) async fn register_or_reuse(
     instance: &str,
 ) -> Result<ReceiptSnapshot, WriteError> {
     let mut tx = pool.begin().await.map_err(WriteError::Storage)?;
+    let stored = register_or_reuse_on_tx(&mut tx, input, instance).await?;
+    commit(tx).await?;
+    Ok(stored)
+}
+
+/// Reuses the caller's transaction so preserving an unstarted delivery cannot commit half custody.
+pub(crate) async fn register_or_reuse_on_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    input: &CanonicalInput,
+    instance: &str,
+) -> Result<ReceiptSnapshot, WriteError> {
     sqlx::query("SELECT pg_advisory_xact_lock(6008, hashtext($1))")
         .bind(&input.request_key)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(WriteError::Storage)?;
-    let stored = match stored_request(&mut tx, StoredBy::Key(&input.request_key)).await? {
+    let stored = match stored_request(tx, StoredBy::Key(&input.request_key)).await? {
         Some(stored) => stored,
         None => {
-            insert_registered(&mut tx, input, instance).await?;
-            stored_request(&mut tx, StoredBy::Key(&input.request_key))
+            insert_registered(tx, input, instance).await?;
+            stored_request(tx, StoredBy::Key(&input.request_key))
                 .await?
                 .ok_or(WriteError::CasMiss)?
         }
@@ -52,7 +63,6 @@ pub(crate) async fn register_or_reuse(
     if !stored.names(input) {
         return Err(WriteError::IdentityConflict(stored.receipt.id));
     }
-    commit(tx).await?;
     Ok(stored.receipt)
 }
 

@@ -81,6 +81,15 @@ impl RetiredExclusion {
         self.channel
     }
 
+    pub(crate) fn execution(
+        &self,
+    ) -> Option<&crate::db::dispatched_sessions::hosted_execution::HostedExecution> {
+        match &self.row.record {
+            HostedRecord::Known(record) => Some(record),
+            _ => None,
+        }
+    }
+
     /// Disconnects the session while its row still records this retired execution and no dispatch
     /// but the bound one; `Ok(false)` means the row moved on and nothing was written.
     pub(crate) async fn disconnect_session(&self, pool: &PgPool) -> Result<bool, String> {

@@ -171,6 +171,7 @@ impl Projection {
             }
         }
         Ok(Some(PieceWork {
+            output_origin: None,
             unit_key,
             index: 0,
             payload,

@@ -44,6 +44,23 @@ pub(in crate::services::discord) use self::reconcile_gate::{
 use super::*;
 use crate::services::discord::runtime_store::durable_publish::sync_moved;
 
+#[cfg(test)]
+static ARCHIVE_READ_ERROR: std::sync::Mutex<Option<std::path::PathBuf>> =
+    std::sync::Mutex::new(None);
+#[cfg(test)]
+pub(crate) struct ArchiveReadError;
+#[cfg(test)]
+impl Drop for ArchiveReadError {
+    fn drop(&mut self) {
+        *ARCHIVE_READ_ERROR.lock().unwrap() = None;
+    }
+}
+#[cfg(test)]
+pub(crate) fn inject_archive_read_error(path: &std::path::Path) -> ArchiveReadError {
+    *ARCHIVE_READ_ERROR.lock().unwrap() = Some(path.to_owned());
+    ArchiveReadError
+}
+
 pub(crate) fn clear_inflight_state(provider: &ProviderKind, channel_id: u64) -> bool {
     let Some(root) = inflight_runtime_root() else {
         return false;
@@ -237,14 +254,39 @@ pub(super) fn archive_inflight_state_if_matches_identity_generation_in_root(
     let Ok(_lock) = lock_inflight_state_path(&path) else {
         return GuardedClearOutcome::IoError;
     };
-    let Ok(data) = fs::read_to_string(&path) else {
-        return GuardedClearOutcome::Missing;
+    let read = fs::read_to_string(&path);
+    #[cfg(test)]
+    let read = if ARCHIVE_READ_ERROR.lock().unwrap().as_ref() == Some(&path) {
+        Err(std::io::Error::from_raw_os_error(5))
+    } else {
+        read
+    };
+    let data = match read {
+        Ok(data) => data,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return GuardedClearOutcome::Missing;
+        }
+        Err(_) => {
+            #[cfg(test)]
+            if crate::services::cluster::intake_router_hook::owner_record::cleanup::tests::mutant(
+                "archive-error",
+            ) {
+                return GuardedClearOutcome::Missing;
+            }
+            return GuardedClearOutcome::IoError;
+        }
     };
     if super::raw_before_start_receipt(&data) && !super::receipt_mutant("clear") {
         return GuardedClearOutcome::IoError;
     }
     let Ok(state) = serde_json::from_str::<InflightTurnState>(&data) else {
-        return GuardedClearOutcome::Missing;
+        #[cfg(test)]
+        if crate::services::cluster::intake_router_hook::owner_record::cleanup::tests::mutant(
+            "archive-error",
+        ) {
+            return GuardedClearOutcome::Missing;
+        }
+        return GuardedClearOutcome::IoError;
     };
     if !expected.matches_state(&state)
         || state.updated_at != expected_updated_at

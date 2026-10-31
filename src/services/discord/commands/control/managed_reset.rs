@@ -72,6 +72,21 @@ pub(super) struct ManagedEnd {
 /// Kills the session's process tree and tmux session and removes its launch files; a verified
 /// Codex incarnation's spawn nonce goes with them, so its pin does not hold the next launch.
 pub(super) fn end_managed_process_session(session_name: &str) -> ManagedEnd {
+    end_process(session_name, None)
+}
+
+pub(super) fn end_under_source(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+) -> ManagedEnd {
+    end_process(authority.session(), Some(authority))
+}
+
+fn end_process(
+    session_name: &str,
+    authority: Option<&crate::services::tmux_common::TmuxSourceAuthority<'_>>,
+) -> ManagedEnd {
+    #[cfg(not(unix))]
+    let _ = authority;
     let mut reset = false;
     let lingering_pid =
         crate::services::session_backend::process_session_pid(session_name).map(|pid| pid as i32);
@@ -98,7 +113,11 @@ pub(super) fn end_managed_process_session(session_name: &str) -> ManagedEnd {
                 );
                 let killed = tmux::kill_session(session_name, "managed session reset");
                 if killed {
-                    crate::services::tmux_common::cleanup_session_temp_files(session_name);
+                    if let Some(authority) = authority {
+                        crate::services::tmux_common::cleanup_session_temp_files_under_source_authority(authority,session_name);
+                    } else {
+                        crate::services::tmux_common::cleanup_session_temp_files(session_name);
+                    }
                     reset = true;
                 }
                 !killed

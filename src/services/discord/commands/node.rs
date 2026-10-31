@@ -11,8 +11,10 @@ use crate::services::cluster::intake_router_hook::{
 use crate::services::cluster::node_registry::node_supports_intake_provider;
 use crate::services::provider::ProviderKind;
 
-use super::super::settings::save_bot_settings;
 use super::super::{Context, Data, Error, SharedData, check_auth};
+use crate::db::channel_home_preferences::{self as homes, WriteOutcome};
+use crate::services::cluster::intake_router_hook::owner_record::OwnerIdentity;
+use uuid::Uuid;
 
 const NODE_PICKER_CUSTOM_ID: &str = "agentdesk:node-picker";
 const NODE_PICKER_RESET_VALUE: &str = "__agentdesk_node_default__";
@@ -24,6 +26,9 @@ struct NodePickerPending {
     owner: serenity::UserId,
     target_channel_id: serenity::ChannelId,
     updated_at: Instant,
+    revision: i64,
+    operation: Uuid,
+    provider: String,
 }
 
 #[derive(Clone, Debug)]
@@ -64,50 +69,49 @@ fn intake_routing_enforced(effective: &EffectiveIntakeRoutingConfig) -> bool {
     effective.mode_is_enforce()
 }
 
-pub(in crate::services::discord) fn channel_node_override(
+pub(in crate::services::discord) async fn channel_node_override(
     shared: &Arc<SharedData>,
     channel_id: serenity::ChannelId,
-) -> Option<String> {
-    shared
-        .overrides
-        .node_overrides
-        .get(&channel_id)
-        .map(|value| value.clone())
+) -> Result<Option<String>, String> {
+    let pool = shared.pg_pool.as_ref().ok_or("shared home requires PG")?;
+    let identity = OwnerIdentity::new(shared.provider.as_str(), &channel_id.get().to_string());
+    homes::read(pool, &identity)
+        .await
+        .map(|row| row.and_then(|preference| preference.home_instance_id))
+        .map_err(|error| format!("shared home read failed: {error}"))
 }
 
 async fn update_channel_node_override(
-    shared: &Arc<SharedData>,
-    token: &str,
-    channel_id: serenity::ChannelId,
-    next_instance_id: Option<String>,
-) -> bool {
-    let current = channel_node_override(shared, channel_id);
-    let next_instance_id = next_instance_id
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    if current.as_deref() == next_instance_id.as_deref() {
-        return false;
+    pool: &sqlx::PgPool,
+    identity: &OwnerIdentity,
+    revision: i64,
+    operation: Uuid,
+    next: Option<&str>,
+) -> Result<WriteOutcome, Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(identity.advisory_key())
+        .execute(&mut *tx)
+        .await?;
+    let outcome = homes::write_on_tx(&mut tx, identity, revision, operation, next).await?;
+    tx.commit().await?;
+    let read_back = homes::read(pool, identity).await?;
+    if matches!(&outcome, WriteOutcome::Applied(row) | WriteOutcome::Reused(row)
+        if read_back.as_ref() == Some(row))
+    {
+        Ok(outcome)
+    } else {
+        Ok(WriteOutcome::Conflict(read_back))
     }
+}
 
-    let channel_key = channel_id.get().to_string();
-    let mut settings = shared.settings.write().await;
-    match next_instance_id {
-        Some(instance_id) => {
-            shared
-                .overrides
-                .node_overrides
-                .insert(channel_id, instance_id.clone());
-            settings
-                .channel_node_overrides
-                .insert(channel_key, instance_id);
-        }
-        None => {
-            shared.overrides.node_overrides.remove(&channel_id);
-            settings.channel_node_overrides.remove(&channel_key);
+fn home_write_note(outcome: &WriteOutcome) -> &'static str {
+    match outcome {
+        WriteOutcome::Applied(_) | WriteOutcome::Reused(_) => "저장했습니다",
+        WriteOutcome::Conflict(_) => {
+            "저장 여부 미확정입니다. `/node`로 현재 설정을 다시 확인하세요"
         }
     }
-    save_bot_settings(token, &settings);
-    true
 }
 
 pub(in crate::services::discord) fn is_node_picker_custom_id(custom_id: &str) -> bool {
@@ -192,7 +196,6 @@ async fn list_online_node_choices(
         .iter()
         .filter(|node| node_supports_intake_provider(node, provider.as_str()))
         .filter_map(node_choice_from_json)
-        .filter(|node| node.status.eq_ignore_ascii_case("online"))
         .take(NODE_PICKER_MAX_OPTIONS - 1)
         .collect())
 }
@@ -216,7 +219,10 @@ fn node_option(
         truncate_discord_field(&label, 100),
         node.instance_id.clone(),
     )
-    .description(truncate_discord_field(&labels, 100));
+    .description(truncate_discord_field(
+        &format!("{} · {labels}", node.status),
+        100,
+    ));
     if selected_instance_id == Some(node.instance_id.as_str()) {
         option.default_selection(true)
     } else {
@@ -309,12 +315,21 @@ pub(in crate::services::discord) async fn cmd_node(ctx: Context<'_>) -> Result<(
         }
     };
     if nodes.is_empty() {
-        ctx.say("현재 provider의 intake worker를 광고하는 온라인 cluster node가 없습니다.")
+        ctx.say("현재 provider의 intake worker를 광고하는 등록된 cluster node가 없습니다.")
             .await?;
         return Ok(());
     }
 
-    let selected = channel_node_override(&ctx.data().shared, channel_id);
+    let pool = ctx
+        .data()
+        .shared
+        .pg_pool
+        .as_ref()
+        .ok_or("shared home requires PG")?;
+    let identity = OwnerIdentity::new(ctx.data().provider.as_str(), &channel_id.get().to_string());
+    let preference = homes::read(pool, &identity).await?;
+    let revision = preference.as_ref().map_or(0, |row| row.revision);
+    let selected = preference.and_then(|row| row.home_instance_id);
     let components = build_node_picker_components(&nodes, selected.as_deref());
     let posted = ctx
         .send(
@@ -332,6 +347,9 @@ pub(in crate::services::discord) async fn cmd_node(ctx: Context<'_>) -> Result<(
             owner: user_id,
             target_channel_id: channel_id,
             updated_at: Instant::now(),
+            revision,
+            operation: Uuid::new_v4(),
+            provider: ctx.data().provider.as_str().to_owned(),
         },
     );
     Ok(())
@@ -421,22 +439,51 @@ pub(in crate::services::discord) async fn handle_node_picker_interaction(
         Some(selected)
     };
 
-    let changed = update_channel_node_override(
-        &data.shared,
-        &data.token,
-        pending.target_channel_id,
-        selected_instance.clone(),
-    )
-    .await;
-    let target = selected_instance.unwrap_or_else(|| "기본 라우팅".to_string());
-    let change_note = if changed {
-        "저장했습니다"
-    } else {
-        "이미 같은 설정입니다"
-    };
-    let content = format!(
-        "`/node` {change_note}: 새 세션의 대상은 `{target}` 입니다. 기존 live 세션은 현재 owner 노드에 계속 고정됩니다."
+    let pool = data
+        .shared
+        .pg_pool
+        .as_ref()
+        .ok_or("shared home requires PG")?;
+    let identity = OwnerIdentity::new(
+        &pending.provider,
+        &pending.target_channel_id.get().to_string(),
     );
+    let outcome = match update_channel_node_override(
+        pool,
+        &identity,
+        pending.revision,
+        pending.operation,
+        selected_instance.as_deref(),
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return ephemeral_reply(
+                ctx,
+                component,
+                format!("저장 여부 미확정입니다: {error}. `/node`로 다시 확인하세요."),
+            )
+            .await;
+        }
+    };
+    let target = selected_instance.unwrap_or_else(|| "기본 라우팅".to_string());
+    let content = if let WriteOutcome::Conflict(current) = &outcome {
+        let home = current
+            .as_ref()
+            .and_then(|row| row.home_instance_id.as_deref())
+            .unwrap_or("기본 라우팅");
+        let revision = current.as_ref().map_or(0, |row| row.revision);
+        format!(
+            "{} (현재 `{home}`, revision {revision})",
+            home_write_note(&outcome)
+        )
+    } else {
+        format!(
+            "`/node` {}: 새 세션의 대상은 `{target}` 입니다. 기존 live 세션은 현재 owner 노드에 계속 고정됩니다.",
+            home_write_note(&outcome)
+        )
+    };
 
     component
         .create_response(
@@ -484,6 +531,9 @@ mod tests {
         assert!(!intake_routing_enforced(&effective));
     }
 }
+
+#[cfg(test)]
+mod home_pg_tests;
 
 #[cfg(test)]
 #[path = "node_snapshot_tests.rs"]

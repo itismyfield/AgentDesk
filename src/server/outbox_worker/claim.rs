@@ -1,6 +1,17 @@
 //! Claim an id-ordered prefix holding at most one image, keeping the existing lease.
 
 use crate::server::*;
+use crate::services::cluster::intake_router_hook::owner_record::event as routing;
+
+fn routing_reclaim_seconds() -> i64 {
+    #[cfg(test)]
+    if crate::services::cluster::intake_router_hook::owner_record::cleanup::tests::mutant(
+        "notice-lease",
+    ) {
+        return MESSAGE_OUTBOX_CLAIM_STALE_SECS;
+    }
+    routing::RECLAIM_SECONDS
+}
 
 pub(in crate::server) async fn claim_pending_message_outbox_batch_pg(
     pool: &PgPool,
@@ -24,7 +35,7 @@ pub(in crate::server) async fn claim_pending_message_outbox_batch_pg(
                     status = 'processing'
                     AND (
                         claimed_at IS NULL
-                        OR claimed_at <= NOW() - ($1::bigint * INTERVAL '1 second')
+                        OR claimed_at <= NOW() - ((CASE WHEN source = $3 THEN $4 ELSE $1 END)::bigint * INTERVAL '1 second')
                     )
                 )
              ORDER BY id ASC
@@ -50,6 +61,8 @@ pub(in crate::server) async fn claim_pending_message_outbox_batch_pg(
     )
     .bind(MESSAGE_OUTBOX_CLAIM_STALE_SECS)
     .bind(claim_owner)
+    .bind(routing::SOURCE)
+    .bind(routing_reclaim_seconds())
     .fetch_all(pool)
     .await
     {

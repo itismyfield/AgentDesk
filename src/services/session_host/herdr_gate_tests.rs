@@ -1323,6 +1323,7 @@ mod service {
     pub(super) struct ScriptedOs {
         inner: Mutex<Arc<dyn ProcessOs>>,
         exists: Result<bool, RestoreUnverified>,
+        next_exists: Mutex<Option<Result<bool, RestoreUnverified>>>,
         on_exists: Mutex<Option<CloseHook>>,
     }
 
@@ -1334,6 +1335,7 @@ mod service {
             Arc::new(Self {
                 inner: Mutex::new(inner),
                 exists,
+                next_exists: Mutex::new(None),
                 on_exists: Mutex::new(None),
             })
         }
@@ -1343,6 +1345,9 @@ mod service {
         /// Runs once, inside the next read of whether the recorded provider still exists.
         pub(super) fn on_exists(&self, hook: CloseHook) {
             *self.on_exists.lock().unwrap() = Some(hook);
+        }
+        pub(super) fn fail_next_read(&self) {
+            *self.next_exists.lock().unwrap() = Some(Err(RestoreUnverified::ProcessUnreadable));
         }
         fn os(&self) -> Arc<dyn ProcessOs> {
             self.inner.lock().unwrap().clone()
@@ -1354,7 +1359,11 @@ mod service {
             if let Some(hook) = self.on_exists.lock().unwrap().take() {
                 hook();
             }
-            self.exists
+            self.next_exists
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or(self.exists)
         }
         fn parent(&self, pid: u32) -> Result<u32, RestoreUnverified> {
             self.os().parent(pid)
@@ -2247,6 +2256,10 @@ pub(crate) mod p11 {
                 let _ = wait.recv_timeout(Duration::from_secs(60));
             }));
             EndCheckPause { arrived, release }
+        }
+
+        pub(crate) fn fail_next_process_read(&self) {
+            self.os.fail_next_read();
         }
 
         /// A restarted server restored the pane as shell `FRESH` alone.
