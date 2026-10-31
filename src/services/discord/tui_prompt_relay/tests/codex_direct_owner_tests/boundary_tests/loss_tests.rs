@@ -584,7 +584,6 @@ fn codex_discord_attempt_new_turn_delivers_through_production_ledger_pg() {
                 has_reply_boundary: false,
                 merge_consecutive: false,
                 pending_uploads: Vec::new(),
-                voice_announcement: None,
             };
             let guard = crate::services::discord::inject_disposition::claim_source(
                 &ProviderKind::Codex,

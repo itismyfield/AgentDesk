@@ -128,16 +128,10 @@ async fn transport(
     let ctx = discord_mock::serenity_context(proxy, gateway).await;
     shared.http.cached_serenity_ctx.set(ctx.clone()).unwrap();
     shared.settings.write().await.owner_user_id = Some(7);
-    let mut voice_config = crate::voice::VoiceConfig::default();
-    let recordings = tempfile::tempdir().unwrap();
-    voice_config.keep_recordings = true;
-    voice_config.audio.recordings_dir = recordings.path().into();
     let data = Data {
         shared: shared.clone(),
         token: "test-token".into(),
         provider: ProviderKind::Claude,
-        voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
-        voice_config,
     };
     (mock, ctx, server, data)
 }
@@ -332,7 +326,7 @@ mod high_risk_recovery {
 }
 
 #[test]
-fn preserve_stop_failed_command_and_mailbox_notice_once_and_reader_continues() {
+fn preserve_stop_failed_command_notice_once_and_reader_continues() {
     let fx = Fixture::new();
     run(async {
         for (n, failure) in ["modal", "capture", "io", "unknown", "draft"]
@@ -372,22 +366,7 @@ fn preserve_stop_failed_command_and_mailbox_notice_once_and_reader_continues() {
                 &inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get())
                     .unwrap(),
             );
-            assert!(
-                discord::mailbox_stop::active_native(
-                    &shared,
-                    channel,
-                    Some(MessageId::new(channel.get() + 1))
-                )
-                .await
-            );
-            let mailbox = discord::mailbox_cancel_active_turn_if_handoff_user_message_with_reason(
-                &shared,
-                channel,
-                MessageId::new(channel.get() + 1),
-                "mailbox_cancel",
-            );
-            let ((), result) = tokio::join!(command(&ctx, &data, channel), mailbox);
-            assert!(result.token.is_none());
+            command(&ctx, &data, channel).await;
             command(&ctx, &data, channel).await;
             assert!(!token.cancelled.load(Ordering::Acquire));
             assert!(mailbox_holds(&shared, channel, &token).await);
@@ -928,7 +907,6 @@ fn preserve_stop_native_published_rearms_drain_after_watcher_cleanup() {
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: vec![],
-            voice_announcement: None,
         };
         shared
             .mailbox(channel)
@@ -1028,109 +1006,87 @@ fn preserve_stop_unbound_or_different_row_uses_main() {
     let fx = Fixture::new();
     fx.pane(&running());
     run(async {
-        for entry in ["command", "mailbox"] {
-            for (n, case) in [
-                "unbound",
-                "foreign_nonce",
-                "foreign_session",
-                "completed_no_owner",
-                "completed_other_arc",
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                let shared = discord::make_shared_data_for_tests();
-                let channel =
-                    ChannelId::new(7_193_910 + n as u64 + if entry == "mailbox" { 30 } else { 0 });
-                let session = format!("native-recovery-{case}");
-                let (bound, _) = generating_turn(&fx, &session);
-                let token = if case == "unbound" {
-                    Arc::new(CancelToken::new())
-                } else {
-                    bound
-                };
-                start(&shared, channel, &token).await;
-                let row_path = native_inflight_row(channel, &token, &session);
-                let mut other_owner = None;
-                let mut other_token = None;
-                match case {
-                    "completed_no_owner" | "completed_other_arc" => {
-                        if case == "completed_other_arc" {
-                            let row = inflight::load_inflight_state_read_only(
-                                &ProviderKind::Claude,
-                                channel.get(),
-                            )
-                            .unwrap();
-                            let other = Arc::new(CancelToken::from_persisted_turn_nonce(
-                                token.turn_nonce().map(str::to_owned),
-                            ));
-                            other_owner = discord::live_bridge::register_without_requeue(
-                                &shared,
-                                &ProviderKind::Claude,
-                                &row,
-                                &other,
-                            )
-                            .await
-                            .unwrap();
-                            other_token = Some(other);
-                        }
-                        std::fs::remove_file(&row_path).unwrap();
-                        token.native_stop.completed();
-                    }
-                    "foreign_nonce" | "foreign_session" => {
-                        let mut row = inflight::load_inflight_state_read_only(
+        for (n, case) in [
+            "unbound",
+            "foreign_nonce",
+            "foreign_session",
+            "completed_no_owner",
+            "completed_other_arc",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let shared = discord::make_shared_data_for_tests();
+            let channel = ChannelId::new(7_193_910 + n as u64);
+            let session = format!("native-recovery-{case}");
+            let (bound, _) = generating_turn(&fx, &session);
+            let token = if case == "unbound" {
+                Arc::new(CancelToken::new())
+            } else {
+                bound
+            };
+            start(&shared, channel, &token).await;
+            let row_path = native_inflight_row(channel, &token, &session);
+            let mut other_owner = None;
+            let mut other_token = None;
+            match case {
+                "completed_no_owner" | "completed_other_arc" => {
+                    if case == "completed_other_arc" {
+                        let row = inflight::load_inflight_state_read_only(
                             &ProviderKind::Claude,
                             channel.get(),
                         )
                         .unwrap();
-                        if case == "foreign_nonce" {
-                            row.turn_nonce = Some("foreign_nonce".into());
-                        } else {
-                            row.tmux_session_name = Some("different-native-session".into());
-                        }
-                        inflight::save_inflight_state(&row).unwrap();
-                    }
-                    _ => {}
-                }
-                let _ = fx.take_calls();
-                if entry == "command" {
-                    let result =
-                        begin_user_stop(&shared, &ProviderKind::Claude, channel, true, "!stop")
-                            .await;
-                    assert!(
-                        matches!(result, CommandStop::Stop(_)),
-                        "main recovery required for {case}"
-                    );
-                } else {
-                    let result =
-                        discord::mailbox_cancel_active_turn_if_handoff_user_message_with_reason(
+                        let other = Arc::new(CancelToken::from_persisted_turn_nonce(
+                            token.turn_nonce().map(str::to_owned),
+                        ));
+                        other_owner = discord::live_bridge::register_without_requeue(
                             &shared,
-                            channel,
-                            MessageId::new(channel.get() + 1),
-                            "mailbox_cancel",
+                            &ProviderKind::Claude,
+                            &row,
+                            &other,
                         )
-                        .await;
-                    assert!(
-                        result
-                            .token
-                            .as_ref()
-                            .is_some_and(|published| Arc::ptr_eq(published, &token)),
-                        "guarded mailbox recovery required for {case}"
-                    );
+                        .await
+                        .unwrap();
+                        other_token = Some(other);
+                    }
+                    std::fs::remove_file(&row_path).unwrap();
+                    token.native_stop.completed();
                 }
-                assert!(
-                    token.cancelled.load(Ordering::Acquire),
-                    "main publishes the stale token for {case}"
-                );
-                assert!(
-                    !fx.take_calls()
-                        .iter()
-                        .any(|call| call.starts_with("send-keys")),
-                    "judgment must not send keys for {case}"
-                );
-                drop((other_owner, other_token));
-                crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
+                "foreign_nonce" | "foreign_session" => {
+                    let mut row = inflight::load_inflight_state_read_only(
+                        &ProviderKind::Claude,
+                        channel.get(),
+                    )
+                    .unwrap();
+                    if case == "foreign_nonce" {
+                        row.turn_nonce = Some("foreign_nonce".into());
+                    } else {
+                        row.tmux_session_name = Some("different-native-session".into());
+                    }
+                    inflight::save_inflight_state(&row).unwrap();
+                }
+                _ => {}
             }
+            let _ = fx.take_calls();
+            let result =
+                begin_user_stop(&shared, &ProviderKind::Claude, channel, true, "!stop").await;
+            assert!(
+                matches!(result, CommandStop::Stop(_)),
+                "main recovery required for {case}"
+            );
+            assert!(
+                token.cancelled.load(Ordering::Acquire),
+                "main publishes the stale token for {case}"
+            );
+            assert!(
+                !fx.take_calls()
+                    .iter()
+                    .any(|call| call.starts_with("send-keys")),
+                "judgment must not send keys for {case}"
+            );
+            drop((other_owner, other_token));
+            crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
         }
     });
 }

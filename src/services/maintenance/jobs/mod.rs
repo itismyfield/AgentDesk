@@ -10,8 +10,7 @@
 //! are never touched); `storage.tmp_pipeline_sweep` (daily, `/private/tmp`
 //! `adk-`/`agentdesk-` dirs); `storage.hang_dump_cleanup` (weekly);
 //! `storage.db_retention` (weekly, 7/30/90d); `memory.memento_consolidation`
-//! (weekly, #1089); `voice.progress_tts_cache_sweep` (#3909).
-//! `voice.turn_link_gc` and `storage.cancel_tombstone_prune` live in
+//! (weekly, #1089). `storage.cancel_tombstone_prune` lives in
 //! `server::maintenance` instead.
 
 use std::time::Duration;
@@ -21,7 +20,6 @@ pub mod hang_dump_cleanup;
 pub mod memento_consolidation;
 pub mod target_sweep;
 pub mod tmp_pipeline_sweep;
-pub mod voice_cache_sweep;
 pub mod worktree_orphan_sweep;
 
 /// Weekly cadence for postgres-backed retention jobs (7/30/90d horizons).

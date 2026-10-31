@@ -117,7 +117,6 @@ async fn t5_real_gateway_busy_never_arms_finalize_error_kick() {
             } else {
                 Vec::new()
             },
-            voice_announcement: None,
         };
         assert!(
             discord::queue_io::with_post_enqueue_idle_queue_kick_suppressed(

@@ -126,25 +126,8 @@ fn submission(id: u64, origin: IntakeOrigin) -> IntakeSubmission {
         has_nonportable_uploads: false,
         attachments: Vec::new(),
         preloaded_uploads: Vec::new(),
-        voice_announcement: None,
     }
 }
-fn voice() -> crate::voice::prompt::VoiceTranscriptAnnouncement {
-    crate::voice::prompt::VoiceTranscriptAnnouncement {
-        transcript: "original voice transcript".into(),
-        user_id: "1".into(),
-        utterance_id: "consent-fixture".into(),
-        language: "ko".into(),
-        verbose_progress: false,
-        started_at: None,
-        completed_at: None,
-        samples_written: Some(48000),
-        control_channel_id: Some(discord_mock::CHANNEL_ID),
-        stt_mode: Some("file".into()),
-        stt_latency_ms: Some(10),
-    }
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn legacy_actual_intake_and_attachment_gates_preserve_all_origins_without_consent_io() {
     let f = Fixture::new("disabled").await;
@@ -205,15 +188,6 @@ async fn legacy_actual_intake_and_attachment_gates_preserve_all_origins_without_
             "legacy_actual_attachment_gate_keeps_base_local_contract"
         );
     }
-    let mut spoken = submission(8_916_010, IntakeOrigin::LiveMessage);
-    spoken.voice_announcement = Some(voice());
-    assert!(
-        matches!(
-            intake::admit_text_intake(&f.deps(), &spoken).await,
-            IntakeAdmission::Local(_)
-        ),
-        "legacy_voice_admission_keeps_base_local_contract"
-    );
     assert!(
         !worker(&f.deps(), &request(8_916_011), None).await,
         "legacy_worker_guard_does_not_consume_execution_contract"
@@ -381,19 +355,16 @@ async fn legacy_actual_queued_entry_retains_local_admission_without_consent_io()
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn consent_live_custody_keeps_expanded_prompt_sources_upload_and_voice_fifo() {
+async fn consent_live_custody_keeps_expanded_prompt_sources_and_upload_fifo() {
     let f = Fixture::new("disabled").await;
     let _boot = session_hosts::force_for_test(Some("node"), &[(discord_mock::CHANNEL_ID, "node")])
         .with_mode(EndpointMode::UserDefault);
-    for (id, origin, spoken) in [
-        (8_916_030, IntakeOrigin::SlashSkill, false),
-        (8_916_031, IntakeOrigin::LiveMessage, true),
+    for (id, origin) in [
+        (8_916_030, IntakeOrigin::SlashSkill),
+        (8_916_031, IntakeOrigin::LiveMessage),
     ] {
         let mut value = submission(id, origin);
         value.preloaded_uploads = vec![format!("upload-{id}").into()];
-        if spoken {
-            value.voice_announcement = Some(voice());
-        }
         let result = hold_live(&f.deps(), value, Ok(f.hold())).await;
         assert!(
             result.is_ok(),
@@ -409,7 +380,7 @@ async fn consent_live_custody_keeps_expanded_prompt_sources_upload_and_voice_fif
         vec![8_916_030, 8_916_031],
         "consent_original_custody_fifo_contract"
     );
-    for (item, expected_origin) in items.iter().zip(["SlashSkill", "Voice"]) {
+    for (item, expected_origin) in items.iter().zip(["SlashSkill", "LiveMessage"]) {
         let id = item.message_id.get();
         assert_eq!(
             item.text,
@@ -433,11 +404,6 @@ async fn consent_live_custody_keeps_expanded_prompt_sources_upload_and_voice_fif
             "consent_original_source_origin_preserved_contract"
         );
     }
-    assert_eq!(
-        items[1].voice_announcement,
-        Some(voice()),
-        "consent_voice_metadata_preserved_contract"
-    );
     let held = store().load_all().unwrap();
     assert_eq!(held.len(), 1);
     assert_eq!(

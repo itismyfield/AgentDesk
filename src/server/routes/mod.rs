@@ -72,9 +72,6 @@ mod turn_lease;
 // Herdr hosting exists only on unix; elsewhere the route is absent.
 #[cfg(unix)]
 mod herdr_terminate;
-pub(crate) mod voice_audio;
-pub(crate) mod voice_conductor;
-pub mod voice_config;
 
 #[cfg(test)]
 #[path = "tests/auto_queue_preflight_harness_tests.rs"]

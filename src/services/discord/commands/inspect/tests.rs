@@ -214,13 +214,10 @@ fn inspect_refuses_unauthorized_users_before_answering() {
         let owner = serenity::UserId::new(42);
         let outsider = serenity::UserId::new(7);
         shared.settings.write().await.owner_user_id = Some(owner.get());
-        let voice_config = crate::voice::VoiceConfig::default();
         let data = crate::services::discord::Data {
             shared,
             token: "test-token".into(),
             provider: ProviderKind::Claude,
-            voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
-            voice_config,
         };
         let channel = serenity::ChannelId::new(discord_mock::CHANNEL_ID);
         let inspect = || {

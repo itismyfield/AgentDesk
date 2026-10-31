@@ -139,7 +139,6 @@ mod tests {
             "services::settings",
             include_str!("../services/settings.rs"),
         ),
-        ("voice::turn_link", include_str!("../voice/turn_link.rs")),
     ];
 
     const DELEGATED_FIXTURE_SOURCE: (&str, &str) = (

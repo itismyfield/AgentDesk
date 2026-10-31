@@ -596,9 +596,7 @@ pub(super) fn reconcile_pending_dispatch_marker_before_take_next(
     }
     if stripped_existing_source
         && (marker.source_message_ids.is_empty()
-            || (marker.text.trim().is_empty()
-                && marker.pending_uploads.is_empty()
-                && marker.voice_announcement.is_none()))
+            || (marker.text.trim().is_empty() && marker.pending_uploads.is_empty()))
     {
         delete_pending_dispatch_marker_with_persistence(
             persistence,
@@ -699,7 +697,6 @@ mod tests {
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         }
     }
 

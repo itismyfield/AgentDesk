@@ -4,7 +4,7 @@
 //! The `턴 트리거:` original-request line is built from ADK relay metadata
 //! (`guild_id` + `channel_id` + the real Discord `user_msg_id`), never from
 //! agent prose. It deliberately renders ONLY for genuine interactive Discord
-//! turns: headless / synthetic / voice / id-0 turns carry no real user message,
+//! turns: headless / synthetic / id-0 turns carry no real user message,
 //! so they get no link (the `대상:` target tags still render from the existing
 //! task-panel snapshot — see `task_panel::render_task_panel_line`). The render
 //! helpers stay free/pure; the store hooks live here too so the already-full
@@ -20,12 +20,12 @@ use crate::services::discord::is_synthetic_headless_message_id_raw;
 pub(super) const CHANNEL_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Builds the `턴 트리거:` original-request deeplink, or `None` when no real
-/// Discord user message backs the turn (headless / synthetic / voice / id-0) or
+/// Discord user message backs the turn (headless / synthetic / id-0) or
 /// the request's channel could not be resolved.
 ///
 /// Gating: id `0` is the id-less sentinel; the synthetic-headless floor
-/// (`SYNTHETIC_HEADLESS_MESSAGE_ID_FLOOR`, 8e18) sits BELOW both the voice
-/// (`INTERNAL_VOICE_MESSAGE_ID_START`, 9e18) and headless
+/// (`SYNTHETIC_HEADLESS_MESSAGE_ID_FLOOR`, 8e18) sits BELOW both the internal
+/// (`INTERNAL_MESSAGE_ID_START`, 9e18) and headless
 /// (`HEADLESS_TURN_MESSAGE_ID_BASE`, 9.1e18) id bases, so the single floor check
 /// rejects every synthetic id class with no fake link. Real Discord snowflakes
 /// stay well below the floor.
@@ -244,11 +244,11 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_voice_id_omits_link() {
-        // INTERNAL_VOICE_MESSAGE_ID_START = 9e18, above the 8e18 floor.
-        let voice = 9_000_000_000_000_000_007;
+    fn internal_message_id_omits_link() {
+        // INTERNAL_MESSAGE_ID_START = 9e18, above the 8e18 floor.
+        let internal = 9_000_000_000_000_000_007;
         assert_eq!(
-            render_request_anchor_line(Some(voice), ChannelId::new(CHANNEL), Some(GUILD)),
+            render_request_anchor_line(Some(internal), ChannelId::new(CHANNEL), Some(GUILD)),
             None
         );
     }

@@ -143,7 +143,6 @@ fn queued(message: MessageId, generation: u64) -> Intervention {
         has_reply_boundary: false,
         merge_consecutive: false,
         pending_uploads: Vec::new(),
-        voice_announcement: None,
     }
 }
 
@@ -170,7 +169,7 @@ async fn catch_up_live_entry(reserved: bool) {
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
     std::fs::create_dir_all(root_path.join("workspace")).unwrap();
     std::fs::write(&config, json!({"server": {}, "data": {"dir": root_path.join("data")},
-        "agents": [{"id": "catch-up-fixture", "name": "Catch-up fixture", "voice_enabled": false,
+        "agents": [{"id": "catch-up-fixture", "name": "Catch-up fixture",
             "provider": "claude", "channels": {"claude": {"id": channel.to_string(),
                 "name": format!("inject-{channel}"), "workspace": root_path.join("workspace"), "runtime": "tui"}}}]
     }).to_string()).unwrap();
@@ -288,13 +287,10 @@ async fn catch_up_live_entry(reserved: bool) {
         pane.keys().is_empty(),
         "fixture has not injected before the live event"
     );
-    let voice_config = crate::voice::VoiceConfig::default();
     let data = crate::services::discord::Data {
         shared: shared.clone(),
         token: "test-token".into(),
         provider: ProviderKind::Claude,
-        voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
-        voice_config,
     };
     let mut message = discord_mock::user_message(message_id.get(), TEXT);
     message.channel_id = channel;

@@ -79,11 +79,6 @@ pub(crate) fn ensure_agent_setup_config(
         id: input.agent_id.clone(),
         name: input.agent_id.clone(),
         name_ko: None,
-        aliases: Vec::new(),
-        wake_word: None,
-        voice_enabled: true,
-        sensitivity_mode: None,
-        voice: crate::config::AgentVoiceConfig::default(),
         provider: input.provider.clone(),
         channels,
         peer_keywords: Vec::new(),
@@ -94,10 +89,6 @@ pub(crate) fn ensure_agent_setup_config(
         preferred_intake_node_labels: None,
         memory_group: None,
     });
-
-    if let Err(error) = crate::voice::commands::validate_agent_alias_collisions(&next_agents) {
-        return AgentSetupConfigMutation::Conflict(format!("validate voice aliases: {error}"));
-    }
 
     config.agents = next_agents;
 
@@ -494,55 +485,8 @@ pub(super) fn resolve_role_binding(
     channel_name: Option<&str>,
 ) -> Option<RoleBinding> {
     let config = load_agentdesk_config()?;
-    if let Some((agent, provider_key, channel)) =
-        find_channel_binding(&config, channel_id, channel_name)
-    {
-        return Some(role_binding_from_channel(agent, provider_key, channel));
-    }
-    // Voice channels bind through the owning agent rather than provider channels.
-    resolve_voice_channel_role_binding(&config, channel_id)
-}
-
-/// Resolve a role binding for a Discord voice channel declared in any agent's
-/// `voice.channel_id`. Returns `None` when no agent owns the channel.
-fn resolve_voice_channel_role_binding(
-    config: &Config,
-    channel_id: ChannelId,
-) -> Option<RoleBinding> {
-    let target = channel_id.get().to_string();
-    config.agents.iter().find_map(|agent| {
-        let voice_channel_id = agent.voice.channel_id.as_deref()?.trim();
-        if voice_channel_id != target {
-            return None;
-        }
-        let provider = ProviderKind::from_str(&agent.provider)?;
-        Some(role_binding_from_agent(agent, provider))
-    })
-}
-
-/// Returns true when `channel_id` is the configured `voice.channel_id` of an
-/// agent whose provider matches `provider`.
-///
-/// Voice channels are declared only in `agents[].voice.channel_id`, never in a
-/// bot's `auth.allowed_channel_ids` (which is built from text-channel bindings
-/// at `init`/`migrate`). The command guard's allowlist check
-/// (`bot_settings_allow_channel`) therefore blocks slash commands in a voice
-/// channel even when voice is configured (#3902). This mirror of the
-/// `resolve_role_binding` voice patch lets the owning provider's bot pass the
-/// allowlist guard; non-owning providers return false so they stay blocked and
-/// are subsequently rejected by the provider-match check (no allow-all
-/// regression).
-pub(super) fn is_voice_channel_owned_by_provider(
-    channel_id: ChannelId,
-    provider: &ProviderKind,
-) -> bool {
-    let Some(config) = load_agentdesk_config() else {
-        return false;
-    };
-    resolve_voice_channel_role_binding(&config, channel_id)
-        .and_then(|binding| binding.provider)
-        .as_ref()
-        == Some(provider)
+    let (agent, provider_key, channel) = find_channel_binding(&config, channel_id, channel_name)?;
+    Some(role_binding_from_channel(agent, provider_key, channel))
 }
 
 pub(super) fn resolve_worktree_isolation_policy(

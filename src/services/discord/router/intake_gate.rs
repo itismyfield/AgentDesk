@@ -93,94 +93,6 @@ async fn can_route_unbound_direct_session(
     has_direct_runtime_session(data, channel_id, effective_channel_id).await
 }
 
-async fn resolve_voice_transcript_announcement_for_intake(
-    pg_pool: Option<&sqlx::PgPool>,
-    channel_id: serenity::ChannelId,
-    message_id: serenity::MessageId,
-    author_id: serenity::UserId,
-    announce_bot_id: Option<u64>,
-    content: &str,
-) -> Option<crate::voice::prompt::VoiceTranscriptAnnouncement> {
-    if announce_bot_id != Some(author_id.get()) {
-        return None;
-    }
-
-    if let Some(pool) = pg_pool {
-        match crate::voice::announce_meta::load_voice_announcement_durable(pool, message_id).await {
-            Ok(Some(announcement)) => return Some(announcement),
-            Ok(None) => {}
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    channel_id = channel_id.get(),
-                    message_id = message_id.get(),
-                    "voice transcript announcement durable metadata load failed at intake gate"
-                );
-            }
-        }
-    } else if let Some(announcement) =
-        crate::voice::announce_meta::global_store().peek_clone(message_id)
-    {
-        return Some(announcement);
-    }
-    if !crate::voice::prompt::is_readable_voice_transcript_announcement(content) {
-        return None;
-    }
-    let pending_key = crate::voice::prompt::parse_voice_transcript_announcement_ref(content);
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    loop {
-        if pg_pool.is_none()
-            && let Some(announcement) =
-                crate::voice::announce_meta::global_store().peek_clone(message_id)
-        {
-            return Some(announcement);
-        }
-        if let Some(pool) = pg_pool {
-            match crate::voice::announce_meta::load_voice_announcement_durable(pool, message_id)
-                .await
-            {
-                Ok(Some(announcement)) => return Some(announcement),
-                Ok(None) => {}
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        channel_id = channel_id.get(),
-                        message_id = message_id.get(),
-                        "voice transcript announcement durable metadata retry-load failed at intake gate"
-                    );
-                }
-            }
-            if let Some(pending_key) = pending_key.as_deref() {
-                match crate::voice::announce_meta::bind_pending_voice_announcement_by_key_durable(
-                    pool,
-                    pending_key,
-                    channel_id,
-                    message_id,
-                )
-                .await
-                {
-                    Ok(Some(announcement)) => return Some(announcement),
-                    Ok(None) => {}
-                    Err(error) => {
-                        tracing::warn!(
-                            error = %error,
-                            channel_id = channel_id.get(),
-                            message_id = message_id.get(),
-                            "voice transcript announcement pending metadata bind failed at intake gate"
-                        );
-                    }
-                }
-            }
-        }
-
-        if std::time::Instant::now() >= deadline {
-            return None;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-}
-
 pub(in crate::services::discord) async fn handle_event(
     ctx: &serenity::Context,
     event: &serenity::FullEvent,
@@ -463,48 +375,25 @@ pub(in crate::services::discord) async fn handle_event(
                 .map(|(parent_id, _)| parent_id)
                 .unwrap_or(channel_id);
             let settings_snapshot = { data.shared.settings.read().await.clone() };
-            // #2266: resolve the voice-transcript payload ONCE at the
-            // intake-gate so queue commits can classify voice messages and
-            // keep them as standalone queue entries. The transaction helper
-            // strips the accepted-replay payload before enqueue; the eventual
-            // dispatch re-resolves and claims the durable row from the readable
-            // announcement text. Resolution is non-consuming: local store,
-            // durable PG row, then a short pending-key wait for the
-            // gateway-before-send-response race. Legacy hidden metadata is
-            // deliberately not trusted here; the durable/ref path is the
-            // authority for new runtime routing.
-            let resolved_voice_announcement = resolve_voice_transcript_announcement_for_intake(
-                data.shared.pg_pool.as_ref(),
+            if validate_live_channel_routing_with_dm_hint(
+                ctx,
+                &data.provider,
+                &settings_snapshot,
                 channel_id,
-                new_message.id,
-                user_id,
-                announce_bot_id,
-                &new_message.content,
+                Some(is_dm),
             )
-            .await;
-            let is_voice_transcript_announcement = resolved_voice_announcement.is_some();
-            if !is_voice_transcript_announcement
-                && validate_live_channel_routing_with_dm_hint(
-                    ctx,
-                    &data.provider,
-                    &settings_snapshot,
-                    channel_id,
-                    Some(is_dm),
-                )
-                .await
-                .is_err()
+            .await
+            .is_err()
             {
                 return Ok(());
             }
-            if !is_voice_transcript_announcement
-                && should_skip_for_missing_required_mention(
-                    &settings_snapshot,
-                    effective_channel_id,
-                    is_dm,
-                    &new_message.content,
-                    ctx.cache.current_user().id,
-                )
-            {
+            if should_skip_for_missing_required_mention(
+                &settings_snapshot,
+                effective_channel_id,
+                is_dm,
+                &new_message.content,
+                ctx.cache.current_user().id,
+            ) {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
                     "  [{ts}] ⏭ MENTION-GUARD: skipping message {} in channel {} (effective {}) because bot mention is required",
@@ -520,22 +409,8 @@ pub(in crate::services::discord) async fn handle_event(
             if taken(&data.provider, channel_id, parent, new_message.id) {
                 return Ok(());
             }
-            if !is_voice_transcript_announcement
-                && data
-                    .shared
-                    .voice_barge_in
-                    .try_handle_voice_channel_text_reply(
-                        &ctx.http,
-                        channel_id,
-                        &new_message.content,
-                        &data.provider,
-                    )
-                    .await
-            {
-                return Ok(());
-            }
             let mut deferred_attachment_unbound_check = false;
-            if !is_dm && !is_voice_transcript_announcement {
+            if !is_dm {
                 match resolve_runtime_channel_binding_status(&ctx.http, effective_channel_id).await
                 {
                     RuntimeChannelBindingStatus::Owned => {}
@@ -716,7 +591,6 @@ pub(in crate::services::discord) async fn handle_event(
                     has_nonportable_uploads: false,
                     attachments: attachments.clone(),
                     preloaded_uploads: Vec::new(),
-                    voice_announcement: resolved_voice_announcement.clone(),
                 };
                 let admission = super::admit_text_intake(&deps, &submission).await;
                 match super::resolve_attachment_admission(admission) {
@@ -1003,11 +877,6 @@ pub(in crate::services::discord) async fn handle_event(
                                         has_reply_boundary: false,
                                         merge_consecutive: false,
                                         pending_uploads: upload_records.clone(),
-                                        // #2266: thread-guard queue path —
-                                        // pass resolved voice metadata only so
-                                        // the transaction can detect voice and
-                                        // enqueue standalone readable text.
-                                        voice_announcement: resolved_voice_announcement.clone(),
                                     },
                                     options: IntakeQueueCommitOptions::default(),
                                 },
@@ -1056,10 +925,6 @@ pub(in crate::services::discord) async fn handle_event(
                                 has_reply_boundary: false,
                                 merge_consecutive: false,
                                 pending_uploads: upload_records.clone(),
-                                // #2266: DISPATCH: collision guard — DISPATCH messages
-                                // never carry voice transcripts, so this is always
-                                // None. Explicit for clarity / future audits.
-                                voice_announcement: None,
                             },
                             options: IntakeQueueCommitOptions::default(),
                         },
@@ -1087,7 +952,6 @@ pub(in crate::services::discord) async fn handle_event(
                 reply_context: reply_context.as_deref(),
                 has_reply_boundary,
                 uploads: &upload_records,
-                voice_announcement: resolved_voice_announcement.as_ref(),
                 merge_consecutive,
             };
             if busy_inject::offered(ctx, data, &live).await {
@@ -1215,11 +1079,6 @@ pub(in crate::services::discord) async fn handle_event(
                             has_reply_boundary,
                             merge_consecutive,
                             pending_uploads: upload_records.clone(),
-                            // #2266: reconcile gate — startup-recovery queue
-                            // path. Resolved voice metadata makes this a
-                            // standalone queued voice entry; durable claim
-                            // remains deferred to dispatch.
-                            voice_announcement: resolved_voice_announcement.clone(),
                         },
                         options: IntakeQueueCommitOptions {
                             pending_reaction: IntakeQueuePendingReactionPolicy::Static(
@@ -1267,10 +1126,6 @@ pub(in crate::services::discord) async fn handle_event(
                             has_reply_boundary,
                             merge_consecutive,
                             pending_uploads: upload_records.clone(),
-                            // #2266: drain-mode queue path (restart pending) —
-                            // pass resolved voice metadata so the transaction
-                            // keeps readable voice text standalone.
-                            voice_announcement: resolved_voice_announcement.clone(),
                         },
                         options: IntakeQueueCommitOptions::default(),
                     },
@@ -1346,12 +1201,6 @@ pub(in crate::services::discord) async fn handle_event(
                                     has_reply_boundary,
                                     merge_consecutive,
                                     pending_uploads: upload_records.clone(),
-                                    // #2266: queued-behind-idle-backlog path —
-                                    // FIFO ordering keeps voice transcripts behind
-                                    // pre-existing queue items; the transaction
-                                    // keeps voice text standalone and defers the
-                                    // durable claim until dispatch.
-                                    voice_announcement: resolved_voice_announcement.clone(),
                                 },
                                 options: IntakeQueueCommitOptions::idle_backlog(),
                             },
@@ -1462,7 +1311,6 @@ pub(in crate::services::discord) async fn handle_event(
                 admitted.origin = super::IntakeOrigin::LiveMessage;
                 admitted.attachments.clear();
                 admitted.preloaded_uploads = preloaded_uploads;
-                admitted.voice_announcement = resolved_voice_announcement;
                 admitted
             } else {
                 super::IntakeSubmission {
@@ -1491,9 +1339,6 @@ pub(in crate::services::discord) async fn handle_event(
                     has_nonportable_uploads: false,
                     attachments: Vec::new(),
                     preloaded_uploads,
-                    // #3905: carry the gate's already-authorized, non-consuming
-                    // voice resolution into direct dispatch.
-                    voice_announcement: resolved_voice_announcement,
                 }
             };
             if let Some(permit) = attachment_local_permit {

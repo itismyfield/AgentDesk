@@ -522,10 +522,10 @@ mod send_source_tests {
     }
 
     #[test]
-    fn reserved_gate_requires_explicit_outbox_authority_and_preserves_voice_delivery() {
-        let voice = super::ManualOutboundDeliveryId {
-            correlation_id: "voice:7001:8002:utterance",
-            semantic_event_id: "announce:generation:1",
+    fn reserved_gate_requires_explicit_outbox_authority_and_preserves_other_delivery() {
+        let other = super::ManualOutboundDeliveryId {
+            correlation_id: "manual:9000:utterance",
+            semantic_event_id: "deliver:1",
         };
         let outbox = super::ManualOutboundDeliveryId {
             correlation_id: "message_outbox:headless_turn:terminal:session-a",
@@ -533,7 +533,7 @@ mod send_source_tests {
         };
 
         assert!(!rejects_untrusted_message_outbox_delivery_id(
-            Some(voice),
+            Some(other),
             false
         ));
         assert!(rejects_untrusted_message_outbox_delivery_id(
@@ -568,7 +568,6 @@ mod send_source_tests {
         assert!(is_allowed_send_source("quality_regression_alerter"));
         assert!(is_allowed_send_source("auto-queue-monitor"));
         assert!(is_allowed_send_source("inventory"));
-        assert!(is_allowed_send_source("voice"));
         assert!(!is_allowed_send_source("not-a-real-source"));
     }
 

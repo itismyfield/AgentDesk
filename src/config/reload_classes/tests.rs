@@ -60,7 +60,6 @@ fn fields_of<T: DeserializeOwned>() -> Vec<&'static str> {
 
 fn struct_registry() -> Vec<(&'static str, Vec<&'static str>)> {
     use crate::config::*;
-    use crate::voice::config as voice;
     vec![
         ("", fields_of::<Config>()),
         ("server", fields_of::<ServerConfig>()),
@@ -68,32 +67,8 @@ fn struct_registry() -> Vec<(&'static str, Vec<&'static str>)> {
         ("discord.bots.*", fields_of::<BotConfig>()),
         ("discord.bots.*.auth", fields_of::<DiscordBotAuthConfig>()),
         ("providers.*", fields_of::<ProviderConfig>()),
-        ("voice", fields_of::<voice::VoiceConfig>()),
-        ("voice.audio", fields_of::<voice::VoiceAudioDirs>()),
-        ("voice.stt", fields_of::<voice::VoiceSttConfig>()),
-        ("voice.tts", fields_of::<voice::VoiceTtsConfig>()),
-        ("voice.thresholds", fields_of::<voice::VoiceDbThresholds>()),
-        ("voice.idle", fields_of::<voice::VoiceIdleTimings>()),
-        ("voice.barge_in", fields_of::<voice::VoiceBargeInConfig>()),
-        (
-            "voice.foreground",
-            fields_of::<voice::VoiceForegroundConfig>(),
-        ),
-        (
-            "voice.conductor",
-            fields_of::<voice::VoiceConductorConfig>(),
-        ),
-        (
-            "voice.spoken_result",
-            fields_of::<voice::VoiceSpokenResultConfig>(),
-        ),
         ("mcp_servers.*", fields_of::<McpServerConfig>()),
         ("agents.*", fields_of::<AgentDef>()),
-        ("agents.*.voice", fields_of::<AgentVoiceConfig>()),
-        (
-            "agents.*.voice.foreground",
-            fields_of::<AgentVoiceForegroundConfig>(),
-        ),
         ("agents.*.channels.*", fields_of::<AgentChannelConfig>()),
         ("meeting", fields_of::<MeetingSettings>()),
         ("github", fields_of::<GitHubConfig>()),

@@ -11,9 +11,6 @@ pub async fn sync_agents_from_config_pg(
     pool: &PgPool,
     agents: &[AgentDef],
 ) -> Result<usize, String> {
-    crate::voice::commands::validate_agent_alias_collisions(agents)
-        .map_err(|error| format!("validate voice aliases: {error}"))?;
-
     let config_ids: BTreeSet<&str> = agents.iter().map(|agent| agent.id.as_str()).collect();
     let mut tx = pool
         .begin()

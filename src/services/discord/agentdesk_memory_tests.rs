@@ -21,14 +21,6 @@ fn memory_group_reaches_channel_voice_dm_and_meeting_bindings() {
     );
     let mut config = Config::default();
     config.agents.push(agent);
-    assert_eq!(
-        resolve_voice_channel_role_binding(&config, ChannelId::new(4243))
-            .unwrap()
-            .memory
-            .memory_group
-            .as_deref(),
-        Some("cookingheart")
-    );
     for entry in [
         MeetingAgentEntry::RoleId("ch-td".into()),
         MeetingAgentEntry::Detailed(crate::config::MeetingAgentDef {

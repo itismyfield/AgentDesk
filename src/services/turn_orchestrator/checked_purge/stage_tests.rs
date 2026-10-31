@@ -12,7 +12,6 @@ use super::herdr::{CheckedPurge, PurgeStage};
 use super::*;
 use crate::services::cluster::attachment_transfer::uploads::Upload;
 use crate::services::discord::runtime_store::durable_probe::{Plan, Step, Watch};
-use crate::voice::prompt::VoiceTranscriptAnnouncement;
 
 const TOKEN: &str = "checked-purge";
 const GENERATION: u64 = 5;
@@ -32,7 +31,7 @@ const STAGES: [&str; 10] = [
 ];
 
 /// Changes to the captured queue, each made after the capture and before the purge.
-const CHANGES: [&str; 13] = [
+const CHANGES: [&str; 12] = [
     "unchanged",
     "text",
     "author",
@@ -42,7 +41,6 @@ const CHANGES: [&str; 13] = [
     "source-generation",
     "segments",
     "uploads",
-    "voice",
     "route",
     "order",
     "reservation",
@@ -74,7 +72,6 @@ fn human(id: u64, text: &str) -> Intervention {
         has_reply_boundary: false,
         merge_consecutive: false,
         pending_uploads: Vec::new(),
-        voice_announcement: None,
     }
 }
 
@@ -339,21 +336,6 @@ fn change(row: &str, queue: &mut Vec<Intervention>) {
             ];
         }
         "uploads" => first.pending_uploads = vec![Upload::Local("late".into())],
-        "voice" => {
-            first.voice_announcement = Some(VoiceTranscriptAnnouncement {
-                transcript: "late".into(),
-                user_id: "7".into(),
-                utterance_id: "u".into(),
-                language: "ko".into(),
-                verbose_progress: false,
-                started_at: None,
-                completed_at: None,
-                samples_written: None,
-                control_channel_id: None,
-                stt_mode: None,
-                stt_latency_ms: None,
-            })
-        }
         "route" => {
             let route = QueuedRoute {
                 target: ChannelId::new(9),

@@ -84,7 +84,7 @@ const RETIRED_TEXT_COMMANDS: [(&str, Option<&str>); 30] = [
     ("!fast", Some("/fast")),
     ("!goals", Some("/goals")),
     ("!allowall", Some("/allowall")),
-    ("!vc", Some("/voice")),
+    ("!vc", None),
     ("!metrics", None),
     ("!allowedtools", None),
     ("!sessions", None),
@@ -218,7 +218,6 @@ pub(super) const SLASH_COMMAND_RISKS: &[(&str, CommandRisk)] = {
         ("/cancel-queued", Mutating),
         ("/restart", Mutating),
         ("/sidecar", Mutating),
-        ("/voice", Mutating),
         ("/allowall", CredentialSystem),
     ]
 };

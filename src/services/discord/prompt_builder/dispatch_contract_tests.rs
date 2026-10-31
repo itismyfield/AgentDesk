@@ -1670,15 +1670,9 @@ fn peer_directory_shared_keywords_are_not_voice_aliases_or_meeting_keywords() {
         "server: {}\ndatabase: {enabled: false}\nvoice: {enabled: true}\nagents:\n  - {id: ch-tad, name: TechnicalArt, name_ko: 테크아트, keywords: [기술미술], peer_keywords: [아트]}\n  - {id: ch-ad, name: ArtDirector, name_ko: 아트디렉터, keywords: [미술감독], peer_keywords: [아트]}\n  - {id: voice-only, name: VoiceOnly, name_ko: 목소리, keywords: [음성전용]}\nmeeting:\n  channel_name: fixture\n  summary_agent: ch-tad\n  available_agents:\n    - ch-tad\n    - {role_id: ch-ad}\n    - voice-only\n",
     )
     .unwrap();
-    let config = crate::config::load_from_path(&path).expect("valid shared keyword fixture");
-    let aliases = crate::voice::commands::validate_agent_alias_collisions(&config.agents);
+    crate::config::load_from_path(&path).expect("valid shared keyword fixture");
     let loaded = crate::services::discord_config_audit::load_runtime_config(root.path())
-        .expect("config audit voice precheck accepts shared directory keywords");
-    assert!(
-        aliases.is_ok(),
-        "shared directory keywords collided: {aliases:?}"
-    );
-    assert!(loaded.config.voice.enabled, "audit must keep voice enabled");
+        .expect("config audit accepts shared directory keywords");
     let audit = crate::services::discord_config_audit::audit_and_reconcile_config_only(
         root.path(),
         loaded.config,
@@ -1689,11 +1683,6 @@ fn peer_directory_shared_keywords_are_not_voice_aliases_or_meeting_keywords() {
     .unwrap();
     assert_eq!(audit.report.status, "ok");
     assert_eq!(audit.report.warnings_count, 0);
-    let mut voice_collision = config.agents.clone();
-    for agent in &mut voice_collision[..2] {
-        agent.keywords = vec!["음성충돌".to_string()];
-    }
-    assert!(crate::voice::commands::validate_agent_alias_collisions(&voice_collision).is_err());
 
     let prompt = peer_directory_prompt();
     let directory = prompt.split("[Peer Agent Directory]").nth(1).unwrap();

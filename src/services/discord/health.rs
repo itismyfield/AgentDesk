@@ -106,7 +106,7 @@ pub(crate) use crate::services::discord::outbound::manual_delivery::ManualOutbou
 pub use crate::services::discord::outbound::send_api::{handle_send, handle_senddm};
 use crate::services::discord::outbound::send_gate::dm_default_agent_authorizes_unmapped_private_channel;
 pub(crate) use crate::services::discord::outbound::send_gate::{
-    ManualOutboundOptions, send_message_with_backends, send_message_with_backends_and_delivery_id,
+    ManualOutboundOptions, send_message_with_backends,
     send_message_with_backends_and_delivery_options,
 };
 #[allow(unused_imports)]

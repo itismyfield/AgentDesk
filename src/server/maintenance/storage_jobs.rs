@@ -4,10 +4,6 @@ use sqlx::PgPool;
 
 use super::{MaintenanceFuture, MaintenanceJob, MaintenanceSchedule};
 
-/// `voice.progress_tts_cache_sweep`: 35s keeps it clear of the other voice GC
-/// jobs (25/60/75s); the first run is the startup bound (#3909).
-const PROGRESS_TTS_CACHE_SWEEP_STARTUP_STAGGER: Duration = Duration::from_secs(35);
-
 /// `storage.target_sweep`: 30s keeps the monthly `target/` sweep off the
 /// boot-time pile-up (the job also self-triggers on the disk threshold).
 const STORAGE_TARGET_SWEEP_STARTUP_STAGGER: Duration = Duration::from_secs(30);
@@ -31,36 +27,6 @@ const STORAGE_DB_RETENTION_STARTUP_STAGGER: Duration = Duration::from_secs(90);
 /// `memory.memento_consolidation`: last base offset (registry tail) so the
 /// weekly memento consolidation trails every other job at startup.
 const MEMORY_MEMENTO_CONSOLIDATION_STARTUP_STAGGER: Duration = Duration::from_secs(110);
-
-/// #3909 — leader-only voice TTS cache/temp sweep (pool-less thin wrapper; the
-/// sweep logic + full rationale live in
-/// `services::maintenance::jobs::voice_cache_sweep`). The `config` is resolved
-/// from the loaded runtime `VoiceConfig` (same dirs the TTS write path uses, so
-/// operator overrides are swept). 30-minute cadence; the 35s startup stagger
-/// makes the first run the startup bound.
-pub(super) struct ProgressTtsCacheSweepJob {
-    pub(super) config: crate::services::maintenance::jobs::voice_cache_sweep::Config,
-}
-
-impl MaintenanceJob for ProgressTtsCacheSweepJob {
-    fn name(&self) -> &'static str {
-        "voice.progress_tts_cache_sweep"
-    }
-
-    fn schedule(&self) -> MaintenanceSchedule {
-        MaintenanceSchedule::every(
-            Duration::from_secs(30 * 60),
-            PROGRESS_TTS_CACHE_SWEEP_STARTUP_STAGGER,
-        )
-    }
-
-    fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
-        Box::pin(async move {
-            let _ = pool;
-            crate::services::maintenance::jobs::voice_cache_sweep::run(self.config.clone()).await
-        })
-    }
-}
 
 /// #3231 — monthly `target/` sweep. Reuses the verbatim sweep logic in
 /// `services::maintenance::jobs::target_sweep` (runs `cargo sweep --time 30`
@@ -252,18 +218,6 @@ impl MaintenanceJob for MemoryMementoConsolidationJob {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn progress_tts_cache_sweep_schedule_matches_documented_interval() {
-        // #3909 — 30-minute cadence, 35s startup stagger (clear of the other
-        // voice GC jobs at 25/60/75s).
-        let job = ProgressTtsCacheSweepJob {
-            config: crate::services::maintenance::jobs::voice_cache_sweep::Config::default_runtime(
-            ),
-        };
-        assert_eq!(job.schedule().every_ms(), 30 * 60 * 1_000);
-        assert_eq!(job.schedule().startup_stagger_ms(), 35 * 1_000);
-    }
 
     #[test]
     fn disk_gc_job_schedules_match_documented_intervals() {

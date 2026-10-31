@@ -18,8 +18,6 @@ pub(super) async fn run_bot_framework_setup(
     provider_for_setup: ProviderKind,
     token_for_ready: String,
     token_owned: String,
-    voice_config_for_setup: crate::voice::VoiceConfig,
-    voice_receiver_for_setup: crate::voice::VoiceReceiver,
     startup_reconcile_remaining: Arc<std::sync::atomic::AtomicUsize>,
     startup_doctor_started: Arc<std::sync::atomic::AtomicBool>,
     api_port: u16,
@@ -198,21 +196,10 @@ pub(super) async fn run_bot_framework_setup(
     super::spawns::run_bot_spawn_stale_session_gc(&shared_clone, &provider_for_setup);
     super::intake_delivery_sweep::spawn_intake_delivery_sweep(shared_clone.clone());
 
-    super::voice::run_bot_spawn_voice_auto_join(
-        ctx,
-        &voice_config_for_setup,
-        &voice_receiver_for_setup,
-        &shared_clone,
-        &provider_for_setup,
-    )
-    .await;
-
     Ok(Data {
         shared: shared_clone,
         token: token_owned,
         provider: provider_for_setup,
-        voice_config: voice_config_for_setup,
-        voice_receiver: voice_receiver_for_setup,
     })
 }
 
@@ -238,7 +225,6 @@ pub(in crate::services::discord) fn run_bot_build_slash_commands()
         commands::cmd_effort(),
         commands::cmd_compact(),
         commands::cmd_adk(),
-        commands::cmd_voice(),
     ];
     slash_commands.extend([
         commands::cmd_queue(),

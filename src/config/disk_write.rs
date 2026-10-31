@@ -122,7 +122,6 @@ fn differing_section(expected: &Config, actual: &Config) -> &'static str {
         server,
         discord,
         providers,
-        voice,
         shared_prompt,
         mcp_servers,
         review_mcp_allowlist,

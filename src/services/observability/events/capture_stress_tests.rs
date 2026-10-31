@@ -11,7 +11,6 @@ use crate::services::turn_lifecycle::policy_observability_tests::{
     assert_noop_cancel_event,
     cancel_observability_emits_unknown_noop_direct_fallback_scenario as noop_cancel,
 };
-use crate::voice::flight::tests::record_writes_structured_voice_flight_event_scenario as voice;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -108,18 +107,6 @@ fn interference(case: &str) {
                     .all(|row| row.event_type == "external flood")
             );
         }
-        "voice" => {
-            global().clear();
-            record_simple("voice sentinel", None, None, json!({}));
-            capture_sync(|| voice(|| {}));
-            assert!(
-                global()
-                    .recent(MAX_EVENTS)
-                    .iter()
-                    .any(|row| row.event_type == "voice sentinel"),
-                "voice scenario cleared a foreign sentinel"
-            );
-        }
         "poison" => {
             let log = global();
             assert!(
@@ -202,7 +189,7 @@ fn isolated_capture_interference_and_append_equivalence() {
         return;
     }
     for case in [
-        "empty", "seeded", "foreign", "clear", "flood", "voice", "poison", "negative",
+        "empty", "seeded", "foreign", "clear", "flood", "poison", "negative",
     ] {
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["services::observability::events::capture_stress_tests::isolated_capture_interference_and_append_equivalence", "--exact", "--nocapture"])
