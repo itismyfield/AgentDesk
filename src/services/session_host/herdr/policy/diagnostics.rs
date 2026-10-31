@@ -34,7 +34,7 @@ pub(crate) fn checker(socket: &Path, stdout: &[u8], stderr: &[u8]) {
     }
 }
 
-/// The version and protocol the socket's last peer ping reported, shown beside every reason.
+/// The version and protocol the socket's last pong reported, shown beside every reason.
 pub(crate) fn server(socket: &Path, version: &str, protocol: u32) {
     if let Ok(mut observed) = OBSERVED.get_or_init(Mutex::default).lock() {
         let shown = version.chars().take(64).collect::<String>();

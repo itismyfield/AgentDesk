@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime};
 use super::contract::{
     HerdrOutcome, HerdrTransport, HerdrTransportError, ServerHello, ServerWitness, Witnessed,
 };
-use super::model::{HerdrCall, HerdrEndpoint, HerdrRequest};
+use super::model::{HERDR_PROTOCOL, HerdrCall, HerdrEndpoint, HerdrRequest};
 use super::observe::{self, RestoreUnverified};
 use super::provenance::{self, ProcessStart};
 use super::wire::{self, HerdrFraming, LineJsonFraming, MAX_FRAME_BYTES};
@@ -203,6 +203,13 @@ impl<F: HerdrFraming> HerdrTransport for HerdrSocketTransport<F> {
             tracing::debug!(?error, "herdr hello refused");
             RestoreUnverified::NoPeer
         })?;
+        super::policy::diagnostics::server(&self.socket_path, &hello.version, hello.protocol);
+        // A readable pong of another protocol names an unsupported server, not a missing one.
+        if hello.protocol != HERDR_PROTOCOL {
+            tracing::warn!(socket = %self.socket_path.display(), version = %hello.version,
+                protocol = hello.protocol, "herdr server speaks another protocol");
+            return Err(RestoreUnverified::VersionNotVerified);
+        }
         Ok(ServerHello {
             witness,
             started,

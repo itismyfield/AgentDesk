@@ -157,7 +157,6 @@ impl PeerSource for SocketPeerSource {
         let (resolved_socket, socket_dir) = socket_directory(&self.expected_socket)?;
         let before = (self.generation)()?;
         let hello = (self.hello)()?;
-        super::diagnostics::server(&self.expected_socket, &hello.version, hello.protocol);
         let pid = hello.witness.pid;
         let process = provenance::process_start(pid).map_err(|_| Unverified::Peer)?;
         let entries = provenance::process_environ(pid).map_err(|_| Unverified::Peer)?;
