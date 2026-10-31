@@ -339,9 +339,8 @@ fn headless_content_matches(content: &str, bodies: &[&str]) -> bool {
     })
 }
 
-/// The legacy headless bridge posts a terminal body through `message_outbox` and leaves no O
-/// receipt. Its sent row covers the frame only with this body, queued no earlier than the
-/// frame's last body record, so an earlier turn's identical answer never stands in for it.
+/// A headless bridge body leaves a sent `message_outbox` row, not an O receipt; only a row with
+/// this body queued after the frame's last body record covers it, never an earlier turn's answer.
 pub(in crate::services::discord) async fn headless_outbox(
     shared: &SharedData,
     frame: Frame<'_>,

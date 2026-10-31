@@ -1159,9 +1159,8 @@ enum HeadlessOutbox {
     UntimedBody,
 }
 
-/// A restart's first headless turn: the bridge posted the body through the outbox and cleared
-/// its row before the watcher framed Claude's late body record, and O never captured this
-/// transcript. Only that turn's own sent outbox row may stand in for the dead letter.
+/// Restart's first headless turn: the bridge posted via the outbox and cleared its row before the
+/// watcher framed the late body O never captured; only that turn's sent row replaces the record.
 async fn headless_restart_frame(pool: &sqlx::PgPool, channel: u64, outbox: HeadlessOutbox) {
     let mut f = Fixture::new(channel, ProviderKind::Claude, &["[E2E:E1:OK]"]).await;
     let body = f.body.clone();
