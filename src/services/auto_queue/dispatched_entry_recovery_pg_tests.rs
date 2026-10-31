@@ -250,8 +250,11 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
     sqlx::raw_sql(
         "UPDATE auto_queue_entries SET status = 'skipped', dispatch_id = NULL, slot_index = NULL
          WHERE run_id != 'run-recover-completed';
-         UPDATE task_dispatches SET status = 'cancelled'
+         UPDATE task_dispatches SET status = 'cancelled',
+             created_at = NOW() - INTERVAL '11 minutes', updated_at = NOW() - INTERVAL '10 minutes',
+             completed_at = NOW() - INTERVAL '10 minutes'
          WHERE kanban_card_id != 'card-recover-completed' AND status IN ('pending', 'dispatched');
+         UPDATE kanban_cards SET status = 'done' WHERE id != 'card-recover-completed';
          UPDATE sessions SET status = 'disconnected', active_dispatch_id = NULL;
          UPDATE auto_queue_runs SET status = 'completed', completed_at = NOW()
          WHERE id != 'run-recover-completed';",
@@ -283,6 +286,14 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
         crate::engine::transition::ForceIntent::None,
     )
     .await
+    .unwrap();
+    crate::kanban::drain_hook_side_effects_with_backends(&resumed_engine);
+    let next_tick_engine = resumed_engine.clone();
+    tokio::task::spawn_blocking(move || {
+        next_tick_engine.try_fire_hook_by_name("OnTick1min", json!({}))
+    })
+    .await
+    .unwrap()
     .unwrap();
     crate::kanban::drain_hook_side_effects_with_backends(&resumed_engine);
     let next: (String, bool) = sqlx::query_as(
