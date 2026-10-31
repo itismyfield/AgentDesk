@@ -532,3 +532,186 @@ async fn boot_queue_recovery_preserves_impl_but_resumes_completed_plan_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn periodic_queue_review_recovery_does_not_reopen_issued_reviews_pg() {
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate_with_max_connections(16).await;
+    let policy_pool = db.connect_and_migrate_with_max_connections(16).await;
+    let engine = test_engine_with_pg(policy_pool.clone());
+    seed_agent_pg(&pool).await;
+    for (card, kind, status, result) in [
+        ("issued-recent", "review", "completed", Some("{}")),
+        ("issued-failed", "review", "failed", None),
+        (
+            "issued-pass-pr",
+            "review",
+            "completed",
+            Some(r#"{"verdict":"pass"}"#),
+        ),
+        (
+            "issued-decision",
+            "review-decision",
+            "completed",
+            Some("{}"),
+        ),
+        ("issued-cancelled", "review", "cancelled", None),
+        ("issued-equal", "review", "completed", Some("{}")),
+        ("newer-work", "review", "completed", Some("{}")),
+        ("fallback-work", "review", "completed", Some("{}")),
+    ] {
+        seed_completed_queue_work(&pool, card, "implementation", "review").await;
+        sqlx::query("UPDATE kanban_cards SET review_round = 1 WHERE id = $1")
+            .bind(card)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, result, created_at, updated_at, completed_at)
+            SELECT $1 || '-review', $1, 'agent-1', $2, $3, $4,
+                CASE WHEN $1 = 'issued-equal' THEN completed_at
+                     WHEN $1 = 'fallback-work' THEN NOW() - INTERVAL '20 minutes'
+                     ELSE NOW() - INTERVAL '5 minutes' END,
+                NOW() - INTERVAL '5 minutes',
+                CASE WHEN $1 = 'issued-recent' THEN NOW() ELSE NOW() - INTERVAL '5 minutes' END
+            FROM task_dispatches WHERE id = $1")
+            .bind(card).bind(kind).bind(status).bind(result).execute(&pool).await.unwrap();
+    }
+    sqlx::query("UPDATE kanban_cards SET review_status = NULL, blocked_reason = 'pr:creating' WHERE id = 'issued-pass-pr'")
+        .execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status)
+        VALUES ('failed-create-pr', 'issued-pass-pr', 'agent-1', 'create-pr', 'failed')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE task_dispatches SET completed_at = NULL WHERE id = 'fallback-work'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, result, context, created_at, updated_at, completed_at)
+        SELECT 'newer-rework', kanban_card_id, to_agent_id, 'rework', 'completed', result, context,
+               NOW() - INTERVAL '4 minutes', NOW() - INTERVAL '3 minutes', NOW() - INTERVAL '3 minutes'
+        FROM task_dispatches WHERE id = 'newer-work'")
+        .execute(&pool).await.unwrap();
+    crate::reconcile::reconcile_missing_queue_review_dispatches_pg(&pool, &engine)
+        .await
+        .unwrap();
+    let counts: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT c.id, (SELECT COUNT(*) FROM task_dispatches d WHERE d.kanban_card_id = c.id AND d.dispatch_type = 'review')
+         FROM kanban_cards c WHERE c.id LIKE 'issued-%' ORDER BY c.id")
+        .fetch_all(&pool).await.unwrap();
+    assert_eq!(
+        counts,
+        vec![
+            ("issued-cancelled".to_string(), 1),
+            ("issued-decision".to_string(), 0),
+            ("issued-equal".to_string(), 1),
+            ("issued-failed".to_string(), 1),
+            ("issued-pass-pr".to_string(), 1),
+            ("issued-recent".to_string(), 1),
+        ],
+        "issued reviews must never be treated as missing review creation"
+    );
+    let recent: String =
+        sqlx::query_scalar("SELECT review_status FROM kanban_cards WHERE id = 'issued-recent'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(recent, "reviewing");
+    let passed: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT review_status, blocked_reason FROM kanban_cards WHERE id = 'issued-pass-pr'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(passed, (None, Some("pr:creating".to_string())));
+    for card in ["newer-work", "fallback-work"] {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = $1 AND dispatch_type = 'review'")
+            .bind(card).fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            count, 2,
+            "review history older than latest completed work must not block {card}"
+        );
+    }
+    crate::server::run_five_min_policy_tiers_for_test(&pool, &engine)
+        .await
+        .unwrap();
+    let after: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT c.id, (SELECT COUNT(*) FROM task_dispatches d WHERE d.kanban_card_id = c.id AND d.dispatch_type = 'review')
+         FROM kanban_cards c WHERE c.id LIKE 'issued-%' ORDER BY c.id")
+        .fetch_all(&pool).await.unwrap();
+    assert_eq!(
+        after, counts,
+        "failed and post-pass work must use existing escalation, not another review"
+    );
+    for card in ["issued-failed", "issued-pass-pr", "issued-decision"] {
+        let state: String =
+            sqlx::query_scalar("SELECT review_status FROM kanban_cards WHERE id = $1")
+                .bind(card)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            state, "dilemma_pending",
+            "retain existing orphan escalation for {card}"
+        );
+    }
+    drop(engine);
+    policy_pool.close().await;
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn periodic_queue_review_recovery_limits_each_tick_pg() {
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate_with_max_connections(16).await;
+    let policy_pool = db.connect_and_migrate_with_max_connections(16).await;
+    let engine = test_engine_with_pg(policy_pool.clone());
+    seed_agent_pg(&pool).await;
+    let limit = crate::reconcile::COMPLETED_QUEUE_REVIEW_DRIFT_BATCH_LIMIT;
+    for i in 0..limit + 2 {
+        seed_completed_queue_work(&pool, &format!("batch-{i:03}"), "implementation", "review")
+            .await;
+    }
+    // Keep the unselected cards inside the existing orphan timeout's grace window.
+    sqlx::query("UPDATE kanban_cards SET review_entered_at = NOW()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for expected in [limit, limit + 2, limit + 2] {
+        crate::server::run_five_min_policy_tiers_for_test(&pool, &engine)
+            .await
+            .unwrap();
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM task_dispatches WHERE dispatch_type = 'review'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            count, expected,
+            "each periodic pass must respect the shared batch limit"
+        );
+        if expected == limit {
+            let remaining: Vec<String> = sqlx::query_scalar(
+                "SELECT c.id FROM kanban_cards c WHERE NOT EXISTS (
+                    SELECT 1 FROM task_dispatches d WHERE d.kanban_card_id = c.id AND d.dispatch_type = 'review'
+                 ) ORDER BY c.id")
+                .fetch_all(&pool).await.unwrap();
+            assert_eq!(
+                remaining,
+                vec![
+                    format!("batch-{limit:03}"),
+                    format!("batch-{:03}", limit + 1)
+                ],
+                "periodic selection is ordered by card id"
+            );
+        }
+    }
+    drop(engine);
+    policy_pool.close().await;
+    pool.close().await;
+    db.drop().await;
+}
