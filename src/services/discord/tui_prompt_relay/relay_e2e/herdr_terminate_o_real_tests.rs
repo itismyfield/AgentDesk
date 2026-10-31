@@ -1,4 +1,4 @@
-//! X1 on real Herdr 0.9.3: the CLI closes the target's last pane and retires only its execution,
+//! X1 on real protocol-22 Herdr: the CLI closes the target's last pane and retires only its execution,
 //! and O's writer, down meanwhile, then posts its sealed tail once, untouched by the service.
 
 use std::sync::Arc;

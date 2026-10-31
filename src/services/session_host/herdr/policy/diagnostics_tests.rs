@@ -29,12 +29,20 @@ fn diagnosis_reports_refusal_and_bounded_checker_output_without_reading_files() 
 fn unsupported_refusal_names_the_server_version_the_socket_reported() {
     let socket = Path::new("/no-server-version-diagnostics-test/herdr.sock");
     server(socket, "0.9.2", 22);
-    let view = record(socket, &ProofCache::default(), &Err(Unverified::Unsupported));
+    let view = record(
+        socket,
+        &ProofCache::default(),
+        &Err(Unverified::Unsupported),
+    );
     assert_eq!(view["reason"], "next_restart_policy_unverified:Unsupported");
     assert_eq!(view["server"], "herdr 0.9.2 / protocol 22");
     assert_eq!(snapshot(socket)["server"], view["server"]);
     server(socket, &"9".repeat(500), 21);
-    let view = record(socket, &ProofCache::default(), &Err(Unverified::Unsupported));
+    let view = record(
+        socket,
+        &ProofCache::default(),
+        &Err(Unverified::Unsupported),
+    );
     assert_eq!(
         view["server"],
         format!("herdr {} / protocol 21", "9".repeat(64))

@@ -38,9 +38,10 @@ pub(crate) fn checker(socket: &Path, stdout: &[u8], stderr: &[u8]) {
 pub(crate) fn server(socket: &Path, version: &str, protocol: u32) {
     if let Ok(mut observed) = OBSERVED.get_or_init(Mutex::default).lock() {
         let shown = version.chars().take(64).collect::<String>();
-        observed
-            .server
-            .insert(socket.into(), format!("herdr {shown} / protocol {protocol}"));
+        observed.server.insert(
+            socket.into(),
+            format!("herdr {shown} / protocol {protocol}"),
+        );
     }
 }
 

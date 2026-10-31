@@ -388,7 +388,12 @@ fn e7_admits_a_newer_release_of_its_protocol_and_refuses_another_protocol() {
             witness: server(77, 1_000)
         }
     );
-    for (version, protocol) in [("0.9.5", 23), ("0.9.2", 22), ("0.9.5-preview.1", 22), ("", 22)] {
+    for (version, protocol) in [
+        ("0.9.5", 23),
+        ("0.9.2", 22),
+        ("0.9.5-preview.1", 22),
+        ("", 22),
+    ] {
         assert_eq!(
             seen(version, protocol),
             RestoreResume::Unverified(RestoreUnverified::VersionNotVerified),

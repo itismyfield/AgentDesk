@@ -1,4 +1,4 @@
-//! A pinned offline scratch server restores AgentDesk providers as shells only.
+//! An offline scratch server restores AgentDesk providers as shells only.
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
@@ -14,7 +14,6 @@ use crate::services::herdr_launch::{HERDR_PANE_ENV, unset_herdr_env_before_exec}
 use crate::services::session_host::herdr::model::{HerdrProcessInfo, HerdrResult};
 use crate::services::session_host::herdr::{pane_probe::start_text, provenance};
 
-const PINNED_SHA256: &str = "5173a3e0ae42d5d1ab7ebfa5d5e6329f7c3d23f8e1a3677c7ce3231da2884157";
 // The macOS sh launcher execs bash, so select the native shell for an exact OS identity.
 const T19_SHELL: &str = "/bin/bash";
 
@@ -41,6 +40,8 @@ fn wait_for(mut ready: impl FnMut() -> bool, what: &str) {
 struct T19Server {
     root: PathBuf,
     bin: PathBuf,
+    /// The scratch copy's bytes when the test began; the server must run exactly these.
+    image_sha: String,
     dir: PathBuf,
     ledger: PathBuf,
     child: Option<Child>,
@@ -72,7 +73,7 @@ impl T19Server {
             root.join("bin/herdr"),
             "T19 executes only the scratch copy"
         );
-        assert_eq!(sha(&bin), PINNED_SHA256, "T19 pinned 0.9.3 bytes");
+        let image_sha = sha(&bin);
         let ledger = read("ADK_TEST_HERDR_PIDS");
         assert_eq!(ledger.parent().unwrap().canonicalize().unwrap(), root);
         for entry in std::fs::read_dir(&root).unwrap() {
@@ -144,6 +145,7 @@ impl T19Server {
         Self {
             root,
             bin,
+            image_sha,
             dir,
             ledger,
             child: None,
@@ -325,7 +327,7 @@ impl T19Server {
             .canonicalize()
             .unwrap();
         assert_eq!(exe, self.bin, "T19 W3 socket peer runs the scratch copy");
-        assert_eq!(sha(&exe), PINNED_SHA256);
+        assert_eq!(sha(&exe), self.image_sha, "T19 scratch copy unchanged");
         witness
     }
 
@@ -650,7 +652,7 @@ fn assert_control_resume_metadata(value: &Value, control_cwd: &str, fake: &Path)
 }
 
 #[test]
-#[ignore = "needs ADK_TEST_HERDR_BIN: pinned isolated Herdr 0.9.3 scratch copy"]
+#[ignore = "needs ADK_TEST_HERDR_BIN: isolated scratch copy of a protocol-22 Herdr"]
 fn herdr_t19_resume_true_restores_claude_and_codex_as_shells_only() {
     use crate::services::codex::validate_herdr_fresh_argv;
 
