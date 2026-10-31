@@ -281,6 +281,9 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
     .await
     .unwrap();
     seed_card_pg(&pool, "card-recover-next", "requested").await;
+    // Plan creation exercises normal activation without fresh implementation worktree infrastructure.
+    sqlx::query("UPDATE kanban_cards SET metadata = '{\"scope_assessment_status\":\"completed\",\"scope_depth\":\"full\"}'::jsonb WHERE id = 'card-recover-next'")
+        .execute(&pool).await.unwrap();
     sqlx::query(
         "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank)
          VALUES ('entry-recover-next', 'run-recover-completed', 'card-recover-next', 'agent-1', 'pending', 2)"
