@@ -19,12 +19,31 @@ function percentage(used: number | null | undefined, total: number | null | unde
   return used != null && total != null && total > 0 ? Math.min(100, used / total * 100) : null;
 }
 
+// At or above this utilization the reading is shown as a warning.
+export const RESOURCE_HIGH_PERCENT = 90;
+
 function Meter({ value, label, tr }: { value: number | null; label: string; tr: SettingsTr }) {
-  return <div className="text-sm tabular-nums" role={value == null ? undefined : "meter"} aria-label={label}
+  const high = value != null && value >= RESOURCE_HIGH_PERCENT;
+  return <div className="flex items-center gap-2 text-sm tabular-nums" role={value == null ? undefined : "meter"} aria-label={label}
     aria-valuemin={value == null ? undefined : 0} aria-valuemax={value == null ? undefined : 100}
-    aria-valuenow={value ?? undefined} aria-valuetext={value == null ? undefined : `${value.toFixed(1)}%`}>
-    <span className="sr-only">{label}: </span>{value == null ? tr("미확인", "Unknown") : `${value.toFixed(1)}%`}
+    aria-valuenow={value ?? undefined} aria-valuetext={value == null ? undefined : `${value.toFixed(1)}%${high ? tr(" (높음)", " (high)") : ""}`}
+    data-level={high ? "high" : "normal"}>
+    <span className="sr-only">{label}: </span>
+    <span style={high ? { color: "var(--th-badge-amber-text)", fontWeight: 600 } : undefined}>
+      {value == null ? tr("미확인", "Unknown") : `${value.toFixed(1)}%`}
+    </span>
+    {high ? <span className="rounded-full px-1.5 text-[11px] font-medium" style={{ background: "var(--th-badge-amber-bg)", color: "var(--th-badge-amber-text)" }}>
+      {tr("높음", "High")}
+    </span> : null}
   </div>;
+}
+
+/** "Available" only adds information when it differs from total minus used (e.g. reclaimable cache). */
+export function meaningfulAvailableBytes(memory: MachineResources["memory"] | null | undefined): number | null {
+  const available = memory?.available_bytes;
+  if (available == null || memory?.total_bytes == null || memory.used_bytes == null || memory.total_bytes <= 0) return null;
+  const free = memory.total_bytes - memory.used_bytes;
+  return Math.abs(available - free) > memory.total_bytes * 0.01 ? available : null;
 }
 
 function Resource({ icon, title, color, trend, children }: {
@@ -70,7 +89,9 @@ export function SettingsMachineResources({ resources, history = [], stale, now, 
         trend={trend("memory", tr("메모리", "Memory"), sample => percentage(sample.memory?.used_bytes, sample.memory?.total_bytes))}>
         <p className="text-sm tabular-nums">{resourceBytes(current ? memory?.used_bytes : null)} / {resourceBytes(memory?.total_bytes)}</p>
         <Meter value={current ? percentage(memory?.used_bytes, memory?.total_bytes) : null} label={tr("메모리 사용률", "Memory utilization")} tr={tr} />
-        <p className="text-[11px] text-th-text-muted">{tr("사용 가능", "Available")}: {resourceBytes(current ? memory?.available_bytes : null)}</p>
+        {current && meaningfulAvailableBytes(memory) != null ? <p className="text-[11px] text-th-text-muted">
+          {tr("바로 쓸 수 있는 메모리", "Available")}: {resourceBytes(meaningfulAvailableBytes(memory))}
+        </p> : null}
       </Resource>
       {disks.length === 0 && <p className="py-3 text-xs text-th-text-muted">{tr("디스크 정보 미확인", "Disk information unavailable")}</p>}
       {disks.map((disk, index) => <Resource key={disk.mount_point} icon={<HardDrive size={15} aria-hidden />}

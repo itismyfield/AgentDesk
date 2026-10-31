@@ -193,7 +193,7 @@ describe("dashboard widgets under token authentication", () => {
 describe("settings under token authentication", () => {
   const entry = { key: "kanban_probe_label", value: "before", category: "pipeline", label_ko: "프로브", label_en: "Probe label" };
 
-  it("loads and saves pipeline config with the tab token", async () => {
+  it("loads and saves settings config with the tab token from the single save bar", async () => {
     serve({
       "GET /api/settings/config": ok({ entries: [entry] }),
       "PATCH /api/settings/config": ok({ ok: true }),
@@ -209,6 +209,7 @@ describe("settings under token authentication", () => {
       </QueryClientProvider>,
     );
     expectBearer("GET /api/settings/config");
+    await act(async () => { view.querySelector<HTMLButtonElement>("#settings-tab-workflow")!.click(); });
     const input = [...view.querySelectorAll("input")].find((node) => node.value === "before");
     expect(input).toBeDefined();
 
@@ -217,7 +218,7 @@ describe("settings under token authentication", () => {
     await settle();
     expectBearer("PATCH /api/settings/config");
     expect(callsTo("PATCH /api/settings/config")[0].body).toEqual({ kanban_probe_label: "after" });
-    expect(notify).toHaveBeenCalledWith("Saved pipeline settings.", "success");
+    expect(notify).toHaveBeenCalledWith("Saved settings.", "success");
   });
 
   it("saves voice config with the tab token and keeps the server's conflict details", async () => {

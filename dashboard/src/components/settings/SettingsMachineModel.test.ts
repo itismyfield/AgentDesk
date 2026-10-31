@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ClusterNode } from "../../api/clusterNodes";
-import { isSettingsPanel, SETTING_GROUPS } from "./SettingsModel";
-import { machineApiOrigin, machineConnection, machineOnline, machineRole } from "./SettingsMachineModel";
+import { machineApiOrigin, machineConnection, machineOnline, machineRole, machinesNeedingAttention } from "./SettingsMachineModel";
 
 const tr = (_ko: string, en: string) => en;
 const now = Date.parse("2026-09-23T00:00:30Z");
@@ -50,10 +49,12 @@ describe("machine connectivity", () => {
 });
 
 describe("machine presentation", () => {
-  it("places the deep-linked machine panel immediately after general", () => {
-    expect(isSettingsPanel("machine")).toBe(true);
-    const general = SETTING_GROUPS.findIndex(group => group.id === "general");
-    expect(SETTING_GROUPS[general + 1].id).toBe("machine");
+  it("counts only registered machines that are not online for the tab badge", () => {
+    const cluster = { enabled: true, local_instance_id: "hub-example", lease_ttl_secs: 30 };
+    const offline = { ...node, instance_id: "runner-offline", status: "offline" };
+    expect(machinesNeedingAttention({ cluster, nodes: [node, offline] }, now)).toBe(1);
+    expect(machinesNeedingAttention({ cluster: { ...cluster, enabled: false }, nodes: [offline] }, now)).toBe(0);
+    expect(machinesNeedingAttention(undefined, now)).toBe(0);
   });
 
   it("shows canonical roles for both current and legacy registry values", () => {

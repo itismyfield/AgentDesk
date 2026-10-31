@@ -1,478 +1,123 @@
-import { Check, RefreshCw } from "lucide-react";
+import { Check } from "lucide-react";
+import type { Dispatch, ReactNode, SetStateAction } from "react";
 import { Modal } from "../common/overlay/Modal";
-import { SettingsGeneralPanel } from "./SettingsGeneralPanel";
-import { SettingsMachinePanel } from "./SettingsMachinePanel";
+import type { SettingsNavItem } from "./SettingsMetaCatalog";
+import type { PendingDangerousConfigSave, SettingsPanel } from "./SettingsModel";
 import { SettingsNavigation } from "./SettingsNavigation";
 import { SettingsOnboardingOverlay } from "./SettingsOnboardingOverlay";
-import { SettingsOnboardingPanel } from "./SettingsOnboardingPanel";
-import { SettingsOperatorConnectorsPanel } from "./SettingsOperatorConnectorsPanel";
-import { SettingsProvidersPanel } from "./SettingsProvidersPanel";
-import { SettingsPipelinePanel } from "./SettingsPipelinePanel";
-import { SettingsRuntimePanel } from "./SettingsRuntimePanel";
-import { SettingsVoicePanel } from "./SettingsVoicePanel";
+import { SETTINGS_PRIMARY_BUTTON, SETTINGS_SECONDARY_BUTTON } from "./SettingsPanels";
 import { getDangerousConfigLabel } from "./settingsDangerousConfig";
 
-export function SettingsViewLayout({ ctx }: { ctx: any }) {
-  const {
-    activeNavItem,
-    activePanel,
-    activeRuntimeCategoryId,
-    companyDirty,
-    configDirty,
-    configEntries,
-    configSaving,
-    filteredNavItems,
-    generalFormInvalid,
-    generalMetas,
-    groupedConfigEntries,
-    handleConfigSave,
-    handleDangerousConfigConfirm,
-    handlePanelChange,
-    handleRcChange,
-    handleRcReset,
-    handleRcSave,
-    handleSave,
-    handleVoiceSave,
-    inputStyle,
-    isKo,
-    isRowVisible,
-    handleAddProviderAccount,
-    handleCompleteProviderLogin,
-    handleRemoveProviderAccount,
-    handleSetProviderPrimary,
-    loadOperatorConnectors,
-    loadProviderAuthProfiles,
-    loadVoiceConfig,
-    matchingKeysInActivePanel,
-    onboardingMetas,
-    openOnboarding,
-    operatorConnectors,
-    operatorConnectorsError,
-    operatorConnectorsLoading,
-    panelQuery,
-    pendingProviderLogin,
-    providerAuthError,
-    providerAuthLoading,
-    providerAuthProviders,
-    panelQueryNormalized,
-    pendingDangerousConfigSave,
-    pipelineAgents,
-    pipelineMetas,
-    pipelineRepos,
-    pipelineSelectorError,
-    pipelineSelectorLoading,
-    primaryActionClass,
-    primaryActionStyle,
-    rcDirty,
-    rcLoaded,
-    rcError,
-    rcSaving,
-    removingProviderAccountKey,
-    renderSettingGroupCard,
-    renderSettingRow,
-    runtimeMetas,
-    saving,
-    secondaryActionClass,
-    secondaryActionStyle,
-    selectedPipelineAgentId,
-    selectedPipelineRepo,
-    setActiveRuntimeCategoryId,
-    setPanelQuery,
-    setPendingDangerousConfigSave,
-    setSelectedPipelineAgentId,
-    setSelectedPipelineRepo,
-    setShowOnboarding,
-    showOnboarding,
-    startingProviderId,
-    subtleButtonClass,
-    subtleButtonStyle,
-    tr,
-    updateVoiceAgent,
-    updateVoiceGlobal,
-    updateVoiceModels,
-    voiceAliasConflict,
-    voiceDirty,
-    voiceDraft,
-    voiceError,
-    voiceLoaded,
-    voiceSaving,
-  } = ctx;
+interface SettingsViewLayoutProps {
+  activePanel: SettingsPanel;
+  activeNavItem: SettingsNavItem;
+  navItems: SettingsNavItem[];
+  matchingCount: number;
+  onPanelChange: (panel: SettingsPanel) => void;
+  query: string;
+  queryActive: boolean;
+  setQuery: Dispatch<SetStateAction<string>>;
+  showNoMatches: boolean;
+  children: ReactNode;
+  saveBar: ReactNode;
+  pendingDangerousSave: PendingDangerousConfigSave | null;
+  saving: boolean;
+  onCancelDangerousSave: () => void;
+  onConfirmDangerousSave: () => void;
+  showOnboarding: boolean;
+  onCloseOnboarding: () => void;
+  isKo: boolean;
+  tr: (ko: string, en: string) => string;
+}
 
-  const renderActivePanel = () => {
-    switch (activePanel) {
-      case "machine":
-        return <SettingsMachinePanel tr={tr} />;
-      case "runtime":
-        return (
-          <SettingsRuntimePanel
-            activeRuntimeCategoryId={activeRuntimeCategoryId}
-            inputStyle={inputStyle}
-            onCategoryChange={setActiveRuntimeCategoryId}
-            onRuntimeChange={handleRcChange}
-            onRuntimeReset={handleRcReset}
-            onRuntimeSave={handleRcSave}
-            panelQueryNormalized={panelQueryNormalized}
-            primaryActionClass={primaryActionClass}
-            primaryActionStyle={primaryActionStyle}
-            rcDirty={rcDirty}
-            rcLoaded={rcLoaded}
-            rcError={rcError}
-            rcSaving={rcSaving}
-            renderSettingRow={renderSettingRow}
-            runtimeMetas={runtimeMetas}
-            subtleButtonClass={subtleButtonClass}
-            subtleButtonStyle={subtleButtonStyle}
-            tr={tr}
-          />
-        );
-      case "pipeline":
-        return (
-          <SettingsPipelinePanel
-            configEntries={configEntries}
-            groupedConfigEntries={groupedConfigEntries}
-            inputStyle={inputStyle}
-            isKo={isKo}
-            pipelineAgents={pipelineAgents}
-            pipelineMetas={pipelineMetas}
-            pipelineRepos={pipelineRepos}
-            pipelineSelectorError={pipelineSelectorError}
-            pipelineSelectorLoading={pipelineSelectorLoading}
-            renderSettingGroupCard={renderSettingGroupCard}
-            renderSettingRow={renderSettingRow}
-            selectedPipelineAgentId={selectedPipelineAgentId}
-            selectedPipelineRepo={selectedPipelineRepo}
-            setSelectedPipelineAgentId={setSelectedPipelineAgentId}
-            setSelectedPipelineRepo={setSelectedPipelineRepo}
-            tr={tr}
-          />
-        );
-      case "voice":
-        return (
-          <SettingsVoicePanel
-            inputStyle={inputStyle}
-            isKo={isKo}
-            isRowVisible={isRowVisible}
-            loadVoiceConfig={loadVoiceConfig}
-            onVoiceSave={handleVoiceSave}
-            primaryActionClass={primaryActionClass}
-            primaryActionStyle={primaryActionStyle}
-            renderSettingGroupCard={renderSettingGroupCard}
-            secondaryActionClass={secondaryActionClass}
-            secondaryActionStyle={secondaryActionStyle}
-            tr={tr}
-            updateVoiceAgent={updateVoiceAgent}
-            updateVoiceGlobal={updateVoiceGlobal}
-            updateVoiceModels={updateVoiceModels}
-            voiceAliasConflict={voiceAliasConflict}
-            voiceDirty={voiceDirty}
-            voiceDraft={voiceDraft}
-            voiceError={voiceError}
-            voiceLoaded={voiceLoaded}
-            voiceSaving={voiceSaving}
-          />
-        );
-      case "providers":
-        return (
-          <SettingsProvidersPanel
-            error={providerAuthError}
-            loading={providerAuthLoading}
-            onAddAccount={(providerId: string) => void handleAddProviderAccount(providerId)}
-            onCompleteLogin={() => void handleCompleteProviderLogin()}
-            onRemoveAccount={(providerId: string, profileId: string) => void handleRemoveProviderAccount(providerId, profileId)}
-            onSetPrimary={(providerId: string, profileId: string) => void handleSetProviderPrimary(providerId, profileId)}
-            onReload={() => void loadProviderAuthProfiles()}
-            pendingLogin={pendingProviderLogin}
-            providers={providerAuthProviders}
-            secondaryActionClass={secondaryActionClass}
-            secondaryActionStyle={secondaryActionStyle}
-            startingProviderId={startingProviderId}
-            removingAccountKey={removingProviderAccountKey}
-            tr={tr}
-          />
-        );
-      case "connectors":
-        return (
-          <SettingsOperatorConnectorsPanel
-            connectors={operatorConnectors}
-            error={operatorConnectorsError}
-            loading={operatorConnectorsLoading}
-            onReload={() => void loadOperatorConnectors()}
-            secondaryActionClass={secondaryActionClass}
-            secondaryActionStyle={secondaryActionStyle}
-            tr={tr}
-          />
-        );
-      case "onboarding":
-        return (
-          <SettingsOnboardingPanel
-            onboardingMetas={onboardingMetas}
-            renderSettingGroupCard={renderSettingGroupCard}
-            renderSettingRow={renderSettingRow}
-            tr={tr}
-          />
-        );
-      case "general":
-      default:
-        return (
-          <SettingsGeneralPanel
-            companyDirty={companyDirty}
-            generalFormInvalid={generalFormInvalid}
-            generalMetas={generalMetas}
-            onSave={handleSave}
-            primaryActionClass={primaryActionClass}
-            primaryActionStyle={primaryActionStyle}
-            renderSettingGroupCard={renderSettingGroupCard}
-            renderSettingRow={renderSettingRow}
-            saving={saving}
-            tr={tr}
-          />
-        );
-    }
-  };
-
-  const renderHeaderActions = () => {
-    if (activePanel === "machine") return null;
-    if (activePanel === "onboarding") {
-      return (
-        <button
-          onClick={openOnboarding}
-          className={secondaryActionClass}
-          style={secondaryActionStyle}
-        >
-          {tr("온보딩 다시 실행", "Re-run onboarding")}
-        </button>
-      );
-    }
-
-    if (activePanel === "pipeline") {
-      return (
-        <button
-          onClick={handleConfigSave}
-          disabled={configSaving || !configDirty}
-          className={primaryActionClass}
-          style={primaryActionStyle}
-        >
-          <Check size={12} />
-          {configSaving ? tr("저장 중...", "Saving...") : tr("저장", "Save")}
-        </button>
-      );
-    }
-
-    if (activePanel === "runtime") {
-      return (
-        <button
-          onClick={handleRcSave}
-          disabled={rcSaving || !rcDirty}
-          className={primaryActionClass}
-          style={primaryActionStyle}
-        >
-          <Check size={12} />
-          {rcSaving ? tr("저장 중...", "Saving...") : tr("저장", "Save")}
-        </button>
-      );
-    }
-
-    if (activePanel === "voice") {
-      return (
-        <>
-          <button
-            type="button"
-            onClick={() => void loadVoiceConfig()}
-            className={secondaryActionClass}
-            style={secondaryActionStyle}
-          >
-            {tr("다시 불러오기", "Reload")}
-          </button>
-          <button
-            type="button"
-            onClick={() => void handleVoiceSave()}
-            disabled={voiceSaving || !voiceDirty || Boolean(voiceAliasConflict)}
-            className={primaryActionClass}
-            style={primaryActionStyle}
-          >
-            <Check size={12} />
-            {voiceSaving ? tr("저장 중...", "Saving...") : tr("저장", "Save")}
-          </button>
-        </>
-      );
-    }
-
-    if (activePanel === "providers") {
-      return (
-        <button
-          type="button"
-          onClick={() => void loadProviderAuthProfiles()}
-          disabled={providerAuthLoading}
-          className={secondaryActionClass}
-          style={secondaryActionStyle}
-        >
-          <RefreshCw size={12} />
-          {providerAuthLoading ? tr("불러오는 중...", "Loading...") : tr("다시 불러오기", "Reload")}
-        </button>
-      );
-    }
-
-    if (activePanel === "connectors") {
-      return (
-        <button
-          type="button"
-          onClick={() => void loadOperatorConnectors()}
-          disabled={operatorConnectorsLoading}
-          className={secondaryActionClass}
-          style={secondaryActionStyle}
-        >
-          <RefreshCw size={12} />
-          {operatorConnectorsLoading ? tr("확인 중...", "Checking...") : tr("다시 확인", "Recheck")}
-        </button>
-      );
-    }
-
-    return (
-      <button
-        onClick={() => void handleSave()}
-        disabled={saving || generalFormInvalid || !companyDirty}
-        className={primaryActionClass}
-        style={primaryActionStyle}
-      >
-        <Check size={12} />
-        {saving ? tr("저장 중...", "Saving...") : tr("저장", "Save")}
-      </button>
-    );
-  };
-
-  const dangerousConfigLabels =
-    pendingDangerousConfigSave?.keys.map((key: string) => getDangerousConfigLabel(key, isKo)).join(", ") ?? "";
+export function SettingsViewLayout({
+  activePanel, activeNavItem, navItems, matchingCount, onPanelChange, query, queryActive, setQuery,
+  showNoMatches, children, saveBar, pendingDangerousSave, saving, onCancelDangerousSave,
+  onConfirmDangerousSave, showOnboarding, onCloseOnboarding, isKo, tr,
+}: SettingsViewLayoutProps) {
+  const dangerousLabels = pendingDangerousSave?.keys.map((key) => getDangerousConfigLabel(key, isKo)).join(", ") ?? "";
 
   return (
     <div
       data-testid="settings-page"
-      className="mx-auto h-full w-full max-w-[88rem] min-w-0 overflow-y-auto px-4 py-5 pb-8 text-th-text-primary sm:px-8 sm:py-7"
+      className="mx-auto flex h-full w-full max-w-[88rem] min-w-0 flex-col overflow-y-auto px-4 pt-5 text-th-text-primary sm:px-8 sm:pt-7"
     >
-      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-th-border-subtle pb-5">
-        <div className="min-w-0">
-          <h1 className="text-2xl font-semibold tracking-tight">{tr("설정", "Settings")}</h1>
-          <div className="mt-2 text-xs leading-5 text-th-text-muted">
-            {tr(
-              "대시보드 표시, 운영 흐름, 음성 설정을 관리합니다.",
-              "Manage dashboard display, operating flow, and voice settings.",
-            )}
-          </div>
-        </div>
-        <div className="flex flex-wrap gap-2">{renderHeaderActions()}</div>
+      <div className="border-b border-th-border-subtle pb-5">
+        <h1 className="text-2xl font-semibold tracking-tight">{tr("설정", "Settings")}</h1>
+        <p className="mt-2 text-xs leading-5 break-keep text-th-text-muted">
+          {tr("대시보드 표시, 작업 흐름, AI 계정과 연결을 관리해요.", "Manage display, workflow, AI accounts and connections.")}
+        </p>
       </div>
 
-      <div className="mt-5 grid min-w-0 gap-5 md:grid-cols-[12rem_minmax(0,1fr)] md:gap-7">
+      <div className="mt-5 grid min-w-0 gap-5 pb-8 md:grid-cols-[12rem_minmax(0,1fr)] md:gap-7">
         <SettingsNavigation
           activePanel={activePanel}
-          inputStyle={inputStyle}
-          items={filteredNavItems}
-          matchingCount={matchingKeysInActivePanel.size}
-          onPanelChange={handlePanelChange}
-          query={panelQuery}
-          queryActive={Boolean(panelQueryNormalized)}
-          setQuery={setPanelQuery}
+          items={navItems}
+          matchingCount={matchingCount}
+          onPanelChange={onPanelChange}
+          query={query}
+          queryActive={queryActive}
+          setQuery={setQuery}
           tr={tr}
         />
 
-        <div className="min-w-0 space-y-4">
-          <section
-            id="settings-panel-content"
-            role="tabpanel"
-            aria-labelledby={`settings-tab-${activePanel}`}
-            tabIndex={-1}
-            className="min-w-0 outline-none"
-          >
-            <div className="flex flex-wrap items-start justify-between gap-3 border-b pb-4" style={{ borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)" }}>
-              <div className="min-w-0">
-                <div className="text-base font-semibold" style={{ color: "var(--th-text)" }}>
-                  {activeNavItem.title}
-                </div>
-                <div className="mt-1 text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
-                  {activeNavItem.detail}
-                </div>
-              </div>
-              {activeNavItem.count ? (
-                <span
-                  className="inline-flex items-center shrink-0 whitespace-nowrap px-1 text-xs tabular-nums"
-                  style={{
-                    color: "var(--th-text-muted)",
-                  }}
-                >
-                  {activeNavItem.count}
-                </span>
-              ) : null}
-            </div>
-            <div className="mt-5 min-w-0">
-              {renderActivePanel()}
-            </div>
-          </section>
-        </div>
+        <section
+          id="settings-panel-content"
+          role="tabpanel"
+          aria-labelledby={`settings-tab-${activePanel}`}
+          tabIndex={-1}
+          className="min-w-0 outline-none"
+        >
+          <div className="border-b border-th-border-subtle pb-4">
+            <h2 className="text-base font-semibold break-keep text-th-text-primary">{activeNavItem.title}</h2>
+            <p className="mt-1 text-xs leading-5 break-keep text-th-text-muted">{activeNavItem.detail}</p>
+          </div>
+          <div className="mt-5 min-w-0">
+            {showNoMatches ? (
+              <p role="status" className="rounded-lg border border-th-border-subtle px-4 py-6 text-sm break-keep text-th-text-muted">
+                {tr(`이 탭에는 “${query.trim()}” 검색 결과가 없어요. 남은 탭에서 찾아보세요.`, `Nothing in this tab matches “${query.trim()}”. Try one of the remaining tabs.`)}
+              </p>
+            ) : children}
+          </div>
+        </section>
       </div>
 
+      {saveBar}
+
       <Modal
-        open={Boolean(pendingDangerousConfigSave)}
-        onClose={() => setPendingDangerousConfigSave(null)}
-        title={tr("위험 설정 저장 확인", "Confirm risky settings")}
+        open={Boolean(pendingDangerousSave)}
+        onClose={onCancelDangerousSave}
+        title={tr("저장하기 전에 확인해 주세요", "Confirm before saving")}
         description={tr(
-          "자동화, 리뷰 게이트, 컨텍스트 초기화에 영향을 주는 설정입니다.",
-          "These settings affect automation, review gates, or context clearing.",
+          "자동화, 리뷰 단계, 대화 초기화에 영향을 주는 설정이 바뀌어요.",
+          "These changes affect automation, review steps, or conversation resets.",
         )}
         size="sm"
       >
         <div className="space-y-4">
-          <div className="rounded-lg border px-4 py-3 text-sm leading-6"
-            style={{
-              borderColor: "rgba(251, 191, 36, 0.35)",
-              background: "rgba(251, 191, 36, 0.10)",
-              color: "var(--th-text)",
-            }}
-          >
+          <p className="rounded-lg border px-4 py-3 text-sm leading-6 break-keep" style={{ borderColor: "rgba(251, 191, 36, 0.35)", background: "rgba(251, 191, 36, 0.10)" }}>
             {tr(
-              "저장하면 진행 중인 카드의 리뷰/머지/컨텍스트 정책이 즉시 달라질 수 있습니다.",
-              "Saving can immediately change review, merge, or context policy for active cards.",
+              "저장하면 진행 중인 카드의 리뷰·병합·대화 정책이 바로 달라질 수 있어요.",
+              "Saving can immediately change review, merge, or conversation policy for active cards.",
             )}
-          </div>
+          </p>
           <div>
-            <div className="text-xs font-semibold uppercase tracking-wide" style={{ color: "var(--th-text-muted)" }}>
-              {tr("변경 대상", "Changing")}
-            </div>
-            <div className="mt-2 rounded-xl border px-3 py-2 text-sm" style={{
-              borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
-              background: "color-mix(in srgb, var(--th-overlay-medium) 88%, transparent)",
-              color: "var(--th-text)",
-            }}>
-              {dangerousConfigLabels}
-            </div>
+            <div className="text-xs font-semibold text-th-text-muted">{tr("바뀌는 설정", "Changing")}</div>
+            <div className="mt-2 rounded-md border border-th-border-subtle px-3 py-2 text-sm">{dangerousLabels}</div>
           </div>
           <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-            <button
-              type="button"
-              onClick={() => setPendingDangerousConfigSave(null)}
-              className={secondaryActionClass}
-              style={secondaryActionStyle}
-            >
+            <button type="button" onClick={onCancelDangerousSave} className={SETTINGS_SECONDARY_BUTTON}>
               {tr("취소", "Cancel")}
             </button>
-            <button
-              type="button"
-              onClick={() => void handleDangerousConfigConfirm()}
-              disabled={configSaving}
-              className={primaryActionClass}
-              style={primaryActionStyle}
-            >
-              <Check size={12} />
-              {configSaving ? tr("저장 중...", "Saving...") : tr("확인 후 저장", "Confirm and save")}
+            <button type="button" onClick={onConfirmDangerousSave} disabled={saving} className={SETTINGS_PRIMARY_BUTTON}>
+              <Check size={14} aria-hidden />
+              {saving ? tr("저장 중…", "Saving…") : tr("확인하고 저장", "Confirm and save")}
             </button>
           </div>
         </div>
       </Modal>
 
-      <SettingsOnboardingOverlay
-        isKo={isKo}
-        onClose={() => setShowOnboarding(false)}
-        open={showOnboarding}
-        tr={tr}
-      />
+      <SettingsOnboardingOverlay isKo={isKo} onClose={onCloseOnboarding} open={showOnboarding} tr={tr} />
     </div>
   );
 }

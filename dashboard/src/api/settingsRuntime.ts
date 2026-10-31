@@ -138,6 +138,27 @@ export async function getOperatorConnectors(): Promise<OperatorConnectorsRespons
   return request("/api/settings/operator-connectors");
 }
 
+/** The subset of /api/onboarding/status the settings page shows as connection rows. */
+export interface OnboardingConnectionStatus {
+  completed?: boolean;
+  guild_id?: string | null;
+  owner_id?: string | null;
+  bot_providers?: { command?: string | null; command2?: string | null };
+}
+
+export async function getOnboardingConnectionStatus(): Promise<OnboardingConnectionStatus> {
+  return request("/api/onboarding/status", { suppressErrorToast: true, maxRetries: 0 });
+}
+
+/** Resolves a Discord channel ID to its name; a miss is shown inline, not as a toast. */
+export async function getSettingsChannelName(channelId: string): Promise<string | null> {
+  const info = await request<{ name?: string | null }>(`/api/discord/channels/${encodeURIComponent(channelId)}`, {
+    suppressErrorToast: true,
+    maxRetries: 0,
+  });
+  return info.name ?? null;
+}
+
 // ── Runtime Health ──
 
 export interface HealthProviderStatus {
