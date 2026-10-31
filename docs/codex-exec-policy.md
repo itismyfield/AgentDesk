@@ -68,8 +68,8 @@ is fresh or resumed.
 
 ## Long-running and CI
 
-Headless callers (CI agents, batch probes, voice barge-in, meeting
-orchestrator) can produce long-running Codex turns. The policy for these:
+Headless callers (CI agents, batch probes, voice barge-in) can produce
+long-running Codex turns. The policy for these:
 
 - Streaming callers (`execute_command_streaming` -> direct headless / wrapper
   fallback / ProcessBackend) already propagate the dispatch `CancelToken`

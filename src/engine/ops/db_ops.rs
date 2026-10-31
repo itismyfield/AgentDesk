@@ -1157,12 +1157,7 @@ fn bind_policy_sql_params<'q>(
     params: Vec<serde_json::Value>,
 ) -> sqlx::query::Query<'q, Postgres, PgArguments> {
     // Bind each policy param with the Postgres type that matches its JSON
-    // shape. The previous implementation routed everything through
-    // `PolicySqlParam` which advertises `text` only — that broke
-    // `xp + ?` style updates with `operator does not exist: bigint + text`
-    // and silently aborted the kanban OnDispatchCompleted hook, which in
-    // turn skipped the in_progress→review transition for auto-queue cards
-    // (run 24837914 Phase 4 entries observed in production).
+    // shape; text-only binds break arithmetic like `col + ?` (`bigint + text`).
     for param in params {
         query = match param {
             serde_json::Value::Null => query.bind(Option::<i64>::None),

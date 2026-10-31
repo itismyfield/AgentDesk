@@ -1079,7 +1079,6 @@ mod postgres_source_contract_tests {
             "scheduled_message",
             "headless_turn",
             "slo_alerter",
-            "quality_regression_alerter",
             "github_sync",
             "catch_up_too_old",
             "queue_overflow_notice",

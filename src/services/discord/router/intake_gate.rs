@@ -1376,32 +1376,6 @@ pub(in crate::services::discord) async fn handle_event(
                 return Ok(());
             }
 
-            // Meeting command from text (e.g. announce bot sending "/meeting start ...")
-            if text.starts_with("/meeting ") {
-                if !upload_records_appended_to_session {
-                    upload_records_appended_to_session =
-                        append_pending_uploads(&data.shared, channel_id, &upload_records).await;
-                }
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!("  [{ts}] ◀ [{user_name}] Meeting cmd: {text}");
-                let http = ctx.http.clone();
-                if meeting::handle_meeting_command(
-                    http,
-                    channel_id,
-                    text,
-                    data.provider.clone(),
-                    &data.shared,
-                )
-                .await?
-                {
-                    if !upload_records_appended_to_session {
-                        let _ =
-                            append_pending_uploads(&data.shared, channel_id, &upload_records).await;
-                    }
-                    return Ok(());
-                }
-            }
-
             // Regular text → Claude AI
             let ts = chrono::Local::now().format("%H:%M:%S");
             let preview = truncate_str(text, 60);

@@ -45,9 +45,6 @@ mod jsonl_watcher;
 mod mailbox_finish;
 mod mailbox_probe;
 mod mcp_credential_watcher;
-pub(crate) mod meeting_artifact_store;
-pub(crate) mod meeting_orchestrator;
-pub(crate) mod meeting_state_machine;
 mod metrics;
 mod model_catalog;
 mod model_picker_interaction;
@@ -211,6 +208,7 @@ pub(in crate::services::discord) use delivery_lease_cell::{
     DELIVERY_LEASE_DEADLINE_MS, DELIVERY_LEASE_HEARTBEAT_MS, DeliveryLeaseCell,
     DeliveryLeaseHeartbeat, LeaseHolder, LeaseOutcome, LeaseSnapshot, lease_now_ms,
 };
+pub(crate) use recovery_engine::CapturedReadyDeliveryCommit;
 #[cfg(unix)]
 pub(crate) use recovery_engine::herdr_reader::local_reconnect_health as herdr_reconnect_health;
 #[allow(unused_imports)]
@@ -224,7 +222,6 @@ pub(in crate::services::discord) use {
     delivery_lease_key::DeliveryLeaseKey,
     relay_health::{RelayFrontierMutationGuard, RelayFrontierToken},
 };
-pub(crate) use {meeting_orchestrator as meeting, recovery_engine::CapturedReadyDeliveryCommit};
 // #3479 item-2: re-export the catch-up subsystem entry points referenced
 // outside the extracted cluster (`maybe_schedule_catch_up_retry_after_queue_drain`
 // here in mod.rs and `catch_up_missed_messages` in runtime_bootstrap recovery).
@@ -894,8 +891,6 @@ pub(super) struct ModelPickerPendingState {
 pub(super) struct CoreState {
     /// Per-channel sessions (each Discord channel can have its own Claude Code session)
     pub(in crate::services::discord) sessions: HashMap<ChannelId, DiscordSession>,
-    /// Per-channel active meeting (one meeting per channel)
-    active_meetings: HashMap<ChannelId, meeting::Meeting>,
 }
 
 const CHANNEL_ROSTER_MAX_USERS: usize = 64;
@@ -1262,7 +1257,6 @@ pub(super) fn make_shared_data_for_tests_with_storage(
     Arc::new(SharedData {
         core: tokio::sync::Mutex::new(CoreState {
             sessions: std::collections::HashMap::new(),
-            active_meetings: std::collections::HashMap::new(),
         }),
         mailboxes: ChannelMailboxRegistry::default(),
         session_transition_locks: dashmap::DashMap::new(),

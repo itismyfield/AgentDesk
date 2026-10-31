@@ -55,7 +55,6 @@ enum StaticSendSource {
     ScheduledMessage,
     HeadlessTurn,
     SloAlerter,
-    QualityRegressionAlerter,
     AutoQueueMonitor,
     Inventory,
     Voice,
@@ -112,11 +111,6 @@ const POLICIES: &[SourcePolicy] = &[
     policy!(ScheduledMessage, "scheduled_message", LOOPBACK),
     policy!(HeadlessTurn, "headless_turn", LOOPBACK),
     policy!(SloAlerter, "slo_alerter", LOOPBACK),
-    policy!(
-        QualityRegressionAlerter,
-        "quality_regression_alerter",
-        LOOPBACK
-    ),
     policy!(AutoQueueMonitor, "auto-queue-monitor", LOOPBACK),
     policy!(Inventory, "inventory", LOOPBACK),
     policy!(Voice, "voice", LOOPBACK),
@@ -191,7 +185,6 @@ mod tests {
         "routine-runtime",
         "headless_turn",
         "slo_alerter",
-        "quality_regression_alerter",
         "auto-queue-monitor",
         "inventory",
         "voice",

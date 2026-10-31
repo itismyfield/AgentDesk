@@ -95,7 +95,6 @@ fn struct_registry() -> Vec<(&'static str, Vec<&'static str>)> {
             fields_of::<AgentVoiceForegroundConfig>(),
         ),
         ("agents.*.channels.*", fields_of::<AgentChannelConfig>()),
-        ("meeting", fields_of::<MeetingSettings>()),
         ("github", fields_of::<GitHubConfig>()),
         ("policies", fields_of::<PoliciesConfig>()),
         ("data", fields_of::<DataConfig>()),

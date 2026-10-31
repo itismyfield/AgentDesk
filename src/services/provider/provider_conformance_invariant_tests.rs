@@ -314,10 +314,7 @@ const PROVIDER_FUNCTIONS: [&str; 3] = [
     "compact_cli_config",
     "tmux_capture_indicates_ready_for_input",
 ];
-const PROVIDER_EXEC_FUNCTIONS: [&str; 2] = [
-    "execute_simple_blocking_inner",
-    "execute_structured_with_context",
-];
+const PROVIDER_EXEC_FUNCTIONS: [&str; 1] = ["execute_simple_blocking_inner"];
 
 fn assert_scoped_dispatches_have_no_wildcard_arms() {
     assert_eq!(

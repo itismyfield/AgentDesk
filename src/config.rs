@@ -61,7 +61,6 @@ pub(crate) fn runtime_config_optional() -> Option<Config> {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RuntimeConfigSource {
     pub(crate) path: PathBuf,
-    pub(crate) meeting_available_agents_explicitly_empty: bool,
 }
 
 #[cfg(test)]
@@ -87,8 +86,6 @@ pub struct Config {
     pub review_mcp_allowlist: Vec<String>,
     #[serde(default)]
     pub agents: Vec<AgentDef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub meeting: Option<MeetingSettings>,
     #[serde(default)]
     pub github: GitHubConfig,
     #[serde(default)]
@@ -619,12 +616,6 @@ pub struct AgentChannelConfig {
     pub thread_inherit: bool,
     #[serde(
         default,
-        alias = "qualityFeedbackInjection",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub quality_feedback_injection: Option<bool>,
-    #[serde(
-        default,
         alias = "dispatchProfile",
         skip_serializing_if = "Option::is_none"
     )]
@@ -663,7 +654,6 @@ impl Default for AgentChannelConfig {
             model: None,
             reasoning_effort: None,
             peer_agents: None,
-            quality_feedback_injection: None,
             dispatch_profile: None,
             isolate_override: None,
             cache_ttl_minutes: None,
@@ -706,77 +696,6 @@ impl AgentChannelConfig {
         }
         names
     }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct MeetingSettings {
-    pub channel_name: String,
-    #[serde(default)]
-    pub max_rounds: Option<u32>,
-    #[serde(
-        default,
-        alias = "maxParticipants",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub max_participants: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary_agent: Option<MeetingSummaryAgentDef>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub available_agents: Vec<MeetingAgentEntry>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(untagged)]
-pub enum MeetingSummaryAgentDef {
-    Static(String),
-    Dynamic {
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        rules: Vec<MeetingSummaryRuleDef>,
-        default: String,
-    },
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct MeetingSummaryRuleDef {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub keywords: Vec<String>,
-    pub agent: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(untagged)]
-pub enum MeetingAgentEntry {
-    RoleId(String),
-    Detailed(MeetingAgentDef),
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
-pub struct MeetingAgentDef {
-    pub role_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub keywords: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_file: Option<String>,
-    #[serde(
-        default,
-        alias = "domainSummary",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub domain_summary: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub strengths: Vec<String>,
-    #[serde(default, alias = "taskTypes", skip_serializing_if = "Vec::is_empty")]
-    pub task_types: Vec<String>,
-    #[serde(default, alias = "antiSignals", skip_serializing_if = "Vec::is_empty")]
-    pub anti_signals: Vec<String>,
-    #[serde(
-        default,
-        alias = "providerHint",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub provider_hint: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -2466,20 +2385,9 @@ fn default_memento_mcp_server() -> Option<(String, McpServerConfig)> {
 }
 
 impl Config {
-    fn with_runtime_source(mut self, path: &Path, contents: &str) -> Self {
-        let explicitly_empty = serde_yaml::from_str::<serde_yaml::Value>(contents)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("meeting")?
-                    .get("available_agents")?
-                    .as_sequence()
-                    .map(Vec::is_empty)
-            })
-            .unwrap_or(false);
+    fn with_runtime_source(mut self, path: &Path) -> Self {
         self.runtime_source = Some(RuntimeConfigSource {
             path: std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()),
-            meeting_available_agents_explicitly_empty: explicitly_empty,
         });
         self
     }
@@ -2548,7 +2456,6 @@ impl Default for Config {
             mcp_servers: std::collections::BTreeMap::new(),
             review_mcp_allowlist: Vec::new(),
             agents: Vec::new(),
-            meeting: None,
             github: GitHubConfig::default(),
             policies: PoliciesConfig::default(),
             data: DataConfig::default(),
@@ -2583,7 +2490,7 @@ pub fn load() -> Result<Config> {
         .with_context(|| format!("Failed to parse config: {path_display}"))?;
     let runtime_root = runtime_root_for_config_path(&path);
     let config = config
-        .with_runtime_source(&path, &contents)
+        .with_runtime_source(&path)
         .apply_runtime_defaults()
         .resolve_runtime_relative_paths(runtime_root.as_deref());
     register_config_secrets(&config);
@@ -2604,7 +2511,7 @@ pub fn load_from_path(path: &Path) -> Result<Config> {
         .with_context(|| format!("Failed to parse config {}", path.display()))?;
     let runtime_root = runtime_root_for_config_path(path);
     let config = config
-        .with_runtime_source(path, &contents)
+        .with_runtime_source(path)
         .apply_runtime_defaults()
         .resolve_runtime_relative_paths(runtime_root.as_deref());
     register_config_secrets(&config);
@@ -2862,7 +2769,7 @@ pub fn load_graceful() -> Config {
         Ok(contents) => match serde_yaml::from_str::<Config>(&contents) {
             Ok(cfg) => {
                 let runtime_root = runtime_root_for_config_path(&path);
-                cfg.with_runtime_source(&path, &contents)
+                cfg.with_runtime_source(&path)
                     .apply_runtime_defaults()
                     .resolve_runtime_relative_paths(runtime_root.as_deref())
             }

@@ -1547,13 +1547,6 @@ test or turning it `#[ignore]` needs an exact ID and kind row in
   - `src/services/discord/router/message_handler/headless_turn.rs` (giant review surface; +1 from #4309 threading the provider-known Claude-harness flag into worker-local per-turn prompt assembly; +1 from #4117 delaying the recovery-context take past the goal-lifecycle Consumed return; -207 from #4119 — inline watchdog loop extracted to the shared watchdog.rs timeout-notice helper; #3751 routes paused-watcher attach through owner-channel persistence helper with no net LoC change; +74 from #family-profile-probe DM-fresh provider session: `dm_fresh_routine_turn` discriminator routes a fresh DM routine turn through the shared `/goal fresh` machinery (`force_fresh_provider_session = goal_fresh || dm_fresh`) — thorough clear (in-memory + DB + stale id) + Claude TUI runtime-binding clear (`tui_prompt_dedupe::clear_tmux_runtime_binding`) + DB/live-TUI restore skip + launch fresh flag, so neither the persisted id nor the live tmux pane is reused (codex review P1/R2/R3 — four reuse layers: in-memory, DB, Codex wrapper, Claude TUI runtime-binding recovery); the `/goal` prompt rewrite stays goal-only so the probe prompt is sent verbatim; so a fresh DM routine turn never resumes the accumulated per-channel session (memento caseId is the only cross-run continuity); -45 from #3591 100턴 세션 리셋(AssistantTurnCap) 제거: reset 판정/clear/DB clear/display 블록 삭제; -2 from #3588 idle 세션 리셋 제거(IdleExpired display arm + `now` 인자 정리); +49 from #4305 recording the durable clear boundary for /goal-fresh and DM-fresh plus the routine identity-change path; +8 from #4571 wiring the native typing indicator spawn + per-turn identity into the non-silent headless turn path; +49 from #4658 scheduled-snapshot session isolation (incl. F1 non-disruption fix): `scheduled_snapshot_session_label` derives the ADK session key from the reservation label (not the channel name); the snapshot turn is deliberately kept OUT of `fresh_context_severance` (which records a DURABLE channel clear boundary + wipes the channel's in-memory provider session) and instead cold-starts by dropping the LOCAL session_id and disables live channel_recent_context via a dedicated `scheduled_snapshot_context` gate — so it runs isolated (DB `sessions` writeback is session_key-keyed) and never disturbs the channel's live session/continuity (AC-2);
     headless Discord turn launch/terminal-response path split from the router
     message handler; accepted turns have no elapsed or silence deadline).
-  - `src/services/discord/meeting_orchestrator.rs` (#4712 de-giant: cohesive
-    participant-selection, lifecycle, meeting-round, record-persistence, and
-    selection-runtime clusters moved verbatim into `meeting_orchestrator/`
-    child modules, leaving the root and every child below 1000 production lines.
-    The root retains shared domain types, state-machine/artifact seams, command
-    parsing, and explicit API re-exports; the former frozen marker is released
-    and its registry entry removed under the ghost-registration rule).
   - `src/services/discord/turn_bridge/tmux_runtime.rs` (below the giant threshold; provider
     stop-token/tmux binding runtime + the async interrupt/cancel/hard-stop
     orchestration + session-teardown. #3169: the claude-anonymous-teardown
@@ -1979,7 +1972,6 @@ test or turning it `#[ignore]` needs an exact ID and kind row in
     `src/server/routes/docs/inventory/endpoints/`; keep new API-docs data in
     those child modules and preserve `scripts/check_api_docs_coverage.py`.
   - `src/server/routes/escalation.rs` (giant review surface; +3 from #4486 UtilityBotRole alias typing, mechanical/non-behavioral).
-  - `src/server/routes/meetings.rs` (giant review surface; SQL extracted to `src/db/meetings.rs` in #3570 slice 1; +24 from #3742 explicit shared GitHub-only issue creation outcomes).
   - `src/server/routes/review_verdict/decision_route.rs` was decomposed in
     #3038 slice 1 and S1-relocated into a 26-line route shim delegating to
     `src/services/review_decision.rs` plus sub-1000-line service modules under
@@ -2496,7 +2488,6 @@ Measured giant paths (planning metadata remains manual):
 - `src/server/routes/agents_setup.rs`
 - `src/server/routes/health_api.rs`
 - `src/server/routes/kanban.rs`
-- `src/server/routes/meetings.rs`
 - `src/server/routes/resume.rs`
 - `src/services/auto_queue.rs`
 - `src/services/auto_queue/activate_command.rs`

@@ -565,7 +565,6 @@ mod send_source_tests {
         assert!(is_allowed_send_source("lifecycle_notifier"));
         assert!(is_allowed_send_source("routine-runtime"));
         assert!(is_allowed_send_source("slo_alerter"));
-        assert!(is_allowed_send_source("quality_regression_alerter"));
         assert!(is_allowed_send_source("auto-queue-monitor"));
         assert!(is_allowed_send_source("inventory"));
         assert!(is_allowed_send_source("voice"));

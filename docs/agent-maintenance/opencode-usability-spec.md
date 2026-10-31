@@ -48,7 +48,6 @@ not. The provider dispatch still routes OpenCode through the same high-level
 execution switch:
 
 - simple calls: `src/services/provider_exec.rs:124-126`
-- structured/streaming calls: `src/services/provider_exec.rs:243-256`
 - Discord router calls: `src/services/discord/router/message_handler/provider_dispatch.rs`
   (`execute`, `LegacyDispatchKind::OpenCode` arm)
 

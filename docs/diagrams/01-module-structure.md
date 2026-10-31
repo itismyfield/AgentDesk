@@ -63,7 +63,6 @@ package "Server  (src/server/)" as ServerPkg #Honeydew {
         [auto_queue.rs] as RAutoQueue
         [pipeline.rs] as RPipeline
         [github.rs / github_dashboard.rs] as RGithub
-        [meetings.rs] as RMeetings
         [analytics.rs / stats.rs] as RAnalytics
         [settings.rs / onboarding.rs] as RSettings
         [discord.rs / messages.rs] as RDiscord
@@ -168,7 +167,7 @@ package "Discord Service  (src/services/discord/)" as DiscordPkg #AliceBlue {
         [control / session] as CmdControl
         [config / model_picker] as CmdConfig
         [diagnostics / help] as CmdDiag
-        [meeting_cmd / skill] as CmdMeeting
+        [skill] as CmdSkill
         [receipt] as CmdReceipt
     }
 
@@ -181,7 +180,6 @@ package "Discord Service  (src/services/discord/)" as DiscordPkg #AliceBlue {
     [session_runtime.rs] as SessRT
     [prompt_builder/] as PromptBuilder
     [shared_memory.rs] as SharedMem
-    [meeting_orchestrator.rs] as MeetingOrch
     [model_catalog.rs] as ModelCat
     [health.rs\n(HealthRegistry)] as DiscHealth
     [settings.rs] as DiscSettings

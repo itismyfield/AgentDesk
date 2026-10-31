@@ -1,7 +1,6 @@
 use super::dto::{
     AnalyticsResponse, AuditLogsParams, AuditLogsResponse, InvariantsResponse,
-    ObservabilityResponse, PolicyHooksParams, PolicyHooksResponse, QualityEventsResponse,
-    SkillsTrendResponse,
+    ObservabilityResponse, PolicyHooksParams, PolicyHooksResponse, SkillsTrendResponse,
 };
 use serde_json::{Value, json};
 use sqlx::{PgPool, QueryBuilder, Row};
@@ -63,63 +62,6 @@ pub async fn query_analytics_pg(
         generated_at: chrono::Utc::now().to_rfc3339(),
         counters,
         events,
-    })
-}
-
-pub async fn query_agent_quality_events_pg(
-    pool: &PgPool,
-    filters: &crate::services::observability::AgentQualityFilters,
-) -> Result<QualityEventsResponse, sqlx::Error> {
-    let days = filters.days.clamp(1, 365);
-    let limit = filters.limit.clamp(1, 1000) as i64;
-    let mut query = QueryBuilder::new(
-        "SELECT id::TEXT AS id,
-                source_event_id,
-                correlation_id,
-                agent_id,
-                provider,
-                channel_id,
-                card_id,
-                dispatch_id,
-                event_type::TEXT AS event_type,
-                payload::TEXT AS payload,
-                created_at::TEXT AS created_at
-           FROM agent_quality_event
-          WHERE created_at >= NOW() - (",
-    );
-    query.push_bind(days).push("::BIGINT * INTERVAL '1 day')");
-    if let Some(agent_id) = filters.agent_id.as_deref() {
-        query.push(" AND agent_id = ").push_bind(agent_id);
-    }
-    query
-        .push(" ORDER BY created_at DESC LIMIT ")
-        .push_bind(limit);
-
-    let events = query
-        .build()
-        .fetch_all(pool)
-        .await?
-        .into_iter()
-        .map(|row| {
-            json!({
-                "id": row.try_get::<String, _>("id").unwrap_or_default(),
-                "source_event_id": row.try_get::<Option<String>, _>("source_event_id").ok().flatten(),
-                "correlation_id": row.try_get::<Option<String>, _>("correlation_id").ok().flatten(),
-                "agent_id": row.try_get::<Option<String>, _>("agent_id").ok().flatten(),
-                "provider": row.try_get::<Option<String>, _>("provider").ok().flatten(),
-                "channel_id": row.try_get::<Option<String>, _>("channel_id").ok().flatten(),
-                "card_id": row.try_get::<Option<String>, _>("card_id").ok().flatten(),
-                "dispatch_id": row.try_get::<Option<String>, _>("dispatch_id").ok().flatten(),
-                "event_type": row.try_get::<String, _>("event_type").unwrap_or_default(),
-                "payload": row.try_get::<Option<String>, _>("payload").ok().flatten(),
-                "created_at": row.try_get::<String, _>("created_at").unwrap_or_default(),
-            })
-        })
-        .collect();
-
-    Ok(QualityEventsResponse {
-        events,
-        generated_at_ms: chrono::Utc::now().timestamp_millis(),
     })
 }
 

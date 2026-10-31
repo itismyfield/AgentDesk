@@ -789,7 +789,6 @@ pub(crate) async fn list_dispatched_sessions_pg(
             a.department,
             a.sprite_number,
             a.avatar_emoji,
-            COALESCE(a.xp, 0)::BIGINT AS stats_xp,
             d.name AS department_name,
             d.name_ko AS department_name_ko,
             d.color AS department_color,
@@ -837,7 +836,6 @@ pub(crate) async fn list_dispatched_sessions_pg(
             a.department,
             a.sprite_number,
             a.avatar_emoji,
-            COALESCE(a.xp, 0)::BIGINT AS stats_xp,
             d.name AS department_name,
             d.name_ko AS department_name_ko,
             d.color AS department_color,
@@ -928,9 +926,6 @@ pub(crate) async fn list_dispatched_sessions_pg(
         let avatar_emoji: Option<String> = row
             .try_get("avatar_emoji")
             .map_err(|error| format!("decode postgres avatar_emoji for session {id}: {error}"))?;
-        let stats_xp: i64 = row
-            .try_get("stats_xp")
-            .map_err(|error| format!("decode postgres stats_xp for session {id}: {error}"))?;
         let department_name: Option<String> = row.try_get("department_name").map_err(|error| {
             format!("decode postgres department_name for session {id}: {error}")
         })?;
@@ -1079,7 +1074,6 @@ pub(crate) async fn list_dispatched_sessions_pg(
             "department_id": department_id,
             "sprite_number": sprite_number,
             "avatar_emoji": avatar_emoji.unwrap_or_else(|| "\u{1F916}".to_string()),
-            "stats_xp": stats_xp,
             "connected_at": null,
             "department_name": department_name,
             "department_name_ko": department_name_ko,
@@ -1999,7 +1993,6 @@ pub(crate) async fn load_session_event_payload_pg(
             a.department,
             a.sprite_number,
             a.avatar_emoji,
-            COALESCE(a.xp, 0)::BIGINT AS stats_xp,
             s.thread_channel_id,
             d.name AS department_name,
             d.name_ko AS department_name_ko,
@@ -2046,7 +2039,6 @@ pub(crate) async fn load_session_event_payload_pg(
         "department_id": row.try_get::<Option<String>, _>("department").map_err(|error| format!("decode postgres department for session event {session_key}: {error}"))?,
         "sprite_number": row.try_get::<Option<i64>, _>("sprite_number").map_err(|error| format!("decode postgres sprite_number for session event {session_key}: {error}"))?,
         "avatar_emoji": row.try_get::<Option<String>, _>("avatar_emoji").map_err(|error| format!("decode postgres avatar_emoji for session event {session_key}: {error}"))?.unwrap_or_else(|| "\u{1F916}".to_string()),
-        "stats_xp": row.try_get::<i64, _>("stats_xp").map_err(|error| format!("decode postgres stats_xp for session event {session_key}: {error}"))?,
         "thread_channel_id": row.try_get::<Option<String>, _>("thread_channel_id").map_err(|error| format!("decode postgres thread_channel_id for session event {session_key}: {error}"))?,
         "department_name": row.try_get::<Option<String>, _>("department_name").map_err(|error| format!("decode postgres department_name for session event {session_key}: {error}"))?,
         "department_name_ko": row.try_get::<Option<String>, _>("department_name_ko").map_err(|error| format!("decode postgres department_name_ko for session event {session_key}: {error}"))?,

@@ -27,9 +27,8 @@ const EXTRA_STAGGER_PER_JOB: Duration = Duration::from_secs(15);
 // `MaintenanceSchedule::every`). On a cold start `startup_stagger_for_index`
 // adds `EXTRA_STAGGER_PER_JOB * <registry index>` on top of this base, so the
 // two mechanisms compose: the index-based auto-stagger fans the jobs out, and
-// the per-job bases below fine-tune the ordering *within* that fan-out (e.g.
-// keeping the quality rollup ahead of the alerters that read its aggregates on
-// the same tick). They are intentionally NOT folded into the auto-stagger —
+// the per-job bases below fine-tune the ordering *within* that fan-out. They
+// are intentionally NOT folded into the auto-stagger —
 // doing so would change the real boot timings. The values here are byte-for-byte
 // identical to the historical inline literals; naming them just makes the
 // existing schedule self-describing (cf. `REREVIEW_TRANSIENT_DIRTY_RETRY_DELAY`
@@ -39,16 +38,8 @@ const EXTRA_STAGGER_PER_JOB: Duration = Duration::from_secs(15);
 /// heartbeat is among the earliest maintenance signals without racing the pool.
 const NOOP_HEARTBEAT_STARTUP_STAGGER: Duration = Duration::from_secs(10);
 
-/// `agent_quality_rollup`: zero base so the hourly rollup runs *before* the
-/// regression + relay alerters below that read its aggregates on the same tick.
-const AGENT_QUALITY_ROLLUP_STARTUP_STAGGER: Duration = Duration::from_secs(0);
-
-/// `quality_regression_alerter`: sequenced after `agent_quality_rollup` (base 0)
-/// on the same hourly tick so alerts evaluate against the freshest aggregates.
-const QUALITY_REGRESSION_ALERTER_STARTUP_STAGGER: Duration = Duration::from_secs(15);
-
-/// `relay_signal_alerter`: sequenced after the quality alerter on the same
-/// hourly tick so the two jobs do not race for a connection at boot.
+/// `relay_signal_alerter`: offset from the other hourly jobs so they do not
+/// race for a connection at boot.
 const RELAY_SIGNAL_ALERTER_STARTUP_STAGGER: Duration = Duration::from_secs(30);
 
 /// `storage.cancel_tombstone_prune`: small boot offset so the tombstone prune
@@ -127,8 +118,6 @@ impl MaintenanceJobRegistry {
     ) -> Self {
         Self::new(vec![
             Arc::new(NoopHeartbeatJob),
-            Arc::new(AgentQualityRollupJob),
-            Arc::new(QualityRegressionAlerterJob),
             Arc::new(RelaySignalAlerterJob),
             Arc::new(CancelTombstonePruneJob),
             Arc::new(PromptManifestRetentionJob::new(prompt_manifest_retention)),
@@ -176,78 +165,13 @@ impl MaintenanceJob for NoopHeartbeatJob {
     }
 }
 
-struct AgentQualityRollupJob;
-
-impl MaintenanceJob for AgentQualityRollupJob {
-    fn name(&self) -> &'static str {
-        "agent_quality_rollup"
-    }
-
-    fn schedule(&self) -> MaintenanceSchedule {
-        MaintenanceSchedule::every(
-            Duration::from_secs(60 * 60),
-            AGENT_QUALITY_ROLLUP_STARTUP_STAGGER,
-        )
-    }
-
-    fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
-        Box::pin(async move {
-            let report = crate::services::observability::run_agent_quality_rollup_pg(pool).await?;
-            tracing::info!(
-                job = self.name(),
-                upserted_rows = report.upserted_rows,
-                "agent quality aggregation rollup completed; alerts are owned by quality_regression_alerter"
-            );
-            Ok(())
-        })
-    }
-}
-
-/// #1104 (911-4) hourly regression rule engine.
-///
-/// Sole regression-alert authority. Runs the rule engine in
-/// `services::agent_quality::regression_alerts`
-/// against the `agent_quality_daily` rollup. The 15s startup stagger keeps
-/// it sequenced AFTER `agent_quality_rollup` (stagger=0) on the same tick
-/// so alerts always evaluate against the freshest aggregates.
-struct QualityRegressionAlerterJob;
-
-impl MaintenanceJob for QualityRegressionAlerterJob {
-    fn name(&self) -> &'static str {
-        "quality_regression_alerter"
-    }
-
-    fn schedule(&self) -> MaintenanceSchedule {
-        MaintenanceSchedule::every(
-            Duration::from_secs(60 * 60),
-            QUALITY_REGRESSION_ALERTER_STARTUP_STAGGER,
-        )
-    }
-
-    fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
-        Box::pin(async move {
-            let sent =
-                crate::services::agent_quality::regression_alerts::run_regression_alerter_pg(pool)
-                    .await?;
-            tracing::info!(
-                job = self.name(),
-                alerts_dispatched = sent,
-                "agent quality regression alerter completed"
-            );
-            Ok(())
-        })
-    }
-}
-
 /// #3561 — hourly relay-loss signal monitor.
 ///
 /// Aggregates the restart-safe `observability_events` stream (relay root-cause
 /// counters + offset invariant violations) over the trailing hour and reports
 /// every signal whose count crosses the (conservative, config-overridable)
 /// threshold as a WARN line plus a `relay_signal_threshold_crossed` event
-/// (#5993: no Discord channel, so no configuration can silence it). The 30s
-/// startup stagger sequences it after the quality alerter on the same hourly
-/// tick so the two jobs do not race for a connection at boot.
+/// (#5993: no Discord channel, so no configuration can silence it).
 struct RelaySignalAlerterJob;
 
 impl MaintenanceJob for RelaySignalAlerterJob {

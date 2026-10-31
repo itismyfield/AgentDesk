@@ -591,7 +591,6 @@ mod voice_alias_precheck_tests {
                 reasoning_effort: None,
                 peer_agents: None,
                 thread_inherit: true,
-                quality_feedback_injection: None,
                 dispatch_profile: None,
                 isolate_override: None,
                 cache_ttl_minutes: None,

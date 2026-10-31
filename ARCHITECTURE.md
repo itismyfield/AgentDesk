@@ -329,7 +329,6 @@ src/
 │   ├── intake_outbox_open_status.rs
 │   ├── intake_outbox_status.rs
 │   ├── kanban.rs
-│   ├── meetings.rs
 │   ├── mod.rs
 │   ├── o_channel_activation.rs
 │   ├── o_channel_activation_fence_tests.rs
@@ -398,7 +397,6 @@ src/
 │   │   ├── log_ops.rs
 │   │   ├── message_ops.rs
 │   │   ├── pipeline_ops.rs
-│   │   ├── quality_ops.rs
 │   │   ├── queue_ops.rs
 │   │   ├── read_bridge.rs
 │   │   ├── review_automation_ops.rs
@@ -632,7 +630,6 @@ src/
 │   │   ├── kanban_repos.rs
 │   │   ├── kanban_snapshot_tests.rs
 │   │   ├── maintenance.rs
-│   │   ├── meetings.rs
 │   │   ├── memory_api.rs
 │   │   ├── message_outbox.rs
 │   │   ├── messages.rs
@@ -708,9 +705,6 @@ src/
 │   ├── worker_registry.rs
 │   └── ws.rs
 ├── services/
-│   ├── agent_quality/
-│   │   ├── mod.rs
-│   │   └── regression_alerts.rs
 │   ├── agent_recovery/
 │   │   ├── durable/
 │   │   │   ├── operations.rs
@@ -1642,12 +1636,6 @@ src/
 │   │   │   └── guard_tests.rs
 │   │   ├── mailbox_finish/
 │   │   │   └── closed_actor_tests.rs
-│   │   ├── meeting_orchestrator/
-│   │   │   ├── lifecycle.rs
-│   │   │   ├── records.rs
-│   │   │   ├── rounds.rs
-│   │   │   ├── selection.rs
-│   │   │   └── selection_runtime.rs
 │   │   ├── model_catalog/
 │   │   │   ├── claude/
 │   │   │   │   └── tests/
@@ -3088,9 +3076,6 @@ src/
 │   │   ├── mailbox_probe.rs
 │   │   ├── mailbox_stop.rs
 │   │   ├── mcp_credential_watcher.rs
-│   │   ├── meeting_artifact_store.rs
-│   │   ├── meeting_orchestrator.rs
-│   │   ├── meeting_state_machine.rs
 │   │   ├── metrics.rs
 │   │   ├── mod.rs
 │   │   ├── model_catalog.rs
@@ -3337,7 +3322,6 @@ src/
 │   │   ├── metrics.rs
 │   │   ├── mod.rs
 │   │   ├── pg_io.rs
-│   │   ├── queries.rs
 │   │   ├── recovery_audit.rs
 │   │   ├── relay_signal_alert.rs
 │   │   ├── retention.rs

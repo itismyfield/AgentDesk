@@ -1162,6 +1162,7 @@ fn execute_command_simple_inner(
     }
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn execute_command_streaming(
     prompt: &str,
