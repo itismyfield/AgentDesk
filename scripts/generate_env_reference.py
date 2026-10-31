@@ -45,7 +45,7 @@ from generate_inventory_docs import (  # noqa: E402
     is_test_file,
     scan_balanced,
 )
-from rust_lex import StripState, strip_line  # noqa: E402
+from rust_lex import StripState, cfg_item_end, strip_line  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_ROOT = REPO_ROOT / "src"
@@ -62,7 +62,7 @@ _LITERAL_READ_RE = re.compile(
 )
 # `env::var(SOME_CONST)` — resolved through the constant table below.
 _CONST_READ_RE = re.compile(
-    r"(?<![A-Za-z0-9_])(?:std::)?env::var(?:_os)?\(\s*(?P<ident>[A-Z][A-Z0-9_]*)\s*\)"
+    r"(?<![A-Za-z0-9_])(?:std::)?env::var(?:_os)?\(\s*(?:(?:crate|super|self)::(?:\w+::)*)?(?P<ident>[A-Z][A-Z0-9_]*)\s*\)"
 )
 # `const FOO: &str = "AGENTDESK_..."` (also `pub`, `pub(crate)`, `static`,
 # `&'static str`; the literal may sit on the next line after a rustfmt wrap).
@@ -74,7 +74,7 @@ _HELPER_READ_RE = re.compile(
     r"(?<![A-Za-z0-9_])(?P<helper>[a-z_]*env[a-z_]*)\(\s*[^()\"]*?\"(?P<name>" + ENV_NAME + r")\""
 )
 _HELPER_CONST_READ_RE = re.compile(
-    r"(?<![A-Za-z0-9_])(?P<helper>[a-z_]*env[a-z_]*)\(\s*(?P<ident>[A-Z][A-Z0-9_]*)\s*[,)]"
+    r"(?<![A-Za-z0-9_])(?P<helper>[a-z_]*env[a-z_]*)\(\s*(?:(?:crate|super|self)::(?:\w+::)*)?(?P<ident>[A-Z][A-Z0-9_]*)\s*[,)]"
 )
 _CFG_ITEM_RE = re.compile(r"#\[\s*cfg\s*\((?P<predicate>[^]]*?)\)\s*\]")
 _HELPER_EXCLUDE = {"set_var", "remove_var", "env_remove", "env"}
@@ -164,27 +164,10 @@ def blank_test_modules(text: str) -> str:
             continue
         if not cfg_requires_test(match.group("predicate")):
             continue
-        index = match.end()
-        field = re.match(r"\s*(?:pub(?:\([^)]*\))?\s+)?\w+\s*(?::(?!:)|,)", code[index:])
         try:
-            while index < len(code):
-                char = code[index]
-                if char in "([":
-                    _, index = scan_balanced(code, index, char, ")" if char == "(" else "]")
-                    continue
-                if char == "{":
-                    _, index = scan_balanced(code, index, "{", "}")
-                    if not field:
-                        break
-                    continue
-                if char == "}":
-                    break
-                if char == ";" or (field and char == ","):
-                    index += 1
-                    break
-                index += 1
+            index = cfg_item_end(code, match.end(), scan_balanced)
         except Exception as error:  # pragma: no cover - defensive
-            raise ParseError(f"unbalanced test item at offset {index}: {error}") from error
+            raise ParseError(f"unbalanced test item at offset {match.end()}: {error}") from error
         result[match.start():index] = ["\n" if c == "\n" else " " for c in text[match.start():index]]
         cursor = index
     return "".join(result)

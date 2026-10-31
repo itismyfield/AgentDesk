@@ -151,9 +151,33 @@ class SourceTreeStabilityTests(unittest.TestCase):
     def test_named_helper_argument_records_the_reader_file(self) -> None:
         self.write("src/names.rs", 'pub const FLAG_ENV: &str = "AGENTDESK_DYNAMIC";')
         self.write("src/consumer.rs", 'fn read() -> bool { crate::utils::env_flag(FLAG_ENV, false) }')
+        for prefix in ("crate::names::", "super::", "self::"):
+            suffix = prefix.split("::")[0]
+            self.write(f"src/direct_{suffix}.rs", f'fn read() {{ std::env::var({prefix}FLAG_ENV); }}')
+            self.write(f"src/helper_{suffix}.rs", f'fn read() {{ env_flag({prefix}FLAG_ENV, false); }}')
         row = self.row(self.render(), "AGENTDESK_DYNAMIC")
         self.assertIn("`src/names.rs`", row)
         self.assertIn("`src/consumer.rs`", row)
+        for suffix in ("crate", "super", "self"):
+            self.assertIn(f"`src/direct_{suffix}.rs`", row)
+            self.assertIn(f"`src/helper_{suffix}.rs`", row)
+
+    def test_cfg_test_list_elements_preserve_production_readers(self) -> None:
+        for source in (
+            'fn f(k: K) { match k { #[cfg(test)] K::T => true, _ => std::env::var("AGENTDESK_PROD_LIST").is_ok() } }',
+            'fn f(#[cfg(test)] mut p: u8) { std::env::var("AGENTDESK_PROD_LIST"); }',
+            'fn f() { K::Pair(#[cfg(test)] K::T, || std::env::var("AGENTDESK_PROD_LIST")); }',
+            'fn f(k: K) { match k { #[cfg(test)] K::T => { env_flag("ADK_TEST_HIDDEN", false) }, _ => std::env::var("AGENTDESK_PROD_LIST").is_ok() } }',
+            'fn f(k: K) { match k { #[cfg(test)] K::T => { env_flag("ADK_TEST_HIDDEN", false) } _ => std::env::var("AGENTDESK_PROD_LIST").is_ok() } }',
+            '#[cfg(test)] #[inline] fn gone() { env_flag("ADK_TEST_HIDDEN", false); } fn kept() { std::env::var("AGENTDESK_PROD_LIST"); }',
+            '#[cfg(test)] union Probe { byte: u8 } fn kept() { std::env::var("AGENTDESK_PROD_LIST"); }',
+            '#[cfg(test)] gone! { env_flag("ADK_TEST_HIDDEN", false); } fn kept() { std::env::var("AGENTDESK_PROD_LIST"); }',
+        ):
+            with self.subTest(source=source):
+                self.write("src/list.rs", source)
+                output = self.render()
+                self.assertIn("AGENTDESK_PROD_LIST", output)
+                self.assertNotIn("ADK_TEST_HIDDEN", output)
 
     def test_external_helper_names_survive_parser_migration(self) -> None:
         self.write("src/external.rs", '''
@@ -198,6 +222,12 @@ class SourceTreeStabilityTests(unittest.TestCase):
 
 
 class RepositoryTests(unittest.TestCase):
+    def test_explicit_config_override_has_a_reference_description(self) -> None:
+        variables = gen.collect_variables([REPO_ROOT / "src/config/config_path/selection.rs"])
+        row = next(line for line in gen.render(variables).splitlines()
+                   if line.startswith("| `AGENTDESK_CONFIG` |"))
+        self.assertTrue(row.rsplit("|", 2)[1].strip(), row)
+
     def test_generated_doc_is_deterministic_and_covers_known_variables(self) -> None:
         variables = gen.collect_variables(gen.production_rust_files())
         first = gen.render(variables)

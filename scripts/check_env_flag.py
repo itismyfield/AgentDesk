@@ -10,7 +10,7 @@ import re
 import subprocess
 
 from generate_inventory_docs import cfg_requires_test, is_test_file, scan_balanced
-from rust_lex import StripState, strip_line
+from rust_lex import StripState, cfg_item_end, strip_line
 
 ROOT = Path(__file__).resolve().parents[1]
 READ = re.compile(r'\b(?:std\s*::\s*)?env\s*::\s*var(?:_os)?\s*\(')
@@ -38,13 +38,7 @@ def production_code(text):
     for match in CFG.finditer(code):
         if match[1] is not None and not cfg_requires_test(match[1]):
             continue
-        rest = code[match.end():]
-        field = re.match(r'\s*(?:pub(?:\([^)]*\))?\s+)?\w+\s*(?::(?!:)|,)', rest)
-        item = re.search(r',' if field else r'[;{}]', rest)
-        if item is None:
-            raise ValueError('unterminated cfg(test) item')
-        start = match.end() + item.start()
-        end = scan_balanced(code, start, '{', '}')[1] if code[start] == '{' else start + (code[start] != '}')
+        end = cfg_item_end(code, match.end(), scan_balanced)
         blanked[match.start():end] = ['\n' if c == '\n' else ' ' for c in code[match.start():end]]
     return ''.join(blanked)
 
@@ -113,7 +107,7 @@ def sites(text):
                 reads.add((function, argument, text.count('\n', 0, pos) + 1, pos))
             for name in re.findall(r'\b\w+\b', statement):
                 reads.update(tainted.get(name, ()))
-            comparison = (re.search(r'\bB\b', statement) and re.search(r'==|!=|\bmatches\s*!|\bmatch\b|\.\s*eq(?:_ignore_ascii_case)?\s*\(', statement)) or re.search(r'\.\s*parse\s*::\s*<\s*bool\s*>', statement)
+            comparison = (re.search(r'\bB\b', statement) and re.search(r'==|!=|\bmatches\s*!|\bmatch\b|\.\s*(?:eq(?:_ignore_ascii_case)?|contains)\s*\(', statement)) or re.search(r'\.\s*parse\s*::\s*<\s*bool\s*>', statement)
             if reads and comparison:
                 for site in reads:
                     found[site[3]] = site[:3]

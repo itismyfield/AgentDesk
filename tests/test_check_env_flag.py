@@ -95,6 +95,8 @@ class EnvFlagGuardTests(unittest.TestCase):
                     'let Some(value) = std::env::var("FLAG").ok() else { return false; }; value.eq("1")',
                     'let Ok(mut value) = std::env::var("FLAG") else { return false; }; value.make_ascii_lowercase(); value.eq("true")',
                     'std::env::var("FLAG").is_ok_and(|v| v.eq_ignore_ascii_case("true"))',
+                    'match 0 { #[cfg(test)] 1 => false, _ => std::env::var("FLAG").as_deref() == Ok("1") }',
+                    'std::env::var("FLAG").is_ok_and(|v| ["1", "true"].contains(&v.as_str()))',
                 ]:
                     with self.subTest(expression=expression):
                         source.write_text('fn enabled() -> bool { ' + expression + ' }')

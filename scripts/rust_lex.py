@@ -25,6 +25,32 @@ from __future__ import annotations
 
 import re
 
+
+def cfg_item_end(code: str, start: int, scan_balanced) -> int:
+    """Find a gated item/list element's end without consuming its parent delimiter."""
+    pos = start
+    while attr := re.match(r"\s*#\[", code[pos:]):
+        _, pos = scan_balanced(code, pos + attr.end() - 1, "[", "]")
+    item = re.match(r"\s*(?:fn|const|static|struct|enum|union|impl|mod|use|type|trait|let|macro_rules|pub|async|unsafe|extern)\b", code[pos:])
+    while pos < len(code):
+        char = code[pos]
+        if char in "([{":
+            block_element = not item and char == "{" and re.search(r"(?:=>|!)\s*$", code[start:pos])
+            _, pos = scan_balanced(code, pos, char, {"(": ")", "[": "]", "{": "}"}[char])
+            if item and char == "{":
+                return pos
+            if block_element:
+                comma = re.match(r"\s*,", code[pos:])
+                return pos + comma.end() if comma else pos
+        elif char in "})]":
+            return pos
+        elif char == ";" or (not item and char == ","):
+            return pos + 1
+        else:
+            pos += 1
+    return pos
+
+
 # Char literal (so `'"'` / `'{'` cannot desync the scanners). Lifetimes (`'a`)
 # do not match and fall through harmlessly.
 _CHAR_LITERAL = re.compile(r"'(\\.|[^'\\])'")

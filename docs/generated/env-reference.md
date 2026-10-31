@@ -62,7 +62,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_CODEX_REASONING_EFFORT` | `src/services/codex.rs` |  |
 | `AGENTDESK_CODEX_REMOTE_TMUX` | `src/services/codex/command_streaming.rs` |  |
 | `AGENTDESK_CODEX_TUI_WARM_FOLLOWUP` | `src/services/codex_tui/warm_followup.rs` |  |
-| `AGENTDESK_CONFIG` | `src/config/config_path/selection.rs`, `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs` |  |
+| `AGENTDESK_CONFIG` | `src/config/config_path/selection.rs`, `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs` | `$AGENTDESK_CONFIG` selects an explicit config path before the normal root search. |
 | `AGENTDESK_CSWAP_PATH` | `src/services/cswap.rs` |  |
 | `AGENTDESK_DCSERVER_LABEL` | `src/cli/dcserver.rs` |  |
 | `AGENTDESK_DCSERVER_LOG_MAX_BYTES` | `src/logging.rs` |  |
@@ -79,7 +79,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_HOOK_RELAY_FAILURE_MARKER_WORKER` | `src/services/claude_tui/hook_relay.rs` |  |
 | `AGENTDESK_HOOK_RELAY_NON_WAIT_WORKER` | `src/services/claude_tui/hook_relay.rs` |  |
 | `AGENTDESK_INSTANCE_ID` | `src/services/cluster/node_registry.rs`, `src/services/tui_prompt_dedupe/binding_context.rs` | Resolve the self instance_id, preferring the value the cluster bootstrap registered (config-driven if present), falling back to the env-var/hostname pair only… |
-| `AGENTDESK_KAKAO_ACCOUNTS` | `src/services/kakao.rs` |  |
+| `AGENTDESK_KAKAO_ACCOUNTS` | `src/services/kakao.rs`, `src/services/kakao/account.rs` |  |
 | `AGENTDESK_KAKAO_CALENDAR_ACCOUNTS` | `src/services/kakao/account.rs` | Separate allowlist: enabling calendar never implicitly grants all message accounts. |
 | `AGENTDESK_KAKAO_CALENDAR_ENABLED` | `src/services/kakao/account.rs` |  |
 | `AGENTDESK_KAKAO_DEFAULT_ACCOUNT` | `src/services/kakao.rs` |  |
