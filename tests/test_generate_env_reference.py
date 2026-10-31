@@ -172,6 +172,19 @@ class SourceTreeStabilityTests(unittest.TestCase):
             '#[cfg(test)] #[inline] fn gone() { env_flag("ADK_TEST_HIDDEN", false); } fn kept() { std::env::var("AGENTDESK_PROD_LIST"); }',
             '#[cfg(test)] union Probe { byte: u8 } fn kept() { std::env::var("AGENTDESK_PROD_LIST"); }',
             '#[cfg(test)] gone! { env_flag("ADK_TEST_HIDDEN", false); } fn kept() { std::env::var("AGENTDESK_PROD_LIST"); }',
+            'fn f() { #[cfg(test)] if tests::bypass() { return; } std::env::var("AGENTDESK_PROD_LIST"); }',
+            'fn f() { #[cfg(test)] if let Some(p) = tests::probe() { return; } std::env::var("AGENTDESK_PROD_LIST"); }',
+            'fn f() { #[cfg(test)] { env_flag("ADK_TEST_HIDDEN", false); } #[cfg(not(test))] { std::env::var("AGENTDESK_PROD_LIST"); } }',
+            'fn f() { #[cfg(test)] match tests::probe() { _ => {} } std::env::var("AGENTDESK_PROD_LIST"); }',
+            'struct Fields { #[cfg(test)] pub probe: bool, live: field_type!(std::env::var("AGENTDESK_PROD_LIST")), }',
+            'fn f() { #[cfg(test)] if tests::bypass() {} else if tests::probe() {} else { env_flag("ADK_TEST_HIDDEN", false); } std::env::var("AGENTDESK_PROD_LIST"); }',
+            'fn f() { #[cfg(test)] let probe = if tests::bypass() {} else { env_flag("ADK_TEST_HIDDEN", false); }; std::env::var("AGENTDESK_PROD_LIST"); }',
+            'fn f(k: K) { match k { #[cfg(test)] K::T { field: _ } | K::U => env_flag("ADK_TEST_HIDDEN", false), _ => std::env::var("AGENTDESK_PROD_LIST").is_ok() } }',
+            'fn f() { #[cfg(test)] for p in tests::probes() {} std::env::var("AGENTDESK_PROD_LIST"); }',
+            'fn f() { #[cfg(test)] while tests::bypass() {} std::env::var("AGENTDESK_PROD_LIST"); }',
+            'fn f() { #[cfg(test)] loop { break; } std::env::var("AGENTDESK_PROD_LIST"); }',
+            'fn f() { #[cfg(test)] K { field: 0 }.probe(env_flag("ADK_TEST_HIDDEN", false))?; std::env::var("AGENTDESK_PROD_LIST"); }',
+            'fn f() { #[cfg(test)] K { field: 0 } + env_flag("ADK_TEST_HIDDEN", false); std::env::var("AGENTDESK_PROD_LIST"); }',
         ):
             with self.subTest(source=source):
                 self.write("src/list.rs", source)

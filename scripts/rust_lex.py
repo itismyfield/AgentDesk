@@ -31,20 +31,25 @@ def cfg_item_end(code: str, start: int, scan_balanced) -> int:
     pos = start
     while attr := re.match(r"\s*#\[", code[pos:]):
         _, pos = scan_balanced(code, pos + attr.end() - 1, "[", "]")
-    item = re.match(r"\s*(?:fn|const|static|struct|enum|union|impl|mod|use|type|trait|let|macro_rules|pub|async|unsafe|extern)\b", code[pos:])
+    item = re.match(r"\s*(?:pub(?:\([^)]*\))?\s+)?(?:fn|const|static|struct|enum|union|impl|mod|use|type|trait|macro_rules|async|unsafe|extern)\b", code[pos:])
+    binding = re.match(r"\s*let\b", code[pos:])
+    statement = re.match(r"\s*(?:(?:if|match|for|while|loop)\b|\{)", code[pos:])
     while pos < len(code):
         char = code[pos]
         if char in "([{":
-            block_element = not item and char == "{" and re.search(r"(?:=>|!)\s*$", code[start:pos])
             _, pos = scan_balanced(code, pos, char, {"(": ")", "[": "]", "{": "}"}[char])
             if item and char == "{":
                 return pos
-            if block_element:
+            if char == "{" and not binding:
                 comma = re.match(r"\s*,", code[pos:])
-                return pos + comma.end() if comma else pos
+                if comma:
+                    return pos + comma.end()
+                continuation = r"else\b" if statement else r"(?:=>|[|.?+*/%&^<>-]|as\b|==|!=)"
+                if not re.match(r"\s*" + continuation, code[pos:]):
+                    return pos
         elif char in "})]":
             return pos
-        elif char == ";" or (not item and char == ","):
+        elif char == ";" or (not (item or binding) and char == ","):
             return pos + 1
         else:
             pos += 1
