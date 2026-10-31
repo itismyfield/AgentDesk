@@ -306,5 +306,7 @@ async fn custody_projection_cut_and_stale_completion_stay_on_the_same_ticket_pg(
 #[path = "owner_custody_tests.rs"]
 mod custody_tests;
 
+#[path = "owner_launch_tests.rs"]
+mod launch_tests;
 #[path = "owner_review_tests.rs"]
 mod review_tests;

@@ -1153,3 +1153,6 @@ fn an_idle_channel_hands_its_front_to_the_turn_start() {
     assert_eq!(fronts[0].1.text, PROMPT);
     assert!(rig.events().is_empty(), "no key: {:?}", rig.events());
 }
+
+#[path = "owner_input_not_sent_tests.rs"]
+mod not_sent;

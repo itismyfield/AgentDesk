@@ -1656,3 +1656,7 @@ async fn unread_idle_composer_consumes_the_queued_head_without_notice_pg() {
         &fixture.pane.session()
     ));
 }
+
+#[cfg(unix)]
+#[path = "queued_head_owner_entry_tests.rs"]
+mod owner_entry;
