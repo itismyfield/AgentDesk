@@ -1191,5 +1191,67 @@ fn an_owner_idle_turn_binds_its_cancel_token_to_its_pane() {
     }
 }
 
+/// A routine, scheduled or HTTP start completes only on its own turn: on a busy channel the drive
+/// leaves it unclaimed at the front for the idle start, while a Discord front goes to the busy turn.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_busy_channel_leaves_a_start_for_its_own_turn() {
+    use crate::services::discord::queue_io::input_owner::admission::admit_with_context;
+    use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let registry = ChannelMailboxRegistry::default();
+    let dir = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap();
+    let mut handed = Vec::new();
+    for (channel, start) in [(7_272_593_u64, true), (7_272_594, false)] {
+        let mailbox = registry.handle(ChannelId::new(channel));
+        let path = dir.join(format!("claude/owner-start/{channel}.json"));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        mailbox.v2_adopt(path, "input-owner".into()).await.unwrap();
+        let original: PendingQueueItem = serde_json::from_value(json!({"author_id":7,
+            "message_id":channel,"channel_id":channel,"source_message_ids":[channel],
+            "queued_generation":1,"text":PROMPT}))
+        .unwrap();
+        let ticket = AdmissionTicket::new();
+        let admitted = match start {
+            true => admit_with_context(&mailbox, &original, ticket, json!({"routine":1})).await,
+            false => admit(&mailbox, &original, ticket).await,
+        };
+        assert!(matches!(
+            admitted,
+            crate::services::discord::queue_io::input_owner::admission::Admission::Accepted(_)
+        ));
+        let token = Arc::new(CancelToken::new());
+        mailbox
+            .restore_active_turn(token, UserId::new(7), MessageId::new(9))
+            .await;
+        let idle: crate::services::discord::queue_io::input_owner::drive::Handoff =
+            Arc::new(|_| Box::pin(async { Err("idle".into()) }));
+        let drive = owner_drive(
+            (mailbox.clone(), None),
+            (ProviderKind::Claude, channel),
+            idle,
+        );
+        let front = mailbox.v2_request(|slot| {
+            let owner = slot.as_mut().ok_or("no owner")?;
+            let front = owner.front().ok_or("no front")?;
+            owner.grant_front(&front)?;
+            Ok(front)
+        });
+        let result = (drive.handoff)(front.await.unwrap()).await;
+        let outstanding = mailbox.v2_request(|slot| Ok(slot.as_ref().unwrap().front_outstanding()));
+        handed.push((result, outstanding.await));
+    }
+    let waits = Err("NotSent(\"synthetic_waits_idle\")".to_string());
+    assert_eq!(
+        handed[0],
+        (waits, Ok(true)),
+        "the start stays granted, unclaimed"
+    );
+    let busy = Err("NotSent(\"busy_turn_unobserved\")".to_string());
+    assert_eq!(
+        handed[1].0, busy,
+        "a Discord front is handed into the busy turn"
+    );
+}
+
 #[path = "owner_input_not_sent_tests.rs"]
 mod not_sent;

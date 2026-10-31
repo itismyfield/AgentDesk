@@ -144,6 +144,10 @@ pub(in crate::services::discord) fn owner_drive(
             (busy.clone(), pool.clone(), provider.clone(), idle.clone());
         Box::pin(async move {
             match mailbox.has_active_turn().await {
+                // A routine, scheduled or HTTP start completes only on its own turn.
+                Ok(true) if synthetic(&mailbox, &front).await => {
+                    Err("NotSent(\"synthetic_waits_idle\")".into())
+                }
                 Ok(true) => hand_busy((mailbox, pool), provider, (channel, front)).await,
                 Ok(false) => idle(front).await,
                 Err(unreachable) => Err(format!("{unreachable:?}")),
@@ -171,6 +175,15 @@ pub(in crate::services::discord) fn owner_drive(
         recheck,
         settled,
     })
+}
+
+/// Whether a front's admission carries a start's context; an unreadable one counts as a start.
+async fn synthetic(mailbox: &ChannelMailboxHandle, (ticket, original): &Front) -> bool {
+    let Some(ticket) = ticket.clone() else {
+        return false;
+    };
+    let context = mailbox.v2_admission_context(original.clone(), ticket);
+    !matches!(context.await, Ok(None))
 }
 
 /// A front into the running turn whose inflight row names the pane; the grant is spent only for a
