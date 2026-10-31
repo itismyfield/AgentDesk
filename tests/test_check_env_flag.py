@@ -60,6 +60,38 @@ class EnvFlagGuardTests(unittest.TestCase):
         self.assertEqual(guard.sites(text), [])
         self.assertEqual(guard.collect([('src/a_tests.rs', 'fn f() { std::env::var("F") == Ok("1"); }')])[0], {})
 
+    def test_cfg_boundary_errors_fail_the_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / 'src/fixture.rs'
+            source.parent.mkdir()
+            for gated, message in (
+                ('K::T => if c { a } else { TEST } &K::U => PROD, _ => 0', 'multiple match arms'),
+                ("K::T => 'b: loop { break TEST; } &K::U => PROD, _ => 0", 'multiple match arms'),
+                ('K::T => { TEST }.probe(PROD), _ => 0', 'before continuation'),
+                ('K::T => { #[cfg(not(test))] PROD }, _ => 0', 'production cfg'),
+            ):
+                with self.subTest(gated=gated):
+                    gated = gated.replace('PROD', 'std::env::var("FLAG") == Ok("1")')
+                    source.write_text('fn f() { match k { #[cfg(test)] ' + gated + ' } }')
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        self.assertEqual(guard.main(['--root', tmp, '--base-ref', '']), 1)
+                    self.assertIn('ENV_FLAG ERROR: src/fixture.rs:', output.getvalue())
+                    self.assertIn(message, output.getvalue())
+                    self.assertNotIn('ENV_FLAG PASS', output.getvalue())
+
+    def test_cfg_boundaries_keep_production_reads(self):
+        read = 'std::env::var("FLAG") == Ok("1")'
+        for body in (
+            "#[cfg(test)] 'b: { TEST }.probe(" + read + ')?; PROD;',
+            '#[cfg(test)] hook(); if live { PROD; }',
+            '#[cfg(test)] if c { hook(); } if live { PROD; }',
+            'K { #[cfg(test)] probe: { false }, ..PROD };',
+            "#[cfg(test)] 'b: { false }; PROD;",
+        ):
+            with self.subTest(body=body):
+                self.assertEqual(len(guard.sites('fn f() { ' + body.replace('PROD', read) + ' }')), 1)
+
     def test_delta_rejects_new_read_without_a_baseline_file_and_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
