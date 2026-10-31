@@ -13,7 +13,7 @@ const PROMPT_PREFIX_BYTES: u64 = 4 * 1024 * 1024;
 
 #[cfg(unix)]
 #[derive(Debug)]
-pub(super) enum SourceFailure {
+pub(crate) enum SourceFailure {
     Pending(String),
     Rejected(String),
 }
@@ -44,7 +44,7 @@ pub(crate) fn verify_source(
 }
 
 #[cfg(unix)]
-pub(super) fn verify_source_detail(
+pub(crate) fn verify_source_detail(
     context: &BindingContext,
     source: &crate::services::tui_prompt_dedupe::binding_events::SourceId,
 ) -> Result<std::path::PathBuf, SourceFailure> {

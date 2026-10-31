@@ -2,7 +2,7 @@
 //! fresh launch context proves it is that execution's first new source and nothing read it before.
 
 use super::*;
-use crate::services::codex_tui::execution_end::identity;
+use crate::services::codex_tui::execution_end::identity::{self, SourceFailure};
 use crate::services::tmux_common::current_tmux_owner_marker;
 use crate::services::tui_o::store::ChannelStore;
 use crate::services::tui_prompt_dedupe::binding_context::execution_context;
@@ -14,6 +14,12 @@ pub(super) enum Fresh {
     Later,
     /// Nothing this process sees can prove it.
     Refused,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Native verifications this thread has run, so a test can count re-judgments.
+    static NATIVE_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The boundary an Unknown bind with no parent gives a source.
@@ -164,26 +170,36 @@ impl<B: BindingEvents> Sources<B> {
             }
             native.dev = fingerprint.dev;
         }
-        match identity::verify_source(&context, &native) {
+        #[cfg(test)]
+        NATIVE_CHECKS.with(|checks| checks.set(checks.get() + 1));
+        match identity::verify_source_detail(&context, &native) {
             Ok(_) => Fresh::Proven,
-            Err(_) => Fresh::Later,
+            Err(SourceFailure::Pending(_)) => Fresh::Later,
+            Err(SourceFailure::Rejected(_)) => Fresh::Refused,
         }
     }
 
-    /// Resolves each proven Codex `Pending{[0]}` link through the ledger, deriving its retained
-    /// spool when `replay`; resume derives it with the rest of the spool instead.
+    #[cfg(test)]
+    pub(crate) fn native_checks() -> usize {
+        NATIVE_CHECKS.with(std::cell::Cell::get)
+    }
+
+    /// Resolves each proven Codex `Pending{[0]}` link, or only `only`'s, through the ledger,
+    /// deriving its retained spool when `replay`; resume derives it with the rest of the spool.
     pub(super) fn settle_codex_fresh<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
         &mut self,
         writer: &mut ChannelWriter<P, L, A>,
         deriver: &mut UnitDeriver,
         owed: &mut impl Owe,
         replay: bool,
+        only: Option<&SourceId>,
     ) -> Result<(), WriterAlarm> {
         if self.provider != ShadowProvider::Codex {
             return Ok(());
         }
         let store = writer.store();
         let due: Vec<(SourceLink, Cursor)> = (self.rotation.links.values())
+            .filter(|link| only.is_none_or(|source| link.source == *source))
             .filter(|link| self.codex_fresh_candidate(store, link))
             .filter_map(|link| {
                 let cursor = store.cursor(&link.source)?;

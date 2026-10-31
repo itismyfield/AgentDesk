@@ -165,6 +165,41 @@ fn held() -> Boundary {
     }
 }
 
+/// An adopted source I bound at seq 1, then O bound by a Startup of another execution at seq 2,
+/// so O holds a link of its own as the incident's predecessor did.
+fn adopted_then_startup() -> (Harness, Arc<FakeBindings>, SourceId, SourceId) {
+    let mut init = None;
+    let harness = Harness::build_channel(CHANNEL, |root| {
+        let root = root.canonicalize().unwrap();
+        let body = [
+            meta(&session(), Utc::now()),
+            message("assistant", "before", "before"),
+        ];
+        let (path, source) = rollout(&root, "init", &session(), &body.concat());
+        let bytes = std::fs::read(&path).unwrap();
+        init = Some(source.clone());
+        vec![InitSource {
+            source_id: source,
+            delivery_start: bytes.len() as u64,
+            prefix_hash: hex::encode(Sha256::digest(&bytes)),
+        }]
+    });
+    let init = init.unwrap();
+    let id = session();
+    let root = init.path.parent().unwrap().to_path_buf();
+    let (_, old) = rollout(&root, "old", &id, &meta(&id, Utc::now()));
+    let bindings = Arc::new(FakeBindings::new());
+    bindings.commit(codex_bind(1, None, &init, BindingCause::Startup, &nonce()));
+    bindings.commit(codex_bind(
+        2,
+        Some(&init),
+        &old,
+        BindingCause::Startup,
+        &nonce(),
+    ));
+    (harness, bindings, init, old)
+}
+
 /// A writer reporting to its own health, with the Sources, deriver and collector of one process.
 struct Engine {
     health: Arc<AlarmHealth>,
@@ -250,23 +285,7 @@ impl Ops {
         change: impl FnOnce(&mut BindingContext),
         fresh_meta: Option<chrono::DateTime<Utc>>,
     ) -> Self {
-        let mut old = None;
-        let harness = Harness::build_channel(CHANNEL, |root| {
-            let root = root.canonicalize().unwrap();
-            let body = [
-                meta(&session(), Utc::now()),
-                message("assistant", "before", "before"),
-            ];
-            let (path, source) = rollout(&root, "old", &session(), &body.concat());
-            let bytes = std::fs::read(&path).unwrap();
-            old = Some(source.clone());
-            vec![InitSource {
-                source_id: source,
-                delivery_start: bytes.len() as u64,
-                prefix_hash: hex::encode(Sha256::digest(&bytes)),
-            }]
-        });
-        let old = old.unwrap();
+        let (harness, bindings, _, old) = adopted_then_startup();
         let root = old.path.parent().unwrap().to_path_buf();
         let fresh_nonce = nonce();
         let context = launched(&root, &fresh_nonce, change);
@@ -276,10 +295,8 @@ impl Ops {
             rollout(&root, "fresh", &id, &[meta(&id, created), turns()].concat());
         let next_id = session();
         let (_, next) = rollout(&root, "next", &next_id, &meta(&next_id, Utc::now()));
-        let bindings = Arc::new(FakeBindings::new());
-        bindings.commit(codex_bind(1, None, &old, BindingCause::Startup, &nonce()));
         bindings.commit(codex_bind(
-            2,
+            3,
             Some(&old),
             &fresh,
             BindingCause::Unknown,
@@ -300,7 +317,7 @@ impl Ops {
             engine.resume().unwrap();
             engine.capture();
             ops.bindings.commit(codex_bind(
-                3,
+                4,
                 Some(&ops.fresh),
                 &next,
                 BindingCause::Startup,
@@ -315,10 +332,15 @@ impl Ops {
             .get_mut(&source_key(&ops.fresh))
             .unwrap();
         assert_eq!(hop.drain_to, Some(len(&ops.fresh_path)));
-        hop.proof = Some(3);
+        hop.proof = Some(4);
         store.write_rotation(&rotation).unwrap();
         store.set_retired(&ops.fresh, true).unwrap();
-        assert_eq!(rotation.successors[&source_key(&old)].proof, None);
+        let link = rotation.link(&old).unwrap();
+        assert_eq!((link.seq, &link.boundary), (2, &Boundary::Owed { from: 0 }));
+        let hop = &rotation.successors[&source_key(&old)];
+        assert_eq!(hop.proof, None);
+        assert_eq!(hop.drain_to, Some(len(&old.path)));
+        assert_eq!(store.cursor(&old).unwrap().captured_through, len(&old.path));
         assert_eq!(boundary(&ops.harness, &ops.fresh), held());
         assert_eq!(resolutions(&ops.harness), 0);
         ops
@@ -353,6 +375,7 @@ async fn the_incident_store_is_owed_from_zero_on_deploy_and_posts_each_answer_on
     drop(engine);
     let mut engine = Engine::start(&ops.harness, &ops.bindings, ShadowProvider::Codex);
     engine.resume().unwrap();
+    assert!(engine.owed.is_empty(), "delivered work is not owed again");
     engine.deliver().await;
     assert_eq!(ops.harness.port.posts(), ANSWERS);
     assert_eq!(resolutions(&ops.harness), 1);
@@ -388,7 +411,15 @@ async fn the_store_refuses_a_second_resolution_its_handle_has_not_read() {
         .store
         .seed_boundary_resolved(CHANNEL, &ops.fresh, 0)
         .unwrap();
-    assert!(store.resolve_codex_fresh_boundary(&ops.fresh, 2).is_err());
+    let seq = store.rotation().unwrap().link(&ops.fresh).unwrap().seq;
+    let refused = store.resolve_codex_fresh_boundary(&ops.fresh, seq);
+    assert!(
+        matches!(
+            &refused,
+            Err(crate::services::tui_o::store::StoreError::Rejected(_))
+        ),
+        "{refused:?}"
+    );
     assert_eq!(resolutions(&ops.harness), 1);
     assert_eq!(
         store.rotation().unwrap().link(&ops.fresh).unwrap().boundary,
@@ -453,31 +484,23 @@ async fn missing_or_mismatched_fresh_evidence_keeps_the_source_held() {
     }
 }
 
-/// The incident shape with one change to the binding log before F's bind.
-fn rebound(
-    prior: impl FnOnce(&Path, &SourceId, &str) -> Vec<BindingEvent>,
-    cause: BindingCause,
-) -> (Harness, Arc<FakeBindings>, SourceId) {
-    let mut old = None;
-    let harness = Harness::build_channel(CHANNEL, |root| {
-        let root = root.canonicalize().unwrap();
-        let body = [
-            meta(&session(), Utc::now()),
-            message("assistant", "before", "before"),
-        ];
-        let (path, source) = rollout(&root, "old", &session(), &body.concat());
-        let bytes = std::fs::read(&path).unwrap();
-        old = Some(source.clone());
-        vec![InitSource {
-            source_id: source,
-            delivery_start: bytes.len() as u64,
-            prefix_hash: hex::encode(Sha256::digest(&bytes)),
-        }]
-    });
-    let old = old.unwrap();
+/// I adopted and O bound, then `prior` events and F's bind by `cause` in F's own execution,
+/// replacing whichever source was bound last.
+struct Rebound {
+    harness: Harness,
+    bindings: Arc<FakeBindings>,
+    init: SourceId,
+    old: SourceId,
+    fresh: SourceId,
+}
+
+type Prior = fn(&Path, &SourceId, &SourceId, &str) -> Vec<BindingEvent>;
+
+fn rebound(prior: Prior, cause: BindingCause, change: fn(&mut BindingContext)) -> Rebound {
+    let (harness, bindings, init, old) = adopted_then_startup();
     let root = old.path.parent().unwrap().to_path_buf();
     let fresh_nonce = nonce();
-    launched(&root, &fresh_nonce, |_| {});
+    launched(&root, &fresh_nonce, change);
     let id = session();
     let (_, fresh) = rollout(
         &root,
@@ -485,29 +508,51 @@ fn rebound(
         &id,
         &[meta(&id, Utc::now()), turns()].concat(),
     );
-    let bindings = Arc::new(FakeBindings::new());
-    bindings.commit(codex_bind(1, None, &old, BindingCause::Startup, &nonce()));
-    let mut seq = 2;
-    for mut event in prior(&root, &old, &fresh_nonce) {
+    let (mut seq, mut last) = (3, old.clone());
+    for mut event in prior(&root, &init, &old, &fresh_nonce) {
+        if let BindingRecord::Bound {
+            new: BindingTarget::Source(new),
+            ..
+        } = &event.record
+        {
+            last = new.clone();
+        }
         event.seq = seq;
         bindings.commit(event);
         seq += 1;
     }
-    bindings.commit(codex_bind(seq, Some(&old), &fresh, cause, &fresh_nonce));
+    bindings.commit(codex_bind(seq, Some(&last), &fresh, cause, &fresh_nonce));
     harness.gate.acquired();
-    (harness, bindings, fresh)
+    Rebound {
+        harness,
+        bindings,
+        init,
+        old,
+        fresh,
+    }
+}
+
+fn first(_: &Path, _: &SourceId, _: &SourceId, _: &str) -> Vec<BindingEvent> {
+    Vec::new()
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_fresh_unknown_bind_is_owed_at_once_unless_its_history_names_an_earlier_source() {
     let _env = env();
-    type Prior = fn(&Path, &SourceId, &str) -> Vec<BindingEvent>;
-    let none: Prior = |_, _, _| Vec::new();
-    // The execution first re-pinned the source the pane already read.
-    let repin: Prior =
-        |_, old, nonce| vec![codex_bind(0, Some(old), old, BindingCause::Unknown, nonce)];
+    // The execution first re-pinned a source bound before it ran, or the adopted one.
+    let repin_link: Prior =
+        |_, _, old, nonce| vec![codex_bind(0, Some(old), old, BindingCause::Unknown, nonce)];
+    let repin_init: Prior = |_, init, _, nonce| {
+        vec![codex_bind(
+            0,
+            Some(init),
+            init,
+            BindingCause::Unknown,
+            nonce,
+        )]
+    };
     // The execution first bound another file of its own, now attached.
-    let own_file: Prior = |root, old, nonce| {
+    let own_file: Prior = |root, _, old, nonce| {
         let id = session();
         let (_, other) = rollout(root, "own", &id, &meta(&id, Utc::now()));
         vec![codex_bind(
@@ -518,14 +563,20 @@ async fn a_fresh_unknown_bind_is_owed_at_once_unless_its_history_names_an_earlie
             nonce,
         )]
     };
-    let cases: [(&str, Prior, BindingCause, bool); 4] = [
-        ("first_source", none, BindingCause::Unknown, true),
-        ("repin_before", repin, BindingCause::Unknown, true),
+    let cases: [(&str, Prior, BindingCause, bool); 5] = [
+        ("first_source", first, BindingCause::Unknown, true),
+        ("repin_link", repin_link, BindingCause::Unknown, true),
+        ("repin_init", repin_init, BindingCause::Unknown, true),
         ("own_file_first", own_file, BindingCause::Unknown, false),
-        ("resume_cause", none, BindingCause::Resume, false),
+        ("resume_cause", first, BindingCause::Resume, false),
     ];
     for (case, prior, cause, owed) in cases {
-        let (harness, bindings, fresh) = rebound(prior, cause);
+        let Rebound {
+            harness,
+            bindings,
+            fresh,
+            ..
+        } = rebound(prior, cause, |_| {});
         let mut engine = Engine::start(&harness, &bindings, ShadowProvider::Codex);
         engine.resume().unwrap();
         let expected = if owed {
@@ -550,19 +601,23 @@ async fn a_fresh_unknown_bind_is_owed_at_once_unless_its_history_names_an_earlie
 #[tokio::test(start_paused = true)]
 async fn a_startup_or_parented_bind_keeps_its_start() {
     let _env = env();
-    for (cause, expected) in [
-        (BindingCause::Startup, Boundary::Owed { from: 0 }),
-        (BindingCause::Fork, Boundary::Undecided),
+    for (cause, parented, expected) in [
+        (BindingCause::Startup, false, Boundary::Owed { from: 0 }),
+        (BindingCause::Fork, true, Boundary::Undecided),
+        (BindingCause::Resume, true, Boundary::Undecided),
     ] {
-        let (harness, bindings, fresh) = rebound(|_, _, _| Vec::new(), cause);
-        if cause == BindingCause::Fork {
+        let Rebound {
+            harness,
+            bindings,
+            init,
+            fresh,
+            ..
+        } = rebound(first, cause, |_| {});
+        if parented {
             let mut events = bindings.events.lock().unwrap();
-            let last = events.last_mut().unwrap();
-            if let BindingRecord::Bound {
-                old, parent_hint, ..
-            } = &mut last.record
+            if let BindingRecord::Bound { parent_hint, .. } = &mut events.last_mut().unwrap().record
             {
-                *parent_hint = old.clone();
+                *parent_hint = Some(init);
             }
         }
         let mut engine = Engine::start(&harness, &bindings, ShadowProvider::Codex);
@@ -653,16 +708,18 @@ async fn an_earlier_name_of_the_fresh_file_keeps_it_held() {
     }
 }
 
-/// Records each owed record's range, so a re-derivation shows up even when its unit is sealed.
+/// Records each owed record's source and range, so a re-derivation shows up even when its unit
+/// is sealed.
 #[derive(Default)]
 struct Ranges {
-    ranges: Vec<(u64, u64)>,
+    ranges: Vec<(PathBuf, u64, u64)>,
     derived: VecDeque<Derived>,
 }
 
 impl Owe for Ranges {
-    fn owe(&mut self, _: &SourceId, record: &CapturedRecord, derived: Vec<Derived>) {
-        self.ranges.push((record.start, record.end));
+    fn owe(&mut self, source: &SourceId, record: &CapturedRecord, derived: Vec<Derived>) {
+        self.ranges
+            .push((source.path.clone(), record.start, record.end));
         self.derived.extend(derived);
     }
 
@@ -674,13 +731,19 @@ impl Owe for Ranges {
     }
 }
 
+/// F's prompt and answer arrive in the same capture pass as its successor N's answer.
 #[tokio::test(start_paused = true)]
-async fn a_prompt_written_after_the_bind_resolves_on_the_capture_that_reads_it() {
+async fn a_prompt_written_after_the_bind_resolves_before_its_successor_is_owed() {
     let _env = env();
-    let (harness, bindings, fresh) = rebound(|_, _, _| Vec::new(), BindingCause::Unknown);
+    let Rebound {
+        harness,
+        bindings,
+        old,
+        fresh,
+        ..
+    } = rebound(first, BindingCause::Unknown, |_| {});
     let id = fresh.session_id.clone();
-    let created = Utc::now();
-    std::fs::write(&fresh.path, meta(&id, created)).unwrap();
+    std::fs::write(&fresh.path, meta(&id, Utc::now())).unwrap();
     let mut engine = Engine::start(&harness, &bindings, ShadowProvider::Codex);
     engine.resume().unwrap();
     assert_eq!(boundary(&harness, &fresh), held(), "no first prompt yet");
@@ -700,6 +763,24 @@ async fn a_prompt_written_after_the_bind_resolves_on_the_capture_that_reads_it()
     std::io::Write::write_all(&mut file, &message("user", "user-0", PROMPT)).unwrap();
     std::io::Write::write_all(&mut file, &message("assistant", "answer-0", ANSWERS[0])).unwrap();
     drop(file);
+    const NEXT: &str = "e2e answer after the hop";
+    let next_id = session();
+    let next_body = [
+        meta(&next_id, Utc::now()),
+        message("user", "next-user", "next prompt"),
+        message("assistant", "next-answer", NEXT),
+    ];
+    let root = old.path.parent().unwrap();
+    let (_, next) = rollout(root, "next", &next_id, &next_body.concat());
+    let seq = bindings.events.lock().unwrap().len() as u64 + 1;
+    bindings.commit(codex_bind(
+        seq,
+        Some(&fresh),
+        &next,
+        BindingCause::Startup,
+        &nonce(),
+    ));
+    engine.sources.follow(writer).unwrap();
     engine
         .sources
         .capture(writer, deriver, &mut ranges)
@@ -716,10 +797,47 @@ async fn a_prompt_written_after_the_bind_resolves_on_the_capture_that_reads_it()
         "each record is owed once: {:?}",
         ranges.ranges
     );
-    assert_eq!(seen.len(), 3, "metadata, prompt and answer");
+    for source in [&fresh, &next] {
+        let owed = seen
+            .iter()
+            .filter(|(path, ..)| *path == source.path)
+            .count();
+        assert_eq!(owed, 3, "metadata, prompt and answer of {source:?}");
+    }
     engine.owed = std::mem::take(&mut ranges.derived);
     engine.deliver().await;
-    assert_eq!(harness.port.posts(), [ANSWERS[0]]);
+    assert_eq!(harness.port.posts(), [ANSWERS[0], NEXT]);
+}
+
+/// A source the native evidence rejects is not judged again in this process as it grows.
+#[tokio::test(start_paused = true)]
+async fn a_rejected_fresh_source_is_not_judged_again_as_it_grows() {
+    let _env = env();
+    let Rebound {
+        harness,
+        bindings,
+        fresh,
+        ..
+    } = rebound(first, BindingCause::Unknown, |c| {
+        c.first_prompt_digest = Some(digest("another prompt"));
+    });
+    let mut engine = Engine::start(&harness, &bindings, ShadowProvider::Codex);
+    engine.resume().unwrap();
+    let before = Sources::<FakeBindings>::native_checks();
+    engine.capture();
+    let judged = Sources::<FakeBindings>::native_checks();
+    assert!(judged > before, "the captured source is judged once");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&fresh.path)
+        .unwrap();
+    std::io::Write::write_all(&mut file, &message("assistant", "answer-5", "more")).unwrap();
+    drop(file);
+    engine.capture();
+    assert_eq!(Sources::<FakeBindings>::native_checks(), judged);
+    assert_eq!(boundary(&harness, &fresh), held());
+    assert_eq!(resolutions(&harness), 0);
+    assert!(engine.pending_health());
 }
 
 #[tokio::test(start_paused = true)]
@@ -783,7 +901,7 @@ async fn a_suspended_held_source_is_left_alone_while_a_selected_one_stays_counte
         unreachable!()
     };
     ops.bindings.commit(codex_bind(
-        4,
+        5,
         Some(&next),
         &unproven,
         BindingCause::Unknown,
