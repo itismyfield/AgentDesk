@@ -410,6 +410,7 @@ jobs:
               - 'src/services/provider_cli/**'
               - 'src/services/review_decision/**'
               - 'src/services/routines/**'
+              - 'src/services/scheduled_messages/owner_input_tests.rs'
               - 'src/services/session_backend/**'
               - 'src/services/slo/**'
               - 'src/services/stream_json_cli/**'
