@@ -19,8 +19,9 @@ import {
   sessionDisplayName,
   sessionProviderLabel,
   sessionProviderTone,
-  sessionSpriteNum,
+  sessionPersona,
 } from "./SessionPanelModel";
+import AgentPersona from "../AgentPersona";
 import { SessionInfoCard } from "./SessionInfoCard";
 
 interface Props {
@@ -135,14 +136,7 @@ export function SessionPanel({ sessions, departments, agents, onAssign }: Props)
                       }
                     >
                       <div className="flex items-center gap-3 min-w-0">
-                        <div className="w-7 h-7 rounded-lg overflow-hidden bg-th-card-bg shrink-0">
-                          <img
-                            src={`/sprites/${sessionSpriteNum(s)}-D-1.png`}
-                            alt={s.name || ""}
-                            className="w-full h-full object-cover"
-                            style={{ imageRendering: "pixelated" }}
-                          />
-                        </div>
+                        <AgentPersona {...sessionPersona(s)} size={28} />
                         <div className="min-w-0 flex-1">
                           <span className="block min-w-0 truncate text-sm text-th-text-muted" title={sessionDisplayName(s).full}>
                             {sessionDisplayName(s).label}
@@ -234,17 +228,7 @@ function SessionCard({
       <div className="flex items-start gap-3">
         {/* Avatar + status */}
         <button type="button" className="relative min-h-11 min-w-11 shrink-0" onClick={onSelect}>
-          <div className="w-10 h-10 rounded-xl overflow-hidden bg-th-card-bg">
-            <img
-              src={`/sprites/${sessionSpriteNum(s)}-D-1.png`}
-              alt={s.name || ""}
-              className="w-full h-full object-cover"
-              style={{ imageRendering: "pixelated" }}
-            />
-          </div>
-          <span
-            className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-th-card-border ${statusColor}`}
-          />
+          <AgentPersona {...sessionPersona(s)} size={40} />
         </button>
 
         {/* Info */}
@@ -279,11 +263,6 @@ function SessionCard({
             {staleIdle && (
               <SurfaceMetaBadge tone="warn" className="shrink-0">
                 {t({ ko: "7일+ stale", en: "7d+ stale" })}
-              </SurfaceMetaBadge>
-            )}
-            {s.stats_xp > 0 && (
-              <SurfaceMetaBadge tone="warn" className="shrink-0">
-                ⭐ {s.stats_xp} XP
               </SurfaceMetaBadge>
             )}
           </div>

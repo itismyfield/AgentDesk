@@ -2,9 +2,7 @@ import { useCallback, useEffect, useMemo, useState, type DragEvent } from "react
 import type { Agent, Department, DispatchedSession } from "../../types";
 import type { UiLanguage } from "../../i18n";
 import * as api from "../../api";
-import { buildSpriteMap } from "../AgentAvatar";
-import { pickRandomSpritePair } from "./utils";
-import { BLANK, ICON_SPRITE_POOL } from "./constants";
+import { BLANK } from "./constants";
 import type { FormData } from "./types";
 import {
   filterAndSortAgents,
@@ -13,7 +11,7 @@ import {
 
 export type { AgentSortMode };
 
-export type AgentManagerTab = "agents" | "departments" | "backlog" | "dispatch";
+export type AgentManagerTab = "agents" | "departments" | "skills" | "dispatch";
 
 interface UseAgentManagerControllerParams {
   agents: Agent[];
@@ -50,7 +48,7 @@ export function useAgentManagerController({
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [sortMode, setSortMode] = useState<AgentSortMode>("status");
   const [search, setSearch] = useState("");
-  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [includeTests, setIncludeTests] = useState(false);
   const [saving, setSaving] = useState(false);
   const [dispatchOpen, setDispatchOpen] = useState(activeTab === "dispatch");
   const [agentModal, setAgentModal] = useState<{
@@ -100,16 +98,10 @@ export function useAgentManagerController({
     onTabChange?.(nextTab);
   }, [activeTab, onTabChange]);
 
-  const spriteMap = useMemo(() => buildSpriteMap(agents), [agents]);
-  const randomIconSprites = useMemo(
-    () => ({ total: pickRandomSpritePair(ICON_SPRITE_POOL) }),
-    [],
-  );
-
   const sortedAgents = useMemo(
     () =>
-      filterAndSortAgents(agents, { deptTab, statusFilter, search }, sortMode),
-    [agents, deptTab, search, sortMode, statusFilter],
+      filterAndSortAgents(agents, { deptTab, statusFilter, search, includeTests }, sortMode),
+    [agents, deptTab, includeTests, search, sortMode, statusFilter],
   );
 
   const openCreateAgent = useCallback(() => {
@@ -126,7 +118,6 @@ export function useAgentManagerController({
       department_id: target.department_id ?? "",
       cli_provider: target.cli_provider ?? "claude",
       avatar_emoji: target.avatar_emoji ?? "🤖",
-      sprite_number: target.sprite_number ?? null,
       personality: target.personality ?? "",
       prompt_content: target.prompt_content ?? "",
       auto_commit: false,
@@ -173,7 +164,6 @@ export function useAgentManagerController({
         department_id: values.department_id || null,
         cli_provider: values.cli_provider,
         avatar_emoji: values.avatar_emoji,
-        sprite_number: values.sprite_number,
         personality: values.personality.trim() || null,
         prompt_content: values.prompt_content,
         auto_commit: values.auto_commit,
@@ -198,7 +188,6 @@ export function useAgentManagerController({
     setSaving(true);
     try {
       await api.deleteAgent(id);
-      setConfirmDeleteId(null);
       onAgentsChange();
     } catch (error) {
       console.error("Agent delete failed:", error);
@@ -291,7 +280,6 @@ export function useAgentManagerController({
 
   return {
     canShowDispatch,
-    confirmDeleteId,
     deptModal,
     deptOrder,
     deptOrderDirty,
@@ -314,22 +302,22 @@ export function useAgentManagerController({
     isKo,
     locale,
     dispatchOpen,
+    includeTests,
     openCreateAgent,
     openCreateDept,
     openEditAgent,
     openEditDept,
     openDuplicateAgent,
-    randomIconSprites,
     reorderSaving,
     resolvedTab,
     saving,
     search,
     setAgentModal,
-    setConfirmDeleteId,
     setDeptModal,
     setDeptTab,
     setForm,
     setDispatchOpen,
+    setIncludeTests,
     setSearch,
     setSortMode,
     setStatusFilter,
@@ -337,7 +325,6 @@ export function useAgentManagerController({
     setSetupWizard,
     sortMode,
     sortedAgents,
-    spriteMap,
     statusFilter,
     tr,
   };

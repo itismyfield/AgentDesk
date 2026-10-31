@@ -11,13 +11,12 @@ import type {
   DispatchedSession,
 } from "../../types";
 import { localeName } from "../../i18n";
-import AgentAvatar from "../AgentAvatar";
+import AgentPersona from "../AgentPersona";
 import {
   SurfaceActionButton,
   SurfaceMetricPill,
   SurfaceSection,
 } from "../common/SurfacePrimitives";
-import { STATUS_DOT } from "./constants";
 import type { Translator } from "./types";
 import * as api from "../../api";
 import type {
@@ -25,7 +24,6 @@ import type {
   AgentSkill,
   DiscordBinding,
 } from "../../api/client";
-import { getAgentLevel, getAgentTitle } from "./agentProgress";
 import { AgentInfoOperationsSections } from "./AgentInfoOperationsSections";
 import { AgentInfoProfileSections } from "./AgentInfoProfileSections";
 import { AgentInfoRoutingSections } from "./AgentInfoRoutingSections";
@@ -36,11 +34,8 @@ import { isDiscordSnowflake } from "./discord-routing";
 import { catalogLabel, getProviderAuthProfiles, useProviderCatalog } from "../../api/providers";
 import type { ProviderAuthProvider } from "../settings/SettingsProvidersModel";
 
-export { getAgentLevel, getAgentTitle } from "./agentProgress";
-
 interface AgentInfoCardProps {
   agent: Agent;
-  spriteMap: Map<string, number>;
   isKo: boolean;
   locale: string;
   tr: Translator;
@@ -51,7 +46,6 @@ interface AgentInfoCardProps {
 
 export default function AgentInfoCard({
   agent,
-  spriteMap,
   isKo,
   locale,
   tr,
@@ -405,8 +399,6 @@ export default function AgentInfoCard({
   ];
   const primaryName = localeName(locale, agent);
   const secondaryName = locale === "en" ? agent.name_ko || "" : agent.name;
-  const levelInfo = getAgentLevel(agent.stats_xp);
-  const levelTitle = getAgentTitle(agent.stats_xp, isKo);
 
   return createPortal(
     <>
@@ -425,7 +417,7 @@ export default function AgentInfoCard({
       <div
         role="dialog"
         aria-modal="true"
-        aria-label={`${primaryName} — ${tr("직원 상세", "Agent Details")}`}
+        aria-label={`${primaryName} — ${tr("에이전트 상세", "Agent details")}`}
         className="w-full self-start max-h-[calc(100dvh-env(safe-area-inset-top)-env(safe-area-inset-bottom)-1.5rem)] max-w-[calc(100vw-1.5rem)] overflow-x-hidden overflow-y-auto overscroll-contain rounded-lg border p-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200 sm:my-auto sm:max-h-[90vh] sm:max-w-4xl sm:p-5"
         style={{
           borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
@@ -437,7 +429,7 @@ export default function AgentInfoCard({
       >
         <div className="space-y-4">
           <SurfaceSection
-            eyebrow={tr("직원 상세", "Agent Details")}
+            eyebrow={tr("에이전트 상세", "Agent details")}
             title={primaryName}
             description={primaryName !== secondaryName && secondaryName ? secondaryName : undefined}
             actions={(
@@ -447,13 +439,7 @@ export default function AgentInfoCard({
             )}
           >
             <div className="mt-4 flex flex-col gap-4 md:flex-row md:items-start">
-              <div className="relative w-fit shrink-0">
-                <AgentAvatar agent={agent} spriteMap={spriteMap} size={64} rounded="xl" />
-                <div
-                  className={`absolute -bottom-0.5 -right-0.5 h-4 w-4 rounded-full border-2 ${STATUS_DOT[agent.status] ?? STATUS_DOT.idle}`}
-                  style={{ borderColor: "var(--th-card-bg)" }}
-                />
-              </div>
+              <AgentPersona agent={agent} size={56} />
               <div className="min-w-0 flex-1 space-y-3">
                 <div className="flex flex-wrap items-center gap-2">
                   {editingAlias ? (
@@ -504,22 +490,17 @@ export default function AgentInfoCard({
                     </span>
                   )}
                   <span className="rounded-full px-2 py-0.5 text-xs" style={{ background: "var(--th-bg-surface)", color: "var(--th-text-muted)" }}>
-                    {dept ? <>{dept.icon} {localeName(locale, dept)}</> : tr("미배정", "Unassigned")}
+                    {dept ? <>{dept.icon} {localeName(locale, dept)}</> : tr("부서 없음", "No department")}
                   </span>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <SurfaceMetricPill
-                    label={tr("레벨", "Level")}
-                    tone="accent"
-                    value={`Lv.${levelInfo.level} ${levelTitle}`}
-                  />
                   <SurfaceMetricPill
                     label={tr("완료", "Done")}
                     tone="success"
                     value={`${agent.stats_tasks_done} ${tr("건", "tasks")}`}
                   />
                   <SurfaceMetricPill
-                    label="AgentDesk"
+                    label={tr("작업 중 세션", "Working sessions")}
                     tone="info"
                     value={`${workingLinkedSessions.length}/${claudeSessions.length}`}
                   />
@@ -595,8 +576,6 @@ export default function AgentInfoCard({
               loadingSkills={loadingSkills}
               showSharedSkills={showSharedSkills}
               onToggleSharedSkills={() => setShowSharedSkills((value) => !value)}
-              levelInfo={levelInfo}
-              levelTitle={levelTitle}
               timeline={timeline}
               loadingTimeline={loadingTimeline}
               timelineOpen={timelineOpen}

@@ -3,16 +3,14 @@ import type { Agent, Department } from "../../types";
 import { localeName } from "../../i18n";
 import { getProviderMeta } from "../../app/providerTheme";
 import { getCurrentTaskSummary } from "../../lib/agentHelpers";
-import AgentAvatar from "../AgentAvatar";
+import AgentPersona from "../AgentPersona";
+import { ActionMenu } from "../common/ActionMenu";
 import { SurfaceActionButton, SurfaceCard } from "../common/SurfacePrimitives";
-import { getAgentLevel, getAgentTitle } from "./agentProgress";
 import type { Translator } from "./types";
 
 interface AgentsGridViewProps {
   agents: Agent[];
-  confirmDeleteId: string | null;
   departments: Department[];
-  isKo: boolean;
   locale: string;
   onDeleteAgent: (agentId: string) => void;
   onDuplicateAgent: (agent: Agent) => void;
@@ -22,23 +20,28 @@ interface AgentsGridViewProps {
   saving: boolean;
   selectedAgent: Agent | null;
   selectedAgentId: string | null;
-  setConfirmDeleteId: (id: string | null) => void;
   setSelectedAgentId: (id: string | null) => void;
-  spriteMap: Map<string, number>;
   topSkillsByAgent: Map<string, string[]>;
   tr: Translator;
 }
 
-function agentSecondaryLine(agent: Agent, locale: string) {
+// Second line only when it adds something beyond the primary name.
+function agentSecondaryLine(agent: Agent, locale: string): string | null {
   if (agent.alias?.trim()) return `aka ${agent.alias.trim()}`;
-  return locale === "en" ? agent.name_ko || agent.name : agent.name;
+  const other = locale === "en" ? agent.name_ko || agent.name : agent.name;
+  return other && other !== localeName(locale, agent) ? other : null;
+}
+
+function statusLabel(status: Agent["status"], tr: Translator): string {
+  if (status === "working") return tr("작업 중", "Working");
+  if (status === "offline") return tr("오프라인", "Offline");
+  if (status === "break") return tr("휴식", "Break");
+  return tr("대기", "Idle");
 }
 
 export function AgentsGridView({
   agents: sortedAgents,
-  confirmDeleteId,
   departments,
-  isKo,
   locale,
   onDeleteAgent,
   onDuplicateAgent,
@@ -48,9 +51,7 @@ export function AgentsGridView({
   saving,
   selectedAgent,
   selectedAgentId,
-  setConfirmDeleteId,
   setSelectedAgentId,
-  spriteMap,
   topSkillsByAgent,
   tr,
 }: AgentsGridViewProps) {
@@ -65,7 +66,7 @@ export function AgentsGridView({
     {sortedAgents.map((agent) => {
       const department = departments.find((candidate) => candidate.id === agent.department_id);
       const providerMeta = getProviderMeta(agent.cli_provider);
-      const levelInfo = getAgentLevel(agent.stats_xp);
+      const secondary = agentSecondaryLine(agent, locale);
       const isSelected = agent.id === selectedAgentId;
 
       return (
@@ -85,29 +86,17 @@ export function AgentsGridView({
           className={`min-w-0 rounded-lg border p-4 text-left transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--th-accent-primary)] ${isSelected ? "border-[var(--th-accent-primary)] bg-surface-subtle" : "border-th-border-subtle bg-th-bg-surface hover:bg-surface-subtle"}`}
         >
           <div className="flex items-start gap-3">
-            <div className="relative shrink-0">
-              <AgentAvatar agent={agent} spriteMap={spriteMap} size={40} rounded="xl" />
-              <span
-                className={`absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 ${
-                  agent.status === "working"
-                    ? "bg-emerald-400"
-                    : agent.status === "break"
-                      ? "bg-amber-300"
-                    : agent.status === "offline"
-                      ? "bg-slate-500"
-                      : "bg-sky-400"
-                }`}
-                style={{ borderColor: "var(--th-card-bg)" }}
-              />
-            </div>
+            <AgentPersona agent={agent} size={40} />
 
             <div className="min-w-0 flex-1">
               <div className="text-sm font-semibold leading-6 [overflow-wrap:anywhere]" style={{ color: "var(--th-text-heading)" }}>
                 {localeName(locale, agent)}
               </div>
-              <div className="text-xs leading-5 [overflow-wrap:anywhere]" style={{ color: "var(--th-text-muted)" }}>
-                {agentSecondaryLine(agent, locale)}
-              </div>
+              {secondary ? (
+                <div className="text-xs leading-5 [overflow-wrap:anywhere]" style={{ color: "var(--th-text-muted)" }}>
+                  {secondary}
+                </div>
+              ) : null}
             </div>
 
             <span
@@ -123,7 +112,7 @@ export function AgentsGridView({
           </div>
 
           <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-th-text-muted">
-            <span>{agent.status === "working" ? tr("근무 중", "Working") : agent.status === "offline" ? tr("오프라인", "Offline") : agent.status === "break" ? tr("휴식", "Break") : tr("대기", "Idle")}</span>
+            <span>{statusLabel(agent.status, tr)}</span>
             {department ? (
               <span
                 className="text-xs leading-5"
@@ -142,15 +131,6 @@ export function AgentsGridView({
                 {department.icon} {localeName(locale, department)}
               </span>
             ) : null}
-            <span
-              className="text-xs leading-5"
-              style={{
-                borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
-                color: "var(--th-text-secondary)",
-              }}
-            >
-              lv.{levelInfo.level}
-            </span>
           </div>
         </button>
       );
@@ -163,8 +143,8 @@ export function AgentsGridView({
       {(() => {
         const department = departments.find((candidate) => candidate.id === selectedAgent.department_id);
         const providerMeta = getProviderMeta(selectedAgent.cli_provider);
-        const levelInfo = getAgentLevel(selectedAgent.stats_xp);
-        const levelTitle = getAgentTitle(selectedAgent.stats_xp, isKo);
+        const selectedSecondary = agentSecondaryLine(selectedAgent, locale);
+        const selectedName = localeName(locale, selectedAgent);
         const task = getCurrentTaskSummary(selectedAgent, tr);
         const roleKey = selectedAgent.role_id || selectedAgent.id;
         const topSkills = topSkillsByAgent.get(roleKey) ?? [];
@@ -172,45 +152,31 @@ export function AgentsGridView({
         return (
           <div className="space-y-5">
             <div className="flex items-start gap-3">
-              <AgentAvatar agent={selectedAgent} spriteMap={spriteMap} size={44} rounded="xl" />
+              <AgentPersona agent={selectedAgent} size={48} />
               <div className="min-w-0 flex-1">
                 <div className="truncate text-base font-semibold" style={{ color: "var(--th-text-heading)" }}>
-                  {localeName(locale, selectedAgent)}
+                  {selectedName}
                 </div>
                 <div className="text-xs leading-5 [overflow-wrap:anywhere]" style={{ color: "var(--th-text-muted)" }}>
-                  {agentSecondaryLine(selectedAgent, locale)} · {providerMeta.label}
+                  {[selectedSecondary, providerMeta.label].filter(Boolean).join(" · ")}
                 </div>
               </div>
               <SurfaceActionButton tone="neutral" compact onClick={() => setSelectedAgentId(null)} aria-label={tr("선택 닫기", "Close selection")}>×</SurfaceActionButton>
-              <SurfaceActionButton tone="neutral" compact onClick={() => onOpenAgent(selectedAgent)}>
-                {tr("상세", "Open")}
-              </SurfaceActionButton>
             </div>
 
             <div className="grid gap-2">
               {[
                 {
                   label: tr("상태", "Status"),
-                  value:
-                    selectedAgent.status === "working"
-                      ? tr("근무 중", "Working")
-                      : selectedAgent.status === "break"
-                        ? tr("휴식", "Break")
-                        : selectedAgent.status === "offline"
-                          ? tr("오프라인", "Offline")
-                          : tr("대기", "Idle"),
+                  value: statusLabel(selectedAgent.status, tr),
                 },
                 {
                   label: tr("부서", "Department"),
-                  value: department ? [department.icon, localeName(locale, department)].filter(Boolean).join(" ") : tr("미배정", "Unassigned"),
+                  value: department ? [department.icon, localeName(locale, department)].filter(Boolean).join(" ") : tr("부서 없음", "No department"),
                 },
                 {
-                  label: tr("레벨", "Level"),
-                  value: `lv.${levelInfo.level} · ${levelTitle}`,
-                },
-                {
-                  label: tr("누적 XP", "Total XP"),
-                  value: selectedAgent.stats_xp.toLocaleString(),
+                  label: tr("완료한 작업", "Tasks done"),
+                  value: selectedAgent.stats_tasks_done.toLocaleString(),
                 },
               ].map((item) => (
                 <div
@@ -276,40 +242,32 @@ export function AgentsGridView({
               </div>
             </div>
 
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <SurfaceActionButton onClick={() => onOpenAgent(selectedAgent)}>
+                {tr("상세 보기", "Open details")}
+              </SurfaceActionButton>
               <SurfaceActionButton onClick={() => onEditAgent(selectedAgent)} tone="neutral">
                 {tr("편집", "Edit")}
               </SurfaceActionButton>
-              <SurfaceActionButton onClick={() => onDuplicateAgent(selectedAgent)} tone="info">
-                {tr("복제", "Duplicate")}
-              </SurfaceActionButton>
-              <SurfaceActionButton onClick={() => onOpenAgent(selectedAgent)}>
-                {tr("상세 보기", "Open Detail")}
-              </SurfaceActionButton>
-              {confirmDeleteId === selectedAgent.id ? (
-                <>
-                  <SurfaceActionButton
-                    onClick={() => onDeleteAgent(selectedAgent.id)}
-                    disabled={saving || selectedAgent.status === "working"}
-                    tone="danger"
-                  >
-                    {tr("해고", "Fire")}
-                  </SurfaceActionButton>
-                  <SurfaceActionButton
-                    onClick={() => setConfirmDeleteId(null)}
-                    tone="neutral"
-                  >
-                    {tr("취소", "Cancel")}
-                  </SurfaceActionButton>
-                </>
-              ) : (
-                <SurfaceActionButton
-                  onClick={() => setConfirmDeleteId(selectedAgent.id)}
-                  tone="neutral"
-                >
-                  {tr("삭제", "Delete")}
-                </SurfaceActionButton>
-              )}
+              <ActionMenu
+                label={tr(`${selectedName} 메뉴`, `${selectedName} menu`)}
+                items={[
+                  { key: "duplicate", label: tr("복제", "Duplicate"), onSelect: () => onDuplicateAgent(selectedAgent) },
+                  {
+                    key: "delete",
+                    label: tr("삭제", "Delete"),
+                    danger: true,
+                    disabled: saving || selectedAgent.status === "working",
+                    onSelect: () => onDeleteAgent(selectedAgent.id),
+                    confirm: {
+                      title: tr(`${selectedName}을(를) 삭제할까요?`, `Delete ${selectedName}?`),
+                      description: tr("에이전트 설정이 지워지고 되돌릴 수 없어요.", "The agent's settings are removed for good."),
+                      confirmLabel: tr("삭제", "Delete"),
+                      cancelLabel: tr("취소", "Cancel"),
+                    },
+                  },
+                ]}
+              />
             </div>
           </div>
         );
@@ -317,7 +275,7 @@ export function AgentsGridView({
     </SurfaceCard>
     </div>
   ) : (
-    <p className="text-xs leading-5 text-th-text-muted">{tr("에이전트를 선택하면 상세 정보와 편집·복제·삭제 동작을 확인할 수 있습니다.", "Select an agent to view details, edit, duplicate, or delete.")}</p>
+    <p className="text-xs leading-5 text-th-text-muted">{tr("에이전트를 고르면 상세 정보와 편집 메뉴가 보여요.", "Select an agent to see details and actions.")}</p>
   )}
 </div>
   );

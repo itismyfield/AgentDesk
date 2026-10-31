@@ -26,15 +26,6 @@ export interface ShareSegment {
   sublabel?: string;
 }
 
-export interface AgentSpendRow {
-  id: string;
-  label: string;
-  tokens: number;
-  cost: number;
-  share: number;
-  color: string;
-}
-
 export interface AgentCacheRow {
   id: string;
   label: string;
@@ -56,15 +47,6 @@ export interface AgentSkillRow {
   skillName: string;
   description: string;
   calls: number;
-}
-
-export interface LeaderboardRow {
-  id: string;
-  label: string;
-  agent: (Pick<Agent, "id" | "name"> & { sprite_number?: number | null }) | null;
-  tasksDone: number;
-  xp: number;
-  tokens: number;
 }
 
 export interface DailySeriesDescriptor {
@@ -256,60 +238,6 @@ export function buildModelSegments(
   return segments;
 }
 
-export function buildProviderSegments(
-  data: TokenAnalyticsResponse | null,
-): ShareSegment[] {
-  const providers = data?.receipt.providers ?? [];
-  if (providers.length > 0) {
-    const totalTokens = providers.reduce((sum, item) => sum + item.tokens, 0);
-    return providers
-      .filter((provider) => provider.tokens > 0)
-      .sort((left, right) => right.tokens - left.tokens)
-      .map((provider) => {
-        const meta = getProviderMeta(provider.provider);
-        const series = getProviderSeries(provider.provider);
-        return {
-          id: provider.provider,
-          label: meta.label,
-          tokens: provider.tokens,
-          percentage:
-            provider.percentage || (provider.tokens / totalTokens) * 100,
-          color: series[0] ?? "var(--accent)",
-          sublabel: provider.provider,
-        };
-      });
-  }
-
-  const models = data?.receipt.models ?? [];
-  const byProvider = new Map<string, number>();
-  for (const model of models) {
-    byProvider.set(
-      model.provider,
-      (byProvider.get(model.provider) ?? 0) + model.total_tokens,
-    );
-  }
-  const totalTokens = Array.from(byProvider.values()).reduce(
-    (sum, value) => sum + value,
-    0,
-  );
-  if (totalTokens <= 0) return [];
-
-  return Array.from(byProvider.entries())
-    .sort((left, right) => right[1] - left[1])
-    .map(([provider, tokens]) => {
-      const meta = getProviderMeta(provider);
-      const series = getProviderSeries(provider);
-      return {
-        id: provider,
-        label: meta.label,
-        tokens,
-        percentage: (tokens / totalTokens) * 100,
-        color: series[0] ?? "var(--accent)",
-        sublabel: provider,
-      };
-    });
-}
-
 export function buildSkillRows(
   ranking: SkillRankingResponse | null,
   catalog: SkillCatalogEntry[],
@@ -371,22 +299,6 @@ export function buildAgentSkillRows(
   });
 }
 
-export function buildAgentSpendRows(
-  data: TokenAnalyticsResponse | null,
-): AgentSpendRow[] {
-  return [...(data?.receipt.agents ?? [])]
-    .sort((left, right) => right.cost - left.cost)
-    .slice(0, 5)
-    .map((agent, index) => ({
-      id: `${agent.agent}-${index}`,
-      label: agent.agent,
-      tokens: agent.tokens,
-      cost: agent.cost,
-      share: agent.percentage,
-      color: AGENT_BAR_COLORS[index % AGENT_BAR_COLORS.length],
-    }));
-}
-
 export function buildAgentCacheRows(
   data: TokenAnalyticsResponse | null,
 ): AgentCacheRow[] {
@@ -413,35 +325,6 @@ export function buildAgentCacheRows(
     })
     .sort((left, right) => right.promptTokens - left.promptTokens)
     .slice(0, 5);
-}
-
-export function buildLeaderboardRows(
-  stats: DashboardStats | null | undefined,
-  agents: Agent[] | undefined,
-): LeaderboardRow[] {
-  const topAgents = stats?.top_agents ?? [];
-  if (topAgents.length > 0) {
-    return topAgents.slice(0, 5).map((agent) => ({
-      id: agent.id,
-      label: agent.alias?.trim() || agent.name_ko || agent.name,
-      agent,
-      tasksDone: agent.stats_tasks_done,
-      xp: agent.stats_xp,
-      tokens: agent.stats_tokens,
-    }));
-  }
-
-  return [...(agents ?? [])]
-    .sort((left, right) => right.stats_tokens - left.stats_tokens)
-    .slice(0, 5)
-    .map((agent) => ({
-      id: agent.id,
-      label: agent.alias?.trim() || agent.name_ko || agent.name,
-      agent,
-      tasksDone: agent.stats_tasks_done,
-      xp: agent.stats_xp,
-      tokens: agent.stats_tokens,
-    }));
 }
 
 export function dailySeries(t: TFunction): DailySeriesDescriptor[] {

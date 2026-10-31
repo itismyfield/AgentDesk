@@ -1,7 +1,6 @@
 import { createPortal } from "react-dom";
 import { useEffect, useRef } from "react";
 import type { Agent, Department, DispatchedSession } from "../../types";
-import { getRankTier } from "../dashboard/model";
 import { useI18n } from "../../i18n";
 import { SurfaceActionButton, SurfaceCard, SurfaceMetaBadge } from "../common/SurfacePrimitives";
 import TooltipLabel from "../common/TooltipLabel";
@@ -14,8 +13,9 @@ import {
   sessionDisplayName,
   sessionProviderLabel,
   sessionProviderTone,
-  sessionSpriteNum,
+  sessionPersona,
 } from "./SessionPanelModel";
+import AgentPersona from "../AgentPersona";
 
 export function SessionInfoCard({
   session: s,
@@ -29,9 +29,7 @@ export function SessionInfoCard({
   onClose: () => void;
 }) {
   const overlayRef = useRef<HTMLDivElement>(null);
-  const spriteNum = sessionSpriteNum(s);
   const dept = departments.find((d) => d.id === s.department_id);
-  const tier = getRankTier(s.stats_xp);
   const isDisconnected = s.status === "disconnected";
   const connectedAt = normalizeTimestamp(s.connected_at);
   const lastSeenAt = normalizeTimestamp(s.last_seen_at);
@@ -77,22 +75,7 @@ export function SessionInfoCard({
         >
           <div className="max-h-[min(78vh,720px)] overflow-y-auto">
             <div className="flex items-start gap-4 border-b px-5 py-5 sm:px-6" style={{ borderColor: "var(--th-border-subtle)" }}>
-              <div className="relative shrink-0">
-                <div className="h-14 w-14 overflow-hidden rounded-lg bg-th-card-bg">
-                  <img
-                    src={`/sprites/${spriteNum}-D-1.png`}
-                    alt={s.name || ""}
-                    className="h-full w-full object-cover"
-                    style={{ imageRendering: "pixelated" }}
-                  />
-                </div>
-                <span
-                  className={`absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full border-2 ${
-                    isDisconnected ? "bg-gray-500" : s.status === "working" ? "bg-emerald-500" : "bg-amber-500"
-                  }`}
-                  style={{ borderColor: "var(--th-card-bg)" }}
-                />
-              </div>
+              <AgentPersona {...sessionPersona(s)} size={56} />
 
               <div className="min-w-0 flex-1">
                 <TooltipLabel
@@ -152,31 +135,6 @@ export function SessionInfoCard({
               </div>
 
               <div className="grid gap-3 sm:grid-cols-2">
-                <SurfaceCard
-                  className="rounded-lg p-4"
-                  style={{
-                    borderColor: `color-mix(in srgb, ${tier.color} 22%, var(--th-border) 78%)`,
-                    background: `color-mix(in srgb, ${tier.color} 10%, var(--th-card-bg) 90%)`,
-                  }}
-                >
-                  <div className="text-[10px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
-                    {t({ ko: "랭크", en: "Rank" })}
-                  </div>
-                  <div className="mt-2 flex flex-wrap items-center gap-2">
-                    <SurfaceMetaBadge
-                      className="font-medium"
-                      style={{
-                        borderColor: `color-mix(in srgb, ${tier.color} 28%, var(--th-border) 72%)`,
-                        background: `color-mix(in srgb, ${tier.color} 16%, var(--th-card-bg) 84%)`,
-                        color: tier.color,
-                      }}
-                    >
-                      {tier.name}
-                    </SurfaceMetaBadge>
-                    <span className="text-sm font-medium text-th-text-primary">XP {s.stats_xp}</span>
-                  </div>
-                </SurfaceCard>
-
                 <SurfaceCard
                   className="rounded-lg p-4"
                   style={{

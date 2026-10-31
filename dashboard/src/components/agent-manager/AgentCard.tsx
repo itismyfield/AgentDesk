@@ -3,27 +3,21 @@ import { localeName } from "../../i18n";
 import { getCurrentTaskSummary } from "../../lib/agentHelpers";
 import { getFontFamilyForText } from "../../lib/fonts";
 import { getProviderMeta } from "../../app/providerTheme";
-import AgentAvatar from "../AgentAvatar";
+import AgentPersona from "../AgentPersona";
+import { ActionMenu } from "../common/ActionMenu";
 import { SurfaceActionButton, SurfaceCard } from "../common/SurfacePrimitives";
-import { STATUS_DOT } from "./constants";
-import { getAgentLevel, getAgentTitle } from "./agentProgress";
 import type { Translator } from "./types";
 
 type AgentCardViewMode = "grid" | "list";
 
 interface AgentCardProps {
   agent: Agent;
-  spriteMap: Map<string, number>;
-  isKo: boolean;
   locale: string;
   tr: Translator;
   departments: Department[];
   onOpen: () => void;
   onEdit: () => void;
-  confirmDeleteId: string | null;
-  onDeleteClick: () => void;
-  onDeleteConfirm: () => void;
-  onDeleteCancel: () => void;
+  onDelete: () => Promise<void> | void;
   saving: boolean;
   topSkills: string[];
   viewMode: AgentCardViewMode;
@@ -31,27 +25,20 @@ interface AgentCardProps {
 
 export default function AgentCard({
   agent,
-  spriteMap,
-  isKo,
   locale,
   tr,
   departments,
   onOpen,
   onEdit,
-  confirmDeleteId,
-  onDeleteClick,
-  onDeleteConfirm,
-  onDeleteCancel,
+  onDelete,
   saving,
   topSkills,
   viewMode,
 }: AgentCardProps) {
-  const isDeleting = confirmDeleteId === agent.id;
   const dept = departments.find((d) => d.id === agent.department_id);
   const primaryLabel = localeName(locale, agent);
+  const secondaryLabel = locale === "en" ? agent.name_ko || agent.name : agent.name;
   const providerMeta = getProviderMeta(agent.cli_provider);
-  const levelInfo = getAgentLevel(agent.stats_xp);
-  const levelTitle = getAgentTitle(agent.stats_xp, isKo);
   const task = getCurrentTaskSummary(agent, tr);
   const contentFont = getFontFamilyForText(task.value, "sans");
 
@@ -68,19 +55,17 @@ export default function AgentCard({
       onDragStart={event => event.preventDefault()}
     >
       <div className="flex min-w-0 items-start gap-3">
-        <div className="relative shrink-0">
-          <AgentAvatar agent={agent} spriteMap={spriteMap} size={40} rounded="xl" />
-          <span className={`absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-th-card-bg ${STATUS_DOT[agent.status] ?? STATUS_DOT.idle}`} aria-hidden="true" />
-        </div>
+        <AgentPersona agent={agent} size={40} />
         <div className="min-w-0">
           <div className="text-sm font-semibold leading-6 text-th-text-heading [overflow-wrap:anywhere]">{primaryLabel}</div>
-          <div className="text-xs leading-5 text-th-text-muted [overflow-wrap:anywhere]">{locale === "en" ? agent.name_ko || agent.name : agent.name}</div>
+          {secondaryLabel && secondaryLabel !== primaryLabel ? (
+            <div className="text-xs leading-5 text-th-text-muted [overflow-wrap:anywhere]">{secondaryLabel}</div>
+          ) : null}
           <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs leading-5 text-th-text-muted">
             <span>{providerMeta.label}</span>
-            <span>Lv.{levelInfo.level} {levelTitle}</span>
-            <span>{dept ? localeName(locale, dept) : tr("미배정", "Unassigned")}</span>
+            <span>{dept ? localeName(locale, dept) : tr("부서 없음", "No department")}</span>
+            <span className="tabular-nums">{tr(`완료 ${agent.stats_tasks_done.toLocaleString()}건`, `${agent.stats_tasks_done.toLocaleString()} done`)}</span>
           </div>
-          <div className="mt-1 text-xs leading-5 tabular-nums text-th-text-muted">XP {agent.stats_xp.toLocaleString()} · {tr("완료", "Done")} {agent.stats_tasks_done.toLocaleString()}</div>
         </div>
       </div>
       <div className="min-w-0">
@@ -92,10 +77,24 @@ export default function AgentCard({
       </div>
       <div className="flex shrink-0 flex-wrap items-center justify-end gap-2" onClick={event => event.stopPropagation()}>
         <SurfaceActionButton onClick={onEdit} tone="neutral" compact>{tr("편집", "Edit")}</SurfaceActionButton>
-        {isDeleting ? <>
-          <SurfaceActionButton onClick={onDeleteConfirm} disabled={saving || agent.status === "working"} tone="danger" compact>{tr("해고", "Fire")}</SurfaceActionButton>
-          <SurfaceActionButton onClick={onDeleteCancel} tone="neutral" compact>{tr("취소", "No")}</SurfaceActionButton>
-        </> : <SurfaceActionButton onClick={onDeleteClick} tone="neutral" compact>{tr("삭제", "Delete")}</SurfaceActionButton>}
+        <ActionMenu
+          label={tr(`${primaryLabel} 메뉴`, `${primaryLabel} menu`)}
+          items={[
+            {
+              key: "delete",
+              label: tr("삭제", "Delete"),
+              danger: true,
+              disabled: saving || agent.status === "working",
+              onSelect: onDelete,
+              confirm: {
+                title: tr(`${primaryLabel}을(를) 삭제할까요?`, `Delete ${primaryLabel}?`),
+                description: tr("에이전트 설정이 지워지고 되돌릴 수 없어요.", "The agent's settings are removed for good."),
+                confirmLabel: tr("삭제", "Delete"),
+                cancelLabel: tr("취소", "Cancel"),
+              },
+            },
+          ]}
+        />
       </div>
     </SurfaceCard>
   );
