@@ -612,9 +612,11 @@ pub(crate) fn native_server_child() -> bool {
         };
         // BSD hands accepted sockets the listener's O_NONBLOCK; reads must wait for the client.
         stream.set_nonblocking(false).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
+        // macOS refuses socket options once the peer closed, as its request-less peer-token dial does.
+        match stream.set_read_timeout(Some(Duration::from_secs(2))) {
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => continue,
+            other => other.unwrap(),
+        }
         let mut writer = stream.try_clone().unwrap();
         let mut line = String::new();
         if let Err(error) = BufReader::new(stream).read_line(&mut line) {

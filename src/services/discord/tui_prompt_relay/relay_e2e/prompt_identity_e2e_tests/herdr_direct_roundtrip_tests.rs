@@ -518,7 +518,7 @@ async fn scenario(rig: Arc<HerdrRig>, mut config: crate::config::Config) {
     rig.answer(
         "workspace.create",
         json!({"type":"workspace_created", "root_pane":{
-        "pane_id":PANE, "workspace_id":"w1", "tab_id":"w1:1", "revision":0, "cwd":h.root.path()}}),
+        "pane_id":PANE, "workspace_id":"w1", "tab_id":"w1:1", "revision":0, "cwd":canonical_root}}),
     );
     rig.show_panes(&[PANE]);
     let ready_screen = "✻ Baked for 2s\n────────────────────────────────────────────────────\n\x1b[36m❯\x1b[0m \n────────────────────────────────────────────────────\n  🤖 Opus(H) │ 7% │ MCP: 2";
