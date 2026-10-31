@@ -4,7 +4,8 @@ use super::*;
 async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
     let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate_with_max_connections(16).await;
-    let engine = test_engine_with_pg(pool.clone());
+    let policy_pool = pg_db.connect_and_migrate_with_max_connections(16).await;
+    let engine = test_engine_with_pg(policy_pool.clone());
     seed_agent_pg(&pool).await;
     let reviewed_commit =
         crate::services::platform::git_head_commit(env!("CARGO_MANIFEST_DIR")).unwrap();
@@ -251,7 +252,9 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
          WHERE run_id != 'run-recover-completed';
          UPDATE task_dispatches SET status = 'cancelled'
          WHERE kanban_card_id != 'card-recover-completed' AND status IN ('pending', 'dispatched');
-         UPDATE sessions SET status = 'disconnected', active_dispatch_id = NULL;",
+         UPDATE sessions SET status = 'disconnected', active_dispatch_id = NULL;
+         UPDATE auto_queue_runs SET status = 'completed', completed_at = NOW()
+         WHERE id != 'run-recover-completed';",
     )
     .execute(&pool)
     .await
@@ -265,10 +268,15 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
         "UPDATE task_dispatches SET status = 'completed', result = '{\"verdict\":\"pass\"}', completed_at = NOW(), updated_at = NOW()
          WHERE kanban_card_id = 'card-recover-completed' AND dispatch_type = 'review'"
     ).execute(&pool).await.unwrap();
+    drop(service);
+    drop(engine);
+    policy_pool.close().await;
+    let resumed_policy_pool = pg_db.connect_and_migrate_with_max_connections(16).await;
+    let resumed_engine = test_engine_with_pg(resumed_policy_pool.clone());
     eprintln!("recovery: completing review and advancing the run");
     crate::kanban::transition_status_with_opts_pg(
         &pool,
-        &engine,
+        &resumed_engine,
         "card-recover-completed",
         "done",
         "test_review_completed",
@@ -276,7 +284,7 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
     )
     .await
     .unwrap();
-    crate::kanban::drain_hook_side_effects_with_backends(&engine);
+    crate::kanban::drain_hook_side_effects_with_backends(&resumed_engine);
     let next: (String, bool) = sqlx::query_as(
         "SELECT status, dispatch_id IS NOT NULL FROM auto_queue_entries WHERE id = 'entry-recover-next'"
     ).fetch_one(&pool).await.unwrap();
@@ -286,8 +294,8 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
         "same run advances after recovered review"
     );
     eprintln!("recovery: next entry dispatched");
-    drop(service);
-    drop(engine);
+    drop(resumed_engine);
+    resumed_policy_pool.close().await;
     pool.close().await;
     pg_db.drop().await;
 }
