@@ -10,7 +10,7 @@ fn config(on: bool) -> Config {
 #[test]
 fn default_on_omits_key_and_config_changes_do_not_replace_boot_capability() {
     let config: Config = serde_json::from_value(serde_json::json!({"server": {}})).unwrap();
-    let tui_o = crate::services::tui_o::shadow::tap::TuiOConfig::of(&config);
+    let tui_o = crate::services::tui_o::channel_policy::tui_o_of(&config);
     assert!(tui_o.writer.late_adopt());
     assert!(
         !serde_yaml::to_string(&config)

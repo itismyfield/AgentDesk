@@ -151,7 +151,7 @@ fn snapshot(config: &Config) -> serde_json::Result<Value> {
     put(&["runtime"], serde_json::to_value(&config.runtime)?);
     put(&["routines"], serde_json::to_value(&config.routines)?);
     put(&["onboarding"], serde_json::to_value(&config.onboarding)?);
-    let tui_o = crate::services::tui_o::shadow::tap::TuiOConfig::of(config).resolved();
+    let tui_o = crate::services::tui_o::channel_policy::tui_o_of(config).resolved();
     put(&["tui_o"], serde_json::to_value(&tui_o)?);
     if let Some(items) = root.get_mut("agents").and_then(Value::as_array_mut) {
         for (item, agent) in items.iter_mut().zip(&config.agents) {

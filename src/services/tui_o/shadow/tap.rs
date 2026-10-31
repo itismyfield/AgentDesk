@@ -13,10 +13,6 @@ pub struct TuiOConfig {
 
 impl TuiOConfig {
     /// The section as configured, or its defaults when the config has none.
-    pub(crate) fn of(config: &crate::config::Config) -> &TuiOConfig {
-        Self::or_default(config.tui_o.as_ref())
-    }
-
     pub(crate) fn or_default(section: Option<&TuiOConfig>) -> &TuiOConfig {
         static DEFAULT: std::sync::LazyLock<TuiOConfig> =
             std::sync::LazyLock::new(Default::default);

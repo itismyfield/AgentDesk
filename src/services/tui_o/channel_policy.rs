@@ -61,9 +61,14 @@ impl PartialEq for BootChannels {
 
 static BOOT: OnceLock<BootChannels> = OnceLock::new();
 
+/// The config's `tui_o` section, or its defaults when the config has none.
+pub(crate) fn tui_o_of(config: &Config) -> &TuiOConfig {
+    TuiOConfig::or_default(config.tui_o.as_ref())
+}
+
 /// The channels the config selects: the explicit list, or with `all_tui` every TUI binding.
 pub(crate) fn configured_channels(config: &Config) -> BTreeSet<u64> {
-    let writer = &TuiOConfig::of(config).writer;
+    let writer = &tui_o_of(config).writer;
     if !writer.all_tui() {
         return writer.channels.clone();
     }
@@ -74,13 +79,13 @@ pub(crate) fn configured_channels(config: &Config) -> BTreeSet<u64> {
 
 /// Dormant membership as configured; only validation decides whether these writers are selected.
 pub(crate) fn configured_dormant_channels(config: &Config) -> BTreeSet<u64> {
-    TuiOConfig::of(config).writer.dormant_channels.clone()
+    tui_o_of(config).writer.dormant_channels.clone()
 }
 
 /// The selected channels' kinds. An unset `all_tui` that cannot apply here (no cluster ids, or a
 /// binding it would reject) selects nothing instead of failing the boot.
 fn selected_kinds(config: &Config, warn: bool) -> Result<BTreeMap<u64, RuntimeHandoffKind>> {
-    let writer = &TuiOConfig::of(config).writer;
+    let writer = &tui_o_of(config).writer;
     if writer.all_tui.is_none() && writer.all_tui() {
         let kinds = site(config, true).and_then(|_| all_tui_kinds(config));
         return Ok(kinds.unwrap_or_else(|error| {
@@ -220,7 +225,7 @@ fn all_tui_kinds(config: &Config) -> Result<BTreeMap<u64, RuntimeHandoffKind>> {
 
 impl BootChannels {
     pub(crate) fn validate(config: &Config) -> Result<Self> {
-        let tui_o = TuiOConfig::of(config);
+        let tui_o = tui_o_of(config);
         let kinds = selected_kinds(config, true)?;
         let channels: BTreeSet<u64> = kinds.keys().copied().collect();
         let dormant_channels = configured_dormant_channels(config);

@@ -166,7 +166,11 @@ impl HostIo for GatewayHost {
 
     fn late_adopt_enabled(&self) -> bool {
         crate::config_live_reload::current()
-            .map(|config| TuiOConfig::of(&config).writer.late_adopt())
+            .map(|config| {
+                crate::services::tui_o::channel_policy::tui_o_of(&config)
+                    .writer
+                    .late_adopt()
+            })
             .unwrap_or_else(|| self.boot.as_ref().is_some_and(|o| o.writer.late_adopt()))
     }
 

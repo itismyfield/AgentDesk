@@ -318,7 +318,7 @@ fn boot_selection(config: &Config) -> (Vec<u64>, bool, Vec<u64>) {
     let boot = BootChannels::validate(config).unwrap();
     let channels: Vec<u64> = boot.channels().iter().copied().collect();
     let mut offered = Vec::new();
-    let turn = crate::services::tui_o::shadow::tap::TuiOConfig::of(config)
+    let turn = crate::services::tui_o::channel_policy::tui_o_of(config)
         .turn
         .clone();
     assert_eq!(&turn, boot.turn());
