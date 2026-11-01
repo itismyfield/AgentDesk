@@ -220,3 +220,63 @@ fn codex_confirmation_reads_past_a_record_longer_than_one_read() {
     );
     let _confirmed = TestConfirmation::confirmed(channel);
 }
+
+/// Commits a late takeover init of `sources` for `channel` in the runtime O store.
+#[cfg(unix)]
+fn init_takeover(channel: u64, sources: &[crate::services::tui_o::shadow::SourceId]) {
+    use crate::services::tui_o::store::{InitSource, Initialized, OStore, StoreConfig};
+    let root = crate::config::runtime_root().unwrap();
+    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, &root);
+    let init = Initialized {
+        channel,
+        sources: (sources.iter())
+            .map(|source| InitSource {
+                source_id: source.clone(),
+                delivery_start: 0,
+                prefix_hash: String::new(),
+            })
+            .collect(),
+        initial_anchor: 0,
+        build_digest: "test".into(),
+        at: chrono::Utc::now(),
+    };
+    let store = store.unwrap().unwrap();
+    store
+        .init_channel_as(&init, InitOrigin::LateCodexTakeover)
+        .unwrap();
+}
+
+/// A reboot renumbers the rollout volume's dev: the takeover init still names its rollout by path
+/// and inode, so the ended turn confirms. A new inode at that path, or an init naming two stored
+/// variants of the file, keeps Legacy turns.
+#[cfg(unix)]
+#[test]
+fn codex_confirmation_reads_a_takeover_rollout_whose_volume_was_renumbered() {
+    use crate::services::tui_o::shadow::capture::renumber;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let dir = tempfile::tempdir().unwrap();
+    let (channel, ambiguous) = (64_700_304, 64_700_305);
+    let source = open_rollout(dir.path(), channel);
+    answer(&source);
+    let row = save_row(channel, true);
+    init_takeover(channel, std::slice::from_ref(&source.source));
+    let variant = crate::services::tui_o::shadow::SourceId {
+        dev: source.source.dev ^ (1 << 41),
+        ..source.source.clone()
+    };
+    init_takeover(ambiguous, &[source.source.clone(), variant]);
+    let (config, aside) = (selecting(channel), dir.path().join("aside.jsonl"));
+
+    std::fs::rename(&source.source.path, &aside).unwrap();
+    std::fs::copy(&aside, &source.source.path).unwrap();
+    retry(confirm_current(channel, &config));
+    assert!(row.exists() && !transcript_turns(channel), "a new inode");
+    std::fs::rename(&aside, &source.source.path).unwrap();
+
+    let _reboot = renumber::shift(&source.source.path, 1 << 40);
+    retry(confirm_current(ambiguous, &selecting(ambiguous)));
+    assert!(!transcript_turns(ambiguous), "two stored variants");
+    assert_eq!(confirm_current(channel, &config), Confirmation::Confirmed);
+    let _confirmed = TestConfirmation::confirmed(channel);
+    assert!(!row.exists(), "the ended turn's synthetic row retires");
+}
