@@ -820,6 +820,11 @@
       "path": "migrations/postgres/0168_drop_meetings_quality_rollups_xp.sql",
       "sha256": "91f50ded9d7b8e382eb34d2c4abffe660957f6dd7f4b533ae5e6ef6c80fc1bee",
       "version": 168
+    },
+    {
+      "path": "migrations/postgres/0169_drop_voice_tables.sql",
+      "sha256": "39bbaa9543324654e82fb5a632f69d8ae1fd1499474acfcdb2b4f336a5facd01",
+      "version": 169
     }
   ],
   "version": 1
