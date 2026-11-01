@@ -785,13 +785,25 @@ impl Writer {
     }
 
     /// Opens a pinned path a stat found renumbered and keeps it only if its first record still names
-    /// the pinned session: the verified identity to re-pin, or what to keep instead.
+    /// the pinned session and the path still names that file: the identity to re-pin, or what to keep.
     fn renumbered_source(&self, p: &Proposal) -> Result<SourceId, Committed> {
         let opened = observe_transcript(Path::new(p.path));
-        match self.pin_judgment(p, Observation::Opened(opened.as_ref())) {
-            PinJudgment::Verified(source) => Ok(source),
-            PinJudgment::Recheck => Err(Committed::Recheck),
-            _ => Err(Committed::Anomaly),
+        #[cfg(test)]
+        super::after_check();
+        let source = match self.pin_judgment(p, Observation::Opened(opened.as_ref())) {
+            PinJudgment::Verified(source) => source,
+            PinJudgment::Recheck => return Err(Committed::Recheck),
+            _ => return Err(Committed::Anomaly),
+        };
+        #[cfg(test)]
+        let replaced =
+            !n2b_mutant("renumber-skip-file-recheck") && !codex::source_file_matches(&source);
+        #[cfg(not(test))]
+        let replaced = !codex::source_file_matches(&source);
+        // A file swapped in after the check is judged again on the next hook, as a checked one is.
+        match replaced {
+            true => Err(Committed::Recheck),
+            false => Ok(source),
         }
     }
 

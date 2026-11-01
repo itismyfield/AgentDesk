@@ -1,8 +1,14 @@
 //! How long a queued request the receiver keeps answering 425 waits before it is sent again.
 //! The delay belongs to the queue head; the next head starts from the first delay.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+use chrono::{DateTime, Utc};
+use serde::Deserialize;
+
+use super::response_window::{may_publish, respond_by};
 
 /// The wait after a request's first 425, as long as the worker's fixed retry interval was.
 const FIRST_DELAY: Duration = Duration::from_millis(25);
@@ -35,6 +41,57 @@ impl Backoff {
     }
 }
 
+/// The reply window of each queued request, read once from its file while the request is queued.
+#[derive(Debug, Default)]
+pub(super) struct CallerWindows {
+    windows: HashMap<PathBuf, Option<DateTime<Utc>>>,
+}
+
+impl CallerWindows {
+    /// Whether a caller still waits at `now` for the reply of any request in `request_paths`.
+    pub(super) fn any_open(&mut self, request_paths: &[PathBuf], now: DateTime<Utc>) -> bool {
+        if mutation("backoff-ignores-caller") {
+            return false;
+        }
+        if mutation("windows-reread") {
+            self.windows.clear();
+        }
+        let queued: HashSet<&PathBuf> = request_paths.iter().collect();
+        self.windows.retain(|path, _| queued.contains(path));
+        request_paths.iter().any(|path| {
+            let window = match self.windows.get(path) {
+                Some(window) => *window,
+                // A file that cannot be read yet is read again on the next pass.
+                None => match read_window(path) {
+                    Some(window) => *self.windows.entry(path.clone()).or_insert(window),
+                    None => None,
+                },
+            };
+            may_publish(window, now)
+        })
+    }
+}
+
+/// The reply window a request file names, `Some(None)` for a request nobody waits on; the payload
+/// is skipped, not parsed.
+fn read_window(path: &Path) -> Option<Option<DateTime<Utc>>> {
+    #[derive(Deserialize)]
+    struct Response {
+        timeout_millis: u64,
+    }
+    #[derive(Deserialize)]
+    struct Window {
+        published_at: DateTime<Utc>,
+        response: Option<Response>,
+    }
+    #[cfg(test)]
+    tests::note_read(path);
+    let encoded = std::fs::read(path).ok()?;
+    let window = serde_json::from_slice::<Window>(&encoded).ok()?;
+    let response = window.response.map(|response| response.timeout_millis);
+    Some(response.map(|timeout| respond_by(window.published_at, timeout)))
+}
+
 /// 25ms after the first 425, doubling with each one after it up to 2s.
 pub(super) fn delay(refusals: u32) -> Duration {
     if mutation("fixed-25ms") {
@@ -61,8 +118,24 @@ fn mutation(_: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
+    use std::sync::{LazyLock, Mutex};
+
     use super::*;
+
+    static READS: LazyLock<Mutex<HashMap<PathBuf, usize>>> = LazyLock::new(Default::default);
+
+    pub(super) fn note_read(path: &Path) {
+        let mut reads = READS.lock().unwrap_or_else(|poison| poison.into_inner());
+        *reads.entry(path.to_path_buf()).or_default() += 1;
+    }
+
+    /// How often each file under `dir` had its reply window read.
+    pub(in crate::services::claude_tui::hook_relay) fn window_reads(dir: &Path) -> Vec<usize> {
+        let reads = READS.lock().unwrap_or_else(|poison| poison.into_inner());
+        let under = reads.iter().filter(|(path, _)| path.starts_with(dir));
+        under.map(|(_, count)| *count).collect()
+    }
 
     #[test]
     fn a_refused_head_waits_twice_as_long_each_time_up_to_two_seconds() {

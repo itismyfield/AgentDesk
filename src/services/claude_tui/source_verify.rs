@@ -379,7 +379,13 @@ pub(crate) fn verify_claude_source(
         if !proven {
             return PendingConflict;
         }
-        return judged((left.pin.as_ref(), left.pinned_at), hook, seen, false);
+        let pinned_at = left.pinned_at;
+        #[cfg(test)]
+        let pinned_at = match n2b_mutant("renumber-left-at") {
+            true => Some(left.left_at),
+            false => pinned_at,
+        };
+        return judged((left.pin.as_ref(), pinned_at), hook, seen, false);
     }
     let awaited = (history.awaiting.as_ref()).is_some_and(|waiting| waiting.session == session);
     let moved = [&history.current, &history.awaiting].into_iter().flatten();

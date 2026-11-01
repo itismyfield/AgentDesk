@@ -44,7 +44,10 @@ impl Relay {
 
     /// Queues a hook nobody waits on and returns its queue.
     fn enqueue(&self, session: &str, ordinal: u64) -> PathBuf {
-        let payload = json!({ "ordinal": ordinal });
+        self.enqueue_payload(session, json!({ "ordinal": ordinal }))
+    }
+
+    fn enqueue_payload(&self, session: &str, payload: Value) -> PathBuf {
         let enqueued = enqueue_ordered_hook_relay_request(
             &self.endpoint,
             "claude",
@@ -248,4 +251,30 @@ fn a_head_refused_until_its_delivery_deadline_is_quarantined_with_a_marker() {
         .unwrap()
         .count();
     assert_eq!(markers, 1);
+}
+
+/// Forty 64 KiB hooks nobody waits on queue behind a head refused for 1.2s: the backoff passes
+/// read each reply window once while it is queued, not on every pass.
+#[test]
+fn a_backlog_behind_a_refused_head_has_each_reply_window_read_once() {
+    let rule: Rule = Arc::new(|ordinal, _, since| match ordinal {
+        1 if since < Duration::from_millis(1200) => 425,
+        _ => 202,
+    });
+    let mut relay = Relay::new(rule);
+    let session = "too-early-backlog";
+    let queue = relay.enqueue(session, 1);
+    let pad = "x".repeat(64 * 1024);
+    for ordinal in 2..=41 {
+        relay.enqueue_payload(session, json!({ "ordinal": ordinal, "pad": pad }));
+    }
+    relay.work(queue.clone());
+    assert!(
+        relay.sends_of(1, 6).len() >= 6,
+        "the head was held over several passes"
+    );
+    relay.sends_of(41, 1);
+    let reads = crate::services::claude_tui::hook_relay::too_early::tests::window_reads(&queue);
+    assert!(reads.len() >= 40, "{reads:?}");
+    assert!(reads.iter().all(|count| *count == 1), "{reads:?}");
 }

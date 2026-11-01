@@ -11,8 +11,8 @@ use crate::services::tui_prompt_dedupe::binding_events::{
     pinned_source, record_rejected, record_verified,
 };
 use crate::services::tui_prompt_dedupe::{
-    admit_herdr_execution, install_herdr_execution, register_launched_tmux_runtime_binding,
-    release_herdr_execution,
+    AFTER_CHECK, admit_herdr_execution, install_herdr_execution,
+    register_launched_tmux_runtime_binding, release_herdr_execution,
 };
 use chrono::{DateTime, Utc};
 use std::os::unix::fs::MetadataExt;
@@ -113,15 +113,7 @@ impl Reboot {
 
     /// S's transcript as a stat finds it now.
     fn identity(&self) -> SourceId {
-        let meta = fs::metadata(&self.path).unwrap();
-        let (session_id, path) = (self.s.clone(), self.path.clone());
-        let (dev, ino) = (meta.dev(), meta.ino());
-        SourceId {
-            session_id,
-            path,
-            dev,
-            ino,
-        }
+        identity(&self.s, &self.path)
     }
 
     fn pin(&self) -> Option<SourceId> {
@@ -131,20 +123,38 @@ impl Reboot {
     /// A reboot as the log sees it: every record of S names another device, and the process
     /// forgets the channel. Returns the boot time that follows every record so far.
     fn renumber(&self) -> DateTime<Utc> {
-        let log = (self.ingress._root.path())
-            .join(crate::services::tui_prompt_dedupe::binding_events::BINDING_EVENTS_DIR)
-            .join(format!("{CHANNEL}.log"));
-        let real = format!("\"dev\":{},", self.identity().dev);
-        let moved = format!("\"dev\":{},", self.identity().dev + 1);
-        let body = fs::read_to_string(&log).unwrap();
-        assert!(body.contains(&real), "{body}");
-        fs::write(&log, body.replace(&real, &moved)).unwrap();
-        forget_channel_for_tests(CHANNEL);
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        let boot = Utc::now();
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        boot
+        reboot(&self.ingress, self.identity().dev)
     }
+}
+
+/// `session`'s transcript at `path` as a stat finds it now.
+fn identity(session: &str, path: &std::path::Path) -> SourceId {
+    let meta = fs::metadata(path).unwrap();
+    let (session_id, path) = (session.to_owned(), path.to_path_buf());
+    let (dev, ino) = (meta.dev(), meta.ino());
+    SourceId {
+        session_id,
+        path,
+        dev,
+        ino,
+    }
+}
+
+/// A reboot as `CHANNEL`'s log sees it: every record of device `dev` names another device, and the
+/// process forgets the channel. Returns the boot time that follows every record so far.
+fn reboot(ingress: &Ingress, dev: u64) -> DateTime<Utc> {
+    let log = (ingress._root.path())
+        .join(crate::services::tui_prompt_dedupe::binding_events::BINDING_EVENTS_DIR)
+        .join(format!("{CHANNEL}.log"));
+    let (real, moved) = (format!("\"dev\":{dev},"), format!("\"dev\":{},", dev + 1));
+    let body = fs::read_to_string(&log).unwrap();
+    assert!(body.contains(&real), "{body}");
+    fs::write(&log, body.replace(&real, &moved)).unwrap();
+    forget_channel_for_tests(CHANNEL);
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let boot = Utc::now();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    boot
 }
 
 #[test]
@@ -271,4 +281,78 @@ fn a_record_after_the_boot_does_not_date_the_earlier_pin() {
     let b = pane.launch("resume");
     assert_eq!(pane.resumed_start(&b), 202);
     assert_eq!(pane.pin(), Some(pane.identity()));
+}
+
+#[test]
+fn a_file_swapped_in_after_the_renumber_check_is_not_pinned() {
+    let pane = Reboot::bound();
+    let boot = pane.renumber();
+    // B's launch cannot re-pin without a boot time, so its resumed start is the first re-pin.
+    let _unknown = boot_time_for_tests(None);
+    let b = pane.launch("resume");
+    let _boot = boot_time_for_tests(Some(boot));
+    let (pinned, lines) = (pane.pin(), events(CHANNEL).len());
+    let (path, staged) = (pane.path.clone(), pane.path.with_extension("staged"));
+    fs::write(&staged, fs::read(&path).unwrap()).unwrap();
+    let swap = move || fs::rename(&staged, &path).unwrap();
+    AFTER_CHECK.with_borrow_mut(|after| *after = Some(Box::new(swap)));
+    assert_eq!(
+        pane.resumed_start(&b),
+        425,
+        "the path names another file now"
+    );
+    assert!(
+        AFTER_CHECK.with_borrow(Option::is_none),
+        "the swap ran inside the re-pin"
+    );
+    assert_eq!(pane.pin(), pinned, "the pin stays");
+    assert_eq!(events(CHANNEL).len(), lines, "nothing logged");
+}
+
+/// L → A (pinned) → reboot → B → resume A, so A's pin precedes the boot and its leaving follows it:
+/// A comes back on its own pin's time, re-pinned under the new device.
+#[test]
+fn a_session_left_after_the_reboot_returns_on_its_earlier_boots_pin() {
+    let _context = crate::services::tui_prompt_dedupe::binding_context::tests::fixture();
+    let ingress = Ingress::new();
+    let (tmux, l, a, b) = (
+        format!("renumber-return-{}", uuid()),
+        uuid(),
+        uuid(),
+        uuid(),
+    );
+    let marker = crate::services::tmux_common::session_temp_path(&tmux, "spawn_nonce");
+    fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+    fs::write(marker, uuid::Uuid::new_v4().simple().to_string()).unwrap();
+    ingress.pane(&tmux, CHANNEL, &l);
+    let a_path = ingress.transcript(&a);
+    let switch = |session: &str, source: Option<&str>| {
+        let payload = ingress.payload(session, source);
+        let event = if source.is_some() {
+            "SessionStart"
+        } else {
+            "UserPromptSubmit"
+        };
+        let status = ingress.claude_hook(event, &l, &payload, Some(&uuid()));
+        clear_claude_session_rotation(&tmux);
+        status
+    };
+    let bound = || runtime_binding_for_tmux_session(&tmux).and_then(|b| b.session_id);
+    let pin = || pinned_source(CHANNEL, &tmux).unwrap();
+    assert_eq!(switch(&a, None), 202, "L → A");
+    assert_eq!(pin(), Some(identity(&a, &a_path)), "A pinned verified");
+    let boot = reboot(&ingress, identity(&a, &a_path).dev);
+    let _boot = boot_time_for_tests(Some(boot));
+    ingress.transcript(&b);
+    assert_eq!(switch(&b, None), 202, "A → B after the boot");
+    assert_eq!(bound().as_deref(), Some(b.as_str()));
+    assert_eq!(switch(&a, Some("resume")), 202, "resume A");
+    assert_eq!(bound().as_deref(), Some(a.as_str()), "A is bound again");
+    assert_eq!(pin(), Some(identity(&a, &a_path)), "re-pinned verified");
+    forget_channel_for_tests(CHANNEL);
+    assert_eq!(
+        pin(),
+        Some(identity(&a, &a_path)),
+        "the re-pin is in the log"
+    );
 }

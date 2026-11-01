@@ -604,6 +604,7 @@ fn run_ordered_hook_relay_worker(request: OrderedHookRelayWorkerRequest) -> Resu
     };
     let mut worker_lock = Some(worker_lock);
     let mut backoff = super::too_early::Backoff::default();
+    let mut windows = super::too_early::CallerWindows::default();
     loop {
         promote_ordered_hook_relay_ingress(&queue_dir)?;
         let request_paths = queue_request_paths(&queue_dir)?;
@@ -618,7 +619,8 @@ fn run_ordered_hook_relay_worker(request: OrderedHookRelayWorkerRequest) -> Resu
         }
         // A head the receiver keeps answering 425 waits out its backoff, unless a caller waits on
         // this queue: then the head is resent every interval so the caller's reply is not held.
-        if backoff.holds(&request_paths[0], Instant::now()) && !caller_waits(&request_paths) {
+        let held = backoff.holds(&request_paths[0], Instant::now());
+        if held && !windows.any_open(&request_paths, Utc::now()) {
             std::thread::sleep(RELAY_IN_FLIGHT_RETRY_INTERVAL);
             continue;
         }
@@ -706,26 +708,6 @@ enum OrderedHookRelayProcessOutcome {
     Retry,
     /// The receiver answered 425: the same request is resent after the head's backoff.
     TooEarly,
-}
-
-/// Whether a caller still waits for the reply of any request in this queue.
-fn caller_waits(request_paths: &[PathBuf]) -> bool {
-    #[cfg(test)]
-    if behavior_mutation_enabled("backoff-ignores-caller") {
-        return false;
-    }
-    let now = Utc::now();
-    request_paths.iter().any(|path| {
-        let Ok(encoded) = std::fs::read(path) else {
-            return false;
-        };
-        let request = serde_json::from_slice::<OrderedHookRelayRequest>(&encoded).ok();
-        let window = request.and_then(|request| {
-            let response = request.response.as_ref()?;
-            Some(respond_by(request.published_at, response.timeout_millis))
-        });
-        may_publish(window, now)
-    })
 }
 
 fn process_ordered_hook_relay_request(
