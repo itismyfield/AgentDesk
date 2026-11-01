@@ -367,6 +367,12 @@ function createAgentdeskMock(options) {
       refreshInventoryDocs() {}
     },
     timeouts: {
+      maintainUnsentNotifications() {
+        if (typeof timeouts.maintainUnsentNotifications === "function") {
+          return clone(timeouts.maintainUnsentNotifications(...arguments));
+        }
+        return { ok: true };
+      },
       clearDeadlockCountersForFreshSessions(staleScanMinutes) {
         state.timeoutClearFreshCounterCalls.push({ staleScanMinutes });
         if (typeof timeouts.clearDeadlockCountersForFreshSessions === "function") {

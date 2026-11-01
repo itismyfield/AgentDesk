@@ -404,7 +404,9 @@ src/
 │   │   ├── review_ops.rs
 │   │   ├── runtime_ops.rs
 │   │   ├── timeouts_ops.rs
-│   │   └── turn_ops.rs
+│   │   ├── turn_ops.rs
+│   │   ├── unsent_notify_ops.rs
+│   │   └── unsent_notify_tests.rs
 │   ├── hooks.rs
 │   ├── intent.rs
 │   ├── loader.rs
@@ -3189,6 +3191,7 @@ src/
 │   │   │   └── transport.rs
 │   │   ├── dtos.rs
 │   │   ├── mod.rs
+│   │   ├── notify_recovery.rs
 │   │   ├── outbox_claiming.rs
 │   │   ├── outbox_queue.rs
 │   │   ├── outbox_queue_replay_tests.rs

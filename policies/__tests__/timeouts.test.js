@@ -521,35 +521,22 @@ test("timeouts review auto-accept keeps aggregate retry when POST returns error 
   assert.match(state.logs.warn.at(-1), /aggregate trigger returned error/);
 });
 
-test("timeouts dispatch maintenance module re-enqueues unnotified pending dispatches", () => {
+test("timeouts dispatch maintenance delegates unsent notification recovery", () => {
+  const calls = [];
   const { policy, state } = loadPolicy("policies/timeouts.js", {
-    dbQuery: createSqlRouter([
-      {
-        match: "FROM task_dispatches td JOIN kanban_cards kc ON td.kanban_card_id = kc.id",
-        result: [
-          {
-            id: "dispatch-unnotified-1",
-            dispatch_type: "implementation",
-            to_agent_id: "agent-1",
-            title: "Needs notify",
-            github_issue_url: null,
-            github_issue_number: null,
-            kanban_card_id: "card-1"
-          }
-        ]
+    timeouts: {
+      maintainUnsentNotifications(...args) {
+        calls.push(args);
+        return { ok: true };
       }
-    ])
+    }
   });
 
   policy._section_I0();
 
-  assert.match(state.executions[0].sql, /INSERT INTO dispatch_outbox/);
-  assert.deepEqual(toPlain(state.executions[0].params), [
-    "dispatch-unnotified-1",
-    "agent-1",
-    "card-1",
-    "Needs notify"
-  ]);
+  assert.deepEqual(calls, [[]]);
+  assert.equal(state.queries.length, 0);
+  assert.equal(state.executions.length, 0);
 });
 
 test("timeouts active monitor normalizes the full-key host observation without exec", () => {
