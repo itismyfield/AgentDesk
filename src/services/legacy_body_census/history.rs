@@ -136,15 +136,15 @@ pub(super) fn prepare(
         "census_hash":probes["census_hash"], "probe_coverage":probes["coverage"],
         "pending_probes":probes["pending"], "startup_reasons":super::reasons(state),
     });
+    let path = dir.join(format!("{}.jsonl", boot.id));
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(dir.join(format!("{}.jsonl", boot.id)))
+        .open(&path)
         .map_err(|_| "JOURNAL_CREATE_FAILED")?;
     append_line(&mut file, &header).map_err(|_| "HEADER_WRITE_FAILED")?;
     #[cfg(unix)]
-    File::open(&dir)
-        .and_then(|dir| dir.sync_all())
+    crate::services::discord::runtime_store::fsync_parent_dir(&path)
         .map_err(|_| "DIRECTORY_SYNC_FAILED")?;
     let mut status = state
         .lock()
