@@ -43,6 +43,6 @@ pub(super) fn tui_o_writer_dormant_channels(old: &Config, new: &Config) -> bool 
 pub(super) fn tui_o_writer_late_adopt(old: &Config, new: &Config) -> bool {
     let capable = channel_policy::boot()
         .map(|boot| boot.late_adopt_capable())
-        .unwrap_or_else(|| old.tui_o.as_ref().is_some_and(|c| c.writer.late_adopt));
-    new.tui_o.as_ref().is_some_and(|c| c.writer.late_adopt) && !capable
+        .unwrap_or_else(|| channel_policy::tui_o_of(old).writer.late_adopt());
+    channel_policy::tui_o_of(new).writer.late_adopt() && !capable
 }

@@ -1,5 +1,6 @@
 //! A live arrival may reuse its sole plain queued source, preserving the queued-head transaction.
 use super::*;
+use crate::services::discord::turn_view_reconciler::{TurnViewIdentity, TurnViewTarget};
 use crate::services::turn_orchestrator::{SourceMessageQueuedGeneration, prefix};
 use std::time::Instant;
 
@@ -90,5 +91,29 @@ pub(super) async fn confirmed(
                 .await;
             }
         }
+    }
+}
+
+/// Uses the live receipt marker after a queued source is confirmed and its pending markers cleared.
+pub(super) async fn mark_confirmed(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    sources: &[SourceMessageQueuedGeneration],
+) {
+    let Some(http) = shared.serenity_http_or_token_fallback() else {
+        return;
+    };
+    for source in sources {
+        let target = TurnViewTarget::intake_user_message(channel, source.message_id);
+        shared
+            .turn_view_reconciler
+            .note_confirmed_injection(
+                shared,
+                provider,
+                target,
+                TurnViewIdentity::IntakeHttp(http.clone()),
+            )
+            .await;
     }
 }

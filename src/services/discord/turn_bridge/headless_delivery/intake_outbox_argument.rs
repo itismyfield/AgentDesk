@@ -18,6 +18,7 @@ pub(in crate::services::discord::turn_bridge) struct HeadlessDeliveryArguments<'
     _intake_outbox_id: IntakeOutboxArgument,
     provider: &'a ProviderKind,
     born_generation: u64,
+    producer_turn_nonce: Option<&'a str>,
     content: &'a str,
     cancel_token: Option<&'a CancelToken>,
 }
@@ -32,6 +33,7 @@ pub(in crate::services::discord::turn_bridge) struct HeadlessDeliveryInputs<'a> 
     pub(in crate::services::discord::turn_bridge) cancel_token: Option<&'a CancelToken>,
 }
 
+#[derive(Clone, Copy)]
 pub(super) struct HeadlessDeliveryRuntimeArguments<'a> {
     pub(super) shared: &'a Arc<SharedData>,
     pub(super) channel_id: ChannelId,
@@ -40,6 +42,7 @@ pub(super) struct HeadlessDeliveryRuntimeArguments<'a> {
     pub(super) delivery_bot: Option<&'a str>,
     pub(super) provider: &'a ProviderKind,
     pub(super) born_generation: u64,
+    pub(super) producer_turn_nonce: Option<&'a str>,
     pub(super) intake_outbox_id: Option<i64>,
     pub(super) content: &'a str,
     pub(super) cancel_token: Option<&'a CancelToken>,
@@ -56,6 +59,7 @@ impl<'a> HeadlessDeliveryArguments<'a> {
             delivery_bot: self.delivery_bot,
             provider: self.provider,
             born_generation: self.born_generation,
+            producer_turn_nonce: self.producer_turn_nonce,
             intake_outbox_id,
             content: self.content,
             cancel_token: self.cancel_token,
@@ -76,6 +80,11 @@ pub(in crate::services::discord::turn_bridge) fn assemble_headless_delivery_argu
         _intake_outbox_id: IntakeOutboxArgument::from_inflight(inflight_state),
         provider: inputs.provider,
         born_generation: inflight_state.born_generation,
+        // The turn's own nonce, copied from its cancel token at intake; empty means unknown.
+        producer_turn_nonce: inflight_state
+            .turn_nonce
+            .as_deref()
+            .filter(|nonce| !nonce.is_empty()),
         content: inputs.content,
         cancel_token: inputs.cancel_token,
     }

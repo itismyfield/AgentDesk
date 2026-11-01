@@ -70,7 +70,7 @@ use self::turn_lifecycle::{
     should_discard_restored_seed_for_idle_direct_prompt, watcher_stream_seed,
 };
 pub(super) use self::turn_lifecycle::{
-    RestoredWatcherTurn, consume_monitor_auto_turn_preamble_once,
+    RestoredWatcherTurn, SeedBodySource, consume_monitor_auto_turn_preamble_once,
     restored_watcher_turn_from_inflight,
 };
 
@@ -312,6 +312,8 @@ mod restored_seed_discard_tests {
             streaming_rollover_frozen_msg_ids: Vec::new(),
             same_turn_rewind: false,
             delivery_source: None,
+            body_source: None,
+            producer_turn_nonce: None,
         };
 
         let seed_reassigned_to_different_turn = restored_seed_reassigned_to_different_turn(

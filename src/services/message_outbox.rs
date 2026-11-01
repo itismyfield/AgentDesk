@@ -343,10 +343,19 @@ pub(crate) async fn enqueue_outbox_pg_with_exact_dedupe_and_attachment(
     cancel_token: Option<&CancelToken>,
     attachment: Option<OutboxAttachment<'_>>,
 ) -> Result<OutboxEnqueueOutcome, OutboxEnqueueError> {
-    enqueue_outbox_pg_with_exact_origin(pool, message, dedupe_key, cancel_token, attachment, None)
-        .await
+    enqueue_outbox_pg_with_exact_origin(
+        pool,
+        message,
+        dedupe_key,
+        cancel_token,
+        attachment,
+        None,
+        None,
+    )
+    .await
 }
 
+/// The INSERT writes `producer_turn_nonce` once; an exact dedupe hit keeps the first row's value.
 pub(crate) async fn enqueue_outbox_pg_with_exact_origin(
     pool: &PgPool,
     message: OutboxMessage<'_>,
@@ -354,6 +363,7 @@ pub(crate) async fn enqueue_outbox_pg_with_exact_origin(
     cancel_token: Option<&CancelToken>,
     attachment: Option<OutboxAttachment<'_>>,
     origin: Option<&crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
+    producer_turn_nonce: Option<&str>,
 ) -> Result<OutboxEnqueueOutcome, OutboxEnqueueError> {
     validate_outbox_source(message.source)?;
     let (filename, content_type, data) = attachments::parts(attachment);
@@ -371,8 +381,9 @@ pub(crate) async fn enqueue_outbox_pg_with_exact_origin(
     let id = sqlx::query_scalar::<_, i64>(
         "INSERT INTO message_outbox
          (target, content, bot, source, reason_code, session_key, dedupe_key, dedupe_expires_at,
-          attachment_filename, attachment_content_type, attachment_data, session_notice, output_origin)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW() + INTERVAL '30 days', $8, $9, $10, $11, $12)
+          attachment_filename, attachment_content_type, attachment_data, session_notice, output_origin,
+          producer_turn_nonce)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW() + INTERVAL '30 days', $8, $9, $10, $11, $12, $13)
          ON CONFLICT (dedupe_key)
              WHERE dedupe_key IS NOT NULL AND status NOT IN ('failed', 'cancelled')
          DO UPDATE SET dedupe_key = EXCLUDED.dedupe_key
@@ -391,6 +402,7 @@ pub(crate) async fn enqueue_outbox_pg_with_exact_origin(
     .bind(data)
     .bind(notice)
     .bind(encoded_output_origin(origin)?)
+    .bind(producer_turn_nonce)
     .fetch_one(pool)
     .await?;
     Ok(OutboxEnqueueOutcome::Enqueued { id })
@@ -402,7 +414,8 @@ pub(crate) async fn enqueue_outbox_pg_returning_outcome_with_ttl_and_cancel(
     dedupe_ttl_secs: i64,
     cancel_token: Option<&CancelToken>,
 ) -> Result<OutboxEnqueueOutcome, OutboxEnqueueError> {
-    enqueue_outbox_pg_with_ttl_origin(pool, message, dedupe_ttl_secs, cancel_token, None).await
+    enqueue_outbox_pg_with_ttl_origin(pool, message, dedupe_ttl_secs, cancel_token, None, None)
+        .await
 }
 
 pub(crate) async fn enqueue_outbox_pg_with_ttl_origin(
@@ -411,6 +424,7 @@ pub(crate) async fn enqueue_outbox_pg_with_ttl_origin(
     dedupe_ttl_secs: i64,
     cancel_token: Option<&CancelToken>,
     origin: Option<&crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
+    producer_turn_nonce: Option<&str>,
 ) -> Result<OutboxEnqueueOutcome, OutboxEnqueueError> {
     validate_outbox_source(message.source)?;
     let reason_code = normalized_reason_code(message.reason_code);
@@ -455,9 +469,15 @@ pub(crate) async fn enqueue_outbox_pg_with_ttl_origin(
     }
 
     let mut tx = pool.begin().await?;
-    let outbox_id =
-        enqueue_outbox_pg_on_tx_with_ttl_origin(&mut tx, message, dedupe_ttl_secs, None, origin)
-            .await?;
+    let outbox_id = enqueue_outbox_pg_on_tx_with_ttl_origin(
+        &mut tx,
+        message,
+        dedupe_ttl_secs,
+        None,
+        origin,
+        producer_turn_nonce,
+    )
+    .await?;
     tx.commit().await?;
 
     match outbox_id {
@@ -507,7 +527,8 @@ pub(crate) async fn enqueue_outbox_pg_on_tx_with_ttl_and_attachment(
     dedupe_ttl_secs: i64,
     attachment: Option<OutboxAttachment<'_>>,
 ) -> Result<Option<i64>, OutboxEnqueueError> {
-    enqueue_outbox_pg_on_tx_with_ttl_origin(tx, message, dedupe_ttl_secs, attachment, None).await
+    enqueue_outbox_pg_on_tx_with_ttl_origin(tx, message, dedupe_ttl_secs, attachment, None, None)
+        .await
 }
 
 async fn enqueue_outbox_pg_on_tx_with_ttl_origin(
@@ -516,6 +537,7 @@ async fn enqueue_outbox_pg_on_tx_with_ttl_origin(
     dedupe_ttl_secs: i64,
     attachment: Option<OutboxAttachment<'_>>,
     origin: Option<&crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
+    producer_turn_nonce: Option<&str>,
 ) -> Result<Option<i64>, OutboxEnqueueError> {
     validate_outbox_source(message.source)?;
     let (filename, content_type, data) = attachments::parts(attachment);
@@ -537,12 +559,13 @@ async fn enqueue_outbox_pg_on_tx_with_ttl_origin(
     Ok(sqlx::query_scalar::<_, i64>(
         "INSERT INTO message_outbox
          (target, content, bot, source, reason_code, session_key, dedupe_key, dedupe_expires_at,
-          attachment_filename, attachment_content_type, attachment_data, session_notice, output_origin)
+          attachment_filename, attachment_content_type, attachment_data, session_notice, output_origin,
+          producer_turn_nonce)
          VALUES ($1, $2, $3, $4, $5, $6, $7,
                  CASE WHEN $8::BIGINT > 0
                       THEN NOW() + ($8::BIGINT * INTERVAL '1 second')
                       ELSE NULL
-                 END, $9, $10, $11, $12, $13)
+                 END, $9, $10, $11, $12, $13, $14)
          ON CONFLICT (dedupe_key)
              WHERE dedupe_key IS NOT NULL AND status NOT IN ('failed', 'cancelled')
          DO NOTHING
@@ -561,6 +584,7 @@ async fn enqueue_outbox_pg_on_tx_with_ttl_origin(
     .bind(data)
     .bind(notice)
     .bind(encoded_output_origin(origin)?)
+    .bind(producer_turn_nonce)
     .fetch_optional(&mut **tx)
     .await?)
 }

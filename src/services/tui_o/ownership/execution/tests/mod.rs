@@ -318,3 +318,90 @@ async fn owner_execution_gate_close_never_holds_the_snapshot_read_lock_pg() {
     );
     pool.close().await;
 }
+
+/// The same execution and its first binding keep the late candidate with its fixed boundary; a
+/// different execution closes the old gate and seeds a candidate whose boundary is not fixed.
+#[tokio::test]
+async fn owner_execution_swap_seeds_a_late_candidate_with_an_unfixed_boundary_pg() {
+    use crate::services::tui_o::channel_policy::{Adoption, BootChannels, LateBoundary};
+    if !cutover::test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::owner_execution_swap_seeds_a_late_candidate_with_an_unfixed_boundary_pg"
+    )) {
+        return;
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let channel = 73368095;
+    admission(&pool, "claude", channel, "mac-a").await;
+    let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+        "server": {}, "agents": [{"id": "w", "name": "W",
+            "channels": {"claude": {"id": channel.to_string(), "runtime": "tui"}}}],
+        "tui_o": {"writer": {"channels": [channel], "late_adopt": true}}
+    }))
+    .unwrap();
+    let boot = BootChannels::validate(&config).unwrap();
+    let states = std::collections::BTreeMap::from([(channel, Adoption::Pending)]);
+    let seeded = boot.seeded(&config, |_, _| Ok(states)).unwrap();
+    let _channels = cutover::test_override::force_boot(seeded);
+    let snapshot = cutover::boot_snapshot().unwrap();
+    let read_now = || read(&pool, "claude", channel, "mac-a", || Ok(false));
+    let permit = read_now().await.unwrap().unwrap();
+    let (old_gate, generation) = (permit.gate(), permit.generation);
+    let like = |generation: i64, session_ref: SessionRef| OwnerPermit {
+        pool: pool.clone(),
+        identity: permit.identity.clone(),
+        executor: permit.executor.clone(),
+        generation,
+        session_ref,
+        gate: Arc::new(super::super::OwnershipGate::for_execution(generation)),
+    };
+    let bound = like(
+        generation,
+        SessionRef::Bound(serde_json::json!({"host": "tmux"})),
+    );
+    let swapped = like(generation + 1, SessionRef::Fresh);
+    snapshot.install_execution(channel, Some(Ok(Arc::clone(&permit))));
+    let first = snapshot.output_candidate(channel).unwrap();
+    assert!(first.late_adopt_origin());
+    let fixed = LateBoundary {
+        baseline: 3,
+        takeover_after: 3,
+        sends: (1, 1),
+    };
+    assert_eq!(first.fix_late_boundary(|| fixed), fixed);
+
+    snapshot.install_execution(channel, Some(Ok(read_now().await.unwrap().unwrap())));
+    snapshot.install_execution(channel, Some(Ok(Arc::new(bound))));
+    let kept = snapshot.output_candidate(channel).unwrap();
+    assert_eq!(
+        kept.late_boundary(),
+        Some(fixed),
+        "same execution, then its first binding"
+    );
+    let gate = snapshot.execution(channel).unwrap().permit.unwrap().gate();
+    assert!(Arc::ptr_eq(&old_gate, &gate));
+
+    snapshot.install_execution(channel, Some(Ok(Arc::new(swapped))));
+    assert_eq!(
+        old_gate.current(),
+        GatewayOwnership::Lost,
+        "the old gate closes"
+    );
+    let next = snapshot.output_candidate(channel).unwrap();
+    assert!(next.late_adopt_origin());
+    assert_eq!(
+        next.late_boundary(),
+        None,
+        "the next host's first read fixes its own"
+    );
+    let refixed = LateBoundary {
+        baseline: 5,
+        takeover_after: 5,
+        sends: (2, 2),
+    };
+    assert_eq!(next.fix_late_boundary(|| refixed), refixed);
+    assert_eq!(first.late_boundary(), Some(fixed));
+    pool.close().await;
+}

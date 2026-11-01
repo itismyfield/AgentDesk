@@ -16,6 +16,7 @@ mod source_boundary_tests;
 enum HistoricalMarker {
     Absent,
     ForeignIdentity,
+    RenamedIdentity,
     MissingIdentity,
     OwnedMemory,
     OwnedBoot,
@@ -56,6 +57,16 @@ async fn disconnected_foreign_identity_queue_kickoff_starts_turn_pg() {
         "::disconnected_foreign_identity_queue_kickoff_starts_turn_pg"
     )) {
         restored_head_reaches_provider(HistoricalMarker::ForeignIdentity, true, true).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn disconnected_renamed_identity_queue_kickoff_starts_turn_pg() {
+    if isolated(concat!(
+        module_path!(),
+        "::disconnected_renamed_identity_queue_kickoff_starts_turn_pg"
+    )) {
+        restored_head_reaches_provider(HistoricalMarker::RenamedIdentity, true, true).await;
     }
 }
 
@@ -155,7 +166,9 @@ async fn restored_head_reaches_provider(marker: HistoricalMarker, warm: bool, st
             .await;
     if matches!(
         marker,
-        HistoricalMarker::ForeignIdentity | HistoricalMarker::MissingIdentity
+        HistoricalMarker::ForeignIdentity
+            | HistoricalMarker::RenamedIdentity
+            | HistoricalMarker::MissingIdentity
     ) {
         let hash = crate::services::discord::settings::discord_token_hash(TEST_BOT);
         let key = crate::services::discord::adk_session::build_namespaced_session_key(
@@ -247,6 +260,7 @@ async fn restored_head_reaches_provider(marker: HistoricalMarker, warm: bool, st
         marker,
         HistoricalMarker::Absent
             | HistoricalMarker::ForeignIdentity
+            | HistoricalMarker::RenamedIdentity
             | HistoricalMarker::MissingIdentity
     ) {
         crate::services::tmux_common::cleanup_session_temp_files(CANARY_TMUX);
@@ -295,24 +309,38 @@ async fn restored_head_reaches_provider(marker: HistoricalMarker, warm: bool, st
     );
     if matches!(
         marker,
-        HistoricalMarker::ForeignIdentity | HistoricalMarker::MissingIdentity
+        HistoricalMarker::ForeignIdentity
+            | HistoricalMarker::RenamedIdentity
+            | HistoricalMarker::MissingIdentity
     ) {
         let pool = fixture.shared.pg_pool.as_ref().unwrap();
         sqlx::query("UPDATE sessions SET identity_kind = NULL, discord_token_hash = NULL")
             .execute(pool)
             .await
             .unwrap();
-        if matches!(marker, HistoricalMarker::ForeignIdentity) {
+        // The identity holder sits on another host, or on this host under the pre-rename tmux name.
+        let holder = match marker {
+            HistoricalMarker::ForeignIdentity => Some(format!(
+                "codex/{}/old-mac-mini:{CANARY_TMUX}",
+                fixture.shared.token_hash
+            )),
+            HistoricalMarker::RenamedIdentity => Some(
+                crate::services::discord::adk_session::build_namespaced_session_key(
+                    &fixture.shared.token_hash,
+                    &ProviderKind::Codex,
+                    "AgentDesk-codex-adk-codex-tui-e2e-renamed",
+                ),
+            ),
+            _ => None,
+        };
+        if let Some(holder) = holder {
             sqlx::query(
                 "INSERT INTO sessions (session_key, provider, status, channel_id,
                                        identity_kind, discord_token_hash, last_heartbeat)
                  VALUES ($1, 'codex', 'disconnected', $2, 'discord_channel', $3,
                          NOW() - INTERVAL '60 days')",
             )
-            .bind(format!(
-                "codex/{}/old-mac-mini:{CANARY_TMUX}",
-                fixture.shared.token_hash
-            ))
+            .bind(holder)
             .bind(CANARY_CHANNEL.to_string())
             .bind(&fixture.shared.token_hash)
             .execute(pool)
@@ -341,7 +369,9 @@ async fn restored_head_reaches_provider(marker: HistoricalMarker, warm: bool, st
     };
     if !matches!(
         marker,
-        HistoricalMarker::ForeignIdentity | HistoricalMarker::MissingIdentity
+        HistoricalMarker::ForeignIdentity
+            | HistoricalMarker::RenamedIdentity
+            | HistoricalMarker::MissingIdentity
     ) {
         let blocked = crate::services::discord::router::hosted_tui_promote_readiness_blocked(
             &fixture.shared,

@@ -118,6 +118,7 @@ pub enum RuntimeHandoff {
         transcript_path: String,
         tmux_session_name: String,
         last_offset: u64,
+        turn_read: Option<TurnReadSource>,
     },
     CodexTui {
         rollout_path: String,
@@ -130,6 +131,13 @@ pub enum RuntimeHandoff {
         session_name: String,
         last_offset: u64,
     },
+}
+
+/// Where a producer began reading the turn it hands off, in the transcript file it opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnReadSource {
+    pub start: u64,
+    pub file: crate::services::cluster::stream_relay::SourceFileIdentity,
 }
 
 /// How a provider's own terminal record ended its turn; every pre-existing producer is `Completed`.

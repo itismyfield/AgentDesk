@@ -115,6 +115,15 @@ pub(in crate::services::discord::tmux::tmux_watcher) struct ActiveReadState {
     pub(in crate::services::discord::tmux::tmux_watcher) fresh_ready_for_input_idle: bool,
 }
 
+/// A body restored from an inflight row, with the producer read that wrote it when known.
+#[derive(Clone, Debug, Default)]
+pub(in crate::services::discord::tmux::tmux_watcher) struct RestoredResponseSeed {
+    pub(in crate::services::discord::tmux::tmux_watcher) body: String,
+    pub(in crate::services::discord::tmux::tmux_watcher) source: Option<SeedBodySource>,
+    /// Turn of the restored row that started this collection; kept even while `body` is empty.
+    pub(in crate::services::discord::tmux::tmux_watcher) producer_turn_nonce: Option<String>,
+}
+
 #[derive(Clone)]
 pub(in crate::services::discord::tmux::tmux_watcher) struct CollectedTurnStream {
     pub(in crate::services::discord::tmux::tmux_watcher) turn_data_start_offset: u64,
@@ -122,7 +131,8 @@ pub(in crate::services::discord::tmux::tmux_watcher) struct CollectedTurnStream 
     pub(in crate::services::discord::tmux::tmux_watcher) mixed_read_provenance: bool,
     pub(in crate::services::discord::tmux::tmux_watcher) split_trailing_turn_follows: bool,
     pub(in crate::services::discord::tmux::tmux_watcher) state: StreamLineState,
-    pub(in crate::services::discord::tmux::tmux_watcher) restored_response_seed: String,
+    pub(in crate::services::discord::tmux::tmux_watcher) restored_response_seed:
+        RestoredResponseSeed,
     pub(in crate::services::discord::tmux::tmux_watcher) full_response: String,
     pub(in crate::services::discord::tmux::tmux_watcher) tool_state: WatcherToolState,
     pub(in crate::services::discord::tmux::tmux_watcher) placeholder_msg_id:

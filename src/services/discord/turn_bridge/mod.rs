@@ -3,7 +3,7 @@ pub(in crate::services::discord) mod before_start_stop;
 mod bridge_entry_persist;
 mod bridge_latency_spans;
 mod cancel_finalize_policy;
-mod chunk_compose;
+pub(in crate::services::discord) mod chunk_compose;
 mod completion_guard;
 mod completion_postlude;
 mod context_window;
@@ -176,6 +176,8 @@ use current_message_anchor::{
     unbound_current_message_candidate,
 };
 use guards::{make_bridge_guards, resolve_guard_owner_channel};
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use headless_delivery::enqueue_headless_turn_row_for_test;
 use headless_delivery::{
     cleanup_headless_streaming_placeholder_after_delivery, enqueue_claimed_headless_delivery,
     is_synthetic_headless_message_id,

@@ -3,7 +3,9 @@ use crate::services::cluster::stream_relay::RelayProducer;
 use crate::services::discord::inflight::{
     InflightTurnIdentity, load_inflight_state, save_inflight_state,
 };
-use crate::services::discord::outbound::o_delivery_evidence::tests::Fixture;
+use crate::services::discord::outbound::o_delivery_evidence::tests::{
+    Fixture, bounded, force_seam_stall,
+};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 thread_local! {
@@ -28,6 +30,11 @@ struct EvidenceFrame {
     turn_start: u64,
     batch_start: u64,
     tail: String,
+    seed: RestoredResponseSeed,
+    body: Option<String>,
+    fresh: bool,
+    /// Inflight rows stored at each outer poll before this frame; `None` keeps the fixture's nonce.
+    polls: Option<Vec<Option<InflightTurnState>>>,
 }
 
 impl From<(u64, u64)> for EvidenceFrame {
@@ -36,8 +43,47 @@ impl From<(u64, u64)> for EvidenceFrame {
             turn_start,
             batch_start,
             tail: String::new(),
+            seed: RestoredResponseSeed::default(),
+            body: None,
+            fresh: true,
+            polls: None,
         }
     }
+}
+
+fn store_inflight(provider: &ProviderKind, channel: u64, state: Option<&InflightTurnState>) {
+    match state {
+        Some(state) => save_inflight_state(state).unwrap(),
+        None => {
+            crate::services::discord::inflight::clear_inflight_state(provider, channel);
+        }
+    }
+}
+
+/// The watcher's turn binding as production derives it: bound to the handed-off row at spawn,
+/// then refreshed by each outer poll against the inflight row stored at that poll.
+fn production_watcher_nonce(
+    f: &Fixture,
+    polls: &[Option<InflightTurnState>],
+    consumed: u64,
+) -> Option<String> {
+    let provider = f.row.provider_kind().unwrap();
+    let session = f.row.tmux_session_name.clone().unwrap();
+    let stored = load_inflight_state(&provider, f.row.channel_id);
+    let (mut identity, mut nonce) = (None, f.row.turn_nonce.clone());
+    for poll in polls {
+        store_inflight(&provider, f.row.channel_id, poll.as_ref());
+        refresh_watcher_turn_identity(
+            &mut identity,
+            &mut nonce,
+            &provider,
+            ChannelId::new(f.row.channel_id),
+            &session,
+            consumed,
+        );
+    }
+    store_inflight(&provider, f.row.channel_id, stored.as_ref());
+    nonce
 }
 
 async fn plan(
@@ -54,7 +100,15 @@ async fn plan(
         turn_start,
         batch_start,
         tail,
+        seed,
+        body,
+        fresh,
+        polls,
     } = frame.into();
+    let watcher_nonce = match polls {
+        Some(polls) => production_watcher_nonce(f, &polls, batch_start),
+        None => f.row.turn_nonce.clone(),
+    };
     let authorized = before.as_ref().is_some_and(|row| {
         row.turn_nonce == f.row.turn_nonce
             && row.effective_relay_owner_kind()
@@ -64,17 +118,10 @@ async fn plan(
     let provider = f.row.provider_kind().unwrap();
     let session = f.row.tmux_session_name.clone().unwrap();
     let output = f.source.path.display().to_string();
-    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+    let binding = crate::services::tui_o::cutover::test_override::bind_tui_session(
         &session,
-        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
-            runtime_kind: f.row.runtime_kind.unwrap(),
-            output_path: output.clone(),
-            relay_output_path: None,
-            input_fifo_path: None,
-            session_id: None,
-            last_offset: 0,
-            relay_last_offset: None,
-        },
+        f.row.runtime_kind.unwrap(),
+        &output,
     );
     let context = TerminalRelayPlanContext {
         evidence_source: Some((f.source.dev, f.source.ino)),
@@ -95,7 +142,7 @@ async fn plan(
             Some(&f.row),
             &session,
             batch_start,
-            f.row.turn_nonce.as_deref(),
+            watcher_nonce.as_deref(),
         ),
     };
     let mut claimed = false;
@@ -115,25 +162,28 @@ async fn plan(
         data_start_offset: batch_start,
         turn_data_start_offset: turn_start,
         all_data: &tail,
-        full_response: &f.body,
-        current_response: &f.body,
+        full_response: body.as_ref().unwrap_or(&f.body),
+        restored_response_seed: &seed,
         response_sent_offset: 0,
         has_assistant_response: true,
         terminal_kind: Some(WatcherTerminalKind::SoftStopHookSummary),
         task_notification_kind: None,
         assistant_text_seen: true,
-        fresh_assistant_text_seen: true,
+        fresh_assistant_text_seen: fresh,
         tool_state: &tools,
         placeholder_msg_id: None,
         status_panel_msg_id: None,
     };
     let sends = f.sends.load(Ordering::SeqCst);
-    let TerminalRelayPlanOutcome::Proceed(result) =
-        run_terminal_relay_plan(&context, locals, &mut state).await
+    let TerminalRelayPlanOutcome::Proceed(result) = bounded(
+        "run_terminal_relay_plan",
+        run_terminal_relay_plan(&context, locals, &mut state),
+    )
+    .await
     else {
         panic!("orphan seam bypassed")
     };
-    crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
+    drop(binding);
     flush_dlq_tasks().await;
     assert_eq!(result.watcher_direct_fallback_authorized, authorized);
     assert_eq!(
@@ -262,6 +312,111 @@ async fn i7441b_actual_o_terminal_denials_and_true_orphans_pg() {
     }
     pool.close().await;
     db.drop().await;
+}
+
+/// One real denial-0 terminal plan on its own thread: env lock, PG test DB, O fixture, binding.
+fn run_plan_case(
+    channel: u64,
+    stall: bool,
+    created: std::sync::mpsc::Sender<String>,
+) -> std::thread::Result<()> {
+    std::thread::Builder::new()
+        .name(format!("i7441 plan case {channel}"))
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let root = tempfile::tempdir().unwrap();
+                let _root = crate::config::set_agentdesk_root_for_test(root.path());
+                let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+                    "i7441_stall",
+                    "seam timeout cleanup",
+                )
+                .await;
+                created.send(db.database_name().to_string()).unwrap();
+                let pool = db.connect_and_migrate().await;
+                let f = Fixture::new(channel, ProviderKind::Claude, &["stalled tail"]).await;
+                let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
+                    channel,
+                    crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+                )]);
+                let (http, _http) = f.http().await;
+                let shared = crate::services::discord::make_shared_data_for_tests_with_storage(
+                    Some(pool.clone()),
+                );
+                save_inflight_state(&f.row).unwrap();
+                crate::services::discord::inflight::clear_inflight_state_for_captured_episode(
+                    &ProviderKind::Claude,
+                    channel,
+                    &InflightTurnIdentity::from_state(&f.row),
+                    f.row.turn_nonce.as_deref(),
+                );
+                if stall {
+                    force_seam_stall(
+                        "run_terminal_relay_plan",
+                        std::time::Duration::from_millis(300),
+                    );
+                }
+                plan(&f, &shared, &http, None, None, &mut None, false, (0, 0)).await;
+                pool.close().await;
+                db.drop().await;
+            })
+        })
+        .unwrap()
+        .join()
+}
+
+/// Whether `database` still exists on the shared PG test server.
+fn test_database_exists(database: &str) -> bool {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let admin_url = crate::dispatch::test_support::postgres_admin_database_url();
+            let admin = crate::db::postgres::connect_test_pool(&admin_url, "stall leak probe")
+                .await
+                .unwrap();
+            let found: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
+                    .bind(database)
+                    .fetch_one(&admin)
+                    .await
+                    .unwrap();
+            admin.close().await;
+            found
+        })
+}
+
+#[test]
+fn i7441_seam_timeout_unwinds_binding_and_test_db_for_the_next_test_pg() {
+    let (channel, session) = (744_900, "test-744900");
+    let (created, names) = std::sync::mpsc::channel();
+    let stalled = run_plan_case(channel, true, created.clone())
+        .expect_err("a stalled seam must fail its test");
+    let message = stalled
+        .downcast_ref::<String>()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        message.contains("run_terminal_relay_plan did not finish within 300ms"),
+        "{message}"
+    );
+    assert!(
+        crate::services::tui_prompt_dedupe::peek_tmux_runtime_binding(session).is_none(),
+        "the timed-out plan left its tmux runtime binding registered"
+    );
+    let stalled_db = names.recv().unwrap();
+    assert!(
+        !test_database_exists(&stalled_db),
+        "the timed-out test left PG test DB {stalled_db}"
+    );
+
+    run_plan_case(channel, false, created).expect("the next test runs on the released locks");
+    assert!(!test_database_exists(&names.recv().unwrap()));
+    assert!(crate::services::tui_prompt_dedupe::peek_tmux_runtime_binding(session).is_none());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -456,9 +611,12 @@ async fn soft_ack_cases(cases: &[u64], injected: bool) {
         let target = ack
             .as_ref()
             .expect("ordinary frame still carries an ACK target");
-        while handle.metrics().snapshot().frames_delivered == 0 {
-            tokio::task::yield_now().await;
-        }
+        bounded("stream relay frame delivery", async {
+            while handle.metrics().snapshot().frames_delivered == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
         assert_eq!(
             handle.metrics().snapshot().last_delivered_sequence,
             Some(target.sequence),
@@ -588,7 +746,7 @@ async fn soft_ack_cases(cases: &[u64], injected: bool) {
                 "O lookup must execute before ACK timeout"
             );
         }
-        handle.shutdown().await;
+        bounded("stream relay shutdown", handle.shutdown()).await;
     }
     pool.close().await;
     db.drop().await;
@@ -1069,6 +1227,7 @@ async fn residual_frame_with_duration(
             },
             batch_start,
             tail,
+            ..EvidenceFrame::from((0, 0))
         },
     )
     .await;
@@ -1145,4 +1304,572 @@ async fn i7441r1_duration_missing_late_body_remains_recorded_pg() {
             residual_frame_with_duration(replayed, false, large, true).await;
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum HeadlessOutbox {
+    Sent,
+    PreviousTurnVariant,
+    SessionBanner,
+    ToolTurn,
+    ToolTurnLeadingNewline,
+    FrameBody,
+    LateBodyDelivered,
+    SeedSourceUnknown,
+    Missing,
+    EarlierTurn,
+    Pending,
+    OtherBody,
+    OtherSource,
+    UntimedBody,
+    SeedRangeOtherBody,
+    GenerationChanged,
+    OtherFile,
+    StaleSeedAfterDiscard,
+    ThinkingThenText,
+    ThinkingThenTextUnsent,
+    MultiTextBlock,
+    ToolThenTextOneRecord,
+    BlankThinking,
+    /// Another turn queued this frame's body; this turn's row is absent.
+    OtherTurnOnly,
+    BothTurnsOtherNewest,
+    /// A row written before rows named their producer turn.
+    LegacyNullRow,
+    /// The handed-off seed was still bodiless; its turn's row is gone and the next turn's stored.
+    FrameBodyAfterBridgeClearedRow,
+    ClearedRowOtherTurnOnly,
+    ClearedRowBothTurnsOtherNewest,
+    /// An idle direct prompt discarded the bodiless seed, and with it the seed's turn.
+    DiscardedSeedOwnRow,
+    /// Preflight stripped the seed; its turn's recent row no longer speaks for the late body.
+    StaleSeedAfterDiscardRecentRow,
+}
+
+/// The watcher's terminal order: preflight may strip the restored seed before the planner reads it.
+async fn prepare_then_plan(
+    f: &Fixture,
+    shared: &Arc<SharedData>,
+    http: &Arc<serenity::Http>,
+    before: Option<InflightTurnState>,
+    mut frame: EvidenceFrame,
+) {
+    let provider = f.row.provider_kind().unwrap();
+    let session = f.row.tmux_session_name.clone().unwrap();
+    let output = f.source.path.display().to_string();
+    let host = HostSnapshot::new(WatchHost::Legacy);
+    let tools = WatcherToolState::new();
+    let mut body = frame.body.take().unwrap();
+    let (mut frozen, mut placeholder, mut panel) = (Vec::new(), None, None);
+    let (mut restored_placeholder, mut sent, mut edit) = (false, 0, String::new());
+    bounded(
+        "run_terminal_preflight_prepare",
+        run_terminal_preflight_prepare(
+            &TerminalPreflightContext {
+                http,
+                shared,
+                channel_id: ChannelId::new(f.row.channel_id),
+                watcher_provider: &provider,
+                tmux_session_name: &session,
+                output_path: &output,
+                host: &host,
+            },
+            TerminalPreflightLocals {
+                current_offset: f.row.last_offset + frame.tail.len() as u64,
+                single_message_panel_footer_mode: false,
+                all_data: &frame.tail,
+                terminal_kind: Some(WatcherTerminalKind::SoftStopHookSummary),
+                fresh_assistant_text_seen: frame.fresh,
+                tool_state: &tools,
+                turn_is_external_input_for_session: false,
+                task_notification_kind: None,
+                data_start_offset: frame.batch_start,
+                turn_identity_for_panel: &None,
+            },
+            &mut TerminalPreflightState {
+                watcher_streaming_rollover_frozen_msg_ids: &mut frozen,
+                placeholder_msg_id: &mut placeholder,
+                placeholder_from_restored_inflight: &mut restored_placeholder,
+                status_panel_msg_id: &mut panel,
+                full_response: &mut body,
+                response_sent_offset: &mut sent,
+                last_edit_text: &mut edit,
+                restored_response_seed: &mut frame.seed,
+            },
+        ),
+    )
+    .await;
+    let frame = EvidenceFrame {
+        body: Some(body),
+        ..frame
+    };
+    plan(f, shared, http, before, None, &mut None, false, frame).await;
+}
+
+/// Restart's first headless turn on a resumed transcript: the bridge's row starts at 0, its seed
+/// body was read from the producer's own start, and the late frame holds only request records.
+async fn headless_restart_frame(
+    pool: &sqlx::PgPool,
+    channel: u64,
+    outbox: HeadlessOutbox,
+) -> Option<String> {
+    use crate::services::discord::turn_bridge::chunk_compose;
+    use HeadlessOutbox as O;
+    let mut f = Fixture::new(channel, ProviderKind::Claude, &["[E2E:E1:OK]"]).await;
+    let body = f.body.clone();
+    let session = f.row.tmux_session_name.clone().unwrap();
+    let marker = crate::services::tmux_common::session_temp_path(&session, "generation");
+    std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+    std::fs::write(&marker, "1").unwrap();
+    let at = |age: i64| (chrono::Utc::now() - chrono::Duration::seconds(age)).to_rfc3339();
+    let line = |record: serde_json::Value| format!("{record}\n");
+    let user = |id: &str| {
+        line(
+            serde_json::json!({"type":"user","uuid":id,"sessionId":"native-session","message":{"content":id}}),
+        )
+    };
+    let blocks = |id: &str, blocks: serde_json::Value, age: Option<i64>| {
+        let mut record = serde_json::json!({"type":"assistant","uuid":id,"apiBlockIndex":0,
+            "message":{"id":id,"role":"assistant","content":blocks}});
+        if let Some(age) = age {
+            record["timestamp"] = at(age).into();
+        }
+        line(record)
+    };
+    let assistant = |id: &str, block: serde_json::Value, age: Option<i64>| {
+        blocks(id, serde_json::json!([block]), age)
+    };
+    let text = |text: &str| serde_json::json!({"type":"text","text":text});
+    let thinking =
+        |text: &str| serde_json::json!({"type":"thinking","thinking":text,"signature":"s"});
+    let tool = serde_json::json!({"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"true"}});
+    // The bridge's body: its reader's parser over the turn's records, then its Text/ToolUse arms.
+    let bridge_body = |records: &str| {
+        use crate::services::agent_protocol::StreamMessage;
+        let (sender, messages) = std::sync::mpsc::channel();
+        let mut state = crate::services::session_backend::StreamLineState::new();
+        let mut body = String::new();
+        for record in records.lines() {
+            crate::services::session_backend::process_claude_transcript_line(
+                record, &sender, &mut state,
+            );
+            for message in messages.try_iter() {
+                match message {
+                    StreamMessage::Text { content } if !content.is_empty() => {
+                        chunk_compose::compose_streamed_text_chunk(&mut body, &content)
+                    }
+                    StreamMessage::ToolUse { .. } => {
+                        chunk_compose::compose_tool_boundary_separator(&mut body, true)
+                    }
+                    _ => {}
+                }
+            }
+        }
+        body
+    };
+    let ended = |age: i64| {
+        line(serde_json::json!({"type":"system","subtype":"stop_hook_summary","timestamp":at(age)}))
+            + &line(
+                serde_json::json!({"type":"system","subtype":"turn_duration","durationMs":1189,"timestamp":at(age)}),
+            )
+    };
+    let previous_body = if outbox == O::PreviousTurnVariant {
+        format!("직전 {body}")
+    } else {
+        body.clone()
+    };
+    let previous =
+        user("E0") + &assistant("previous", text(&previous_body), Some(120)) + &ended(120);
+    let late = matches!(
+        outbox,
+        O::LateBodyDelivered | O::StaleSeedAfterDiscard | O::StaleSeedAfterDiscardRecentRow
+    );
+    let cleared = matches!(
+        outbox,
+        O::FrameBodyAfterBridgeClearedRow
+            | O::ClearedRowOtherTurnOnly
+            | O::ClearedRowBothTurnsOtherNewest
+    );
+    let frame_body = cleared || matches!(outbox, O::FrameBody | O::DiscardedSeedOwnRow);
+    let answer_age = if late { 60 } else { 1 };
+    let (answer, seed_body) = match outbox {
+        O::ToolTurn | O::ToolTurnLeadingNewline => {
+            let after = if outbox == O::ToolTurn {
+                "done"
+            } else {
+                "\ndone"
+            };
+            let result = serde_json::json!({"type":"user","uuid":"result","timestamp":at(1),
+                "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"ok"}]}});
+            let records = assistant("checking", text("checking"), Some(2))
+                + &assistant("tool", tool.clone(), Some(2))
+                + &line(result)
+                + &assistant("done", text(after), Some(1));
+            let seed_body = bridge_body(&records);
+            (records, seed_body)
+        }
+        O::ThinkingThenText | O::ThinkingThenTextUnsent => {
+            let records = blocks(
+                "answer",
+                serde_json::json!([thinking("T_BODY"), text("X_BODY")]),
+                Some(1),
+            );
+            let seed_body = bridge_body(&records);
+            (records, seed_body)
+        }
+        O::MultiTextBlock => {
+            let records = blocks(
+                "answer",
+                serde_json::json!([text("X_BODY"), text("Y_BODY")]),
+                Some(1),
+            );
+            let seed_body = bridge_body(&records);
+            (records, seed_body)
+        }
+        O::ToolThenTextOneRecord => {
+            let records = blocks("answer", serde_json::json!([tool, text("X_BODY")]), Some(1));
+            let seed_body = bridge_body(&records);
+            (records, seed_body)
+        }
+        O::BlankThinking => {
+            let records = blocks(
+                "answer",
+                serde_json::json!([thinking(""), text("X_BODY")]),
+                Some(1),
+            );
+            let seed_body = bridge_body(&records);
+            (records, seed_body)
+        }
+        _ if frame_body => (String::new(), String::new()),
+        _ => {
+            let recorded = if outbox == O::SeedRangeOtherBody {
+                "[E2E:E0:OK]"
+            } else {
+                body.as_str()
+            };
+            let age = (outbox != O::UntimedBody).then_some(answer_age);
+            let records = assistant("answer", text(recorded), age);
+            // A seed that claims another body than its range carries the bridge's real body.
+            let seed_body = bridge_body(&assistant("answer", text(&body), age));
+            (records, seed_body)
+        }
+    };
+    let turn = user("E1") + &answer + &ended(answer_age);
+    let requests = [
+        serde_json::json!({"type":"file-history-snapshot","messageId":"m","snapshot":{"trackedFileBackups":{}},"isSnapshotUpdate":false}),
+        serde_json::json!({"type":"api-request-blob","sessionId":"native-session","message":{"role":"user","content":"E2"}}),
+        serde_json::json!({"type":"api-request-blob","sessionId":"native-session","message":{"role":"system","content":[{"type":"text","text":"tools"}]}}),
+        serde_json::json!({"type":"api-request","sessionId":"native-session","timestamp":at(0)}),
+    ]
+    .map(line)
+    .concat();
+    let body_record = assistant("answer", text(&body), Some(1));
+    let frame = match outbox {
+        _ if frame_body => body_record.clone() + &requests,
+        _ if late => assistant("late", text(&body), Some(1)) + &requests,
+        _ => requests,
+    };
+    let next = user("E2");
+    let path = f.root.join(format!("restart-{channel}.jsonl"));
+    std::fs::write(&path, format!("{previous}{turn}{frame}{next}")).unwrap();
+    f.source =
+        crate::services::tui_o::shadow::binding_reader::source_id_for("native-session", &path)
+            .unwrap();
+    let read_start = previous.len() as u64;
+    let handoff_end = read_start + turn.len() as u64;
+    f.row.turn_start_offset = Some(0);
+    f.row.last_offset = handoff_end;
+    f.row.full_response = seed_body.clone();
+    f.row.response_sent_offset = 0;
+    let read = (outbox != O::SeedSourceUnknown).then(|| {
+        let read_path = if outbox == O::OtherFile {
+            let rotated = f.root.join(format!("rotated-{channel}.jsonl"));
+            std::fs::write(&rotated, std::fs::read(&path).unwrap()).unwrap();
+            rotated
+        } else {
+            path.clone()
+        };
+        let file = std::fs::File::open(read_path).unwrap();
+        crate::services::agent_protocol::TurnReadSource {
+            start: read_start,
+            file: crate::services::cluster::stream_relay::SourceFileIdentity::from_open_file(&file),
+        }
+    });
+    let mut restored = (outbox != O::FrameBody).then(|| {
+        restored_watcher_turn_from_inflight(&f.row, &session, true)
+            .unwrap()
+            .read_by_producer(read, handoff_end, &session)
+    });
+    if outbox == O::GenerationChanged {
+        std::fs::File::options()
+            .write(true)
+            .open(&marker)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
+            .unwrap();
+    }
+    if outbox == O::DiscardedSeedOwnRow {
+        crate::services::tui_prompt_dedupe::record_prompt_anchor(
+            "claude", &session, channel, 9_001,
+        );
+    }
+    let (stream_seed, seed, _) = turn_stream_collector::stream_seed::restore_stream_seed(
+        &mut None,
+        &mut restored,
+        &None,
+        &None,
+        &ProviderKind::Claude,
+        &session,
+        ChannelId::new(channel),
+    );
+    crate::services::tui_prompt_dedupe::take_prompt_anchor_for_response(
+        "claude", &session, channel,
+    );
+    let mut full_response = stream_seed.full_response;
+    if late || frame_body {
+        if !full_response.is_empty()
+            && crate::services::discord::semantic_boundaries::semantic_chunk_separator_needed(
+                &full_response,
+                &body,
+            )
+        {
+            full_response.push_str("\n\n");
+        }
+        full_response.push_str(&body);
+    }
+    f.row.last_offset = handoff_end + frame.len() as u64;
+    let banner = format!("⚙ session restored\n\n{body}");
+    let mut previous_turn = f.row.clone();
+    previous_turn.turn_nonce = Some(format!("previous-{channel}"));
+    let mut successor = f.row.clone();
+    successor.turn_nonce = Some(format!("successor-{channel}"));
+    successor.user_msg_id = f.row.user_msg_id + 1;
+    successor.current_msg_id = 0;
+    successor.turn_start_offset = Some(handoff_end + body_record.len() as u64);
+    let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
+        channel,
+        crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+    )]);
+    let (http, _http) = f.http().await;
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    // Each row names the turn whose bridge queued it; `None` is a row without a producer turn.
+    let (own, other) = (Some(&f.row), Some(&successor));
+    let mut rows = vec![(
+        previous_body.as_str(),
+        Some(&previous_turn),
+        "headless_turn",
+        "sent",
+        119,
+    )];
+    rows.extend(match outbox {
+        O::SessionBanner => vec![(banner.as_str(), own, "headless_turn", "sent", 0)],
+        O::Missing | O::ThinkingThenTextUnsent => Vec::new(),
+        // This turn's own row, queued before the floor: the time bound alone refuses it.
+        O::EarlierTurn => vec![(body.as_str(), own, "headless_turn", "sent", 3600)],
+        O::Pending => vec![(body.as_str(), own, "headless_turn", "pending", 0)],
+        O::OtherBody => vec![("[E2E:E0:OK]", own, "headless_turn", "sent", 0)],
+        O::OtherSource => vec![(body.as_str(), None, "system", "sent", 0)],
+        O::ToolTurn
+        | O::ToolTurnLeadingNewline
+        | O::ThinkingThenText
+        | O::MultiTextBlock
+        | O::ToolThenTextOneRecord
+        | O::BlankThinking => vec![(seed_body.as_str(), own, "headless_turn", "sent", 0)],
+        O::StaleSeedAfterDiscard => vec![(body.as_str(), own, "headless_turn", "sent", 59)],
+        O::OtherTurnOnly | O::ClearedRowOtherTurnOnly => {
+            vec![(body.as_str(), other, "headless_turn", "sent", 0)]
+        }
+        O::BothTurnsOtherNewest | O::ClearedRowBothTurnsOtherNewest => vec![
+            (body.as_str(), own, "headless_turn", "sent", 1),
+            (body.as_str(), other, "headless_turn", "sent", 0),
+        ],
+        O::LegacyNullRow => vec![(body.as_str(), None, "headless_turn", "sent", 0)],
+        _ => vec![(body.as_str(), own, "headless_turn", "sent", 0)],
+    });
+    if outbox == O::LateBodyDelivered {
+        rows.push((body.as_str(), own, "headless_turn", "sent", 59));
+    }
+    for (index, (content, turn, source, status, age)) in rows.into_iter().enumerate() {
+        let (target, reason) = (format!("channel:{channel}"), format!("headless.{index}"));
+        let id = match turn {
+            Some(turn) => {
+                let crate::services::message_outbox::OutboxEnqueueOutcome::Enqueued { id } =
+                    crate::services::discord::turn_bridge::enqueue_headless_turn_row_for_test(
+                        &shared, turn, content,
+                    )
+                    .await
+                else {
+                    panic!("the bridge row for {outbox:?} was not written");
+                };
+                id
+            }
+            None => crate::services::message_outbox::enqueue_outbox_pg_returning_id(
+                pool,
+                crate::services::message_outbox::OutboxMessage {
+                    target: &target,
+                    content,
+                    bot: "claude",
+                    source,
+                    reason_code: Some(&reason),
+                    session_key: None,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+        };
+        sqlx::query(
+            "UPDATE message_outbox SET status = $2, sent_at = NOW(),
+                created_at = NOW() - make_interval(secs => $3) WHERE id = $1",
+        )
+        .bind(id)
+        .bind(status)
+        .bind(age as f64)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    let expected = match outbox {
+        O::Sent
+        | O::PreviousTurnVariant
+        | O::SessionBanner
+        | O::ToolTurn
+        | O::ToolTurnLeadingNewline
+        | O::FrameBody
+        | O::LateBodyDelivered
+        | O::ThinkingThenText
+        | O::MultiTextBlock
+        | O::ToolThenTextOneRecord
+        | O::BlankThinking
+        | O::BothTurnsOtherNewest
+        | O::FrameBodyAfterBridgeClearedRow
+        | O::ClearedRowBothTurnsOtherNewest => Vec::new(),
+        _ => vec![full_response.clone()],
+    };
+    let expected = if late && expected.len() == 1 {
+        vec![body.clone()]
+    } else {
+        expected
+    };
+    // The bridge's row was still stored at the watcher's last poll, unless it was cleared first.
+    let (polls, before) = if cleared {
+        (vec![None, Some(successor.clone())], Some(successor))
+    } else if matches!(
+        outbox,
+        O::DiscardedSeedOwnRow | O::StaleSeedAfterDiscardRecentRow
+    ) {
+        (vec![None], None)
+    } else {
+        (vec![Some(f.row.clone())], None)
+    };
+    if let Some(stored) = before.as_ref() {
+        save_inflight_state(stored).unwrap();
+    }
+    prepare_then_plan(
+        &f,
+        &shared,
+        &http,
+        before,
+        EvidenceFrame {
+            turn_start: handoff_end,
+            batch_start: handoff_end,
+            tail: next,
+            seed,
+            body: Some(full_response),
+            fresh: late || frame_body,
+            polls: Some(polls),
+        },
+    )
+    .await;
+    let recorded: Vec<String> =
+        sqlx::query_scalar("SELECT content FROM relay_dead_letter WHERE channel_id=$1")
+            .bind(channel.to_string())
+            .fetch_all(pool)
+            .await
+            .unwrap();
+    (recorded != expected)
+        .then(|| format!("{outbox:?}: recorded {recorded:?}, expected {expected:?}"))
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441r3_headless_bridge_seed_body_before_late_frame_needs_its_sent_outbox_row_pg() {
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        "i7441r3_headless",
+        "headless outbox terminal evidence",
+    )
+    .await;
+    let pool = db.connect_and_migrate().await;
+    use HeadlessOutbox as O;
+    let mut mismatches = Vec::new();
+    for (index, outbox) in [
+        O::Sent,
+        O::PreviousTurnVariant,
+        O::SessionBanner,
+        O::ToolTurn,
+        O::ToolTurnLeadingNewline,
+        O::FrameBody,
+        O::LateBodyDelivered,
+        O::SeedSourceUnknown,
+        O::Missing,
+        O::EarlierTurn,
+        O::Pending,
+        O::OtherBody,
+        O::OtherSource,
+        O::UntimedBody,
+        O::SeedRangeOtherBody,
+        O::GenerationChanged,
+        O::OtherFile,
+        O::StaleSeedAfterDiscard,
+        O::ThinkingThenText,
+        O::ThinkingThenTextUnsent,
+        O::MultiTextBlock,
+        O::ToolThenTextOneRecord,
+        O::BlankThinking,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        mismatches.extend(headless_restart_frame(&pool, 744_600 + index as u64, outbox).await);
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+    pool.close().await;
+    db.drop().await;
+}
+
+/// Two turns can queue the same body; a frame is covered only by a sent row its own turn queued,
+/// whether the bridge seed or the watcher's own read wrote the body.
+#[tokio::test(flavor = "current_thread")]
+async fn headless_outbox_row_covers_only_its_producer_turn_pg() {
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        "i7653_producer_turn",
+        "headless outbox producer turn evidence",
+    )
+    .await;
+    let pool = db.connect_and_migrate().await;
+    use HeadlessOutbox as O;
+    let mut mismatches = Vec::new();
+    for (index, outbox) in [
+        O::Sent,
+        O::OtherTurnOnly,
+        O::BothTurnsOtherNewest,
+        O::LegacyNullRow,
+        O::FrameBodyAfterBridgeClearedRow,
+        O::ClearedRowOtherTurnOnly,
+        O::ClearedRowBothTurnsOtherNewest,
+        O::DiscardedSeedOwnRow,
+        O::StaleSeedAfterDiscardRecentRow,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        mismatches.extend(headless_restart_frame(&pool, 765_300 + index as u64, outbox).await);
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+    pool.close().await;
+    db.drop().await;
 }

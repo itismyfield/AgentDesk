@@ -11,6 +11,7 @@ use super::activation;
 use super::adoption::{self, At, Hold, LegacyEpoch, LegacyView, ReadVersion, Refused, Snapshot};
 use super::binding::{BindingEvent, BindingEvents};
 use super::host::{Custody, FencedFacts, HostIo, release, stop, until_owned};
+use super::late_adopt::claude::{self, Floor, Owed, Sample};
 use crate::services::tui_o::channel_policy::{Adoption, Candidate};
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
@@ -41,6 +42,24 @@ pub(super) struct Waiting<'a, I: HostIo> {
     /// boundary, as of that log entry.
     pub(super) bound: (SourceId, u64),
     pub(super) late: bool,
+    /// Earlier sources a rebase left unproven; none commits until each is settled.
+    pub(super) owed: Vec<Owed>,
+}
+
+/// How a deferred handoff ends.
+pub(super) enum Retried {
+    Committed,
+    /// Legacy keeps the channel for this process.
+    Left,
+    /// A late reservation's current source moved while it waited.
+    Rebase(Rebased),
+}
+
+/// The next source bound after the old one and the takeover floor its predecessors' proofs give.
+pub(super) struct Rebased {
+    pub(super) new: (SourceId, u64),
+    pub(super) floor: Result<Floor, String>,
+    pub(super) owed: Vec<Owed>,
 }
 
 /// How the first look at a channel that already holds output ends.
@@ -211,9 +230,13 @@ fn latest_progress<I: HostIo>(waiting: &Waiting<'_, I>) -> Option<Progress> {
     Progress::read(waiting, current.as_ref())
 }
 
-/// Retries until the channel commits (true) or is left to Legacy for good (false). `refused` is
-/// the last refusal and `seq` the binding log entry its read ended at.
-pub(super) async fn retry<I: HostIo>(waiting: Waiting<'_, I>, refused: Refused, seq: u64) -> bool {
+/// Retries until the channel commits or is left to Legacy; a late reservation whose source moves
+/// rebases. `refused` is the last refusal and `seq` the log entry its read ended at.
+pub(super) async fn retry<I: HostIo>(
+    waiting: Waiting<'_, I>,
+    refused: Refused,
+    seq: u64,
+) -> Retried {
     let Waiting {
         io,
         channel,
@@ -230,20 +253,22 @@ pub(super) async fn retry<I: HostIo>(waiting: Waiting<'_, I>, refused: Refused, 
         activation::test_hook::run(channel, activation::test_hook::Step::DeferredStarted)
     {
         stop(candidate, &alarms, channel, &detail);
-        return false;
+        return Retried::Left;
     }
     let mut clocks = Clocks::new(started, latest_progress(&waiting));
     let mut last_logged = Some(refused.to_string());
     let (mut refused, mut seq, mut pinned_at) = (refused, seq, started);
     let (mut quiet, mut read_at) = (Quiet::default(), None);
     let mut handoff_refused: Option<Refused> = None;
+    // The last look that found the current source delivered to its end, for a later rebase.
+    let mut sample: Option<Sample> = None;
     loop {
         #[cfg(test)]
         if let Err(detail) =
             activation::test_hook::run(channel, activation::test_hook::Step::DeferredTick)
         {
             stop(candidate, &alarms, channel, &detail);
-            return false;
+            return Retried::Left;
         }
         if let Some(wake) = &mut wake {
             wake.wait().await;
@@ -257,25 +282,27 @@ pub(super) async fn retry<I: HostIo>(waiting: Waiting<'_, I>, refused: Refused, 
                 channel,
                 "adoption left Deferred outside its host",
             );
-            return false;
+            return Retried::Left;
         }
         until_owned(waiting.gate).await;
         if waiting.late && !io.late_adopt_enabled() {
             continue;
         }
+        // Sends are read before the log, so a bind after this read is not behind them.
+        let sends = {
+            let _adoption = candidate.lock();
+            candidate.sends()
+        };
         let observed = match events(&waiting) {
             Ok(events) => events,
             Err(detail) if waiting.late => {
                 release(candidate, &alarms, channel, &detail);
-                return false;
+                return Retried::Left;
             }
             Err(_) => continue,
         };
-        if waiting.late
-            && let Some(detail) = rotation(&waiting, &observed)
-        {
-            release(candidate, &alarms, channel, &detail);
-            return false;
+        if let Some(rebased) = rebased(&waiting, &observed, sample.as_ref()) {
+            return Retried::Rebase(rebased);
         }
         let current = adoption::current(&observed);
         let version = current
@@ -290,20 +317,29 @@ pub(super) async fn retry<I: HostIo>(waiting: Waiting<'_, I>, refused: Refused, 
                 _ => refused.may_pass(&*waiting.legacy, channel),
             };
         if settled && (moved || due) && idle(&waiting, current.as_ref()).await {
+            if let Some(rebased) = rebased(&waiting, &observed, sample.as_ref()) {
+                return Retried::Rebase(rebased);
+            }
             if let Some(detail) = rotation(&waiting, &observed) {
                 release(candidate, &alarms, channel, &detail);
-                return false;
+                return Retried::Left;
             }
             seq = observed.last().map_or(0, |event| event.seq);
             (pinned_at, read_at) = (Instant::now(), version);
             let pinned = if waiting.late {
                 let legacy = Arc::clone(&waiting.legacy);
-                tokio::task::spawn_blocking(move || {
-                    adoption::pin_late(&*legacy, &observed, channel)
+                let read = observed.clone();
+                let pinned = tokio::task::spawn_blocking(move || {
+                    adoption::pin_late(&*legacy, &read, channel)
                 })
                 .await
                 .map_err(|error| Refused::retry(format!("late pin task: {error}")))
-                .and_then(|pinned| pinned)
+                .and_then(|pinned| pinned);
+                sample = sampled(&waiting, &observed, sends, &pinned).or(sample);
+                pinned.and_then(|snapshot| match owing(&waiting, &observed) {
+                    Some(detail) => Err(Refused::retry(detail)),
+                    None => Ok(snapshot),
+                })
             } else {
                 pin(
                     Arc::clone(&waiting.legacy),
@@ -319,7 +355,7 @@ pub(super) async fn retry<I: HostIo>(waiting: Waiting<'_, I>, refused: Refused, 
                     None => match commit(&waiting, &snapshot, None, None).await {
                         Ok(()) => {
                             committed(&waiting, &alarms, &snapshot);
-                            return true;
+                            return Retried::Committed;
                         }
                         Err(again) => {
                             clocks.observe(latest_progress(&waiting));
@@ -329,8 +365,13 @@ pub(super) async fn retry<I: HostIo>(waiting: Waiting<'_, I>, refused: Refused, 
                 },
                 Err(again) => again,
             };
+            // The fenced recheck refuses a moved source as final; a late reservation rebases.
+            let now = events(&waiting).ok();
+            if let Some(rebased) = now.and_then(|now| rebased(&waiting, &now, sample.as_ref())) {
+                return Retried::Rebase(rebased);
+            }
             if leaves(&waiting, &alarms, &again) {
-                return false;
+                return Retried::Left;
             }
             note_wait(
                 channel,
@@ -349,7 +390,7 @@ pub(super) async fn retry<I: HostIo>(waiting: Waiting<'_, I>, refused: Refused, 
         };
         if let Some(detail) = rotation(&waiting, &observed) {
             release(candidate, &alarms, channel, &detail);
-            return false;
+            return Retried::Left;
         }
         let current = adoption::current(&observed);
         let version = current
@@ -387,7 +428,7 @@ pub(super) async fn retry<I: HostIo>(waiting: Waiting<'_, I>, refused: Refused, 
             Ok(snapshot) => snapshot,
             Err(again) => {
                 if leaves(&waiting, &alarms, &again) {
-                    return false;
+                    return Retried::Left;
                 }
                 note_wait(channel, &again, &mut last_logged, true);
                 handoff_refused = Some(again);
@@ -412,12 +453,12 @@ pub(super) async fn retry<I: HostIo>(waiting: Waiting<'_, I>, refused: Refused, 
                     "[tui_o] Legacy delivered nothing through the stall; O starts at the source's end"
                 );
                 committed(&waiting, &alarms, &snapshot);
-                return true;
+                return Retried::Committed;
             }
             Err(again) => {
                 clocks.observe(latest_progress(&waiting));
                 if leaves(&waiting, &alarms, &again) {
-                    return false;
+                    return Retried::Left;
                 }
                 note_wait(channel, &again, &mut last_logged, true);
                 handoff_refused = Some(again);
@@ -557,7 +598,7 @@ fn rotation<I: HostIo>(waiting: &Waiting<'_, I>, events: &[BindingEvent]) -> Opt
     let boundary = (waiting.late)
         .then(|| waiting.candidate.late_boundary())
         .flatten()
-        .map_or_else(|| "-".to_owned(), |boundary| boundary.to_string());
+        .map_or_else(|| "-".to_owned(), |boundary| boundary.baseline.to_string());
     let end = events.last().map_or(0, |event| event.seq);
     Some(format!(
         "source {} was bound while the adoption waited (seq {seq}; baseline {}@{since}; \
@@ -565,6 +606,83 @@ fn rotation<I: HostIo>(waiting: &Waiting<'_, I>, events: &[BindingEvent]) -> Opt
         rotated.path.display(),
         source.path.display()
     ))
+}
+
+/// A late reservation's rotation, with the floor the old source's delivered sample proves.
+fn rebased<I: HostIo>(
+    waiting: &Waiting<'_, I>,
+    events: &[BindingEvent],
+    sample: Option<&Sample>,
+) -> Option<Rebased> {
+    if !waiting.late {
+        return None;
+    }
+    // A rotation already in the log at the reservation's first read stays Legacy's.
+    let (next, seq) = adoption::rotated(events, waiting.bound.1, &waiting.bound.0)?;
+    let boundary = waiting.candidate.late_boundary()?;
+    if seq <= boundary.takeover_after {
+        return None;
+    }
+    let detail = rotation(waiting, events)?;
+    // One hop at a time, so each source passed through is judged and owed in turn.
+    let new = (next.clone(), seq);
+    let candidate = waiting.candidate;
+    let mut owed: Vec<Owed> = (waiting.owed.iter())
+        .filter(|owed| owed.settled(events, candidate).is_err())
+        .cloned()
+        .collect();
+    let mut floor = claude::old_source_done(sample, &waiting.bound, events, candidate);
+    if floor.is_err() {
+        let old = waiting.bound.clone();
+        let sample = sample.cloned();
+        owed.push(Owed { old, sample });
+    } else if let Some(earlier) = owed.first() {
+        floor = Err(format!(
+            "{} still owes delivery",
+            earlier.old.0.path.display()
+        ));
+    }
+    tracing::info!(
+        channel = waiting.channel,
+        detail,
+        proven = floor.is_ok(),
+        "[tui_o] late reservation rebases onto the new source"
+    );
+    Some(Rebased { new, floor, owed })
+}
+
+/// The first earlier source still unsettled, which a commit of the current one would orphan.
+fn owing<I: HostIo>(waiting: &Waiting<'_, I>, events: &[BindingEvent]) -> Option<String> {
+    let owed = waiting.owed.iter();
+    owed.map(|owed| (owed, owed.settled(events, waiting.candidate)))
+        .find_map(|(owed, settled)| {
+            let path = owed.old.0.path.display();
+            settled
+                .err()
+                .map(|detail| format!("{path} still owes delivery: {detail}"))
+        })
+}
+
+/// The current source as delivered through Legacy's late pin, with no body send in flight when
+/// `sends` was read before the log.
+fn sampled<I: HostIo>(
+    waiting: &Waiting<'_, I>,
+    events: &[BindingEvent],
+    sends: (u64, u64),
+    pinned: &Result<Snapshot, Refused>,
+) -> Option<Sample> {
+    let snapshot = pinned.as_ref().ok().filter(|s| s.owed().is_none())?;
+    let (source, _) = adoption::current(events)?;
+    if activation::body_in_flight(sends) || source != waiting.bound.0 {
+        return None;
+    }
+    let nonce = claude::nonce_of(events, &source)?;
+    Some(Sample {
+        source,
+        nonce,
+        len: snapshot.start(),
+        sends,
+    })
 }
 
 fn leaves<I: HostIo>(waiting: &Waiting<'_, I>, alarms: &I::Alarms, again: &Refused) -> bool {

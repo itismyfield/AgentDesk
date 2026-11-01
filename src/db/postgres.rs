@@ -812,14 +812,6 @@ fn lock_test_setup() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[cfg(test)]
-fn lock_test_lifecycle_raw() -> std::sync::MutexGuard<'static, ()> {
-    let mutex = POSTGRES_TEST_LIFECYCLE_LOCK.get_or_init(|| std::sync::Mutex::new(()));
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-#[cfg(test)]
 pub(crate) struct PostgresTestLifecycleGuard {
     _guard: std::sync::MutexGuard<'static, ()>,
 }
@@ -830,13 +822,20 @@ pub(crate) struct PostgresTestLifecycleGuard {
 #[cfg(test)]
 impl Drop for PostgresTestLifecycleGuard {
     fn drop(&mut self) {
+        crate::test_support::lock_holder::PG_LIFECYCLE_LOCK.release();
         PG_LIFECYCLE_HELD.with(|depth| depth.set(depth.get().saturating_sub(1)));
     }
 }
 
 #[cfg(test)]
+#[track_caller]
 pub(crate) fn lock_test_lifecycle() -> PostgresTestLifecycleGuard {
-    let guard = lock_test_lifecycle_raw();
+    let mutex = POSTGRES_TEST_LIFECYCLE_LOCK.get_or_init(|| std::sync::Mutex::new(()));
+    let guard = crate::test_support::lock_holder::PG_LIFECYCLE_LOCK.hold(|| {
+        mutex
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    });
     PG_LIFECYCLE_HELD.with(|depth| depth.set(depth.get() + 1));
     PostgresTestLifecycleGuard { _guard: guard }
 }
