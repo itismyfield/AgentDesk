@@ -18,7 +18,7 @@ impl Drop for DispatchPostgresTestDb {
         }
         let (admin_url, database_name, label) = (
             self.admin_url.clone(),
-            self.database_name.clone(),
+            self.database_name().to_string(),
             format!("{} unwind", self.label),
         );
         let (done_tx, done_rx) = std::sync::mpsc::channel();
