@@ -105,6 +105,7 @@ fn herdr_key(key: HostKey) -> &'static str {
         HostKey::Escape => "esc",
         HostKey::CtrlU => "ctrl+u",
         HostKey::CtrlE => "ctrl+e",
+        HostKey::CtrlS => "ctrl+s",
         HostKey::Left => "left",
         HostKey::Right => "right",
         HostKey::Backspace => "backspace",

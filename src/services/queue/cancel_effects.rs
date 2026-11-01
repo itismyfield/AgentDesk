@@ -163,6 +163,11 @@ async fn purge_on(
     let persistence = QueuePersistenceContext::new(provider, &token_hash, None);
     #[cfg(test)]
     run_pre_purge_hook_for_test(provider, channel_id, handle).await;
+    // A V2 owner's queue purges only as captured; the head it already attempted stays.
+    #[cfg(unix)]
+    if let Some(purge) = purge_v2(handle, persistence.clone()).await {
+        return purge;
+    }
     let purge = handle
         .try_purge_queue(persistence, clear_cancelled_active_anchor)
         .await
@@ -185,6 +190,33 @@ async fn purge_on(
         "force purged channel mailbox queue"
     );
     Some(purge)
+}
+
+#[cfg(all(test, unix))]
+#[path = "cancel_effects_v2_tests.rs"]
+mod v2_tests;
+
+/// `None` when no V2 owner holds the queue; a refused or unanswered purge preserves it.
+#[cfg(unix)]
+async fn purge_v2(
+    handle: &ChannelMailboxHandle,
+    persistence: QueuePersistenceContext,
+) -> Option<Option<PurgeQueueResult>> {
+    let expected = match handle.try_capture_v2().await {
+        Ok(Some(expected)) => expected,
+        Ok(None) => return None,
+        Err(error) => {
+            tracing::warn!(%error, "V2 force purge capture failed; queue preserved");
+            return Some(None);
+        }
+    };
+    let purge = handle.try_purge_queue_if_unchanged(persistence, expected);
+    let purge = purge.await.ok().filter(|purge| purge.failed.is_none());
+    Some(purge.map(|purge| PurgeQueueResult {
+        drained: purge.receipt.len(),
+        queue_len_after: purge.queue_len_after,
+        ..Default::default()
+    }))
 }
 
 /// The forced Herdr cancel's effects; the terminate service they run under is unix-only.
@@ -317,19 +349,25 @@ pub(super) mod herdr {
         let persistence =
             QueuePersistenceContext::new(provider, token.as_deref().unwrap_or_default(), None);
         // Only the runtime's own namespace is absorbed first; another one is captured as held.
-        let capture = match token.as_deref() == exclusion.owner_token() {
-            true => match actor.try_capture_own_queue(persistence.clone()).await {
+        let capture = match (
+            actor.try_capture_v2().await,
+            token.as_deref() == exclusion.owner_token(),
+        ) {
+            (Ok(Some(expected)), _) => Ok(expected),
+            (Err(why), _) => Err(format!("queue capture: {why}")),
+            (Ok(None), true) => match actor.try_capture_own_queue(persistence.clone()).await {
                 Ok(captured) => captured.map_err(|why| format!("queue hydrate: {why}")),
                 Err(_) => Err("queue hydrate: the mailbox actor did not answer".to_string()),
-            },
-            false => (actor.try_snapshot().await)
+            }
+            .map(|snapshot| ExpectedQueue::of(&snapshot)),
+            (Ok(None), false) => (actor.try_snapshot().await)
+                .map(|snapshot| ExpectedQueue::of(&snapshot))
                 .map_err(|_| "queue capture: the mailbox actor did not answer".to_string()),
         };
         let checked = match capture {
-            Ok(snapshot) => {
+            Ok(expected) => {
                 #[cfg(test)]
                 super::run_pre_purge_hook_for_test(provider, channel, actor).await;
-                let expected = ExpectedQueue::of(&snapshot);
                 let purge = actor.try_purge_queue_if_unchanged(persistence, expected);
                 purge
                     .await

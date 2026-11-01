@@ -76,7 +76,7 @@ pub(super) async fn bound_pane(
 
 /// One gated paste and Enter into an empty composer under a live turn, never sent twice; only the
 /// exact frame in the transcript makes it injected, and a refusal before the paste sends nothing.
-pub(super) fn run(
+pub(in crate::services::discord) fn run(
     pane: &HerdrTarget,
     session: &str,
     transcript: &Path,

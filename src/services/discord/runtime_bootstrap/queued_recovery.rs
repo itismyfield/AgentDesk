@@ -45,6 +45,11 @@ pub(super) async fn restore_queued_and_inflight_work(
         }
     }
     held::spawn_retries(http, shared, provider, held);
+    // A V2 queue survives the restart in its owner's file: re-adopted, settled, then driven.
+    #[cfg(unix)]
+    for channel in crate::services::turn_orchestrator::v2_channels(provider, &shared.token_hash) {
+        super::super::router::message_handler::owner_recover(shared, channel).await;
+    }
     stale_cards
 }
 

@@ -82,6 +82,8 @@ pub(in crate::services::discord) struct DiscordMockState {
     extra_channels: Arc<Mutex<std::collections::HashSet<u64>>>,
     /// Guild threads the mock answers for, by thread id, with their parent channel.
     threads: Arc<Mutex<std::collections::HashMap<u64, u64>>>,
+    /// Guild text channels a channel `GET` names, by channel id.
+    named: Arc<Mutex<std::collections::HashMap<u64, String>>>,
     next_response_id: Arc<AtomicU64>,
     pub(super) admission_probe: Arc<Mutex<Option<Arc<super::pending_admission_e2e::EffectProbe>>>>,
 }
@@ -114,6 +116,7 @@ impl DiscordMockState {
             seeded: Arc::new(Mutex::new(std::collections::HashMap::new())),
             extra_channels: Arc::new(Mutex::new(std::collections::HashSet::new())),
             threads: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            named: Arc::new(Mutex::new(std::collections::HashMap::new())),
             next_response_id: Arc::new(AtomicU64::new(FIRST_RESPONSE_MESSAGE_ID)),
             admission_probe: Arc::new(Mutex::new(None)),
         }
@@ -146,6 +149,12 @@ impl DiscordMockState {
             .lock()
             .expect("allowed channels")
             .insert(channel_id);
+    }
+
+    /// Answers a channel `GET` for `channel` as a guild text channel named `name`.
+    pub(in crate::services::discord) fn name_channel(&self, channel: u64, name: &str) {
+        let mut named = self.named.lock().expect("named channels");
+        named.insert(channel, name.to_string());
     }
 
     /// Answers `thread` as a guild thread under `parent`.
@@ -408,6 +417,15 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
         .and_then(|rest| rest.split('/').next())
         .and_then(|id| id.parse::<u64>().ok());
     let channel_allowed = route_channel.is_some_and(|id| state.accepts_channel(id));
+    let named = route_channel.and_then(|id| state.named.lock().expect("named").get(&id).cloned());
+    if method == Method::GET
+        && let (Some(id), Some(name)) = (route_channel, named)
+        && path == format!("/api/v10/channels/{id}")
+    {
+        let channel = json!({"id": id.to_string(), "type": 0, "guild_id": "940487400000009",
+            "name": name});
+        return Json(channel).into_response();
+    }
     if method == Method::GET
         && channel_allowed
         && route_channel.is_some_and(|id| path == format!("/api/v10/channels/{id}"))

@@ -110,6 +110,8 @@ pub(crate) enum HostKey {
     Escape,
     CtrlU,
     CtrlE,
+    /// Claude's stash: parks a visible draft before the owner's paste.
+    CtrlS,
     Left,
     Right,
     Backspace,

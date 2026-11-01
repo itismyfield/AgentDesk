@@ -12,7 +12,6 @@ mod compat_tests;
 mod screen;
 #[cfg(test)]
 mod screen_tests;
-#[cfg(test)]
 pub(crate) mod v2;
 
 const CAPACITY: usize = 4096;
@@ -116,6 +115,55 @@ fn read(path: &Path) -> Result<Store, String> {
     compat::read_legacy(path)
 }
 
+/// What a non-scoped reader matches against: the V1 store, or a V2 history's owned entries.
+fn readable(path: &Path) -> Result<Store, String> {
+    if let Some(store) = v2::unscoped_store(path)? {
+        return Ok(store);
+    }
+    read(path)
+}
+
+/// What the V1 append readers match against: the V1 store, or a V2 history's owned entries when
+/// it holds any migrated append entry.
+fn readable_append(path: &Path) -> Result<Store, String> {
+    if let Some(store) = v2::append_store(path)? {
+        return Ok(store);
+    }
+    read(path)
+}
+
+/// A V1 append mutation: on the V1 store, or on a V2 history's migrated append entries.
+fn update_append<T>(apply: impl FnOnce(&mut Store) -> Result<T, String>) -> Result<T, String> {
+    {
+        let path = path()?;
+        if v2::is_v2(&path)? {
+            return v2::update_migrated(&path, apply);
+        }
+    }
+    update(apply)
+}
+
+/// The attempt a diagnostic receipt thread records into, with no pane write right. A receipt is
+/// evidence that the native record was observed, not that the provider ran the input.
+pub(crate) struct ReceiptScope {
+    context: Option<v2::ReceiptContext>,
+}
+
+impl ReceiptScope {
+    pub(crate) fn capture() -> Self {
+        Self {
+            context: v2::ReceiptContext::capture(),
+        }
+    }
+
+    pub(crate) fn enter<T>(&self, f: impl FnOnce() -> T) -> T {
+        if let Some(context) = &self.context {
+            return context.enter(f);
+        }
+        f()
+    }
+}
+
 fn update<T>(apply: impl FnOnce(&mut Store) -> Result<T, String>) -> Result<T, String> {
     let path = path()?;
     std::fs::create_dir_all(path.parent().ok_or("frame ledger parent missing")?)
@@ -153,7 +201,6 @@ pub(crate) fn register(
     offset: u64,
     frame: &str,
 ) -> Result<(), String> {
-    #[cfg(test)]
     if let Some(result) =
         v2::scoped_register((provider, session, id, author), transcript, offset, frame)
     {
@@ -227,7 +274,8 @@ fn register_inner(
 }
 
 pub(crate) fn withdraw(id: &str, transcript: &Path) {
-    #[cfg(test)]
+    // A scoped attempt keeps its registration and writes nothing; only the queue's exact
+    // not-sent proof, projected as abandoned, releases its collision candidate.
     if v2::scoped() {
         return;
     }
@@ -248,7 +296,6 @@ pub(crate) fn withdraw(id: &str, transcript: &Path) {
 }
 
 pub(crate) fn registered(id: &str, transcript: &Path, frame: &str) -> bool {
-    #[cfg(test)]
     if let Some(registered) = v2::scoped_registered(id, transcript, frame) {
         return registered;
     }
@@ -267,7 +314,6 @@ pub(crate) fn registered(id: &str, transcript: &Path, frame: &str) -> bool {
 }
 
 pub(crate) fn allows_legacy(id: &str, transcript: &Path) -> bool {
-    #[cfg(test)]
     if v2::scoped() {
         return false;
     }
@@ -280,7 +326,7 @@ pub(crate) fn allows_legacy(id: &str, transcript: &Path) -> bool {
 }
 
 pub(crate) fn known(frame: &str) -> bool {
-    #[cfg(test)]
+    // A rolled-back binary still recognizes frames a V2 history records; it never rewrites them.
     if let Some(known) = path()
         .ok()
         .and_then(|p| compat::known_v2(&p, &class_hashes(frame)))
@@ -310,7 +356,6 @@ pub(crate) fn receipt(
     row: Option<&str>,
     frame: &str,
 ) -> Option<bool> {
-    #[cfg(test)]
     if let Some(receipt) = v2::scoped_receipt(id, transcript, offset, kind, row, frame) {
         return receipt;
     }
@@ -421,11 +466,10 @@ fn observed_at_checked(
     prompts: &[String],
     row: Option<&str>,
 ) -> Result<ObservedAttempt, String> {
-    #[cfg(test)]
     if let Some(observed) = v2::scoped_observed(provider, session, prompts, row) {
         return Ok(observed);
     }
-    let store = path.and_then(|path| read(&path))?;
+    let store = path.and_then(|path| readable(&path))?;
     let hashes: Vec<_> = prompts
         .iter()
         .flat_map(|prompt| class_hashes(prompt))
@@ -458,7 +502,6 @@ fn observed_at_checked(
 }
 
 pub(crate) fn receipt_row(id: &str, transcript: &Path) -> Option<String> {
-    #[cfg(test)]
     if let Some(row) = v2::scoped_receipt_row(id, transcript) {
         return row;
     }

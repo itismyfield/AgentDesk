@@ -5,6 +5,7 @@ use crate::services::discord::runtime_store;
 pub(crate) enum Fault {
     None,
     Before,
+    #[cfg(test)]
     AfterRename,
     Third,
     Read,
@@ -21,6 +22,10 @@ impl Owner {
         let actual = read(&self.path)?;
         if actual != self.bytes {
             return Err("snapshot changed outside owner".into());
+        }
+        if Some(&candidate) == self.bytes.as_ref() {
+            self.snapshot = next;
+            return Ok(());
         }
         let mut sync_unconfirmed = false;
         let result = if self.fault == Fault::Before {

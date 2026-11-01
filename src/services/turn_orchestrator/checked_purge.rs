@@ -98,6 +98,14 @@ impl ChannelMailboxHandle {
 
 #[cfg(unix)]
 pub(crate) use herdr::ExpectedQueue;
+
+/// Why a V2 checked purge changed nothing, or did not learn whether it did.
+#[cfg(unix)]
+pub(crate) enum V2PurgeStop {
+    Refused(String),
+    NotSaved(String),
+    SaveUnknown(String),
+}
 #[cfg(unix)]
 pub(super) use herdr::{CheckedPurgeRequest, OwnCaptureRequest};
 
@@ -126,6 +134,8 @@ mod herdr {
         queue: Vec<Intervention>,
         reserved: Option<MessageId>,
         reserved_sources: Vec<MessageId>,
+        /// The V2 owner's committed snapshot at the capture, namespace included.
+        v2: Option<String>,
     }
 
     impl ExpectedQueue {
@@ -134,7 +144,13 @@ mod herdr {
                 queue: snapshot.intervention_queue.clone(),
                 reserved: snapshot.pending_user_dispatch,
                 reserved_sources: snapshot.pending_user_dispatch_source_ids.clone(),
+                v2: None,
             }
+        }
+
+        pub(crate) fn with_v2(mut self, fingerprint: String) -> Self {
+            self.v2 = Some(fingerprint);
+            self
         }
 
         /// Why the actor no longer holds this queue: the order, every stored field of each item
@@ -282,6 +298,49 @@ mod herdr {
             let purge = purge_if_unchanged(state, channel_id, &self.persistence, &self.expected);
             let _ = self.reply.send(purge);
         }
+
+        /// The V2 form: the request's queue file must be the owner's and the V1 shape unchanged, then the
+        /// owner's CAS runs only while it still holds the captured snapshot. Marker and files stay.
+        pub(in crate::services::turn_orchestrator) fn run_v2(
+            self,
+            state: &mut ChannelMailboxState,
+            channel_id: ChannelId,
+        ) {
+            use super::super::pending_queue_persistence::pending_queue_item_to_intervention;
+            use super::V2PurgeStop as PurgeStop;
+            let (provider, token) = (&self.persistence.provider, &self.persistence.token_hash);
+            let checked = pending_queue_file_path(provider, token, channel_id)
+                .ok_or_else(|| "the request names no queue file".to_string())
+                .and_then(|path| self.expected.differs(state).map_or(Ok(path), Err))
+                .and_then(|path| Ok((path, self.expected.v2.ok_or("no V2 capture")?)));
+            let purge = match checked
+                .map(|(path, expected)| state.v2_purge_if_unchanged(&path, &expected))
+            {
+                Ok(Ok(drained)) => CheckedPurge {
+                    receipt: (drained.into_iter())
+                        .map(|item| {
+                            let now = (SystemTime::now(), Instant::now());
+                            pending_queue_item_to_intervention(item, now.0, now.1)
+                        })
+                        .collect(),
+                    failed: None,
+                    queue_len_after: state.v2_len().unwrap_or_default(),
+                },
+                Err(reason) | Ok(Err(PurgeStop::Refused(reason))) => {
+                    tracing::warn!(%channel_id, %reason, "V2 checked purge refused; queue preserved");
+                    CheckedPurge::stopped(PurgeStage::Refused, reason, state.v2_len().unwrap_or(0))
+                }
+                Ok(Err(PurgeStop::NotSaved(reason))) => {
+                    CheckedPurge::stopped(PurgeStage::NotSaved, reason, state.v2_len().unwrap_or(0))
+                }
+                Ok(Err(PurgeStop::SaveUnknown(reason))) => CheckedPurge::stopped(
+                    PurgeStage::SaveUnknown,
+                    reason,
+                    state.v2_len().unwrap_or(0),
+                ),
+            };
+            let _ = self.reply.send(purge);
+        }
     }
 
     /// The forced cancel's capture, taken once the actor absorbed its own queue file.
@@ -312,6 +371,12 @@ mod herdr {
             });
             let _ = self.reply.send(captured);
         }
+
+        /// A V2 owner's queue is not a V1 capture: an empty snapshot here would read as nothing queued.
+        pub(in crate::services::turn_orchestrator) fn refuse_v2(self) {
+            let error = "the V2 owner holds this queue; a V1 capture is refused".to_string();
+            let _ = self.reply.send(Err(error));
+        }
     }
 
     impl ChannelMailboxHandle {
@@ -326,6 +391,19 @@ mod herdr {
                 ChannelMailboxMsg::CaptureOwnQueue(request)
             })
             .await
+        }
+
+        /// A forced cancel's capture of a V2 owner's queue: its committed snapshot beside the V1
+        /// shape the owner leaves empty; `None` when no V2 owner holds this queue.
+        pub(crate) async fn try_capture_v2(&self) -> Result<Option<ExpectedQueue>, String> {
+            let fingerprint =
+                self.v2_request(|slot| slot.as_ref().map(|owner| owner.fingerprint()).transpose());
+            let Some(fingerprint) = fingerprint.await? else {
+                return Ok(None);
+            };
+            let snapshot = self.try_snapshot().await;
+            let snapshot = snapshot.map_err(|_| "the mailbox actor did not answer".to_string())?;
+            Ok(Some(ExpectedQueue::of(&snapshot).with_v2(fingerprint)))
         }
 
         /// Purges this actor's queue only while it is still `expected`; unreachable is an error.

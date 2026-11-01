@@ -92,7 +92,7 @@ pub(in crate::services::discord::health::turn_deliver) fn start<'a>(
         let owner = poise::serenity_prelude::UserId::new(request.author_id);
         let identity = (request.provider.clone(), None);
         let claim = crate::services::discord::router::claim_reserved_headless_turn;
-        match claim(shared, channel, owner, reservation, identity).await {
+        match claim(shared, channel, owner, reservation, identity, None).await {
             Ok(_) => StartAttempt::Started(reservation.turn_id(channel)),
             Err(crate::services::discord::router::HeadlessTurnStartError::Conflict(_)) => {
                 StartAttempt::Busy

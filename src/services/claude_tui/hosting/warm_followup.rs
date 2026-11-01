@@ -397,6 +397,28 @@ fn run_claude_tui_warm_followup_submit_and_stream(
             }
         };
     }
+    let at = (tmux_session_name, resolved_session_id, prompt);
+    let transcript = (transcript_path, transcript_path_string);
+    let to = (sender, cancel_token, report_channel_id);
+    observe_submitted(
+        host,
+        at,
+        transcript,
+        to,
+        (hook_rx, turn_started_at, fallback_start_offset),
+    )
+}
+
+/// What follows a delivered warm submit, shared by the legacy and owner submits: the AI turn read
+/// to its end on `sender`, a prompt left in the input buffer held, a broken session retired.
+#[cfg(unix)]
+fn observe_submitted(
+    host: &FollowupHost,
+    (tmux_session_name, resolved_session_id, prompt): (&str, &str, &str),
+    (transcript_path, transcript_path_string): (&std::path::Path, &str),
+    (sender, cancel_token, report_channel_id): Delivery,
+    (hook_rx, turn_started_at, fallback_start_offset): Observed,
+) -> ClaudeTuiWarmFollowupSubmitOutcome {
     let hook_events_after = chrono::Utc::now();
     let start_offset = claude_tui_turn_start_offset_after_timestamp(
         &transcript_path,
@@ -519,6 +541,68 @@ fn run_claude_tui_warm_followup_submit_and_stream(
     ClaudeTuiWarmFollowupSubmitOutcome::FallThroughRecreate
 }
 
+type Delivery = (
+    Sender<StreamMessage>,
+    Option<std::sync::Arc<CancelToken>>,
+    Option<u64>,
+);
+type Observed = (
+    tokio::sync::broadcast::Receiver<crate::services::claude_tui::hook_server::HookEvent>,
+    chrono::DateTime<chrono::Utc>,
+    u64,
+);
+
+const OWNER_RETIRED_NOTICE: &str = "⚠ 세션이 응답 전에 중단되어 새 세션으로 넘깁니다. 입력은 다시 보내지 않았으니 같은 요청을 다시 보내 주세요.";
+
+/// The owner's idle submit observed as a warm follow-up observes its own, set up before that
+/// submit; a session that died before any output is retired with a notice, never resent.
+#[cfg(unix)]
+pub(crate) fn owner_observer(
+    (tmux, prompt, channel): (&str, &str, u64),
+    (session_id, working_dir): (Option<&str>, &std::path::Path),
+    sender: Sender<StreamMessage>,
+    cancel: std::sync::Arc<CancelToken>,
+) -> Option<Box<dyn FnOnce() -> Result<(), String> + Send>> {
+    cancel.bind_claude_tmux_session(tmux);
+    let resolved = crate::services::claude::resolve_claude_tui_session_for_launch(
+        working_dir,
+        session_id,
+        None,
+    );
+    let resolved = resolved.ok()?;
+    let fallback = std::fs::metadata(&resolved.transcript_path).ok()?.len();
+    let hooks = crate::services::claude_tui::hook_server::subscribe_hook_events();
+    let (started_at, tmux, prompt) = (chrono::Utc::now(), tmux.to_string(), prompt.to_string());
+    Some(Box::new(move || {
+        let host = FollowupHost::legacy_tmux(&tmux);
+        let path = resolved.transcript_path.display().to_string();
+        let transcript = (resolved.transcript_path.as_path(), path.as_str());
+        let to = (sender.clone(), Some(cancel), Some(channel));
+        let at = (tmux.as_str(), resolved.session_id.as_str(), prompt.as_str());
+        let observed = observe_submitted(&host, at, transcript, to, (hooks, started_at, fallback));
+        owner_settles(observed, &sender)
+    }))
+}
+
+/// An observed owner submit's result. The session that died before any output is already
+/// retired; the user reads that the input was not resent, and the turn ends in error.
+#[cfg(unix)]
+fn owner_settles(
+    observed: ClaudeTuiWarmFollowupSubmitOutcome,
+    sender: &Sender<StreamMessage>,
+) -> Result<(), String> {
+    match observed {
+        ClaudeTuiWarmFollowupSubmitOutcome::Terminal(result) => result,
+        ClaudeTuiWarmFollowupSubmitOutcome::Stopped(run) => {
+            Err(SubmissionError::Guarded(run).into_legacy())
+        }
+        ClaudeTuiWarmFollowupSubmitOutcome::FallThroughRecreate => {
+            emit_followup_restart_suppressed_notice(sender, OWNER_RETIRED_NOTICE);
+            Err("claude tui session died before any output; retired and not resent".into())
+        }
+    }
+}
+
 /// Producer error when a turn teardown cancelled a follow-up whose prompt never reached the pane.
 const FOLLOWUP_TORN_DOWN_BEFORE_SUBMIT_ERROR: &str =
     "claude tui follow-up was torn down before submit; the prompt was not delivered";
@@ -537,6 +621,10 @@ fn pre_submit_cancel_exit(
     }
     (cancelled_kind, Ok(()))
 }
+
+#[cfg(all(test, unix))]
+#[path = "warm_followup_owner_tests.rs"]
+mod owner_settle_tests;
 
 #[cfg(test)]
 mod pre_submit_cancel_tests {

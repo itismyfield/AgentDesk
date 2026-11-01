@@ -30,6 +30,58 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
         tmux_session_label,
         is_dm_hint,
         reservation,
+        None,
+    ))
+    .await
+}
+
+/// An owner front kept with a start's provenance starts as its legacy start would, under the
+/// owner's claim, so session key, role, workspace and fresh boundary resolve the same way.
+pub(in crate::services::discord) async fn start_owner_headless(
+    (ctx, shared, token): (&serenity::Context, &Arc<SharedData>, &str),
+    channel: ChannelId,
+    (prompt, context): (&str, &serde_json::Value),
+    owner: super::super::OwnerTurn,
+) -> Result<HeadlessTurnStartOutcome, HeadlessTurnStartError> {
+    let mut context = context.clone();
+    // A scheduled start kept before its provenance had keys of its own holds its metadata flat.
+    if context["origin"] == "scheduled" && context["metadata"].is_null() {
+        context["metadata"] = context.clone();
+        let agent = context["agent_id"].as_str().unwrap_or_default();
+        let bound = crate::db::agents::load_agent_channel_bindings_pg;
+        if let Some(pool) = &shared.pg_pool
+            && let Ok(Some(bound)) = bound(pool, agent).await
+        {
+            let hint = bound.channel_for_provider(Some(shared.provider.as_str()));
+            context["channel_name_hint"] = serde_json::json!(hint);
+        }
+        context["synthetic_label"] = context["scheduled_snapshot_session_label"].clone();
+        context["source"] = crate::services::scheduled_messages::OUTBOX_SOURCE.into();
+        context["is_dm"] = false.into();
+    }
+    let text = |key: &str| context[key].as_str().map(str::to_owned);
+    let source = text("source");
+    let name = text("request_owner_name").or(source.clone());
+    let request_owner = UserId::new(context["request_owner"].as_u64().unwrap_or(1));
+    let metadata = Some(context["metadata"].clone()).filter(|m| !m.is_null());
+    let reservation = super::super::super::turn_start::owner_headless_turn(MessageId::new(
+        owner.front().1.message_id,
+    ));
+    Box::pin(start_reserved_headless_turn_admitted(
+        ctx,
+        channel,
+        prompt,
+        name.as_deref().unwrap_or("system"),
+        request_owner,
+        shared,
+        token,
+        source.as_deref(),
+        metadata,
+        text("channel_name_hint"),
+        text("synthetic_label"),
+        context["is_dm"].as_bool(),
+        reservation,
+        Some(owner),
     ))
     .await
 }

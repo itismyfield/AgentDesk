@@ -13,6 +13,9 @@ mod claim_bootstrap;
 mod dispatch_runtime;
 mod host_refusal;
 pub(crate) mod inflight_create_log;
+#[cfg(test)]
+#[path = "owned_turn_start.rs"]
+pub(in crate::services::discord) mod owned_turn_start;
 mod placeholder_handoff;
 pub(super) mod race_loss;
 pub(super) mod replay_start;
@@ -45,7 +48,11 @@ mod intake_outbox_state_builder_tests {
                 &'static IntakeDeps<'static>,
                 bool,
                 IntakeRequest,
-                (bool, Option<adk_thread::Route>),
+                (
+                    bool,
+                    Option<adk_thread::Route>,
+                    Option<super::super::OwnerTurn>,
+                ),
                 crate::services::cluster::attachment_transfer::uploads::PendingUploads,
                 bool,
             ) -> F,
@@ -157,7 +164,7 @@ pub(super) async fn handle_text_message(
     deps: &IntakeDeps<'_>,
     preserve_on_cancel: bool,
     request: IntakeRequest,
-    (_queued_drain, queued): (bool, Option<adk_thread::Route>),
+    (_queued_drain, queued, owner): (bool, Option<adk_thread::Route>, Option<super::OwnerTurn>),
     preloaded_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     durable_reply_context: bool,
 ) -> Result<IntakeExecution, Error> {
@@ -1003,6 +1010,7 @@ pub(super) async fn handle_text_message(
                     &mut memento_context_loaded,
                     &mut session_strategy_reason,
                 ),
+                owner.as_ref().map(|owner| owner.front().clone()),
             ))
             .await;
         // The claim owns the route: publish it before this turn can be observed.
@@ -2145,6 +2153,7 @@ pub(super) async fn handle_text_message(
                             },
                             replay_start,
                             tx.clone(),
+                            owner,
                         )
                     }))
                 },

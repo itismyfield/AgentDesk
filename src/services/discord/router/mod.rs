@@ -27,7 +27,7 @@ pub(crate) use intake_dispatch::{
     admit_text_intake, checkpoint_waits_for_admission, dispatch_live_text_intake,
     dispatch_skill_intake, dispatch_text_intake, finish_admitted_queued_intake,
     finish_admitted_text_intake, finish_nonlocal_attachment_admission, live_checkpoint_waits,
-    prepare_admitted_live_attachments, resolve_attachment_admission,
+    prepare_admitted_live_attachments, resolve_attachment_admission, start_owner_front,
 };
 #[cfg(test)]
 pub(in crate::services::discord) use intake_gate::busy_inject::test_support as busy_inject_support;
@@ -47,6 +47,7 @@ pub(super) use turn_start::claim_reserved_headless_turn;
 pub(super) use turn_start::reserve_headless_turn;
 pub(crate) use turn_start::{
     HeadlessTurnReservation, HeadlessTurnStartError, HeadlessTurnStartOutcome,
+    HeadlessTurnStartStatus,
 };
 #[cfg(test)]
 pub(crate) use turn_start::{

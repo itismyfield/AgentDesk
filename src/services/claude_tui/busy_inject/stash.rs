@@ -109,7 +109,7 @@ fn load_failed() -> Outcome {
     Outcome::NotSent(Veto::LoadFailed)
 }
 
-enum Key {
+pub(crate) enum Key {
     Applied,
     /// The tmux server found another pane identity and ran nothing.
     Held,
@@ -117,7 +117,7 @@ enum Key {
 }
 
 /// Runs one content key; under an owner the server runs it only for the pinned pane identity.
-fn key<const N: usize>(pane: &Pane, command: impl Fn(&str) -> [String; N]) -> Key {
+pub(crate) fn key<const N: usize>(pane: &Pane, command: impl Fn(&str) -> [String; N]) -> Key {
     match owner_input::pinned() {
         Ok(None) => {}
         Ok(Some((target, condition))) => {

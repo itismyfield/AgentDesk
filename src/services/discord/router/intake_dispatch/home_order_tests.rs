@@ -89,6 +89,7 @@ fn submission(channel: u64, message: u64) -> IntakeSubmission {
         has_nonportable_uploads: false,
         attachments: Vec::new(),
         preloaded_uploads: Vec::new(),
+        owner: None,
     }
 }
 

@@ -47,6 +47,8 @@ use crate::services::turn_orchestrator::{Intervention, InterventionMode};
 mod codex_turn_hold;
 mod fallback_queued_tests;
 mod final_guards;
+#[cfg(unix)]
+mod owner_ingress_tests;
 mod replay_hold;
 
 struct ScopedIntakeTestEnv {
@@ -205,6 +207,7 @@ fn submission_for_admission(channel_id: ChannelId, message_id: u64) -> IntakeSub
         has_nonportable_uploads: false,
         attachments: Vec::new(),
         preloaded_uploads: Vec::new(),
+        owner: None,
     }
 }
 
@@ -385,6 +388,7 @@ async fn intake_dispatch_invariant_enforce_without_postgres_blocks_owner_unknown
         has_nonportable_uploads: false,
         attachments: Vec::new(),
         preloaded_uploads: Vec::new(),
+        owner: None,
     };
 
     assert!(matches!(
@@ -488,6 +492,7 @@ async fn live_and_skill_producers_forward_to_foreign_owner_pg() {
             has_nonportable_uploads: false,
             attachments: Vec::new(),
             preloaded_uploads: Vec::new(),
+            owner: None,
         },
     )
     .await
@@ -557,6 +562,7 @@ async fn raw_attachment_foreign_owner_blocks_before_outbox_or_local_state_pg() {
             url: "https://example.invalid/report.txt".to_string(),
         }],
         preloaded_uploads: Vec::new(),
+        owner: None,
     };
 
     assert!(matches!(
@@ -732,6 +738,7 @@ async fn distinct_open_route_requeues_queued_successor_pg() {
             has_nonportable_uploads: false,
             attachments: Vec::new(),
             preloaded_uploads: Vec::new(),
+            owner: None,
         },
     )
     .await

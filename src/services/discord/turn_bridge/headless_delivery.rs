@@ -276,6 +276,7 @@ use outcome::{classify_visible_outbox_result, run_headless_direct_fallback};
 pub(super) async fn enqueue_headless_delivery(
     arguments: HeadlessDeliveryArguments<'_>,
 ) -> HeadlessDeliveryOutcome {
+    let runtime = arguments.into_runtime_arguments();
     let HeadlessDeliveryRuntimeArguments {
         shared,
         channel_id,
@@ -283,11 +284,11 @@ pub(super) async fn enqueue_headless_delivery(
         session_key,
         delivery_bot,
         provider,
-        born_generation,
         intake_outbox_id,
         content,
         cancel_token,
-    } = arguments.into_runtime_arguments();
+        ..
+    } = runtime;
     if should_suppress_headless_delivery_for_cancel(cancel_token) {
         return HeadlessDeliveryOutcome::Cancelled;
     }
@@ -312,33 +313,8 @@ pub(super) async fn enqueue_headless_delivery(
                 };
             }
         };
-    let target = format!("channel:{}", channel_id.get());
-    let bot = headless_delivery_bot_alias(delivery_bot, provider);
-
-    let outbox_message = crate::services::message_outbox::OutboxMessage {
-        target: &target,
-        content,
-        bot,
-        source: "headless_turn",
-        // Explicit reason_code keeps dedupe consistent across PG/SQLite.
-        reason_code: Some("headless.delivery"),
-        session_key,
-    };
     if let Some(pool) = shared.pg_pool.as_ref() {
-        let delivery_cancel_token = cancel_token.filter(|token| !token.is_completion_cleanup());
-        // Terminal headless responses are per-turn facts. Identical content in
-        // back-to-back E2E or operator turns must still be delivered.
-        match durable_outbox::enqueue_headless_outbox(
-            pool,
-            outbox_message,
-            owning_user_msg_id,
-            provider,
-            born_generation,
-            delivery_cancel_token,
-            output_origin.as_ref(),
-        )
-        .await
-        {
+        match enqueue_headless_turn_row(pool, runtime, output_origin.as_ref()).await {
             Ok(crate::services::message_outbox::OutboxEnqueueOutcome::Enqueued {
                 id: outbox_id,
             }) => {
@@ -528,6 +504,69 @@ pub(super) async fn enqueue_headless_delivery(
         Ok(())
     };
     run_headless_direct_fallback(suppress_for_cancel, || direct_fallback).await
+}
+
+/// Writes the turn's headless outbox row. Terminal headless responses are per-turn facts:
+/// identical content in back-to-back E2E or operator turns must still be delivered.
+async fn enqueue_headless_turn_row(
+    pool: &sqlx::PgPool,
+    runtime: HeadlessDeliveryRuntimeArguments<'_>,
+    output_origin: Option<
+        &crate::services::cluster::intake_router_hook::owner_record::output::Artifact,
+    >,
+) -> Result<
+    crate::services::message_outbox::OutboxEnqueueOutcome,
+    crate::services::message_outbox::OutboxEnqueueError,
+> {
+    let target = format!("channel:{}", runtime.channel_id.get());
+    let outbox_message = crate::services::message_outbox::OutboxMessage {
+        target: &target,
+        content: runtime.content,
+        bot: headless_delivery_bot_alias(runtime.delivery_bot, runtime.provider),
+        source: "headless_turn",
+        // Explicit reason_code keeps dedupe consistent across PG/SQLite.
+        reason_code: Some("headless.delivery"),
+        session_key: runtime.session_key,
+    };
+    let delivery_cancel_token = runtime
+        .cancel_token
+        .filter(|token| !token.is_completion_cleanup());
+    durable_outbox::enqueue_headless_outbox(
+        pool,
+        outbox_message,
+        runtime.owning_user_msg_id,
+        runtime.provider,
+        runtime.born_generation,
+        delivery_cancel_token,
+        (output_origin, runtime.producer_turn_nonce),
+    )
+    .await
+}
+
+/// The production row write for `state`'s turn, without waiting for the worker to send it.
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) async fn enqueue_headless_turn_row_for_test(
+    shared: &Arc<SharedData>,
+    state: &InflightTurnState,
+    content: &str,
+) -> crate::services::message_outbox::OutboxEnqueueOutcome {
+    let provider = state.provider_kind().expect("turn provider");
+    let runtime = assemble_headless_delivery_arguments(
+        state,
+        HeadlessDeliveryInputs {
+            shared,
+            channel_id: ChannelId::new(state.channel_id),
+            owning_user_msg_id: (state.user_msg_id != 0).then(|| MessageId::new(state.user_msg_id)),
+            session_key: None,
+            provider: &provider,
+            content,
+            cancel_token: None,
+        },
+    )
+    .into_runtime_arguments();
+    enqueue_headless_turn_row(shared.pg_pool.as_ref().expect("outbox pool"), runtime, None)
+        .await
+        .expect("headless row write")
 }
 
 /// Enqueues under `claim`; O owning the channel or a held identity enqueues nothing and the

@@ -2504,3 +2504,9 @@ mod root_replaced_tests;
 
 #[path = "herdr_gate/policy_tests.rs"]
 mod policy;
+
+/// Claude's stash reaches a Herdr pane under the gate's own `ctrl+s` key name.
+#[test]
+fn ctrl_s_is_the_herdr_stash_key() {
+    assert_eq!(super::herdr_key(super::HostKey::CtrlS), "ctrl+s");
+}

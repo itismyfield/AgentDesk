@@ -44,3 +44,37 @@ fn history_v2_update_refuses_without_changing_recognition_evidence() {
     );
     assert_eq!(std::fs::read(path).unwrap(), bytes);
 }
+
+/// The production readers a rolled-back binary uses still see frames a V2 history records.
+#[test]
+fn history_v2_frames_stay_known_to_the_production_readers() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let root = tempfile::tempdir().unwrap();
+    let transcript = root.path().join("native.jsonl");
+    std::fs::write(&transcript, "").unwrap();
+    let session = format!("rollback-{}", uuid::Uuid::new_v4());
+    let frame = super::super::idle("ann", "720101", &session);
+    register(
+        ("claude", &session, "attempt-r", "720101"),
+        &transcript,
+        0,
+        &frame,
+    )
+    .unwrap();
+    let path = path().unwrap();
+    let v1: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let v2 = serde_json::json!({"version": 2, "live": v1["entries"], "passive": []});
+    std::fs::write(&path, v2.to_string()).unwrap();
+    assert!(
+        known(&frame),
+        "a V2-recorded frame is still an injected frame"
+    );
+    assert!(
+        screen_pending(&session, &frame),
+        "and still owns its composer"
+    );
+    assert!(
+        update(|_| Ok(())).is_err(),
+        "while the V2 file stays read-only"
+    );
+}

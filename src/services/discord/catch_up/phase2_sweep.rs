@@ -110,6 +110,8 @@ pub(super) async fn run<A: CatchUpDiscordApi + ?Sized>(
         // #5996: keep the arm that answered for each id — only the arm can say
         // whether a membership carries the evidence an advance must earn.
         let (mut known_arms, mut existing_ids) = recovery_known_arms_and_ids(&mailbox);
+        let fence = crate::services::discord::recovery_known_ids::merge_v2_held_sources;
+        fence(shared, channel_id, &mut known_arms, &mut existing_ids).await;
         // Phase 1's ledger consult, re-read per channel. A Settled outcome
         // skips (no enqueue): an answered message is never re-surfaced.
         #[cfg(unix)]

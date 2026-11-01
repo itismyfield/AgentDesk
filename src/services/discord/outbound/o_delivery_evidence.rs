@@ -341,14 +341,18 @@ fn headless_content_matches(content: &str, bodies: &[&str]) -> bool {
     })
 }
 
-/// A headless bridge body leaves a sent `message_outbox` row, not an O receipt; only a row with
-/// this body queued after the records that wrote it covers it, never an earlier turn's answer.
+/// A headless bridge body leaves a sent `message_outbox` row, not an O receipt; only a row the
+/// frame's own turn queued with this body after its records covers it, never another turn's.
 pub(in crate::services::discord) async fn headless_outbox(
     shared: &SharedData,
     frame: Frame<'_>,
     producer: manifest::BodyProducer,
+    producer_turn_nonce: &str,
     deadline: Instant,
 ) -> Option<TailCovered> {
+    if producer_turn_nonce.is_empty() {
+        return None;
+    }
     let pool = shared.pg_pool.as_ref()?;
     let (provider, path) = (frame.provider.clone(), frame.path.to_path_buf());
     let (channel, file, range) = (frame.channel.get(), frame.file, frame.range);
@@ -379,11 +383,12 @@ pub(in crate::services::discord) async fn headless_outbox(
         sqlx::query_scalar(
             "SELECT content FROM message_outbox
               WHERE target = $1 AND source = 'headless_turn' AND status = 'sent'
-                AND created_at >= $2
+                AND created_at >= $2 AND producer_turn_nonce = $3
               ORDER BY id DESC LIMIT 32",
         )
         .bind(format!("channel:{channel}"))
         .bind(floor)
+        .bind(producer_turn_nonce)
         .fetch_all(pool),
     )
     .await

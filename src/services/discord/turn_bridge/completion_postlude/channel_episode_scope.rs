@@ -560,7 +560,7 @@ mod tests {
         // The headless start bridges the token its shared claim helper registered with the mailbox.
         want(
             headless,
-            "let (session_transition_guard, cancel_token) = claim(shared, channel_id, request_owner, &reservation, identity).await?;",
+            "let (session_transition_guard, cancel_token) = claim(shared, channel_id, request_owner, &reservation, identity, front,).await?;",
             None,
         );
         want(
@@ -642,7 +642,7 @@ mod tests {
             (|i| &mut i.headless, &spawn),
             (
                 |i| &mut i.headless,
-                "claim(shared, channel_id, request_owner, &reservation, identity)",
+                "let (session_transition_guard, cancel_token) = claim(",
             ),
             (|i| &mut i.recovery, "mailbox_recovery_kickoff("),
             (|i| &mut i.recovery, "kickoff_identity.request_owner,"),

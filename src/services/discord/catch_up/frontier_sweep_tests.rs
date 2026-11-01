@@ -243,7 +243,7 @@ impl CatchUpDiscordApi for StrictApi {
                 let owner = serenity::UserId::new(HUMAN_ID);
                 // The Discord text-intake claim: it waits behind anything already queued.
                 let start = discord::queue_io::mailbox_try_start_turn_behind_queue;
-                let started = start(shared, channel_id, token, owner, message_id);
+                let started = start(shared, channel_id, token, owner, message_id, None);
                 assert!(started.await, "{message_id} claims its turn");
                 enqueue(intervention).await
             }
@@ -1202,6 +1202,10 @@ mod duplicate_race_tests;
 
 #[path = "merged_alias_tests.rs"]
 mod merged_alias_tests;
+
+#[cfg(unix)]
+#[path = "owner_pending_recovery_tests.rs"]
+mod owner_pending_recovery_tests;
 
 #[path = "phase2_age_tests.rs"]
 mod phase2_age_tests;

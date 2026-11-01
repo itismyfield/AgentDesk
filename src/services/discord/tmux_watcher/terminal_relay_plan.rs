@@ -692,12 +692,20 @@ pub(super) async fn run_terminal_relay_plan<'a>(
         };
         // A legacy headless bridge body has an outbox row, not an O receipt. The watcher composed
         // this frame; a restored seed was composed by the bridge from its producer's read range.
+        // Either way only the frame's own turn's row counts: the handed-off seed's turn, else the
+        // turn the watcher bound, never the pre-relay row (a later turn can share the body).
         let consumed_end = terminal_event_consumed_offset(current_offset, all_data);
+        let seed_turn_nonce = restored_response_seed.producer_turn_nonce.as_deref();
         let body_source = if restored_response_seed.body.is_empty() {
-            Some((
-                (turn_data_start_offset, consumed_end),
-                o_delivery_evidence::BodyProducer::Watcher,
-            ))
+            seed_turn_nonce
+                .or_else(|| startup_soft_terminal_authority.bound_turn_nonce())
+                .map(|nonce| {
+                    (
+                        (turn_data_start_offset, consumed_end),
+                        o_delivery_evidence::BodyProducer::Watcher,
+                        nonce,
+                    )
+                })
         } else {
             restored_response_seed
                 .source
@@ -706,10 +714,17 @@ pub(super) async fn run_terminal_relay_plan<'a>(
                         && source.generation_mtime_ns
                             == dr::current_generation_mtime_ns(tmux_session_name)
                 })
-                .map(|source| (source.range, o_delivery_evidence::BodyProducer::Bridge))
+                .zip(seed_turn_nonce)
+                .map(|(source, nonce)| {
+                    (
+                        source.range,
+                        o_delivery_evidence::BodyProducer::Bridge,
+                        nonce,
+                    )
+                })
         };
         let o_tail_covered = match (o_tail_covered, context.evidence_source, body_source) {
-            (None, Some(file), Some((range, producer)))
+            (None, Some(file), Some((range, producer, producer_turn_nonce)))
                 if orphan_facts.existing_record_required() =>
             {
                 o_delivery_evidence::headless_outbox(
@@ -724,6 +739,7 @@ pub(super) async fn run_terminal_relay_plan<'a>(
                         sent: response_sent_offset,
                     },
                     producer,
+                    producer_turn_nonce,
                     evidence_deadline.max(tokio::time::Instant::now() + HEADLESS_OUTBOX_BUDGET),
                 )
                 .await

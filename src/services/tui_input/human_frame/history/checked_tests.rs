@@ -63,7 +63,7 @@ fn checked_observation_distinguishes_absence_from_history_failures() {
     for bytes in [
         b"{broken".as_slice(),
         br#"{"version":3,"live":[],"passive":[]}"#,
-        br#"{"version":2,"live":[],"passive":[]}"#,
+        br#"{"version":2,"live":7,"passive":[]}"#,
     ] {
         std::fs::write(&file, bytes).unwrap();
         for prompts in [&plain, &injected] {

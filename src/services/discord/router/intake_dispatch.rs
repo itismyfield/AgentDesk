@@ -44,6 +44,7 @@ pub(crate) use attachment::{prepare_admitted_live_attachments, resolve_attachmen
 use notice::notify_blocked_intake;
 pub(crate) use queued::{
     QueuedAdmissionDisposition, admit_queued_intake, finish_admitted_queued_intake,
+    start_owner_front,
 };
 pub(crate) use skill::dispatch_skill_intake;
 
@@ -78,6 +79,8 @@ pub(crate) struct IntakeSubmission {
         Vec<message_handler::AttachmentDescriptor>,
     pub(crate) preloaded_uploads:
         crate::services::cluster::attachment_transfer::uploads::PendingUploads,
+    /// The owner's claimed front this queued start runs; such a start is never admitted again.
+    pub(in crate::services::discord) owner: Option<message_handler::OwnerTurn>,
 }
 
 #[derive(Debug)]
@@ -593,6 +596,15 @@ pub(crate) fn dispatch_live_text_intake<'a, 'b: 'a>(
         #[cfg(unix)]
         let waits =
             waits || super::herdr_consent::endpoint(submission.request.channel_id.get()).is_some();
+        // An owner admission moves the checkpoint only once it is Accepted.
+        let waits = waits
+            || super::super::queue_io::input_ingress::adopt(
+                deps.shared,
+                &submission.provider,
+                submission.request.channel_id,
+            )
+            .await
+                != Ok(false);
         if !waits {
             checkpoint();
             return finish_text_intake_admission(deps, admission, submission).await;
@@ -741,6 +753,19 @@ pub(crate) async fn finish_admitted_local(
         return Ok(super::IntakeExecution::Deferred);
     }
     let preserve_on_cancel = submission.preserve_on_cancel;
+    if submission.owner.is_none()
+        && let Some(intake) = super::super::queue_io::input_ingress::intake(
+            deps.shared,
+            &submission.provider,
+            &submission.request,
+            submission.preloaded_uploads.clone(),
+            matches!(submission.origin, IntakeOrigin::QueuedDrain(_)),
+            !submission.attachments.is_empty(),
+        )
+        .await
+    {
+        return intake.live();
+    }
     local_turn(deps, submission, preserve_on_cancel).await
 }
 
@@ -766,8 +791,7 @@ fn local_turn<'a, 'b: 'a>(
         deps,
         submission.request,
         preserve_on_cancel,
-        queued_drain,
-        queued,
+        (queued_drain, queued, submission.owner),
         submission.preloaded_uploads,
     ))
 }

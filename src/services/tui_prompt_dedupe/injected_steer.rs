@@ -47,7 +47,6 @@ fn marker(nonce: &str) -> String {
 }
 
 /// Projection of durable retention: frees capacity without inventing a native observation.
-#[cfg(test)]
 pub(crate) fn retain_injected_steer(provider: &str, session: &str, nonce: &str) {
     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ledger) = state

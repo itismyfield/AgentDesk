@@ -20,6 +20,12 @@ use routine_metadata::persist_boundary_before_provider_clear;
 mod entrypoints;
 pub(in crate::services::discord) use entrypoints::*;
 
+/// Each start's resolved role, session key, tmux session, channel name, workspace, source and
+/// session.
+#[cfg(test)]
+pub(in crate::services::discord) static STARTS_RESOLVED: std::sync::Mutex<Vec<(u64, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
 #[allow(clippy::too_many_arguments)]
 async fn start_reserved_headless_turn_admitted(
     ctx: &serenity::Context,
@@ -41,6 +47,8 @@ async fn start_reserved_headless_turn_admitted(
     tmux_session_label: Option<String>,
     is_dm_hint: Option<bool>,
     reservation: HeadlessTurnReservation,
+    // The owner front this start runs as its input, its claim made under the owner's grant.
+    owner: Option<super::OwnerTurn>,
 ) -> Result<HeadlessTurnStartOutcome, HeadlessTurnStartError> {
     let prompt = prompt.trim();
     if prompt.is_empty() {
@@ -182,13 +190,38 @@ async fn start_reserved_headless_turn_admitted(
             reservation.turn_id(channel_id),
         ));
     }
+    #[cfg(unix)]
+    if owner.is_none()
+        && let Some(outcome) = owner_start(
+            (shared, channel_id, &reservation),
+            prompt,
+            (request_owner.get(), request_owner_name),
+            (source, metadata.as_ref()),
+            (
+                channel_name_hint.as_deref(),
+                tmux_session_label.as_deref(),
+                is_dm_hint,
+            ),
+        )
+        .await
+    {
+        return outcome;
+    }
     let identity = (
         provider.clone(),
         role_binding.as_ref().map(|b| b.role_id.clone()),
     );
     let claim = super::super::turn_start::claim_reserved_headless_turn;
-    let (session_transition_guard, cancel_token) =
-        claim(shared, channel_id, request_owner, &reservation, identity).await?;
+    let front = owner.as_ref().map(|owner| owner.front().clone());
+    let (session_transition_guard, cancel_token) = claim(
+        shared,
+        channel_id,
+        request_owner,
+        &reservation,
+        identity,
+        front,
+    )
+    .await?;
     let process_mailbox =
         process_mailbox::capture((shared, channel_id), &cancel_token, metadata.as_ref()).await;
     crate::services::discord::increment_global_active(shared, "headless_turn_start");
@@ -968,6 +1001,12 @@ async fn start_reserved_headless_turn_admitted(
         channel_name: channel_name.clone(),
         execution_mode: Some("discord_turn".to_string()),
     };
+    #[cfg(test)]
+    let seen = (&provider_execution_context, &current_path, source);
+    #[cfg(test)]
+    let seen = (channel_id.get(), format!("{seen:?} {session_id:?}"));
+    #[cfg(test)]
+    STARTS_RESOLVED.lock().unwrap().push(seen);
 
     let prompt_owned = prompt.to_string();
     let provider_for_blocking = provider.clone();
@@ -1027,6 +1066,7 @@ async fn start_reserved_headless_turn_admitted(
                             },
                             replay_start,
                             tx.clone(),
+                            owner,
                         )
                     }))
                 },
@@ -1094,6 +1134,47 @@ async fn start_reserved_headless_turn_admitted(
     );
 
     Ok(HeadlessTurnStartOutcome::started(turn_id, receipt))
+}
+
+/// A start whose target the owner takes is admitted as an original with its resolved provenance;
+/// a routine or scheduled start already met its own owner seam and keeps the legacy path here.
+#[cfg(unix)]
+async fn owner_start(
+    (shared, channel, reservation): (&Arc<SharedData>, ChannelId, &HeadlessTurnReservation),
+    prompt: &str,
+    owner: (u64, &str),
+    (source, metadata): (Option<&str>, Option<&serde_json::Value>),
+    (channel_hint, label, dm): (Option<&str>, Option<&str>, Option<bool>),
+) -> Option<Result<HeadlessTurnStartOutcome, HeadlessTurnStartError>> {
+    use crate::services::discord::queue_io::input_ingress::Intake;
+    use crate::services::discord::queue_io::input_owner::start::HeadlessProvenance;
+    let seamed = |key| metadata.is_some_and(|metadata| metadata.get(key).is_some());
+    if seamed("routine_id") || seamed("scheduled_message_id") {
+        return None;
+    }
+    let turn_id = reservation.turn_id(channel);
+    let metadata = metadata.cloned();
+    let provenance = HeadlessProvenance {
+        owner,
+        source,
+        metadata,
+        channel_hint,
+        label,
+        dm,
+    };
+    let admit = super::provider_dispatch::owner_admit_start;
+    let intake = admit(
+        shared,
+        channel,
+        (&turn_id, prompt),
+        provenance.json(&turn_id),
+    )
+    .await?;
+    Some(match intake {
+        Intake::Accepted => Ok(HeadlessTurnStartOutcome::accepted(turn_id)),
+        Intake::Pending(pending) => Err(HeadlessTurnStartError::Conflict(pending.to_string())),
+        Intake::Rejected(reason) => Err(HeadlessTurnStartError::Conflict(reason)),
+    })
 }
 
 #[cfg(test)]

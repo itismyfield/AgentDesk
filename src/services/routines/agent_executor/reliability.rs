@@ -63,6 +63,7 @@ pub(super) fn fresh_provider_session_probe_allowed(
     now: DateTime<Utc>,
 ) -> bool {
     run.execution_strategy == "fresh"
+        && !owner_input::needs_owner(run)
         && execution::AgentExecutionMode::from_result(run.result_json.as_ref())
             != execution::AgentExecutionMode::Process
         && run.turn_id.is_some()

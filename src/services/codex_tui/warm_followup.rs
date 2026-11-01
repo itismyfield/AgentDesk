@@ -591,19 +591,7 @@ fn warm_followup_on(
             .unwrap_or(0),
     );
     // Held until this handoff's tail returns; an input seen first waits for its turn.
-    let _handoff = crate::services::tui_prompt_dedupe::reserve_discord_handoff(
-        ProviderKind::Codex.as_str(),
-        tmux_session_name,
-        prompt,
-    );
-    crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
-        ProviderKind::Codex.as_str(),
-        tmux_session_name,
-        prompt,
-    );
-    if let Some(channel_id) = report_channel_id {
-        crate::services::tui_prompt_dedupe::register_tmux_channel(tmux_session_name, channel_id);
-    }
+    let _handoff = claim_handoff(tmux_session_name, prompt, report_channel_id);
 
     if let Err(error) = preflight_warm_effect(tmux_session_name, report_channel_id, launch_options)
     {
@@ -626,29 +614,76 @@ fn warm_followup_on(
         return settled;
     }
 
-    let tail_result = super::rollout_tail::tail_warm_followup_rollout_for_tmux(
-        rollout_path,
-        start_offset,
-        session_id,
+    let at = (rollout_path, start_offset, session_id);
+    let tail = tail_to_end(at, sender, cancel_token, tmux_session_name, prompt);
+    CodexWarmFollowupOutcome::Terminal(tail)
+}
+
+/// Reserves the Discord handoff and records the prompt and its channel before the submit they guard.
+#[cfg(unix)]
+fn claim_handoff(
+    tmux: &str,
+    prompt: &str,
+    channel: Option<u64>,
+) -> crate::services::tui_prompt_dedupe::HandoffGuard {
+    use crate::services::tui_prompt_dedupe as dedupe;
+    let handoff = dedupe::reserve_discord_handoff(ProviderKind::Codex.as_str(), tmux, prompt);
+    dedupe::record_discord_originated_prompt(ProviderKind::Codex.as_str(), tmux, prompt);
+    if let Some(channel) = channel {
+        dedupe::register_tmux_channel(tmux, channel);
+    }
+    handoff
+}
+
+/// Tails a submitted turn's rollout to its end on `sender`, then hands the pane to the watcher.
+#[cfg(unix)]
+fn tail_to_end(
+    (rollout, start, session): (&Path, u64, &str),
+    sender: Sender<StreamMessage>,
+    cancel: Option<std::sync::Arc<CancelToken>>,
+    tmux: &str,
+    prompt: &str,
+) -> Result<(), String> {
+    let alive = || host_input::legacy_pane_alive(tmux);
+    let tail = super::rollout_tail::tail_warm_followup_rollout_for_tmux;
+    match tail(
+        rollout,
+        start,
+        session,
         sender.clone(),
-        cancel_token.clone(),
-        || host_input::legacy_pane_alive(tmux_session_name),
-        tmux_session_name,
+        cancel.clone(),
+        alive,
+        tmux,
         prompt,
-    );
-    let tail_result = match tail_result {
-        Ok(result) => result,
-        Err(_) if cancel_requested(cancel_token.as_deref()) => {
-            return CodexWarmFollowupOutcome::Terminal(Ok(()));
+    ) {
+        Ok(tail) => {
+            crate::services::codex::emit_codex_tui_post_tail_handoff(tail, sender, cancel, tmux)
         }
-        Err(error) => return CodexWarmFollowupOutcome::Terminal(Err(error)),
-    };
-    CodexWarmFollowupOutcome::Terminal(crate::services::codex::emit_codex_tui_post_tail_handoff(
-        tail_result,
-        sender,
-        cancel_token,
-        tmux_session_name,
-    ))
+        Err(_) if cancel_requested(cancel.as_deref()) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// The owner's idle submit observed as this follow-up observes its own: handoff, dedupe and
+/// channel records come before that submit, then the rollout is tailed to its end on `sender`.
+#[cfg(unix)]
+pub(crate) fn owner_observer(
+    (tmux, prompt, channel): (&str, &str, u64),
+    (session_id, working_dir): (Option<&str>, &Path),
+    sender: Sender<StreamMessage>,
+    cancel: std::sync::Arc<CancelToken>,
+) -> Option<Box<dyn FnOnce() -> Result<(), String> + Send>> {
+    crate::services::codex::wire_cancel_token_to_tmux_session(Some(&cancel), tmux);
+    let selection = super::session::resolve_codex_tui_session(session_id, working_dir, None, false);
+    let (rollout, session) = (selection.rollout_path?, selection.selected_session_id?);
+    let start = std::fs::metadata(&rollout).ok()?.len();
+    let handoff = claim_handoff(tmux, prompt, Some(channel));
+    let (tmux, prompt) = (tmux.to_string(), prompt.to_string());
+    Some(Box::new(move || {
+        let _handoff = handoff;
+        let at = (rollout.as_path(), start, session.as_str());
+        tail_to_end(at, sender, Some(cancel), &tmux, &prompt)
+    }))
 }
 
 #[cfg(unix)]

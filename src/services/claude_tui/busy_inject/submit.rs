@@ -25,6 +25,25 @@ pub(crate) fn inject_report_any_turn(
     report(pane, request, channel, timing, TurnGate::AnyTurn)
 }
 
+/// The input owner's busy entry: a person's draft is parked whichever channel the input names.
+#[cfg(unix)]
+pub(crate) fn inject_owned(pane: &Pane, request: &Request<'_>, timing: &Timing) -> Report {
+    inject_gated_with(
+        pane,
+        request,
+        timing,
+        Some(person_draft),
+        TurnGate::BusyOnly,
+    )
+}
+
+/// A draft as Herdr's owner reads it: an injected frame or an existing stash is never parked.
+#[cfg(unix)]
+fn person_draft(capture: &str) -> bool {
+    draft_sighting(capture)
+        == crate::services::claude_tui::composer_lock::DraftSighting::PersonDraft
+}
+
 fn report(
     pane: &Pane,
     request: &Request<'_>,
@@ -38,7 +57,10 @@ fn report(
             pane,
             request,
             timing,
-            stash_channel_listed(channel, &stash_tests::configured_channels()),
+            listed(stash_channel_listed(
+                channel,
+                &stash_tests::configured_channels(),
+            )),
             turn_gate,
         );
     }
@@ -46,7 +68,7 @@ fn report(
         pane,
         request,
         timing,
-        stash_channel_listed(channel, stash_channels_configured()),
+        listed(stash_channel_listed(channel, stash_channels_configured())),
         turn_gate,
     )
 }
@@ -63,7 +85,7 @@ pub(super) fn inject_listed(
         pane,
         request,
         timing,
-        stash_channel_listed(channel, listed),
+        super::listed(stash_channel_listed(channel, listed)),
         TurnGate::BusyOnly,
     )
 }
@@ -75,14 +97,14 @@ pub(super) fn inject_gated(
     timing: &Timing,
     stash: bool,
 ) -> Report {
-    inject_gated_with(pane, request, timing, stash, TurnGate::BusyOnly)
+    inject_gated_with(pane, request, timing, listed(stash), TurnGate::BusyOnly)
 }
 
 fn inject_gated_with(
     pane: &Pane,
     request: &Request<'_>,
     timing: &Timing,
-    stash: bool,
+    park: Park,
     turn_gate: TurnGate,
 ) -> Report {
     let text = frame(
@@ -121,7 +143,7 @@ fn inject_gated_with(
                 if own {
                     dedupe::record_discord_originated_prompt("claude", request.session, &text);
                 }
-                let report = inject_locked(pane, request, &text, timing, stash, turn_gate);
+                let report = inject_locked(pane, request, &text, timing, park, turn_gate);
                 if own && matches!(&report.outcome, Outcome::NotSent(_)) {
                     dedupe::remove_discord_originated_prompt("claude", request.session, &text);
                 }

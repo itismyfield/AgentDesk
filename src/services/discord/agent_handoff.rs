@@ -652,6 +652,8 @@ fn extract_discord_status(detail: &str) -> Option<u16> {
 }
 
 #[cfg(test)]
+mod accepted_tests;
+#[cfg(test)]
 mod tests {
     use super::*;
 

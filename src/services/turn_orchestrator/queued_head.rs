@@ -88,8 +88,9 @@ impl SnapshotMeta {
 
 pub(super) mod compat;
 mod snapshot;
-#[cfg(test)]
 mod v2;
+pub(crate) use v2::actor::v2_queue;
+pub(crate) use v2::source_admission::TurnBind;
 mod v2_types;
 pub(super) use snapshot::{parse_snapshot, snapshot_json};
 
@@ -101,6 +102,11 @@ fn read_snapshot_meta(path: &Path) -> Result<Option<SnapshotMeta>, String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(queue_unread(format!("read {}: {error}", path.display()))),
     };
+    // A V2 file holds the channel for a V2-capable binary: every claim and legacy mutation waits.
+    if let Ok(compat::SnapshotRead::ReadOnlyV2(_)) = compat::inspect(&content) {
+        let held = format!("{} is a read-only V2 queue", path.display());
+        return Err(queue_unread(held));
+    }
     let (_, meta) = parse_snapshot(&content)
         .map_err(|e| queue_unread(format!("parse {}: {e}", path.display())))?;
     Ok(meta.filter(SnapshotMeta::is_set))
@@ -140,7 +146,6 @@ pub(crate) struct HeadLease;
 /// The actor's copy of the channel's snapshot metadata, read from disk once per namespace.
 #[derive(Default)]
 pub(super) struct HeadLedger {
-    #[cfg(test)]
     v2: Option<v2::Owner>,
     adopted: Option<(ProviderKind, String)>,
     pub(super) meta: SnapshotMeta,
@@ -246,7 +251,6 @@ pub(super) fn release_for_clear(
         false => Vec::new(),
     };
     state.queued_head = HeadLedger {
-        #[cfg(test)]
         v2: previous.v2,
         adopted: Some(key),
         meta: SnapshotMeta {
@@ -408,12 +412,30 @@ pub(super) fn withhold_take(
     Some(withheld)
 }
 
+/// Runs after the closed gate: an actor holding a V2 owner serves or refuses every queue-changing
+/// arm there, so the V1 handlers never write beside it.
+pub(super) fn route_v2(
+    state: &mut ChannelMailboxState,
+    channel_id: ChannelId,
+    msg: super::ChannelMailboxMsg,
+) -> Option<super::ChannelMailboxMsg> {
+    v2::control::route(state, channel_id, msg)
+}
+
 /// A turn claim never starts ahead of a reserved or unresolved head, nor over an unreadable record.
 pub(super) fn blocks_claims(
     state: &mut ChannelMailboxState,
-    channel_id: ChannelId,
-    persistence: Option<&QueuePersistenceContext>,
+    (channel_id, persistence): (ChannelId, Option<&QueuePersistenceContext>),
+    (message, order, front): (u64, super::TurnAdmissionOrder, Option<&v2::Front>),
 ) -> bool {
+    // A V2 owner holds the file the V1 check cannot read: only the front it claimed starts by
+    // presenting that front, and any other claim follows the owner's typed order.
+    if let Some(owner) = &state.queued_head.v2 {
+        return match front {
+            Some(front) => !owner.claimed(message, front),
+            None => owner.blocks_claim(message, order),
+        };
+    }
     if persistence.is_some_and(|p| validate_disk(state, channel_id, p).is_err()) {
         return true;
     }
@@ -490,7 +512,6 @@ mod claim {
     }
 
     pub(crate) enum HeadMsg {
-        #[cfg(test)]
         V2(v2::actor::Message),
         Claim {
             expected: QueueIdentity,
@@ -510,7 +531,6 @@ mod claim {
     impl HeadMsg {
         pub(in crate::services::turn_orchestrator) fn refuse(self, error: String) {
             match self {
-                #[cfg(test)]
                 Self::V2(msg) => msg.refuse(),
                 Self::Claim { reply, .. } => {
                     let _ = reply.send(QueuedHeadClaim::PersistenceFailed(error));
@@ -529,8 +549,11 @@ mod claim {
         msg: HeadMsg,
     ) {
         match msg {
-            #[cfg(test)]
-            HeadMsg::V2(msg) => msg.run(&mut state.queued_head.v2),
+            HeadMsg::V2(msg) => {
+                let v1_holds =
+                    !state.intervention_queue.is_empty() || state.pending_user_dispatch.is_some();
+                msg.run(&mut state.queued_head.v2, v1_holds)
+            }
             HeadMsg::Claim {
                 expected,
                 persistence,
