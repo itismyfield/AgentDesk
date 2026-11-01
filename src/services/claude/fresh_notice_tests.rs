@@ -36,7 +36,10 @@ fn a_tmux_resume_without_its_transcript_is_announced_once_and_one_with_it_never(
     let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
     let _home = set("CLAUDE_CONFIG_DIR", home.path());
     let lost = uuid::Uuid::new_v4().to_string();
-    let errors = [launch(NAME, cwd.path(), &lost), launch(NAME, cwd.path(), &lost)];
+    let errors = [
+        launch(NAME, cwd.path(), &lost),
+        launch(NAME, cwd.path(), &lost),
+    ];
     assert_eq!(posted_for_tests(&lost), 1, "{errors:?}");
 
     let kept = uuid::Uuid::new_v4().to_string();
@@ -82,7 +85,10 @@ fn a_live_session_its_binding_recovers_is_never_announced() {
     let refuse = Box::new(|_, _, _, _, _| Err("unused".to_string()));
     let _owner = crate::services::claude_tui::owner_input::install_launch(refuse);
     let error = launch(NAME, cwd.path(), &live);
-    assert!(error.contains("a live session takes no first prompt"), "{error}");
+    assert!(
+        error.contains("a live session takes no first prompt"),
+        "{error}"
+    );
     assert_eq!(posted_for_tests(&live), 0);
     crate::services::tmux_common::cleanup_session_temp_files(NAME);
 }

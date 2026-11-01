@@ -859,6 +859,8 @@ src/
 │   │   ├── backend_routing.rs
 │   │   ├── c1_teardown_tests.rs
 │   │   ├── first_input.rs
+│   │   ├── fresh_notice.rs
+│   │   ├── fresh_notice_tests.rs
 │   │   ├── herdr_return.rs
 │   │   ├── herdr_return_tests.rs
 │   │   ├── herdr_turn.rs
@@ -2142,6 +2144,7 @@ src/
 │   │   │   │   ├── provider_dispatch_codex_live_end_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_t14_actual_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_t14_composed_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_fresh_notice_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_start_offset_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests.rs
