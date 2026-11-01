@@ -9,7 +9,7 @@ use sqlx::Row as SqlxRow;
 /// **Safety**:
 /// - Process-global once guard via `std::sync::Once` — safe across multiple provider instances
 /// - Startup boot timestamp from dcserver.pid mtime — not wall clock
-/// - Newer-dispatch check uses rowid (monotonic) instead of created_at (second-granularity)
+/// - Newer-dispatch check uses strict created_at comparison; equal timestamps remain eligible.
 /// - Five AND conditions must ALL be met before re-delivery (see issue #164)
 pub(crate) async fn recover_on_boot(pg_pool: Option<&sqlx::PgPool>) {
     // Process-global once guard: prevents duplicate execution when multiple
@@ -56,8 +56,8 @@ pub(crate) async fn recover_once(pg_pool: Option<&sqlx::PgPool>) {
     // 2. card is assigned to the dispatch target agent
     // 3. agent has NO working session (idle)
     // 4. created_at < boot_time (pre-restart, using pid mtime)
-    // 5. no newer dispatch for the same card (using rowid for monotonic ordering,
-    //    avoids same-second ambiguity with created_at)
+    // 5. no dispatch for the same card with a strictly later created_at;
+    //    a later dispatch in the same timestamp second is not excluded.
     let orphans: Vec<(String, String, String, String, String)> = if let Some(pool) = pg_pool {
         match sqlx::query(
             "SELECT d.id, d.to_agent_id, d.kanban_card_id, d.title, d.dispatch_type

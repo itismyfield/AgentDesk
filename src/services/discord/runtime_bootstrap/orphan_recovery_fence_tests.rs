@@ -339,6 +339,27 @@ async fn orphan_owner_policy_grace_and_dispatch_identity_pg() {
         "failed",
         "an invalid boot value retains the old no-grace behavior"
     );
+    sqlx::raw_sql("CREATE OR REPLACE FUNCTION owner_clock.now() RETURNS timestamptz LANGUAGE sql IMMUTABLE AS $$ SELECT timestamptz '2026-11-01 00:00:00.483921+00' $$;")
+        .execute(&pool).await.unwrap();
+    owner_dispatch(&pool, "owner-pg-fractional", 601).await;
+    sqlx::query("UPDATE kv_meta SET value = NOW()::TEXT WHERE key = 'server_boot_at'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let boot_value: String =
+        sqlx::query_scalar("SELECT value FROM kv_meta WHERE key = 'server_boot_at'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(boot_value, "2026-11-01 00:00:00.483921+00");
+    for (now_ms, expected) in [(OWNER_NOW + 600_482, 0), (OWNER_NOW + 600_483, 1)] {
+        owner_tick(&pool, now_ms, false);
+        assert_eq!(
+            owner_state(&pool, "owner-pg-fractional").await.2,
+            expected,
+            "the fractional PostgreSQL boot value retains QuickJS millisecond precision"
+        );
+    }
     pool.close().await;
     original.close().await;
     db.drop().await;
@@ -422,6 +443,122 @@ async fn orphan_owner_boot_pid_cutoff_rearm_and_agent_identity_pg() {
     assert_eq!(reset, (0, true));
     pool.close().await;
     db.drop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn orphan_owner_boot_requeues_older_dispatch_at_equal_created_at_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    owner_dispatch(&pool, "owner-same-second-old", 3_600).await;
+    sqlx::query("INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at) SELECT 'owner-same-second-new', kanban_card_id, to_agent_id, dispatch_type, status, 'new', date_trunc('second', created_at) FROM task_dispatches WHERE id = 'owner-same-second-old'")
+        .execute(&pool).await.unwrap();
+    sqlx::query("UPDATE task_dispatches SET created_at = date_trunc('second', created_at) WHERE id = 'owner-same-second-old'")
+        .execute(&pool).await.unwrap();
+    sqlx::query("UPDATE kanban_cards SET latest_dispatch_id = 'owner-same-second-new' WHERE id = 'card-owner-same-second-old'")
+        .execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO kv_meta(key, value) VALUES ('dispatch_notified:owner-same-second-new', '1')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    owner_pid(chrono::Utc::now().timestamp());
+
+    recover_orphan_pending_dispatches_once(Some(&pool)).await;
+
+    for id in ["owner-same-second-old", "owner-same-second-new"] {
+        assert_eq!(
+            notified(&pool, id).await,
+            (false, true),
+            "strict created_at comparison retains rearm of both same-second dispatches: {id}"
+        );
+        let status: String = sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "pending");
+    }
+    pool.close().await;
+    db.drop().await;
+}
+
+#[test]
+fn orphan_owner_policy_isolates_malformed_rows_and_coerces_executed() {
+    let runtime = rquickjs::Runtime::new().unwrap();
+    let context = rquickjs::Context::full(&runtime).unwrap();
+    context.with(|ctx| {
+        crate::engine::ops::register_globals_with_supervisor_and_pg(
+            &ctx,
+            None,
+            crate::supervisor::BridgeHandle::new(),
+        )
+        .unwrap();
+        let read = |name| {
+            std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(name))
+                .unwrap()
+        };
+        let helpers = read("policies/lib/timeouts-helpers.js");
+        let orphan = read("policies/timeouts/orphan-dispatch.js");
+        let entry = read("policies/timeouts.js");
+        let script = format!(r#"(function() {{
+            var helpers = {{exports: {{}}}};
+            (function(module, exports) {{ {helpers} }})(helpers, helpers.exports);
+            var orphan = {{exports: {{}}}};
+            (function(module) {{ {orphan} }})(orphan);
+            var root = {{exports: {{}}}};
+            var require = function(name) {{
+                if (name === './lib/timeouts-helpers') return helpers.exports;
+                if (name === './timeouts/orphan-dispatch') return orphan.exports;
+                return function(t) {{}};
+            }};
+            (function(module, require) {{ {entry} }})(root, require);
+            ['I0', 'J', 'I'].forEach(function(s) {{ root.exports.policy['_section_' + s] = function() {{}}; }});
+            agentdesk.db.__query_raw = function(sql) {{
+                return sql.indexOf('server_boot_at') >= 0 ? '[]' : JSON.stringify([
+                    {{dispatch_id: null, kanban_card_id: 'bad-card', dispatch_type: 'implementation'}},
+                    {{dispatch_id: 'good-dispatch', kanban_card_id: 'good-card', dispatch_type: 'rework'}}
+                ]);
+            }};
+            agentdesk.pipeline.getConfig = function() {{ return {{}}; }};
+            agentdesk.pipeline.kickoffState = function() {{ return 'ready'; }};
+            agentdesk.pipeline.nextGatedTarget = function() {{ return 'in_progress'; }};
+            return [true, false, 1, 0, 'yes', '', {{}}, null, undefined].map(function(executed) {{
+                var emitted = [], warnings = [], infos = [], errors = [];
+                agentdesk.runtime.emitSignal = function(signal, evidence) {{
+                    if (evidence.dispatch_id === null) throw new Error('invalid dispatch id');
+                    emitted.push([signal, evidence]);
+                    return {{executed: executed, note: 'probe'}};
+                }};
+                agentdesk.log.warn = function(message) {{ warnings.push(message); }};
+                agentdesk.log.info = function(message) {{ infos.push(message); }};
+                agentdesk.log.error = function(message) {{ errors.push(message); }};
+                root.exports.policy.onTick30s({{}});
+                return {{emitted: emitted, warnings: warnings, infos: infos, errors: errors}};
+            }});
+        }})()"#);
+        let raw: String = ctx
+            .eval(format!("JSON.stringify({script})"))
+            .unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(rows.len(), 9);
+        for (row, truthy) in rows.iter().zip([true, false, true, false, true, false, true, false, false]) {
+            assert_eq!(
+                row["emitted"],
+                serde_json::json!([["OrphanCandidate", {
+                    "dispatch_id": "good-dispatch", "card_id": "good-card",
+                    "dispatch_type": "rework", "detected_from": "timeouts._section_K"
+                }]]),
+                "a malformed first row must not prevent the second candidate from reaching emitSignal"
+            );
+            assert_eq!(row["warnings"].as_array().unwrap().len(), usize::from(truthy));
+            assert_eq!(row["infos"].as_array().unwrap().len(), usize::from(!truthy));
+            let errors = row["errors"].as_array().unwrap();
+            assert_eq!(errors.len(), 1);
+            assert!(errors[0].as_str().unwrap().contains("emit failed for null: Error: invalid dispatch id"));
+        }
+    });
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -516,7 +653,7 @@ async fn orphan_owner_actual_boot_once_and_concurrent_tick_pg() {
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "the actual boot entrypoint must reach its orphan effect"
+            "the actual boot entrypoint must reach its orphan effect; another test may have already consumed the process boot Once"
         );
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
@@ -605,7 +742,7 @@ async fn orphan_owner_actor_hook_flushes_deferred_confirmation_pg() {
     .unwrap();
     assert_eq!(
         audits, 0,
-        "retain the existing JSONB audit binding failure after the effects"
+        "retain the existing JSONB audit binding failure after the effects; #7644 수리 뒤 뒤집는다"
     );
     drop(engine);
     pool.close().await;

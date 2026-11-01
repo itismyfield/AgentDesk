@@ -1,3 +1,4 @@
+use rquickjs::convert::Coerced;
 use rquickjs::function::{Args, IntoArgs};
 use rquickjs::{Array, Ctx, Exception, FromJs, Function, Object, Result as JsResult, Value};
 
@@ -95,43 +96,48 @@ pub(crate) fn maintain_policy(ctx: &Ctx<'_>) -> JsResult<()> {
     )?;
     for candidate in candidates.iter::<Object>() {
         let candidate = candidate?;
-        let dispatch_id: String = candidate.get("dispatch_id")?;
-        let card_id: String = candidate.get("kanban_card_id")?;
-        let outcome = (|| -> JsResult<()> {
-            let evidence = Object::new(ctx.clone())?;
-            evidence.set("dispatch_id", &dispatch_id)?;
-            evidence.set("card_id", &card_id)?;
-            evidence.set("dispatch_type", candidate.get::<_, Value>("dispatch_type")?)?;
-            evidence.set("detected_from", "timeouts._section_K")?;
-            // Actor-thread hooks must still defer through the existing intent bridge.
-            let decision: Object =
-                io.call("runtime", "emitSignal", ("OrphanCandidate", evidence))?;
-            if decision.get::<_, bool>("executed")? {
-                io.call("log", "warn", (format!(
-                    "[orphan-recovery] Supervisor resumed orphaned dispatch {dispatch_id} → card {card_id} → {}",
+        let outcome =
+            (|| -> JsResult<()> {
+                let dispatch_id: Value = candidate.get("dispatch_id")?;
+                let card_id: Value = candidate.get("kanban_card_id")?;
+                let evidence = Object::new(ctx.clone())?;
+                evidence.set("dispatch_id", dispatch_id.clone())?;
+                evidence.set("card_id", card_id.clone())?;
+                evidence.set("dispatch_type", candidate.get::<_, Value>("dispatch_type")?)?;
+                evidence.set("detected_from", "timeouts._section_K")?;
+                // Actor-thread hooks must still defer through the existing intent bridge.
+                let decision: Object =
+                    io.call("runtime", "emitSignal", ("OrphanCandidate", evidence))?;
+                if decision.get::<_, Coerced<bool>>("executed")?.0 {
+                    io.call("log", "warn", (format!(
+                    "[orphan-recovery] Supervisor resumed orphaned dispatch {} → card {} → {}",
+                    io.text(dispatch_id)?,
+                    io.text(card_id)?,
                     io.text(initial.clone())?
                 ),))
-            } else {
-                let note: Option<String> = decision.get("note")?;
-                let suffix = note
-                    .filter(|note| !note.is_empty())
-                    .map(|note| format!(" — {note}"))
-                    .unwrap_or_default();
-                io.call(
-                    "log",
-                    "info",
-                    (format!(
-                        "[orphan-recovery] Supervisor skipped {dispatch_id}{suffix}"
-                    ),),
-                )
-            }
-        })();
+                } else {
+                    let note: Option<String> = decision.get("note")?;
+                    let suffix = note
+                        .filter(|note| !note.is_empty())
+                        .map(|note| format!(" — {note}"))
+                        .unwrap_or_default();
+                    io.call(
+                        "log",
+                        "info",
+                        (format!(
+                            "[orphan-recovery] Supervisor skipped {}{suffix}",
+                            io.text(dispatch_id)?
+                        ),),
+                    )
+                }
+            })();
         if let Err(error) = outcome {
             let error = if matches!(error, rquickjs::Error::Exception) {
                 io.text(ctx.catch())?
             } else {
                 error.to_string()
             };
+            let dispatch_id = io.text(candidate.get("dispatch_id")?)?;
             io.call::<_, ()>(
                 "log",
                 "error",
