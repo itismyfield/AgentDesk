@@ -36,12 +36,15 @@ fn alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 
+/// The helper test's full name, as the nested libtest audit reads it.
+const HELPER: &str =
+    "services::session_host::herdr::autostart::real_tests::spawn::t7638_helper_ensure";
+
 /// This test binary re-run as one more AgentDesk process calling `ensure` on `home`.
 fn helper(home: &Home, hold: bool) -> Child {
-    let module = module_path!().split_once("::").unwrap().1;
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
-        .args(["--exact", &format!("{module}::t7638_helper_ensure")])
+        .args(["--exact", HELPER])
         .args(["--ignored", "--nocapture", "--test-threads=1"])
         .env("ADK_T7638_HELPER_HOME", &home.home)
         .env("ADK_T7638_HELPER_RECORDS", home.records())
