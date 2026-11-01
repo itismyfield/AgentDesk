@@ -603,6 +603,7 @@ fn run_ordered_hook_relay_worker(request: OrderedHookRelayWorkerRequest) -> Resu
         return Ok(());
     };
     let mut worker_lock = Some(worker_lock);
+    let mut backoff = super::too_early::Backoff::default();
     loop {
         promote_ordered_hook_relay_ingress(&queue_dir)?;
         let request_paths = queue_request_paths(&queue_dir)?;
@@ -613,6 +614,12 @@ fn run_ordered_hook_relay_worker(request: OrderedHookRelayWorkerRequest) -> Resu
                 drop(worker_lock.take());
                 return Ok(());
             }
+            continue;
+        }
+        // A head the receiver keeps answering 425 waits out its backoff, unless a caller waits on
+        // this queue: then the head is resent every interval so the caller's reply is not held.
+        if backoff.holds(&request_paths[0], Instant::now()) && !caller_waits(&request_paths) {
+            std::thread::sleep(RELAY_IN_FLIGHT_RETRY_INTERVAL);
             continue;
         }
         let mut retry_pending = false;
@@ -633,6 +640,11 @@ fn run_ordered_hook_relay_worker(request: OrderedHookRelayWorkerRequest) -> Resu
                     quarantine_path(&queue_dir, &request_path, &error)?;
                 }
                 OrderedHookRelayProcessOutcome::Retry => {
+                    retry_pending = true;
+                    break;
+                }
+                OrderedHookRelayProcessOutcome::TooEarly => {
+                    backoff.refused(&request_path, Instant::now());
                     retry_pending = true;
                     break;
                 }
@@ -692,6 +704,28 @@ enum OrderedHookRelayProcessOutcome {
     Completed,
     Quarantine(String),
     Retry,
+    /// The receiver answered 425: the same request is resent after the head's backoff.
+    TooEarly,
+}
+
+/// Whether a caller still waits for the reply of any request in this queue.
+fn caller_waits(request_paths: &[PathBuf]) -> bool {
+    #[cfg(test)]
+    if behavior_mutation_enabled("backoff-ignores-caller") {
+        return false;
+    }
+    let now = Utc::now();
+    request_paths.iter().any(|path| {
+        let Ok(encoded) = std::fs::read(path) else {
+            return false;
+        };
+        let request = serde_json::from_slice::<OrderedHookRelayRequest>(&encoded).ok();
+        let window = request.and_then(|request| {
+            let response = request.response.as_ref()?;
+            Some(respond_by(request.published_at, response.timeout_millis))
+        });
+        may_publish(window, now)
+    })
 }
 
 fn process_ordered_hook_relay_request(
@@ -751,7 +785,7 @@ fn process_ordered_hook_relay_request(
             .err()
             .is_some_and(|error| error.contains("HTTP 425"))
         {
-            return Ok(OrderedHookRelayProcessOutcome::Retry);
+            return Ok(OrderedHookRelayProcessOutcome::TooEarly);
         }
         let encoded = serde_json::to_vec(&OrderedHookRelayResponse { result })
             .map_err(|err| format!("serialize ordered hook relay response: {err}"))?;
@@ -781,6 +815,9 @@ fn process_ordered_hook_relay_request(
     ) {
         Ok(()) => Ok(OrderedHookRelayProcessOutcome::Completed),
         Err(error) => {
+            if error.contains("HTTP 425") {
+                return Ok(OrderedHookRelayProcessOutcome::TooEarly);
+            }
             if super::transport_retry::retries(&request.provider, &request.event, &error) {
                 return Ok(OrderedHookRelayProcessOutcome::Retry);
             }
@@ -2509,6 +2546,8 @@ mod tests {
 
     #[cfg(unix)]
     mod source_guard_tests;
+    #[cfg(unix)]
+    mod too_early_tests;
     #[cfg(unix)]
     mod tq_tests;
 }

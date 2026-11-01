@@ -661,6 +661,8 @@ impl Writer {
             parents_synced: read.total_len > 0,
             poisoned: false,
             tainted: false,
+            #[cfg(test)]
+            latest_committed_at: None,
         };
         let mut next = 1;
         for logged in &read.records {

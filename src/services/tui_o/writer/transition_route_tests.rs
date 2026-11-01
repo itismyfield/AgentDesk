@@ -144,6 +144,7 @@ fn moved_from(current: &SourceId, left: &[&SourceId]) -> impl Drop + use<> {
     let unpinned = |source: &&SourceId| {
         let left = Left {
             pin: None,
+            pinned_at: None,
             left_at: Utc::now(),
         };
         (source.session_id.clone(), left)

@@ -287,10 +287,9 @@ pub(crate) fn judge_pin(
     match (pin, identity) {
         // A file rewritten or truncated in place keeps its inode, so its first record decides too.
         (Some(pin), Some(file)) if own && pinned_file == Some(file) => Verified(pin.clone()),
-        (Some(pin), Some(file)) if renumbered_own && renumbered(file) => Verified(SourceId {
-            dev: file.0,
-            ..pin.clone()
-        }),
+        (Some(pin), Some(file)) if renumbered_own && renumbered(file) => {
+            Verified(renumber::under_new_device(pin, file))
+        }
         (Some(_), _) => Anomaly,
         (None, _) if *first == FirstRecord::NotWritten => Pending,
         (None, _) if !own => Foreign,

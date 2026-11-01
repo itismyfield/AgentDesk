@@ -2076,3 +2076,7 @@ fn a_hook_naming_a_headless_sdk_transcript_never_becomes_the_pane_source() {
 
 #[path = "pending_history_tests.rs"]
 mod history;
+
+#[cfg(unix)]
+#[path = "pending_renumber_tests.rs"]
+mod renumber;

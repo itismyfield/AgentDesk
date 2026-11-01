@@ -14,6 +14,10 @@ pub(crate) fn renumbered(
     pinned_at: Option<DateTime<Utc>>,
     (dev, ino): (u64, u64),
 ) -> bool {
+    #[cfg(test)]
+    if super::n2b_mutant("renumber-off") {
+        return false;
+    }
     let earlier_boot = pinned_at
         .zip(boot_time())
         .is_some_and(|(at, boot)| at < boot);
@@ -24,6 +28,15 @@ pub(crate) fn renumbered(
         return pin.dev != dev && earlier_boot;
     }
     pin.ino == ino && pin.dev != dev && earlier_boot
+}
+
+/// `pin` under the device `file` was found on, which is what a re-pin records.
+pub(crate) fn under_new_device(pin: &SourceId, (dev, _): (u64, u64)) -> SourceId {
+    #[cfg(test)]
+    if super::n2b_mutant("renumber-return-old-pin") {
+        return pin.clone();
+    }
+    SourceId { dev, ..pin.clone() }
 }
 
 /// When this host booted, read once per process so a later clock change cannot move it.
@@ -102,11 +115,149 @@ impl Drop for TestBootGuard {
 
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod tests {
+    use std::os::unix::fs::MetadataExt;
+    use std::path::{Path, PathBuf};
+
+    use super::super::{
+        ClaudeHookSource, Observation, PinJudgment, SourceHistory, SourceVerdict, judge_pin,
+        observe_transcript, verify_claude_source,
+    };
     use super::*;
 
     #[test]
     fn this_host_reports_a_boot_time_in_the_past() {
         let boot = os_boot_time().expect("a unix host reports when it booted");
         assert!(boot < Utc::now(), "{boot}");
+    }
+
+    /// `<root>/<project>/<session>.jsonl` whose first record names `session`.
+    fn transcript(root: &Path, project: &str, session: &str) -> PathBuf {
+        let path = root.join(project).join(format!("{session}.jsonl"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let row = serde_json::json!({"type": "mode", "sessionId": session});
+        std::fs::write(&path, format!("{row}\n")).unwrap();
+        path
+    }
+
+    fn identity(session: &str, path: &Path) -> SourceId {
+        let meta = std::fs::metadata(path).unwrap();
+        let (session_id, path) = (session.to_owned(), path.to_path_buf());
+        let (dev, ino) = (meta.dev(), meta.ino());
+        SourceId {
+            session_id,
+            path,
+            dev,
+            ino,
+        }
+    }
+
+    /// A stat of the file is judged against a pin taken at `pinned_at` under a boot at `boot`.
+    #[test]
+    fn only_an_earlier_boots_pin_of_the_same_inode_and_path_is_renumbered() {
+        let root = tempfile::tempdir().unwrap();
+        let s = uuid::Uuid::new_v4().to_string();
+        let path = transcript(root.path(), "-work", &s);
+        let real = identity(&s, &path);
+        let boot = Utc::now();
+        let second = chrono::Duration::seconds(1);
+        let moved = SourceId {
+            dev: real.dev + 1,
+            ..real.clone()
+        };
+        let elsewhere = SourceId {
+            path: root.path().join("-other").join(format!("{s}.jsonl")),
+            ..moved.clone()
+        };
+        let other_ino = SourceId {
+            ino: real.ino + 1,
+            ..moved.clone()
+        };
+        let cases = [
+            (
+                "earlier boot",
+                &moved,
+                Some(boot - second),
+                Some(boot),
+                "renumbered",
+            ),
+            ("at the boot", &moved, Some(boot), Some(boot), "anomaly"),
+            (
+                "this boot",
+                &moved,
+                Some(boot + second),
+                Some(boot),
+                "anomaly",
+            ),
+            ("pin time unknown", &moved, None, Some(boot), "anomaly"),
+            ("boot unknown", &moved, Some(boot - second), None, "anomaly"),
+            (
+                "another inode",
+                &other_ino,
+                Some(boot - second),
+                Some(boot),
+                "anomaly",
+            ),
+            (
+                "another project",
+                &elsewhere,
+                Some(boot - second),
+                Some(boot),
+                "unpinned",
+            ),
+            (
+                "same device",
+                &real,
+                Some(boot - second),
+                Some(boot),
+                "verified",
+            ),
+        ];
+        for (case, pin, pinned_at, boot, expected) in cases {
+            let _boot = boot_time_for_tests(boot);
+            let seen = Observation::Stat(Ok((real.dev, real.ino)));
+            let judged = match judge_pin(Some(pin), pinned_at, &s, &path, seen) {
+                PinJudgment::Renumbered => "renumbered",
+                PinJudgment::Anomaly => "anomaly",
+                PinJudgment::Unpinned => "unpinned",
+                PinJudgment::Verified(id) if id == real => "verified",
+                other => panic!("{case}: {other:?}"),
+            };
+            assert_eq!(judged, expected, "{case}");
+        }
+    }
+
+    /// The bound session's hook after a reboot confirms its file under the new device, which the
+    /// next hook then finds current.
+    #[test]
+    fn a_bound_hook_after_a_reboot_confirms_the_new_device_then_finds_it_current() {
+        let root = tempfile::tempdir().unwrap();
+        let s = uuid::Uuid::new_v4().to_string();
+        let path = transcript(root.path(), "-work", &s);
+        let real = identity(&s, &path);
+        let boot = Utc::now();
+        let _boot = boot_time_for_tests(Some(boot));
+        let hook = ClaudeHookSource {
+            event: "SessionStart".into(),
+            session_id: s.clone(),
+            transcript_path: path.clone(),
+            start_source: Some("resume".into()),
+            published_at: None,
+        };
+        let opened = observe_transcript(&path).unwrap();
+        let history = SourceHistory::default();
+        let moved = SourceId {
+            dev: real.dev + 1,
+            ..real.clone()
+        };
+        let earlier = Some(boot - chrono::Duration::seconds(1));
+        let pinned = (Some(&moved), earlier);
+        let verdict = verify_claude_source(&hook, root.path(), Ok(&opened), &s, pinned, &history);
+        let SourceVerdict::Confirm(source) = verdict else {
+            panic!("{verdict:?}");
+        };
+        assert_eq!(source.source_id(), Some(real.clone()));
+        let repinned = (Some(&real), Some(boot + chrono::Duration::seconds(1)));
+        let verdict = verify_claude_source(&hook, root.path(), Ok(&opened), &s, repinned, &history);
+        assert_eq!(verdict, SourceVerdict::Current);
     }
 }
