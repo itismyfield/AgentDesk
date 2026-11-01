@@ -4,6 +4,8 @@ use std::{collections::BTreeSet, sync::LazyLock};
 
 const EMBEDDED: &str = include_str!("../../../scripts/tui_o_body_probes.json");
 
+pub(super) const EXPECTED_PROBE_ROWS: usize = 68;
+
 pub(super) fn snapshot() -> Value {
     static SNAPSHOT: LazyLock<Value> = LazyLock::new(|| inspect(EMBEDDED));
     SNAPSHOT.clone()
@@ -15,7 +17,9 @@ pub(super) fn inspect(raw: &str) -> Value {
         if data["schema_version"] != 1 {
             return None;
         }
-        let rows = data["probes"].as_array().filter(|rows| !rows.is_empty())?;
+        let rows = data["probes"]
+            .as_array()
+            .filter(|rows| rows.len() == EXPECTED_PROBE_ROWS)?;
         let mut ids = BTreeSet::new();
         let mut pending = 0;
         for row in rows {
@@ -40,8 +44,6 @@ pub(super) fn inspect(raw: &str) -> Value {
         Some(pending)
     })();
     let coverage = pending == Some(0);
-    #[cfg(test)]
-    let coverage = coverage || super::tests::mutant("coverage_true");
     json!({"coverage":coverage,"census_hash":hex::encode(Sha256::digest(raw.as_bytes())),
         "pending":pending.unwrap_or(0),
         "error":if pending.is_some() { Value::Null } else { json!("manifest_invalid") }})

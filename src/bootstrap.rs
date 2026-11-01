@@ -99,11 +99,16 @@ pub(crate) async fn prepare_and_install_boot_snapshots(
     pool: Option<&sqlx::PgPool>,
 ) -> Result<()> {
     crate::services::legacy_body_census::ensure_ready().await;
-    crate::config::validate_config(config)?;
-    let candidate = crate::config::session_hosts::BootSessionHosts::from_config(config)?;
-    let selection = prepare_session_hosts_boot(candidate, pool).await;
-    crate::services::session_host::policy::boot_grants::prepare(selection.hosts()).await;
-    install_boot_snapshots(config, selection)
+    let result = async {
+        crate::config::validate_config(config)?;
+        let candidate = crate::config::session_hosts::BootSessionHosts::from_config(config)?;
+        let selection = prepare_session_hosts_boot(candidate, pool).await;
+        crate::services::session_host::policy::boot_grants::prepare(selection.hosts()).await;
+        install_boot_snapshots(config, selection)
+    }
+    .await;
+    crate::services::legacy_body_census::record_selection(config, result.is_ok()).await;
+    result
 }
 
 /// The dcserver preserves its static-validation failure contract before starting HTTP or intake.

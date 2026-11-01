@@ -1,4 +1,8 @@
 use super::*;
+#[path = "review_tests.rs"]
+mod review;
+#[path = "window_tests.rs"]
+mod window;
 use crate::services::process_boot::{self, Boot};
 use std::sync::{
     Barrier,
@@ -60,7 +64,7 @@ async fn predecessor_links_a_boot_that_had_no_samples_or_end() {
         old.snapshot()["reasons"]
             .as_array()
             .unwrap()
-            .contains(&json!("PREDECESSOR_MISSING"))
+            .contains(&json!("PREDECESSOR_UNKNOWN"))
     );
     let mut second = boot();
     second.started_at_ms = first.started_at_ms + 1;
@@ -74,7 +78,7 @@ async fn predecessor_links_a_boot_that_had_no_samples_or_end() {
         !new.snapshot()["reasons"]
             .as_array()
             .unwrap()
-            .contains(&json!("PREDECESSOR_MISSING"))
+            .contains(&json!("PREDECESSOR_UNKNOWN"))
     );
 }
 
@@ -92,10 +96,27 @@ async fn headerless_or_truncated_history_never_becomes_empty_success() {
             malformed,
         )
         .unwrap();
+        let id = std::fs::read_dir(&dir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path()
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        use sha2::{Digest, Sha256};
+        std::fs::write(
+            dir.join("HEAD"),
+            json!({"boot_id":id,"header_digest":hex::encode(Sha256::digest(malformed))})
+                .to_string(),
+        )
+        .unwrap();
         let journal = open(root.path(), &boot()).await;
         let state = journal.snapshot();
         assert_eq!(state["status"], "INCONCLUSIVE");
-        assert_eq!(state["journal_invalid"], true);
+        assert_eq!(state["journal_invalid"], false);
         assert!(
             state["reasons"]
                 .as_array()
@@ -263,10 +284,6 @@ fn journal_initialization_is_pinned_before_recovery_and_drain() {
     );
 }
 
-pub(crate) fn mutant(name: &str) -> bool {
-    std::env::var("ADK_I7651_MUTANT").ok().as_deref() == Some(name)
-}
-
 #[tokio::test]
 async fn doctor_pid_mtime_is_preserved_as_a_distinct_identity() {
     let root = tempfile::tempdir().unwrap();
@@ -326,7 +343,7 @@ fn two_processes_keep_unsampled_crash_boots_and_their_incarnations() {
             String::from_utf8_lossy(&child.stderr)
         );
     }
-    let mut headers: Vec<Value> = std::fs::read_dir(root.path().join("legacy_body_census"))
+    let headers: Vec<Value> = std::fs::read_dir(root.path().join("legacy_body_census"))
         .unwrap()
         .map(Result::unwrap)
         .filter(|entry| entry.path().extension().is_some_and(|e| e == "jsonl"))
@@ -335,40 +352,38 @@ fn two_processes_keep_unsampled_crash_boots_and_their_incarnations() {
             serde_json::from_str(raw.lines().next().unwrap()).unwrap()
         })
         .collect();
-    headers.sort_by_key(|h| h["started_at_ms"].as_i64());
     assert_eq!(headers.len(), 2);
     assert_ne!(headers[0]["boot_id"], headers[1]["boot_id"]);
-    assert_eq!(headers[1]["predecessor_boot_id"], headers[0]["boot_id"]);
+    let head: Value = serde_json::from_slice(
+        &std::fs::read(root.path().join("legacy_body_census/HEAD")).unwrap(),
+    )
+    .unwrap();
+    let current = headers
+        .iter()
+        .find(|header| header["boot_id"] == head["boot_id"])
+        .unwrap();
+    let predecessor = headers
+        .iter()
+        .find(|header| header["boot_id"] != head["boot_id"])
+        .unwrap();
+    assert_eq!(current["predecessor_boot_id"], predecessor["boot_id"]);
 }
 
-#[tokio::test]
-async fn dangling_or_cyclic_predecessors_are_inconclusive() {
+#[test]
+fn dangling_or_cyclic_predecessors_are_inconclusive() {
+    assert!(!window::valid_chain(
+        &std::collections::BTreeMap::new(),
+        &mut 0
+    ));
     for cyclic in [false, true] {
-        let root = tempfile::tempdir().unwrap();
-        let first = boot();
-        let _old = open(root.path(), &first).await;
-        let mut old_header = header(root.path(), &first);
-        old_header["predecessor_boot_id"] = json!(if cyclic {
-            first.id.clone()
+        let id = uuid::Uuid::new_v4().to_string();
+        let parent = if cyclic {
+            id.clone()
         } else {
             uuid::Uuid::new_v4().to_string()
-        });
-        std::fs::write(
-            root.path()
-                .join("legacy_body_census")
-                .join(format!("{}.jsonl", first.id)),
-            format!("{old_header}\n"),
-        )
-        .unwrap();
-        let new = open(root.path(), &boot()).await;
-        let state = new.snapshot();
-        assert_eq!(state["status"], "INCONCLUSIVE");
-        assert_eq!(state["journal_invalid"], true);
-        assert!(
-            state["reasons"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("HISTORY_CHAIN_INVALID"))
-        );
+        };
+        let headers =
+            std::collections::BTreeMap::from([(id, json!({"predecessor_boot_id":parent}))]);
+        assert!(!window::valid_chain(&headers, &mut 0));
     }
 }

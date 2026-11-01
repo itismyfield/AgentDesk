@@ -18,10 +18,6 @@ static SNAPSHOT: LazyLock<RwLock<Option<ExecutionProbe>>> = LazyLock::new(|| RwL
 static POLLERS: LazyLock<RwLock<BTreeMap<String, i64>>> =
     LazyLock::new(|| RwLock::new(BTreeMap::new()));
 pub(crate) fn boot_id() -> String {
-    #[cfg(test)]
-    if crate::services::legacy_body_census::mutant("second_uuid") {
-        return uuid::Uuid::new_v4().to_string();
-    }
     crate::services::process_boot::initialize().id.clone()
 }
 

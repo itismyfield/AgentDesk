@@ -50,6 +50,16 @@ class BodyProbeManifestTests(unittest.TestCase):
             self.assertFalse(state["coverage"])
             self.assertTrue(state["error"])
 
+    def test_rust_expected_probe_rows_matches_the_census_total(self):
+        import re
+        source = (ROOT / "src/services/legacy_body_census/manifest.rs").read_text()
+        expected = int(re.search(r"EXPECTED_PROBE_ROWS: usize = ([0-9]+);", source)[1])
+        census_total = sum(count for path, census in CENSUS.CENSUS.items()
+                           if census[1] == "CUT_D" or census[1].startswith("COV:")
+                           or path in ("footer_view_reconciler/mod.rs", "turn_bridge/headless_delivery.rs")
+                           for count in CENSUS.EXPECTED_PRIMITIVES[path].values())
+        self.assertEqual(expected, census_total)
+
     def test_w02_fallback_post_is_body_and_only_two_seeds_are_nonbody(self):
         data = json.loads((ROOT / "scripts/tui_o_body_probes.json").read_text())
         rows = {row["line"]: row for row in data["probes"]
