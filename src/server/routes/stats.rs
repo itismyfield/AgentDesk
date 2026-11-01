@@ -160,10 +160,15 @@ async fn load_kanban_stats_pg(pool: &PgPool) -> Result<serde_json::Value, String
             .await
             .map_err(|error| format!("query postgres review_queue: {error}"))?;
 
-    let blocked_rows = sqlx::query("SELECT review_status, blocked_reason FROM kanban_cards")
-        .fetch_all(pool)
-        .await
-        .map_err(|error| format!("query postgres blocked cards: {error}"))?;
+    // Closed cards keep their last blocked_reason, so only open cards count as waiting on a person.
+    let blocked_rows = sqlx::query(
+        "SELECT review_status, blocked_reason
+           FROM kanban_cards
+          WHERE status NOT IN ('done', 'cancelled')",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("query postgres blocked cards: {error}"))?;
     let blocked = blocked_rows
         .into_iter()
         .filter(|row| {
@@ -556,6 +561,37 @@ mod memento_feedback_stats_pg_tests {
 
         // automatic = 0 + 1, voluntary = 1 + 5.
         assert_eq!(load_memento_feedback_counts(&state).await, Some((1, 6)));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn kanban_blocked_counts_only_open_cards_pg() {
+        let Some(pg_db) = StatsPostgresDb::try_create().await else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+        for (id, status, reason) in [
+            ("open-blocked", "in_progress", Some("needs:human")),
+            ("open-benign", "in_progress", Some("ci:waiting")),
+            ("done-blocked", "done", Some("needs:human")),
+            ("cancelled-blocked", "cancelled", Some("needs:human")),
+            ("open-clear", "ready", None),
+        ] {
+            sqlx::query(
+                "INSERT INTO kanban_cards (id, title, status, blocked_reason) VALUES ($1, $1, $2, $3)",
+            )
+            .bind(id)
+            .bind(status)
+            .bind(reason)
+            .execute(&pool)
+            .await
+            .expect("insert card");
+        }
+
+        let stats = super::load_kanban_stats_pg(&pool).await.expect("kanban stats");
+        assert_eq!(stats["blocked"], 1);
 
         pool.close().await;
         pg_db.drop().await;
