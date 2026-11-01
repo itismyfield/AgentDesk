@@ -99,3 +99,12 @@ db::timestamps::tests::
 [High-risk recovery: O writer restart replay]
 services::tui_o::writer::tests::actor::host_start::managed::restart_replay::
 services::tui_o::writer::owed::tests::verified::tool_card_provenance::replay_metadata::
+
+[Fast targeted tests: PR tracking owner]
+engine::ops::pr_tracking_owner_tests::
+engine::ops::pr_tracking_ops::tests::
+engine::sql_guard::tests::
+
+[Fast targeted tests: Phase gate owner]
+engine::ops::phase_gate_owner_tests::
+db::auto_queue::phase_gate_verdict::tests::

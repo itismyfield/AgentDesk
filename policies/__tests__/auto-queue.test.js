@@ -48,72 +48,15 @@ function passingPrChecks() {
   };
 }
 
-test("auto-queue infers phase_gate_passed when every registry check passes", () => {
-  const { module } = loadPolicy("policies/auto-queue.js", { phaseGateDeclaration });
-  const verdict = module.__test.inferPhaseGatePassVerdict(
-    { phase_gate: prConfirmDeclaration() },
-    { checks: passingPrChecks() }
-  );
-  assert.equal(verdict, "phase_gate_passed");
-});
-
-test("auto-queue does not infer a phase gate verdict when result carries explicit failure", () => {
-  const { module } = loadPolicy("policies/auto-queue.js", { phaseGateDeclaration });
-  const verdict = module.__test.inferPhaseGatePassVerdict(
-    { phase_gate: prConfirmDeclaration() },
-    { verdict: "manual_override", checks: passingPrChecks() }
-  );
-  assert.equal(verdict, null);
-});
-
-test("auto-queue treats phase_gate_verdict as explicit phase gate verdict", () => {
-  const { module } = loadPolicy("policies/auto-queue.js", { phaseGateDeclaration });
-  const verdict = module.__test.inferPhaseGatePassVerdict(
-    { phase_gate: prConfirmDeclaration() },
-    { phase_gate_verdict: "manual_hold", checks: passingPrChecks() }
-  );
-  assert.equal(verdict, null);
-});
-
-test("auto-queue accepts pass alias only when registry checks pass", () => {
-  const { module } = loadPolicy("policies/auto-queue.js", { phaseGateDeclaration });
-  const matches = module.__test.phaseGateVerdictMatches(
-    "pass",
-    "phase_gate_passed",
-    { phase_gate: prConfirmDeclaration() },
-    { verdict: "pass", checks: passingPrChecks() }
-  );
-  assert.equal(matches, true);
-});
-
-test("auto-queue explicit phase_gate_passed cannot bypass registry checks", () => {
-  const { module } = loadPolicy("policies/auto-queue.js", { phaseGateDeclaration });
-  assert.equal(module.__test.phaseGateVerdictMatches(
-    "phase_gate_passed",
-    "phase_gate_passed",
-    { phase_gate: prConfirmDeclaration() },
-    { verdict: "phase_gate_passed", checks: {} }
-  ), false);
-});
-
-test("auto-queue agent-supplied deploy_verified cannot satisfy authoritative evidence", () => {
-  const { module } = loadPolicy("policies/auto-queue.js", { phaseGateDeclaration });
-  assert.equal(module.__test.phaseGateVerdictMatches(
-    "phase_gate_passed",
-    "phase_gate_passed",
-    { phase_gate: deployGateDeclaration() },
-    { verdict: "phase_gate_passed", checks: { build_passed: "pass", deploy_verified: "pass" } }
-  ), false);
-});
-
-test("auto-queue malformed and stale declaration snapshots fail closed", () => {
-  const { module } = loadPolicy("policies/auto-queue.js", { phaseGateDeclaration });
-  const stale = prConfirmDeclaration();
-  stale.declaration_version = 99;
-  assert.equal(module.__test.inferPhaseGatePassVerdict(
-    { phase_gate: stale },
-    { checks: passingPrChecks() }
-  ), null);
+test("auto-queue forwards phase-gate decisions without interpreting the payload", () => {
+  const decision = { verdict: "host-veto", pass_verdict: "host-pass", matches: false, inferred: false, diagnostic: "host-veto" };
+  const { module, state } = loadPolicy("policies/auto-queue.js", {
+    phaseGateEvaluation() { return decision; }
+  });
+  const context = { phase_gate: { unknown: true } };
+  const result = { verdict: true, checks: { strange: { status: true, result: "pass" } } };
+  assert.deepEqual(toPlain(module.__test.evaluatePhaseGate(context, result)), decision);
+  assert.deepEqual(state.phaseGateEvaluations, [{ context, result }]);
 });
 
 test("auto-queue production completion persists only closed non-string verdict labels", () => {
@@ -130,6 +73,9 @@ test("auto-queue production completion persists only closed non-string verdict l
   };
   const { policy, state } = loadPolicy("policies/auto-queue.js", {
     phaseGateDeclaration,
+    phaseGateEvaluation() {
+      return { verdict: null, pass_verdict: "phase_gate_passed", matches: false, inferred: false, diagnostic: "<non-string:object>" };
+    },
     dbQuery: createSqlRouter([
       {
         match: "SELECT id, kanban_card_id, dispatch_type, result, context FROM task_dispatches",
@@ -168,183 +114,6 @@ test("auto-queue production completion persists only closed non-string verdict l
   assert.equal(saved.verdict, "<non-string:object>");
   assert.equal(saved.failure_reason, "expected phase_gate_passed, got <non-string:object>");
   assert.doesNotMatch(JSON.stringify(saved), /authorization|Bearer secret/);
-});
-
-test("auto-queue completes pre-snapshot legacy gate only from persisted NULL/blank provenance", () => {
-  for (const provenance of ["NULL", "blank"]) {
-    const legacyContext = {
-      phase_gate: {
-        run_id: `run-legacy-${provenance}`,
-        batch_phase: 0,
-        next_phase: 1,
-        final_phase: false,
-        pass_verdict: "attacker_override",
-        checks: ["attacker_override"]
-      }
-    };
-    const result = {
-      verdict: "phase_gate_passed",
-      checks: passingPrChecks()
-    };
-    const dispatch = {
-      id: `dsp-legacy-${provenance}`,
-      kanban_card_id: `card-legacy-${provenance}`,
-      dispatch_type: "phase-gate",
-      context: JSON.stringify(legacyContext),
-      result: JSON.stringify(result),
-      status: "completed"
-    };
-    const { policy, state } = loadPolicy("policies/auto-queue.js", {
-      phaseGateDeclaration,
-      dbQuery: createSqlRouter([
-        {
-          match: "SELECT id, kanban_card_id, dispatch_type, result, context FROM task_dispatches",
-          result: [dispatch]
-        },
-        {
-          match: "FROM auto_queue_phase_gates",
-          result: [{
-            dispatch_id: dispatch.id,
-            status: "pending",
-            verdict: null,
-            pass_verdict: "attacker_override",
-            next_phase: 1,
-            final_phase: false,
-            anchor_card_id: dispatch.kanban_card_id,
-            failure_reason: null,
-            created_at: "2026-07-25T00:00:00Z"
-          }]
-        },
-        {
-          match: "legacy_default_count",
-          result: [{ entry_count: 1, legacy_default_count: 1 }]
-        },
-        {
-          match: "SELECT id, status, result, context FROM task_dispatches WHERE id IN",
-          result: [dispatch]
-        },
-        { match: "FROM kanban_cards WHERE id = ?", result: [] },
-        { match: "FROM task_dispatches td LEFT JOIN auto_queue_entries", result: [] }
-      ]),
-      globals: { notifyCardOwner() {} }
-    });
-
-    policy.onDispatchCompleted({ dispatch_id: dispatch.id });
-
-    assert.equal(state.autoQueueSavedPhaseGates.length, 0);
-    assert.equal(state.autoQueueClearedPhaseGates.length, 1);
-    assert.equal(state.autoQueueResumes.length, 1);
-  }
-});
-
-test("auto-queue legacy context remains fail-closed for nonblank persisted kind", () => {
-  const context = {
-    phase_gate: {
-      run_id: "run-explicit-deploy",
-      batch_phase: 0,
-      pass_verdict: "phase_gate_passed"
-    }
-  };
-  const result = {
-    verdict: "phase_gate_passed",
-    checks: passingPrChecks()
-  };
-  const dispatch = {
-    id: "dsp-explicit-deploy",
-    kanban_card_id: "card-explicit-deploy",
-    dispatch_type: "phase-gate",
-    context: JSON.stringify(context),
-    result: JSON.stringify(result),
-    status: "completed"
-  };
-  const { policy, state } = loadPolicy("policies/auto-queue.js", {
-    phaseGateDeclaration,
-    dbQuery: createSqlRouter([
-      {
-        match: "SELECT id, kanban_card_id, dispatch_type, result, context FROM task_dispatches",
-        result: [dispatch]
-      },
-      {
-        match: "FROM auto_queue_phase_gates",
-        result: [{
-          dispatch_id: dispatch.id,
-          status: "pending",
-          pass_verdict: "phase_gate_passed",
-          next_phase: 1,
-          final_phase: false,
-          anchor_card_id: dispatch.kanban_card_id,
-          created_at: "2026-07-25T00:00:00Z"
-        }]
-      },
-      {
-        match: "legacy_default_count",
-        result: [{ entry_count: 1, legacy_default_count: 0 }]
-      },
-      { match: "FROM kanban_cards WHERE id = ?", result: [] },
-      { match: "FROM task_dispatches td LEFT JOIN auto_queue_entries", result: [] }
-    ]),
-    globals: { notifyCardOwner() {} }
-  });
-
-  policy.onDispatchCompleted({ dispatch_id: dispatch.id });
-
-  assert.equal(state.autoQueueSavedPhaseGates.length, 1);
-  assert.equal(state.autoQueueSavedPhaseGates[0].state.status, "failed");
-  assert.equal(state.autoQueueClearedPhaseGates.length, 0);
-});
-
-test("auto-queue legacy context remains fail-closed for mixed NULL and nonblank persisted kinds", () => {
-  const context = {
-    phase_gate: {
-      run_id: "run-mixed-provenance",
-      batch_phase: 0
-    }
-  };
-  const result = {
-    verdict: "phase_gate_passed",
-    checks: passingPrChecks()
-  };
-  const dispatch = {
-    id: "dsp-mixed-provenance",
-    kanban_card_id: "card-mixed-provenance",
-    dispatch_type: "phase-gate",
-    context: JSON.stringify(context),
-    result: JSON.stringify(result),
-    status: "completed"
-  };
-  let provenanceSql = "";
-  const { policy, state } = loadPolicy("policies/auto-queue.js", {
-    phaseGateDeclaration,
-    dbQuery(sql) {
-      if (sql.includes("SELECT id, kanban_card_id, dispatch_type, result, context FROM task_dispatches")) {
-        return [dispatch];
-      }
-      if (sql.includes("FROM auto_queue_phase_gates")) {
-        return [{
-          dispatch_id: dispatch.id,
-          status: "pending",
-          pass_verdict: "phase_gate_passed",
-          next_phase: 1,
-          final_phase: false,
-          anchor_card_id: dispatch.kanban_card_id,
-          created_at: "2026-07-25T00:00:00Z"
-        }];
-      }
-      if (sql.includes("legacy_default_count")) {
-        provenanceSql = sql;
-        return [{ entry_count: 2, legacy_default_count: 1 }];
-      }
-      return [];
-    },
-    globals: { notifyCardOwner() {} }
-  });
-
-  policy.onDispatchCompleted({ dispatch_id: dispatch.id });
-
-  assert.equal(state.autoQueueSavedPhaseGates.length, 1);
-  assert.equal(state.autoQueueSavedPhaseGates[0].state.status, "failed");
-  assert.equal(state.autoQueueClearedPhaseGates.length, 0);
-  assert.match(provenanceSql, /BTRIM\(phase_gate_kind, E' \\t\\n\\r\\f\\v'\)/);
 });
 
 test("auto-queue group keys split distinct kind and declaration snapshots", () => {
