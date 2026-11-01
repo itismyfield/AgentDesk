@@ -1,6 +1,5 @@
-//! The notice reporting what a same-session relaunch brought up, from the new process's statusline
-//! record and, for a model change, its first answer. Fast mode is reported as delivered, never as
-//! on: the account and model decide that.
+//! What a same-session relaunch brought up, from the new process's statusline record and its first
+//! answer; fast mode is reported as delivered, never as on, as the account and model decide it.
 
 use std::path::Path;
 use std::sync::LazyLock;
@@ -200,9 +199,8 @@ where
     ))
 }
 
-/// Waits for the restarted process's record of `confirm.session`, then, for a model change, for its
-/// first answer; every round first checks whether the channel moved to another session, which ends
-/// the wait at once.
+/// Waits for the restarted process's record of `confirm.session` and, for a model change, its first
+/// answer; every round first checks for a move to another session, which ends the wait at once.
 pub(super) async fn confirm_notice<F, Fut>(
     confirm: &Confirm,
     records: &Path,

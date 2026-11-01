@@ -31,9 +31,8 @@ pub(super) enum Outcome {
     Refused(String),
 }
 
-/// Failed kills per channel, counted for the fast value they tried to apply under the channel whose
-/// settings it shares; a new value starts the count again, and a spent count stays so a drift check
-/// does not retry the same value.
+/// Failed kills per channel with the fast value tried and the channel whose settings it shares; a
+/// new value or a new save restarts the count, and a spent one stops drift retries of that value.
 static KILL_FAILURES: LazyLock<
     dashmap::DashMap<serenity::ChannelId, (u8, Option<bool>, serenity::ChannelId)>,
 > = LazyLock::new(dashmap::DashMap::new);
