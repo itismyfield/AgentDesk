@@ -1404,7 +1404,7 @@ mod tests {
                 let path = queue_request_paths(&queue).unwrap().remove(0);
                 assert!(matches!(
                     process_ordered_hook_relay_request(&path).unwrap(),
-                    OrderedHookRelayProcessOutcome::Retry
+                    OrderedHookRelayProcessOutcome::TooEarly
                 ));
                 assert_eq!(
                     requests.recv_timeout(Duration::from_secs(3)).unwrap()["header"],

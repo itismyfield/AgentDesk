@@ -54,7 +54,7 @@ fn rebooted(lane: &Lane, channel: u64, tmux: &str) -> (String, PathBuf, chrono::
 fn a_boot_restore_re_pins_a_renumbered_source_only_in_its_own_execution() {
     let lane = Lane::new();
     for (case, channel) in [("own", 7_642), ("respawned", 7_643), ("no marker", 7_644)] {
-        let tmux = format!("i7641-restore-{channel}");
+        let tmux = format!("renumber-restore-{channel}");
         let (s, path, boot) = rebooted(&lane, channel, &tmux);
         let _boot = boot_time_for_tests(Some(boot));
         let before = pinned_source(channel, &tmux).unwrap();
@@ -84,7 +84,7 @@ fn a_boot_restore_re_pins_a_renumbered_source_only_in_its_own_execution() {
 #[test]
 fn a_boot_restore_keeps_a_pin_renumbered_in_its_own_boot() {
     let lane = Lane::new();
-    let (channel, tmux) = (7_645, "i7641-restore-same-boot");
+    let (channel, tmux) = (7_645, "renumber-restore-same-boot");
     let (s, path, boot) = rebooted(&lane, channel, tmux);
     let _boot = boot_time_for_tests(Some(boot - chrono::Duration::hours(1)));
     let before = pinned_source(channel, tmux).unwrap();

@@ -34,7 +34,7 @@ impl Reboot {
     fn bound() -> Self {
         let context = crate::services::tui_prompt_dedupe::binding_context::tests::fixture();
         let ingress = Ingress::new();
-        let (tmux, s) = (format!("i7641-{}", uuid()), uuid());
+        let (tmux, s) = (format!("renumber-resume-{}", uuid()), uuid());
         let path = ingress.transcript(&s);
         register_tmux_channel(&tmux, CHANNEL);
         register_provider_session("claude", &s, &tmux);
