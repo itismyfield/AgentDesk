@@ -592,22 +592,22 @@ pub(super) fn refresh_watcher_turn_identity(
     }
 }
 
-/// Whether the stored row names another turn that started on this session before `offset`: from
-/// that row's start the transcript is the other turn's, so `nonce` cannot speak for it.
-pub(super) fn other_turn_started_before(
+/// Where the stored row's turn starts when it is another turn than `nonce` on this session: from
+/// that offset the transcript is the other turn's, so `nonce` cannot speak for it.
+pub(super) fn other_turn_start(
     inflight: Option<&crate::services::discord::inflight::InflightTurnState>,
     tmux_session_name: &str,
     nonce: &str,
-    offset: u64,
-) -> bool {
-    inflight.is_some_and(|state| {
-        state.tmux_session_name.as_deref().map(str::trim) == Some(tmux_session_name.trim())
-            && state
-                .turn_nonce
-                .as_deref()
-                .is_some_and(|row| !row.is_empty() && row != nonce)
-            && state.turn_start_offset.unwrap_or(state.last_offset) < offset
-    })
+) -> Option<u64> {
+    inflight
+        .filter(|state| {
+            state.tmux_session_name.as_deref().map(str::trim) == Some(tmux_session_name.trim())
+                && state
+                    .turn_nonce
+                    .as_deref()
+                    .is_some_and(|row| !row.is_empty() && row != nonce)
+        })
+        .map(|state| state.turn_start_offset.unwrap_or(state.last_offset))
 }
 
 #[cfg(test)]
