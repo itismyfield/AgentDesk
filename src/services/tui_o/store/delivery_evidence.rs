@@ -1,7 +1,7 @@
 //! Bounded, read-only snapshots for delivery observers; never recover or repair the writer store.
 
 use super::{CURSOR_DIR, LEDGER_FILE, OStore, ledger, rotation, spool};
-use crate::services::tui_o::shadow::{SourceId, UnitKey};
+use crate::services::tui_o::shadow::{SourceId, UnitKey, capture};
 use serde::de::DeserializeOwned;
 use std::{
     collections::HashMap,
@@ -40,9 +40,15 @@ pub(crate) fn source(
         let rotation: rotation::Rotation = json(&boundary, 1024 * 1024)?;
         sources.extend(rotation.links.into_values().map(|link| link.source));
     }
-    let source = sources
+    // A reboot may renumber the volume's dev while the writer keeps the source it stored first;
+    // like the writer, two stored variants of one file are refused rather than guessed between.
+    let mut stored = sources
         .into_iter()
-        .find(|s| s.path == path && (s.dev, s.ino) == file)?;
+        .filter(|s| s.path == path && capture::file_match(s, file) != capture::FileMatch::Other);
+    let source = stored.next()?;
+    if stored.any(|other| other != source) {
+        return None;
+    }
     let cursor: spool::Cursor = json(
         &dir.join(CURSOR_DIR)
             .join(format!("{}.json", spool::source_key(&source))),
