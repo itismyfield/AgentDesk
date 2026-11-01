@@ -32,7 +32,7 @@ seconds with content comparison, independently of native filesystem notification
 | `discord.bots.*.provider` | restart | `src/services/discord/settings/read.rs` load_bot_settings (run_bot -> SharedData.settings) |
 | `discord.bots.*.agent` | restart | `src/services/discord/settings/read.rs` load_bot_settings (run_bot -> SharedData.settings) |
 | `discord.bots.*.auth` | restart | `src/services/discord/settings/read.rs` load_bot_settings (SharedData.settings at run_bot) |
-| `discord.guild_id` | restart | `src/services/auto_queue/fsm.rs` AutoQueueActivateDeps::from_state (AppState.config) |
+| `discord.guild_id` | restart | `src/services/auto_queue/fsm.rs` AutoQueueActivateDeps::from_state; `src/server/routes/agents.rs` agent_dispatched_sessions and `src/cli/direct.rs` resolve_guild_id (effective_guild_id with onboarding override) |
 | `discord.dm_default_agent` | live | `src/services/discord/agentdesk_config.rs` resolve_dm_default_agent (validated snapshot per DM) |
 | `discord.owner_id` | restart | `src/services/discord/settings/read.rs` load_bot_settings (owner_user_id into SharedData.settings) |
 | `discord.scheduled_message_required_mention_user_ids` | restart | `src/server/routes/scheduled_messages/discord_mentions.rs` required_from_state (AppState.config) |
@@ -113,7 +113,7 @@ seconds with content comparison, independently of native filesystem notification
 | `cluster.semaphores.*.capacity` | live | `src/server/task_dispatch_claims/config_read.rs` claim_task_dispatches (config::snapshot per claim) |
 | `cluster.semaphores.*.scope` | live | `src/server/task_dispatch_claims/config_read.rs` claim_task_dispatches (config::snapshot per claim) |
 | `cluster.session_bound_relay_enabled` | restart | `src/server/worker_registry/registry.rs` start_worker (WatcherSupervisor spawn gate) |
-| `kanban.manager_channel_id` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (applied by db/postgres/shared_config.rs:startup_reseed) -> kv kanban_manager_channel_id |
+| `kanban.manager_channel_id` | live | `src/services/kanban_cards.rs` require_explicit_bearer_token; `src/services/auto_queue/control_routes.rs` repair_phase_gates; `src/server/routes/kanban.rs` log_kanban_identity_consumption (runtime_config snapshot) |
 | `kanban.deadlock_manager_channel_id` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (applied by db/postgres/shared_config.rs:startup_reseed) -> kv deadlock_manager_channel_id |
 | `kanban.relay_alert_threshold` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (applied by db/postgres/shared_config.rs:startup_reseed) -> kv kanban_relay_alert_threshold |
 | `review.enabled` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (applied by db/postgres/shared_config.rs:startup_reseed) -> kv review_enabled |

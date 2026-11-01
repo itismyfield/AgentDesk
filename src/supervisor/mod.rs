@@ -103,7 +103,6 @@ pub struct RuntimeSupervisor {
 struct OrphanCandidate {
     card_id: String,
     card_status: String,
-    title: String,
     assigned_agent_id: Option<String>,
     repo_id: Option<String>,
 }
@@ -282,9 +281,7 @@ impl RuntimeSupervisor {
                         &ready_target.status,
                         ready_target.clock.as_ref(),
                     ) {
-                        Ok(OrphanReadyTransition::Transitioned) => {
-                            self.notify_orphan_recovery(&candidate, &ready_target.status);
-                        }
+                        Ok(OrphanReadyTransition::Transitioned) => {}
                         Ok(OrphanReadyTransition::CardMoved {
                             status,
                             latest_dispatch_id,
@@ -347,7 +344,6 @@ impl RuntimeSupervisor {
                     let row = sqlx::query(
                         "SELECT td.kanban_card_id,
                                 kc.status,
-                                kc.title,
                                 kc.assigned_agent_id,
                                 kc.repo_id
                          FROM task_dispatches td
@@ -369,7 +365,6 @@ impl RuntimeSupervisor {
                     Ok(row.map(|row| OrphanCandidate {
                         card_id: row.try_get("kanban_card_id").unwrap_or_default(),
                         card_status: row.try_get("status").unwrap_or_default(),
-                        title: row.try_get("title").unwrap_or_default(),
                         assigned_agent_id: row.try_get("assigned_agent_id").ok().flatten(),
                         repo_id: row.try_get("repo_id").ok().flatten(),
                     }))
@@ -581,50 +576,6 @@ impl RuntimeSupervisor {
             );
         }
         Err("runtime supervisor postgres backend is unavailable".to_string())
-    }
-
-    fn notify_orphan_recovery(&self, candidate: &OrphanCandidate, review_target: &str) {
-        let channel_id: Option<String> = match self.kv_get("kanban_manager_channel_id") {
-            Ok(value) => value,
-            Err(error) => {
-                tracing::warn!("failed to load orphan recovery channel id: {error}");
-                None
-            }
-        };
-        let Some(channel_id) = channel_id.filter(|id| !id.trim().is_empty()) else {
-            return;
-        };
-        let agent = candidate
-            .assigned_agent_id
-            .as_deref()
-            .unwrap_or("?")
-            .to_string();
-        let content = format!(
-            "🔄 [고아 디스패치 복구] {} — {}\n사유: pending 디스패치 5분 경과 + 활성 세션 없음 → {} 전이",
-            agent, candidate.title, review_target
-        );
-        if let Some(pool) = self.pg_pool.as_ref() {
-            let channel_id = channel_id.clone();
-            let content = content.clone();
-            let card_id = candidate.card_id.clone();
-            let _ = crate::utils::async_bridge::block_on_pg_result(
-                pool,
-                move |bridge_pool| async move {
-                    crate::services::message_outbox::enqueue_lifecycle_notification_pg(
-                        &bridge_pool,
-                        &format!("channel:{channel_id}"),
-                        Some(&card_id),
-                        "lifecycle.orphan_recovery",
-                        &content,
-                    )
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| format!("enqueue orphan recovery notification: {error}"))
-                },
-                |error| error,
-            );
-            return;
-        }
     }
 }
 
@@ -889,6 +840,62 @@ impl std::fmt::Display for SupervisorAction {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn orphan_recovery_returns_card_to_dispatchable_without_notification_pg() {
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        sqlx::query("INSERT INTO kanban_cards (id, title, status, latest_dispatch_id) VALUES ('orphan-card', '고아 작업', 'in_progress', 'orphan-dispatch')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO task_dispatches (id, kanban_card_id, dispatch_type, status, created_at) VALUES ('orphan-dispatch', 'orphan-card', 'implementation', 'pending', NOW() - INTERVAL '10 minutes')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO kv_meta (key, value) VALUES ('kanban_manager_channel_id', '1234567890123456789')")
+            .execute(&pool).await.unwrap();
+        let supervisor = RuntimeSupervisor {
+            pg_pool: Some(pool.clone()),
+        };
+        let evidence = json!({ "dispatch_id": "orphan-dispatch" });
+        let probe = supervisor.emit_signal(SupervisorSignal::OrphanCandidate, evidence.clone());
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = 'orphan-dispatch'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            status, "pending",
+            "first signal must only confirm: {probe:?}"
+        );
+        let recovered = supervisor.emit_signal(SupervisorSignal::OrphanCandidate, evidence);
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = 'orphan-dispatch'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            status, "failed",
+            "recovery must fail the dispatch: {recovered:?}"
+        );
+        let card: (String, Option<String>) = sqlx::query_as(
+            "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = 'orphan-card'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(card, ("requested".into(), Some("orphan-dispatch".into())));
+        let audit: (String, String) = sqlx::query_as("SELECT from_status, to_status FROM kanban_audit_logs WHERE card_id = 'orphan-card' AND source = 'runtime_supervisor'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(audit, ("in_progress".into(), "requested".into()));
+        let notifications: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            notifications, 0,
+            "orphan recovery must not enqueue notifications"
+        );
+        pool.close().await;
+        db.drop().await;
+    }
 
     #[test]
     fn supervisor_signal_support_states_are_explicit() {

@@ -86,6 +86,22 @@ class DeployConfigPaths(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((output / "PGHOST").read_text(), "selected-host")
 
+    def test_pg_probe_defaults_missing_host_like_rust(self):
+        self.selected.write_text("database:\n  enabled: true\n  user: test-user\n  dbname: test-db\n")
+        output = self.root / "conninfo"
+        output.mkdir()
+        result = self.run_shell(
+            function("_pg_write_probe_conninfo")
+            + f"\n_pg_write_probe_conninfo 25432 {shlex.quote(str(output))} "
+            + shlex.quote(str(self.root / "pgpass")) + "\n"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((output / "PGHOST").read_text(), "127.0.0.1")
+        self.assertEqual((output / "PGHOSTADDR").read_text(), "127.0.0.1")
+        self.assertEqual((output / "PGPORT").read_text(), "25432")
+        self.assertEqual((output / "PGUSER").read_text(), "test-user")
+        self.assertEqual((output / "PGDATABASE").read_text(), "test-db")
+
     def test_policy_rewrite_only_edits_the_selected_file(self):
         start = SOURCE.index("\nAGENTDESK_YAML=")
         end = SOURCE.index('\nif [ -n "${ROUTINES_STAGED:-}" ]', start)
