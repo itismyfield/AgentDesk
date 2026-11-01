@@ -65,15 +65,7 @@ async fn recover(channel_seed: u64, reply: Option<&str>, uploads: Vec<&str>) {
             ..Default::default()
         },
     );
-    let intake = input_ingress::intake(
-        &fx.shared,
-        &fx.provider,
-        &request,
-        uploads,
-        None,
-        false,
-        false,
-    );
+    let intake = input_ingress::intake(&fx.shared, &fx.provider, &request, uploads, false, false);
     assert!(
         matches!(intake.await, Some(Intake::Pending(_))),
         "the live arrival is Pending"

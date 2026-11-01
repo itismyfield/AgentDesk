@@ -93,7 +93,6 @@ pub(in crate::services::discord) fn owned_original(
     request: &crate::services::discord::IntakeRequest,
     author_is_bot: bool,
     uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
-    voice: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
     durable_context: bool,
 ) -> crate::services::turn_orchestrator::Intervention {
     let reply = if durable_context {
@@ -110,7 +109,6 @@ pub(in crate::services::discord) fn owned_original(
         request.has_reply_boundary,
         request.merge_consecutive,
         uploads,
-        voice,
     );
     original.author_is_bot = author_is_bot;
     for source in request
@@ -134,16 +132,13 @@ pub(in crate::services::discord) fn owned_original(
     original
 }
 
-/// A queued original's body for a running turn, its uploads prepared first; a voice original or a
-/// failed preparation leaves it queued, unsent.
+/// A queued original's body for a running turn, its uploads prepared first; a failed preparation
+/// leaves it queued, unsent.
 pub(in crate::services::discord) async fn busy_body(
     channel: u64,
     item: &crate::services::turn_orchestrator::PendingQueueItem,
     pool: Option<&sqlx::PgPool>,
 ) -> Result<String, String> {
-    if item.voice_announcement.is_some() {
-        return Err("NotSent(\"voice_claim_deferred\")".into());
-    }
     let uploads = prepare_busy_uploads(ChannelId::new(channel), &item.pending_uploads, pool).await;
     let uploads = uploads.map_err(|_| "NotSent(\"upload_materialization_failed\")".to_string())?;
     Ok(member_body(item, &uploads))

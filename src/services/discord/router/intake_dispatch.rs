@@ -759,7 +759,6 @@ pub(crate) async fn finish_admitted_local(
             &submission.provider,
             &submission.request,
             submission.preloaded_uploads.clone(),
-            submission.voice_announcement.clone(),
             matches!(submission.origin, IntakeOrigin::QueuedDrain(_)),
             !submission.attachments.is_empty(),
         )

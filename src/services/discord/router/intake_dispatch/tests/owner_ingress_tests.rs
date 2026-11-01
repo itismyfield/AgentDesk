@@ -97,7 +97,6 @@ fn live(channel: ChannelId, message: u64, text: &str) -> IntakeSubmission {
         has_nonportable_uploads: false,
         attachments: Vec::new(),
         preloaded_uploads: Vec::new(),
-        voice_announcement: None,
         owner: None,
     }
 }
@@ -460,7 +459,6 @@ async fn every_hold_notices_once_and_pending_or_attempted_never() {
         &request(channel, 7_272_404_002, "pending input"),
         false,
         Vec::new(),
-        None,
         false,
     );
     let unconfirmed = input_ingress::original(&ProviderKind::Claude, channel, None, &raw).unwrap();

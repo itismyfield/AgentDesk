@@ -66,7 +66,6 @@ async fn real_enqueue_keeps_pending_raw_and_reuses_the_source_after_restart() {
         &req,
         false,
         vec!["local asset ref".into()],
-        None,
         false,
     );
     let watch = Watch::new(
@@ -171,13 +170,8 @@ async fn cancelled_source_is_not_reenqueued_by_its_committed_ticket() {
     let shared = make_shared_data_for_tests();
     let (handle, path) = adopt(&shared, 727_453).await;
     let req = request(727_453, 727_453_001);
-    let raw = crate::services::discord::router::input_payload::owned_original(
-        &req,
-        false,
-        vec![],
-        None,
-        false,
-    );
+    let raw =
+        crate::services::discord::router::input_payload::owned_original(&req, false, vec![], false);
     let admitted = original(&ProviderKind::Claude, req.channel_id, None, &raw).unwrap();
     assert!(matches!(
         admitted.admit(&handle).await,
@@ -220,7 +214,6 @@ async fn original_bot_and_human_rights_survive_the_real_queue_entry() {
             &req,
             bot,
             vec![],
-            None,
             false,
         );
         assert!(

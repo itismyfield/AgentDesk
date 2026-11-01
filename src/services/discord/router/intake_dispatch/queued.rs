@@ -283,7 +283,6 @@ fn queued_submission(
             .any(|upload| upload.is_local()),
         attachments: Vec::new(),
         preloaded_uploads: intervention.pending_uploads.clone(),
-        voice_announcement: None,
         owner: None,
     }
 }

@@ -279,7 +279,6 @@ pub(crate) async fn intake(
     provider: &ProviderKind,
     request: &crate::services::discord::IntakeRequest,
     uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
-    voice: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
     durable_context: bool,
     uploads_pending: bool,
 ) -> Option<Intake> {
@@ -287,7 +286,6 @@ pub(crate) async fn intake(
         return None;
     }
     let bot = request.turn_kind.is_background_trigger()
-        || voice.is_some()
         || shared
             .settings
             .read()
@@ -298,7 +296,6 @@ pub(crate) async fn intake(
         request,
         bot,
         uploads,
-        voice,
         durable_context,
     );
     admit_raw(shared, provider, request.channel_id, &raw, uploads_pending).await
@@ -403,7 +400,7 @@ pub(crate) fn original(
         "source_text_segments": if segments.len()>1 {segments} else {vec![]},
         "text":intervention.text,"reply_context":intervention.reply_context,
         "has_reply_boundary":intervention.has_reply_boundary,"merge_consecutive":intervention.merge_consecutive,
-        "pending_uploads":intervention.pending_uploads,"voice_announcement":intervention.voice_announcement,
+        "pending_uploads":intervention.pending_uploads,
         "channel_id":channel.get(),"override_channel_id":role,
     })).map_err(|error| error.to_string())?;
     Ok(Original::with_ticket(item, ticket))
