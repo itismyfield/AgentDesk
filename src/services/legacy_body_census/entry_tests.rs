@@ -215,6 +215,10 @@ fn journal_initialization_is_pinned_before_recovery_and_drain() {
         later.find("dcserver.pid").unwrap() < later.find("legacy_body_census::start()").unwrap()
     );
     assert!(
+        later.find("std::env::remove_var(\"CLAUDECODE\")").unwrap()
+            < later.find("legacy_body_census::start()").unwrap()
+    );
+    assert!(
         later.find("legacy_body_census::start()").unwrap()
             < later.find("tokio::runtime::Runtime::new()").unwrap()
     );

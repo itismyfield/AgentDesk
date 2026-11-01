@@ -912,7 +912,6 @@ pub fn handle_dcserver(token: Option<String>) {
         );
         let _ = std::fs::write(runtime_dir.join("dcserver.version"), VERSION);
     }
-    crate::services::legacy_body_census::start();
 
     // Ensure the persistent session temp-file directory exists so wrappers
     // spawned after this point write into the canonical location rather
@@ -926,6 +925,7 @@ pub fn handle_dcserver(token: Option<String>) {
     unsafe {
         std::env::remove_var("CLAUDECODE");
     }
+    crate::services::legacy_body_census::start();
 
     let rt = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
