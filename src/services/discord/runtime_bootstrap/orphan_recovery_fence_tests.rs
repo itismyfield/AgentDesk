@@ -721,6 +721,14 @@ async fn orphan_owner_actor_hook_flushes_deferred_confirmation_pg() {
     let engine = crate::engine::PolicyEngine::new_for_tick(&config, Some(pool.clone())).unwrap();
     let hook = crate::engine::hooks::Hook::OnTick30s;
     engine.fire_hook(hook, serde_json::json!({})).unwrap();
+    let audit_first: Vec<(String, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT signal, actor, dispatch_id, chosen_action FROM runtime_decisions WHERE dispatch_id = 'owner-actor' ORDER BY id",
+    ).fetch_all(&pool).await.unwrap();
+    assert_eq!(
+        audit_first.len(),
+        1,
+        "the first emitted signal leaves one audit row"
+    );
     assert_eq!(
         owner_state(&pool, "owner-actor").await,
         ("pending".into(), "in_progress".into(), 1),
@@ -734,6 +742,27 @@ async fn orphan_owner_actor_hook_flushes_deferred_confirmation_pg() {
         confirmation, 0,
         "the second actor hook consumes confirmation and rolls back"
     );
+    let audit_rows: Vec<(String, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT signal, actor, dispatch_id, chosen_action FROM runtime_decisions WHERE dispatch_id = 'owner-actor' ORDER BY id",
+    ).fetch_all(&pool).await.unwrap();
+    assert_eq!(
+        audit_rows,
+        vec![
+            (
+                "OrphanCandidate".to_string(),
+                "runtime_supervisor".to_string(),
+                Some("owner-actor".to_string()),
+                "Probe".to_string()
+            ),
+            (
+                "OrphanCandidate".to_string(),
+                "runtime_supervisor".to_string(),
+                Some("owner-actor".to_string()),
+                "Resume".to_string()
+            ),
+        ],
+        "the actor records the probe and confirmed resume for this dispatch"
+    );
     let audits: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM runtime_decisions WHERE dispatch_id = 'owner-actor'",
     )
@@ -741,8 +770,8 @@ async fn orphan_owner_actor_hook_flushes_deferred_confirmation_pg() {
     .await
     .unwrap();
     assert_eq!(
-        audits, 0,
-        "retain the existing JSONB audit binding failure after the effects; #7644 수리 뒤 뒤집는다"
+        audits, 2,
+        "one audit row per successful OrphanCandidate emission"
     );
     drop(engine);
     pool.close().await;
