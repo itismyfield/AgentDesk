@@ -255,6 +255,9 @@ fn save_runtime_bot_settings_checked(
         .cloned()
         .collect();
     sorted_codex_goals_reset_pending.sort();
+    let mut sorted_relaunch_pending: Vec<_> =
+        settings.channel_relaunch_pending.iter().cloned().collect();
+    sorted_relaunch_pending.sort();
 
     if yaml_manages_bot {
         if !settings.channel_model_overrides.is_empty()
@@ -262,6 +265,7 @@ fn save_runtime_bot_settings_checked(
             || !sorted_fast_mode_reset_pending.is_empty()
             || !settings.channel_codex_goals.is_empty()
             || !sorted_codex_goals_reset_pending.is_empty()
+            || !sorted_relaunch_pending.is_empty()
             || !settings.channel_node_overrides.is_empty()
         {
             let mut runtime_entry = serde_json::Map::new();
@@ -293,6 +297,12 @@ fn save_runtime_bot_settings_checked(
                 runtime_entry.insert(
                     "channel_codex_goals_reset_pending".to_string(),
                     serde_json::json!(sorted_codex_goals_reset_pending),
+                );
+            }
+            if !sorted_relaunch_pending.is_empty() {
+                runtime_entry.insert(
+                    "channel_relaunch_pending".to_string(),
+                    serde_json::json!(sorted_relaunch_pending),
                 );
             }
             if !settings.channel_node_overrides.is_empty() {
@@ -417,6 +427,14 @@ fn save_runtime_bot_settings_checked(
             entry.insert(
                 "channel_codex_goals_reset_pending".to_string(),
                 serde_json::json!(sorted_codex_goals_reset_pending),
+            );
+        }
+        if sorted_relaunch_pending.is_empty() {
+            entry.remove("channel_relaunch_pending");
+        } else {
+            entry.insert(
+                "channel_relaunch_pending".to_string(),
+                serde_json::json!(sorted_relaunch_pending),
             );
         }
         if settings.channel_node_overrides.is_empty() {

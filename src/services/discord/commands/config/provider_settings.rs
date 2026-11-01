@@ -215,13 +215,19 @@ pub(in crate::services::discord) async fn update_channel_model_override(
     if same_model_override(current.as_deref(), next_override.as_deref()) {
         return Ok(false);
     }
-    let reset = session_reset_required_for_model_change(
-        provider,
-        current.as_deref(),
-        next_override.as_deref(),
-    );
+    // A local Claude TUI takes the new model by restarting on its session, keeping its context.
+    let relaunch = claude_local_tui_relaunch_applies(provider, channel_id);
+    let reset = !relaunch
+        && session_reset_required_for_model_change(
+            provider,
+            current.as_deref(),
+            next_override.as_deref(),
+        );
     let mut candidate = settings.clone();
     let key = channel_id.get().to_string();
+    if relaunch {
+        candidate.channel_relaunch_pending.insert(key.clone());
+    }
     match &next_override {
         Some(model) => {
             candidate.channel_model_overrides.insert(key, model.clone());
@@ -231,6 +237,7 @@ pub(in crate::services::discord) async fn update_channel_model_override(
         }
     }
     candidate.try_save_bot_settings(token)?;
+    super::super::control::forget_relaunch_failures(channel_id);
     *settings = candidate;
     match next_override {
         Some(model) => {
@@ -295,6 +302,7 @@ pub(in crate::services::discord) async fn update_channel_fast_mode(
         .channel_fast_mode_reset_pending
         .insert(fast_mode_reset_pending_key(channel_id, provider));
     candidate.try_save_bot_settings(token)?;
+    super::super::control::forget_relaunch_failures(channel_id);
     *settings = candidate;
     if enabled {
         shared.overrides.fast_mode_channels.insert(channel_id);

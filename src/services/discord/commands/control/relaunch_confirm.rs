@@ -1,5 +1,6 @@
 //! The notice reporting what a same-session relaunch brought up, from the new process's statusline
-//! record. Fast mode is reported as delivered, never as on: the account and model decide that.
+//! record and, for a model change, its first answer. Fast mode is reported as delivered, never as
+//! on: the account and model decide that.
 
 use std::path::Path;
 use std::sync::LazyLock;
@@ -11,18 +12,29 @@ use super::*;
 pub(super) struct Confirm {
     pub(super) session: String,
     pub(super) requested_fast: Option<bool>,
-    /// When the relaunch began, in Unix seconds; an earlier record is the old process's.
+    /// When the old process ended, in Unix seconds; an earlier record is the old process's.
     pub(super) at: f64,
+    pub(super) model: Option<ModelCheck>,
+}
+
+/// Where the new process's first answer shows the model a model change brought up.
+pub(super) struct ModelCheck {
+    pub(super) requested: Option<String>,
+    pub(super) transcript: Option<std::path::PathBuf>,
+    /// The transcript's length when the old process ended; what lies before it is the old one's.
+    pub(super) offset: u64,
 }
 
 pub(super) struct Waits {
     pub(super) record: Duration,
     pub(super) settle: Duration,
     pub(super) poll: Duration,
+    pub(super) answer: Duration,
 }
 
 const WAITS: Waits = Waits {
     record: Duration::from_secs(90),
+    answer: Duration::from_secs(15 * 60),
     // Fast mode is shown on at start and turned off within a second when the account lacks it.
     settle: Duration::from_secs(3),
     poll: Duration::from_secs(1),
@@ -140,8 +152,57 @@ fn observed(confirm: &Confirm, record: &Record) -> String {
     )
 }
 
-/// Waits for the restarted process's record of `confirm.session`, checking first on every round
-/// whether the channel moved to another session, which ends the wait at once.
+enum Answer {
+    Model(String),
+    Failed,
+}
+
+/// The first answer of `session` written past `offset`.
+fn first_answer(transcript: &Path, offset: u64, session: &str) -> Option<Answer> {
+    use std::io::{Read, Seek};
+    let mut file = std::fs::File::open(transcript).ok()?;
+    file.seek(std::io::SeekFrom::Start(offset)).ok()?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail).ok()?;
+    let tail = String::from_utf8_lossy(&tail);
+    let record = tail.lines().find_map(|line| {
+        let record: serde_json::Value = serde_json::from_str(line).ok()?;
+        (record["type"] == "assistant" && record["sessionId"].as_str() == Some(session))
+            .then_some(record)
+    })?;
+    if record["isApiErrorMessage"].as_bool() == Some(true) {
+        return Some(Answer::Failed);
+    }
+    let model = record["message"]["model"].as_str().unwrap_or("미상");
+    Some(Answer::Model(model.to_string()))
+}
+
+fn answered(check: &ModelCheck, answer: Option<Answer>) -> String {
+    let requested = check.requested.as_deref().unwrap_or("기본값");
+    match answer {
+        Some(Answer::Model(model)) => format!("응답 모델 `{model}`(요청 `{requested}`)."),
+        Some(Answer::Failed) => format!("모델 적용 미확인(응답 오류, 요청 `{requested}`)."),
+        None => format!("응답 모델 미확인(요청 `{requested}`)."),
+    }
+}
+
+/// The notice ending the wait when the channel moved to another session.
+async fn switched<F, Fut>(confirm: &Confirm, current: &F) -> Option<String>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Option<String>>,
+{
+    let now = current().await.filter(|now| *now != confirm.session)?;
+    Some(format!(
+        "재기동 뒤 다른 세션 `{}`으로 시작됐습니다(이전 세션 `{}`의 맥락 소실).",
+        short(&now),
+        short(&confirm.session)
+    ))
+}
+
+/// Waits for the restarted process's record of `confirm.session`, then, for a model change, for its
+/// first answer; every round first checks whether the channel moved to another session, which ends
+/// the wait at once.
 pub(super) async fn confirm_notice<F, Fut>(
     confirm: &Confirm,
     records: &Path,
@@ -154,15 +215,9 @@ where
 {
     let deadline = Instant::now() + waits.record;
     let mut seen: Option<(Instant, Record)> = None;
-    loop {
-        if let Some(now) = current().await
-            && now != confirm.session
-        {
-            return format!(
-                "재기동 뒤 다른 세션 `{}`으로 시작됐습니다(이전 세션 `{}`의 맥락 소실).",
-                short(&now),
-                short(&confirm.session)
-            );
+    let record = loop {
+        if let Some(notice) = switched(confirm, &current).await {
+            return notice;
         }
         if let Some(record) = read_record(records, &confirm.session, confirm.at) {
             let first = seen.as_ref().map_or_else(Instant::now, |(first, _)| *first);
@@ -172,14 +227,31 @@ where
             .as_ref()
             .is_some_and(|(first, _)| first.elapsed() >= waits.settle);
         if settled || Instant::now() >= deadline {
-            return match seen {
-                Some((_, record)) => observed(confirm, &record),
-                None => format!(
-                    "재기동 뒤 세션 `{}`의 상태 기록을 확인하지 못했어요. 설정 적용 여부는 아직 확인되지 않았습니다.",
-                    short(&confirm.session)
-                ),
-            };
+            break seen.map(|(_, record)| record);
         }
         tokio::time::sleep(waits.poll).await;
-    }
+    };
+    let status = match record {
+        Some(record) => observed(confirm, &record),
+        None => format!(
+            "재기동 뒤 세션 `{}`의 상태 기록을 확인하지 못했어요. 설정 적용 여부는 아직 확인되지 않았습니다.",
+            short(&confirm.session)
+        ),
+    };
+    let Some(check) = &confirm.model else {
+        return status;
+    };
+    let deadline = Instant::now() + waits.answer;
+    let answer = loop {
+        if let Some(notice) = switched(confirm, &current).await {
+            return notice;
+        }
+        let transcript = check.transcript.as_deref();
+        let answer = transcript.and_then(|path| first_answer(path, check.offset, &confirm.session));
+        if answer.is_some() || Instant::now() >= deadline {
+            break answer;
+        }
+        tokio::time::sleep(waits.poll).await;
+    };
+    format!("{status}\n{}", answered(check, answer))
 }

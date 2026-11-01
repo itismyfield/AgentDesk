@@ -12,6 +12,7 @@ struct LegacyBotSettingsEntry {
     channel_fast_mode_reset_pending: std::collections::HashSet<String>,
     channel_codex_goals: std::collections::HashMap<String, bool>,
     channel_codex_goals_reset_pending: std::collections::HashSet<String>,
+    channel_relaunch_pending: std::collections::HashSet<String>,
     channel_node_overrides: std::collections::HashMap<String, String>,
     owner_user_id: Option<u64>,
     allowed_user_ids: Vec<u64>,
@@ -113,6 +114,15 @@ fn load_legacy_bot_settings_entry(token: &str) -> LegacyBotSettingsEntry {
                 .collect()
         })
         .unwrap_or_default();
+    let channel_relaunch_pending = entry
+        .get("channel_relaunch_pending")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|id| id.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
     let channel_node_overrides = entry
         .get("channel_node_overrides")
         .and_then(|v| v.as_object())
@@ -159,6 +169,7 @@ fn load_legacy_bot_settings_entry(token: &str) -> LegacyBotSettingsEntry {
         channel_fast_mode_reset_pending,
         channel_codex_goals,
         channel_codex_goals_reset_pending,
+        channel_relaunch_pending,
         channel_node_overrides,
         owner_user_id,
         allowed_user_ids,
@@ -280,6 +291,7 @@ pub(crate) fn load_bot_settings(token: &str) -> DiscordBotSettings {
         channel_fast_mode_reset_pending: legacy.channel_fast_mode_reset_pending,
         channel_codex_goals: legacy.channel_codex_goals,
         channel_codex_goals_reset_pending: legacy.channel_codex_goals_reset_pending,
+        channel_relaunch_pending: legacy.channel_relaunch_pending,
         channel_node_overrides: legacy.channel_node_overrides,
         owner_user_id: fallback_legacy_option(
             configured.as_ref().and_then(|bot| bot.owner_id),

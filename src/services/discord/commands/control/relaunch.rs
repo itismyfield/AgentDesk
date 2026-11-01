@@ -31,14 +31,25 @@ pub(super) enum Outcome {
     Refused(String),
 }
 
-/// Failed kills per channel, counted for the fast value they tried to apply; a new value starts
-/// the count again, and a spent count stays so a drift check does not retry the same value.
-static KILL_FAILURES: LazyLock<dashmap::DashMap<serenity::ChannelId, (u8, Option<bool>)>> =
-    LazyLock::new(dashmap::DashMap::new);
+/// Failed kills per channel, counted for the fast value they tried to apply under the channel whose
+/// settings it shares; a new value starts the count again, and a spent count stays so a drift check
+/// does not retry the same value.
+static KILL_FAILURES: LazyLock<
+    dashmap::DashMap<serenity::ChannelId, (u8, Option<bool>, serenity::ChannelId)>,
+> = LazyLock::new(dashmap::DashMap::new);
 static DEFER_NOTICED: LazyLock<dashmap::DashSet<serenity::ChannelId>> =
     LazyLock::new(dashmap::DashSet::new);
 
 const RELAUNCH_KILL_LIMIT: u8 = 2;
+
+/// What a relaunch is meant to bring up.
+pub(super) struct Requested {
+    /// The channel whose fast setting the turn takes.
+    pub(super) feature: serenity::ChannelId,
+    pub(super) fast: Option<bool>,
+    /// The model a model change asks for; `None` when no model change is part of the relaunch.
+    pub(super) model: Option<Option<String>>,
+}
 
 struct Target {
     tmux: String,
@@ -101,7 +112,8 @@ fn pane_state_of(_: &str) -> PaneState {
 /// Whether the launch that follows a kill resumes the session.
 #[derive(Debug, Eq, PartialEq)]
 enum Resume {
-    Yes,
+    /// Under the account whose home, if not the default one, is given.
+    Yes(Option<std::path::PathBuf>),
     /// The account the launch takes has no transcript of the session.
     No,
     /// The launch's account cannot be confirmed from here.
@@ -139,7 +151,9 @@ fn resumable(channel_id: serenity::ChannelId, target: &Target, session: &str, di
         overlay.home.as_deref(),
     );
     match resolved {
-        Ok(resolution) if resolution.resume && resolution.session_id == session => Resume::Yes,
+        Ok(resolution) if resolution.resume && resolution.session_id == session => {
+            Resume::Yes(overlay.home)
+        }
         Ok(_) => Resume::No,
         Err(_) => Resume::Undetermined,
     }
@@ -219,7 +233,7 @@ pub(super) async fn run(
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
     reset_source: &str,
-    requested_fast: Option<bool>,
+    requested: Requested,
 ) -> Outcome {
     let Some(target) = target(shared, provider, channel_id).await else {
         return Outcome::Fallback;
@@ -228,11 +242,29 @@ pub(super) async fn run(
     else {
         return Outcome::Fallback;
     };
-    match resumable(channel_id, &target, &session, &working_dir) {
-        Resume::Yes => {}
+    let home = match resumable(channel_id, &target, &session, &working_dir) {
+        Resume::Yes(home) => home,
         Resume::No => return Outcome::Fallback,
         Resume::Undetermined => return Outcome::Undetermined,
-    }
+    };
+    // The new process's answer is the first one written past what the old process left.
+    let model = requested.model.map(|requested| {
+        let path = crate::services::claude_tui::transcript_tail::claude_transcript_path;
+        let transcript = path(
+            std::path::Path::new(&working_dir),
+            &session,
+            home.as_deref(),
+        )
+        .ok();
+        let offset = transcript
+            .as_ref()
+            .and_then(|path| std::fs::metadata(path).ok());
+        super::relaunch_confirm::ModelCheck {
+            requested,
+            offset: offset.map_or(0, |meta| meta.len()),
+            transcript,
+        }
+    });
     let tmux = target.tmux;
     match relaunch_channel_tmux_keeping_session(shared, provider, channel_id, &tmux, reset_source)
         .await
@@ -248,8 +280,9 @@ pub(super) async fn run(
             say(http, channel_id, notice).await;
             let confirm = super::relaunch_confirm::Confirm {
                 session,
-                requested_fast,
+                requested_fast: requested.fast,
                 at,
+                model,
             };
             super::relaunch_confirm::spawn(http.clone(), shared.clone(), channel_id, confirm);
             Outcome::Applied(tmux)
@@ -264,11 +297,10 @@ pub(super) async fn run(
         Relaunch::Refused(reason) => Outcome::Refused(reason),
         Relaunch::KillFailed => {
             let failures = {
-                let mut entry = KILL_FAILURES
-                    .entry(channel_id)
-                    .or_insert((0, requested_fast));
-                if entry.1 != requested_fast {
-                    *entry = (0, requested_fast);
+                let fresh = (0, requested.fast, requested.feature);
+                let mut entry = KILL_FAILURES.entry(channel_id).or_insert(fresh);
+                if entry.1 != requested.fast {
+                    *entry = fresh;
                 }
                 entry.0 += 1;
                 entry.0
@@ -287,6 +319,12 @@ pub(super) async fn run(
     }
 }
 
+/// Drops the kill failures of `channel` and of every channel sharing its settings, as a newly saved
+/// setting gets its own attempts.
+pub(super) fn forget_failures(channel: serenity::ChannelId) {
+    KILL_FAILURES.retain(|own, entry| *own != channel && entry.2 != channel);
+}
+
 pub(super) fn forget_attempts(channel_id: serenity::ChannelId) {
     KILL_FAILURES.remove(&channel_id);
     DEFER_NOTICED.remove(&channel_id);
@@ -303,3 +341,5 @@ pub(super) const OTHER_LIVE_NOTICE: &str =
     "실행 중 세션이 TUI가 아니라 같은 세션 재기동을 할 수 없어 세션을 리셋했습니다(맥락 소실).";
 
 pub(super) const FALLBACK_NOTICE: &str = "같은 세션을 이어갈 기록이 없어 새 세션으로 시작합니다(맥락 소실). 새 설정은 새 세션에 적용됩니다.";
+
+pub(super) const HERDR_NOTICE: &str = "Herdr 채널로 바뀌어 같은 세션 재기동을 하지 않습니다. 저장한 설정은 다음 세션 기동 때 적용됩니다.";
