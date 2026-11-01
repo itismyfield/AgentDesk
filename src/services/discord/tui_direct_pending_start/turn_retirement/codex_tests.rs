@@ -246,9 +246,8 @@ fn init_takeover(channel: u64, sources: &[crate::services::tui_o::shadow::Source
         .unwrap();
 }
 
-/// A reboot renumbers the rollout volume's dev: the takeover init still names its rollout by path
-/// and inode, so the ended turn confirms. A new inode at that path, or an init naming two stored
-/// variants of the file, keeps Legacy turns.
+/// A takeover rollout whose dev a reboot renumbered confirms its ended turn; a new inode at that
+/// path, or an init naming two stored variants of the file, keeps Legacy turns.
 #[cfg(unix)]
 #[test]
 fn codex_confirmation_reads_a_takeover_rollout_whose_volume_was_renumbered() {
