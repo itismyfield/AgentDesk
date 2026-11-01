@@ -126,6 +126,7 @@ fn context(home: &Home, records: Option<PathBuf>) -> Context {
         grace_rounds: 0,
         lock_wait: std::time::Duration::from_millis(200),
         ready_wait: std::time::Duration::from_millis(200),
+        supported: true,
     }
 }
 

@@ -40,6 +40,11 @@ pub(in crate::services::discord) struct Fx {
 
 impl Fx {
     pub(in crate::services::discord) async fn new() -> Self {
+        Self::on_host(true).await
+    }
+
+    /// `new` on a host that may start servers (`supported`) or one that never does.
+    async fn on_host(supported: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().to_path_buf();
         std::fs::create_dir_all(home.join(".config/herdr")).unwrap();
@@ -55,6 +60,7 @@ impl Fx {
             grace_rounds: 0,
             lock_wait: Duration::from_millis(200),
             ready_wait: Duration::from_millis(200),
+            supported,
         };
         let mut fx = Self::at(home, context, "/fixture/runtime".into()).await;
         fx._dir = Some(dir);
@@ -259,11 +265,14 @@ async fn a_row_is_held_only_while_its_granted_server_is_replaced_or_absent_pg() 
 
     drop(listener);
     std::fs::remove_file(fx.socket()).unwrap();
+    // Only a local APFS socket dir proves nothing else may start the server; elsewhere it is unknown.
+    let absent = cfg!(target_os = "macos");
     let before = ensured_on_this_thread();
-    assert_eq!(fx.hold().await, Some(RowHold::ServerReplaced), "absent");
+    let held = absent.then_some(RowHold::ServerReplaced);
+    assert_eq!(fx.hold().await, held, "absent");
     assert_eq!(
         asked_since(before).await,
-        1,
+        usize::from(absent),
         "an absent server is asked for"
     );
 
@@ -315,6 +324,48 @@ async fn the_owner_retires_nothing_without_the_new_server_policy_pg() {
         pid: current.pid + 1,
         ..current
     });
+    let unread = recover(&fx.shared, &ProviderKind::Claude, channel).await;
+    assert!(
+        unread.as_ref().is_err_and(|e| e.starts_with("policy:")),
+        "{unread:?}"
+    );
+    assert_eq!(fx.row().await, Some(before), "the row is kept");
+    fx.close().await;
+}
+
+/// A host that starts no server neither waits nor asks for an absent one, while a replaced
+/// server still holds and the owner goes on to the policy of whatever answers.
+#[tokio::test(flavor = "current_thread")]
+async fn a_host_that_starts_no_server_keeps_the_existing_server_path_pg() {
+    let fx = Fx::on_host(false).await;
+    fx.bound().await;
+    let channel = ChannelId::new(CHANNEL);
+    let before = fx.row().await.unwrap();
+    fx.grant(ServerWitness {
+        socket: fx.socket(),
+        pid: 1,
+        start: crate::services::session_host::StartIdentity::Darwin {
+            seconds: 1,
+            micros: 0,
+        },
+    });
+    let asked = ensured_on_this_thread();
+    assert_eq!(fx.hold().await, None, "an absent server is not waited for");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(ensured_on_this_thread(), asked, "nor asked for");
+    let unread = recover(&fx.shared, &ProviderKind::Claude, channel).await;
+    assert!(
+        unread.as_ref().is_err_and(|e| e.starts_with("policy:")),
+        "{unread:?}"
+    );
+
+    let _listener = UnixListener::bind(fx.socket()).unwrap();
+    let current = fx.current();
+    fx.grant(ServerWitness {
+        pid: current.pid + 1,
+        ..current
+    });
+    assert_eq!(fx.hold().await, Some(RowHold::ServerReplaced));
     let unread = recover(&fx.shared, &ProviderKind::Claude, channel).await;
     assert!(
         unread.as_ref().is_err_and(|e| e.starts_with("policy:")),

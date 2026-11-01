@@ -33,6 +33,7 @@ impl Real {
             grace_rounds: 0,
             lock_wait: Duration::from_secs(15),
             ready_wait: Duration::from_secs(10),
+            supported: true,
         };
         let fx = Fx::at(home.home.clone(), context, runtime_root).await;
         fx.shared

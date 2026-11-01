@@ -17,6 +17,8 @@ pub(crate) enum Ensured {
     Present,
     Started(u32),
     Refused(Refusal),
+    /// This host starts no server; the caller goes on with whatever answers the socket.
+    Unmanaged,
 }
 
 /// Where one start reads and writes; production derives it from this process.
@@ -29,6 +31,8 @@ pub(crate) struct Context {
     pub grace_rounds: usize,
     pub lock_wait: Duration,
     pub ready_wait: Duration,
+    /// This host may start a server at all (macOS); production reads the build target.
+    pub supported: bool,
 }
 
 impl Context {
@@ -40,6 +44,7 @@ impl Context {
             grace_rounds: presence::GRACE_ROUNDS,
             lock_wait: Duration::from_secs(15),
             ready_wait: Duration::from_secs(10),
+            supported: cfg!(target_os = "macos"),
         }
     }
 }
@@ -74,6 +79,9 @@ pub(crate) fn demand(launch: &HerdrLaunchEndpoint) {
 
 pub(crate) async fn ensure_at(socket: &Path, context: &Context) -> Ensured {
     let mut value = json!({});
+    if !context.supported {
+        return finish(socket, Ensured::Unmanaged, value);
+    }
     let home = match super::target(socket, &context.env) {
         Ok(home) => home,
         Err(reason) => return finish(socket, Ensured::Refused(reason), value),
@@ -149,6 +157,7 @@ async fn locked_start(
             "another_server_answered",
         ),
         Ensured::Refused(reason) => (value["spawned"].as_u64().map(|pid| pid as u32), *reason),
+        Ensured::Unmanaged => (None, "platform_unsupported"),
     };
     record.finish(pid, word);
     let _ = record::save(&records, &record);
@@ -174,6 +183,7 @@ fn finish(socket: &Path, outcome: Ensured, mut value: Value) -> Ensured {
         Ensured::Present => "not_needed_present",
         Ensured::Started(_) => "started",
         Ensured::Refused(reason) => *reason,
+        Ensured::Unmanaged => "platform_unsupported",
     };
     value["reason"] = reason.into();
     value["action"] = super::action(reason).map_or(Value::Null, Value::from);
@@ -363,6 +373,11 @@ pub(crate) fn ensured_on_this_thread() -> usize {
 
 #[cfg(test)]
 static TEST_CONTEXTS: Mutex<BTreeMap<PathBuf, Context>> = Mutex::new(BTreeMap::new());
+
+/// Whether this host may start `socket`'s server, as `ensure` would judge it.
+pub(crate) fn supported(socket: &Path) -> bool {
+    scoped(socket).map_or(cfg!(target_os = "macos"), |context| context.supported)
+}
 
 fn context_for(socket: &Path) -> Context {
     scoped(socket).unwrap_or_else(Context::for_process)

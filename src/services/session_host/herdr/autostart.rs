@@ -57,6 +57,7 @@ pub(crate) async fn assess(socket: &Path, env: Environment) -> Value {
     let verdict = match presence {
         presence::Presence::Present => Err("not_needed_present"),
         presence::Presence::Unknown(_) => Err("presence_unknown"),
+        presence::Presence::Absent(_) if !cfg!(target_os = "macos") => Err("platform_unsupported"),
         presence::Presence::Absent(_) => match target(socket, &env) {
             Ok(home) => prepare(socket, home, &env, &mut value).await.map(drop),
             Err(reason) => Err(reason),
@@ -72,11 +73,8 @@ pub(crate) async fn assess(socket: &Path, env: Environment) -> Value {
 /// Why a start is refused, as the stable word health and the probe show.
 pub(crate) type Refusal = &'static str;
 
-/// The checks that need no IO: the platform, HOME and that `socket` is its default socket.
+/// The checks that need no IO: HOME and that `socket` is its default socket.
 pub(crate) fn target<'a>(socket: &Path, env: &'a Environment) -> Result<&'a Path, Refusal> {
-    if !cfg!(target_os = "macos") {
-        return Err("platform_unsupported");
-    }
     let home = env
         .home
         .as_deref()

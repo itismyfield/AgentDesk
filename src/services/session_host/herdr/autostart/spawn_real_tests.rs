@@ -14,6 +14,7 @@ fn context(home: &Home, grace_rounds: usize) -> Context {
         grace_rounds,
         lock_wait: Duration::from_secs(15),
         ready_wait: Duration::from_secs(10),
+        supported: true,
     }
 }
 
@@ -98,6 +99,7 @@ async fn t7638_helper_ensure() {
         grace_rounds: 0,
         lock_wait: Duration::from_secs(15),
         ready_wait: Duration::from_secs(10),
+        supported: true,
     };
     println!("HELPER_READY");
     // Bounded, so a helper whose test was killed does not outlive it.

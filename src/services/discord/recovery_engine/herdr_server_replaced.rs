@@ -108,10 +108,13 @@ pub(in crate::services::discord) async fn granted_server(
     tokio::task::spawn_blocking(read).await.ok().flatten()
 }
 
-/// The endpoint's socket has no server and nothing that may start one.
+/// The endpoint's socket has no server, nothing else may start one, and this host may.
 pub(in crate::services::discord) async fn absent(launch: &HerdrLaunchEndpoint) -> bool {
     use crate::services::session_host::autostart::presence::{self, Presence};
     let socket = std::path::PathBuf::from(&launch.socket_addr);
+    if !autostart::supported(&socket) {
+        return false;
+    }
     let read = move || presence::classify(&socket, &presence::HostOs);
     let seen = tokio::task::spawn_blocking(read).await;
     matches!(seen, Ok(Presence::Absent(_)))
