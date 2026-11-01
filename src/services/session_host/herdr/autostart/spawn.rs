@@ -315,10 +315,11 @@ async fn ready(socket: &Path, child: Child, wait: Duration, value: &mut Value) -
     loop {
         let exited = child.exited.lock().ok().and_then(|slot| *slot);
         let owned = socket.to_path_buf();
-        let accepting = tokio::task::spawn_blocking(move || accepting_pid(&owned))
-            .await
-            .ok()
-            .flatten();
+        let accepting =
+            tokio::task::spawn_blocking(move || super::super::launch_host::accepting_pid(&owned))
+                .await
+                .ok()
+                .flatten();
         match accepting {
             Some(pid) if pid == child.pid => return Ensured::Started(pid),
             Some(pid) => {
@@ -333,18 +334,6 @@ async fn ready(socket: &Path, child: Child, wait: Duration, value: &mut Value) -
             None => tokio::time::sleep(Duration::from_millis(50)).await,
         }
     }
-}
-
-/// The pid the server on `socket` reports in its hello, when one answers.
-fn accepting_pid(socket: &Path) -> Option<u32> {
-    use super::super::contract::HerdrTransport;
-    use super::super::model::HerdrEndpoint;
-    use super::super::transport::{HerdrSocketConfig, HerdrSocketTransport};
-    use super::super::wire::LineJsonFraming;
-    let endpoint = HerdrEndpoint::new("autostart", "autostart", socket, "autostart").ok()?;
-    let transport =
-        HerdrSocketTransport::new(&endpoint, HerdrSocketConfig::default(), LineJsonFraming);
-    transport.server_witness().ok().map(|witness| witness.pid)
 }
 
 #[cfg(test)]

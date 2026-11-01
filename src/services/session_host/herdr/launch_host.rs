@@ -155,6 +155,14 @@ pub(crate) fn probe_source(socket: &Path) -> Result<Arc<dyn PeerSource>, String>
     Ok(peer_source(socket, &Arc::new(transport)))
 }
 
+/// The pid the server on `socket` reports in its hello, when one answers.
+pub(crate) fn accepting_pid(socket: &Path) -> Option<u32> {
+    let endpoint = HerdrEndpoint::new("autostart", "autostart", socket, "autostart").ok()?;
+    let transport =
+        HerdrSocketTransport::new(&endpoint, HerdrSocketConfig::default(), LineJsonFraming);
+    transport.server_witness().ok().map(|witness| witness.pid)
+}
+
 impl SocketHerdrLaunchHost {
     /// No I/O: every call dials its own connection.
     pub(crate) fn new(endpoints: Vec<HerdrEndpoint>, config: HerdrSocketConfig) -> Self {
