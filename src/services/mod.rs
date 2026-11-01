@@ -79,9 +79,11 @@ pub mod pipeline_routes;
 pub mod platform;
 // #3034: 2 residual dead-code items; scoped here so the lint stays
 // live on clean sibling modules. Remove during pr_summary dead-code cleanup.
+pub(crate) mod legacy_body_census;
 #[allow(dead_code)]
 pub mod pr_summary;
 pub mod process;
+pub(crate) mod process_boot;
 // #3034: residual dead code here is a dormant recovery-priming constructor;
 // scoped allow retained pending provider recovery cleanup. The old #2662/#2668
 // envelope/dev-role dedup stubs were retired by #3744.

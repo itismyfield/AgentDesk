@@ -48,8 +48,11 @@ references passed as values (`.is_some_and(helper)`) are counted as gates.
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import json
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 PRIMITIVE_ROOT = "src/services/discord/"
@@ -776,12 +779,60 @@ def flip_readiness(root: Path) -> tuple[bool, str]:
     return True, f"flip_ready=true: {len(names)} funnel tests over {len(FLIP_READY_TESTS)} rows"
 
 
+def body_probe_snapshot(root: Path) -> dict:
+    """Read the same bytes embedded by Rust; incomplete or malformed data cannot certify coverage."""
+    try:
+        raw = (root / "scripts/tui_o_body_probes.json").read_bytes()
+    except OSError:
+        return dict(coverage=False, census_hash=None, pending=0, error="manifest_unreadable")
+    digest = hashlib.sha256(raw).hexdigest()
+
+    def require(condition):
+        if not condition:
+            raise ValueError("manifest_invalid")
+
+    try:
+        data = json.loads(raw)
+        require(type(data["schema_version"]) is int and data["schema_version"] == 1)
+        rows = data["probes"]
+        require(isinstance(rows, list) and bool(rows))
+        seen, measured = set(), Counter()
+        pending = 0
+        for row in rows:
+            for key in ("id", "path", "function", "primitive"):
+                require(isinstance(row[key], str) and bool(row[key]))
+            require(row["id"] not in seen)
+            seen.add(row["id"])
+            require(type(row["line"]) is int and row["line"] > 0)
+            require(row["op"] in ("POST", "EDIT", "POST_OR_EDIT"))
+            require(row["classification"] in ("BODY_CAPABLE", "NONBODY"))
+            status = row["status"]
+            require(status == "VERIFIED" or status in {
+                "PENDING_0a3", "PENDING_0b1", "PENDING_0b2", "PENDING_0c1", "PENDING_0c2",
+            })
+            pending += status != "VERIFIED"
+            measured[(row["path"], row["primitive"])] += 1
+        expected = Counter({
+            (PRIMITIVE_ROOT + path, primitive): count
+            for path, census in CENSUS.items()
+            if census[1] == "CUT_D" or census[1].startswith("COV:")
+            or path in ("footer_view_reconciler/mod.rs", "turn_bridge/headless_delivery.rs")
+            for primitive, count in EXPECTED_PRIMITIVES[path].items()
+        })
+        require(measured == expected)
+        return dict(coverage=pending == 0, census_hash=digest, pending=pending, error=None)
+    except (AssertionError, KeyError, TypeError, ValueError):
+        return dict(coverage=False, census_hash=digest, pending=0, error="manifest_invalid")
+
+
 def check(root: Path, pinned_test_only_files=None) -> tuple[bool, str]:
     try:
         primitives, gates, flags, raw, marks, admission_problems = measure(root, pinned_test_only_files)
     except RuntimeError as exc:
         return False, str(exc)
     problems = problems_for(primitives, gates, flags, raw, marks, admission_problems)
+    if error := body_probe_snapshot(root)["error"]:
+        problems.append(f"body probes: {error}")
     sites = sum(sum(m.values()) for m in primitives.values())
     deferred = sorted(rel for rel, row in CENSUS.items() if DEFER_RE.fullmatch(row[1]))
     if problems:
@@ -804,9 +855,12 @@ def main(argv: list[str] | None = None) -> int:
     print(message, file=sys.stdout if ok else sys.stderr)
     ready, verdict = flip_readiness(root)
     print(verdict)
+    body = body_probe_snapshot(root)
+    print(f"body_probe_coverage={str(body['coverage']).lower()} pending={body['pending']} "
+          f"census_hash={body['census_hash']}")
     if not ok:
         return 1
-    return 1 if "--require-flip-ready" in args and not ready else 0
+    return 1 if "--require-flip-ready" in args and (not ready or not body["coverage"]) else 0
 
 
 if __name__ == "__main__":

@@ -3290,6 +3290,12 @@ src/
 │   │   ├── test_support.rs
 │   │   ├── token_store.rs
 │   │   └── transport_tests.rs
+│   ├── legacy_body_census/
+│   │   ├── entry_tests.rs
+│   │   ├── history.rs
+│   │   ├── manifest.rs
+│   │   ├── mod.rs
+│   │   └── writer.rs
 │   ├── maintenance/
 │   │   ├── jobs/
 │   │   │   ├── db_retention/
@@ -4285,6 +4291,7 @@ src/
 │   ├── pipeline_routes.rs
 │   ├── pr_summary.rs
 │   ├── process.rs
+│   ├── process_boot.rs
 │   ├── provider.rs
 │   ├── provider_auth.rs
 │   ├── provider_auth_profile.rs

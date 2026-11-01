@@ -12,6 +12,7 @@ pub(super) async fn message_outbox_loop(
     health_registry: Option<Arc<HealthRegistry>>,
 ) {
     use std::time::Duration;
+    crate::services::legacy_body_census::ensure_ready().await;
 
     let Some(health_registry) = health_registry else {
         tracing::error!("[outbox] Health registry unavailable; message outbox worker stopped");
@@ -76,6 +77,7 @@ pub(crate) async fn drain_message_outbox_once(
     health_registry: &Arc<HealthRegistry>,
     claim_owner: &str,
 ) -> usize {
+    crate::services::legacy_body_census::ensure_ready().await;
     drain_message_outbox_batch_once(pg_pool.as_ref(), Some(claim_owner), {
         let health_registry = health_registry.clone();
         let pg_pool = pg_pool.clone();

@@ -17,7 +17,13 @@ const PROBE_INTERVAL: Duration = Duration::from_millis(PROBE_TTL_MS as u64 / 4);
 static SNAPSHOT: LazyLock<RwLock<Option<ExecutionProbe>>> = LazyLock::new(|| RwLock::new(None));
 static POLLERS: LazyLock<RwLock<BTreeMap<String, i64>>> =
     LazyLock::new(|| RwLock::new(BTreeMap::new()));
-static BOOT_ID: LazyLock<String> = LazyLock::new(|| uuid::Uuid::new_v4().to_string());
+pub(crate) fn boot_id() -> String {
+    #[cfg(test)]
+    if crate::services::legacy_body_census::mutant("second_uuid") {
+        return uuid::Uuid::new_v4().to_string();
+    }
+    crate::services::process_boot::initialize().id.clone()
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct ProviderEvidence {
@@ -340,7 +346,7 @@ fn collect(config: &Config) -> ExecutionProbe {
     let root = crate::config::runtime_root().unwrap_or_else(|| config.data.dir.clone());
     ExecutionProbe {
         schema: 1,
-        boot_id: BOOT_ID.clone(),
+        boot_id: boot_id(),
         observed_at_ms,
         expires_at_ms: observed_at_ms.saturating_add(PROBE_TTL_MS),
         os: std::env::consts::OS.into(),

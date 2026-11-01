@@ -37,6 +37,10 @@ fn boot_id_from_pid_file(pid_file: &std::path::Path) -> Result<String, String> {
 pub(crate) fn current_boot_id() -> Result<String, String> {
     let root = crate::cli::agentdesk_runtime_root()
         .ok_or_else(|| "AGENTDESK runtime root is not resolvable".to_string())?;
+    current_boot_id_at(&root)
+}
+
+pub(crate) fn current_boot_id_at(root: &std::path::Path) -> Result<String, String> {
     boot_id_from_pid_file(&root.join("runtime").join("dcserver.pid"))
 }
 

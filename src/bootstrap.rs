@@ -8,6 +8,7 @@ pub(crate) fn initialize() -> Result<BootstrapState> {
     crate::logging::init_tracing()?;
 
     let runtime_root = crate::config::runtime_root();
+    crate::services::legacy_body_census::start();
     if let Some(root) = runtime_root.as_ref() {
         crate::runtime_layout::ensure_runtime_layout(root)
             .map_err(|error| anyhow::anyhow!("Failed to prepare runtime layout: {error}"))?;
@@ -97,6 +98,7 @@ pub(crate) async fn prepare_and_install_boot_snapshots(
     config: &crate::config::Config,
     pool: Option<&sqlx::PgPool>,
 ) -> Result<()> {
+    crate::services::legacy_body_census::ensure_ready().await;
     crate::config::validate_config(config)?;
     let candidate = crate::config::session_hosts::BootSessionHosts::from_config(config)?;
     let selection = prepare_session_hosts_boot(candidate, pool).await;

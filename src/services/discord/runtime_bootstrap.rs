@@ -148,6 +148,7 @@ mod snapshot_reader_tests;
 
 /// Entry point: start the Discord bot
 pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBotContext) {
+    crate::services::legacy_body_census::ensure_ready().await;
     if crate::services::codex::codex_source_mode_snapshot()
         == crate::services::codex::CodexSourceMode::Invalid
     {
