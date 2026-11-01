@@ -86,15 +86,6 @@ def tool_inventory() -> tuple[ToolSpec, ...]:
         ("pipx", "pipx", "hygiene", "pipx", "pypa/pipx", "isolated Python CLI management"),
         ("jq", "jq", "hygiene", "jq", "jqlang/jq", "JSON command-line parsing"),
         ("ripgrep", "ripgrep", "hygiene", "ripgrep", "BurntSushi/ripgrep", "repository search tooling"),
-        ("ffmpeg", "ffmpeg", "hygiene", "ffmpeg", "FFmpeg/FFmpeg", "voice media processing"),
-        (
-            "whisper-cpp",
-            "whisper-cpp",
-            "hygiene",
-            "whisper-cpp",
-            "ggml-org/whisper.cpp",
-            "voice transcription runtime",
-        ),
         (
             "postgresql-17",
             "postgresql@17",
@@ -201,21 +192,6 @@ def tool_inventory() -> tuple[ToolSpec, ...]:
         )
     specs.extend(
         [
-            ToolSpec(
-                "edge-tts",
-                "edge-tts",
-                "pipx",
-                "hygiene",
-                "command",
-                ("edge-tts", "--version"),
-                "pypi",
-                "edge-tts",
-                "pipx-exact",
-                "edge-tts",
-                "edge-tts",
-                "voice synthesis CLI compatibility",
-                "https://pypi.org/project/edge-tts/",
-            ),
             ToolSpec(
                 "opencode",
                 "opencode",
