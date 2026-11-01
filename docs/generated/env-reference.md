@@ -13,7 +13,7 @@ when the code has none).
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
 - AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 98
-- Platform and third-party variables: 39
+- Platform and third-party variables: 40
 
 ## AgentDesk variables
 
@@ -138,7 +138,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `GROK_BIN_DIR` | `src/services/platform/binary_resolver/grok.rs` |  |
 | `GROK_HOME` | `src/services/platform/binary_resolver/grok.rs` |  |
 | `HERDR_CONFIG_PATH` | `src/services/session_host/herdr/observe.rs` | The ping connection names the server; its version, env, config and start are checked; a last connection that carries no request must still reach that same serv… |
-| `HOME` | `src/cli/doctor/orchestrator.rs`, `src/cli/herdr.rs`, `src/config/session_hosts.rs`, `src/services/discord/sidecar_interaction.rs`, `src/services/mcp_config.rs`, `src/services/observability/events.rs`, `src/services/operator_connectors.rs`, `src/services/qwen.rs`, `src/services/routines/migrated.rs` | Absolute socket path; defaults to $HOME/.config/herdr/herdr.sock |
+| `HOME` | `src/cli/doctor/orchestrator.rs`, `src/cli/herdr.rs`, `src/config/session_hosts.rs`, `src/services/discord/sidecar_interaction.rs`, `src/services/mcp_config.rs`, `src/services/observability/events.rs`, `src/services/operator_connectors.rs`, `src/services/qwen.rs`, `src/services/routines/migrated.rs`, `src/services/session_host/herdr/autostart/spawn.rs` | Absolute socket path; defaults to $HOME/.config/herdr/herdr.sock |
 | `HOSTNAME` | `src/server/outbox_worker.rs`, `src/services/scheduled_messages.rs`, `src/services/tmux_common.rs` |  |
 | `LOCALAPPDATA` | `src/services/platform/binary_resolver.rs`, `src/services/stream_json_cli/dialects/agy.rs` |  |
 | `MEMENTO_WORKSPACE` | `src/server/routes/memory_api.rs`, `src/services/maintenance/jobs/memento_consolidation.rs`, `src/services/memory/memento.rs`, `src/services/memory/runtime_state.rs` |  |
@@ -147,7 +147,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `OBSIDIAN_REMOTE_VAULT_ROOT` | `src/services/operator_connectors.rs`, `src/services/routines/migrated.rs` |  |
 | `OBSIDIAN_VAULT_ROOT` | `src/services/operator_connectors.rs`, `src/services/routines/migrated.rs` |  |
 | `OPENAI_API_KEY` | `src/server/rate_limit_sync.rs` | --- Codex: ~/.codex/auth.json (CLI subscription), else OPENAI_API_KEY --- |
-| `PATH` | `src/cli/doctor/orchestrator.rs`, `src/cli/init.rs`, `src/config/test_env.rs`, `src/services/platform/binary_resolver.rs`, `src/services/platform/binary_resolver/runtime_path.rs`, `src/services/platform/tmux/session_inventory.rs` | Put `dir` in front of `PATH` while the caller owns the shared env lock. |
+| `PATH` | `src/cli/doctor/orchestrator.rs`, `src/cli/init.rs`, `src/config/test_env.rs`, `src/services/platform/binary_resolver.rs`, `src/services/platform/binary_resolver/runtime_path.rs`, `src/services/platform/tmux/session_inventory.rs`, `src/services/session_host/herdr/autostart.rs` | Put `dir` in front of `PATH` while the caller owns the shared env lock. |
 | `PNPM_HOME` | `src/services/platform/binary_resolver.rs` |  |
 | `POSTGRES_TEST_ADMIN_DB` | `src/db/auto_queue/test_support.rs`, `src/dispatch/test_support.rs`, `src/high_risk_recovery.rs` |  |
 | `QWEN_CODE_SYSTEM_DEFAULTS_PATH` | `src/cli/doctor/orchestrator.rs`, `src/services/discord/model_catalog.rs` |  |
@@ -156,6 +156,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `RTX_DATA_DIR` | `src/services/platform/binary_resolver.rs` |  |
 | `RUST_LOG` | `src/logging.rs` | The directive every shipped dcserver process adds on top of `RUST_LOG`. |
 | `SHELL` | `src/services/platform/binary_resolver.rs` |  |
+| `SSH_AUTH_SOCK` | `src/services/session_host/herdr/autostart/spawn.rs` | The environment the server and its panes inherit: identity, a fixed PATH and locale only. |
 | `TMUX` | `src/services/claude/host_gate.rs`, `src/services/platform/tmux/session_inventory.rs` | The server socket tmux itself connects to with no `-L`/`-S`: `$TMUX`, else `$TMUX_TMPDIR` (or `/tmp`) `/tmux-<uid>/default`. |
 | `TMUX_TMPDIR` | `src/services/claude/host_gate.rs`, `src/services/platform/tmux/session_inventory.rs` | The server socket tmux itself connects to with no `-L`/`-S`: `$TMUX`, else `$TMUX_TMPDIR` (or `/tmp`) `/tmux-<uid>/default`. |
 | `USERPROFILE` | `src/cli/doctor/orchestrator.rs`, `src/services/mcp_config.rs`, `src/services/operator_connectors.rs`, `src/services/platform/binary_resolver.rs`, `src/services/qwen.rs`, `src/services/routines/migrated.rs` |  |

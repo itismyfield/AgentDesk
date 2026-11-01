@@ -290,7 +290,7 @@ pub(super) async fn mailbox_has_live_active_turn_or_cleanup_stale_proof(
     channel_id: serenity::ChannelId,
 ) -> bool {
     if !mailbox_has_active_turn(shared, channel_id).await {
-        return restarted_row_holds(shared, provider, channel_id);
+        return restarted_row_holds(shared, provider, channel_id).await;
     }
     if release_queue_blocked_stale_active_turn(
         shared,
@@ -301,25 +301,34 @@ pub(super) async fn mailbox_has_live_active_turn_or_cleanup_stale_proof(
     .await
     {
         return mailbox_has_active_turn(shared, channel_id).await
-            || restarted_row_holds(shared, provider, channel_id);
+            || restarted_row_holds(shared, provider, channel_id).await;
     }
     true
 }
 
-/// A prior process's Herdr row would refuse a start, so intake queues behind it as behind a turn.
-fn restarted_row_holds(
+/// A prior process's Herdr row, or a row on a replaced herdr server, would refuse a start, so
+/// intake queues behind it as behind a turn; the queue's hold then asks its owner to end it.
+async fn restarted_row_holds(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
 ) -> bool {
     #[cfg(unix)]
-    let held =
-        crate::services::discord::recovery_engine::herdr_row_end::owner::restarted_herdr_hold(
-            provider,
-            channel_id.get(),
-            shared.restart.current_generation,
-        )
-        .is_some();
+    let held = {
+        use crate::services::discord::recovery_engine::{
+            herdr_row_end::owner, herdr_server_replaced,
+        };
+        let current = shared.restart.current_generation;
+        if owner::restarted_herdr_hold(provider, channel_id.get(), current).is_some() {
+            // Start the server while the input waits for its drain; the hold stays as it is.
+            herdr_server_replaced::demand(channel_id.get());
+            true
+        } else {
+            owner::server_replaced_hold(shared, provider, channel_id)
+                .await
+                .is_some()
+        }
+    };
     #[cfg(not(unix))]
     let held = {
         let _ = (shared, provider, channel_id);

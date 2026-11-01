@@ -51,31 +51,7 @@ module.exports = function attachDispatchMaintenance(timeouts, helpers) {
     };
 
   timeouts._section_I0 = function() {
-      // ─── [I-0] 미전송 디스패치 알림 복구 ──────────────────────
-      // pending dispatch가 2분 이상 됐는데 알림이 안 갔을 수 있음 → 재전송
-      var unnotifiedDispatches = agentdesk.db.query(
-        "SELECT td.id, td.dispatch_type, td.to_agent_id, kc.title, kc.github_issue_url, kc.github_issue_number, td.kanban_card_id " +
-        "FROM task_dispatches td " +
-        "JOIN kanban_cards kc ON td.kanban_card_id = kc.id " +
-        "WHERE td.status = 'pending' " +
-        "AND td.created_at < datetime('now', '-2 minutes') " +
-        "AND NOT EXISTS (SELECT 1 FROM kv_meta WHERE key = 'dispatch_notified:' || td.id) " +
-        "AND NOT EXISTS (SELECT 1 FROM kv_meta WHERE key = 'dispatch_reserving:' || td.id) " +
-        "AND NOT EXISTS (SELECT 1 FROM dispatch_outbox WHERE dispatch_id = td.id AND status IN ('pending', 'processing', 'failed'))"
-      );
-      for (var un = 0; un < unnotifiedDispatches.length; un++) {
-        var ud = unnotifiedDispatches[un];
-
-        // Re-enqueue into dispatch_outbox so the Rust outbox worker handles delivery
-        // with proper two-phase guard and retry/backoff (#209).
-        // Do NOT send directly via message.queue — that bypasses the delivery guarantee.
-        agentdesk.db.execute(
-          "INSERT INTO dispatch_outbox (dispatch_id, action, agent_id, card_id, title, status) " +
-          "VALUES (?1, 'notify', ?2, ?3, ?4, 'pending') ON CONFLICT DO NOTHING",
-          [ud.id, ud.to_agent_id, ud.kanban_card_id || "", ud.title]
-        );
-        agentdesk.log.info("[notify-recovery] Dispatch " + ud.id + " re-enqueued to dispatch_outbox");
-      }
+      agentdesk.timeouts.maintainUnsentNotifications();
     };
 
   timeouts._section_J = function() {

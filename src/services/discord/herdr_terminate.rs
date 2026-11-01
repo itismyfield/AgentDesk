@@ -178,7 +178,7 @@ async fn read_end(target: HerdrTarget, record: HostedExecution) -> Result<(), Te
     })?;
     tokio::task::spawn_blocking(move || {
         let pane = view.read_execution();
-        if !view.ended(&record, &pane) {
+        if !target.ended_reading(&record, &pane) {
             return Err(TerminationResult::Indeterminate(format!("pane: {pane:?}")));
         }
         match target.provider_absent() {

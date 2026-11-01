@@ -17,10 +17,14 @@
 
 use crate::dispatch::{DispatchCreateOptions, apply_dispatch_attached_intents_on_pg_tx};
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
-use serde::Deserialize;
 use serde_json::json;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
+
+use super::pr_tracking_ops::{
+    self, HandoffPayload, refresh_pg_pr_tracking_reuse_state_if_active,
+    seed_pg_pr_tracking_handoff_state,
+};
 
 pub(super) fn register_review_automation_ops<'js>(
     ctx: &Ctx<'js>,
@@ -96,17 +100,6 @@ pub(super) fn register_review_automation_ops<'js>(
 
 // ── handoffCreatePr ─────────────────────────────────────────────────────
 
-#[derive(Clone, Debug, Deserialize)]
-struct HandoffPayload {
-    card_id: String,
-    repo_id: String,
-    worktree_path: Option<String>,
-    branch: String,
-    head_sha: Option<String>,
-    agent_id: String,
-    title: String,
-}
-
 fn handoff_create_pr_raw(pg_pool: Option<&PgPool>, payload_json: &str) -> String {
     let payload: HandoffPayload = match serde_json::from_str(payload_json) {
         Ok(p) => p,
@@ -136,164 +129,6 @@ fn handoff_create_pr_raw(pg_pool: Option<&PgPool>, payload_json: &str) -> String
         Ok(v) => v.to_string(),
         Err(e) => json!({"error": e}).to_string(),
     }
-}
-
-async fn seed_pg_pr_tracking_handoff_state(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    payload: &HandoffPayload,
-    generation: &str,
-    current_round: i64,
-) -> Result<(), String> {
-    sqlx::query(
-        "INSERT INTO pr_tracking (
-            card_id,
-            repo_id,
-            worktree_path,
-            branch,
-            head_sha,
-            state,
-            last_error,
-            dispatch_generation,
-            review_round,
-            retry_count,
-            created_at,
-            updated_at
-         ) VALUES (
-            $1, $2, $3, $4, $5, 'create-pr', NULL, $6, $7, 0, NOW(), NOW()
-         )
-         ON CONFLICT (card_id) DO UPDATE
-         SET repo_id = EXCLUDED.repo_id,
-             worktree_path = EXCLUDED.worktree_path,
-             branch = EXCLUDED.branch,
-             head_sha = EXCLUDED.head_sha,
-             state = 'create-pr',
-             last_error = NULL,
-             dispatch_generation = EXCLUDED.dispatch_generation,
-             review_round = EXCLUDED.review_round,
-             retry_count = 0,
-             updated_at = NOW()",
-    )
-    .bind(&payload.card_id)
-    .bind(&payload.repo_id)
-    .bind(payload.worktree_path.as_deref())
-    .bind(&payload.branch)
-    .bind(payload.head_sha.as_deref())
-    .bind(generation)
-    .bind(current_round)
-    .execute(&mut **tx)
-    .await
-    .map_err(|e| format!("upsert postgres pr_tracking for {}: {e}", payload.card_id))?;
-
-    Ok(())
-}
-
-async fn refresh_pg_pr_tracking_reuse_state_if_active(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    payload: &HandoffPayload,
-    dispatch_id: &str,
-    generation: &str,
-    current_round: i64,
-) -> Result<bool, String> {
-    let refreshed = sqlx::query(
-        "WITH active_dispatch AS (
-             SELECT id
-             FROM task_dispatches
-             WHERE id = $8
-               AND status IN ('pending', 'dispatched')
-             FOR UPDATE
-         ),
-         upsert_tracking AS (
-             INSERT INTO pr_tracking (
-                 card_id,
-                 repo_id,
-                 worktree_path,
-                 branch,
-                 head_sha,
-                 state,
-                 last_error,
-                 dispatch_generation,
-                 review_round,
-                 retry_count,
-                 created_at,
-                 updated_at
-             )
-             SELECT
-                 $1,
-                 $2,
-                 $3,
-                 $4,
-                 $5,
-                 'create-pr',
-                 NULL,
-                 $6,
-                 $7,
-                 0,
-                 NOW(),
-                 NOW()
-             FROM active_dispatch
-             ON CONFLICT (card_id) DO UPDATE
-             SET state = 'create-pr',
-                 last_error = NULL,
-                 dispatch_generation = EXCLUDED.dispatch_generation,
-                 review_round = EXCLUDED.review_round,
-                 retry_count = 0,
-                 updated_at = NOW()
-             RETURNING 1
-         ),
-         update_card AS (
-             UPDATE kanban_cards
-             SET blocked_reason = 'pr:creating',
-                 updated_at = NOW()
-             WHERE id = $1
-               AND EXISTS (SELECT 1 FROM active_dispatch)
-             RETURNING 1
-         )
-         SELECT
-             EXISTS (SELECT 1 FROM active_dispatch) AS dispatch_active,
-             EXISTS (SELECT 1 FROM upsert_tracking) AS tracking_updated,
-             EXISTS (SELECT 1 FROM update_card) AS card_updated",
-    )
-    .bind(&payload.card_id)
-    .bind(&payload.repo_id)
-    .bind(payload.worktree_path.as_deref())
-    .bind(&payload.branch)
-    .bind(payload.head_sha.as_deref())
-    .bind(generation)
-    .bind(current_round)
-    .bind(dispatch_id)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|e| {
-        format!(
-            "refresh postgres reused pr_tracking for {}: {e}",
-            payload.card_id
-        )
-    })?;
-
-    let dispatch_active = refreshed
-        .try_get::<bool, _>("dispatch_active")
-        .map_err(|e| {
-            format!(
-                "decode postgres reuse dispatch_active for {}: {e}",
-                payload.card_id
-            )
-        })?;
-    let tracking_updated = refreshed
-        .try_get::<bool, _>("tracking_updated")
-        .map_err(|e| {
-            format!(
-                "decode postgres reuse tracking_updated for {}: {e}",
-                payload.card_id
-            )
-        })?;
-    let card_updated = refreshed.try_get::<bool, _>("card_updated").map_err(|e| {
-        format!(
-            "decode postgres reuse card_updated for {}: {e}",
-            payload.card_id
-        )
-    })?;
-
-    Ok(dispatch_active && tracking_updated && card_updated)
 }
 
 async fn load_pg_dispatch_status(
@@ -567,101 +402,16 @@ async fn record_pr_create_failure_pg(
         .begin()
         .await
         .map_err(|e| format!("begin postgres pr_tracking failure transaction: {e}"))?;
-
-    if !stamp_gen.is_empty() {
-        let current_gen = sqlx::query_scalar::<_, String>(
-            "SELECT dispatch_generation
-             FROM pr_tracking
-             WHERE card_id = $1",
-        )
-        .bind(card_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| format!("load postgres pr_tracking generation for {card_id}: {e}"))?;
-        if let Some(cur) = current_gen.as_deref()
-            && !cur.is_empty()
-            && cur != stamp_gen
-        {
-            tx.rollback().await.ok();
-            return Ok(json!({
-                "ok": true,
-                "noop": true,
-                "reason": "stale_generation",
-            }));
-        }
+    let result =
+        pr_tracking_ops::record_failure_on_pg_tx(&mut tx, card_id, error, stamp_gen).await?;
+    if result["noop"] == true {
+        tx.rollback().await.ok();
+    } else {
+        tx.commit()
+            .await
+            .map_err(|e| format!("commit postgres pr_tracking failure for {card_id}: {e}"))?;
     }
-
-    let updated = sqlx::query(
-        "UPDATE pr_tracking
-         SET retry_count = retry_count + 1,
-             last_error = $1,
-             updated_at = NOW()
-         WHERE card_id = $2",
-    )
-    .bind(error)
-    .bind(card_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| format!("update postgres pr_tracking failure for {card_id}: {e}"))?
-    .rows_affected();
-    if updated == 0 {
-        sqlx::query(
-            "INSERT INTO pr_tracking (
-                card_id,
-                state,
-                last_error,
-                dispatch_generation,
-                review_round,
-                retry_count,
-                created_at,
-                updated_at
-             ) VALUES (
-                $1, 'create-pr', $2, '', 0, 1, NOW(), NOW()
-             )
-             ON CONFLICT (card_id) DO UPDATE
-             SET retry_count = pr_tracking.retry_count + 1,
-                 last_error = EXCLUDED.last_error,
-                 updated_at = NOW()",
-        )
-        .bind(card_id)
-        .bind(error)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("insert postgres pr_tracking failure row for {card_id}: {e}"))?;
-    }
-
-    let retry_count = sqlx::query_scalar::<_, i64>(
-        "SELECT retry_count::BIGINT
-         FROM pr_tracking
-         WHERE card_id = $1",
-    )
-    .bind(card_id)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|e| format!("load postgres retry_count for {card_id}: {e}"))?;
-    let escalated = retry_count >= 3;
-    if escalated {
-        sqlx::query(
-            "UPDATE pr_tracking
-             SET state = 'escalated',
-                 updated_at = NOW()
-             WHERE card_id = $1",
-        )
-        .bind(card_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("escalate postgres pr_tracking for {card_id}: {e}"))?;
-    }
-
-    tx.commit()
-        .await
-        .map_err(|e| format!("commit postgres pr_tracking failure for {card_id}: {e}"))?;
-
-    Ok(json!({
-        "ok": true,
-        "retry_count": retry_count,
-        "escalated": escalated,
-    }))
+    Ok(result)
 }
 
 // ── reseedPrTracking ──────────────────────────────────────────────────
@@ -750,48 +500,14 @@ async fn reseed_pr_tracking_pg(pool: &PgPool, card_id: &str) -> Result<serde_jso
 
     let generation = Uuid::new_v4().to_string();
 
-    let updated = sqlx::query(
-        "UPDATE pr_tracking
-         SET dispatch_generation = $1,
-             review_round = $2,
-             head_sha = COALESCE($3, head_sha),
-             state = 'create-pr',
-             retry_count = 0,
-             last_error = NULL,
-             updated_at = NOW()
-         WHERE card_id = $4",
+    pr_tracking_ops::reseed_on_pg_tx(
+        &mut tx,
+        card_id,
+        &generation,
+        current_round,
+        latest_head.as_deref(),
     )
-    .bind(&generation)
-    .bind(current_round)
-    .bind(latest_head.as_deref())
-    .bind(card_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| format!("update postgres reseeded pr_tracking for {card_id}: {e}"))?
-    .rows_affected();
-    if updated == 0 {
-        sqlx::query(
-            "INSERT INTO pr_tracking (
-                card_id,
-                head_sha,
-                state,
-                dispatch_generation,
-                review_round,
-                retry_count,
-                created_at,
-                updated_at
-             ) VALUES (
-                $1, $2, 'create-pr', $3, $4, 0, NOW(), NOW()
-             )",
-        )
-        .bind(card_id)
-        .bind(latest_head.as_deref())
-        .bind(&generation)
-        .bind(current_round)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("insert postgres reseeded pr_tracking for {card_id}: {e}"))?;
-    }
+    .await?;
 
     tx.commit()
         .await

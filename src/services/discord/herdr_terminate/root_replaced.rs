@@ -32,6 +32,16 @@ impl RootReplacedCandidate {
                 HerdrExecutionMatch::Mismatch(HerdrMismatch::RootReplaced)))) if record.state == HostedState::Bound
         ).then(|| Self(row.clone()))
     }
+    /// A Bound row on a server that replaced the one its grant admitted and has startup proof;
+    /// the strict proof still requires its pane gone or left to a lone shell.
+    pub(in crate::services::discord) fn from_replaced_server(
+        row: &HostedObservation,
+        server: &crate::services::session_host::ReplacedServer,
+    ) -> Option<Self> {
+        matches!(&row.record, HostedRecord::Known(record)
+            if record.state == HostedState::Bound && server.startup)
+        .then(|| Self(row.clone()))
+    }
     pub(crate) fn matches(&self, row: &HostedObservation) -> bool {
         self.0 == *row
     }

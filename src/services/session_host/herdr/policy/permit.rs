@@ -214,11 +214,24 @@ pub(crate) fn create_for_test(
     endpoint: HerdrLaunchEndpoint,
     witness: ServerWitness,
 ) -> CreatePermit {
+    CreatePermit::new(endpoint, proof_for_test(witness)).unwrap()
+}
+
+/// Startup proof of `witness`'s server, as `observe_policy` leaves it when its config predates it.
+#[cfg(test)]
+pub(crate) fn startup_for_test(witness: ServerWitness) -> super::StartupProof {
+    super::StartupProof {
+        evidence: proof_for_test(witness),
+    }
+}
+
+#[cfg(test)]
+fn proof_for_test(witness: ServerWitness) -> NextRestartProof {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("config.toml");
     std::fs::write(&config, b"[session]\nresume_agents_on_restore=false\n").unwrap();
     let file = super::file::read(&config).unwrap().token;
-    let proof = NextRestartProof {
+    NextRestartProof {
         peer: super::peer::PeerSnapshot {
             started: std::time::SystemTime::now(),
             home: dir.path().into(),
@@ -229,8 +242,7 @@ pub(crate) fn create_for_test(
             socket_dir: (0, 0),
         },
         file,
-    };
-    CreatePermit::new(endpoint, proof).unwrap()
+    }
 }
 
 #[cfg(test)]

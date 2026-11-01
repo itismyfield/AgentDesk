@@ -3,6 +3,8 @@
 //! destruction, execution identity and cancel routing stay with their owners.
 
 mod herdr {
+    #[cfg(unix)]
+    pub(crate) mod autostart;
     pub(crate) mod contract;
     #[cfg(unix)]
     pub(crate) mod launch_host;
@@ -45,6 +47,8 @@ mod traits;
 pub(crate) use herdr::contract::ServerWitness;
 // Dedicated Herdr config upkeep: the boot pass, the 30-second task, doctor and health.
 #[cfg(unix)]
+pub(crate) use herdr::autostart;
+#[cfg(unix)]
 pub(crate) use herdr::managed_config;
 #[cfg(all(test, unix))]
 pub(crate) use herdr::model::HerdrEndpoint;
@@ -63,8 +67,12 @@ pub(crate) use herdr_registry::registry as herdr_endpoints;
 #[cfg(unix)]
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use herdr::launch_host::SocketHerdrLaunchHost;
+#[cfg(unix)]
+pub(crate) use herdr::launch_host::{GrantedServer, ReplacedServer};
 pub(crate) use herdr::observe::{RESTORE_RESUME_NOT_OFF, RestoreResume, RestoreUnverified};
 pub(crate) use herdr::pane_probe::{EvidenceGap, PaneOccupant, START_SLACK};
+#[cfg(unix)]
+pub(crate) use herdr::provenance::{StartIdentity, boot_time};
 pub(crate) use model::{
     HostCapabilities, HostError, HostKey, HostKind, HostKindResolution, HostKindSource,
     HostLiveness, HostMutation, HostPresence, HostRefusal, HostSessionRef, HostedRuntimeLocator,
