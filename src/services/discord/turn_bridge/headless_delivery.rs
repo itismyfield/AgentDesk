@@ -544,7 +544,7 @@ async fn enqueue_headless_turn_row(
 }
 
 /// The production row write for `state`'s turn, without waiting for the worker to send it.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(in crate::services::discord) async fn enqueue_headless_turn_row_for_test(
     shared: &Arc<SharedData>,
     state: &InflightTurnState,
