@@ -19,12 +19,12 @@ use crate::services::tui_prompt_dedupe::binding_events::{
     BindingCause, BindingEvent, BindingTarget, CauseSource, Corrupt, CorruptKind, HookSignal,
     Proposal, SourceId, pinned_source_at, records_strict, subscribe_binding_events,
 };
-use chrono::{DateTime, Utc};
 use crate::services::tui_prompt_dedupe::{
     Persisted, Record, TuiRuntimeBinding, pane_registration, register_provider_session,
     resolve_tmux_session_name, runtime_binding_for_tmux_session,
     runtime_binding_for_tmux_session_under_source_authority,
 };
+use chrono::{DateTime, Utc};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NotEligible {
@@ -397,7 +397,13 @@ pub(crate) fn judge_restore(
     let bind_current =
         |((record, pin), launch): ((&BindingEvent, &SourceId), &LaunchTranscript)| {
             let target = (pin.session_id.as_str(), pin.path.as_path());
-            judged((pinned, pinned_at), target, (record.seq, record.seq), launch, &observe)
+            judged(
+                (pinned, pinned_at),
+                target,
+                (record.seq, record.seq),
+                launch,
+                &observe,
+            )
         };
     let current_or = |otherwise| restorable.map_or(done(otherwise), bind_current);
     let live = match fold(tmux_session, &records) {
@@ -441,7 +447,13 @@ pub(crate) fn judge_restore(
     };
     let exact = |line| {
         let target = (live.session, transcript.as_path());
-        judged((pinned, pinned_at), target, (live.pending.seq, line), launch, &observe)
+        judged(
+            (pinned, pinned_at),
+            target,
+            (live.pending.seq, line),
+            launch,
+            &observe,
+        )
     };
     if let Some((record, source)) = live.resolved {
         if source.path != transcript {

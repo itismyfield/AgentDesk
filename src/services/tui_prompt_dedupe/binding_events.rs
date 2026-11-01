@@ -494,7 +494,10 @@ pub(crate) fn pinned_source(channel_id: u64, tmux_session: &str) -> io::Result<O
 pub(crate) type PinnedAt = (SourceId, Option<DateTime<Utc>>);
 
 /// The pane's verified pin with the commit time of the record that pinned it.
-pub(crate) fn pinned_source_at(channel_id: u64, tmux_session: &str) -> io::Result<Option<PinnedAt>> {
+pub(crate) fn pinned_source_at(
+    channel_id: u64,
+    tmux_session: &str,
+) -> io::Result<Option<PinnedAt>> {
     Ok(claude_history_at(channel_id, tmux_session, None)?.0)
 }
 
@@ -770,7 +773,13 @@ impl Writer {
             false => pinned_at,
         };
         let session = p.session().or(pin.map(|pin| pin.session_id.as_str()));
-        judge_pin(pin, pinned_at, session.unwrap_or_default(), Path::new(p.path), seen)
+        judge_pin(
+            pin,
+            pinned_at,
+            session.unwrap_or_default(),
+            Path::new(p.path),
+            seen,
+        )
     }
 
     /// Opens a pinned path a stat found renumbered and keeps it only if its first record still names

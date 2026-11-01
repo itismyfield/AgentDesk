@@ -429,7 +429,13 @@ fn judged(
     bound: bool,
 ) -> SourceVerdict {
     use SourceVerdict::{Anomaly, Confirm, Current, Pending, Recheck, Rejected, Rotate};
-    match judge_pin(pin, pinned_at, &hook.session_id, &hook.transcript_path, seen) {
+    match judge_pin(
+        pin,
+        pinned_at,
+        &hook.session_id,
+        &hook.transcript_path,
+        seen,
+    ) {
         PinJudgment::Verified(id) if bound && pin == Some(&id) => Current,
         PinJudgment::Verified(id) => {
             #[cfg(unix)]
@@ -600,7 +606,14 @@ mod tests {
         let left = rest.iter().map(|source| {
             let pin = source.source_id();
             let pinned_at = None;
-            (source.session_id.clone(), Left { pin, pinned_at, left_at })
+            (
+                source.session_id.clone(),
+                Left {
+                    pin,
+                    pinned_at,
+                    left_at,
+                },
+            )
         });
         let history = SourceHistory {
             left: left.collect(),

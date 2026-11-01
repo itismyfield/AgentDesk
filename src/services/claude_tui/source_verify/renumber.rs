@@ -14,7 +14,9 @@ pub(crate) fn renumbered(
     pinned_at: Option<DateTime<Utc>>,
     (dev, ino): (u64, u64),
 ) -> bool {
-    let earlier_boot = pinned_at.zip(boot_time()).is_some_and(|(at, boot)| at < boot);
+    let earlier_boot = pinned_at
+        .zip(boot_time())
+        .is_some_and(|(at, boot)| at < boot);
     #[cfg(test)]
     let earlier_boot = earlier_boot || super::n2b_mutant("renumber-ignore-boot");
     #[cfg(test)]
