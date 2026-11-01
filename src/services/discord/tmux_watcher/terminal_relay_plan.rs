@@ -694,11 +694,24 @@ pub(super) async fn run_terminal_relay_plan<'a>(
         // this frame; a restored seed was composed by the bridge from its producer's read range.
         // Either way only the frame's own turn's row counts: the handed-off seed's turn, else the
         // turn the watcher bound, never the pre-relay row (a later turn can share the body).
+        // A held nonce loses the frame once the pre-relay row shows another turn started: a
+        // bodiless seed if it started by the frame's first byte, the bound turn if before its end.
         let consumed_end = terminal_event_consumed_offset(current_offset, all_data);
         let seed_turn_nonce = restored_response_seed.producer_turn_nonce.as_deref();
         let body_source = if restored_response_seed.body.is_empty() {
+            let inflight = inflight_before_relay.as_ref();
+            let held_until = |offset: u64| {
+                move |nonce: &&str| {
+                    !other_turn_started_before(inflight, tmux_session_name, nonce, offset)
+                }
+            };
             seed_turn_nonce
-                .or_else(|| startup_soft_terminal_authority.bound_turn_nonce())
+                .filter(held_until(turn_data_start_offset.saturating_add(1)))
+                .or_else(|| {
+                    startup_soft_terminal_authority
+                        .bound_turn_nonce()
+                        .filter(held_until(current_offset))
+                })
                 .map(|nonce| {
                     (
                         (turn_data_start_offset, consumed_end),
