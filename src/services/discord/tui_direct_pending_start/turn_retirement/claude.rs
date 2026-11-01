@@ -119,9 +119,8 @@ pub(crate) fn note_ended(channel: u64, nonce: &str, basis: &str) {
     }
 }
 
-/// Confirms a selected takeover channel once the taken execution ended — its transcript Idle, a
-/// kept end, a confirmed clear, `herdr_retired` naming it or a proven hop — and Legacy holds no
-/// unfinished turn. A live end is kept first, so a later execution or a restart cannot erase it.
+/// Confirms once the taken execution ended (Idle, a kept end, a clear, `herdr_retired` or a proven
+/// hop) and Legacy holds no unfinished turn; a live end is kept so nothing later erases it.
 pub(in crate::services::discord) fn confirm_takeover(
     channel: u64,
     config: &TurnConfig,
