@@ -1001,6 +1001,7 @@ mod post_work_evidence_tests {
                 transcript_path,
                 tmux_session_name,
                 last_offset,
+                ..
             } => {
                 assert_eq!(transcript_path, "/tmp/claude-transcript.jsonl");
                 assert_eq!(tmux_session_name, "AgentDesk-claude-adk");

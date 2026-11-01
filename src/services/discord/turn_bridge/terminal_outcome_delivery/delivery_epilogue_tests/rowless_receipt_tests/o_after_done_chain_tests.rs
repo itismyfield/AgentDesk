@@ -46,6 +46,7 @@ async fn hand_off_after_done(
             transcript_path: transcript,
             tmux_session_name: DRIVER_TMUX_SESSION.to_string(),
             last_offset: 64,
+            turn_read: None,
         },
     };
     let (mut ready, mut tmux_last_offset, mut owner) = (false, None, channel_id);
@@ -245,6 +246,7 @@ async fn bridge_turn(o_owns: bool, drains: &[&[Frame]]) -> (BridgeCompletionSign
                 transcript_path: transcript.clone(),
                 tmux_session_name: DRIVER_TMUX_SESSION.to_string(),
                 last_offset: 64,
+                turn_read: None,
             },
         },
     };
