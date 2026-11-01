@@ -362,15 +362,17 @@ pub(crate) fn ensured_on_this_thread() -> usize {
 static TEST_CONTEXTS: Mutex<BTreeMap<PathBuf, Context>> = Mutex::new(BTreeMap::new());
 
 fn context_for(socket: &Path) -> Context {
-    #[cfg(test)]
-    if let Some(context) = TEST_CONTEXTS
-        .lock()
-        .ok()
-        .and_then(|contexts| contexts.get(socket).cloned())
-    {
-        return context;
-    }
-    Context::for_process()
+    scoped(socket).unwrap_or_else(Context::for_process)
+}
+
+#[cfg(test)]
+fn scoped(socket: &Path) -> Option<Context> {
+    TEST_CONTEXTS.lock().ok()?.get(socket).cloned()
+}
+
+#[cfg(not(test))]
+fn scoped(_: &Path) -> Option<Context> {
+    None
 }
 
 /// Makes `ensure` use `context` for `socket` until the guard drops; sockets keep tests apart.
