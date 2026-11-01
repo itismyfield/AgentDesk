@@ -1,6 +1,5 @@
+use super::native_contract::paused_bridge;
 use super::*;
-use crate::services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::seed_context;
-use crate::services::discord::turn_bridge::cancel_backstop_test_support::BridgePause;
 use crate::services::discord::turn_finalizer::{FinalizeContext, TerminalEvent, TurnKey};
 use crate::services::discord::{self as discord, inflight::RelayOwnerKind};
 use std::time::Duration;
@@ -15,31 +14,6 @@ pub(in super::super) async fn after_native() {
     if let Some(step) = step {
         step.await;
     }
-}
-
-async fn paused_bridge(
-    shared: &Arc<SharedData>,
-    channel: ChannelId,
-    token: &Arc<CancelToken>,
-    direct: bool,
-) -> (
-    BridgePause,
-    std::sync::mpsc::Sender<crate::services::agent_protocol::StreamMessage>,
-) {
-    let row =
-        inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get()).unwrap();
-    let mut context = seed_context("", row);
-    context.provider = ProviderKind::Claude;
-    context.is_external_input_tui_direct = direct;
-    let pause = BridgePause::install(channel);
-    let (tx, rx) = std::sync::mpsc::channel();
-    discord::turn_bridge::spawn_turn_bridge(shared.clone(), token.clone(), rx, context);
-    assert!(pause.wait_for_entry(Duration::from_secs(8)).await);
-    assert!(
-        discord::live_bridge::retain_original(&ProviderKind::Claude, channel.get(), token)
-            .is_none()
-    );
-    (pause, tx)
 }
 
 async fn native_finished(shared: &Arc<SharedData>, channel: ChannelId, token: &Arc<CancelToken>) {

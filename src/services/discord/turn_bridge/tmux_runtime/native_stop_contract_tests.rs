@@ -3,9 +3,11 @@ use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
 use crate::services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::{
     cold_error::Shown, seed_context,
 };
+use crate::services::discord::turn_bridge::cancel_backstop_test_support::BridgePause;
 use crate::services::discord::{self as discord, Data};
 use poise::serenity_prelude as serenity;
 use std::io::Write;
+use std::time::Duration;
 
 fn run<F: std::future::Future>(future: F) -> F::Output {
     // This fixture owns Legacy delivery with a verified empty O selection.
@@ -66,6 +68,31 @@ async fn mailbox_released(
         std::fs::read_to_string(path),
         fx.calls(),
     );
+}
+
+pub(super) async fn paused_bridge(
+    shared: &Arc<SharedData>,
+    channel: ChannelId,
+    token: &Arc<CancelToken>,
+    direct: bool,
+) -> (
+    BridgePause,
+    std::sync::mpsc::Sender<crate::services::agent_protocol::StreamMessage>,
+) {
+    let row =
+        inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get()).unwrap();
+    let mut context = seed_context("", row);
+    context.provider = ProviderKind::Claude;
+    context.is_external_input_tui_direct = direct;
+    let pause = BridgePause::install(channel);
+    let (tx, rx) = std::sync::mpsc::channel();
+    discord::turn_bridge::spawn_turn_bridge(shared.clone(), token.clone(), rx, context);
+    assert!(pause.wait_for_entry(Duration::from_secs(8)).await);
+    assert!(
+        discord::live_bridge::retain_original(&ProviderKind::Claude, channel.get(), token)
+            .is_none()
+    );
+    (pause, tx)
 }
 
 fn bridge(
