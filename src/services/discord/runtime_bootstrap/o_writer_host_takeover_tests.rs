@@ -456,9 +456,8 @@ async fn within(seconds: u64, mut ready: impl FnMut() -> bool) -> bool {
     ready()
 }
 
-/// The real Claude gateway writer: the old transcript delivered and sampled, a new Discord turn
-/// claims the real mailbox and Legacy's inflight row as O commits, and a cleared transcript binds.
-/// O takes it while busy and Row stand, posts its answer once over REST, and Legacy sends none.
+/// Through the real gateway writer, a new Discord turn holds the mailbox and a Row as the next
+/// transcript binds: O takes it, posts its answer once over REST, and Legacy sends none.
 #[test]
 fn claude_takeover_commits_while_a_discord_turn_holds_the_mailbox_and_its_row_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
