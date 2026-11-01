@@ -633,6 +633,8 @@ test.describe("settings", () => {
     await expect(page.getByTestId("settings-connectors-summary")).toHaveText("3개 중 2개 준비됐어요.");
     await expect(page.getByTestId("settings-connector-kakao_scheduled_delivery")).toContainText("Kakao 메시지 보내기");
     await expect(page.getByTestId("settings-connector-kakao_scheduled_delivery")).toContainText("꺼져 있어요.");
+    await page.getByTestId("settings-connector-kakao_scheduled_delivery").getByText("설정 방법 보기").click();
+    await expect(page.getByTestId("settings-connector-steps-kakao_scheduled_delivery")).toHaveText("Kakao 인증 정보를 넣은 뒤 AGENTDESK_KAKAO_ENABLED=true로 켜세요.");
     await expect(page.getByTestId("settings-tab-attention-connections")).toHaveCount(0);
     await expect(page.getByText("Obsidian agent prompts")).toHaveCount(0);
     await expect(page.getByRole("button", { name: "초기 설정 다시 하기" })).toBeVisible();

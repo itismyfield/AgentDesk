@@ -1,6 +1,6 @@
 import { AlertTriangle, CheckCircle2, CircleSlash, RefreshCw } from "lucide-react";
 import type { OperatorConnectorStatus, OperatorConnectorsResponse } from "../../api";
-import { connectorCopy, connectorReason } from "./SettingsCopy";
+import { connectorCopy, connectorReason, connectorSetupSteps } from "./SettingsCopy";
 import { SETTINGS_SECONDARY_BUTTON, SettingsStatusMessage } from "./SettingsPanels";
 
 type Tr = (ko: string, en: string) => string;
@@ -70,6 +70,7 @@ function stateLabel(state: string, tr: Tr): string {
 function ConnectorRow({ connector, isKo, tr }: { connector: OperatorConnectorStatus; isKo: boolean; tr: Tr }) {
   const tone = connectorTone(connector.state);
   const copy = connectorCopy(connector.id, connector.name);
+  const setup = connectorSetupSteps(connector, isKo);
   const Icon = tone === "ready" ? CheckCircle2 : tone === "setup" ? AlertTriangle : CircleSlash;
   const color = tone === "ready" ? "var(--th-badge-emerald-text)" : tone === "setup" ? "var(--th-badge-amber-text)" : "var(--th-text-muted)";
 
@@ -99,14 +100,15 @@ function ConnectorRow({ connector, isKo, tr }: { connector: OperatorConnectorSta
           <dd className="min-w-0 font-mono text-th-text-primary [overflow-wrap:anywhere]">{connector.source}</dd>
         </> : null}
       </dl>
-      {connector.setup_actions.length > 0 ? (
+      {setup.steps.length > 0 ? (
         <details className="mt-2 text-xs">
           <summary className="inline-flex min-h-11 cursor-pointer items-center font-medium text-th-text-secondary">
             {tr("설정 방법 보기", "How to set up")}
           </summary>
-          <ul className="mt-1 space-y-1.5 leading-5 text-th-text-primary">
-            {connector.setup_actions.map((action) => (
-              <li key={action} className="rounded-md border border-th-border-subtle px-3 py-2 font-mono [overflow-wrap:anywhere]" lang="en">
+          <ul className="mt-1 space-y-1.5 leading-5 text-th-text-primary" data-testid={`settings-connector-steps-${connector.id}`}>
+            {setup.steps.map((action) => (
+              <li key={action} className={`rounded-md border border-th-border-subtle px-3 py-2 [overflow-wrap:anywhere] ${setup.translated ? "break-keep" : "font-mono"}`}
+                lang={setup.translated ? undefined : "en"}>
                 {action}
               </li>
             ))}

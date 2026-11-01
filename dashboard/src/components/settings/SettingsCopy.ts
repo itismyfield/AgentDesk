@@ -423,3 +423,33 @@ export function connectorReason(reason: string, tr: Tr): string {
   const copy = CONNECTOR_REASONS[reason];
   return copy ? tr(copy[0], copy[1]) : reason;
 }
+
+type ConnectorSetupInput = { id: string; state: string; reason: string | null; env_var: string; source: string | null; setup_actions: string[] };
+const OBSIDIAN_STUBS = "scripts/operator-init-portable.py --with-obsidian-stubs";
+
+/** Korean setup steps for the reason codes this screen knows. `translated` is false when the server's English steps are shown as they are. */
+export function connectorSetupSteps(connector: ConnectorSetupInput, isKo: boolean): { steps: string[]; translated: boolean } {
+  const steps = isKo ? koreanSetupSteps(connector) : null;
+  return steps ? { steps, translated: true } : { steps: connector.setup_actions, translated: false };
+}
+
+function koreanSetupSteps({ id, state, reason, env_var: env, source }: ConnectorSetupInput): string[] | null {
+  if (id === "kakao_scheduled_delivery") {
+    if (reason === "disabled") return ["Kakao 인증 정보를 넣은 뒤 AGENTDESK_KAKAO_ENABLED=true로 켜세요."];
+    if (reason === "missing_credentials") return [
+      "KAKAO_REST_API_KEY와 KAKAO_REFRESH_TOKEN을 넣으세요(권장). 잠깐만 쓸 거라면 KAKAO_ACCESS_TOKEN을 넣어도 돼요.",
+      "Kakao 환경 변수를 바꾼 뒤 AgentDesk를 다시 시작하세요.",
+    ];
+    if (state === "invalid_config") return [
+      "AGENTDESK_KAKAO_ACCOUNTS, AGENTDESK_KAKAO_DEFAULT_ACCOUNT, AGENTDESK_KAKAO_LANDING_URL 값을 확인하세요.",
+      "고친 뒤 AgentDesk를 다시 시작하세요.",
+    ];
+    return null;
+  }
+  if (reason === "home_unavailable") return [`${env}를 이미 있는 폴더로 지정하세요.`];
+  if (reason === "missing_path" && source) return [`지정한 폴더를 만드세요: ${source}`, `${env}를 지우거나 이미 있는 폴더로 바꾸세요.`];
+  if (reason === "missing_skill_files" && source) return [`${source} 아래에 SKILL.md가 든 스킬 폴더를 하나 이상 넣으세요.`];
+  if (reason === "missing_config" && id === "obsidian_agent_prompts") return [`${env}를 이미 있는 프롬프트 폴더로 지정하세요. 시작용 폴더가 필요하면 ${OBSIDIAN_STUBS}를 실행하세요.`];
+  if (reason === "missing_config" && id === "obsidian_skill_root") return [`${env}를 <스킬>/SKILL.md가 하나 이상 든 폴더로 지정하세요. 실제 스킬을 동기화하기 전이라면 ${OBSIDIAN_STUBS}를 실행하세요.`];
+  return null;
+}
