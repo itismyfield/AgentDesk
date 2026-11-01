@@ -1,5 +1,6 @@
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use std::collections::{HashMap, VecDeque};
 
 // Put an immutable clock before pg_catalog so the real queries see exact boundaries,
 // including on the async bridge's separately connected pool.
@@ -128,15 +129,52 @@ async fn automatic_owner_strict_five_minute_and_null_boundary_pg() {
 
 #[derive(Clone)]
 struct TraceIo {
-    row: serde_json::Value,
-    observed: serde_json::Value,
+    working: Vec<serde_json::Value>,
+    deadlocks: Vec<serde_json::Value>,
+    observed: HashMap<String, serde_json::Value>,
     inflights: Vec<serde_json::Value>,
-    repaired: serde_json::Value,
+    repaired: HashMap<String, serde_json::Value>,
+    inflight_errors: VecDeque<bool>,
     fault: Option<&'static str>,
     trace: Vec<serde_json::Value>,
 }
 
 impl TraceIo {
+    fn new(rows: Vec<serde_json::Value>) -> Self {
+        use serde_json::json;
+        let observed = rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let key = row["session_key"].as_str().unwrap();
+                (
+                    key.to_owned(),
+                    json!({"state": "dead", "session_id": index + 7,
+                "tmux_name": key.rsplit(':').next().unwrap()}),
+                )
+            })
+            .collect();
+        let repaired = rows
+            .iter()
+            .map(|row| {
+                (
+                    row["session_key"].as_str().unwrap().to_owned(),
+                    json!({"repaired": true, "dispatch_rows_affected": 1, "dispatch_error": null}),
+                )
+            })
+            .collect();
+        Self {
+            working: rows.clone(),
+            deadlocks: rows,
+            observed,
+            inflights: vec![],
+            repaired,
+            inflight_errors: VecDeque::new(),
+            fault: None,
+            trace: vec![],
+        }
+    }
+
     fn step(&mut self, name: &str, args: serde_json::Value) -> Result<(), String> {
         self.trace.push(serde_json::json!([name, args]));
         if self.fault == Some(name) {
@@ -153,18 +191,25 @@ impl PolicyMaintenanceIo for TraceIo {
     }
     fn working(&mut self, minutes: i32) -> Result<Vec<serde_json::Value>, String> {
         self.step("working", serde_json::json!([minutes]))?;
-        Ok(vec![self.row.clone()])
+        Ok(self.working.clone())
     }
     fn deadlocks(&mut self, minutes: i32, limit: i32) -> Result<Vec<serde_json::Value>, String> {
         self.step("deadlocks", serde_json::json!([minutes, limit]))?;
-        Ok(vec![self.row.clone()])
+        Ok(self.deadlocks.clone())
     }
     fn observe(&mut self, key: &str) -> Result<serde_json::Value, String> {
         self.step("observe", serde_json::json!([key]))?;
-        Ok(self.observed.clone())
+        Ok(self
+            .observed
+            .get(key)
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
     }
     fn inflights(&mut self) -> Result<Vec<serde_json::Value>, String> {
         self.step("inflights", serde_json::json!([]))?;
+        if self.inflight_errors.pop_front().unwrap_or(false) {
+            return Err("Error: transient inflight".to_string());
+        }
         Ok(self.inflights.clone())
     }
     fn repair(
@@ -173,7 +218,7 @@ impl PolicyMaintenanceIo for TraceIo {
         request: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
         self.step("repair", serde_json::json!([key, request]))?;
-        Ok(self.repaired.clone())
+        Ok(self.repaired.get(key).cloned().unwrap())
     }
     fn delete_counter(&mut self, key: &str) -> Result<(), String> {
         self.step("delete_counter", serde_json::json!([key]))
@@ -252,14 +297,10 @@ fn legacy_trace(io: TraceIo) -> (Vec<serde_json::Value>, Option<String>) {
 fn policy_owner_trace_matches_pre_move_policy_for_cache_liveness_and_failures() {
     use serde_json::{Value, json};
     let key = "provider:__proto__";
-    let template = TraceIo {
-        row: json!({"session_key": key, "active_dispatch_id": "d1", "active_dispatch_status": "pending", "active_turn_nonce": "turn-1"}),
-        observed: json!({"state": "live", "session_id": 7, "tmux_name": "__proto__"}),
-        inflights: vec![],
-        repaired: json!({"repaired": true, "dispatch_rows_affected": 1, "dispatch_error": null}),
-        fault: None,
-        trace: vec![],
-    };
+    let mut template = TraceIo::new(vec![
+        json!({"session_key": key, "active_dispatch_id": "d1", "active_dispatch_status": "pending", "active_turn_nonce": "turn-1"}),
+    ]);
+    template.observed.get_mut(key).unwrap()["state"] = json!("live");
     let mut cases = Vec::new();
     for state in ["live", "dead", "unknown", "other"] {
         for mode in [
@@ -272,9 +313,11 @@ fn policy_owner_trace_matches_pre_move_policy_for_cache_liveness_and_failures() 
         ] {
             for status in ["pending", "dispatched", "completed"] {
                 let mut io = template.clone();
-                io.observed["state"] = json!(state);
-                io.observed["reason"] = json!("probe_failed");
-                io.row["active_dispatch_status"] = json!(status);
+                io.observed.get_mut(key).unwrap()["state"] = json!(state);
+                io.observed.get_mut(key).unwrap()["reason"] = json!("probe_failed");
+                for row in io.working.iter_mut().chain(&mut io.deadlocks) {
+                    row["active_dispatch_status"] = json!(status);
+                }
                 if mode != "absent" {
                     let mut row = json!({"session_key": key, "tmux_session_name": "__proto__", "turn_source": mode,
                         "request_owner_user_id": 1, "user_msg_id": 2, "updated_at": "2026-10-30 00:00:00"});
@@ -315,12 +358,14 @@ fn policy_owner_trace_matches_pre_move_policy_for_cache_liveness_and_failures() 
         json!({"state": "unknown", "reason": "host_conflict"}),
     ] {
         let mut io = template.clone();
-        io.observed = observed;
+        io.observed.insert(key.to_owned(), observed);
         cases.push(io);
     }
-    for key in [Value::Null, json!(""), json!("  ")] {
+    for row_key in [Value::Null, json!(""), json!("  ")] {
         let mut io = template.clone();
-        io.row["session_key"] = key;
+        for row in io.working.iter_mut().chain(&mut io.deadlocks) {
+            row["session_key"] = row_key.clone();
+        }
         cases.push(io);
     }
     for repaired in [
@@ -329,7 +374,7 @@ fn policy_owner_trace_matches_pre_move_policy_for_cache_liveness_and_failures() 
         json!({"repaired": true, "dispatch_error": "dispatch transition failed"}),
     ] {
         let mut io = template.clone();
-        io.repaired = repaired;
+        io.repaired.insert(key.to_owned(), repaired);
         cases.push(io);
     }
     assert_eq!(cases.len(), 90);
@@ -338,4 +383,133 @@ fn policy_owner_trace_matches_pre_move_policy_for_cache_liveness_and_failures() 
         let error = maintain_policy_sessions(&mut io).err();
         assert_eq!((io.trace, error), expected, "legacy trace case {index}");
     }
+}
+
+#[test]
+fn policy_owner_multirow_trace_keeps_processing_after_skipped_rows() {
+    use serde_json::json;
+    let row = |key: &str| {
+        json!({"session_key": key, "active_dispatch_id": key,
+        "active_dispatch_status": "pending", "active_turn_nonce": "turn-1"})
+    };
+    let dead = "provider:dead";
+    for working in [true, false] {
+        for scenario in [
+            "unknown-first",
+            "unknown-last",
+            "live-inflight",
+            "repair-deferred",
+            "inflight-error",
+        ] {
+            let first = match scenario {
+                "unknown-first" | "unknown-last" => "provider:herdr",
+                "live-inflight" => "provider:active",
+                "repair-deferred" => "provider:changed",
+                "inflight-error" => "provider:transient",
+                _ => unreachable!(),
+            };
+            let rows = if scenario == "unknown-last" {
+                vec![row(dead), row(first)]
+            } else {
+                vec![row(first), row(dead)]
+            };
+            let mut io = TraceIo::new(rows);
+            match scenario {
+                "unknown-first" | "unknown-last" => {
+                    io.observed.insert(
+                        first.to_owned(),
+                        json!({"state": "unknown", "reason": "herdr"}),
+                    );
+                }
+                "live-inflight" => {
+                    io.observed.get_mut(first).unwrap()["state"] = json!("live");
+                    io.inflights
+                        .push(json!({"session_key": first, "updated_at": "2026-10-31 23:49:00"}));
+                }
+                "repair-deferred" => {
+                    io.repaired.insert(
+                        first.to_owned(),
+                        json!({"repaired": false, "deferred": "row_changed"}),
+                    );
+                }
+                "inflight-error" => io.inflight_errors.push_back(true),
+                _ => unreachable!(),
+            }
+            if working {
+                io.deadlocks.clear();
+            } else {
+                io.working.clear();
+            }
+            let label = format!(
+                "{}:{scenario}",
+                if working { "working" } else { "deadlocks" }
+            );
+            let expected = legacy_trace(io.clone());
+            let error = maintain_policy_sessions(&mut io).err();
+            assert_eq!(
+                (&io.trace, error),
+                (&expected.0, expected.1),
+                "multirow legacy trace {label}"
+            );
+            assert!(
+                io.trace
+                    .iter()
+                    .any(|entry| entry[0] == "repair" && entry[1][0] == dead),
+                "later dead row must be repaired: {label}"
+            );
+        }
+    }
+}
+
+#[test]
+fn policy_producers_do_not_call_low_level_stale_busy_ops() {
+    use std::path::{Path, PathBuf};
+    fn scripts(directory: &Path, paths: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if entry.file_type().unwrap().is_dir() {
+                if entry.file_name() != "__tests__" {
+                    scripts(&path, paths);
+                }
+            } else if path.extension().is_some_and(|extension| extension == "js") {
+                paths.push(path);
+            }
+        }
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    assert!(
+        root.join("src").is_dir(),
+        "source scan must use the repository root"
+    );
+    let mut paths = Vec::new();
+    scripts(&root.join("policies"), &mut paths);
+    assert!(
+        !paths.is_empty(),
+        "source scan must cover production policy scripts"
+    );
+    paths.sort();
+    let forbidden = [
+        "listStaleWorkingSessions",
+        "listDeadlockCandidates",
+        "repairStaleSession",
+        "clearDeadlockCounters",
+        "cleanupDeadlock",
+    ];
+    let mut violations = Vec::new();
+    for path in paths {
+        let source = std::fs::read_to_string(&path).unwrap();
+        for name in forbidden {
+            if source.contains(name) {
+                violations.push(format!(
+                    "{}: {name}",
+                    path.strip_prefix(root).unwrap().display()
+                ));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "policy decisions must stay in the Rust stale-busy owner: {violations:?}"
+    );
 }
