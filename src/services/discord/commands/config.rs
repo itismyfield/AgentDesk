@@ -870,9 +870,28 @@ mod session_override_cluster_characterization_tests {
 
     #[test]
     fn model_override_round_trip_observed_via_would_change_probe() {
+        let _hosting = crate::services::provider_hosting::TEST_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         let _env_guard = isolate_persistence(tmp.path());
+        // A headless Claude channel, whose model change resets the session; a local TUI relaunches.
+        let mut config = crate::config::Config::default();
+        let headless = crate::config::ProviderConfig {
+            tui_hosting: Some(false),
+            ..Default::default()
+        };
+        config.providers.insert("claude".into(), headless);
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let default = crate::config::Config::default();
+                crate::services::provider_hosting::install_provider_hosting_config(&default);
+            }
+        }
+        let _restore = Restore;
+        crate::services::provider_hosting::install_provider_hosting_config(&config);
 
         let shared = make_shared_data_for_tests();
         let channel_id = serenity::ChannelId::new(3_038_430);
