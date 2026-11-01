@@ -1585,7 +1585,7 @@ async fn i7441r3_headless_bridge_seed_body_before_late_frame_needs_its_sent_outb
     .into_iter()
     .enumerate()
     {
-        headless_restart_frame(&pool, 744_130 + index as u64, outbox).await;
+        headless_restart_frame(&pool, 744_600 + index as u64, outbox).await;
     }
     pool.close().await;
     db.drop().await;
