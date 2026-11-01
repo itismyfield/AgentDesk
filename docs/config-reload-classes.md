@@ -113,7 +113,7 @@ seconds with content comparison, independently of native filesystem notification
 | `cluster.semaphores.*.capacity` | live | `src/server/task_dispatch_claims/config_read.rs` claim_task_dispatches (config::snapshot per claim) |
 | `cluster.semaphores.*.scope` | live | `src/server/task_dispatch_claims/config_read.rs` claim_task_dispatches (config::snapshot per claim) |
 | `cluster.session_bound_relay_enabled` | restart | `src/server/worker_registry/registry.rs` start_worker (WatcherSupervisor spawn gate) |
-| `kanban.manager_channel_id` | live | `src/services/kanban_cards.rs` require_explicit_bearer_token; `src/services/auto_queue/control_routes.rs` repair_phase_gates; `src/server/routes/kanban.rs` log_kanban_identity_consumption (runtime_config snapshot) |
+| `kanban.manager_channel_id` | restart | `src/services/kanban_cards.rs` require_explicit_bearer_token, `src/server/routes/kanban.rs` log_kanban_identity_consumption, `src/services/auto_queue/order_routes.rs` submit_order_with_pg (live runtime_config()); `src/services/auto_queue/control_routes.rs` repair_phase_gates (boot AppState.config authorization) |
 | `kanban.deadlock_manager_channel_id` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (applied by db/postgres/shared_config.rs:startup_reseed) -> kv deadlock_manager_channel_id |
 | `kanban.relay_alert_threshold` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (applied by db/postgres/shared_config.rs:startup_reseed) -> kv kanban_relay_alert_threshold |
 | `review.enabled` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (applied by db/postgres/shared_config.rs:startup_reseed) -> kv review_enabled |

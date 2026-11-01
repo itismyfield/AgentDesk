@@ -1011,6 +1011,12 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn retired_manager_key_is_absent_from_endpoint_inventory() {
+        let inventory = include_str!("../server/routes/docs/inventory/endpoints/part_03.rs");
+        assert!(!inventory.contains("kanban_manager_channel_id"));
+    }
+
     struct TestDatabase {
         _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
         admin_url: String,
