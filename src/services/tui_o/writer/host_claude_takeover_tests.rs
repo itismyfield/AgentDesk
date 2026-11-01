@@ -414,3 +414,47 @@ async fn late_claude_fallback_commits_once_the_old_transcript_was_proven_deliver
         .find(|pinned| pinned.source_id == source);
     assert_eq!(new.map(|pinned| pinned.delivery_start), Some(len));
 }
+
+/// The old transcript delivered and sampled, two rotations land before the next look: B with an
+/// answer Legacy never delivered, then C delivered to EOF. B stays owed, so C is not committed.
+#[tokio::test(start_paused = true)]
+async fn late_claude_rotations_read_together_keep_the_middle_transcript_owed() {
+    const CH: u64 = 63_761_908;
+    let old = [prompted(), answer("msg_0", "old"), turn_end()].concat();
+    let f = reserved(CH, |h, binds| {
+        let path = h._runtime.path().join("old.jsonl");
+        std::fs::write(&path, &old).unwrap();
+        binds.source(h._runtime.path(), "n-old", &path);
+        path
+    })
+    .await;
+    f.legacy.frontier.store(old.len() as u64, Ordering::SeqCst);
+    let io = f.io.clone();
+    test_hook::set(CH, Step::AfterFence, move || {
+        io.busy.store(true, Ordering::SeqCst);
+        Err("the new turn claimed the mailbox".into())
+    });
+    settle().await;
+    assert_eq!(adoption(CH), Adoption::Deferred);
+    let turn = |id, text| [prompted(), answer(id, text), turn_end()].concat();
+    let middle = f.file("middle.jsonl", &turn("msg_1", "undelivered"));
+    let last = turn("msg_2", "delivered");
+    let path = f.file("last.jsonl", &last);
+    f.binds.source(f.root(), "n-middle", &middle);
+    f.binds.source(f.root(), "n-last", &path);
+    let moved = Legacy {
+        path,
+        frontier: AtomicU64::new(last.len() as u64),
+    };
+    *f.io.legacy.lock().unwrap() = Some(Arc::new(moved));
+    f.io.busy.store(false, Ordering::SeqCst);
+    settle().await;
+    settle().await;
+    assert_eq!(
+        adoption(CH),
+        Adoption::Deferred,
+        "{:?}",
+        f.io.alarms.released()
+    );
+    assert!(!f.harness.store.has_channel_dir(CH));
+}

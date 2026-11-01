@@ -448,6 +448,18 @@ pub(super) mod test_host {
             execution: BTreeMap::new(),
         }
     }
+
+    /// The Claude gateway host's parts as the boot builds them, posting through `rest` as the
+    /// node clustering configured as `configured_id`.
+    pub(in crate::services::discord::runtime_bootstrap) fn claude_parts(
+        shared: &Arc<SharedData>,
+        rest: Arc<serenity::Http>,
+        configured_id: &str,
+    ) -> host::HostParts<impl HostIo> {
+        let mut parts = parts_with_rest(shared, &ProviderKind::Claude, None, Some(rest));
+        Arc::get_mut(&mut parts.io).unwrap().configured_id = Some(configured_id.to_owned());
+        parts
+    }
 }
 
 #[cfg(test)]

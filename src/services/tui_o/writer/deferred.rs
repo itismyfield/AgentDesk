@@ -55,7 +55,7 @@ pub(super) enum Retried {
     Rebase(Rebased),
 }
 
-/// The source bound now and the takeover floor its predecessors' delivery proofs give, if any.
+/// The next source bound after the old one and the takeover floor its predecessors' proofs give.
 pub(super) struct Rebased {
     pub(super) new: (SourceId, u64),
     pub(super) floor: Result<Floor, String>,
@@ -618,13 +618,14 @@ fn rebased<I: HostIo>(
         return None;
     }
     // A rotation already in the log at the reservation's first read stays Legacy's.
-    let (_, seq) = adoption::rotated(events, waiting.bound.1, &waiting.bound.0)?;
+    let (next, seq) = adoption::rotated(events, waiting.bound.1, &waiting.bound.0)?;
     let boundary = waiting.candidate.late_boundary()?;
     if seq <= boundary.takeover_after {
         return None;
     }
     let detail = rotation(waiting, events)?;
-    let new = super::late_adopt::codex::bound_after(events, waiting.bound.1)?;
+    // One hop at a time, so each source passed through is judged and owed in turn.
+    let new = (next.clone(), seq);
     let candidate = waiting.candidate;
     let mut owed: Vec<Owed> = (waiting.owed.iter())
         .filter(|owed| owed.settled(events, candidate).is_err())

@@ -1,5 +1,5 @@
-//! The Codex takeover through the gateway's own facts, intake fence and custody: the fence is held
-//! until the init is written, and a Legacy body claimed between custody's two reads is O's.
+//! Codex and Claude takeovers through the gateway's own facts, fence, custody and mailbox: what O
+//! takes is O's to post, and a Legacy body claimed around the takeover waits on its lock.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -19,11 +19,12 @@ use crate::services::tui_o::shadow::binding_reader::source_id_for;
 use crate::services::tui_o::turn_mode::{TurnConfig, transcript_turns};
 use crate::services::tui_o::writer::activation::ActivationFacts;
 use crate::services::tui_o::writer::activation::test_hook::{self, Step};
-use crate::services::tui_o::writer::adoption::LegacyView;
+use crate::services::tui_o::writer::adoption::{LegacyCursor, LegacyView};
 use crate::services::tui_o::writer::binding::{
     BindingCause, BindingEvent, BindingEvents, BindingEvidence, BindingRecord, BindingTarget,
 };
 use crate::services::tui_o::writer::late_adopt;
+use poise::serenity_prelude as serenity;
 
 /// Binds as the hook writer would; reads are counted so a bind can land after the baseline.
 struct Log {
@@ -54,6 +55,10 @@ impl Log {
         while self.reads.load(Ordering::SeqCst) <= reads {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        self.bind_now(source);
+    }
+
+    fn bind_now(&self, source: &SourceId) {
         let mut events = self.events.lock().unwrap();
         let seq = events.len() as u64 + 1;
         let evidence = BindingEvidence {
@@ -94,10 +99,12 @@ impl BindingEvents for Log {
     }
 }
 
-/// The gateway host with late adoption on and the test's binding log; all else is the gateway's.
+/// The gateway host with late adoption on, the test's binding log and, when given, Legacy's
+/// delivery as `stub` reports it; all else is the gateway's.
 struct Late<H> {
     host: H,
     log: Arc<Log>,
+    stub: Option<Arc<dyn LegacyView>>,
 }
 
 impl<H: HostIo> HostIo for Late<H> {
@@ -108,8 +115,21 @@ impl<H: HostIo> HostIo for Late<H> {
     fn port(&self) -> impl Future<Output = Arc<H::Port>> + Send {
         self.host.port()
     }
+    fn port_for(&self, channel: u64) -> impl Future<Output = Result<Arc<H::Port>, String>> + Send {
+        self.host.port_for(channel)
+    }
+    fn execution_permit(
+        &self,
+        channel: u64,
+    ) -> Option<Result<Arc<crate::services::tui_o::ownership::execution::OwnerPermit>, String>>
+    {
+        self.host.execution_permit(channel)
+    }
     fn lease(&self) -> H::Lease {
         self.host.lease()
+    }
+    fn writer_unavailable(&self, channel: u64) {
+        self.host.writer_unavailable(channel);
     }
     fn alarms(&self) -> H::Alarms {
         self.host.alarms()
@@ -138,13 +158,16 @@ impl<H: HostIo> HostIo for Late<H> {
         self.host.local_custody(channel, provider)
     }
     fn legacy(&self) -> Arc<dyn LegacyView> {
-        self.host.legacy()
+        self.stub.clone().unwrap_or_else(|| self.host.legacy())
     }
     fn legacy_busy(&self, channel: u64) -> impl Future<Output = bool> + Send {
         self.host.legacy_busy(channel)
     }
     fn relaying(&self, channel: u64) -> bool {
         self.host.relaying(channel)
+    }
+    fn adopted(&self, channel: u64, provider: ShadowProvider) {
+        self.host.adopted(channel, provider);
     }
 }
 
@@ -249,6 +272,7 @@ async fn gateway_takeover() {
     let io = Late {
         host: test_host::over(shared, Duration::ZERO, Some(local)),
         log: Arc::clone(&log),
+        stub: None,
     };
     let stores = tempfile::tempdir().unwrap();
     let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, stores.path());
@@ -302,6 +326,7 @@ async fn gateway_takeover() {
     let io = Late {
         host: io.host,
         log: Arc::clone(&raced_log),
+        stub: None,
     };
     // Legacy's body claim lands between custody's two reads and waits on the adoption lock.
     let claimer = Arc::new(Mutex::new(None));
@@ -334,8 +359,106 @@ async fn gateway_takeover() {
     fixture.drop().await;
 }
 
-/// A Claude takeover commits while a new Discord turn holds the real mailbox and Legacy's inflight
-/// row; the body of the assistant record that follows is O's and Legacy sends none of it.
+/// Legacy's delivery for a Claude transcript: its cursor at EOF and the frontier the test sets.
+struct Delivered {
+    path: std::path::PathBuf,
+    frontier: std::sync::atomic::AtomicU64,
+}
+
+impl LegacyView for Delivered {
+    fn started(&self) -> bool {
+        true
+    }
+    fn cursor(&self, _: &str) -> LegacyCursor {
+        let offset = std::fs::metadata(&self.path).map_or(0, |meta| meta.len());
+        LegacyCursor::Bound {
+            path: self.path.clone(),
+            offset,
+        }
+    }
+    fn late_cursor(&self, tmux: &str) -> Result<LegacyCursor, String> {
+        Ok(self.cursor(tmux))
+    }
+    fn frontier(&self, _: u64, _: &str, _: u64) -> Option<u64> {
+        Some(self.frontier.load(Ordering::SeqCst))
+    }
+    fn tail_running(&self, _: &str) -> bool {
+        false
+    }
+}
+
+/// Discord's REST API as the writer's port meets it, recording each posted message's content.
+struct Rest {
+    http: Arc<serenity::Http>,
+    posts: Arc<Mutex<Vec<String>>>,
+    server: tokio::task::AbortHandle,
+}
+
+impl Rest {
+    async fn start(channel: u64) -> Self {
+        use axum::{body::Bytes, http::Method, http::Uri, response::IntoResponse};
+        let posts: Arc<Mutex<Vec<String>>> = Arc::default();
+        let recorded = Arc::clone(&posts);
+        let app = axum::Router::new().fallback(axum::routing::any(
+            move |method: Method, uri: Uri, body: Bytes| {
+                let recorded = Arc::clone(&recorded);
+                async move {
+                    let bot = json!({"id": "1", "username": "o-bot", "discriminator": "0001",
+                        "avatar": null, "bot": true});
+                    if uri.path().ends_with("/users/@me") {
+                        return axum::Json(bot).into_response();
+                    }
+                    if method == Method::GET {
+                        return axum::Json(json!([])).into_response();
+                    }
+                    let payload: serde_json::Value =
+                        serde_json::from_slice(&body).unwrap_or_default();
+                    let content = payload["content"].as_str().unwrap_or_default().to_owned();
+                    let mut posts = recorded.lock().unwrap();
+                    posts.push(content.clone());
+                    let message = json!({"id": (900_001 + posts.len() as u64).to_string(),
+                        "channel_id": channel.to_string(), "content": content, "author": bot,
+                        "timestamp": "2026-11-01T00:00:00+00:00", "edited_timestamp": null,
+                        "tts": false, "mention_everyone": false, "mentions": [],
+                        "mention_roles": [], "attachments": [], "embeds": [], "pinned": false,
+                        "type": 0});
+                    axum::Json(message).into_response()
+                }
+            },
+        ));
+        let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = socket.local_addr().unwrap().port();
+        let http = serenity::HttpBuilder::new("test-token")
+            .proxy(format!("http://127.0.0.1:{port}"))
+            .ratelimiter_disabled(true)
+            .build();
+        let server = tokio::spawn(async move { axum::serve(socket, app).await.unwrap() });
+        Self {
+            http: Arc::new(http),
+            posts,
+            server: server.abort_handle(),
+        }
+    }
+
+    fn posts_with(&self, text: &str) -> usize {
+        let posts = self.posts.lock().unwrap();
+        posts.iter().filter(|post| post.contains(text)).count()
+    }
+}
+
+async fn within(seconds: u64, mut ready: impl FnMut() -> bool) -> bool {
+    for _ in 0..seconds * 20 {
+        if ready() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    ready()
+}
+
+/// The real Claude gateway writer: the old transcript delivered and sampled, a new Discord turn
+/// claims the real mailbox and Legacy's inflight row as O commits, and a cleared transcript binds.
+/// O takes it while busy and Row stand, posts its answer once over REST, and Legacy sends none.
 #[test]
 fn claude_takeover_commits_while_a_discord_turn_holds_the_mailbox_and_its_row_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -350,35 +473,79 @@ async fn busy_takeover() {
     use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
     use crate::services::provider::{CancelToken, ProviderKind};
     use crate::services::tui_o::store::InitOrigin;
+    use crate::services::tui_o::writer::host;
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
     let fixture = TestPostgresDb::create().await;
     let pool = fixture.connect_and_migrate().await;
     let shared =
         crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let channel = 64_700_511;
+    let rest = Rest::start(channel).await;
+    let _reserved = reserve_as("claude", &[channel]);
+    let session = "c1a0de00-0000-4000-8000-000000700511";
+    let record = |value: serde_json::Value| format!("{value}\n");
+    let prompted = || {
+        record(json!({"type": "mode", "mode": "normal", "sessionId": session}))
+            + &record(json!({"type": "user", "sessionId": session, "uuid": "u1",
+                "message": {"role": "user", "content": "hi"}}))
+    };
+    let answer = |id: &str, text: &str| {
+        record(
+            json!({"type": "assistant", "sessionId": session, "uuid": format!("a-{id}"),
+            "apiBlockIndex": 0, "message": {"id": id, "role": "assistant",
+            "content": [{"type": "text", "text": text}]}}),
+        ) + &record(
+            json!({"type": "system", "subtype": "turn_duration", "durationMs": 5,
+                "sessionId": session}),
+        )
+    };
+    let transcripts = tempfile::tempdir().unwrap();
+    let old_path = transcripts.path().join("claude-old.jsonl");
+    let old = prompted() + &answer("msg_0", "the delivered old answer");
+    std::fs::write(&old_path, &old).unwrap();
+    let log = Log::of(channel, Claude);
+    log.bind_now(&source_id_for(session, &old_path).unwrap());
+    let delivered = Arc::new(Delivered {
+        path: old_path,
+        frontier: (old.len() as u64).into(),
+    });
+    let refused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fired = Arc::clone(&refused);
+    test_hook::set(channel, Step::AfterFence, move || {
+        fired.store(true, Ordering::SeqCst);
+        Err("a new Discord turn claimed the mailbox".into())
+    });
+
     let local = crate::services::cluster::node_registry::SELF_INSTANCE_ID.get();
     let local = local.map_or("takeover-local", String::as_str);
-    let channel = 64_700_511;
-    let log = Log::of(channel, Claude);
-    let io = Late {
-        host: test_host::over(Arc::clone(&shared), Duration::ZERO, Some(local)),
-        log: Arc::clone(&log),
+    let prepared = test_host::claude_parts(&shared, Arc::clone(&rest.http), local);
+    let Ok(gateway) = Arc::try_unwrap(prepared.io) else {
+        panic!("the gateway host is shared")
     };
-    let stores = tempfile::tempdir().unwrap();
-    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, stores.path());
-    let store = store.unwrap().unwrap();
-    let _reserved = reserve_as("claude", &[channel]);
-    let gate = OwnershipGate::default();
-    gate.acquired();
+    let io = Arc::new(Late {
+        host: gateway,
+        log: Arc::clone(&log),
+        stub: Some(delivered),
+    });
+    prepared.gate.acquired();
+    let parts = host::HostParts {
+        io: Arc::clone(&io),
+        runtime_root: prepared.runtime_root,
+        gate: prepared.gate,
+        readiness: prepared.readiness,
+    };
+    let owned = crate::services::tui_o::cutover::boot_ownership();
+    let mut handles = host::start_managed(Claude, true, owned, || parts);
+    assert_eq!(handles.len(), 1);
+    assert!(
+        within(60, || refused.load(Ordering::SeqCst)).await,
+        "the delivered old transcript's quiet commit reached the fence"
+    );
 
     let token = Arc::new(CancelToken::new());
     let (owner, message) = (UserId::new(1), MessageId::new(10));
-    let claimed = crate::services::discord::mailbox_try_start_turn(
-        &shared,
-        ChannelId::new(channel),
-        token,
-        owner,
-        message,
-    );
+    let claim = crate::services::discord::mailbox_try_start_turn;
+    let claimed = claim(&shared, ChannelId::new(channel), token, owner, message);
     assert!(claimed.await, "the new Discord turn claims the mailbox");
     let inflight = crate::services::discord::inflight::inflight_runtime_root().unwrap();
     let row = crate::services::discord::inflight::inflight_state_path(
@@ -388,48 +555,57 @@ async fn busy_takeover() {
     );
     std::fs::create_dir_all(row.parent().unwrap()).unwrap();
     std::fs::write(&row, "{}").unwrap();
-    let busy = || async { io.legacy_busy(channel).await };
-    assert!(busy().await);
+    assert!(io.legacy_busy(channel).await);
     assert_eq!(io.local_custody(channel, Claude), Ok(Custody::Row));
 
-    let transcripts = tempfile::tempdir().unwrap();
-    let path = transcripts.path().join("claude-busy.jsonl");
-    let session = "c1a0de00-0000-4000-8000-000000700511";
-    let text = [
-        json!({"type": "mode", "mode": "normal", "sessionId": session}),
-        json!({"type": "user", "sessionId": session, "uuid": "u1",
-            "message": {"role": "user", "content": "hi"}}),
-    ];
-    let text: String = text.iter().map(|line| format!("{line}\n")).collect();
-    std::fs::write(&path, text).unwrap();
-    let taken = source_id_for(session, &path).unwrap();
-    let adopting = candidate(channel);
-    let activated = late_adopt::activate(&io, channel, Claude, &store, &*log, &adopting, &gate);
-    let joined = async { tokio::join!(activated, log.bind_after(0, &taken)) };
-    let committed = tokio::time::timeout(Duration::from_secs(20), joined).await;
+    let new_path = transcripts.path().join("claude-new.jsonl");
+    std::fs::write(&new_path, prompted()).unwrap();
+    let taken = source_id_for(session, &new_path).unwrap();
+    log.bind_now(&taken);
+    let root = crate::config::runtime_root().unwrap();
+    let store = OStore::existing(&root);
+    let read_init = || {
+        store
+            .as_ref()
+            .and_then(|s| s.read_init(channel).ok().flatten())
+    };
     assert!(
-        matches!(committed, Ok((true, ()))),
+        within(60, || read_init().is_some()).await,
         "busy and a Row do not stop the takeover"
     );
-    assert_eq!(init_sources(&store, channel), [(taken.clone(), 0)]);
+    let store = OStore::existing(&root).unwrap();
+    assert_eq!(init_sources(&store, channel), [(taken, 0)]);
     let origin = store.read_init_origin(channel).unwrap();
     assert_eq!(origin, InitOrigin::LateClaudeTakeover);
-    assert!(busy().await, "the Discord turn still holds the mailbox");
+    assert!(
+        io.legacy_busy(channel).await,
+        "the Discord turn still holds the mailbox"
+    );
     assert_eq!(io.local_custody(channel, Claude), Ok(Custody::Row));
 
-    let answer = json!({"type": "assistant", "sessionId": session, "uuid": "a1",
-        "message": {"id": "m1", "role": "assistant",
-        "content": [{"type": "text", "text": "done"}]}});
+    let reply = "the new turn's answer";
     let mut file = std::fs::OpenOptions::new()
         .append(true)
-        .open(&path)
+        .open(&new_path)
         .unwrap();
-    std::io::Write::write_all(&mut file, format!("{answer}\n").as_bytes()).unwrap();
+    std::io::Write::write_all(&mut file, answer("msg_1", reply).as_bytes()).unwrap();
+    assert!(
+        within(60, || rest.posts_with(reply) > 0).await,
+        "O posts the answer while the turn holds the mailbox"
+    );
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(rest.posts_with(reply), 1, "O posts the answer once");
+    assert_eq!(rest.posts_with("the delivered old answer"), 0);
     let claim = o_owns_tui_output_for_channel_reserving(channel, Some(ClaudeTui));
     assert!(
         matches!(claim.map(|claim| claim.owned), Ok(true)),
-        "O owns the answer's body: Legacy sends nothing"
+        "O owns the answer's body: Legacy sends none of it"
     );
+    for handle in handles.drain(..) {
+        let stopped = tokio::time::timeout(Duration::from_secs(20), handle.stop_and_join());
+        stopped.await.expect("the writer stops").unwrap();
+    }
+    rest.server.abort();
     pool.close().await;
     fixture.drop().await;
 }
