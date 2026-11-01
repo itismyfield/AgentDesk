@@ -1,6 +1,6 @@
 # herdr 사용자 기본 서버
 
-`mode: user_default`는 실행 노드 사용자의 기존 herdr 서버에 연결한다. AgentDesk는 서버나 daemon을 만들거나 재시작하지 않는다. 설정을 바꾸지 않은 기존 `legacy_dedicated` endpoint의 경로와 판정은 유지된다.
+`mode: user_default`는 실행 노드 사용자의 기존 herdr 서버에 연결한다. 기본 서버가 꺼져 있으면 그 서버가 필요한 입력 시점에 AgentDesk가 띄울 수 있다(조건은 아래 [서버 자동 기동](#서버-자동-기동)). 살아 있는 서버는 멈추거나 재시작하지 않는다. 설정을 바꾸지 않은 기존 `legacy_dedicated` endpoint의 경로와 판정은 유지된다.
 
 ## 설정 예시
 
