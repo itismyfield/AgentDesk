@@ -10,7 +10,7 @@ use super::{TmuxCleanupPolicy, bind_judged_legacy, stop_active_turn_on};
 use crate::services::discord::{SharedData, inflight};
 use crate::services::provider::cancel_token_claude_interrupt::StopCancel;
 use crate::services::provider::{CancelToken, ProviderKind};
-use crate::services::turn_orchestrator::CancelActiveTurnResult;
+use crate::services::turn_orchestrator::{CancelActiveTurnResult, ChannelMailboxHandle};
 
 /// The reason the channel cancel records on the token and its tombstone.
 const CANCEL_REASON: &str = "mailbox_cancel_active_turn";
@@ -45,6 +45,8 @@ pub(in crate::services::discord) struct ChannelStop {
     provider: ProviderKind,
     channel: ChannelId,
     token: Arc<CancelToken>,
+    mailbox: ChannelMailboxHandle,
+    incarnation: Option<super::native_stop::SourceIncarnation>,
     target: StopTarget,
     /// The unbound token's name, read from its inflight row; bound by the cancel.
     bind_name: Option<LegacyTmuxName>,
@@ -83,7 +85,7 @@ impl ChannelStop {
             true => inflight_name(provider, channel).map_err(|error| unobserved(channel, error))?,
             false => bound,
         };
-        let mut stop = Self::judge_token(shared, provider, channel, token, approved, name);
+        let mut stop = Self::judge_token(shared, provider, channel, handle, token, approved, name);
         #[cfg(test)]
         if let Some(target) = NEXT_TARGET.with_borrow_mut(Option::take) {
             stop.target = target;
@@ -123,6 +125,7 @@ impl ChannelStop {
         shared: &Arc<SharedData>,
         provider: &ProviderKind,
         channel: ChannelId,
+        mailbox: ChannelMailboxHandle,
         token: Arc<CancelToken>,
         approved: Option<Option<&str>>,
         name: Option<String>,
@@ -132,6 +135,13 @@ impl ChannelStop {
             provider: provider.clone(),
             channel,
             token,
+            mailbox,
+            incarnation: if *provider == ProviderKind::Claude {
+                name.as_deref()
+                    .map(super::native_stop::SourceIncarnation::capture)
+            } else {
+                None
+            },
             target: StopTarget::judge(name, approved),
             bind_name: None,
             tombstone_name: None,
@@ -174,7 +184,10 @@ impl ChannelStop {
 
     /// A user stop's cancel as the mailbox decided it under the token's Herdr slot.
     async fn cancel_user(&self) -> StopCancel {
-        let mailbox = self.shared.mailbox(self.channel);
+        if !self.same_actor() {
+            return StopCancel::NotCurrent;
+        }
+        let mailbox = &self.mailbox;
         let reason = CANCEL_REASON.to_string();
         let expected = self.token.clone();
         let decision = mailbox
@@ -209,11 +222,43 @@ impl ChannelStop {
             &self.shared,
             &self.provider,
             self.channel,
+            &self.mailbox,
             &self.token,
             self.legacy_name()?,
             reason,
         )
         .await
+    }
+
+    fn same_actor(&self) -> bool {
+        self.shared
+            .mailbox_peek(self.channel)
+            .is_some_and(|handle| handle.same_actor(&self.mailbox))
+    }
+
+    async fn rejudge_native(&self, reason: &str) -> Option<super::NativeStop> {
+        if !self.same_actor()
+            || self
+                .token
+                .cancelled
+                .load(std::sync::atomic::Ordering::Acquire)
+            || self.token.is_completion_cleanup()
+            || self.token.tmux_session_name().as_deref() != self.legacy_name()
+            || !self
+                .legacy_name()
+                .zip(self.incarnation.as_ref())
+                .is_some_and(|(name, incarnation)| incarnation.matches(name))
+            || !self
+                .mailbox
+                .cancel_token()
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|token| Arc::ptr_eq(&token, &self.token))
+        {
+            return None;
+        }
+        self.native(reason).await
     }
 
     /// Stops the judged token on the judged target.
@@ -410,10 +455,19 @@ async fn begin_stop(
         return CommandStop::Native(native);
     }
     #[cfg(all(test, unix))]
-    tests::before_stop_cancel();
+    {
+        tests::ownership::after_native().await;
+        tests::before_stop_cancel();
+    }
     let decision = stop.cancel_user().await;
     #[cfg(all(test, unix))]
     let decision = tests::after_stop_decision(decision);
+    if matches!(decision, StopCancel::NotCurrent)
+        && let Some(reason) = reason
+        && let Some(native) = stop.rejudge_native(reason).await
+    {
+        return CommandStop::Native(native);
+    }
     // The mailbox's decision, as it made it: a token changed since never turns it into another.
     match decision {
         StopCancel::NotCurrent => CommandStop::NoActiveTurn,

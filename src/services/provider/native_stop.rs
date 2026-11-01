@@ -1,12 +1,13 @@
 //! State for one token's cooperative native stop, separate from raw cancellation.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 
 #[derive(Default)]
 pub(crate) struct State {
     inner: Mutex<Inner>,
     notice: AtomicBool,
+    bridges: Mutex<Vec<Weak<()>>>,
 }
 
 #[derive(Default)]
@@ -26,6 +27,27 @@ pub(crate) struct Attempt {
 }
 
 impl State {
+    /// Every bridge holds its own lifetime guard, including overlapping recovered bridges.
+    pub(crate) fn register_bridge(&self) -> Arc<()> {
+        let guard = Arc::new(());
+        let mut bridges = self
+            .bridges
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        bridges.retain(|bridge| bridge.strong_count() > 0);
+        bridges.push(Arc::downgrade(&guard));
+        guard
+    }
+
+    pub(crate) fn has_live_bridge(&self) -> bool {
+        let mut bridges = self
+            .bridges
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        bridges.retain(|bridge| bridge.upgrade().is_some());
+        !bridges.is_empty()
+    }
+
     pub(crate) fn attempt(
         &self,
         key: String,

@@ -13,7 +13,7 @@ fn run<F: std::future::Future>(future: F) -> F::Output {
     super::run(future)
 }
 
-fn running() -> String {
+pub(super) fn running() -> String {
     include_str!("../../../../../tests/fixtures/tui_input/claude-2.1.293-tool-running.txt")
         .lines()
         .filter(|line| !line.contains("Tomfoolering"))
@@ -1111,6 +1111,7 @@ fn preserve_stop_recovery_rechecks_owner_before_publish() {
                     &shared,
                     &ProviderKind::Claude,
                     channel,
+                    &shared.mailbox_peek(channel).unwrap(),
                     &token,
                     &session,
                     "!stop"
@@ -1162,9 +1163,16 @@ fn preserve_stop_recovery_rechecks_owner_before_publish() {
                 .mailbox(channel)
                 .cancel_active_turn_if_current_unless_herdr(token.clone(), "recovery_race".into())
                 .await;
-            assert!(matches!(result, crate::services::provider::cancel_token_claude_interrupt::StopCancel::NotCurrent), "changed recovery authority must be rechecked: {change}");
+            assert!(
+                if change == "owner" {
+                    matches!(result, crate::services::provider::cancel_token_claude_interrupt::StopCancel::Published(_))
+                } else {
+                    matches!(result, crate::services::provider::cancel_token_claude_interrupt::StopCancel::NotCurrent)
+                },
+                "a completed nonce-only row adds no recovery authority: {change}"
+            );
             drop(owner);
-            assert!(!token.cancelled.load(Ordering::Acquire));
+            assert_eq!(token.cancelled.load(Ordering::Acquire), change == "owner");
             assert!(mailbox_holds(&shared, channel, &token).await);
             assert_eq!(tombstone(channel), None);
             crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&session);

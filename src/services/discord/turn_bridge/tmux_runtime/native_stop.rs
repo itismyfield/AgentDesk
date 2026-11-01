@@ -15,6 +15,7 @@ pub(in crate::services::discord) const UNCONFIRMED: &str =
 const SENT: &str = "중단 요청을 전달했어요. 같은 작업의 종료 기록을 기다려요.";
 
 pub(in crate::services::discord) struct NativeStop {
+    shared: Arc<SharedData>,
     mailbox: ChannelMailboxHandle,
     token: Arc<CancelToken>,
     channel: ChannelId,
@@ -52,6 +53,93 @@ fn confirmed_missing_session(session: &str) -> bool {
     }
 }
 
+pub(super) struct SourceIncarnation {
+    source: Option<(
+        String,
+        Option<String>,
+        crate::services::cluster::stream_relay::SourceFileIdentity,
+    )>,
+    spawn: crate::services::tui_prompt_dedupe::binding_context::SpawnNonceMarker,
+    generation: i64,
+}
+
+impl SourceIncarnation {
+    pub(super) fn capture(session: &str) -> Self {
+        use crate::services::cluster::stream_relay::SourceFileIdentity;
+        let source = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(session)
+            .map(|binding| {
+                let identity = std::fs::File::open(&binding.output_path)
+                    .map(|file| SourceFileIdentity::from_open_file(&file))
+                    .unwrap_or(SourceFileIdentity::Unavailable);
+                (binding.output_path, binding.session_id, identity)
+            });
+        Self {
+            source,
+            spawn: crate::services::tui_prompt_dedupe::binding_context::observe_spawn_nonce_marker(
+                session,
+            ),
+            generation:
+                crate::services::discord::outbound::delivery_record::current_generation_mtime_ns(
+                    session,
+                ),
+        }
+    }
+
+    pub(super) fn matches(&self, session: &str) -> bool {
+        use crate::services::tui_prompt_dedupe::binding_context::SpawnNonceMarker;
+        let current = Self::capture(session);
+        self.spawn != SpawnNonceMarker::Unreadable
+            && self.spawn == current.spawn
+            && self.source == current.source
+            && self.generation == current.generation
+    }
+}
+
+fn live_bridge_owner(
+    provider: &ProviderKind,
+    channel: ChannelId,
+    token: &Arc<CancelToken>,
+) -> bool {
+    !super::claude_stop_pane::mutant("ignore_live_owner")
+        && (crate::services::discord::live_bridge::retain_original(provider, channel.get(), token)
+            .is_some()
+            || token.native_stop.has_live_bridge())
+}
+
+fn row_identity(
+    provider: &ProviderKind,
+    channel: ChannelId,
+) -> Result<Option<crate::services::discord::inflight::InflightTurnIdentity>, String> {
+    crate::services::discord::inflight::load_inflight_state_read_only_result(
+        provider,
+        channel.get(),
+    )
+    .map(|row| {
+        row.as_ref()
+            .map(crate::services::discord::inflight::InflightTurnIdentity::from_state)
+    })
+}
+
+fn terminal_delivered(
+    provider: &ProviderKind,
+    channel: ChannelId,
+    token: &Arc<CancelToken>,
+    session: &str,
+) -> bool {
+    crate::services::discord::inflight::load_inflight_state_read_only_result(
+        provider,
+        channel.get(),
+    )
+    .ok()
+    .flatten()
+    .is_some_and(|row| {
+        row.terminal_delivery_committed
+            && token.turn_nonce().is_some()
+            && row.turn_nonce.as_deref() == token.turn_nonce()
+            && row.tmux_session_name.as_deref() == Some(session)
+    })
+}
+
 fn recovery_admissible(
     provider: &ProviderKind,
     channel: ChannelId,
@@ -62,10 +150,7 @@ fn recovery_admissible(
     if token.tmux_session_name().as_deref() != Some(session) {
         return Some(true);
     }
-    let live_owner =
-        crate::services::discord::live_bridge::retain_original(provider, channel.get(), token)
-            .is_some()
-            && !super::claude_stop_pane::mutant("ignore_live_owner");
+    let live_owner = live_bridge_owner(provider, channel, token);
     match crate::services::discord::inflight::load_inflight_state_read_only_result(
         provider,
         channel.get(),
@@ -83,11 +168,15 @@ fn recovery_admissible(
             {
                 return Some(true);
             }
-            // Prelaunch rows have no transcript yet; a matching nonce still owns the row.
+            // A completed row needs a live finalizer or a committed terminal, not just its nonce.
             if live_owner
-                || token.turn_nonce().is_some() && row.turn_nonce.as_deref() == token.turn_nonce()
+                || (token.turn_nonce().is_some()
+                    && row.turn_nonce.as_deref() == token.turn_nonce()
+                    && (!completed || row.terminal_delivery_committed))
             {
                 Some(false)
+            } else if completed {
+                Some(true)
             } else {
                 None
             }
@@ -99,9 +188,10 @@ fn recovery_admissible(
 
 impl NativeStop {
     pub(in crate::services::discord) async fn begin(
-        shared: &SharedData,
+        shared: &Arc<SharedData>,
         provider: &ProviderKind,
         channel: ChannelId,
+        mailbox: &ChannelMailboxHandle,
         token: &Arc<CancelToken>,
         session: &str,
         reason: &str,
@@ -109,9 +199,9 @@ impl NativeStop {
         if !protected(provider, session) || token.herdr_interrupt_state().is_some() {
             return None;
         }
-        let mailbox = shared.mailbox_peek(channel)?;
         let mut stop = Self {
-            mailbox,
+            shared: shared.clone(),
+            mailbox: mailbox.clone(),
             token: token.clone(),
             channel,
             session: session.into(),
@@ -132,6 +222,34 @@ impl NativeStop {
             return None;
         }
         let completed = token.native_stop.is_completed();
+        let row_before = row_identity(provider, channel);
+        let binding_before = token.tmux_session_name();
+        // Delegation registers watcher debt before the bridge drops its guard.
+        let live_bridge = live_bridge_owner(provider, channel, token);
+        #[cfg(all(test, unix))]
+        after_bridge_probe().await;
+        let watcher_pending = if live_bridge {
+            false
+        } else {
+            // This existing query is conservative across episodes in this channel/restart generation.
+            shared
+                .turn_finalizer
+                .has_live_watcher_pending(channel, shared.restart.current_generation)
+                .await
+        };
+        if !stop.current().await
+            || row_before != row_identity(provider, channel)
+            || binding_before != token.tmux_session_name()
+        {
+            stop.finished = true;
+            return Some(stop);
+        }
+        if (token.native_stop.is_completed() && (live_bridge || watcher_pending))
+            || terminal_delivered(provider, channel, token, session)
+        {
+            stop.finished = true;
+            return Some(stop);
+        }
         let recovery = recovery_admissible(provider, channel, token, session, completed);
         if !super::claude_stop_pane::mutant("protect_unowned")
             && (recovery == Some(true)
@@ -265,12 +383,16 @@ impl NativeStop {
     }
 
     async fn current(&self) -> bool {
-        self.mailbox
-            .cancel_token()
-            .await
-            .ok()
-            .flatten()
-            .is_some_and(|token| Arc::ptr_eq(&token, &self.token))
+        self.shared
+            .mailbox_peek(self.channel)
+            .is_some_and(|handle| handle.same_actor(&self.mailbox))
+            && self
+                .mailbox
+                .cancel_token()
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|token| Arc::ptr_eq(&token, &self.token))
             && !self.token.is_completion_cleanup()
     }
 
@@ -376,5 +498,21 @@ struct Completion(Arc<crate::services::provider::native_stop::Attempt>);
 impl Drop for Completion {
     fn drop(&mut self) {
         self.0.complete(false);
+    }
+}
+
+#[cfg(all(test, unix))]
+type OwnerProbe = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+#[cfg(all(test, unix))]
+thread_local! {
+    pub(super) static AFTER_BRIDGE_PROBE: std::cell::RefCell<Option<OwnerProbe>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, unix))]
+async fn after_bridge_probe() {
+    let step = AFTER_BRIDGE_PROBE.with_borrow_mut(Option::take);
+    if let Some(step) = step {
+        step.await;
     }
 }
