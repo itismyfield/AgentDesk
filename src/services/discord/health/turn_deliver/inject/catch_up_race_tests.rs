@@ -23,6 +23,7 @@ const TEXT: &str = "status?\nline two\nline three";
 struct RestState {
     markers: Arc<Mutex<HashSet<String>>>,
     notices: Arc<AtomicUsize>,
+    injected_puts: Arc<AtomicUsize>,
 }
 
 async fn rest(State(state): State<RestState>, request: Request<Body>) -> Response {
@@ -31,6 +32,12 @@ async fn rest(State(state): State<RestState>, request: Request<Body>) -> Respons
     if let Some((_, marker)) = path.split_once("/reactions/") {
         let marker = marker.trim_end_matches("/@me").to_string();
         if method == Method::PUT {
+            if matches!(marker.as_str(), "⏳" | "📥")
+                || marker.eq_ignore_ascii_case("%E2%8F%B3")
+                || marker.eq_ignore_ascii_case("%F0%9F%93%A5")
+            {
+                state.injected_puts.fetch_add(1, Ordering::SeqCst);
+            }
             state.markers.lock().unwrap().insert(marker);
         } else if method == Method::DELETE {
             state.markers.lock().unwrap().remove(&marker);
@@ -115,6 +122,10 @@ impl Transport {
 
     fn notice_count(&self) -> usize {
         self.state.notices.load(Ordering::SeqCst)
+    }
+
+    fn injected_put_count(&self) -> usize {
+        self.state.injected_puts.load(Ordering::SeqCst)
     }
 }
 
@@ -287,6 +298,7 @@ async fn catch_up_live_entry(reserved: bool) {
         pane.keys().is_empty(),
         "fixture has not injected before the live event"
     );
+    assert_eq!(transport.injected_put_count(), 0);
     let data = crate::services::discord::Data {
         shared: shared.clone(),
         token: "test-token".into(),
@@ -330,6 +342,7 @@ async fn catch_up_live_entry(reserved: bool) {
             transport.pending_present(),
             "a reserved source keeps its pending marker"
         );
+        assert_eq!(transport.injected_put_count(), 0);
         return;
     }
     assert!(
@@ -350,6 +363,11 @@ async fn catch_up_live_entry(reserved: bool) {
     assert!(
         !transport.pending_present(),
         "confirmed injection removes the existing REST pending marker"
+    );
+    assert_eq!(
+        transport.injected_put_count(),
+        1,
+        "live takeover must PUT the injected marker exactly once"
     );
     crate::services::discord::queue_marker::note_added_queued_generation(
         &shared,
@@ -647,6 +665,11 @@ async fn catch_up_mended_head_clears_pending_marker_without_another_paste_pg() {
         metadata: None,
         channel_name_hint: None,
     };
+    assert_eq!(
+        transport.injected_put_count(),
+        0,
+        "Unknown is not yet confirmed"
+    );
     let mended = super::queued_reconcile::mend(&shared, &request, None, |_, _| true).await;
     assert!(matches!(
         mended,
@@ -665,6 +688,11 @@ async fn catch_up_mended_head_clears_pending_marker_without_another_paste_pg() {
     assert!(
         !transport.pending_present(),
         "mend confirmation also clears the existing pending marker"
+    );
+    assert_eq!(
+        transport.injected_put_count(),
+        1,
+        "mend confirmation must PUT the injected marker exactly once"
     );
     crate::services::discord::queue_marker::note_added_queued_generation(
         &shared,
