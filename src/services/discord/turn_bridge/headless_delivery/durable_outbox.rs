@@ -123,6 +123,7 @@ fn durable_headless_outbox_enabled() -> bool {
     crate::utils::env_flag(DURABLE_HEADLESS_OUTBOX_ENV, false)
 }
 
+/// `producer_turn_nonce` names the turn that queued the row; only that turn's frames may cite it.
 pub(super) async fn enqueue_headless_outbox(
     pool: &sqlx::PgPool,
     message: crate::services::message_outbox::OutboxMessage<'_>,
@@ -130,7 +131,10 @@ pub(super) async fn enqueue_headless_outbox(
     provider: &ProviderKind,
     born_generation: u64,
     cancel_token: Option<&CancelToken>,
-    origin: Option<&crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
+    (origin, producer_turn_nonce): (
+        Option<&crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
+        Option<&str>,
+    ),
 ) -> Result<
     crate::services::message_outbox::OutboxEnqueueOutcome,
     crate::services::message_outbox::OutboxEnqueueError,
@@ -142,7 +146,11 @@ pub(super) async fn enqueue_headless_outbox(
         provider,
         born_generation,
         cancel_token,
-        (durable_headless_outbox_enabled(), origin),
+        (
+            durable_headless_outbox_enabled(),
+            origin,
+            producer_turn_nonce,
+        ),
     )
     .await
 }
@@ -155,7 +163,7 @@ pub(super) async fn enqueue_headless_outbox_with_rollout(
     provider: &ProviderKind,
     born_generation: u64,
     cancel_token: Option<&CancelToken>,
-    durable_enabled: bool,
+    (durable_enabled, producer_turn_nonce): (bool, Option<&str>),
 ) -> Result<
     crate::services::message_outbox::OutboxEnqueueOutcome,
     crate::services::message_outbox::OutboxEnqueueError,
@@ -167,7 +175,7 @@ pub(super) async fn enqueue_headless_outbox_with_rollout(
         provider,
         born_generation,
         cancel_token,
-        (durable_enabled, None),
+        (durable_enabled, None, producer_turn_nonce),
     )
     .await
 }
@@ -179,9 +187,10 @@ async fn enqueue_headless_outbox_with_origin(
     provider: &ProviderKind,
     born_generation: u64,
     cancel_token: Option<&CancelToken>,
-    (durable_enabled, origin): (
+    (durable_enabled, origin, producer_turn_nonce): (
         bool,
         Option<&crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
+        Option<&str>,
     ),
 ) -> Result<
     crate::services::message_outbox::OutboxEnqueueOutcome,
@@ -215,6 +224,7 @@ async fn enqueue_headless_outbox_with_origin(
             0,
             cancel_token,
             origin,
+            producer_turn_nonce,
         )
         .await;
     };
@@ -226,6 +236,7 @@ async fn enqueue_headless_outbox_with_origin(
         cancel_token,
         None,
         origin,
+        producer_turn_nonce,
     )
     .await
 }
@@ -263,7 +274,7 @@ mod tests {
             &ProviderKind::Claude,
             1,
             None,
-            Some(&artifact),
+            (Some(&artifact), None),
         )
         .await
         .unwrap()
@@ -356,7 +367,7 @@ mod tests {
             &ProviderKind::Claude,
             2,
             None,
-            (true, Some(&artifact)),
+            (true, Some(&artifact), None),
         )
         .await
         .unwrap();
@@ -383,7 +394,7 @@ mod tests {
             &ProviderKind::Claude,
             2,
             None,
-            (true, Some(&changed_artifact)),
+            (true, Some(&changed_artifact), None),
         )
         .await
         .unwrap();
@@ -409,7 +420,7 @@ mod tests {
                 &ProviderKind::Claude,
                 2,
                 None,
-                (true, Some(&wrong)),
+                (true, Some(&wrong), None),
             )
             .await
             .is_err()
