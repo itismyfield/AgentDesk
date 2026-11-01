@@ -56,7 +56,7 @@ mod backend_routing;
 #[cfg(test)]
 mod c1_teardown_tests;
 #[cfg(unix)]
-mod fresh_notice;
+pub(crate) mod fresh_notice;
 #[cfg(unix)]
 pub(crate) mod herdr_return;
 #[cfg(unix)]

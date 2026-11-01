@@ -73,3 +73,7 @@ pub(crate) fn forget_for_tests(requested: &str) {
     let mut announced = ANNOUNCED.lock().unwrap_or_else(PoisonError::into_inner);
     announced.retain(|(_, lost)| lost != requested);
 }
+
+#[cfg(test)]
+#[path = "fresh_notice_tests.rs"]
+mod tests;
