@@ -132,6 +132,30 @@ pub fn activate_codex_takeover(
     candidate: &Candidate,
     sources: impl FnOnce() -> Result<Vec<InitSource>, String>,
 ) -> Result<(), String> {
+    let origin = InitOrigin::LateCodexTakeover;
+    let fenced = (facts, queued_bodies);
+    activate_takeover(
+        store,
+        channel,
+        fenced,
+        local_custody,
+        candidate,
+        sources,
+        origin,
+    )
+}
+
+/// A takeover of the source Legacy runs a turn on, recorded as `origin`; see
+/// `activate_codex_takeover`.
+pub fn activate_takeover(
+    store: &OStore,
+    channel: u64,
+    (facts, queued_bodies): (ActivationFacts, i64),
+    local_custody: impl FnOnce() -> Result<bool, String>,
+    candidate: &Candidate,
+    sources: impl FnOnce() -> Result<Vec<InitSource>, String>,
+    origin: InitOrigin,
+) -> Result<(), String> {
     let facts = ActivationFacts {
         open_intake: 0,
         ..facts
@@ -140,7 +164,6 @@ pub fn activate_codex_takeover(
         0 => sources(),
         queued => Err(format!("{queued} queued Legacy bodies")),
     };
-    let origin = InitOrigin::LateCodexTakeover;
     activate_as(
         store,
         channel,

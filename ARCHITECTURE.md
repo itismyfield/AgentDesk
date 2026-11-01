@@ -2494,6 +2494,8 @@ src/
 │   │   │   │   ├── restarted_herdr_sweep_tests.rs
 │   │   │   │   └── retire_tests.rs
 │   │   │   ├── turn_retirement/
+│   │   │   │   ├── claude.rs
+│   │   │   │   ├── claude_tests.rs
 │   │   │   │   ├── codex.rs
 │   │   │   │   └── codex_tests.rs
 │   │   │   ├── foreign_recovery.rs
@@ -3789,9 +3791,13 @@ src/
 │   │   │   │   ├── migration_tests.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── late_adopt/
+│   │   │   │   ├── claude/
+│   │   │   │   │   ├── prefix.rs
+│   │   │   │   │   └── prefix_tests.rs
 │   │   │   │   ├── codex/
 │   │   │   │   │   ├── prefix.rs
 │   │   │   │   │   └── prefix_tests.rs
+│   │   │   │   ├── claude.rs
 │   │   │   │   └── codex.rs
 │   │   │   ├── local_retry/
 │   │   │   │   └── notice_selection.rs
@@ -3852,6 +3858,7 @@ src/
 │   │   │   ├── historical_hops.rs
 │   │   │   ├── host.rs
 │   │   │   ├── host_bo_provider_tests.rs
+│   │   │   ├── host_claude_takeover_tests.rs
 │   │   │   ├── host_codex_takeover_tests.rs
 │   │   │   ├── host_codex_turn_mark_tests.rs
 │   │   │   ├── host_first_init_tests.rs

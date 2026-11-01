@@ -150,7 +150,7 @@ fn snapshot(config: &Config) -> serde_json::Result<Value> {
     put(&["runtime"], serde_json::to_value(&config.runtime)?);
     put(&["routines"], serde_json::to_value(&config.routines)?);
     put(&["onboarding"], serde_json::to_value(&config.onboarding)?);
-    let tui_o = config.tui_o.clone().unwrap_or_default();
+    let tui_o = crate::services::tui_o::channel_policy::tui_o_of(config).resolved();
     put(&["tui_o"], serde_json::to_value(&tui_o)?);
     Ok(root)
 }

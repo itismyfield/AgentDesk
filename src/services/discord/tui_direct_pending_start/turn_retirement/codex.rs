@@ -25,7 +25,7 @@ pub(in crate::services::discord) fn confirm_codex_channels(
     config: Option<&TurnConfig>,
     owned: impl FnOnce() -> Vec<u64>,
 ) -> Vec<u64> {
-    let Some(config) = config.filter(|c| c.all_owned || !c.channels.is_empty()) else {
+    let Some(config) = config.filter(|c| c.selects_any()) else {
         return Vec::new();
     };
     let confirmed = |&channel: &u64| match confirm_current(channel, config) {
@@ -134,7 +134,7 @@ pub(in crate::services::discord) fn confirm_codex_channel(
 
 /// The whole rollout ends Idle after a turn fact; metadata alone, an open or unknown turn, or a
 /// missing file do not end the takeover turn.
-fn ended(source: &SourceBinding) -> Result<(), String> {
+pub(super) fn ended(source: &SourceBinding) -> Result<(), String> {
     let mut facts = InputFacts::open(source.clone())?;
     let mut read = None;
     loop {
@@ -152,7 +152,7 @@ fn ended(source: &SourceBinding) -> Result<(), String> {
 }
 
 /// A pending start, durable or in memory, or an inflight row before its terminal delivery.
-fn unfinished(provider: &ProviderKind, channel: u64) -> Option<String> {
+pub(super) fn unfinished(provider: &ProviderKind, channel: u64) -> Option<String> {
     if pending_synthetic_start_present(provider.as_str(), channel) {
         return Some("a pending start is held in memory".into());
     }

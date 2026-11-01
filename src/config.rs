@@ -2629,7 +2629,7 @@ mod secret_bearing_config_file_tests {
             let loaded = load_from_path(&path).unwrap();
             let output = loaded.tui_o.as_ref().unwrap();
             assert_eq!(output, &expected);
-            assert!(output.writer.late_adopt);
+            assert!(output.writer.late_adopt());
             let rendered = serde_yaml::to_string(output).unwrap();
             assert!(!rendered.contains("repost"), "{rendered}");
             assert_eq!(std::fs::read_to_string(&path).unwrap(), yaml);

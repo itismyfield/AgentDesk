@@ -225,7 +225,8 @@ pub(crate) mod test_override {
             .collect();
         let ids: Vec<_> = channels.iter().map(|(id, _)| *id).collect();
         let config = serde_json::from_value(serde_json::json!({
-            "server": {}, "agents": agents, "tui_o": {"writer": {"channels": ids}}
+            "server": {}, "agents": agents,
+            "tui_o": {"writer": {"channels": ids, "all_tui": false}, "turn": {"all_owned": false}}
         }))
         .unwrap();
         BootChannels::validate(&config).unwrap()

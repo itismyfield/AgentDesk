@@ -511,7 +511,7 @@ async fn an_empty_writer_list_leaves_both_channels_to_legacy() {
             "channels": {"claude": {"id": id.to_string(), "runtime": "tui"}}})
         };
         let config = serde_json::from_value(serde_json::json!({"server": {},
-            "agents": [channel(640020), channel(640021)], "tui_o": {"writer": {"channels": []}}}));
+            "agents": [channel(640020), channel(640021)], "tui_o": {"writer": {"channels": [], "all_tui": false}}}));
         crate::bootstrap::prepare_and_install_boot_snapshots(&config.unwrap(), None)
             .await
             .unwrap();
@@ -532,7 +532,7 @@ async fn unretired_supervisor_consumer_preserves_legacy_decode_and_backfill() {
         "id": "legacy-control", "name": "Legacy", "channels": {
             "claude": {"id": channel.to_string(), "runtime": "tui"}
         }
-    }], "tui_o": {"writer": {"channels": []}}}))
+    }], "tui_o": {"writer": {"channels": [], "all_tui": false}}}))
     .unwrap();
     crate::bootstrap::prepare_and_install_boot_snapshots(&config, None)
         .await

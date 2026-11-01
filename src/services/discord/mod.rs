@@ -178,6 +178,11 @@ mod relay_coord_tests;
 pub(crate) mod terminal_delivery_custody;
 mod tui_direct_abort_marker;
 mod tui_direct_pending_start;
+pub(crate) use tui_direct_pending_start::turn_retirement::claude::note_ended as note_takeover_ended;
+#[cfg(test)]
+pub(crate) use tui_direct_pending_start::turn_retirement::claude::{
+    confirmed_now as claude_takeover_confirmed_now, tests::seed_takeover as seed_claude_takeover,
+};
 mod tui_prompt_relay;
 #[cfg(all(test, unix))]
 pub(crate) use tmux::commit_codex_watcher_restore_for_tests;
