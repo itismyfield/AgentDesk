@@ -8,7 +8,7 @@
 | Method | Path | Handler | Handler Source | Route Decl |
 | --- | --- | --- | --- | --- |
 | `GET` | `/` | `runner_entry` | `src/server/web_surface.rs:57` | `src/server/web_surface.rs:51` |
-| `GET` | `/api/activity-heatmap` | `analytics::activity_heatmap` | `src/server/routes/analytics.rs:361` | `src/server/routes/domains/analytics.rs:14` |
+| `GET` | `/api/activity-heatmap` | `analytics::activity_heatmap` | `src/server/routes/analytics.rs:327` | `src/server/routes/domains/analytics.rs:14` |
 | `GET` | `/api/agents` | `agents_crud::list_agents` | `src/server/routes/agents_crud.rs:399` | `src/server/routes/domains/agents.rs:16` |
 | `POST` | `/api/agents` | `agents_crud::create_agent` | `src/server/routes/agents_crud.rs:437` | `src/server/routes/domains/agents.rs:16` |
 | `GET` | `/api/agents/diag/{identifier}` | `agents::agent_diag` | `src/server/routes/agents.rs:156` | `src/server/routes/domains/agents.rs:21` |
@@ -35,11 +35,11 @@
 | `POST` | `/api/agents/{id}/turn/deliver` | `agents_turn_deliver::deliver_turn_input` | `src/server/routes/agents_turn_deliver.rs:122` | `src/server/routes/domains/runtime.rs:133` |
 | `POST` | `/api/agents/{id}/turn/start` | `agents::start_agent_turn` | `src/server/routes/agents.rs:660` | `src/server/routes/domains/runtime.rs:132` |
 | `POST` | `/api/agents/{id}/turn/stop` | `agents::stop_agent_turn` | `src/server/routes/agents_stop.rs:4` | `src/server/routes/domains/runtime.rs:137` |
-| `GET` | `/api/analytics` | `analytics::analytics` | `src/server/routes/analytics.rs:254` | `src/server/routes/domains/analytics.rs:10` |
-| `GET` | `/api/analytics/invariants` | `analytics::invariants` | `src/server/routes/analytics.rs:324` | `src/server/routes/domains/analytics.rs:11` |
-| `GET` | `/api/analytics/observability` | `analytics::observability` | `src/server/routes/analytics.rs:303` | `src/server/routes/domains/analytics.rs:12` |
-| `GET` | `/api/analytics/policy-hooks` | `analytics::policy_hooks` | `src/server/routes/analytics.rs:311` | `src/server/routes/domains/analytics.rs:13` |
-| `GET` | `/api/audit-logs` | `analytics::audit_logs` | `src/server/routes/analytics.rs:389` | `src/server/routes/domains/analytics.rs:17` |
+| `GET` | `/api/analytics` | `analytics::analytics` | `src/server/routes/analytics.rs:218` | `src/server/routes/domains/analytics.rs:10` |
+| `GET` | `/api/analytics/invariants` | `analytics::invariants` | `src/server/routes/analytics.rs:289` | `src/server/routes/domains/analytics.rs:11` |
+| `GET` | `/api/analytics/observability` | `analytics::observability` | `src/server/routes/analytics.rs:268` | `src/server/routes/domains/analytics.rs:12` |
+| `GET` | `/api/analytics/policy-hooks` | `analytics::policy_hooks` | `src/server/routes/analytics.rs:276` | `src/server/routes/domains/analytics.rs:13` |
+| `GET` | `/api/audit-logs` | `analytics::audit_logs` | `src/server/routes/analytics.rs:356` | `src/server/routes/domains/analytics.rs:17` |
 | `GET` | `/api/auth/session` | `auth::get_session` | `src/server/routes/auth.rs:12` | `src/server/routes/domains/access.rs:16` |
 | `POST` | `/api/auth/ws-ticket` | `auth::issue_ws_ticket` | `src/server/routes/auth.rs:38` | `src/server/routes/domains/access.rs:19` |
 | `POST` | `/api/automation-candidates` | `automation_candidates::materialize_candidate` | `src/server/routes/automation_candidates.rs:98` | `src/server/routes/domains/kanban.rs:61` |
@@ -49,10 +49,10 @@
 | `GET` | `/api/automation-candidates/{card_id}/iterations` | `automation_candidates::list_iterations` | `src/server/routes/automation_candidates.rs:190` | `src/server/routes/domains/kanban.rs:69` |
 | `POST` | `/api/automation-candidates/{card_id}/prepare-worktree` | `automation_candidates::prepare_worktree` | `src/server/routes/automation_candidates.rs:286` | `src/server/routes/domains/kanban.rs:81` |
 | `GET` | `/api/campaigns` | `campaigns::list` | `src/server/routes/campaigns.rs:81` | `src/server/routes/domains/admin.rs:18` |
-| `POST` | `/api/campaigns` | `campaigns::create` | `src/server/routes/campaigns.rs:155` | `src/server/routes/domains/admin.rs:18` |
+| `POST` | `/api/campaigns` | `campaigns::create` | `src/server/routes/campaigns.rs:142` | `src/server/routes/domains/admin.rs:18` |
 | `GET` | `/api/campaigns/{id}` | `campaigns::get` | `src/server/routes/campaigns.rs:104` | `src/server/routes/domains/admin.rs:19` |
-| `PUT` | `/api/campaigns/{id}` | `campaigns::replace` | `src/server/routes/campaigns.rs:170` | `src/server/routes/domains/admin.rs:19` |
-| `GET` | `/api/campaigns/{id}/history` | `campaigns::history` | `src/server/routes/campaigns.rs:146` | `src/server/routes/domains/admin.rs:23` |
+| `PUT` | `/api/campaigns/{id}` | `campaigns::replace` | `src/server/routes/campaigns.rs:157` | `src/server/routes/domains/admin.rs:19` |
+| `GET` | `/api/campaigns/{id}/history` | `campaigns::history` | `src/server/routes/campaigns.rs:133` | `src/server/routes/domains/admin.rs:23` |
 | `GET` | `/api/channels/{channel_id}/monitoring` | `monitoring::list_monitoring` | `src/server/routes/monitoring.rs:69` | `src/server/routes/domains/runtime.rs:114` |
 | `POST` | `/api/channels/{channel_id}/monitoring` | `monitoring::upsert_monitoring` | `src/server/routes/monitoring.rs:19` | `src/server/routes/domains/runtime.rs:114` |
 | `DELETE` | `/api/channels/{channel_id}/monitoring/{key}` | `monitoring::remove_monitoring` | `src/server/routes/monitoring.rs:52` | `src/server/routes/domains/runtime.rs:118` |
@@ -180,7 +180,7 @@
 | `PATCH` | `/api/kanban-repos/{owner}/{repo}` | `kanban_repos::update_repo` | `src/server/routes/kanban_repos.rs:139` | `src/server/routes/domains/kanban.rs:56` |
 | `PATCH` | `/api/kanban-reviews/{id}/decisions` | `reviews::update_decisions` | `src/server/routes/reviews.rs:585` | `src/server/routes/domains/reviews.rs:13` |
 | `POST` | `/api/kanban-reviews/{id}/trigger-rework` | `reviews::trigger_rework` | `src/server/routes/reviews.rs:628` | `src/server/routes/domains/reviews.rs:17` |
-| `GET` | `/api/machine-status` | `analytics::machine_status` | `src/server/routes/analytics.rs:411` | `src/server/routes/domains/analytics.rs:18` |
+| `GET` | `/api/machine-status` | `analytics::machine_status` | `src/server/routes/analytics.rs:378` | `src/server/routes/domains/analytics.rs:18` |
 | `GET` | `/api/maintenance/jobs` | `maintenance::list_jobs` | `src/server/routes/maintenance.rs:7` | `src/server/routes/domains/ops.rs:158` |
 | `POST` | `/api/memory/forget` | `memory_api::memory_forget` | `src/server/routes/memory_api.rs:207` | `src/server/routes/domains/agents.rs:50` |
 | `POST` | `/api/memory/recall` | `memory_api::memory_recall` | `src/server/routes/memory_api.rs:101` | `src/server/routes/domains/agents.rs:48` |
@@ -247,7 +247,7 @@
 | `POST` | `/api/queue/slots/{agent_id}/{slot_index}/rebind` | `auto_queue::rebind_slot` | `src/server/routes/auto_queue.rs:79` | `src/server/routes/domains/ops.rs:244` |
 | `POST` | `/api/queue/slots/{agent_id}/{slot_index}/reset-thread` | `auto_queue::reset_slot_thread` | `src/server/routes/auto_queue.rs:102` | `src/server/routes/domains/ops.rs:248` |
 | `GET` | `/api/queue/status` | `auto_queue::status` | `src/server/routes/auto_queue.rs:42` | `src/server/routes/domains/ops.rs:226` |
-| `GET` | `/api/rate-limits` | `analytics::rate_limits` | `src/server/routes/analytics.rs:419` | `src/server/routes/domains/analytics.rs:19` |
+| `GET` | `/api/rate-limits` | `analytics::rate_limits` | `src/server/routes/analytics.rs:386` | `src/server/routes/domains/analytics.rs:19` |
 | `GET` | `/api/receipt` | `receipt::get_receipt` | `src/server/routes/receipt.rs:486` | `src/server/routes/domains/analytics.rs:15` |
 | `POST` | `/api/reviews/decision` | `review_verdict::submit_review_decision` | `src/server/routes/review_verdict/decision_route.rs:45` | `src/server/routes/domains/reviews.rs:23` |
 | `POST` | `/api/reviews/recovery` | `reviews::recover_review_target` | `src/server/routes/reviews.rs:613` | `src/server/routes/domains/reviews.rs:21` |
@@ -295,12 +295,12 @@
 | `GET` | `/api/settings/operator-connectors` | `settings::get_operator_connectors` | `src/server/routes/settings.rs:73` | `src/server/routes/domains/admin.rs:81` |
 | `GET` | `/api/settings/runtime-config` | `settings::get_runtime_config` | `src/server/routes/settings.rs:63` | `src/server/routes/domains/admin.rs:77` |
 | `PUT` | `/api/settings/runtime-config` | `settings::put_runtime_config` | `src/server/routes/settings.rs:83` | `src/server/routes/domains/admin.rs:77` |
-| `GET` | `/api/skills-trend` | `analytics::skills_trend` | `src/server/routes/analytics.rs:432` | `src/server/routes/domains/analytics.rs:20` |
+| `GET` | `/api/skills-trend` | `analytics::skills_trend` | `src/server/routes/analytics.rs:399` | `src/server/routes/domains/analytics.rs:20` |
 | `GET` | `/api/skills/catalog` | `skills_api::catalog` | `src/server/routes/skills_api.rs:368` | `src/server/routes/domains/ops.rs:154` |
 | `POST` | `/api/skills/prune` | `skills_api::prune` | `src/server/routes/skills_api.rs:620` | `src/server/routes/domains/ops.rs:156` |
 | `GET` | `/api/skills/ranking` | `skills_api::ranking` | `src/server/routes/skills_api.rs:470` | `src/server/routes/domains/ops.rs:155` |
-| `GET` | `/api/stats` | `stats::get_stats` | `src/server/routes/stats.rs:357` | `src/server/routes/domains/admin.rs:67` |
-| `GET` | `/api/stats/memento` | `stats::get_memento_stats` | `src/server/routes/stats.rs:374` | `src/server/routes/domains/admin.rs:68` |
+| `GET` | `/api/stats` | `stats::get_stats` | `src/server/routes/stats.rs:362` | `src/server/routes/domains/admin.rs:67` |
+| `GET` | `/api/stats/memento` | `stats::get_memento_stats` | `src/server/routes/stats.rs:379` | `src/server/routes/domains/admin.rs:68` |
 | `GET` | `/api/token-analytics` | `receipt::get_token_analytics` | `src/server/routes/receipt.rs:566` | `src/server/routes/domains/analytics.rs:16` |
 | `POST` | `/api/turn-lease/release` | `turn_lease::release` | `src/server/routes/turn_lease.rs:32` | `src/server/routes/domains/runtime.rs:20` |
 | `GET` | `/api/turn-lease/{provider}/{channel_id}` | `turn_lease::inspect` | `src/server/routes/turn_lease.rs:14` | `src/server/routes/domains/runtime.rs:16` |
