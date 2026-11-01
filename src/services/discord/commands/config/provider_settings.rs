@@ -177,19 +177,25 @@ fn reject_foreign_owner(local: &str, owners: &[String]) -> io::Result<()> {
     Ok(())
 }
 
-fn claude_tui_fast_unavailable(provider: &ProviderKind, channel_id: serenity::ChannelId) -> bool {
+/// Whether a Claude launch setting reaches this channel by restarting its local tmux TUI on the
+/// same session; a Herdr channel and the non-TUI drivers keep their own paths.
+pub(in crate::services::discord) fn claude_local_tui_relaunch_applies(
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+) -> bool {
     use crate::services::provider_hosting::{
         ProviderSessionDriver, resolve_provider_session_selection_with_channel,
     };
     matches!(provider, ProviderKind::Claude)
-        && (crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_some()
-            || resolve_provider_session_selection_with_channel(
-                provider,
-                true,
-                Some(channel_id.get()),
-            )
+        && crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_none()
+        && resolve_provider_session_selection_with_channel(provider, true, Some(channel_id.get()))
             .driver
-                == ProviderSessionDriver::TuiHosting)
+            == ProviderSessionDriver::TuiHosting
+}
+
+fn claude_herdr_fast_unavailable(provider: &ProviderKind, channel_id: serenity::ChannelId) -> bool {
+    matches!(provider, ProviderKind::Claude)
+        && crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_some()
 }
 
 pub(in crate::services::discord) async fn update_channel_model_override(
@@ -263,9 +269,9 @@ pub(in crate::services::discord) async fn update_channel_fast_mode(
     if runtime_channel_id != channel_id {
         shared.check_settings_owner(provider, channel_id).await?;
     }
-    if claude_tui_fast_unavailable(provider, runtime_channel_id) {
+    if claude_herdr_fast_unavailable(provider, runtime_channel_id) {
         return Err(io::Error::other(
-            "Claude TUI에는 /fast 설정이 적용되지 않습니다. 설정과 현재 세션을 유지했습니다.",
+            "Herdr 채널의 Claude TUI에는 /fast 설정이 적용되지 않습니다. 설정과 현재 세션을 유지했습니다.",
         ));
     }
     let mut settings = shared.settings.write().await;
@@ -494,6 +500,58 @@ mod truthful_tests {
         ));
         assert!(shared.overrides.session_reset_pending.contains(&channel));
         assert!(session_toggle_reset_line(true).contains("맥락 소실"));
+    }
+
+    // A Claude channel on the local tmux TUI saves fast mode for a same-session relaunch instead
+    // of refusing it; only a Herdr channel keeps the refusal.
+    #[test]
+    fn truthful_local_claude_tui_fast_saves_for_a_same_session_relaunch() {
+        let _hosting = crate::services::provider_hosting::TEST_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let root = tempfile::tempdir().unwrap();
+        let _env = isolate_persistence(root.path());
+        let _hosts = crate::config::session_hosts::force_for_test(None, &[]);
+        let mut config = crate::config::Config::default();
+        config.providers.insert(
+            "claude".into(),
+            crate::config::ProviderConfig {
+                tui_hosting: Some(true),
+                ..Default::default()
+            },
+        );
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                crate::services::provider_hosting::install_provider_hosting_config(
+                    &crate::config::Config::default(),
+                );
+            }
+        }
+        let _restore = Restore;
+        crate::services::provider_hosting::install_provider_hosting_config(&config);
+        let shared = make_shared_data_for_tests();
+        let channel = serenity::ChannelId::new(648631);
+        let saved = test_rt().block_on(update_channel_fast_mode(
+            &shared,
+            "test-token",
+            channel,
+            &ProviderKind::Claude,
+            true,
+            channel,
+        ));
+        assert!(saved.unwrap());
+        assert!(channel_fast_mode_enabled(&shared, channel));
+        assert!(fast_mode_reset_pending_for_provider(
+            &shared,
+            channel,
+            &ProviderKind::Claude
+        ));
+        assert!(claude_local_tui_relaunch_applies(
+            &ProviderKind::Claude,
+            channel
+        ));
     }
 
     #[cfg(unix)]

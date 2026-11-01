@@ -2,7 +2,7 @@ pub(crate) mod claude_footer;
 pub(crate) mod host_marker;
 mod session_markers;
 pub(crate) use session_markers::{
-    advance_claude_session_auth, resolve_tmux_runtime_kind_marker,
+    AuthMarkers, advance_claude_session_auth, resolve_tmux_runtime_kind_marker,
     tmux_session_auth_profile_matches, write_tmux_runtime_kind_marker,
     write_tmux_session_auth_profile,
 };

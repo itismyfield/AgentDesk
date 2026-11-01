@@ -13,7 +13,18 @@ fn tui_turn(name: &str, clearance: Option<&TeardownClearance>) -> Result<(), Str
     let (tx, _rx) = std::sync::mpsc::channel();
     let endpoint = "http://127.0.0.1:9".to_string();
     execute_streaming_local_tui_tmux(
-        "hello", None, "/tmp", tx, None, name, clearance, None, None, None, None, endpoint,
+        "hello",
+        None,
+        "/tmp",
+        tx,
+        None,
+        name,
+        clearance,
+        None,
+        None,
+        Default::default(),
+        None,
+        endpoint,
     )
 }
 
@@ -401,7 +412,7 @@ fn a_returned_resume_without_its_resumed_start_types_nothing() {
         Some(&TeardownClearance::Returned),
         None,
         None,
-        None,
+        Default::default(),
         None,
         "http://127.0.0.1:9".to_string(),
     )

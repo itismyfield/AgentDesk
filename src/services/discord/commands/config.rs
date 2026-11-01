@@ -307,7 +307,8 @@ fn runtime_model_for_turn(
 
 mod provider_settings;
 pub(in crate::services::discord) use provider_settings::{
-    update_channel_codex_goals, update_channel_fast_mode, update_channel_model_override,
+    claude_local_tui_relaunch_applies, update_channel_codex_goals, update_channel_fast_mode,
+    update_channel_model_override,
 };
 
 pub(in crate::services::discord) fn would_channel_model_override_change(

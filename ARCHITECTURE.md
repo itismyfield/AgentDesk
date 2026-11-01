@@ -937,7 +937,8 @@ src/
 │   │   │   ├── timeout_draft_tests.rs
 │   │   │   └── user_receipt.rs
 │   │   ├── session/
-│   │   │   └── auto_compact_launch_tests.rs
+│   │   │   ├── auto_compact_launch_tests.rs
+│   │   │   └── fast_launch_tests.rs
 │   │   ├── busy_inject.rs
 │   │   ├── busy_inject_tests.rs
 │   │   ├── composer_lock.rs
@@ -1277,7 +1278,10 @@ src/
 │   │   │   │   ├── herdr_report_tests.rs
 │   │   │   │   ├── managed_reset.rs
 │   │   │   │   ├── native.rs
-│   │   │   │   └── provider_reset.rs
+│   │   │   │   ├── provider_reset.rs
+│   │   │   │   ├── relaunch.rs
+│   │   │   │   ├── relaunch_confirm.rs
+│   │   │   │   └── relaunch_tests.rs
 │   │   │   ├── diagnostics/
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── recovery_command_tests.rs

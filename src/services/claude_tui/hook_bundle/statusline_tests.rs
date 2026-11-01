@@ -65,12 +65,47 @@ fn passthrough_preserves_original_stdin_and_stdout_byte_for_byte() {
     let recorded: Value =
         serde_json::from_slice(&std::fs::read(record_path(&fixture.records, "session-a")).unwrap())
             .unwrap();
-    assert_eq!(recorded.as_object().unwrap().len(), 2);
+    let mut keys: Vec<_> = recorded.as_object().unwrap().keys().cloned().collect();
+    keys.sort();
+    let kept = [
+        "effort",
+        "fast_mode",
+        "model",
+        "rate_limits",
+        "session_id",
+        "written_at",
+    ];
+    assert_eq!(
+        keys, kept,
+        "only the named fields are cached, never the rest of stdin"
+    );
     assert_eq!(recorded["session_id"], "session-a");
     assert_eq!(
         recorded["rate_limits"],
         serde_json::from_slice::<Value>(raw).unwrap()["rate_limits"]
     );
+}
+
+// A relaunch is confirmed from what the restarted process itself showed: its model, effort and
+// fast mode, and when it showed them.
+#[test]
+fn the_record_keeps_model_effort_fast_and_its_time() {
+    let fixture = Fixture::new(None);
+    let raw =
+        br#"{"session_id":"session-b","model":{"id":"claude-opus-5-5","display_name":"Opus 5.5"},
+        "effort":{"level":"high"},"fast_mode":true,"rate_limits":null}"#;
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    assert!(fixture.run(raw).status.success());
+    let recorded: Value =
+        serde_json::from_slice(&std::fs::read(record_path(&fixture.records, "session-b")).unwrap())
+            .unwrap();
+    assert_eq!(recorded["model"]["id"], "claude-opus-5-5");
+    assert_eq!(recorded["effort"]["level"], "high");
+    assert_eq!(recorded["fast_mode"], true);
+    assert!(recorded["written_at"].as_f64().unwrap() >= before.floor());
 }
 
 #[test]

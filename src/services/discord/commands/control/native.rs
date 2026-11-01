@@ -36,4 +36,5 @@ pub(super) async fn clear_process_reset_pending(
     overrides.session_reset_pending.remove(&channel_id);
     super::clear_all_fast_mode_reset_markers(shared, channel_id).await;
     super::persist_codex_goals_reset_marker(shared, channel_id, false).await;
+    super::relaunch::forget(channel_id);
 }

@@ -8,7 +8,9 @@ use std::{
 };
 
 use crate::services::claude_command::ClaudeBinary;
-use crate::services::claude_tui::hook_bundle::{HookBundleConfig, write_claude_hook_settings};
+#[cfg(test)]
+use crate::services::claude_tui::hook_bundle::write_claude_hook_settings;
+use crate::services::claude_tui::hook_bundle::{HookBundleConfig, write_claude_launch_settings};
 use crate::services::process::shell_escape;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -268,6 +270,14 @@ fn persist_claude_continuation_session_files(
     Ok(true)
 }
 
+/// The launch inputs a Claude TUI process takes from its channel's settings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ClaudeTuiLaunchSettings<'a> {
+    pub(crate) model: Option<&'a str>,
+    /// `None` leaves fast mode to the CLI's own settings.
+    pub(crate) fast_mode: Option<bool>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaudeTuiLaunchConfig {
     pub tmux_session_name: String,
@@ -299,6 +309,14 @@ impl ClaudeTuiLaunchConfig {
 pub fn prepare_claude_tui_launch(
     config: &ClaudeTuiLaunchConfig,
 ) -> Result<ClaudeTuiSessionFiles, String> {
+    prepare_claude_tui_launch_with_fast(config, None)
+}
+
+/// [`prepare_claude_tui_launch`] whose settings file also carries the channel's fast mode choice.
+pub fn prepare_claude_tui_launch_with_fast(
+    config: &ClaudeTuiLaunchConfig,
+    fast_mode: Option<bool>,
+) -> Result<ClaudeTuiSessionFiles, String> {
     let files = config.session_files();
     let result = (|| {
         // A freshly prepared hosted pane must never inherit a disarmed or
@@ -311,7 +329,7 @@ pub fn prepare_claude_tui_launch(
             &config.session_id,
             &config.tmux_session_name,
         );
-        write_claude_hook_settings(
+        write_claude_launch_settings(
             &files.hook_settings_path,
             &HookBundleConfig {
                 endpoint: config.hook_endpoint.clone(),
@@ -319,6 +337,7 @@ pub fn prepare_claude_tui_launch(
                 session_id: config.session_id.clone(),
                 agentdesk_exe: config.agentdesk_exe.display().to_string(),
             },
+            fast_mode,
         )?;
         write_launch_script(&files.launch_script_path, config, &files.hook_settings_path)
     })();
@@ -445,6 +464,9 @@ fn write_launch_script(
 #[cfg(test)]
 #[path = "session/auto_compact_launch_tests.rs"]
 mod auto_compact_launch_tests;
+#[cfg(test)]
+#[path = "session/fast_launch_tests.rs"]
+mod fast_launch_tests;
 
 #[cfg(test)]
 mod tests {

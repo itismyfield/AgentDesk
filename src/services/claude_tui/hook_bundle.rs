@@ -117,12 +117,28 @@ pub fn codex_hook_config_overrides(config: &HookBundleConfig) -> Vec<String> {
     ]
 }
 
+/// The hook bundle alone, as the fixtures that need no launch setting write it.
+#[cfg(test)]
 pub fn write_claude_hook_settings(path: &Path, config: &HookBundleConfig) -> Result<(), String> {
+    write_claude_launch_settings(path, config, None)
+}
+
+/// The hook bundle with the channel's fast mode beside it, both in the one `--settings` file the
+/// launch passes; `None` writes no `fastMode`, so the CLI's own setting stays in effect.
+pub fn write_claude_launch_settings(
+    path: &Path,
+    config: &HookBundleConfig,
+    fast_mode: Option<bool>,
+) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("create hook settings dir {}: {error}", parent.display()))?;
     }
-    let rendered = serde_json::to_string_pretty(&render_claude_hook_settings(config))
+    let mut settings = render_claude_hook_settings(config);
+    if let (Some(enabled), Some(object)) = (fast_mode, settings.as_object_mut()) {
+        object.insert("fastMode".to_string(), Value::Bool(enabled));
+    }
+    let rendered = serde_json::to_string_pretty(&settings)
         .map_err(|error| format!("render hook settings: {error}"))?;
     std::fs::write(path, rendered)
         .map_err(|error| format!("write hook settings {}: {error}", path.display()))
