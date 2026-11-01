@@ -342,8 +342,7 @@ fn headless_content_matches(content: &str, bodies: &[&str]) -> bool {
 }
 
 /// A headless bridge body leaves a sent `message_outbox` row, not an O receipt; only a row the
-/// frame's own turn queued with this body after the records that wrote it covers it. A row of
-/// another turn, or one without a producer turn, never does, even with the same body.
+/// frame's own turn queued with this body after its records covers it, never another turn's.
 pub(in crate::services::discord) async fn headless_outbox(
     shared: &SharedData,
     frame: Frame<'_>,
