@@ -391,6 +391,8 @@ src/
 │   │   ├── db_ops.rs
 │   │   ├── dispatch_ops.rs
 │   │   ├── dm_reply_ops.rs
+│   │   ├── escalation_ops.rs
+│   │   ├── escalation_owner_tests.rs
 │   │   ├── exec_ops.rs
 │   │   ├── http_ops.rs
 │   │   ├── kanban_ops.rs
@@ -4183,6 +4185,7 @@ src/
 │   ├── dispatch_watchdog.rs
 │   ├── dispatched_sessions.rs
 │   ├── dispatches_followup.rs
+│   ├── escalation_cooldown.rs
 │   ├── explicit_auth_route.rs
 │   ├── gemini.rs
 │   ├── github_issue_creation.rs
