@@ -29,9 +29,17 @@ fn server(socket: &str) -> Selection {
     }
 }
 
+/// A measured case: its label, herdr's argv after the binary, its environment and what it bound.
+type Case = (
+    &'static str,
+    Vec<&'static str>,
+    Vec<(&'static str, &'static str)>,
+    Selection,
+);
+
 #[test]
 fn measured_resolutions_select_the_socket_herdr_bound() {
-    let cases: Vec<(&str, Vec<&str>, Vec<(&str, &str)>, Selection)> = vec![
+    let cases: Vec<Case> = vec![
         ("S4 A default", vec!["server"], vec![], server(DEFAULT)),
         (
             "S4 B env session",

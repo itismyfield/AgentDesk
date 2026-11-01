@@ -9,12 +9,15 @@ use serde_json::Value;
 
 use super::*;
 
+/// A started server with the environment and arguments that address it again.
+type Server = (Child, Vec<(String, String)>, Vec<String>);
+
 /// One isolated HOME with the scratch herdr installed where the user would have it.
 struct Home {
     _dir: tempfile::TempDir,
     home: PathBuf,
     bin: PathBuf,
-    servers: Vec<(Child, Vec<(String, String)>, Vec<String>)>,
+    servers: Vec<Server>,
 }
 
 impl Home {
