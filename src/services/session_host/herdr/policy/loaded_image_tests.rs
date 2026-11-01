@@ -225,6 +225,7 @@ fn read_hello(socket: &Path) -> Result<ServerHello, Unverified> {
         },
         started: start.wall_clock,
         version: "0.9.3".into(),
+        protocol: 22,
         connected_at,
     })
 }

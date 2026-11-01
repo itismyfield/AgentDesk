@@ -8,8 +8,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use super::contract::{HerdrOutcome, HerdrTransport, ServerWitness, Witnessed};
 use super::model::{
-    ExecutionState, HERDR_PROTOCOL, HerdrCall, HerdrEndpoint, HerdrObservation, HerdrRequest,
-    HerdrResult, VERIFIED_HERDR_VERSIONS,
+    ExecutionState, HerdrCall, HerdrEndpoint, HerdrObservation, HerdrRequest, HerdrResult,
+    supported_herdr_server,
 };
 use super::provenance::ProcessStart;
 use crate::services::session_host::model::HostError;
@@ -35,6 +35,7 @@ pub(crate) enum RestoreResume {
 pub(crate) enum RestoreUnverified {
     /// No connection, no handshake, or its peer process could not be read.
     NoPeer,
+    /// The server answered, but its version or protocol is not one this adapter supports.
     VersionNotVerified,
     PlatformUnsupported,
     /// No herdr home, an unknown endpoint, or a server env naming another config.
@@ -117,7 +118,9 @@ fn prove_restore_off<T: HerdrTransport + ?Sized>(
     if hello.started > hello.connected_at {
         return Err(Why::ProcessChanged);
     }
-    if !VERIFIED_HERDR_VERSIONS.contains(&hello.version.as_str()) {
+    if !supported_herdr_server(&hello.version, hello.protocol) {
+        tracing::warn!(socket = %witness.socket.display(), version = %hello.version,
+            protocol = hello.protocol, "herdr dedicated server version or protocol unsupported");
         return Err(Why::VersionNotVerified);
     }
     let home = endpoint.herdr_home().ok_or(Why::NotBootstrapped)?;
@@ -152,14 +155,15 @@ fn prove_restore_off<T: HerdrTransport + ?Sized>(
     Ok(witness)
 }
 
-/// What a verified pong reported. Only E7 reads the version; the handshake does not.
+/// What a pong that echoed its ping reported; the transport judges the protocol, E7 and the
+/// user-default policy the version.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HerdrHello {
     pub version: String,
     pub protocol: u32,
 }
 
-/// A pong must echo the ping id and speak our protocol; the version may differ.
+/// A pong must echo the ping id; its version and protocol are returned as reported.
 pub(crate) fn hello_result(
     call: &HerdrCall,
     outcome: HerdrOutcome,
@@ -175,12 +179,7 @@ pub(crate) fn hello_result(
         )));
     }
     match reply.body {
-        Ok(HerdrResult::Pong { version, protocol }) if protocol == HERDR_PROTOCOL => {
-            Ok(HerdrHello { version, protocol })
-        }
-        Ok(HerdrResult::Pong { protocol, .. }) => Err(HostError::Protocol(format!(
-            "herdr protocol {protocol}, expected {HERDR_PROTOCOL}"
-        ))),
+        Ok(HerdrResult::Pong { version, protocol }) => Ok(HerdrHello { version, protocol }),
         Ok(other) => Err(HostError::Protocol(format!("ping answered with {other:?}"))),
         Err(body) => Err(HostError::Remote {
             code: body.code,

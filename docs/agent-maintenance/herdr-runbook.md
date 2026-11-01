@@ -63,7 +63,7 @@ admission은 해당 프로세스의 공통 스위치다. 특정 채널만 멈추
 - 관리 대상 서버를 사용자 개인 Herdr 환경과 분리한다. named session 이름만으로 설정까지 분리된다고 가정하지 않는다.
 - 관리 config를 손으로 고치거나 `reload-config`를 복구 수단으로 쓰지 않는다. 관리 config는 아래 자동 보장만 고치며, 고친 내용은 실행 중 서버에 적용되지 않는다.
 
-현재 adapter의 protocol은 22이며 restore 설정 검증인 E7이 허용하는 서버 버전은 **0.9.3 하나**다. 일반 ping handshake는 버전 문자열 일치를 요구하지 않지만 E7은 별도의 검증 버전 목록을 적용한다. 새 버전의 protocol이 같다는 이유만으로 운영 입력 호환성을 승인하지 않는다.
+현재 adapter의 protocol은 22다. restore 설정 검증인 E7과 사용자 기본 서버 판정은 같은 판정 함수(`supported_herdr_server`)로 서버를 받는다. 조건은 pong의 `protocol=22`와 `MAJOR.MINOR.PATCH` 안정판 버전 **0.9.3 이상**이다. protocol 22만으로는 restore 동작을 측정하기 전인 0.9.0~0.9.2를 가를 수 없어 최소 버전을 둔다. 사전 배포판(`0.9.5-preview.…`)·빈 값·해석할 수 없는 버전은 거부한다. 일반 ping handshake는 protocol만 확인하며, 읽힌 pong의 protocol이 다르면 서버 부재가 아니라 지원하지 않는 서버(E7 `VersionNotVerified`, 사용자 기본 서버 `Unsupported`)로 거부한다. 새 herdr를 따라갈 때는 0.9.4·0.9.5 때처럼 변경 기록에서 pane 환경·ansi 렌더·`pane.close`·restore 설정이 바뀌었는지 보고, 실제 바이너리 시험(`ADK_TEST_HERDR_BIN`)을 그 버전으로 돌린다. protocol이 바뀌면 adapter 변경이 먼저다.
 
 근거: `src/services/session_host/herdr/model.rs:13`, `:17`; `src/services/session_host/herdr/observe.rs:120`, `:163`.
 
@@ -364,7 +364,7 @@ create 응답을 잃었거나 위치 기록 전에 실패해 pane이 있을 수�
 
 [O-U-7] 이 저장소는 외부 Herdr 클라이언트 업데이트·attach의 호환성을 구현하지 않는다. 실제 사용할 클라이언트 버전 쌍을 격리 서버에서 측정한다. 클라이언트 분리·재연결 중 provider 프로세스와 AgentDesk 응답 회수가 유지되는지 확인한다.
 
-Adapter의 서버 식별은 socket peer PID와 OS 시작 식별을 사용한다. metadata, pane ID 또는 버전 문자열만으로 같은 서버 프로세스라고 판단하지 않는다. 일반 handshake의 version 허용과 E7의 0.9.3 제한은 별개다.
+Adapter의 서버 식별은 socket peer PID와 OS 시작 식별을 사용한다. metadata, pane ID 또는 버전 문자열만으로 같은 서버 프로세스라고 판단하지 않는다. 일반 handshake는 protocol만 보고, E7·사용자 기본 서버 판정은 protocol과 최소 버전(0.9.3)을 함께 본다.
 
 근거: `src/services/session_host/herdr/transport.rs:41`, `:80`, `:156`; `src/services/session_host/herdr/observe.rs:117`, `:153`.
 
@@ -376,7 +376,7 @@ Adapter의 서버 식별은 socket peer PID와 OS 시작 식별을 사용한다.
 2. 영향을 받는 모든 실행을 정상 종료·retire하거나 별도 승인한 종료 절차를 수행한다. 살아 있는 실행을 보존해야 하면 교체를 연기한다.
 3. 서비스 관리자의 재기동 정책을 확인한다([O-U-1]). 정지 직후 자동으로 다시 뜨는 상태에서 바이너리 교체를 진행하지 않는다.
 4. 지정한 관리 서버만 정지한다. 저장소의 격리 서버 코드에는 `<HERDR_BIN> server stop`과 `<HERDR_BIN> server`가 사용된다. 이를 운영 서비스의 완성된 lifecycle 절차로 간주하지 않는다.
-5. 기존 바이너리와 설정·대화·배달 기록을 보존하고 새 서버를 명시적으로 기동한다. 현재 입력 재개에는 E7 검증 목록의 0.9.3 조건이 필요하다. 새 서버 버전 승인은 adapter 검증·변경을 별도 작업으로 다룬다.
+5. 기존 바이너리와 설정·대화·배달 기록을 보존하고 새 서버를 명시적으로 기동한다. 현재 입력 재개에는 E7 조건(protocol 22, 0.9.3 이상 안정판)이 필요하다. protocol이 바뀐 서버는 adapter 검증·변경을 별도 작업으로 다룬다.
 6. **일반 제출 중단을 유지한 채 읽기 전용 검사를 마친다.** ping, socket 접근, 새 서버 식별, endpoint, E7 provenance 조건, row·hold를 확인한다. health 조회가 E7을 실행하는 것으로 가정하지 않는다.
 7. **admission stop-file과 시작 환경의 정지 조건을 해제하고 dcserver를 재시작한다.** 설정된 시험 채널의 runtime에서 `admission="open"`과 준비 상태를 확인한 뒤 승인된 시험 입력만 보낸다. 첫 입력·후속 입력·원래 요청의 응답 회수를 검증한다. 시험 통과 후 일반 제출을 재개한다.
 8. 실패하면 일반 제출 중단을 유지하고 필요한 admission 정지를 다시 적용한다. 새 시험 실행의 종료·기록을 확인한 뒤 이전 바이너리로 되돌리는 절차를 적용한다. 이전 바이너리를 다시 띄웠다는 사실을 이전 provider 프로세스 복원으로 기록하지 않는다([O-U-5]).
@@ -410,7 +410,7 @@ dcserver 재접속은 provider 응답을 자동으로 재실행하는 경로가 
 
 | 시점·목적 | 명령 또는 API | 기대 결과와 한계 | 근거 |
 |---|---|---|---|
-| 서버 확인 | Socket API `ping`: `{"id":"ops-ping","method":"ping","params":{}}` | 같은 id의 `result.type="pong"`, `protocol=22`. 현재 E7 허용 버전은 `0.9.3`. ping만으로 E7·프로세스 연속성 증명 불가 | `src/services/session_host/herdr/model.rs:164`, `:221`, `:270`; `src/services/session_host/herdr/observe.rs:153` |
+| 서버 확인 | Socket API `ping`: `{"id":"ops-ping","method":"ping","params":{}}` | 같은 id의 `result.type="pong"`, `protocol=22`. E7은 0.9.3 이상 안정판만 받는다. ping만으로 E7·프로세스 연속성 증명 불가 | `src/services/session_host/herdr/model.rs:164`, `:221`, `:270`; `src/services/session_host/herdr/observe.rs:153` |
 | 서버 pane 목록 | Socket API `session.snapshot` | `result.type="session_snapshot"`와 snapshot. pane ID만으로 AgentDesk 실행 소유권 판단 불가 | `src/services/session_host/herdr/model.rs:169`, `:238`, `:277` |
 | 대상 pane 프로세스 | Socket API `pane.process_info`, params `{"pane_id":"<verified-pane-id>"}` | shell/foreground 정보. 실행 확인에는 nonce와 OS 시작 증거가 추가로 필요 | `src/services/session_host/herdr/model.rs:173`, `:245`; `src/services/discord/recovery_engine/herdr_reader.rs:51` |
 | 설정 반영·admission | `GET /api/health/detail` | `herdr.configured_channels`, endpoint `local`, `restart_required`, `admission`. `last_e7="never"`는 E7 성공이 아님 | `src/server/routes/health_api/runtime_profile.rs:15` |

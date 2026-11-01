@@ -38,7 +38,8 @@ use crate::services::tui_prompt_dedupe::binding_context::{
 pub(crate) const ENDPOINT_MISSING: &str = "endpoint_missing";
 pub(crate) const HERDR_NOT_ADMITTED: &str = "herdr launch is not admitted";
 const HOST_KIND_TEMP_EXT: &str = "host_kind";
-/// What Herdr 0.9.3 gives every pane process; a provider that sees them may report to Herdr.
+/// What Herdr gives every pane process (same set through 0.9.5); a provider that sees them may
+/// report to Herdr.
 pub(crate) const HERDR_PANE_ENV: [&str; 7] = [
     "HERDR_ENV",
     "HERDR_PANE_ID",
