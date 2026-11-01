@@ -35,11 +35,9 @@ pub(super) async fn handle_delivery_epilogue(
     let (user_msg_id, current_msg_id) = (ctx.user_msg_id, ctx.current_msg_id);
     let (adk_session_key, adk_cwd) = (ctx.adk_session_key, ctx.adk_cwd);
     let (dispatch_id, turn_id) = (ctx.dispatch_id, ctx.turn_id);
-    let user_text_owned = ctx.user_text_owned;
     let full_response = ctx.full_response.clone();
     let delivery_response = ctx.delivery_response.clone();
-    let spoken_delivery_response = ctx.spoken_delivery_response.clone();
-    let (cancelled, is_prompt_too_long) = (ctx.cancelled, ctx.is_prompt_too_long);
+    let cancelled = ctx.cancelled;
     let transport_error = ctx.transport_error;
     let recovery_retry = ctx.recovery_retry;
     let resume_failure_detected = ctx.resume_failure_detected;
@@ -156,105 +154,6 @@ pub(super) async fn handle_delivery_epilogue(
                     replay_outcome,
                     replay_detail.as_deref(),
                 );
-            }
-            // #2236: look up the typed handoff marker stamped at dispatch
-            // time so multi-agent setups with overlapping background
-            // channels can be disambiguated by the stored agent_id. The
-            // marker is consumed inside voice_background_completion_target
-            // below; passing the stored agent_id (cloned, not taken) here
-            // keeps both lookups consistent for this single dispatch.
-            //
-            // #2274: if the in-memory marker is absent (dcserver
-            // restarted mid-turn, or rehydration has not yet completed)
-            // fall back to the durable PG row for the agent_id lookup.
-            // A recovery turn with no anchored user message (user_msg_id ==
-            // 0) is never a voice turn — voice turns carry a synthetic,
-            // non-zero voice message id — so the voice-handoff completion
-            // routing (all keyed on the user message id) does not apply.
-            if projection_allowed && !ctx.already_receipted && let Some(user_msg_id) = user_msg_id {
-                let pg_pool_for_handoff = shared_owned.pg_pool.as_ref();
-                let in_memory_handoff_agent_id = crate::voice::announce_meta::global_store()
-                    .get_handoff(user_msg_id)
-                    .and_then(|meta| meta.agent_id);
-                let stored_handoff_agent_id = match in_memory_handoff_agent_id {
-                    Some(agent_id) => Some(agent_id),
-                    None => match pg_pool_for_handoff {
-                        Some(pool) => {
-                            crate::voice::announce_meta::load_handoff_durable(pool, user_msg_id)
-                                .await
-                                .ok()
-                                .flatten()
-                                .and_then(|meta| meta.agent_id)
-                        }
-                        None => None,
-                    },
-                };
-                let mapped_voice_channel_id = shared_owned
-                    .voice_barge_in
-                    .voice_channel_for_background(channel_id, stored_handoff_agent_id.as_deref())
-                    .await;
-                if let Some(voice_channel_id) = voice_background_completion_target(
-                    mapped_voice_channel_id,
-                    dispatch_id.as_deref(),
-                    user_msg_id,
-                    Some(&turn_id),
-                    &user_text_owned,
-                    channel_id,
-                    pg_pool_for_handoff,
-                )
-                .await
-                {
-                    if !inflight_state.silent_turn {
-                        let voice_barge_in = shared_owned.voice_barge_in.clone();
-                        let shared_for_voice = shared_owned.clone();
-                        let summary_source = spoken_delivery_response.clone();
-                        let background_channel_id = channel_id;
-                        let failed = cancelled
-                            || is_prompt_too_long
-                            || transport_error
-                            || recovery_retry
-                            || resume_failure_detected;
-                        super::super::super::task_supervisor::spawn_observed(
-                            "voice_background_completion_summary",
-                            async move {
-                                voice_barge_in
-                                    .speak_voice_background_completion_summary(
-                                        &shared_for_voice,
-                                        voice_channel_id,
-                                        background_channel_id,
-                                        &summary_source,
-                                        failed,
-                                    )
-                                    .await;
-                                voice_barge_in.publish_progress_for_playback(
-                                    background_channel_id,
-                                    Some(voice_channel_id),
-                                    "agent:done",
-                                );
-                            },
-                        );
-                    } else {
-                        shared_owned.voice_barge_in.publish_progress_for_playback(
-                            channel_id,
-                            Some(voice_channel_id),
-                            "agent:done",
-                        );
-                    }
-                } else if inflight_state.source == crate::dispatch::Source::Voice {
-                    if !inflight_state.silent_turn {
-                        shared_owned
-                            .voice_barge_in
-                            .spawn_spoken_result_playback(
-                                &shared_owned,
-                                channel_id,
-                                &spoken_delivery_response,
-                            )
-                            .await;
-                    }
-                    shared_owned
-                        .voice_barge_in
-                        .publish_progress(channel_id, "agent:done");
-                }
             }
         }
 

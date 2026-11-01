@@ -9,12 +9,6 @@ pub struct AnalyticsResponse {
 }
 
 #[derive(Debug, Serialize)]
-pub struct QualityEventsResponse {
-    pub events: Vec<Value>,
-    pub generated_at_ms: i64,
-}
-
-#[derive(Debug, Serialize)]
 pub struct InvariantsResponse {
     pub generated_at: String,
     pub total_violations: i64,
@@ -49,17 +43,6 @@ pub struct SkillsTrendResponse {
 #[derive(Debug, Serialize)]
 pub struct RateLimitsResponse {
     pub providers: Vec<Value>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct StreaksResponse {
-    pub streaks: Vec<Value>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct AchievementsResponse {
-    pub achievements: Vec<Value>,
-    pub daily_missions: Vec<Value>,
 }
 
 #[derive(Debug, Serialize)]

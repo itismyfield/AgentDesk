@@ -37,9 +37,7 @@ pub(crate) fn hydrate_pending_queue_into_state(
         }
         if stripped_existing_source
             && (item.source_message_ids.is_empty()
-                || (item.text.trim().is_empty()
-                    && item.pending_uploads.is_empty()
-                    && item.voice_announcement.is_none()))
+                || (item.text.trim().is_empty() && item.pending_uploads.is_empty()))
         {
             continue;
         }

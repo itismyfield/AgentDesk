@@ -29,7 +29,6 @@ cluster:
 | Provider 실행, intake claim, heartbeat | 유지 | 유지 |
 | 세션 출력·취소·복구, provider hook, 종료 대기 | 유지 | 공통 구현 유지 |
 | Discord gateway lease 획득·재시도·승격 | 기존 역할/lease 정책 | 시작하지 않음 |
-| Voice STT/TTS/receiver/background 작업 | 기존 voice 설정 | 초기화하지 않음 |
 | 허브 담당 scheduler·정책 tick·calendar 등 | 기존 lease 대기/실행 | task/thread 자체를 생성하지 않음 |
 | Dashboard 자산 보충·정적 제공·WebSocket | 제공 | 제공하지 않음 |
 | 설정·agent CRUD·onboarding·queue 관리 API | 제공 | route를 구성하지 않음, 404 |
@@ -67,4 +66,4 @@ intake poller와 CLI의 실제 실행 가능 여부는 별도의 readiness 근�
 패키지와 executable은 플랫폼별 기존 공통 artifact를 재사용한다. 실행 전용 모드에서
 dashboard 파일이 없어도 자동으로 다시 복사하지 않는다. 패키지 크기·다운로드량은
 이 변경으로 줄지 않으며, RSS·idle CPU·DB 연결 수·시작 시간은 두 장비 실측 결과와
-함께 판정한다. Gateway/voice를 빌드에서 제거한 별도 실행 파일은 만들지 않는다.
+함께 판정한다. Gateway를 빌드에서 제거한 별도 실행 파일은 만들지 않는다.

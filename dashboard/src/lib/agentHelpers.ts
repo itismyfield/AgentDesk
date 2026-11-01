@@ -40,3 +40,8 @@ export function getCurrentTaskSummary(
     value: tr("대기 중", "Standing by"),
   };
 }
+
+/** Harness agents used by relay E2E runs; hidden from default lists. */
+export function isTestAgent(agent: Pick<Agent, "id">): boolean {
+  return /(^|-)e2e(-|$)/i.test(agent.id);
+}

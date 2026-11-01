@@ -28,16 +28,16 @@ afterEach(() => {
 });
 
 describe("home token analytics load", () => {
-  it("shares one in-flight 7d request with the stats warmup", async () => {
+  it("shares one in-flight 7d request with another caller", async () => {
     const { fetchMock, answerAll } = heldFetch();
     const seen: unknown[] = [];
     const stop = loadHomeTokenAnalytics((next) => seen.push(next));
-    const warmup = getTokenAnalytics("7d", { suppressErrorToast: true });
+    const other = getTokenAnalytics("7d", { suppressErrorToast: true });
     await flush();
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     answerAll(() => new Response(JSON.stringify({ period: "7d" })));
-    await warmup;
+    await other;
     await flush();
     expect(seen).toEqual([{ period: "7d" }]);
     stop();

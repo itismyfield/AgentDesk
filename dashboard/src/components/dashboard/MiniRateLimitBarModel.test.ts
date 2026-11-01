@@ -118,7 +118,7 @@ describe("MiniRateLimitBar model helpers", () => {
     const label = formatRateLimitResetLabel(nowMs + 90 * 60_000, true, nowMs);
 
     expect(label).toContain("초기화");
-    expect(label).toContain("1h 30m 후");
+    expect(label).toContain("1시간 30분 후");
   });
 
   it("does not project unsupported bucket windows", () => {

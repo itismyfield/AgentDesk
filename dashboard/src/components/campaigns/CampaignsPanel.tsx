@@ -1,20 +1,17 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { getCampaigns, type Campaign, type CampaignLive, type CampaignNodeLive } from "../../api/campaigns";
-import { ApiRequestError } from "../../api/httpClient";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import type { CampaignNodeLive } from "../../api/campaigns";
 import {
-  getServerCampaign, getServerCampaignEvents, getServerCampaigns, isDefinitiveAnswer, sendServerCampaignCommand, serverCampaignRejection,
-  type ServerCampaignCommand, type ServerCampaignDocument, type ServerCampaignEvent,
+  isDefinitiveAnswer, sendServerCampaignCommand, serverCampaignRejection,
+  type ServerCampaignCommand, type ServerCampaignDocument,
 } from "../../api/serverCampaigns";
 import { STORAGE_KEYS } from "../../lib/storageKeys";
 import { readLocalStorageValue, writeLocalStorageValue } from "../../lib/useLocalStorage";
+import { Select } from "../common/Select";
 import { WidgetState } from "../common/WidgetState";
-import CampaignAutoQueueToggle from "./CampaignAutoQueueToggle";
-import { campaignProgress } from "./campaignModel";
-import { Badge, type Tr } from "./campaignPresentation";
-import CampaignExplorer from "./CampaignExplorer";
-import { campaignRawEdges } from "./campaignGraphRouting";
-import { groupViewScope, pruneStoredView, storedGroupViewCampaigns } from "./campaignViewStorage";
+import CampaignPageHeader, { type CampaignTab } from "./CampaignPageHeader";
+import type { Tr } from "./campaignPresentation";
 import type { CampaignDraft } from "./CampaignNodeDetails";
+import LegacyCampaignView from "./LegacyCampaignView";
 import type { ControlCommand } from "./ServerCampaignControls";
 import ServerCampaignDetail from "./ServerCampaignDetail";
 import ServerCampaignForm, { createDraft, editDraft, isUntouchedCreate, type DefinitionDraft } from "./ServerCampaignForm";
@@ -23,7 +20,13 @@ import {
   campaignLocationQuery, commandAvailability, newIdempotencyKey, parseCampaignLocation, reconcileStop, rejectionText, stopRequest,
   type CampaignLocation, type StopIntent,
 } from "./serverCampaignModel";
+import { queueLocationQuery, parseQueueLocation } from "./campaignQueueModel";
+import { useLegacyCampaigns } from "./useLegacyCampaigns";
+import { useServerCampaignHolds } from "./useServerCampaignHolds";
+import { useServerCampaignReads } from "./useServerCampaignReads";
 import "./campaigns.css";
+
+const CampaignQueueTab = lazy(() => import("./CampaignQueueTab"));
 
 const NO_LIVE: Record<string, CampaignNodeLive> = {};
 const SERVER_OPTION = "server:";
@@ -31,15 +34,20 @@ const SERVER_OPTION = "server:";
 const NEW_DRAFT = "create";
 const editKey = (id: string) => `edit:${id}`;
 const POLL_MS = 15_000;
+// Both campaign lists are re-read on this slower beat; a failed list read is retried on the next poll.
+const LIST_POLL_MS = 60_000;
 // Route paths match without regard to a trailing slash or case.
 const samePage = (a: string, b: string) => a.replace(/\/+$/, "").toLowerCase() === b.replace(/\/+$/, "").toLowerCase();
 
 export default function CampaignsPanel({ language }: { language: string }) {
   const tr: Tr = useCallback((ko, en) => language === "ko" ? ko : en, [language]);
-  // A link names the mode, campaign and task; without one the legacy selection is restored.
+  // A link names the tab, or the mode, campaign and task; without one the legacy selection is restored.
   const [linked] = useState(() => parseCampaignLocation(window.location.search));
-  const [campaigns, setCampaigns] = useState<Campaign[]>([]);
-  const [live, setLive] = useState<CampaignLive>({});
+  const [queueLink] = useState(() => parseQueueLocation(window.location.search));
+  const [tab, setTab] = useState<CampaignTab>(queueLink ? "queue" : "campaigns");
+  const [queueCard, setQueueCard] = useState<string | null>(queueLink?.card ?? null);
+  const legacy = useLegacyCampaigns();
+  const { campaigns, live, loading, error, refreshedAt, checkedRead, onSaved } = legacy;
   const [drafts, setDrafts] = useState<Record<string, CampaignDraft>>({});
   const onDraftChange = (key: string, draft: CampaignDraft | null, expected?: CampaignDraft) => setDrafts((current) => {
     // A save may finish after this task was reopened and its draft changed.
@@ -49,56 +57,20 @@ export default function CampaignsPanel({ language }: { language: string }) {
     return next;
   });
   const [selectedId, setSelectedId] = useState<string | null>(() => linked?.mode === "legacy" ? linked.campaign : readLocalStorageValue(STORAGE_KEYS.dashboardActiveCampaign, null, { validate: (value): value is string | null => value === null || typeof value === "string" }));
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [refreshedAt, setRefreshedAt] = useState<number | null>(null);
-  const [checkedRead, setCheckedRead] = useState<number | null>(null);
-  // Saved tie layouts follow every loaded definition, even while no graph is open, a campaign has no tasks or
-  // the campaign is gone (an id created again must not bring old ties back). Only after a successful load.
   useEffect(() => {
     if (refreshedAt === null) return;
-    const loaded = new Map(campaigns.map((value) => [value.id, value]));
-    for (const id of new Set([...loaded.keys(), ...storedGroupViewCampaigns()])) {
-      const shown = loaded.get(id);
-      pruneStoredView(groupViewScope(id), shown ? campaignRawEdges(shown.nodes) : [], shown?.revision ?? null);
-    }
+    setSelectedId((current) => campaigns.some((value) => value.id === current) ? current : campaigns.find((value) => value.status === "active")?.id ?? campaigns[0]?.id ?? null);
   }, [campaigns, refreshedAt]);
-  const mounted = useRef(false);
-  const requestId = useRef(0);
-  const refresh = useCallback(async () => {
-    const id = ++requestId.current;
-    setLoading(true);
-    try {
-      const { campaigns: values, live: nextLive, read } = await getCampaigns();
-      if (!mounted.current || id !== requestId.current) return;
-      setLive(nextLive);
-      setCampaigns((current) => values.map((value) => {
-        const previous = current.find((candidate) => candidate.id === value.id);
-        return previous && previous.revision > value.revision ? previous : value;
-      })); setError(null); setRefreshedAt(Date.now()); setCheckedRead(read);
-      setSelectedId((current) => values.some((value) => value.id === current) ? current : values.find((value) => value.status === "active")?.id ?? values[0]?.id ?? null);
-    } catch (cause) {
-      if (mounted.current && id === requestId.current) setError(cause instanceof Error ? cause.message : "Unable to load campaigns");
-    } finally { if (mounted.current && id === requestId.current) setLoading(false); }
-  }, []);
+  useEffect(() => { writeLocalStorageValue(STORAGE_KEYS.dashboardActiveCampaign, selectedId); }, [selectedId]);
 
   const [mode, setMode] = useState<CampaignLocation["mode"]>(linked?.mode ?? "legacy");
   const [serverSelected, setServerSelected] = useState<string | null>(linked?.mode === "server" ? linked.campaign : null);
   const [node, setNode] = useState<string | null>(linked?.node ?? null);
-  // Server campaigns poll as whole documents; the selected detail is read from that list.
-  const [serverDocs, setServerDocs] = useState<ServerCampaignDocument[]>([]);
-  const [serverLoaded, setServerLoaded] = useState(false);
-  const [serverError, setServerError] = useState<string | null>(null);
-  // The previous poll was still unanswered when the next one was due.
-  const [serverSilent, setServerSilent] = useState(false);
-  // Campaigns the list does not hold, each with its own last read so a failed read marks only it stale.
-  const [details, setDetails] = useState<Record<string, { doc: ServerCampaignDocument | null; loading: boolean; error: string | null }>>({});
-  // `read` names the campaign and last event a list answers. A list is null until one read succeeds;
-  // a failed read keeps the last list and records the list read it failed after.
-  const [events, setEvents] = useState<{ campaign: string; read: string; events: ServerCampaignEvent[] | null; failedAfter: number | null } | null>(null);
-  const [serverPolls, setServerPolls] = useState(0);
-  const serverPollCount = useRef(0);
-  const eventsPending = useRef<string | null>(null);
+  const server = useServerCampaignReads(mode === "server" ? serverSelected : null);
+  const { summaries, listLoaded, listError, details, detail, events, refreshList, refreshDetail } = server;
+  const serverDoc = server.doc;
+  const serverDown = !!listError || server.silent;
+  const connection = serverDown || detail?.error ? "stale" : "live";
   const [serverDrafts, setServerDrafts] = useState<Record<string, DefinitionDraft>>({});
   // The form the user just opened or filled takes focus once; showing it again later does not.
   const focusRequest = useRef<{ key: string; n: number } | null>(null);
@@ -107,113 +79,58 @@ export default function CampaignsPanel({ language }: { language: string }) {
   // A command's progress and refusal belong to the campaign it was sent for.
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
   const [commandErrors, setCommandErrors] = useState<Record<string, string>>({});
-  const serverRequest = useRef(0);
-  // `ticks`: poll slots this read (or the ones it replaced) has waited through unanswered.
-  const serverPending = useRef<{ id: number; ticks: number } | null>(null);
-  const detailRequest = useRef<Record<string, number>>({});
-  const eventsRequest = useRef(0);
-  const refreshServer = useCallback(async (onSchedule = false) => {
-    const id = ++serverRequest.current;
-    // A read on the poll schedule starts a slot; a read the user starts takes over the count of the one it
-    // replaces, so refreshing never hides a hung server.
-    serverPending.current = { id, ticks: onSchedule ? 1 : serverPending.current?.ticks ?? 0 };
-    try {
-      const documents = await getServerCampaigns();
-      if (!mounted.current || id !== serverRequest.current) return;
-      setServerDocs(documents); setServerError(null); setServerPolls(++serverPollCount.current);
-    } catch (cause) {
-      if (mounted.current && id === serverRequest.current) setServerError(cause instanceof Error ? cause.message : "Unable to load server campaigns");
-    } finally {
-      if (serverPending.current?.id === id) serverPending.current = null;
-      if (mounted.current && id === serverRequest.current) { setServerLoaded(true); setServerSilent(false); }
-    }
-  }, []);
-  const refreshAll = useCallback(() => { void refresh(); void refreshServer(); }, [refresh, refreshServer]);
-  useEffect(() => {
-    mounted.current = true;
-    void refresh(); void refreshServer(true);
-    const interval = window.setInterval(() => {
-      // Slots count while the tab is hidden too: a read unanswered past a whole slot marks the snapshot stale.
-      const pending = serverPending.current;
-      if (pending && ++pending.ticks >= 2) setServerSilent(true);
-      if (document.visibilityState !== "visible") return;
-      void refresh();
-      // An unanswered read is waited out rather than superseded, so its failure still lands.
-      if (!pending) void refreshServer(true);
-    }, POLL_MS);
-    return () => { mounted.current = false; requestId.current++; serverRequest.current++; window.clearInterval(interval); };
-  }, [refresh, refreshServer]);
-  useEffect(() => { writeLocalStorageValue(STORAGE_KEYS.dashboardActiveCampaign, selectedId); }, [selectedId]);
 
-  const inList = serverDocs.find((doc) => doc.view.campaign_id === serverSelected);
-  const detail = !inList && serverSelected ? details[serverSelected] : undefined;
-  const serverDoc = inList ?? detail?.doc ?? undefined;
-  const serverDown = !!serverError || serverSilent;
-  const connection = serverDown || detail?.error ? "stale" : "live";
-  // A linked or just-created campaign the list does not hold is read on its own, after each list poll.
+  const refreshServer = useCallback((campaign: string | null) => {
+    void refreshList();
+    if (campaign) void refreshDetail(campaign);
+  }, [refreshList, refreshDetail]);
+  const refreshAll = () => { void legacy.refresh(); refreshServer(mode === "server" ? serverSelected : null); };
+
+  // Each poll reads the campaign on screen; the lists come on a slower beat. Nothing is read while hidden.
+  const listsReadAt = useRef(0);
+  const readListsIfDue = () => {
+    if (Date.now() - listsReadAt.current < LIST_POLL_MS && !legacy.error && !listError) return false;
+    listsReadAt.current = Date.now();
+    void legacy.refresh(true); void refreshList(true);
+    return true;
+  };
+  const poll = useRef<(visible: boolean) => void>(() => {});
+  poll.current = (visible) => {
+    const watching = visible && tab === "campaigns";
+    server.tick(watching);
+    if (visible && readListsIfDue()) return;
+    if (watching && mode === "legacy" && selectedId) void legacy.refreshCampaign(selectedId);
+  };
+  const resume = useRef<() => void>(() => {});
+  resume.current = () => {
+    if (readListsIfDue() || tab !== "campaigns") return;
+    if (mode === "server") server.resume();
+    else if (selectedId) void legacy.refreshCampaign(selectedId);
+  };
   useEffect(() => {
-    if (mode !== "server" || !serverSelected || !serverLoaded || serverDocs.some((doc) => doc.view.campaign_id === serverSelected)) return;
-    const campaign = serverSelected;
-    const id = (detailRequest.current[campaign] ?? 0) + 1;
-    detailRequest.current[campaign] = id;
-    const settle = (next: { doc?: ServerCampaignDocument; error: string | null; notFound?: boolean }) => {
-      if (!mounted.current || id !== detailRequest.current[campaign]) return;
-      setDetails((current) => {
-        const doc = next.doc ?? current[campaign]?.doc ?? null;
-        // A 404 before any snapshot means the campaign does not exist; after one, the shown snapshot is stale.
-        return { ...current, [campaign]: { doc, loading: false, error: next.notFound && !doc ? null : next.error } };
-      });
-    };
-    setDetails((current) => ({ ...current, [campaign]: { doc: current[campaign]?.doc ?? null, loading: true, error: current[campaign]?.error ?? null } }));
-    getServerCampaign(campaign).then((doc) => settle({ doc, error: null }))
-      .catch((cause) => settle({
-        error: cause instanceof Error ? cause.message : "Unable to load the server campaign",
-        notFound: cause instanceof ApiRequestError && cause.status === 404,
-      }));
-  }, [mode, serverSelected, serverLoaded, serverDocs]);
-  const selectedCampaign = serverDoc?.view.campaign_id;
-  const lastEvent = serverDoc?.view.last_event_sequence;
-  // Events are read when the campaign or its last event moves; after a failed read, each later list read retries it.
-  const eventsRetry = events !== null && events.campaign === selectedCampaign && events.failedAfter !== null ? serverPolls - events.failedAfter : 0;
-  useEffect(() => {
-    if (!selectedCampaign || lastEvent === undefined) return;
-    const read = `${selectedCampaign}\n${lastEvent}`;
-    if (eventsPending.current === read) return; // it will answer; request() always settles
-    const id = ++eventsRequest.current; // a read for anything else is no longer wanted
-    eventsPending.current = null;
-    // A good read stands; a failed one waits for a list read that lands after it.
-    if (events?.read === read && (events.failedAfter === null || events.failedAfter >= serverPollCount.current)) return;
-    eventsPending.current = read;
-    const campaign = selectedCampaign;
-    getServerCampaignEvents(campaign, { after: Math.max(0, lastEvent - 50), limit: 50 }).then(
-      (list) => {
-        if (!mounted.current || id !== eventsRequest.current) return;
-        eventsPending.current = null;
-        setEvents({ campaign, read, events: list, failedAfter: null });
-      },
-      () => {
-        if (!mounted.current || id !== eventsRequest.current) return;
-        eventsPending.current = null;
-        // Keep the last list, marked, rather than an old timeline that looks current.
-        setEvents((current) => ({ campaign, read, events: current?.campaign === campaign ? current.events : null, failedAfter: serverPollCount.current }));
-      },
-    );
-  }, [selectedCampaign, lastEvent, eventsRetry]); // eslint-disable-line react-hooks/exhaustive-deps -- `events` is read, not watched
+    listsReadAt.current = Date.now();
+    void legacy.refresh(); void refreshList(true);
+    const interval = window.setInterval(() => poll.current(document.visibilityState === "visible"), POLL_MS);
+    const onVisibility = () => { if (document.visibilityState === "visible") resume.current(); };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => { window.clearInterval(interval); document.removeEventListener("visibilitychange", onVisibility); };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps -- reads start once; polls read the latest state through refs
+
   useEffect(() => setStops((current) => {
     let changed = false;
     const next: Record<string, StopIntent> = {};
     for (const [campaign, intent] of Object.entries(current)) {
-      const doc = serverDocs.find((candidate) => candidate.view.campaign_id === campaign) ?? details[campaign]?.doc ?? undefined;
+      const doc = details[campaign]?.doc ?? undefined;
       const settled = doc ? reconcileStop(intent, doc.view, events?.campaign === campaign ? events.events ?? [] : []) : intent;
       if (settled) next[campaign] = settled; else changed = true;
     }
     return changed ? next : current;
-  }), [serverDocs, details, events]);
+  }), [details, events]);
 
   const location: CampaignLocation | null = mode === "server"
     ? serverSelected ? { mode, campaign: serverSelected, node } : null
     : selectedId ? { mode, campaign: selectedId, node } : null;
-  const query = location ? campaignLocationQuery(location) : null;
+  const query = tab === "queue" ? queueLocationQuery(queueCard) : location ? campaignLocationQuery(location) : null;
   // Runs after every render, so a navigation that dropped the query while this panel stayed mounted is undone;
   // once the address shows another page, the query is not this panel's to write.
   const [home] = useState(() => window.location.pathname);
@@ -254,7 +171,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
       }
     } finally {
       setBusy((current) => { const next = new Set(current); next.delete(campaign); return next; });
-      void refreshServer(); // The screen shows the server's view after a write, never one built from the reply.
+      refreshServer(campaign); // The screen shows the server's view after a write, never one built from the reply.
     }
   };
   const setServerDraft = (key: string, update: (current: DefinitionDraft) => DefinitionDraft | null) => setServerDrafts((current) => {
@@ -284,7 +201,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
   const renderForm = (key: string, disabled: boolean) => serverDrafts[key] && <ServerCampaignForm key={key}
     draft={serverDrafts[key]} disabled={disabled} tr={tr}
     focus={focusRequest.current?.key === key ? focusRequest.current.n : 0} onFocused={() => { focusRequest.current = null; }}
-    onDraftChange={(update) => setServerDraft(key, update)} onCancel={() => setServerDraft(key, () => null)} onConflict={() => void refreshServer()}
+    onDraftChange={(update) => setServerDraft(key, update)} onCancel={() => setServerDraft(key, () => null)} onConflict={() => refreshServer(key === NEW_DRAFT ? null : key.slice("edit:".length))}
     onSaved={(id) => {
       // The form keeps edits made while a create was in flight; they continue as an edit of the new campaign.
       if (key === NEW_DRAFT) {
@@ -298,62 +215,60 @@ export default function CampaignsPanel({ language }: { language: string }) {
         });
         selectServer(id);
       }
-      void refreshServer();
+      refreshServer(id);
     }} />;
 
+  const holds = useServerCampaignHolds(summaries, listLoaded, tab === "queue");
   const campaign = campaigns.find((value) => value.id === selectedId);
-  const progress = campaign ? campaignProgress(campaign.nodes) : null;
-  const onSaved = (updated: Campaign) => {
-    requestId.current++; // A poll started before this save must not replace its result.
-    setLoading(false); setError(null); setRefreshedAt(Date.now());
-    setCampaigns((current) => current.map((value) => value.id === updated.id && updated.revision >= value.revision ? updated : value));
-  };
-  const selector = <label className="campaign-selector"><span>{tr("캠페인 선택", "Select campaign")}</span><select aria-label={tr("캠페인 선택", "Select campaign")} value={mode === "server" ? `${SERVER_OPTION}${serverSelected}` : campaign?.id ?? ""} onChange={(event) => {
+  const selectorTitle = tr("캠페인 선택", "Select campaign");
+  const selector = <label className="campaign-selector"><span>{selectorTitle}</span><Select aria-label={selectorTitle} className="font-semibold" value={mode === "server" ? `${SERVER_OPTION}${serverSelected}` : campaign?.id ?? ""} onChange={(event) => {
     const { value } = event.target;
     if (value.startsWith(SERVER_OPTION)) selectServer(value.slice(SERVER_OPTION.length));
     else { setMode("legacy"); setSelectedId(value); setNode(null); }
   }}>
     {campaigns.map((value) => <option key={value.id} value={value.id}>{value.title}</option>)}
-    {[...serverDocs, ...(serverDoc && !serverDocs.includes(serverDoc) ? [serverDoc] : [])].map(({ definition, view }) => <option key={view.campaign_id} value={`${SERVER_OPTION}${view.campaign_id}`}>{definition.title}</option>)}
+    {summaries.map(({ definition, view }) => <option key={view.campaign_id} value={`${SERVER_OPTION}${view.campaign_id}`}>{definition.title}</option>)}
     {/* The selection must match an option, or the browser shows another campaign as chosen and it cannot be picked. */}
-    {mode === "server" && serverSelected && !serverDoc && <option value={`${SERVER_OPTION}${serverSelected}`}>{serverSelected}</option>}
-  </select></label>;
-  return <section className="campaigns-panel [&_[data-widget-state]]:!rounded-lg min-w-0 gap-6 text-th-text-primary [&_button]:min-h-11 [&_button]:min-w-11 [&_input:not([type=checkbox])]:min-h-11 [&_select]:min-h-11 [&_summary]:min-h-11 [&_summary]:py-3 [&_label:has(input[type=checkbox])]:min-h-11 [&_h2]:text-2xl [&_h2]:font-semibold [&_h2]:tracking-tight [&_h3]:font-semibold [&_h4]:text-xs [&_h4]:font-medium [&_a]:inline-flex [&_a]:min-h-11 [&_a]:max-w-full [&_a]:items-center [&_a]:py-2 [&_a]:[overflow-wrap:anywhere]">
-    <header className="campaign-row items-start gap-4 border-b border-th-border-subtle pb-5"><div><h2>{tr("캠페인", "Campaigns")}</h2><p>{tr("그룹별 작업을 살펴보고, 선택한 작업의 다음 행동부터 이어가세요.", "Browse tasks by group and pick up the next action.")}</p></div><div className="campaign-actions"><button disabled={serverDown} onClick={() => openDraft(NEW_DRAFT, () => createDraft(null))}>{tr("새 서버 캠페인", "New server campaign")}</button><button disabled={loading} onClick={() => refreshAll()}>{loading ? tr("불러오는 중…", "Refreshing…") : tr("새로고침", "Refresh")}</button></div></header>
-    {error && <WidgetState kind={campaigns.length ? "stale" : "error"} title={tr("캠페인을 갱신하지 못했습니다.", "Could not refresh campaigns.")} description={error + (campaigns.length ? tr(" · 이전 내용을 표시 중입니다.", " · Showing the previous snapshot.") : "")} action={<button onClick={() => void refresh()}>{tr("다시 시도", "Retry")}</button>} />}
-    {serverDown && <WidgetState kind={serverDocs.length ? "stale" : "error"} title={tr("서버 캠페인을 갱신하지 못했습니다.", "Could not refresh server campaigns.")} description={(serverError ?? tr("서버가 응답하지 않습니다", "The server is not answering")) + (serverDocs.length ? tr(" · 마지막 서버 스냅샷을 표시 중이며 중단만 보낼 수 있습니다.", " · Showing the last server snapshot; only stop can be sent.") : "")} />}
-    {/* Nothing is called empty until both lists have answered without an error. */}
-    {!campaigns.length && !serverDocs.length && !error && !serverDown && <WidgetState kind={loading || !serverLoaded ? "loading" : "empty"} title={loading || !serverLoaded ? tr("캠페인을 불러오고 있습니다.", "Loading campaigns.") : tr("등록된 캠페인이 없습니다.", "No campaigns yet.")} description={loading || !serverLoaded ? undefined : tr("캠페인이 등록되면 작업 흐름과 진행 상황이 여기에 표시됩니다.", "Registered campaigns and their progress will appear here.")} />}
-    {renderForm(NEW_DRAFT, serverDown)}
-    {serverDocs.length > 0 && <ServerCampaignList documents={serverDocs} selectedId={mode === "server" ? serverSelected : null} onSelect={selectServer} tr={tr} />}
-    {mode === "legacy" && campaign && progress && <div className="campaign-main gap-5 rounded-lg p-4 sm:p-5">
-      <div className="campaign-row campaign-summary-header">
-        {selector}
-        <Badge status={campaign.status} tr={tr} />
-        <span className="campaign-badge">{tr("기존 방식", "Legacy mode")}</span>
-        <span className="campaign-summary-round">{tr("라운드", "Round")} {campaign.round}</span>
-        <strong>{tr(`완료 ${progress.counts.completed}/${progress.total}`, `${progress.counts.completed}/${progress.total} done`)}</strong>
-        {refreshedAt && <span className="campaign-freshness">{tr("확인", "Checked")} {new Date(refreshedAt).toLocaleTimeString(language)}</span>}
-        <CampaignAutoQueueToggle key={campaign.id} campaign={campaign} tr={tr} onSaved={onSaved} checkedRead={checkedRead} />
-      </div>
-      {campaign.description && <details className="text-xs text-th-text-muted"><summary className="cursor-pointer">{tr("캠페인 설명", "Campaign description")}</summary><p className="campaign-description mt-2">{campaign.description}</p></details>}
-      <progress className="campaign-progress" max={100} value={progress.percent} aria-label={tr("작업 완료율", "Task completion")} />
-      {campaign.nodes.length ? <CampaignExplorer key={campaign.id} campaign={campaign} live={live[campaign.id] ?? NO_LIVE} tr={tr} onSaved={onSaved} drafts={drafts} onDraftChange={onDraftChange} initialSelectedId={node} onSelectedChange={setNode} /> : <WidgetState kind="empty" title={tr("아직 작업이 없습니다.", "No tasks yet.")} />}
-    </div>}
-    {mode === "server" && serverSelected && <div className="campaign-main gap-5 rounded-lg p-4 sm:p-5">
-      <div className="campaign-row campaign-summary-header">{selector}</div>
-      {detail?.error && <WidgetState kind={serverDoc ? "stale" : "error"} title={tr("이 서버 캠페인을 갱신하지 못했습니다.", "Could not refresh this server campaign.")} description={detail.error + (serverDoc ? tr(" · 마지막 서버 스냅샷을 표시 중이며 중단만 보낼 수 있습니다.", " · Showing the last server snapshot; only stop can be sent.") : "")} />}
-      {serverDoc ? <>
-        {renderForm(editKey(serverDoc.view.campaign_id), !commandAvailability(serverDoc.view, "edit_definition", connection).enabled)}
-        <ServerCampaignDetail document={serverDoc} events={events?.campaign === serverDoc.view.campaign_id ? events.events : null}
-          eventsFailed={events?.campaign === serverDoc.view.campaign_id && events.failedAfter !== null}
-          connection={connection} selectedNode={node} onSelectNode={setNode} stopIntent={stops[serverDoc.view.campaign_id] ?? null}
-          busy={busy.has(serverDoc.view.campaign_id)} commandError={commandErrors[serverDoc.view.campaign_id] ?? null}
-          onCommand={(name, nodeId) => void runCommand(serverDoc, name, nodeId)}
-          onEdit={() => openDraft(editKey(serverDoc.view.campaign_id), () => editDraft(serverDoc))}
-          onCopy={() => copyToCreate(serverDoc.definition)}
-          link={`${window.location.origin}${window.location.pathname}${query ?? ""}`} tr={tr} />
-      </> : detail?.error ? null : <WidgetState kind={serverLoaded && detail && !detail.loading ? "empty" : "loading"} title={serverLoaded && detail && !detail.loading ? tr("이 서버 캠페인을 찾을 수 없습니다.", "This server campaign was not found.") : tr("서버 캠페인을 불러오고 있습니다.", "Loading server campaigns.")} />}
+    {mode === "server" && serverSelected && !summaries.some((summary) => summary.view.campaign_id === serverSelected) && <option value={`${SERVER_OPTION}${serverSelected}`}>{serverDoc?.definition.title ?? serverSelected}</option>}
+  </Select></label>;
+
+  const actions = tab === "campaigns" && <>
+    <button type="button" disabled={serverDown} onClick={() => openDraft(NEW_DRAFT, () => createDraft(null))}>{tr("새 캠페인", "New campaign")}</button>
+    <button type="button" disabled={loading} onClick={refreshAll}>{loading ? tr("불러오는 중…", "Refreshing…") : tr("새로고침", "Refresh")}</button>
+  </>;
+  return <section className="campaigns-panel [&_[data-widget-state]]:!rounded-lg min-w-0 gap-4 text-sm text-th-text-primary sm:gap-6 [&_button]:min-h-11 [&_button]:min-w-11 [&_input:not([type=checkbox])]:min-h-11 [&_select]:min-h-11 [&_summary]:min-h-11 [&_summary]:py-3 [&_label:has(input[type=checkbox])]:min-h-11 [&_h2]:text-2xl [&_h2]:font-semibold [&_h2]:tracking-tight [&_h3]:font-semibold [&_h4]:text-xs [&_h4]:font-medium [&_a]:inline-flex [&_a]:min-h-11 [&_a]:max-w-full [&_a]:items-center [&_a]:py-2 [&_a]:[overflow-wrap:anywhere]">
+    <CampaignPageHeader tab={tab} onTab={setTab} actions={actions} tr={tr} />
+    {tab === "queue" ? <div id="campaign-panel-queue" role="tabpanel" aria-labelledby="campaign-tab-queue" className="min-w-0">
+      <Suspense fallback={<WidgetState kind="loading" title={tr("대기열을 불러오고 있습니다.", "Loading the queue.")} />}>
+        <CampaignQueueTab language={language} tr={tr} campaigns={campaigns} campaignsLoaded={refreshedAt !== null && holds.loaded}
+          campaignsError={refreshedAt === null ? error : null} onRetryCampaigns={() => { void legacy.refresh(); void refreshList(); }}
+          heldIssueUrls={holds.issueUrls} serverHoldsIncomplete={!!listError || holds.failed > 0}
+          selectedCardId={queueCard} onSelectCard={setQueueCard} onCampaignSaved={onSaved} />
+      </Suspense>
+    </div> : <div id="campaign-panel-campaigns" role="tabpanel" aria-labelledby="campaign-tab-campaigns" className="grid min-w-0 gap-4 sm:gap-6">
+      {error && <WidgetState kind={campaigns.length ? "stale" : "error"} title={tr("캠페인을 갱신하지 못했습니다.", "Could not refresh campaigns.")} description={error + (campaigns.length ? tr(" · 이전 내용을 표시 중입니다.", " · Showing the previous snapshot.") : "")} action={<button onClick={() => void legacy.refresh()}>{tr("다시 시도", "Retry")}</button>} />}
+      {serverDown && <WidgetState kind={summaries.length || serverDoc ? "stale" : "error"} title={tr("서버 캠페인을 갱신하지 못했습니다.", "Could not refresh server campaigns.")} description={(listError ?? tr("서버가 응답하지 않습니다", "The server is not answering")) + (summaries.length || serverDoc ? tr(" · 마지막 서버 스냅샷을 표시 중이며 중단만 보낼 수 있습니다.", " · Showing the last server snapshot; only stop can be sent.") : "")} />}
+      {/* Nothing is called empty until both lists have answered without an error. */}
+      {!campaigns.length && !summaries.length && !error && !serverDown && mode === "legacy" && <WidgetState kind={loading || !listLoaded ? "loading" : "empty"} title={loading || !listLoaded ? tr("캠페인을 불러오고 있습니다.", "Loading campaigns.") : tr("등록된 캠페인이 없습니다.", "No campaigns yet.")} description={loading || !listLoaded ? undefined : tr("캠페인이 등록되면 작업 흐름과 진행 상황이 여기에 표시됩니다.", "Registered campaigns and their progress will appear here.")} />}
+      {renderForm(NEW_DRAFT, serverDown)}
+      {summaries.length > 0 && <ServerCampaignList summaries={summaries} selectedId={mode === "server" ? serverSelected : null} onSelect={selectServer} tr={tr} />}
+      {mode === "legacy" && campaign && <LegacyCampaignView campaign={campaign} live={live[campaign.id] ?? NO_LIVE} selector={selector} refreshedAt={refreshedAt} checkedRead={checkedRead} language={language}
+        drafts={drafts} onDraftChange={onDraftChange} node={node} onNode={setNode} onSaved={onSaved} tr={tr} />}
+      {mode === "server" && serverSelected && <div className="campaign-main gap-4 rounded-lg p-3 sm:p-5">
+        <div className="campaign-row campaign-summary-header">{selector}</div>
+        {detail?.error && <WidgetState kind={serverDoc ? "stale" : "error"} title={tr("이 서버 캠페인을 갱신하지 못했습니다.", "Could not refresh this server campaign.")} description={detail.error + (serverDoc ? tr(" · 마지막 서버 스냅샷을 표시 중이며 중단만 보낼 수 있습니다.", " · Showing the last server snapshot; only stop can be sent.") : "")} />}
+        {serverDoc ? <>
+          {renderForm(editKey(serverDoc.view.campaign_id), !commandAvailability(serverDoc.view, "edit_definition", connection).enabled)}
+          <ServerCampaignDetail document={serverDoc} events={events?.campaign === serverDoc.view.campaign_id ? events.events : null}
+            eventsFailed={events?.campaign === serverDoc.view.campaign_id && events.failedAfter !== null}
+            connection={connection} selectedNode={node} onSelectNode={setNode} stopIntent={stops[serverDoc.view.campaign_id] ?? null}
+            busy={busy.has(serverDoc.view.campaign_id)} commandError={commandErrors[serverDoc.view.campaign_id] ?? null}
+            onCommand={(name, nodeId) => void runCommand(serverDoc, name, nodeId)}
+            onEdit={() => openDraft(editKey(serverDoc.view.campaign_id), () => editDraft(serverDoc))}
+            onCopy={() => copyToCreate(serverDoc.definition)}
+            link={`${window.location.origin}${window.location.pathname}${query ?? ""}`} tr={tr} />
+        </> : detail?.error ? null : <WidgetState kind={detail && !detail.loading ? "empty" : "loading"} title={detail && !detail.loading ? tr("이 서버 캠페인을 찾을 수 없습니다.", "This server campaign was not found.") : tr("서버 캠페인을 불러오고 있습니다.", "Loading server campaigns.")} />}
+      </div>}
     </div>}
   </section>;
 }

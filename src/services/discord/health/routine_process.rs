@@ -172,7 +172,6 @@ mod tests {
                     has_reply_boundary: false,
                     merge_consecutive: false,
                     pending_uploads: vec![],
-                    voice_announcement: None,
                 };
                 assert!(
                     mailbox

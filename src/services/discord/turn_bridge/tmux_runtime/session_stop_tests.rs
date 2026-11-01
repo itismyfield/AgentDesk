@@ -208,15 +208,10 @@ fn n1b_actual_stop_targets_open_parent_without_lease_and_keeps_idle_or_refused()
         let ctx = discord_mock::serenity_context(proxy, gateway).await;
         let shared = crate::services::discord::make_shared_data_for_tests();
         shared.settings.write().await.owner_user_id = Some(7);
-        let mut voice_config = crate::voice::VoiceConfig::default();
-        voice_config.keep_recordings = true;
-        voice_config.audio.recordings_dir = root.path().join("recordings");
         let mut data = Data {
             shared: shared.clone(),
             token: "test-token".into(),
             provider: ProviderKind::Claude,
-            voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
-            voice_config,
         };
         let channel = ChannelId::new(discord_mock::CHANNEL_ID);
         let session = "n1b-direct-parent";
@@ -451,15 +446,10 @@ fn codex_parent_without_session_meta_refuses_stop_and_replies() {
         );
         let shared = crate::services::discord::make_shared_data_for_tests();
         shared.settings.write().await.owner_user_id = Some(7);
-        let mut voice_config = crate::voice::VoiceConfig::default();
-        voice_config.keep_recordings = true;
-        voice_config.audio.recordings_dir = root.path().join("recordings");
         let data = Data {
             shared: shared.clone(),
             token: "test-token".into(),
             provider: ProviderKind::Codex,
-            voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
-            voice_config,
         };
         let channel = ChannelId::new(discord_mock::CHANNEL_ID);
         let session = "codex-without-parent-header";
@@ -502,15 +492,10 @@ fn n1c_confirmed_stop_keeps_a_discord_token_on_the_channel_stop_and_refuses_an_u
         let ctx = discord_mock::serenity_context(proxy, gateway).await;
         let shared = crate::services::discord::make_shared_data_for_tests();
         shared.settings.write().await.owner_user_id = Some(7);
-        let mut voice_config = crate::voice::VoiceConfig::default();
-        voice_config.keep_recordings = true;
-        voice_config.audio.recordings_dir = root.path().join("recordings");
         let data = Data {
             shared: shared.clone(),
             token: "test-token".into(),
             provider: ProviderKind::Claude,
-            voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
-            voice_config,
         };
         let channel = ChannelId::new(discord_mock::CHANNEL_ID);
         let session = "n1c-discord-turn";
@@ -698,15 +683,10 @@ fn owner_stop_case(name: &str, case: OwnerCase) {
             let (proxy, gateway, server) = discord_mock::start(mock.clone()).await;
             let ctx = discord_mock::serenity_context(proxy, gateway).await;
             shared.settings.write().await.owner_user_id = Some(7);
-            let mut voice_config = crate::voice::VoiceConfig::default();
-            voice_config.keep_recordings = true;
-            voice_config.audio.recordings_dir = root.path().join("recordings");
             let data = Data {
                 shared: shared.clone(),
                 token: "test-token".into(),
                 provider: provider.clone(),
-                voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
-                voice_config,
             };
             command(&ctx, &data, channel).await;
             assert!(mock.unhandled.lock().unwrap().is_empty());

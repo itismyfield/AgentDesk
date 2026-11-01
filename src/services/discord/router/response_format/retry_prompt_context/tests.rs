@@ -68,7 +68,6 @@ fn empty_raw_wire_keeps_plain_text_eligibility_but_actual_context_does_not() {
         false,
         false,
         Vec::new(),
-        None,
     );
     assert!(crate::services::turn_orchestrator::prefix::eligible(&item));
     item.reply_context = RetryPromptContext::raw(None).encode();

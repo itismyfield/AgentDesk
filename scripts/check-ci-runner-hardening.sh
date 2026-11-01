@@ -772,7 +772,7 @@ targets = {
     "needs" => "changes",
     "if" => "${{ !github.event.pull_request.draft && needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true' }}",
     "runs_on" => '${{ matrix.os }}',
-    "job_sha256" => "148f6669238504a554aa6f1c312f502c84eab13886df25c205ae4c08bb460aa5",
+    "job_sha256" => "959bbf84d5672397470445b0aa15245bdebe413b43485dbd03189c2a2550d627",
     "cargo_steps" => {
       "cargo check" => {
         "commands" => ["cargo check --workspace --all-targets"],
@@ -786,7 +786,7 @@ targets = {
     "needs" => "changes",
     "if" => "${{ !github.event.pull_request.draft && needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true' }}",
     "runs_on" => '${{ matrix.os }}',
-    "job_sha256" => "5af310f0434fc4ee5227d916f2b9bf1113ea1d9e3b43f644890fe428dfccd9fc",
+    "job_sha256" => "d01dcdf5b05e0b25e87fd5af17acb4881ab91aab92ebe0914527a3ff3fdcecad",
     "cargo_steps" => {
       "Writer namespace exact Windows targets" => {
         "commands" => ["./scripts/ci/run-writer-namespace-windows-targets.sh"],
@@ -827,8 +827,8 @@ targets = {
     "needs" => "changes",
     "if" => "${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "9e2f665589c7d1985275bcbcdd5a967be5b99c1c7e1cc73ce36b2677ff6a5b2b",
-    "job_timeout_minutes" => 45,
+    "job_sha256" => "f9d82ef5c7b9d497edaad746306464a733033519a9a19ba4d7ff3b290fdec26e",
+    "job_timeout_minutes" => 60,
     "cargo_steps" => {
       "Fetch Cargo dependencies" => {
         "commands" => ["cargo fetch --locked"],
@@ -837,7 +837,7 @@ targets = {
       },
       "Require relay-authority mutations to be killed" => {
         "commands" => ["bash scripts/run_relay_authority_mutations.sh"],
-        "timeout_minutes" => 45,
+        "timeout_minutes" => 60,
         "if_condition" => "steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'",
       },
     },

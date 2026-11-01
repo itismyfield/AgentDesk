@@ -3,10 +3,8 @@ import { useLocation, useNavigate } from "react-router";
 import type { Agent, CompanySettings } from "../types";
 import { DEFAULT_SETTINGS } from "../types";
 import * as api from "../api/client";
-import { useKanban } from "../contexts/KanbanContext";
-import { useOffice } from "../contexts/OfficeContext";
+import { useWorkspace } from "../contexts/WorkspaceContext";
 import { useSettings } from "../contexts/SettingsContext";
-import { useSpriteMap } from "../components/AgentAvatar";
 import type { Notification } from "../components/NotificationCenter";
 import { useFocusTrap } from "../components/common/overlay";
 import { MOBILE_LAYOUT_MEDIA_QUERY } from "./breakpoints";
@@ -30,11 +28,9 @@ import {
 import AppShellRoutes from "./AppShellRoutes";
 import AppShellOverlays from "./AppShellOverlays";
 import AppViewSkeleton from "./AppViewSkeleton";
-import { countOpenMeetingIssues } from "./meetingSummary";
 import { MOBILE_PRIMARY_ROUTE_IDS, SIDEBAR_SECTION_ORDER } from "./shellNavigationConfig";
 import { iconForRoute } from "./shellRouteIcons";
-import { getOperatorLevelTitle } from "./HomeOverviewConfig";
-import { getAgentLevelFromXp } from "../components/gamification/GamificationShared";
+import type { AgentManagerTab } from "../components/agent-manager/useAgentManagerController";
 
 interface AppShellProps {
   wsConnected: boolean;
@@ -52,9 +48,6 @@ interface AppShellProps {
   ) => void;
   dismissNotification: (id: string) => void;
 }
-
-type AgentsPageTab = "agents" | "departments" | "backlog" | "dispatch";
-type KanbanSignalFocus = "review" | "blocked" | "requested" | "stalled";
 
 const MOBILE_TABBAR_SAFE_AREA_HEIGHT = "calc(4rem + env(safe-area-inset-bottom))";
 
@@ -82,22 +75,13 @@ export default function AppShell({
     useSettings();
   const {
     agents,
-    allAgents,
     departments,
-    allDepartments,
     setSessions,
-    roundTableMeetings,
-    setRoundTableMeetings,
     visibleDispatchedSessions,
     agentsWithDispatched,
     refreshAgents,
-    refreshAllAgents,
     refreshDepartments,
-    refreshAllDepartments,
-    refreshAuditLogs,
-  } = useOffice();
-  const { kanbanCards, taskDispatches, upsertKanbanCard, setKanbanCards } =
-    useKanban();
+  } = useWorkspace();
 
   const [agentInfoAgent, setAgentInfoAgent] = useState<Agent | null>(null);
   const [showCommandPalette, setShowCommandPalette] = useState(false);
@@ -106,9 +90,7 @@ export default function AppShell({
   const [showTweaksPanel, setShowTweaksPanel] = useState(false);
   const [showMobileMoreMenu, setShowMobileMoreMenu] = useState(false);
   const mobileMoreMenuRef = useFocusTrap(showMobileMoreMenu);
-  const [agentsPageTab, setAgentsPageTab] = useState<AgentsPageTab>("agents");
-  const [kanbanSignalFocus, setKanbanSignalFocus] =
-    useState<KanbanSignalFocus | null>(null);
+  const [agentsPageTab, setAgentsPageTab] = useState<AgentManagerTab>("agents");
   const [themePreference, setThemePreference] = useState<ThemePreference>(() =>
     readStoredThemePreference(window.localStorage, settings.theme),
   );
@@ -123,54 +105,16 @@ export default function AppShell({
     return window.matchMedia(MOBILE_LAYOUT_MEDIA_QUERY).matches;
   });
 
-  const spriteMap = useSpriteMap(agents);
-  const unresolvedMeetingsCount = roundTableMeetings.filter(
-    (meeting) => countOpenMeetingIssues(meeting) > 0,
-  ).length;
   const unreadCount = notifications.filter(
     (notification) => Date.now() - notification.ts < 60_000,
   ).length;
-  const kanbanBadgeCount = kanbanCards.filter(
-    (card) =>
-      card.status === "requested" ||
-      card.status === "in_progress" ||
-      card.status === "review" ||
-      card.status === "blocked",
-  ).length;
-  const notificationBadgeCount = unresolvedMeetingsCount + unreadCount;
+  // Cards waiting on a person (review or blocked) badge the campaigns tab.
+  const attentionCount = (stats?.kanban.review_queue ?? 0) + (stats?.kanban.blocked ?? 0);
   const resolvedTheme = useMemo(
     () => resolveThemePreference(themePreference, prefersDarkScheme),
     [prefersDarkScheme, themePreference],
   );
   const recentNotifications = notifications.slice(0, 6);
-  const currentUserXp = useMemo(() => {
-    if (stats?.top_agents?.length) {
-      const samples = stats.top_agents.slice(0, 3);
-      return Math.round(
-        samples.reduce((sum, agent) => sum + agent.stats_xp, 0) /
-          Math.max(samples.length, 1),
-      );
-    }
-    if (agentsWithDispatched.length === 0) {
-      return 0;
-    }
-    const rankedAgents = [...agentsWithDispatched]
-      .sort((left, right) => right.stats_xp - left.stats_xp)
-      .slice(0, 3);
-    return Math.round(
-      rankedAgents.reduce((sum, agent) => sum + agent.stats_xp, 0) /
-        Math.max(rankedAgents.length, 1),
-    );
-  }, [agentsWithDispatched, stats?.top_agents]);
-  const currentUserLevel = useMemo(
-    () => getAgentLevelFromXp(currentUserXp),
-    [currentUserXp],
-  );
-  const currentUserLabel = "you";
-  const currentUserDetail = `lv.${currentUserLevel.level} · ${getOperatorLevelTitle(
-    currentUserLevel.level,
-    isKo,
-  )}`;
 
   useEffect(() => {
     const query = window.matchMedia("(prefers-color-scheme: dark)");
@@ -235,22 +179,15 @@ export default function AppShell({
       await api.saveSettings(mergedSettings);
       const refreshed = await api.getSettings();
       setSettings({ ...DEFAULT_SETTINGS, ...refreshed } as CompanySettings);
-      refreshAuditLogs();
     },
-    [refreshAuditLogs, setSettings, settings],
+    [setSettings, settings],
   );
 
   const navigateToRoute = useCallback(
-    (
-      path: string,
-      options?: { agentsTab?: AgentsPageTab; kanbanFocus?: KanbanSignalFocus },
-    ) => {
+    (path: string, options?: { agentsTab?: AgentManagerTab }) => {
       setShowMobileMoreMenu(false);
       if (options?.agentsTab) {
         setAgentsPageTab(options.agentsTab);
-      }
-      if (options?.kanbanFocus) {
-        setKanbanSignalFocus(options.kanbanFocus);
       }
       navigate(path);
     },
@@ -334,16 +271,8 @@ export default function AppShell({
       ).filter((route): route is AppRouteEntry => route !== undefined),
     [],
   );
-  const mobileOverflowSections = useMemo(
-    () =>
-      SIDEBAR_SECTION_ORDER.map((section) => ({
-        ...section,
-        routes: PRIMARY_ROUTES.filter(
-          (route) =>
-            route.section === section.id &&
-            !MOBILE_PRIMARY_ROUTE_IDS.includes(route.id),
-        ),
-      })).filter((section) => section.routes.length > 0),
+  const mobileOverflowRoutes = useMemo(
+    () => PRIMARY_ROUTES.filter((route) => !MOBILE_PRIMARY_ROUTE_IDS.includes(route.id)),
     [],
   );
   const activeMobileRouteId =
@@ -353,18 +282,9 @@ export default function AppShell({
       : currentRoute?.id ?? "home";
   const sidebarBadgeForRoute = useCallback(
     (routeId: AppRouteId): number | undefined => {
-      switch (routeId) {
-        case "kanban":
-          return kanbanBadgeCount || undefined;
-        case "meetings":
-          return unresolvedMeetingsCount || undefined;
-        case "settings":
-          return unreadCount || undefined;
-        default:
-          return undefined;
-      }
+      return routeId === "campaigns" && attentionCount > 0 ? attentionCount : undefined;
     },
-    [kanbanBadgeCount, unreadCount, unresolvedMeetingsCount],
+    [attentionCount],
   );
 
   return (
@@ -377,9 +297,6 @@ export default function AppShell({
       {!isMobileViewport && (
         <AppSidebar
           currentRouteId={currentRoute?.id ?? null}
-          currentUserDetail={currentUserDetail}
-          currentUserLabel={currentUserLabel}
-          currentUserProgress={currentUserLevel.progress}
           iconForRoute={iconForRoute}
           isKo={isKo}
           navigateToRoute={navigateToRoute}
@@ -395,11 +312,11 @@ export default function AppShell({
         <AppTopBar
           wsConnected={wsConnected}
           currentRoute={currentRoute ?? null}
-            dismissNotification={dismissNotification}
-            headerZIndex={SHELL_HEADER_Z_INDEX}
-            isKo={isKo}
-          navigateToRoute={navigateToRoute}
-          notificationBadgeCount={notificationBadgeCount}
+          dismissNotification={dismissNotification}
+          headerZIndex={SHELL_HEADER_Z_INDEX}
+          isKo={isKo}
+          isMobileViewport={isMobileViewport}
+          notificationBadgeCount={unreadCount}
           popoverZIndex={SHELL_POPOVER_Z_INDEX}
           recentNotifications={recentNotifications}
           resolvedTheme={resolvedTheme}
@@ -408,7 +325,6 @@ export default function AppShell({
           setShowTweaksPanel={setShowTweaksPanel}
           showNotificationPanel={showNotificationPanel}
           toggleShellTheme={toggleShellTheme}
-          unresolvedMeetingsCount={unresolvedMeetingsCount}
         />
 
         <main
@@ -433,40 +349,28 @@ export default function AppShell({
               />
             }
           >
-<AppShellRoutes
+            <AppShellRoutes
               ctx={{
                 agents,
                 agentsPageTab,
                 agentsWithDispatched,
-                allAgents,
-                allDepartments,
                 departments,
                 handleSettingsSave,
                 isKo,
                 isMobileViewport,
-                kanbanCards,
-                kanbanSignalFocus,
                 navigateToRoute,
                 notifications,
                 openDefaultAgentInfo,
                 pushNotification,
-                roundTableMeetings,
                 setAgentsPageTab,
-                setKanbanCards,
-                setKanbanSignalFocus,
-                setRoundTableMeetings,
                 setSessions,
                 settings,
                 stats,
-                taskDispatches,
                 updateNotification,
-                upsertKanbanCard,
                 visibleDispatchedSessions,
                 wsConnected,
                 wsLastEventTs,
                 refreshAgents,
-                refreshAllAgents,
-                refreshAllDepartments,
                 refreshDepartments,
               }}
             />
@@ -482,11 +386,14 @@ export default function AppShell({
           isKo={isKo}
           moreMenuRef={mobileMoreMenuRef}
           moreOpen={showMobileMoreMenu}
-          moreSections={mobileOverflowSections}
+          moreRoutes={mobileOverflowRoutes}
           navigateToRoute={navigateToRoute}
           primaryRoutes={mobilePrimaryRoutes}
+          resolvedTheme={resolvedTheme}
           routeBadge={sidebarBadgeForRoute}
           setMoreOpen={setShowMobileMoreMenu}
+          setShowTweaksPanel={setShowTweaksPanel}
+          toggleShellTheme={toggleShellTheme}
           tabbarHeight={MOBILE_TABBAR_SAFE_AREA_HEIGHT}
           tabbarZIndex={SHELL_TABBAR_Z_INDEX}
         />
@@ -496,7 +403,7 @@ export default function AppShell({
         ctx={{
           accentPreset,
           agentInfoAgent,
-          allAgents,
+          agents,
           closeAgentInfo,
           departments,
           dismissNotification,
@@ -507,8 +414,6 @@ export default function AppShell({
           openDefaultAgentInfo,
           popoverZIndex: SHELL_POPOVER_Z_INDEX,
           refreshAgents,
-          refreshAllAgents,
-          refreshAuditLogs,
           setAccentPreset,
           setShowCommandPalette,
           setShowShortcutHelp,
@@ -517,7 +422,6 @@ export default function AppShell({
           showCommandPalette,
           showShortcutHelp,
           showTweaksPanel,
-          spriteMap,
           themePreference,
           tr,
           wsConnected,

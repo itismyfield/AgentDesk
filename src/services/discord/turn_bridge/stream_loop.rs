@@ -52,7 +52,6 @@ pub(super) async fn run_stream_loop(
         .placeholder_live_events
         .set_tool_activity_cwd(channel_id, adk_cwd.as_deref());
     let (role_binding, turn_id) = (ctx.role_binding, ctx.turn_id);
-    let voice_progress_playback_channel_id = ctx.voice_progress_playback_channel_id;
     let single_message_panel_footer_mode = ctx.single_message_panel_footer_mode;
     let (footer_owner, status_panel_started_at) = (ctx.footer_owner, ctx.status_panel_started_at);
     let (status_interval, context_window_tokens) = (ctx.status_interval, ctx.context_window_tokens);
@@ -337,7 +336,6 @@ pub(super) async fn run_stream_loop(
                                     cancel_token: &cancel_token,
                                     recovery_lease: recovery_lease.as_ref(),
                                     expected_identity: &stream_tick_expected_identity,
-                                    voice_progress_playback_channel_id,
                                     watcher_owns_assistant_relay,
                                     watcher_relay_available_for_turn,
                                     standby_relay_owns_output,
@@ -428,7 +426,6 @@ pub(super) async fn run_stream_loop(
                                     adk_session_key: &adk_session_key,
                                     adk_session_name: &adk_session_name,
                                     role_binding: &role_binding,
-                                    voice_progress_playback_channel_id,
                                     single_message_panel_footer_mode,
                                     footer_owner,
                                     current_msg_id: &mut current_msg_id,
@@ -497,7 +494,6 @@ pub(super) async fn run_stream_loop(
                                     adk_session_key: &adk_session_key,
                                     adk_session_name: &adk_session_name,
                                     role_binding: &role_binding,
-                                    voice_progress_playback_channel_id,
                                     single_message_panel_footer_mode,
                                     footer_owner,
                                     current_msg_id: &mut current_msg_id,
@@ -573,7 +569,6 @@ pub(super) async fn run_stream_loop(
                                     adk_session_key: &adk_session_key,
                                     adk_session_name: &adk_session_name,
                                     role_binding: &role_binding,
-                                    voice_progress_playback_channel_id,
                                     single_message_panel_footer_mode,
                                     footer_owner,
                                     current_msg_id: &mut current_msg_id,

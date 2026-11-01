@@ -113,6 +113,10 @@
 > `auto-queue-monitor` label now matches its live script producer. No delivery
 > verb or v3 callsite changed.)
 
+> Last refreshed: 2026-11-01 (meetings, agent quality rollups and voice were
+> removed, so `quality_regression_alerter`, the meeting notifications and the
+> voice producers no longer exist. Older notes below keep their history.)
+
 > Last refreshed: 2026-07-11 (#4448 review follow-up — quality regression
 > cooldowns and terminal auto-queue entry failures now commit their
 > `message_outbox` obligation in the same PostgreSQL transaction as the owning
@@ -315,7 +319,6 @@ These callsites already use the unified delivery engine. Rows marked
 | `src/services/discord/gateway.rs` (`TurnGateway::{send_message, edit_message}`) | turn-bridge messages/edits | **migrated_v3 transitively via gateway**. Used for handoff, rollover freeze, snapshot, stable update, and terminal edit. |
 | `src/services/discord/outbound/reaction_control.rs` (`send_reaction_control_reply_http`) | reaction-control lifecycle replies | **migrated_v3 and nonce-hardened**. Queued-card POST and queue-reaction failure fallbacks use referenced v3 lifecycle notices. Correlation = `intake-reaction-control:<channel_id>:<message_id>`, semantic = `intake-reaction-control:<channel_id>:<message_id>:<reason_key>`; the same identity derives an enforced stable Discord create nonce for bounded replay suppression across process-local deduper restarts. |
 | `src/services/discord/monitoring_status.rs` (`deliver_monitoring_status`) | monitoring status | **migrated_v3**. Status banner send + edit with `preserve_inline_content`; edits use `without_idempotency()`. |
-| `src/services/discord/meeting_orchestrator/selection_runtime.rs` (`meeting_outbound_message` / edit path) | meeting status / cancel / parse-error | **migrated_v3**. Stable meeting dedup metadata plus `OutboundOperation::Edit`. |
 | `src/services/routines/discord_log.rs` (`send_or_edit_run_log`; formerly `deliver_or_update_discord_summary`) | routine Discord summary | **migrated_v3**. Uses direct v3 send/edit and disables semantic dedupe for repeated summary writes. |
 | `src/integration_tests/discord_flow/scenarios.rs` (removed in #3035 Phase 1) | integration test harness | Mock-Discord roundtrip for §1.2 validation; legacy-sqlite-only harness deleted. |
 | `src/integration_tests/agents_setup_e2e.rs` (removed in #3035 Phase 1) | integration test | Wizard-ready E2E; legacy-sqlite-only harness deleted. |
@@ -524,9 +527,9 @@ button hits the manual outbound API, which is covered under §3.A
   verifies `/api/discord/send-dm` short text uses v3 DM target semantics and preserves
   the manual duplicate response contract.
 - `src/services/discord/outbound/manual_delivery.rs`:
-  `api_send_rejects_user_supplied_voice_delivery_id_namespace` verifies manual
-  `/api/discord/send` callers cannot forge the reserved `voice:` correlation
-  namespace used by voice announce delivery ids.
+  `api_send_rejects_user_supplied_message_outbox_delivery_id_namespace` verifies manual
+  `/api/discord/send` callers cannot forge the reserved `message_outbox:` correlation
+  namespace used by internal outbox delivery ids.
 - `src/services/discord/outbound/manual_delivery.rs`:
   #3807 keeps the manual over-limit notification path on the compatibility
   chunk shim while adding compact continuation context to each split message.

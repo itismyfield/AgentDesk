@@ -329,44 +329,12 @@ pub(crate) fn log_producer_exit(
 }
 
 /// Execute a simple Claude CLI call with `--print` flag (no tools, text-only response).
-/// Used for short synchronous tasks like meeting participant selection.
 /// This is a blocking function — call from tokio::task::spawn_blocking.
 pub fn execute_command_simple_cancellable(
     prompt: &str,
-    cancel_token: Option<&CancelToken>,
-) -> Result<String, String> {
-    execute_command_simple_with_model_and_cancel(prompt, None, cancel_token, None)
-}
-
-/// Cancel-aware variant of the model-override simple execution path.
-///
-/// Threads the supplied `CancelToken` into the spawned Claude child so that a
-/// mid-flight cancel (e.g. voice barge-in) terminates the process tree
-/// instead of letting it run to natural exit. Required by ADR #2175 for all
-/// non-foreground entry points — call sites that hold a `CancelToken` from
-/// the surrounding turn MUST use this variant.
-///
-/// This is a blocking function — call from `tokio::task::spawn_blocking`.
-pub fn execute_command_simple_cancellable_with_model(
-    prompt: &str,
-    model_override: Option<&str>,
-    cancel_token: Option<std::sync::Arc<CancelToken>>,
-) -> Result<String, String> {
-    let borrow = cancel_token.as_deref();
-    execute_command_simple_with_model_and_cancel(
-        prompt,
-        model_override,
-        borrow,
-        cancel_token.clone(),
-    )
-}
-
-fn execute_command_simple_with_model_and_cancel(
-    prompt: &str,
-    model_override: Option<&str>,
-    cancel_token: Option<&CancelToken>,
     cancel_token_arc: Option<std::sync::Arc<CancelToken>>,
 ) -> Result<String, String> {
+    let cancel_token = cancel_token_arc.as_deref();
     let session_selection =
         crate::services::provider_hosting::resolve_provider_session_selection_with_capability(
             &ProviderKind::Claude,
@@ -376,17 +344,13 @@ fn execute_command_simple_with_model_and_cancel(
 
     let (claude_bin, resolution) = resolve_claude_binary()?;
 
-    let mut args = vec![
+    let args = [
         "-p".to_string(),
         "--tools".to_string(),
         "".to_string(),
         "--output-format".to_string(),
         "text".to_string(),
     ];
-    if let Some(model) = model_override {
-        args.push("--model".to_string());
-        args.push(model.to_string());
-    }
 
     let mut builder = ClaudeCommandBuilder::for_binary(&claude_bin, &resolution);
     configure_execute_command_simple(builder.command_mut(), &args);
@@ -409,7 +373,7 @@ fn execute_command_simple_with_model_and_cancel(
     // not be honoured. The Codex counterpart has no stdin so it is not
     // affected. ADR #2175.
     let cancel_watcher =
-        crate::services::process::spawn_simple_cancel_watcher(cancel_token_arc, child_pid);
+        crate::services::process::spawn_simple_cancel_watcher(cancel_token_arc.clone(), child_pid);
 
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(prompt.as_bytes());

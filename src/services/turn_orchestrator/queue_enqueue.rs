@@ -92,10 +92,6 @@ pub(super) fn enqueue_behind(
             );
             last.text = join_source_text_segments(&last.source_text_segments);
             last.created_at = intervention.created_at;
-            // Voice metadata follows the new primary used by dispatch.
-            if intervention.voice_announcement.is_some() {
-                last.voice_announcement = intervention.voice_announcement;
-            }
             last.pending_uploads.extend(intervention.pending_uploads);
             return EnqueueInterventionResult {
                 enqueued: true,

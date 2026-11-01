@@ -38,7 +38,6 @@ use crate::services::discord::tmux_reaper::heal_stale_busy_mailbox;
 #[cfg(test)]
 use crate::services::observability::turn_lifecycle::TurnEvent;
 use crate::services::provider::CancelToken;
-use std::future::Future;
 use std::sync::Arc;
 use url::Url;
 mod attachments;
@@ -56,8 +55,6 @@ mod provider_isolation;
 mod tui_followup;
 mod turn_lifecycle;
 pub(in crate::services::discord) mod typing_indicator;
-mod voice_announcement_route;
-mod voice_announcement_scope;
 mod watchdog;
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use watchdog::incident_attach;
@@ -286,7 +283,6 @@ pub(super) use self::control::handle_text_command;
 #[allow(unused_imports)]
 pub(in crate::services::discord) use self::headless_turn::{
     start_headless_turn, start_reserved_headless_turn, start_reserved_headless_turn_with_owner,
-    start_voice_headless_turn,
 };
 pub(in crate::services::discord) use self::intake_turn::IntakeDeps;
 pub(crate) use self::intake_turn::{IntakeRequest, execute_intake_turn_core, start_exact_retry};
@@ -306,7 +302,6 @@ pub(super) async fn finish_admitted_local(
     queued_drain: bool,
     queued: Option<crate::services::turn_orchestrator::QueuedRoute>,
     preloaded_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
-    voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> Result<IntakeExecution, Error> {
     intake_turn::handle_text_message(
         deps,
@@ -314,7 +309,6 @@ pub(super) async fn finish_admitted_local(
         request,
         (queued_drain, queued),
         preloaded_uploads,
-        voice_announcement,
         false,
     )
     .await

@@ -291,7 +291,6 @@ async fn queued(
         has_reply_boundary: false,
         merge_consecutive: false,
         pending_uploads: Vec::new(),
-        voice_announcement: None,
     };
     let persistence =
         crate::services::discord::queue_persistence_context(shared, provider, channel);

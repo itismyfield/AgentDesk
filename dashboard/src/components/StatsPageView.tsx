@@ -21,17 +21,13 @@ import type {
   CompanySettings,
   DashboardStats,
   DispatchedSession,
-  RoundTableMeeting,
   SkillCatalogEntry,
   TokenAnalyticsResponse,
 } from "../types";
 import {
   buildAgentCacheRows,
   buildAgentSkillRows,
-  buildAgentSpendRows,
-  buildLeaderboardRows,
   buildModelSegments,
-  buildProviderSegments,
   buildSavingsDelta,
   buildSkillRows,
   buildWindowDelta,
@@ -48,12 +44,8 @@ import {
 } from "./stats/statsModel";
 import {
   AgentCacheCard,
-  AgentLeaderboardCard,
-  AgentSpendCard,
-  DailyCacheHitCard,
   DailyTokenCompositionCard,
   ModelDistributionCard,
-  ProviderDistributionCard,
   SkillUsageCard,
   StatsSummaryGrid,
 } from "./stats/StatsCards";
@@ -67,7 +59,6 @@ import {
   RefreshCw,
   ShieldAlert,
 } from "lucide-react";
-import { AgentQualityWidget } from "./dashboard/ExtraWidgets";
 import ReceiptWidget from "./dashboard/ReceiptWidget";
 import ClaudeAccountsWidget from "./dashboard/ClaudeAccountsWidget";
 
@@ -76,32 +67,16 @@ interface StatsPageViewProps {
   stats?: DashboardStats | null;
   agents?: Agent[];
   sessions?: DispatchedSession[];
-  meetings?: RoundTableMeeting[];
-  requestedTab?: unknown;
-  onSelectAgent?: (agent: Agent) => void;
-  onOpenKanbanSignal?: (
-    signal: "review" | "blocked" | "requested" | "stalled",
-  ) => void;
-  onOpenDispatchSessions?: () => void;
-  onOpenSettings?: () => void;
-  onRefreshMeetings?: () => void;
-  onRequestedTabHandled?: () => void;
 }
 
 const PERIOD_OPTIONS: Period[] = ["7d", "30d", "90d"];
 const DEFAULT_PERIOD: Period = "7d";
 
 const NUMERIC_STYLE: CSSProperties = {
-  fontFamily: "var(--font-mono)",
   fontVariantNumeric: "tabular-nums",
-  fontFeatureSettings: '"tnum" 1',
 };
 
-export default function StatsPageView({
-  settings,
-  stats,
-  agents,
-}: StatsPageViewProps) {
+export default function StatsPageView({ settings }: StatsPageViewProps) {
   const language = settings.language;
   const localeTag = useMemo(() => resolveLocaleTag(language), [language]);
   const numberFormatter = useMemo(
@@ -301,14 +276,6 @@ export default function StatsPageView({
     () => buildModelSegments(analytics),
     [analytics],
   );
-  const providerSegments = useMemo(
-    () => buildProviderSegments(analytics),
-    [analytics],
-  );
-  const agentSpendRows = useMemo(
-    () => buildAgentSpendRows(analytics),
-    [analytics],
-  );
   const agentCacheRows = useMemo(
     () => buildAgentCacheRows(analytics),
     [analytics],
@@ -320,10 +287,6 @@ export default function StatsPageView({
   const topAgentSkillPairs = useMemo(
     () => buildAgentSkillRows(skillRanking, catalog, language).slice(0, 5),
     [catalog, language, skillRanking],
-  );
-  const leaderboardRows = useMemo(
-    () => buildLeaderboardRows(stats, agents),
-    [agents, stats],
   );
   const skillWindowCalls = useMemo(
     () => skillRanking?.overall.reduce((sum, row) => sum + row.calls, 0) ?? 0,
@@ -354,7 +317,7 @@ export default function StatsPageView({
               <p className="mt-2 text-xs leading-5 text-th-text-muted">
                 {t(
                   msg(
-                    "토큰 / 비용 / 캐시 / 모델 분포를 한곳에서",
+                    "토큰 사용량, 비용, 캐시 효과, 모델별 비중을 봐요.",
                     "Token, cost, cache, and model mix in one place.",
                     "トークン / コスト / キャッシュ / モデル分布を一か所で確認します。",
                     "在一个页面查看 Token、成本、缓存和模型分布。",
@@ -424,7 +387,7 @@ export default function StatsPageView({
                   >
                     {t(
                       msg(
-                        "일부 통계를 불러오지 못했습니다.",
+                        "일부 통계를 불러오지 못했어요.",
                         "Some stats could not be loaded.",
                         "一部の統計を読み込めませんでした。",
                         "部分统计加载失败。",
@@ -466,7 +429,7 @@ export default function StatsPageView({
             />
           </div>
 
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 items-stretch [&>div]:flex [&>div>article]:flex-1">
+          <div className="grid grid-cols-1 items-stretch gap-4 lg:grid-cols-2 [&>div]:flex [&>div>article]:flex-1">
             <div data-testid="stats-model-share">
               <ModelDistributionCard
                 t={t}
@@ -475,12 +438,13 @@ export default function StatsPageView({
                 totalTokens={summary?.total_tokens ?? 0}
               />
             </div>
-            <div data-testid="stats-agent-cost">
-              <AgentSpendCard
+            <div data-testid="stats-skill-usage">
+              <SkillUsageCard
                 t={t}
-                loading={loading}
-                rows={agentSpendRows}
-                rangeDays={rangeDays}
+                loading={skillLoading || catalogLoading}
+                rows={skillRows}
+                byAgentRows={topAgentSkillPairs}
+                windowCalls={skillWindowCalls}
               />
             </div>
           </div>
@@ -494,40 +458,8 @@ export default function StatsPageView({
             />
           </div>
 
-          <div data-testid="stats-agent-quality">
-            <AgentQualityWidget
-              agents={agents ?? []}
-              t={t}
-              localeTag={localeTag}
-            />
-          </div>
-
           <div data-testid="stats-receipt">
             <ReceiptWidget t={t} />
-          </div>
-
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <div data-testid="stats-provider-share">
-              <ProviderDistributionCard
-                t={t}
-                loading={loading}
-                segments={providerSegments}
-              />
-            </div>
-            <div className="grid min-w-0 gap-4">
-              <div data-testid="stats-skill-usage">
-                <SkillUsageCard
-                  t={t}
-                  loading={skillLoading || catalogLoading}
-                  rows={skillRows}
-                  byAgentRows={topAgentSkillPairs}
-                  windowCalls={skillWindowCalls}
-                />
-              </div>
-              <div data-testid="stats-agent-leaderboard">
-                <AgentLeaderboardCard t={t} rows={leaderboardRows} agents={agents} />
-              </div>
-            </div>
           </div>
         </section>
       </div>

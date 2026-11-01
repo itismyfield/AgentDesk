@@ -168,7 +168,6 @@ async fn legacy_handoff_after_rowless_snapshot_schedules_backlog_kickoff() {
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         };
         discord::queue_io::with_post_enqueue_idle_queue_kick_suppressed(
             discord::mailbox_enqueue_intervention(

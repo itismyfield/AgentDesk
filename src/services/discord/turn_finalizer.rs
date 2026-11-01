@@ -8,7 +8,7 @@
 //! clear (honouring `PlannedRestartSkipped`), (2) mailbox cancel_token release
 //! via `mailbox_finish_turn`, (3) `global_active` decrement gated on
 //! `removed_token.is_some()`, (4) the trailing terminal side-effects (watchdog
-//! override clear, `dispatch_thread_parents` retain, voice barge-in drain,
+//! override clear, `dispatch_thread_parents` retain,
 //! `dispatch_role_overrides` cleanup).
 //!
 //! Exactly-once is decided in one place — the actor task's `Terminal` handling
@@ -2015,7 +2015,6 @@ pub(super) mod tests {
                         has_reply_boundary: false,
                         merge_consecutive: false,
                         pending_uploads: Vec::new(),
-                        voice_announcement: None,
                     }],
                     super::super::queue_persistence_context(&shared, &ProviderKind::Claude, ch),
                 )
@@ -2119,7 +2118,6 @@ pub(super) mod tests {
                         has_reply_boundary: false,
                         merge_consecutive: false,
                         pending_uploads: Vec::new(),
-                        voice_announcement: None,
                     }],
                     super::super::queue_persistence_context(&shared, &ProviderKind::Claude, ch),
                 )

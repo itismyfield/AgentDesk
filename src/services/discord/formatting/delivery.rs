@@ -594,23 +594,16 @@ mod discord_unit_tests {
                 shard_index: 0,
                 shard_init: 0,
                 shard_total: 1,
-                voice_manager: None,
                 ws_url: Arc::new(tokio::sync::Mutex::new("ws://127.0.0.1:1".into())),
                 cache: serenity_ctx.cache.clone(),
                 http: api.http.clone(),
                 intents: serenity::GatewayIntents::empty(),
                 presence: None,
             });
-        let voice_config = crate::voice::VoiceConfig {
-            keep_recordings: true,
-            ..Default::default()
-        };
         let data = Data {
             shared: make_shared_data_for_tests_with_storage(None),
             token: "test-token".into(),
             provider: crate::services::provider::ProviderKind::Claude,
-            voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
-            voice_config,
         };
         let options = poise::FrameworkOptions::<Data, super::Error>::default();
         let command = poise::Command::<Data, super::Error>::default();

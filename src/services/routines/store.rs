@@ -992,6 +992,27 @@ impl RoutineStore {
         .map_err(|e| anyhow!("list routine runs {routine_id}: {e}"))
     }
 
+    /// The newest run of each listed routine, ordered as `list_runs` orders them.
+    pub async fn latest_runs(&self, routine_ids: &[String]) -> Result<Vec<RoutineRunRecord>> {
+        sqlx::query_as(
+            r#"
+            SELECT DISTINCT ON (routine_id)
+                   id, routine_id, status, action, turn_id, lease_expires_at,
+                   retry_count, next_retry_at, attempts,
+                   result_json, error, discord_log_status, discord_log_error,
+                   discord_message_id, discord_log_sections, started_at,
+                   finished_at, created_at, updated_at
+            FROM routine_runs
+            WHERE routine_id = ANY($1)
+            ORDER BY routine_id, started_at DESC, created_at DESC
+            "#,
+        )
+        .bind(routine_ids)
+        .fetch_all(&*self.pool)
+        .await
+        .map_err(|e| anyhow!("list latest routine runs: {e}"))
+    }
+
     /// Only a run with its own `turn_id` owns a fresh agent session (#3006).
     /// Terminal script actions create separate runs with no turn, so they must
     /// not tear down a session based on an earlier run's history: an unrelated

@@ -329,7 +329,6 @@ src/
 │   ├── intake_outbox_open_status.rs
 │   ├── intake_outbox_status.rs
 │   ├── kanban.rs
-│   ├── meetings.rs
 │   ├── mod.rs
 │   ├── o_channel_activation.rs
 │   ├── o_channel_activation_fence_tests.rs
@@ -399,7 +398,6 @@ src/
 │   │   ├── log_ops.rs
 │   │   ├── message_ops.rs
 │   │   ├── pipeline_ops.rs
-│   │   ├── quality_ops.rs
 │   │   ├── queue_ops.rs
 │   │   ├── read_bridge.rs
 │   │   ├── review_automation_ops.rs
@@ -619,6 +617,7 @@ src/
 │   │   ├── docs.rs
 │   │   ├── e2e_control.rs
 │   │   ├── escalation.rs
+│   │   ├── etag.rs
 │   │   ├── execution_requirements.rs
 │   │   ├── github.rs
 │   │   ├── github_dashboard.rs
@@ -630,10 +629,10 @@ src/
 │   │   ├── hooks.rs
 │   │   ├── kakao_calendar.rs
 │   │   ├── kanban.rs
+│   │   ├── kanban_list_view_tests.rs
 │   │   ├── kanban_repos.rs
 │   │   ├── kanban_snapshot_tests.rs
 │   │   ├── maintenance.rs
-│   │   ├── meetings.rs
 │   │   ├── memory_api.rs
 │   │   ├── message_outbox.rs
 │   │   ├── messages.rs
@@ -664,11 +663,7 @@ src/
 │   │   ├── skills_manifest_audit_tests.rs
 │   │   ├── stats.rs
 │   │   ├── termination_events.rs
-│   │   ├── turn_lease.rs
-│   │   ├── voice_audio.rs
-│   │   ├── voice_conductor.rs
-│   │   ├── voice_config.rs
-│   │   └── voice_config_snapshot_tests.rs
+│   │   └── turn_lease.rs
 │   ├── task_dispatch_claims/
 │   │   ├── config_read.rs
 │   │   └── config_read_tests.rs
@@ -709,9 +704,6 @@ src/
 │   ├── worker_registry.rs
 │   └── ws.rs
 ├── services/
-│   ├── agent_quality/
-│   │   ├── mod.rs
-│   │   └── regression_alerts.rs
 │   ├── agent_recovery/
 │   │   ├── durable/
 │   │   │   ├── operations.rs
@@ -1041,6 +1033,7 @@ src/
 │   │   │   │   └── other.rs
 │   │   │   ├── command.rs
 │   │   │   ├── gpu.rs
+│   │   │   ├── memory.rs
 │   │   │   ├── network.rs
 │   │   │   ├── sampler.rs
 │   │   │   ├── store.rs
@@ -1310,9 +1303,6 @@ src/
 │   │   │   │   ├── clear_http_overlap_tests.rs
 │   │   │   │   ├── clear_refusal_reply_tests.rs
 │   │   │   │   └── native_stop.rs
-│   │   │   ├── voice/
-│   │   │   │   ├── alert.rs
-│   │   │   │   └── sensitivity.rs
 │   │   │   ├── cancel_backstop_tests.rs
 │   │   │   ├── command_policy.rs
 │   │   │   ├── config.rs
@@ -1337,8 +1327,7 @@ src/
 │   │   │   ├── tmux_recreate.rs
 │   │   │   ├── tool_call.rs
 │   │   │   ├── tool_call_tests.rs
-│   │   │   ├── tui_passthrough.rs
-│   │   │   └── voice.rs
+│   │   │   └── tui_passthrough.rs
 │   │   ├── delivery_lease_cell/
 │   │   │   ├── exact_lease/
 │   │   │   │   ├── tests.rs
@@ -1644,12 +1633,6 @@ src/
 │   │   │   └── guard_tests.rs
 │   │   ├── mailbox_finish/
 │   │   │   └── closed_actor_tests.rs
-│   │   ├── meeting_orchestrator/
-│   │   │   ├── lifecycle.rs
-│   │   │   ├── records.rs
-│   │   │   ├── rounds.rs
-│   │   │   ├── selection.rs
-│   │   │   └── selection_runtime.rs
 │   │   ├── model_catalog/
 │   │   │   ├── claude/
 │   │   │   │   └── tests/
@@ -2080,7 +2063,6 @@ src/
 │   │   │   │   │   ├── start_placeholder.rs
 │   │   │   │   │   ├── start_placeholder_tests.rs
 │   │   │   │   │   ├── system_prompt_tests.rs
-│   │   │   │   │   ├── voice_intake.rs
 │   │   │   │   │   └── worker_entry.rs
 │   │   │   │   ├── provider_dispatch/
 │   │   │   │   │   ├── producer_error_test_support.rs
@@ -2134,8 +2116,6 @@ src/
 │   │   │   │   ├── turn_lifecycle.rs
 │   │   │   │   ├── turn_mark_admission_tests.rs
 │   │   │   │   ├── typing_indicator.rs
-│   │   │   │   ├── voice_announcement_route.rs
-│   │   │   │   ├── voice_announcement_scope.rs
 │   │   │   │   ├── watchdog.rs
 │   │   │   │   └── watchdog_host_tests.rs
 │   │   │   ├── response_format/
@@ -2228,8 +2208,7 @@ src/
 │   │   │   ├── snapshot_reader_tests.rs
 │   │   │   ├── spawns.rs
 │   │   │   ├── spawns_tests.rs
-│   │   │   ├── startup_doctor.rs
-│   │   │   └── voice.rs
+│   │   │   └── startup_doctor.rs
 │   │   ├── runtime_store/
 │   │   │   ├── generation_allocation_tests/
 │   │   │   │   └── source_guard_tests.rs
@@ -2873,8 +2852,6 @@ src/
 │   │   │   ├── tmux_runtime_tests.rs
 │   │   │   ├── turn_analytics.rs
 │   │   │   ├── two_message_panel.rs
-│   │   │   ├── voice_completion.rs
-│   │   │   ├── voice_completion_tests.rs
 │   │   │   ├── watcher_handoff.rs
 │   │   │   └── watcher_orphan_cleanup.rs
 │   │   ├── turn_finalizer/
@@ -2982,24 +2959,6 @@ src/
 │   │   │   ├── resolution.rs
 │   │   │   ├── store.rs
 │   │   │   └── tests.rs
-│   │   ├── voice_barge_in/
-│   │   │   ├── tests/
-│   │   │   │   └── pcm_harness_tests.rs
-│   │   │   ├── channel_state.rs
-│   │   │   ├── final_result_playback.rs
-│   │   │   ├── foreground_decision.rs
-│   │   │   ├── handoff_cancel.rs
-│   │   │   ├── live_cut_playback.rs
-│   │   │   ├── progress_playback.rs
-│   │   │   ├── receive_hook.rs
-│   │   │   ├── routing.rs
-│   │   │   ├── runtime_lifecycle.rs
-│   │   │   ├── stt.rs
-│   │   │   ├── tts_pipeline.rs
-│   │   │   ├── turn_dispatch.rs
-│   │   │   ├── utility.rs
-│   │   │   ├── utterance_pipeline.rs
-│   │   │   └── utterance_snapshot_tests.rs
 │   │   ├── watchers/
 │   │   │   ├── lifecycle/
 │   │   │   │   ├── activity.rs
@@ -3063,7 +3022,7 @@ src/
 │   │   ├── footer_retirement_boot_tests.rs
 │   │   ├── formatting.rs
 │   │   ├── gateway.rs
-│   │   ├── gateway_voice_queue.rs
+│   │   ├── gateway_queue_owner.rs
 │   │   ├── health.rs
 │   │   ├── herdr_terminate.rs
 │   │   ├── herdr_terminate_exit_tests.rs
@@ -3090,9 +3049,6 @@ src/
 │   │   ├── mailbox_probe.rs
 │   │   ├── mailbox_stop.rs
 │   │   ├── mcp_credential_watcher.rs
-│   │   ├── meeting_artifact_store.rs
-│   │   ├── meeting_orchestrator.rs
-│   │   ├── meeting_state_machine.rs
 │   │   ├── metrics.rs
 │   │   ├── mod.rs
 │   │   ├── model_catalog.rs
@@ -3203,14 +3159,6 @@ src/
 │   │   ├── turn_teardown_clearance.rs
 │   │   ├── turn_teardown_clearance_tests.rs
 │   │   ├── turn_view_reconciler.rs
-│   │   ├── voice_acknowledgement.rs
-│   │   ├── voice_background_driver.rs
-│   │   ├── voice_barge_in.rs
-│   │   ├── voice_config_cache.rs
-│   │   ├── voice_id_sequences.rs
-│   │   ├── voice_lifecycle.rs
-│   │   ├── voice_routing.rs
-│   │   ├── voice_sensitivity.rs
 │   │   ├── watcher_summary_authority_tests.rs
 │   │   └── zombie_foreground_release.rs
 │   ├── discord_config_audit/
@@ -3301,7 +3249,6 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── target_sweep.rs
 │   │   │   ├── tmp_pipeline_sweep.rs
-│   │   │   ├── voice_cache_sweep.rs
 │   │   │   └── worktree_orphan_sweep.rs
 │   │   └── mod.rs
 │   ├── manual_steer/
@@ -3340,7 +3287,6 @@ src/
 │   │   ├── metrics.rs
 │   │   ├── mod.rs
 │   │   ├── pg_io.rs
-│   │   ├── queries.rs
 │   │   ├── recovery_audit.rs
 │   │   ├── relay_signal_alert.rs
 │   │   ├── retention.rs
@@ -4308,8 +4254,7 @@ src/
 │   ├── turn_lifecycle.rs
 │   ├── turn_orchestrator.rs
 │   ├── turn_summary_line.rs
-│   ├── turn_summary_line_tests.rs
-│   └── voice_conductor.rs
+│   └── turn_summary_line_tests.rs
 ├── supervisor/
 │   └── mod.rs
 ├── test_support/
@@ -4335,34 +4280,6 @@ src/
 │   ├── redact.rs
 │   ├── secret_file.rs
 │   └── wip_detect.rs
-├── voice/
-│   ├── announce_meta/
-│   │   └── durable.rs
-│   ├── receiver/
-│   │   └── recording.rs
-│   ├── tts/
-│   │   ├── chunks.rs
-│   │   ├── edge.rs
-│   │   ├── mod.rs
-│   │   └── playback.rs
-│   ├── announce_meta.rs
-│   ├── barge_in.rs
-│   ├── cancel_tombstone.rs
-│   ├── commands.rs
-│   ├── config.rs
-│   ├── flight.rs
-│   ├── metrics.rs
-│   ├── mod.rs
-│   ├── openai_compat.rs
-│   ├── progress.rs
-│   ├── prompt.rs
-│   ├── receiver.rs
-│   ├── runtime_boundary.rs
-│   ├── sanitizer.rs
-│   ├── stt.rs
-│   ├── stt_streaming.rs
-│   ├── turn_link.rs
-│   └── utils.rs
 ├── api_caller_observability.rs
 ├── app_state.rs
 ├── bootstrap.rs
@@ -4413,7 +4330,6 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/test_support/` | Tests for the test-only Rust source lexer. |
 | `src/ui/` | Compatibility shims for persisted UI/session types used by the Discord runtime. |
 | `src/utils/` | Shared formatting and Unicode-safe string utilities. |
-| `src/voice/` | Voice command, STT/TTS, prompt, progress, metrics, receiver, and barge-in helpers. |
 | `src/api_caller_observability.rs` | Request-principal classification and uniform log-only API caller attribution records for identity-consuming mutation paths. |
 | `src/app_state.rs` | Shared HTTP route-handler state (`AppState`); lives at crate root below server+services so service-layer handlers reference it without a service→server backflow. |
 | `src/bootstrap.rs` | Builds config, database, policy engine, and shared app state before launch. |
@@ -4449,7 +4365,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/services/discord/recovery_engine.rs` | Restart-time inflight turn recovery. |
 | `src/services/discord/placeholder_controller/queued_card_gate.rs` | #5035: sole enforcement point for destroying a channel's queued `📬` card. Evaluates contract G (G1 ∧ G2) under the channel persist lock over the whole mailbox queue and hands out a `QueuedCardTeardown` token no other module can construct. |
 | `src/services/discord/gateway.rs` / `discord_io.rs` / `queue_io.rs` | Discord gateway bridge and outbound/inbound message plumbing. |
-| `src/services/discord/commands/` | Slash command handlers for session, config, diagnostics, meetings, models, receipts, skills. |
+| `src/services/discord/commands/` | Slash command handlers for session, config, diagnostics, models, receipts, skills. |
 | `src/services/discord/agentdesk_config.rs` | YAML/DB/legacy config source-of-truth handling. |
 | `src/services/discord/prompt_builder/` / `shared_memory.rs` | Turn prompt assembly and org/shared memory context. |
 

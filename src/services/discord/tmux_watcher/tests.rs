@@ -528,7 +528,6 @@ async fn terminal_delivery_timeout_cleanup_releases_mailbox_and_preserves_follow
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         },
     )
     .await;
@@ -669,7 +668,6 @@ fn watchdog_timeout_path_releases_mailbox_via_finalizer_and_does_not_double_fina
                 has_reply_boundary: false,
                 merge_consecutive: false,
                 pending_uploads: Vec::new(),
-                voice_announcement: None,
             },
         )
         .await;

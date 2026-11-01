@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { beginAuthentication } from "./authState";
 import { onApiError } from "./httpClient";
 import {
-  createServerCampaign, editServerCampaignDefinition, getServerCampaignEvents, getServerCampaigns, isDefinitiveAnswer,
+  createServerCampaign, editServerCampaignDefinition, getServerCampaignEvents, getServerCampaignSummaries, isDefinitiveAnswer,
   sendServerCampaignCommand, serverCampaignRejection, type ServerCampaignRejection,
 } from "./serverCampaigns";
 import { serverCampaignFixtures as fixtures } from "./serverCampaignsFixtures";
@@ -104,7 +104,7 @@ it("reads every page of the campaign list, not only the first hundred", async ()
   });
   // A campaign created between reads shifts the second page by one; it is listed once.
   fetchMock.mockResolvedValueOnce(response({ campaigns: page(0, 100) })).mockResolvedValueOnce(response({ campaigns: page(99, 3) }));
-  const campaigns = await getServerCampaigns();
-  expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(["/api/server-campaigns", "/api/server-campaigns?limit=100&offset=100"]);
+  const campaigns = await getServerCampaignSummaries();
+  expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(["/api/server-campaigns?view=summary&limit=100&offset=0", "/api/server-campaigns?view=summary&limit=100&offset=100"]);
   expect(campaigns.map((document) => document.view.campaign_id)).toEqual(page(0, 102).map((document) => document.view.campaign_id));
 });

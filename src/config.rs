@@ -1,4 +1,3 @@
-use crate::voice::{VoiceConfig, barge_in::BargeInSensitivity};
 use anyhow::{Context, Result};
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
@@ -61,7 +60,6 @@ pub(crate) fn runtime_config_optional() -> Option<Config> {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RuntimeConfigSource {
     pub(crate) path: PathBuf,
-    pub(crate) meeting_available_agents_explicitly_empty: bool,
 }
 
 #[cfg(test)]
@@ -77,8 +75,6 @@ pub struct Config {
     pub discord: DiscordConfig,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub providers: BTreeMap<String, ProviderConfig>,
-    #[serde(default, skip_serializing_if = "VoiceConfig::is_default")]
-    pub voice: VoiceConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -87,8 +83,6 @@ pub struct Config {
     pub review_mcp_allowlist: Vec<String>,
     #[serde(default)]
     pub agents: Vec<AgentDef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub meeting: Option<MeetingSettings>,
     #[serde(default)]
     pub github: GitHubConfig,
     #[serde(default)]
@@ -354,46 +348,6 @@ where
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
-pub struct AgentVoiceConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub channel_id: Option<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "AgentVoiceForegroundConfig::is_default"
-    )]
-    pub foreground: AgentVoiceForegroundConfig,
-}
-
-impl AgentVoiceConfig {
-    pub fn is_default(&self) -> bool {
-        self.channel_id.as_deref().unwrap_or("").trim().is_empty() && self.foreground.is_default()
-    }
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct AgentVoiceForegroundConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_chars: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout_ms: Option<u64>,
-}
-
-impl AgentVoiceForegroundConfig {
-    pub fn is_default(&self) -> bool {
-        self.provider.as_deref().unwrap_or("").trim().is_empty()
-            && self.model.as_deref().unwrap_or("").trim().is_empty()
-            && self.max_chars.is_none()
-            && self.timeout_ms.is_none()
-    }
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default)]
 pub struct McpServerConfig {
     #[serde(default)]
     pub url: String,
@@ -619,12 +573,6 @@ pub struct AgentChannelConfig {
     pub thread_inherit: bool,
     #[serde(
         default,
-        alias = "qualityFeedbackInjection",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub quality_feedback_injection: Option<bool>,
-    #[serde(
-        default,
         alias = "dispatchProfile",
         skip_serializing_if = "Option::is_none"
     )]
@@ -663,7 +611,6 @@ impl Default for AgentChannelConfig {
             model: None,
             reasoning_effort: None,
             peer_agents: None,
-            quality_feedback_injection: None,
             dispatch_profile: None,
             isolate_override: None,
             cache_ttl_minutes: None,
@@ -706,77 +653,6 @@ impl AgentChannelConfig {
         }
         names
     }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct MeetingSettings {
-    pub channel_name: String,
-    #[serde(default)]
-    pub max_rounds: Option<u32>,
-    #[serde(
-        default,
-        alias = "maxParticipants",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub max_participants: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary_agent: Option<MeetingSummaryAgentDef>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub available_agents: Vec<MeetingAgentEntry>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(untagged)]
-pub enum MeetingSummaryAgentDef {
-    Static(String),
-    Dynamic {
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        rules: Vec<MeetingSummaryRuleDef>,
-        default: String,
-    },
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct MeetingSummaryRuleDef {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub keywords: Vec<String>,
-    pub agent: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(untagged)]
-pub enum MeetingAgentEntry {
-    RoleId(String),
-    Detailed(MeetingAgentDef),
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
-pub struct MeetingAgentDef {
-    pub role_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub keywords: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_file: Option<String>,
-    #[serde(
-        default,
-        alias = "domainSummary",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub domain_summary: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub strengths: Vec<String>,
-    #[serde(default, alias = "taskTypes", skip_serializing_if = "Vec::is_empty")]
-    pub task_types: Vec<String>,
-    #[serde(default, alias = "antiSignals", skip_serializing_if = "Vec::is_empty")]
-    pub anti_signals: Vec<String>,
-    #[serde(
-        default,
-        alias = "providerHint",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub provider_hint: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -1772,6 +1648,30 @@ mod runtime_hook_registry_config_tests {
         );
     }
 
+    // Deployed yaml may still carry the removed voice section and per-agent voice keys.
+    #[test]
+    fn retired_voice_keys_load_on_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agentdesk.yaml");
+        std::fs::write(
+            &path,
+            concat!(
+                "server: {}\nvoice: {enabled: true, lobby_channel_id: '1'}\n",
+                "agents:\n  - id: a\n    name: A\n    aliases: [x]\n    wake_word: w\n",
+                "    voice_enabled: false\n    sensitivity_mode: conservative\n    voice: {channel_id: '2'}\n",
+                "    channels:\n      claude: {id: '41'}\n",
+            ),
+        )
+        .unwrap();
+        let loaded = load_from_path(&path).expect("retired voice keys must not fail config load");
+        assert_eq!(loaded.agents.len(), 1);
+        assert!(
+            !render_config_for_path(&path, &loaded)
+                .unwrap()
+                .contains("voice")
+        );
+    }
+
     #[test]
     fn intake_delivery_sweep_cutoffs_clamp_before_chrono_conversion() {
         let runtime = RuntimeSettingsConfig {
@@ -2466,20 +2366,9 @@ fn default_memento_mcp_server() -> Option<(String, McpServerConfig)> {
 }
 
 impl Config {
-    fn with_runtime_source(mut self, path: &Path, contents: &str) -> Self {
-        let explicitly_empty = serde_yaml::from_str::<serde_yaml::Value>(contents)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("meeting")?
-                    .get("available_agents")?
-                    .as_sequence()
-                    .map(Vec::is_empty)
-            })
-            .unwrap_or(false);
+    fn with_runtime_source(mut self, path: &Path) -> Self {
         self.runtime_source = Some(RuntimeConfigSource {
             path: std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()),
-            meeting_available_agents_explicitly_empty: explicitly_empty,
         });
         self
     }
@@ -2543,12 +2432,10 @@ impl Default for Config {
             server: ServerConfig::default(),
             discord: DiscordConfig::default(),
             providers: std::collections::BTreeMap::new(),
-            voice: VoiceConfig::default(),
             shared_prompt: None,
             mcp_servers: std::collections::BTreeMap::new(),
             review_mcp_allowlist: Vec::new(),
             agents: Vec::new(),
-            meeting: None,
             github: GitHubConfig::default(),
             policies: PoliciesConfig::default(),
             data: DataConfig::default(),
@@ -2583,7 +2470,7 @@ pub fn load() -> Result<Config> {
         .with_context(|| format!("Failed to parse config: {path_display}"))?;
     let runtime_root = runtime_root_for_config_path(&path);
     let config = config
-        .with_runtime_source(&path, &contents)
+        .with_runtime_source(&path)
         .apply_runtime_defaults()
         .resolve_runtime_relative_paths(runtime_root.as_deref());
     register_config_secrets(&config);
@@ -2604,7 +2491,7 @@ pub fn load_from_path(path: &Path) -> Result<Config> {
         .with_context(|| format!("Failed to parse config {}", path.display()))?;
     let runtime_root = runtime_root_for_config_path(path);
     let config = config
-        .with_runtime_source(path, &contents)
+        .with_runtime_source(path)
         .apply_runtime_defaults()
         .resolve_runtime_relative_paths(runtime_root.as_deref());
     register_config_secrets(&config);
@@ -2862,7 +2749,7 @@ pub fn load_graceful() -> Config {
         Ok(contents) => match serde_yaml::from_str::<Config>(&contents) {
             Ok(cfg) => {
                 let runtime_root = runtime_root_for_config_path(&path);
-                cfg.with_runtime_source(&path, &contents)
+                cfg.with_runtime_source(&path)
                     .apply_runtime_defaults()
                     .resolve_runtime_relative_paths(runtime_root.as_deref())
             }

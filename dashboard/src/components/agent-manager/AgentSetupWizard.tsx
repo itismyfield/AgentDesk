@@ -301,7 +301,7 @@ export default function AgentSetupWizard({
 
               {currentStep === "workspace" && (
                 <SurfaceSubsection
-                  title={tr("Workspace + MCP", "Workspace + MCP")}
+                  title={tr("작업 폴더와 MCP", "Workspace + MCP")}
                   description={tr("스킬은 setup API에 그대로 전달됩니다.", "Skills are passed through to the setup API.")}
                 >
                   <div className="grid gap-4 md:grid-cols-2">
@@ -340,7 +340,7 @@ export default function AgentSetupWizard({
 
               {currentStep === "cron" && (
                 <SurfaceSubsection
-                  title={tr("Cron", "Cron")}
+                  title={tr("예약 작업", "Cron")}
                   description={tr("선택 항목입니다. 일정 연결은 관리 화면에서 이어서 조정합니다.", "Optional. Schedule wiring can be adjusted from management later.")}
                 >
                   <div className="space-y-4">
@@ -364,7 +364,7 @@ export default function AgentSetupWizard({
 
               {currentStep === "preview" && (
                 <SurfaceSubsection
-                  title={tr("Preview + Confirm", "Preview + Confirm")}
+                  title={tr("미리 보고 확정", "Preview + Confirm")}
                   description={tr("dry-run으로 파일/설정 변경을 확인한 뒤 생성합니다. 실패 시 setup rollback 결과를 확인하고 같은 화면에서 재시도합니다.", "Dry-run the file/config changes before creation. On failure, review rollback output and retry here.")}
                 >
                   <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(280px,0.8fr)]">
@@ -511,10 +511,10 @@ export default function AgentSetupWizard({
             ) : (
               <>
                 <SurfaceActionButton tone="info" onClick={runPreview} disabled={!currentValid || busy}>
-                  {busy ? tr("확인 중...", "Checking...") : tr("Preview", "Preview")}
+                  {busy ? tr("확인 중...", "Checking...") : tr("미리 보기", "Preview")}
                 </SurfaceActionButton>
                 <SurfaceActionButton tone="accent" onClick={runConfirm} disabled={!currentValid || busy}>
-                  {busy ? tr("처리 중...", "Working...") : tr("Confirm", "Confirm")}
+                  {busy ? tr("처리 중...", "Working...") : tr("확정", "Confirm")}
                 </SurfaceActionButton>
               </>
             )}

@@ -354,7 +354,6 @@ impl RecoveryFixture {
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         };
         let persistence =
             QueuePersistenceContext::new(&ProviderKind::Claude, &self.shared.token_hash, None);

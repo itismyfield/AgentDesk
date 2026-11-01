@@ -66,7 +66,6 @@ RISKY_INTEGER_NAMES = {
     "stage_order",
     "tokens",
     "updated_at",
-    "xp",
 }
 
 RISKY_INTEGER_SUFFIXES = (

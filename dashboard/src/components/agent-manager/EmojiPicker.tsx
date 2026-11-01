@@ -1,36 +1,7 @@
-import { Suspense, lazy, useEffect, useRef, useState, type SyntheticEvent } from "react";
+import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { useI18n } from "../../i18n";
 
 const EmojiPickerLibraryPanel = lazy(() => import("./EmojiPickerLibraryPanel"));
-
-const SPRITE_ICON_FALLBACK_SRC = "/sprites/1-D-1.png";
-
-export function StackedSpriteIcon({ sprites }: { sprites: [number, number] }) {
-  const handleImageError = (event: SyntheticEvent<HTMLImageElement>) => {
-    const image = event.currentTarget;
-    image.onerror = null;
-    image.src = SPRITE_ICON_FALLBACK_SRC;
-  };
-
-  return (
-    <span className="relative inline-flex items-center" style={{ width: 22, height: 16 }}>
-      <img
-        src={`/sprites/${sprites[0]}-D-1.png`}
-        alt=""
-        className="absolute left-0 top-0 w-4 h-4 rounded-full object-cover"
-        style={{ imageRendering: "pixelated", opacity: 0.85 }}
-        onError={handleImageError}
-      />
-      <img
-        src={`/sprites/${sprites[1]}-D-1.png`}
-        alt=""
-        className="absolute left-1.5 top-px w-4 h-4 rounded-full object-cover"
-        style={{ imageRendering: "pixelated", zIndex: 1 }}
-        onError={handleImageError}
-      />
-    </span>
-  );
-}
 
 export default function EmojiPicker({
   id,

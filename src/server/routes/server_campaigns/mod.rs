@@ -41,6 +41,39 @@ fn document(state: &CampaignState, as_of: chrono::DateTime<Utc>) -> Value {
     json!({"definition": state.definition.input(), "view": view::view(state, as_of)})
 }
 
+/// A campaign picker's document: node definitions, node views, sessions and
+/// unreconciled actions are dropped and counted instead.
+fn summary_document(state: &CampaignState, as_of: chrono::DateTime<Utc>) -> Value {
+    let full = view::view(state, as_of);
+    let mut node_counts = std::collections::BTreeMap::<String, usize>::new();
+    for node in &full.nodes {
+        if let Value::String(disposition) = json!(node.runtime.disposition) {
+            *node_counts.entry(disposition).or_default() += 1;
+        }
+    }
+    let counts = [
+        ("node_total", json!(full.nodes.len())),
+        ("node_counts", json!(node_counts)),
+        ("session_count", json!(full.sessions.len())),
+        (
+            "unreconciled_action_count",
+            json!(full.unreconciled_actions.len()),
+        ),
+    ];
+    let mut definition = json!(state.definition.input());
+    let mut view = json!(full);
+    if let Some(definition) = definition.as_object_mut() {
+        definition.remove("nodes");
+    }
+    if let Some(view) = view.as_object_mut() {
+        for dropped in ["nodes", "sessions", "unreconciled_actions"] {
+            view.remove(dropped);
+        }
+        view.extend(counts.map(|(key, value)| (key.to_string(), value)));
+    }
+    json!({"definition": definition, "view": view})
+}
+
 pub(super) async fn list(
     State(state): State<AppState>,
     query: Result<Query<ListQuery>, QueryRejection>,
@@ -55,8 +88,12 @@ pub(super) async fn list(
         .await
         .map_err(store_error)?;
     let as_of = Utc::now();
+    let render = match query.view {
+        ListView::Full => document,
+        ListView::Summary => summary_document,
+    };
     Ok(Json(
-        json!({"campaigns": campaigns.iter().map(|state| document(state, as_of)).collect::<Vec<_>>()}),
+        json!({"campaigns": campaigns.iter().map(|state| render(state, as_of)).collect::<Vec<_>>()}),
     ))
 }
 

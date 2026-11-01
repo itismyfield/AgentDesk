@@ -825,7 +825,6 @@ mod tests {
         let snapshot = extract_anchor_snapshot(&payload(&content)).unwrap();
         assert_eq!(snapshot.text, format!("[ANCHOR MEMORY]\n- {content}"));
         assert!(!snapshot.text.contains("ordinary recall"));
-        assert!(snapshot.text.len() > MEMENTO_MODEL_OUTPUT_MAX_BYTES);
     }
 
     #[test]

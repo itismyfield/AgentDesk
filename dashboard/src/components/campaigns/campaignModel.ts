@@ -16,7 +16,19 @@ export function campaignIssueNumber(node: CampaignNode): string | null {
   const issue = safe ? new URL(safe).pathname.match(/\/issues\/(\d+)\/?$/)?.[1] : null;
   return issue ? `#${issue}` : null;
 }
-export function campaignIssueLabel(node: CampaignNode): string { return campaignIssueNumber(node) ?? node.id; }
+const TITLE_NUMBER = /^#(\d+)\b[\s:·-]*/;
+/** The issue number shown once per task: the linked issue, else a leading "#123" in the title, else an "i123" node id. */
+export function campaignTaskNumber(node: CampaignNode): string | null {
+  const number = campaignIssueNumber(node)?.slice(1) ?? node.title.match(TITLE_NUMBER)?.[1] ?? node.id.match(/^i(\d+)(?:_|$)/)?.[1];
+  return number ? `#${number}` : null;
+}
+/** The title without a leading copy of the task number. */
+export function campaignTaskTitle(node: CampaignNode): string {
+  const match = node.title.match(TITLE_NUMBER);
+  const stripped = match && `#${match[1]}` === campaignTaskNumber(node) ? node.title.slice(match[0].length).trim() : "";
+  return stripped || node.title;
+}
+export function campaignIssueLabel(node: CampaignNode): string { return campaignTaskNumber(node) ?? node.id; }
 export function filterCampaignNodes(nodes: CampaignNode[], filters: CampaignFilters): CampaignNode[] {
   const query = filters.query.trim().toLocaleLowerCase();
   return nodes.filter((node) => (!filters.hideCompleted || node.status !== "completed")

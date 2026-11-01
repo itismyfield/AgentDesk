@@ -1,12 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
-import { CheckCircle2, KeyRound, Loader2, RefreshCw } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 import { ApiRequestError, request } from "../../api/httpClient";
-import TooltipLabel from "../common/TooltipLabel";
-import {
-  SurfaceActionButton,
-  SurfaceCard,
-  SurfaceSection,
-} from "../common/SurfacePrimitives";
+import { SurfaceCard, SurfaceSection } from "../common/SurfacePrimitives";
 import { StatusBadge } from "../common/StatusBadge";
 import { WidgetState } from "../common/WidgetState";
 import {
@@ -15,6 +10,7 @@ import {
   rateLimitFillWidth,
 } from "../common/rateLimitGauge";
 import type { TFunction } from "./model";
+import { pollWhileVisible } from "../../lib/pollWhileVisible";
 
 interface ClaudeUsageWindow {
   pct?: number | null;
@@ -51,7 +47,7 @@ interface ClaudeAccountsResponse {
 }
 
 interface ClaudeAccountsErrorResponse {
-  status?: "not_installed" | "execution_failure" | "switch_in_progress" | "bad_request";
+  status?: "not_installed" | "execution_failure" | "bad_request";
   code?: string;
   hostname?: string;
   instanceId?: string | null;
@@ -60,23 +56,6 @@ interface ClaudeAccountsErrorResponse {
     command?: string;
     binaryHint?: string;
   };
-}
-
-interface SwitchResponse {
-  status?: string;
-  switched?: boolean;
-  from?: unknown;
-  to?: unknown;
-  reason?: string | null;
-  hostname?: string;
-  switchedAt?: string;
-  rateLimitRefresh?: {
-    triggered?: boolean;
-    dispatchGateRefreshed?: boolean;
-    reason?: string | null;
-    error?: string | null;
-  };
-  error?: string;
 }
 
 type LoadState = "loading" | "ready" | "not_installed" | "execution_failure";
@@ -102,128 +81,29 @@ function accountKey(account: ClaudeAccount): string {
   return account.email ?? (account.number == null ? "unknown" : String(account.number));
 }
 
-function accountSwitchTarget(account: ClaudeAccount): string | null {
-  if (account.email && account.email.trim()) return account.email;
-  if (account.number != null) return String(account.number);
-  return null;
+function formatSpan(totalMinutes: number, t: TFunction): string {
+  const days = Math.floor(totalMinutes / 1440);
+  const hours = Math.floor((totalMinutes % 1440) / 60);
+  const minutes = totalMinutes % 60;
+  if (days > 0) return t({ ko: `${days}일 ${hours}시간`, en: `${days}d ${hours}h`, ja: `${days}日 ${hours}時間`, zh: `${days}天 ${hours}小时` });
+  if (hours > 0) return t({ ko: `${hours}시간 ${minutes}분`, en: `${hours}h ${minutes}m`, ja: `${hours}時間 ${minutes}分`, zh: `${hours}小时 ${minutes}分` });
+  return t({ ko: `${minutes}분`, en: `${minutes}m`, ja: `${minutes}分`, zh: `${minutes}分` });
 }
 
-function formatUnknown(value: unknown): string {
-  if (value == null) return "-";
-  if (typeof value === "string") return value;
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
-  if (typeof value === "object") {
-    const maybeRecord = value as Record<string, unknown>;
-    const email = maybeRecord.email;
-    const number = maybeRecord.number;
-    if (typeof email === "string") return email;
-    if (typeof number === "number" || typeof number === "string") return String(number);
-  }
-  return JSON.stringify(value);
-}
-
-function switchReasonLabel(reason: string | null | undefined, t: TFunction): string | null {
-  if (!reason) return null;
-  switch (reason) {
-    case "manual":
-      return t({ ko: "수동 전환", en: "Manual switch", ja: "手動切替", zh: "手动切换" });
-    case "already_active":
-    case "unchanged":
-    case "same_account":
-      return t({ ko: "이미 활성 상태", en: "Already active", ja: "すでに有効", zh: "已是活动账号" });
-    default:
-      return null;
-  }
-}
-
-function refreshReasonLabel(reason: string | null | undefined, t: TFunction): string | null {
-  if (!reason) return null;
-  switch (reason) {
-    case "refresh_scheduled":
-      return t({
-        ko: "사용량 새로고침 예약됨",
-        en: "Usage refresh queued",
-        ja: "使用量更新を予約済み",
-        zh: "用量刷新已排队",
-      });
-    case "rate_limit_sync_not_active_on_this_node":
-      return t({
-        ko: "사용량 새로고침은 허브에서 실행됩니다",
-        en: "Usage refresh runs on the hub",
-        ja: "使用量更新はハブで実行されます",
-        zh: "用量刷新在枢纽节点执行",
-      });
-    case "postgres_pool_unavailable":
-      return t({
-        ko: "사용량 새로고침을 사용할 수 없습니다",
-        en: "Usage refresh unavailable",
-        ja: "使用量更新を利用できません",
-        zh: "用量刷新不可用",
-      });
-    case "serialization_failure":
-      return t({
-        ko: "새로고침 상태를 표시하지 못했습니다",
-        en: "Unable to report refresh status",
-        ja: "更新状態を表示できません",
-        zh: "无法显示刷新状态",
-      });
-    case "sync_failed":
-      return t({
-        ko: "사용량 새로고침 실패",
-        en: "Usage refresh failed",
-        ja: "使用量更新に失敗しました",
-        zh: "用量刷新失败",
-      });
-    default:
-      return t({
-        ko: "사용량 새로고침 상태를 확인할 수 없습니다",
-        en: "Usage refresh status unavailable",
-        ja: "使用量更新状態を確認できません",
-        zh: "无法确认用量刷新状态",
-      });
-  }
-}
-
-function switchSuccessDescription(result: SwitchResponse, t: TFunction): string {
-  const refreshReason = refreshReasonLabel(result.rateLimitRefresh?.reason, t);
-  if (result.switched === false) {
-    const account = formatUnknown(result.to ?? result.from);
-    const alreadyActive =
-      account === "-"
-        ? t({ ko: "선택한 계정이 이미 활성 상태입니다", en: "Selected account is already active", ja: "選択したアカウントはすでに有効です", zh: "所选账号已是活动账号" })
-        : t({ ko: `${account} 계정이 이미 활성 상태입니다`, en: `${account} is already active`, ja: `${account} はすでに有効です`, zh: `${account} 已是活动账号` });
-    return [alreadyActive, refreshReason].filter(Boolean).join(" · ");
-  }
-
-  const switchReason = switchReasonLabel(result.reason, t);
-  return [
-    `${formatUnknown(result.from)} → ${formatUnknown(result.to)}`,
-    switchReason,
-    refreshReason,
-  ]
-    .filter(Boolean)
-    .join(" · ");
-}
-
-function formatTimeRemaining(resetsAt: string | null | undefined): string {
+function formatResetLabel(resetsAt: string | null | undefined, t: TFunction): string {
   if (!resetsAt) return "";
   const diff = new Date(resetsAt).getTime() - Date.now();
-  if (!Number.isFinite(diff) || diff <= 0) return "now";
-  const days = Math.floor(diff / 86400000);
-  const hours = Math.floor((diff % 86400000) / 3600000);
-  const minutes = Math.floor((diff % 3600000) / 60000);
-  if (days > 0) return `${days}d ${hours}h`;
-  if (hours > 0) return `${hours}h ${minutes}m`;
-  return `${minutes}m`;
+  if (!Number.isFinite(diff)) return "";
+  if (diff <= 0) return t({ ko: "곧 초기화", en: "Resets soon", ja: "まもなくリセット", zh: "即将重置" });
+  const span = formatSpan(Math.floor(diff / 60000), t);
+  return t({ ko: `${span} 후 초기화`, en: `Resets in ${span}`, ja: `${span}後にリセット`, zh: `${span}后重置` });
 }
 
-function formatAge(seconds: number | null | undefined): string {
+function formatUsageAge(seconds: number | null | undefined, t: TFunction): string {
   if (seconds == null || seconds < 0) return "";
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  return `${hours}h ${minutes % 60}m`;
+  if (seconds < 60) return t({ ko: "방금 갱신", en: "Updated just now", ja: "たった今更新", zh: "刚刚更新" });
+  const span = formatSpan(Math.floor(seconds / 60), t);
+  return t({ ko: `${span} 전 갱신`, en: `Updated ${span} ago`, ja: `${span}前に更新`, zh: `${span}前更新` });
 }
 
 function usageLevel(pct: number | null | undefined): "normal" | "warning" | "danger" {
@@ -260,13 +140,14 @@ function usageColors(level: "normal" | "warning" | "danger") {
 interface ClaudeUsageGaugeProps {
   label: string;
   window?: ClaudeUsageWindow | null;
+  t: TFunction;
 }
 
-function ClaudeUsageGauge({ label, window }: ClaudeUsageGaugeProps) {
+function ClaudeUsageGauge({ label, window, t }: ClaudeUsageGaugeProps) {
   const rawPct = typeof window?.pct === "number" ? Math.round(window.pct) : null;
   const level = usageLevel(rawPct);
   const colors = usageColors(level);
-  const remaining = formatTimeRemaining(window?.resetsAt);
+  const resetLabel = formatResetLabel(window?.resetsAt, t);
 
   return (
     <div>
@@ -275,10 +156,10 @@ function ClaudeUsageGauge({ label, window }: ClaudeUsageGaugeProps) {
           {label}
         </span>
         <span
-          className="text-xs font-mono font-bold"
+          className="text-xs font-semibold tabular-nums"
           style={{ color: rawPct == null ? "var(--th-text-muted)" : colors.text }}
         >
-          {rawPct == null ? "N/A" : `${rawPct}%`}
+          {rawPct == null ? t({ ko: "정보 없음", en: "No data", ja: "情報なし", zh: "无数据" }) : `${rawPct}%`}
         </span>
       </div>
       <div className="relative overflow-hidden rounded-full" style={{ height: 12, ...RATE_LIMIT_GAUGE_TRACK_STYLE }}>
@@ -292,9 +173,9 @@ function ClaudeUsageGauge({ label, window }: ClaudeUsageGaugeProps) {
           }}
         />
       </div>
-      {remaining ? (
-        <span className="mt-1 inline-flex whitespace-nowrap text-[10px]" style={{ color: "var(--th-text-muted)", lineHeight: 1.2 }}>
-          resets {remaining}
+      {resetLabel ? (
+        <span className="mt-1 inline-flex whitespace-nowrap text-[11px]" style={{ color: "var(--th-text-muted)", lineHeight: 1.2 }}>
+          {resetLabel}
         </span>
       ) : null}
     </div>
@@ -312,8 +193,6 @@ function ClaudeAccountsWidgetImpl({ t }: ClaudeAccountsWidgetProps) {
   const [installHint, setInstallHint] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(true);
   const [refreshNonce, setRefreshNonce] = useState(0);
-  const [switchingAccount, setSwitchingAccount] = useState<string | null>(null);
-  const [switchResult, setSwitchResult] = useState<SwitchResponse | null>(null);
 
   const requestRefresh = useCallback(() => {
     setRefreshNonce((current) => current + 1);
@@ -359,49 +238,12 @@ function ClaudeAccountsWidgetImpl({ t }: ClaudeAccountsWidgetProps) {
     };
 
     void load();
-    const timer = window.setInterval(() => void load(), 30_000);
+    const stopPolling = pollWhileVisible(() => void load(), 30_000);
     return () => {
       activeController?.abort();
-      window.clearInterval(timer);
+      stopPolling();
     };
   }, [refreshNonce]);
-
-  const handleSwitch = useCallback(
-    async (target: string) => {
-      const { controller, cleanup } = createTimedController(CLAUDE_ACCOUNTS_FETCH_TIMEOUT_MS);
-      setSwitchingAccount(target);
-      setSwitchResult(null);
-
-      try {
-        const raw = await request<SwitchResponse>("/api/claude-accounts/switch", {
-          method: "POST",
-          body: JSON.stringify({ account: target }),
-          signal: controller.signal,
-          timeoutMs: CLAUDE_ACCOUNTS_FETCH_TIMEOUT_MS,
-          suppressErrorToast: true,
-        });
-        if (controller.signal.aborted) return;
-
-        setSwitchResult(raw);
-        requestRefresh();
-      } catch (nextError) {
-        if (controller.signal.aborted) return;
-        if (nextError instanceof ApiRequestError) {
-          const failure = errorPayload<SwitchResponse>(nextError);
-          setSwitchResult({ ...failure, status: failure.status ?? "execution_failure", error: failure.error ?? `HTTP ${nextError.status}` });
-          return;
-        }
-        setSwitchResult({
-          status: "execution_failure",
-          error: nextError instanceof Error ? nextError.message : String(nextError),
-        });
-      } finally {
-        cleanup();
-        if (!controller.signal.aborted) setSwitchingAccount(null);
-      }
-    },
-    [requestRefresh],
-  );
 
   const fetchedAgeMs = useMemo(() => {
     if (!data?.fetchedAt) return null;
@@ -412,7 +254,7 @@ function ClaudeAccountsWidgetImpl({ t }: ClaudeAccountsWidgetProps) {
   const isUsageDataStale =
     Boolean(data?.usageDataStale) || (fetchedAgeMs != null && fetchedAgeMs > CLAUDE_ACCOUNTS_STALE_MS);
   const accounts = data?.accounts ?? [];
-  const nodeLabel = data?.hostname ?? switchResult?.hostname ?? "";
+  const nodeLabel = data?.hostname ?? "";
 
   const refreshButton = (
     <button
@@ -440,13 +282,6 @@ function ClaudeAccountsWidgetImpl({ t }: ClaudeAccountsWidgetProps) {
     </button>
   );
 
-  const tooltip = t({
-    ko: "이 노드의 cswap 계정 목록과 5h/7d 사용량을 표시하고, 선택한 계정으로 macOS 전역 Claude 인증을 전환합니다.",
-    en: "Shows this node's cswap accounts, 5h/7d usage, and switches the machine-wide Claude auth to the selected account.",
-    ja: "このノードの cswap アカウント、5h/7d 使用量を表示し、選択したアカウントへマシン全体の Claude 認証を切り替えます。",
-    zh: "显示此节点的 cswap 账号、5h/7d 用量，并将整机 Claude 认证切换到所选账号。",
-  });
-
   const sectionActions = (
     <>
       {nodeLabel ? (
@@ -454,24 +289,18 @@ function ClaudeAccountsWidgetImpl({ t }: ClaudeAccountsWidgetProps) {
           {nodeLabel}
         </StatusBadge>
       ) : null}
-      <TooltipLabel
-        text={t({ ko: "설명", en: "About", ja: "説明", zh: "说明" })}
-        tooltip={tooltip}
-        className="max-w-fit text-sm"
-      />
       {refreshButton}
     </>
   );
 
   return (
     <SurfaceSection
-      eyebrow={t({ ko: "Claude", en: "Claude", ja: "Claude", zh: "Claude" })}
-      title={t({ ko: "Claude 계정", en: "Claude Accounts", ja: "Claude アカウント", zh: "Claude 账号" })}
+      title={t({ ko: "Claude 계정 사용량", en: "Claude account usage", ja: "Claude アカウント使用量", zh: "Claude 账号用量" })}
       description={t({
-        ko: "현재 노드의 전역 Claude 인증 계정과 계정별 사용량을 확인합니다.",
-        en: "Inspect this node's global Claude auth account and per-account usage.",
-        ja: "このノードのグローバル Claude 認証アカウントとアカウント別使用量を確認します。",
-        zh: "查看此节点的全局 Claude 认证账号和各账号用量。",
+        ko: "계정별로 사용 한도에 얼마나 가까운지 봐요.",
+        en: "How close each account is to its usage limit.",
+        ja: "アカウントごとの使用上限までの余裕を確認します。",
+        zh: "查看各账号距离用量上限还有多少。",
       })}
       actions={sectionActions}
     >
@@ -522,50 +351,12 @@ function ClaudeAccountsWidgetImpl({ t }: ClaudeAccountsWidgetProps) {
                 kind="stale"
                 compact
                 title={t({
-                  ko: "오래된 사용량 데이터를 표시 중",
+                  ko: "최신이 아닌 사용량을 보여주고 있어요",
                   en: "Showing stale usage data",
                   ja: "古い使用量データを表示中",
                   zh: "正在显示过期用量数据",
                 })}
                 description={data?.staleReason ?? error ?? undefined}
-              />
-            </div>
-          ) : null}
-
-          {switchResult ? (
-            <div className="mt-4">
-              <WidgetState
-                kind={switchResult.status === "ok" ? (switchResult.switched === false ? "empty" : "stale") : "error"}
-                tone={switchResult.status === "ok" ? (switchResult.switched === false ? "idle" : "healthy") : undefined}
-                compact
-                icon={switchResult.status === "ok" ? (switchResult.switched === false ? <KeyRound size={18} aria-hidden /> : <CheckCircle2 size={18} aria-hidden />) : undefined}
-                title={
-                  switchResult.status === "ok"
-                    ? switchResult.switched === false
-                      ? t({
-                          ko: `${switchResult.hostname ?? nodeLabel} 노드에서 이미 활성 상태`,
-                          en: `Already active on ${switchResult.hostname ?? nodeLabel}`,
-                          ja: `${switchResult.hostname ?? nodeLabel} ノードですでに有効`,
-                          zh: `${switchResult.hostname ?? nodeLabel} 节点已是活动账号`,
-                        })
-                      : t({
-                          ko: `${switchResult.hostname ?? nodeLabel} 노드에 적용됨`,
-                          en: `Applied on ${switchResult.hostname ?? nodeLabel}`,
-                          ja: `${switchResult.hostname ?? nodeLabel} ノードに適用済み`,
-                          zh: `已应用到 ${switchResult.hostname ?? nodeLabel}`,
-                        })
-                    : t({
-                        ko: "계정 전환 실패",
-                        en: "Account switch failed",
-                        ja: "アカウント切替に失敗しました",
-                        zh: "账号切换失败",
-                      })
-                }
-                description={
-                  switchResult.status === "ok"
-                    ? switchSuccessDescription(switchResult, t)
-                    : switchResult.error
-                }
               />
             </div>
           ) : null}
@@ -585,10 +376,8 @@ function ClaudeAccountsWidgetImpl({ t }: ClaudeAccountsWidgetProps) {
           ) : (
             <div className="mt-4 grid gap-4 xl:grid-cols-2">
               {accounts.map((account) => {
-                const target = accountSwitchTarget(account);
                 const key = accountKey(account);
-                const usageAge = formatAge(account.usageAgeSeconds);
-                const isSwitching = switchingAccount === target;
+                const usageAge = formatUsageAge(account.usageAgeSeconds, t);
                 return (
                   <SurfaceCard key={key} className="rounded-lg p-4">
                     <div className="flex items-start justify-between gap-3">
@@ -598,37 +387,22 @@ function ClaudeAccountsWidgetImpl({ t }: ClaudeAccountsWidgetProps) {
                             {account.email ?? t({ ko: `계정 ${account.number ?? "-"}`, en: `Account ${account.number ?? "-"}`, ja: `アカウント ${account.number ?? "-"}`, zh: `账号 ${account.number ?? "-"}` })}
                           </div>
                           {account.active ? (
-                            <StatusBadge tone="healthy" size="xs" pulse title="active">
-                              active
+                            <StatusBadge tone="healthy" size="xs">
+                              {t({ ko: "사용 중", en: "In use", ja: "使用中", zh: "使用中" })}
                             </StatusBadge>
                           ) : null}
                         </div>
                         <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
-                          {account.number != null ? `#${account.number}` : "no slot"}
-                          {account.usageStatus ? ` · ${account.usageStatus}` : ""}
-                          {usageAge ? ` · ${usageAge} old` : ""}
+                          {[account.number != null ? `#${account.number}` : null, usageAge || null]
+                            .filter(Boolean)
+                            .join(" · ")}
                         </div>
                       </div>
-
-                      <SurfaceActionButton
-                        tone={account.active ? "neutral" : "info"}
-                        compact
-                        disabled={account.active || !target || Boolean(switchingAccount)}
-                        onClick={target ? () => void handleSwitch(target) : undefined}
-                        className="shrink-0 gap-1.5"
-                      >
-                        {isSwitching ? (
-                          <Loader2 size={12} className="motion-safe:animate-spin" aria-hidden />
-                        ) : (
-                          <KeyRound size={12} aria-hidden />
-                        )}
-                        <span>{account.active ? "Active" : "Switch"}</span>
-                      </SurfaceActionButton>
                     </div>
 
                     <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
-                      <ClaudeUsageGauge label="5h" window={account.usage?.fiveHour} />
-                      <ClaudeUsageGauge label="7d" window={account.usage?.sevenDay} />
+                      <ClaudeUsageGauge label={t({ ko: "5시간", en: "5 hours", ja: "5時間", zh: "5小时" })} window={account.usage?.fiveHour} t={t} />
+                      <ClaudeUsageGauge label={t({ ko: "7일", en: "7 days", ja: "7日", zh: "7天" })} window={account.usage?.sevenDay} t={t} />
                     </div>
                   </SurfaceCard>
                 );

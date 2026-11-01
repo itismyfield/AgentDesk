@@ -721,23 +721,12 @@ impl Close {
         channel: u64,
         shape: impl FnOnce(&mut InflightTurnState),
     ) -> Self {
-        Self::open_with(generation, channel, shape, |_| {}).await
-    }
-
-    /// Opens with `setup` applied to the shared data before anything else holds it.
-    async fn open_with(
-        generation: u64,
-        channel: u64,
-        shape: impl FnOnce(&mut InflightTurnState),
-        setup: impl FnOnce(&mut SharedData),
-    ) -> Self {
         let legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
         let provider = ProviderKind::Claude;
         let mut shared = discord::make_shared_data_for_tests_with_storage(None);
         let writable = Arc::get_mut(&mut shared).unwrap();
         writable.provider = provider.clone();
         writable.restart.current_generation = generation;
-        setup(writable);
         let (actor, owner) = prepared(provider.clone(), channel);
         let mut row = InflightTurnState::new(
             provider.clone(),
@@ -1263,11 +1252,10 @@ fn queued_b() -> crate::services::turn_orchestrator::Intervention {
         has_reply_boundary: false,
         merge_consecutive: false,
         pending_uploads: Vec::new(),
-        voice_announcement: None,
     }
 }
 
-/// The new process restores B once into a free slot, with no routing, voice or ticket left over,
+/// The new process restores B once into a free slot, with no routing or ticket left over,
 /// and the restart's queue kickoff runs it exactly once through its intake claim.
 async fn restore_queued_b_once(shared: &Arc<SharedData>) {
     let channel = ChannelId::new(CRASH_CHANNEL);
@@ -1305,7 +1293,6 @@ async fn restore_queued_b_once(shared: &Arc<SharedData>) {
             .iter()
             .any(|edge| *edge.value() == channel)
     );
-    assert!(shared.voice_barge_in.deferred_for_test(channel).is_none());
     run_restored_b_once(shared, channel, &persistence).await;
 }
 

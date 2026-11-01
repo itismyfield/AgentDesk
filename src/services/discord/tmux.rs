@@ -1648,7 +1648,7 @@ async fn finish_restored_watcher_active_turn_with_ctx(
     // precise: a stale terminal from an already-finalized turn resolves to that turn's
     // `Finalized` entry (→ AlreadyFinalized) instead of accidentally finalizing a
     // queued follow-up. The watcher cleared inflight inline before calling this helper,
-    // and never marked completion-cleanup or drained voice, so `FinalizeContext::watcher`
+    // and never marked completion-cleanup, so `FinalizeContext::watcher`
     // reproduces exactly that side-effect set; the kickoff stays gated on the caller's
     // `kickoff_queue`.
     let outcome = shared

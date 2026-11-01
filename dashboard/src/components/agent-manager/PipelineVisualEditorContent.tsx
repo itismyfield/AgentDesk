@@ -38,7 +38,7 @@ export default function PipelineVisualEditorContent({ ctx, actions }: Props) {
                 className="rounded-xl border px-3 py-1.5 text-xs font-medium"
                 style={BUTTON_WARN_STYLE}
               >
-                {tr("Phase Gate", "Phase Gate")}
+                {tr("단계 관문", "Phase Gate")}
               </button>
             </div>
           )}

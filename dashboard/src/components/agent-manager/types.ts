@@ -16,7 +16,6 @@ export interface FormData {
   department_id: string;
   cli_provider: import("../../types").CliProvider;
   avatar_emoji: string;
-  sprite_number: number | null;
   personality: string;
   prompt_content: string;
   auto_commit: boolean;

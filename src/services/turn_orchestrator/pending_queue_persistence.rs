@@ -63,14 +63,6 @@ pub(crate) struct PendingQueueItem {
     /// Active dispatch role override at save time (lost on restart; stored for diagnostics).
     #[serde(default)]
     pub(crate) override_channel_id: Option<u64>,
-    /// #2266: voice-transcript announcement metadata embedded in the queued
-    /// intervention so the durable on-disk queue stays in sync with the
-    /// in-memory enrichment. `#[serde(default)]` (and `skip_serializing_if`)
-    /// makes the field invisible on non-voice items and forward-compatible
-    /// with queue files written by older binaries.
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -410,7 +402,6 @@ pub(super) fn pending_queue_item_from_intervention(
         channel_id: Some(channel_id.get()),
         channel_name: None,
         override_channel_id: dispatch_role_override,
-        voice_announcement: intervention.voice_announcement.clone(),
     }
 }
 
@@ -700,13 +691,6 @@ pub(super) fn pending_queue_item_to_intervention(
         has_reply_boundary: item.has_reply_boundary,
         merge_consecutive: item.merge_consecutive,
         pending_uploads: item.pending_uploads,
-        // #2266: durable on-disk queue restores the voice-transcript
-        // metadata so the dispatch path on the next run can reinsert it
-        // into the per-process announce_meta store. Older queue files that
-        // predate this field deserialize as `None` (#[serde(default)]) and
-        // the queued turn degrades to plain text - same as the prior
-        // restart behavior.
-        voice_announcement: item.voice_announcement,
     }
 }
 
@@ -925,7 +909,6 @@ mod tests {
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         }
     }
 

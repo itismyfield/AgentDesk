@@ -33,7 +33,6 @@ fn item(id: u64) -> Intervention {
         has_reply_boundary: false,
         merge_consecutive: false,
         pending_uploads: Vec::new(),
-        voice_announcement: None,
     }
 }
 
@@ -593,7 +592,6 @@ fn release_clear_preserves_a_live_injection_for_a_late_front_handback() {
                 has_reply_boundary: false,
                 merge_consecutive: false,
                 pending_uploads: Vec::new(),
-                voice_announcement: None,
             };
             let channel = ChannelId::new(7_186_812);
             let registry = ChannelMailboxRegistry::default();

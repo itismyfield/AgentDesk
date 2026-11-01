@@ -1,16 +1,12 @@
-export type AppSectionId = "workspace" | "extensions" | "me";
+export type AppSectionId = "workspace" | "system";
 
 export type AppRouteId =
-  | "voice"
   | "home"
-  | "agents"
-  | "kanban"
   | "campaigns"
   | "routines"
-  | "stats"
   | "ops"
-  | "meetings"
-  | "achievements"
+  | "stats"
+  | "agents"
   | "settings";
 
 export interface AppRouteEntry {
@@ -26,30 +22,7 @@ export interface AppRouteEntry {
   shortcutKey: string;
 }
 
-export interface AppRouteSection {
-  id: AppSectionId;
-  labelKo: string;
-  labelEn: string;
-}
-
-export const APP_ROUTE_SECTIONS: AppRouteSection[] = [
-  { id: "workspace", labelKo: "워크스페이스", labelEn: "Workspace" },
-  { id: "extensions", labelKo: "확장", labelEn: "Extensions" },
-  { id: "me", labelKo: "나", labelEn: "Me" },
-];
-
 export const APP_ROUTES: AppRouteEntry[] = [
-  {
-    id: "voice",
-    path: "/voice",
-    section: "workspace",
-    labelKo: "음성",
-    labelEn: "Voice",
-    descriptionKo: "말로 여러 에이전트에 일을 맡기고 결과를 들어요.",
-    descriptionEn: "Hand work to agents by voice and hear the results.",
-    paletteIcon: "🎙️",
-    shortcutKey: "v",
-  },
   {
     id: "home",
     path: "/home",
@@ -57,33 +30,10 @@ export const APP_ROUTES: AppRouteEntry[] = [
     section: "workspace",
     labelKo: "홈",
     labelEn: "Home",
-    descriptionKo: "오늘의 상태와 빠른 진입점을 확인합니다.",
-    descriptionEn: "See today's overview and quick entry points.",
+    descriptionKo: "지금 일하는 에이전트와 확인할 일을 한눈에 봐요.",
+    descriptionEn: "See who is working and what needs your attention.",
     paletteIcon: "🏠",
     shortcutKey: "1",
-  },
-  {
-    id: "stats",
-    path: "/stats",
-    aliases: ["/pulse"],
-    section: "workspace",
-    labelKo: "통계",
-    labelEn: "Stats",
-    descriptionKo: "운영 지표와 대시보드 위젯을 봅니다.",
-    descriptionEn: "Review operational metrics and dashboard widgets.",
-    paletteIcon: "📈",
-    shortcutKey: "3",
-  },
-  {
-    id: "kanban",
-    path: "/kanban",
-    section: "workspace",
-    labelKo: "칸반",
-    labelEn: "Kanban",
-    descriptionKo: "작업 상태와 디스패치를 추적합니다.",
-    descriptionEn: "Track work status and dispatches.",
-    paletteIcon: "📋",
-    shortcutKey: "4",
   },
   {
     id: "campaigns",
@@ -91,10 +41,10 @@ export const APP_ROUTES: AppRouteEntry[] = [
     section: "workspace",
     labelKo: "캠페인",
     labelEn: "Campaigns",
-    descriptionKo: "작업 흐름, 담당 세션과 다음 행동을 확인합니다.",
-    descriptionEn: "Track task dependencies, responsible sessions and next actions.",
+    descriptionKo: "작업 흐름과 대기열, 자동 진행을 관리해요.",
+    descriptionEn: "Manage task flow, the queue and auto-run.",
     paletteIcon: "🧭",
-    shortcutKey: "c",
+    shortcutKey: "2",
   },
   {
     id: "routines",
@@ -102,10 +52,10 @@ export const APP_ROUTES: AppRouteEntry[] = [
     section: "workspace",
     labelKo: "루틴",
     labelEn: "Routines",
-    descriptionKo: "예약된 자동 작업을 시간순으로 확인합니다.",
-    descriptionEn: "Review scheduled routine jobs chronologically.",
+    descriptionKo: "예약된 자동 작업과 최근 결과를 봐요.",
+    descriptionEn: "Review scheduled jobs and their latest results.",
     paletteIcon: "🗓️",
-    shortcutKey: "r",
+    shortcutKey: "3",
   },
   {
     id: "ops",
@@ -114,55 +64,53 @@ export const APP_ROUTES: AppRouteEntry[] = [
     section: "workspace",
     labelKo: "운영",
     labelEn: "Ops",
-    descriptionKo: "시스템 헬스와 전달 병목을 모니터링합니다.",
-    descriptionEn: "Monitor system health and delivery bottlenecks.",
+    descriptionKo: "시스템 상태와 전달 지연을 살펴봐요.",
+    descriptionEn: "Monitor system health and delivery delays.",
     paletteIcon: "🛠️",
+    shortcutKey: "4",
+  },
+  {
+    id: "stats",
+    path: "/stats",
+    aliases: ["/pulse"],
+    section: "workspace",
+    labelKo: "통계",
+    labelEn: "Stats",
+    descriptionKo: "토큰 사용량과 비용을 기간별로 봐요.",
+    descriptionEn: "Review token usage and cost by period.",
+    paletteIcon: "📈",
     shortcutKey: "5",
   },
   {
     id: "agents",
     path: "/agents",
-    section: "extensions",
+    section: "workspace",
     labelKo: "에이전트",
     labelEn: "Agents",
-    descriptionKo: "에이전트, 부서, 파견 세션을 관리합니다.",
-    descriptionEn: "Manage agents, departments, and dispatched sessions.",
+    descriptionKo: "에이전트, 부서, 스킬을 관리해요.",
+    descriptionEn: "Manage agents, departments and skills.",
     paletteIcon: "👥",
     shortcutKey: "6",
   },
   {
-    id: "meetings",
-    path: "/meetings",
-    section: "extensions",
-    labelKo: "회의",
-    labelEn: "Meetings",
-    descriptionKo: "회의 기록과 후속 이슈를 정리합니다.",
-    descriptionEn: "Review meeting records and follow-up issues.",
-    paletteIcon: "📝",
-    shortcutKey: "7",
-  },
-  {
-    id: "achievements",
-    path: "/achievements",
-    section: "me",
-    labelKo: "업적",
-    labelEn: "Achievements",
-    descriptionKo: "성과와 랭킹 흐름을 확인합니다.",
-    descriptionEn: "Inspect achievements and ranking flow.",
-    paletteIcon: "🏆",
-    shortcutKey: "8",
-  },
-  {
     id: "settings",
     path: "/settings",
-    section: "me",
+    section: "system",
     labelKo: "설정",
     labelEn: "Settings",
-    descriptionKo: "개인 및 시스템 설정을 조정합니다.",
-    descriptionEn: "Adjust personal and system settings.",
+    descriptionKo: "개인 설정과 시스템 연결을 바꿔요.",
+    descriptionEn: "Adjust personal settings and system connections.",
     paletteIcon: "⚙️",
     shortcutKey: "9",
   },
+];
+
+// Removed pages keep their old URLs working.
+export const LEGACY_ROUTE_REDIRECTS: Array<{ path: string; to: string }> = [
+  { path: "/kanban", to: "/campaigns?tab=queue" },
+  { path: "/meetings", to: "/agents?tab=skills" },
+  { path: "/achievements", to: "/stats" },
+  { path: "/voice", to: "/home" },
 ];
 
 export const PRIMARY_ROUTES = APP_ROUTES;
@@ -186,14 +134,9 @@ export function findRouteByPath(pathname: string): AppRouteEntry | null {
   return (
     PRIMARY_ROUTES.find(
       (route) =>
-        route.path === normalizedPath || route.aliases?.includes(normalizedPath),
+        route.path === normalizedPath ||
+        normalizedPath.startsWith(`${route.path}/`) ||
+        route.aliases?.includes(normalizedPath),
     ) ?? null
-  );
-}
-
-export function getSectionById(sectionId: AppSectionId): AppRouteSection {
-  return (
-    APP_ROUTE_SECTIONS.find((section) => section.id === sectionId) ??
-    APP_ROUTE_SECTIONS[0]
   );
 }

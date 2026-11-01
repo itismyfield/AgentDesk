@@ -41,7 +41,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/campaigns/{id}",
             "campaigns",
-            "Read the canonical checkpoint before resuming after clear, compaction, quota interruption, or provider/session replacement. Recorded running state is not proof of a live process; check `live` (node id -> card, dispatch, session and queue status of the node's issue card), where `running` means a session is mid-turn on it now. `issue_drift` lists completed nodes whose linked issue is open.",
+            "Read the canonical checkpoint before resuming after clear, compaction, quota interruption, or provider/session replacement. Recorded running state is not proof of a live process; check `live` (node id -> card, dispatch, session and queue status of the node's issue card), where `running` means a session is mid-turn on it now. `issue_drift` lists completed nodes whose linked issue is open. The response carries a strong `ETag` (hash of the whole body, so live/issue_drift changes count) and `Cache-Control: no-cache`; a request whose If-None-Match lists that tag gets 304 Not Modified with an empty body.",
         )
         .with_params([("id", path_param("Campaign ID."))])
         .with_example(json!({"path": {"id": "release-a"}}), json!({"campaign": {"id": "release-a", "title": "Release A", "description": "", "status": "planned", "round": 1, "revision": 1, "nodes": [], "created_at": "2026-09-20T00:00:00Z", "updated_at": "2026-09-20T00:00:00Z"}, "live": {}, "issue_drift": []}))

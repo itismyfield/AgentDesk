@@ -1,9 +1,9 @@
 import type { Agent } from "../../types";
+import { isTestAgent } from "../../lib/agentHelpers";
 
 export type AgentSortMode =
   | "status"
   | "name"
-  | "xp"
   | "activity"
   | "department"
   | "created";
@@ -12,6 +12,8 @@ export interface AgentListFilter {
   deptTab: string;
   statusFilter: string;
   search: string;
+  /** E2E harness agents stay hidden unless asked for. */
+  includeTests?: boolean;
 }
 
 const STATUS_ORDER: Record<string, number> = {
@@ -23,9 +25,9 @@ const STATUS_ORDER: Record<string, number> = {
 
 export function filterAgents(
   agents: Agent[],
-  { deptTab, statusFilter, search }: AgentListFilter,
+  { deptTab, statusFilter, search, includeTests = false }: AgentListFilter,
 ): Agent[] {
-  let filtered = agents;
+  let filtered = includeTests ? agents : agents.filter((agent) => !isTestAgent(agent));
   if (deptTab !== "all") {
     filtered = filtered.filter((agent) => agent.department_id === deptTab);
   }
@@ -52,9 +54,6 @@ export function compareAgents(
   return (left, right) => {
     if (sortMode === "name") {
       return left.name.localeCompare(right.name);
-    }
-    if (sortMode === "xp") {
-      return (right.stats_xp ?? 0) - (left.stats_xp ?? 0);
     }
     if (sortMode === "activity") {
       const leftActivity =

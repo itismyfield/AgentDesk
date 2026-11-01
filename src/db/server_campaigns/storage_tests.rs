@@ -901,8 +901,9 @@ async fn later_branch_migrations_upgrade_a_main_database_already_at_0161_pg() {
         assert!(row.2);
         assert_eq!(row.1.as_slice(), migration.checksum.as_ref());
     }
-    // Each later file leaves at least one object of its own, so a partial apply cannot pass.
-    let expected: [(i64, &[&str]); 5] = [
+    // Each later file leaves (or, with `!`, drops) at least one object of its own,
+    // so a partial apply cannot pass.
+    let expected: [(i64, &[&str]); 8] = [
         (
             163,
             &["table:channel_home_preferences", "constraint:chp_mode_home"],
@@ -939,6 +940,34 @@ async fn later_branch_migrations_upgrade_a_main_database_already_at_0161_pg() {
                 "constraint:input_fallback_notice_pointer",
             ],
         ),
+        (
+            168,
+            &[
+                "!table:meetings",
+                "!table:meeting_transcripts",
+                "!table:agent_quality_daily",
+                "!table:quality_regression_cooldowns",
+                "!table:agent_prompt_commits",
+                "column:agents.xp",
+            ],
+        ),
+        (
+            169,
+            &[
+                "!table:voice_turn_link",
+                "!table:voice_background_handoff_meta",
+                "!table:voice_transcript_announcement_meta",
+                "!function:voice_background_handoff_meta_touch_updated_at",
+                "!function:voice_transcript_announcement_meta_touch_updated_at",
+            ],
+        ),
+        (
+            170,
+            &[
+                "index:idx_routine_runs_routine_newest",
+                "!index:idx_routine_runs_routine_id",
+            ],
+        ),
     ];
     assert_eq!(
         expected
@@ -951,6 +980,10 @@ async fn later_branch_migrations_upgrade_a_main_database_already_at_0161_pg() {
     for (version, objects) in expected {
         for object in objects {
             let (kind, name) = object.split_once(':').unwrap();
+            let (kind, want) = match kind.strip_prefix('!') {
+                Some(kind) => (kind, false),
+                None => (kind, true),
+            };
             let query = match kind {
                 "table" => "SELECT to_regclass($1) IS NOT NULL",
                 "column" => {
@@ -958,6 +991,9 @@ async fn later_branch_migrations_upgrade_a_main_database_already_at_0161_pg() {
                 }
                 "constraint" => "SELECT EXISTS(SELECT 1 FROM pg_constraint WHERE conname=$1)",
                 "function" => "SELECT EXISTS(SELECT 1 FROM pg_proc WHERE proname=$1)",
+                "index" => {
+                    "SELECT EXISTS(SELECT 1 FROM pg_indexes WHERE schemaname='public' AND indexname=$1)"
+                }
                 other => panic!("unknown schema object kind {other}"),
             };
             let present: bool = sqlx::query_scalar(query)
@@ -965,7 +1001,10 @@ async fn later_branch_migrations_upgrade_a_main_database_already_at_0161_pg() {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-            assert!(present, "{version:04} must leave {object}");
+            assert_eq!(
+                present, want,
+                "{version:04} must leave the schema as {object}"
+            );
         }
     }
     let status = postgres::migration_status(&pool).await.unwrap();

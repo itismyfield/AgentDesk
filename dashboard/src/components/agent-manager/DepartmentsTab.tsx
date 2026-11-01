@@ -1,7 +1,7 @@
 import type { DragEvent } from "react";
 import type { Agent, Department } from "../../types";
 import { localeName } from "../../i18n";
-import AgentAvatar from "../AgentAvatar";
+import AgentPersona from "../AgentPersona";
 import { SurfaceActionButton, SurfaceCard, SurfaceEmptyState, SurfaceNotice } from "../common/SurfacePrimitives";
 import type { Translator } from "./types";
 
@@ -160,7 +160,7 @@ export default function DepartmentsTab({
                             "color-mix(in srgb, var(--th-bg-surface) 82%, var(--th-card-bg) 18%)",
                         }}
                       >
-                        <AgentAvatar agent={member} size={24} rounded="xl" />
+                        <AgentPersona agent={member} size={24} />
                         <span className="min-w-0 flex-1 truncate text-xs" style={{ color: "var(--th-text-primary)" }}>
                           {localeName(locale, member)}
                         </span>

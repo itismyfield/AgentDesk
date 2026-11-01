@@ -1,4 +1,5 @@
 import type { Agent, DispatchedSession } from "../../types";
+import type { PersonaState } from "../AgentPersona";
 
 export const STALE_IDLE_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -30,14 +31,16 @@ export function normalizeTimestamp(value: unknown): number | null {
   return null;
 }
 
-export function sessionSpriteNum(s: DispatchedSession): number {
-  if (s.sprite_number != null && s.sprite_number > 0) return s.sprite_number;
-  const idStr = String(s.id);
-  let hash = 0;
-  for (let i = 0; i < idStr.length; i += 1) {
-    hash = (hash * 31 + idStr.charCodeAt(i)) >>> 0;
-  }
-  return (hash % 12) + 1;
+export function sessionPersona(s: DispatchedSession): {
+  agent: Pick<Agent, "id" | "name" | "avatar_emoji" | "department_color">;
+  state: PersonaState;
+} {
+  const state: PersonaState =
+    s.status === "disconnected" ? "offline" : s.status === "working" || s.status === "turn_active" ? "working" : "idle";
+  return {
+    agent: { id: s.id, name: s.name || s.session_key, avatar_emoji: s.avatar_emoji, department_color: s.department_color ?? null },
+    state,
+  };
 }
 
 /** Display name for a session; full key used as tooltip */

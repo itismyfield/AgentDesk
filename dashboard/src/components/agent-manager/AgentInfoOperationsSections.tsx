@@ -15,12 +15,6 @@ import {
   timeAgo,
 } from "./AgentInfoCardModel";
 
-interface AgentLevelInfo {
-  level: number;
-  progress: number;
-  nextThreshold: number;
-}
-
 interface AuditLog {
   id: string;
   action: string;
@@ -44,8 +38,6 @@ interface AgentInfoOperationsSectionsProps {
   loadingSkills: boolean;
   showSharedSkills: boolean;
   onToggleSharedSkills: () => void;
-  levelInfo: AgentLevelInfo;
-  levelTitle: string;
   timeline: api.TimelineEvent[];
   loadingTimeline: boolean;
   timelineOpen: boolean;
@@ -66,8 +58,6 @@ export function AgentInfoOperationsSections({
   loadingSkills,
   showSharedSkills,
   onToggleSharedSkills,
-  levelInfo,
-  levelTitle,
   timeline,
   loadingTimeline,
   timelineOpen,
@@ -227,36 +217,8 @@ export function AgentInfoOperationsSections({
         )}
       </SurfaceSubsection>
 
-      <SurfaceSubsection title={tr("활동 레벨", "Activity Level")} className="md:col-span-2">
+      <SurfaceSubsection title={tr("활동", "Activity")} className="md:col-span-2">
         <div className="space-y-3">
-          <div className="flex items-center gap-2">
-            <span
-              className="shrink-0 rounded-full px-2 py-0.5 text-xs font-bold"
-              style={{
-                background: "color-mix(in srgb, var(--th-accent-primary-soft) 80%, transparent)",
-                color: "var(--th-accent-primary)",
-              }}
-            >
-              Lv.{levelInfo.level} {levelTitle}
-            </span>
-            <div
-              className="h-1.5 flex-1 overflow-hidden rounded-full"
-              style={{ background: "var(--th-bg-surface)" }}
-            >
-              <div
-                className="h-full rounded-full transition-all"
-                style={{
-                  width: `${Math.round(levelInfo.progress * 100)}%`,
-                  background:
-                    "linear-gradient(90deg, var(--th-accent-primary), var(--th-accent-info))",
-                }}
-              />
-            </div>
-            <span className="shrink-0 text-xs" style={{ color: "var(--th-text-muted)" }}>
-              {agent.stats_xp} / {levelInfo.nextThreshold === Infinity ? "MAX" : levelInfo.nextThreshold} XP
-            </span>
-          </div>
-
           <SurfaceCard className="overflow-hidden px-0 py-0" style={{ background: "var(--th-bg-card)" }}>
             <button
               onClick={onToggleTimeline}

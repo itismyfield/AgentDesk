@@ -362,7 +362,7 @@ async fn finish_monitor_auto_turn(
     // real id (generation is ledger-keying only). The ledger phase gate makes a
     // racing watcher/bridge terminal exactly-once safe. `FinalizeContext::monitor`
     // reproduces the inline side-effect set: no inflight clear, no
-    // completion-cleanup, no voice drain, but kick off any queued backlog.
+    // completion-cleanup, but kick off any queued backlog.
     let user_msg_id = synthetic_message_id.map(|id| id.get()).unwrap_or(0);
     let generation = ledger_generation.unwrap_or(shared.restart.current_generation);
     let _ = shared
