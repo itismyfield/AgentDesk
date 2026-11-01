@@ -543,6 +543,44 @@ impl Registry {
                 .ok_or_else(|| "source not bound".into())
         })
     }
+
+    #[cfg(unix)]
+    pub(super) fn claude_entries(
+        &self,
+        session: &str,
+        path: &Path,
+        execution: Option<&str>,
+        native: Option<&str>,
+    ) -> Vec<(String, Value, Entry)> {
+        let Some(execution) = execution else {
+            return Vec::new();
+        };
+        let Ok(meta) = std::fs::metadata(path) else {
+            return Vec::new();
+        };
+        self.inspect(|state| {
+            Ok(state
+                .entries()
+                .filter_map(|(registration, entry)| {
+                    let registration = registration?;
+                    let source = registration.source.as_ref()?;
+                    (claude_source_entry(entry, session, path, file_id(&meta))
+                        && source.validate(&registration.key).is_ok()
+                        && source.target["execution_nonce"] == execution
+                        && native.is_none_or(|native| source.session_id == native)
+                        && !state.abandoned(&registration.namespace, &registration.key))
+                    .then(|| {
+                        (
+                            registration.namespace.clone(),
+                            registration.key.clone(),
+                            entry.clone(),
+                        )
+                    })
+                })
+                .collect())
+        })
+        .unwrap_or_default()
+    }
     pub(crate) fn registered(
         &self,
         namespace: &str,

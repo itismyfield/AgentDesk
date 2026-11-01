@@ -3,6 +3,86 @@ use super::super::recovery_engine::recover_idle_partial_response;
 use super::*;
 
 use super::source_tick::CLAUDE_IDLE_FRESH_TRANSCRIPT_LOOKBACK_BYTES;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
+#[cfg(unix)]
+fn claude_prompt_row_is_complete(path: &Path, end: u64) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let Some(last) = end.checked_sub(1) else {
+        return false;
+    };
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut byte = [0];
+    file.seek(SeekFrom::Start(last))
+        .and_then(|_| file.read_exact(&mut byte))
+        .is_ok()
+        && byte == [b'\n']
+}
+
+#[cfg(unix)]
+#[derive(PartialEq, Eq, Hash)]
+struct ClaudeInitialSource {
+    logical: String,
+    path: PathBuf,
+    file: [u64; 2],
+    execution: Option<String>,
+}
+
+#[cfg(unix)]
+fn registered_recovery_prompt(
+    path: &Path,
+    (mut start, end): (u64, u64),
+    logical: &str,
+    context: Option<&crate::services::tui_prompt_dedupe::binding_context::BindingContext>,
+) -> Result<Option<ClaudeIdleTranscriptScan>, String> {
+    while start < end {
+        let scan = scan_claude_idle_transcript_for_prompt(path, start)?;
+        match &scan {
+            ClaudeIdleTranscriptScan::Prompt {
+                prompt,
+                prompt_start_offset,
+                line_end_offset,
+                entry_id,
+                ..
+            } => {
+                if *prompt_start_offset >= end {
+                    return Ok(None);
+                }
+                if !claude_prompt_row_is_complete(path, *line_end_offset) {
+                    return Err("registered recovery row is incomplete".into());
+                }
+                let current_record = context.is_none_or(|context| {
+                    crate::services::tui_prompt_dedupe::hosted_source::claude_record_created_at(
+                        path,
+                        *prompt_start_offset,
+                    )
+                    .is_some_and(|created| created >= context.created_at)
+                });
+                if current_record
+                    && crate::services::tui_input::human_frame::history::claude_user_receipt(
+                        logical,
+                        (path, *prompt_start_offset, *line_end_offset),
+                        entry_id.as_deref(),
+                        prompt,
+                        context.map(|context| context.execution_nonce.as_str()),
+                    )
+                    .is_some()
+                {
+                    return Ok(Some(scan));
+                }
+                start = *line_end_offset;
+            }
+            ClaudeIdleTranscriptScan::NoPrompt { offset } if *offset < end => {
+                return Err("registered recovery tail is incomplete".into());
+            }
+            _ => return Ok(None),
+        }
+    }
+    Ok(None)
+}
 
 #[cfg(unix)]
 pub(super) fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
@@ -15,6 +95,7 @@ pub(super) fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
         "claude_idle_transcript_relay",
         async move {
             let mut next_rehydrate = tokio::time::Instant::now();
+            let mut initialized = std::collections::HashSet::new();
             loop {
                 super::source_tick::claude_rehydrate_source_phase(&shared, &mut next_rehydrate)
                     .await;
@@ -30,8 +111,12 @@ pub(super) fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
                             candidates = super::source_tick::claude_source_phase(&shared).await;
                         }
                         ClaudeIdleTickPhase::LegacyBody => {
-                            relay_legacy_claude_bodies(&shared, std::mem::take(&mut candidates))
-                                .await;
+                            relay_legacy_claude_bodies(
+                                &shared,
+                                std::mem::take(&mut candidates),
+                                &mut initialized,
+                            )
+                            .await;
                         }
                     }
                 }
@@ -66,14 +151,20 @@ pub(super) const CLAUDE_IDLE_TICK_PHASES: [ClaudeIdleTickPhase; 3] = [
 #[cfg(test)]
 pub(super) async fn relay_idle_claude_bindings(shared: &Arc<SharedData>) {
     let candidates = super::source_tick::claude_source_phase(shared).await;
-    relay_legacy_claude_bodies(shared, candidates).await;
+    relay_legacy_claude_bodies(shared, candidates, &mut Default::default()).await;
 }
 
 #[cfg(unix)]
 async fn relay_legacy_claude_bodies(
     shared: &Arc<SharedData>,
     candidates: Vec<super::source_tick::ClaudeLegacyBodyCandidate>,
+    initialized: &mut std::collections::HashSet<ClaudeInitialSource>,
 ) {
+    initialized.retain(|old| {
+        candidates
+            .iter()
+            .any(|candidate| candidate.tmux_session_name == old.logical)
+    });
     for super::source_tick::ClaudeLegacyBodyCandidate {
         tmux_session_name,
         channel_id,
@@ -85,9 +176,46 @@ async fn relay_legacy_claude_bodies(
         if super::source_tick::skip_body_for_test(&tmux_session_name) {
             continue;
         }
+        let context_path = super::launch_script::claude_launch_observation(&tmux_session_name).1;
+        let original_context =
+            crate::services::tui_prompt_dedupe::hosted_source::scan_context_from_path(
+                "claude",
+                &tmux_session_name,
+                channel_id.get(),
+                context_path.as_deref(),
+            );
+        let initial_source_path = transcript_path
+            .as_deref()
+            .unwrap_or(Path::new(&binding.output_path));
+        let initial_source =
+            std::fs::metadata(initial_source_path)
+                .ok()
+                .map(|meta| ClaudeInitialSource {
+                    logical: tmux_session_name.clone(),
+                    path: initial_source_path.to_path_buf(),
+                    file: [meta.dev(), meta.ino()],
+                    execution: original_context
+                        .as_ref()
+                        .map(|context| context.execution_nonce.clone()),
+                });
         if let Some(row) =
             super::super::inflight::load_inflight_state(&ProviderKind::Claude, channel_id.get())
         {
+            if let Some(source) = initial_source
+                && row.tmux_session_name.as_deref() == Some(source.logical.as_str())
+                && row
+                    .hosted_execution_nonce
+                    .as_deref()
+                    .is_none_or(|nonce| source.execution.as_deref() == Some(nonce))
+                && row
+                    .output_path
+                    .as_ref()
+                    .and_then(|path| std::fs::metadata(path).ok())
+                    .is_some_and(|meta| [meta.dev(), meta.ino()] == source.file)
+            {
+                initialized.retain(|old| old.logical != source.logical);
+                initialized.insert(source);
+            }
             // Recovery offsets belong to the retained row's source, even after rebinding.
             let Some(source) = row.output_path.as_deref().map(Path::new) else {
                 continue;
@@ -114,14 +242,6 @@ async fn relay_legacy_claude_bodies(
         let Some(transcript_path) = transcript_path else {
             continue;
         };
-        let context_path = super::launch_script::claude_launch_observation(&tmux_session_name).1;
-        let original_context =
-            crate::services::tui_prompt_dedupe::hosted_source::scan_context_from_path(
-                "claude",
-                &tmux_session_name,
-                channel_id.get(),
-                context_path.as_deref(),
-            );
         // #3402: restore footer slots a restart wiped while tasks kept
         // running (one-shot per channel+session; footer-mode gated inside).
         shared
@@ -145,6 +265,37 @@ async fn relay_legacy_claude_bodies(
         let transcript_eof = std::fs::metadata(&transcript_path)
             .ok()
             .map(|metadata| metadata.len());
+        let first_scan = initial_source
+            .as_ref()
+            .is_some_and(|source| !initialized.contains(source));
+        let config = crate::config::runtime_config();
+        let selected =
+            crate::services::tui_o::shadow::tap::TuiOConfig::or_default(config.tui_o.as_ref())
+                .turn
+                .selects(channel_id.get());
+        let delivered_floor = (first_scan && !selected)
+            .then(|| {
+                dr::resolved_delivered_frontier_end_current_generation(
+                    &ProviderKind::Claude,
+                    channel_id,
+                    &tmux_session_name,
+                    transcript_eof,
+                )
+            })
+            .flatten();
+        let recovery_start = delivered_floor
+            .filter(|_| context_path.is_none() || original_context.is_some())
+            .and_then(|floor| {
+                crate::services::tui_input::human_frame::history::claude_unconfirmed_offset(
+                    &tmux_session_name,
+                    &transcript_path,
+                    original_context
+                        .as_ref()
+                        .map(|context| context.execution_nonce.as_str()),
+                )
+                .map(|offset| offset.max(floor))
+            })
+            .filter(|start| *start < scan_offset);
         // #4549/#4841: `/compact` rewrites the same UUID/path in place.
         // Re-anchor only to a complete JSONL boundary: a mid-write EOF falls
         // back to zero so the next poll re-reads the entire partial line.
@@ -171,6 +322,28 @@ async fn relay_legacy_claude_bodies(
         // one); unchanged-path tailing keeps first-prompt semantics.
         let scan_result = if let Some(scan) = compaction_reanchor {
             Ok(scan)
+        } else if let Some(start) = recovery_start {
+            registered_recovery_prompt(
+                &transcript_path,
+                (start, scan_offset),
+                &tmux_session_name,
+                original_context.as_ref(),
+            )
+            .and_then(|recovered| {
+                recovered.map_or_else(
+                    || {
+                        if path_changed {
+                            scan_claude_idle_transcript_for_last_prompt(
+                                &transcript_path,
+                                scan_offset,
+                            )
+                        } else {
+                            scan_claude_idle_transcript_for_prompt(&transcript_path, scan_offset)
+                        }
+                    },
+                    Ok,
+                )
+            })
         } else if path_changed {
             scan_claude_idle_transcript_for_last_prompt(&transcript_path, scan_offset)
         } else {
@@ -188,6 +361,18 @@ async fn relay_legacy_claude_bodies(
                 continue;
             }
         };
+
+        if let ClaudeIdleTranscriptScan::Prompt {
+            line_end_offset, ..
+        } = &scan
+            && !claude_prompt_row_is_complete(&transcript_path, *line_end_offset)
+        {
+            continue;
+        }
+        if let Some(source) = initial_source {
+            initialized.retain(|old| old.logical != source.logical);
+            initialized.insert(source);
+        }
 
         match scan {
             ClaudeIdleTranscriptScan::NoPrompt { offset } => {
@@ -268,11 +453,13 @@ async fn relay_legacy_claude_bodies(
                 prompt_id,
                 ..
             } => {
-                advance_claude_tmux_runtime_binding_offset(
-                    &tmux_session_name,
-                    &transcript_path,
-                    line_end_offset,
-                );
+                if prompt_start_offset >= scan_offset {
+                    advance_claude_tmux_runtime_binding_offset(
+                        &tmux_session_name,
+                        &transcript_path,
+                        line_end_offset,
+                    );
+                }
                 let observed_at = chrono::Utc::now();
                 // Row uuid and `promptId` suppress replay; otherwise use the content window.
                 let pin = if context_path.is_some() && original_context.is_none() {
@@ -294,7 +481,17 @@ async fn relay_legacy_claude_bodies(
                     crate::services::tui_prompt_dedupe::hosted_source::observe_claude_record_at(
                         &tmux_session_name,
                         &prompt,
-                        (entry_id.as_deref(), prompt_id.as_deref()),
+                        (
+                            entry_id.as_deref(),
+                            prompt_id.as_deref(),
+                            (delivered_floor.is_none_or(|floor| prompt_start_offset >= floor)
+                                && (context_path.is_none() || pin.is_some()))
+                            .then_some((
+                                transcript_path.as_path(),
+                                prompt_start_offset,
+                                line_end_offset,
+                            )),
+                        ),
                         observed_at,
                         pin.clone(),
                     );

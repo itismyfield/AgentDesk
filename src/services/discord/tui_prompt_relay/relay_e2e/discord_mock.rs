@@ -75,6 +75,8 @@ pub(in crate::services::discord) struct DiscordMockState {
     /// Every message the mock minted, in id order, as `(reply_to, latest content)`.
     pub(super) messages: Arc<Mutex<MintedMessages>>,
     pub(super) channel_posts: Arc<Mutex<Vec<(u64, String)>>>,
+    /// Successful POST/PATCH content, retained after edits and deletion.
+    pub(super) message_writes: Arc<Mutex<Vec<(u64, String)>>>,
     /// Every message id a `DELETE` named, in order.
     deleted: Arc<Mutex<Vec<u64>>>,
     /// Messages a single-message `GET` answers until deleted; any other id stays unhandled.
@@ -112,6 +114,7 @@ impl DiscordMockState {
             release_held_history: Arc::new(Notify::new()),
             messages: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             channel_posts: Arc::new(Mutex::new(Vec::new())),
+            message_writes: Arc::new(Mutex::new(Vec::new())),
             deleted: Arc::new(Mutex::new(Vec::new())),
             seeded: Arc::new(Mutex::new(std::collections::HashMap::new())),
             extra_channels: Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -382,6 +385,11 @@ fn mint_message(
         .lock()
         .expect("mock messages")
         .insert(id, (reply_to, content.to_string()));
+    state
+        .message_writes
+        .lock()
+        .expect("message writes")
+        .push((id, content.to_owned()));
     let mut message = discord_message_json(id, content);
     message["channel_id"] = json!(channel_id.to_string());
     (StatusCode::OK, Json(message)).into_response()
@@ -546,6 +554,11 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
             state.edit_held.notify_one();
             state.release_held_edit.notified().await;
         }
+        state
+            .message_writes
+            .lock()
+            .expect("message writes")
+            .push((id, content.to_owned()));
         let edited = content.to_string();
         state
             .messages

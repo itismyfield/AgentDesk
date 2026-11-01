@@ -408,6 +408,196 @@ pub(crate) enum ObservedAttempt {
     None,
 }
 
+/// A native reader's exact user receipt; hook and pane observations cannot construct it.
+pub(crate) struct ClaudeUserReceipt {
+    session: String,
+    row: String,
+    prompt_hash: String,
+}
+
+impl ClaudeUserReceipt {
+    pub(crate) fn matches(&self, session: &str, prompts: &[String], row: Option<&str>) -> bool {
+        self.session == session
+            && row == Some(self.row.as_str())
+            && prompts.len() == 1
+            && hash(&prompts[0]) == self.prompt_hash
+    }
+}
+
+#[cfg(unix)]
+fn claude_source_entry(entry: &Entry, session: &str, path: &Path, file: [u64; 2]) -> bool {
+    entry.provider == "claude"
+        && entry.session == session
+        && entry.path == path
+        && entry.file == file
+        && entry.append.is_none()
+}
+
+#[cfg(unix)]
+pub(crate) fn claude_unconfirmed_offset(
+    session: &str,
+    transcript: &Path,
+    execution: Option<&str>,
+) -> Option<u64> {
+    let ledger = path().ok()?;
+    let entries = if v2::is_v2(&ledger).ok()? {
+        v2::Registry::at(ledger)
+            .claude_entries(session, transcript, execution, None)
+            .into_iter()
+            .map(|(_, _, entry)| entry)
+            .collect()
+    } else {
+        let file = file_id(&std::fs::metadata(transcript).ok()?);
+        read(&ledger)
+            .ok()?
+            .entries
+            .into_iter()
+            .filter(|entry| claude_source_entry(entry, session, transcript, file))
+            .collect::<Vec<_>>()
+    };
+    entries
+        .into_iter()
+        .filter(|entry| {
+            !entry
+                .events
+                .iter()
+                .any(|event| matches!(event.kind.as_str(), "command" | "user"))
+        })
+        .map(|entry| entry.offset)
+        .min()
+}
+
+#[cfg(unix)]
+pub(crate) fn claude_user_receipt(
+    session: &str,
+    (transcript, start, end): (&Path, u64, u64),
+    row: Option<&str>,
+    prompt: &str,
+    execution: Option<&str>,
+) -> Option<ClaudeUserReceipt> {
+    use std::io::{BufRead, Seek, SeekFrom};
+    let row = row?;
+    let file = std::fs::File::open(transcript).ok()?;
+    let identity = file_id(&file.metadata().ok()?);
+    let mut reader = std::io::BufReader::new(file);
+    reader.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    reader.read_until(b'\n', &mut bytes).ok()?;
+    if bytes.last() != Some(&b'\n') || start.checked_add(bytes.len() as u64)? != end {
+        return None;
+    }
+    let record: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    if record["type"] != "user"
+        || record["promptSource"] != "queued"
+        || record
+            .pointer("/origin/kind")
+            .and_then(serde_json::Value::as_str)
+            != Some("human")
+    {
+        return None;
+    }
+    let extracted =
+        crate::services::tui_prompt_dedupe::extract_claude_transcript_user_prompt_with_entry_id(
+            &record,
+        )?;
+    if extracted.0 != prompt || extracted.1.as_deref() != Some(row) {
+        return None;
+    }
+    let text = match &record["message"]["content"] {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(blocks)
+            if blocks
+                .iter()
+                .all(|block| block["type"] == "text" && block["text"].is_string()) =>
+        {
+            blocks
+                .iter()
+                .filter_map(|block| block["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        _ => return None,
+    };
+    let frame = class_inner(&text)
+        .filter(|inner| crate::services::claude_tui::busy_inject::exact_receipt(&text, inner))
+        .unwrap_or(&text);
+    if file_id(&std::fs::metadata(transcript).ok()?) != identity {
+        return None;
+    }
+    let ledger = path().ok()?;
+    let registry = v2::is_v2(&ledger)
+        .ok()?
+        .then(|| v2::Registry::at(ledger.clone()));
+    let entries = if let Some(registry) = &registry {
+        registry.claude_entries(session, transcript, execution, record["sessionId"].as_str())
+    } else {
+        read(&ledger)
+            .ok()?
+            .entries
+            .into_iter()
+            .filter(|entry| claude_source_entry(entry, session, transcript, identity))
+            .map(|entry| (String::new(), serde_json::Value::Null, entry))
+            .collect()
+    };
+    for (namespace, key, entry) in entries {
+        if entry.offset > start
+            || entry.hash != hash(frame)
+            || entry.events.iter().any(|event| {
+                event.kind == "command"
+                    || (event.kind == "user" && event.row.as_deref() != Some(row))
+            })
+        {
+            continue;
+        }
+        let claimed = if let Some(registry) = &registry {
+            registry.receipt(
+                &namespace,
+                &key,
+                (transcript, start, "user", Some(row), frame),
+            )
+        } else {
+            receipt(&entry.id, transcript, start, "user", Some(row), frame)
+        };
+        if claimed == Some(true) {
+            return Some(ClaudeUserReceipt {
+                session: session.into(),
+                row: row.into(),
+                prompt_hash: hash(prompt),
+            });
+        }
+    }
+    None
+}
+
+pub(crate) fn claude_receipt_kind(
+    session: &str,
+    prompts: &[String],
+    row: Option<&str>,
+) -> Option<&'static str> {
+    let row = row?;
+    let hashes: Vec<_> = prompts
+        .iter()
+        .flat_map(|prompt| class_hashes(prompt))
+        .collect();
+    let store = readable(&path().ok()?).ok()?;
+    let event = store
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.provider == "claude"
+                && entry.session == session
+                && entry.append.is_none()
+                && hashes.contains(&entry.class_hash)
+        })
+        .flat_map(|entry| &entry.events)
+        .find(|event| event.row.as_deref() == Some(row))?;
+    match event.kind.as_str() {
+        "command" => Some("command"),
+        "user" => Some("user"),
+        _ => None,
+    }
+}
+
 pub(crate) fn observed_attempt(
     provider: &str,
     session: &str,
@@ -566,8 +756,8 @@ mod tests {
                     Some(&format!("replay-row-{index}")),
                     chrono::Utc::now()
                 ),
-                PromptObservation::InjectedSteer,
-                "actual observer replay form {index}"
+                PromptObservation::InjectedDeferred,
+                "a registration without a command receipt stays deferred: form {index}"
             );
         }
         assert!(super::super::opens_inject(frame));

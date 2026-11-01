@@ -277,10 +277,11 @@ fn human_input_text(record: &serde_json::Value, prompt_only: bool) -> Option<(St
                 return None;
             }
             if prompt_only
-                && attachment
-                    .get("commandMode")
-                    .and_then(|mode| mode.as_str())
-                    .is_some_and(|mode| mode != "prompt")
+                && (attachment.get("commandMode").and_then(|mode| mode.as_str()) != Some("prompt")
+                    || attachment
+                        .pointer("/origin/kind")
+                        .and_then(|kind| kind.as_str())
+                        != Some("human"))
             {
                 return None;
             }

@@ -40,7 +40,7 @@ fn a_previous_same_author_drain_does_not_contaminate_the_next_receipt() {
     append(json!({
         "type": "attachment",
         "attachment": {
-            "type": "queued_command", "commandMode": "prompt",
+            "type": "queued_command", "commandMode": "prompt", "origin": {"kind":"human"},
             "source_uuid": "command-a", "prompt": first,
         },
     }));
@@ -135,7 +135,7 @@ fn a_previous_frame_containing_the_next_one_is_not_its_receipt() {
     append(json!({
         "type": "attachment",
         "attachment": {
-            "type": "queued_command", "commandMode": "prompt",
+            "type": "queued_command", "commandMode": "prompt", "origin": {"kind":"human"},
             "source_uuid": "command-a", "prompt": first,
         },
     }));
@@ -195,7 +195,7 @@ fn a_mixed_row_an_earlier_attempt_took_is_not_the_next_receipt() {
     )
     .unwrap();
     append(json!({"type": "attachment", "attachment": {
-        "type": "queued_command", "commandMode": "prompt", "prompt": mixed}}));
+        "type": "queued_command", "commandMode": "prompt", "origin": {"kind":"human"}, "prompt": mixed}}));
     assert_eq!(
         transcript_submission(&path, offset, "ca720272", Some(&second)),
         None,

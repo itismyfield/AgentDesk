@@ -129,7 +129,18 @@ pub(super) fn claim_injected_steer(
         .as_ref()
         .is_some_and(|entry| entry.bound && entry.row.as_deref() == entry_id && entry_id.is_some());
     if provider == "claude" && !matches!(&observed, ObservedAttempt::None) {
-        return Some(Claim::Joined { first: false });
+        return Some(
+            if crate::services::tui_input::human_frame::history::claude_receipt_kind(
+                tmux_session_name,
+                prompts,
+                entry_id,
+            ) == Some("command")
+            {
+                Claim::Joined { first: false }
+            } else {
+                Claim::Deferred
+            },
+        );
     }
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();

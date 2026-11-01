@@ -19,6 +19,9 @@ mod agent_text_command_e2e;
 #[path = "busy_inject_e2e_tests.rs"]
 mod busy_inject_e2e;
 #[cfg(unix)]
+#[path = "busy_receipt_e2e_tests.rs"]
+mod busy_receipt_e2e;
+#[cfg(unix)]
 #[path = "cancel_backstop_e2e_tests.rs"]
 mod cancel_backstop_e2e;
 mod catch_up_pagination_e2e;

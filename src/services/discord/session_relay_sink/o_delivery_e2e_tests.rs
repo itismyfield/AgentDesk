@@ -13,6 +13,7 @@ mod writer;
 mod adoption;
 
 const BODY: &str = "동일한 응답 본문 — delivered by O";
+const PRIOR_BODY: &str = "prior A response before the queued input";
 const TURN_DONE: &str = "-# ✅ 완료";
 const CHILD: &str = "ADK_O_DELIVERY_E2E_CHILD";
 
@@ -49,15 +50,82 @@ fn isolated(name: &str) -> bool {
 #[derive(Clone, Copy)]
 enum Turn {
     Claude,
+    ClaudeAbsorbed,
+    ClaudeQueued,
+    ClaudeAbsorbedCurrent,
+    ClaudeQueuedCurrent,
+    ClaudeQueuedWithPrior,
+    ClaudeQueuedCurrentWithPrior,
     Codex,
     Task,
 }
 
 fn transcript(turn: Turn) -> String {
+    let fixture = match turn {
+        Turn::ClaudeAbsorbed => Some(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/tui_input/claude-2.1.281.jsonl"
+        ))),
+        Turn::ClaudeQueued | Turn::ClaudeQueuedWithPrior => Some(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/tui_input/claude-2.1.283.jsonl"
+        ))),
+        Turn::ClaudeAbsorbedCurrent => Some(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/tui_input/claude-2.1.316-absorbed.jsonl"
+        ))),
+        Turn::ClaudeQueuedCurrent | Turn::ClaudeQueuedCurrentWithPrior => {
+            Some(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/tui_input/claude-2.1.316-queued.jsonl"
+            )))
+        }
+        _ => None,
+    };
+    if let Some(fixture) = fixture {
+        let frame = crate::services::tui_input::human_frame::plain_inject(
+            "discord",
+            "200",
+            "Fixture User",
+            "fixture-attempt",
+            "busy fixture input",
+        );
+        let input: String = fixture
+            .lines()
+            .map(|line| {
+                let mut record: serde_json::Value = serde_json::from_str(line).unwrap();
+                for path in ["/content", "/attachment/prompt", "/message/content"] {
+                    if let Some(value) = record.pointer_mut(path) {
+                        *value = serde_json::json!(frame);
+                    }
+                }
+                format!("{record}\n")
+            })
+            .collect();
+        let prior = if matches!(
+            turn,
+            Turn::ClaudeQueuedWithPrior | Turn::ClaudeQueuedCurrentWithPrior
+        ) {
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({"type":"assistant","uuid":"prior-answer-row","apiBlockIndex":0,"message":{"id":"prior-answer","content":[{"type":"text","text":PRIOR_BODY}]}}),
+                serde_json::json!({"type":"result","result":PRIOR_BODY})
+            )
+        } else {
+            String::new()
+        };
+        return prior + &input + &transcript(Turn::Claude);
+    }
     let assistant = serde_json::json!({"type":"assistant", "uuid":"row-answer", "apiBlockIndex":0,
         "message":{"id":"answer", "content":[{"type":"text", "text":BODY}]}});
     let rows = match turn {
-        Turn::Claude => vec![
+        Turn::Claude
+        | Turn::ClaudeAbsorbed
+        | Turn::ClaudeQueued
+        | Turn::ClaudeAbsorbedCurrent
+        | Turn::ClaudeQueuedCurrent
+        | Turn::ClaudeQueuedWithPrior
+        | Turn::ClaudeQueuedCurrentWithPrior => vec![
             assistant,
             serde_json::json!({"type":"result", "result":BODY}),
         ],
@@ -245,6 +313,16 @@ async fn run(turn: Turn) {
     }
     let before = paths.each_ref().map(|p| snapshot(p));
     let _delegated = cutover::test_override::force_channels(&[(channel_id, kind)]);
+    let _confirmed = matches!(
+        turn,
+        Turn::ClaudeAbsorbed
+            | Turn::ClaudeQueued
+            | Turn::ClaudeAbsorbedCurrent
+            | Turn::ClaudeQueuedCurrent
+            | Turn::ClaudeQueuedWithPrior
+            | Turn::ClaudeQueuedCurrentWithPrior
+    )
+    .then(|| crate::services::tui_o::turn_mode::TestConfirmation::new(channel_id));
     for _ in 0..2 {
         assert_eq!(
             sink.deliver(&frame).await.unwrap(),
@@ -305,10 +383,19 @@ async fn run(turn: Turn) {
     );
     writer.acquired();
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-    stop.send(true).unwrap();
-    actor.await.unwrap();
+    let _ = stop.send(true);
+    assert_eq!(
+        actor.await.unwrap(),
+        None,
+        "the O writer must finish without a stop cause"
+    );
     let expected = if codex {
         vec![BODY]
+    } else if matches!(
+        turn,
+        Turn::ClaudeQueuedWithPrior | Turn::ClaudeQueuedCurrentWithPrior
+    ) {
+        vec![PRIOR_BODY, TURN_DONE, BODY, TURN_DONE]
     } else {
         vec![BODY, TURN_DONE]
     };
@@ -324,6 +411,34 @@ async fn run(turn: Turn) {
 async fn claude_consumed_body_reaches_o_transport_once() {
     if isolated("claude_consumed_body_reaches_o_transport_once") {
         run(Turn::Claude).await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn claude_busy_absorbed_fixture_body_once_without_legacy_claim() {
+    if isolated("claude_busy_absorbed_fixture_body_once_without_legacy_claim") {
+        run(Turn::ClaudeAbsorbed).await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn claude_busy_queued_user_fixture_body_once_without_legacy_claim() {
+    if isolated("claude_busy_queued_user_fixture_body_once_without_legacy_claim") {
+        run(Turn::ClaudeQueued).await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn claude_busy_absorbed_current_fixture_reaches_o_once() {
+    if isolated("claude_busy_absorbed_current_fixture_reaches_o_once") {
+        run(Turn::ClaudeAbsorbedCurrent).await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn claude_busy_queued_current_fixture_reaches_o_once() {
+    if isolated("claude_busy_queued_current_fixture_reaches_o_once") {
+        run(Turn::ClaudeQueuedCurrent).await;
     }
 }
 
@@ -597,4 +712,18 @@ async fn unretired_supervisor_consumer_preserves_legacy_decode_and_backfill() {
             + leg.gateway.replace_calls.load(Ordering::Acquire),
         1
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn claude_busy_queued_fixture_preserves_both_a_and_b_bodies() {
+    if isolated("claude_busy_queued_fixture_preserves_both_a_and_b_bodies") {
+        run(Turn::ClaudeQueuedWithPrior).await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn claude_busy_current_queued_fixture_preserves_both_a_and_b_bodies() {
+    if isolated("claude_busy_current_queued_fixture_preserves_both_a_and_b_bodies") {
+        run(Turn::ClaudeQueuedCurrentWithPrior).await;
+    }
 }

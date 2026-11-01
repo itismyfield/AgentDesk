@@ -62,7 +62,56 @@ fn modal_screen() -> String {
 fn real(mut record: serde_json::Value) -> String {
     record["sessionId"] = "6245-session".into();
     record["timestamp"] = "2026-10-06T00:00:00.000Z".into();
+    if record
+        .pointer("/attachment/type")
+        .and_then(serde_json::Value::as_str)
+        == Some("queued_command")
+        && record.pointer("/attachment/origin").is_none()
+    {
+        record["attachment"]["origin"] = serde_json::json!({"kind":"human"});
+    }
     record.to_string()
+}
+
+#[test]
+fn busy_receipt_requires_human_prompt_provenance() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    for origin in [
+        serde_json::json!({"kind":"human"}),
+        serde_json::json!({"kind":"notification"}),
+        serde_json::Value::Null,
+    ] {
+        let fake = Fake::new();
+        let offset = fs::metadata(&fake.transcript).unwrap().len();
+        let expected = text();
+        crate::services::tui_input::human_frame::history::register(
+            ("claude", "receipt-origin", NONCE, "200"),
+            &fake.transcript,
+            offset,
+            &expected,
+        )
+        .unwrap();
+        let record = serde_json::json!({"type":"attachment","uuid":"native-command","attachment":{"type":"queued_command","commandMode":"prompt","origin":origin,"prompt":expected}});
+        writeln!(
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&fake.transcript)
+                .unwrap(),
+            "{}",
+            real(record.clone())
+        )
+        .unwrap();
+        let receipt = transcript_submission(&fake.transcript, offset, NONCE, Some(&expected));
+        assert_eq!(
+            receipt,
+            if record["attachment"]["origin"]["kind"] == "human" {
+                Some(true)
+            } else {
+                None
+            },
+            "{record}"
+        );
+    }
 }
 
 fn enqueue_record(content: &str) -> String {

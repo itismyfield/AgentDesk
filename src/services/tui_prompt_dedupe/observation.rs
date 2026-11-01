@@ -139,7 +139,7 @@ pub(crate) fn observe_codex_prompt_in_turn_at(
         (entry_id, None, native_turn),
         PromptObservationEffect::NotifyAndLease,
         observed_at,
-        (handoff::Evidence::Live, None),
+        (handoff::Evidence::Live, None, None),
     )
 }
 
@@ -161,7 +161,7 @@ pub(crate) fn observe_codex_record_prompt_at(
         (entry_id, None, native_turn),
         PromptObservationEffect::NotifyAndLease,
         observed_at,
-        (handoff::Evidence::Record(record), None),
+        (handoff::Evidence::Record(record), None, None),
     )
 }
 
@@ -200,7 +200,7 @@ pub(super) fn observe_held_prompt(
         (entry_id, None, native_turn),
         PromptObservationEffect::NotifyAndLease,
         observed_at,
-        (handoff::Evidence::Live, hosted_source),
+        (handoff::Evidence::Live, hosted_source, None),
     )
 }
 
@@ -293,7 +293,7 @@ fn observe_prompt_candidates_by_tmux_inner(
         ids,
         effect,
         observed_at,
-        (evidence, None),
+        (evidence, None, None),
     )
 }
 
@@ -307,9 +307,10 @@ pub(super) fn observe_inner(
     (entry_id, prompt_id, native_turn): ObservationIds<'_>,
     effect: PromptObservationEffect,
     observed_at: DateTime<Utc>,
-    (evidence, hosted_source): (
+    (evidence, hosted_source, native_user): (
         handoff::Evidence<'_>,
         Option<hosted_source::HostedSourcePin>,
+        Option<history::ClaudeUserReceipt>,
     ),
 ) -> PromptObservation {
     handoff::drain_expired_handoffs();
@@ -318,6 +319,8 @@ pub(super) fn observe_inner(
     let entry_id = entry_id.map(str::trim).filter(|value| !value.is_empty());
     let prompt_id = prompt_id.filter(|id| !id.value().trim().is_empty());
     let native_turn = native_turn.map(str::trim).filter(|turn| !turn.is_empty());
+    let native_handed = provider == "claude"
+        && native_user.is_some_and(|proof| proof.matches(tmux_session_name, prompts, entry_id));
     if provider == "codex"
         && crate::services::tui_input::human_frame::history::append::pending_candidate(
             &provider,
@@ -364,6 +367,7 @@ pub(super) fn observe_inner(
             continue;
         }
         if !append_row
+            && !native_handed
             && is_discord_relayed_user_prompt(prompt)
             && !is_user_prefixed_subagent_notification_machine_event(prompt)
         {
@@ -390,17 +394,20 @@ pub(super) fn observe_inner(
         return PromptObservation::Ignored;
     }
     // An injected input is settled once, by the first observation that names its native turn.
-    let claim = claim_injected_steer(
-        &provider,
-        tmux_session_name,
-        &candidates,
-        native_turn,
-        entry_id,
-    );
-    // A Codex inject header no ledger entry vouches for (expired, restarted or never recorded)
-    // opens no turn below; Claude records no entry, so its pastes keep the ordinary path.
+    let claim = if native_handed {
+        Some(Claim::Handed { verified_row: true })
+    } else {
+        claim_injected_steer(
+            &provider,
+            tmux_session_name,
+            &candidates,
+            native_turn,
+            entry_id,
+        )
+    };
+    // An inject header without a registered native handoff opens no direct turn.
     let unvouched = claim.is_none()
-        && provider == "codex"
+        && matches!(provider.as_str(), "codex" | "claude")
         && candidates.iter().any(|prompt| opens_inject(prompt));
     let first_handed_row = matches!(claim, Some(Claim::Handed { verified_row: true }));
     match claim {

@@ -36,7 +36,7 @@ pub(crate) fn observe_hook_at(
         (None, prompt_id.map(ClaudePromptId::HookSubmit), native_turn),
         PromptObservationEffect::NotifyAndLease,
         at,
-        (evidence, pin),
+        (evidence, pin, None),
     )
 }
 
@@ -44,10 +44,19 @@ pub(crate) fn observe_hook_at(
 pub(crate) fn observe_claude_record_at(
     logical: &str,
     prompt: &str,
-    (entry, prompt_id): (Option<&str>, Option<&str>),
+    (entry, prompt_id, record): (Option<&str>, Option<&str>, Option<(&Path, u64, u64)>),
     at: DateTime<Utc>,
     pin: Option<HostedSourcePin>,
 ) -> PromptObservation {
+    let receipt = record.and_then(|record| {
+        crate::services::tui_input::human_frame::history::claude_user_receipt(
+            logical,
+            record,
+            entry,
+            prompt,
+            pin.as_ref().map(|pin| pin.execution_nonce.as_str()),
+        )
+    });
     observe_inner(
         "claude",
         logical,
@@ -55,7 +64,7 @@ pub(crate) fn observe_claude_record_at(
         (entry, prompt_id.map(ClaudePromptId::TranscriptRow), None),
         PromptObservationEffect::NotifyAndLease,
         at,
-        (handoff::Evidence::Unattributed, pin),
+        (handoff::Evidence::Unattributed, pin, receipt),
     )
 }
 
@@ -86,6 +95,7 @@ pub(crate) fn observe_codex_record_at(
                 entry,
             },
             pin,
+            None,
         ),
     )
 }
