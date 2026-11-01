@@ -904,10 +904,12 @@ src/
 │   │   │   │   └── tests/
 │   │   │   │       ├── session_start_retry_tests.rs
 │   │   │   │       ├── source_guard_tests.rs
+│   │   │   │       ├── too_early_tests.rs
 │   │   │   │       └── tq_tests.rs
 │   │   │   ├── ordered_queue.rs
 │   │   │   ├── queue_retention.rs
 │   │   │   ├── response_window.rs
+│   │   │   ├── too_early.rs
 │   │   │   └── transport_retry.rs
 │   │   ├── hook_server/
 │   │   │   ├── observation_ingress/
@@ -920,7 +922,8 @@ src/
 │   │   │   ├── observation_ingress.rs
 │   │   │   ├── observation_ingress_tests.rs
 │   │   │   ├── rehydration_ingress_tests.rs
-│   │   │   └── relay_receipts.rs
+│   │   │   ├── relay_receipts.rs
+│   │   │   └── resume_renumber_tests.rs
 │   │   ├── hosting/
 │   │   │   ├── followup_support.rs
 │   │   │   ├── fresh_hold_tests.rs
@@ -944,6 +947,8 @@ src/
 │   │   │   └── user_receipt.rs
 │   │   ├── session/
 │   │   │   └── auto_compact_launch_tests.rs
+│   │   ├── source_verify/
+│   │   │   └── renumber.rs
 │   │   ├── busy_inject.rs
 │   │   ├── busy_inject_tests.rs
 │   │   ├── composer_lock.rs
@@ -4092,6 +4097,7 @@ src/
 │   │   ├── observation.rs
 │   │   ├── pending.rs
 │   │   ├── pending_history_tests.rs
+│   │   ├── pending_renumber_tests.rs
 │   │   ├── pending_tests.rs
 │   │   ├── prompt_identity.rs
 │   │   ├── prompt_identity_tests.rs
