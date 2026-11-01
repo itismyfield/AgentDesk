@@ -37,33 +37,16 @@
     return store.upsert(cardId, repoId, worktreePath, branch, prNumber, headSha, state, lastError);
   }
 
-  function importLegacyPrTracking(cardId, fallbackState) {
-    return store.importLegacyForCard(cardId, fallbackState);
+  function markHandedOff(cardId, errorMsg) {
+    return store.markHandedOff(cardId, String(errorMsg));
   }
 
-  function importLegacyPrTrackingOnce(fallbackState) {
-    return store.importLegacyOnce(fallbackState);
+  function touchGeneration(cardId, generation) {
+    return store.touchGeneration(cardId, generation || "");
   }
 
-  function loadPrTracking(cardId, options) {
-    var tracking = loadPrTrackingCanonical(cardId);
-    if (tracking) return tracking;
-    var fallbackState = options && options.fallback_state ? options.fallback_state : null;
-    return importLegacyPrTracking(cardId, fallbackState);
-  }
-
-  function findByRepoPr(repoId, prNumber, options) {
+  function findByRepoPr(repoId, prNumber) {
     var rows = agentdesk.db.query(
-      "SELECT card_id, repo_id, worktree_path, branch, pr_number, head_sha, state, last_error, " +
-      "dispatch_generation, review_round, retry_count " +
-      "FROM pr_tracking WHERE repo_id = ? AND pr_number = ? LIMIT 1",
-      [repoId, prNumber]
-    );
-    if (rows.length > 0) return rows[0];
-
-    var fallbackState = options && options.fallback_state ? options.fallback_state : null;
-    importLegacyPrTrackingOnce(fallbackState);
-    rows = agentdesk.db.query(
       "SELECT card_id, repo_id, worktree_path, branch, pr_number, head_sha, state, last_error, " +
       "dispatch_generation, review_round, retry_count " +
       "FROM pr_tracking WHERE repo_id = ? AND pr_number = ? LIMIT 1",
@@ -72,10 +55,7 @@
     return rows.length > 0 ? rows[0] : null;
   }
 
-  function listTrackedPrRows(whereClause, params, options) {
-    var fallbackState = options && options.fallback_state ? options.fallback_state : null;
-    importLegacyPrTrackingOnce(fallbackState);
-
+  function listTrackedPrRows(whereClause, params) {
     var query =
       "SELECT card_id, repo_id, worktree_path, branch, pr_number, head_sha, state, last_error, " +
       "dispatch_generation, review_round, retry_count " +
@@ -117,7 +97,7 @@
 
   function resolvePrInfoForCard(cardId, options) {
     var fallbackState = options && options.fallback_state ? options.fallback_state : null;
-    var tracking = loadPrTracking(cardId, options);
+    var tracking = loadPrTrackingCanonical(cardId);
     if (!tracking) return null;
 
     var repo = tracking.repo_id || repoForCard(cardId);
@@ -158,15 +138,15 @@
     parseJsonObject: parseJsonObject,
     extractRepoFromIssueUrl: extractRepoFromIssueUrl,
     loadCanonical: loadPrTrackingCanonical,
-    load: loadPrTracking,
+    load: loadPrTrackingCanonical,
     upsert: upsertPrTracking,
+    markHandedOff: markHandedOff,
+    touchGeneration: touchGeneration,
     list: listTrackedPrRows,
     findByRepoPr: findByRepoPr,
     findOpenPrByBranch: findOpenPrByTrackedBranch,
     repoForCard: repoForCard,
-    resolvePrInfoForCard: resolvePrInfoForCard,
-    importLegacyForCard: importLegacyPrTracking,
-    importLegacyOnce: importLegacyPrTrackingOnce
+    resolvePrInfoForCard: resolvePrInfoForCard
   };
 })();
 

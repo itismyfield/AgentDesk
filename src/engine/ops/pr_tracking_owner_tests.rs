@@ -39,12 +39,6 @@ impl Policy {
             serde_json::from_str(&raw).unwrap()
         })
     }
-
-    fn reload(&self) {
-        self.context
-            .with(|ctx| ctx.eval::<(), _>(include_str!("../../../policies/00-pr-tracking.js")))
-            .unwrap();
-    }
 }
 
 async fn setup() -> (TestPostgresDb, PgPool) {
@@ -111,90 +105,6 @@ async fn policy_pr_tracking_observation_merge_pg() {
         row(&pool, "pr-1").await,
         empty,
         "NULL state rejects the entire observation"
-    );
-    drop(policy);
-    pool.close().await;
-    db.drop().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn policy_pr_tracking_legacy_import_pg() {
-    let (db, pool) = setup().await;
-    let policy = Policy::new(&pool);
-    let result = policy.eval(r#"
-        agentdesk.kv.set('pr:pr-1', '{"number":71,"headRefName":"legacy","head_sha":"h1"}', 0);
-        agentdesk.kv.set('pr:pr-2', '{"pr_number":72,"branch":"b2","repo":"other/repo","state":"escalated"}', 0);
-        agentdesk.kv.set('pr:pr-3', '{"branch":"b3"}', 0);
-        agentdesk.kv.set('pr:pr-4', 'invalid', 0);
-        agentdesk.prTracking.importLegacyOnce('wait-ci');
-        return [agentdesk.prTracking.load('pr-1'), agentdesk.prTracking.load('pr-2'), agentdesk.prTracking.load('pr-3'), agentdesk.prTracking.load('pr-4')];
-    "#);
-    assert_eq!(result[0]["repo_id"], "owner/repo");
-    assert_eq!(result[0]["state"], "wait-ci");
-    assert_eq!(result[0]["head_sha"], "h1");
-    assert_eq!(result[0]["branch"], "legacy");
-    assert_eq!(result[0]["pr_number"], 71);
-    assert_eq!(result[0]["dispatch_generation"], "");
-    assert_eq!(result[0]["review_round"], 0);
-    assert_eq!(result[0]["retry_count"], 0);
-    assert_eq!(result[1]["repo_id"], "other/repo");
-    assert_eq!(result[1]["state"], "escalated");
-    assert_eq!(result[2]["state"], "wait-ci");
-    assert!(result[3].is_null());
-    assert!(
-        policy
-            .eval(
-                r#"
-        agentdesk.kv.set('pr:pr-4', '{"branch":"repaired"}', 0);
-        agentdesk.prTracking.importLegacyOnce('wait-ci');
-        return agentdesk.prTracking.loadCanonical('pr-4');
-    "#
-            )
-            .is_null(),
-        "same key set retains the scan stamp"
-    );
-    policy.eval("globalThis.previousTracking = agentdesk.prTracking; return true;");
-    policy.reload();
-    assert!(policy.eval("previousTracking.importLegacyOnce('wait-ci'); return previousTracking.loadCanonical('pr-4');").is_null(), "an old policy object keeps its own stamp after another evaluation");
-    assert_eq!(policy.eval("agentdesk.prTracking.importLegacyOnce('wait-ci'); return agentdesk.prTracking.loadCanonical('pr-4').branch;"), "repaired", "reloading a policy resets the scan stamp in its existing Context");
-    let restarted = Policy::new(&pool);
-    assert_eq!(restarted.eval("agentdesk.prTracking.importLegacyOnce('wait-ci'); return agentdesk.prTracking.loadCanonical('pr-4').branch;"), "repaired");
-    drop(restarted);
-    sqlx::query("UPDATE kanban_cards SET blocked_reason = 'ci:waiting' WHERE id = 'pr-6'")
-        .execute(&pool)
-        .await
-        .unwrap();
-    let inferred = policy.eval(r#"
-        agentdesk.kv.set('pr:pr-5', '{"number":75}', 0);
-        agentdesk.kv.set('pr:pr-6', '{"number":76}', 0);
-        agentdesk.kv.set('pr:pr-7', '{"branch":"b7"}', 0);
-        return [agentdesk.prTracking.load('pr-5'), agentdesk.prTracking.load('pr-6'), agentdesk.prTracking.load('pr-7')];
-    "#);
-    assert_eq!(inferred[0]["state"], "merge");
-    assert_eq!(inferred[1]["state"], "wait-ci");
-    assert_eq!(inferred[2]["state"], "create-pr");
-    sqlx::query("INSERT INTO kv_meta (key, value, expires_at) VALUES ('pr:pr-8', '{\"number\":78}', NOW() - INTERVAL '1 second')")
-        .execute(&pool).await.unwrap();
-    assert!(
-        policy
-            .eval("return agentdesk.prTracking.load('pr-8');")
-            .is_null()
-    );
-    sqlx::query("UPDATE pr_tracking SET dispatch_generation = 'new-generation', retry_count = 2, state = 'create-pr' WHERE card_id = 'pr-1'")
-        .execute(&pool).await.unwrap();
-    assert_eq!(
-        policy.eval(
-            "return agentdesk.prTracking.importLegacyForCard('pr-1', 'merge').dispatch_generation;"
-        ),
-        "new-generation"
-    );
-    assert_eq!(row(&pool, "pr-1").await["retry_count"], 2);
-    assert_eq!(row(&pool, "pr-1").await["state"], "create-pr");
-    assert!(
-        policy
-            .eval("return agentdesk.kv.get('pr:pr-1');")
-            .is_string(),
-        "import retains legacy key"
     );
     drop(policy);
     pool.close().await;
@@ -277,50 +187,96 @@ async fn policy_pr_tracking_generation_retry_reset_pg() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn policy_pr_tracking_owner_without_sql_writes_pg() {
+    assert_policy_sources_have_no_tracking_writes();
     let (db, pool) = setup().await;
     let policy = Policy::new(&pool);
-    policy.eval("agentdesk.kv.set('pr:pr-2', '{\"number\":72,\"branch\":\"legacy\"}', 0); agentdesk.db.execute = function() { throw new Error('policy SQL writes disabled'); }; return true;");
-    let result = policy.eval("agentdesk.prTracking.upsert('pr-1', 'owner/repo', null, 'branch', 71, 'head', 'wait-ci', null); return [agentdesk.prTracking.load('pr-1'), agentdesk.prTracking.load('pr-2')];");
+    policy.eval("agentdesk.db.execute = function() { throw new Error('policy SQL writes disabled'); }; return true;");
+    let result = policy.eval("agentdesk.prTracking.upsert('pr-1', 'owner/repo', null, 'branch', 71, 'head', 'wait-ci', null); agentdesk.prTracking.markHandedOff('pr-1', 'ignored'); agentdesk.prTracking.touchGeneration('pr-1', ''); return [agentdesk.prTracking.load('pr-1'), agentdesk.prTracking.load('pr-2')];");
     assert_eq!(result[0]["pr_number"], 71);
-    assert_eq!(result[1]["pr_number"], 72);
+    assert!(result[1].is_null());
+    assert_eq!(policy.eval("return [agentdesk.prTracking.list('', []).length, agentdesk.prTracking.findByRepoPr('owner/repo', 71).card_id, agentdesk.prTracking.findByRepoPr('owner/repo', 999), typeof agentdesk.prTracking.importLegacyOnce, typeof agentdesk.prTracking.importLegacyForCard];"), json!([1, "pr-1", null, "undefined", "undefined"]));
     drop(policy);
     pool.close().await;
     db.drop().await;
 }
 
+fn assert_policy_sources_have_no_tracking_writes() {
+    fn check(dir: &std::path::Path, writes: &regex::Regex, joins: &regex::Regex) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() && path.file_name().unwrap() != "__tests__" {
+                check(&path, writes, joins);
+            } else if path.extension().is_some_and(|ext| ext == "js") {
+                let source = std::fs::read_to_string(&path).unwrap();
+                let joined = joins.replace_all(&source, "");
+                assert!(
+                    !writes.is_match(&joined),
+                    "policy tracking SQL write: {}",
+                    path.display()
+                );
+                assert!(
+                    !source.contains("\"pr:\"") && !source.contains("'pr:'"),
+                    "policy legacy PR key: {}",
+                    path.display()
+                );
+            }
+        }
+    }
+    let writes = regex::Regex::new(r#"(?i)\b(?:insert(?:\s+or\s+\w+)?\s+into|replace\s+into|update|delete\s+from|truncate(?:\s+table)?)\s+[\"`]?pr_tracking\b"#).unwrap();
+    let joins = regex::Regex::new(r#"[\"']\s*\+\s*[\"']"#).unwrap();
+    check(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("policies"),
+        &writes,
+        &joins,
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn policy_pr_tracking_import_overlapping_handoff_keeps_generation_pg() {
+async fn policy_pr_tracking_handoff_bookkeeping_pg() {
     let (db, pool) = setup().await;
     let policy = Policy::new(&pool);
-    policy.eval(
-        "agentdesk.kv.set('pr:pr-1', '{\"number\":71,\"branch\":\"legacy\"}', 0); return true;",
-    );
-    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-    let import_pool = pool.clone();
-    let import_barrier = barrier.clone();
-    let import = tokio::task::spawn_blocking(move || {
-        let policy = Policy::new(&import_pool);
-        import_barrier.wait();
-        policy.eval("return agentdesk.prTracking.importLegacyForCard('pr-1', 'wait-ci');")
-    });
-    let handoff_pool = pool.clone();
-    let handoff = tokio::task::spawn_blocking(move || {
-        let policy = Policy::new(&handoff_pool);
-        barrier.wait();
-        policy.eval("return agentdesk.reviewAutomation.handoffCreatePr('pr-1', {repo_id:'owner/repo', worktree_path:null, branch:'new', head_sha:'new-head', agent_id:'pr-owner', title:'PR'});")
-    });
-    let (import, handoff) = tokio::join!(import, handoff);
-    import.unwrap();
-    let handoff = handoff.unwrap();
+    policy.eval("['create-pr', 'escalated', 'wait-ci'].forEach(function(state, i) { agentdesk.prTracking.upsert('pr-' + (i+1), 'owner/repo', '/wt', 'branch', 71+i, 'head', state, 'old'); }); return true;");
+    sqlx::query("UPDATE pr_tracking SET dispatch_generation = 'g1', review_round = 4, retry_count = 2, created_at = '2000-01-01T00:00:00Z', updated_at = '2000-01-01T00:00:00Z'")
+        .execute(&pool).await.unwrap();
+    let before = row(&pool, "pr-1").await;
+    policy.eval("agentdesk.prTracking.touchGeneration('pr-1', 'stale'); agentdesk.prTracking.touchGeneration('pr-2', ''); agentdesk.prTracking.markHandedOff('pr-3', 'ignored'); return true;");
+    let unchanged: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM pr_tracking WHERE updated_at = created_at")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(
-        row(&pool, "pr-1").await["dispatch_generation"],
-        handoff["generation"]
+        unchanged, 3,
+        "stale/empty generations and inactive states do not touch rows"
     );
-    let final_load = policy.eval(
-        "agentdesk.prTracking.importLegacyOnce('merge'); return agentdesk.prTracking.load('pr-1');",
+    assert_eq!(row(&pool, "pr-3").await["last_error"], "old");
+    policy.eval("agentdesk.prTracking.markHandedOff('pr-1', 'failed'); agentdesk.prTracking.markHandedOff('pr-2', ''); agentdesk.prTracking.touchGeneration('pr-3', 'g1'); agentdesk.prTracking.markHandedOff('missing', 'ignored'); return true;");
+    let mut expected = before;
+    expected["last_error"] = json!("handed-off:failed");
+    assert_eq!(
+        row(&pool, "pr-1").await,
+        expected,
+        "marker preserves lifecycle fields and metadata"
     );
-    assert_eq!(final_load["dispatch_generation"], handoff["generation"]);
-    assert_eq!(final_load["retry_count"], 0);
+    assert_eq!(row(&pool, "pr-2").await["last_error"], "handed-off:");
+    assert_eq!(row(&pool, "pr-3").await["last_error"], "old");
+    let advanced: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM pr_tracking WHERE updated_at > created_at")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(advanced, 3);
+    sqlx::query("UPDATE pr_tracking SET dispatch_generation = '', updated_at = created_at WHERE card_id = 'pr-1'")
+        .execute(&pool).await.unwrap();
+    policy.eval("agentdesk.prTracking.touchGeneration('pr-1', ''); return true;");
+    let touched: bool = sqlx::query_scalar(
+        "SELECT updated_at > created_at FROM pr_tracking WHERE card_id = 'pr-1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(touched, "the legacy empty generation still matches itself");
+    assert_eq!(policy.eval("try { agentdesk.prTracking.markHandedOff(null, 'bad'); return false; } catch (e) { return true; }"), true);
     drop(policy);
     pool.close().await;
     db.drop().await;

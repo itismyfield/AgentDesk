@@ -550,6 +550,20 @@ function createAgentdeskMock(options) {
         }
         return { card_id: cardId, repo_id: repoId, branch, pr_number: prNumber, state: trackingState, last_error: lastError };
       },
+      // Model native bookkeeping through the sweep tests' SQL-aware fake.
+      markHandedOff(cardId, errorMsg) {
+        return agentdesk.db.execute(
+          "UPDATE pr_tracking SET last_error = ?, updated_at = datetime('now') " +
+          "WHERE card_id = ? AND state IN ('create-pr', 'escalated')",
+          ["handed-off:" + errorMsg, cardId]
+        );
+      },
+      touchGeneration(cardId, generation) {
+        return agentdesk.db.execute(
+          "UPDATE pr_tracking SET updated_at = datetime('now') WHERE card_id = ? AND dispatch_generation = ?",
+          [cardId, generation || ""]
+        );
+      },
       findOpenPrByBranch(repoId, branch) {
         if (settings.prTracking && typeof settings.prTracking.findOpenPrByBranch === "function") {
           return clone(settings.prTracking.findOpenPrByBranch(repoId, branch, state));

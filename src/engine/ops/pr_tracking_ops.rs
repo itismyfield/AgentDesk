@@ -1,6 +1,6 @@
-//! Owns PR tracking merges and legacy imports; lifecycle callers supply their transaction.
+//! Owns PR tracking writes; lifecycle callers supply their transaction.
 
-use rquickjs::{Ctx, Function, Object, Result as JsResult, function::MutFn};
+use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
@@ -39,70 +39,66 @@ struct Observation {
 #[serde(tag = "op", rename_all = "camelCase")]
 enum Request {
     Upsert(Observation),
-    ImportLegacyForCard {
-        card_id: String,
-        fallback_state: Option<String>,
-    },
-    ImportLegacyOnce {
-        fallback_state: Option<String>,
-    },
+    MarkHandedOff { card_id: String, error_msg: String },
+    TouchGeneration { card_id: String, generation: String },
 }
 
 fn new_store<'js>(ctx: &Ctx<'js>, pool: Option<PgPool>) -> JsResult<Object<'js>> {
     let store = Object::new(ctx.clone())?;
-    let mut scan_stamp: Option<String> = None;
     store.set(
         "__callRaw",
-        Function::new(
-            ctx.clone(),
-            MutFn::from(move |raw: String| {
-                let result = (|| {
-                    let request: Request = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-                    let pool = pool
-                        .as_ref()
-                        .ok_or("postgres backend is required for prTracking")?;
-                    let previous = scan_stamp.clone();
-                    let (value, next_stamp) = crate::utils::async_bridge::block_on_pg_result(
-                        pool,
-                        move |pool| async move {
-                            match request {
-                                Request::Upsert(observation) => {
-                                    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-                                    observe_on_pg_tx(&mut tx, &observation).await?;
-                                    tx.commit().await.map_err(|e| e.to_string())?;
-                                    Ok((Value::Null, previous))
-                                }
-                                Request::ImportLegacyForCard {
-                                    card_id,
-                                    fallback_state,
-                                } => {
-                                    let value =
-                                        import_legacy(&pool, &card_id, fallback_state.as_deref())
-                                            .await?;
-                                    Ok((value, previous))
-                                }
-                                Request::ImportLegacyOnce { fallback_state } => {
-                                    let next = import_legacy_once(
-                                        &pool,
-                                        previous,
-                                        fallback_state.as_deref(),
-                                    )
-                                    .await?;
-                                    Ok((Value::Null, Some(next)))
-                                }
+        Function::new(ctx.clone(), move |raw: String| {
+            let result = (|| {
+                let request: Request = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+                let pool = pool
+                    .as_ref()
+                    .ok_or("postgres backend is required for prTracking")?;
+                crate::utils::async_bridge::block_on_pg_result(
+                    pool,
+                    move |pool| async move {
+                        let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+                        match request {
+                            Request::Upsert(observation) => {
+                                observe_on_pg_tx(&mut tx, &observation).await?
                             }
-                        },
-                        |e| e,
-                    )?;
-                    scan_stamp = next_stamp;
-                    Ok::<_, String>(json!({"value": value}))
-                })();
-                match result {
-                    Ok(value) => value.to_string(),
-                    Err(error) => json!({"error": error}).to_string(),
-                }
-            }),
-        )?,
+                            Request::MarkHandedOff { card_id, error_msg } => {
+                                sqlx::query(
+                                    "UPDATE pr_tracking SET last_error = $1, updated_at = NOW()
+                                     WHERE card_id = $2 AND state IN ('create-pr', 'escalated')",
+                                )
+                                .bind(format!("handed-off:{error_msg}"))
+                                .bind(card_id)
+                                .execute(&mut *tx)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            }
+                            Request::TouchGeneration {
+                                card_id,
+                                generation,
+                            } => {
+                                sqlx::query(
+                                    "UPDATE pr_tracking SET updated_at = NOW()
+                                     WHERE card_id = $1 AND dispatch_generation = $2",
+                                )
+                                .bind(card_id)
+                                .bind(generation)
+                                .execute(&mut *tx)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            }
+                        }
+                        tx.commit().await.map_err(|e| e.to_string())?;
+                        Ok(())
+                    },
+                    |e| e,
+                )?;
+                Ok::<_, String>(json!({"value": null}))
+            })();
+            match result {
+                Ok(value) => value.to_string(),
+                Err(error) => json!({"error": error}).to_string(),
+            }
+        })?,
     )?;
     Ok(store)
 }
@@ -128,11 +124,11 @@ pub(super) fn register_pr_tracking_ops<'js>(ctx: &Ctx<'js>, pool: Option<PgPool>
                 call({op:'upsert', card_id:cardId, repo_id:repoId, worktree_path:worktreePath,
                       branch:branch, pr_number:prNumber, head_sha:headSha, state:state, last_error:lastError});
             };
-            store.importLegacyForCard = function(cardId, fallbackState) {
-                return call({op:'importLegacyForCard', card_id:cardId, fallback_state:fallbackState || null});
+            store.markHandedOff = function(cardId, errorMsg) {
+                call({op:'markHandedOff', card_id:cardId, error_msg:errorMsg});
             };
-            store.importLegacyOnce = function(fallbackState) {
-                call({op:'importLegacyOnce', fallback_state:fallbackState || null});
+            store.touchGeneration = function(cardId, generation) {
+                call({op:'touchGeneration', card_id:cardId, generation:generation});
             };
             return store;
           }
@@ -145,6 +141,9 @@ fn wire_text(value: &Value) -> Option<String> {
     match value {
         Value::Null => None,
         Value::String(value) => Some(value.clone()),
+        Value::Number(value) if value.as_i64().is_some() || value.as_u64().is_some() => {
+            Some(value.to_string())
+        }
         Value::Number(value) if value.as_f64().is_some_and(|n| n.fract() == 0.0) => {
             Some(format!("{:.0}", value.as_f64()?))
         }
@@ -180,165 +179,6 @@ async fn observe_on_pg_tx(
     .bind(wire_text(&value.last_error))
     .execute(&mut **tx).await.map_err(|e| e.to_string())?;
     Ok(())
-}
-
-async fn canonical(pool: &PgPool, card_id: &str) -> Result<Option<Value>, String> {
-    sqlx::query_scalar(
-        "SELECT to_jsonb(p) FROM (
-            SELECT card_id, repo_id, worktree_path, branch, pr_number, head_sha, state, last_error,
-                   dispatch_generation, review_round, retry_count
-            FROM pr_tracking WHERE card_id = $1
-         ) p",
-    )
-    .bind(card_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| e.to_string())
-}
-
-fn truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(value) => *value,
-        Value::Number(value) => value.as_f64().is_some_and(|n| n != 0.0),
-        Value::String(value) => !value.is_empty(),
-        _ => true,
-    }
-}
-
-fn first(values: &[&Value]) -> Value {
-    values
-        .iter()
-        .find(|value| truthy(value))
-        .map_or(Value::Null, |value| (*value).clone())
-}
-
-fn js_string(value: &Value) -> String {
-    match value {
-        Value::String(value) => value.clone(),
-        Value::Object(_) => "[object Object]".to_string(),
-        Value::Array(values) => values
-            .iter()
-            .map(|v| {
-                if v.is_null() {
-                    String::new()
-                } else {
-                    js_string(v)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(","),
-        _ => wire_text(value).unwrap_or_else(|| "null".to_string()),
-    }
-}
-
-async fn import_legacy(
-    pool: &PgPool,
-    card_id: &str,
-    fallback: Option<&str>,
-) -> Result<Value, String> {
-    if let Some(existing) = canonical(pool, card_id).await? {
-        return Ok(existing);
-    }
-    let cached: Option<String> = sqlx::query_scalar(
-        "SELECT value FROM kv_meta WHERE key = $1 AND (expires_at IS NULL OR expires_at > NOW())",
-    )
-    .bind(format!("pr:{card_id}"))
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| e.to_string())?
-    .flatten();
-    let info: Value = cached
-        .as_deref()
-        .and_then(|raw| serde_json::from_str(raw).ok())
-        .unwrap_or(Value::Null);
-    if ![
-        &info["number"],
-        &info["pr_number"],
-        &info["branch"],
-        &info["headRefName"],
-    ]
-    .iter()
-    .any(|v| truthy(v))
-    {
-        return Ok(Value::Null);
-    }
-    let card = sqlx::query(
-        "SELECT blocked_reason, repo_id, github_issue_url FROM kanban_cards WHERE id = $1",
-    )
-    .bind(card_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-    let (blocked, card_repo, url): (Option<String>, Option<String>, Option<String>) = match card {
-        Some(card) => (
-            card.try_get("blocked_reason").map_err(|e| e.to_string())?,
-            card.try_get("repo_id").map_err(|e| e.to_string())?,
-            card.try_get("github_issue_url")
-                .map_err(|e| e.to_string())?,
-        ),
-        None => (None, None, None),
-    };
-    let repo_pattern =
-        regex::Regex::new(r"github\.com/([^/]+/[^/]+)").map_err(|e| e.to_string())?;
-    let url_repo = url
-        .as_deref()
-        .and_then(|url| repo_pattern.captures(url))
-        .map(|captures| captures[1].to_string());
-    let number = first(&[&info["number"], &info["pr_number"]]);
-    let state = if truthy(&info["state"]) {
-        js_string(&info["state"])
-    } else if let Some(fallback) = fallback.filter(|s| !s.is_empty()) {
-        fallback.to_string()
-    } else if blocked.as_deref().is_some_and(|s| s.starts_with("ci:")) {
-        "wait-ci".to_string()
-    } else if truthy(&number) {
-        "merge".to_string()
-    } else {
-        "create-pr".to_string()
-    };
-    let observation = Observation {
-        card_id: card_id.to_string(),
-        repo_id: first(&[&info["repo"], &json!(card_repo), &json!(url_repo)]),
-        worktree_path: Value::Null,
-        branch: first(&[&info["branch"], &info["headRefName"]]),
-        pr_number: number,
-        head_sha: first(&[&info["sha"], &info["head_sha"]]),
-        state: json!(state),
-        last_error: Value::Null,
-    };
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-    observe_on_pg_tx(&mut tx, &observation).await?;
-    tx.commit().await.map_err(|e| e.to_string())?;
-    Ok(canonical(pool, card_id).await?.unwrap_or(Value::Null))
-}
-
-async fn import_legacy_once(
-    pool: &PgPool,
-    previous: Option<String>,
-    fallback: Option<&str>,
-) -> Result<String, String> {
-    let stamp: (i64, String, String) = sqlx::query_as(
-        "SELECT COUNT(*), COALESCE(MIN(key), ''), COALESCE(MAX(key), '') FROM kv_meta
-         WHERE key LIKE 'pr:%' AND (expires_at IS NULL OR expires_at > NOW())",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-    let stamp = format!("{}:{}:{}", stamp.0, stamp.1, stamp.2);
-    if previous.as_ref() == Some(&stamp) {
-        return Ok(stamp);
-    }
-    let keys: Vec<String> = sqlx::query_scalar(
-        "SELECT key FROM kv_meta WHERE key LIKE 'pr:%' AND (expires_at IS NULL OR expires_at > NOW())",
-    ).fetch_all(pool).await.map_err(|e| e.to_string())?;
-    for key in keys {
-        let card_id = key.strip_prefix("pr:").unwrap_or(&key);
-        if !card_id.is_empty() && canonical(pool, card_id).await?.is_none() {
-            import_legacy(pool, card_id, fallback).await?;
-        }
-    }
-    Ok(stamp)
 }
 
 pub(super) async fn seed_pg_pr_tracking_handoff_state(
@@ -647,4 +487,24 @@ pub(super) async fn reseed_on_pg_tx(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wire_text;
+    use serde_json::json;
+
+    #[test]
+    fn wire_text_preserves_integer_precision() {
+        for value in [
+            json!(9007199254740993_i64),
+            json!(i64::MIN),
+            json!(u64::MAX),
+        ] {
+            assert_eq!(wire_text(&value), Some(value.to_string()));
+        }
+        assert_eq!(wire_text(&json!(71.0)), Some("71".into()));
+        assert_eq!(wire_text(&json!(71.5)), Some("71.5".into()));
+        assert_eq!(wire_text(&json!(null)), None);
+    }
 }
