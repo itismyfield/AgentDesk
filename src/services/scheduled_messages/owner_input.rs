@@ -149,9 +149,8 @@ async fn owner(
 #[cfg(test)]
 tokio::task_local! { pub(super) static OWNER: crate::services::turn_orchestrator::ChannelMailboxHandle; }
 
-/// The owner's start of a scheduled turn on its target after the launch fence, with the
-/// message's metadata, hint and label as provenance; `None` leaves an unowned channel to the
-/// legacy start.
+/// The owner's start of a scheduled turn after the launch fence, keeping its metadata, hint and
+/// label; `None` leaves an unowned channel to the legacy start.
 pub(super) async fn owned(
     pool: &PgPool,
     fire: &ClaimedFire,

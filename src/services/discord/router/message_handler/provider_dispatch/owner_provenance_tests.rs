@@ -1,6 +1,5 @@
-//! A routine or scheduled start the owner takes resolves its role, session key, tmux session,
-//! channel, workspace and session as its legacy start does: one start runs through the legacy
-//! entry on one channel and through the owner's drive on another, and the two choices match.
+//! A routine or scheduled start run through the legacy entry on one channel and the owner's drive
+//! on another resolves the same role, session key, tmux session, channel, workspace and session.
 use super::super::start_idle;
 use crate::services::discord::SharedData;
 use crate::services::discord::admin_host_guard::tests::{ModeTmux, Tmux, api_child};
