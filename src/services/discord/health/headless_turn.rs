@@ -1,6 +1,6 @@
 //! Extracted from `services::discord::health` (#3038 Phase A) — verbatim
 //! move; behavior unchanged. Headless agent-turn reserve/start API
-//! (reservation channel/turn-id invariants) and the direct-meeting starter.
+//! (reservation channel/turn-id invariants).
 
 use std::sync::Arc;
 
@@ -8,9 +8,9 @@ use poise::serenity_prelude as serenity;
 use serenity::ChannelId;
 
 use super::HealthRegistry;
-use super::runtime_resolve::{resolve_direct_meeting_runtime, resolve_direct_meeting_shared};
+use super::runtime_resolve::{resolve_direct_channel_runtime, resolve_direct_channel_shared};
 use crate::services::discord::SharedData;
-use crate::services::discord::{meeting, router};
+use crate::services::discord::router;
 use crate::services::provider::ProviderKind;
 
 pub async fn start_headless_agent_turn(
@@ -77,7 +77,7 @@ pub async fn start_reserved_headless_agent_turn(
         )));
     }
 
-    let shared = resolve_direct_meeting_shared(registry, channel_id, &owner_provider)
+    let shared = resolve_direct_channel_shared(registry, channel_id, &owner_provider)
         .await
         .map_err(router::HeadlessTurnStartError::Internal)?;
 
@@ -121,7 +121,7 @@ pub async fn start_reserved_headless_agent_turn_with_owner_channel(
         )));
     }
 
-    let shared = resolve_direct_meeting_shared(registry, owner_channel_id, &owner_provider)
+    let shared = resolve_direct_channel_shared(registry, owner_channel_id, &owner_provider)
         .await
         .map_err(router::HeadlessTurnStartError::Internal)?;
 
@@ -149,7 +149,7 @@ pub async fn start_headless_agent_turn_in_dm(
     source: Option<String>,
     metadata: Option<serde_json::Value>,
 ) -> Result<router::HeadlessTurnStartOutcome, router::HeadlessTurnStartError> {
-    let (_, shared) = resolve_direct_meeting_runtime(registry, owner_channel_id, &owner_provider)
+    let (_, shared) = resolve_direct_channel_runtime(registry, owner_channel_id, &owner_provider)
         .await
         .map_err(router::HeadlessTurnStartError::Internal)?;
     let ctx = shared
@@ -196,7 +196,7 @@ pub async fn reserve_headless_agent_turn_in_dm(
     dm_user_id: u64,
     owner_provider: &ProviderKind,
 ) -> Result<(ChannelId, HeadlessAgentTurnReservation), router::HeadlessTurnStartError> {
-    let (_, shared) = resolve_direct_meeting_runtime(registry, owner_channel_id, owner_provider)
+    let (_, shared) = resolve_direct_channel_runtime(registry, owner_channel_id, owner_provider)
         .await
         .map_err(router::HeadlessTurnStartError::Internal)?;
     let ctx = shared
@@ -270,7 +270,7 @@ pub async fn start_reserved_headless_agent_turn_in_dm(
         )));
     }
 
-    let (_, shared) = resolve_direct_meeting_runtime(registry, owner_channel_id, &owner_provider)
+    let (_, shared) = resolve_direct_channel_runtime(registry, owner_channel_id, &owner_provider)
         .await
         .map_err(router::HeadlessTurnStartError::Internal)?;
     let (channel_name_hint, tmux_session_label, is_dm_hint) =
@@ -373,30 +373,6 @@ async fn start_reserved_headless_agent_turn_with_shared(
     }
 
     Ok(outcome)
-}
-
-pub async fn start_direct_meeting(
-    registry: &HealthRegistry,
-    channel_id: ChannelId,
-    owner_provider: ProviderKind,
-    primary_provider: ProviderKind,
-    reviewer_provider: ProviderKind,
-    agenda: String,
-    fixed_participants: Vec<String>,
-) -> Result<(), String> {
-    let (http, shared) =
-        resolve_direct_meeting_runtime(registry, channel_id, &owner_provider).await?;
-
-    meeting::spawn_direct_start(
-        http,
-        channel_id,
-        agenda,
-        primary_provider,
-        reviewer_provider,
-        fixed_participants,
-        shared,
-    )
-    .await
 }
 
 #[cfg(test)]

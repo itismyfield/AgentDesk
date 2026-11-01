@@ -76,14 +76,24 @@ export default function CampaignAutoQueueToggle({ campaign, tr, onSaved, checked
       setMessage(tr("상태를 읽지 못했습니다: ", "Could not read the state: ") + (cause instanceof Error ? cause.message : String(cause)));
     } finally { setBusy(false); }
   };
+  const label = tr("자동 진행", "Auto-run");
   return <>
-    <button type="button" className="campaign-auto-queue" aria-pressed={unknown ? "mixed" : campaign.auto_queue} disabled={busy}
-      onClick={() => void (unknown ? recheck() : toggle())}
-      title={unknown
-        ? tr("마지막 저장 결과를 모릅니다. 누르면 서버 상태를 다시 읽습니다.", "The last save's outcome is unknown. Press to read the server state again.")
-        : tr("켜면 선행 작업이 끝난 작업을 자동큐가 차례로 실행합니다. 끄면 새로 넘기는 것만 멈춥니다.", "When on, auto-queue runs each task as soon as its prerequisites are done. Turning it off only stops sending new tasks.")}>
-      {unknown ? tr("자동 진행 상태 확인", "Check auto-run") : campaign.auto_queue ? tr("자동 진행 켜짐", "Auto-run on") : tr("자동 진행 꺼짐", "Auto-run off")}
-    </button>
+    {unknown
+      ? <button type="button" className="campaign-auto-queue" data-state="unknown" disabled={busy} onClick={() => void recheck()}
+        title={tr("마지막 저장 결과를 모릅니다. 누르면 서버 상태를 다시 읽습니다.", "The last save's outcome is unknown. Press to read the server state again.")}>
+        {tr("자동 진행 상태 확인", "Check auto-run")}
+      </button>
+      : <span className="campaign-auto-run inline-flex items-center gap-2"
+        title={tr("켜면 선행 작업이 끝난 작업을 차례로 실행합니다. 끄면 새로 넘기는 것만 멈춥니다.", "When on, each task runs as soon as its prerequisites are done. Turning it off only stops sending new tasks.")}>
+        <span className="text-xs text-th-text-muted" aria-hidden>{label}</span>
+        <button type="button" role="switch" aria-checked={campaign.auto_queue} aria-label={label} disabled={busy} onClick={() => void toggle()}
+          className="campaign-auto-queue group inline-flex items-center gap-2 !rounded-full !px-2 !py-1">
+          <span aria-hidden className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${campaign.auto_queue ? "bg-emerald-600" : "bg-th-border"}`}>
+            <span className={`absolute top-0.5 size-4 rounded-full bg-white shadow transition-[left] ${campaign.auto_queue ? "left-[18px]" : "left-0.5"}`} />
+          </span>
+          <span className="min-w-6 text-left text-xs font-medium">{campaign.auto_queue ? tr("켜짐", "On") : tr("꺼짐", "Off")}</span>
+        </button>
+      </span>}
     {message && (unknown || !unknownSince) && <p className="campaign-handoff-result" role="status">{message}</p>}
   </>;
 }

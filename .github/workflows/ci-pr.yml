@@ -266,9 +266,7 @@ jobs:
               - 'src/supervisor/**'
               - 'src/ui/**'
               - 'src/utils/**'
-              - 'src/voice/**'
               - 'src/services/*'
-              - 'src/services/agent_quality/**'
               - 'src/services/agents/**'
               - 'src/services/analytics/**'
               - 'src/services/api_friction/**'
@@ -329,7 +327,6 @@ jobs:
               - 'src/services/discord/jsonl_watcher.rs'
               - 'src/services/discord/live_bridge.rs'
               - 'src/services/discord/mailbox_probe.rs'
-              - 'src/services/discord/meeting_orchestrator/**'
               - 'src/services/discord/mod.rs'
               - 'src/services/discord/model_catalog/**'
               - 'src/services/discord/monitoring_status_inline_tests.rs'
@@ -393,7 +390,6 @@ jobs:
               - 'src/services/discord/turn_presence/supervisor.rs'
               - 'src/services/discord/turn_presence/supervisor_tests.rs'
               - 'src/services/discord/turn_presence/unknown_notice.rs'
-              - 'src/services/discord/voice_barge_in/**'
               - 'src/services/discord/zombie_foreground_release.rs'
               - 'src/services/git/**'
               # Cover Windows-compiled cfg consumers outside the relay tree;
@@ -513,12 +509,6 @@ jobs:
             echo "SCCACHE_GHA_ENABLED="
           } >> "$GITHUB_ENV"
 
-      - name: Install Opus on macOS
-        if: runner.os == 'macOS'
-        run: |
-          brew install opus pkg-config
-          echo "PKG_CONFIG_PATH=$(brew --prefix opus)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
-
       - name: Setup sccache
         if: runner.os != 'macOS'
         uses: mozilla-actions/sccache-action@v0.0.10
@@ -587,12 +577,6 @@ jobs:
             echo "RUSTC_WRAPPER="
             echo "SCCACHE_GHA_ENABLED="
           } >> "$GITHUB_ENV"
-
-      - name: Install Opus on macOS
-        if: runner.os == 'macOS'
-        run: |
-          brew install opus pkg-config
-          echo "PKG_CONFIG_PATH=$(brew --prefix opus)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
 
       - name: Setup sccache
         if: runner.os != 'macOS'
@@ -901,7 +885,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py e85dd6104fefd77f5deba1aca46c26df868c45c9b40d0c3fb32ee469b8587405
-          pin scripts/check-ci-runner-hardening.sh e6069f08580c9fd2bd50a50504a97ddbcfb36c815d62c34715fbce35e2642806
+          pin scripts/check-ci-runner-hardening.sh 236cc874ffd47f7fa80aa9a82f67008ebe3bf29a86366912a4671e1cdcb660c7
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks

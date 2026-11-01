@@ -456,7 +456,7 @@ fn intake_state(channel: u64, message: u64, token: Option<&CancelToken>) -> Infl
     );
     state.turn_nonce = token.and_then(|token| token.turn_nonce().map(str::to_owned));
     state.busy_followup_retry_user_msg_id = message;
-    state.set_followup_requeue_context(None, false, false, Vec::new(), None, true);
+    state.set_followup_requeue_context(None, false, false, Vec::new(), true);
     state
 }
 
@@ -501,7 +501,6 @@ fn queued(message: u64) -> Intervention {
         has_reply_boundary: false,
         merge_consecutive: false,
         pending_uploads: Vec::new(),
-        voice_announcement: None,
     }
 }
 

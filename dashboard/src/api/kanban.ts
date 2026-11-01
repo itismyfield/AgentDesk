@@ -3,21 +3,32 @@ import { z } from "zod";
 import type { KanbanCard, KanbanRepoSource } from "../types";
 import { request, SLOW_MUTATION_TIMEOUT_MS } from "./httpClient";
 
+/** `view: "summary"` leaves out each card's description and duplicated metadata; read one card
+ * with getKanbanCard for those. */
 export async function getKanbanCards(filters?: {
   status?: string;
   repoId?: string;
   assigneeAgentId?: string;
+  view?: "summary";
+  excludeDone?: boolean;
 }): Promise<KanbanCard[]> {
   const params = new URLSearchParams();
   if (filters?.status) params.set("status", filters.status);
   if (filters?.repoId) params.set("repo_id", filters.repoId);
   if (filters?.assigneeAgentId)
     params.set("assigned_agent_id", filters.assigneeAgentId);
+  if (filters?.view) params.set("view", filters.view);
+  if (filters?.excludeDone) params.set("exclude_done", "true");
   const q = params.toString();
   const data = await request<{ cards: KanbanCard[] }>(
     `/api/kanban-cards${q ? `?${q}` : ""}`,
   );
   return data.cards;
+}
+
+export async function getKanbanCard(id: string): Promise<KanbanCard> {
+  const data = await request<{ card: KanbanCard }>(`/api/kanban-cards/${encodeURIComponent(id)}`);
+  return data.card;
 }
 
 export async function createKanbanCard(

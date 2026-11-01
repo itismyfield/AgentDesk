@@ -49,6 +49,9 @@ mod clear_end;
 #[cfg(unix)]
 #[path = "rotation/codex_end.rs"]
 mod codex_end;
+#[cfg(unix)]
+#[path = "rotation/codex_fresh.rs"]
+mod codex_fresh;
 #[path = "fork_lineage.rs"]
 mod fork_lineage;
 mod owe;
@@ -143,6 +146,9 @@ pub struct Sources<B> {
     prefix_seen: HashSet<String>,
     /// Retained Pending bytes to derive once after an explicit hot refinement; resume replays them normally.
     refined: Vec<SourceId>,
+    /// Codex Pending sources judged by spool key, with the length then; a refusal holds `u64::MAX`.
+    #[cfg(unix)]
+    codex_fresh_tried: HashMap<String, u64>,
     /// Boundary decisions and alarms made while deriving, flushed before delivery.
     dirty: bool,
     raised: Vec<WriterAlarm>,
@@ -310,6 +316,8 @@ impl<B: BindingEvents> Sources<B> {
             lineage: HashMap::new(),
             prefix_seen: HashSet::new(),
             refined: Vec::new(),
+            #[cfg(unix)]
+            codex_fresh_tried: HashMap::new(),
             dirty: false,
             raised: Vec::new(),
             readers_alarmed: false,
@@ -607,12 +615,26 @@ impl<B: BindingEvents> Sources<B> {
                 parent_hint.filter(|parent| **parent != new && store.cursor(parent).is_some());
             let log = self.bindings.binding_events_since(self.channel, 0);
             let attached = |source: &SourceId| store.cursor(source).is_some();
-            let unread = past_bind::unread_before(log, event.seq, &new, attached);
+            let unread = past_bind::unread_before(log.as_deref().ok(), event.seq, &new, attached);
             // A verified source an adoption left unread holds old records; it is not owed from 0.
             let boundary = if verified && !unread {
                 Boundary::Owed { from: 0 }
             } else {
                 past_bind::first_boundary(cause, parent.is_some(), unread)
+            };
+            // An Unknown bind of its execution's first fresh Codex source is owed as a Startup is.
+            #[cfg(unix)]
+            let boundary = if cause == BindingCause::Unknown
+                && parent.is_none()
+                && !unread
+                && codex_fresh::held(&boundary)
+                && log.as_deref().is_ok_and(|raw| {
+                    self.codex_fresh_start(store, &new, event.seq, raw, None)
+                        == codex_fresh::Fresh::Proven
+                }) {
+                Boundary::Owed { from: 0 }
+            } else {
+                boundary
             };
             let link = SourceLink {
                 source: new.clone(),

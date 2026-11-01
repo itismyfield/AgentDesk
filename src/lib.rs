@@ -246,9 +246,6 @@ pub(crate) mod supervisor;
 mod ui;
 // Utility detectors are shared opportunistically across provider paths.
 mod utils;
-// Voice runtime is an optional provider feature; most entry points are wired
-// only when voice config is enabled.
-pub(crate) mod voice;
 
 #[cfg(test)]
 mod high_risk_recovery;

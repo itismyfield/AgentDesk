@@ -368,7 +368,7 @@ mod tests {
             99_999_999_999_999
         )));
         assert!(!super::is_real_discord_message_id(MessageId::new(
-            super::super::voice_barge_in::INTERNAL_VOICE_MESSAGE_ID_START
+            super::super::INTERNAL_MESSAGE_ID_START
         )));
         assert!(super::is_real_discord_message_id(MessageId::new(
             100_000_000_000_000

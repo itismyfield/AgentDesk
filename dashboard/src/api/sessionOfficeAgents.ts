@@ -1,5 +1,4 @@
 import type { Agent, AuditLogEntry, Department } from "../types";
-import { resolveAvatarSeed } from "../lib/pixel-avatar";
 import { getDashboardSession } from "./dashboardAuth";
 import { readCachedSnapshot, request, type CachedApiSnapshot, type RequestOptions } from "./httpClient";
 
@@ -8,7 +7,6 @@ function normalizeAgent(agent: Agent): Agent {
     ...agent,
     name_ko: agent.name_ko ?? agent.name,
     avatar_emoji: agent.avatar_emoji ?? "",
-    avatar_seed: resolveAvatarSeed(agent),
     department_name: agent.department_name ?? null,
     department_name_ko: agent.department_name_ko ?? agent.department_name ?? null,
   };

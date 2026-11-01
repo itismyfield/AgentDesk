@@ -255,14 +255,10 @@ impl Fixture {
         message.author.id = UserId::new(100);
         message.author.name = "a2-owner".into();
         message.content = "!clear".into();
-        let mut voice_config = crate::voice::VoiceConfig::default();
-        voice_config.audio.recordings_dir = self.rig.root.path().join("voice");
         let data = crate::services::discord::Data {
             shared: self.rig.shared.clone(),
             token: "test-token".into(),
             provider: self.provider.clone(),
-            voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
-            voice_config,
         };
         assert!(
             Box::pin(crate::services::discord::commands::handle_text_command(

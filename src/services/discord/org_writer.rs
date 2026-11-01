@@ -44,8 +44,6 @@ struct OrgDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     channels: Option<OrgChannelsConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    meeting: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     suffix_map: Option<Value>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     provider_auth_profiles: BTreeMap<String, ProviderAuthProfileDef>,

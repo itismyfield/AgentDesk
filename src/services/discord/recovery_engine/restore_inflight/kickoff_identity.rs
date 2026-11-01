@@ -153,7 +153,7 @@ pub(in crate::services::discord) async fn finish_recovered_turn_mailbox(
     // retain + role-override cleanup + queue kickoff this code did inline. The
     // ledger phase gate keeps a racing watcher/bridge terminal exactly-once safe.
     // `FinalizeContext::monitor` reproduces the inline side-effect set (no
-    // inflight clear, no completion-cleanup, no voice drain, kick off backlog).
+    // inflight clear, no completion-cleanup, kick off backlog).
     //
     // Recovery is single-turn-per-channel (the channel is being recovered, not
     // running a fresh turn), so id-0 here is safe: the finalizer's id-0 guard

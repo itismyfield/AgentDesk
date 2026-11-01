@@ -25,6 +25,24 @@ pub(in crate::services::discord) fn sync_inflight_restart_mode_from_cancel(
     true
 }
 
+/// Returns true when any nested object inside `value` has `key` set to boolean `true`.
+fn json_any_true_flag(value: &serde_json::Value, key: &str) -> bool {
+    let mut stack = vec![value];
+    while let Some(node) = stack.pop() {
+        match node {
+            serde_json::Value::Object(map) => {
+                if map.get(key).and_then(serde_json::Value::as_bool) == Some(true) {
+                    return true;
+                }
+                stack.extend(map.values());
+            }
+            serde_json::Value::Array(items) => stack.extend(items.iter()),
+            _ => {}
+        }
+    }
+    false
+}
+
 pub(in crate::services::discord) fn classify_turn_finished_dispatch_kind(
     dispatch_context: Option<&str>,
     dispatch_type: Option<&str>,

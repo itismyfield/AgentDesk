@@ -137,14 +137,13 @@ pub(super) async fn handle_race_loss_enqueue(
     channel_id: ChannelId,
     original_channel_id: ChannelId,
     turn_kind: TurnKind,
-    original_request_owner: UserId,
+    request_owner: UserId,
     user_msg_id: MessageId,
     user_text: &str,
     reply_context: &Option<String>,
     has_reply_boundary: bool,
     merge_consecutive: bool,
     pending_uploads: &[crate::services::cluster::attachment_transfer::uploads::Upload],
-    voice_announcement: &Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
     reply_to_user_message: bool,
     dispatch_id_for_thread: &Option<String>,
     turn_start_attempt: Option<crate::services::discord::turn_view_reconciler::TurnStartAttempt>,
@@ -170,12 +169,7 @@ pub(super) async fn handle_race_loss_enqueue(
         channel_id,
         user_msg_id,
         build_race_requeued_intervention(
-            // #2266: attribute to the original Discord author (the announce
-            // bot) so the downstream `announce_bot_id == Some(request_owner)`
-            // check passes on replay; the post-rebind voice-user id would
-            // look like a non-announce author and discard the voice payload
-            // as spoofed.
-            original_request_owner,
+            request_owner,
             user_msg_id,
             user_text,
             preserve_on_cancel,
@@ -183,10 +177,6 @@ pub(super) async fn handle_race_loss_enqueue(
             has_reply_boundary,
             merge_consecutive,
             pending_uploads.to_vec(),
-            // #2266: keep the voice payload in the queued `Intervention` so
-            // `dispatch_queued_turn` can reinsert it before re-entering
-            // `handle_text_message`, restoring voice-transcript framing.
-            voice_announcement.clone(),
         )
         .with_route(route),
         cause,

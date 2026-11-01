@@ -48,7 +48,6 @@ async fn held_on_parent(shared: &Arc<SharedData>, ids: &Ids) {
         false,
         false,
         Vec::new(),
-        None,
     );
     let persistence =
         crate::services::discord::queue_persistence_context(shared, &shared.provider, ids.parent);
@@ -426,7 +425,6 @@ fn queued(id: u64, text: &str, route: Option<QueuedRoute>) -> Intervention {
         false,
         true,
         Vec::new(),
-        None,
     );
     match route {
         Some(route) => item.with_route(route),

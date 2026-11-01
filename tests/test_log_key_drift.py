@@ -323,17 +323,17 @@ class SessionIdAllowlistTest(unittest.TestCase):
                 )
                 self.assertEqual(_keys(violations), ["session_id"])
 
-    def test_allowlisted_voice_gateway_site_passes(self) -> None:
+    def test_allowlisted_hook_session_site_passes(self) -> None:
         violations = _scan_fixture(
             """
             fn probe() {
                 tracing::info!(
-                    session_id = data.session_id,
-                    "voice driver connected"
+                    session_id = %event.session_id,
+                    "hook prompt observed"
                 );
             }
             """,
-            rel="src/services/discord/voice_lifecycle.rs",
+            rel="src/services/discord/tui_prompt_relay/hook_observer.rs",
         )
         self.assertEqual(violations, [])
 
@@ -342,8 +342,8 @@ class SessionIdAllowlistTest(unittest.TestCase):
             """
             fn probe() {
                 tracing::info!(
-                    session_id = data.session_id,
-                    "not the voice file"
+                    session_id = %event.session_id,
+                    "not the hook file"
                 );
             }
             """,
@@ -357,11 +357,11 @@ class SessionIdAllowlistTest(unittest.TestCase):
             fn probe() {
                 tracing::info!(
                     session_id = something_else,
-                    "voice file but different value"
+                    "hook file but different value"
                 );
             }
             """,
-            rel="src/services/discord/voice_lifecycle.rs",
+            rel="src/services/discord/tui_prompt_relay/hook_observer.rs",
         )
         self.assertEqual(_keys(violations), ["session_id"])
 

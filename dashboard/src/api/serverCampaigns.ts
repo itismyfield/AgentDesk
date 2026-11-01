@@ -137,8 +137,27 @@ export const serverCampaignDocumentSchema = z.looseObject({
   definition: serverCampaignDefinitionSchema,
   view: serverCampaignViewSchema,
 });
-export const serverCampaignListResponseSchema = z.looseObject({
-  campaigns: z.array(serverCampaignDocumentSchema),
+// A summary document may omit every per-node payload; only the picker fields are kept, so no
+// node count or number can be read from it.
+export const serverCampaignSummarySchema = z.looseObject({
+  definition: z.looseObject({ repository: repositorySchema, title: z.string(), goal: z.string() }),
+  view: z.looseObject({
+    campaign_id: z.string(),
+    as_of: timestampSchema,
+    display: serverCampaignViewSchema.shape.display,
+    stop_mode: serverCampaignViewSchema.shape.stop_mode.optional(),
+    failed_count: unsignedSchema,
+    blocked_count: unsignedSchema,
+  }),
+}).transform(({ definition, view }) => ({
+  definition: { repository: definition.repository, title: definition.title, goal: definition.goal },
+  view: {
+    campaign_id: view.campaign_id, as_of: view.as_of, display: view.display, stop_mode: view.stop_mode ?? null,
+    failed_count: view.failed_count, blocked_count: view.blocked_count,
+  },
+}));
+export const serverCampaignSummaryListResponseSchema = z.looseObject({
+  campaigns: z.array(serverCampaignSummarySchema),
 });
 export const serverCampaignDetailResponseSchema = z.looseObject({
   campaign: serverCampaignDocumentSchema,
@@ -165,20 +184,20 @@ export type ServerCampaignProfile = z.infer<typeof profileSchema>;
 export type ServerCampaignDefinition = z.infer<typeof serverCampaignDefinitionSchema>;
 export type ServerCampaignView = z.infer<typeof serverCampaignViewSchema>;
 export type ServerCampaignDocument = z.infer<typeof serverCampaignDocumentSchema>;
-export type ServerCampaignListResponse = z.infer<typeof serverCampaignListResponseSchema>;
+export type ServerCampaignSummary = z.output<typeof serverCampaignSummarySchema>;
 export type ServerCampaignDetailResponse = z.infer<typeof serverCampaignDetailResponseSchema>;
 export type ServerCampaignReadOptions = Pick<RequestOptions, "signal" | "suppressErrorToast">;
 
 const LIST_PAGE = 100; // the server's largest page
 
-/** Every campaign, page by page. The first page uses the server's defaults (100 from offset 0);
- * a campaign pushed onto the next page by a concurrent create is listed once. */
-export async function getServerCampaigns(options: ServerCampaignReadOptions = {}): Promise<ServerCampaignDocument[]> {
-  const campaigns: ServerCampaignDocument[] = [];
+/** Every campaign's summary, page by page; a campaign pushed onto the next page by a concurrent
+ * create is listed once. Full documents are read one campaign at a time with getServerCampaign. */
+export async function getServerCampaignSummaries(options: ServerCampaignReadOptions = {}): Promise<ServerCampaignSummary[]> {
+  const campaigns: ServerCampaignSummary[] = [];
   for (let offset = 0; ; offset += LIST_PAGE) {
-    const page = await request(offset ? `/api/server-campaigns?limit=${LIST_PAGE}&offset=${offset}` : "/api/server-campaigns", {
+    const page = await request(`/api/server-campaigns?view=summary&limit=${LIST_PAGE}&offset=${offset}`, {
       method: "GET", signal: options.signal, suppressErrorToast: options.suppressErrorToast ?? true, shareInflight: false,
-    }, serverCampaignListResponseSchema);
+    }, serverCampaignSummaryListResponseSchema);
     const seen = new Set(campaigns.map((document) => document.view.campaign_id));
     campaigns.push(...page.campaigns.filter((document) => !seen.has(document.view.campaign_id)));
     if (page.campaigns.length < LIST_PAGE) return campaigns;

@@ -55,7 +55,6 @@
 "src/services/discord/turn_bridge/stream_loop/content_arms.rs" = 635 # 2026-07-10 #4230 S8 approved extraction of content/status/terminal stream-loop arms, including explicit Text drain-continue outcome mapping.
 "src/services/discord/turn_bridge/stream_loop/tool_arms.rs" = 684 # 2026-07-10 #4230 S7 approved contiguous verbatim extraction of ToolUse/ToolResult/TaskNotification stream-loop arms.
 "src/services/discord/turn_bridge/status_panel.rs" = 700
-"src/services/discord/turn_bridge/voice_completion.rs" = 700
 
 # Frozen test-residue ceilings for the parent_test_residue check (#4267).
 #

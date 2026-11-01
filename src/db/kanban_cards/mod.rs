@@ -19,6 +19,7 @@ pub struct ListCardsFilter {
     pub status: Option<String>,
     pub repo_id: Option<String>,
     pub assigned_agent_id: Option<String>,
+    pub exclude_done: bool,
 }
 
 #[derive(Debug, Clone)]

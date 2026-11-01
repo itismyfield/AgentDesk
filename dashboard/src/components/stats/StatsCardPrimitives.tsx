@@ -4,9 +4,7 @@ import { cx } from "../dashboard/ui";
 import type { MetricDeltaTone } from "./statsModel";
 
 export const NUMERIC_STYLE: CSSProperties = {
-  fontFamily: "var(--font-mono)",
   fontVariantNumeric: "tabular-nums",
-  fontFeatureSettings: '"tnum" 1',
 };
 
 export function HeadlineMetricCard({

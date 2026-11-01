@@ -14,15 +14,10 @@ async fn stop_alias_matches_the_stop_owner_failure_reply() {
         discord_mock::serenity_context(format!("http://127.0.0.1:{}", api.port), gateway_url).await;
     let shared = crate::services::discord::make_shared_data_for_tests();
     shared.settings.write().await.owner_user_id = Some(1);
-    let voice = tempfile::tempdir().unwrap();
-    let mut voice_config = crate::voice::VoiceConfig::default();
-    voice_config.audio.recordings_dir = voice.path().to_owned();
     let data = Data {
         shared,
         token: "stop-alias-test".into(),
         provider: ProviderKind::Gemini,
-        voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
-        voice_config,
     };
     let mut replies = Vec::new();
     for alias in [false, true] {

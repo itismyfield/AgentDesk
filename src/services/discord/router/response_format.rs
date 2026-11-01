@@ -180,14 +180,6 @@ pub(super) fn build_race_requeued_intervention(
     has_reply_boundary: bool,
     merge_consecutive: bool,
     pending_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
-    // #2266: when the race-lost message is a voice-transcript announcement,
-    // the per-process `voice::announce_meta` store entry was already consumed
-    // by the active `handle_text_message` call before the race-loss branch
-    // ran. Carry the announcement payload through the queued `Intervention`
-    // so the dispatch path can reinsert it into the store before re-entering
-    // `handle_text_message`, preserving voice-transcript framing instead of
-    // degrading to plain text.
-    voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> Intervention {
     let queued_generation = crate::services::discord::runtime_store::process_generation();
     let source_generation = if preserve_on_cancel {
@@ -216,7 +208,6 @@ pub(super) fn build_race_requeued_intervention(
         has_reply_boundary,
         merge_consecutive,
         pending_uploads,
-        voice_announcement,
     }
 }
 
@@ -259,7 +250,6 @@ mod tests {
             false,
             false,
             Vec::new(),
-            None,
         );
         assert!(human.preserve_on_cancel());
         assert_eq!(human.source_message_queued_generations.len(), 1);
@@ -274,7 +264,6 @@ mod tests {
             false,
             false,
             Vec::new(),
-            None,
         );
         assert!(!automation.preserve_on_cancel());
         assert!(!automation.source_message_queued_generations[0].preserve_on_cancel);

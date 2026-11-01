@@ -22,7 +22,6 @@ mod kv_ops;
 mod log_ops;
 pub(crate) mod message_ops;
 mod pipeline_ops;
-mod quality_ops;
 mod queue_ops;
 mod read_bridge;
 mod review_automation_ops;
@@ -71,7 +70,6 @@ fn register_globals_pg_only(
     db_ops::register_db_ops(ctx, pg_pool.clone())?;
     cards_ops::register_card_ops(ctx, pg_pool.clone())?;
     log_ops::register_log_ops(ctx)?;
-    quality_ops::register_quality_ops(ctx)?;
     // One reader per Context, shared by config.get and kv.get; none without PostgreSQL.
     let reads = pg_pool
         .as_ref()

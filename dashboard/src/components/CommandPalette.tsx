@@ -3,7 +3,7 @@ import { Command } from "cmdk";
 import { Search } from "lucide-react";
 import type { Agent, Department } from "../types";
 import { SurfaceEmptyState } from "./common/SurfacePrimitives";
-import AgentAvatar from "./AgentAvatar";
+import AgentPersona from "./AgentPersona";
 
 function searchTerms(...values: Array<string | null | undefined>): string[] {
   return values.filter((value): value is string => typeof value === "string" && value.trim().length > 0);
@@ -160,7 +160,7 @@ export default function CommandPalette({
                 onSelect={() => handleSelect({ type: "agent", agent })}
               >
                 <span className="flex w-6 items-center justify-center text-base text-center">
-                  <AgentAvatar agent={agent} agents={agents} size={22} />
+                  <AgentPersona agent={agent} size={22} />
                 </span>
                 <div className="min-w-0 flex-1">
                   <div className="truncate">

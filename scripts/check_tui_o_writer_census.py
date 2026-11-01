@@ -151,7 +151,6 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "commands/system_prompt.rs": {".say": 3},
     "commands/tui_passthrough.rs": {".say": 8},
     "commands/tool_call.rs": {".say": 1},
-    "commands/voice.rs": {".say": 6},
     "discord_io.rs": {"dispatch_channel_message": 1},
     "footer_view_reconciler/mod.rs": {"edit_channel_message*": 6},
     "formatting/delivery.rs": {".say": 2, "dispatch_channel_message": 1, "send_channel_message*": 6, "send_long_message*": 2},
@@ -161,9 +160,6 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "gateway/headless_exact.rs": {"TurnGateway::send_message": 1, "TurnGateway::edit_message": 1, "replace_message_with_outcome": 1, "send_long_message*": 1},
     "health/recovery.rs": {"edit_channel_message*": 1, "send_channel_message*": 1},
     "http.rs": {".edit_message": 1, ".send_message": 5, "send_channel_message*": 2, "dispatch_channel_message": 2},
-    "meeting_orchestrator/records.rs": {"send_long_message*": 3},
-    "meeting_orchestrator/rounds.rs": {"send_long_message*": 1},
-    "meeting_orchestrator/selection_runtime.rs": {".edit_message": 1, "dispatch_channel_message": 1},
     "monitoring_status.rs": {".edit_message": 1, "dispatch_channel_message": 1},
     "outbound/confirmation.rs": {".send_notice_once": 1, "send_channel_message*": 1},
     "outbound/delivery.rs": {".edit_message": 1},
@@ -247,10 +243,6 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "turn_bridge/terminal_outcome_delivery/recovery_retry.rs": {".edit_message": 1},
     "turn_bridge/two_message_panel.rs": {".send_message": 2},
     "turn_presence/supervisor.rs": {".say": 1},
-    "voice_barge_in/final_result_playback.rs": {"send_channel_message*": 1},
-    "voice_barge_in/progress_playback.rs": {"send_channel_message*": 1},
-    "voice_barge_in/routing.rs": {"send_channel_message*": 1},
-    "voice_barge_in/runtime_lifecycle.rs": {".say": 1},
 }
 # file (relative to PRIMITIVE_ROOT): (census rows, target[, gate file]).
 CENSUS: dict[str, tuple[str, ...]] = {
@@ -273,7 +265,6 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "commands/skill.rs": ("CMD", "KEEP_NONBODY"),
     "commands/system_prompt.rs": ("CMD", "KEEP_NONBODY"),
     "commands/tui_passthrough.rs": ("CMD", "KEEP_NONBODY"),
-    "commands/voice.rs": ("CMD", "KEEP_NONBODY"),
     "discord_io.rs": ("W19", "KEEP_TRANSPORT"),
     "footer_view_reconciler/mod.rs": ("1-B-panel", "KEEP_NONBODY"),
     "formatting/delivery.rs": ("W19", "KEEP_TRANSPORT"),
@@ -283,9 +274,6 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "gateway/headless_exact.rs": ("W19", "KEEP_TRANSPORT"),
     "health/recovery.rs": ("W33", "CUT_D"),
     "http.rs": ("W19", "KEEP_TRANSPORT"),
-    "meeting_orchestrator/records.rs": ("MEETING", "KEEP_NONBODY"),
-    "meeting_orchestrator/rounds.rs": ("MEETING", "KEEP_NONBODY"),
-    "meeting_orchestrator/selection_runtime.rs": ("MEETING", "KEEP_NONBODY"),
     "monitoring_status.rs": ("OPS", "KEEP_NONBODY"),
     "outbound/confirmation.rs": ("TURN-END-TRANSPORT", "KEEP_TRANSPORT"),
     "outbound/delivery.rs": ("W19", "KEEP_TRANSPORT"),
@@ -374,10 +362,6 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "turn_bridge/terminal_outcome_delivery/recovery_retry.rs": ("W18", "KEEP_NONBODY"),
     "turn_bridge/two_message_panel.rs": ("1-B-panel", "KEEP_NONBODY"),
     "turn_presence/supervisor.rs": ("1-D-notice", "KEEP_NONBODY"),
-    "voice_barge_in/final_result_playback.rs": ("1-E", "KEEP_36"),
-    "voice_barge_in/progress_playback.rs": ("1-E", "KEEP_36"),
-    "voice_barge_in/routing.rs": ("1-E", "KEEP_36"),
-    "voice_barge_in/runtime_lifecycle.rs": ("1-E", "KEEP_36"),
 }
 # Each file's cutover gates as `enclosing fn:kind`, in source order.
 # claim: a body is sent here (`claim_then_send`, or a RAW_CLAIM_SITES claim). peek: only read.

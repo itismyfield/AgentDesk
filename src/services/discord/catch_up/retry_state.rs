@@ -551,7 +551,7 @@ pub(in crate::services::discord) fn discard_cleared_backlog(
     if let Some(mut slot) = shared.catch_up_scan_in_progress.get_mut(&channel_id) {
         slot.1 = None;
     }
-    // Only real Discord ids are cursors: a synthetic headless/voice id would hide every later message.
+    // Only real Discord ids are cursors: a synthetic headless id would hide every later message.
     let real = |id: &u64| {
         is_real_discord_message_id_value(*id) && !is_synthetic_headless_message_id_raw(*id)
     };

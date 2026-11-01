@@ -126,7 +126,6 @@ pub(crate) async fn admit_queued_intake(
             .any(|upload| upload.is_local()),
         attachments: Vec::new(),
         preloaded_uploads: intervention.pending_uploads.clone(),
-        voice_announcement: None,
     };
     let admission = admit_text_intake(deps, &submission).await;
     let local_permit = match admission {
@@ -268,10 +267,6 @@ pub(crate) async fn finish_admitted_queued_intake(
     if owner.dispatch_lease.superseded_by_clear() {
         return Ok(super::super::IntakeExecution::ConsumedProtected);
     }
-    if let Some(announcement) = owner.original.voice_announcement.as_ref() {
-        crate::voice::announce_meta::global_store()
-            .insert_accepted_replay(owner.original.message_id, announcement.clone());
-    }
     #[cfg(unix)]
     let original_request = admitted.submission.request.clone();
     match finish_admitted_local(deps, permit, admitted.submission).await {
@@ -367,7 +362,6 @@ mod tests {
             has_reply_boundary: false,
             merge_consecutive: true,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         };
 
         let channel = serenity::ChannelId::new(5_071_204);
@@ -455,7 +449,6 @@ mod tests {
             has_reply_boundary: false,
             merge_consecutive: true,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         };
         let mut queue = Vec::new();
         assert!(

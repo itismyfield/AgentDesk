@@ -31,58 +31,6 @@ export type CliProvider =
 
 export type ActivitySource = "idle" | "agentdesk";
 
-export type VoiceSensitivityMode = "normal" | "conservative";
-
-export interface VoiceGlobalConfig {
-  lobby_channel_id: string | null;
-  active_agent_ttl_seconds: number;
-  default_sensitivity_mode: VoiceSensitivityMode;
-}
-
-export interface VoiceAgentConfig {
-  id: string;
-  name: string;
-  name_ko: string | null;
-  voice_enabled: boolean;
-  wake_word: string;
-  aliases: string[];
-  sensitivity_mode: VoiceSensitivityMode;
-}
-
-export type VoiceSttProvider = "whisper-cli" | "openai-compatible";
-export type VoiceTtsBackend = "edge" | "openai-compatible";
-
-export interface VoiceOpenAiEndpoint {
-  base_url: string;
-  model: string;
-  api_key_env: string;
-}
-
-export interface VoiceModels {
-  stt_provider: VoiceSttProvider;
-  stt: VoiceOpenAiEndpoint;
-  language: string;
-  tts_backend: VoiceTtsBackend;
-  tts: VoiceOpenAiEndpoint & { voice: string };
-  edge_voice: string;
-}
-
-export interface VoiceConfigResponse {
-  global: VoiceGlobalConfig;
-  models: VoiceModels;
-  agents: VoiceAgentConfig[];
-  version: string;
-  source_path?: string | null;
-}
-
-export interface VoiceConfigPutBody {
-  version?: string;
-  actor?: string;
-  global: VoiceGlobalConfig;
-  models?: VoiceModels;
-  agents: VoiceAgentConfig[];
-}
-
 export interface Agent {
   id: string;
   name: string;
@@ -104,8 +52,6 @@ export interface Agent {
   department_name_ko?: string | null;
   department_color?: string | null;
   avatar_emoji: string;
-  avatar_seed?: number | null;
-  sprite_number?: number | null;
   personality: string | null;
   system_prompt?: string | null;
   status: AgentStatus;
@@ -113,19 +59,11 @@ export interface Agent {
   prompt_content?: string | null;
   current_task_id?: string | null;
   stats_tasks_done: number;
-  stats_xp: number;
   stats_tokens: number;
   discord_channel_id?: string | null;
   discord_channel_id_alt?: string | null;
   discord_channel_id_codex?: string | null;
   created_at: number;
-}
-
-export interface SubAgent {
-  id: string;
-  parentAgentId: string;
-  task: string;
-  status: "working" | "done";
 }
 
 // Task
@@ -211,32 +149,6 @@ export interface TaskLog {
   created_at: number;
 }
 
-export interface MeetingMinuteEntry {
-  id: number;
-  meeting_id: string;
-  seq: number;
-  speaker_agent_id: string | null;
-  speaker_name: string;
-  department_name: string | null;
-  role_label: string | null;
-  message_type: string;
-  content: string;
-  created_at: number;
-}
-
-export interface MeetingMinute {
-  id: string;
-  task_id: string;
-  meeting_type: "planned" | "review";
-  round: number;
-  title: string;
-  status: "in_progress" | "completed" | "revision_requested" | "failed";
-  started_at: number;
-  completed_at: number | null;
-  created_at: number;
-  entries: MeetingMinuteEntry[];
-}
-
 // Messages
 export type SenderType = "ceo" | "agent" | "system";
 export type ReceiverType = "agent" | "department" | "all";
@@ -292,44 +204,6 @@ export interface CliToolStatus {
 
 export type CliStatusMap = Record<CliProvider, CliToolStatus>;
 
-// Company Stats (matches server GET /api/stats response)
-export interface CompanyStats {
-  tasks: {
-    total: number;
-    done: number;
-    in_progress: number;
-    inbox: number;
-    planned: number;
-    collaborating: number;
-    review: number;
-    cancelled: number;
-    completion_rate: number;
-  };
-  agents: {
-    total: number;
-    working: number;
-    idle: number;
-  };
-  top_agents: Array<{
-    id: string;
-    name: string;
-    alias?: string | null;
-    avatar_emoji: string;
-    stats_tasks_done: number;
-    stats_xp: number;
-    stats_tokens: number;
-  }>;
-  tasks_by_department: Array<{
-    id: string;
-    name: string;
-    icon: string;
-    color: string;
-    total_tasks: number;
-    done_tasks: number;
-  }>;
-  recent_activity: Array<Record<string, unknown>>;
-}
-
 // SubTask
 export type SubTaskStatus = "pending" | "in_progress" | "done" | "blocked";
 
@@ -380,8 +254,6 @@ export type WSEventType =
   | "kanban_card_deleted"
   | "task_dispatch_created"
   | "task_dispatch_updated"
-  | "round_table_new"
-  | "round_table_update"
   | "connected";
 
 export interface WSEvent {
@@ -482,9 +354,7 @@ export interface DispatchedSession {
   model: string | null;
   status: DispatchedSessionStatus;
   session_info: string | null;
-  sprite_number: number | null;
   avatar_emoji: string;
-  stats_xp: number;
   tokens: number;
   connected_at: number;
   last_seen_at: number | null;

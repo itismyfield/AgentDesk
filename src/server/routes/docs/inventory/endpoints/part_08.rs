@@ -181,32 +181,6 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         .with_curl("curl 'http://localhost:8787/api/analytics/observability?recentLimit=50'"),
         ep(
             "GET",
-            "/api/quality/events",
-            "analytics",
-            "Agent quality raw event stream",
-        )
-        .with_params([
-            (
-                "agent_id",
-                query_param("string", false, "Filter by agent id"),
-            ),
-            (
-                "days",
-                query_param("integer", false, "Lookback window in days").with_default(7),
-            ),
-            (
-                "limit",
-                query_param("integer", false, "Maximum recent events to return").with_default(200),
-            ),
-        ])
-        .with_example(
-            json!({"query": {"agent_id": "project-agentdesk", "days": 7, "limit": 50}}),
-            json!({"events": [{"agent_id": "project-agentdesk", "event_type": "turn_completed", "quality_score": 0.95}]}),
-        ),
-        ep("GET", "/api/streaks", "analytics", "Agent activity streaks"),
-        ep("GET", "/api/achievements", "analytics", "Agent achievements"),
-        ep(
-            "GET",
             "/api/activity-heatmap",
             "analytics",
             "Activity heatmap by hour",
@@ -239,12 +213,12 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 ]
             }),
         ),
-        ep("GET", "/api/receipt", "analytics", "Latest usage receipt snapshot"),
+        ep("GET", "/api/receipt", "analytics", "Usage receipt for period=today|week|month|ratelimit|all (default month). Cached 10 min per period window, then served stale while one background collect refreshes it; `generated_at` (RFC 3339) is when the logs were scanned."),
         ep(
             "GET",
             "/api/token-analytics",
             "analytics",
-            "Token dashboard analytics with daily trend, heatmap, and usage breakdowns",
+            "Token dashboard analytics with daily trend, heatmap, and usage breakdowns. Cached 10 min per period; after that the last result returns at once (X-Token-Analytics-Cache: stale) while one background scan refreshes it, and only a period never scanned waits. `generated_at` (RFC 3339) is when the data was computed; fresh=1 rescans before answering.",
         )
         .with_params([(
             "period",
@@ -706,12 +680,6 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ),
             ("batch_phase", body_param("integer", false, "Optional batch phase override")),
         ]),
-        ep(
-            "GET",
-            "/api/round-table-meetings/channels",
-            "meetings",
-            "List Discord channels available to round-table meeting workflows.",
-        ),
         ep(
             "POST",
             "/api/inflight/rebind",

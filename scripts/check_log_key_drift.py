@@ -41,8 +41,7 @@ above. Covered and excluded shapes are pinned by `tests/test_log_key_drift.py`
 (run in CI next to this guard).
 
 `session_id` carries a small, documented allowlist: a few log sites record a
-genuinely different identifier than the relay's `adk_session_key` — the Discord
-voice-gateway session (songbird `DriverConnect`/`DriverReconnect`) and the raw
+genuinely different identifier than the relay's `adk_session_key` — the raw
 provider-CLI hook session (`HookEvent.session_id`). Renaming those to
 `session_key` would mislabel the value, so they are exempt by
 `(path-suffix, value-expression)` signature rather than by line number (which
@@ -75,9 +74,6 @@ KEY_ASSIGN = re.compile(rf"\b(?P<key>{_KEY_ALT})\s*=\s*(?P<rest>[^=].*)$")
 # `session_id` sites that log a genuinely different identifier than the relay
 # `adk_session_key`. Exempt by (path suffix, value expression after `=`).
 SESSION_ID_ALLOWLIST: set[tuple[str, str]] = {
-    # Discord voice-gateway session id (songbird DriverConnect / DriverReconnect
-    # event payload) — the voice WebSocket session, not an agent session.
-    ("services/discord/voice_lifecycle.rs", "data.session_id"),
     # Raw provider-CLI hook session id (HookEvent.session_id) observed off the
     # UserPromptSubmit hook — the provider's own session, not adk_session_key.
     ("services/discord/tui_prompt_relay/hook_observer.rs", "%event.session_id"),

@@ -225,16 +225,6 @@
 
 ---
 
-## P1: Meeting System
-
-- `meeting_create_and_start` — 회의 생성 + 시작
-- `meeting_round_progression` — 라운드 진행
-- `meeting_transcript_accumulation` — 발언 기록 누적
-- `meeting_completion_saves_summary` — 완료 시 요약 저장
-- `meeting_cancel_mid_round` — 진행 중 취소
-
----
-
 ## P2: Health & Metrics
 
 ### Health Check Server

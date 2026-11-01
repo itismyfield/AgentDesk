@@ -140,7 +140,7 @@ Engine -> JS : Call kanban-rules.onCardTerminal(payload)
 activate JS
 JS -> P10 : onCardTerminal(payload)
 activate P10
-P10 -> DB : UPDATE completed_at,\nrecord XP
+P10 -> DB : UPDATE completed_at
 P10 --> JS
 deactivate P10
 JS --> Engine

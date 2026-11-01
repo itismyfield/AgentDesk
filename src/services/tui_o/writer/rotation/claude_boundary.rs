@@ -74,6 +74,8 @@ impl<B: BindingEvents> Sources<B> {
         owed: &mut impl Owe,
         replay: bool,
     ) -> Result<(), WriterAlarm> {
+        #[cfg(unix)]
+        self.settle_codex_fresh(writer, deriver, owed, replay, None)?;
         let pending: Vec<_> = self
             .rotation
             .links
@@ -298,6 +300,12 @@ impl<B: BindingEvents> Sources<B> {
         while let Some(at) = left.iter().position(|&index| !self.held(index)) {
             let index = left.remove(at);
             self.capture_one(writer, deriver, owed, index)?;
+            // A predecessor this read proves is owed before its successor is read.
+            #[cfg(unix)]
+            {
+                let source = self.readers[index].source.clone();
+                self.settle_codex_fresh(writer, deriver, owed, true, Some(&source))?;
+            }
         }
         self.reevaluate_boundaries(writer, deriver, owed, true)?;
         self.flush(writer)?;

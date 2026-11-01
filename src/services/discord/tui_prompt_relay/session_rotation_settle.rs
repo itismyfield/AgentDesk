@@ -210,14 +210,12 @@ pub(in crate::services::discord) fn launch_script_may_replace_binding(
 
 /// Finalize context for the rotation settle: clear the unfinalizable row and let
 /// the queue kick, but do not run completion cleanup (there is no completion to
-/// clean up — the transcript that would have carried it is frozen) and do not
-/// drain voice.
+/// clean up — the transcript that would have carried it is frozen).
 #[cfg(unix)]
 fn rotation_settle_finalize_context() -> super::super::turn_finalizer::FinalizeContext {
     super::super::turn_finalizer::FinalizeContext {
         clear_inflight: true,
         allow_completion_cleanup: false,
-        drain_voice: false,
         kickoff_queue: true,
         expected_idempotent_guard_miss: false,
     }

@@ -6,8 +6,8 @@ lands on `main`. Rename the rendered file to
 `agent-onboarding-<yyyy-mm-dd>.md` and place it next to the other observation
 reports under `docs/reports/`.
 
-This template mirrors the structure of `agent-quality-2-week-template.md` and
-`cost-efficiency-908.md` so operators get a consistent shape across campaigns.
+This template mirrors the structure of `cost-efficiency-908.md` so operators
+get a consistent shape across campaigns.
 
 Reference: [`docs/agent-onboarding.md`](../agent-onboarding.md).
 

@@ -5,7 +5,7 @@ use axum::{
 
 use super::super::{
     ApiRouter, AppState, claude_accounts_api, discord, github, github_dashboard, kakao_calendar,
-    meetings, pr_summary, protected_api_domain, provider_auth_profiles,
+    pr_summary, protected_api_domain, provider_auth_profiles,
 };
 
 // Category: integrations
@@ -94,36 +94,7 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 "/discord/channels/{id}/messages",
                 get(discord::channel_messages),
             )
-            .route("/discord/channels/{id}", get(discord::channel_info))
-            .route(
-                "/round-table-meetings",
-                get(meetings::list_meetings).post(meetings::upsert_meeting),
-            )
-            .route(
-                "/round-table-meetings/channels",
-                get(meetings::list_meeting_channels),
-            )
-            .route("/round-table-meetings/start", post(meetings::start_meeting))
-            .route(
-                "/round-table-meetings/{id}",
-                get(meetings::get_meeting).delete(meetings::delete_meeting),
-            )
-            .route(
-                "/round-table-meetings/{id}/issue-repo",
-                patch(meetings::update_issue_repo),
-            )
-            .route(
-                "/round-table-meetings/{id}/issues",
-                post(meetings::create_issues),
-            )
-            .route(
-                "/round-table-meetings/{id}/issues/discard",
-                post(meetings::discard_issue),
-            )
-            .route(
-                "/round-table-meetings/{id}/issues/discard-all",
-                post(meetings::discard_all_issues),
-            ),
+            .route("/discord/channels/{id}", get(discord::channel_info)),
         state,
     )
 }
