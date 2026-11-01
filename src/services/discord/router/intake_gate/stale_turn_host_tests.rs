@@ -697,3 +697,34 @@ async fn thread_guard_clears_the_witnessed_row_from_the_thread_file_only_pg() {
     );
     db.drop().await;
 }
+
+/// A live input on an idle channel queues behind a row whose granted herdr server was replaced,
+/// and goes straight on while that server still answers.
+#[tokio::test(flavor = "current_thread")]
+async fn a_live_input_queues_only_behind_a_replaced_herdr_server_pg() {
+    use crate::services::discord::recovery_engine::herdr_server_replaced::tests::{CHANNEL, Fx};
+    let fx = Fx::new().await;
+    fx.bound().await;
+    let _server =
+        std::os::unix::net::UnixListener::bind(std::path::Path::new(&fx.socket_addr())).unwrap();
+    let current = fx.current();
+    let channel = ChannelId::new(CHANNEL);
+    let live = || {
+        mailbox_has_live_active_turn_or_cleanup_stale_proof(
+            fx.shared(),
+            &ProviderKind::Claude,
+            channel,
+        )
+    };
+    fx.grant(current.clone());
+    assert!(!live().await, "the granted server runs the input");
+    fx.grant(crate::services::session_host::ServerWitness {
+        pid: current.pid + 1,
+        ..current
+    });
+    assert!(
+        live().await,
+        "the input waits for the replaced-server owner"
+    );
+    fx.close().await;
+}

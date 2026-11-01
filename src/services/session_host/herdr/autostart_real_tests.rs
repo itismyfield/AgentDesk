@@ -16,7 +16,7 @@ mod spawn;
 type Server = (Child, Vec<(String, String)>, Vec<String>);
 
 /// One isolated HOME with the scratch herdr installed where the user would have it.
-pub(super) struct Home {
+pub(crate) struct Home {
     dir: tempfile::TempDir,
     pub home: PathBuf,
     pub bin: PathBuf,
@@ -177,7 +177,7 @@ fn settle(child: &mut Child) {
     let _ = child.wait();
 }
 
-pub(super) fn wait_for(listens: &Path) {
+pub(crate) fn wait_for(listens: &Path) {
     let ready = Instant::now() + Duration::from_secs(10);
     while UnixStream::connect(listens).is_err() {
         assert!(Instant::now() < ready, "no server at {}", listens.display());
@@ -185,7 +185,7 @@ pub(super) fn wait_for(listens: &Path) {
     }
 }
 
-pub(super) const FALSE: &str = "[session]\nresume_agents_on_restore = false\n";
+pub(crate) const FALSE: &str = "[session]\nresume_agents_on_restore = false\n";
 
 #[tokio::test]
 #[ignore = "needs ADK_TEST_HERDR_BIN: a protocol-22 herdr run in an isolated HOME"]

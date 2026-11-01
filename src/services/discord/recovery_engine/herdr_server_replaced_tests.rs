@@ -17,30 +17,58 @@ use crate::services::session_host::autostart::spawn::{
     Context, ensured_on_this_thread, scoped_context,
 };
 
-const CHANNEL: u64 = 7_638_200_001;
-const NONCE: &str = "replaced-server-nonce";
+#[path = "herdr_server_replaced_real_tests.rs"]
+mod real;
 
-struct Fx {
+pub(in crate::services::discord) const CHANNEL: u64 = 7_638_200_001;
+/// Hex, as launch contexts name their executions.
+const NONCE: &str = "7638b2000000000000000000000000aa";
+const LOGICAL: &str = "replaced-server-session";
+
+pub(in crate::services::discord) struct Fx {
     db: crate::db::auto_queue::test_support::TestPostgresDb,
     pool: sqlx::PgPool,
     shared: Arc<SharedData>,
-    home: tempfile::TempDir,
+    home: PathBuf,
+    runtime_root: String,
     launch: HerdrLaunchEndpoint,
+    _dir: Option<tempfile::TempDir>,
     _hosts: crate::config::session_hosts::ForcedSessionHosts,
     _registry: Box<dyn std::any::Any>,
     _context: Box<dyn std::any::Any>,
 }
 
 impl Fx {
-    async fn new() -> Self {
+    pub(in crate::services::discord) async fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_path_buf();
+        std::fs::create_dir_all(home.join(".config/herdr")).unwrap();
+        // No binary is found, so a start this test asks for is refused before any spawn.
+        let context = Context {
+            env: crate::services::session_host::autostart::Environment {
+                home: Some(home.clone()),
+                path: None,
+                excluded: vec![home.clone(), "/opt/homebrew".into(), "/usr/local".into()],
+            },
+            local_node: Some("node".into()),
+            records: None,
+            grace_rounds: 0,
+            lock_wait: Duration::from_millis(200),
+            ready_wait: Duration::from_millis(200),
+        };
+        let mut fx = Self::at(home, context, "/fixture/runtime".into()).await;
+        fx._dir = Some(dir);
+        fx
+    }
+
+    /// The user_default endpoint of `home`'s default socket, with `context` for any start.
+    async fn at(home: PathBuf, context: Context, runtime_root: String) -> Self {
         let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         let mut shared =
             crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
         Arc::get_mut(&mut shared).unwrap().token_hash = "replaced-token".into();
-        let home = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(home.path().join(".config/herdr")).unwrap();
-        let socket = home.path().join(".config/herdr/herdr.sock");
+        let socket = home.join(".config/herdr/herdr.sock");
         let config: crate::config::Config = serde_json::from_value(serde_json::json!({
             "server": {},
             "cluster": {"instance_id": "node"},
@@ -65,23 +93,6 @@ impl Fx {
             crate::services::session_host::herdr_socket_rig_tests::boot_registry_on_this_thread(
                 &boot,
             );
-        // No binary is found, so a start this test asks for is refused before any spawn.
-        let context = Context {
-            env: crate::services::session_host::autostart::Environment {
-                home: Some(home.path().into()),
-                path: None,
-                excluded: vec![
-                    home.path().into(),
-                    "/opt/homebrew".into(),
-                    "/usr/local".into(),
-                ],
-            },
-            local_node: Some("node".into()),
-            records: None,
-            grace_rounds: 0,
-            lock_wait: Duration::from_millis(200),
-            ready_wait: Duration::from_millis(200),
-        };
         let context = scoped_context(&socket, context);
         let launch = HerdrLaunchEndpoint {
             execution_node: "node".into(),
@@ -94,11 +105,21 @@ impl Fx {
             pool,
             shared,
             home,
+            runtime_root,
             launch,
+            _dir: None,
             _hosts: hosts,
             _registry: Box::new(registry),
             _context: Box::new(context),
         }
+    }
+
+    pub(in crate::services::discord) fn shared(&self) -> &Arc<SharedData> {
+        &self.shared
+    }
+
+    pub(in crate::services::discord) fn socket_addr(&self) -> String {
+        self.launch.socket_addr.clone()
     }
 
     fn socket(&self) -> PathBuf {
@@ -106,15 +127,20 @@ impl Fx {
     }
 
     /// The channel's Bound row on the endpoint's pane.
-    async fn bound(&self) {
+    pub(in crate::services::discord) async fn bound(&self) {
+        self.insert(|_| {}).await;
+    }
+
+    /// The channel's row: Bound on pane `w1-1` of the endpoint, as `edit` leaves it.
+    async fn insert(&self, edit: impl FnOnce(&mut HostedExecution)) {
         let channel = CHANNEL.to_string();
         let owner = HostedOwner {
             provider: "claude".into(),
             discord_token_hash: self.shared.token_hash.clone(),
             channel_id: channel.clone(),
-            logical_key: "replaced-server-session".into(),
+            logical_key: LOGICAL.into(),
             owner_node: "node".into(),
-            runtime_root: "/fixture/runtime".into(),
+            runtime_root: self.runtime_root.clone(),
         };
         let stamp = |pid, start: &str| ProcessStamp {
             pid,
@@ -149,6 +175,7 @@ impl Fx {
             provider_process: stamp(20, "darwin:1002.000000"),
             provenance: "herdr_launch:ppid+env;exec=?".into(),
         });
+        edit(&mut record);
         sqlx::query("INSERT INTO sessions (session_key,provider,status,identity_kind,discord_token_hash,channel_id,hosted_execution) VALUES ($1,'claude','idle','discord_channel',$2,$3,$4)")
             .bind(&owner.logical_key).bind(&self.shared.token_hash).bind(channel)
             .bind(serde_json::to_value(record).unwrap())
@@ -156,7 +183,7 @@ impl Fx {
     }
 
     /// The server this test answers as, read by the launch host against a grant naming another.
-    fn current(&self) -> ServerWitness {
+    pub(in crate::services::discord) fn current(&self) -> ServerWitness {
         self.grant(ServerWitness {
             socket: self.socket(),
             pid: 1,
@@ -174,7 +201,7 @@ impl Fx {
         }
     }
 
-    fn grant(&self, witness: ServerWitness) {
+    pub(in crate::services::discord) fn grant(&self, witness: ServerWitness) {
         use crate::services::session_host::policy::permit::grant_for_test;
         let host = crate::services::session_host::herdr_endpoints()
             .launch_host()
@@ -198,7 +225,7 @@ impl Fx {
         .await
     }
 
-    async fn close(self) {
+    pub(in crate::services::discord) async fn close(self) {
         self.pool.close().await;
         self.db.drop().await;
     }
@@ -240,7 +267,7 @@ async fn a_row_is_held_only_while_its_granted_server_is_replaced_or_absent_pg() 
         "an absent server is asked for"
     );
 
-    std::fs::remove_dir(fx.home.path().join(".config/herdr")).unwrap();
+    std::fs::remove_dir(fx.home.join(".config/herdr")).unwrap();
     let before = ensured_on_this_thread();
     assert_eq!(fx.hold().await, None, "a socket that cannot be judged");
     tokio::time::sleep(Duration::from_millis(50)).await;

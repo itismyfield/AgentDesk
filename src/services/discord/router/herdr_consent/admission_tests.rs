@@ -1751,3 +1751,47 @@ async fn actual_worker_record_error_keeps_spawned_and_emits_original_row_notice_
     pool.close().await;
     db.drop().await;
 }
+
+/// A passing admission check is the launch host's own observation: its startup proof then
+/// stands for the host's later permits and mutations of the endpoint's executions.
+#[tokio::test(flavor = "current_thread")]
+async fn a_passing_admission_check_is_kept_by_the_launch_host() {
+    const CHANNEL: u64 = discord_mock::CHANNEL_ID + 7638;
+    let _boot = session_hosts::force_for_test(Some("node"), &[(CHANNEL, "node")])
+        .with_mode(EndpointMode::UserDefault);
+    let boot = session_hosts::with_boot(|boot| boot.cloned()).unwrap();
+    let _registry =
+        crate::services::session_host::herdr_socket_rig_tests::boot_registry_on_this_thread(&boot);
+    let configured = endpoint(CHANNEL).unwrap();
+    let (_dir, source) = preview::tests::fixture("printf 'config: ok\n'");
+    {
+        let mut peer = source.0.lock().unwrap();
+        std::fs::write(
+            &peer.config,
+            "[session]\nresume_agents_on_restore = false\n",
+        )
+        .unwrap();
+        peer.witness.socket = configured.socket_addr.clone().into();
+        // The server started well after the config was written: a startup proof.
+        peer.started = std::time::SystemTime::now() + std::time::Duration::from_secs(600);
+    }
+    let (checked, _) = observe(&configured, source).await;
+    assert!(checked.is_ok(), "{checked:?}");
+    let registered = crate::services::session_host::HerdrEndpoint::new(
+        &configured.execution_node,
+        &configured.config_key,
+        std::path::Path::new(&configured.socket_addr),
+        &configured.herdr_session,
+    )
+    .unwrap();
+    let host = crate::services::session_host::herdr_endpoints()
+        .launch_host()
+        .unwrap();
+    let evidence = host
+        .mutation_evidence(&registered, "any-execution")
+        .unwrap();
+    assert!(
+        evidence.startup.is_some(),
+        "the host keeps the admission's proof"
+    );
+}

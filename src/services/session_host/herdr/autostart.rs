@@ -196,4 +196,4 @@ mod tests;
 
 #[cfg(all(test, unix))]
 #[path = "autostart_real_tests.rs"]
-mod real_tests;
+pub(crate) mod real_tests;

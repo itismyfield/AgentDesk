@@ -286,4 +286,4 @@ async fn rebooted_pending(
 
 #[cfg(test)]
 #[path = "herdr_server_replaced_tests.rs"]
-mod tests;
+pub(in crate::services::discord) mod tests;
