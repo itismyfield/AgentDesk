@@ -551,6 +551,19 @@ mod tests {
         assert!(!args.iter().any(|arg| arg == "--model"));
     }
 
+    // A resumed session would keep the model it last ran; without a model it is sent back to the
+    // account default, while a new session needs no selector.
+    #[test]
+    fn tui_args_name_the_default_model_when_resuming_without_one() {
+        let mut config = sample_config();
+        config.model = None;
+        config.resume = true;
+
+        let args = build_claude_tui_args(&config, Path::new("/tmp/settings.json"));
+
+        assert!(args.windows(2).any(|pair| pair == ["--model", "default"]));
+    }
+
     #[test]
     fn prepare_launch_writes_settings_and_script() {
         let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();

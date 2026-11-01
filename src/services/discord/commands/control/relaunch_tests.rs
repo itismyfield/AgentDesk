@@ -162,6 +162,17 @@ impl Fixture {
     /// The real streaming entry with fast mode on, launching `name` on `session` with a CLI that
     /// records its arguments and the settings file it was handed; both, once it ran.
     fn launch_fast(&self, channel: ChannelId, name: &str, session: &str) -> (Vec<String>, Value) {
+        self.launch(channel, name, session, None)
+    }
+
+    /// The real streaming entry with fast mode on and `model`, as `launch_fast`.
+    fn launch(
+        &self,
+        channel: ChannelId,
+        name: &str,
+        session: &str,
+        model: Option<&str>,
+    ) -> (Vec<String>, Value) {
         use std::os::unix::fs::PermissionsExt as _;
         let bin = tempfile::tempdir().unwrap();
         let (claude, argv) = (bin.path().join("claude"), bin.path().join("argv"));
@@ -199,7 +210,7 @@ impl Fixture {
                         Some(&clearance),
                         Some(channel.get()),
                         None,
-                        None,
+                        model,
                         Some(true),
                         None,
                         0,
@@ -569,6 +580,7 @@ const WAITS: Waits = Waits {
     record: Duration::from_secs(5),
     settle: Duration::from_millis(50),
     poll: Duration::from_millis(10),
+    answer: Duration::from_secs(2),
 };
 
 fn confirm(at: f64) -> Confirm {
@@ -576,6 +588,7 @@ fn confirm(at: f64) -> Confirm {
         session: SESSION.to_string(),
         requested_fast: Some(true),
         at,
+        model: None,
     }
 }
 
@@ -649,3 +662,6 @@ async fn clear_aborts_the_pending_confirmation() {
         "the confirmation is aborted"
     );
 }
+
+#[path = "relaunch_model_tests.rs"]
+mod model_tests;
