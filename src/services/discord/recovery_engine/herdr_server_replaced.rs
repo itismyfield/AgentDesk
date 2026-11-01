@@ -277,7 +277,9 @@ async fn rebooted_pending(
     if now.as_ref() != Some(row) {
         return Err("row changed".into());
     }
-    match hosted::retire_pg(pool, row, &record.owner, &record.execution_nonce).await {
+    let (owner, nonce) = (&record.owner, &record.execution_nonce);
+    let placed = record.location.as_ref();
+    match crate::services::herdr_launch::retire_own_pending(pool, owner, nonce, placed).await {
         Ok(HostedCasOutcome::Written) => Ok(()),
         other => Err(format!("retire: {other:?}")),
     }

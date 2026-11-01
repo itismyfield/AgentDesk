@@ -5,6 +5,7 @@ use super::*;
 use crate::db::dispatched_sessions::hosted_execution::{
     self as hosted, HostedLookup, HostedRecord, HostedState,
 };
+use crate::services::session_host::herdr_endpoints;
 use crate::services::session_host::policy::{LocalChecker, ProofCache, Unverified};
 use consent::{ConsentKey, IntentRef, Preview, Question, workflow::Request};
 use refusal::Code;
@@ -55,7 +56,7 @@ async fn observe(
     Result<crate::services::session_host::policy::NextRestartProof, Unverified>,
     serde_json::Value,
 ) {
-    let registry = crate::services::session_host::herdr_endpoints();
+    let registry = herdr_endpoints();
     if let Some(host) = registry.launch_host() {
         return host.observe_policy_from(configured, source).await;
     }

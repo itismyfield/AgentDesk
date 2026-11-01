@@ -579,6 +579,17 @@ pub(crate) async fn retire_own_unplaced(
     owner: &HostedOwner,
     nonce: &str,
 ) -> Result<HostedCasOutcome, String> {
+    retire_own_pending(pool, owner, nonce, None).await
+}
+
+/// Retires Pending `nonce` with no launch evidence whose recorded pane is `placed` (`None`: no
+/// pane), by a CAS on the row read here.
+pub(crate) async fn retire_own_pending(
+    pool: &PgPool,
+    owner: &HostedOwner,
+    nonce: &str,
+    placed: Option<&HostedLocation>,
+) -> Result<HostedCasOutcome, String> {
     let current = load_row(pool, owner)
         .await
         .map_err(|row| format!("{row:?}"))?;
@@ -586,14 +597,14 @@ pub(crate) async fn retire_own_unplaced(
         HostedRecord::Known(record)
             if record.state == HostedState::Pending
                 && record.execution_nonce == nonce
-                && record.location.is_none()
+                && record.location.as_ref() == placed
                 && record.expected.is_none() =>
         {
             retire_pg(pool, &current, owner, nonce)
                 .await
                 .map_err(|e| format!("{e:?}"))
         }
-        _ => Err("the row is no longer this launch's unplaced Pending".into()),
+        _ => Err("the row is no longer this launch's Pending".into()),
     }
 }
 
