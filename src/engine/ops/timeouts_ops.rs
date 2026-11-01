@@ -429,20 +429,26 @@ mod tests {
         let runtime = rquickjs::Runtime::new().unwrap();
         let context = rquickjs::Context::full(&runtime).unwrap();
         context.with(|ctx| {
-            ctx.eval::<(), _>("var agentdesk = {session: {}};").unwrap();
-            register_timeouts_ops(&ctx, None).unwrap();
+            super::super::register_globals_with_supervisor_and_pg(
+                &ctx,
+                None,
+                crate::supervisor::BridgeHandle::new(),
+            )
+            .unwrap();
             let keys: String = ctx
-                .eval("JSON.stringify(Object.keys(agentdesk.timeouts).sort())")
+                .eval("JSON.stringify(Reflect.ownKeys(agentdesk.timeouts).map(String).sort())")
                 .unwrap();
             assert_eq!(
                 serde_json::from_str::<serde_json::Value>(&keys).unwrap(),
                 json!([
                     "__maintainStaleSessionsRaw",
+                    "__maintainUnsentNotificationsRaw",
                     "__observeSessionHostRaw",
                     "maintainStaleSessions",
+                    "maintainUnsentNotifications",
                     "observeSessionHost"
                 ]),
-                "policies must only see the stale-session owner and host observation"
+                "policies must only see the maintenance owners and host observation"
             );
         });
     }

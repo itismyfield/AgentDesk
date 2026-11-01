@@ -337,3 +337,17 @@ async fn policy_delegates_unsent_decisions_and_effects_to_native_owner_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+#[test]
+fn auto_queue_thresholds_belong_to_notify_owner() {
+    let root = include_str!("../../reconcile.rs");
+    for threshold in [
+        "AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_STALE_CLAIM",
+        "AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_BATCH_LIMIT",
+    ] {
+        assert!(
+            !root.contains(threshold),
+            "owner-only threshold in reconcile root: {threshold}"
+        );
+    }
+}

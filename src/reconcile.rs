@@ -28,10 +28,8 @@ use crate::engine::PolicyEngine;
 
 const COMPLETED_QUEUE_REVIEW_DRIFT_GRACE: Duration = Duration::from_secs(5 * 60);
 pub(crate) const COMPLETED_QUEUE_REVIEW_DRIFT_BATCH_LIMIT: i64 = 50;
+// Shared by notification recovery and review redispatch candidate selection.
 pub(crate) const AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_GRACE: Duration = Duration::from_secs(2 * 60);
-pub(crate) const AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_STALE_CLAIM: Duration =
-    Duration::from_secs(5 * 60);
-pub(crate) const AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_BATCH_LIMIT: i64 = 50;
 const DISPATCH_DELIVERY_EVENT_RECONCILE_BATCH_LIMIT: i64 = 500;
 
 const DISPATCH_DELIVERY_MISMATCH_MISSING_TYPED: &str = "missing_typed";

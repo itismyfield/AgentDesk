@@ -210,7 +210,7 @@ fn pr_tracking_mutation_re() -> &'static Result<Regex, regex::Error> {
     static RE: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r#"(?i)\b(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|MERGE\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?)\s+(?:ONLY\s+)?(?:["`]?\w+["`]?\s*\.\s*)?["`]?pr_tracking\b|\bTRUNCATE\b[^;]*\bpr_tracking\b"#,
+            r#"(?i)\b(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|MERGE\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?)\s+(?:ONLY\s+)?(?:["`]?\w+["`]?\s*\.\s*)?["`]?pr_tracking\b|\bTRUNCATE\b[\s\w.,"`]*\bpr_tracking\b"#,
         )
     })
 }
@@ -252,6 +252,8 @@ mod tests {
     fn pr_tracking_guard_allows_unrelated_writes_and_reads() {
         for sql in [
             "UPDATE pr_tracking_archive SET state = 'merged'",
+            "UPDATE kanban_cards SET note = 'truncate' WHERE id IN (SELECT card_id FROM pr_tracking)",
+            "UPDATE kanban_cards SET title = 'x' -- truncate later\n WHERE id IN (SELECT card_id FROM pr_tracking)",
             "TRUNCATE pr_tracking_archive",
             "SELECT * FROM (SELECT card_id FROM public.pr_tracking) AS tracking",
             "UPDATE kanban_cards SET title = 'renamed' WHERE id = 'card'",

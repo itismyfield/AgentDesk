@@ -42,8 +42,8 @@ pub(crate) async fn recover_once(pg_pool: Option<&sqlx::PgPool>) {
         }
     };
 
-    // Match pre-boot pending dispatches assigned to an idle agent, without a later
-    // created_at on the same card; equal-timestamp dispatches remain eligible.
+    // Match pre-boot pending dispatches assigned to idle agents, with no later non-cancelled/failed
+    // dispatch on the same card (strict created_at); equal timestamps remain eligible.
     let orphans: Vec<(String, String, String, String, String)> = if let Some(pool) = pg_pool {
         match sqlx::query(
             "SELECT d.id, d.to_agent_id, d.kanban_card_id, d.title, d.dispatch_type

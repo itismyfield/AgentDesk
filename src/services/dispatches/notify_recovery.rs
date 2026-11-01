@@ -2,8 +2,7 @@ use anyhow::{Result, anyhow};
 use sqlx::{PgPool, Row as SqlxRow};
 
 use crate::reconcile::{
-    AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_BATCH_LIMIT, AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_GRACE,
-    AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_STALE_CLAIM, AutoQueuePendingDeliveryOrphanStats,
+    AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_GRACE, AutoQueuePendingDeliveryOrphanStats,
     DISPATCH_DELIVERY_RECOVERY_EXPIRED_RESERVING, DISPATCH_DELIVERY_RECOVERY_ORPHAN_NOTIFIED,
     DISPATCH_DELIVERY_RECOVERY_ORPHAN_TYPED, DispatchDeliveryEventReconcileStats,
     dispatch_delivery_event_reconcile_report_pg, record_dispatch_delivery_mismatch_metric,
@@ -11,6 +10,9 @@ use crate::reconcile::{
 };
 
 const BOOT_RECONCILE_OUTBOX_LEASE_TIMEOUT_SECS: i64 = 300;
+const AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_STALE_CLAIM: std::time::Duration =
+    std::time::Duration::from_secs(5 * 60);
+const AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_BATCH_LIMIT: i64 = 50;
 
 pub(crate) struct BootNotifyRecoveryStats {
     pub(crate) stale_processing_outbox_reset: usize,

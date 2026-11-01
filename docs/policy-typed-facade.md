@@ -84,7 +84,7 @@ The migrated slice covers `onReviewEnter` and its round-planning logic. A static
 
 The owner is Rust: `services::stale_turn_reconciler::policy_maintenance` owns the 10-minute then 30-minute policy scans, shared host cache, inflight/liveness decisions, repair requests, and counter/history cleanup. The same facade retains the separate automatic sweep (5-minute grace) and keyed reconciliation contracts.
 
-Policy JS has no candidate-scan, repair, deadlock-cleanup, or termination-audit entrypoints. `observeSessionHost` remains read I/O for the Rust owner; `maintainStaleSessions` is the only policy maintenance command. A runtime test pins the exact timeout namespace immediately after registration, including its two raw bridge functions. A source-scan test also prevents production `policies/**/*.js` from calling the removed operations; the legacy oracle remains test-only.
+Policy JS has no candidate-scan, repair, deadlock-cleanup, or termination-audit entrypoints. `observeSessionHost` remains read I/O for the Rust owner; `maintainStaleSessions` is the active-monitor policy maintenance command. The timeout namespace also exposes `maintainUnsentNotifications` for the separate notification recovery owner. A runtime test pins the exact timeout namespace after all globals are registered, including its three raw bridge functions. A source-scan test also prevents production `policies/**/*.js` from calling the scan, repair, or deadlock-cleanup operations; the legacy oracle remains test-only.
 
 The active-monitor policy capability manifest sets `db.raw_sql.mode=forbidden`, so static capability checks fail if `agentdesk.db.*` is reintroduced in that file.
 
