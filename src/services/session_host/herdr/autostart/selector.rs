@@ -1,7 +1,5 @@
-//! Which socket a running herdr process serves or would start, read from its argv and environment
-//! the way herdr 0.9.5 resolves it: an explicit session (`--session NAME`, `--session=NAME`,
-//! `session attach NAME`, last one wins) before `HERDR_SOCKET_PATH`, before `HERDR_SESSION`, before
-//! the default session; sessions live under `$XDG_CONFIG_HOME/herdr`, else `$HOME/.config/herdr`.
+//! The socket a herdr process serves or would start, resolved as herdr 0.9.5 does: explicit session
+//! (last wins) before `HERDR_SOCKET_PATH`, before `HERDR_SESSION`, before the default.
 
 use std::path::{Path, PathBuf};
 

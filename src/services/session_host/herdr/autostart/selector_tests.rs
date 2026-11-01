@@ -1,5 +1,5 @@
-//! The selector against the resolutions measured on herdr 0.9.5 in an isolated HOME (#7638
-//! spikes S4, S4c, S4d) and the upstream session precedence.
+//! The selector against the resolutions measured on herdr 0.9.5 in an isolated HOME (spikes S4,
+//! S4c, S4d) and the upstream session precedence.
 
 use super::*;
 

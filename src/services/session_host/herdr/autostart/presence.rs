@@ -1,7 +1,5 @@
-//! Whether a server answers on a socket, judged apart from the next-restart policy: `Peer` and
-//! `Changed` also come from live servers, so they never mean "no server". Only a socket that is
-//! missing or refuses connections three times in a row, with no herdr server or launcher of this
-//! user selecting it, is absent; anything unclear is unknown.
+//! Whether a server answers on a socket, apart from the policy's `Peer`/`Changed` (live servers too):
+//! absent only after three missing or refused readings with no herdr of this user selecting it.
 
 use std::path::Path;
 

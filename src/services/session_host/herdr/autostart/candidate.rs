@@ -1,7 +1,5 @@
-//! The herdr binary AgentDesk would start for the execution user: found in this process's PATH,
-//! then Homebrew, `/usr/local/bin`, `~/.local/bin` and `~/.cargo/bin`; never an AgentDesk-managed
-//! copy. It must be a regular, owner- or root-owned, not group- or world-writable, native arm64
-//! single-architecture image on APFS that reports a supported stable version.
+//! The user's herdr a start would run: from PATH, then the usual install dirs, never `~/.adk`; a
+//! private native arm64 image on APFS reporting a supported stable version.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};

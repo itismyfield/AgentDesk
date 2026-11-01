@@ -228,9 +228,8 @@ fn herdr_processes_of_other_sockets_do_not_block_the_default() {
     assert_eq!(others.run(), Presence::Absent(AbsentKind::Refused));
 }
 
-/// A stand-in that the host's own process table must classify as a server selecting the default
-/// socket before it binds: `/bin/sh` through a symlink named `herdr` (a copy is killed by code
-/// signing), run as `herdr server`, blocked on reading its stdin so it starts no child.
+/// `/bin/sh` behind a `herdr` symlink (a copy is killed by code signing) run as `herdr server` and
+/// blocked on stdin: the host scan must see a server selecting the default socket before it binds.
 #[cfg(target_os = "macos")]
 #[test]
 fn the_host_process_table_finds_a_herdr_server_before_it_binds() {

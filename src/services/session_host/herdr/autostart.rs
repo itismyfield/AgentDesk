@@ -1,7 +1,5 @@
-//! Whether AgentDesk could start the execution user's own herdr server for a user_default socket,
-//! judged read-only: whether a server is present, the binary it would run and the config that
-//! server would read. Nothing here locks, spawns a server, writes a record or grants authority; a
-//! start re-judges all of it under its own lock.
+//! Read-only judgement of whether AgentDesk could start the user's own herdr for a user_default
+//! socket; nothing here locks, spawns, writes or grants, and a start re-judges it under its lock.
 
 #[path = "autostart/candidate.rs"]
 pub(crate) mod candidate;
