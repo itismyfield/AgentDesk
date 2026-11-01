@@ -34,15 +34,15 @@ static OWNER_TIMING: Timing = Timing {
 pub(super) struct Rig {
     pub(super) f: Fixture,
     pub(super) name: String,
-    channel: u64,
+    pub(super) channel: u64,
     pub(super) nonce: String,
     pub(super) renderer: std::path::PathBuf,
-    program: std::path::PathBuf,
+    pub(super) program: std::path::PathBuf,
     pub(super) runtime: tokio::runtime::Runtime,
     _registry: ChannelMailboxRegistry,
-    mailbox: ChannelMailboxHandle,
+    pub(super) mailbox: ChannelMailboxHandle,
     ticket: AdmissionTicket,
-    original: PendingQueueItem,
+    pub(super) original: PendingQueueItem,
     /// The database an idle turn's execution capacity is leased in, when a test gives one.
     pub(super) pool: std::sync::OnceLock<sqlx::PgPool>,
 }
@@ -80,12 +80,12 @@ pub(super) fn owned(
     let script = format!(
         "#!/bin/sh\nd='{dir}'\nprintf '%s\\n' \"$*\" >> \"$d/trace\"\n\
          case \"$*\" in *load-buffer*) [ ! -f \"$d/fail-load\" ] || exit 1 ;; esac\n\
-         case \"$*\" in *paste-buffer*) [ ! -f \"$d/before-paste\" ] || {{ sh \"$d/before-paste\"; rm \"$d/before-paste\"; }} ;; esac\n\
-         case \"$*\" in *send-keys*Enter*) [ ! -f \"$d/before-Enter\" ] || {{ sh \"$d/before-Enter\"; rm \"$d/before-Enter\"; }} ;; esac\n\
+         case \"$*\" in *paste-buffer*) [ ! -f \"$d/before-paste\" ] || {{ sh \"$d/before-paste\" || printf 'before-paste rc=%s\\n' \"$?\" >> \"$d/hook-timeout\"; rm \"$d/before-paste\"; }} ;; esac\n\
+         case \"$*\" in *send-keys*Enter*) [ ! -f \"$d/before-Enter\" ] || {{ sh \"$d/before-Enter\" || printf 'before-Enter rc=%s\\n' \"$?\" >> \"$d/hook-timeout\"; rm \"$d/before-Enter\"; }} ;; esac\n\
          '{shim}' \"$@\"; rc=$?\ncase \"$*\" in *load-buffer*) step=load ;; *paste-buffer*) step=paste ;; *C-s*) step=C-s ;; *send-keys*Enter*) step=Enter ;; *) step= ;; esac\n\
          if [ -n \"$step\" ] && [ \"$(cat \"$d/swap-after\" 2>/dev/null)\" = \"$step\" ]; then\n\
            rm \"$d/swap-after\"; '{real}' -L '{socket}' -f /dev/null respawn-pane -k -t '{pane}'\nfi\n\
-         if [ -n \"$step\" ] && [ -f \"$d/after-$step\" ]; then sh \"$d/after-$step\"; rm \"$d/after-$step\"; fi\nexit $rc\n",
+         if [ -n \"$step\" ] && [ -f \"$d/after-$step\" ]; then sh \"$d/after-$step\" || printf 'after-%s rc=%s\\n' \"$step\" \"$?\" >> \"$d/hook-timeout\"; rm \"$d/after-$step\"; fi\nexit $rc\n",
         dir = dir.display(),
         shim = f.root.path().join("tmux").display(),
         real = f.real.display(),
@@ -156,7 +156,7 @@ impl Rig {
         fs::write(dir.join(file), value).unwrap();
     }
 
-    /// One turn through `execute` with this rig's owner registered for its channel.
+    /// Routes the driver's own tmux writes through this rig's trace and hooks.
     fn trace_driver(&self) -> crate::config::TestEnvVarGuard {
         let bin = self.f.root.path().join("owner-driver-bin");
         fs::create_dir(&bin).unwrap();
@@ -164,6 +164,20 @@ impl Rig {
         crate::config::TestEnvVarGuard::prepend_path_after_shared_test_env_lock(&bin)
     }
 
+    fn assert_hooks_completed(&self) {
+        let marker = self
+            .f
+            .root
+            .path()
+            .join(format!("{}-owner/hook-timeout", self.name));
+        assert!(
+            !marker.exists(),
+            "fixture hook-timeout: {}",
+            fs::read_to_string(marker).unwrap_or_default()
+        );
+    }
+
+    /// One turn through `execute` with this rig's owner registered for its channel.
     pub(super) fn dispatch(
         &self,
         provider: ProviderKind,
@@ -929,6 +943,7 @@ fn startup_enter_is_the_attempts_first_key() {
     rig.mark("fail-load", "");
     let result = created_first_prompt(&rig);
     assert!(result.is_err(), "{result:?}");
+    rig.assert_hooks_completed();
     assert_eq!(rig.events(), ["Enter"], "startup key only; the load failed");
     let trace =
         fs::read_to_string(rig.f.root.path().join(format!("{}-owner/trace", rig.name))).unwrap();
@@ -984,6 +999,7 @@ fn startup_enter_never_reaches_a_replaced_pane() {
     rig.mark("before-Enter", &script);
     let result = created_first_prompt(&rig);
     assert!(result.is_err(), "{result:?}");
+    rig.assert_hooks_completed();
     assert!(
         ready.exists(),
         "the replacement was running at the send boundary"
@@ -1497,4 +1513,55 @@ pub(in crate::services::discord) async fn claimed_owner_turn(
         settled,
     };
     (owner, answer)
+}
+
+/// An attached client on this isolated server does not add a finishing Enter to an owned submit.
+#[test]
+fn an_attached_client_receives_one_owned_first_prompt_enter() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig("oc-attached", 7_272_520, "normal", view("", false), IDLE);
+    let _driver = rig.trace_driver();
+    rig.f.attach(&rig.name);
+    assert_eq!(created_first_prompt(&rig), Ok(()));
+    wait("attached owner Enter", || {
+        rig.events().contains(&"Enter".into())
+    });
+    rig.assert_hooks_completed();
+    assert_eq!(rig.events(), ["paste", "Enter"]);
+    assert_eq!(
+        fs::read_to_string(rig.renderer.join("body")).unwrap(),
+        PROMPT
+    );
+    rig.f.assert_enter(&rig.name, 1);
+    rig.delivered();
+}
+
+/// A bounded fixture hook that exits unsuccessfully produces its own diagnostic before key checks.
+#[test]
+fn a_failed_injection_hook_has_an_explicit_diagnostic() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig(
+        "oc-hook-failure",
+        7_272_550,
+        "normal",
+        view("", false),
+        IDLE,
+    );
+    let _driver = rig.trace_driver();
+    rig.mark(
+        "after-Enter",
+        "tries=0; while [ \"$tries\" -lt 2 ]; do tries=$((tries+1)); sleep 0.01; done; exit 1\n",
+    );
+    assert_eq!(created_first_prompt(&rig), Ok(()));
+    let diagnostic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rig.assert_hooks_completed()
+    }))
+    .expect_err("a failed hook must fail explicitly");
+    let message = diagnostic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .unwrap_or_default();
+    assert!(message.contains("fixture hook-timeout"), "{message}");
+    assert!(message.contains("after-Enter rc=1"), "{message}");
+    assert_eq!(rig.events(), ["paste", "Enter"]);
 }

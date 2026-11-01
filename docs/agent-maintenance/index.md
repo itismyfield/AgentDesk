@@ -37,6 +37,8 @@
 - [`idle-kill-owner-recovery.md`](idle-kill-owner-recovery.md) — how idle-kill
   skips and later recovers remote session owners whose origin or heartbeat is
   missing.
+- [`input-owner-entry-notes.md`](input-owner-entry-notes.md) — input owner readiness,
+  launch outcomes and adjacent entries (#7539).
 - [`kanban-extraction-plan.md`](kanban-extraction-plan.md) — subdomain map and
   ordered extraction issues for shrinking the former `src/kanban.rs` (removed)
   into the `src/kanban/` facade (#1787).

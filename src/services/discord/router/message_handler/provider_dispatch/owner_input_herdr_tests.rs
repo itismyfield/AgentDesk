@@ -51,6 +51,10 @@ struct HerdrOwner {
 
 impl HerdrOwner {
     fn start(provider: &str, channel: u64) -> Self {
+        Self::start_with(provider, channel, PROMPT)
+    }
+
+    fn start_with(provider: &str, channel: u64, prompt: &str) -> Self {
         let rig = HerdrRig::start();
         let execution = uuid::Uuid::new_v4().simple().to_string();
         let context = rig.context(&execution);
@@ -73,7 +77,7 @@ impl HerdrOwner {
         let id = 8_000_000_000_000_009_000 + channel % 1000;
         let original: PendingQueueItem = serde_json::from_value(json!({"author_id":7,
             "message_id":id,"channel_id":channel,"source_message_ids":[id],
-            "queued_generation":1,"text":PROMPT}))
+            "queued_generation":1,"text":prompt}))
         .unwrap();
         let ticket = AdmissionTicket::new();
         runtime.block_on(async {
@@ -721,8 +725,10 @@ fn a_refused_first_herdr_pin_reaches_the_rendezvous() {
         reached.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     });
     assert!(
-        result.is_err(),
-        "the replaced provider must fail its pin: {result:?}"
+        result
+            .as_ref()
+            .is_err_and(|why| why.contains("ProviderReplaced")),
+        "pin must reject the replaced provider: {result:?}"
     );
     assert_eq!(
         reached.load(std::sync::atomic::Ordering::SeqCst),
@@ -842,4 +848,142 @@ fn owned_herdr_ready_before_content_pins_the_bound_pane() {
 fn admit_herdr_here() {
     let stop = std::env::temp_dir().join(format!("adk-oh-none-{}", uuid::Uuid::new_v4()));
     std::mem::forget(force_for_test(Admission::new(true, Some(stop))));
+}
+
+/// The public Bound turn entry reaches followup_write; each newline form reserves its typed bytes.
+#[test]
+fn bound_codex_followup_reserves_and_writes_each_normalized_prompt() {
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+    use crate::services::codex::herdr_turn::{self, CodexHerdrPorts};
+    use crate::services::session_host::HerdrTarget;
+    use crate::services::tui_prompt_dedupe::{TuiRuntimeBinding, register_tmux_runtime_binding};
+    use sha2::{Digest, Sha256};
+    struct Bound;
+    impl CodexHerdrPorts for Bound {
+        fn launch_host(&self) -> Option<Arc<dyn crate::services::herdr_launch::HerdrLaunchHost>> {
+            None
+        }
+        fn attach(
+            &self,
+            _: &HostedOwner,
+            _: &HostedExecution,
+            _: &crate::services::tui_prompt_dedupe::binding_events::SourceId,
+            _: &HerdrTarget,
+        ) -> Result<bool, String> {
+            panic!("Bound followup never attaches a fresh source")
+        }
+        fn confirm_bound(
+            &self,
+            _: &HostedOwner,
+            record: &HostedExecution,
+            _: &HerdrTarget,
+        ) -> Result<(), String> {
+            assert_eq!(record.state, HostedState::Bound);
+            Ok(())
+        }
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _effort = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "AGENTDESK_CODEX_REASONING_EFFORT",
+        std::ffi::OsStr::new("high"),
+    );
+    for (index, prompt) in ["one\ntwo\nthree", "one\r\ntwo\r\nthree", "one\rtwo\rthree"]
+        .into_iter()
+        .enumerate()
+    {
+        let owner = HerdrOwner::start_with("codex", 7_272_620 + index as u64, prompt);
+        let _registry = owner.rig.registry_on_this_thread();
+        owner.rig.answer("pane.read", codex_ready());
+        let transcript = owner._dir.path().join("bound.jsonl");
+        std::fs::write(&transcript, "{}\n").unwrap();
+        register_tmux_runtime_binding(
+            &owner.logical,
+            TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::CodexTui,
+                output_path: transcript.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some("bound-followup-sid".into()),
+                last_offset: 0,
+                relay_last_offset: None,
+            },
+        );
+        let instructions =
+            crate::services::codex::compose_codex_developer_instructions(None, Some(&[]));
+        let options = crate::services::codex::CodexLaunchOptions::new("")
+            .with_developer_instructions(instructions.as_deref())
+            .with_reasoning_effort(Some("high"))
+            .with_readonly_mode(crate::services::provider::is_readonly_tool_policy(
+                Some(&[]),
+            ))
+            .with_cwd(Some("/tmp"));
+        let fingerprint =
+            crate::services::codex_tui::warm_followup::codex_tui_launch_options_fingerprint(
+                &options,
+            );
+        crate::services::codex_tui::session::write_codex_tui_launch_options_fingerprint(
+            &owner.logical,
+            &format!("{} {fingerprint}", owner.execution),
+        )
+        .unwrap();
+        let cancel = Arc::new(crate::services::provider::CancelToken::new());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (at_send, mailbox, handle) = (
+            seen.clone(),
+            owner.mailbox.clone(),
+            owner.runtime.handle().clone(),
+        );
+        owner.rig.on_send(move |_| {
+            let snapshot = handle
+                .block_on(mailbox.v2_request(|s| s.as_ref().unwrap().json()))
+                .unwrap();
+            let history = crate::services::tui_input::human_frame::history::v2::Registry::runtime()
+                .and_then(|r| r.json())
+                .unwrap();
+            at_send
+                .lock()
+                .unwrap()
+                .push((snapshot["head_injection"].clone(), history));
+        });
+        let hook = owner.hook_with("codex", "herdr", Lineage::Existing, prompt);
+        let stop = cancel.clone();
+        let _waiting =
+            scope::install_launch(Box::new(move |lineage, target, source, writer, submit| {
+                let result = hook(lineage, target, source, writer, submit);
+                stop.cancelled
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                result
+            }));
+        let pool = unused_pool(&owner);
+        let record = crate::db::dispatched_sessions::hosted_execution::HostedRecord::Known(
+            owner.record("codex", HostedState::Bound),
+        );
+        let mut turn = owner.codex_turn_with(&pool, prompt);
+        turn.row = Some(&record);
+        turn.cancel = Some(cancel);
+        let (sender, _messages) = std::sync::mpsc::channel();
+        let _entered = owner.runtime.enter();
+        let result = herdr_turn::execute(turn, &Bound, sender);
+        assert_eq!(result, Ok(()), "{prompt:?}");
+        owner.delivered_once("one\ntwo\nthree");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "followup_write must send text and Enter");
+        let (head, history) = &seen[0];
+        let hash = format!("{:x}", Sha256::digest(b"one\ntwo\nthree"));
+        assert_eq!(head["payload"]["frame"], "one\ntwo\nthree");
+        assert_eq!(head["payload"]["digest"], hash);
+        assert_eq!(
+            head["attempt"]["source"]["session_id"],
+            "bound-followup-sid"
+        );
+        let hashes: Vec<_> = ["planned", "live", "passive"]
+            .iter()
+            .filter_map(|state| history[state].as_array())
+            .flatten()
+            .map(|row| row.get("registration").unwrap_or(row))
+            .filter(|row| row["key"]["attempt"]["nonce"] == format!("{:032x}", owner.channel))
+            .map(|row| row["frame"]["hash"].clone())
+            .collect();
+        assert_eq!(hashes, [json!(hash)], "{history}");
+    }
 }
