@@ -550,6 +550,16 @@ function createAgentdeskMock(options) {
         }
         return { card_id: cardId, repo_id: repoId, branch, pr_number: prNumber, state: trackingState, last_error: lastError };
       },
+      // Existing Node sweep fixtures model the native read; PG owner tests verify its SQL.
+      listStrandedCreatePr(limit) {
+        return agentdesk.db.query(
+          "SELECT card_id, last_error, retry_count, dispatch_generation FROM pr_tracking " +
+          "WHERE state IN ('create-pr', 'escalated') AND retry_count > 0 " +
+          "AND COALESCE(last_error, '') NOT LIKE 'handed-off:%' " +
+          "AND updated_at > datetime('now', '-30 days') ORDER BY updated_at LIMIT " + limit,
+          []
+        );
+      },
       // Model native bookkeeping through the sweep tests' SQL-aware fake.
       markHandedOff(cardId, errorMsg) {
         return agentdesk.db.execute(

@@ -135,7 +135,7 @@ function getRepoForCard(cardId) {
 }
 
 function loadPrTracking(cardId) {
-  return prTracking.load(cardId, { fallback_state: "wait-ci" });
+  return prTracking.load(cardId);
 }
 
 function upsertPrTracking(cardId, repoId, worktreePath, branch, prNumber, headSha, state, lastError) {

@@ -9,6 +9,7 @@ pub enum SqlGuardTarget {
     TaskDispatches,
     CardReviewState,
     AutoQueueEntries,
+    PrTracking,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +35,9 @@ impl SqlGuardViolation {
             SqlGuardTarget::CardReviewState => {
                 "Direct card_review_state mutation is blocked. Use agentdesk.reviewState.sync(cardId, state, opts) instead."
             }
+            SqlGuardTarget::PrTracking => {
+                "Direct pr_tracking mutation is blocked. Use agentdesk.prTracking methods instead."
+            }
             SqlGuardTarget::AutoQueueEntries => {
                 "Direct auto_queue_entries mutation is blocked. Use agentdesk.autoQueue.updateEntryStatus(entryId, status, source, opts) instead."
             }
@@ -58,6 +62,7 @@ impl SqlGuardViolation {
             SqlGuardTarget::TaskDispatches => "task_dispatches",
             SqlGuardTarget::CardReviewState => "card_review_state",
             SqlGuardTarget::AutoQueueEntries => "auto_queue_entries",
+            SqlGuardTarget::PrTracking => "pr_tracking",
         }
     }
 
@@ -78,6 +83,7 @@ impl SqlGuardViolation {
             SqlGuardTarget::CardReviewState => {
                 "agentdesk.reviewState.sync(cardId, state, opts) instead."
             }
+            SqlGuardTarget::PrTracking => "agentdesk.prTracking methods instead.",
             SqlGuardTarget::AutoQueueEntries => {
                 "agentdesk.autoQueue.updateEntryStatus(entryId, status, source, opts) instead."
             }
@@ -123,6 +129,12 @@ pub fn detect_core_table_write(sql: &str) -> Option<SqlGuardViolation> {
     if auto_queue_entries_mutation_re().is_match(sql) {
         return Some(SqlGuardViolation {
             target: SqlGuardTarget::AutoQueueEntries,
+        });
+    }
+
+    if pr_tracking_mutation_re().is_match(sql) {
+        return Some(SqlGuardViolation {
+            target: SqlGuardTarget::PrTracking,
         });
     }
 
@@ -186,5 +198,14 @@ fn auto_queue_entries_mutation_re() -> &'static Regex {
             r"(?i)\b(?:INSERT(?:\s+OR\s+REPLACE)?\s+INTO|REPLACE\s+INTO|UPDATE|DELETE\s+FROM)\s+auto_queue_entries\b",
         )
         .unwrap()
+    })
+}
+
+fn pr_tracking_mutation_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?i)\b(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|MERGE\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?)\s+(?:["`]?\w+["`]?\s*\.\s*)?["`]?pr_tracking\b"#,
+        ).unwrap()
     })
 }
