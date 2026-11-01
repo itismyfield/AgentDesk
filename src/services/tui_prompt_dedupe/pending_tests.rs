@@ -101,7 +101,7 @@ impl Lane {
         judge_restore(
             tmux,
             records,
-            pinned.as_ref(),
+            (pinned.as_ref(), None),
             &marker,
             Some(&launch),
             Path::is_file,
@@ -572,7 +572,7 @@ fn pending_without_a_current_execution_is_never_restored() {
         judge_restore(
             tmux,
             records,
-            None,
+            (None, None),
             &unreadable,
             Some(&launch),
             |_| true,
@@ -1484,7 +1484,7 @@ mod verified_adoption {
         judge_restore(
             tmux,
             records,
-            pinned.as_ref(),
+            (pinned.as_ref(), None),
             &marker,
             Some(&launch),
             Path::is_file,

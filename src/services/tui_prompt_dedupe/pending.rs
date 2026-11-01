@@ -17,8 +17,9 @@ use crate::services::tui_prompt_dedupe::binding_context::{
 };
 use crate::services::tui_prompt_dedupe::binding_events::{
     BindingCause, BindingEvent, BindingTarget, CauseSource, Corrupt, CorruptKind, HookSignal,
-    Proposal, SourceId, pinned_source, records_strict, subscribe_binding_events,
+    Proposal, SourceId, pinned_source_at, records_strict, subscribe_binding_events,
 };
+use chrono::{DateTime, Utc};
 use crate::services::tui_prompt_dedupe::{
     Persisted, Record, TuiRuntimeBinding, pane_registration, register_provider_session,
     resolve_tmux_session_name, runtime_binding_for_tmux_session,
@@ -295,17 +296,19 @@ fn current_record<'a>(
 /// Binds exactly `session`'s `path` as the pane's pin judges what the path holds now: a pinned
 /// file only while it is the same, an unpinned one verified or waited for, another session's never.
 fn judged(
-    pin: Option<&SourceId>,
+    (pin, pinned_at): (Option<&SourceId>, Option<DateTime<Utc>>),
     (session, path): (&str, &Path),
     (pending_seq, line): (u64, u64),
     launch: &LaunchTranscript,
     observe: &impl Fn(&Path) -> io::Result<OpenedTranscript>,
 ) -> RestoreStep {
     let opened = observe(path);
-    let verified = match judge_pin(pin, session, path, Observation::Opened(opened.as_ref())) {
+    let seen = Observation::Opened(opened.as_ref());
+    let verified = match judge_pin(pin, pinned_at, session, path, seen) {
         PinJudgment::Verified(source) => Some(source),
         PinJudgment::Pending | PinJudgment::Unpinned => None,
-        PinJudgment::Recheck => {
+        // An opened file is judged by its first record, so a stat-only renumber never comes here.
+        PinJudgment::Recheck | PinJudgment::Renumbered => {
             let why = Unavailable::TranscriptUnreadable;
             return RestoreStep::Finished(PendingRestore::Unavailable(why));
         }
@@ -360,11 +363,12 @@ fn restored_hook(pending: &BindingEvent, path: Option<&str>) -> HookSignal {
 }
 
 /// First step of restoring `tmux_session`; a publish or seed reports its outcome only after the
-/// caller hands back what it registered. `pinned` is the writer's verified current source.
+/// caller hands back what it registered. `pinned` is the writer's verified current source, with
+/// the commit time of the record that pinned it.
 pub(crate) fn judge_restore(
     tmux_session: &str,
     records: io::Result<Result<Vec<BindingEvent>, Corrupt>>,
-    pinned: Option<&SourceId>,
+    (pinned, pinned_at): (Option<&SourceId>, Option<DateTime<Utc>>),
     marker: &SpawnNonceMarker,
     launch: Option<&LaunchTranscript>,
     launch_exists: impl Fn(&Path) -> bool,
@@ -393,7 +397,7 @@ pub(crate) fn judge_restore(
     let bind_current =
         |((record, pin), launch): ((&BindingEvent, &SourceId), &LaunchTranscript)| {
             let target = (pin.session_id.as_str(), pin.path.as_path());
-            judged(pinned, target, (record.seq, record.seq), launch, &observe)
+            judged((pinned, pinned_at), target, (record.seq, record.seq), launch, &observe)
         };
     let current_or = |otherwise| restorable.map_or(done(otherwise), bind_current);
     let live = match fold(tmux_session, &records) {
@@ -437,7 +441,7 @@ pub(crate) fn judge_restore(
     };
     let exact = |line| {
         let target = (live.session, transcript.as_path());
-        judged(pinned, target, (live.pending.seq, line), launch, &observe)
+        judged((pinned, pinned_at), target, (live.pending.seq, line), launch, &observe)
     };
     if let Some((record, source)) = live.resolved {
         if source.path != transcript {
@@ -572,9 +576,9 @@ fn restore_under_source_authority(
     if let Some(outcome) = memoized {
         return Some(outcome);
     }
-    let (records, pinned) = match pinned_source(channel_id, tmux_session) {
-        Ok(pinned) => (records_strict(channel_id), pinned),
-        Err(error) => (Err(error), None),
+    let (records, (pinned, pinned_at)) = match pinned_source_at(channel_id, tmux_session) {
+        Ok(pinned) => (records_strict(channel_id), pinned.unzip()),
+        Err(error) => (Err(error), (None, None)),
     };
     let register = |session: &str, transcript: &Path, launch_session: &str, record: Record| {
         let target = |b: &TuiRuntimeBinding| {
@@ -622,7 +626,7 @@ fn restore_under_source_authority(
     let outcome = match judge_restore(
         tmux_session,
         records,
-        pinned.as_ref(),
+        (pinned.as_ref(), pinned_at.flatten()),
         &marker,
         launch.as_ref(),
         Path::is_file,

@@ -18,7 +18,7 @@ use crate::services::agent_protocol::RuntimeHandoffKind;
 #[cfg(test)]
 use crate::services::claude_tui::source_verify::n2b_mutant;
 use crate::services::claude_tui::source_verify::{
-    Observation, PinJudgment, SourceHistory, judge_pin,
+    Observation, PinJudgment, SourceHistory, judge_pin, observe_transcript,
 };
 use crate::services::discord::runtime_store::fsync_parent_dir;
 pub(crate) use crate::services::tui_o::shadow::SourceId;
@@ -183,6 +183,8 @@ impl<'a> Proposal<'a> {
 struct PaneState {
     current: Option<SourceId>,
     verified: bool,
+    /// Commit time of the record that set `current`, which is when a verified one was pinned.
+    pinned_at: Option<DateTime<Utc>>,
     pending: Option<BindingEvent>,
     /// The waiting Pending's publish time; only a prompt published after it reclaims the pane.
     pending_published: Option<DateTime<Utc>>,
@@ -211,6 +213,8 @@ struct Writer {
     poisoned: bool,
     /// An unreadable line or seq gap came after the last record applied.
     tainted: bool,
+    #[cfg(test)]
+    latest_committed_at: Option<DateTime<Utc>>,
 }
 
 struct ChannelLog {
@@ -483,13 +487,15 @@ pub(crate) fn pending_seq(channel_id: u64, tmux_session: &str, session: &str) ->
 
 /// The pane's current source, when a verified record pinned it.
 pub(crate) fn pinned_source(channel_id: u64, tmux_session: &str) -> io::Result<Option<SourceId>> {
-    let mut pinned = None;
-    commit_with(channel_id, |writer| {
-        let pane = writer.panes.get(tmux_session).filter(|pane| pane.verified);
-        pinned = pane.and_then(|pane| pane.current.clone());
-        Planned::Keep(Committed::Unchanged)
-    })?;
-    Ok(pinned)
+    Ok(pinned_source_at(channel_id, tmux_session)?.map(|(pin, _)| pin))
+}
+
+/// A verified pin and the commit time of the record that pinned it.
+pub(crate) type PinnedAt = (SourceId, Option<DateTime<Utc>>);
+
+/// The pane's verified pin with the commit time of the record that pinned it.
+pub(crate) fn pinned_source_at(channel_id: u64, tmux_session: &str) -> io::Result<Option<PinnedAt>> {
+    Ok(claude_history_at(channel_id, tmux_session, None)?.0)
 }
 
 /// The pane's pinned source and its Claude history in execution `nonce`, read from the writer that
@@ -499,12 +505,29 @@ pub(crate) fn claude_history(
     tmux_session: &str,
     nonce: Option<&str>,
 ) -> io::Result<(Option<SourceId>, SourceHistory)> {
+    let (pin, history) = claude_history_at(channel_id, tmux_session, nonce)?;
+    Ok((pin.map(|(pin, _)| pin), history))
+}
+
+/// `claude_history` with the commit time of the record that pinned the pane's source.
+pub(crate) fn claude_history_at(
+    channel_id: u64,
+    tmux_session: &str,
+    nonce: Option<&str>,
+) -> io::Result<(Option<PinnedAt>, SourceHistory)> {
     let mut found = (None, SourceHistory::default());
     commit_with(channel_id, |writer| {
         let pane = writer.panes.get(tmux_session);
-        let pin = pane
-            .filter(|pane| pane.verified)
-            .and_then(|pane| pane.current.clone());
+        let pin = pane.filter(|pane| pane.verified).and_then(|pane| {
+            #[cfg(test)]
+            let pinned_at = match n2b_mutant("renumber-latest-event-time") {
+                true => writer.latest_committed_at,
+                false => pane.pinned_at,
+            };
+            #[cfg(not(test))]
+            let pinned_at = pane.pinned_at;
+            Some((pane.current.clone()?, pinned_at))
+        });
         let history = match pane {
             Some(pane) => pane.claude.history(nonce, writer.tainted),
             None => claude_fold::ClaudeFold::default().history(nonce, writer.tainted),
@@ -660,6 +683,10 @@ impl Writer {
         published_at: Option<DateTime<Utc>>,
     ) -> bool {
         self.last_seq = self.last_seq.max(record.seq);
+        #[cfg(test)]
+        {
+            self.latest_committed_at = Some(record.committed_at);
+        }
         let tainted = std::mem::take(&mut self.tainted);
         if tainted {
             self.panes.values_mut().for_each(|pane| pane.claude.taint());
@@ -692,6 +719,7 @@ impl Writer {
             BindingTarget::Source(source) => {
                 pane.current = Some(source.clone());
                 pane.verified = verified;
+                pane.pinned_at = Some(record.committed_at);
             }
             BindingTarget::Pending {
                 payload_session_id, ..
@@ -712,6 +740,7 @@ impl Writer {
             } => {
                 pane.current = Some(source.clone());
                 pane.verified = verified;
+                pane.pinned_at = Some(record.committed_at);
                 if pane.pending.as_ref().is_some_and(|p| p.seq == *pending_seq) {
                     (pane.pending, pane.pending_published) = (None, None);
                 }
@@ -734,8 +763,25 @@ impl Writer {
     fn pin_judgment(&self, p: &Proposal, seen: Observation) -> PinJudgment {
         let pane = self.panes.get(p.tmux_session).filter(|pane| pane.verified);
         let pin = pane.and_then(|pane| pane.current.as_ref());
+        let pinned_at = pane.and_then(|pane| pane.pinned_at);
+        #[cfg(test)]
+        let pinned_at = match n2b_mutant("renumber-latest-event-time") {
+            true => self.latest_committed_at,
+            false => pinned_at,
+        };
         let session = p.session().or(pin.map(|pin| pin.session_id.as_str()));
-        judge_pin(pin, session.unwrap_or_default(), Path::new(p.path), seen)
+        judge_pin(pin, pinned_at, session.unwrap_or_default(), Path::new(p.path), seen)
+    }
+
+    /// Opens a pinned path a stat found renumbered and keeps it only if its first record still names
+    /// the pinned session: the verified identity to re-pin, or what to keep instead.
+    fn renumbered_source(&self, p: &Proposal) -> Result<SourceId, Committed> {
+        let opened = observe_transcript(Path::new(p.path));
+        match self.pin_judgment(p, Observation::Opened(opened.as_ref())) {
+            PinJudgment::Verified(source) => Ok(source),
+            PinJudgment::Recheck => Err(Committed::Recheck),
+            _ => Err(Committed::Anomaly),
+        }
     }
 
     /// Whether `p`'s prompt outlived the Pending its pane waits on.
@@ -774,11 +820,22 @@ impl Writer {
             _ => None,
         };
         // Every source a registration or a check logs is held to the pane's pin first.
-        match seen.map(|seen| self.pin_judgment(p, seen)) {
+        let repin = match seen.map(|seen| self.pin_judgment(p, seen)) {
             Some(PinJudgment::Anomaly) => return Planned::Keep(Committed::Anomaly),
             Some(PinJudgment::Recheck) => return Planned::Keep(Committed::Recheck),
-            _ => {}
-        }
+            Some(PinJudgment::Renumbered) => match self.renumbered_source(p) {
+                Ok(source) => Some(source),
+                Err(committed) => return Planned::Keep(committed),
+            },
+            _ => None,
+        };
+        #[cfg(test)]
+        let repin = repin.filter(|_| !n2b_mutant("renumber-stat-unverified"));
+        // A renumbered pin is logged as the verified identity its first record proved.
+        let (mode, file) = match &repin {
+            Some(source) => (Plan::Verified(source), Some((source.dev, source.ino))),
+            None => (mode, file),
+        };
         let pane = self.panes.entry(p.tmux_session.to_owned()).or_default();
         let session = p.session();
         let replaced = p.replaced.filter(|(path, id)| {
