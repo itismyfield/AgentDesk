@@ -217,6 +217,7 @@ async fn transition_inspect_issues_its_scope_from_its_final_snapshot_only() {
             history.awaiting = Some(Visit {
                 session,
                 pin,
+                pinned_at: None,
                 since,
                 seen,
             });
