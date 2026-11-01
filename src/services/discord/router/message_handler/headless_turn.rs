@@ -41,6 +41,8 @@ async fn start_reserved_headless_turn_admitted(
     tmux_session_label: Option<String>,
     is_dm_hint: Option<bool>,
     reservation: HeadlessTurnReservation,
+    // The owner front this start runs as its input, its claim made under the owner's grant.
+    owner: Option<super::OwnerTurn>,
 ) -> Result<HeadlessTurnStartOutcome, HeadlessTurnStartError> {
     let prompt = prompt.trim();
     if prompt.is_empty() {
@@ -183,18 +185,19 @@ async fn start_reserved_headless_turn_admitted(
         ));
     }
     #[cfg(unix)]
-    if let Some(outcome) = owner_start(
-        (shared, channel_id, &reservation),
-        prompt,
-        (request_owner.get(), request_owner_name),
-        (source, metadata.as_ref()),
-        (
-            channel_name_hint.as_deref(),
-            tmux_session_label.as_deref(),
-            is_dm_hint,
-        ),
-    )
-    .await
+    if owner.is_none()
+        && let Some(outcome) = owner_start(
+            (shared, channel_id, &reservation),
+            prompt,
+            (request_owner.get(), request_owner_name),
+            (source, metadata.as_ref()),
+            (
+                channel_name_hint.as_deref(),
+                tmux_session_label.as_deref(),
+                is_dm_hint,
+            ),
+        )
+        .await
     {
         return outcome;
     }
@@ -203,8 +206,16 @@ async fn start_reserved_headless_turn_admitted(
         role_binding.as_ref().map(|b| b.role_id.clone()),
     );
     let claim = super::super::turn_start::claim_reserved_headless_turn;
-    let (session_transition_guard, cancel_token) =
-        claim(shared, channel_id, request_owner, &reservation, identity).await?;
+    let front = owner.as_ref().map(|owner| owner.front().clone());
+    let (session_transition_guard, cancel_token) = claim(
+        shared,
+        channel_id,
+        request_owner,
+        &reservation,
+        identity,
+        front,
+    )
+    .await?;
     let process_mailbox =
         process_mailbox::capture((shared, channel_id), &cancel_token, metadata.as_ref()).await;
     crate::services::discord::increment_global_active(shared, "headless_turn_start");
@@ -1043,7 +1054,7 @@ async fn start_reserved_headless_turn_admitted(
                             },
                             replay_start,
                             tx.clone(),
-                            None,
+                            owner,
                         )
                     }))
                 },

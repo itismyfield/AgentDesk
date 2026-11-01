@@ -150,14 +150,16 @@ async fn owner(
 tokio::task_local! { pub(super) static OWNER: crate::services::turn_orchestrator::ChannelMailboxHandle; }
 
 /// The owner's start of a scheduled turn on its target after the launch fence, with the
-/// message's metadata as provenance; `None` leaves an unowned channel to the legacy start.
+/// message's metadata, hint and label as provenance; `None` leaves an unowned channel to the
+/// legacy start.
 pub(super) async fn owned(
     pool: &PgPool,
     fire: &ClaimedFire,
     (turn_id, channel, prompt): (&str, u64, &str),
-    (provider, metadata): (
+    (provider, metadata, (hint, label)): (
         &crate::services::provider::ProviderKind,
         Option<&serde_json::Value>,
+        (Option<&str>, Option<&str>),
     ),
 ) -> anyhow::Result<Option<AgentTurnStartDisposition>> {
     use crate::services::turn_orchestrator::ChannelMailboxHandle;
@@ -175,6 +177,11 @@ pub(super) async fn owned(
     context["provider"] = serde_json::json!(provider.as_str());
     context["delivery_id"] = serde_json::json!(fire.delivery_id);
     context["origin"] = serde_json::json!("scheduled");
+    // What the legacy start below would be given, so the owner's start resolves the same way.
+    context["metadata"] = serde_json::json!(metadata);
+    context["channel_name_hint"] = serde_json::json!(hint);
+    context["synthetic_label"] = serde_json::json!(label);
+    (context["source"], context["is_dm"]) = (serde_json::json!(super::OUTBOX_SOURCE), false.into());
     let started = start_owned(pool, fire, &handle, turn_id, (original, namespace, context));
     let started = started.await?;
     // The owner runs an accepted start once its drive looks at the queue.

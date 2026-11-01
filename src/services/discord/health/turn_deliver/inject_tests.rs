@@ -1924,7 +1924,15 @@ async fn a_headless_claim_returns_the_token_it_registered() {
         };
         let claim = crate::services::discord::router::claim_reserved_headless_turn;
         let identity = (ProviderKind::Claude, None);
-        let claimed = claim(&shared, channel, UserId::new(100), &reservation, identity).await;
+        let claimed = claim(
+            &shared,
+            channel,
+            UserId::new(100),
+            &reservation,
+            identity,
+            None,
+        )
+        .await;
         let Ok((_transition, token)) = claimed else {
             panic!("an idle channel claims");
         };

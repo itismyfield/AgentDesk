@@ -153,8 +153,11 @@ impl RoutineAgentExecutor {
         // The owner keeps what the legacy start resolves here, so its turn resolves the same way.
         let mut planned = result_json.clone();
         planned["metadata"] = json!(metadata);
-        planned["channel_name_hint"] = json!(channel_name_hint);
+        // A DM start is given the user's `dm-<user>` channel as its hint, as the DM start below is.
+        let dm_hint = dm_user_id_num.map(|user| format!("dm-{user}"));
+        planned["channel_name_hint"] = json!(dm_hint.or(channel_name_hint.clone()));
         planned["synthetic_label"] = json!(tmux_session_label);
+        planned["source"] = json!("routine");
         if let Some(started) = owner_input::custody::owned(self, store, &start, &planned).await? {
             return Ok(started);
         }

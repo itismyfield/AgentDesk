@@ -412,7 +412,16 @@ async fn start_agent_turn(
     });
 
     let target = (turn_id.as_str(), turn_channel_num, prompt.as_str());
-    let owned = owner_input::owned(pool, fire, target, (&provider, metadata.as_ref()));
+    let started_as = (
+        Some(primary_channel.as_str()),
+        snapshot_session_label.as_deref(),
+    );
+    let owned = owner_input::owned(
+        pool,
+        fire,
+        target,
+        (&provider, metadata.as_ref(), started_as),
+    );
     if let Some(disposition) = owned.await? {
         return Ok(disposition);
     }

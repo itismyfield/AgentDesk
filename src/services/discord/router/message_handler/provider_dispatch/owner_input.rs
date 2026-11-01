@@ -353,6 +353,12 @@ async fn start_idle(
         .map(|transport| transport.intake_deps(&shared));
     let deps = deps.ok_or("NotSent(\"discord_unavailable\")")?;
     let mailbox = shared.mailbox(channel);
+    // A routine, scheduled or HTTP start keeps its provenance; a user's input keeps none.
+    let kept = match front.0.clone() {
+        Some(ticket) => mailbox.v2_admission_context(front.1.clone(), ticket).await,
+        None => Ok(None),
+    };
+    let kept = kept.map_err(effect::unsent)?;
     let claim = claim_turn(&mailbox, front.1.message_id, &front).await?;
     let claim = claim.ok_or("NotSent(\"front_not_granted\")")?;
     let (settled, answer) = tokio::sync::oneshot::channel();
@@ -374,11 +380,27 @@ async fn start_idle(
     let owner_name = crate::services::discord::queue_dispatch::kickoff::queued_owner_name;
     let name = owner_name(deps.http, intervention.author_id).await;
     let at = (shared.provider.clone(), channel);
-    let start = crate::services::discord::router::start_owner_front;
-    let started = start(&deps, at, &intervention, name, owner).await;
+    let started = match (kept, deps.ctx_for_chained_dispatch) {
+        // Its session key, role, workspace and fresh boundary resolve as its legacy start's do.
+        (Some(context), Some(ctx)) => {
+            let start = super::super::headless_turn::start_owner_headless;
+            let at = (ctx, &shared, deps.token);
+            let started = start(at, channel, (&intervention.text, &context), owner).await;
+            started.map(drop).map_err(|error| error.to_string())
+        }
+        (Some(_), None) => {
+            drop(owner);
+            Err("discord_unavailable".to_string())
+        }
+        (None, _) => {
+            let start = crate::services::discord::router::start_owner_front;
+            let started = start(&deps, at, &intervention, name, owner).await;
+            started.map(drop).map_err(|error| error.to_string())
+        }
+    };
     match (answer.await, started) {
         (Ok(settlement), _) => settlement,
-        (Err(_), Err(error)) => Err(format!("NotSent({:?})", error.to_string())),
+        (Err(_), Err(error)) => Err(format!("NotSent({error:?})")),
         (Err(_), Ok(_)) => Err("NotSent(\"turn_not_started\")".into()),
     }
 }
@@ -506,6 +528,8 @@ fn take_owned(
         TurnHost::Tmux => "tmux",
         TurnHost::Herdr(_) => "herdr",
         TurnHost::Refused(refusal) => return Some(Taken::Done(Err(refusal.to_string()))),
+        // Only the legacy driver brings a session back from Herdr; the owner writes nothing first.
+        TurnHost::Return(_) => return Some(Taken::Done(Err("NotSent(\"host_returning\")".into()))),
     };
     let route = target::route(
         registration.execution,
