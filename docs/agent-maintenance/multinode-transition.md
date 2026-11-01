@@ -597,7 +597,7 @@
 - A merge may only proceed when the required phase evidence exists for the same
   head SHA that will be merged.
 - Current anchors: PR tracking treats `head_sha` as authoritative at
-  `policies/00-pr-tracking.js:37`; the head-SHA load and merge-readiness
+  `src/engine/ops/pr_tracking_ops.rs` (`observe_on_pg_tx`); the head-SHA load and merge-readiness
   mismatch check went with `policies/merge-automation.js` (removed) in #5716 slice B.
 - Enablement condition: #881/#882/#883 defined phase-run evidence for
   merge-automation; with that policy removed the condition has no consumer.

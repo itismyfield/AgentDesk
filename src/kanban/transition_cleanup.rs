@@ -41,17 +41,7 @@ pub(super) async fn clear_escalation_alert_state_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     card_id: &str,
 ) -> anyhow::Result<()> {
-    sqlx::query("DELETE FROM kv_meta WHERE key = ANY($1)")
-        .bind(vec![
-            format!("pm_pending:{card_id}"),
-            format!("pm_decision_sent:{card_id}"),
-        ])
-        .execute(&mut **tx)
-        .await
-        .map_err(|error| {
-            anyhow::anyhow!("clear postgres escalation state for {card_id}: {error}")
-        })?;
-    Ok(())
+    crate::services::escalation_cooldown::clear_on_pg_tx(tx, card_id).await
 }
 
 async fn skip_live_auto_queue_entries_for_card_on_pg_tx(
