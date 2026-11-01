@@ -1,16 +1,7 @@
 use sqlx::Row as SqlxRow;
 
-/// #164: Re-deliver orphan pending dispatches after dcserver restart.
-///
-/// After a restart, dispatches in `pending` status may have been Discord-notified
-/// but the in-memory intervention_queue was lost. Or the notification was interrupted
-/// mid-flight. This function identifies truly orphan dispatches and re-delivers them.
-///
-/// **Safety**:
-/// - Process-global once guard via `std::sync::Once` — safe across multiple provider instances
-/// - Startup boot timestamp from dcserver.pid mtime — not wall clock
-/// - Newer-dispatch check uses strict created_at comparison; equal timestamps remain eligible.
-/// - Five AND conditions must ALL be met before re-delivery (see issue #164)
+/// Requeue pre-restart pending dispatches once, using pid mtime and idle-agent checks.
+/// The strict created_at comparison keeps equal-timestamp dispatches eligible.
 pub(crate) async fn recover_on_boot(pg_pool: Option<&sqlx::PgPool>) {
     // Process-global once guard: prevents duplicate execution when multiple
     // provider instances (Claude + Codex) call this from their own setup paths.
@@ -51,13 +42,8 @@ pub(crate) async fn recover_once(pg_pool: Option<&sqlx::PgPool>) {
         }
     };
 
-    // Query orphan pending dispatches with all 5 safety conditions:
-    // 1. status = 'pending'
-    // 2. card is assigned to the dispatch target agent
-    // 3. agent has NO working session (idle)
-    // 4. created_at < boot_time (pre-restart, using pid mtime)
-    // 5. no dispatch for the same card with a strictly later created_at;
-    //    a later dispatch in the same timestamp second is not excluded.
+    // Match pre-boot pending dispatches assigned to an idle agent, without a later
+    // created_at on the same card; equal-timestamp dispatches remain eligible.
     let orphans: Vec<(String, String, String, String, String)> = if let Some(pool) = pg_pool {
         match sqlx::query(
             "SELECT d.id, d.to_agent_id, d.kanban_card_id, d.title, d.dispatch_type
