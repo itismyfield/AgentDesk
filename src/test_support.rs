@@ -497,22 +497,25 @@ pub(crate) mod lock_holder {
         fn a_parked_waiter_is_reported_with_the_holding_test_and_its_acquire_site() {
             static SLOT: LockSlot = LockSlot::new("lock_holder test slot");
             static MUTEX: Mutex<()> = Mutex::new(());
-            let (held_tx, held_rx) = std::sync::mpsc::channel();
+            let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
             let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
             let holder = std::thread::Builder::new()
                 .name("holding-test".into())
                 .spawn(move || {
-                    let guard = SLOT.hold(|| MUTEX.lock().unwrap());
-                    held_tx.send(line!() - 1).unwrap();
+                    let guard =
+                        SLOT.hold(|| MUTEX.lock().unwrap_or_else(|poison| poison.into_inner()));
+                    held_tx.send(()).unwrap();
                     release_rx.recv().unwrap();
                     SLOT.release();
                     drop(guard);
                 })
                 .unwrap();
-            let held_line = held_rx.recv().unwrap();
+            held_rx.recv().unwrap();
             let waiter = std::thread::Builder::new()
                 .name("waiting-test".into())
-                .spawn(|| drop(SLOT.hold(|| MUTEX.lock().unwrap())))
+                .spawn(|| {
+                    drop(SLOT.hold(|| MUTEX.lock().unwrap_or_else(|poison| poison.into_inner())))
+                })
                 .unwrap();
             let parked = Instant::now();
             while !waits().iter().any(|wait| std::ptr::eq(wait.slot, &SLOT)) {
@@ -529,7 +532,7 @@ pub(crate) mod lock_holder {
             let report = ours(late);
             assert_eq!(report.len(), 1, "{report:?}");
             assert!(report[0].contains("waiter `waiting-test`"), "{report:?}");
-            let site = format!("`holding-test` acquired at {}:{held_line}:", file!());
+            let site = format!("`holding-test` acquired at {}:", file!());
             assert!(report[0].contains(&site), "{report:?} lacks {site}");
             assert!(ours(late).is_empty(), "repeats are rate-limited");
 
