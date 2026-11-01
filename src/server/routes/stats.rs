@@ -590,7 +590,9 @@ mod memento_feedback_stats_pg_tests {
             .expect("insert card");
         }
 
-        let stats = super::load_kanban_stats_pg(&pool).await.expect("kanban stats");
+        let stats = super::load_kanban_stats_pg(&pool)
+            .await
+            .expect("kanban stats");
         assert_eq!(stats["blocked"], 1);
 
         pool.close().await;
