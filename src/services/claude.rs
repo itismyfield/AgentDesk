@@ -56,6 +56,8 @@ mod backend_routing;
 #[cfg(test)]
 mod c1_teardown_tests;
 #[cfg(unix)]
+mod fresh_notice;
+#[cfg(unix)]
 pub(crate) mod herdr_return;
 #[cfg(unix)]
 pub(crate) mod herdr_turn;
@@ -1666,8 +1668,8 @@ fn execute_streaming_local_tui_tmux(
 
     let session_id = profile_matches.then_some(session_id).flatten();
     let working_dir_path = std::path::Path::new(working_dir);
-    let session_resolution =
-        resolve_claude_tui_session_for_launch(working_dir_path, session_id, claude_home)?;
+    let (session_resolution, substitution) =
+        tui_session_launch::prepared::resolve(working_dir_path, session_id, claude_home)?;
     let mut resolved_session_id = session_resolution.session_id;
     let mut transcript_path = session_resolution.transcript_path;
     let mut transcript_path_string = transcript_path.display().to_string();
@@ -1698,6 +1700,12 @@ fn execute_streaming_local_tui_tmux(
         transcript_path = recovered.transcript_path;
         transcript_path_string = transcript_path.display().to_string();
         resume = recovered.resume;
+    }
+    // Told only when no live binding recovered the session, so the launch really starts fresh.
+    if let Some(lost) = substitution.filter(|_| !resume) {
+        let pool = crate::db::cancel_tombstones::global_pool();
+        let missing = lost.missing_transcript.as_path();
+        fresh_notice::announce(pool, report_channel_id, &lost.requested, missing);
     }
 
     if session_exists && has_live_pane && resume {
