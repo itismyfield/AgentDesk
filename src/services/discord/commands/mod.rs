@@ -16,6 +16,7 @@ macro_rules! log_info_event {
     };
 }
 
+mod autocomplete;
 #[cfg(all(test, unix))]
 mod cancel_backstop_tests;
 mod command_policy;

@@ -1,5 +1,5 @@
 mod autocomplete;
-use autocomplete::autocomplete_session;
+use autocomplete::{autocomplete_cwd, autocomplete_session};
 #[cfg(all(test, unix))]
 mod resume_key_tests;
 
@@ -16,9 +16,9 @@ pub(in crate::services::discord) async fn cmd_resume(
     #[description = "Provider session id to resume (empty = auto-select previous)"]
     #[autocomplete = "autocomplete_session"]
     session_id: Option<String>,
-    #[description = "Worktree path (empty = locate the selected session transcript)"] cwd: Option<
-        String,
-    >,
+    #[description = "Worktree path (empty = locate the selected session transcript)"]
+    #[autocomplete = "autocomplete_cwd"]
+    cwd: Option<String>,
 ) -> Result<(), Error> {
     let user_id = ctx.author().id;
     let user_name = &ctx.author().name;

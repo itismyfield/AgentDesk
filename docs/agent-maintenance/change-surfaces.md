@@ -2462,6 +2462,7 @@ Measured giant paths (planning metadata remains manual):
 - `src/db/auto_queue/entries.rs`
 - `src/db/auto_queue/phase_gates.rs`
 - `src/db/dispatched_sessions.rs`
+- `src/db/dispatched_sessions/canonical_identity.rs`
 - `src/db/dispatches/mod.rs`
 - `src/db/postgres.rs`
 - `src/dispatch/dispatch_context.rs`
@@ -2473,7 +2474,6 @@ Measured giant paths (planning metadata remains manual):
 - `src/github/sync.rs`
 - `src/pipeline.rs`
 - `src/receipt.rs`
-- `src/reconcile.rs`
 - `src/server/mod.rs`
 - `src/server/routes/agents.rs`
 - `src/server/routes/agents_crud.rs`
@@ -2484,7 +2484,9 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/auto_queue.rs`
 - `src/services/auto_queue/activate_command.rs`
 - `src/services/auto_queue/cleanup_tasks.rs`
+- `src/services/campaign_execution/verification_run.rs`
 - `src/services/claude.rs`
+- `src/services/claude_tui/hook_relay/ordered_queue.rs`
 - `src/services/claude_tui/input.rs`
 - `src/services/codex.rs`
 - `src/services/codex_tmux_wrapper.rs`
@@ -2503,7 +2505,6 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/dispatches/discord_delivery/orchestration.rs`
 - `src/services/dispatches/outbox_route.rs`
 - `src/services/gemini.rs`
-- `src/services/memory/memento.rs`
 - `src/services/onboarding/mod.rs`
 - `src/services/opencode.rs`
 - `src/services/platform/binary_resolver.rs`
@@ -2512,7 +2513,11 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/routines/agent_executor.rs`
 - `src/services/routines/discord_log.rs`
 - `src/services/routines/store.rs`
+- `src/services/session_host/herdr_gate.rs`
+- `src/services/settings.rs`
 - `src/services/tmux_common.rs`
 - `src/services/tui_o/writer/deliver.rs`
+- `src/services/tui_prompt_dedupe/binding_events.rs`
+- `src/services/tui_prompt_dedupe/runtime_binding/codex_cursor.rs`
 - `src/services/turn_orchestrator.rs`
 <!-- END GENERATED: GIANT PATHS -->

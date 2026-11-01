@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(all(test, unix))]
+mod slash_command_tests;
+
 /// Start the leader gateway runtime after health registration, restart-marker
 /// fencing, and optional intake-worker startup. This final `run_bot` tail owns
 /// framework/client construction, gateway-lease keepalive and the gateway
@@ -116,14 +119,25 @@ pub(in crate::services::discord) fn run_bot_framework_options(
         commands,
         command_check: Some(|ctx| {
             Box::pin(async move {
-                let settings_snapshot = { ctx.data().shared.settings.read().await.clone() };
-                let allowed = provider_handles_channel(
-                    ctx.serenity_context(),
-                    &ctx.data().provider,
-                    &settings_snapshot,
-                    ctx.channel_id(),
-                )
-                .await;
+                let autocomplete = matches!(ctx, poise::Context::Application(app)
+                    if app.interaction_type == poise::CommandInteractionType::Autocomplete);
+                let routing = async {
+                    let settings_snapshot = ctx.data().shared.settings.read().await.clone();
+                    provider_handles_channel(
+                        ctx.serenity_context(),
+                        &ctx.data().provider,
+                        &settings_snapshot,
+                        ctx.channel_id(),
+                    )
+                    .await
+                };
+                let allowed = if autocomplete {
+                    tokio::time::timeout(std::time::Duration::from_millis(500), routing)
+                        .await
+                        .unwrap_or(false)
+                } else {
+                    routing.await
+                };
                 if !allowed {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!(
@@ -132,6 +146,29 @@ pub(in crate::services::discord) fn run_bot_framework_options(
                         ctx.channel_id(),
                         ctx.data().provider.as_str()
                     );
+                    if let poise::Context::Application(app) = ctx {
+                        match app.interaction_type {
+                            poise::CommandInteractionType::Autocomplete => {
+                                app.interaction
+                                    .create_response(
+                                        ctx.serenity_context(),
+                                        serenity::CreateInteractionResponse::Autocomplete(
+                                            serenity::CreateAutocompleteResponse::new(),
+                                        ),
+                                    )
+                                    .await?;
+                            }
+                            poise::CommandInteractionType::Command => {
+                                let guidance = command_guard_guidance(ctx).await;
+                                ctx.send(
+                                    poise::CreateReply::default()
+                                        .content(guidance)
+                                        .ephemeral(true),
+                                )
+                                .await?;
+                            }
+                        }
+                    }
                 }
                 Ok(allowed)
             })
@@ -144,5 +181,73 @@ pub(in crate::services::discord) fn run_bot_framework_options(
             ))
         },
         ..Default::default()
+    }
+}
+
+async fn command_guard_guidance(ctx: Context<'_>) -> String {
+    let target = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+        let channel = ctx.channel_id().get().to_string();
+        if let Some(fallback) = crate::services::agent_recovery::fallback_provider(&channel)
+            && matches!(
+                crate::services::agent_recovery::channel_recovery_intake(&fallback, &channel).await,
+                Some(crate::services::agent_recovery::RecoveryIntake::Allow)
+            )
+        {
+            return Some(fallback);
+        }
+        let http = &ctx.serenity_context().http;
+        let (binding_channel, name) = match resolve_thread_parent(http, ctx.channel_id()).await {
+            Some(parent) => parent,
+            None => (
+                ctx.channel_id(),
+                session_runtime::resolve_channel_name(http, ctx.channel_id())
+                    .await
+                    .ok()
+                    .flatten(),
+            ),
+        };
+        let binding = settings::resolve_role_binding(binding_channel, name.as_deref());
+        for candidate in crate::services::provider::provider_registry()
+            .iter()
+            .filter_map(|entry| entry.kind())
+        {
+            if candidate != ctx.data().provider
+                && settings::channel_supports_provider(
+                    &candidate,
+                    name.as_deref(),
+                    false,
+                    binding.as_ref(),
+                )
+                && provider_handles_channel(
+                    ctx.serenity_context(),
+                    &candidate,
+                    &DiscordBotSettings::default(),
+                    ctx.channel_id(),
+                )
+                .await
+            {
+                return Some(candidate);
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten();
+    let command = ctx
+        .parent_commands()
+        .iter()
+        .map(|command| command.name.as_ref())
+        .chain(std::iter::once(ctx.command().name.as_ref()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    match target {
+        Some(provider) => format!(
+            "이 채널에서는 `{}` 봇의 `/{command}` 명령을 선택해 주세요.",
+            provider.as_str()
+        ),
+        None => format!(
+            "이 봇은 이 채널의 명령을 처리할 수 없어요. 이 채널 담당 봇의 `/{command}` 명령을 선택해 주세요."
+        ),
     }
 }

@@ -1,6 +1,6 @@
 use poise::serenity_prelude as serenity;
 
-use super::super::formatting::{send_long_message_ctx, truncate_str};
+use super::super::formatting::send_long_message_ctx;
 use super::super::outbound::confirmation::send_command_confirmation_message;
 use super::super::router::{IntakeDeps, IntakeOrigin, dispatch_skill_intake};
 use super::super::{Context, Error, auto_restore_session, check_auth, mailbox_has_active_turn};
@@ -110,36 +110,27 @@ async fn autocomplete_skill<'a>(
     ctx: Context<'a>,
     partial: &'a str,
 ) -> serenity::CreateAutocompleteResponse {
-    let builtins = [
-        ("health", "Show runtime health summary"),
-        ("status", "Show this channel session status"),
-        ("inflight", "Show saved inflight turn state"),
-        ("pwd", "Show current working directory"),
-        ("stop", "Stop current AI request"),
-        ("help", "Show command help"),
-    ];
-    let skills = ctx.data().shared.skills_cache.read().await;
-    let partial_lower = partial.to_lowercase();
-    let mut choices = Vec::new();
-
-    for (name, desc) in builtins {
-        if partial.is_empty() || name.contains(&partial_lower) {
-            let label = format!("{} — {}", name, truncate_str(desc, 60));
-            choices.push(serenity::AutocompleteChoice::new(label, name.to_string()));
+    super::autocomplete::complete(partial, async {
+        if !super::autocomplete::authorized(ctx).await {
+            return Vec::new();
         }
-    }
-
-    for (name, desc) in skills.iter() {
-        if choices.len() >= 25 {
-            break;
-        }
-        if partial.is_empty() || name.to_lowercase().contains(&partial_lower) {
-            let label = format!("{} — {}", name, truncate_str(desc, 60));
-            choices.push(serenity::AutocompleteChoice::new(label, name.clone()));
-        }
-    }
-
-    serenity::CreateAutocompleteResponse::new().set_choices(choices)
+        let builtins = [
+            ("health", "Show runtime health summary"),
+            ("status", "Show this channel session status"),
+            ("inflight", "Show saved inflight turn state"),
+            ("pwd", "Show current working directory"),
+            ("stop", "Stop current AI request"),
+            ("help", "Show command help"),
+        ];
+        let skills = ctx.data().shared.skills_cache.read().await;
+        builtins
+            .into_iter()
+            .map(|(name, description)| (name.to_string(), description.to_string()))
+            .chain(skills.iter().cloned())
+            .map(|(name, description)| (format!("{name} — {description}"), name))
+            .collect()
+    })
+    .await
 }
 
 async fn run_skill_slash_command(
