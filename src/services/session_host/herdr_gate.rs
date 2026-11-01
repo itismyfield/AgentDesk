@@ -815,26 +815,30 @@ impl HerdrPaneView {
 }
 
 fn confirmed_ended(os: &dyn ProcessOs, record: &HostedExecution, reading: &PaneReading) -> bool {
-    ended_across(os, record, reading, None)
+    ended_across(os, record, reading, &|| None)
 }
 
 /// `record`'s execution is over: its pane is gone, or a lone shell is left that is its recorded
-/// root or another shell outliving both recorded processes; only the latter reads the OS.
-/// `rebooted` lets a process that started before this boot count as gone (`original_gone`).
+/// root or outlives both recorded processes; only that last check reads the OS and `rebooted`.
 fn ended_across(
     os: &dyn ProcessOs,
     record: &HostedExecution,
     reading: &PaneReading,
-    rebooted: Option<provenance::StartIdentity>,
+    rebooted: &dyn Fn() -> Option<provenance::StartIdentity>,
 ) -> bool {
-    let absent = |stamp: &ProcessStamp| pane_probe::original_gone(os, stamp, rebooted).is_ok();
     match reading {
         PaneReading::Missing => true,
         PaneReading::Present {
             root,
             provider: PaneProvider::Exited,
         } => record.expected.as_ref().is_some_and(|expected| {
-            expected.root == *root || (absent(&expected.root) && absent(&expected.provider_process))
+            if expected.root == *root {
+                return true;
+            }
+            let rebooted = rebooted();
+            let absent =
+                |stamp: &ProcessStamp| pane_probe::original_gone(os, stamp, rebooted).is_ok();
+            absent(&expected.root) && absent(&expected.provider_process)
         }),
         PaneReading::Present { .. } | PaneReading::Unreadable(_) => false,
     }

@@ -63,11 +63,11 @@ impl HerdrTarget {
     /// `HerdrPaneView::ended` of a reading of this target's pane; on a server that replaced the
     /// granted one, a recorded process that started before this boot also counts as gone.
     pub(crate) fn ended_reading(&self, record: &HostedExecution, reading: &PaneReading) -> bool {
-        let rebooted = match self.0.transport.server_witness() {
+        let rebooted = || match self.0.transport.server_witness() {
             Ok(current) => self.0.rebooted(&current),
             Err(_) => None,
         };
-        ended_across(self.0.os.as_ref(), record, reading, rebooted)
+        ended_across(self.0.os.as_ref(), record, reading, &rebooted)
     }
 }
 
