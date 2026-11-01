@@ -212,7 +212,6 @@ mod recovery_known_message_ids_tests {
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         }
     }
 

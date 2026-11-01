@@ -33,25 +33,14 @@ pub(crate) fn channel_supports_provider(
 
 pub(crate) fn bot_settings_allow_channel(
     settings: &DiscordBotSettings,
-    provider: &ProviderKind,
     channel_id: ChannelId,
     is_dm: bool,
 ) -> bool {
     if is_dm {
         return true;
     }
-    if settings.allowed_channel_ids.is_empty()
+    settings.allowed_channel_ids.is_empty()
         || settings.allowed_channel_ids.contains(&channel_id.get())
-    {
-        return true;
-    }
-    // Voice channels are declared only via `agents[].voice.channel_id`, never in
-    // a bot's `auth.allowed_channel_ids`, so a non-empty allowlist that lacks the
-    // voice channel would otherwise block `/voice join` (#3902). Treat the
-    // configured voice channel as allowed for its owning provider bot only —
-    // mirroring the `resolve_role_binding` voice patch. Non-owning providers stay
-    // blocked here and are caught again by the provider-match check.
-    agentdesk_config::is_voice_channel_owned_by_provider(channel_id, provider)
 }
 
 pub(crate) fn bot_settings_allow_agent(
@@ -144,7 +133,7 @@ pub(crate) fn validate_bot_channel_routing_with_provider_channel(
     // influence agent binding resolution.
     let role_binding = resolve_role_binding(allowlist_channel_id, provider_channel_name);
 
-    if !bot_settings_allow_channel(settings, provider, allowlist_channel_id, is_dm) {
+    if !bot_settings_allow_channel(settings, allowlist_channel_id, is_dm) {
         return Err(BotChannelRoutingGuardFailure::ChannelNotAllowed);
     }
     if !bot_settings_allow_agent(settings, role_binding.as_ref(), is_dm) {
@@ -260,12 +249,9 @@ mod voice_channel_guard_tests {
 
     use super::*;
 
-    // A voice channel declared only via `agents[].voice.channel_id`; it is never
-    // present in any bot's `auth.allowed_channel_ids`.
-    const VOICE_CHANNEL_ID: u64 = 1504612455916245163;
     // A normal text-channel binding for the owning (codex) agent.
     const TEXT_CHANNEL_ID: u64 = 1479671301387059200;
-    // An unrelated channel that is neither in the allowlist nor a voice channel.
+    // An unrelated channel that is not in the allowlist.
     const UNRELATED_CHANNEL_ID: u64 = 1111111111111111111;
 
     fn with_temp_root<F>(f: F)
@@ -290,8 +276,6 @@ agents:
   - id: project-agentdesk
     name: "AgentDesk"
     provider: codex
-    voice:
-      channel_id: "1504612455916245163"
     channels:
       codex:
         id: "1479671301387059200"
@@ -329,100 +313,6 @@ agents:
             agent: Some("project-agentdesk".to_string()),
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn allow_channel_recognizes_owner_voice_channel_without_allowlist_entry() {
-        with_temp_root(|_root| {
-            // codex owns the voice channel; its allowlist has only the text
-            // channel, NOT the voice channel.
-            let codex = bot_settings(ProviderKind::Codex, vec![TEXT_CHANNEL_ID]);
-
-            assert!(
-                bot_settings_allow_channel(
-                    &codex,
-                    &ProviderKind::Codex,
-                    ChannelId::new(VOICE_CHANNEL_ID),
-                    false,
-                ),
-                "owning provider must be allowed in its configured voice channel",
-            );
-
-            // No allow-all regression: an unrelated channel that is neither in
-            // the allowlist nor a voice channel stays blocked.
-            assert!(
-                !bot_settings_allow_channel(
-                    &codex,
-                    &ProviderKind::Codex,
-                    ChannelId::new(UNRELATED_CHANNEL_ID),
-                    false,
-                ),
-                "non-allowlisted, non-voice channel must stay blocked",
-            );
-
-            // A non-owning provider with a non-empty allowlist that lacks the
-            // voice channel is not granted the voice exception.
-            let claude = bot_settings(ProviderKind::Claude, vec![TEXT_CHANNEL_ID]);
-            assert!(
-                !bot_settings_allow_channel(
-                    &claude,
-                    &ProviderKind::Claude,
-                    ChannelId::new(VOICE_CHANNEL_ID),
-                    false,
-                ),
-                "non-owning provider must not inherit the voice-channel exception",
-            );
-        });
-    }
-
-    #[test]
-    fn full_guard_passes_voice_slash_command_for_owner_blocks_non_owner() {
-        with_temp_root(|_root| {
-            // Owner (codex) with a non-empty allowlist that omits the voice
-            // channel — a slash command in the voice channel must pass the guard.
-            let codex = bot_settings(ProviderKind::Codex, vec![TEXT_CHANNEL_ID]);
-            assert!(
-                validate_bot_channel_routing(
-                    &codex,
-                    &ProviderKind::Codex,
-                    ChannelId::new(VOICE_CHANNEL_ID),
-                    None,
-                    false,
-                )
-                .is_ok(),
-                "owning provider's voice slash command must pass the command guard",
-            );
-
-            // No allow-all regression: an unrelated channel stays blocked for the
-            // owner with ChannelNotAllowed.
-            assert_eq!(
-                validate_bot_channel_routing(
-                    &codex,
-                    &ProviderKind::Codex,
-                    ChannelId::new(UNRELATED_CHANNEL_ID),
-                    None,
-                    false,
-                ),
-                Err(BotChannelRoutingGuardFailure::ChannelNotAllowed),
-                "unrelated channel must still be blocked",
-            );
-
-            // Non-owning provider (claude) with an empty allowlist (allow-all)
-            // is still blocked by the provider-match check, mirroring the live
-            // bug report.
-            let claude = bot_settings(ProviderKind::Claude, Vec::new());
-            assert_eq!(
-                validate_bot_channel_routing(
-                    &claude,
-                    &ProviderKind::Claude,
-                    ChannelId::new(VOICE_CHANNEL_ID),
-                    None,
-                    false,
-                ),
-                Err(BotChannelRoutingGuardFailure::ProviderMismatch),
-                "non-owning provider must stay blocked in the voice channel",
-            );
-        });
     }
 
     // #3869: the restart recovery engine (`recovery_engine::restore_inflight_turns`)
@@ -492,7 +382,7 @@ agents:
             let rebind_reason = validate_bot_channel_routing(
                 &claude,
                 &ProviderKind::Claude,
-                ChannelId::new(VOICE_CHANNEL_ID),
+                ChannelId::new(TEXT_CHANNEL_ID),
                 None,
                 false,
             )
@@ -567,7 +457,6 @@ mod retirement_tests {
         assert!(list_registered_channel_bindings().is_empty());
         assert!(!super::super::content::is_known_agent("legacy-agent"));
         assert!(super::super::content::load_shared_prompt_for_profile("claude").is_none());
-        assert!(crate::services::discord::meeting_orchestrator::load_meeting_config().is_none());
 
         let org = crate::runtime_layout::org_schema_path(root.path());
         std::fs::write(
@@ -590,12 +479,6 @@ mod retirement_tests {
             resolve_workspace(channel, None).as_deref(),
             Some("/org-workspace")
         );
-        assert_eq!(
-            crate::services::discord::meeting_orchestrator::load_meeting_config()
-                .unwrap()
-                .channel_name,
-            "org-meeting"
-        );
 
         let mut config = crate::config::Config::default();
         config.agents = serde_json::from_value(serde_json::json!([{
@@ -604,12 +487,6 @@ mod retirement_tests {
             }
         }]))
         .unwrap();
-        config.meeting = Some(
-            serde_json::from_value(serde_json::json!({
-                "channel_name": "yaml-meeting", "summary_agent": "yaml-agent"
-            }))
-            .unwrap(),
-        );
         crate::config_live_reload::install(config);
         assert_eq!(
             resolve_role_binding(channel, None).unwrap().role_id,
@@ -623,12 +500,6 @@ mod retirement_tests {
         assert_eq!(
             list_registered_channel_bindings()[0].owner_provider,
             ProviderKind::Codex
-        );
-        assert_eq!(
-            crate::services::discord::meeting_orchestrator::load_meeting_config()
-                .unwrap()
-                .channel_name,
-            "yaml-meeting"
         );
     }
 }

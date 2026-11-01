@@ -32,7 +32,7 @@ struct ReactionCleanupRequest {
 ///   reached only by `run_backstop_finalize -> do_finalize` after a deferred
 ///   busy-pane gate, where no caller remains to clear inflight or the reaction.
 /// * the no-owner restored-watcher path mutates watcher context into the same
-///   `clear_inflight && kickoff_queue && !completion_cleanup && !voice` shape.
+///   `clear_inflight && kickoff_queue && !completion_cleanup` shape.
 ///   That path also skipped the normal watcher block, so it needs this fallback.
 /// * `AlreadyFinalized` losers only inherit their submitter context, so they
 ///   cannot become the backstop reaction owner after someone else won the gate.
@@ -54,10 +54,7 @@ pub(super) fn finalized_reaction_lifecycle(
     if !super::super::formatting::is_real_discord_message_id(message_id) {
         return;
     }
-    let backstop_cleanup = ctx.clear_inflight
-        && ctx.kickoff_queue
-        && !ctx.allow_completion_cleanup
-        && !ctx.drain_voice;
+    let backstop_cleanup = ctx.clear_inflight && ctx.kickoff_queue && !ctx.allow_completion_cleanup;
     let standby_completion_cleanup = relay_owner_kind == RelayOwnerKind::StandbyRelay
         && matches!(event, TerminalEvent::Complete);
     if !backstop_cleanup && !standby_completion_cleanup {
@@ -926,7 +923,6 @@ mod tests {
                     has_reply_boundary: false,
                     merge_consecutive: false,
                     pending_uploads: Vec::new(),
-                    voice_announcement: None,
                 };
                 let enqueued = shared
                     .mailbox(channel_id)
@@ -1903,7 +1899,6 @@ mod tests {
                     has_reply_boundary: false,
                     merge_consecutive: false,
                     pending_uploads: Vec::new(),
-                    voice_announcement: None,
                 };
                 assert!(
                     shared

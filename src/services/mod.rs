@@ -1,6 +1,5 @@
 pub mod agent_identity;
 pub mod agent_protocol;
-pub mod agent_quality;
 pub mod agent_recovery;
 pub mod agents;
 pub mod analytics;
@@ -176,7 +175,6 @@ pub(crate) mod turn_host;
 pub mod turn_lifecycle;
 pub mod turn_orchestrator;
 pub(crate) mod turn_summary_line;
-pub(crate) mod voice_conductor;
 
 // The disabled remote types keep their `services::remote` path; no remote runtime exists.
 pub use remote_stub as remote;

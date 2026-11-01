@@ -33,7 +33,7 @@ pub(in crate::services::discord) struct TurnBridgeContext {
     pub(in crate::services::discord) channel_id: ChannelId,
     /// `None` for a recovery turn with no anchored Discord user message
     /// (user_msg_id == 0, e.g. a TUI-direct turn). All Discord-message side
-    /// effects keyed on it (reactions, analytics row, voice link) are skipped.
+    /// effects keyed on it (reactions, analytics row) are skipped.
     pub(in crate::services::discord) user_msg_id: Option<MessageId>,
     pub(in crate::services::discord) user_text_owned: String,
     pub(in crate::services::discord) request_owner_name: String,

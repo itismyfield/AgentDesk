@@ -722,7 +722,6 @@ pub(super) async fn enqueue_busy_tui_followup_for_retry(
     has_reply_boundary: bool,
     merge_consecutive: bool,
     pending_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
-    voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> MailboxEnqueueOutcome {
     super::super::super::mailbox_requeue_intervention_front(
         shared,
@@ -737,7 +736,6 @@ pub(super) async fn enqueue_busy_tui_followup_for_retry(
             has_reply_boundary,
             merge_consecutive,
             pending_uploads,
-            voice_announcement,
         ),
     )
     .await
@@ -770,7 +768,6 @@ mod busy_retry_fifo_tests {
             false,
             false,
             Vec::new(),
-            None,
         );
         intervention.author_is_bot = author_is_bot;
         intervention
@@ -830,7 +827,6 @@ mod busy_retry_fifo_tests {
             dequeued.has_reply_boundary,
             dequeued.merge_consecutive,
             dequeued.pending_uploads,
-            dequeued.voice_announcement,
         )
         .await;
         assert!(retry.enqueued, "busy retry is restored at the queue front");
@@ -944,7 +940,6 @@ mod busy_retry_fifo_tests {
                 dequeued.has_reply_boundary,
                 dequeued.merge_consecutive,
                 dequeued.pending_uploads,
-                dequeued.voice_announcement,
             )
             .await;
 

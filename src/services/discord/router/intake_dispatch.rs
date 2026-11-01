@@ -79,7 +79,6 @@ pub(crate) struct IntakeSubmission {
         Vec<message_handler::AttachmentDescriptor>,
     pub(crate) preloaded_uploads:
         crate::services::cluster::attachment_transfer::uploads::PendingUploads,
-    pub(crate) voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
     /// The owner's claimed front this queued start runs; such a start is never admitted again.
     pub(in crate::services::discord) owner: Option<message_handler::OwnerTurn>,
 }
@@ -795,7 +794,6 @@ fn local_turn<'a, 'b: 'a>(
         preserve_on_cancel,
         (queued_drain, queued, submission.owner),
         submission.preloaded_uploads,
-        submission.voice_announcement,
     ))
 }
 
@@ -843,7 +841,6 @@ pub(in crate::services::discord::router) async fn defer_live_submission(
         request.has_reply_boundary,
         request.merge_consecutive,
         submission.preloaded_uploads,
-        submission.voice_announcement,
     );
     let absorbed = request.source_message_ids.iter().copied();
     for source in absorbed.filter(|&source| all_sources && source != request.user_msg_id) {
@@ -863,11 +860,7 @@ pub(in crate::services::discord::router) async fn defer_live_submission(
     }
     #[cfg(unix)]
     if super::herdr_consent::endpoint(channel_id.get()).is_some() {
-        let origin = if intervention.voice_announcement.is_some() {
-            "Voice".into()
-        } else {
-            format!("{:?}", submission.origin)
-        };
+        let origin = format!("{:?}", submission.origin);
         for source in &mut intervention.source_message_queued_generations {
             source.origin = Some(origin.clone());
         }

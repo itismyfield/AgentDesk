@@ -2,10 +2,9 @@
  *
  * #1078: Extracted from kanban-rules.js as part of the policy modularization pass.
  *
- * Provides Discord/quality notification helpers used by the core kanban
+ * Provides Discord notification helpers used by the core kanban
  * lifecycle hooks:
  *   - sendDiscordNotification: thin wrapper over agentdesk.message.queue
- *   - emitQualityEvent: optional emit on agentdesk.quality.emit
  *   - _loadCardAlertContext / _formatCardAlertLabel: card label hydration
  *   - notifyCardOwner: routes alerts to the assigned agent or escalates to human
  *
@@ -15,12 +14,6 @@
 
 function sendDiscordNotification(target, content, bot) {
   agentdesk.message.queue(target, content, bot || "announce", "system");
-}
-
-function emitQualityEvent(event) {
-  if (agentdesk.quality && typeof agentdesk.quality.emit === "function") {
-    agentdesk.quality.emit(event);
-  }
 }
 
 function _loadCardAlertContext(cardId) {
@@ -71,7 +64,6 @@ function notifyCardOwner(cardId, reason, source) {
 
 module.exports = {
   sendDiscordNotification: sendDiscordNotification,
-  emitQualityEvent: emitQualityEvent,
   _loadCardAlertContext: _loadCardAlertContext,
   _formatCardAlertLabel: _formatCardAlertLabel,
   notifyCardOwner: notifyCardOwner

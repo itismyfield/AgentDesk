@@ -16,7 +16,7 @@ use crate::db::kanban_cards as kanban_db;
 use crate::db::kanban_cards::{IssueCardUpsert, upsert_card_from_issue_pg};
 use crate::error::{AppError, AppResult, ErrorCode};
 pub use crate::server::dto::kanban::{
-    AssignCardBody, AssignIssueBody, BatchRereviewBody, CreateCardBody, DeferDodBody,
+    AssignCardBody, AssignIssueBody, BatchRereviewBody, CardListView, CreateCardBody, DeferDodBody,
     ForceTransitionBody, ListCardsQuery, PmDecisionBody, RedispatchCardBody, ReopenBody,
     RereviewBody, RetryCardBody, UpdateCardBody,
 };
@@ -340,17 +340,35 @@ pub async fn list_cards(
     Query(params): Query<ListCardsQuery>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let service = crate::services::kanban::KanbanService::new(state.pg_pool);
-    match service
+    let response = service
         .list_cards(crate::services::kanban::ListCardsInput {
             status: params.status,
             repo_id: params.repo_id,
             assigned_agent_id: params.assigned_agent_id,
+            exclude_done: params.exclude_done,
         })
-        .await
-    {
-        Ok(response) => Ok((StatusCode::OK, Json(json!({"cards": response.cards})))),
-        Err(error) => Err(error),
+        .await?;
+    Ok((
+        StatusCode::OK,
+        Json(json!({"cards": card_list_json(response.cards, params.view)})),
+    ))
+}
+
+/// The summary view leaves card bodies and the parsed `metadata` copy of
+/// `metadata_json` to `GET /api/kanban-cards/{id}`.
+fn card_list_json(
+    cards: Vec<crate::services::kanban::KanbanCardView>,
+    view: CardListView,
+) -> serde_json::Value {
+    let mut cards = json!(cards);
+    if view == CardListView::Summary {
+        let summaries = cards.as_array_mut().into_iter().flatten();
+        for card in summaries.filter_map(serde_json::Value::as_object_mut) {
+            card.remove("description");
+            card.remove("metadata");
+        }
     }
+    cards
 }
 
 /// GET /api/kanban-cards/:id
@@ -2438,3 +2456,7 @@ mod update_card_validation_tests {
 #[cfg(test)]
 #[path = "kanban_snapshot_tests.rs"]
 mod snapshot_tests;
+
+#[cfg(test)]
+#[path = "kanban_list_view_tests.rs"]
+mod list_view_tests;

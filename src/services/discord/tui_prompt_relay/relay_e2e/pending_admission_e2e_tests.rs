@@ -372,8 +372,8 @@ async fn purge_closed_actor_cannot_claim_or_erase_successor_pending() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn synthetic_inputs_keep_their_no_discord_reaction_policy() {
     let synthetic = crate::services::tui_input::input_key::SYNTHETIC_KEY_BASE;
-    let voice = discord::voice_barge_in::INTERNAL_VOICE_MESSAGE_ID_START;
-    for message in [synthetic, voice] {
+    let internal = discord::INTERNAL_MESSAGE_ID_START;
+    for message in [synthetic, internal] {
         let h = RelayE2eHarness::start().await;
         let probe = observe(&h, false);
         let arrived = h.mock.first_placeholder_arrived.notified();

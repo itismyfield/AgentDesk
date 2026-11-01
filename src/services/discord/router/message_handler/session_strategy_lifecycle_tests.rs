@@ -1733,7 +1733,6 @@ fn verified_codex_queued_followup_waits_before_dequeue_with_unknown_permission()
             false,
             false,
             Vec::new(),
-            None,
         );
         let persistence =
             crate::services::discord::queue_persistence_context(&shared, &provider, channel);

@@ -2,7 +2,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { getCampaigns, updateCampaignNode, type Campaign } from "../../api/campaigns";
+import { getCampaignDetail, getCampaigns, updateCampaignNode, type Campaign } from "../../api/campaigns";
 import { ApiRequestError } from "../../api/httpClient";
 import { STORAGE_KEYS } from "../../lib/storageKeys";
 import CampaignsPanel from "./CampaignsPanel";
@@ -10,13 +10,14 @@ import { makeLargeCampaign } from "./campaignTestFixtures";
 
 vi.mock("../../api/campaigns", () => ({
   getCampaigns: vi.fn(),
+  getCampaignDetail: vi.fn(),
   updateCampaignNode: vi.fn(),
   setCampaignAutoQueue: vi.fn(),
 }));
 // Server campaigns have their own tests; here the panel shows legacy campaigns only.
 vi.mock("../../api/serverCampaigns", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../api/serverCampaigns")>()),
-  getServerCampaigns: vi.fn().mockResolvedValue([]),
+  getServerCampaignSummaries: vi.fn().mockResolvedValue([]),
 }));
 vi.mock("@xyflow/react", () => ({
   ReactFlow: ({ nodes, onNodeClick }: { nodes: Array<{ id: string; data: { group?: string } }>; onNodeClick?: (event: unknown, node: unknown) => void }) => (
@@ -499,4 +500,37 @@ it.each(["pending", "completed"])("shows the working implementation on a pending
   expect(detail.textContent).not.toContain("Consultation running");
   expect(detail.textContent).not.toContain("Idle");
   expect(detail.textContent).not.toContain(new Date(live.session_seen_at).toLocaleString());
+});
+
+it("reads the campaign list once and then polls only the shown campaign, and none while the page is hidden", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  const polled = { ...campaign, revision: 6, nodes: [{ ...campaign.nodes[0], next_action: "Polled checkpoint" }] };
+  vi.mocked(getCampaignDetail).mockResolvedValue({ campaign: polled, live: {}, read: 2 });
+  try {
+    await render();
+    await act(async () => { vi.advanceTimersByTime(15_000); });
+    expect(getCampaigns).toHaveBeenCalledTimes(1);
+    expect(getCampaignDetail).toHaveBeenCalledExactlyOnceWith("ongoing");
+    await selectTask();
+    expect(container.querySelector(".campaign-next")?.textContent).toContain("Polled checkpoint");
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+    await act(async () => { vi.advanceTimersByTime(45_000); });
+    expect(getCampaignDetail).toHaveBeenCalledTimes(1);
+    Reflect.deleteProperty(document, "visibilityState");
+    await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+    expect(getCampaignDetail).toHaveBeenCalledTimes(2);
+  } finally {
+    vi.useRealTimers(); Reflect.deleteProperty(document, "visibilityState");
+  }
+});
+
+it("shows a task number once, and the stage as one line under the title", async () => {
+  const numbered = { ...campaign, nodes: [{ ...campaign.nodes[0], title: "#7 Review current head", issue_url: "https://github.com/o/r/issues/7", stage: "Absorbed into #7272 acceptance" }] };
+  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [numbered], live: {}, read: 1 });
+  await render();
+  if (!container.querySelector(".campaign-task-row")) await act(async () => button("Expand all").click());
+  const row = container.querySelector(".campaign-task-row")!;
+  expect(row.querySelector(".campaign-task-id")?.textContent).toBe("#7");
+  expect(row.querySelector("strong")?.textContent).toBe("Review current head");
+  expect(row.querySelector(".campaign-task-title .campaign-task-stage")?.textContent).toBe("Absorbed into #7272 acceptance");
 });

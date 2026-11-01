@@ -107,7 +107,7 @@ impl Fixture {
     fn legacy(&self, socket: &str) -> BootSessionHosts {
         let path = crate::runtime_layout::config_file_path(self.runtime.path());
         let config = json!({"server":{},"cluster":{"instance_id":"node"},
-            "agents":[{"id":"return-consent","name":"Return fixture","provider":"claude","voice_enabled":false,
+            "agents":[{"id":"return-consent","name":"Return fixture","provider":"claude",
                 "channels":{"claude":{"id":CHANNEL.to_string(),"name":"return-consent-cc","workspace":self.workspace.path(),"runtime":"tui"}}}],
             "session_hosts":{"herdr":{"endpoints":{"node-endpoint":{"execution_node":"node","socket_path":socket,
                 "herdr_home":"/adk/herdr","herdr_session":"agentdesk"}},"channels":{CHANNEL.to_string():"node-endpoint"}}}});
@@ -165,7 +165,6 @@ impl Fixture {
             has_reply_boundary: true,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         };
         let enqueued = self.mailbox().enqueue(item, self.persistence()).await;
         assert!(enqueued.enqueued && enqueued.persistence_error.is_none());
@@ -193,13 +192,10 @@ async fn restarted() -> Data {
         settings.owner_user_id = Some(discord_mock::user_message(1, "").author.id.get());
         settings.allowed_channel_ids = vec![CHANNEL];
     }
-    let voice_config = crate::voice::VoiceConfig::default();
     Data {
         shared,
         token: "test-token".into(),
         provider: ProviderKind::Claude,
-        voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
-        voice_config,
     }
 }
 

@@ -701,7 +701,6 @@ async fn recover_messages<A: CatchUpDiscordApi + ?Sized>(
                     && !intervention_text.starts_with('/')
                     && !intervention_text.starts_with("DISPATCH:"),
                 pending_uploads: Vec::new(),
-                voice_announcement: None,
             },
             evidence.known_snapshot.claim_observation,
         );

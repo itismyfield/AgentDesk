@@ -135,55 +135,13 @@ pub(crate) fn load_runtime_config(root: &Path) -> Result<LoadedRuntimeConfig, St
     let loaded = crate::config::config_path::load_config_file(&path)
         .map_err(|err| format!("Failed to load config '{}': {err:#}", path.display()))?;
     let existed = loaded.is_some();
-    let mut config = loaded.unwrap_or_default();
-
-    precheck_voice_alias_collisions(&mut config)?;
+    let config = loaded.unwrap_or_default();
 
     Ok(LoadedRuntimeConfig {
         config,
         path,
         existed,
     })
-}
-
-/// Pre-check voice alias collisions at yaml-load time so we never let the
-/// boot path hit `sync_agents_from_config_pg → validate_agent_alias_collisions`
-/// only to crash dcserver into a launchd restart loop (#2053).
-///
-/// Behavior:
-/// - If no `voice` section is configured (i.e. `voice.is_default()`), this is
-///   a no-op — voice alias checks only matter once voice is enabled.
-/// - On collision in normal mode: downgrade `config.voice.enabled = false`,
-///   emit a `tracing::warn!`, and return `Ok(())` so dcserver keeps booting.
-/// - On collision when `AGENTDESK_VOICE_REQUIRE_ALIASES=1`: return an `Err`
-///   describing the collision so callers can choose to fail fast.
-pub(crate) fn precheck_voice_alias_collisions(config: &mut Config) -> Result<(), String> {
-    if config.voice.is_default() {
-        return Ok(());
-    }
-
-    let collision = match crate::voice::commands::validate_agent_alias_collisions(&config.agents) {
-        Ok(()) => return Ok(()),
-        Err(collision) => collision,
-    };
-
-    let require = crate::utils::env_flag("AGENTDESK_VOICE_REQUIRE_ALIASES", false);
-
-    if require {
-        return Err(format!(
-            "voice alias collision detected (AGENTDESK_VOICE_REQUIRE_ALIASES=1): {collision}"
-        ));
-    }
-
-    let was_enabled = config.voice.enabled;
-    config.voice.enabled = false;
-    tracing::warn!(
-        collision = %collision,
-        previously_enabled = was_enabled,
-        "[config-audit] voice alias collision detected; downgrading voice.enabled=false to keep dcserver bootable. \
-         Set AGENTDESK_VOICE_REQUIRE_ALIASES=1 to make this a hard error."
-    );
-    Ok(())
 }
 
 pub(crate) fn audit_and_reconcile_config_only(
@@ -417,11 +375,6 @@ mod db_agent_drift_tests {
             id: provider.to_string(),
             name: provider.to_string(),
             name_ko: None,
-            aliases: Vec::new(),
-            wake_word: None,
-            voice_enabled: true,
-            sensitivity_mode: None,
-            voice: Default::default(),
             provider: provider.to_string(),
             channels: {
                 let mut channels = AgentChannels::new()
@@ -551,155 +504,6 @@ mod db_agent_drift_tests {
         assert_eq!(
             report.warnings,
             vec!["Failed to verify PostgreSQL agents after config sync: boom".to_string()]
-        );
-    }
-}
-
-#[cfg(test)]
-mod voice_alias_precheck_tests {
-    use super::*;
-    use crate::config::{AgentChannel, AgentChannelConfig, AgentChannels, AgentDef};
-    use crate::voice::VoiceConfig;
-
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-    }
-    fn make_agent(id: &str, name: &str, channel_name: Option<&str>) -> AgentDef {
-        let mut channels = AgentChannels::default();
-        channels.insert(
-            "codex",
-            AgentChannel::Detailed(AgentChannelConfig {
-                id: Some("9999".to_string()),
-                name: channel_name.map(str::to_string),
-                aliases: Vec::new(),
-                prompt_file: None,
-                workspace: None,
-                provider: Some("codex".to_string()),
-                tui_hosting: None,
-                runtime: None,
-                model: None,
-                reasoning_effort: None,
-                peer_agents: None,
-                thread_inherit: true,
-                quality_feedback_injection: None,
-                dispatch_profile: None,
-                isolate_override: None,
-                cache_ttl_minutes: None,
-            }),
-        );
-        AgentDef {
-            id: id.to_string(),
-            name: name.to_string(),
-            name_ko: None,
-            aliases: Vec::new(),
-            wake_word: None,
-            voice_enabled: true,
-            sensitivity_mode: None,
-            voice: crate::config::AgentVoiceConfig::default(),
-            provider: "codex".to_string(),
-            channels,
-            peer_keywords: Vec::new(),
-            peer_directory: true,
-            keywords: Vec::new(),
-            department: None,
-            avatar_emoji: None,
-            preferred_intake_node_labels: None,
-            memory_group: None,
-        }
-    }
-
-    fn enabled_voice_config() -> VoiceConfig {
-        let mut voice = VoiceConfig::default();
-        voice.enabled = true;
-        voice
-    }
-
-    #[test]
-    fn precheck_no_voice_section_is_noop_even_with_collision() {
-        let _guard = env_lock();
-        unsafe {
-            std::env::remove_var("AGENTDESK_VOICE_REQUIRE_ALIASES");
-        }
-        let mut config = Config::default();
-        // Inject a collision pair but leave voice config at default (no voice section).
-        config.agents = vec![
-            make_agent("adk-cdx", "AgentDesk", None),
-            make_agent("adkcdx-stub", "stub", Some("adk-cdx")),
-        ];
-        assert!(config.voice.is_default());
-        precheck_voice_alias_collisions(&mut config).expect("noop when voice section is default");
-        // voice.enabled must remain at its default (false) without being touched as warning.
-        assert!(!config.voice.enabled);
-    }
-
-    #[test]
-    fn precheck_collision_with_voice_enabled_downgrades_to_disabled() {
-        let _guard = env_lock();
-        unsafe {
-            std::env::remove_var("AGENTDESK_VOICE_REQUIRE_ALIASES");
-        }
-        let mut config = Config::default();
-        config.voice = enabled_voice_config();
-        // Two agents both expose alias `adk-cdx` (one via id, one via channel name).
-        config.agents = vec![
-            make_agent("adk-cdx", "AgentDesk", None),
-            make_agent("adkcdx-stub", "stub", Some("adk-cdx")),
-        ];
-
-        let outcome = precheck_voice_alias_collisions(&mut config);
-        assert!(
-            outcome.is_ok(),
-            "soft-fallback must not abort boot: {outcome:?}"
-        );
-        assert!(
-            !config.voice.enabled,
-            "voice.enabled must be downgraded to false on collision"
-        );
-    }
-
-    #[test]
-    fn precheck_collision_returns_err_when_require_env_set() {
-        let _guard = env_lock();
-        unsafe {
-            std::env::set_var("AGENTDESK_VOICE_REQUIRE_ALIASES", "1");
-        }
-        let mut config = Config::default();
-        config.voice = enabled_voice_config();
-        config.agents = vec![
-            make_agent("adk-cdx", "AgentDesk", None),
-            make_agent("adkcdx-stub", "stub", Some("adk-cdx")),
-        ];
-
-        let outcome = precheck_voice_alias_collisions(&mut config);
-        unsafe {
-            std::env::remove_var("AGENTDESK_VOICE_REQUIRE_ALIASES");
-        }
-        let err = outcome.expect_err("require mode must hard-error on collision");
-        assert!(
-            err.contains("voice alias collision detected"),
-            "error message must mention collision; got: {err}"
-        );
-    }
-
-    #[test]
-    fn precheck_no_collision_keeps_voice_enabled() {
-        let _guard = env_lock();
-        unsafe {
-            std::env::remove_var("AGENTDESK_VOICE_REQUIRE_ALIASES");
-        }
-        let mut config = Config::default();
-        config.voice = enabled_voice_config();
-        config.agents = vec![
-            make_agent("agent-one", "AgentOne", None),
-            make_agent("agent-two", "AgentTwo", None),
-        ];
-
-        precheck_voice_alias_collisions(&mut config).expect("no collision => Ok");
-        assert!(
-            config.voice.enabled,
-            "voice.enabled must stay true when there is no collision"
         );
     }
 }

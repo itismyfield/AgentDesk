@@ -64,7 +64,7 @@ export function SettingsOnboardingOverlay({
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-[80] overflow-y-auto bg-th-bg-primary text-th-text-primary" role="dialog" aria-modal="true" aria-label="Onboarding wizard">
+    <div className="fixed inset-0 z-[80] overflow-y-auto bg-th-bg-primary text-th-text-primary" role="dialog" aria-modal="true" aria-label={tr("초기 설정", "Initial setup")}>
       <div className="flex min-h-screen items-start justify-center pb-8 pt-4">
         <div ref={onboardingDialogRef} className="w-full max-w-3xl">
           <div className="mb-2 flex justify-end px-4">
@@ -77,7 +77,7 @@ export function SettingsOnboardingOverlay({
               {tr("닫기", "Close")}
             </button>
           </div>
-          <Suspense fallback={<div className="py-8 text-center" style={{ color: "var(--th-text-muted)" }}>Loading...</div>}>
+          <Suspense fallback={<div className="py-8 text-center" style={{ color: "var(--th-text-muted)" }}>{tr("불러오는 중…", "Loading…")}</div>}>
             <OnboardingWizard
               isKo={isKo}
               onComplete={() => {

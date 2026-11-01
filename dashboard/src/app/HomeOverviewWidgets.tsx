@@ -15,7 +15,8 @@ export function HomeMetricTile({
 }: {
   icon: ReactNode;
   title: string;
-  value: string;
+  /** null while loading: renders a skeleton instead of a placeholder glyph. */
+  value: string | null;
   sub: string;
   delta?: string;
   deltaTone?: "up" | "down" | "flat";
@@ -38,7 +39,11 @@ export function HomeMetricTile({
   return (
     <section className="flex h-full min-w-0 flex-col rounded-lg border border-th-border-subtle bg-th-bg-surface px-4 py-4 sm:px-5">
       <div className="flex items-center gap-2 text-xs text-th-text-muted">{icon}<span>{title}</span></div>
-      <div className="mt-3 break-words text-[28px] font-semibold leading-9 tracking-tight tabular-nums text-th-text-heading">{value}</div>
+      {value === null ? (
+        <div className="mt-3 h-9 w-24 animate-pulse rounded-md bg-surface-medium motion-reduce:animate-none" aria-hidden />
+      ) : (
+        <div className="mt-3 break-words text-[28px] font-semibold leading-9 tracking-tight tabular-nums text-th-text-heading">{value}</div>
+      )}
       <div className="mt-1 text-xs leading-5 text-th-text-muted">{sub}</div>
       <div className="mt-auto flex flex-wrap items-end justify-between gap-1 pt-3">
         {delta ? <span className={`text-[11px] leading-5 ${deltaTone === "up" ? "text-[var(--th-accent-success)]" : deltaTone === "down" ? "text-[var(--th-accent-danger)]" : "text-th-text-muted"}`}>{delta}</span> : null}

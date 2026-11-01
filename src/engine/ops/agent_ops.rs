@@ -112,7 +112,7 @@ fn agent_get_raw_pg(pool: &PgPool, agent_id: &str) -> String {
         move |bridge_pool| async move {
             let row = sqlx::query(
                 "SELECT id, name, name_ko, department, provider, avatar_emoji,
-                        status, xp, description, system_prompt,
+                        status, description, system_prompt,
                         discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx
                  FROM agents
                  WHERE id = $1",
@@ -149,7 +149,6 @@ fn agent_get_raw_pg(pool: &PgPool, agent_id: &str) -> String {
                         "provider": bindings.provider.clone(),
                         "avatar_emoji": row.try_get::<Option<String>, _>("avatar_emoji").map_err(|error| format!("decode avatar_emoji for {agent_id}: {error}"))?,
                         "status": row.try_get::<Option<String>, _>("status").map_err(|error| format!("decode status for {agent_id}: {error}"))?,
-                        "xp": row.try_get::<Option<i64>, _>("xp").map_err(|error| format!("decode xp for {agent_id}: {error}"))?,
                         "description": row.try_get::<Option<String>, _>("description").map_err(|error| format!("decode description for {agent_id}: {error}"))?,
                         "system_prompt": row.try_get::<Option<String>, _>("system_prompt").map_err(|error| format!("decode system_prompt for {agent_id}: {error}"))?,
                         "discord_channel_id": bindings.discord_channel_id.clone(),

@@ -14,7 +14,6 @@ fn queued(context: Option<String>, text: &str) -> Intervention {
         false,
         false,
         Vec::new(),
-        None,
     )
 }
 

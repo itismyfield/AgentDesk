@@ -27,8 +27,8 @@ const INJECTED_REACTION: char = '⏳';
 const UNCONFIRMED_REACTION: char = '❓';
 const UNCONFIRMED_NOTICE: &str = "❓ 터미널 입력을 확인하지 못했습니다. 중복이면 무시하세요.";
 const QUEUE_UNKNOWN_NOTICE: &str = "⚠️ 메시지 큐 저장 중 오류가 감지되어 접수 표시를 생략했어.";
-/// Prefixes intake handles as dispatches or meetings, never as typed input.
-const NOT_TYPED: [&str; 2] = ["DISPATCH:", "/meeting "];
+/// Prefixes intake handles as dispatches, never as typed input.
+const NOT_TYPED: [&str; 1] = ["DISPATCH:"];
 
 #[derive(Debug, PartialEq, Eq)]
 enum Gate {
@@ -138,7 +138,6 @@ pub(super) struct LiveText<'a> {
     pub(super) reply_context: Option<&'a str>,
     pub(super) has_reply_boundary: bool,
     pub(super) uploads: &'a [crate::services::cluster::attachment_transfer::uploads::Upload],
-    pub(super) voice_announcement: Option<&'a crate::voice::prompt::VoiceTranscriptAnnouncement>,
     pub(super) merge_consecutive: bool,
 }
 
@@ -155,12 +154,6 @@ fn offerable(live: &LiveText<'_>, shared: &SharedData) -> bool {
 
 fn readiness(live: &LiveText<'_>) -> Option<&'static str> {
     use crate::services::cluster::attachment_transfer::uploads::Upload;
-    if live.voice_announcement.is_some()
-        || crate::voice::prompt::is_readable_voice_transcript_announcement(live.text)
-        || crate::voice::prompt::is_voice_transcript_announcement_candidate(live.text)
-    {
-        return Some("voice_claim_deferred");
-    }
     let completed: u64 = live
         .uploads
         .iter()

@@ -352,9 +352,7 @@ fn strip_submitted_sources(state: &mut ChannelMailboxState, channel_id: ChannelI
             strip_source_message_id_from_intervention(item, *id);
         }
         stripped += done.len();
-        let empty = item.text.trim().is_empty()
-            && item.pending_uploads.is_empty()
-            && item.voice_announcement.is_none();
+        let empty = item.text.trim().is_empty() && item.pending_uploads.is_empty();
         done.is_empty() || !(item.source_message_ids.is_empty() || empty)
     });
     if stripped > 0 {

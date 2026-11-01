@@ -56,7 +56,6 @@ mod thinking;
 mod tmux_runtime;
 mod turn_analytics;
 mod two_message_panel;
-mod voice_completion;
 mod watcher_handoff;
 mod watcher_orphan_cleanup;
 use super::gateway::TurnGateway;
@@ -148,8 +147,7 @@ pub(super) use tmux_runtime::herdr_marked;
 pub(super) use tmux_runtime::stale_inflight_message;
 pub(super) use tmux_runtime::tmux_generation_file_mtime_ns;
 pub(super) use tmux_runtime::{
-    ChannelJudgement, ChannelStop, CommandStop, NativeStop, begin_user_stop, empty_native_stop,
-    keeps_turn, native_preserve_stop,
+    ChannelJudgement, ChannelStop, CommandStop, NativeStop, begin_user_stop, keeps_turn,
 };
 pub(super) use tmux_runtime::{
     stop_active_turn, stop_active_turn_with_outcome, stop_approved_turn,
@@ -229,9 +227,6 @@ use turn_analytics::{
     record_turn_bridge_invariant, resolve_exact_completion_usage, total_model_input_tokens,
     turn_duration_ms,
 };
-use voice_completion::{
-    json_any_true_flag, resolve_voice_turn_link_for_playback, voice_background_completion_target,
-};
 use watcher_handoff::{live_watcher_registered_for_relay, should_delegate_bridge_relay_to_watcher};
 mod context;
 use super::tmux_watcher_registry::WatcherClaimIncarnation;
@@ -297,8 +292,6 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         let dispatch_kind = bridge.dispatch_kind.clone();
         let context_window_tokens = bridge.context_window_tokens;
         let context_compact_percent = bridge.context_compact_percent;
-        let voice_progress_playback_channel_id =
-            bridge_entry_persist::voice_progress_playback_channel(&shared_owned, &bridge, &turn_id).await;
         let mut full_response = bridge_entry_persist::seed_bridge_local_body(&bridge);
         let terminal_empty_response_notice: Option<String> = None;
         let mut last_edit_text = String::new();
@@ -608,7 +601,6 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                 dispatch_id: dispatch_id.clone(),
                 role_binding: role_binding.clone(),
                 turn_id: turn_id.clone(),
-                voice_progress_playback_channel_id,
                 single_message_panel_footer_mode,
                 footer_owner,
                 status_panel_started_at,

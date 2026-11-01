@@ -767,7 +767,6 @@ pub(super) fn stale_foreign_cancel_finalize_context() -> turn_finalizer::Finaliz
     turn_finalizer::FinalizeContext {
         clear_inflight: true,
         allow_completion_cleanup: false,
-        drain_voice: false,
         kickoff_queue: true,
         expected_idempotent_guard_miss: false,
     }
@@ -777,7 +776,6 @@ pub(super) fn committed_foreign_complete_finalize_context() -> turn_finalizer::F
     turn_finalizer::FinalizeContext {
         clear_inflight: true,
         allow_completion_cleanup: false,
-        drain_voice: false,
         kickoff_queue: true,
         expected_idempotent_guard_miss: false,
     }

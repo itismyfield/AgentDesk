@@ -121,6 +121,17 @@ pub(in crate::server::routes) struct ListQuery {
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
+    #[serde(default)]
+    pub view: ListView,
+}
+
+#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(in crate::server::routes) enum ListView {
+    #[default]
+    Full,
+    /// Per-node and per-run arrays become counts; the detail GET stays full.
+    Summary,
 }
 
 #[derive(Deserialize)]

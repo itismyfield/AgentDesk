@@ -42,11 +42,3 @@ test = "services::discord::turn_bridge::two_message_panel::tests::reanchor_moves
 issue = "#5251"
 expires = 2026-11-06
 reason = "intermittent under parallel co-selection; mechanism not measured, kept until per-process runs show it gone"
-
-[[flaky]]
-scope = "linux-lib"
-binary-id = "agentdesk"
-test = "voice::receiver::tests::receive_hook_observes_pcm_and_completed_utterance_with_control_channel"
-issue = "#5217"
-expires = 2026-11-06
-reason = "completion hook missed once on ubuntu; candidate is the 30ms wall-clock margin, not process-global state"

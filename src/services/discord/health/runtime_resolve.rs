@@ -1,6 +1,6 @@
 //! Extracted from `services::discord::health` (#3038 Phase A) — verbatim
 //! move; behavior unchanged. Bot-HTTP resolution by name plus the
-//! channel-aware direct-meeting runtime/shared resolver pair.
+//! channel-aware direct channel runtime/shared resolver pair.
 
 use std::sync::Arc;
 
@@ -70,27 +70,17 @@ fn bot_names_match(registered: &str, requested: &str) -> bool {
     }
 }
 
-pub async fn fetch_channel_name(
-    registry: &HealthRegistry,
-    channel_id: ChannelId,
-    provider: &ProviderKind,
-) -> Option<String> {
-    let http = resolve_bot_http(registry, provider.as_str()).await.ok()?;
-    let channel = channel_id.to_channel(&*http).await.ok()?;
-    channel.guild().map(|guild_channel| guild_channel.name)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DirectMeetingRuntimeCandidate {
+struct DirectChannelRuntimeCandidate {
     index: usize,
     explicit_channel_match: bool,
     live_channel_match: bool,
 }
 
-fn select_direct_meeting_runtime_candidate(
+fn select_direct_channel_runtime_candidate(
     provider_name: &str,
     channel_id: ChannelId,
-    candidates: &[DirectMeetingRuntimeCandidate],
+    candidates: &[DirectChannelRuntimeCandidate],
 ) -> Result<Option<usize>, String> {
     let explicit_matches = candidates
         .iter()
@@ -138,7 +128,7 @@ fn select_direct_meeting_runtime_candidate(
 async fn select_candidate_with_live_probe<F, Fut>(
     provider_name: &str,
     channel_id: ChannelId,
-    mut candidates: Vec<DirectMeetingRuntimeCandidate>,
+    mut candidates: Vec<DirectChannelRuntimeCandidate>,
     mut probe: F,
 ) -> Result<Option<usize>, String>
 where
@@ -149,12 +139,12 @@ where
         .iter()
         .any(|candidate| candidate.explicit_channel_match)
     {
-        return select_direct_meeting_runtime_candidate(provider_name, channel_id, &candidates);
+        return select_direct_channel_runtime_candidate(provider_name, channel_id, &candidates);
     }
     for candidate in &mut candidates {
         candidate.live_channel_match = probe(candidate.index).await;
     }
-    select_direct_meeting_runtime_candidate(provider_name, channel_id, &candidates)
+    select_direct_channel_runtime_candidate(provider_name, channel_id, &candidates)
 }
 
 async fn resolve_channel_candidate(
@@ -167,7 +157,7 @@ async fn resolve_channel_candidate(
     let mut candidates = Vec::with_capacity(shared_candidates.len());
     for (index, shared) in shared_candidates {
         let settings = shared.settings.read().await.clone();
-        candidates.push(DirectMeetingRuntimeCandidate {
+        candidates.push(DirectChannelRuntimeCandidate {
             index: *index,
             explicit_channel_match: settings.allowed_channel_ids.contains(&channel_id.get()),
             live_channel_match: false,
@@ -240,7 +230,7 @@ async fn resolve_channel_candidate(
     .await
 }
 
-pub(super) async fn resolve_direct_meeting_runtime(
+pub(super) async fn resolve_direct_channel_runtime(
     registry: &HealthRegistry,
     channel_id: ChannelId,
     owner_provider: &ProviderKind,
@@ -280,7 +270,7 @@ pub(super) async fn resolve_direct_meeting_runtime(
             }
             None => false,
         };
-        candidate_matches.push(DirectMeetingRuntimeCandidate {
+        candidate_matches.push(DirectChannelRuntimeCandidate {
             index: *index,
             explicit_channel_match,
             live_channel_match,
@@ -288,7 +278,7 @@ pub(super) async fn resolve_direct_meeting_runtime(
     }
 
     if let Some(selected_index) =
-        select_direct_meeting_runtime_candidate(provider_name, channel_id, &candidate_matches)?
+        select_direct_channel_runtime_candidate(provider_name, channel_id, &candidate_matches)?
     {
         let (_, shared) = shared_candidates
             .iter()
@@ -360,7 +350,7 @@ pub(crate) async fn resolve_intake_worker_runtime(
         .upgrade()
         .ok_or_else(|| "runner runtime registry unavailable".to_string())?;
     let (http, shared) =
-        resolve_direct_meeting_runtime(&registry, channel_id, &claimant.provider).await?;
+        resolve_direct_channel_runtime(&registry, channel_id, &claimant.provider).await?;
     let token = shared
         .http
         .cached_bot_token
@@ -374,7 +364,7 @@ pub(crate) async fn resolve_intake_worker_runtime(
     })
 }
 
-pub(super) async fn resolve_direct_meeting_shared(
+pub(super) async fn resolve_direct_channel_shared(
     registry: &HealthRegistry,
     channel_id: ChannelId,
     owner_provider: &ProviderKind,
@@ -414,7 +404,7 @@ pub(super) async fn resolve_direct_meeting_shared(
             }
             None => false,
         };
-        candidate_matches.push(DirectMeetingRuntimeCandidate {
+        candidate_matches.push(DirectChannelRuntimeCandidate {
             index: *index,
             explicit_channel_match,
             live_channel_match,
@@ -422,7 +412,7 @@ pub(super) async fn resolve_direct_meeting_shared(
     }
 
     if let Some(selected_index) =
-        select_direct_meeting_runtime_candidate(provider_name, channel_id, &candidate_matches)?
+        select_direct_channel_runtime_candidate(provider_name, channel_id, &candidate_matches)?
     {
         let (_, shared) = shared_candidates
             .iter()
@@ -467,20 +457,20 @@ async fn unbound_single_runtime_allowed(shared: &SharedData) -> bool {
 }
 
 #[cfg(test)]
-mod direct_meeting_candidate_tests {
+mod direct_channel_candidate_tests {
     //! #3038 Phase A characterization tests — pin the runtime-candidate
-    //! selection behavior of `select_direct_meeting_runtime_candidate`
+    //! selection behavior of `select_direct_channel_runtime_candidate`
     //! before the health.rs directory decomposition.
 
     use poise::serenity_prelude::ChannelId;
 
     use super::{
-        DirectMeetingRuntimeCandidate, select_candidate_with_live_probe,
-        select_direct_meeting_runtime_candidate,
+        DirectChannelRuntimeCandidate, select_candidate_with_live_probe,
+        select_direct_channel_runtime_candidate,
     };
 
-    fn candidate(index: usize, explicit: bool, live: bool) -> DirectMeetingRuntimeCandidate {
-        DirectMeetingRuntimeCandidate {
+    fn candidate(index: usize, explicit: bool, live: bool) -> DirectChannelRuntimeCandidate {
+        DirectChannelRuntimeCandidate {
             index,
             explicit_channel_match: explicit,
             live_channel_match: live,
@@ -489,7 +479,7 @@ mod direct_meeting_candidate_tests {
 
     #[test]
     fn no_candidates_resolves_to_none() {
-        let selected = select_direct_meeting_runtime_candidate("claude", ChannelId::new(42), &[]);
+        let selected = select_direct_channel_runtime_candidate("claude", ChannelId::new(42), &[]);
         assert_eq!(selected, Ok(None));
     }
 
@@ -497,7 +487,7 @@ mod direct_meeting_candidate_tests {
     fn single_explicit_match_wins_over_live_matches() {
         let candidates = [candidate(0, false, true), candidate(3, true, true)];
         let selected =
-            select_direct_meeting_runtime_candidate("claude", ChannelId::new(42), &candidates);
+            select_direct_channel_runtime_candidate("claude", ChannelId::new(42), &candidates);
         assert_eq!(selected, Ok(Some(3)));
     }
 
@@ -505,7 +495,7 @@ mod direct_meeting_candidate_tests {
     fn multiple_explicit_matches_are_ambiguous() {
         let candidates = [candidate(0, true, false), candidate(1, true, false)];
         let error =
-            select_direct_meeting_runtime_candidate("claude", ChannelId::new(42), &candidates)
+            select_direct_channel_runtime_candidate("claude", ChannelId::new(42), &candidates)
                 .unwrap_err();
         let body: serde_json::Value = serde_json::from_str(&error).unwrap();
         assert_eq!(body["ok"], false);
@@ -519,7 +509,7 @@ mod direct_meeting_candidate_tests {
     fn single_live_match_is_selected_without_explicit_match() {
         let candidates = [candidate(0, false, false), candidate(2, false, true)];
         let selected =
-            select_direct_meeting_runtime_candidate("claude", ChannelId::new(42), &candidates);
+            select_direct_channel_runtime_candidate("claude", ChannelId::new(42), &candidates);
         assert_eq!(selected, Ok(Some(2)));
     }
 
@@ -527,7 +517,7 @@ mod direct_meeting_candidate_tests {
     fn multiple_live_matches_are_ambiguous() {
         let candidates = [candidate(0, false, true), candidate(1, false, true)];
         let error =
-            select_direct_meeting_runtime_candidate("claude", ChannelId::new(42), &candidates)
+            select_direct_channel_runtime_candidate("claude", ChannelId::new(42), &candidates)
                 .unwrap_err();
         let body: serde_json::Value = serde_json::from_str(&error).unwrap();
         assert_eq!(body["ok"], false);

@@ -16,8 +16,8 @@ use crate::services::provider::ProviderKind;
 // (provider/bot-HTTP registration, token rotation, channel-aware runtime
 // lookup). The former 2.9k-line monolith body lives in the submodules below
 // as verbatim function moves:
-//   * `runtime_resolve` — bot-HTTP resolution + direct-meeting runtime resolver pair
-//   * `headless_turn` — headless agent-turn reserve/start API + direct-meeting starter
+//   * `runtime_resolve` — bot-HTTP resolution + direct channel runtime resolver pair
+//   * `headless_turn` — headless agent-turn reserve/start API
 //   * `outbound::{send_target,send_gate,manual_delivery,send_api}` — manual
 //     send-to-agent/outbound dispatch, re-exported here for compatibility
 mod headless_turn;
@@ -106,7 +106,7 @@ pub(crate) use crate::services::discord::outbound::manual_delivery::ManualOutbou
 pub use crate::services::discord::outbound::send_api::{handle_send, handle_senddm};
 use crate::services::discord::outbound::send_gate::dm_default_agent_authorizes_unmapped_private_channel;
 pub(crate) use crate::services::discord::outbound::send_gate::{
-    ManualOutboundOptions, send_message_with_backends, send_message_with_backends_and_delivery_id,
+    ManualOutboundOptions, send_message_with_backends,
     send_message_with_backends_and_delivery_options,
 };
 #[allow(unused_imports)]
@@ -116,9 +116,8 @@ pub use crate::services::discord::outbound::send_gate::{
 #[allow(unused_imports)]
 pub use headless_turn::HeadlessAgentTurnReservation;
 pub use headless_turn::{
-    reserve_headless_agent_turn, reserve_headless_agent_turn_in_dm, start_direct_meeting,
-    start_headless_agent_turn, start_headless_agent_turn_in_dm,
-    start_reserved_headless_agent_turn_in_dm,
+    reserve_headless_agent_turn, reserve_headless_agent_turn_in_dm, start_headless_agent_turn,
+    start_headless_agent_turn_in_dm, start_reserved_headless_agent_turn_in_dm,
     start_reserved_headless_agent_turn_with_owner_channel,
 };
 pub use mailbox::purge_idle_channel_mailbox_registry_entry;
@@ -178,8 +177,8 @@ pub(crate) use recovery::{
 };
 #[cfg(test)]
 pub(crate) use runtime_resolve::owner_runtime_for_tests;
-pub use runtime_resolve::{fetch_channel_name, resolve_bot_http};
-use runtime_resolve::{resolve_direct_meeting_runtime, resolve_direct_meeting_shared};
+pub use runtime_resolve::resolve_bot_http;
+use runtime_resolve::{resolve_direct_channel_runtime, resolve_direct_channel_shared};
 pub(crate) use runtime_resolve::{resolve_intake_worker_runtime, resolve_utility_bot_http};
 #[allow(unused_imports)]
 pub use snapshot::{
@@ -620,7 +619,7 @@ impl HealthRegistry {
     /// progress stops updating for the other bot.
     ///
     /// This disambiguates by the runtime's allowed/live channel set via
-    /// the same selection logic `resolve_direct_meeting_shared` uses. For
+    /// the same selection logic `resolve_direct_channel_shared` uses. For
     /// a single registered runtime it returns that runtime regardless of
     /// channel, so single-bot deployments behave exactly as before.
     pub(in crate::services::discord) async fn shared_for_provider_on_channel(
@@ -628,7 +627,7 @@ impl HealthRegistry {
         provider: &ProviderKind,
         channel_id: ChannelId,
     ) -> Option<Arc<SharedData>> {
-        resolve_direct_meeting_shared(self, channel_id, provider)
+        resolve_direct_channel_shared(self, channel_id, provider)
             .await
             .ok()
     }
@@ -700,11 +699,11 @@ impl HealthRegistry {
         // rebind whichever runtime registered first instead of the one
         // that actually owns `channel_id`, leaving the real runtime's
         // orphan inflight untouched (turn stuck, no progress). This reuses
-        // the same selection logic as the direct-meeting resolver and
+        // the same selection logic as the direct channel resolver and
         // falls back to the single registered runtime when only one
         // exists, so single-bot behaviour is unchanged.
         let (http, shared) =
-            resolve_direct_meeting_runtime(self, ChannelId::new(channel_id), provider)
+            resolve_direct_channel_runtime(self, ChannelId::new(channel_id), provider)
                 .await
                 .ok()?;
         Some(
@@ -733,7 +732,7 @@ impl HealthRegistry {
     ) -> Option<Result<super::recovery_engine::RebindOutcome, super::recovery_engine::RebindError>>
     {
         let (http, shared) =
-            resolve_direct_meeting_runtime(self, ChannelId::new(channel_id), provider)
+            resolve_direct_channel_runtime(self, ChannelId::new(channel_id), provider)
                 .await
                 .ok()?;
         Some(

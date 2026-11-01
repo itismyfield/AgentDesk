@@ -1587,11 +1587,6 @@ fn write_agentdesk_channel_bindings(
                 id: mapping.role_id.clone(),
                 name: mapping.role_id.clone(),
                 name_ko: None,
-                aliases: Vec::new(),
-                wake_word: None,
-                voice_enabled: true,
-                sensitivity_mode: None,
-                voice: crate::config::AgentVoiceConfig::default(),
                 provider: provider.to_string(),
                 channels: crate::config::AgentChannels::default(),
                 peer_keywords: Vec::new(),
@@ -1940,8 +1935,8 @@ async fn persist_onboarding_pg(
 
     for mapping in resolved_channels {
         sqlx::query(
-            "INSERT INTO agents (id, name, provider, discord_channel_id, description, system_prompt, status, xp)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 0)
+            "INSERT INTO agents (id, name, provider, discord_channel_id, description, system_prompt, status)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT (id) DO UPDATE SET
                name = COALESCE(EXCLUDED.name, agents.name),
                provider = COALESCE(EXCLUDED.provider, agents.provider),

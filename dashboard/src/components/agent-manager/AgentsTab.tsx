@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { getSkillRanking } from "../../api";
 import type { Agent, Department } from "../../types";
 import { localeName } from "../../i18n";
+import { isTestAgent } from "../../lib/agentHelpers";
+import { useIsMobile } from "../common/overlay/useBreakpoint";
 import {
   SurfaceActionButton,
   SurfaceCard,
@@ -16,7 +18,6 @@ import { AgentsGridView } from "./AgentsGridView";
 interface AgentsTabProps {
   tr: Translator;
   locale: string;
-  isKo: boolean;
   agents: Agent[];
   departments: Department[];
   deptTab: string;
@@ -28,9 +29,8 @@ interface AgentsTabProps {
   sortMode: AgentSortMode;
   setSortMode: (next: AgentSortMode) => void;
   sortedAgents: Agent[];
-  spriteMap: Map<string, number>;
-  confirmDeleteId: string | null;
-  setConfirmDeleteId: (id: string | null) => void;
+  includeTests: boolean;
+  setIncludeTests: (next: boolean) => void;
   onOpenAgent: (agent: Agent) => void;
   onEditAgent: (agent: Agent) => void;
   onDuplicateAgent: (agent: Agent) => void;
@@ -57,7 +57,6 @@ function buildTopSkillMap(rows: Awaited<ReturnType<typeof getSkillRanking>>["byA
 export default function AgentsTab({
   tr,
   locale,
-  isKo,
   agents,
   departments,
   deptTab,
@@ -69,9 +68,8 @@ export default function AgentsTab({
   sortMode,
   setSortMode,
   sortedAgents,
-  spriteMap,
-  confirmDeleteId,
-  setConfirmDeleteId,
+  includeTests,
+  setIncludeTests,
   onOpenAgent,
   onEditAgent,
   onDuplicateAgent,
@@ -79,7 +77,11 @@ export default function AgentsTab({
   onDeleteAgent,
   saving,
 }: AgentsTabProps) {
-  const [viewMode, setViewMode] = useState<AgentViewMode>("grid");
+  const [preferredViewMode, setViewMode] = useState<AgentViewMode>("grid");
+  // On phones a tap opens the full-screen detail directly, so the list mode always wins.
+  const isMobile = useIsMobile();
+  const viewMode: AgentViewMode = isMobile ? "list" : preferredViewMode;
+  const testAgentCount = agents.filter(isTestAgent).length;
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [topSkillsByAgent, setTopSkillsByAgent] = useState<Map<string, string[]>>(
     () => new Map(),
@@ -102,8 +104,9 @@ export default function AgentsTab({
     };
   }, []);
 
+  const countedAgents = includeTests ? agents : agents.filter((candidate) => !isTestAgent(candidate));
   const deptCounts = new Map<string, { total: number; working: number }>();
-  for (const agent of agents) {
+  for (const agent of countedAgents) {
     const key = agent.department_id || "__none";
     const count = deptCounts.get(key) ?? { total: 0, working: 0 };
     count.total += 1;
@@ -135,13 +138,13 @@ export default function AgentsTab({
             <label className="min-w-0 flex-1 sm:flex-none">
               <span className="sr-only">{tr("소속 부서", "Department")}</span>
               <select value={deptTab} onChange={event => setDeptTab(event.target.value)} className="min-h-11 w-full max-w-full rounded-md border border-th-input-border bg-th-input-bg px-3 text-xs text-th-text-primary sm:w-56">
-                <option value="all">{tr(`전체 부서 · ${agents.length}명`, `All departments · ${agents.length} agents`)}</option>
+                <option value="all">{tr(`전체 부서 · ${countedAgents.length}명`, `All departments · ${countedAgents.length} agents`)}</option>
                 {departments.map(department => <option key={department.id} value={department.id}>{localeName(locale, department)} · {deptCounts.get(department.id)?.total ?? 0}</option>)}
               </select>
             </label>
             {deptTab !== "all" && departments.find(department => department.id === deptTab) ? <SurfaceActionButton tone="neutral" compact onClick={() => onEditDepartment(departments.find(department => department.id === deptTab)!)}>{tr("부서 편집", "Edit department")}</SurfaceActionButton> : null}
           </div>
-          <div data-testid="agents-view-mode" className="flex items-center gap-1" aria-label={tr("보기 방식", "View mode")}>
+          <div data-testid="agents-view-mode" className="hidden items-center gap-1 sm:flex" aria-label={tr("보기 방식", "View mode")}>
             <SurfaceSegmentButton active={viewMode === "grid"} onClick={() => setViewMode("grid")} tone="neutral">{tr("그리드", "Grid")}</SurfaceSegmentButton>
             <SurfaceSegmentButton active={viewMode === "list"} onClick={() => setViewMode("list")} tone="neutral">{tr("리스트", "List")}</SurfaceSegmentButton>
           </div>
@@ -150,7 +153,7 @@ export default function AgentsTab({
           <input aria-label={tr("에이전트 검색", "Search agents")} type="search" placeholder={tr("이름·역할 검색", "Search name or role")} value={search} onChange={event => setSearch(event.target.value)} className="col-span-2 min-h-11 min-w-0 w-full rounded-md border border-th-input-border bg-th-input-bg px-3 text-sm text-th-text-primary sm:col-span-1" />
           <select aria-label={tr("에이전트 상태", "Agent status")} value={statusFilter} onChange={event => setStatusFilter(event.target.value)} className="min-h-11 min-w-0 rounded-md border border-th-input-border bg-th-input-bg px-3 text-xs text-th-text-primary">
             <option value="all">{tr("전체 상태", "All statuses")}</option>
-            <option value="working">{tr("근무 중", "Working")}</option>
+            <option value="working">{tr("작업 중", "Working")}</option>
             <option value="idle">{tr("대기", "Idle")}</option>
             <option value="break">{tr("휴식", "Break")}</option>
             <option value="offline">{tr("오프라인", "Offline")}</option>
@@ -159,12 +162,25 @@ export default function AgentsTab({
             <option value="status">{tr("상태순", "By status")}</option>
             <option value="department">{tr("부서순", "By department")}</option>
             <option value="name">{tr("이름순", "By name")}</option>
-            <option value="xp">{tr("XP순", "By XP")}</option>
             <option value="activity">{tr("활동량순", "By activity")}</option>
             <option value="created">{tr("생성일순", "By created date")}</option>
           </select>
         </div>
-        <p className="text-xs text-th-text-muted" aria-live="polite">{tr(`${sortedAgents.length}명 표시 · 에이전트를 선택하면 상세와 관리 동작을 확인합니다.`, `${sortedAgents.length} agents shown · Select an agent for details and management.`)}</p>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-xs text-th-text-muted" aria-live="polite">{tr(`${sortedAgents.length}명 표시`, `${sortedAgents.length} agents shown`)}</p>
+          {testAgentCount > 0 ? (
+            <label className="inline-flex min-h-11 cursor-pointer items-center gap-2 text-xs text-th-text-secondary">
+              <input
+                type="checkbox"
+                data-testid="agents-include-tests"
+                checked={includeTests}
+                onChange={(event) => setIncludeTests(event.target.checked)}
+                className="h-4 w-4 accent-[var(--th-accent-primary)]"
+              />
+              {tr(`테스트 에이전트 포함 (${testAgentCount})`, `Include test agents (${testAgentCount})`)}
+            </label>
+          ) : null}
+        </div>
       </SurfaceCard>
 
       {sortedAgents.length === 0 ? (
@@ -175,9 +191,7 @@ export default function AgentsTab({
       ) : viewMode === "grid" ? (
         <AgentsGridView
           agents={sortedAgents}
-          confirmDeleteId={confirmDeleteId}
           departments={departments}
-          isKo={isKo}
           locale={locale}
           onDeleteAgent={onDeleteAgent}
           onDuplicateAgent={onDuplicateAgent}
@@ -187,9 +201,7 @@ export default function AgentsTab({
           saving={saving}
           selectedAgent={selectedAgent}
           selectedAgentId={selectedAgentId}
-          setConfirmDeleteId={setConfirmDeleteId}
           setSelectedAgentId={setSelectedAgentId}
-          spriteMap={spriteMap}
           topSkillsByAgent={topSkillsByAgent}
           tr={tr}
         />
@@ -206,17 +218,12 @@ export default function AgentsTab({
               <AgentCard
                 key={agent.id}
                 agent={agent}
-                spriteMap={spriteMap}
-                isKo={isKo}
                 locale={locale}
                 tr={tr}
                 departments={departments}
                 onOpen={() => onOpenAgent(agent)}
                 onEdit={() => onEditAgent(agent)}
-                confirmDeleteId={confirmDeleteId}
-                onDeleteClick={() => setConfirmDeleteId(agent.id)}
-                onDeleteConfirm={() => onDeleteAgent(agent.id)}
-                onDeleteCancel={() => setConfirmDeleteId(null)}
+                onDelete={() => onDeleteAgent(agent.id)}
                 saving={saving}
                 topSkills={topSkills}
                 viewMode={viewMode}

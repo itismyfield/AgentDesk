@@ -135,7 +135,6 @@ fn snapshot(config: &Config) -> serde_json::Result<Value> {
         }
         at[*last] = value;
     };
-    put(&["voice"], serde_json::to_value(&config.voice)?);
     put(&["cluster"], serde_json::to_value(&config.cluster)?);
     let routing = &config.cluster;
     put(
@@ -153,11 +152,6 @@ fn snapshot(config: &Config) -> serde_json::Result<Value> {
     put(&["onboarding"], serde_json::to_value(&config.onboarding)?);
     let tui_o = config.tui_o.clone().unwrap_or_default();
     put(&["tui_o"], serde_json::to_value(&tui_o)?);
-    if let Some(items) = root.get_mut("agents").and_then(Value::as_array_mut) {
-        for (item, agent) in items.iter_mut().zip(&config.agents) {
-            item["voice"] = serde_json::to_value(&agent.voice)?;
-        }
-    }
     Ok(root)
 }
 

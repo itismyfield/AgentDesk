@@ -157,7 +157,6 @@ impl Fixture {
             has_nonportable_uploads: false,
             attachments: Vec::new(),
             preloaded_uploads: Vec::new(),
-            voice_announcement: None,
             owner: None,
         };
         intake::dispatch_live_text_intake(&self.deps(), submission, move || {

@@ -8,12 +8,12 @@ use crate::services::tui_o::store::rotation::Boundary;
 /// Whether `log` bound `source` before `seq` under an unattached name with its session and path, or
 /// its path and inode when either session is empty (any device); an unreadable log counts as bound.
 pub(super) fn unread_before(
-    log: Result<Vec<BindingEvent>, String>,
+    log: Option<&[BindingEvent]>,
     seq: u64,
     source: &SourceId,
     attached: impl Fn(&SourceId) -> bool,
 ) -> bool {
-    let Ok(events) = log else {
+    let Some(events) = log else {
         return true;
     };
     let earlier = events.iter().filter(|event| event.seq < seq);

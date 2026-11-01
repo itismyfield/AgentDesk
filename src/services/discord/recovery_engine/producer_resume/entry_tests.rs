@@ -1324,7 +1324,6 @@ async fn r1_repaired_episode_admits_one_queued_successor_and_delivers_its_final(
         has_reply_boundary: false,
         merge_consecutive: false,
         pending_uploads: Vec::new(),
-        voice_announcement: None,
     };
     let queued = discord::queue_io::with_post_enqueue_idle_queue_kick_suppressed(
         discord::mailbox_enqueue_intervention(&f.shared, &ProviderKind::Codex, f.channel, next),

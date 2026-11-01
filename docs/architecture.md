@@ -69,13 +69,13 @@ invariant 위반은 별도의 hard gate다.
 
 ### 1. Discord Runtime (`src/services/discord/`)
 
-Serenity/Poise 기반 Discord gateway, message router, turn bridge, tmux watcher, recovery, meeting orchestration이 이 트리에 모여 있다. 세부 파일 목록과 giant-file 현황은 generated module inventory를 참고한다.
+Serenity/Poise 기반 Discord gateway, message router, turn bridge, tmux watcher, recovery가 이 트리에 모여 있다. 세부 파일 목록과 giant-file 현황은 generated module inventory를 참고한다.
 
 핵심 역할:
 - Discord 이벤트 수신과 명령 처리
 - provider turn lifecycle과 tmux/process backend handoff
 - restart recovery, inflight restore, watcher cleanup
-- round-table meeting orchestration과 Discord side-effect delivery
+- Discord side-effect delivery
 
 Turn bridge decomposition anchors:
 - `turn_bridge/completion_postlude.rs` — status-panel completion, final ADK
@@ -103,7 +103,7 @@ Turn bridge decomposition anchors:
   response auto-retry/recovery, late response shaping, and silent-turn delivery
   lease commit.
 - `turn_bridge/terminal_outcome_delivery/delivery_epilogue.rs` — post-commit
-  voice/TUI completion, dispatch completion/failure, watcher-delivered mark,
+  TUI completion, dispatch completion/failure, watcher-delivered mark,
   `tv_done`, and terminal status readiness.
 
 ### 2. Session + Provider Runtime (`src/services/`, `src/dispatch/`)
@@ -203,7 +203,7 @@ export default {
   },
 
   onCardTransition({ card, from, to }) {
-    // done → GitHub issue close + XP reward
+    // done → GitHub issue close
     if (to === "done" && card.github_issue_url) {
       agentdesk.github.closeIssue(card.repo, card.issue_number);
       agentdesk.kanban.reward(card.id);
@@ -427,29 +427,6 @@ CREATE TABLE session_locator_namespace (
 -- (provider, discord_token_hash, channel_id). Scheduled snapshots and nullable
 -- legacy rows are excluded; ambiguous legacy rows are never auto-merged.
 
--- 회의 (기존 PCD meetings 확장)
-CREATE TABLE meetings (
-  id                  TEXT PRIMARY KEY,
-  channel_id          TEXT,
-  title               TEXT,
-  status              TEXT,                -- in_progress/completed/cancelled
-  effective_rounds    INTEGER,
-  started_at          DATETIME,
-  completed_at        DATETIME,
-  summary             TEXT
-);
-
-CREATE TABLE meeting_transcripts (
-  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-  meeting_id          TEXT REFERENCES meetings(id),
-  seq                 INTEGER,
-  round               INTEGER,
-  speaker_agent_id    TEXT,
-  speaker_name        TEXT,
-  content             TEXT,
-  is_summary          BOOLEAN DEFAULT FALSE
-);
-
 -- GitHub 레포 등록
 CREATE TABLE github_repos (
   id                  TEXT PRIMARY KEY,    -- owner/repo
@@ -668,7 +645,6 @@ AgentDesk/
 │   │   ├── gateway.rs           # serenity 봇 (← RCC)
 │   │   ├── router.rs            # 메시지 라우팅 (← RCC)
 │   │   ├── turn_bridge.rs       # 턴 관리 (← RCC)
-│   │   ├── meeting.rs           # 라운드테이블 (← RCC)
 │   │   └── multi_bot.rs         # 다중 봇 관리 (← RCC)
 │   │
 │   ├── session/
@@ -688,7 +664,6 @@ AgentDesk/
 │   │       ├── dispatches.rs
 │   │       ├── sessions.rs
 │   │       ├── github.rs
-│   │       ├── meetings.rs
 │   │       ├── settings.rs
 │   │       ├── discord_proxy.rs
 │   │       ├── rate_limits.rs

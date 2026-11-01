@@ -3,7 +3,7 @@ use crate::config::TestRuntimeRootGuard;
 use crate::services::cluster::attachment_transfer::{self as assets, uploads::Upload};
 
 #[tokio::test]
-async fn admission_failure_keeps_consumed_voice_assets_and_ack_custody_pg() {
+async fn admission_failure_keeps_consumed_assets_and_ack_custody_pg() {
     let _root = TestRuntimeRootGuard::new();
     let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
         "admission_custody",
@@ -18,36 +18,8 @@ async fn admission_failure_keeps_consumed_voice_assets_and_ack_custody_pg() {
         .v2_adopt(path.clone(), "admission-pg".into())
         .await
         .unwrap();
-    let mut original = original(8_000_000_000_000_001_200, "voice original\n_ WIP");
-    let voice: crate::voice::prompt::VoiceTranscriptAnnouncement = serde_json::from_value(json!({
-        "transcript":"voice original", "user_id":"42", "utterance_id":"custody", "language":"ko-KR",
-        "verbose_progress":true, "started_at":null, "completed_at":null, "samples_written":null,
-        "control_channel_id":null, "stt_mode":null, "stt_latency_ms":null }))
-    .unwrap();
+    let mut original = original(8_000_000_000_000_001_200, "custody original\n_ WIP");
     let message = poise::serenity_prelude::MessageId::new(original.message_id);
-    crate::voice::announce_meta::persist_voice_announcement_reservation_durable(
-        &pool,
-        "custody-pending",
-        ChannelId::new(727_372),
-        "voice",
-        &voice,
-    )
-    .await
-    .unwrap();
-    assert!(
-        crate::voice::announce_meta::bind_voice_announcement_durable_message_id(
-            &pool,
-            "custody-pending",
-            message
-        )
-        .await
-        .unwrap()
-    );
-    assert!(
-        crate::voice::announce_meta::mark_voice_announcement_durable_consumed(&pool, message)
-            .await
-            .unwrap()
-    );
     let identity = assets::AttachmentMessageIdentity {
         provider: "claude".into(),
         channel_id: "727372".into(),
@@ -70,7 +42,6 @@ async fn admission_failure_keeps_consumed_voice_assets_and_ack_custody_pg() {
     .unwrap();
     let reference = assets::store::put(&pool, &bundle).await.unwrap();
     original.pending_uploads = vec![Upload::Bundle(reference.clone())];
-    original.voice_announcement = Some(voice.clone());
     let saved = serde_json::to_value(&original).unwrap();
     let custody = Arc::new(Mutex::new(Custody::new(&original)));
     handle
@@ -119,14 +90,6 @@ async fn admission_failure_keeps_consumed_voice_assets_and_ack_custody_pg() {
             .unwrap()
             .as_bundle(),
         bundle.as_bundle()
-    );
-    assert_eq!(
-        crate::voice::announce_meta::load_consumed_voice_announcement_durable(&pool, message)
-            .await
-            .unwrap()
-            .unwrap()
-            .utterance_id,
-        voice.utterance_id
     );
     drop(watch);
     handle

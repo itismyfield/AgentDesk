@@ -341,13 +341,10 @@ impl RelayE2eHarness {
             settings.owner_user_id = Some(USER_ID);
             settings.allow_all_users = true;
         }
-        let voice_config = crate::voice::VoiceConfig::default();
         let data = Data {
             shared: shared.clone(),
             token: "test-token".to_string(),
             provider: ProviderKind::Claude,
-            voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
-            voice_config,
         };
         let channel_id = ChannelId::new(CHANNEL_ID);
         let cwd = root.path().to_str().expect("utf8 test root").to_string();
@@ -392,8 +389,6 @@ impl RelayE2eHarness {
             shared: self.data.shared.clone(),
             token: self.data.token.clone(),
             provider: self.data.provider.clone(),
-            voice_config: self.data.voice_config.clone(),
-            voice_receiver: self.data.voice_receiver.clone(),
         }
     }
 

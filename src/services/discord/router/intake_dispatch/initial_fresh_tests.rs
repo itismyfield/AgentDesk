@@ -36,7 +36,6 @@ impl IntakeSubmission {
             attachments: Vec::new(),
             owner: None,
             preloaded_uploads: Vec::new(),
-            voice_announcement: None,
         }
     }
 }
@@ -81,7 +80,6 @@ fn input() -> IntakeSubmission {
         has_nonportable_uploads: false,
         attachments: Vec::new(),
         preloaded_uploads: Vec::new(),
-        voice_announcement: None,
         owner: None,
     }
 }
@@ -694,7 +692,6 @@ async fn queue_payload(fixture: &CanaryFixture) -> Vec<(std::time::Instant, serd
                     "text":item.text,"mode":format!("{:?}",item.mode),
                     "reply":item.reply_context,"reply_boundary":item.has_reply_boundary,
                     "merge":item.merge_consecutive,"uploads":item.pending_uploads,
-                    "voice":item.voice_announcement,
                 }),
             )
         })

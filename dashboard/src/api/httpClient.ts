@@ -31,9 +31,14 @@ export interface CachedGetEntry<T = unknown> {
 const CACHED_GET_MAX_ENTRIES = 200;
 const CACHED_GET_TTL_MS = 60_000;
 const cachedGets = new Map<string, CachedGetEntry>();
+// Last ETag and body per GET, in memory only: authenticated requests use
+// no-store, so the browser never revalidates for us.
+const ETAG_MAX_ENTRIES = 20;
+const etagBodies = new Map<string, { etag: string; payload: unknown }>();
 onCredentialChange(() => {
   inflightGets.clear();
   cachedGets.clear();
+  etagBodies.clear();
 });
 
 // #2050 P3 finding 17 — strip `fresh=1` from cache key so forceRefresh
@@ -58,6 +63,17 @@ function storeCachedGet(url: string, payload: unknown): void {
 
 export function clearCachedGet(url: string): void {
   cachedGets.delete(cacheKeyForUrl(url));
+  etagBodies.delete(url);
+}
+
+function rememberEtagBody(url: string, etag: string | null, payload: unknown): void {
+  etagBodies.delete(url);
+  if (!etag) return;
+  if (etagBodies.size >= ETAG_MAX_ENTRIES) {
+    const oldest = etagBodies.keys().next().value;
+    if (typeof oldest === "string") etagBodies.delete(oldest);
+  }
+  etagBodies.set(url, { etag, payload });
 }
 
 // ── Global error listener for toast integration ──
@@ -205,6 +221,8 @@ export async function request<T>(
         } = opts ?? {};
         const headers = new Headers(fetchOpts.headers);
         if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+        const remembered = isGet ? etagBodies.get(url) : undefined;
+        if (remembered && !headers.has("If-None-Match")) headers.set("If-None-Match", remembered.etag);
         if (auth.token) {
           if (!url.startsWith("/") || url.startsWith("//")) throw new Error("Authenticated API requests must use same-origin paths");
           headers.set("Authorization", `Bearer ${auth.token}`);
@@ -217,6 +235,10 @@ export async function request<T>(
           headers,
         });
         auth.signal.throwIfAborted();
+        if (res.status === 304 && remembered) {
+          storeCachedGet(url, remembered.payload);
+          return remembered.payload as T;
+        }
         if (!res.ok) {
           const body: unknown = await res.json().catch(() => undefined);
           const err = (body ?? { error: "unknown" }) as { error?: string; code?: unknown; error_code?: unknown };
@@ -246,6 +268,7 @@ export async function request<T>(
         if (isGet) {
           // Only validated payloads reach this cache when a parser is supplied.
           storeCachedGet(url, payload);
+          rememberEtagBody(url, res.headers?.get("ETag") ?? null, payload);
         }
         return payload;
       } catch (error) {

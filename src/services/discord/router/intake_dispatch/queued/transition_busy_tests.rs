@@ -77,7 +77,6 @@ fn item(id: u64) -> Intervention {
         has_reply_boundary: false,
         merge_consecutive: false,
         pending_uploads: Vec::new(),
-        voice_announcement: None,
     }
 }
 fn session(path: &std::path::Path) -> DiscordSession {
@@ -275,19 +274,6 @@ async fn t1_a_busy_restores_original_uploads_and_new_lease() {
         .map(|segment| segment.text.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    original.voice_announcement = Some(crate::voice::prompt::VoiceTranscriptAnnouncement {
-        transcript: "voice body".into(),
-        user_id: "42".into(),
-        utterance_id: "r1-original-voice".into(),
-        language: "ko".into(),
-        verbose_progress: true,
-        started_at: Some("2026-10-12T20:00:00+09:00".into()),
-        completed_at: Some("2026-10-12T20:00:01+09:00".into()),
-        samples_written: Some(48000),
-        control_channel_id: Some(f.channel.get()),
-        stt_mode: Some("file".into()),
-        stt_latency_ms: Some(120),
-    });
     original.pending_uploads = vec!["Q".into()];
     original.reply_context = Some("original reply".into());
     original.has_reply_boundary = true;
@@ -374,7 +360,6 @@ async fn t1_a_busy_restores_original_uploads_and_new_lease() {
     assert_eq!(restored.reply_context, original.reply_context);
     assert_eq!(restored.has_reply_boundary, original.has_reply_boundary);
     assert_eq!(restored.merge_consecutive, original.merge_consecutive);
-    assert_eq!(restored.voice_announcement, original.voice_announcement);
     assert_eq!(restored.queued_generation, original.queued_generation);
     assert_eq!(restored.created_at, original.created_at);
     assert!(snapshot.pending_user_dispatch.is_none());
@@ -437,7 +422,6 @@ async fn t1_a_busy_restores_original_uploads_and_new_lease() {
     assert_eq!(disk[0].reply_context, original.reply_context);
     assert_eq!(disk[0].has_reply_boundary, original.has_reply_boundary);
     assert_eq!(disk[0].merge_consecutive, original.merge_consecutive);
-    assert_eq!(disk[0].voice_announcement, original.voice_announcement);
     assert!(
         disk[0]
             .created_at
@@ -733,7 +717,6 @@ async fn t2_fresh_busy_keeps_tail_order() {
         has_nonportable_uploads: false,
         attachments: Vec::new(),
         preloaded_uploads: Vec::new(),
-        voice_announcement: None,
         request: super::super::super::message_handler::IntakeRequest {
             intake_outbox_id: None,
             channel_id: f.channel,

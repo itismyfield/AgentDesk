@@ -1388,7 +1388,6 @@ async fn the_boot_kickoff_loop_arms_only_turn_mode_channels_it_could_not_start()
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         };
         let context =
             crate::services::discord::queue_persistence_context(&shared, &provider, channel);

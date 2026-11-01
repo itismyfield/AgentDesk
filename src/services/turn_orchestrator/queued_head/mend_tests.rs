@@ -58,7 +58,6 @@ fn human(id: u64, text: &str) -> Intervention {
         has_reply_boundary: false,
         merge_consecutive: false,
         pending_uploads: Vec::new(),
-        voice_announcement: None,
     }
 }
 

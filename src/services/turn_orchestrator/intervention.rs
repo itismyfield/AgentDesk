@@ -43,16 +43,6 @@ pub(crate) struct Intervention {
     pub(crate) has_reply_boundary: bool,
     pub(crate) merge_consecutive: bool,
     pub(crate) pending_uploads: PendingUploads,
-    /// #2266: when a voice-transcript announcement loses the
-    /// `mailbox_try_start_turn` race and is enqueued for later dispatch, the
-    /// per-process `voice::announce_meta` store entry is consumed by the
-    /// original `handle_text_message` call before the race-loss branch runs.
-    /// Embedding the full announcement here keeps the queued payload
-    /// self-contained so the dispatch path (which reinserts the entry into
-    /// the store before re-entering `handle_text_message`) can reconstruct
-    /// the voice-transcript framing instead of falling back to plain text.
-    /// `None` for non-voice paths.
-    pub(crate) voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 }
 
 /// Where a turn resolved to run and the routing its claim publishes, kept with a queued item so

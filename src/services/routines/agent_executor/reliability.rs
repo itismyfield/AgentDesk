@@ -72,7 +72,7 @@ pub(super) fn fresh_provider_session_probe_allowed(
 }
 
 /// Completion evidence for a headless agent turn: its transcript, or a terminal
-/// no-deliverable quality event. Shared by routines and the voice conductor.
+/// no-deliverable quality event.
 pub(crate) async fn find_headless_turn_completion(
     pool: &PgPool,
     turn_id: &str,

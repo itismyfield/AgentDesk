@@ -10,6 +10,7 @@ import {
   SurfaceSection,
   SurfaceSegmentButton,
 } from "../common/SurfacePrimitives";
+import { pollWhileVisible } from "../../lib/pollWhileVisible";
 
 interface ModelLineItem {
   model: string;
@@ -85,7 +86,7 @@ function formatTokens(value: number): string {
 }
 
 function formatCost(value: number): string {
-  if (value >= 100) return `$${value.toFixed(0)}`;
+  if (value >= 100) return `$${Math.round(value).toLocaleString("en-US")}`;
   if (value >= 1) return `$${value.toFixed(2)}`;
   if (value >= 0.01) return `$${value.toFixed(3)}`;
   return `$${value.toFixed(4)}`;
@@ -196,10 +197,10 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
     };
 
     void load();
-    const timer = setInterval(() => void load(), 60_000);
+    const stopPolling = pollWhileVisible(() => void load(), 60_000);
     return () => {
       mounted = false;
-      clearInterval(timer);
+      stopPolling();
     };
   }, [period]);
 
@@ -240,7 +241,7 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
         <div className="mt-4 py-6 text-center text-sm" style={{ color: "var(--th-text-muted)" }}>
           {loading
             ? `${t({
-              ko: "서버가 영수증을 집계하는 중입니다. 1분 넘게 걸릴 수 있습니다",
+              ko: "서버가 영수증을 집계하는 중이에요. 1분 넘게 걸릴 수 있어요",
               en: "The server is aggregating the receipt; this can take over a minute",
               ja: "サーバーがレシートを集計中です。1分以上かかる場合があります",
               zh: "服务器正在汇总收据，可能需要一分钟以上",
@@ -266,7 +267,7 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
                 borderColor: "color-mix(in srgb, var(--th-accent-warn) 28%, var(--th-border) 72%)",
               }}
             >
-              {t({ ko: "갱신 중", en: "SYNCING", ja: "更新中", zh: "更新中" })} · {loadingSeconds}s
+              {t({ ko: "갱신 중", en: "Syncing", ja: "更新中", zh: "更新中" })} · {loadingSeconds}s
             </span>
           )}
           <SurfaceActionButton
@@ -306,7 +307,7 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
             active={selectedProvider === "all"}
             onClick={() => setSelectedProvider("all")}
           >
-            {t({ ko: "전체 Provider", en: "All Providers", ja: "全 Provider", zh: "全部 Provider" })}
+            {t({ ko: "전체 프로바이더", en: "All providers", ja: "全プロバイダー", zh: "全部提供方" })}
           </SurfaceSegmentButton>
           {providerOptions.map((provider) => {
             const active = providerKey(selectedProvider) === providerKey(provider);
@@ -332,7 +333,12 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
               <span style={{ color: "var(--th-accent-warn)" }}>{formatCost(viewData.total)}</span>
               {viewData.cache_discount > 0.001 && (
                 <span className="text-[11px]" style={{ color: "var(--th-accent-primary)" }}>
-                  -{formatCost(viewData.cache_discount)}
+                  {t({
+                    ko: `캐시로 ${formatCost(viewData.cache_discount)} 절약`,
+                    en: `${formatCost(viewData.cache_discount)} saved by cache`,
+                    ja: `キャッシュで ${formatCost(viewData.cache_discount)} 節約`,
+                    zh: `缓存节省 ${formatCost(viewData.cache_discount)}`,
+                  })}
                 </span>
               )}
             </span>
@@ -342,10 +348,10 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
         <SurfaceMetricPill
           label={t({ ko: "토큰 사용량", en: "Token Usage", ja: "トークン使用量", zh: "代币用量" })}
           value={t({
-            ko: `${formatTokens(totalTokens)} tokens / ${viewData.models.length} lines`,
-            en: `${formatTokens(totalTokens)} tokens / ${viewData.models.length} lines`,
-            ja: `${formatTokens(totalTokens)} tokens / ${viewData.models.length} lines`,
-            zh: `${formatTokens(totalTokens)} tokens / ${viewData.models.length} lines`,
+            ko: `${formatTokens(totalTokens)} 토큰 · 모델 ${viewData.models.length}개`,
+            en: `${formatTokens(totalTokens)} tokens · ${viewData.models.length} models`,
+            ja: `${formatTokens(totalTokens)} トークン · モデル ${viewData.models.length}個`,
+            zh: `${formatTokens(totalTokens)} 代币 · ${viewData.models.length} 个模型`,
           })}
           tone="info"
         />
@@ -353,7 +359,7 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
           <SurfaceMetricPill
             label={t({ ko: "활동량", en: "Activity", ja: "アクティビティ", zh: "活动量" })}
             value={t({
-              ko: `${viewData.stats.total_messages.toLocaleString()} msgs / ${viewData.stats.total_sessions} sessions`,
+              ko: `메시지 ${viewData.stats.total_messages.toLocaleString()}개 · 세션 ${viewData.stats.total_sessions}개`,
               en: `${viewData.stats.total_messages.toLocaleString()} msgs / ${viewData.stats.total_sessions} sessions`,
               ja: `${viewData.stats.total_messages.toLocaleString()} msgs / ${viewData.stats.total_sessions} sessions`,
               zh: `${viewData.stats.total_messages.toLocaleString()} msgs / ${viewData.stats.total_sessions} sessions`,
@@ -362,7 +368,7 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
           />
         ) : (
           <SurfaceMetricPill
-            label={t({ ko: "Provider Slice", en: "Provider Slice", ja: "Provider Slice", zh: "Provider Slice" })}
+            label={t({ ko: "프로바이더", en: "Provider", ja: "プロバイダー", zh: "提供方" })}
             value={selectedProviderLabel ?? selectedProvider}
             tone="accent"
           />
@@ -372,7 +378,7 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
       {selectedProviderLabel && (
         <SurfaceNotice className="mt-4" tone="info" compact>
           {t({
-            ko: `${selectedProviderLabel} provider만 필터링한 비용/토큰 slice입니다.`,
+            ko: `${selectedProviderLabel} 사용분만 골라 본 비용과 토큰이에요.`,
             en: `This view is filtered to the ${selectedProviderLabel} provider slice.`,
             ja: `${selectedProviderLabel} provider に絞った slice です。`,
             zh: `当前视图是 ${selectedProviderLabel} provider 的 slice。`,

@@ -23,7 +23,6 @@ export const STATUS_DOT: Record<string, string> = {
   idle: "bg-slate-500",
 };
 
-export const ICON_SPRITE_POOL = Array.from({ length: 20 }, (_, i) => i + 1);
 
 export const EMOJI_GROUPS: { label: string; labelEn: string; emojis: string[] }[] = [
   {
@@ -56,7 +55,6 @@ export const BLANK: FormData = {
   department_id: "",
   cli_provider: "claude",
   avatar_emoji: "🤖",
-  sprite_number: null,
   personality: "",
   prompt_content: "",
   auto_commit: false,

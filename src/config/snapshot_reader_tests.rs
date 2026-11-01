@@ -124,6 +124,7 @@ fn snapshot_facades_keep_published_value_and_preserve_boot_fallback() {
             crate::config::shared_test_env_lock().try_lock(),
             Err(std::sync::TryLockError::WouldBlock)
         ));
+        // A retired top-level `meeting` key still loads and is ignored.
         fixture.write("server: {port: 41}\nmeeting: {channel_name: fixture, available_agents: []}");
         for config in [
             runtime_config(),
@@ -131,9 +132,7 @@ fn snapshot_facades_keep_published_value_and_preserve_boot_fallback() {
             runtime_config_optional().unwrap(),
         ] {
             assert_eq!(config.server.port, 41);
-            let source = config.runtime_source.unwrap();
-            assert_eq!(source.path, fixture.path);
-            assert!(source.meeting_available_agents_explicitly_empty);
+            assert_eq!(config.runtime_source.unwrap().path, fixture.path);
         }
         fixture.install("server: {port: 41}", "server: {port: 73}");
         assert_eq!(runtime_config().server.port, 41);
@@ -141,12 +140,6 @@ fn snapshot_facades_keep_published_value_and_preserve_boot_fallback() {
         assert_eq!(runtime_config_optional().unwrap().server.port, 41);
         fixture.reload();
         assert_eq!(runtime_config().server.port, 73);
-        assert!(
-            !runtime_config()
-                .runtime_source
-                .unwrap()
-                .meeting_available_agents_explicitly_empty
-        );
     });
 }
 

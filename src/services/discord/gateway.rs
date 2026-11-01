@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
 
-use super::gateway_voice_queue::queued_intervention_request_owner;
+use super::gateway_queue_owner::queued_intervention_request_owner;
 use super::outbound::delivery::{deliver_outbound, first_raw_message_id};
 use super::outbound::message::{
     DiscordOutboundMessage, OutboundOperation, OutboundReferenceContext, OutboundTarget,
@@ -573,7 +573,7 @@ fn live_bot_owner_provider(live_turn: Option<&LiveDiscordTurnContext>) -> Option
 }
 
 fn next_headless_message_id() -> MessageId {
-    static HEADLESS_MESSAGE_ID_SEQ: AtomicU64 = AtomicU64::new(9_000_000_000_000_000_000);
+    static HEADLESS_MESSAGE_ID_SEQ: AtomicU64 = AtomicU64::new(super::INTERNAL_MESSAGE_ID_START);
     MessageId::new(HEADLESS_MESSAGE_ID_SEQ.fetch_add(1, Ordering::Relaxed))
 }
 
@@ -803,8 +803,7 @@ impl TurnGateway for DiscordGateway {
                 return Err("missing live Discord context".to_string());
             };
 
-            // #2266: voice-tagged queue items retain the original announce-bot
-            // author; ordinary queued items retain the live-turn owner.
+            // Queued human input keeps its verified author; other items take the live-turn owner.
             let dispatch_request_owner =
                 queued_intervention_request_owner(intervention, live_turn.request_owner);
             let deps = router::IntakeDeps {
@@ -1154,7 +1153,6 @@ mod tests {
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         }
     }
 

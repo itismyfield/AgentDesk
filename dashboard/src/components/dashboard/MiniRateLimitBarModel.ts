@@ -151,16 +151,26 @@ function formatResetDay(resetAtMs: number, nowMs: number, isKo: boolean): string
   return `${resetDate.getMonth() + 1}/${resetDate.getDate()}`;
 }
 
-function formatResetDistance(resetAtMs: number, nowMs: number): string {
+function formatResetDistance(resetAtMs: number, nowMs: number, isKo: boolean): string {
   const diffMs = resetAtMs - nowMs;
   if (diffMs <= 0) return "now";
   const totalMinutes = Math.max(1, Math.round(diffMs / 60_000));
   const days = Math.floor(totalMinutes / 1_440);
   const hours = Math.floor((totalMinutes % 1_440) / 60);
   const minutes = totalMinutes % 60;
-  if (days > 0) return `${days}d${hours > 0 ? ` ${hours}h` : ""}`;
-  if (hours > 0) return `${hours}h${minutes > 0 ? ` ${minutes}m` : ""}`;
-  return `${minutes}m`;
+  const [d, h, m] = isKo ? ["일", "시간", "분"] : ["d", "h", "m"];
+  if (days > 0) return `${days}${d}${hours > 0 ? ` ${hours}${h}` : ""}`;
+  if (hours > 0) return `${hours}${h}${minutes > 0 ? ` ${minutes}${m}` : ""}`;
+  return `${minutes}${m}`;
+}
+
+/** "5h" / "7d Fable" bucket names read as "5시간" / "7일 Fable". */
+export function formatRateLimitWindowLabel(label: string, isKo: boolean): string {
+  if (!isKo) return label;
+  return label.replace(/^(\d+)\s*([mhd])\b/i, (_, value: string, unit: string) => {
+    const suffix = { m: "분", h: "시간", d: "일" }[unit.toLowerCase() as "m" | "h" | "d"];
+    return `${value}${suffix}`;
+  });
 }
 
 function formatResetDistanceShort(resetAtMs: number, nowMs: number): string {
@@ -187,16 +197,16 @@ export function formatRateLimitResetLabel(
   const distance =
     density === "short"
       ? formatResetDistanceShort(resetAtMs, nowMs)
-      : formatResetDistance(resetAtMs, nowMs);
+      : formatResetDistance(resetAtMs, nowMs, isKo);
   if (distance === "now") {
     if (density === "short") return "↻ now";
-    return isKo ? "초기화 지금" : "Reset now";
+    return isKo ? "곧 초기화" : "Resets soon";
   }
   const day = formatResetDay(resetAtMs, nowMs, isKo);
   const clock = formatResetClock(resetAtMs, isKo);
   const when = day ? `${day} ${clock}` : clock;
   if (density === "short") return `↻ ${when} · ${distance}`;
-  return isKo ? `초기화 ${when} · ${distance} 후` : `Reset ${when} · in ${distance}`;
+  return isKo ? `${distance} 후 초기화 (${when})` : `Resets in ${distance} (${when})`;
 }
 
 export function transformRLProviders(

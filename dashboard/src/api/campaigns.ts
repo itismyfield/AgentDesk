@@ -107,7 +107,7 @@ const campaignHandoffSchema = z.looseObject({
   queued: z.array(z.looseObject({ node_id: z.string(), card_id: z.string(), run_id: z.string() })).default([]),
   waiting: z.array(z.looseObject({ node_id: z.string(), reason: z.string(), detail: z.string().nullable().optional() })).default([]),
 });
-const campaignGetResponseSchema = z.looseObject({ campaign: campaignSchema });
+const campaignGetResponseSchema = z.looseObject({ campaign: campaignSchema, live: nodeLiveMapSchema.default({}) });
 const campaignSaveResponseSchema = z.looseObject({
   campaign: campaignSchema,
   handoff: campaignHandoffSchema.optional(),
@@ -148,8 +148,14 @@ export async function getCampaigns(): Promise<{
 }
 
 export async function getCampaign(id: string): Promise<Campaign> {
+  return (await getCampaignDetail(id)).campaign;
+}
+
+/** One campaign with its nodes' live card state; numbered like list reads (see campaignReadMark). */
+export async function getCampaignDetail(id: string): Promise<{ campaign: Campaign; live: Record<string, CampaignNodeLive>; read: number }> {
+  const read = ++readsStarted;
   const result = await request(`/api/campaigns/${encodeURIComponent(id)}`, { suppressErrorToast: true, shareInflight: false }, campaignGetResponseSchema);
-  return result.campaign;
+  return { campaign: result.campaign, live: result.live, read };
 }
 
 /** True when the server answered with a refusal, so the save is known not to have happened. */
@@ -181,6 +187,11 @@ function saveCampaign(campaign: Campaign, patch: Partial<Pick<Campaign, "nodes" 
 
 export async function updateCampaignNode(campaign: Campaign, updated: CampaignNode): Promise<Campaign> {
   const result = await saveCampaign(campaign, { nodes: campaign.nodes.map((node) => (node.id === updated.id ? updated : node)) });
+  return result.campaign;
+}
+
+export async function addCampaignNode(campaign: Campaign, added: CampaignNode): Promise<Campaign> {
+  const result = await saveCampaign(campaign, { nodes: [...campaign.nodes, added] });
   return result.campaign;
 }
 

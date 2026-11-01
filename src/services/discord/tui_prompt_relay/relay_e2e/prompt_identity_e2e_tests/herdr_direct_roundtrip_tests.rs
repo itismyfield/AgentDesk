@@ -472,12 +472,9 @@ async fn scenario(rig: Arc<HerdrRig>, mut config: crate::config::Config) {
     use std::os::unix::fs::PermissionsExt;
     let claude_binary = h.root.path().join("bin/claude");
     std::fs::create_dir_all(claude_binary.parent().unwrap()).unwrap();
-    let claude_non_version = h
-        .root
-        .path()
-        .canonicalize()
-        .unwrap()
-        .join("claude-non-version.invoked");
+    // Canonical on both sides: macOS temp dirs sit behind the /var -> /private/var link.
+    let canonical_root = h.root.path().canonicalize().unwrap();
+    let claude_non_version = canonical_root.join("claude-non-version.invoked");
     assert!(claude_non_version.is_absolute());
     let invocation_marker =
         crate::services::process::shell_escape(claude_non_version.to_str().unwrap());
@@ -486,7 +483,8 @@ async fn scenario(rig: Arc<HerdrRig>, mut config: crate::config::Config) {
     std::fs::set_permissions(&claude_binary, std::fs::Permissions::from_mode(0o700)).unwrap();
     let claude_binary = claude_binary.canonicalize().unwrap();
     assert!(
-        claude_binary.starts_with(h.root.path()) && claude_binary.file_name().unwrap() == "claude"
+        claude_binary.starts_with(&canonical_root)
+            && claude_binary.file_name().unwrap() == "claude"
     );
     let claude_binary_guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_CLAUDE_PATH",
@@ -520,7 +518,7 @@ async fn scenario(rig: Arc<HerdrRig>, mut config: crate::config::Config) {
     rig.answer(
         "workspace.create",
         json!({"type":"workspace_created", "root_pane":{
-        "pane_id":PANE, "workspace_id":"w1", "tab_id":"w1:1", "revision":0, "cwd":h.root.path()}}),
+        "pane_id":PANE, "workspace_id":"w1", "tab_id":"w1:1", "revision":0, "cwd":canonical_root}}),
     );
     rig.show_panes(&[PANE]);
     let ready_screen = "✻ Baked for 2s\n────────────────────────────────────────────────────\n\x1b[36m❯\x1b[0m \n────────────────────────────────────────────────────\n  🤖 Opus(H) │ 7% │ MCP: 2";

@@ -45,7 +45,6 @@ pub(crate) async fn dispatch_skill_intake(
         has_nonportable_uploads: preloaded_uploads.iter().any(|upload| upload.is_local()),
         attachments: Vec::new(),
         preloaded_uploads,
-        voice_announcement: None,
         owner: None,
     };
     if let Some(permit) = admitted_local {
