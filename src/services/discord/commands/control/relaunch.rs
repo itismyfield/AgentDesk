@@ -1,6 +1,7 @@
 //! A pending launch-setting change applied to a live Claude TUI by restarting it on the session it
 //! already runs: the next turn's launch resumes that session with the new settings.
 
+use std::path::Path;
 use std::sync::LazyLock;
 
 use super::super::tmux_recreate::{Relaunch, relaunch_channel_tmux_keeping_session};
@@ -246,31 +247,25 @@ pub(super) async fn run(
         Resume::No => return Outcome::Fallback,
         Resume::Undetermined => return Outcome::Undetermined,
     };
-    // The new process's answer is the first one written past what the old process left.
-    let model = requested.model.map(|requested| {
-        let path = crate::services::claude_tui::transcript_tail::claude_transcript_path;
-        let transcript = path(
-            std::path::Path::new(&working_dir),
-            &session,
-            home.as_deref(),
-        )
-        .ok();
-        let offset = transcript
-            .as_ref()
-            .and_then(|path| std::fs::metadata(path).ok());
-        super::relaunch_confirm::ModelCheck {
-            requested,
-            offset: offset.map_or(0, |meta| meta.len()),
-            transcript,
-        }
-    });
+    let path = crate::services::claude_tui::transcript_tail::claude_transcript_path;
+    let transcript = path(Path::new(&working_dir), &session, home.as_deref()).ok();
     let tmux = target.tmux;
     match relaunch_channel_tmux_keeping_session(shared, provider, channel_id, &tmux, reset_source)
         .await
     {
         Relaunch::Relaunched => {
-            // Only a record written after the old process ended is the new process's.
+            // Only a record or answer written after the old process ended is the new process's.
             let at = super::relaunch_confirm::now();
+            let model = requested.model.map(|requested| {
+                let ended = transcript
+                    .as_ref()
+                    .and_then(|path| std::fs::metadata(path).ok());
+                super::relaunch_confirm::ModelCheck {
+                    requested,
+                    offset: ended.map_or(0, |meta| meta.len()),
+                    transcript,
+                }
+            });
             forget_attempts(channel_id);
             let notice = format!(
                 "설정 변경을 적용하려고 같은 세션 `{}`으로 TUI를 재기동합니다.",
