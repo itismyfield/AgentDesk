@@ -224,6 +224,39 @@ pub(crate) fn process_start(pid: u32) -> Result<ProcessStart, RestoreUnverified>
     })
 }
 
+/// When this host booted (`kern.boottime`), in the start identity's own units; `None` when unread.
+#[cfg(target_os = "macos")]
+pub(crate) fn boot_time() -> Option<StartIdentity> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_BOOTTIME];
+    let mut boot = libc::timeval {
+        tv_sec: 0,
+        tv_usec: 0,
+    };
+    let mut size = std::mem::size_of::<libc::timeval>();
+    // SAFETY: sysctl writes at most `size` bytes into `boot`; the result and size are checked.
+    let status = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            2,
+            (&raw mut boot).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    let whole = status == 0 && size == std::mem::size_of::<libc::timeval>();
+    let seconds = u64::try_from(boot.tv_sec)
+        .ok()
+        .filter(|s| whole && *s > 0)?;
+    let micros = u64::try_from(boot.tv_usec).ok()?;
+    Some(StartIdentity::Darwin { seconds, micros })
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn boot_time() -> Option<StartIdentity> {
+    None
+}
+
 /// The kernel's parent pid, the field `sysctl KERN_PROC_PID` reports as `e_ppid`.
 #[cfg(target_os = "macos")]
 pub(crate) fn process_parent(pid: u32) -> Result<u32, RestoreUnverified> {

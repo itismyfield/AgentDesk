@@ -57,6 +57,21 @@ pub(crate) async fn ensure(launch: &HerdrLaunchEndpoint) -> Ensured {
     ensure_at(&socket, &context).await
 }
 
+/// `ensure` in its own task, for a caller that must not wait; skipped while a start for the
+/// socket is already being judged.
+pub(crate) fn demand(launch: &HerdrLaunchEndpoint) {
+    if socket_gate(Path::new(&launch.socket_addr))
+        .try_lock()
+        .is_err()
+    {
+        return;
+    }
+    let launch = launch.clone();
+    tokio::spawn(async move {
+        ensure(&launch).await;
+    });
+}
+
 pub(crate) async fn ensure_at(socket: &Path, context: &Context) -> Ensured {
     let mut value = json!({});
     let home = match super::target(socket, &context.env) {

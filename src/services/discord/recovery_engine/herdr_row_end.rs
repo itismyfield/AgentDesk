@@ -144,12 +144,22 @@ pub(in crate::services::discord) async fn row_end_pass(
     }
 }
 
+/// Who asks for an end: a queued input, which may start the channel's server, or a sweep that
+/// only reads the row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::services::discord) enum RowEndAsk {
+    Input,
+    Sweep,
+}
+
 /// Asks for the channel's end task at once, as a hold on its queue found the row: the task waits
-/// for the asker's transition to drop, then reads the row as a pass would.
+/// for the asker's transition to drop, then reads the row as a pass would. An input's task first
+/// waits for the channel's server, before the transition lock.
 pub(in crate::services::discord) fn request_row_end(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel: ChannelId,
+    ask: RowEndAsk,
 ) {
     let current = shared.restart.current_generation;
     let picked = inflight::load_inflight_state_read_only(provider, channel.get());
@@ -162,6 +172,9 @@ pub(in crate::services::discord) fn request_row_end(
     let (shared, provider) = (shared.clone(), provider.clone());
     super::task_supervisor::spawn_observed("herdr_row_end_request", async move {
         let _ending = ending;
+        if ask == RowEndAsk::Input {
+            super::herdr_server_replaced::ensure_server(channel.get()).await;
+        }
         let transition = shared.session_transition_lock(channel).lock_owned().await;
         end_locked(&shared, &provider, picked, transition).await;
     });

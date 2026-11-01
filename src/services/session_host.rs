@@ -67,8 +67,12 @@ pub(crate) use herdr_registry::registry as herdr_endpoints;
 #[cfg(unix)]
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use herdr::launch_host::SocketHerdrLaunchHost;
+#[cfg(unix)]
+pub(crate) use herdr::launch_host::{GrantedServer, ReplacedServer};
 pub(crate) use herdr::observe::{RESTORE_RESUME_NOT_OFF, RestoreResume, RestoreUnverified};
 pub(crate) use herdr::pane_probe::{EvidenceGap, PaneOccupant, START_SLACK};
+#[cfg(unix)]
+pub(crate) use herdr::provenance::{StartIdentity, boot_time};
 pub(crate) use model::{
     HostCapabilities, HostError, HostKey, HostKind, HostKindResolution, HostKindSource,
     HostLiveness, HostMutation, HostPresence, HostRefusal, HostSessionRef, HostedRuntimeLocator,

@@ -44,7 +44,8 @@ config는 socket peer의 실제 HOME/XDG/config 환경과 실행 파일 identity
 - 사전 조건: macOS, 기본 소켓, 실행 사용자 소유이고 group·other 쓰기가 없는 디렉터리, `session.resume_agents_on_restore = false`가 명시된 config, 그 config를 통과시키는 `herdr config check`. 바이너리는 PATH, Homebrew, `/usr/local/bin`, `~/.local/bin`, `~/.cargo/bin` 순으로 찾는다. `~/.adk` 아래 사본은 쓰지 않는다. native arm64 단일 아키텍처 이미지이고 APFS에 있으며 `--version`이 0.9.3 이상 안정판이어야 한다.
 - 기동: 소켓 디렉터리 `flock`과 프로세스 안 잠금 아래에서 다시 판정한 뒤 `herdr server`를 자체 세션(setsid)으로 실행한다. 환경은 HOME·USER·LOGNAME·SHELL·고정 PATH·TERM·TMPDIR·LANG·LC_ALL·SSH_AUTH_SOCK만 넘긴다. AgentDesk가 끝나도 서버는 남는다. AgentDesk는 서버를 멈추거나 신호를 보내거나 소켓을 지우지 않는다.
 - 상한: 같은 소켓은 10분에 3번까지만 띄운다. 기록과 서버 출력은 runtime 아래 `runtime/herdr_autostart/`에 남는다.
-- 기동은 권한이 아니다. fresh launch는 새 서버에서도 기존 next-restart 판정과 create fence를 통과해야 한다. 이전 실행이 남은 채널은 서버가 떠도 지금처럼 보류된다(후속 조각).
+- 기동은 권한이 아니다. fresh launch는 새 서버에서도 기존 next-restart 판정과 create fence를 통과해야 한다.
+- 이전 실행이 남은 채널: 이전 프로세스의 inflight가 남았으면 큐 hold가 서버를 요청하고, row-end owner가 기존 종료 증명으로 끝낸다. 주기 pass·leaked-row sweep은 띄우지 않는다. inflight 없이 Bound·Pending 행이 grant와 다른 서버(또는 서버 없음) 위에 있으면 입력을 큐에 보존한 채 replaced-server owner가 서버를 띄우고 새 서버의 정책(startup proof)을 관측한 뒤 기존 증명으로 retire한다. 그 뒤 원래 입력이 한 번 실행된다. 기록된 프로세스의 pid를 재부팅 뒤 다른 프로세스가 쓰고 있어도, 서버가 바뀌었고 기록된 시작 시각이 이번 부팅보다 앞서면 끝난 것으로 본다. 판정이 서지 않으면(정책 실패, 원 provider 생존·판독 불가, 재부팅 없는 교체의 placed Pending) retire하지 않고 입력을 보존한다. 로그 `herdr_server_replaced`에 이유가 남는다.
 - 진단: health의 endpoint `autostart`에 마지막 판정(`presence`, `reason`, `action`)이 남는다. `agentdesk herdr probe-user-default`는 같은 판정을 dry run으로 보여 주며 아무것도 띄우지 않는다. 사용자가 `herdr server stop`으로 멈춘 서버도 다음 입력 때 다시 띄운다.
 
 ## 카나리 순서

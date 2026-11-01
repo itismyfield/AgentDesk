@@ -411,7 +411,7 @@ pub(crate) async fn launch_herdr_session(
                     on_blocking_thread(&host, move |host| host.current_witness(&endpoint)).await;
                 if current != Some(Ok(granted.clone())) {
                     return Err(HerdrLaunchError::Prepare(
-                        "pending grant witness changed".into(),
+                        "server_replaced: pending grant witness changed".into(),
                     ));
                 }
                 host.remember_grant(grant);
