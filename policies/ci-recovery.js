@@ -135,7 +135,7 @@ function getRepoForCard(cardId) {
 }
 
 function loadPrTracking(cardId) {
-  return prTracking.load(cardId, { fallback_state: "wait-ci" });
+  return prTracking.load(cardId);
 }
 
 function upsertPrTracking(cardId, repoId, worktreePath, branch, prNumber, headSha, state, lastError) {
@@ -857,8 +857,6 @@ var ciRecovery = {
   priority: 46,
 
   onTick1min: function() {
-    prTracking.importLegacyOnce("wait-ci");
-
     // Find canonical PR lifecycle entries that are waiting for CI.
     var cards = agentdesk.ciRecovery.listWaitingForCi();
 

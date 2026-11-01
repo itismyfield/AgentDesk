@@ -9,6 +9,7 @@ pub enum SqlGuardTarget {
     TaskDispatches,
     CardReviewState,
     AutoQueueEntries,
+    PrTracking,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +35,9 @@ impl SqlGuardViolation {
             SqlGuardTarget::CardReviewState => {
                 "Direct card_review_state mutation is blocked. Use agentdesk.reviewState.sync(cardId, state, opts) instead."
             }
+            SqlGuardTarget::PrTracking => {
+                "Direct pr_tracking mutation is blocked. Use agentdesk.prTracking methods instead."
+            }
             SqlGuardTarget::AutoQueueEntries => {
                 "Direct auto_queue_entries mutation is blocked. Use agentdesk.autoQueue.updateEntryStatus(entryId, status, source, opts) instead."
             }
@@ -58,6 +62,7 @@ impl SqlGuardViolation {
             SqlGuardTarget::TaskDispatches => "task_dispatches",
             SqlGuardTarget::CardReviewState => "card_review_state",
             SqlGuardTarget::AutoQueueEntries => "auto_queue_entries",
+            SqlGuardTarget::PrTracking => "pr_tracking",
         }
     }
 
@@ -78,6 +83,7 @@ impl SqlGuardViolation {
             SqlGuardTarget::CardReviewState => {
                 "agentdesk.reviewState.sync(cardId, state, opts) instead."
             }
+            SqlGuardTarget::PrTracking => "agentdesk.prTracking methods instead.",
             SqlGuardTarget::AutoQueueEntries => {
                 "agentdesk.autoQueue.updateEntryStatus(entryId, status, source, opts) instead."
             }
@@ -123,6 +129,17 @@ pub fn detect_core_table_write(sql: &str) -> Option<SqlGuardViolation> {
     if auto_queue_entries_mutation_re().is_match(sql) {
         return Some(SqlGuardViolation {
             target: SqlGuardTarget::AutoQueueEntries,
+        });
+    }
+
+    // A broken guard expression must reject raw SQL rather than allow writes.
+    let tracking_write = match pr_tracking_mutation_re() {
+        Ok(pattern) => pattern.is_match(sql),
+        Err(_) => true,
+    };
+    if tracking_write {
+        return Some(SqlGuardViolation {
+            target: SqlGuardTarget::PrTracking,
         });
     }
 
@@ -187,4 +204,61 @@ fn auto_queue_entries_mutation_re() -> &'static Regex {
         )
         .unwrap()
     })
+}
+
+fn pr_tracking_mutation_re() -> &'static Result<Regex, regex::Error> {
+    static RE: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?i)\b(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|MERGE\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?)\s+(?:ONLY\s+)?(?:["`]?\w+["`]?\s*\.\s*)?["`]?pr_tracking\b|\bTRUNCATE\b[\s\w.,"`]*\bpr_tracking\b"#,
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SqlGuardTarget, detect_core_table_write, pr_tracking_mutation_re};
+
+    #[test]
+    fn pr_tracking_guard_expression_compiles() {
+        assert!(pr_tracking_mutation_re().is_ok());
+    }
+
+    #[test]
+    fn pr_tracking_guard_rejects_mutations() {
+        for sql in [
+            "UPDATE public.pr_tracking SET state = 'merged'",
+            "UPDATE \"public\".\"pr_tracking\" SET state = 'merged'",
+            "MERGE INTO ONLY pr_tracking USING incoming ON false WHEN NOT MATCHED THEN INSERT (card_id) VALUES ('card')",
+            "UPDATE ONLY pr_tracking SET state = 'merged'",
+            "DELETE FROM ONLY public.pr_tracking WHERE card_id = 'card'",
+            "MERGE INTO public.pr_tracking USING incoming ON false WHEN NOT MATCHED THEN INSERT (card_id) VALUES ('card')",
+            "TRUNCATE pr_tracking",
+            "TRUNCATE TABLE \"public\".\"pr_tracking\"",
+            "TRUNCATE ONLY pr_tracking",
+            "TRUNCATE TABLE ONLY pr_tracking",
+            "TRUNCATE kanban_cards, pr_tracking",
+            "WITH removed AS (DELETE FROM pr_tracking RETURNING *) SELECT * FROM removed",
+        ] {
+            assert_eq!(
+                detect_core_table_write(sql).map(|violation| violation.target),
+                Some(SqlGuardTarget::PrTracking),
+                "unblocked tracking mutation: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn pr_tracking_guard_allows_unrelated_writes_and_reads() {
+        for sql in [
+            "UPDATE pr_tracking_archive SET state = 'merged'",
+            "UPDATE kanban_cards SET note = 'truncate' WHERE id IN (SELECT card_id FROM pr_tracking)",
+            "UPDATE kanban_cards SET title = 'x' -- truncate later\n WHERE id IN (SELECT card_id FROM pr_tracking)",
+            "TRUNCATE pr_tracking_archive",
+            "SELECT * FROM (SELECT card_id FROM public.pr_tracking) AS tracking",
+            "UPDATE kanban_cards SET title = 'renamed' WHERE id = 'card'",
+        ] {
+            assert_eq!(detect_core_table_write(sql), None, "blocked SQL: {sql}");
+        }
+    }
 }

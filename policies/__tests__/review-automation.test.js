@@ -931,3 +931,21 @@ test("review-automation does not count a previous pass verdict as an empty impro
     false
   );
 });
+
+
+test("pr-tracking forwards handoff bookkeeping to the native owner", () => {
+  const calls = [];
+  const native = {
+    markHandedOff: (...args) => calls.push(["mark", ...args]),
+    touchGeneration: (...args) => calls.push(["touch", ...args])
+  };
+  const agentdesk = { prTrackingStore: { create: () => native }, registerPolicy() {} };
+  const source = require("node:fs").readFileSync(__dirname + "/../00-pr-tracking.js", "utf8");
+  require("node:vm").runInNewContext(source, { agentdesk });
+  agentdesk.prTracking.markHandedOff("card", "failed");
+  agentdesk.prTracking.markHandedOff("card", null);
+  agentdesk.prTracking.touchGeneration("card", "g1");
+  agentdesk.prTracking.touchGeneration("card", null);
+  assert.deepEqual(calls, [["mark", "card", "failed"], ["mark", "card", "null"],
+    ["touch", "card", "g1"], ["touch", "card", ""]]);
+});

@@ -12,6 +12,9 @@ mod config_ops;
 mod db_ops;
 mod dispatch_ops;
 mod dm_reply_ops;
+mod escalation_ops;
+#[cfg(test)]
+mod escalation_owner_tests;
 mod exec_ops;
 mod http_ops;
 mod kanban_ops;
@@ -21,7 +24,14 @@ pub(crate) use kanban_ops::reopen_done_auto_queue_entries_on_pg_tx;
 mod kv_ops;
 mod log_ops;
 pub(crate) mod message_ops;
+mod orphan_recovery_ops;
+mod phase_gate_ops;
+#[cfg(test)]
+mod phase_gate_owner_tests;
 mod pipeline_ops;
+mod pr_tracking_ops;
+#[cfg(test)]
+mod pr_tracking_owner_tests;
 mod queue_ops;
 mod read_bridge;
 mod review_automation_ops;
@@ -29,6 +39,10 @@ mod review_ops;
 mod runtime_ops;
 mod timeouts_ops;
 pub(crate) mod turn_ops;
+mod unsent_notify_ops;
+
+#[cfg(test)]
+mod unsent_notify_tests;
 
 pub(crate) use db_ops::execute_policy_sql;
 pub(crate) use review_ops::{ADVANCE_REVIEW_ROUND_HINT_KEY, ensure_js_error_json};
@@ -82,15 +96,20 @@ fn register_globals_pg_only(
     kv_ops::register_kv_ops_with_reads(ctx, pg_pool.clone(), reads)?;
     review_ops::register_review_ops(ctx, pg_pool.clone())?;
     review_automation_ops::register_review_automation_ops(ctx, pg_pool.clone())?;
+    pr_tracking_ops::register_pr_tracking_ops(ctx, pg_pool.clone())?;
     queue_ops::register_queue_ops(ctx, pg_pool.clone())?;
     auto_queue_ops::register_auto_queue_ops(ctx, pg_pool.clone(), supervisor_bridge.clone())?;
     runtime_ops::register_runtime_ops(ctx, pg_pool.clone(), supervisor_bridge)?;
+    orphan_recovery_ops::register_orphan_recovery_ops(ctx)?;
     message_ops::register_message_ops(ctx, pg_pool.clone())?;
+    escalation_ops::register_escalation_ops(ctx, pg_pool.clone())?;
     exec_ops::register_exec_ops(ctx)?;
+    phase_gate_ops::register_phase_gate_ops(ctx, pg_pool.clone())?;
     pipeline_ops::register_pipeline_ops(ctx, pg_pool.clone())?;
     dm_reply_ops::register_dm_reply_ops(ctx, pg_pool.clone())?;
     agent_ops::register_agent_ops(ctx, pg_pool.clone())?;
     timeouts_ops::register_timeouts_ops(ctx, pg_pool.clone())?;
+    unsent_notify_ops::register_unsent_notify_ops(ctx, pg_pool.clone())?;
     turn_ops::register_turn_ops(ctx, pg_pool)?;
 
     Ok(())
