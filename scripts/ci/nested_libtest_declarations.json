@@ -158,6 +158,21 @@
           "ignored_args": 1
         }
       ]
+    },
+    {
+      "id": "services::session_host::herdr::autostart::real_tests::spawn::t7638_helper_ensure",
+      "source": "src/services/session_host/herdr/autostart/spawn_real_tests.rs",
+      "platform": "linux",
+      "parents": [],
+      "calls": [
+        {
+          "source": "src/services/session_host/herdr/autostart/spawn_real_tests.rs",
+          "function": "helper",
+          "stdout": "piped",
+          "sha256": "53c2989cadc3cc998e8479d87357998320ebb46f6e69ce216e3421c10529ad75",
+          "ignored_args": 1
+        }
+      ]
     }
   ]
 }
