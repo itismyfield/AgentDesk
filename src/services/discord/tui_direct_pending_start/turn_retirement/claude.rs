@@ -12,6 +12,8 @@ use super::{Retirement, retire_channel};
 use crate::services::discord::tui_direct_pending_start::channel_lock;
 use crate::services::provider::ProviderKind;
 use crate::services::tui_o::shadow::{ShadowProvider, SourceBinding, SourceId};
+use crate::services::tui_o::store::rotation::TakeoverEnd;
+use crate::services::tui_o::store::spool::source_key;
 use crate::services::tui_o::store::{InitOrigin, OStore};
 use crate::services::tui_o::turn_mode::{self, TurnConfig};
 use crate::services::tui_o::writer::binding::{
@@ -19,11 +21,19 @@ use crate::services::tui_o::writer::binding::{
 };
 
 /// The source a Claude takeover's init committed; None for an init of another origin.
+fn store() -> Option<OStore> {
+    crate::config::runtime_root().and_then(|root| OStore::existing(&root))
+}
+
+/// The same transcript file and session; a reboot may renumber the device.
+fn same(bound: &SourceId, source: &SourceId) -> bool {
+    (bound.path == source.path && bound.ino == source.ino) && bound.session_id == source.session_id
+}
+
 pub(in crate::services::discord) fn takeover_source(
     channel: u64,
 ) -> Result<Option<SourceBinding>, String> {
-    let store = crate::config::runtime_root().and_then(|root| OStore::existing(&root));
-    let Some(store) = store else {
+    let Some(store) = store() else {
         return Ok(None);
     };
     let origin = store.read_init_origin(channel);
@@ -47,16 +57,12 @@ pub(in crate::services::discord) fn takeover_source(
 /// after a resume binds the same transcript under another nonce.
 fn taken_nonce(channel: u64, source: &SourceId) -> Result<String, String> {
     let events = BindingLog.binding_events_since(channel, 0)?;
-    let same = |bound: &SourceId| {
-        (bound.path == source.path && bound.ino == source.ino)
-            && bound.session_id == source.session_id
-    };
     let first = events.into_iter().find(|event| match &event.record {
         BindingRecord::Bound {
             new: BindingTarget::Source(bound),
             ..
         }
-        | BindingRecord::Resolved { source: bound, .. } => same(bound),
+        | BindingRecord::Resolved { source: bound, .. } => same(bound, source),
         _ => false,
     });
     first
@@ -73,8 +79,49 @@ fn cleared(channel: u64, source: &SourceId, nonce: &str) -> bool {
     })
 }
 
+/// A hop O's rotation proved the taken transcript's session left.
+fn hopped(channel: u64, source: &SourceId) -> bool {
+    let rotation = store().map(|store| store.peek_rotation(channel));
+    rotation.and_then(Result::ok).is_some_and(|rotation| {
+        let next = rotation.successors.get(&source_key(source));
+        next.is_some_and(|next| next.proof.is_some())
+    })
+}
+
+fn kept_end(channel: u64, source: &SourceId, nonce: &str) -> bool {
+    let end = store().and_then(|store| store.takeover_end(channel).ok().flatten());
+    end.is_some_and(|end| same(&end.source, source) && end.nonce == nonce)
+}
+
+/// A failure to keep it only leaves the live evidence, read again on the next try.
+fn keep_end(channel: u64, source: &SourceId, nonce: &str, basis: &str) {
+    let end = TakeoverEnd {
+        source: source.clone(),
+        nonce: nonce.into(),
+        basis: basis.into(),
+    };
+    if let Some(Err(error)) = store().map(|store| store.keep_takeover_end(channel, &end)) {
+        tracing::warn!(
+            channel,
+            ?error,
+            "[tui_o] a Claude takeover's end was not kept"
+        );
+    }
+}
+
+/// Keeps the end of execution `nonce` when it is the one a Claude takeover of `channel` took.
+pub(crate) fn note_ended(channel: u64, nonce: &str, basis: &str) {
+    let Ok(Some(takeover)) = takeover_source(channel) else {
+        return;
+    };
+    if taken_nonce(channel, &takeover.source).is_ok_and(|taken| taken == nonce) {
+        keep_end(channel, &takeover.source, nonce, basis);
+    }
+}
+
 /// Confirms a selected takeover channel once the taken execution ended — its transcript Idle, a
-/// confirmed clear of it, or `herdr_retired` naming it — and Legacy holds no unfinished turn.
+/// kept end, a confirmed clear, `herdr_retired` naming it or a proven hop — and Legacy holds no
+/// unfinished turn. A live end is kept first, so a later execution or a restart cannot erase it.
 pub(in crate::services::discord) fn confirm_takeover(
     channel: u64,
     config: &TurnConfig,
@@ -92,15 +139,29 @@ pub(in crate::services::discord) fn confirm_takeover(
     if turn_mode::transcript_turns(channel) {
         return Confirmation::Confirmed;
     }
-    if let Some(detail) = unfinished(&provider, channel) {
-        return Confirmation::Retry(detail);
-    }
     let nonce = match taken_nonce(channel, &takeover.source) {
         Ok(nonce) => nonce,
         Err(detail) => return Confirmation::Retry(detail),
     };
     let source = &takeover.source;
-    if ended(takeover).is_err() && !cleared(channel, source, &nonce) && !herdr_retired(&nonce) {
+    let mut gone = kept_end(channel, source, &nonce);
+    if !gone {
+        let basis = if cleared(channel, source, &nonce) {
+            Some("confirmed_clear")
+        } else if herdr_retired(&nonce) {
+            Some("herdr_retired")
+        } else {
+            hopped(channel, source).then_some("proven_hop")
+        };
+        if let Some(basis) = basis {
+            keep_end(channel, source, &nonce, basis);
+        }
+        gone = basis.is_some() || ended(takeover).is_ok();
+    }
+    if let Some(detail) = unfinished(&provider, channel) {
+        return Confirmation::Retry(detail);
+    }
+    if !gone {
         return Confirmation::Retry("the taken execution has not ended".into());
     }
     match retire_channel(&provider, channel) {
@@ -157,6 +218,11 @@ impl Drop for Running {
 /// Owns a takeover channel's confirmation: retried on each bind and every few seconds until it is
 /// confirmed or unselected, then the channel joins the turn supervisor.
 pub(in crate::services::discord) fn spawn_confirm(channel: u64, config: TurnConfig) {
+    let pool = crate::db::cancel_tombstones::global_pool().cloned();
+    spawn_confirm_with(channel, config, pool);
+}
+
+fn spawn_confirm_with(channel: u64, config: TurnConfig, pool: Option<PgPool>) {
     let Ok(runtime) = tokio::runtime::Handle::try_current() else {
         tracing::warn!(
             channel,
@@ -171,7 +237,6 @@ pub(in crate::services::discord) fn spawn_confirm(channel: u64, config: TurnConf
     {
         return;
     }
-    let pool = crate::db::cancel_tombstones::global_pool().cloned();
     runtime.spawn(async move {
         let _running = Running(channel);
         let mut binds =
@@ -224,6 +289,19 @@ pub(in crate::services::discord) fn spawn_confirm(channel: u64, config: TurnConf
     });
 }
 
+/// Whether a selected takeover channel confirms now with no Herdr row read as retired.
+#[cfg(test)]
+pub(crate) fn confirmed_now(channel: u64) -> bool {
+    let config = TurnConfig {
+        channels: [channel].into(),
+        all_owned: Some(false),
+    };
+    let Ok(Some(takeover)) = takeover_source(channel) else {
+        return false;
+    };
+    confirm_takeover(channel, &config, &takeover, |_| false) == Confirmation::Confirmed
+}
+
 #[cfg(test)]
 #[path = "claude_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -28,6 +28,7 @@ use crate::services::tui_o::writer::late_adopt;
 /// Binds as the hook writer would; reads are counted so a bind can land after the baseline.
 struct Log {
     channel: u64,
+    provider: ShadowProvider,
     events: Mutex<Vec<BindingEvent>>,
     notice: watch::Sender<u64>,
     reads: AtomicUsize,
@@ -35,8 +36,13 @@ struct Log {
 
 impl Log {
     fn new(channel: u64) -> Arc<Self> {
+        Self::of(channel, Codex)
+    }
+
+    fn of(channel: u64, provider: ShadowProvider) -> Arc<Self> {
         Arc::new(Self {
             channel,
+            provider,
             events: Mutex::default(),
             notice: watch::channel(0).0,
             reads: AtomicUsize::new(0),
@@ -58,7 +64,7 @@ impl Log {
         events.push(BindingEvent {
             seq,
             channel_id: self.channel,
-            provider: Codex,
+            provider: self.provider,
             tmux_session: "takeover".into(),
             execution_nonce: "takeover".into(),
             record: BindingRecord::Bound {
@@ -144,10 +150,14 @@ impl<H: HostIo> HostIo for Late<H> {
 
 /// Each of `channels` reserved for late adoption as the boot seeds it on the home.
 fn reserve(channels: &[u64]) -> test_override::ChannelsGuard {
+    reserve_as("codex", channels)
+}
+
+fn reserve_as(provider: &str, channels: &[u64]) -> test_override::ChannelsGuard {
     let agents: Vec<_> = (channels.iter())
         .map(|id| {
             serde_json::json!({"id": format!("w{id}"), "name": "W",
-            "channels": {"codex": {"id": id.to_string(), "runtime": "tui"}}})
+            "channels": {provider: {"id": id.to_string(), "runtime": "tui"}}})
         })
         .collect();
     let config: Config = serde_json::from_value(serde_json::json!({
@@ -319,6 +329,106 @@ async fn gateway_takeover() {
     assert!(
         matches!(claim.join().unwrap(), Ok(true)),
         "O owns the body: Legacy sends nothing"
+    );
+    pool.close().await;
+    fixture.drop().await;
+}
+
+/// A Claude takeover commits while a new Discord turn holds the real mailbox and Legacy's inflight
+/// row; the body of the assistant record that follows is O's and Legacy sends none of it.
+#[test]
+fn claude_takeover_commits_while_a_discord_turn_holds_the_mailbox_and_its_row_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(busy_takeover());
+}
+
+async fn busy_takeover() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    use crate::services::provider::{CancelToken, ProviderKind};
+    use crate::services::tui_o::store::InitOrigin;
+    use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+    let fixture = TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate().await;
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let local = crate::services::cluster::node_registry::SELF_INSTANCE_ID.get();
+    let local = local.map_or("takeover-local", String::as_str);
+    let channel = 64_700_511;
+    let log = Log::of(channel, Claude);
+    let io = Late {
+        host: test_host::over(Arc::clone(&shared), Duration::ZERO, Some(local)),
+        log: Arc::clone(&log),
+    };
+    let stores = tempfile::tempdir().unwrap();
+    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, stores.path());
+    let store = store.unwrap().unwrap();
+    let _reserved = reserve_as("claude", &[channel]);
+    let gate = OwnershipGate::default();
+    gate.acquired();
+
+    let token = Arc::new(CancelToken::new());
+    let (owner, message) = (UserId::new(1), MessageId::new(10));
+    let claimed = crate::services::discord::mailbox_try_start_turn(
+        &shared,
+        ChannelId::new(channel),
+        token,
+        owner,
+        message,
+    );
+    assert!(claimed.await, "the new Discord turn claims the mailbox");
+    let inflight = crate::services::discord::inflight::inflight_runtime_root().unwrap();
+    let row = crate::services::discord::inflight::inflight_state_path(
+        &inflight,
+        &ProviderKind::Claude,
+        channel,
+    );
+    std::fs::create_dir_all(row.parent().unwrap()).unwrap();
+    std::fs::write(&row, "{}").unwrap();
+    let busy = || async { io.legacy_busy(channel).await };
+    assert!(busy().await);
+    assert_eq!(io.local_custody(channel, Claude), Ok(Custody::Row));
+
+    let transcripts = tempfile::tempdir().unwrap();
+    let path = transcripts.path().join("claude-busy.jsonl");
+    let session = "c1a0de00-0000-4000-8000-000000700511";
+    let text = [
+        json!({"type": "mode", "mode": "normal", "sessionId": session}),
+        json!({"type": "user", "sessionId": session, "uuid": "u1",
+            "message": {"role": "user", "content": "hi"}}),
+    ];
+    let text: String = text.iter().map(|line| format!("{line}\n")).collect();
+    std::fs::write(&path, text).unwrap();
+    let taken = source_id_for(session, &path).unwrap();
+    let adopting = candidate(channel);
+    let activated = late_adopt::activate(&io, channel, Claude, &store, &*log, &adopting, &gate);
+    let joined = async { tokio::join!(activated, log.bind_after(0, &taken)) };
+    let committed = tokio::time::timeout(Duration::from_secs(20), joined).await;
+    assert!(
+        matches!(committed, Ok((true, ()))),
+        "busy and a Row do not stop the takeover"
+    );
+    assert_eq!(init_sources(&store, channel), [(taken.clone(), 0)]);
+    let origin = store.read_init_origin(channel).unwrap();
+    assert_eq!(origin, InitOrigin::LateClaudeTakeover);
+    assert!(busy().await, "the Discord turn still holds the mailbox");
+    assert_eq!(io.local_custody(channel, Claude), Ok(Custody::Row));
+
+    let answer = json!({"type": "assistant", "sessionId": session, "uuid": "a1",
+        "message": {"id": "m1", "role": "assistant",
+        "content": [{"type": "text", "text": "done"}]}});
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    std::io::Write::write_all(&mut file, format!("{answer}\n").as_bytes()).unwrap();
+    let claim = o_owns_tui_output_for_channel_reserving(channel, Some(ClaudeTui));
+    assert!(
+        matches!(claim.map(|claim| claim.owned), Ok(true)),
+        "O owns the answer's body: Legacy sends nothing"
     );
     pool.close().await;
     fixture.drop().await;

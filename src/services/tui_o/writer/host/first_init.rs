@@ -138,6 +138,7 @@ pub(super) async fn start<I: HostIo>(
                                 legacy,
                                 bound: (source, seq),
                                 late: false,
+                                owed: Vec::new(),
                             };
                             let retried = deferred::retry(waiting, refused, seq);
                             let retried = unless_stopped(stopping, retried).await;

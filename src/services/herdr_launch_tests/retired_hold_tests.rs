@@ -150,3 +150,34 @@ async fn retired_launch_owner_mismatch_keeps_n1_hold_and_row_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+/// A successor launched before a Claude takeover's confirmation read the retired row keeps that
+/// end, so the takeover still confirms once the row names only the successor.
+#[tokio::test(flavor = "multi_thread")]
+async fn retired_launch_keeps_a_claude_takeovers_end_before_its_successor_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let root = crate::config::runtime_root().unwrap();
+    let channel: u64 = CHANNEL.parse().unwrap();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    crate::services::discord::seed_claude_takeover(&root, channel, "takeover-n1");
+    let n1 = record(&owner(CHANNEL), "takeover-n1", HostedState::Retired);
+    seed_row(&pool, Some(wire(&n1))).await;
+    let host = Arc::new(FakeHost::created("fresh-pane"));
+    let result = launch_herdr_session(&pool, launch(Some(endpoint())), command, host).await;
+    assert!(
+        matches!(result, Ok(HerdrLaunchOutcome::Launched { .. })),
+        "{result:?}"
+    );
+    let HostedRecord::Known(n2) = decoded(stored(&pool).await) else {
+        panic!("the successor is missing")
+    };
+    assert_ne!(n2.execution_nonce, n1.execution_nonce);
+    assert!(
+        crate::services::discord::claude_takeover_confirmed_now(channel),
+        "the end kept before the overwrite confirms the takeover"
+    );
+    drop(crate::services::tui_o::turn_mode::TestConfirmation::confirmed(channel));
+    pool.close().await;
+    db.drop().await;
+}

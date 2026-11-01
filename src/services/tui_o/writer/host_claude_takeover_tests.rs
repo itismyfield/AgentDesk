@@ -341,3 +341,76 @@ async fn late_claude_fallback_boundary_does_not_take_a_bind_from_before_the_firs
     assert_eq!(adoption(CH), Adoption::Deferred);
     assert!(!harness.store.has_channel_dir(CH));
 }
+
+/// The old transcript answered past Legacy's frontier, or delivered when `delivered` but with its
+/// commit taken; Legacy then moves to a cleared transcript and delivers its whole turn.
+async fn moved_on(channel: u64, delivered: bool) -> (Reserved, SourceId, u64) {
+    let head = prompted();
+    let old = [head.clone(), answer("msg_0", "old"), turn_end()].concat();
+    let f = reserved(channel, |h, binds| {
+        let path = h._runtime.path().join("old.jsonl");
+        std::fs::write(&path, &old).unwrap();
+        binds.source(h._runtime.path(), "n-old", &path);
+        path
+    })
+    .await;
+    let frontier = if delivered { old.len() } else { head.len() };
+    f.legacy.frontier.store(frontier as u64, Ordering::SeqCst);
+    // A new Discord turn takes the commit of the old transcript Legacy delivered and sampled.
+    if delivered {
+        let io = f.io.clone();
+        test_hook::set(channel, Step::AfterFence, move || {
+            io.busy.store(true, Ordering::SeqCst);
+            Err("the new turn claimed the mailbox".into())
+        });
+    }
+    settle().await;
+    assert_eq!(adoption(channel), Adoption::Deferred);
+    let new = [prompted(), answer("msg_1", "new"), turn_end()].concat();
+    let path = f.file("new.jsonl", &new);
+    let moved = Legacy {
+        path: path.clone(),
+        frontier: AtomicU64::new(new.len() as u64),
+    };
+    *f.io.legacy.lock().unwrap() = Some(Arc::new(moved));
+    let source = f.binds.source(f.root(), "n-new", &path);
+    f.io.busy.store(false, Ordering::SeqCst);
+    settle().await;
+    settle().await;
+    (f, source, new.len() as u64)
+}
+
+/// With the old transcript's answer undelivered, the cleared one finishing its turn and Legacy
+/// delivering it to EOF does not let O start the old one at EOF: the channel stays Legacy's.
+#[tokio::test(start_paused = true)]
+async fn late_claude_fallback_keeps_an_undelivered_old_transcript_owed_after_the_new_turn() {
+    const CH: u64 = 63_761_906;
+    let (f, _, _) = moved_on(CH, false).await;
+    assert_eq!(
+        adoption(CH),
+        Adoption::Deferred,
+        "{:?}",
+        f.io.alarms.released()
+    );
+    assert!(!f.harness.store.has_channel_dir(CH));
+}
+
+/// The old transcript sampled delivered settles its obligation, so the quiet handoff commits the
+/// cleared one at its EOF once Legacy delivered its turn.
+#[tokio::test(start_paused = true)]
+async fn late_claude_fallback_commits_once_the_old_transcript_was_proven_delivered() {
+    const CH: u64 = 63_761_907;
+    let (f, source, len) = moved_on(CH, true).await;
+    assert_eq!(
+        adoption(CH),
+        Adoption::Committed,
+        "{:?}",
+        f.io.alarms.released()
+    );
+    let init = f.harness.store.read_init(CH).unwrap().unwrap();
+    let new = init
+        .sources
+        .iter()
+        .find(|pinned| pinned.source_id == source);
+    assert_eq!(new.map(|pinned| pinned.delivery_start), Some(len));
+}

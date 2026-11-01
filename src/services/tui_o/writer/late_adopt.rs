@@ -214,9 +214,9 @@ pub(crate) async fn activate<I: HostIo>(
                 }
             }
             short = 0;
-            let bound = match rebased.take() {
-                Some(rebased) => Some(rebased.new),
-                None => baseline(&events, boundary.baseline),
+            let (bound, owed) = match rebased.take() {
+                Some(rebased) => (Some(rebased.new), rebased.owed),
+                None => (baseline(&events, boundary.baseline), Vec::new()),
             };
             if let Some(bound) = bound {
                 let seq = events.last().map_or(0, |event| event.seq);
@@ -231,6 +231,7 @@ pub(crate) async fn activate<I: HostIo>(
                     legacy: io.legacy(),
                     bound,
                     late: true,
+                    owed,
                 };
                 let retried = deferred::retry(
                     waiting,

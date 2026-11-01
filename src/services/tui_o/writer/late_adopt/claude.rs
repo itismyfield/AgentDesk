@@ -100,6 +100,24 @@ pub(in crate::services::tui_o::writer) struct Sample {
     pub(in crate::services::tui_o::writer) sends: (u64, u64),
 }
 
+/// A source a rebase left without proof that Legacy delivered it, with the sample taken before.
+#[derive(Clone, Debug)]
+pub(in crate::services::tui_o::writer) struct Owed {
+    pub(in crate::services::tui_o::writer) old: (SourceId, u64),
+    pub(in crate::services::tui_o::writer) sample: Option<Sample>,
+}
+
+impl Owed {
+    /// Only the old source's own proof settles it; the current source's delivery says nothing.
+    pub(in crate::services::tui_o::writer) fn settled(
+        &self,
+        events: &[BindingEvent],
+        candidate: &Candidate,
+    ) -> Result<Floor, String> {
+        old_source_done(self.sample.as_ref(), &self.old, events, candidate)
+    }
+}
+
 /// The execution nonce of the last bind of `source`.
 pub(in crate::services::tui_o::writer) fn nonce_of(
     events: &[BindingEvent],

@@ -11,7 +11,7 @@ use super::activation;
 use super::adoption::{self, At, Hold, LegacyEpoch, LegacyView, ReadVersion, Refused, Snapshot};
 use super::binding::{BindingEvent, BindingEvents};
 use super::host::{Custody, FencedFacts, HostIo, release, stop, until_owned};
-use super::late_adopt::claude::{self, Floor, Sample};
+use super::late_adopt::claude::{self, Floor, Owed, Sample};
 use crate::services::tui_o::channel_policy::{Adoption, Candidate};
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
@@ -42,6 +42,8 @@ pub(super) struct Waiting<'a, I: HostIo> {
     /// boundary, as of that log entry.
     pub(super) bound: (SourceId, u64),
     pub(super) late: bool,
+    /// Earlier sources a rebase left unproven; none commits until each is settled.
+    pub(super) owed: Vec<Owed>,
 }
 
 /// How a deferred handoff ends.
@@ -53,10 +55,11 @@ pub(super) enum Retried {
     Rebase(Rebased),
 }
 
-/// The source bound now and the takeover floor its predecessor's delivery proof gives, if any.
+/// The source bound now and the takeover floor its predecessors' delivery proofs give, if any.
 pub(super) struct Rebased {
     pub(super) new: (SourceId, u64),
     pub(super) floor: Result<Floor, String>,
+    pub(super) owed: Vec<Owed>,
 }
 
 /// How the first look at a channel that already holds output ends.
@@ -333,7 +336,10 @@ pub(super) async fn retry<I: HostIo>(
                 .map_err(|error| Refused::retry(format!("late pin task: {error}")))
                 .and_then(|pinned| pinned);
                 sample = sampled(&waiting, &observed, sends, &pinned).or(sample);
-                pinned
+                pinned.and_then(|snapshot| match owing(&waiting, &observed) {
+                    Some(detail) => Err(Refused::retry(detail)),
+                    None => Ok(snapshot),
+                })
             } else {
                 pin(
                     Arc::clone(&waiting.legacy),
@@ -619,14 +625,41 @@ fn rebased<I: HostIo>(
     }
     let detail = rotation(waiting, events)?;
     let new = super::late_adopt::codex::bound_after(events, waiting.bound.1)?;
-    let floor = claude::old_source_done(sample, &waiting.bound, events, waiting.candidate);
+    let candidate = waiting.candidate;
+    let mut owed: Vec<Owed> = (waiting.owed.iter())
+        .filter(|owed| owed.settled(events, candidate).is_err())
+        .cloned()
+        .collect();
+    let mut floor = claude::old_source_done(sample, &waiting.bound, events, candidate);
+    if floor.is_err() {
+        let old = waiting.bound.clone();
+        let sample = sample.cloned();
+        owed.push(Owed { old, sample });
+    } else if let Some(earlier) = owed.first() {
+        floor = Err(format!(
+            "{} still owes delivery",
+            earlier.old.0.path.display()
+        ));
+    }
     tracing::info!(
         channel = waiting.channel,
         detail,
         proven = floor.is_ok(),
         "[tui_o] late reservation rebases onto the new source"
     );
-    Some(Rebased { new, floor })
+    Some(Rebased { new, floor, owed })
+}
+
+/// The first earlier source still unsettled, which a commit of the current one would orphan.
+fn owing<I: HostIo>(waiting: &Waiting<'_, I>, events: &[BindingEvent]) -> Option<String> {
+    let owed = waiting.owed.iter();
+    owed.map(|owed| (owed, owed.settled(events, waiting.candidate)))
+        .find_map(|(owed, settled)| {
+            let path = owed.old.0.path.display();
+            settled
+                .err()
+                .map(|detail| format!("{path} still owes delivery: {detail}"))
+        })
 }
 
 /// The current source as delivered through Legacy's late pin, with no body send in flight when
