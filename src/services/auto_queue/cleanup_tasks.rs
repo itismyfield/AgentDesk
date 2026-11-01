@@ -1366,10 +1366,7 @@ pub(crate) async fn perform_card_rollback_on_tx(
     .await
     .map_err(|error| format!("reset card review state {card_id}: {error}"))?;
 
-    sqlx::query("DELETE FROM kv_meta WHERE key = $1 OR key = $2")
-        .bind(format!("pm_pending:{card_id}"))
-        .bind(format!("pm_decision_sent:{card_id}"))
-        .execute(&mut **tx)
+    crate::services::escalation_cooldown::clear_on_pg_tx(tx, card_id)
         .await
         .map_err(|error| format!("clear card escalation state {card_id}: {error}"))?;
 

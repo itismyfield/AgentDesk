@@ -12,6 +12,9 @@ mod config_ops;
 mod db_ops;
 mod dispatch_ops;
 mod dm_reply_ops;
+mod escalation_ops;
+#[cfg(test)]
+mod escalation_owner_tests;
 mod exec_ops;
 mod http_ops;
 mod kanban_ops;
@@ -88,6 +91,7 @@ fn register_globals_pg_only(
     auto_queue_ops::register_auto_queue_ops(ctx, pg_pool.clone(), supervisor_bridge.clone())?;
     runtime_ops::register_runtime_ops(ctx, pg_pool.clone(), supervisor_bridge)?;
     message_ops::register_message_ops(ctx, pg_pool.clone())?;
+    escalation_ops::register_escalation_ops(ctx, pg_pool.clone())?;
     exec_ops::register_exec_ops(ctx)?;
     pipeline_ops::register_pipeline_ops(ctx, pg_pool.clone())?;
     dm_reply_ops::register_dm_reply_ops(ctx, pg_pool.clone())?;
