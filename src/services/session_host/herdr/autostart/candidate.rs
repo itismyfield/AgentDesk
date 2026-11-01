@@ -116,8 +116,9 @@ pub(crate) fn supported_version(output: &str) -> Option<String> {
     supported_herdr_server(version, HERDR_PROTOCOL).then(|| version.into())
 }
 
-/// `herdr --version` run with an empty environment, bounded in time and output.
-fn version_output(path: &Path) -> Result<String, String> {
+/// `herdr --version` run with an empty environment; it must exit 0 within the deadline with its
+/// whole output inside the limit.
+pub(crate) fn version_output(path: &Path) -> Result<String, String> {
     use std::io::Read;
     let mut child = std::process::Command::new(path)
         .arg("--version")
@@ -127,21 +128,37 @@ fn version_output(path: &Path) -> Result<String, String> {
         .stderr(std::process::Stdio::null())
         .spawn()
         .map_err(|e| format!("--version did not run: {e}"))?;
+    let stdout = child.stdout.take().ok_or("--version has no stdout")?;
+    let (sent, read) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut output = Vec::new();
+        let result = stdout
+            .take(VERSION_OUTPUT_LIMIT as u64 + 1)
+            .read_to_end(&mut output);
+        let _ = sent.send(result.map(|_| output));
+    });
     let deadline = Instant::now() + VERSION_TIMEOUT;
-    while child.try_wait().map_err(|e| e.to_string())?.is_none() {
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            break status;
+        }
         if Instant::now() > deadline {
             let _ = child.kill();
             let _ = child.wait();
             return Err("--version timed out".into());
         }
         std::thread::sleep(Duration::from_millis(20));
+    };
+    let output = read
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .map_err(|_| "--version output did not end".to_string())?
+        .map_err(|e| e.to_string())?;
+    // An overlong output closes the pipe early, so its writer may also die of SIGPIPE.
+    if output.len() > VERSION_OUTPUT_LIMIT {
+        return Err("--version printed too much".into());
     }
-    let mut output = Vec::new();
-    if let Some(stdout) = child.stdout.take() {
-        stdout
-            .take(VERSION_OUTPUT_LIMIT as u64)
-            .read_to_end(&mut output)
-            .map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err(format!("--version exited {status}"));
     }
     Ok(String::from_utf8_lossy(&output).into_owned())
 }

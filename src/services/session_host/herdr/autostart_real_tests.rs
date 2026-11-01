@@ -13,15 +13,25 @@ use super::*;
 type Server = (Child, Vec<(String, String)>, Vec<String>);
 
 /// One isolated HOME with the scratch herdr installed where the user would have it.
-struct Home {
-    _dir: tempfile::TempDir,
-    home: PathBuf,
-    bin: PathBuf,
+pub(super) struct Home {
+    dir: tempfile::TempDir,
+    pub home: PathBuf,
+    pub bin: PathBuf,
     servers: Vec<Server>,
+    /// Other processes this test started (launchers, helpers); killed by pid on drop.
+    pub others: Vec<Child>,
+}
+
+/// What an assessment or a refused start must leave as it was.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct State {
+    config: Option<Vec<u8>>,
+    socket: Option<u64>,
+    pids: Vec<u32>,
 }
 
 impl Home {
-    fn new(config: &str) -> Self {
+    pub fn new(config: &str) -> Self {
         let source =
             PathBuf::from(std::env::var("ADK_TEST_HERDR_BIN").expect("ADK_TEST_HERDR_BIN"));
         let dir = tempfile::Builder::new()
@@ -35,18 +45,23 @@ impl Home {
         std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
         std::fs::copy(source, &bin).unwrap();
         Self {
-            _dir: dir,
+            dir,
             home,
             bin,
             servers: Vec::new(),
+            others: Vec::new(),
         }
     }
 
-    fn socket(&self) -> PathBuf {
+    pub fn socket(&self) -> PathBuf {
         self.home.join(".config/herdr/herdr.sock")
     }
 
-    fn command(&self, env: &[(String, String)], args: &[String]) -> Command {
+    pub fn records(&self) -> PathBuf {
+        self.dir.path().join("records")
+    }
+
+    pub fn command(&self, env: &[(String, String)], args: &[String]) -> Command {
         let mut command = Command::new(&self.bin);
         command
             .env_clear()
@@ -62,49 +77,61 @@ impl Home {
     }
 
     /// Starts `herdr <args> server` and waits until `listens` accepts; returns the server pid.
-    fn serve(&mut self, env: &[(&str, &str)], args: &[&str], listens: &Path) -> u32 {
+    pub fn serve(&mut self, env: &[(&str, &str)], args: &[&str], listens: &Path) -> u32 {
         let env: Vec<(String, String)> = env
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
         let child = self.command(&env, &args).spawn().unwrap();
-        let ready = Instant::now() + Duration::from_secs(10);
-        while UnixStream::connect(listens).is_err() {
-            assert!(Instant::now() < ready, "no server at {}", listens.display());
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        wait_for(listens);
         let pid = child.id();
         self.servers.push((child, env, args));
         pid
     }
 
-    async fn assess(&self) -> Value {
-        assess(
-            &self.socket(),
-            Environment {
-                home: Some(self.home.clone()),
-                // PATH comes before the known install dirs, so this HOME's copy is chosen.
-                path: Some(
-                    format!("{}:/usr/bin:/bin", self.bin.parent().unwrap().display()).into(),
-                ),
-                excluded: vec![self.home.join(".adk")],
-            },
-        )
-        .await
+    /// PATH comes before the known install dirs, so this HOME's copy is chosen.
+    pub fn env(&self) -> Environment {
+        Environment {
+            home: Some(self.home.clone()),
+            path: Some(format!("{}:/usr/bin:/bin", self.bin.parent().unwrap().display()).into()),
+            excluded: vec![self.home.join(".adk")],
+        }
     }
 
-    /// herdr processes whose HOME is this one: an assessment must leave this set unchanged.
-    fn herdr_pids(&self) -> Vec<u32> {
+    async fn assess(&self) -> Value {
+        assess(&self.socket(), self.env()).await
+    }
+
+    /// herdr processes whose HOME is this one. A scan error or a herdr whose environment cannot
+    /// be read fails the test instead of looking like no process.
+    pub fn herdr_pids(&self) -> Vec<u32> {
         let home = format!("HOME={}", self.home.display());
-        let mut pids: Vec<u32> = presence::PresenceOs::herdr_processes(&presence::HostOs)
-            .unwrap_or_default()
+        let processes = presence::PresenceOs::herdr_processes(&presence::HostOs)
+            .expect("the process table must be readable to judge a start");
+        let mut pids: Vec<u32> = processes
             .into_iter()
-            .filter(|p| p.environ.as_ref().is_some_and(|env| env.contains(&home)))
+            .filter(|p| {
+                p.environ
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("environment of herdr {} unreadable", p.pid))
+                    .contains(&home)
+            })
             .map(|p| p.pid)
             .collect();
         pids.sort_unstable();
         pids
+    }
+
+    pub fn state(&self) -> State {
+        use std::os::unix::fs::MetadataExt;
+        State {
+            config: std::fs::read(self.home.join(".config/herdr/config.toml")).ok(),
+            socket: std::fs::symlink_metadata(self.socket())
+                .ok()
+                .map(|m| m.ino()),
+            pids: self.herdr_pids(),
+        }
     }
 }
 
@@ -115,27 +142,53 @@ impl Drop for Home {
             let mut stop: Vec<String> = args.iter().filter(|a| *a != "server").cloned().collect();
             stop.extend(["server".into(), "stop".into()]);
             let _ = self.command(&env, &stop).status();
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while child.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(50));
-            }
+            settle(&mut child);
+        }
+        // A server AgentDesk started here is not a child of this test; stop it by its socket.
+        let _ = self
+            .command(&[], &["server".into(), "stop".into()])
+            .status();
+        for mut child in self.others.drain(..) {
             let _ = child.kill();
             let _ = child.wait();
+        }
+        let home = format!("HOME={}", self.home.display());
+        let leftover = presence::PresenceOs::herdr_processes(&presence::HostOs).unwrap_or_default();
+        for pid in leftover
+            .iter()
+            .filter(|p| p.environ.as_ref().is_some_and(|env| env.contains(&home)))
+            .map(|p| p.pid)
+        {
+            // SAFETY: kill only signals; every pid here runs with this test's private HOME.
+            unsafe { libc::kill(pid as i32, libc::SIGTERM) };
         }
     }
 }
 
-const FALSE: &str = "[session]\nresume_agents_on_restore = false\n";
-
-fn inode(path: &Path) -> u64 {
-    use std::os::unix::fs::MetadataExt;
-    std::fs::symlink_metadata(path).unwrap().ino()
+fn settle(child: &mut Child) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while child.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
+pub(super) fn wait_for(listens: &Path) {
+    let ready = Instant::now() + Duration::from_secs(10);
+    while UnixStream::connect(listens).is_err() {
+        assert!(Instant::now() < ready, "no server at {}", listens.display());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+pub(super) const FALSE: &str = "[session]\nresume_agents_on_restore = false\n";
+
 #[tokio::test]
-#[ignore = "needs ADK_TEST_HERDR_BIN: a protocol-22 herdr run in an isolated HOME (#7638)"]
+#[ignore = "needs ADK_TEST_HERDR_BIN: a protocol-22 herdr run in an isolated HOME"]
 async fn t7638_absent_and_stale_sockets_are_eligible_without_a_start() {
     let mut home = Home::new(FALSE);
+    let before = home.state();
     let report = home.assess().await;
     assert_eq!(report["presence"], "absent:no_file", "{report}");
     assert_eq!(
@@ -145,10 +198,8 @@ async fn t7638_absent_and_stale_sockets_are_eligible_without_a_start() {
     );
     assert_eq!(report["binary"], home.bin.display().to_string(), "{report}");
     assert_eq!(report["version"], "0.9.5", "{report}");
-    assert!(
-        !home.socket().exists() && home.herdr_pids().is_empty(),
-        "a dry run starts nothing"
-    );
+    assert_eq!(home.state(), before, "a dry run starts and writes nothing");
+    assert!(before.pids.is_empty() && before.socket.is_none());
 
     let socket = home.socket();
     let pid = home.serve(&[], &["server"], &socket);
@@ -160,19 +211,20 @@ async fn t7638_absent_and_stale_sockets_are_eligible_without_a_start() {
         home.socket().exists(),
         "SIGKILL leaves the stale socket file"
     );
+    let before = home.state();
     let report = home.assess().await;
     assert_eq!(report["presence"], "absent:refused", "{report}");
     assert_eq!(report["eligible"], true, "{report}");
-    assert!(home.herdr_pids().is_empty(), "a dry run starts nothing");
+    assert_eq!(home.state(), before, "a dry run starts and writes nothing");
 }
 
 #[tokio::test]
-#[ignore = "needs ADK_TEST_HERDR_BIN: a protocol-22 herdr run in an isolated HOME (#7638)"]
+#[ignore = "needs ADK_TEST_HERDR_BIN: a protocol-22 herdr run in an isolated HOME"]
 async fn t7638_a_live_server_is_present_and_untouched() {
     let mut home = Home::new(FALSE);
     let socket = home.socket();
     let pid = home.serve(&[], &["server"], &socket);
-    let before = (inode(&socket), home.herdr_pids());
+    let before = home.state();
     let report = home.assess().await;
     assert_eq!(report["presence"], "present", "{report}");
     assert_eq!(
@@ -180,12 +232,12 @@ async fn t7638_a_live_server_is_present_and_untouched() {
         (&Value::Bool(false), &Value::from("not_needed_present")),
         "{report}"
     );
-    assert_eq!((inode(&socket), home.herdr_pids()), before);
-    assert_eq!(before.1, vec![pid]);
+    assert_eq!(home.state(), before);
+    assert_eq!(before.pids, vec![pid]);
 }
 
 #[tokio::test]
-#[ignore = "needs ADK_TEST_HERDR_BIN: a protocol-22 herdr run in an isolated HOME (#7638)"]
+#[ignore = "needs ADK_TEST_HERDR_BIN: a protocol-22 herdr run in an isolated HOME"]
 async fn t7638_servers_of_other_sockets_do_not_block_the_default() {
     let mut home = Home::new(FALSE);
     let named = |name: &str| {
@@ -201,23 +253,25 @@ async fn t7638_servers_of_other_sockets_do_not_block_the_default() {
         &["--session", "alt", "server"],
         &alt,
     );
-    assert!(!home.socket().exists());
+    let before = home.state();
     let report = home.assess().await;
     assert_eq!(report["presence"], "absent:no_file", "{report}");
     assert_eq!(report["eligible"], true, "{report}");
     let mut expected = vec![first, second];
     expected.sort_unstable();
+    assert_eq!(before.pids, expected);
     assert_eq!(
-        home.herdr_pids(),
-        expected,
+        home.state(),
+        before,
         "both named servers kept, nothing started"
     );
 }
 
 #[tokio::test]
-#[ignore = "needs ADK_TEST_HERDR_BIN: a protocol-22 herdr run in an isolated HOME (#7638)"]
+#[ignore = "needs ADK_TEST_HERDR_BIN: a protocol-22 herdr run in an isolated HOME"]
 async fn t7638_a_config_that_may_resume_is_not_eligible() {
     let home = Home::new("[session]\nresume_agents_on_restore = true\n");
+    let before = home.state();
     let report = home.assess().await;
     assert_eq!(report["presence"], "absent:no_file", "{report}");
     assert_eq!(
@@ -231,4 +285,38 @@ async fn t7638_a_config_that_may_resume_is_not_eligible() {
             .is_some_and(|a| a.contains("resume_agents_on_restore = false")),
         "{report}"
     );
+    assert_eq!(home.state(), before, "a refusal starts and writes nothing");
+}
+
+#[tokio::test]
+#[ignore = "needs ADK_TEST_HERDR_BIN: a protocol-22 herdr run in an isolated HOME"]
+async fn t7638_a_config_the_binary_rejects_is_not_eligible() {
+    // `explicit_false` accepts this; only the candidate's own `config check` rejects the key.
+    let home = Home::new("[session]\nresume_agents_on_restore = false\nbogus_key = 1\n");
+    let before = home.state();
+    let report = home.assess().await;
+    assert_eq!(report["reason"], "config_check_failed", "{report}");
+    assert_eq!(report["binary"], home.bin.display().to_string(), "{report}");
+    assert_eq!(
+        home.state(),
+        before,
+        "the check reads the config and changes nothing"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs ADK_TEST_HERDR_BIN: a protocol-22 herdr run in an isolated HOME"]
+async fn t7638_the_host_scan_finds_a_server_whose_socket_file_is_gone() {
+    let mut home = Home::new(FALSE);
+    let socket = home.socket();
+    let pid = home.serve(&[], &["server"], &socket);
+    // The test's own server keeps running while its socket path is missing.
+    std::fs::remove_file(&socket).unwrap();
+    let report = home.assess().await;
+    assert_eq!(
+        report["presence"],
+        format!("unknown:herdr_process_{pid}_server"),
+        "{report}"
+    );
+    assert_eq!(report["reason"], "presence_unknown", "{report}");
 }

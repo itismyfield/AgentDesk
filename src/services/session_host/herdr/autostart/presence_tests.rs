@@ -1,4 +1,4 @@
-//! `classify` over scripted OS reads, and once over this host's real process table.
+//! `classify` over scripted OS reads, and the `ps` rows the host scan keeps.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -224,50 +224,46 @@ fn herdr_processes_of_other_sockets_do_not_block_the_default() {
         process(54, &["server"], &["XDG_CONFIG_HOME=/a/xdg"]),
         process(55, &["server", "stop"], &[]),
         process(56, &["session", "attach", "work"], &[]),
+        process(57, &["--remote=mac-mini"], &[]),
+        process(58, &["--machine=m1", "pane", "list"], &[]),
     ]);
     assert_eq!(others.run(), Presence::Absent(AbsentKind::Refused));
 }
 
-/// `/bin/sh` behind a `herdr` symlink (a copy is killed by code signing) run as `herdr server` and
-/// blocked on stdin: the host scan must see a server selecting the default socket before it binds.
-#[cfg(target_os = "macos")]
 #[test]
-fn the_host_process_table_finds_a_herdr_server_before_it_binds() {
-    use std::io::Write;
-    let dir = tempfile::tempdir().unwrap();
-    let home = dir.path().join("home");
-    let config = home.join(".config/herdr");
-    std::fs::create_dir_all(&config).unwrap();
-    let bin = dir.path().join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let fake = bin.join("herdr");
-    std::os::unix::fs::symlink("/bin/sh", &fake).unwrap();
-    std::fs::write(dir.path().join("server"), "read line\n").unwrap();
-    let mut child = std::process::Command::new(&fake)
-        .arg("server")
-        .current_dir(dir.path())
-        .env_clear()
-        .env("HOME", &home)
-        .env("PATH", "/usr/bin:/bin")
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    let socket = config.join("herdr.sock");
-    let found = classify(&socket, &HostOs);
-    child.stdin.take().unwrap().write_all(b"\n").unwrap();
-    let _ = child.wait();
+fn the_process_table_keeps_unreadable_live_herdr_rows_and_drops_zombies() {
+    let ps = "  10   501 S    herdr\n  11   501 Ss   herdr\n  12   501 Z    herdr\n  13   502 S    herdr\n  14   501 S    bash\n  15   501 S    herdr\n  16   501 R+   herdrx\n";
+    // pid 15 is this process; pid 11 cannot be read, as when ps itself would print `(herdr)`.
+    let rows = table(ps, 501, 15, |pid| match pid {
+        11 => (None, None),
+        _ => (
+            Some(vec!["herdr".into(), "server".into()]),
+            Some(vec!["HOME=/h".into()]),
+        ),
+    });
     assert_eq!(
-        found,
+        rows.iter().map(|row| row.pid).collect::<Vec<_>>(),
+        vec![10, 11]
+    );
+    assert_eq!((&rows[1].argv, &rows[1].environ), (&None, &None));
+    let blocked = stale().with_processes(rows);
+    assert_eq!(
+        blocked.run(),
         Presence::Unknown(Unknown::HerdrProcess {
-            pid: child.id(),
+            pid: 10,
             role: Role::Server
         }),
-        "the production scan read the stand-in's argv and HOME"
+        "the first live row already selects the default socket"
     );
+    let unread = stale().with_processes(table(ps, 501, 15, |_| (None, None)));
     assert_eq!(
-        classify(&socket, &HostOs),
-        Presence::Absent(AbsentKind::NoFile),
-        "once it exits the socket is absent"
+        unread.run(),
+        Presence::Unknown(Unknown::HerdrProcess {
+            pid: 10,
+            role: Role::Unknown
+        })
     );
+    let zombie_only =
+        stale().with_processes(table("  12   501 Z    herdr\n", 501, 15, |_| (None, None)));
+    assert_eq!(zombie_only.run(), Presence::Absent(AbsentKind::Refused));
 }

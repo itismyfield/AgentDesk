@@ -178,6 +178,30 @@ pub(crate) fn describe(presence: &Presence) -> String {
     }
 }
 
+/// Live `herdr` rows of `euid` other than `me` from `ps -o pid=,uid=,stat=,ucomm=`, each with what
+/// `read` could see of it; zombies cannot bind and are left out.
+pub(crate) fn table(
+    ps: &str,
+    euid: u32,
+    me: u32,
+    read: impl Fn(u32) -> (Option<Vec<String>>, Option<Vec<String>>),
+) -> Vec<HerdrProcess> {
+    ps.lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid: u32 = fields.next()?.parse().ok()?;
+            let uid: u32 = fields.next()?.parse().ok()?;
+            let stat = fields.next()?;
+            let name = fields.collect::<Vec<_>>().join(" ");
+            let live = !stat.starts_with('Z');
+            (name == "herdr" && live && uid == euid && pid != me).then(|| {
+                let (argv, environ) = read(pid);
+                HerdrProcess { pid, argv, environ }
+            })
+        })
+        .collect()
+}
+
 /// This host's reads. The process table comes from `ps`, then each `herdr`'s own argv and
 /// environment from the kernel.
 pub(crate) struct HostOs;
@@ -209,31 +233,22 @@ impl PresenceOs for HostOs {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     fn herdr_processes(&self) -> Result<Vec<HerdrProcess>, String> {
+        // `ucomm` is the kernel's name, so a process whose argv cannot be read is still listed.
         let output = std::process::Command::new("/bin/ps")
-            .args(["-axo", "pid=,uid=,comm="])
+            .args(["-axo", "pid=,uid=,stat=,ucomm="])
             .env_clear()
             .output()
             .map_err(|error| error.to_string())?;
         if !output.status.success() {
             return Err(format!("ps exited {}", output.status));
         }
-        let (me, euid) = (std::process::id(), self.euid());
         use super::super::provenance::{process_argv, process_environ};
-        Ok(String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(|line| {
-                let mut fields = line.split_whitespace();
-                let pid: u32 = fields.next()?.parse().ok()?;
-                let uid: u32 = fields.next()?.parse().ok()?;
-                let command = fields.collect::<Vec<_>>().join(" ");
-                let named = Path::new(&command).file_name() == Some("herdr".as_ref());
-                (named && uid == euid && pid != me).then(|| HerdrProcess {
-                    pid,
-                    argv: process_argv(pid).ok(),
-                    environ: process_environ(pid).ok(),
-                })
-            })
-            .collect())
+        Ok(table(
+            &String::from_utf8_lossy(&output.stdout),
+            self.euid(),
+            std::process::id(),
+            |pid| (process_argv(pid).ok(), process_environ(pid).ok()),
+        ))
     }
     fn local_filesystem(&self, dir: &Path) -> bool {
         super::candidate::filesystem(dir).is_some_and(|kind| kind == "apfs")

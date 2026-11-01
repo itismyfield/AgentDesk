@@ -91,3 +91,25 @@ fn unacceptable_files_are_rejected_with_their_reason() {
     assert!(why(&excluded).contains("AgentDesk"), "{rejected:?}");
     assert_eq!(rejected.len(), 3, "a dir without herdr is no rejection");
 }
+
+#[test]
+fn a_version_run_must_exit_zero_within_the_output_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = |name: &str, body: &str| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        path
+    };
+    let version = |path: &Path| version_output(path).map(|out| supported_version(&out));
+    let ok = script("ok", "echo 'herdr 0.9.5'");
+    assert_eq!(version(&ok), Ok(Some("0.9.5".into())));
+    let failed = script("failed", "echo 'herdr 0.9.5'; exit 7");
+    assert!(version(&failed).is_err_and(|e| e.contains("exited")));
+    // A valid line padded past the limit would still trim to a supported version if cut short.
+    let long = script(
+        "long",
+        "echo 'herdr 0.9.5'; i=0; while [ $i -lt 5000 ]; do printf ' '; i=$((i+1)); done; echo; echo extra",
+    );
+    assert!(version(&long).is_err_and(|e| e.contains("too much")));
+}

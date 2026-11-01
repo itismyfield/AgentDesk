@@ -48,6 +48,8 @@ pub(crate) fn select(argv: &[String], environ: &[String]) -> Selection {
             session = args.next().map(String::as_str).or(Some(""));
         } else if let Some(name) = arg.strip_prefix("--session=") {
             session = Some(name);
+        } else if let Some((name, _)) = arg.split_once('=').filter(|(n, _)| VALUED.contains(n)) {
+            remote |= name != "--remote-keybindings";
         } else if VALUED.contains(&arg) {
             remote |= arg != "--remote-keybindings";
             args.next();

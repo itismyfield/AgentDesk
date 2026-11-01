@@ -147,6 +147,8 @@ fn launchers_and_other_commands_are_told_apart() {
         vec!["server", "reload-config"],
         vec!["--remote", "mac-mini"],
         vec!["--machine", "m1", "pane", "list"],
+        vec!["--remote=mac-mini"],
+        vec!["--machine=m1", "pane", "list"],
         vec!["api", "ping"],
         vec!["--version"],
         vec!["config", "check"],
