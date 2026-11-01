@@ -3,6 +3,7 @@ import {
   createServerCampaign, editServerCampaignDefinition, getServerCampaign, isDefinitiveAnswer, serverCampaignRejection,
   type ServerCampaignCommandResult, type ServerCampaignDefinition, type ServerCampaignDocument,
 } from "../../api/serverCampaigns";
+import { Select } from "../common/Select";
 import type { Tr } from "./campaignPresentation";
 import { changedDefinitionValues, newIdempotencyKey, nodeDefinitionText, rejectionText } from "./serverCampaignModel";
 
@@ -199,7 +200,7 @@ export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCo
     <div className="campaign-edit-grid grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
       {draft.mode === "create" && <label>{tr("캠페인 ID", "Campaign ID")}<input aria-label={tr("캠페인 ID", "Campaign ID")} disabled={saving} value={draft.id} onChange={(event) => update({ id: event.target.value })} /></label>}
       <label>{tr("이름", "Name")}<input aria-label={tr("이름", "Name")} value={definition.title} onChange={(event) => setDefinition({ title: event.target.value })} /></label>
-      <label>{tr("저장소", "Repository")}<select aria-label={tr("저장소", "Repository")} value={definition.repository} onChange={(event) => setDefinition({ repository: event.target.value as Definition["repository"] })}><option value="adk">AgentDesk</option><option value="cooking_heart">CookingHeart</option></select></label>
+      <label>{tr("저장소", "Repository")}<Select aria-label={tr("저장소", "Repository")} value={definition.repository} onChange={(event) => setDefinition({ repository: event.target.value as Definition["repository"] })}><option value="adk">AgentDesk</option><option value="cooking_heart">CookingHeart</option></Select></label>
     </div>
     <label>{tr("목표", "Goal")}<textarea aria-label={tr("목표", "Goal")} rows={2} value={definition.goal} onChange={(event) => setDefinition({ goal: event.target.value })} /></label>
     {definition.nodes.map((node, index) => {
@@ -233,9 +234,9 @@ export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCo
         {node.acceptance.map((ac, acIndex) => <div key={acIndex} className="campaign-server-ac items-end">
           <label>{tr("수용조건 ID", "Acceptance ID")}<input aria-label={tr("수용조건 ID", "Acceptance ID")} value={ac.id} onChange={(event) => setAcceptance(index, acIndex, { id: event.target.value })} /></label>
           <label>{tr("수용조건 설명", "Acceptance description")}<input aria-label={tr("수용조건 설명", "Acceptance description")} value={ac.description} onChange={(event) => setAcceptance(index, acIndex, { description: event.target.value })} /></label>
-          <label>{tr("검증 종류", "Verification")}<select aria-label={tr("검증 종류", "Verification")} value={ac.verification} onChange={(event) => setAcceptance(index, acIndex, { verification: event.target.value as Acceptance["verification"] })}>
+          <label>{tr("검증 종류", "Verification")}<Select aria-label={tr("검증 종류", "Verification")} value={ac.verification} onChange={(event) => setAcceptance(index, acIndex, { verification: event.target.value as Acceptance["verification"] })}>
             {VERIFICATIONS.map(([value, label]) => <option key={value} value={value}>{tr(...label)}</option>)}
-          </select></label>
+          </Select></label>
           <button type="button" onClick={() => setNode(index, { acceptance: node.acceptance.filter((_, at) => at !== acIndex) })}>{tr("수용조건 삭제", "Remove acceptance")}</button>
         </div>)}
         <div className="campaign-actions">

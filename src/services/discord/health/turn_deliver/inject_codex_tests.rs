@@ -589,7 +589,6 @@ impl QueuedCodex {
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         };
         let result = crate::services::discord::mailbox_enqueue_intervention(
             &shared,

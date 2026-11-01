@@ -53,13 +53,17 @@ export function StatsSummaryGrid({
           )}
           tip={t(
             msg(
-              "input + output + cache read / write 합산",
+              "입력·출력·캐시 읽기/쓰기 토큰을 모두 더한 값",
               "Sum of input + output + cache read / write",
               "input + output + cache read / write の合計",
               "input + output + cache read / write 的总和",
             ),
           )}
-          delta={tokenMomentumDelta?.value}
+          delta={
+            tokenMomentumDelta
+              ? t(msg(`앞 절반 대비 ${tokenMomentumDelta.value}`, `${tokenMomentumDelta.value} vs first half`, `前半比 ${tokenMomentumDelta.value}`, `较前半 ${tokenMomentumDelta.value}`))
+              : undefined
+          }
           deltaTone={tokenMomentumDelta?.tone}
         />
       </div>
@@ -87,7 +91,11 @@ export function StatsSummaryGrid({
               "计入缓存折扣后的实际支出",
             ),
           )}
-          delta={cacheSavingsDelta?.value}
+          delta={
+            cacheSavingsDelta
+              ? t(msg(`캐시로 ${cacheSavingsDelta.value.replace("-", "")} 절약`, `${cacheSavingsDelta.value.replace("-", "")} saved by cache`, `キャッシュで ${cacheSavingsDelta.value.replace("-", "")} 節約`, `缓存节省 ${cacheSavingsDelta.value.replace("-", "")}`))
+              : undefined
+          }
           deltaTone={cacheSavingsDelta?.tone}
         />
       </div>
@@ -129,7 +137,7 @@ export function StatsSummaryGrid({
             peakDay
               ? t(
                   msg(
-                    `${formatTokens(peakDay.total_tokens)} · ${peakRatio ? `${peakRatio.toFixed(1)}x 평균` : "평균 대비"}`,
+                    `${formatTokens(peakDay.total_tokens)} · ${peakRatio ? `평균의 ${peakRatio.toFixed(1)}배` : "평균 대비"}`,
                     `${formatTokens(peakDay.total_tokens)} · ${peakRatio ? `${peakRatio.toFixed(1)}x avg` : "vs average"}`,
                     `${formatTokens(peakDay.total_tokens)} · ${peakRatio ? `平均の ${peakRatio.toFixed(1)}x` : "平均比"}`,
                     `${formatTokens(peakDay.total_tokens)} · ${peakRatio ? `${peakRatio.toFixed(1)}x 平均` : "相对平均"}`,

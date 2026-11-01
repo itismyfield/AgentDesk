@@ -47,7 +47,6 @@ pub(super) async fn handle_stream_tool_message(
     let adk_session_key = ctx.adk_session_key;
     let adk_session_name = ctx.adk_session_name;
     let role_binding = ctx.role_binding;
-    let voice_progress_playback_channel_id = ctx.voice_progress_playback_channel_id;
     let single_message_panel_footer_mode = ctx.single_message_panel_footer_mode;
     let footer_owner = ctx.footer_owner;
     let (current_msg_id, captured_nonce) = (&mut *ctx.current_msg_id, ctx.captured_nonce);
@@ -149,13 +148,6 @@ pub(super) async fn handle_stream_tool_message(
                 truncate_str(&summary, 120).to_string()
             };
             let display = format!("⚙ {}: {}", name, display_summary);
-            if inflight_state.source == crate::dispatch::Source::Voice {
-                shared_owned.voice_barge_in.publish_progress_for_playback(
-                    channel_id,
-                    voice_progress_playback_channel_id,
-                    format!("tool:{name}:{display_summary}"),
-                );
-            }
             record_placeholder_live_event(
                 shared_owned.as_ref(),
                 channel_id,
@@ -419,18 +411,6 @@ pub(super) async fn handle_stream_tool_message(
                     .or_else(|| pending_status_tool_results.pop_front()),
                 None => pending_status_tool_results.pop_front(),
             };
-            if inflight_state.source == crate::dispatch::Source::Voice {
-                let label = if is_error {
-                    "tool_result:error"
-                } else {
-                    "tool_result:ok"
-                };
-                shared_owned.voice_barge_in.publish_progress_for_playback(
-                    channel_id,
-                    voice_progress_playback_channel_id,
-                    label,
-                );
-            }
             let projected = crate::services::tool_output_guard::project_for_relay(
                 matched_or_last_tool(status_tool_name.as_deref(), last_tool_name.as_deref()),
                 is_error,

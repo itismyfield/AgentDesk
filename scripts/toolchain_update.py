@@ -723,9 +723,6 @@ def run_smoke_profile(profile: str, runner: Runner, *, strict: bool = True) -> l
         "pipx": ("pipx", "--version"),
         "jq": ("jq", "--version"),
         "ripgrep": ("rg", "--version"),
-        "ffmpeg": ("ffmpeg", "-version"),
-        "whisper-cpp": ("whisper-cli", "--version"),
-        "edge-tts": ("edge-tts", "--version"),
         "opencode": ("opencode", "--version"),
     }
     if profile in simple:
@@ -771,14 +768,12 @@ def run_smoke_profile(profile: str, runner: Runner, *, strict: bool = True) -> l
 def _update_argv(spec: ToolSpec, latest: str) -> tuple[str, ...]:
     if spec.update_kind is None or spec.update_value is None:
         raise ToolchainError(f"{spec.key} is report-only and has no local update command")
-    if spec.update_kind in {"npm-exact", "uv-exact", "pipx-exact"} and not _SAFE_VERSION_RE.fullmatch(latest):
+    if spec.update_kind in {"npm-exact", "uv-exact"} and not _SAFE_VERSION_RE.fullmatch(latest):
         raise ToolchainError(f"refusing unsafe or non-semver version for {spec.key}: {latest!r}")
     if spec.update_kind == "npm-exact":
         return ("npm", "install", "-g", f"{spec.update_value}@{latest}")
     if spec.update_kind == "uv-exact":
         return ("uv", "tool", "install", "--force", f"{spec.update_value}=={latest}")
-    if spec.update_kind == "pipx-exact":
-        return ("pipx", "install", "--force", f"{spec.update_value}=={latest}")
     if spec.update_kind == "brew-upgrade":
         return ("brew", "upgrade", str(spec.update_value))
     if spec.update_kind == "command":
@@ -793,8 +788,6 @@ def _rollback_or_pin_hint(spec: ToolSpec, current: str) -> str:
         return f"npm install -g {spec.update_value}@{current}"
     if spec.update_kind == "uv-exact":
         return f"uv tool install --force {spec.update_value}=={current}"
-    if spec.update_kind == "pipx-exact":
-        return f"pipx install --force {spec.update_value}=={current}"
     if spec.update_kind == "brew-upgrade":
         return f"brew pin {spec.update_value}; restore {current} from the approved Homebrew rollback procedure"
     return f"restore/pin {spec.display_name} to {current} using its native installer"

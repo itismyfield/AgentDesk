@@ -157,7 +157,6 @@
         "src/runtime_layout/skill_refresh.rs": 7,
         "src/server/dashboard_provision.rs": 1,
         "src/server/routes/agents_setup.rs": 2,
-        "src/server/routes/voice_audio.rs": 2,
         "src/server/worker_recovery.rs": 1,
         "src/services/claude.rs": 7,
         "src/services/claude/herdr_turn.rs": 1,
@@ -209,7 +208,6 @@
         "src/services/discord/tui_direct_abort_marker/store.rs": 4,
         "src/services/discord/tui_direct_pending_start/state.rs": 1,
         "src/services/discord/turn_view_reconciler/store.rs": 5,
-        "src/services/discord/voice_barge_in/utility.rs": 2,
         "src/services/discord/watchers/lifecycle/liveness.rs": 1,
         "src/services/discord/watchers/lifecycle/restore.rs": 1,
         "src/services/gemini.rs": 1,
@@ -231,12 +229,7 @@
         "src/services/tui_prompt_dedupe/handoff.rs": 1,
         "src/services/turn_orchestrator/clear_channel.rs": 1,
         "src/services/turn_orchestrator/pending_queue_persistence.rs": 3,
-        "src/services/turn_orchestrator/pending_queue_persistence/snapshot_io.rs": 1,
-        "src/voice/receiver/recording.rs": 1,
-        "src/voice/stt.rs": 1,
-        "src/voice/tts/edge.rs": 1,
-        "src/voice/tts/mod.rs": 3,
-        "src/voice/tts/playback.rs": 1
+        "src/services/turn_orchestrator/pending_queue_persistence/snapshot_io.rs": 1
       }
     },
     "structural_candidate_apply": {

@@ -39,39 +39,6 @@ class AlertDedupeWiringTests(unittest.TestCase):
         self.assertIn('"restore_run_create_dispatch_failed"', fsm)
         self.assertIn('"restore_run_create_dispatch_retry_scheduled"', fsm)
 
-    def test_quality_regression_has_one_runtime_alert_authority(self) -> None:
-        legacy = REPO_ROOT / "src/services/observability/quality_alert.rs"
-        queries = (REPO_ROOT / "src/services/observability/queries.rs").read_text(
-            encoding="utf-8"
-        )
-        source_registry = (
-            REPO_ROOT / "src/services/discord/outbound/source_registry.rs"
-        ).read_text(encoding="utf-8")
-        maintenance = (REPO_ROOT / "src/server/maintenance/mod.rs").read_text(
-            encoding="utf-8"
-        )
-        quality_module = (
-            REPO_ROOT / "src/services/agent_quality/mod.rs"
-        ).read_text(encoding="utf-8")
-        regression_alerts = (
-            REPO_ROOT / "src/services/agent_quality/regression_alerts.rs"
-        ).read_text(encoding="utf-8")
-
-        self.assertFalse(legacy.exists(), "legacy quality alert producer must be removed")
-        self.assertNotIn("enqueue_quality_regression_alerts_pg", queries)
-        self.assertIn("alert_count: 0", queries)
-        self.assertNotIn('"agent_quality_rollup"', source_registry)
-        self.assertIn("sole regression-alert authority", quality_module)
-        self.assertIn(
-            "agent_quality::regression_alerts::run_regression_alerter_pg", maintenance
-        )
-        self.assertIn("TURN_DROP_THRESHOLD: f64 = 0.15", regression_alerts)
-        self.assertIn("REVIEW_DROP_THRESHOLD: f64 = 0.20", regression_alerts)
-        self.assertIn("agent_quality_monitoring_channel_id", regression_alerts)
-        # #5993: the shared human-alert fallback was retired.
-        self.assertNotIn("kanban_human_alert_channel_id", regression_alerts)
-        self.assertNotIn("FALLBACK_ALERT_CHANNEL", regression_alerts)
-
 
 if __name__ == "__main__":
     unittest.main()

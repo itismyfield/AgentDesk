@@ -21,36 +21,6 @@ function notifyPmdPendingDecision(cardId, reason) {
   escalate(cardId, reason);
 }
 
-function emitQualityEvent(event) {
-  if (agentdesk.quality && typeof agentdesk.quality.emit === "function") {
-    agentdesk.quality.emit(event);
-  }
-}
-
-function emitReviewVerdictQualityEvent(cardId, verdict, result, options, eventType) {
-  if (!(agentdesk.quality && typeof agentdesk.quality.emit === "function")) return;
-  var opts = options || {};
-  var rows = agentdesk.db.query(
-    "SELECT assigned_agent_id FROM kanban_cards WHERE id = ?",
-    [cardId]
-  );
-  var agentId = rows.length > 0 ? (rows[0].assigned_agent_id || null) : null;
-  var dispatchId = opts.review_dispatch_id || null;
-  emitQualityEvent({
-    event_type: eventType,
-    source_event_id: dispatchId || cardId,
-    correlation_id: dispatchId || cardId,
-    agent_id: agentId,
-    card_id: cardId,
-    dispatch_id: dispatchId,
-    payload: {
-      verdict: verdict,
-      notes_present: !!(result && (result.notes || result.feedback)),
-      source: dispatchId ? "review_dispatch" : "review_verdict"
-    }
-  });
-}
-
 function reviewLoopFingerprintInfo(cardId) {
   // #751: Prefer the latest completed work dispatch's head_sha. It is
   // updated immediately on every implementation/rework completion. The
@@ -1451,7 +1421,6 @@ function processVerdict(cardId, verdict, result, options) {
   // #116: accept is NOT a counter-model verdict — it's an agent's review-decision action
   // (rework continuation). Only pass/approved route to done/next-stage.
   if (verdict === "pass" || verdict === "approved") {
-    emitReviewVerdictQualityEvent(cardId, verdict, result, opts, "review_pass");
     // #2051 Finding 12 (P2): the two state-syncs below execute in separate
     // bridge calls (each commits its own SQL transaction). A throw from one
     // used to leave the card with `review_status = NULL` but
@@ -1703,7 +1672,6 @@ function processVerdict(cardId, verdict, result, options) {
     }
 
   } else if (verdict === "improve" || verdict === "reject" || verdict === "rework") {
-    emitReviewVerdictQualityEvent(cardId, verdict, result, opts, "review_fail");
     var newNotes = result.notes || result.feedback || "";
 
     // #118: Detect repeated findings — if same issues recur across rounds,

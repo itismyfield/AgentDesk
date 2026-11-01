@@ -278,7 +278,6 @@ async fn try_close(
                 FinalizeContext {
                     clear_inflight: mutant("archive"),
                     allow_completion_cleanup: false,
-                    drain_voice: false,
                     kickoff_queue: true,
                     expected_idempotent_guard_miss: false,
                 },

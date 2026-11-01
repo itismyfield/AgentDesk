@@ -1,13 +1,12 @@
 //! Extracted from `services::discord::health` (#3038 Phase A) — verbatim
 //! move; behavior unchanged. HTTP-facing `/api/discord/send` and
-//! `/api/discord/send-dm` handlers (body parsing, delivery-id assembly,
-//! reserved voice-namespace rejection).
+//! `/api/discord/send-dm` handlers (body parsing, delivery-id assembly).
 
 use sqlx::PgPool;
 
 use super::manual_delivery::{
     ManualDeliveryOutcome, ManualOutboundDeliveryId, SerenityManualOutboundClient,
-    deliver_manual_dm_notification, is_reserved_voice_correlation_namespace,
+    deliver_manual_dm_notification,
 };
 use super::send_gate::{
     ManualOutboundOptions, SendCallerClass, send_message_with_backends_and_delivery_id_for_caller,
@@ -78,16 +77,6 @@ pub async fn handle_send_with_caller<'a>(
         }
         _ => None,
     };
-    if delivery_id.is_some_and(is_reserved_voice_correlation_namespace) {
-        return (
-            "400 Bad Request",
-            serde_json::json!({
-                "ok": false,
-                "error": "delivery_id correlation namespace is reserved"
-            })
-            .to_string(),
-        );
-    }
     let transcript_options = parse_transcript_options(&json);
 
     send_message_with_backends_and_delivery_id_for_caller(

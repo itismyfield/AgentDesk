@@ -89,7 +89,6 @@ impl Request<'_> {
         state.session_key = session_key.map(str::to_owned);
         state.delivery_bot = metadata_delivery_bot(self.metadata);
         state.silent_turn = metadata_silent_flag(self.metadata);
-        state.source = metadata_turn_source(self.source, self.metadata);
         // An exact retry starts again with this request's metadata, so it keeps the origin.
         state.input_origin_ids =
             crate::services::agents::input_result::metadata_origin_id(self.metadata)

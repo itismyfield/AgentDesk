@@ -1,5 +1,4 @@
 import type { HealthResponse } from "../api";
-import { describeDegradedReason } from "./dashboard/HealthWidget";
 
 export type SignalSeverity = "normal" | "warning" | "danger";
 
@@ -18,18 +17,12 @@ export interface SignalCard {
 }
 
 export interface BottleneckRow {
+  /** Stable id (metric key or raw degraded reason); shown as the tooltip. */
   kind: string;
+  label: string;
   count: number;
   severity: Exclude<SignalSeverity, "normal">;
   detail: string;
-}
-
-export interface RuntimeSignalRow {
-  key: string;
-  label: string;
-  value: string;
-  hint: string;
-  severity: SignalSeverity;
 }
 
 export const STALE_AFTER_MS = 75_000;
@@ -71,20 +64,6 @@ export function toneForSeverity(severity: SignalSeverity): "info" | "warn" | "da
       return "warn";
     default:
       return "success";
-  }
-}
-
-export function chipClassFromTone(tone: "info" | "warn" | "danger" | "success"): string {
-  switch (tone) {
-    case "success":
-      return "chip ok";
-    case "warn":
-      return "chip warn";
-    case "danger":
-      return "chip err";
-    case "info":
-    default:
-      return "chip codex";
   }
 }
 
@@ -148,29 +127,61 @@ export function formatBytes(value: number): string {
   return `${formatNumber(safe)} B`;
 }
 
-export function formatDurationCompact(seconds: number): string {
+export function formatDurationCompact(seconds: number, isKo = false): string {
   const safe = Math.max(0, Math.round(seconds));
+  if (safe >= 86_400) {
+    const days = Math.floor(safe / 86_400);
+    const hours = Math.floor((safe % 86_400) / 3600);
+    return isKo ? `${days}일 ${hours}시간` : `${days}d ${hours}h`;
+  }
   if (safe >= 3600) {
     const hours = Math.floor(safe / 3600);
     const minutes = Math.floor((safe % 3600) / 60);
-    return `${hours}h ${minutes}m`;
+    return isKo ? `${hours}시간 ${minutes}분` : `${hours}h ${minutes}m`;
   }
   if (safe >= 60) {
     const minutes = Math.floor(safe / 60);
     const remainSeconds = safe % 60;
-    return `${minutes}m ${remainSeconds}s`;
+    return isKo ? `${minutes}분 ${remainSeconds}초` : `${minutes}m ${remainSeconds}s`;
   }
-  return `${safe}s`;
+  return isKo ? `${safe}초` : `${safe}s`;
 }
 
-export function formatUpdatedAt(timestamp: number | null, localeTag: string): string {
-  if (!timestamp) return "n/a";
-  return new Date(timestamp).toLocaleTimeString(localeTag, {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  });
+/** Turns a runtime degraded-reason key into a short human label; callers keep the raw key as a tooltip. */
+export function describeDegradedReason(reason: string, isKo: boolean): string {
+  const tr = (ko: string, en: string) => (isKo ? ko : en);
+  const provider = reason.match(/^provider:([^:]+):(.+)$/);
+  if (provider) {
+    const name = provider[1];
+    const detail = provider[2];
+    if (detail === "disconnected") return tr(`${name} 연결 끊김`, `${name} disconnected`);
+    if (detail === "restart_pending") return tr(`${name} 재시작 대기`, `${name} restart pending`);
+    if (detail === "reconcile_in_progress") return tr(`${name} 상태 맞추는 중`, `${name} reconciling`);
+    const deferred = detail.match(/^deferred_hooks_backlog:(\d+)$/);
+    if (deferred) return tr(`${name} 후처리 대기 ${deferred[1]}건`, `${name} deferred hooks ${deferred[1]}`);
+    const queue = detail.match(/^pending_queue_depth:(\d+)$/);
+    if (queue) return tr(`${name} 처리 대기 ${queue[1]}건`, `${name} queue depth ${queue[1]}`);
+    const recovering = detail.match(/^recovering_channels:(\d+)$/);
+    if (recovering) return tr(`${name} 채널 ${recovering[1]}개 복구 중`, `${name} recovering ${recovering[1]} channels`);
+  }
+  const outbox = reason.match(/^dispatch_outbox_oldest_pending_age:(\d+)$/);
+  if (outbox) {
+    const age = formatDurationCompact(Number(outbox[1]), isKo);
+    return tr(`전달 대기 ${age}째`, `Dispatch outbox waiting ${age}`);
+  }
+  if (reason === "db_unavailable") return tr("데이터베이스 연결 안 됨", "Database unavailable");
+  if (reason === "no_providers_registered") return tr("등록된 프로바이더 없음", "No providers registered");
+  const relay = reason.match(/^relay_verdict_unknown_([a-z]+)_\d+$/);
+  if (relay) return tr(`${relay[1]} 응답 전달 확인 안 됨`, `${relay[1]} relay delivery unconfirmed`);
+  if (reason.startsWith("tui_o:boundary_pending")) return tr("TUI 출력 마무리 대기", "TUI output waiting to finish");
+  if (reason.startsWith("tui_o:unresolved")) return tr("TUI 출력 확인 필요", "TUI output unresolved");
+  if (reason.startsWith("tui_o:cleanup_retired")) return tr("끝난 TUI 출력 정리 대기", "Retired TUI output awaiting cleanup");
+  // Other TUI writer alarms share one readable title; the exact key stays in the tooltip.
+  if (reason.startsWith("tui_o:")) return tr("TUI 출력 경보", "TUI output alarm");
+  const presence = reason.match(/^turn_presence_unknown:([^:]+):([^:]+)/);
+  if (presence) return tr(`${presence[2]} 턴 상태 확인 불가 (${presence[1]})`, `${presence[2]} turn state unknown (${presence[1]})`);
+  // Unknown keys: keep the leading segment and drop channel ids and counters.
+  return reason.split(":")[0].replace(/_\d{6,}$/, "").replaceAll("_", " ");
 }
 
 export function buildSignalCards(data: HealthResponse, isKo: boolean): SignalCard[] {
@@ -184,7 +195,7 @@ export function buildSignalCards(data: HealthResponse, isKo: boolean): SignalCar
   return [
     {
       key: "deferred_hooks",
-      label: isKo ? "후처리 대기" : "Deferred Hooks",
+      label: isKo ? "후처리 대기" : "Deferred hooks",
       value: formatNumber(deferredHooks),
       rawValue: deferredHooks,
       severity: resolveSeverity(deferredHooks, SIGNAL_THRESHOLDS.deferred_hooks),
@@ -194,48 +205,52 @@ export function buildSignalCards(data: HealthResponse, isKo: boolean): SignalCar
     },
     {
       key: "outbox_age",
-      label: isKo ? "전달 지연" : "Outbox Age",
-      value: formatDurationCompact(outboxAge),
+      label: isKo ? "전달 지연" : "Outbox age",
+      value: formatDurationCompact(outboxAge, isKo),
       rawValue: outboxAge,
       severity: resolveSeverity(outboxAge, SIGNAL_THRESHOLDS.outbox_age),
       note: isKo
-        ? `pending ${formatNumber(data.dispatch_outbox?.pending ?? 0)} · retry ${formatNumber(data.dispatch_outbox?.retrying ?? 0)}`
+        ? `대기 ${formatNumber(data.dispatch_outbox?.pending ?? 0)} · 재시도 ${formatNumber(data.dispatch_outbox?.retrying ?? 0)}`
         : `pending ${formatNumber(data.dispatch_outbox?.pending ?? 0)} · retry ${formatNumber(data.dispatch_outbox?.retrying ?? 0)}`,
     },
     {
       key: "pending_queue",
-      label: isKo ? "처리 대기" : "Pending Queue",
+      label: isKo ? "처리 대기" : "Pending queue",
       value: formatNumber(pendingQueue),
       rawValue: pendingQueue,
       severity: resolveSeverity(pendingQueue, SIGNAL_THRESHOLDS.pending_queue),
       note: isKo
-        ? `active ${formatNumber(data.global_active ?? 0)} · finalizing ${formatNumber(data.global_finalizing ?? 0)}`
+        ? `진행 중 ${formatNumber(data.global_active ?? 0)} · 마무리 중 ${formatNumber(data.global_finalizing ?? 0)}`
         : `active ${formatNumber(data.global_active ?? 0)} · finalizing ${formatNumber(data.global_finalizing ?? 0)}`,
     },
     {
       key: "active_watchers",
-      label: isKo ? "감시 중" : "Active Watchers",
+      label: isKo ? "감시 중" : "Active watchers",
       value: formatNumber(activeWatchers),
       rawValue: activeWatchers,
       severity: resolveSeverity(activeWatchers, SIGNAL_THRESHOLDS.active_watchers),
       note: isKo
-        ? `${formatNumber(providerCount)}개 provider 추적 중`
+        ? `프로바이더 ${formatNumber(providerCount)}개 연결`
         : `${formatNumber(providerCount)} providers in scope`,
     },
     {
       key: "recovery_seconds",
       label: isKo ? "복구 시간" : "Recovery",
-      value: formatDurationCompact(recoverySeconds),
+      value: formatDurationCompact(recoverySeconds, isKo),
       rawValue: recoverySeconds,
       severity: resolveSeverity(recoverySeconds, SIGNAL_THRESHOLDS.recovery_seconds),
       note: isKo
-        ? `uptime ${formatDurationCompact(data.uptime_secs ?? 0)}`
+        ? `가동 ${formatDurationCompact(data.uptime_secs ?? 0, true)}`
         : `uptime ${formatDurationCompact(data.uptime_secs ?? 0)}`,
     },
   ];
 }
 
-export function buildBottlenecks(data: HealthResponse): BottleneckRow[] {
+// Metric rows already cover these reasons, so they are only listed when no metric row fired.
+const METRIC_REASON = /^(provider:|dispatch_outbox_)/;
+
+export function buildBottlenecks(data: HealthResponse, isKo: boolean): BottleneckRow[] {
+  const tr = (ko: string, en: string) => (isKo ? ko : en);
   const rows: BottleneckRow[] = [];
   const outboxAge = data.outbox_age ?? data.dispatch_outbox?.oldest_pending_age ?? 0;
   const disconnectedProviders = (data.providers ?? []).filter((provider) => !provider.connected).length;
@@ -246,58 +261,62 @@ export function buildBottlenecks(data: HealthResponse): BottleneckRow[] {
   );
 
   const addMetricBottleneck = (
-    kind: string,
-    count: number,
     key: SignalCard["key"],
+    count: number,
+    label: string,
     detail: string,
   ) => {
     const severity = resolveSeverity(count, SIGNAL_THRESHOLDS[key]);
     if (severity === "normal" || count <= 0) return;
-    rows.push({ kind, count, severity, detail });
+    rows.push({ kind: key, label, count, severity, detail });
   };
 
-  addMetricBottleneck("deferred_hooks", data.deferred_hooks ?? 0, "deferred_hooks", "deferred hook backlog");
-  addMetricBottleneck("outbox_age", outboxAge, "outbox_age", "oldest outbox item age (seconds)");
-  addMetricBottleneck("pending_queue", data.queue_depth ?? 0, "pending_queue", "global pending queue depth");
-  addMetricBottleneck("recovery_seconds", data.recovery_duration ?? 0, "recovery_seconds", "long-running recovery window");
-  addMetricBottleneck("active_watchers", data.watcher_count ?? 0, "active_watchers", "watcher load");
+  addMetricBottleneck("deferred_hooks", data.deferred_hooks ?? 0, tr("후처리 대기", "Deferred hooks"), tr("턴이 끝난 뒤 처리할 작업이 쌓였어요.", "Post-turn work is backing up."));
+  addMetricBottleneck("outbox_age", outboxAge, tr("전달 지연", "Outbox age"), tr("가장 오래 기다린 전달 항목의 대기 시간(초)이에요.", "Age in seconds of the oldest undelivered item."));
+  addMetricBottleneck("pending_queue", data.queue_depth ?? 0, tr("처리 대기", "Pending queue"), tr("아직 시작하지 못한 요청이에요.", "Requests not started yet."));
+  addMetricBottleneck("recovery_seconds", data.recovery_duration ?? 0, tr("복구 시간", "Recovery"), tr("재시작 뒤 이전 작업을 되살리는 데 오래 걸렸어요.", "Restoring work after restart took long."));
+  addMetricBottleneck("active_watchers", data.watcher_count ?? 0, tr("감시 중", "Active watchers"), tr("동시에 지켜보는 세션이 많아요.", "Many sessions are being watched at once."));
 
   if (disconnectedProviders > 0) {
     rows.push({
       kind: "provider_disconnects",
+      label: tr("프로바이더 연결 끊김", "Provider disconnects"),
       count: disconnectedProviders,
       severity: disconnectedProviders >= 2 ? "danger" : "warning",
-      detail: "providers disconnected",
+      detail: tr("연결이 끊긴 프로바이더 수예요.", "Providers that are disconnected."),
     });
   }
 
   if (restartPendingProviders > 0) {
     rows.push({
       kind: "restart_pending",
+      label: tr("재시작 대기", "Restart pending"),
       count: restartPendingProviders,
       severity: restartPendingProviders >= 2 ? "danger" : "warning",
-      detail: "providers waiting for restart",
+      detail: tr("재시작을 기다리는 프로바이더 수예요.", "Providers waiting for a restart."),
     });
   }
 
   if (providerQueueDepth > 0) {
     rows.push({
       kind: "provider_queue",
+      label: tr("프로바이더 대기열", "Provider queue"),
       count: providerQueueDepth,
       severity: resolveSeverity(providerQueueDepth, SIGNAL_THRESHOLDS.pending_queue) === "danger" ? "danger" : "warning",
-      detail: "aggregate provider queue depth",
+      detail: tr("프로바이더별 대기 건수의 합이에요.", "Sum of per-provider queue depth."),
     });
   }
 
-  if (rows.length === 0 && (data.degraded_reasons?.length ?? 0) > 0) {
-    for (const reason of data.degraded_reasons ?? []) {
-      rows.push({
-        kind: reason,
-        count: 1,
-        severity: data.status === "unhealthy" ? "danger" : "warning",
-        detail: describeDegradedReason(reason),
-      });
-    }
+  const metricRowsFired = rows.length > 0;
+  for (const reason of data.degraded_reasons ?? []) {
+    if (metricRowsFired && METRIC_REASON.test(reason)) continue;
+    rows.push({
+      kind: reason,
+      label: describeDegradedReason(reason, isKo),
+      count: 1,
+      severity: data.status === "unhealthy" ? "danger" : "warning",
+      detail: tr("서버가 보고한 주의 신호예요. 원래 키는 제목에 마우스를 올리면 보여요.", "Reported by the server. Hover the title for the raw key."),
+    });
   }
 
   return rows.sort((left, right) => {
@@ -312,13 +331,6 @@ export function translateStatus(status: string, isKo: boolean): string {
   if (status === "degraded") return isKo ? "주의" : "Degraded";
   if (status === "unhealthy") return isKo ? "장애" : "Unhealthy";
   return status.toUpperCase();
-}
-
-export function formatBottleneckLabel(kind: string): string {
-  return kind
-    .replaceAll("_", " ")
-    .replaceAll("provider disconnects", "provider disconnects")
-    .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
 export function errorMessage(error: unknown): string {

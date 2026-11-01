@@ -18,22 +18,6 @@ const SUCCESSOR: Option<PolicyTailDecision> = Some(PolicyTailDecision::Skipped(
     PolicyTailSkip::SuccessorObserved,
 ));
 
-/// A close whose runtime defers voice barge-ins, so its tail has a buffer to take.
-async fn open_voice(channel: u64) -> Close {
-    let root = tempfile::tempdir().unwrap();
-    let env = crate::config::set_agentdesk_root_for_test(root.path());
-    let voice = |shared: &mut SharedData| {
-        let mut config = crate::voice::VoiceConfig::default();
-        config.enabled = true;
-        config.barge_in.acknowledgement_enabled = false;
-        let runtime = discord::voice_barge_in::VoiceBargeInRuntime::from_voice_config(&config);
-        shared.voice_barge_in = Arc::new(runtime);
-    };
-    let mut close = Close::open_with(17, channel, |_| {}, voice).await;
-    close._root = Some((root, env));
-    close
-}
-
 /// The channel's parent and its counter-model role channel.
 fn route_of(close: &Close) -> (ChannelId, ChannelId) {
     let channel = close.row.channel_id;
@@ -108,7 +92,7 @@ async fn start_successor(
 }
 
 /// On another thread while the close's finalizer waits at its seam: a successor claims the channel,
-/// starts its recovery cycle, then publishes its route, with the same role channel, and its voice.
+/// starts its recovery cycle, then publishes its route, with the same role channel.
 fn successor_at_seam(close: &Close, parent: ChannelId, role: ChannelId) -> (Raced, SeamHook) {
     let slot = Raced::default();
     let (shared, channel, message) = (close.shared.clone(), close.channel(), close.row.user_msg_id);
@@ -125,10 +109,6 @@ fn successor_at_seam(close: &Close, parent: ChannelId, role: ChannelId) -> (Race
                     .reset();
                 shared.dispatch.thread_parents.insert(parent, channel);
                 shared.dispatch.role_overrides.insert(channel, role);
-                shared
-                    .voice_barge_in
-                    .defer_for_test(channel, "successor input")
-                    .await;
                 successor
             })
         });
@@ -152,13 +132,12 @@ fn at_seam(work: impl FnOnce() + Send + 'static) -> SeamHook {
     })
 }
 
-/// What a skipped tail must leave: the successor's slot, route, voice buffer and recovery cycle.
+/// What a skipped tail must leave: the successor's slot, route and recovery cycle.
 async fn assert_successor_kept(
     close: &Close,
     successor: &Arc<CancelToken>,
     parent: ChannelId,
     role: ChannelId,
-    voice: &Arc<tokio::sync::Mutex<crate::voice::barge_in::DeferredBargeInBuffer>>,
     case: &str,
 ) {
     let slot = close.slot().await.expect("the successor holds the slot");
@@ -172,18 +151,6 @@ async fn assert_successor_kept(
         (Some(close.channel()), Some(role)),
         "{case}: route"
     );
-    let current = close
-        .shared
-        .voice_barge_in
-        .deferred_for_test(close.channel());
-    assert!(
-        current.is_some_and(|current| Arc::ptr_eq(&current, voice)),
-        "{case}: voice"
-    );
-    assert!(
-        !voice.try_lock().unwrap().is_empty(),
-        "{case}: the voice prompt stays"
-    );
     assert!(
         !recovery_done(close),
         "{case}: the successor's recovery cycle stays open"
@@ -191,28 +158,18 @@ async fn assert_successor_kept(
 }
 
 /// A commit whose reply is lost settles on the first attempt from its sealed ticket: the granted
-/// tail takes the episode's parent route and deferred voice once, and publishes one release.
+/// tail takes the episode's parent route once, and publishes one release.
 #[tokio::test(flavor = "current_thread")]
 async fn s2f_reply_loss_settles_from_the_sealed_ticket() {
     for queued in [true, false] {
-        let close = open_voice(5_342_001).await;
+        let close = Close::open(5_342_001, |_| {}).await;
         let (parent, role) = route_of(&close);
         publish(&close, parent, role);
         let queue = if queued {
-            close
-                .shared
-                .voice_barge_in
-                .defer_for_test(close.channel(), "deferred during A")
-                .await;
             close.other_turn_and_queue().await
         } else {
             Vec::new()
         };
-        let buffer = close
-            .shared
-            .voice_barge_in
-            .deferred_for_test(close.channel());
-        let buffer = buffer.map(|buffer| Arc::downgrade(&buffer));
         let acked = close.acked().await;
         let intent = close.intent(acked);
         let probe = intent.request.trace.probe();
@@ -248,23 +205,9 @@ async fn s2f_reply_loss_settles_from_the_sealed_ticket() {
         let (parent_route, kept_role) = routed(&close, parent);
         assert_eq!(parent_route, None, "{case}: the parent route is released");
         if queued {
-            // The queued input and the deferred prompt run under the same role, once each.
+            // The queued input runs under the same role.
             assert_eq!(kept_role, Some(role), "{case}");
-            let after = close.queued().await;
-            assert_eq!(after[..1], queue[..], "{case}");
-            assert_eq!(after.len(), 2, "{case}: one enqueued voice prompt");
-            assert_eq!(after[1].1, "deferred during A", "{case}");
-            assert!(
-                buffer.unwrap().upgrade().is_none(),
-                "{case}: the buffer is let go"
-            );
-            assert!(
-                close
-                    .shared
-                    .voice_barge_in
-                    .deferred_for_test(close.channel())
-                    .is_none()
-            );
+            assert_eq!(close.queued().await, queue, "{case}");
         } else {
             assert_eq!(kept_role, None, "{case}: nothing runs after it");
             assert!(close.queued().await.is_empty(), "{case}");
@@ -275,8 +218,8 @@ async fn s2f_reply_loss_settles_from_the_sealed_ticket() {
 /// A successor that claims while the tail waits after a lost reply keeps everything it holds: the
 /// tail is skipped, and only the episode's queue exit and its own finalization run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn s2f_successor_before_the_tail_keeps_its_claim_route_and_voice() {
-    let close = open_voice(5_342_002).await;
+async fn s2f_successor_before_the_tail_keeps_its_claim_and_route() {
+    let close = Close::open(5_342_002, |_| {}).await;
     let (parent, role) = route_of(&close);
     publish(&close, parent, role);
     let queued = close.other_turn_and_queue().await;
@@ -293,13 +236,8 @@ async fn s2f_successor_before_the_tail_keeps_its_claim_route_and_voice() {
         "{outcome:?}"
     );
     let successor = raced.lock().unwrap().take().expect("the successor claimed");
-    let voice = close
-        .shared
-        .voice_barge_in
-        .deferred_for_test(close.channel())
-        .unwrap();
     assert_eq!(probe.tail(), SUCCESSOR);
-    assert_successor_kept(&close, &successor, parent, role, &voice, "reply loss").await;
+    assert_successor_kept(&close, &successor, parent, role, "reply loss").await;
     assert_eq!(read(&probe, &TAIL), [1, 1, 1, 1]);
     assert_eq!(
         close.released(&mut events),
@@ -319,7 +257,7 @@ async fn s2f_successor_before_the_tail_keeps_its_claim_route_and_voice() {
 /// before the second attempt keeps its state, and the queue exit is handed out once in total.
 #[tokio::test(flavor = "current_thread")]
 async fn s2f_panic_before_the_tail_resumes_skipped_behind_a_successor() {
-    let close = open_voice(5_342_003).await;
+    let close = Close::open(5_342_003, |_| {}).await;
     let (parent, role) = route_of(&close);
     publish(&close, parent, role);
     let queued = close.other_turn_and_queue().await;
@@ -337,16 +275,6 @@ async fn s2f_panic_before_the_tail_resumes_skipped_behind_a_successor() {
     let mailbox = close.shared.mailbox_peek(close.channel()).unwrap();
     mailbox.recovery_done().reset();
     publish(&close, parent, role);
-    close
-        .shared
-        .voice_barge_in
-        .defer_for_test(close.channel(), "successor input")
-        .await;
-    let voice = close
-        .shared
-        .voice_barge_in
-        .deferred_for_test(close.channel())
-        .unwrap();
     let mut events = close.events();
     let intent = close.intent(acked);
     let second = intent.request.trace.probe();
@@ -358,7 +286,7 @@ async fn s2f_panic_before_the_tail_resumes_skipped_behind_a_successor() {
     assert_eq!(second.tail(), SUCCESSOR);
     assert_eq!(read(&second, &TAIL), [0, 1, 1, 1], "no second mailbox step");
     assert_eq!(second.stages(), [Stage::BeforeFinalize]);
-    assert_successor_kept(&close, &successor, parent, role, &voice, "panic").await;
+    assert_successor_kept(&close, &successor, parent, role, "panic").await;
     assert_eq!(close.released(&mut events), 0);
     assert_eq!(close.queued().await, queued);
     assert!(ticket_released(&second));

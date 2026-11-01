@@ -1,12 +1,10 @@
 import { useMemo, useState } from "react";
 import type { CampaignNode, CampaignNodeLive, CampaignNodeStatus } from "../../api/campaigns";
-import { CAMPAIGN_STAGES, campaignGlance, campaignIssueLabel, campaignStageStep } from "./campaignModel";
+import { CAMPAIGN_STAGES, campaignGlance, campaignStageStep, campaignTaskNumber, campaignTaskTitle } from "./campaignModel";
 import { Badge, LABELS, LiveChip, type Tr } from "./campaignPresentation";
 
 function gist(node: CampaignNode) {
-  const label = campaignIssueLabel(node);
-  const title = node.title.startsWith(label) ? node.title.slice(label.length).trim() : node.title;
-  return { label, text: node.summary?.trim() || title || node.title };
+  return { label: campaignTaskNumber(node), text: node.summary?.trim() || campaignTaskTitle(node) };
 }
 
 function StageLabel({ node, tr }: { node: CampaignNode; tr: Tr }) {
@@ -30,14 +28,14 @@ export default function CampaignGlance({ nodes, live = {}, tr, onOpen }: { nodes
       </button>)}
     </div>}
     {open && <ul className="campaign-glance-list" aria-label={tr(...LABELS[open.status])}>
-      {open.nodes.map((node) => { const { label, text } = gist(node); return <li key={node.id}><button onClick={() => onOpen(node.id)}><small>{label}</small><span>{text}</span><StageLabel node={node} tr={tr} /></button></li>; })}
+      {open.nodes.map((node) => { const { label, text } = gist(node); return <li key={node.id}><button onClick={() => onOpen(node.id)}><small>{label ?? ""}</small><span>{text}</span><StageLabel node={node} tr={tr} /></button></li>; })}
     </ul>}
     <div className={`campaign-glance-cards grid min-w-0 gap-2 lg:grid-cols-3 ${showAll ? "" : "max-sm:[&>button:not(:first-child)]:hidden"}`}>
       {(showAll ? active : active.slice(0, 3)).map((node) => {
         const { label, text } = gist(node);
         const step = campaignStageStep(node.stage);
         return <button key={node.id} className={`campaign-glance-card grid min-w-0 content-start gap-2 border-th-border-subtle bg-th-bg-surface p-3 text-left ${node.blocker ? " is-blocked" : ""}`} data-glance-id={node.id} onClick={() => onOpen(node.id)}>
-          <span className="campaign-glance-title flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1 [&_strong]:basis-full [&_strong]:text-sm [&_strong]:font-medium [&_strong]:leading-6 [&_strong]:[overflow-wrap:anywhere] [&_small]:text-xs [&_small]:text-th-text-muted"><small>{label}</small>{node.status === "blocked" && <Badge status={node.status} tr={tr} />}<LiveChip live={live[node.id]} tr={tr} /><strong>{text}</strong></span>
+          <span className="campaign-glance-title flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1 [&_strong]:basis-full [&_strong]:text-sm [&_strong]:font-medium [&_strong]:leading-6 [&_strong]:[overflow-wrap:anywhere] [&_small]:text-xs [&_small]:text-th-text-muted">{label && <small>{label}</small>}{node.status === "blocked" && <Badge status={node.status} tr={tr} />}<LiveChip live={live[node.id]} tr={tr} /><strong>{text}</strong></span>
           <span className="campaign-glance-stage">
             <span className="campaign-stage-bar" aria-hidden>{CAMPAIGN_STAGES.map((stage, index) => <i key={stage.key} className={index < step.index ? "done" : index === step.index ? "current" : undefined} />)}</span>
             <StageLabel node={node} tr={tr} />

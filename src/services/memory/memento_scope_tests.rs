@@ -99,18 +99,6 @@ async fn scoped_calls_with_group_change(
         })
         .await
         .unwrap();
-    let recall = backend
-        .recall(RecallRequest {
-            provider: crate::services::provider::ProviderKind::Claude,
-            role_id: "ch-td".into(),
-            channel_id: 4242,
-            channel_name: None,
-            session_id: root.path().display().to_string(),
-            dispatch_profile: DispatchProfile::Full,
-            user_text: "scope fixture".into(),
-        })
-        .await;
-    assert!(recall.memento_context_loaded, "{:?}", recall.warnings);
     if anchor {
         let repo = root.path().join("legacy-project");
         std::fs::create_dir(&repo).unwrap();
@@ -151,53 +139,49 @@ async fn scoped_calls_with_group_change(
 }
 
 #[tokio::test]
-async fn memory_group_automatic_remember_and_recall_use_group() {
+async fn memory_group_automatic_remember_uses_group() {
     let calls = automatic_calls(Some("cookingheart")).await;
-    assert_eq!(calls.len(), 2);
-    for (call, tool) in calls.iter().zip(["remember", "context"]) {
-        assert_eq!(call["name"], tool);
-        assert_eq!(call["arguments"]["workspace"], "cookingheart");
-        assert_eq!(call["arguments"]["agentId"], "ch-td");
-    }
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["name"], "remember");
+    assert_eq!(calls[0]["arguments"]["workspace"], "cookingheart");
+    assert_eq!(calls[0]["arguments"]["agentId"], "ch-td");
 }
 
 #[tokio::test]
 async fn memory_group_absent_automatic_paths_preserve_legacy_workspace() {
     let calls = automatic_calls(None).await;
-    assert_eq!(calls.len(), 2);
-    for call in calls {
-        assert_eq!(call["arguments"]["workspace"], "agentdesk-ch-td");
-        assert_eq!(call["arguments"]["agentId"], "ch-td");
-    }
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["arguments"]["workspace"], "agentdesk-ch-td");
+    assert_eq!(calls[0]["arguments"]["agentId"], "ch-td");
 }
 
 #[tokio::test]
 async fn memory_group_anchor_uses_shared_group_and_keeps_session_cache() {
     let calls = scoped_calls(Some("cookingheart"), true, None).await;
-    assert_eq!(calls.len(), 3, "one anchor fetch plus remember and recall");
-    assert_eq!(calls[2]["arguments"]["workspace"], "cookingheart");
-    assert_eq!(calls[2]["arguments"]["agentId"], "default");
+    assert_eq!(calls.len(), 2, "one anchor fetch plus remember");
+    assert_eq!(calls[1]["arguments"]["workspace"], "cookingheart");
+    assert_eq!(calls[1]["arguments"]["agentId"], "default");
 }
 
 #[tokio::test]
 async fn memory_group_absent_anchor_preserves_git_workspace_and_cache() {
     let calls = scoped_calls(None, true, None).await;
-    assert_eq!(calls.len(), 3);
-    assert_eq!(calls[2]["arguments"]["workspace"], "legacy-project");
-    assert_eq!(calls[2]["arguments"]["agentId"], "default");
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[1]["arguments"]["workspace"], "legacy-project");
+    assert_eq!(calls[1]["arguments"]["agentId"], "default");
 }
 
 #[tokio::test]
 async fn memory_group_override_stays_first_for_automatic_and_anchor_paths() {
     let calls = scoped_calls(Some("cookingheart"), true, Some("explicit-scope")).await;
-    assert_eq!(calls.len(), 3);
+    assert_eq!(calls.len(), 2);
     for call in calls {
         assert_eq!(call["arguments"]["workspace"], "explicit-scope");
     }
 }
 
 #[test]
-fn memory_group_meeting_participant_settings_win_over_host_channel() {
+fn memory_group_explicit_settings_win_over_host_channel() {
     let root = tempfile::tempdir().unwrap();
     let _guard = crate::config::set_agentdesk_root_for_test(root.path());
     fixture(root.path(), Some("cookingheart"));
@@ -219,7 +203,7 @@ fn memory_group_meeting_participant_settings_win_over_host_channel() {
 #[tokio::test]
 async fn memory_group_api_shape_implicit_remember_defaults_to_private_role() {
     let calls = scoped_calls_with_agent(Some("cookingheart"), false, None, None).await;
-    assert_eq!(calls.len(), 2);
+    assert_eq!(calls.len(), 1);
     assert_eq!(calls[0]["arguments"]["workspace"], "cookingheart");
     assert_eq!(calls[0]["arguments"]["agentId"], "ch-td");
 }
@@ -227,7 +211,7 @@ async fn memory_group_api_shape_implicit_remember_defaults_to_private_role() {
 #[tokio::test]
 async fn memory_group_api_shape_absent_group_keeps_omitted_agent_id() {
     let calls = scoped_calls_with_agent(None, false, None, None).await;
-    assert_eq!(calls.len(), 2);
+    assert_eq!(calls.len(), 1);
     assert_eq!(calls[0]["arguments"]["workspace"], "agentdesk-ch-td");
     assert!(calls[0]["arguments"].get("agentId").is_none());
 }
@@ -235,7 +219,7 @@ async fn memory_group_api_shape_absent_group_keeps_omitted_agent_id() {
 #[tokio::test]
 async fn memory_group_api_shape_explicit_shared_agent_id_stays_default() {
     let calls = scoped_calls_with_agent(Some("cookingheart"), false, None, Some("default")).await;
-    assert_eq!(calls.len(), 2);
+    assert_eq!(calls.len(), 1);
     assert_eq!(calls[0]["arguments"]["workspace"], "cookingheart");
     assert_eq!(calls[0]["arguments"]["agentId"], "default");
 }
@@ -250,7 +234,7 @@ async fn memory_group_api_shape_explicit_workspace_keeps_shared_default() {
         Some("cookingheart"),
     )
     .await;
-    assert_eq!(calls.len(), 2);
+    assert_eq!(calls.len(), 1);
     assert_eq!(calls[0]["arguments"]["workspace"], "cookingheart");
     assert!(calls[0]["arguments"].get("agentId").is_none());
 }
@@ -266,8 +250,8 @@ async fn memory_group_anchor_cache_tracks_group_changes() {
         Some("family-counsel"),
     )
     .await;
-    assert_eq!(calls.len(), 4, "a changed group must fetch its own anchors");
-    assert_eq!(calls[2]["arguments"]["workspace"], "cookingheart");
-    assert_eq!(calls[3]["arguments"]["workspace"], "family-counsel");
-    assert_eq!(calls[3]["arguments"]["agentId"], "default");
+    assert_eq!(calls.len(), 3, "a changed group must fetch its own anchors");
+    assert_eq!(calls[1]["arguments"]["workspace"], "cookingheart");
+    assert_eq!(calls[2]["arguments"]["workspace"], "family-counsel");
+    assert_eq!(calls[2]["arguments"]["agentId"], "default");
 }

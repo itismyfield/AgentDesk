@@ -815,6 +815,21 @@
       "path": "migrations/postgres/0167_input_fallback_plan.sql",
       "sha256": "44777c95d6244770298d7ca9d7efbef721ebe7b4b389e2069b39a31ed8d026e6",
       "version": 167
+    },
+    {
+      "path": "migrations/postgres/0168_drop_meetings_quality_rollups.sql",
+      "sha256": "b19657cd28a7ecafc2c4dbb714bd702b7358cd938576ee767a30ff35db776e19",
+      "version": 168
+    },
+    {
+      "path": "migrations/postgres/0169_drop_voice_tables.sql",
+      "sha256": "30ca1b3182efd5d644b85cc12e5094f389d7da774f50e20a506be4ce62ae67db",
+      "version": 169
+    },
+    {
+      "path": "migrations/postgres/0170_routine_runs_newest_first_index.sql",
+      "sha256": "9525b92107be07f19d5415f216a604dc54edcc90e093463d170134a4bd1d88be",
+      "version": 170
     }
   ],
   "version": 1

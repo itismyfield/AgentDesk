@@ -277,7 +277,6 @@ impl Fixture {
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         };
         let persistence =
             discord::queue_persistence_context(self.shared(), &ProviderKind::Codex, self.channel());

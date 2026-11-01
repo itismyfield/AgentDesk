@@ -345,88 +345,6 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             json!({"body": {"source_agent": "family-counsel", "user_id": "123456789012345678", "channel_id": "1473922824350601297", "ttl_seconds": 3600, "context": {"topic": "followup"}}}),
             json!({"ok": true, "id": 42}),
         ),
-        ep(
-            "GET",
-            "/api/round-table-meetings",
-            "meetings",
-            "List meetings",
-        ),
-        ep(
-            "POST",
-            "/api/round-table-meetings",
-            "meetings",
-            "Create or update meeting",
-        )
-        .with_example(
-            json!({"body": {"id": "meeting-1", "channel_id": "1473922824350601297", "agenda": "API docs review", "status": "completed", "summary": "Decided to add examples", "participant_names": ["PM", "Reviewer"], "total_rounds": 2}}),
-            json!({"ok": true, "meeting": {"id": "meeting-1", "status": "completed", "agenda": "API docs review"}}),
-        ),
-        ep(
-            "POST",
-            "/api/round-table-meetings/start",
-            "meetings",
-            "Start meeting",
-        )
-        .with_example(
-            json!({"body": {"channel_id": "1473922824350601297", "agenda": "Plan docs sweep", "primary_provider": "codex", "reviewer_provider": "claude", "fixed_participants": ["project-agentdesk"]}}),
-            json!({"ok": true, "message": "Meeting start scheduled"}),
-        ),
-        ep(
-            "GET",
-            "/api/round-table-meetings/{id}",
-            "meetings",
-            "Get meeting by ID",
-        ),
-        ep(
-            "DELETE",
-            "/api/round-table-meetings/{id}",
-            "meetings",
-            "Delete meeting",
-        )
-        .with_example(
-            json!({"path": {"id": "meeting-1"}}),
-            json!({"ok": true}),
-        ),
-        ep(
-            "PATCH",
-            "/api/round-table-meetings/{id}/issue-repo",
-            "meetings",
-            "Update meeting issue repository",
-        )
-        .with_example(
-            json!({"path": {"id": "meeting-1"}, "body": {"repo": "itismyfield/AgentDesk"}}),
-            json!({"ok": true, "meeting": {"id": "meeting-1", "issue_repo": "itismyfield/AgentDesk"}}),
-        ),
-        ep(
-            "POST",
-            "/api/round-table-meetings/{id}/issues",
-            "meetings",
-            "Create meeting issues",
-        )
-        .with_example(
-            json!({"path": {"id": "meeting-1"}, "body": {"repo": "itismyfield/AgentDesk"}}),
-            json!({"ok": true, "results": [{"key": "item-0", "ok": true, "issue_number": 4227}], "summary": {"total": 1, "created": 1, "failed": 0, "discarded": 0, "pending": 0}}),
-        ),
-        ep(
-            "POST",
-            "/api/round-table-meetings/{id}/issues/discard",
-            "meetings",
-            "Discard one meeting issue",
-        )
-        .with_example(
-            json!({"path": {"id": "meeting-1"}, "body": {"key": "item-0"}}),
-            json!({"ok": true, "summary": {"discarded": 1, "pending": 0}}),
-        ),
-        ep(
-            "POST",
-            "/api/round-table-meetings/{id}/issues/discard-all",
-            "meetings",
-            "Discard all meeting issues",
-        )
-        .with_example(
-            json!({"path": {"id": "meeting-1"}}),
-            json!({"ok": true, "results": [], "summary": {"discarded": 3, "pending": 0, "all_resolved": true}}),
-        ),
         ep("GET", "/api/skills/catalog", "skills", "List skill catalog")
             .with_params([(
                 "include_stale",
@@ -486,7 +404,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/routines",
             "routines",
-            "List durable routines with optional agent/status filters.",
+            "List durable routines with optional agent/status filters. Each routine carries `last_run`: its newest run in the `/api/routines/{id}/runs` record shape, or null before the first run.",
         )
         .with_params([
             (
@@ -500,7 +418,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         ])
         .with_example(
             json!({"query": {"status": "enabled"}}),
-            json!({"routines": [{"id": "routine-1", "script_ref": "daily-summary.js", "status": "enabled", "fallback_agent_id": "claude", "max_retries": 1}], "default_timeout_secs": 1800}),
+            json!({"routines": [{"id": "routine-1", "script_ref": "daily-summary.js", "status": "enabled", "fallback_agent_id": "claude", "max_retries": 1, "last_run": {"id": "run-1", "routine_id": "routine-1", "status": "succeeded", "started_at": "2026-10-31T03:00:00Z", "finished_at": "2026-10-31T03:00:04Z"}}], "default_timeout_secs": 1800}),
         ),
         ep(
             "GET",

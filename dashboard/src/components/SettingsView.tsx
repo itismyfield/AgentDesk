@@ -1,42 +1,33 @@
-import { useCallback, useEffect, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
-import type {
-  CompanySettings,
-  VoiceAgentConfig,
-  VoiceConfigResponse,
-  VoiceGlobalConfig,
-  VoiceModels,
-} from "../types";
-import * as api from "../api";
-import type { OperatorConnectorsResponse, RuntimeConfigMap, RuntimeConfigValue } from "../api";
-import type {
-  PendingProviderLogin,
-  ProviderAuthProvider,
-} from "./settings/SettingsProvidersModel";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import type { CompanySettings } from "../types";
 import { STORAGE_KEYS } from "../lib/storageKeys";
 import { writeLocalStorageValue } from "../lib/useLocalStorage";
-import { SurfaceEmptyState as SettingsEmptyState } from "./common/SurfacePrimitives";
-import { SettingRow } from "./settings/SettingsPanels";
+import { SettingsAiPanel } from "./settings/SettingsAiPanel";
+import { connectionStatusRows, connectorsNeedingSetup } from "./settings/SettingsConnectionsModel";
+import { SettingsConnectionsPanel } from "./settings/SettingsConnectionsPanel";
+import { RUNTIME_FIELDS } from "./settings/SettingsCopy";
+import { SettingsGeneralPanel } from "./settings/SettingsGeneralPanel";
+import { SettingsMachinePanel } from "./settings/SettingsMachinePanel";
+import { machinesNeedingAttention } from "./settings/SettingsMachineModel";
 import { useSettingsMetaCatalog } from "./settings/SettingsMetaCatalog";
-import { SettingsViewLayout } from "./settings/SettingsViewLayout";
-import { getDangerousConfigKeys } from "./settings/settingsDangerousConfig";
-import { useSettingsPipelineSelector } from "./settings/useSettingsPipelineSelector";
 import {
-  GENERAL_FIELD_LIMITS,
   SETTINGS_PANEL_QUERY_KEY,
-  applyConfigEdits,
-  cloneVoiceConfig,
-  isReadOnlyConfigKey,
-  readStoredRuntimeCategory,
-  readStoredSettingsPanel,
   readSettingsPanelFromUrl,
-  voiceSaveBody,
-  type ConfigEditValue,
-  type ConfigEntry,
+  readStoredSettingsPanel,
   type PendingDangerousConfigSave,
   type SettingRowMeta,
   type SettingsNotificationType,
   type SettingsPanel,
 } from "./settings/SettingsModel";
+import { SettingRow } from "./settings/SettingsPanels";
+import type { SettingsPanelContext, SourceStatus } from "./settings/SettingsPanelTypes";
+import { SettingsSaveBar } from "./settings/SettingsSaveBar";
+import { SettingsViewLayout } from "./settings/SettingsViewLayout";
+import { SettingsWorkflowPanel } from "./settings/SettingsWorkflowPanel";
+import { getDangerousConfigKeys } from "./settings/settingsDangerousConfig";
+import { useMachineNodes } from "./settings/useMachineNodes";
+import { useConfigEntriesDraft, useGeneralDraft, useRuntimeConfigDraft, type GeneralField } from "./settings/useSettingsDrafts";
+import { useConnectionStatus, useOperatorConnectors, useProviderAccounts } from "./settings/useSettingsRemoteData";
 
 interface SettingsViewProps {
   settings: CompanySettings;
@@ -45,227 +36,20 @@ interface SettingsViewProps {
   onNotify?: (message: string, type?: SettingsNotificationType) => string | void;
 }
 
-export default function SettingsView({
-  settings,
-  onSave,
-  isKo,
-  onNotify,
-}: SettingsViewProps) {
-  const tr = useCallback((ko: string, en: string) => (isKo ? ko : en), [isKo]);
+const GENERAL_FIELDS = new Set<string>(["companyName", "ceoName", "language", "theme"]);
+const RUNTIME_KEYS = new Set(RUNTIME_FIELDS.map((field) => field.key));
 
-  const [companyName, setCompanyName] = useState(settings.companyName);
-  const [ceoName, setCeoName] = useState(settings.ceoName);
-  const [language, setLanguage] = useState(settings.language);
-  const [theme, setTheme] = useState(settings.theme);
-  const [saving, setSaving] = useState(false);
+function sourceStatus(loaded: boolean, error: boolean): SourceStatus {
+  return error ? "error" : loaded ? "ready" : "loading";
+}
 
-  const [rcValues, setRcValues] = useState<RuntimeConfigMap>({});
-  const [rcDefaults, setRcDefaults] = useState<RuntimeConfigMap>({});
-  const [rcExplicitKeys, setRcExplicitKeys] = useState<Set<string>>(() => new Set());
-  const [rcLoaded, setRcLoaded] = useState(false);
-  const [rcError, setRcError] = useState(false);
-  const [rcSaving, setRcSaving] = useState(false);
-  const [rcDirty, setRcDirty] = useState(false);
-
-  const [configEntries, setConfigEntries] = useState<ConfigEntry[]>([]);
-  const [configEdits, setConfigEdits] = useState<Record<string, ConfigEditValue>>({});
-  const [configSaving, setConfigSaving] = useState(false);
-  const [pendingDangerousConfigSave, setPendingDangerousConfigSave] =
-    useState<PendingDangerousConfigSave | null>(null);
-
-  const [voiceConfig, setVoiceConfig] = useState<VoiceConfigResponse | null>(null);
-  const [voiceDraft, setVoiceDraft] = useState<VoiceConfigResponse | null>(null);
-  const [voiceLoaded, setVoiceLoaded] = useState(false);
-  const [voiceSaving, setVoiceSaving] = useState(false);
-  const [voiceError, setVoiceError] = useState<string | null>(null);
-  const [operatorConnectors, setOperatorConnectors] = useState<OperatorConnectorsResponse | null>(null);
-  const [operatorConnectorsLoaded, setOperatorConnectorsLoaded] = useState(false);
-  const [operatorConnectorsLoading, setOperatorConnectorsLoading] = useState(false);
-  const [operatorConnectorsError, setOperatorConnectorsError] = useState<string | null>(null);
-  const [providerAuthProviders, setProviderAuthProviders] = useState<ProviderAuthProvider[]>([]);
-  const [providerAuthLoaded, setProviderAuthLoaded] = useState(false);
-  const [providerAuthLoading, setProviderAuthLoading] = useState(false);
-  const [providerAuthError, setProviderAuthError] = useState<string | null>(null);
-  const [pendingProviderLogin, setPendingProviderLogin] = useState<PendingProviderLogin | null>(null);
-  const [startingProviderId, setStartingProviderId] = useState<string | null>(null);
-  const [removingProviderAccountKey, setRemovingProviderAccountKey] = useState<string | null>(null);
-
+function usePanelRoute() {
   const [activePanel, setActivePanel] = useState<SettingsPanel>(() => readStoredSettingsPanel());
-  const [activeRuntimeCategoryId, setActiveRuntimeCategoryId] = useState<string>(() => readStoredRuntimeCategory());
-  const [panelQuery, setPanelQuery] = useState("");
-  const [showOnboarding, setShowOnboarding] = useState(false);
-
-  const notify = useCallback(
-    (ko: string, en: string, type: SettingsNotificationType = "info") => {
-      onNotify?.(tr(ko, en), type);
-    },
-    [onNotify, tr],
-  );
-
-  const {
-    pipelineAgents,
-    pipelineRepos,
-    pipelineSelectorError,
-    pipelineSelectorLoading,
-    selectedPipelineAgentId,
-    selectedPipelineRepo,
-    setSelectedPipelineAgentId,
-    setSelectedPipelineRepo,
-  } = useSettingsPipelineSelector({ activePanel, notify, tr });
-
-  const loadConfigEntries = useCallback(async () => {
-    const data = await api.getSettingsConfig();
-    const entries = Array.isArray(data.entries) ? data.entries : [];
-    setConfigEntries(entries);
-    return entries;
-  }, []);
-
-  const loadVoiceConfig = useCallback(async () => {
-    setVoiceError(null);
-    try {
-      const data = await api.getVoiceConfig();
-      setVoiceConfig(data);
-      setVoiceDraft(cloneVoiceConfig(data));
-      setVoiceLoaded(true);
-      return data;
-    } catch {
-      setVoiceLoaded(true);
-      setVoiceError(tr("음성 설정을 불러오지 못했습니다.", "Failed to load voice settings."));
-      return null;
-    }
-  }, [tr]);
-
-  const loadOperatorConnectors = useCallback(async () => {
-    setOperatorConnectorsLoading(true);
-    setOperatorConnectorsError(null);
-    try {
-      const data = await api.getOperatorConnectors();
-      setOperatorConnectors(data);
-      setOperatorConnectorsLoaded(true);
-      return data;
-    } catch {
-      setOperatorConnectorsLoaded(true);
-      setOperatorConnectorsError(tr("커넥터 상태를 불러오지 못했습니다.", "Failed to load connector status."));
-      return null;
-    } finally {
-      setOperatorConnectorsLoading(false);
-    }
-  }, [tr]);
-
-  const loadProviderAuthProfiles = useCallback(async () => {
-    setProviderAuthLoading(true);
-    setProviderAuthError(null);
-    try {
-      const data = await api.getProviderAuthProfiles();
-      setProviderAuthProviders(Array.isArray(data.providers) ? data.providers : []);
-      setProviderAuthLoaded(true);
-      return data;
-    } catch {
-      setProviderAuthLoaded(true);
-      setProviderAuthError(tr("프로바이더 계정을 불러오지 못했습니다.", "Failed to load provider accounts."));
-      return null;
-    } finally {
-      setProviderAuthLoading(false);
-    }
-  }, [tr]);
-
-  const handleAddProviderAccount = useCallback(async (providerId: string) => {
-    setStartingProviderId(providerId);
-    setProviderAuthError(null);
-    try {
-      const pending = await api.startProviderAuthLogin(providerId);
-      setPendingProviderLogin(pending);
-      notify(
-        `${providerId} 로그인을 tmux에서 완료하세요.`,
-        `Finish the ${providerId} login in tmux.`,
-        "info",
-      );
-    } catch {
-      setProviderAuthError(tr("extra 계정 로그인을 시작하지 못했습니다.", "Failed to start extra-account login."));
-    } finally {
-      setStartingProviderId(null);
-    }
-  }, [notify, tr]);
-
-  const handleCompleteProviderLogin = useCallback(async () => {
-    if (!pendingProviderLogin) return;
-    setProviderAuthError(null);
-    try {
-      await api.completeProviderAuthLogin(
-        pendingProviderLogin.providerId,
-        pendingProviderLogin.profileId,
-        pendingProviderLogin.home,
-      );
-      setPendingProviderLogin(null);
-      notify("extra 계정이 카탈로그에 추가되었습니다.", "Extra account was added to the catalog.", "success");
-      await loadProviderAuthProfiles();
-    } catch {
-      setProviderAuthError(tr(
-        "아직 자격 증명이 보이지 않습니다. tmux에서 로그인을 마친 뒤 다시 확인하세요.",
-        "Credentials are still missing. Finish vendor login in tmux, then try again.",
-      ));
-    }
-  }, [loadProviderAuthProfiles, notify, pendingProviderLogin, tr]);
-
-  const handleRemoveProviderAccount = useCallback(async (providerId: string, profileId: string) => {
-    const key = `${providerId}:${profileId}`;
-    const confirmed = window.confirm(tr(
-      `“${profileId}” 계정 연결을 해제할까요? 저장된 자격 증명 폴더는 유지됩니다.`,
-      `Unlink “${profileId}”? Its saved credential directory will be kept.`,
-    ));
-    if (!confirmed) return;
-    setRemovingProviderAccountKey(key);
-    setProviderAuthError(null);
-    try {
-      await api.removeProviderAuthProfile(providerId, profileId);
-      notify("extra 계정 연결을 해제했습니다. 자격 증명은 유지됩니다.", "Extra account unlinked; credentials were kept.", "success");
-      await loadProviderAuthProfiles();
-    } catch (error) {
-      setProviderAuthError(error instanceof Error ? error.message : tr(
-        "연결 해제에 실패했습니다. 먼저 연결된 에이전트/채널을 기본 계정으로 바꾸세요.",
-        "Unlink failed. First move bound agents/channels back to the default account.",
-      ));
-    } finally {
-      setRemovingProviderAccountKey(null);
-    }
-  }, [loadProviderAuthProfiles, notify, tr]);
-
-  const handleSetProviderPrimary = useCallback(async (providerId: string, profileId: string) => {
-    setProviderAuthError(null);
-    try {
-      await api.setProviderAuthPrimaryProfile(providerId, profileId);
-      notify(
-        `${providerId} 기본 계정을 ${profileId === "default" ? "시스템 기본" : profileId}(으)로 변경했습니다.`,
-        `Updated ${providerId} primary account.`,
-        "success",
-      );
-      await loadProviderAuthProfiles();
-    } catch (error) {
-      setProviderAuthError(error instanceof Error ? error.message : tr(
-        "기본 계정을 변경하지 못했습니다.",
-        "Failed to update the primary account.",
-      ));
-    }
-  }, [loadProviderAuthProfiles, notify, tr]);
-
-  useEffect(() => {
-    setCompanyName(settings.companyName);
-    setCeoName(settings.ceoName);
-    setLanguage(settings.language);
-    setTheme(settings.theme);
-  }, [settings.companyName, settings.ceoName, settings.language, settings.theme]);
 
   useEffect(() => {
     writeLocalStorageValue(STORAGE_KEYS.settingsPanel, activePanel);
-  }, [activePanel]);
-
-  useEffect(() => {
-    writeLocalStorageValue(STORAGE_KEYS.settingsRuntimeCategory, activeRuntimeCategoryId);
-  }, [activeRuntimeCategoryId]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (readSettingsPanelFromUrl() !== activePanel) {
+    // Also rewrites legacy ids such as ?settingsPanel=runtime to the tab they now open.
+    if (new URLSearchParams(window.location.search).get(SETTINGS_PANEL_QUERY_KEY) !== activePanel) {
       const url = new URL(window.location.href);
       url.searchParams.set(SETTINGS_PANEL_QUERY_KEY, activePanel);
       window.history.replaceState(window.history.state, "", url);
@@ -273,7 +57,6 @@ export default function SettingsView({
   }, [activePanel]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
     const handlePopState = () => {
       const panelFromUrl = readSettingsPanelFromUrl();
       if (panelFromUrl) setActivePanel(panelFromUrl);
@@ -282,443 +65,231 @@ export default function SettingsView({
     return () => window.removeEventListener("popstate", handlePopState);
   }, []);
 
-  useEffect(() => {
-    void api.getRuntimeConfig()
-      .then((data) => {
-        setRcValues(data?.current ?? {});
-        setRcDefaults(data?.defaults ?? {});
-        setRcExplicitKeys(new Set(data?.explicit_keys ?? []));
-        setRcLoaded(true);
-      })
-      .catch(() => {
-        setRcError(true);
-        setRcLoaded(true);
-      });
-
-    void loadConfigEntries()
-      .catch(() => {});
-  }, [loadConfigEntries]);
-
-  useEffect(() => {
-    if (activePanel !== "voice" || voiceLoaded) {
-      return;
-    }
-    void loadVoiceConfig();
-  }, [activePanel, loadVoiceConfig, voiceLoaded]);
-
-  useEffect(() => {
-    if (activePanel !== "connectors" || operatorConnectorsLoaded) {
-      return;
-    }
-    void loadOperatorConnectors();
-  }, [activePanel, loadOperatorConnectors, operatorConnectorsLoaded]);
-
-  useEffect(() => {
-    if (activePanel !== "providers" || providerAuthLoaded) {
-      return;
-    }
-    void loadProviderAuthProfiles();
-  }, [activePanel, loadProviderAuthProfiles, providerAuthLoaded]);
-
-  const normalizedCompanyName = companyName.trim();
-  const normalizedCeoName = ceoName.trim();
-  const companyNameError =
-    normalizedCompanyName.length === 0
-      ? tr("회사 이름은 비워둘 수 없습니다.", "Company name is required.")
-      : normalizedCompanyName.length > GENERAL_FIELD_LIMITS.companyName
-        ? tr(
-            `회사 이름은 ${GENERAL_FIELD_LIMITS.companyName}자 이하여야 합니다.`,
-            `Company name must be ${GENERAL_FIELD_LIMITS.companyName} characters or fewer.`,
-          )
-        : null;
-  const ceoNameError =
-    normalizedCeoName.length > GENERAL_FIELD_LIMITS.ceoName
-      ? tr(
-          `CEO 이름은 ${GENERAL_FIELD_LIMITS.ceoName}자 이하여야 합니다.`,
-          `CEO name must be ${GENERAL_FIELD_LIMITS.ceoName} characters or fewer.`,
-        )
-      : null;
-  const generalFormInvalid = Boolean(companyNameError || ceoNameError);
-  const companyDirty =
-    normalizedCompanyName !== settings.companyName.trim() ||
-    normalizedCeoName !== settings.ceoName.trim() ||
-    language !== settings.language ||
-    theme !== settings.theme;
-  const configDirty = Object.keys(configEdits).length > 0;
-
-  const {
-    activeNavItem,
-    filteredNavItems,
-    generalMetas,
-    groupedConfigEntries,
-    isRowVisible,
-    matchingKeysInActivePanel,
-    onboardingMetas,
-    panelQueryNormalized,
-    pipelineMetas,
-    runtimeMetas,
-    voiceAliasConflict,
-    voiceDirty,
-  } = useSettingsMetaCatalog({
-    activePanel,
-    ceoName,
-    ceoNameError,
-    companyName,
-    companyNameError,
-    configEdits,
-    configEntries,
-    language,
-    panelQuery,
-    rcDefaults,
-    rcValues,
-    settings,
-    theme,
-    tr,
-    voiceConfig,
-    voiceDraft,
-  });
-
-  const handlePanelChange = useCallback((panel: SettingsPanel, mode: "push" | "replace" = "push") => {
+  const changePanel = useCallback((panel: SettingsPanel) => {
     setActivePanel((current) => {
-      if (typeof window !== "undefined" && !(current === panel && mode === "push")) {
+      if (current !== panel) {
         const url = new URL(window.location.href);
         url.searchParams.set(SETTINGS_PANEL_QUERY_KEY, panel);
-        if (mode === "replace") {
-          window.history.replaceState(window.history.state, "", url);
-        } else {
-          window.history.pushState(window.history.state, "", url);
-        }
+        window.history.pushState(window.history.state, "", url);
       }
       return panel;
     });
   }, []);
 
-  const openOnboarding = useCallback(() => {
-    handlePanelChange("onboarding");
-    setShowOnboarding(true);
-  }, [handlePanelChange]);
+  return [activePanel, changePanel] as const;
+}
 
-  const inputStyle: CSSProperties = {
-    background: "var(--th-bg-surface)",
-    border: "1px solid var(--th-border)",
-    color: "var(--th-text)",
-  };
-  const primaryActionClass = "inline-flex min-h-[44px] shrink-0 items-center justify-center whitespace-nowrap rounded-md px-4 py-2.5 text-sm font-medium text-white transition-colors disabled:opacity-50";
-  const primaryActionStyle: CSSProperties = { background: "var(--th-accent-primary)" };
-  const secondaryActionClass = "inline-flex min-h-[44px] items-center justify-center whitespace-nowrap rounded-md border px-4 py-2.5 text-sm font-medium transition-[opacity,color,border-color] hover:opacity-100";
-  const secondaryActionStyle: CSSProperties = {
-    borderColor: "rgba(148,163,184,0.28)",
-    color: "var(--th-text-secondary)",
-    background: "color-mix(in srgb, var(--th-bg-surface) 94%, transparent)",
-  };
-  const subtleButtonClass = "inline-flex min-h-11 min-w-11 items-center justify-center whitespace-nowrap rounded-md border px-3 py-1.5 text-[11px] font-medium transition-colors";
-  const subtleButtonStyle: CSSProperties = {
-    borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
-    color: "var(--th-text-muted)",
-    background: "color-mix(in srgb, var(--th-bg-surface) 94%, transparent)",
+export default function SettingsView({ settings, onSave, isKo, onNotify }: SettingsViewProps) {
+  const tr = useCallback((ko: string, en: string) => (isKo ? ko : en), [isKo]);
+  const notify = useCallback(
+    (ko: string, en: string, type: SettingsNotificationType = "info") => {
+      onNotify?.(tr(ko, en), type);
+    },
+    [onNotify, tr],
+  );
+
+  const general = useGeneralDraft(settings, tr);
+  const runtime = useRuntimeConfigDraft();
+  const config = useConfigEntriesDraft();
+  const [activePanel, changePanel] = usePanelRoute();
+  const [query, setQuery] = useState("");
+  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [pendingDangerousSave, setPendingDangerousSave] = useState<PendingDangerousConfigSave | null>(null);
+
+  const connection = useConnectionStatus();
+  const connectors = useOperatorConnectors();
+  const machines = useMachineNodes();
+  const accounts = useProviderAccounts({ enabled: activePanel === "ai", notify, tr });
+
+  const runtimeStatus = sourceStatus(runtime.loaded, runtime.error);
+  const configStatus = sourceStatus(config.loaded, config.error);
+  const loadFailed = activePanel !== "general"
+    && (config.error || (runtime.error && (activePanel === "workflow" || activePanel === "ai")));
+  const statusRows = useMemo(
+    () => connectionStatusRows(connection.onboarding, connection.health, tr),
+    [connection.health, connection.onboarding, tr],
+  );
+  const attention = useMemo<Partial<Record<SettingsPanel, number>>>(() => ({
+    general: Number(Boolean(general.companyNameError)) + Number(Boolean(general.ceoNameError)),
+    connections: statusRows.filter((row) => row.tone === "warn").length + connectorsNeedingSetup(connectors.data),
+    machine: machinesNeedingAttention(machines.data, Date.now()),
+  }), [connectors.data, general.ceoNameError, general.companyNameError, machines.data, statusRows]);
+
+  const catalog = useSettingsMetaCatalog({
+    activePanel,
+    attention,
+    configEdits: config.edits,
+    configEntries: config.entries,
+    general,
+    query,
+    runtime: {
+      values: runtime.values,
+      defaults: runtime.defaults,
+      changedKeys: runtime.changedKeys,
+      ready: runtimeStatus === "ready",
+    },
+    tr,
+  });
+
+  const { setFieldValue } = general;
+  const { change: changeRuntime, resetToDefault } = runtime;
+  const { edit: editConfig } = config;
+  const handleRowChange = useCallback((key: string, value: string | boolean | number) => {
+    if (GENERAL_FIELDS.has(key)) {
+      setFieldValue(key as GeneralField, String(value));
+    } else if (RUNTIME_KEYS.has(key)) {
+      changeRuntime(key, value);
+    } else {
+      editConfig(key, typeof value === "boolean" ? value : String(value));
+    }
+  }, [changeRuntime, editConfig, setFieldValue]);
+
+  const renderRow = useCallback((meta: SettingRowMeta, options?: { extra?: ReactNode }) => (
+    <SettingRow
+      key={meta.key}
+      meta={meta}
+      isKo={isKo}
+      onChange={handleRowChange}
+      onReset={RUNTIME_KEYS.has(meta.key) ? resetToDefault : undefined}
+      extra={options?.extra}
+    />
+  ), [handleRowChange, isKo, resetToDefault]);
+
+  const ctx: SettingsPanelContext = {
+    tr,
+    isKo,
+    queryActive: catalog.queryActive,
+    matches: catalog.matches,
+    rowsFor: catalog.rowsFor,
+    renderRow,
   };
 
-  const handleSave = async (event?: FormEvent<HTMLFormElement>) => {
-    event?.preventDefault();
-    if (generalFormInvalid) return;
+  const changeCount = general.changedFields.length + runtime.changedKeys.size + Object.keys(config.edits).length;
+  const generalChanged = general.changedFields.length > 0;
+  const blockedReason = generalChanged && general.invalid ? (general.companyNameError ?? general.ceoNameError) : null;
+
+  const performSave = async () => {
     setSaving(true);
-    try {
-      await onSave({
-        companyName: normalizedCompanyName,
-        ceoName: normalizedCeoName,
-        language,
-        theme,
-      });
-      notify("일반 설정을 저장했습니다.", "Saved general settings.", "success");
-    } catch {
-      notify("일반 설정 저장에 실패했습니다.", "Failed to save general settings.", "error");
-    } finally {
-      setSaving(false);
+    let failed = false;
+    if (generalChanged) {
+      try { await onSave(general.payload); } catch { failed = true; }
     }
-  };
-
-  const handleRcSave = async () => {
-    setRcSaving(true);
-    try {
-      await api.saveRuntimeConfig({
-        ...rcValues,
-        __runtimeConfigExplicitKeys: Array.from(rcExplicitKeys).sort(),
-      });
-      setRcDirty(false);
-      notify("런타임 설정을 저장했습니다.", "Saved runtime settings.", "success");
-    } catch {
-      notify("런타임 설정 저장에 실패했습니다.", "Failed to save runtime settings.", "error");
-    } finally {
-      setRcSaving(false);
+    if (runtime.dirty) {
+      try { await runtime.save(); } catch { failed = true; }
     }
-  };
-
-  const handleRcChange = (key: string, value: RuntimeConfigValue) => {
-    setRcValues((prev) => ({ ...prev, [key]: value }));
-    setRcExplicitKeys((prev) => {
-      const next = new Set(prev);
-      next.add(key);
-      return next;
-    });
-    setRcDirty(true);
-  };
-
-  const handleRcReset = (key: string) => {
-    if (rcDefaults[key] !== undefined) {
-      setRcValues((prev) => ({ ...prev, [key]: rcDefaults[key] }));
-      setRcExplicitKeys((prev) => {
-        const next = new Set(prev);
-        next.delete(key);
-        return next;
-      });
-      setRcDirty(true);
+    if (config.dirty) {
+      try { await config.save({ ...config.edits }); } catch { failed = true; }
     }
-  };
-
-  const handleConfigEdit = (key: string, value: ConfigEditValue) => {
-    if (isReadOnlyConfigKey(key)) return;
-    setConfigEdits((prev) => ({ ...prev, [key]: value }));
-  };
-
-  const saveConfigEdits = async (pendingEdits: Record<string, ConfigEditValue>) => {
-    if (Object.keys(pendingEdits).length === 0) return;
-    const previousEntries = configEntries;
-    setConfigSaving(true);
-    setConfigEntries((current) => applyConfigEdits(current, pendingEdits));
-    setConfigEdits({});
-    try {
-      await api.patchSettingsConfig(pendingEdits);
-      await loadConfigEntries();
+    setSaving(false);
+    if (failed) {
       notify(
-        "파이프라인 설정을 저장했습니다.",
-        "Saved pipeline settings.",
-        "success",
-      );
-    } catch {
-      setConfigEntries(previousEntries);
-      setConfigEdits(pendingEdits);
-      notify(
-        "파이프라인 설정 저장에 실패해 이전 값으로 복원했습니다.",
-        "Failed to save pipeline settings and restored the previous values.",
+        "일부 설정을 저장하지 못했어요. 바뀐 값은 남아 있으니 다시 저장해 주세요.",
+        "Some settings were not saved. Your changes are kept; try saving again.",
         "error",
       );
-    } finally {
-      setConfigSaving(false);
+    } else {
+      notify("설정을 저장했어요.", "Saved settings.", "success");
     }
   };
 
-  const handleConfigSave = async () => {
-    if (!configDirty) return;
-    const pendingEdits = { ...configEdits };
-    const dangerousKeys = getDangerousConfigKeys(pendingEdits);
+  const handleSave = () => {
+    if (blockedReason) return;
+    const dangerousKeys = getDangerousConfigKeys(config.edits);
     if (dangerousKeys.length > 0) {
-      setPendingDangerousConfigSave({ edits: pendingEdits, keys: dangerousKeys });
+      setPendingDangerousSave({ edits: { ...config.edits }, keys: dangerousKeys });
       return;
     }
-    await saveConfigEdits(pendingEdits);
+    void performSave();
   };
 
-  const handleDangerousConfigConfirm = async () => {
-    if (!pendingDangerousConfigSave) return;
-    const pendingEdits = pendingDangerousConfigSave.edits;
-    setPendingDangerousConfigSave(null);
-    await saveConfigEdits(pendingEdits);
+  const handleDiscard = () => {
+    general.discard();
+    runtime.discard();
+    config.discard();
   };
 
-  const updateVoiceGlobal = useCallback(
-    <K extends keyof VoiceGlobalConfig>(key: K, value: VoiceGlobalConfig[K]) => {
-      setVoiceDraft((current) =>
-        current
-          ? {
-              ...current,
-              global: {
-                ...current.global,
-                [key]: value,
-              },
-            }
-          : current,
-      );
-    },
-    [],
-  );
+  const warningPct = Number(runtime.values.rateLimitWarningPct ?? runtime.defaults.rateLimitWarningPct ?? 80);
+  const dangerPct = Number(runtime.values.rateLimitDangerPct ?? runtime.defaults.rateLimitDangerPct ?? 95);
 
-  const updateVoiceModels = useCallback((patch: Partial<VoiceModels>) => {
-    setVoiceDraft((current) =>
-      current ? { ...current, models: { ...current.models, ...patch } } : current,
-    );
-  }, []);
-
-  const updateVoiceAgent = useCallback(
-    (agentId: string, patch: Partial<VoiceAgentConfig>) => {
-      setVoiceDraft((current) =>
-        current
-          ? {
-              ...current,
-              agents: current.agents.map((agent) =>
-                agent.id === agentId ? { ...agent, ...patch } : agent,
-              ),
-            }
-          : current,
-      );
-    },
-    [],
-  );
-
-  const handleVoiceSave = async () => {
-    if (!voiceDraft || !voiceDirty || voiceAliasConflict) return;
-    setVoiceSaving(true);
-    setVoiceError(null);
-    try {
-      const saved = await api.saveVoiceConfig(voiceSaveBody(voiceDraft));
-      setVoiceConfig(saved);
-      setVoiceDraft(cloneVoiceConfig(saved));
-      notify("음성 설정을 저장했습니다.", "Saved voice settings.", "success");
-    } catch (error) {
-      const message =
-        error instanceof api.VoiceConfigApiError
-          ? error.message
-          : tr("음성 설정 저장에 실패했습니다.", "Failed to save voice settings.");
-      setVoiceError(message);
-      notify("음성 설정 저장에 실패했습니다.", "Failed to save voice settings.", "error");
-      if (error instanceof api.VoiceConfigApiError && error.status === 409) {
-        void loadVoiceConfig();
-      }
-    } finally {
-      setVoiceSaving(false);
+  const panelBody = (() => {
+    switch (activePanel) {
+      case "workflow":
+        return (
+          <SettingsWorkflowPanel
+            ctx={ctx}
+            configStatus={configStatus}
+            runtimeStatus={runtimeStatus}
+            editorOpen={editorOpen}
+            onToggleEditor={() => setEditorOpen((open) => !open)}
+            notify={notify}
+          />
+        );
+      case "ai":
+        return (
+          <SettingsAiPanel
+            ctx={ctx}
+            accounts={accounts}
+            configStatus={configStatus}
+            runtimeStatus={runtimeStatus}
+            warningPct={warningPct}
+            dangerPct={dangerPct}
+          />
+        );
+      case "connections":
+        return (
+          <SettingsConnectionsPanel
+            ctx={ctx}
+            statusRows={statusRows}
+            connectors={connectors}
+            configStatus={configStatus}
+            onRerunSetup={() => setShowOnboarding(true)}
+          />
+        );
+      case "machine":
+        return <SettingsMachinePanel ctx={ctx} />;
+      case "general":
+      default:
+        return <SettingsGeneralPanel ctx={ctx} />;
     }
-  };
-
-  const handleSettingRowChange = useCallback(
-    (key: string, value: string | boolean | number) => {
-      if (key === "companyName" && typeof value === "string") {
-        setCompanyName(value);
-        return;
-      }
-      if (key === "ceoName" && typeof value === "string") {
-        setCeoName(value);
-        return;
-      }
-      if (key === "language" && typeof value === "string") {
-        setLanguage(value as typeof language);
-        return;
-      }
-      if (key === "theme" && typeof value === "string") {
-        setTheme(value as typeof theme);
-        return;
-      }
-      if (Object.prototype.hasOwnProperty.call(rcDefaults, key)) {
-        handleRcChange(key, value);
-        return;
-      }
-      if (typeof value === "boolean") {
-        handleConfigEdit(key, value);
-        return;
-      }
-      handleConfigEdit(key, String(value));
-    },
-    [handleRcChange, rcDefaults],
-  );
-
-  const renderSettingRow = useCallback(
-    (meta: SettingRowMeta, options?: { controlOverlay?: ReactNode; trailingMeta?: ReactNode }) => {
-      if (!isRowVisible(meta.key)) return null;
-      return (
-        <SettingRow
-          key={meta.key}
-          meta={meta}
-          isKo={isKo}
-          onChange={handleSettingRowChange}
-          controlOverlay={options?.controlOverlay}
-          trailingMeta={options?.trailingMeta}
-        />
-      );
-    },
-    [handleSettingRowChange, isKo, isRowVisible],
-  );
-
-  const renderSettingGroupCard = useCallback(
-    (
-      args: {
-        titleKo: string;
-        titleEn: string;
-        descriptionKo: string;
-        descriptionEn: string;
-        rows: ReactNode[];
-        totalCount: number;
-      },
-    ) => {
-      const filteredRows = args.rows.filter(Boolean);
-      const countLabel = panelQueryNormalized
-        ? `${filteredRows.length}/${args.totalCount}`
-        : tr(`${args.totalCount}개`, `${args.totalCount} items`);
-      return (
-        <div
-          className="setting-group-card min-w-0 overflow-hidden rounded-lg border"
-          style={{
-            borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
-            background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
-          }}
-        >
-          <div
-            className="flex flex-wrap items-start justify-between gap-3 border-b px-4 py-4 sm:px-5"
-            style={{ borderColor: "color-mix(in srgb, var(--th-border) 60%, transparent)" }}
-          >
-            <div className="min-w-0">
-              <div className="settings-section-title text-sm font-semibold" style={{ color: "var(--th-text)" }}>
-                {tr(args.titleKo, args.titleEn)}
-              </div>
-              <div className="settings-copy mt-1 text-[12px] leading-5" style={{ color: "var(--th-text-muted)" }}>
-                {tr(args.descriptionKo, args.descriptionEn)}
-              </div>
-            </div>
-            <span
-              className="inline-flex shrink-0 items-center whitespace-nowrap px-1 text-xs tabular-nums"
-              style={{
-                color: "var(--th-text-muted)",
-              }}
-            >
-              {countLabel}
-            </span>
-          </div>
-          <div className="divide-y divide-th-border-subtle px-3 sm:px-4">
-            {filteredRows.length > 0 ? (
-              filteredRows
-            ) : (
-              <SettingsEmptyState className="text-sm">
-                {tr("검색 결과가 없습니다.", "No matching settings.")}
-              </SettingsEmptyState>
-            )}
-          </div>
-        </div>
-      );
-    },
-    [panelQueryNormalized, tr],
-  );
+  })();
 
   return (
     <SettingsViewLayout
-      ctx={{
-        activeNavItem, activePanel, activeRuntimeCategoryId,
-        companyDirty, configDirty, configEntries, configSaving,
-        filteredNavItems, generalFormInvalid, generalMetas, groupedConfigEntries,
-        handleConfigSave, handleDangerousConfigConfirm, handlePanelChange,
-        handleRcChange, handleRcReset, handleRcSave, handleSave, handleVoiceSave,
-        inputStyle, isKo, isRowVisible, loadVoiceConfig, matchingKeysInActivePanel,
-        handleAddProviderAccount, handleCompleteProviderLogin, handleRemoveProviderAccount, handleSetProviderPrimary, loadOperatorConnectors,
-        loadProviderAuthProfiles, onboardingMetas, openOnboarding, operatorConnectors,
-        operatorConnectorsError, operatorConnectorsLoading, panelQuery, panelQueryNormalized,
-        pendingProviderLogin, providerAuthError, providerAuthLoading, providerAuthProviders,
-        pendingDangerousConfigSave, pipelineAgents, pipelineMetas, pipelineRepos,
-        pipelineSelectorError, pipelineSelectorLoading, primaryActionClass,
-        primaryActionStyle, rcDirty, rcLoaded, rcError, rcSaving, renderSettingGroupCard,
-        renderSettingRow, runtimeMetas, saving, secondaryActionClass,
-        secondaryActionStyle, selectedPipelineAgentId, selectedPipelineRepo,
-        setActiveRuntimeCategoryId, setPanelQuery, setPendingDangerousConfigSave,
-        setSelectedPipelineAgentId, setSelectedPipelineRepo, setShowOnboarding,
-        showOnboarding, startingProviderId, removingProviderAccountKey, subtleButtonClass, subtleButtonStyle, tr,
-        updateVoiceAgent, updateVoiceGlobal, updateVoiceModels, voiceAliasConflict, voiceDirty, voiceDraft,
-        voiceError, voiceLoaded, voiceSaving,
+      activePanel={activePanel}
+      activeNavItem={catalog.activeNavItem}
+      navItems={catalog.filteredNavItems}
+      matchingCount={catalog.activeMatchCount}
+      onPanelChange={changePanel}
+      query={query}
+      queryActive={catalog.queryActive}
+      setQuery={setQuery}
+      showNoMatches={catalog.queryActive && !catalog.filteredNavItems.some((item) => item.id === activePanel)}
+      loadFailed={loadFailed}
+      saveBar={(
+        <SettingsSaveBar
+          changeCount={changeCount}
+          blockedReason={blockedReason}
+          saving={saving}
+          onDiscard={handleDiscard}
+          onSave={handleSave}
+          tr={tr}
+        />
+      )}
+      pendingDangerousSave={pendingDangerousSave}
+      saving={saving}
+      onCancelDangerousSave={() => setPendingDangerousSave(null)}
+      onConfirmDangerousSave={() => {
+        setPendingDangerousSave(null);
+        void performSave();
       }}
-    />
+      showOnboarding={showOnboarding}
+      onCloseOnboarding={() => setShowOnboarding(false)}
+      isKo={isKo}
+      tr={tr}
+    >
+      {panelBody}
+    </SettingsViewLayout>
   );
 }

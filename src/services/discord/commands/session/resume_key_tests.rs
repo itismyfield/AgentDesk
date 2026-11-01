@@ -35,13 +35,10 @@ fn resume_without_a_channel_name_does_not_blame_the_workspace() {
         let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
         let owner = serenity::UserId::new(42);
         shared.settings.write().await.owner_user_id = Some(owner.get());
-        let voice_config = crate::voice::VoiceConfig::default();
         let data = crate::services::discord::Data {
             shared,
             token: "test-token".into(),
             provider: ProviderKind::Claude,
-            voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
-            voice_config,
         };
         let transport = ActionTransport::new(discord_mock::DiscordMockState::new()).await;
         let answered = invoke_real_slash_action(

@@ -10,8 +10,6 @@ use crate::services::turn_orchestrator::policy_close::tail::{
     PolicyCommitTicket, PolicyTailDecision, PolicyTailSkip, TailCapture,
 };
 
-type DeferredVoice = Arc<tokio::sync::Mutex<crate::voice::barge_in::DeferredBargeInBuffer>>;
-
 /// One exact close as the ledger holds it: the ticket, the actor that commits it and the channel
 /// state its granted claim took. Every strong ref goes once the close finalizes.
 pub(in crate::services::discord::turn_finalizer) struct PolicyCommit {
@@ -24,7 +22,6 @@ pub(in crate::services::discord::turn_finalizer) struct PolicyCommit {
 #[derive(Default)]
 struct TailPlan {
     parents: Vec<ChannelId>,
-    voice: Option<DeferredVoice>,
 }
 
 impl PolicyCommit {
@@ -61,21 +58,16 @@ impl PolicyCommit {
         *self.plan.lock().unwrap_or_else(PoisonError::into_inner) = None;
     }
 
-    /// Runs inside the granted actor step: takes the episode's thread parents and deferred voice,
-    /// and drops its role override when nothing will run after it.
-    fn capture(&self, shared: &Arc<SharedData>, channel: ChannelId, voice: bool) -> TailCapture {
+    /// Runs inside the granted actor step: takes the episode's thread parents and drops its role
+    /// override when nothing will run after it.
+    fn capture(&self, shared: &Arc<SharedData>, channel: ChannelId) -> TailCapture {
         let (shared, plan) = (shared.clone(), self.plan.clone());
         Box::new(move |queued| {
             let parents = super::super::cleanup::collect_and_clear_thread_parents(&shared, channel);
-            let voice = voice
-                .then(|| shared.voice_barge_in.detach_deferred(channel))
-                .flatten();
-            let silent = (voice.as_ref())
-                .is_none_or(|buffer| buffer.try_lock().is_ok_and(|buffer| buffer.is_empty()));
-            if !queued && silent {
+            if !queued {
                 shared.dispatch.role_overrides.remove(&channel);
             }
-            let taken = TailPlan { parents, voice };
+            let taken = TailPlan { parents };
             *plan.lock().unwrap_or_else(PoisonError::into_inner) = Some(taken);
         })
     }
@@ -158,8 +150,7 @@ async fn run_tail(
     let decision = match (commit.ticket.decision(), commit.actor()) {
         (Some(decided), _) => decided,
         (None, Some(actor)) => {
-            let voice = shared.voice_barge_in.deferred_drainable();
-            let capture = commit.capture(shared, channel, voice);
+            let capture = commit.capture(shared, channel);
             actor.claim_policy_tail(commit.ticket(), capture).await
         }
         (None, None) => (commit.ticket).decide(PolicyTailDecision::Skipped(
@@ -223,14 +214,6 @@ async fn run_tail(
         .take();
     let plan = plan.unwrap_or_default();
     super::super::cleanup::kickoff_thread_parents_after_finalize(shared, provider, plan.parents);
-    let voice_enqueued = match plan.voice {
-        Some(buffer) => {
-            (shared.voice_barge_in)
-                .drain_detached(shared, provider, channel, buffer)
-                .await
-        }
-        None => false,
-    };
     if removed_token.is_some() {
         super::super::super::turn_completion_events::publish_turn_completion_event(
             shared,
@@ -240,7 +223,7 @@ async fn run_tail(
             ),
         );
     }
-    let has_pending = finish.as_ref().is_some_and(|f| f.has_pending) || voice_enqueued;
+    let has_pending = finish.as_ref().is_some_and(|f| f.has_pending);
     super::super::cleanup::rearm_queue_backstop_after_mailbox_release(
         shared,
         provider,

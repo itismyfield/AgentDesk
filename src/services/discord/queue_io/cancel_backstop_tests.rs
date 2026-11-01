@@ -28,7 +28,6 @@ fn queued(message: MessageId) -> Intervention {
         has_reply_boundary: false,
         merge_consecutive: false,
         pending_uploads: Vec::new(),
-        voice_announcement: None,
     }
 }
 
@@ -492,7 +491,6 @@ async fn matching_residue_keeps_release_priority_over_the_cancel_backstop() {
         active_turn_nonce: snapshot.active_turn_nonce.clone(),
         observed_before: std::time::Instant::now(),
         allow_completion_cleanup: false,
-        drain_voice: false,
         terminal_was_cancel: true,
     };
     assert!(residue.matches_observed_owner(&snapshot));
@@ -589,7 +587,6 @@ async fn matching_residue_inserted_after_terminal_evidence_preserves_its_owner()
         active_turn_nonce: observed.active_turn_nonce.clone(),
         observed_before: std::time::Instant::now(),
         allow_completion_cleanup: false,
-        drain_voice: false,
         terminal_was_cancel: true,
     };
     assert!(residue.matches_observed_owner(&observed));

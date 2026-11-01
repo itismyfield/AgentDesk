@@ -593,7 +593,7 @@ async fn start_turn(
     state.turn_nonce = token.turn_nonce().map(str::to_owned);
     state.source_message_ids = vec![message];
     state.busy_followup_retry_user_msg_id = message;
-    state.set_followup_requeue_context(None, false, false, Vec::new(), None, true);
+    state.set_followup_requeue_context(None, false, false, Vec::new(), true);
     let created = inflight::save_inflight_state_create_new(&state).is_ok();
     (token, state, created)
 }

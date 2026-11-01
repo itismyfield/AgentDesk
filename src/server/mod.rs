@@ -2015,9 +2015,6 @@ mod message_outbox_retry_tests {
             crate::services::message_outbox::LIFECYCLE_NOTIFIER_SOURCE
         ));
         assert!(!is_terminal_turn_delivery_outbox_source("routine-runtime"));
-        assert!(!is_terminal_turn_delivery_outbox_source(
-            "quality_regression_alerter"
-        ));
         assert!(!is_terminal_turn_delivery_outbox_source("system"));
     }
 

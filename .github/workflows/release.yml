@@ -126,13 +126,12 @@ jobs:
       - name: Install macOS build libraries
         if: runner.os == 'macOS'
         run: |
-          brew install opus pkg-config
-          echo "PKG_CONFIG_PATH=$(brew --prefix opus)/lib/pkgconfig" >> "$GITHUB_ENV"
+          brew install pkg-config
       - name: Install Linux build libraries
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libclang-dev libopus-dev pkg-config
+          sudo apt-get install -y libclang-dev pkg-config
       - uses: actions/download-artifact@v4
         with:
           name: release-dashboard

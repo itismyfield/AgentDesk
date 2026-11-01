@@ -12,8 +12,8 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 103
-- Platform and third-party variables: 41
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 98
+- Platform and third-party variables: 39
 
 ## AgentDesk variables
 
@@ -37,14 +37,11 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_OBSERVABILITY_EVENTS_PATH` | `src/services/observability/events.rs` | Honors `ADK_OBSERVABILITY_EVENTS_PATH` for tests. |
 | `ADK_OBSERVABILITY_EVENT_RETENTION_DAYS` | `src/services/observability/retention.rs` |  |
 | `ADK_OBSERVABILITY_QUALITY_RETENTION_DAYS` | `src/services/observability/retention.rs` |  |
-| `ADK_QUALITY_ALERT_DRILL_BASE` | `src/services/agent_quality/regression_alerts.rs` | Resolve the drill-down base URL (env override or fallback const). |
 | `ADK_QUEUED_HEAD_INJECT` | `src/services/discord/queue_io/queued_head_inject.rs` | `ADK_QUEUED_HEAD_INJECT=1` opts into queued-head injection; absent values keep it off. |
 | `ADK_ROOT_GUARD_TEARDOWN_CHILD` | `src/config/test_env/teardown_probe.rs` |  |
 | `ADK_SLO_ALERT_CHANNEL` | `src/services/slo/mod.rs` | Fallback alert channel (adk-cc) used when `ADK_SLO_ALERT_CHANNEL` is unset. |
 | `ADK_TEST_REGISTERED_SNAPSHOT_RESTORE` | `src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs` |  |
 | `ADK_TURN_PRESENCE_TAIL` | `src/services/discord/turn_presence/activity/tail.rs` |  |
-| `ADK_VOICE_KEEP_WAV` | `src/voice/config.rs` | `keep_recordings` 또는 환경변수 `ADK_VOICE_KEEP_WAV` 에 따라 utterance wav / segment / transcript sidecar 를 보존할지 결정한다 (#2156). |
-| `ADK_VOICE_SILENCE` | `src/services/discord/voice_barge_in/foreground_decision.rs` |  |
 | `ADK_WATCHER_FIXTURE_CHILD` | `src/services/discord/watchers/lifecycle/watcher_install_fixture.rs` |  |
 | `AGENTDESK_API_URL` | `src/cli/client.rs`, `src/cli/monitoring.rs` | `env_hint` names the environment variable(s) the *caller's* `api_base()` actually honors — client.rs resolves `AGENTDESK_API_URL` only, while monitoring.rs pre… |
 | `AGENTDESK_BINDING_CONTEXT` | `src/services/tui_prompt_dedupe/binding_context.rs` | Hook capture reads this value without consulting mutable markers. |
@@ -86,7 +83,6 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_KAKAO_ENABLED` | `src/services/kakao.rs`, `src/services/operator_connectors.rs` |  |
 | `AGENTDESK_KAKAO_LANDING_URL` | `src/services/kakao.rs` |  |
 | `AGENTDESK_KAKAO_TOKEN_STORE_DIR` | `src/services/kakao.rs`, `src/services/kakao/token_store.rs` | Offline settings probe. |
-| `AGENTDESK_MEETING_SELECTION_TIMEOUT_SECS` | `src/services/discord/meeting_orchestrator/selection_runtime.rs` |  |
 | `AGENTDESK_MEMORY_MERGE_SKILL` | `src/services/routines/migrated.rs` |  |
 | `AGENTDESK_MIGRATED_AGENTFACTORY_WORKDIR` | `src/services/routines/migrated.rs` |  |
 | `AGENTDESK_OBSIDIAN_AGENTS_SRC` | `src/services/operator_connectors.rs`, `src/services/routines/migrated.rs` |  |
@@ -120,7 +116,6 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_TEST_PG_RECLAIM_SERVER` | `src/db/postgres/test_db_reclaim.rs` |  |
 | `AGENTDESK_TEST_RUNTIME` | `src/config/runtime_root_guard.rs` |  |
 | `AGENTDESK_TOKEN` | `src/cli/run.rs` |  |
-| `AGENTDESK_VOICE_REQUIRE_ALIASES` | `src/services/discord_config_audit.rs` | - On collision when `AGENTDESK_VOICE_REQUIRE_ALIASES=1`: return an `Err` describing the collision so callers can choose to fail fast. |
 | `AGENTDESK_WORKSPACE_ROOT` | `src/services/routines/migrated.rs` |  |
 
 ## Platform and third-party variables
@@ -152,19 +147,17 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `OBSIDIAN_REMOTE_VAULT_ROOT` | `src/services/operator_connectors.rs`, `src/services/routines/migrated.rs` |  |
 | `OBSIDIAN_VAULT_ROOT` | `src/services/operator_connectors.rs`, `src/services/routines/migrated.rs` |  |
 | `OPENAI_API_KEY` | `src/server/rate_limit_sync.rs` | --- Codex: ~/.codex/auth.json (CLI subscription), else OPENAI_API_KEY --- |
-| `PATH` | `src/cli/doctor/orchestrator.rs`, `src/cli/init.rs`, `src/config/test_env.rs`, `src/services/platform/binary_resolver.rs`, `src/services/platform/binary_resolver/runtime_path.rs`, `src/services/platform/tmux/session_inventory.rs` | Resolve via PATH using `which` semantics — mirror the existing ProviderRuntime checks which simply call the binary with --version. |
+| `PATH` | `src/cli/doctor/orchestrator.rs`, `src/cli/init.rs`, `src/config/test_env.rs`, `src/services/platform/binary_resolver.rs`, `src/services/platform/binary_resolver/runtime_path.rs`, `src/services/platform/tmux/session_inventory.rs` | Put `dir` in front of `PATH` while the caller owns the shared env lock. |
 | `PNPM_HOME` | `src/services/platform/binary_resolver.rs` |  |
 | `POSTGRES_TEST_ADMIN_DB` | `src/db/auto_queue/test_support.rs`, `src/dispatch/test_support.rs`, `src/high_risk_recovery.rs` |  |
 | `QWEN_CODE_SYSTEM_DEFAULTS_PATH` | `src/cli/doctor/orchestrator.rs`, `src/services/discord/model_catalog.rs` |  |
 | `QWEN_CODE_SYSTEM_SETTINGS_PATH` | `src/cli/doctor/orchestrator.rs`, `src/services/discord/model_catalog.rs` |  |
 | `QWEN_HOME` | `src/cli/doctor/orchestrator.rs`, `src/services/mcp_config.rs`, `src/services/qwen.rs` |  |
-| `REQUIRE_WAKE_WORD` | `src/voice/config.rs` | A live yaml with `wake_words: []` plus `REQUIRE_WAKE_WORD=1` would otherwise make EVERY utterance fail the (impossible-to-satisfy) gate and be silently dropped. |
 | `RTX_DATA_DIR` | `src/services/platform/binary_resolver.rs` |  |
 | `RUST_LOG` | `src/logging.rs` | The directive every shipped dcserver process adds on top of `RUST_LOG`. |
 | `SHELL` | `src/services/platform/binary_resolver.rs` |  |
 | `TMUX` | `src/services/claude/host_gate.rs`, `src/services/platform/tmux/session_inventory.rs` | The server socket tmux itself connects to with no `-L`/`-S`: `$TMUX`, else `$TMUX_TMPDIR` (or `/tmp`) `/tmux-<uid>/default`. |
 | `TMUX_TMPDIR` | `src/services/claude/host_gate.rs`, `src/services/platform/tmux/session_inventory.rs` | The server socket tmux itself connects to with no `-L`/`-S`: `$TMUX`, else `$TMUX_TMPDIR` (or `/tmp`) `/tmux-<uid>/default`. |
 | `USERPROFILE` | `src/cli/doctor/orchestrator.rs`, `src/services/mcp_config.rs`, `src/services/operator_connectors.rs`, `src/services/platform/binary_resolver.rs`, `src/services/qwen.rs`, `src/services/routines/migrated.rs` |  |
-| `VOICE_AUDIO_DEBUG_DIR` | `src/voice/receiver.rs` |  |
 | `VOLTA_HOME` | `src/services/platform/binary_resolver.rs` |  |
 | `XDG_CONFIG_HOME` | `src/services/session_host/herdr/managed_config/path.rs`, `src/services/session_host/herdr/observe.rs` | The ping connection names the server; its version, env, config and start are checked; a last connection that carries no request must still reach that same serv… |

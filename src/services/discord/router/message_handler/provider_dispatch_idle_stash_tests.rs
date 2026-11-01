@@ -516,7 +516,6 @@ async fn held_fifo(capped: bool, capture_failure: bool) {
         has_reply_boundary: false,
         merge_consecutive: false,
         pending_uploads: Vec::new(),
-        voice_announcement: None,
     };
     assert!(
         mailbox_enqueue_intervention(&shared, &ProviderKind::Claude, channel, later)

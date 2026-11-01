@@ -31,7 +31,6 @@ fn row(id: u64) -> Intervention {
         has_reply_boundary: false,
         merge_consecutive: false,
         pending_uploads: vec![],
-        voice_announcement: None,
     }
 }
 fn transcript(path: &std::path::Path, large: bool, closed: bool) {

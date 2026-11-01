@@ -3,9 +3,8 @@ import {
   BellRing,
   ChevronRight,
   Moon,
+  Palette,
   Search,
-  Settings,
-  Sparkles,
   Sun,
   X,
   WifiOff,
@@ -22,7 +21,7 @@ interface AppTopBarProps {
   wsConnected: boolean;
   dismissNotification: (id: string) => void;
   isKo: boolean;
-  navigateToRoute: (path: string) => void;
+  isMobileViewport: boolean;
   headerZIndex: number;
   notificationBadgeCount: number;
   popoverZIndex: number;
@@ -33,40 +32,17 @@ interface AppTopBarProps {
   setShowTweaksPanel: Dispatch<SetStateAction<boolean>>;
   showNotificationPanel: boolean;
   toggleShellTheme: () => void;
-  unresolvedMeetingsCount: number;
 }
 
-function NotificationSummaryRow({
-  label,
-  value,
-  accent,
-}: {
-  label: string;
-  value: number;
-  accent: string;
-}) {
-  return (
-    <div
-      className="flex items-center justify-between rounded-md border px-3 py-2 text-sm"
-      style={{
-        borderColor: "var(--th-border-subtle)",
-        background: "var(--th-overlay-subtle)",
-      }}
-    >
-      <span style={{ color: "var(--th-text-muted)" }}>{label}</span>
-      <span className="font-semibold" style={{ color: accent }}>
-        {value}
-      </span>
-    </div>
-  );
-}
+const ICON_BUTTON_CLASS =
+  "relative flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-th-border-subtle transition-colors hover:bg-surface-subtle focus-visible:outline-2 focus-visible:outline-[var(--th-accent-primary)]";
 
 export function AppTopBar({
   wsConnected,
   currentRoute,
   dismissNotification,
   isKo,
-  navigateToRoute,
+  isMobileViewport,
   headerZIndex,
   notificationBadgeCount,
   popoverZIndex,
@@ -77,91 +53,98 @@ export function AppTopBar({
   setShowTweaksPanel,
   showNotificationPanel,
   toggleShellTheme,
-  unresolvedMeetingsCount,
 }: AppTopBarProps) {
   const tr = (ko: string, en: string) => (isKo ? ko : en);
+  const routeLabel = currentRoute ? (isKo ? currentRoute.labelKo : currentRoute.labelEn) : tr("홈", "Home");
+  const themeLabel = tr(
+    resolvedTheme === "dark" ? "밝은 화면으로 전환" : "어두운 화면으로 전환",
+    resolvedTheme === "dark" ? "Switch to light theme" : "Switch to dark theme",
+  );
 
   return (
     <header
       data-testid="topbar"
-      className="relative flex min-h-16 shrink-0 flex-col justify-center border-b px-4 py-2 sm:px-5"
+      className="relative flex min-h-14 shrink-0 flex-col justify-center border-b px-4 py-1.5 sm:min-h-16 sm:px-5 sm:py-2"
       style={{
         zIndex: headerZIndex,
         borderColor: "var(--th-border-subtle)",
         background: "var(--th-bg-surface)",
       }}
     >
-      <div className="flex w-full flex-wrap items-center gap-2 sm:flex-nowrap">
-        <div className="min-w-0 basis-full sm:flex-1">
+      <div className="flex w-full items-center gap-2">
+        {isMobileViewport ? (
+          <h1
+            data-testid="topbar-title"
+            className="min-w-0 flex-1 truncate text-base font-semibold"
+            style={{ color: "var(--th-text-heading)" }}
+          >
+            {routeLabel}
+          </h1>
+        ) : (
           <div
             data-testid="topbar-breadcrumb"
-            className="flex min-w-0 items-center gap-2 overflow-hidden text-[12px] font-medium"
+            className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden text-[12px] font-medium"
             style={{ color: "var(--th-text-muted)" }}
           >
             <span className="shrink-0">AgentDesk</span>
             <ChevronRight size={12} className="shrink-0" />
-            <span className="truncate whitespace-nowrap">
-              {currentRoute
-                ? isKo
-                  ? currentRoute.labelKo
-                  : currentRoute.labelEn
-                : isKo
-                  ? "홈"
-                  : "Home"}
-            </span>
+            <span className="truncate whitespace-nowrap">{routeLabel}</span>
           </div>
-        </div>
+        )}
 
-        <label
-          data-testid="topbar-search"
-          className="order-3 flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-md border px-3 text-sm sm:order-none sm:max-w-[18rem]"
-          style={{
-            borderColor: "var(--th-border-subtle)",
-            background:
-              "color-mix(in srgb, var(--th-bg-surface) 82%, transparent)",
-          }}
-        >
-          <Search size={15} style={{ color: "var(--th-text-muted)" }} />
-          <input
-            type="search"
-            readOnly
-            value=""
-            onFocus={() => setShowCommandPalette(true)}
-            onClick={() => setShowCommandPalette(true)}
-            placeholder={tr("검색…", "Search…")}
-            className="h-11 w-full min-w-0 bg-transparent text-sm outline-none"
-            style={{ color: "var(--th-text-primary)" }}
-            aria-label={tr("검색 열기", "Open search")}
-          />
-          <kbd
-            className="hidden rounded-lg px-2 py-1 text-[11px] sm:inline-flex"
-            style={{
-              background: "var(--th-overlay-subtle)",
-              color: "var(--th-text-muted)",
-            }}
-          >
-            ⌘K
-          </kbd>
-        </label>
-
-        <div className="ml-auto flex shrink-0 items-center justify-end gap-2 sm:ml-0">
-          <DashboardLogout />
+        {isMobileViewport ? (
           <button
             type="button"
-            onClick={toggleShellTheme}
-            className="flex h-11 w-11 items-center justify-center rounded-md border transition-colors hover:bg-white/5"
-            style={{ borderColor: "var(--th-border-subtle)" }}
-            aria-label={tr(
-              resolvedTheme === "dark" ? "라이트 테마로 전환" : "다크 테마로 전환",
-              resolvedTheme === "dark" ? "Switch to light theme" : "Switch to dark theme",
-            )}
-            title={tr(
-              resolvedTheme === "dark" ? "라이트 테마로 전환" : "다크 테마로 전환",
-              resolvedTheme === "dark" ? "Switch to light theme" : "Switch to dark theme",
-            )}
+            data-testid="topbar-search"
+            onClick={() => setShowCommandPalette(true)}
+            className={ICON_BUTTON_CLASS}
+            aria-label={tr("검색 열기", "Open search")}
           >
-            {resolvedTheme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
+            <Search size={18} />
           </button>
+        ) : (
+          <label
+            data-testid="topbar-search"
+            className="flex min-h-11 w-full max-w-[18rem] items-center gap-2 rounded-md border px-3 text-sm"
+            style={{
+              borderColor: "var(--th-border-subtle)",
+              background: "color-mix(in srgb, var(--th-bg-surface) 82%, transparent)",
+            }}
+          >
+            <Search size={15} style={{ color: "var(--th-text-muted)" }} />
+            <input
+              type="search"
+              readOnly
+              value=""
+              onFocus={() => setShowCommandPalette(true)}
+              onClick={() => setShowCommandPalette(true)}
+              placeholder={tr("검색…", "Search…")}
+              className="h-11 w-full min-w-0 bg-transparent text-sm outline-none"
+              style={{ color: "var(--th-text-primary)" }}
+              aria-label={tr("검색 열기", "Open search")}
+            />
+            <kbd
+              className="inline-flex rounded-lg px-2 py-1 text-[11px]"
+              style={{ background: "var(--th-overlay-subtle)", color: "var(--th-text-muted)" }}
+            >
+              ⌘K
+            </kbd>
+          </label>
+        )}
+
+        <div className="flex shrink-0 items-center justify-end gap-2">
+          <DashboardLogout />
+          {!isMobileViewport ? (
+            <button
+              type="button"
+              onClick={toggleShellTheme}
+              className={ICON_BUTTON_CLASS}
+              aria-label={themeLabel}
+              title={themeLabel}
+            >
+              {resolvedTheme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
+            </button>
+          ) : null}
 
           <div className="relative">
             <button
@@ -172,8 +155,7 @@ export function AppTopBar({
                   return !prev;
                 })
               }
-              className="relative flex h-11 w-11 items-center justify-center rounded-md border transition-colors hover:bg-white/5"
-              style={{ borderColor: "var(--th-border-subtle)" }}
+              className={ICON_BUTTON_CLASS}
               aria-label={tr("알림 보기", "View notifications")}
               title={tr("알림 보기", "View notifications")}
             >
@@ -188,7 +170,7 @@ export function AppTopBar({
             {showNotificationPanel && (
               <div
                 role="dialog" aria-label={tr("알림", "Notifications")}
-                className="fixed inset-x-4 top-24 max-h-[calc(100dvh-10rem)] overflow-auto rounded-lg border p-4 shadow-lg sm:absolute sm:inset-x-auto sm:right-0 sm:top-14 sm:w-[22rem]"
+                className="fixed inset-x-4 top-16 max-h-[calc(100dvh-10rem)] overflow-auto rounded-lg border p-4 shadow-lg sm:absolute sm:inset-x-auto sm:right-0 sm:top-14 sm:w-[22rem]"
                 style={{
                   zIndex: popoverZIndex,
                   borderColor: "var(--th-border-subtle)",
@@ -207,10 +189,7 @@ export function AppTopBar({
                       className="text-xs"
                       style={{ color: "var(--th-text-muted)" }}
                     >
-                      {tr(
-                        "최근 이벤트와 회의 후속 상태",
-                        "Recent events and meeting follow-ups",
-                      )}
+                      {tr("최근 1분 동안의 이벤트", "Events from the last minute")}
                     </div>
                   </div>
                   <button
@@ -221,19 +200,6 @@ export function AppTopBar({
                   >
                     <X size={14} />
                   </button>
-                </div>
-
-                <div className="space-y-2">
-                  <NotificationSummaryRow
-                    label={tr("미해결 회의", "Open meetings")}
-                    value={unresolvedMeetingsCount}
-                    accent="var(--th-accent-warn)"
-                  />
-                  <NotificationSummaryRow
-                    label={tr("최근 알림", "Recent notifications")}
-                    value={recentNotifications.length}
-                    accent="var(--th-accent-info)"
-                  />
                 </div>
 
                 <div className="mt-3 space-y-2">
@@ -291,37 +257,26 @@ export function AppTopBar({
                   )}
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowNotificationPanel(false);
-                    navigateToRoute("/meetings");
-                  }}
-                  className="mt-3 flex min-h-11 w-full items-center justify-center gap-2 rounded-md border px-3 py-2 text-sm font-medium transition-colors hover:bg-white/5"
-                  style={{ borderColor: "var(--th-border-subtle)" }}
-                >
-                  <Sparkles size={15} />
-                  {tr("회의 페이지로 이동", "Open meetings page")}
-                </button>
               </div>
             )}
           </div>
 
-          <button
-            type="button"
-            onClick={() =>
-              setShowTweaksPanel((prev) => {
-                if (!prev) setShowNotificationPanel(false);
-                return !prev;
-              })
-            }
-            className="flex h-11 w-11 items-center justify-center rounded-md border transition-colors hover:bg-white/5"
-            style={{ borderColor: "var(--th-border-subtle)" }}
-            aria-label={tr("디자인 설정 열기", "Open tweaks")}
-            title={tr("디자인 설정 열기", "Open tweaks")}
-          >
-            <Settings size={18} />
-          </button>
+          {!isMobileViewport ? (
+            <button
+              type="button"
+              onClick={() =>
+                setShowTweaksPanel((prev) => {
+                  if (!prev) setShowNotificationPanel(false);
+                  return !prev;
+                })
+              }
+              className={ICON_BUTTON_CLASS}
+              aria-label={tr("화면 꾸미기", "Appearance")}
+              title={tr("화면 꾸미기", "Appearance")}
+            >
+              <Palette size={18} />
+            </button>
+          ) : null}
         </div>
       </div>
       {!wsConnected ? (

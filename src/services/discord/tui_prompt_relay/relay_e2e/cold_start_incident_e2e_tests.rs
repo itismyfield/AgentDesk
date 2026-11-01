@@ -143,7 +143,6 @@ impl Incident {
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         };
         assert!(
             queue_io::with_post_enqueue_idle_queue_kick_suppressed(

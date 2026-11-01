@@ -27,6 +27,8 @@ export interface RoutineRecord {
   timeout_secs: number | null;
   in_flight_run_id: string | null;
   pause_reason?: string | null;
+  /** Newest run, embedded by the list endpoint so rows need no per-routine fetch. */
+  last_run?: RoutineRunRecord | null;
   created_at: string;
   updated_at: string;
 }

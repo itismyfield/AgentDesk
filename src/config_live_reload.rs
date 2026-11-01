@@ -432,11 +432,6 @@ mod tests {
             id: "dispatcher".to_string(),
             name: "Dispatcher".to_string(),
             name_ko: None,
-            aliases: Vec::new(),
-            wake_word: None,
-            voice_enabled: true,
-            sensitivity_mode: None,
-            voice: crate::config::AgentVoiceConfig::default(),
             provider: "codex".to_string(),
             channels: crate::config::AgentChannels::new().with(
                 "claude",
@@ -803,13 +798,6 @@ mod tests {
             vec!["cluster.enabled"]
         );
 
-        let mut global_voice = base.clone();
-        global_voice.voice.enabled = !base.voice.enabled;
-        assert_eq!(
-            restart_required_changes(&base, &global_voice),
-            vec!["voice.enabled"]
-        );
-
         let mut review_mcp_allowlist = base.clone();
         review_mcp_allowlist
             .review_mcp_allowlist
@@ -1015,27 +1003,6 @@ mod tests {
         assert_eq!(
             restart_required_changes(&new, &renamed_agent),
             vec!["agents.*.id"]
-        );
-    }
-
-    #[test]
-    fn restart_required_changes_flags_agent_voice_bindings() {
-        let mut old = Config::default();
-        old.agents
-            .push(test_agent_with_claude_channel("123", None, None));
-
-        let mut voice_channel_changed = old.clone();
-        voice_channel_changed.agents[0].voice.channel_id = Some("456".to_string());
-        assert_eq!(
-            restart_required_changes(&old, &voice_channel_changed),
-            vec!["agents.*.voice.channel_id"]
-        );
-
-        let mut foreground_changed = voice_channel_changed.clone();
-        foreground_changed.agents[0].voice.foreground.provider = Some("codex".to_string());
-        assert_eq!(
-            restart_required_changes(&voice_channel_changed, &foreground_changed),
-            vec!["agents.*.voice.foreground.provider"]
         );
     }
 

@@ -103,7 +103,6 @@ pub(in crate::services::discord) struct GuardedFinishResidue {
     pub(in crate::services::discord) active_turn_nonce: Option<String>,
     pub(in crate::services::discord) observed_before: std::time::Instant,
     pub(in crate::services::discord) allow_completion_cleanup: bool,
-    pub(in crate::services::discord) drain_voice: bool,
     pub(in crate::services::discord) terminal_was_cancel: bool,
 }
 
@@ -185,15 +184,7 @@ pub(super) async fn release(
     super::cleanup::kick_thread_parents_after_turn_release(shared, &residue.provider, channel_id)
         .await;
 
-    let voice_deferred_enqueued = if residue.drain_voice {
-        shared
-            .voice_barge_in
-            .drain_deferred_after_turn(shared, &residue.provider, channel_id)
-            .await
-    } else {
-        false
-    };
-    let has_pending = finish.has_pending || voice_deferred_enqueued;
+    let has_pending = finish.has_pending;
     if !has_pending {
         super::cleanup::remove_owned_role_override(shared, channel_id, owned_role_override);
     }

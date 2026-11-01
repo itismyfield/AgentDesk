@@ -136,7 +136,6 @@ async fn seed_at(shared: &Arc<SharedData>, source: u64, channel: u64) {
                 has_reply_boundary: true,
                 merge_consecutive: false,
                 pending_uploads: Vec::new(),
-                voice_announcement: None,
             },
             QueuePersistenceContext::new(&ProviderKind::Claude, &shared.token_hash, None),
         )

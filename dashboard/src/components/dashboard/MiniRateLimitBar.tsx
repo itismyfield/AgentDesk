@@ -13,11 +13,13 @@ import {
 } from "../common/rateLimitGauge";
 import {
   formatRateLimitResetLabel,
+  formatRateLimitWindowLabel,
   transformRLProviders,
   type RLBucket,
   type RLProvider,
   type RawRLProvider,
 } from "./MiniRateLimitBarModel";
+import { pollWhileVisible } from "../../lib/pollWhileVisible";
 
 const RL_ICONS: Record<string, string> = {
   Claude: "🤖",
@@ -199,20 +201,20 @@ function RateLimitBucketGauge({
 
 function HomeSummaryBucket({ bucket, isKo }: { bucket: RLBucket; isKo: boolean }) {
   const isNearLimit = bucket.utilization !== null && bucket.utilization >= 90;
+  const projected = shouldShowProjectedUtilization(bucket) ? bucket.projectedUtilization : null;
   const resetLabel = formatRateLimitResetLabel(bucket.resetAtMs, isKo);
 
   return (
     <div className="min-w-0 space-y-1">
-      <div className="flex min-w-0 flex-wrap items-baseline gap-x-1 gap-y-0.5 text-[11px] leading-4">
-        <span className="min-w-0 break-words text-th-text-secondary">{bucket.label}</span>
-        <span className="min-w-0 break-words text-th-text-muted" title={resetLabel}>
-          {formatRateLimitResetLabel(bucket.resetAtMs, isKo, Date.now(), "short")}
-        </span>
+      <div className="flex min-w-0 items-baseline justify-between gap-2 text-xs leading-4">
+        <span className="min-w-0 break-words text-th-text-secondary">{formatRateLimitWindowLabel(bucket.label, isKo)}</span>
         <span
-          className="ml-auto font-mono tabular-nums text-th-text-primary"
+          className="shrink-0 font-medium tabular-nums text-th-text-primary"
           style={isNearLimit ? { color: "var(--th-badge-amber-text)" } : undefined}
         >
-          {formatCompactPctPair(bucket, shouldShowProjectedUtilization(bucket))}
+          {bucket.utilization === null
+            ? isKo ? "정보 없음" : "No data"
+            : isKo ? `${bucket.utilization}% 사용` : `${bucket.utilization}% used`}
         </span>
       </div>
       <div className="h-1 overflow-hidden rounded-full bg-th-border-subtle" aria-hidden="true">
@@ -224,6 +226,14 @@ function HomeSummaryBucket({ bucket, isKo }: { bucket: RLBucket; isKo: boolean }
           }}
         />
       </div>
+      <p className="break-words text-[11px] leading-4 text-th-text-muted">
+        {resetLabel}
+        {projected !== null ? (
+          <span style={projected >= 100 ? { color: "var(--th-badge-amber-text)" } : undefined}>
+            {isKo ? ` · 이 속도면 ${projected}%` : ` · on pace for ${projected}%`}
+          </span>
+        ) : null}
+      </p>
     </div>
   );
 }
@@ -255,8 +265,8 @@ export function MiniRateLimitBar({
       }
     };
     load();
-    const timer = setInterval(load, 30_000);
-    return () => { mounted = false; clearInterval(timer); };
+    const stopPolling = pollWhileVisible(() => void load(), 30_000);
+    return () => { mounted = false; stopPolling(); };
   }, []);
 
   if (layout === "homeSummary") {

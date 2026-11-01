@@ -116,7 +116,6 @@ pub(super) struct SoftInterventionSpec {
     pub(super) merge_consecutive: bool,
     pub(super) pending_uploads:
         crate::services::cluster::attachment_transfer::uploads::PendingUploads,
-    pub(super) voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 }
 
 impl SoftInterventionSpec {
@@ -142,7 +141,6 @@ impl SoftInterventionSpec {
             has_reply_boundary: self.has_reply_boundary,
             merge_consecutive: self.merge_consecutive,
             pending_uploads: self.pending_uploads,
-            voice_announcement: self.voice_announcement,
         }
     }
 }
@@ -348,7 +346,7 @@ where
     let source = request.source;
     let author_class = request.author_class;
     let options = request.options;
-    let intervention = request.intervention.for_queue().mark_raw();
+    let intervention = request.intervention.mark_raw();
     let mailbox_outcome = effects.enqueue_soft_intervention(intervention).await;
 
     let status = classify_mailbox_outcome(&mailbox_outcome);
@@ -676,25 +674,8 @@ mod tests {
                 has_reply_boundary: false,
                 merge_consecutive: true,
                 pending_uploads: Vec::new(),
-                voice_announcement: None,
             },
             options,
-        }
-    }
-
-    fn voice_announcement() -> crate::voice::prompt::VoiceTranscriptAnnouncement {
-        crate::voice::prompt::VoiceTranscriptAnnouncement {
-            transcript: "상태 알려줘".to_string(),
-            user_id: "42".to_string(),
-            utterance_id: "utt-3724".to_string(),
-            language: "ko-KR".to_string(),
-            verbose_progress: true,
-            started_at: Some("2026-06-28T22:00:00+09:00".to_string()),
-            completed_at: Some("2026-06-28T22:00:01+09:00".to_string()),
-            samples_written: Some(48_000),
-            control_channel_id: Some(300),
-            stt_mode: Some("file".to_string()),
-            stt_latency_ms: Some(120),
         }
     }
 
@@ -1021,82 +1002,6 @@ mod tests {
             effects.fallback_notices.is_empty(),
             "an intervention that was not durably queued must not claim queue admission"
         );
-        assert!(effects.checkpoints.is_empty());
-        assert_eq!(
-            outcome.committed_steps,
-            vec![IntakeQueueCommittedStep::MailboxEnqueued]
-        );
-    }
-
-    #[tokio::test]
-    async fn voice_commit_defers_durable_claim_until_dispatch() {
-        let mut effects = FakeEffects {
-            enqueue_outcome: MailboxEnqueueOutcome {
-                enqueued: true,
-                merged: false,
-                refusal_reason: None,
-                persistence_error: None,
-            },
-            ..FakeEffects::default()
-        };
-        let mut req = request(Default::default());
-        req.intervention.voice_announcement = Some(voice_announcement());
-
-        let outcome = commit_soft_intervention_transaction(&mut effects, req).await;
-
-        assert!(outcome.accepted());
-        assert_eq!(effects.enqueued_specs.len(), 1);
-        assert!(effects.enqueued_specs[0].voice_announcement.is_none());
-        assert!(
-            !effects.enqueued_specs[0].merge_consecutive,
-            "queued voice announcements stay standalone so dispatch can resolve the durable row by the head message id"
-        );
-        assert_eq!(
-            outcome.pending_reaction,
-            PendingReactionDecision::Apply('📬')
-        );
-        assert_eq!(
-            effects.reactions,
-            vec![(
-                serenity::ChannelId::new(42),
-                serenity::MessageId::new(100),
-                '📬'
-            )]
-        );
-        assert_eq!(
-            effects.checkpoints,
-            vec![(serenity::ChannelId::new(42), serenity::MessageId::new(100))]
-        );
-        assert_eq!(
-            outcome.committed_steps,
-            vec![
-                IntakeQueueCommittedStep::MailboxEnqueued,
-                IntakeQueueCommittedStep::PendingReactionApplied,
-                IntakeQueueCommittedStep::CheckpointAdvanced,
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn voice_persistence_failure_never_exposes_accepted_replay_payload() {
-        let mut effects = FakeEffects {
-            enqueue_outcome: MailboxEnqueueOutcome {
-                enqueued: true,
-                merged: false,
-                refusal_reason: None,
-                persistence_error: Some("disk unavailable".to_string()),
-            },
-            ..FakeEffects::default()
-        };
-        let mut req = request(Default::default());
-        req.intervention.voice_announcement = Some(voice_announcement());
-
-        let outcome = commit_soft_intervention_transaction(&mut effects, req).await;
-
-        assert!(outcome.failed());
-        assert_eq!(effects.enqueued_specs.len(), 1);
-        assert!(effects.enqueued_specs[0].voice_announcement.is_none());
-        assert!(effects.reactions.is_empty());
         assert!(effects.checkpoints.is_empty());
         assert_eq!(
             outcome.committed_steps,

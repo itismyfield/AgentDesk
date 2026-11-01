@@ -280,12 +280,9 @@ pub(super) struct DeliveryEpilogueContext<'a> {
     pub(super) adk_cwd: &'a Option<String>,
     pub(super) dispatch_id: &'a Option<String>,
     pub(super) turn_id: &'a String,
-    pub(super) user_text_owned: &'a String,
     pub(super) full_response: &'a String,
     pub(super) delivery_response: &'a String,
-    pub(super) spoken_delivery_response: &'a String,
     pub(super) cancelled: bool,
-    pub(super) is_prompt_too_long: bool,
     pub(super) transport_error: bool,
     /// The turn ends on the bridge's provider failure notice (see `is_provider_failure_turn`).
     pub(super) provider_failure: bool,

@@ -40,6 +40,21 @@ impl KeyedLocks {
         .await
     }
 
+    /// Starts `work` in the background under the key's lock, or does nothing
+    /// when a collect for the key already holds it.
+    pub(super) fn spawn_if_idle<Work>(&self, key: &str, work: Work)
+    where
+        Work: Future<Output = ()> + Send + 'static,
+    {
+        let Ok(guard) = self.lock_for(key).try_lock_owned() else {
+            return;
+        };
+        tokio::spawn(async move {
+            let _guard = guard;
+            work.await
+        });
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.locks
@@ -65,5 +80,26 @@ mod tests {
         }
         locks.lock_for("month@0");
         assert_eq!(locks.len(), 1, "finished keys must not accumulate");
+    }
+
+    #[tokio::test]
+    async fn background_work_is_skipped_while_the_key_is_held() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let locks = KeyedLocks::default();
+        let runs = Arc::new(AtomicUsize::new(0));
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let first = Arc::clone(&runs);
+        locks.spawn_if_idle("30d", async move {
+            first.fetch_add(1, Ordering::SeqCst);
+            let _ = released.await;
+        });
+        let second = Arc::clone(&runs);
+        locks.spawn_if_idle("30d", async move {
+            second.fetch_add(1, Ordering::SeqCst);
+        });
+        release.send(()).expect("release first");
+        locks.run_detached("30d", async {}).await.unwrap();
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
     }
 }

@@ -1,76 +1,3 @@
-// Round Table Meetings
-export interface ProposedIssue {
-  title: string;
-  body: string;
-  assignee: string;
-}
-
-export interface IssueCreationResult {
-  key: string;
-  title: string;
-  assignee: string;
-  ok: boolean;
-  discarded?: boolean;
-  error?: string | null;
-  issue_url?: string | null;
-  attempted_at: number;
-}
-
-export interface RoundTableMeetingChannelOption {
-  channel_id: string;
-  channel_name: string;
-  owner_provider: string;
-  available_experts?: RoundTableMeetingExpertOption[];
-}
-
-export interface RoundTableMeetingExpertOption {
-  role_id: string;
-  display_name: string;
-  keywords: string[];
-  domain_summary?: string | null;
-  strengths: string[];
-  task_types: string[];
-  anti_signals: string[];
-  provider_hint?: string | null;
-  metadata_missing?: boolean;
-  metadata_confidence?: "high" | "medium" | "low";
-}
-
-export interface RoundTableMeeting {
-  id: string;
-  channel_id?: string | null;
-  meeting_hash?: string | null;
-  thread_hash?: string | null;
-  agenda: string;
-  summary: string | null;
-  selection_reason?: string | null;
-  status: "in_progress" | "completed" | "cancelled";
-  primary_provider: string | null;
-  reviewer_provider: string | null;
-  participant_names: string[];
-  total_rounds: number;
-  issues_created: number;
-  proposed_issues: ProposedIssue[] | null;
-  issue_creation_results: IssueCreationResult[] | null;
-  issue_repo?: string | null;
-  started_at: number;
-  completed_at: number | null;
-  created_at: number;
-  entries?: RoundTableEntry[];
-}
-
-export interface RoundTableEntry {
-  id: number;
-  meeting_id: string;
-  seq: number;
-  round: number;
-  speaker_role_id: string | null;
-  speaker_name: string;
-  content: string;
-  is_summary: number;
-  created_at: number;
-}
-
 export type TaskDispatchStatus =
   | "pending"
   | "dispatched"
@@ -145,12 +72,6 @@ export interface KanbanCardMetadata {
   redispatch_count?: number;
   redispatch_reason?: string;
   review_checklist?: KanbanReviewChecklistItem[];
-  reward?: {
-    granted_at: number;
-    agent_id: string;
-    xp: number;
-    tasks_done: number;
-  };
   manual_review?: boolean;
   deferred_dod?: Array<{
     id: string;

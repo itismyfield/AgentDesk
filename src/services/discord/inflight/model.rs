@@ -178,10 +178,6 @@ pub(in crate::services::discord) struct InflightTurnState {
     pub current_msg_id: u64,
     pub current_msg_len: usize,
     pub user_text: String,
-    /// Origin of the user turn. Voice turns keep normal text mirroring but also
-    /// drive spoken result playback and voice progress subscribers.
-    #[serde(default)]
-    pub source: Source,
     pub session_id: Option<String>,
     pub tmux_session_name: Option<String>,
     pub output_path: Option<String>,
@@ -549,12 +545,6 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// Empty for legacy rows / turns without uploads.
     #[serde(default)]
     pub followup_pending_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
-    /// FIX #6: originating `Intervention::voice_announcement` projection.
-    /// `VoiceTranscriptAnnouncement` is already serde-persisted in the durable
-    /// intervention queue, so it round-trips directly here. `None` for
-    /// non-voice turns / legacy rows.
-    #[serde(default)]
-    pub followup_voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
     /// #4247 FIX 2: originating `Intervention::preserve_on_cancel()` decision,
     /// persisted so `mailbox_requeue_inflight_for_followup_retry` can rebuild a
     /// PRE-submit busy-timeout requeue with the SAME fail-safe preservation
@@ -1079,7 +1069,6 @@ impl InflightTurnState {
             current_msg_id,
             current_msg_len: 0,
             user_text,
-            source: Source::Text,
             session_id,
             tmux_session_name,
             output_path,
@@ -1150,7 +1139,6 @@ impl InflightTurnState {
             followup_has_reply_boundary: false,
             followup_merge_consecutive: false,
             followup_pending_uploads: Vec::new(),
-            followup_voice_announcement: None,
             followup_preserve_on_cancel: false,
             streaming_rollover_frozen_msg_ids: Vec::new(),
             replay_receipt_id: None,
@@ -1385,7 +1373,7 @@ impl InflightTurnState {
     /// FIX #6 (Codex P2): record the originating `Intervention`'s follow-up
     /// requeue context so a PRE-submit busy-timeout requeue
     /// (`mailbox_requeue_inflight_for_followup_retry`) can faithfully rebuild
-    /// the retry Intervention (reply context / attachments / voice metadata)
+    /// the retry Intervention (reply context / attachments)
     /// instead of dropping it. Called at the follow-up turn-start construction
     /// site; non-follow-up paths leave the defaults (empty/None), which is
     /// correct.
@@ -1395,7 +1383,6 @@ impl InflightTurnState {
         has_reply_boundary: bool,
         merge_consecutive: bool,
         pending_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
-        voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
         // #4247 FIX 2: the genuine-human intake's preserve decision, carried
         // forward so a PRE-submit busy-timeout requeue can reconstruct a
         // correctly marked/unmarked `Intervention` (see field doc above).
@@ -1405,7 +1392,6 @@ impl InflightTurnState {
         self.followup_has_reply_boundary = has_reply_boundary;
         self.followup_merge_consecutive = merge_consecutive;
         self.followup_pending_uploads = pending_uploads;
-        self.followup_voice_announcement = voice_announcement;
         self.followup_preserve_on_cancel = preserve_on_cancel;
     }
 }

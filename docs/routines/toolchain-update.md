@@ -20,8 +20,7 @@ services, and manual-only tools are reported explicitly rather than silently dro
 | npm global | `codex`, `ocx` | approval tier; all npm mutations, including tools classified as hygiene, require an exact per-tool approval marker |
 | uv tool | `cswap` (`claude-swap`) | approval required because `--list --json` has drifted |
 | rustup | `cargo/rustc` | hygiene candidate; per-tool approval required; rustup binary self-update disabled; post-update compiler smoke required |
-| Homebrew | `tmux`, `gh`, `node`, `python@3.14`, `uv`, `pipx`, `jq`, `ripgrep`, `ffmpeg`, `whisper-cpp`, `postgresql@17` | `tmux`, `node`, and PostgreSQL require approval; the rest are hygiene candidates |
-| pipx | `edge-tts` | hygiene candidate |
+| Homebrew | `tmux`, `gh`, `node`, `python@3.14`, `uv`, `pipx`, `jq`, `ripgrep`, `postgresql@17` | `tmux`, `node`, and PostgreSQL require approval; the rest are hygiene candidates |
 | native installer | `opencode` | hygiene candidate only when already installed; its self-updater still requires exact per-tool approval |
 | remote service | memento MCP at the configured mac-mini endpoint | health/version report only; no local mutation |
 | npx always-latest | brave-search MCP | reports the unpinned spec and latest package version; pin approval is a manual config decision |
@@ -85,8 +84,8 @@ result is an unapproved version and fails before smoke:
   the manifest (`codex`, `ocx`), and successfully probe every corresponding binary.
 - PostgreSQL requires both `psql --version` and a matching server major from `SHOW server_version`.
   A strict apply therefore requires `AGENTDESK_DATABASE_URL` or `DATABASE_URL`.
-- Rust checks the actual rustup `stable` rustc/cargo pair; Homebrew hygiene tools, `edge-tts`, and
-  `opencode` must load their version command.
+- Rust checks the actual rustup `stable` rustc/cargo pair; Homebrew hygiene tools and `opencode`
+  must load their version command.
 
 The smoke gate can also be run independently:
 

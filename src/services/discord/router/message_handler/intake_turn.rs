@@ -1,7 +1,6 @@
 use super::super::super::queue_marker;
 use super::super::super::turn_view_reconciler::note_intake_turn_started_current_with_attempt as tv_start_current_with_attempt;
 use super::provider_dispatch::producer_panic;
-use super::voice_announcement_route::route_voice_transcript_announcement_once;
 use super::*;
 use crate::services::provider::session_prompt;
 
@@ -22,7 +21,6 @@ mod runtime_transition;
 pub(in crate::services::discord) mod session_preparation;
 mod stale_dispatch_guard;
 mod start_placeholder;
-mod voice_intake;
 mod worker_entry;
 
 #[cfg(all(test, unix))]
@@ -49,7 +47,6 @@ mod intake_outbox_state_builder_tests {
                 IntakeRequest,
                 (bool, Option<adk_thread::Route>),
                 crate::services::cluster::attachment_transfer::uploads::PendingUploads,
-                Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
                 bool,
             ) -> F,
         ) -> usize {
@@ -162,7 +159,6 @@ pub(super) async fn handle_text_message(
     request: IntakeRequest,
     (_queued_drain, queued): (bool, Option<adk_thread::Route>),
     preloaded_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
-    gate_resolved_voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
     durable_reply_context: bool,
 ) -> Result<IntakeExecution, Error> {
     // Keep the intake body on the heap so worker and local caller frames stay small.
@@ -198,111 +194,6 @@ pub(super) async fn handle_text_message(
         let request_owner_name = request_owner_name_owned.as_str();
         let user_text = user_text_owned.as_str();
         let original_channel_id = channel_id;
-        let stored_voice_announcement =
-            crate::voice::announce_meta::global_store().take_with_acceptance(user_msg_id);
-        let has_stored_voice_announcement = stored_voice_announcement.is_some();
-        let has_legacy_voice_announcement =
-            crate::voice::prompt::is_voice_transcript_announcement_candidate(user_text);
-        let is_readable_voice_announcement =
-            crate::voice::prompt::is_readable_voice_transcript_announcement(user_text);
-        let voice_announcement_ref = if is_readable_voice_announcement {
-            crate::voice::prompt::parse_voice_transcript_announcement_ref(user_text)
-        } else {
-            None
-        };
-        let announce_bot_id = if has_stored_voice_announcement
-            || has_legacy_voice_announcement
-            || is_readable_voice_announcement
-        {
-            super::super::super::resolve_announce_bot_user_id(shared).await
-        } else {
-            None
-        };
-        let (voice_announcement, voice_announcement_already_accepted) =
-            voice_intake::resolve_intake_voice_announcement(
-                shared,
-                channel_id,
-                user_msg_id,
-                request_owner,
-                announce_bot_id,
-                is_readable_voice_announcement,
-                &voice_announcement_ref,
-                gate_resolved_voice_announcement,
-                stored_voice_announcement,
-            )
-            .await;
-        // #3464: scope unauthorized voice announcements to the owning agent — a
-        // non-owning agent must not fall through to generic handling and answer
-        // (multi-agent reply storm). Decision + one-shot warn live in
-        // `voice_announcement_scope` (this file is LoC-frozen).
-        if super::voice_announcement_scope::drop_unauthorized_voice_announcement(
-            has_stored_voice_announcement,
-            has_legacy_voice_announcement,
-            is_readable_voice_announcement,
-            voice_announcement.is_some(),
-            announce_bot_id,
-            request_owner,
-            channel_id,
-            user_msg_id,
-        ) {
-            return Ok(IntakeExecution::Executed);
-        }
-        let is_voice_announcement = voice_announcement.is_some();
-        let voice_prompt_text = voice_announcement.as_ref().map(voice_intake::prompt);
-        // #2266: keep the original Discord author (the announce bot, for a voice-transcript announcement) so the race-loss enqueue path can
-        // attribute the queued `Intervention` to the announce bot. When the
-        // queued turn later re-enters `handle_text_message` via the
-        // dispatch/kickoff hooks, the same `announce_bot_id == Some(request_owner)`
-        // check (line ~2274) will pass and the reinserted voice payload (or
-        // the embedded copy lifted into `stored_voice_announcement`) will be
-        // honored instead of treated as spoofed. The post-rebind
-        // `request_owner` below is the voice user id, used only for the rest
-        // of the active-turn flow.
-        let original_request_owner = request_owner;
-        let voice_request_owner_name;
-        let request_owner = voice_announcement
-            .as_ref()
-            .and_then(|announcement| announcement.user_id.parse::<u64>().ok())
-            .map(UserId::new)
-            .unwrap_or(request_owner);
-        let request_owner_name = if let Some(announcement) = voice_announcement.as_ref() {
-            voice_request_owner_name = format!("voice-user-{}", announcement.user_id);
-            voice_request_owner_name.as_str()
-        } else {
-            request_owner_name
-        };
-        let user_text = voice_announcement
-            .as_ref()
-            .map(|announcement| announcement.transcript.as_str())
-            .unwrap_or(user_text);
-        let voice_route_outcome = route_voice_transcript_announcement_once(
-            shared.pg_pool.as_ref(),
-            channel_id,
-            user_msg_id,
-            voice_announcement_already_accepted,
-            voice_announcement.as_ref(),
-            |announcement| {
-                let voice_barge_in = shared.voice_barge_in.clone();
-                let shared = Arc::clone(shared);
-                async move {
-                    voice_barge_in
-                        .try_handle_voice_transcript_announcement(&shared, channel_id, &announcement)
-                        .await
-                }
-            },
-        )
-        .await;
-        if voice_route_outcome.bypasses_normal_turn() {
-            return Ok(IntakeExecution::Executed);
-        }
-        if !is_voice_announcement
-            && shared
-                .voice_barge_in
-                .try_handle_voice_channel_text_reply(http, channel_id, user_text, &shared.provider)
-                .await
-        {
-            return Ok(IntakeExecution::Executed);
-        }
         let channel_lookup = channel_id.to_channel(http).await.ok();
         let live_events = &shared.ui.placeholder_live_events;
         live_events.observe_panel_channel_kind(channel_id, dm_hint, channel_lookup.as_ref());
@@ -645,7 +536,7 @@ pub(super) async fn handle_text_message(
         let add_turn_pending = should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref())
             && !(_queued_drain
                 && super::super::intake_dispatch::checkpoint_waits_for_admission(channel_id))
-            && !super::super::super::voice_barge_in::is_synthetic_voice_message_id(user_msg_id);
+            && !super::super::super::is_internal_message_id(user_msg_id);
 
         // ── Dispatch thread auto-creation ──────────────────────────────
         // When a dispatch message arrives, create a Discord thread for
@@ -765,9 +656,9 @@ pub(super) async fn handle_text_message(
         let Some(intake_runtime_transition) = runtime_transition::acquire_after_redirect_or_requeue(
             (http, shared, token, &provider),
             (channel_id, original_channel_id),
-            (turn_kind, original_request_owner, user_msg_id, user_text),
+            (turn_kind, request_owner, user_msg_id, user_text),
             (&reply_context, has_reply_boundary, merge_consecutive),
-            (&mut pending_uploads, &voice_announcement),
+            &mut pending_uploads,
             (
                 reply_to_user_message,
                 &dispatch_id_for_thread,
@@ -863,7 +754,7 @@ pub(super) async fn handle_text_message(
         }
         // Sanitize input
         let sanitized_input =
-            ai_screen::sanitize_user_input(voice_prompt_text.as_deref().unwrap_or(user_text));
+            ai_screen::sanitize_user_input(user_text);
 
         let mut resolved_role_binding = {
             // For cross-channel dispatch reuse (e.g. review in implementation thread),
@@ -1188,14 +1079,13 @@ pub(super) async fn handle_text_message(
                 channel_id,
                 original_channel_id,
                 turn_kind,
-                original_request_owner,
+                request_owner,
                 user_msg_id,
                 user_text,
                 &reply_context,
                 has_reply_boundary,
                 merge_consecutive,
                 &pending_uploads,
-                &voice_announcement,
                 reply_to_user_message,
                 &dispatch_id_for_thread,
                 None,
@@ -1257,7 +1147,7 @@ pub(super) async fn handle_text_message(
                 channel_id,
                 if reply_to_user_message
                     && dispatch_id_for_thread.is_none()
-                    && !super::super::super::voice_barge_in::is_synthetic_voice_message_id(user_msg_id)
+                    && !super::super::super::is_internal_message_id(user_msg_id)
                 {
                     Some((channel_id, user_msg_id))
                 } else {
@@ -1352,7 +1242,7 @@ pub(super) async fn handle_text_message(
                 channel_id,
                 if reply_to_user_message
                     && dispatch_id_for_thread.is_none()
-                    && !super::super::super::voice_barge_in::is_synthetic_voice_message_id(user_msg_id)
+                    && !super::super::super::is_internal_message_id(user_msg_id)
                 {
                     Some((channel_id, user_msg_id))
                 } else {
@@ -1831,7 +1721,7 @@ pub(super) async fn handle_text_message(
                 shared,
                 &bot_owner_provider,
                 channel_id,
-                original_request_owner,
+                request_owner,
                 user_msg_id,
                 user_text,
                 preserve_on_cancel,
@@ -1839,7 +1729,6 @@ pub(super) async fn handle_text_message(
                 has_reply_boundary,
                 merge_consecutive,
                 pending_uploads.clone(),
-                voice_announcement.clone(),
             )
             .await;
             let queue_depth_after_busy_enqueue =
@@ -2019,21 +1908,17 @@ pub(super) async fn handle_text_message(
         // FIX #6 (Codex P2): persist the originating Intervention's follow-up
         // requeue context so a PRE-submit busy-timeout requeue
         // (`mailbox_requeue_inflight_for_followup_retry`) can rebuild the retry
-        // Intervention without losing reply context / attachments / voice metadata.
+        // Intervention without losing reply context / attachments.
         inflight_state.set_followup_requeue_context(
             prepared_prompt.snapshot(&context_prompt),
             has_reply_boundary,
             merge_consecutive,
             pending_uploads.clone(),
-            voice_announcement.clone(),
             preserve_on_cancel,
         );
         inflight_state.logical_channel_id = Some(logical_channel_id);
         inflight_state.thread_id = thread_id;
         inflight_state.thread_title = thread_title;
-        if is_voice_announcement {
-            inflight_state.source = crate::dispatch::Source::Voice;
-        }
         inflight_state.session_key = adk_session_key.clone();
         inflight_state.dispatch_id = dispatch_id.clone();
         let replay_reply_context = prepared_prompt.context.requeue();
@@ -2203,9 +2088,6 @@ pub(super) async fn handle_text_message(
         };
         let dispatch_type_for_mcp = dispatch_type_str.clone();
         // Run the provider in a blocking thread
-        if is_voice_announcement {
-            crate::voice::metrics::mark_agent_start(channel_id.get());
-        }
         let provider_for_blocking = provider.clone();
         let execution_pool = shared.pg_pool.clone();
         let turn_shared = shared.clone();

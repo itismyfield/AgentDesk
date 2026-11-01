@@ -95,7 +95,6 @@ struct Rig {
     pool: sqlx::PgPool,
     db: crate::db::auto_queue::test_support::TestPostgresDb,
     gateway: tokio::task::JoinHandle<()>,
-    _voice: tempfile::TempDir,
     _root: crate::config::TestRuntimeRootGuard,
 }
 
@@ -112,15 +111,10 @@ impl Rig {
             discord_mock::start(discord_mock::DiscordMockState::new()).await;
         let rest = format!("http://127.0.0.1:{}", api.port);
         let ctx = discord_mock::serenity_context(rest, gateway_url).await;
-        let voice = tempfile::tempdir().unwrap();
-        let mut voice_config = crate::voice::VoiceConfig::default();
-        voice_config.audio.recordings_dir = voice.path().to_path_buf();
         let data = Data {
             shared,
             token: "clear-entry-test".into(),
             provider: PROVIDER,
-            voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
-            voice_config,
         };
         Self {
             api,
@@ -129,7 +123,6 @@ impl Rig {
             pool,
             db,
             gateway,
-            _voice: voice,
             _root: root,
         }
     }
@@ -311,7 +304,6 @@ fn input(id: MessageId, author: u64) -> Intervention {
         has_reply_boundary: false,
         merge_consecutive: false,
         pending_uploads: Vec::new(),
-        voice_announcement: None,
     }
 }
 
@@ -444,8 +436,6 @@ async fn a_clear_without_a_pool_commits_and_warns_through_both_entries_pg() {
         shared,
         token: rig.data.token.clone(),
         provider: PROVIDER,
-        voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&rig.data.voice_config),
-        voice_config: rig.data.voice_config.clone(),
     };
     let rig = Rig { data, ..rig };
     for (n, entry) in [Entry::Slash, Entry::Text].into_iter().enumerate() {

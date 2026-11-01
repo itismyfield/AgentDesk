@@ -16,7 +16,7 @@ vi.mock("../../api/campaigns", async (importOriginal) => ({
 // The panel also lists server campaigns; these tests count only legacy requests.
 vi.mock("../../api/serverCampaigns", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../api/serverCampaigns")>()),
-  getServerCampaigns: vi.fn().mockResolvedValue([]),
+  getServerCampaignSummaries: vi.fn().mockResolvedValue([]),
 }));
 
 let container: HTMLDivElement;
@@ -44,7 +44,8 @@ it("turns auto-run on and says what was sent and why the rest is held back", asy
   });
   await act(async () => root.render(<CampaignAutoQueueToggle campaign={campaign} tr={(_, en) => en} onSaved={onSaved} />));
   const button = container.querySelector("button")!;
-  expect(button.getAttribute("aria-pressed")).toBe("false");
+  expect(button.getAttribute("role")).toBe("switch");
+  expect(button.getAttribute("aria-checked")).toBe("false");
   await act(async () => button.click());
   expect(setCampaignAutoQueue).toHaveBeenCalledWith(campaign, true);
   expect(onSaved).toHaveBeenCalledWith(expect.objectContaining({ auto_queue: true, revision: 6 }));
@@ -63,7 +64,7 @@ it("shows a rejected save, such as a stale revision, instead of pretending it sw
   await act(async () => container.querySelector("button")!.click());
   expect(setCampaignAutoQueue).toHaveBeenCalledWith(campaign, false);
   expect(onSaved).not.toHaveBeenCalled();
-  expect(container.querySelector("button")?.textContent).toBe("Auto-run on");
+  expect(container.querySelector("button")?.getAttribute("aria-checked")).toBe("true");
   expect(statusText()).toContain("revision conflict");
   expect(getCampaign).not.toHaveBeenCalled();
 });
@@ -93,7 +94,7 @@ it("after a lost response describes what the server has now, not whether the sav
   expect(statusText()).toBe(
     "No response (Request timeout: /api/campaigns/x). The server has auto-run on now. Check the nodes for what was sent.",
   );
-  expect(button().textContent).toBe("Auto-run on");
+  expect(button().getAttribute("aria-checked")).toBe("true");
 
   await act(async () => button().click());
   expect(statusText()).toBe(
@@ -110,13 +111,13 @@ it("shows the state as unknown until the server is read again", async () => {
   await act(async () => button().click());
   expect(statusText()).toContain("Could not confirm the save");
   expect(button().textContent).toBe("Check auto-run");
-  expect(button().getAttribute("aria-pressed")).toBe("mixed");
+  expect(button().getAttribute("data-state")).toBe("unknown");
 
   vi.mocked(getCampaign).mockResolvedValueOnce({ ...campaign, auto_queue: true, revision: campaign.revision + 1 });
   await act(async () => button().click());
   expect(setCampaignAutoQueue).toHaveBeenCalledTimes(1);
-  expect(button().textContent).toBe("Auto-run on");
-  expect(button().getAttribute("aria-pressed")).toBe("true");
+  expect(button().getAttribute("aria-checked")).toBe("true");
+  expect(button().textContent).toBe("On");
   expect(statusText()).toBe("The server has auto-run on now.");
 });
 
@@ -127,9 +128,9 @@ it("leaves the unknown state once a newer campaign arrives from elsewhere", asyn
   const render = (value: Campaign) => root.render(<CampaignAutoQueueToggle campaign={value} tr={(_, en) => en} onSaved={vi.fn()} />);
   await act(async () => render(campaign));
   await act(async () => button().click());
-  expect(button().getAttribute("aria-pressed")).toBe("mixed");
+  expect(button().getAttribute("data-state")).toBe("unknown");
   await act(async () => render({ ...campaign, auto_queue: true, revision: campaign.revision + 1 }));
-  expect(button().textContent).toBe("Auto-run on");
+  expect(button().getAttribute("aria-checked")).toBe("true");
 });
 
 it("stays unknown through a poll that began before the failure and settles on the next one", async () => {
@@ -140,6 +141,7 @@ it("stays unknown through a poll that began before the failure and settles on th
     resolve(new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } })))));
   vi.stubGlobal("fetch", fetchMock);
   const page = { campaigns: [campaign], live: {}, limit: 100, offset: 0 };
+  const read = { campaign, live: {} };
   try {
     await act(async () => root.render(<CampaignsPanel language="en" />));
     await act(async () => pending[0](page));
@@ -150,15 +152,16 @@ it("stays unknown through a poll that began before the failure and settles on th
     vi.mocked(getCampaign).mockRejectedValueOnce(new Error("offline"));
     const toggle = () => container.querySelector<HTMLButtonElement>(".campaign-auto-queue")!;
     await act(async () => toggle().click());
-    expect(toggle().getAttribute("aria-pressed")).toBe("mixed");
+    expect(toggle().getAttribute("data-state")).toBe("unknown");
 
     await act(async () => { vi.advanceTimersByTime(15_000); });
     expect(fetchMock).toHaveBeenCalledTimes(3); // its own request, not the one in flight
-    await act(async () => pending[1](page));
-    expect(toggle().getAttribute("aria-pressed")).toBe("mixed");
-    await act(async () => pending[2](page));
-    expect(toggle().textContent).toBe("Auto-run off");
-    expect(toggle().getAttribute("aria-pressed")).toBe("false");
+    expect(String(fetchMock.mock.calls[2][0])).toContain(`/api/campaigns/${campaign.id}`);
+    await act(async () => pending[1](read));
+    expect(toggle().getAttribute("data-state")).toBe("unknown");
+    await act(async () => pending[2](read));
+    expect(toggle().textContent).toBe("Off");
+    expect(toggle().getAttribute("aria-checked")).toBe("false");
   } finally {
     vi.useRealTimers(); vi.unstubAllGlobals();
   }

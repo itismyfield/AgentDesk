@@ -732,7 +732,6 @@ mod tests {
             has_reply_boundary: false,
             merge_consecutive: true,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         };
         let event = crate::services::turn_orchestrator::QueueExitEvent {
             intervention,

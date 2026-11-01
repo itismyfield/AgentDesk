@@ -1,5 +1,5 @@
+import { ActionMenu } from "../common/ActionMenu";
 import {
-  BUTTON_DANGER_STYLE,
   BUTTON_NEUTRAL_STYLE,
   INPUT_CLASS,
   INPUT_STYLE,
@@ -14,6 +14,33 @@ interface Props {
   actions: any;
 }
 
+/** Destructive state actions live behind a menu with a confirmation step. */
+export function PipelineStateMenu({ ctx, actions }: Props) {
+  const tr = ctx.tr;
+  const state = ctx.selectedState;
+  const name = state.label || state.id;
+  return (
+    <ActionMenu
+      label={tr("상태 메뉴", "State menu")}
+      items={[{
+        key: "delete",
+        label: tr("이 상태 삭제", "Delete state"),
+        danger: true,
+        onSelect: () => actions.removeState(state.id),
+        confirm: {
+          title: tr(`'${name}' 상태를 삭제할까요?`, `Delete the '${name}' state?`),
+          description: tr(
+            "이 상태로 들어오고 나가는 전환과 훅도 함께 지워져요. 편집기에서 저장하기 전까지는 다시 불러와 되돌릴 수 있어요.",
+            "Transitions and hooks attached to this state are removed too. Until you save the editor, reloading restores it.",
+          ),
+          confirmLabel: tr("삭제", "Delete"),
+          cancelLabel: tr("취소", "Cancel"),
+        },
+      }]}
+    />
+  );
+}
+
 export default function PipelineVisualEditorStatePanel({ ctx, actions }: Props) {
   const tr = ctx.tr;
   const selectedState = ctx.selectedState;
@@ -22,18 +49,18 @@ export default function PipelineVisualEditorStatePanel({ ctx, actions }: Props) 
   return (
     <div className="space-y-3">
       <div className="grid gap-3 sm:grid-cols-2">
-        <div>
+        <div className="min-w-0">
           <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
             {tr("상태 ID", "State ID")}
           </label>
           <div
-            className="rounded-xl border px-3 py-2 text-sm font-mono"
+            className="rounded-xl border px-3 py-2 text-sm font-mono [overflow-wrap:anywhere]"
             style={{ ...PANEL_SOFT_STYLE, color: "var(--th-text-primary)" }}
           >
             {selectedState.id}
           </div>
         </div>
-        <div>
+        <div className="min-w-0">
           <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
             {tr("레이블", "Label")}
           </label>
@@ -55,10 +82,10 @@ export default function PipelineVisualEditorStatePanel({ ctx, actions }: Props) 
         {tr("터미널 상태", "Terminal state")}
       </label>
 
-      <div className="grid gap-3 sm:grid-cols-2">
-        <div>
+      <div className="grid gap-3">
+        <div className="min-w-0">
           <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
-            {tr("on_enter 훅", "on_enter hooks")}
+            {tr("들어올 때 실행할 훅 (on_enter)", "on_enter hooks")}
           </label>
           <textarea
             rows={3}
@@ -69,9 +96,9 @@ export default function PipelineVisualEditorStatePanel({ ctx, actions }: Props) 
             placeholder="OnCardTransition, OnReviewEnter"
           />
         </div>
-        <div>
+        <div className="min-w-0">
           <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
-            {tr("on_exit 훅", "on_exit hooks")}
+            {tr("나갈 때 실행할 훅 (on_exit)", "on_exit hooks")}
           </label>
           <textarea
             rows={3}
@@ -120,13 +147,6 @@ export default function PipelineVisualEditorStatePanel({ ctx, actions }: Props) 
         </div>
       </div>
 
-      <button
-        onClick={() => actions.removeState(selectedState.id)}
-        className="rounded-xl border px-3 py-1.5 text-xs font-medium"
-        style={BUTTON_DANGER_STYLE}
-      >
-        {tr("이 상태 삭제", "Delete state")}
-      </button>
     </div>
   );
 }

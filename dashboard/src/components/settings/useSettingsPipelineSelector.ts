@@ -13,17 +13,16 @@ import {
   type PipelineAgentCacheEntry,
   type PipelineRepoCacheEntry,
   type SettingsNotificationType,
-  type SettingsPanel,
 } from "./SettingsModel";
 
 type UseSettingsPipelineSelectorArgs = {
-  activePanel: SettingsPanel;
+  enabled: boolean;
   notify: (ko: string, en: string, type?: SettingsNotificationType) => void;
   tr: (ko: string, en: string) => string;
 };
 
 export function useSettingsPipelineSelector({
-  activePanel,
+  enabled,
   notify,
   tr,
 }: UseSettingsPipelineSelectorArgs) {
@@ -52,7 +51,7 @@ export function useSettingsPipelineSelector({
   }, []);
 
   useEffect(() => {
-    if (activePanel !== "pipeline") {
+    if (!enabled) {
       return;
     }
     let stale = false;
@@ -108,13 +107,13 @@ export function useSettingsPipelineSelector({
         } else if (!hasCachedRepos) {
           setPipelineSelectorError(
             tr(
-              "파이프라인 에디터용 repo 목록을 불러오지 못했습니다. 마지막 성공값이 없어 에디터를 열 수 없습니다.",
-              "Failed to load repository options for the pipeline editor, and no cached data is available yet.",
+              "편집기에서 쓸 저장소 목록을 불러오지 못했어요. 잠시 뒤 다시 열어 주세요.",
+              "Could not load repositories for the editor. Try opening it again shortly.",
             ),
           );
           notify(
-            "파이프라인 에디터용 repo 목록을 불러오지 못했습니다.",
-            "Failed to load repository options for the pipeline editor.",
+            "편집기에서 쓸 저장소 목록을 불러오지 못했어요.",
+            "Could not load repositories for the editor.",
             "error",
           );
         }
@@ -138,7 +137,7 @@ export function useSettingsPipelineSelector({
       setPipelineSelectorLoading(false);
     };
   }, [
-    activePanel,
+    enabled,
     applyPipelineAgentCache,
     applyPipelineRepoCache,
     notify,

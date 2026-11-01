@@ -4069,7 +4069,6 @@ mod hard_stop_completion_event_tests {
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         }
     }
 

@@ -2,48 +2,28 @@ use super::*;
 use crate::config::snapshot_reader_tests::{Fixture, isolated};
 
 #[test]
-fn bot_boot_modules_and_voice_keep_the_installed_config() {
+fn bot_boot_modules_keep_the_installed_config() {
     isolated(|| {
         let fixture = Fixture::new();
         fixture.install(
-            "server: {}\nvoice: {enabled: false, active_agent_ttl_seconds: 41}\n",
-            "server: {}\ncluster: {enabled: true, role: runner, runtime_profile: runner, intake_routing: {enabled: true, mode: observe}}\nvoice: {enabled: true, active_agent_ttl_seconds: 73}\n",
+            "server: {}\n",
+            "server: {}\ncluster: {enabled: true, role: runner, runtime_profile: runner, intake_routing: {enabled: true, mode: observe}}\n",
         );
-        let config = bot_boot_settings();
-        let modules = config.cluster.runtime_profile.modules();
-        let voice = config.voice;
-        assert!(modules.voice);
-        assert!(!voice.enabled);
-        assert_eq!(voice.active_agent_ttl_seconds, 41);
+        assert!(
+            bot_boot_settings()
+                .cluster
+                .runtime_profile
+                .modules()
+                .gateway
+        );
         fixture.reload();
-        let config = bot_boot_settings();
-        let modules = config.cluster.runtime_profile.modules();
-        let voice = config.voice;
-        assert!(!modules.voice);
-        assert!(voice.enabled);
-        assert_eq!(voice.active_agent_ttl_seconds, 73);
-    });
-}
-
-#[test]
-fn voice_auto_join_provider_map_keeps_the_installed_agents() {
-    isolated(|| {
-        let fixture = Fixture::new();
-        fixture.install(
-            "server: {}\nagents: [{id: snapshot-agent, name: Snapshot, provider: claude, channels: {claude: '41'}, voice: {channel_id: '51'}}]\n",
-            "server: {}\nagents: [{id: disk-agent, name: Disk, provider: codex, channels: {codex: '42'}, voice: {channel_id: '52'}}]\n",
+        assert!(
+            !bot_boot_settings()
+                .cluster
+                .runtime_profile
+                .modules()
+                .gateway
         );
-        let map = voice::configured_voice_auto_join_provider_map();
-        assert_eq!(map.get("41"), Some(&("claude".to_string(), None)));
-        assert_eq!(
-            map.get("51"),
-            Some(&("claude".to_string(), Some("snapshot-agent".to_string())))
-        );
-        assert!(!map.contains_key("42"));
-        fixture.reload();
-        let map = voice::configured_voice_auto_join_provider_map();
-        assert_eq!(map.get("42"), Some(&("codex".to_string(), None)));
-        assert!(!map.contains_key("41"));
     });
 }
 
@@ -92,7 +72,6 @@ fn shared_with_configured_placeholder() -> Arc<SharedData> {
             initial_skills: Vec::new(),
             token_hash: "snapshot-reader-shared".to_string(),
             api_port: 9,
-            voice_barge_in: Arc::new(voice_barge_in::VoiceBargeInRuntime::disabled()),
             health_registry: Arc::new(health::HealthRegistry::new()),
             pg_pool: None,
             engine: None,
@@ -171,15 +150,10 @@ fn boot_consumers_call_the_configuration_seams() {
     assert_eq!(run_bot.matches("bot_boot_settings()").count(), 1);
     for consumer in [
         "let modules = boot_config.cluster.runtime_profile.modules();",
-        "let voice_config = boot_config.voice;",
         "boot_config.tui_o.as_ref()",
     ] {
         assert!(run_bot.contains(consumer), "{consumer}");
     }
-    assert!(
-        include_str!("voice.rs")
-            .contains("let channel_provider_map = configured_voice_auto_join_provider_map();")
-    );
     assert!(
         include_str!("framework_setup.rs")
             .contains("if let Some(dedupe_window) = credential_watcher_dedupe_window()")

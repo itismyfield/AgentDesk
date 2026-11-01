@@ -195,7 +195,6 @@ async fn finalization_preserves_queued_successor_messages_and_their_actor() {
                 has_reply_boundary: false,
                 merge_consecutive: false,
                 pending_uploads: vec![],
-                voice_announcement: None,
             };
             assert!(
                 fixture

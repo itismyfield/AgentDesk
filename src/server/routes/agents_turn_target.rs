@@ -174,7 +174,6 @@ pub(super) async fn turn_presence(pool: &sqlx::PgPool, id: &str) -> serde_json::
 }
 
 /// Starts a headless turn on a resolved agent target; returns its turn id and start status.
-/// Shared by the turn-start route and the voice conductor.
 pub(super) async fn start_headless_turn_on_target(
     registry: &crate::services::discord::health::HealthRegistry,
     target: AgentTurnTarget,

@@ -378,7 +378,6 @@ mod duplicate_repair_interleaving_tests {
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         }
     }
 
@@ -1400,7 +1399,6 @@ mod rekey_window_tests {
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         }
     }
 

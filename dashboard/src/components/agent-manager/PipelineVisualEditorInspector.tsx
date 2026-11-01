@@ -1,7 +1,7 @@
 import PipelineVisualEditorMobileSelector from "./PipelineVisualEditorMobileSelector";
 import PipelineVisualEditorPhaseGatePanel from "./PipelineVisualEditorPhaseGatePanel";
-import PipelineVisualEditorStatePanel from "./PipelineVisualEditorStatePanel";
-import PipelineVisualEditorTransitionPanel from "./PipelineVisualEditorTransitionPanel";
+import PipelineVisualEditorStatePanel, { PipelineStateMenu } from "./PipelineVisualEditorStatePanel";
+import PipelineVisualEditorTransitionPanel, { PipelineTransitionMenu } from "./PipelineVisualEditorTransitionPanel";
 import {
   EMPTY_PANEL_STYLE,
   FSM_DETAIL_PANEL_STYLE,
@@ -31,15 +31,19 @@ export default function PipelineVisualEditorInspector({ ctx, actions }: Props) {
         >
           {formatSelectionTitle(tr, ctx.selection, ctx.pipelineDraft)}
         </h4>
-        {ctx.isFsmVariant && ctx.useScrollableMobileFsmCanvas ? (
-          <span className="text-xs" style={MUTED_TEXT_STYLE}>
-            {tr("모바일은 위 목록으로 선택하고 이 패널에서 바로 수정합니다.", "Use the quick selector above, then edit here.")}
-          </span>
-        ) : ctx.selection?.kind === "state" ? (
-          <span className="text-xs" style={MUTED_TEXT_STYLE}>
-            {tr("노드 클릭으로 선택됨", "Selected from graph")}
-          </span>
-        ) : null}
+        <div className="flex items-center gap-2">
+          {ctx.isFsmVariant && ctx.useScrollableMobileFsmCanvas ? (
+            <span className="text-xs" style={MUTED_TEXT_STYLE}>
+              {tr("모바일은 위 목록으로 선택하고 이 패널에서 바로 수정합니다.", "Use the quick selector above, then edit here.")}
+            </span>
+          ) : ctx.selection?.kind === "state" ? (
+            <span className="text-xs" style={MUTED_TEXT_STYLE}>
+              {tr("노드 클릭으로 선택됨", "Selected from graph")}
+            </span>
+          ) : null}
+          {ctx.selectedState ? <PipelineStateMenu ctx={ctx} actions={actions} /> : null}
+          {ctx.selectedTransition ? <PipelineTransitionMenu ctx={ctx} actions={actions} /> : null}
+        </div>
       </div>
 
       {ctx.selectedState && <PipelineVisualEditorStatePanel ctx={ctx} actions={actions} />}

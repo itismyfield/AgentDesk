@@ -711,7 +711,6 @@ fn untypable(channel: ChannelId, shape: &str) -> Intervention {
         has_reply_boundary: false,
         merge_consecutive: false,
         pending_uploads: Vec::new(),
-        voice_announcement: None,
     };
     match shape {
         "command" => item.text = "/compact now".into(),

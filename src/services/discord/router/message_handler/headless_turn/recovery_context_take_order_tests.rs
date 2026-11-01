@@ -39,7 +39,6 @@ async fn deferred_headless_start_leaves_metadata_with_caller_and_no_foreground_q
     state.turn_nonce = token.turn_nonce().map(str::to_owned);
     state.silent_turn = true;
     state.delivery_bot = Some("routine-bot".into());
-    state.source = crate::dispatch::Source::Voice;
     assert!(
         discord::mailbox_try_start_turn(
             &shared,
@@ -70,7 +69,6 @@ async fn deferred_headless_start_leaves_metadata_with_caller_and_no_foreground_q
     assert!(discord::inflight::load_inflight_state(&ProviderKind::Codex, channel.get()).is_none());
     assert!(state.silent_turn);
     assert_eq!(state.delivery_bot.as_deref(), Some("routine-bot"));
-    assert_eq!(state.source, crate::dispatch::Source::Voice);
     assert!(!live_bridge::is_live(&ProviderKind::Codex, channel.get()));
     drop(recovery);
 }

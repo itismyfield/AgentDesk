@@ -54,7 +54,6 @@ CFG_SHIM_CONSUMERS = (
     "src/services/discord/tui_prompt_relay/tests.rs",
     "src/services/discord/tui_prompt_relay/relay_ownership.rs",
     "src/services/discord/tui_prompt_relay/synthetic_start/claim.rs",
-    "src/services/discord/voice_barge_in/tests/pcm_harness_tests.rs",
 )
 UNREACHABLE_RUST_FILES = (
     ("src/services/discord/tmux/monitor_auto_turn_inflight_tests.rs",
