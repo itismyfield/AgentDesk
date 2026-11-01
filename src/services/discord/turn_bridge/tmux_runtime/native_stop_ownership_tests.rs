@@ -376,7 +376,10 @@ fn a3b_late_binding_cannot_retarget_successor_token_or_replaced_incarnation() {
             let token = Arc::new(CancelToken::new());
             start(&shared, channel, &token).await;
             native_inflight_row(channel, &token, &session);
-            let marker = crate::services::tmux_common::session_temp_path(&session, "spawn_nonce");
+            let marker = std::path::PathBuf::from(crate::services::tmux_common::session_temp_path(
+                &session,
+                "spawn_nonce",
+            ));
             std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
             std::fs::write(&marker, "before").unwrap();
             let successor = Arc::new(CancelToken::new());
@@ -445,4 +448,35 @@ fn a1_overlapping_bridge_lifetimes_keep_the_remaining_owner() {
     assert!(state.has_live_bridge());
     drop(first);
     assert!(!state.has_live_bridge());
+}
+
+#[test]
+fn a2b_terminal_commit_between_native_and_publication_keeps_done() {
+    let fx = Fixture::new();
+    run(async {
+        let shared = discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(7_212_340);
+        let session = "ownership-late-terminal";
+        let (_source, _) = generating_turn(&fx, session);
+        let token = Arc::new(CancelToken::new());
+        start(&shared, channel, &token).await;
+        native_inflight_row(channel, &token, session);
+        token.native_stop.completed();
+        let judged = ChannelStop::judge(&shared, &ProviderKind::Claude, channel, None, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(judged.native("!stop").await.is_none());
+        let mut row =
+            inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get()).unwrap();
+        row.terminal_delivery_committed = true;
+        inflight::save_inflight_state(&row).unwrap();
+        assert!(
+            matches!(judged.cancel_user().await, StopCancel::NotCurrent),
+            "a committed natural terminal must veto a late recovery publication"
+        );
+        assert!(!token.cancelled.load(Ordering::Acquire));
+        assert_eq!(tombstone(channel), None);
+        crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+    });
 }

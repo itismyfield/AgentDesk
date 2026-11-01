@@ -265,6 +265,7 @@ impl NativeStop {
             let witness = Arc::new(move || {
                 weak.upgrade().is_some_and(|token| {
                     !token.is_completion_cleanup()
+                        && !terminal_delivered(&provider, channel, &token, &session)
                         && token.tmux_session_name() == expected_binding
                         && crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(
                             &session,
