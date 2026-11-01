@@ -6,6 +6,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use poise::serenity_prelude::ChannelId;
+use serde_json::Value;
 
 use super::relaunch_confirm::{Confirm, Waits, confirm_notice};
 use super::*;
@@ -29,6 +30,8 @@ struct Fixture {
     tmux: FakeTmux,
     discord: Recorder,
     api: Recorder,
+    /// The agent a turn on the channel runs as, as its provider context names it.
+    agent: Option<&'static str>,
     _hosting: HostingConfig,
     _account: (TestEnvVarGuard, tempfile::TempDir, PathBuf),
     _db: crate::db::auto_queue::test_support::TestPostgresDb,
@@ -110,6 +113,7 @@ impl Fixture {
             tmux,
             discord,
             api,
+            agent: None,
             _hosting: HostingConfig::tui(),
             _account: account,
             _db: db,
@@ -117,15 +121,105 @@ impl Fixture {
     }
 
     async fn consume(&self) -> Option<ManagedReset> {
-        let (http, channel) = (&self.discord.http, self.channel);
-        reset_provider_session_if_pending(
-            http,
-            &self.shared,
-            &ProviderKind::Claude,
-            channel,
-            channel,
-        )
-        .await
+        self.consume_on(self.channel).await
+    }
+
+    /// A turn start on `channel`, whose fast setting is the fixture channel's.
+    async fn consume_on(&self, channel: ChannelId) -> Option<ManagedReset> {
+        let http = &self.discord.http;
+        let provider = &ProviderKind::Claude;
+        reset_provider_session_if_pending(http, &self.shared, provider, channel, self.channel).await
+    }
+
+    /// The provider context a turn on `channel` runs its launch under.
+    fn context(
+        &self,
+        channel: ChannelId,
+    ) -> crate::services::provider_cli::ProviderExecutionContext {
+        crate::services::provider_cli::ProviderExecutionContext {
+            provider: "claude".to_string(),
+            agent_id: self.agent.map(str::to_string),
+            channel_id: Some(channel.get().to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// Binds the channel to agent `owner` on the `work` account while the provider primary stays
+    /// the default account.
+    fn bind_channel_account(&mut self) {
+        let home = self._account.2.display().to_string();
+        let org = serde_yaml::to_string(&serde_json::json!({"version": 1,
+            "agents": {"owner": {"display_name": "owner", "provider": "claude"}},
+            "channels": {"by_id": {self.channel.get().to_string():
+                {"agent": "owner", "auth_profile": "work"}}},
+            "provider_auth_profiles": {"work": {"provider": "claude", "home": home}}}))
+        .unwrap();
+        let root = crate::config::runtime_root().unwrap();
+        std::fs::write(crate::runtime_layout::org_schema_path(&root), org).unwrap();
+        self.agent = Some("owner");
+    }
+
+    /// The real streaming entry with fast mode on, launching `name` on `session` with a CLI that
+    /// records its arguments and the settings file it was handed; both, once it ran.
+    fn launch_fast(&self, channel: ChannelId, name: &str, session: &str) -> (Vec<String>, Value) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let bin = tempfile::tempdir().unwrap();
+        let (claude, argv) = (bin.path().join("claude"), bin.path().join("argv"));
+        let settings = bin.path().join("settings.json");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{argv}.tmp'\nwhile [ $# -gt 0 ]; do [ \"$1\" = --settings ] && cp \"$2\" '{}'; shift; done\nmv '{argv}.tmp' '{argv}'\n",
+            settings.display(),
+            argv = argv.display()
+        );
+        std::fs::write(&claude, script).unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let set = TestEnvVarGuard::set_path_after_shared_test_env_lock;
+        let _cli = set("AGENTDESK_CLAUDE_PATH", &claude);
+        self.tmux.enable_fixture_launch();
+        crate::services::platform::tmux::mark_available_from_live_session();
+        let _hooks = crate::services::claude_tui::hook_server::publish_hook_endpoint(
+            "http://127.0.0.1:9".to_string(),
+        );
+        let cancel = Arc::new(CancelToken::new());
+        let (cwd, context) = (self.cwd.path().to_str().unwrap(), self.context(channel));
+        std::thread::scope(|scope| {
+            let (token, clearance) = (cancel.clone(), cleared(name));
+            let turn = scope.spawn(move || {
+                crate::services::platform::with_provider_execution_context(context, || {
+                    let (tx, _rx) = std::sync::mpsc::channel();
+                    crate::services::claude::execute_command_streaming(
+                        "hello",
+                        Some(session),
+                        cwd,
+                        tx,
+                        None,
+                        None,
+                        Some(token),
+                        Some(name),
+                        Some(&clearance),
+                        Some(channel.get()),
+                        None,
+                        None,
+                        Some(true),
+                        None,
+                        0,
+                        None,
+                        None,
+                    )
+                })
+            });
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while !argv.exists() && !turn.is_finished() {
+                assert!(Instant::now() < deadline, "the relaunch never ran its CLI");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            cancel.cancelled.store(true, Ordering::SeqCst);
+            let _ = turn.join().unwrap();
+        });
+        let args = std::fs::read_to_string(&argv).expect("the CLI ran");
+        let settings = std::fs::read(&settings).expect("the CLI got a settings file");
+        let args = args.lines().map(str::to_string).collect();
+        (args, serde_json::from_slice(&settings).unwrap())
     }
 
     async fn session_id(&self) -> Option<String> {
@@ -153,11 +247,14 @@ impl Fixture {
     fn turn(&self, argv: Option<&Path>) -> Result<(), String> {
         let cancel = Arc::new(CancelToken::new());
         let (cwd, name, channel) = (self.cwd.path().to_str().unwrap(), &self.name, self.channel);
+        let context = self.context(channel);
         std::thread::scope(|scope| {
             let (token, clearance) = (cancel.clone(), cleared(name));
             let turn = scope.spawn(move || {
-                let turn = crate::services::claude::tmux_tui_turn_for_tests;
-                turn(cwd, Some(SESSION), token, name, &clearance, channel.get())
+                crate::services::platform::with_provider_execution_context(context, || {
+                    let turn = crate::services::claude::tmux_tui_turn_for_tests;
+                    turn(cwd, Some(SESSION), token, name, &clearance, channel.get())
+                })
             });
             if let Some(argv) = argv {
                 let deadline = Instant::now() + Duration::from_secs(60);
@@ -220,24 +317,195 @@ async fn fast_toggle_on_live_claude_tui_relaunches_the_same_session_pg() {
     );
     assert_eq!(fx.session_id().await.as_deref(), Some(SESSION));
 
-    use std::os::unix::fs::PermissionsExt as _;
-    let bin = tempfile::tempdir().unwrap();
-    let (claude, argv) = (bin.path().join("claude"), bin.path().join("argv"));
-    let script = format!(
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexit 0\n",
-        argv.display()
-    );
-    std::fs::write(&claude, script).unwrap();
-    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let _cli =
-        TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_CLAUDE_PATH", &claude);
-    fx.tmux.enable_fixture_launch();
-    let _ = fx.turn(Some(&argv));
-    let args = std::fs::read_to_string(&argv).expect("the CLI ran");
-    let args: Vec<&str> = args.lines().collect();
+    let (args, settings) = fx.launch_fast(fx.channel, &fx.name, SESSION);
     let resumed = args.windows(2).any(|pair| pair == ["--resume", SESSION]);
     assert!(resumed, "{args:?}");
+    assert_eq!(
+        settings["fastMode"], true,
+        "the saved fast setting reaches the CLI"
+    );
     assert_eq!(fx.session_id().await.as_deref(), Some(SESSION));
+    tc::cleanup_session_temp_files(&fx.name);
+}
+
+// A channel bound to its own account, not the provider primary, relaunches on that account: the
+// session, its selector and markers stay, and the launch resumes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fast_relaunch_uses_channel_auth_profile_not_provider_primary_pg() {
+    let test = "services::discord::commands::control::relaunch_tests::fast_relaunch_uses_channel_auth_profile_not_provider_primary_pg";
+    if !api_child(test) {
+        return;
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let mut fx = Fixture::new(4, RuntimeHandoffKind::ClaudeTui).await;
+    fx.bind_channel_account();
+    let _idle = crate::services::discord::router::set_hosted_tui_promote_busy_for_tests(false);
+
+    let reset = fx.consume().await;
+    let relaunched = matches!(&reset, Some(ManagedReset::Applied(Some(name))) if *name == fx.name);
+    assert!(relaunched, "{reset:?}");
+    assert_eq!(
+        fx.session_id().await.as_deref(),
+        Some(SESSION),
+        "session kept"
+    );
+    let api = fx.api.take();
+    assert!(
+        !api.iter().any(|call| call.contains("clear-session-id")),
+        "{api:?}"
+    );
+    let kept = (Some("work".to_string()), Some(format!("{SESSION}\nwork")));
+    assert_eq!(fx.markers(), kept, "account markers kept");
+    super::relaunch::forget(fx.channel);
+
+    let (args, _) = fx.launch_fast(fx.channel, &fx.name, SESSION);
+    assert!(
+        args.windows(2).any(|pair| pair == ["--resume", SESSION]),
+        "{args:?}"
+    );
+    tc::cleanup_session_temp_files(&fx.name);
+}
+
+/// A second live Claude TUI on `n`, a thread sharing the fixture channel's fast setting, on its own
+/// session with the given launch fast setting.
+async fn sharing_thread(
+    fx: &Fixture,
+    n: u64,
+    session: &str,
+    fast: Option<bool>,
+) -> (ChannelId, String) {
+    let channel = ChannelId::new(1_486_486_000_000_000_000 + n);
+    let channel_name = format!("i6486-relaunch-{n}");
+    let name = ProviderKind::Claude.build_tmux_session_name(&channel_name);
+    map_channel(&fx.shared, channel, &channel_name).await;
+    let mut core = fx.shared.core.lock().await;
+    let entry = core.sessions.get_mut(&channel).unwrap();
+    entry.session_id = Some(session.to_string());
+    entry.current_path = Some(fx.cwd.path().to_str().unwrap().to_string());
+    drop(core);
+    let path = crate::services::claude_tui::transcript_tail::claude_transcript_path;
+    let transcript = path(fx.cwd.path(), session, Some(&fx._account.2)).unwrap();
+    std::fs::write(&transcript, "{}\n").unwrap();
+    tc::write_tmux_runtime_kind_marker(&name, RuntimeHandoffKind::ClaudeTui).unwrap();
+    tc::write_tmux_session_auth_profile(&name, "work").unwrap();
+    tc::write_claude_session_auth(&name, session, "work").unwrap();
+    let pool = fx.shared.pg_pool.as_ref().unwrap();
+    Case::Stored(Stored::Legacy)
+        .seed(pool, &channel_key(&fx.shared, &name), &name, channel.get())
+        .await;
+    launched_with(&name, session, fast);
+    (channel, name)
+}
+
+/// The settings file a launch of `name` on `session` writes, through the launch's own writer.
+fn launched_with(name: &str, session: &str, fast: Option<bool>) {
+    let config = crate::services::claude_tui::session::ClaudeTuiLaunchConfig {
+        tmux_session_name: name.to_string(),
+        working_dir: std::env::temp_dir(),
+        claude_bin: crate::services::claude_command::ClaudeBinary::from_tmux_wrapper_argv("claude"),
+        agentdesk_exe: PathBuf::from("/fixture/agentdesk"),
+        hook_endpoint: "http://127.0.0.1:9".to_string(),
+        session_id: session.to_string(),
+        system_prompt: None,
+        model: None,
+        resume: true,
+    };
+    crate::services::claude_tui::session::prepare_claude_tui_launch_with_fast(&config, fast)
+        .unwrap();
+}
+
+// A thread sharing its parent's fast setting is restarted on its own session even after the parent
+// consumed the shared pending change; a settings file naming another session is not trusted, and a
+// TUI already launched with the setting is left alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shared_fast_pending_applies_to_each_live_tui_pg() {
+    let test = "services::discord::commands::control::relaunch_tests::shared_fast_pending_applies_to_each_live_tui_pg";
+    if !api_child(test) {
+        return;
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let fx = Fixture::new(5, RuntimeHandoffKind::ClaudeTui).await;
+    let _idle = crate::services::discord::router::set_hosted_tui_promote_busy_for_tests(false);
+    const THREAD: &str = "64860000-0000-4000-8000-000000000005";
+    let (thread, name) = sharing_thread(&fx, 6, THREAD, Some(false)).await;
+
+    let parent = fx.consume().await;
+    assert!(
+        matches!(parent, Some(ManagedReset::Applied(_))),
+        "{parent:?}"
+    );
+    assert!(!fx.pending(), "the parent consumed the shared change");
+    fx.tmux.mark_present();
+    launched_with(&name, "77770000-0000-4000-8000-000000000009", Some(false));
+    fx.tmux.take_calls();
+    assert!(
+        fx.consume_on(thread).await.is_none(),
+        "another session's settings are not trusted"
+    );
+    assert!(!called(&fx.tmux.take_calls(), "kill-session"));
+
+    launched_with(&name, THREAD, Some(false));
+    let reset = fx.consume_on(thread).await;
+    let relaunched = matches!(&reset, Some(ManagedReset::Applied(Some(n))) if *n == name);
+    assert!(relaunched, "the thread relaunches too: {reset:?}");
+    assert!(called(&fx.tmux.take_calls(), "kill-session"));
+    let core = fx.shared.core.lock().await;
+    assert_eq!(core.sessions[&thread].session_id.as_deref(), Some(THREAD));
+    drop(core);
+    super::relaunch::forget(thread);
+
+    let (args, settings) = fx.launch_fast(thread, &name, THREAD);
+    assert!(
+        args.windows(2).any(|pair| pair == ["--resume", THREAD]),
+        "{args:?}"
+    );
+    assert_eq!(settings["fastMode"], true);
+    launched_with(&name, THREAD, Some(true));
+    fx.tmux.mark_present();
+    fx.tmux.take_calls();
+    assert!(
+        fx.consume_on(thread).await.is_none(),
+        "an applied setting relaunches nothing"
+    );
+    assert!(!called(&fx.tmux.take_calls(), "kill-session"));
+    tc::cleanup_session_temp_files(&fx.name);
+    tc::cleanup_session_temp_files(&name);
+}
+
+// Kill failures count per fast value: a failure for the old value does not use up the retry a newly
+// saved value gets.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_fast_value_restarts_the_kill_failure_count_pg() {
+    let test = "services::discord::commands::control::relaunch_tests::a_new_fast_value_restarts_the_kill_failure_count_pg";
+    if !api_child(test) {
+        return;
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let fx = Fixture::new(7, RuntimeHandoffKind::ClaudeTui).await;
+    let _idle = crate::services::discord::router::set_hosted_tui_promote_busy_for_tests(false);
+    fx.tmux.fail_kills();
+
+    assert!(fx.consume().await.is_none());
+    let key = fx.channel.get().to_string();
+    fx.shared
+        .settings
+        .write()
+        .await
+        .channel_fast_modes
+        .insert(key, false);
+    assert!(fx.consume().await.is_none());
+    assert!(fx.pending(), "the new value keeps its retry");
+    let said = fx.said();
+    let retries = said
+        .iter()
+        .filter(|call| call.contains("한 번 더 시도"))
+        .count();
+    assert_eq!(retries, 2, "{said:?}");
+    assert!(
+        !said.iter().any(|call| call.contains("2회 실패")),
+        "{said:?}"
+    );
+    super::relaunch::forget(fx.channel);
     tc::cleanup_session_temp_files(&fx.name);
 }
 

@@ -292,6 +292,79 @@ pub(crate) fn spawn_auth_overlay(
     spawn_auth_overlay_for_context(provider, channel_id, agent_id.as_deref())
 }
 
+/// The account a launch for the channel and agent is configured to use: a recovery pin first,
+/// then the channel or agent setting, then the provider primary; `true` when a pin chose it.
+fn configured_launch_profile(
+    schema: Option<&OrgSchema>,
+    provider: &ProviderKind,
+    channel_id: Option<u64>,
+    agent_id: Option<&str>,
+) -> Result<(Option<String>, bool), String> {
+    let channel_profile = channel_id.and_then(|id| {
+        schema.and_then(|schema| {
+            resolve_channel_binding(schema, ChannelId::new(id), None)
+                .filter(|(binding, _)| agent_id.is_none_or(|agent| agent == binding.agent))
+                .and_then(|(binding, _)| binding.auth_profile.clone())
+        })
+    });
+    let agent_profile = agent_id.and_then(|agent_id| {
+        schema.and_then(|schema| {
+            schema
+                .agents
+                .get(agent_id)
+                .and_then(|agent| agent.auth_profile.clone())
+        })
+    });
+    let pinned_profile = channel_id
+        .map(|id| {
+            crate::services::agent_recovery::pinned_auth_profile(
+                &id.to_string(),
+                provider,
+                agent_id,
+            )
+        })
+        .transpose()?
+        .flatten();
+    let recovery_pinned = pinned_profile.is_some();
+    let profile = pinned_profile.or_else(|| {
+        configured_auth_profile(channel_profile.as_deref(), agent_profile.as_deref())
+            .map(str::to_string)
+            .or_else(|| {
+                schema.map(|schema| provider_primary_profile(schema, Some(provider.as_str())))
+            })
+    });
+    Ok((profile, recovery_pinned))
+}
+
+/// The account a launch for the channel and agent would take, read without the fallback router a
+/// launch updates; `None` when a fallback policy may choose another account at launch.
+pub(crate) fn configured_launch_overlay(
+    provider: ProviderKind,
+    channel_id: u64,
+    agent_id: Option<&str>,
+) -> Result<Option<crate::services::provider_auth_profile::ProviderAuthOverlay>, String> {
+    use crate::services::provider_auth_profile::resolve;
+    let schema = load_org_schema_for_auth()?;
+    let catalog = schema
+        .as_ref()
+        .and_then(|schema| schema.provider_auth_profiles.clone())
+        .unwrap_or_default();
+    let (profile, pinned) =
+        configured_launch_profile(schema.as_ref(), &provider, Some(channel_id), agent_id)?;
+    let fallback = schema
+        .as_ref()
+        .and_then(|schema| schema.provider_auth_fallbacks.get(provider.as_str()))
+        .is_some_and(|policy| policy.enabled);
+    if fallback
+        && !pinned
+        && crate::services::provider_auth_profile::extra_account_login_supported(&provider)
+    {
+        return Ok(None);
+    }
+    let overlay = resolve(provider, profile.as_deref(), None, &catalog);
+    overlay.map(Some).map_err(|error| error.to_string())
+}
+
 fn spawn_auth_overlay_for_context(
     provider: ProviderKind,
     channel_id: Option<u64>,
@@ -304,41 +377,8 @@ fn spawn_auth_overlay_for_context(
         .as_ref()
         .and_then(|schema| schema.provider_auth_profiles.clone())
         .unwrap_or_default();
-    let channel_profile = channel_id.and_then(|id| {
-        schema.as_ref().and_then(|schema| {
-            resolve_channel_binding(schema, ChannelId::new(id), None)
-                .filter(|(binding, _)| agent_id.is_none_or(|agent| agent == binding.agent))
-                .and_then(|(binding, _)| binding.auth_profile.clone())
-        })
-    });
-    let agent_profile = agent_id.and_then(|agent_id| {
-        schema.as_ref().and_then(|schema| {
-            schema
-                .agents
-                .get(agent_id)
-                .and_then(|agent| agent.auth_profile.clone())
-        })
-    });
-    let pinned_profile = channel_id
-        .map(|id| {
-            crate::services::agent_recovery::pinned_auth_profile(
-                &id.to_string(),
-                &provider,
-                agent_id,
-            )
-        })
-        .transpose()?
-        .flatten();
-    let recovery_pinned = pinned_profile.is_some();
-    let profile = pinned_profile.or_else(|| {
-        configured_auth_profile(channel_profile.as_deref(), agent_profile.as_deref())
-            .map(str::to_string)
-            .or_else(|| {
-                schema
-                    .as_ref()
-                    .map(|schema| provider_primary_profile(schema, Some(provider.as_str())))
-            })
-    });
+    let (profile, recovery_pinned) =
+        configured_launch_profile(schema.as_ref(), &provider, channel_id, agent_id)?;
     // Validate the configured primary first: a typo must not silently choose an account.
     let primary_overlay = resolve(provider.clone(), profile.as_deref(), None, &catalog)
         .map_err(|error| error.to_string())?;

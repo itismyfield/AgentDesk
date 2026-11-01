@@ -26,10 +26,14 @@ pub(super) enum Outcome {
     Released,
     /// No session can be resumed, so the provider reset applies instead.
     Fallback,
+    /// The launch's account cannot be confirmed; the session is kept and nothing ends this turn.
+    Undetermined,
     Refused(String),
 }
 
-static KILL_FAILURES: LazyLock<dashmap::DashMap<serenity::ChannelId, u8>> =
+/// Failed kills per channel, counted for the fast value they tried to apply; a new value starts
+/// the count again, and a spent count stays so a drift check does not retry the same value.
+static KILL_FAILURES: LazyLock<dashmap::DashMap<serenity::ChannelId, (u8, Option<bool>)>> =
     LazyLock::new(dashmap::DashMap::new);
 static DEFER_NOTICED: LazyLock<dashmap::DashSet<serenity::ChannelId>> =
     LazyLock::new(dashmap::DashSet::new);
@@ -38,6 +42,7 @@ const RELAUNCH_KILL_LIMIT: u8 = 2;
 
 struct Target {
     tmux: String,
+    channel_name: String,
     session: Option<String>,
     working_dir: Option<String>,
 }
@@ -49,9 +54,11 @@ async fn target(
 ) -> Option<Target> {
     let data = shared.core.lock().await;
     let session = data.sessions.get(&channel_id)?;
-    let tmux = provider.build_tmux_session_name(session.channel_name.as_deref()?);
+    let channel_name = session.channel_name.clone()?;
+    let tmux = provider.build_tmux_session_name(&channel_name);
     Some(Target {
         tmux,
+        channel_name,
         session: session.session_id.clone(),
         working_dir: session.current_path.clone(),
     })
@@ -91,30 +98,106 @@ fn pane_state_of(_: &str) -> PaneState {
     PaneState::None
 }
 
-/// Whether the launch that follows a kill would resume `session` rather than start a new one.
+/// Whether the launch that follows a kill resumes the session.
+#[derive(Debug, Eq, PartialEq)]
+enum Resume {
+    Yes,
+    /// The account the launch takes has no transcript of the session.
+    No,
+    /// The launch's account cannot be confirmed from here.
+    Undetermined,
+}
+
+/// The agent a turn on the channel runs as: the channel's own binding, else its thread parent's.
+fn launch_agent(channel_id: serenity::ChannelId, channel_name: &str) -> Option<String> {
+    let binding = crate::services::discord::settings::resolve_role_binding;
+    binding(channel_id, Some(channel_name))
+        .or_else(|| SharedData::feature_settings_parent(channel_id).and_then(|p| binding(p, None)))
+        .map(|binding| binding.role_id)
+}
+
+/// Judges the resume under the account the channel's launch is configured to take, as the pane's
+/// own account marker and that account's transcripts show it.
 #[cfg(unix)]
-fn resumable(tmux: &str, session: &str, working_dir: &str) -> bool {
-    let overlay =
-        crate::services::discord::org_schema::overlay_from_tmux_session(ProviderKind::Claude, tmux);
-    let Ok(overlay) = overlay else {
-        return false;
+fn resumable(channel_id: serenity::ChannelId, target: &Target, session: &str, dir: &str) -> Resume {
+    let agent = launch_agent(channel_id, &target.channel_name);
+    let overlay = crate::services::discord::org_schema::configured_launch_overlay(
+        ProviderKind::Claude,
+        channel_id.get(),
+        agent.as_deref(),
+    );
+    let Ok(Some(overlay)) = overlay else {
+        return Resume::Undetermined;
     };
-    // A pane under another account would have its session dropped by the launch.
+    let tmux = target.tmux.as_str();
     if !crate::services::tmux_common::tmux_session_auth_profile_matches(tmux, &overlay.profile_id) {
-        return false;
+        return Resume::Undetermined;
     }
-    let dir = std::path::Path::new(working_dir);
     let resolved = crate::services::claude::resolve_claude_tui_session_for_launch(
-        dir,
+        std::path::Path::new(dir),
         Some(session),
         overlay.home.as_deref(),
     );
-    resolved.is_ok_and(|resolution| resolution.resume && resolution.session_id == session)
+    match resolved {
+        Ok(resolution) if resolution.resume && resolution.session_id == session => Resume::Yes,
+        Ok(_) => Resume::No,
+        Err(_) => Resume::Undetermined,
+    }
 }
 
 #[cfg(not(unix))]
-fn resumable(_: &str, _: &str, _: &str) -> bool {
-    false
+fn resumable(_: serenity::ChannelId, _: &Target, _: &str, _: &str) -> Resume {
+    Resume::Undetermined
+}
+
+/// The fast setting the live TUI was launched with, from the settings file its launch wrote; `None`
+/// when that file does not name `session`, so it cannot be tied to the process running it.
+fn launched_fast(tmux: &str, session: &str) -> Option<Option<bool>> {
+    let ext = crate::services::tmux_common::CLAUDE_TUI_HOOK_SETTINGS_TEMP_EXT;
+    let path = crate::services::tmux_common::session_temp_path(tmux, ext);
+    let settings: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    let commands = settings["hooks"]
+        .as_object()?
+        .values()
+        .filter_map(|v| v.as_array());
+    let commands = commands
+        .flatten()
+        .filter_map(|group| group["hooks"].as_array())
+        .flatten();
+    let names_session = commands
+        .filter_map(|hook| hook["command"].as_str())
+        .any(|command| {
+            let mut words = command
+                .split_whitespace()
+                .skip_while(|word| *word != "--session-id");
+            words.nth(1) == Some(session)
+        });
+    names_session.then(|| settings["fastMode"].as_bool())
+}
+
+/// Whether the channel's live TUI was launched with a fast setting other than `desired`, as when a
+/// session sharing the setting consumed its pending change first.
+pub(super) async fn fast_drifted(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    desired: Option<bool>,
+) -> bool {
+    let Some(desired) = desired else {
+        return false;
+    };
+    let spent = KILL_FAILURES
+        .get(&channel_id)
+        .is_some_and(|entry| entry.0 >= RELAUNCH_KILL_LIMIT && entry.1 == Some(desired));
+    let Some(Target {
+        tmux,
+        session: Some(session),
+        ..
+    }) = target(shared, provider, channel_id).await
+    else {
+        return false;
+    };
+    !spent && launched_fast(&tmux, &session).is_some_and(|fast| fast != Some(desired))
 }
 
 /// The one send of every relaunch notice: a status line, never a turn body.
@@ -138,22 +221,25 @@ pub(super) async fn run(
     reset_source: &str,
     requested_fast: Option<bool>,
 ) -> Outcome {
-    let Some(Target {
-        tmux,
-        session: Some(session),
-        working_dir: Some(working_dir),
-    }) = target(shared, provider, channel_id).await
+    let Some(target) = target(shared, provider, channel_id).await else {
+        return Outcome::Fallback;
+    };
+    let (Some(session), Some(working_dir)) = (target.session.clone(), target.working_dir.clone())
     else {
         return Outcome::Fallback;
     };
-    if !resumable(&tmux, &session, &working_dir) {
-        return Outcome::Fallback;
+    match resumable(channel_id, &target, &session, &working_dir) {
+        Resume::Yes => {}
+        Resume::No => return Outcome::Fallback,
+        Resume::Undetermined => return Outcome::Undetermined,
     }
-    let at = super::relaunch_confirm::now();
+    let tmux = target.tmux;
     match relaunch_channel_tmux_keeping_session(shared, provider, channel_id, &tmux, reset_source)
         .await
     {
         Relaunch::Relaunched => {
+            // Only a record written after the old process ended is the new process's.
+            let at = super::relaunch_confirm::now();
             forget_attempts(channel_id);
             let notice = format!(
                 "설정 변경을 적용하려고 같은 세션 `{}`으로 TUI를 재기동합니다.",
@@ -178,12 +264,17 @@ pub(super) async fn run(
         Relaunch::Refused(reason) => Outcome::Refused(reason),
         Relaunch::KillFailed => {
             let failures = {
-                let mut count = KILL_FAILURES.entry(channel_id).or_insert(0);
-                *count += 1;
-                *count
+                let mut entry = KILL_FAILURES
+                    .entry(channel_id)
+                    .or_insert((0, requested_fast));
+                if entry.1 != requested_fast {
+                    *entry = (0, requested_fast);
+                }
+                entry.0 += 1;
+                entry.0
             };
             if failures >= RELAUNCH_KILL_LIMIT {
-                forget_attempts(channel_id);
+                DEFER_NOTICED.remove(&channel_id);
                 let notice = "TUI 재기동이 2회 실패했습니다. 설정은 저장돼 있고 다음 세션 기동(/clear·재시작) 때 적용됩니다.";
                 say(http, channel_id, notice.to_string()).await;
                 Outcome::Released

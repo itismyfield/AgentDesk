@@ -250,7 +250,8 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
         if fast_mode_channel_id != channel_id {
             sync_session_reset_pending(shared, fast_mode_channel_id);
         }
-        return None;
+        return relaunch_on_fast_drift(http, shared, provider, channel_id, fast_mode_channel_id)
+            .await;
     };
     let mut fallback = false;
     match plan.action {
@@ -278,6 +279,13 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
                     return Some(ManagedReset::Applied(Some(name)));
                 }
                 relaunch::Outcome::Kept => return None,
+                relaunch::Outcome::Undetermined => {
+                    tracing::info!(
+                        channel_id = channel_id.get(),
+                        "fast relaunch waits: launch account unconfirmed"
+                    );
+                    return None;
+                }
                 relaunch::Outcome::Released => {
                     release_fast_pending(shared, provider, channel_id, fast_mode_channel_id).await;
                     return None;
@@ -341,6 +349,40 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
         sync_session_reset_pending(shared, fast_mode_channel_id);
     }
     Some(reset)
+}
+
+/// Restarts a live local Claude TUI launched with a fast setting other than the channel's, on its
+/// own session, though another session sharing the setting consumed the pending change.
+async fn relaunch_on_fast_drift(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    fast_mode_channel_id: serenity::ChannelId,
+) -> Option<ManagedReset> {
+    if !super::config::claude_local_tui_relaunch_applies(provider, channel_id) {
+        return None;
+    }
+    let desired = super::config::channel_fast_mode_setting(shared, fast_mode_channel_id).await;
+    if !relaunch::fast_drifted(shared, provider, channel_id, desired).await
+        || relaunch::pane_state(shared, provider, channel_id).await
+            != relaunch::PaneState::ClaudeTuiLive
+    {
+        return None;
+    }
+    match relaunch::run(
+        http,
+        shared,
+        provider,
+        channel_id,
+        "fast mode relaunch",
+        desired,
+    )
+    .await
+    {
+        relaunch::Outcome::Applied(name) => Some(ManagedReset::Applied(Some(name))),
+        _ => None,
+    }
 }
 
 /// Drops a fast change that no longer needs its process ended.
