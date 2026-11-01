@@ -1872,6 +1872,7 @@ src/
 │   │   │   ├── herdr_row_end_settle_tests.rs
 │   │   │   ├── herdr_row_end_tests.rs
 │   │   │   ├── herdr_server_replaced.rs
+│   │   │   ├── herdr_server_replaced_real_tests.rs
 │   │   │   ├── herdr_server_replaced_tests.rs
 │   │   │   ├── host_reconcile.rs
 │   │   │   ├── host_reconcile_tests.rs
@@ -3465,7 +3466,8 @@ src/
 │   │   │   │   ├── selector.rs
 │   │   │   │   ├── selector_tests.rs
 │   │   │   │   ├── spawn.rs
-│   │   │   │   └── spawn_real_tests.rs
+│   │   │   │   ├── spawn_real_tests.rs
+│   │   │   │   └── spawn_tests.rs
 │   │   │   ├── managed_config/
 │   │   │   │   ├── maintenance.rs
 │   │   │   │   ├── maintenance_tests.rs
