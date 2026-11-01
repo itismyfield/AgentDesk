@@ -857,8 +857,6 @@ var ciRecovery = {
   priority: 46,
 
   onTick1min: function() {
-    prTracking.importLegacyOnce("wait-ci");
-
     // Find canonical PR lifecycle entries that are waiting for CI.
     var cards = agentdesk.ciRecovery.listWaitingForCi();
 
