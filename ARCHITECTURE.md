@@ -399,6 +399,7 @@ src/
 │   │   ├── kv_ops.rs
 │   │   ├── log_ops.rs
 │   │   ├── message_ops.rs
+│   │   ├── orphan_recovery_ops.rs
 │   │   ├── phase_gate_ops.rs
 │   │   ├── phase_gate_owner_tests.rs
 │   │   ├── pipeline_ops.rs
@@ -4278,6 +4279,10 @@ src/
 │   ├── turn_summary_line.rs
 │   └── turn_summary_line_tests.rs
 ├── supervisor/
+│   ├── orphan_recovery/
+│   │   ├── boot.rs
+│   │   ├── mod.rs
+│   │   └── policy.rs
 │   └── mod.rs
 ├── test_support/
 │   ├── serial_runtime.rs

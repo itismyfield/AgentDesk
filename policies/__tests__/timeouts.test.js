@@ -552,39 +552,16 @@ test("timeouts dispatch maintenance module re-enqueues unnotified pending dispat
   ]);
 });
 
-test("timeouts orphan dispatch module emits orphan recovery signals", () => {
+test("timeouts orphan dispatch delegates from the real scheduler to its Rust owner", () => {
+  let queries = 0;
   const { policy, state } = loadPolicy("policies/timeouts.js", {
-    dbQuery: createSqlRouter([
-      { match: "SELECT value FROM kv_meta WHERE key = 'server_boot_at'", result: [] },
-      {
-        match: "FROM task_dispatches td JOIN kanban_cards kc ON kc.id = td.kanban_card_id",
-        result: [
-          {
-            dispatch_id: "dispatch-orphan-1",
-            kanban_card_id: "card-orphan-1",
-            dispatch_type: "implementation"
-          }
-        ]
-      }
-    ]),
-    emitSignal() {
-      return { executed: true };
-    }
+    dbQuery() { queries++; return []; }
   });
-
-  policy._section_K();
-
-  assert.deepEqual(state.runtimeSignals, [
-    {
-      signalName: "OrphanCandidate",
-      evidence: {
-        dispatch_id: "dispatch-orphan-1",
-        card_id: "card-orphan-1",
-        dispatch_type: "implementation",
-        detected_from: "timeouts._section_K"
-      }
-    }
-  ]);
+  for (const section of ["I0", "J", "I"]) policy["_section_" + section] = () => {};
+  policy.onTick30s({});
+  assert.equal(state.orphanMaintenanceCalls, 1);
+  assert.equal(queries, 0);
+  assert.deepEqual(state.runtimeSignals, []);
 });
 
 test("long turns do not register monitoring or page the deadlock manager", () => {

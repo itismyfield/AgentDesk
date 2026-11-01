@@ -169,6 +169,7 @@ function createAgentdeskMock(options) {
     timeoutHostObservations: [],
     retrospectiveCalls: [],
     runtimeSignals: [],
+    orphanMaintenanceCalls: 0,
     httpPosts: [],
     httpGets: [],
     deadlockAlerts: [],
@@ -347,6 +348,12 @@ function createAgentdeskMock(options) {
       }
     },
     runtime: {
+      maintainOrphanDispatches() {
+        state.orphanMaintenanceCalls++;
+        if (typeof settings.maintainOrphanDispatches === "function") {
+          return settings.maintainOrphanDispatches(state);
+        }
+      },
       emitSignal(signalName, evidence) {
         state.runtimeSignals.push({ signalName, evidence: clone(evidence || null) });
         if (typeof settings.emitSignal === "function") {
