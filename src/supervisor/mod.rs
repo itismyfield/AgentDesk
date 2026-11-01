@@ -494,6 +494,62 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[tokio::test]
+    async fn orphan_recovery_returns_card_to_dispatchable_without_notification_pg() {
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        sqlx::query("INSERT INTO kanban_cards (id, title, status, latest_dispatch_id) VALUES ('orphan-card', '고아 작업', 'in_progress', 'orphan-dispatch')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO task_dispatches (id, kanban_card_id, dispatch_type, status, created_at) VALUES ('orphan-dispatch', 'orphan-card', 'implementation', 'pending', NOW() - INTERVAL '10 minutes')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO kv_meta (key, value) VALUES ('kanban_manager_channel_id', '1234567890123456789')")
+            .execute(&pool).await.unwrap();
+        let supervisor = RuntimeSupervisor {
+            pg_pool: Some(pool.clone()),
+        };
+        let evidence = json!({ "dispatch_id": "orphan-dispatch" });
+        let probe = supervisor.emit_signal(SupervisorSignal::OrphanCandidate, evidence.clone());
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = 'orphan-dispatch'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            status, "pending",
+            "first signal must only confirm: {probe:?}"
+        );
+        let recovered = supervisor.emit_signal(SupervisorSignal::OrphanCandidate, evidence);
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = 'orphan-dispatch'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            status, "failed",
+            "recovery must fail the dispatch: {recovered:?}"
+        );
+        let card: (String, Option<String>) = sqlx::query_as(
+            "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = 'orphan-card'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(card, ("requested".into(), Some("orphan-dispatch".into())));
+        let audit: (String, String) = sqlx::query_as("SELECT from_status, to_status FROM kanban_audit_logs WHERE card_id = 'orphan-card' AND source = 'runtime_supervisor'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(audit, ("in_progress".into(), "requested".into()));
+        let notifications: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            notifications, 0,
+            "orphan recovery must not enqueue notifications"
+        );
+        pool.close().await;
+        db.drop().await;
+    }
+
     #[test]
     fn supervisor_signal_support_states_are_explicit() {
         assert_eq!(

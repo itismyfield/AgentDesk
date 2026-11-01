@@ -40,12 +40,25 @@ const RETIRED_CONFIG_KEYS: &[&str] = &[
     "context_clear_idle_minutes",
     "counter_model_review_enabled",
     "narrate_progress",
-    // Retired rows deleted at boot: the human-alert channel, the PM decision gate
-    // toggle, and the escalation routing override.
     "kanban_human_alert_channel_id",
     "pm_decision_gate_enabled",
     "escalation-settings-override",
+    "merge_automation_enabled",
+    "merge_strategy",
+    "merge_strategy_mode",
+    "merge_allowed_authors",
+    "maxReviewRounds",
+    "maxChainDepth",
+    "inProgressStaleMin",
+    "requestedAckTimeoutMin",
+    "long_turn_alert_interval_min",
+    "health_port",
+    "test_tier_write",
+    "kanban_manager_channel_id",
 ];
+
+pub(crate) const RETIRED_CONFIG_KEY_PREFIXES: &[&str] =
+    &["merge_strategy_mode:card:", "escalation_thread:"];
 
 const RUNTIME_CONFIG_KEYS: &[&str] = &[
     "maxRetries",
@@ -71,13 +84,6 @@ pub(crate) const RUNTIME_CONFIG_EXPLICIT_KEYS_META: &str = "__runtimeConfigExpli
 /// (key, category, label_ko, label_en, default_value)
 /// default_value is seeded into kv_meta on startup if absent.
 const CONFIG_KEYS: &[(&str, &str, &str, &str, Option<&str>)] = &[
-    (
-        "kanban_manager_channel_id",
-        "pipeline",
-        "칸반매니저 채널 ID",
-        "Kanban Manager Channel ID",
-        None,
-    ),
     (
         "deadlock_manager_channel_id",
         "pipeline",
@@ -506,7 +512,6 @@ fn stringified_number<T: ToString>(value: Option<T>) -> Option<String> {
 
 fn yaml_section_value(config: &crate::config::Config, key: &str) -> Option<String> {
     match key {
-        "kanban_manager_channel_id" => config.kanban.manager_channel_id.clone(),
         "deadlock_manager_channel_id" => config.kanban.deadlock_manager_channel_id.clone(),
         "agent_quality_monitoring_channel_id" => None,
         "kanban_relay_alert_threshold" => stringified_number(config.kanban.relay_alert_threshold),
@@ -1006,6 +1011,12 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn retired_manager_key_is_absent_from_endpoint_inventory() {
+        let inventory = include_str!("../server/routes/docs/inventory/endpoints/part_03.rs");
+        assert!(!inventory.contains("kanban_manager_channel_id"));
+    }
+
     struct TestDatabase {
         _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
         admin_url: String,
@@ -1135,12 +1146,21 @@ mod tests {
         let mut keys = CONFIG_KEYS.iter().map(|(key, ..)| key);
         assert!(!keys.any(|key| key.starts_with("merge_")));
         let actions = config_default_seed_actions(&config);
-        for key in [
+        let retired = [
             "merge_automation_enabled",
             "merge_strategy",
             "merge_strategy_mode",
             "merge_allowed_authors",
-        ] {
+            "maxReviewRounds",
+            "maxChainDepth",
+            "inProgressStaleMin",
+            "requestedAckTimeoutMin",
+            "long_turn_alert_interval_min",
+            "health_port",
+            "test_tier_write",
+            "kanban_manager_channel_id",
+        ];
+        for key in retired {
             upsert_test_kv(&pool, key, "legacy").await;
             assert!(!actions.iter().any(|action| matches!(action, KvSeedAction::Put { key: k, .. } | KvSeedAction::PutIfAbsent { key: k, .. } if k == key)));
             let response = service
@@ -1152,6 +1172,11 @@ mod tests {
         }
         let entries = service.get_config_entries().await.unwrap().entries;
         assert!(entries.iter().all(|entry| !entry.key.starts_with("merge_")));
+        assert!(
+            entries
+                .iter()
+                .all(|entry| !retired.contains(&entry.key.as_str()))
+        );
         database.drop().await;
     }
 
