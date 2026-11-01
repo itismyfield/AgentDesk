@@ -103,3 +103,8 @@ services::tui_o::writer::owed::tests::verified::tool_card_provenance::replay_met
 [Fast targeted tests: PR tracking owner]
 engine::ops::pr_tracking_owner_tests::
 engine::ops::pr_tracking_ops::tests::
+engine::sql_guard::tests::
+
+[Fast targeted tests: Phase gate owner]
+engine::ops::phase_gate_owner_tests::
+db::auto_queue::phase_gate_verdict::tests::

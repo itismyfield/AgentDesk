@@ -162,6 +162,8 @@ function createAgentdeskMock(options) {
     autoQueueCompletes: [],
     autoQueuePauses: [],
     autoQueueResumes: [],
+    phaseGateContextCalls: [],
+    phaseGateEvaluations: [],
     autoQueueSavedPhaseGates: [],
     autoQueueClearedPhaseGates: [],
     timeoutHostObservations: [],
@@ -470,6 +472,20 @@ function createAgentdeskMock(options) {
         return { retryCount: 1, retryLimit: 3, to: "pending", changed: true };
       }
     },
+    phaseGate: {
+      authoritativeContext(runId, phase, context) {
+        state.phaseGateContextCalls.push({ runId, phase, context: clone(context) });
+        return typeof settings.phaseGateContext === "function"
+          ? clone(settings.phaseGateContext(runId, phase, context)) : clone(context);
+      },
+      evaluate(context, result) {
+        state.phaseGateEvaluations.push({ context: clone(context), result: clone(result) });
+        if (typeof settings.phaseGateEvaluation !== "function") {
+          throw new Error("phaseGateEvaluation fixture is required; verdict logic belongs to Rust");
+        }
+        return clone(settings.phaseGateEvaluation(context, result));
+      }
+    },
     prTracking: {
       load(cardId) {
         return clone((settings.prTracking && settings.prTracking.load && settings.prTracking.load(cardId, state)) || null);
@@ -489,6 +505,16 @@ function createAgentdeskMock(options) {
           );
         }
         return { card_id: cardId, repo_id: repoId, branch, pr_number: prNumber, state: trackingState, last_error: lastError };
+      },
+      // Existing Node sweep fixtures model the native read; PG owner tests verify its SQL.
+      listStrandedCreatePr(limit) {
+        return agentdesk.db.query(
+          "SELECT card_id, last_error, retry_count, dispatch_generation FROM pr_tracking " +
+          "WHERE state IN ('create-pr', 'escalated') AND retry_count > 0 " +
+          "AND COALESCE(last_error, '') NOT LIKE 'handed-off:%' " +
+          "AND updated_at > datetime('now', '-30 days') ORDER BY updated_at LIMIT " + limit,
+          []
+        );
       },
       // Model native bookkeeping through the sweep tests' SQL-aware fake.
       markHandedOff(cardId, errorMsg) {

@@ -5,6 +5,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 
+const HANDED_OFF_PREFIX: &str = "handed-off:";
+const CREATE_PR_STATES: [&str; 2] = ["create-pr", "escalated"];
+
 #[derive(Clone, Debug, Deserialize)]
 pub(super) struct HandoffPayload {
     pub(super) card_id: String,
@@ -39,6 +42,7 @@ struct Observation {
 #[serde(tag = "op", rename_all = "camelCase")]
 enum Request {
     Upsert(Observation),
+    ListStrandedCreatePr { limit: i64 },
     MarkHandedOff { card_id: String, error_msg: String },
     TouchGeneration { card_id: String, generation: String },
 }
@@ -53,24 +57,44 @@ fn new_store<'js>(ctx: &Ctx<'js>, pool: Option<PgPool>) -> JsResult<Object<'js>>
                 let pool = pool
                     .as_ref()
                     .ok_or("postgres backend is required for prTracking")?;
-                crate::utils::async_bridge::block_on_pg_result(
+                let value = crate::utils::async_bridge::block_on_pg_result(
                     pool,
                     move |pool| async move {
                         let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-                        match request {
+                        let value = match request {
                             Request::Upsert(observation) => {
-                                observe_on_pg_tx(&mut tx, &observation).await?
+                                observe_on_pg_tx(&mut tx, &observation).await?;
+                                Value::Null
+                            }
+                            Request::ListStrandedCreatePr { limit } => {
+                                let rows = sqlx::query_scalar::<_, Value>(
+                                    "SELECT jsonb_build_object('card_id', card_id, 'last_error', last_error,
+                                         'retry_count', retry_count, 'dispatch_generation', dispatch_generation)
+                                     FROM pr_tracking WHERE state = ANY($1) AND retry_count > 0
+                                       AND COALESCE(last_error, '') NOT LIKE $2
+                                       AND updated_at > NOW() - INTERVAL '30 days'
+                                     ORDER BY updated_at LIMIT $3",
+                                )
+                                .bind(&CREATE_PR_STATES[..])
+                                .bind(format!("{HANDED_OFF_PREFIX}%"))
+                                .bind(limit)
+                                .fetch_all(&mut *tx)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                                Value::Array(rows)
                             }
                             Request::MarkHandedOff { card_id, error_msg } => {
                                 sqlx::query(
                                     "UPDATE pr_tracking SET last_error = $1, updated_at = NOW()
-                                     WHERE card_id = $2 AND state IN ('create-pr', 'escalated')",
+                                     WHERE card_id = $2 AND state = ANY($3)",
                                 )
-                                .bind(format!("handed-off:{error_msg}"))
+                                .bind(format!("{HANDED_OFF_PREFIX}{error_msg}"))
                                 .bind(card_id)
+                                .bind(&CREATE_PR_STATES[..])
                                 .execute(&mut *tx)
                                 .await
                                 .map_err(|e| e.to_string())?;
+                                Value::Null
                             }
                             Request::TouchGeneration {
                                 card_id,
@@ -85,14 +109,15 @@ fn new_store<'js>(ctx: &Ctx<'js>, pool: Option<PgPool>) -> JsResult<Object<'js>>
                                 .execute(&mut *tx)
                                 .await
                                 .map_err(|e| e.to_string())?;
+                                Value::Null
                             }
-                        }
+                        };
                         tx.commit().await.map_err(|e| e.to_string())?;
-                        Ok(())
+                        Ok(value)
                     },
                     |e| e,
                 )?;
-                Ok::<_, String>(json!({"value": null}))
+                Ok::<_, String>(json!({"value": value}))
             })();
             match result {
                 Ok(value) => value.to_string(),
@@ -123,6 +148,9 @@ pub(super) fn register_pr_tracking_ops<'js>(ctx: &Ctx<'js>, pool: Option<PgPool>
             store.upsert = function(cardId, repoId, worktreePath, branch, prNumber, headSha, state, lastError) {
                 call({op:'upsert', card_id:cardId, repo_id:repoId, worktree_path:worktreePath,
                       branch:branch, pr_number:prNumber, head_sha:headSha, state:state, last_error:lastError});
+            };
+            store.listStrandedCreatePr = function(limit) {
+                return call({op:'listStrandedCreatePr', limit:limit});
             };
             store.markHandedOff = function(cardId, errorMsg) {
                 call({op:'markHandedOff', card_id:cardId, error_msg:errorMsg});

@@ -16,7 +16,7 @@
 
   function loadCardMeta(cardId) {
     var rows = agentdesk.db.query(
-      "SELECT id, status, blocked_reason, repo_id, github_issue_url " +
+      "SELECT repo_id, github_issue_url " +
       "FROM kanban_cards WHERE id = ? LIMIT 1",
       [cardId]
     );
@@ -141,6 +141,7 @@
     load: loadPrTrackingCanonical,
     upsert: upsertPrTracking,
     markHandedOff: markHandedOff,
+    listStrandedCreatePr: function(limit) { return store.listStrandedCreatePr(limit); },
     touchGeneration: touchGeneration,
     list: listTrackedPrRows,
     findByRepoPr: findByRepoPr,

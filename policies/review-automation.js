@@ -1193,14 +1193,7 @@ function handOffPrCreateFailure(cardId, errorMsg, retryCount, generation) {
 // deadlock-channel enqueue kept failing 30 days after its last write. Without a deadlock channel the
 // handoff settles on its human-alert WARN log line (#5993) unless recording the handoff fails.
 function sweepStrandedPrCreateFailures() {
-  var rows = agentdesk.db.query(
-    "SELECT card_id, last_error, retry_count, dispatch_generation FROM pr_tracking " +
-    "WHERE state IN ('create-pr', 'escalated') AND retry_count > 0 " +
-    "AND COALESCE(last_error, '') NOT LIKE 'handed-off:%' " +
-    "AND updated_at > datetime('now', '-30 days') " +
-    "ORDER BY updated_at LIMIT 20",
-    []
-  );
+  var rows = prTracking.listStrandedCreatePr(20);
   var handed = 0;
   var deduped = 0;
   for (var i = 0; i < rows.length; i++) {

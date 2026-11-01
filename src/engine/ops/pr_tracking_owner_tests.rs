@@ -187,7 +187,6 @@ async fn policy_pr_tracking_generation_retry_reset_pg() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn policy_pr_tracking_owner_without_sql_writes_pg() {
-    assert_policy_sources_have_no_tracking_writes();
     let (db, pool) = setup().await;
     let policy = Policy::new(&pool);
     policy.eval("agentdesk.db.execute = function() { throw new Error('policy SQL writes disabled'); }; return true;");
@@ -200,12 +199,18 @@ async fn policy_pr_tracking_owner_without_sql_writes_pg() {
     db.drop().await;
 }
 
-fn assert_policy_sources_have_no_tracking_writes() {
-    fn check(dir: &std::path::Path, writes: &regex::Regex, joins: &regex::Regex) {
+#[test]
+fn policy_pr_tracking_sources_have_no_tracking_writes() {
+    fn check(
+        dir: &std::path::Path,
+        writes: &regex::Regex,
+        joins: &regex::Regex,
+        legacy: &regex::Regex,
+    ) {
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
             if path.is_dir() && path.file_name().unwrap() != "__tests__" {
-                check(&path, writes, joins);
+                check(&path, writes, joins, legacy);
             } else if path.extension().is_some_and(|ext| ext == "js") {
                 let source = std::fs::read_to_string(&path).unwrap();
                 let joined = joins.replace_all(&source, "");
@@ -215,19 +220,31 @@ fn assert_policy_sources_have_no_tracking_writes() {
                     path.display()
                 );
                 assert!(
-                    !source.contains("\"pr:\"") && !source.contains("'pr:'"),
+                    !legacy.is_match(&joined),
                     "policy legacy PR key: {}",
                     path.display()
                 );
             }
         }
     }
-    let writes = regex::Regex::new(r#"(?i)\b(?:insert(?:\s+or\s+\w+)?\s+into|replace\s+into|update|delete\s+from|truncate(?:\s+table)?)\s+[\"`]?pr_tracking\b"#).unwrap();
-    let joins = regex::Regex::new(r#"[\"']\s*\+\s*[\"']"#).unwrap();
+    let writes = regex::Regex::new(r#"(?i)\b(?:insert(?:\s+or\s+\w+)?\s+into|replace\s+into|merge\s+into|update|delete\s+from|truncate(?:\s+table)?)\s+(?:\\?["`]?\w+\\?["`]?\s*\.\s*)?\\?["`]?pr_tracking\b"#).unwrap();
+    let joins = regex::Regex::new(r#"["'`]\s*\+\s*["'`]"#).unwrap();
+    let legacy = regex::Regex::new(r#"["'`]pr:(?:["'`]|\$\{)"#).unwrap();
+    for fixture in [
+        r#"UPDATE public.pr_tracking SET state = 'x'"#,
+        r#"UPDATE \"pr_tracking\" SET state = 'x'"#,
+        "MERGE INTO pr_tracking USING x ON true",
+    ] {
+        assert!(writes.is_match(fixture), "scanner must detect {fixture}");
+    }
+    for fixture in [r#"`pr:${id}`"#, r#""pr" + ":""#] {
+        assert!(legacy.is_match(&joins.replace_all(fixture, "")));
+    }
     check(
         &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("policies"),
         &writes,
         &joins,
+        &legacy,
     );
 }
 
@@ -277,6 +294,51 @@ async fn policy_pr_tracking_handoff_bookkeeping_pg() {
     .unwrap();
     assert!(touched, "the legacy empty generation still matches itself");
     assert_eq!(policy.eval("try { agentdesk.prTracking.markHandedOff(null, 'bad'); return false; } catch (e) { return true; }"), true);
+    drop(policy);
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn policy_pr_tracking_raw_write_guard_pg() {
+    let (db, pool) = setup().await;
+    let policy = Policy::new(&pool);
+    policy.eval("agentdesk.prTracking.upsert('pr-1', 'owner/repo', null, 'owner-branch', 71, 'head', 'create-pr', null); return true;");
+    assert_eq!(policy.eval("try { agentdesk.db.execute(['UPDATE', 'public.pr_tracking'].join(' ') + \" SET branch='corrupt' WHERE card_id='pr-1'\"); return false; } catch(e) { return String(e).indexOf('blocked') >= 0; }"), true);
+    let result = crate::engine::intent::execute_intents_with_backends(
+        Some(&pool),
+        None,
+        vec![crate::engine::intent::Intent::ExecuteSQL {
+            sql: "UPDATE pr_tracking SET branch='corrupt' WHERE card_id='pr-1'".into(),
+            params: vec![],
+        }],
+    );
+    assert_eq!(
+        result.errors, 1,
+        "execute_sql intent must use the same guard"
+    );
+    assert_eq!(row(&pool, "pr-1").await["branch"], "owner-branch");
+    policy.eval("agentdesk.prTracking.markHandedOff('pr-1', 'failed'); agentdesk.prTracking.touchGeneration('pr-1', ''); return true;");
+    assert_eq!(
+        row(&pool, "pr-1").await["last_error"],
+        "handed-off:failed",
+        "native owner writes remain allowed"
+    );
+    drop(policy);
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn policy_pr_tracking_stranded_list_pg() {
+    let (db, pool) = setup().await;
+    let policy = Policy::new(&pool);
+    sqlx::query("INSERT INTO pr_tracking (card_id, state, retry_count, last_error, updated_at) VALUES ('pr-1', 'create-pr', 1, 'failed', NOW() - INTERVAL '2 days'), ('pr-2', 'escalated', 3, 'failed', NOW() - INTERVAL '1 day'), ('pr-3', 'wait-ci', 1, 'failed', NOW()), ('pr-4', 'create-pr', 0, 'failed', NOW()), ('pr-5', 'create-pr', 1, 'failed', NOW() - INTERVAL '40 days')")
+        .execute(&pool).await.unwrap();
+    assert_eq!(policy.eval("return agentdesk.prTracking.listStrandedCreatePr(20).map(function(r) { return r.card_id; });"), json!(["pr-1", "pr-2"]));
+    assert_eq!(policy.eval("return agentdesk.prTracking.listStrandedCreatePr(1).map(function(r) { return r.card_id; });"), json!(["pr-1"]));
+    policy.eval("agentdesk.prTracking.markHandedOff('pr-1', 'failed'); return true;");
+    assert_eq!(policy.eval("return agentdesk.prTracking.listStrandedCreatePr(20).map(function(r) { return r.card_id; });"), json!(["pr-2"]), "marker and list must share their prefix contract");
     drop(policy);
     pool.close().await;
     db.drop().await;

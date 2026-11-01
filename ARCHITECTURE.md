@@ -399,6 +399,8 @@ src/
 │   │   ├── kv_ops.rs
 │   │   ├── log_ops.rs
 │   │   ├── message_ops.rs
+│   │   ├── phase_gate_ops.rs
+│   │   ├── phase_gate_owner_tests.rs
 │   │   ├── pipeline_ops.rs
 │   │   ├── pr_tracking_ops.rs
 │   │   ├── pr_tracking_owner_tests.rs
