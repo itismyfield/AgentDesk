@@ -85,9 +85,9 @@ fn b2_legacy_warm_submit_and_reader_collect_the_actual_token() {
         .observed()
         .expect("legacy warm must forward its token receipt")
         .unwrap();
-    assert_eq!(pin.0, "warm-a");
+    assert_eq!(pin.uuid, "warm-a");
     assert_eq!(
-        pin.2.0,
+        pin.range.0,
         past.len() as u64,
         "the writer boundary excludes the past input"
     );

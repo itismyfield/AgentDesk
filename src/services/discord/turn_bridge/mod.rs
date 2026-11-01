@@ -249,6 +249,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         bridge.channel_id.get(),
         &cancel_token,
     );
+    super::inflight::bind_native_stop_pin(&bridge.inflight_state, &cancel_token);
     let bridge_turn_id = discord_turn_id(
         &bridge.provider,
         bridge.channel_id,

@@ -16,7 +16,12 @@ fn tool(name: &str) -> StreamMessage {
 
 /// One Claude idle turn opened by a Bash call, then Done (`then_done`) or, once Bash is consumed,
 /// Read and Done. None when the idle prefix stays shut.
-fn tool_first_turn(o_owned: bool, then_done: bool, channel: u64) -> Option<Vec<String>> {
+fn tool_first_turn(
+    o_owned: bool,
+    then_done: bool,
+    channel: u64,
+    verify_pin: bool,
+) -> Option<Vec<String>> {
     let _telemetry = crate::services::observability::lock_env_then_runtime();
     let temp = tempfile::tempdir().unwrap();
     let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -45,14 +50,39 @@ fn tool_first_turn(o_owned: bool, then_done: bool, channel: u64) -> Option<Vec<S
         let generation = crate::services::tmux_common::session_temp_path(&tmux, "generation");
         std::fs::write(&generation, b"1").unwrap();
         let output = temp.path().join("transcript.jsonl");
-        std::fs::write(&output, b"").unwrap();
+        let prompt = "tool first prompt";
+        let user = |uuid: &str| {
+            serde_json::json!({"type":"user", "uuid":uuid,
+            "sessionId":"direct-sid", "message":{"role":"user","content":prompt}})
+            .to_string()
+                + "\n"
+        };
+        let past = if verify_pin {
+            user("same-text-past")
+        } else {
+            String::new()
+        };
+        let current = if verify_pin {
+            user("direct-a")
+        } else {
+            String::new()
+        };
+        std::fs::write(&output, format!("{past}{current}")).unwrap();
+        let user_end = (past.len() + current.len()) as u64;
+        if verify_pin {
+            std::fs::write(
+                crate::services::tmux_common::session_temp_path(&tmux, "spawn_nonce"),
+                "direct-live-pane",
+            )
+            .unwrap();
+        }
         let binding = crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
             runtime_kind: runtime,
             output_path: output.to_str().unwrap().into(),
             relay_output_path: None,
             input_fifo_path: None,
             session_id: None,
-            last_offset: 0,
+            last_offset: user_end,
             relay_last_offset: None,
         };
         crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(&tmux, binding);
@@ -97,7 +127,7 @@ fn tool_first_turn(o_owned: bool, then_done: bool, channel: u64) -> Option<Vec<S
         let source = claude_idle_bridge::IdleBridgeSource {
             tmux_session_name: &tmux,
             output_path: &output,
-            start_offset: 0,
+            start_offset: user_end,
             prompt_text: prompt,
             lease: &lease,
         };
@@ -135,6 +165,27 @@ fn tool_first_turn(o_owned: bool, then_done: bool, channel: u64) -> Option<Vec<S
                 )
                 .expect("opened O turn remains durable");
                 assert_eq!(live.runtime_kind, Some(runtime));
+                if verify_pin {
+                    let snapshot = super::super::super::mailbox_snapshot(&shared, channel).await;
+                    let actor = snapshot.cancel_token.expect("direct actor");
+                    let pin = actor
+                        .native_stop
+                        .receipt_sink()
+                        .observed()
+                        .expect("C1: direct Bash has a pin before any text or terminal")
+                        .unwrap();
+                    let pin = serde_json::to_value(pin).unwrap();
+                    assert_eq!(pin["uuid"], "direct-a");
+                    assert_eq!(
+                        pin["direct"], true,
+                        "relay proof does not claim an AgentDesk Enter"
+                    );
+                    assert_eq!(pin["range"], serde_json::json!([past.len(), user_end]));
+                    assert!(
+                        serde_json::to_value(&live).unwrap()["native_stop_user_pin"].is_object(),
+                        "C1: running direct proof is already durable"
+                    );
+                }
                 assert!(
                     panel_bodies(&gateway).is_empty(),
                     "retired O panel writes no Legacy chrome:{}",
@@ -166,12 +217,12 @@ fn tool_first_turn(o_owned: bool, then_done: bool, channel: u64) -> Option<Vec<S
 #[test]
 fn o_channel_panel_shows_a_first_tool_before_the_status_interval() {
     let opened = "a tool call opens O's idle stream";
-    let bodies = tool_first_turn(true, false, 583_325_101).expect(opened);
+    let bodies = tool_first_turn(true, false, 583_325_101, false).expect(opened);
     assert!(
         bodies.is_empty(),
         "the retired O panel sends no Legacy chrome: {bodies:?}"
     );
-    let quick = tool_first_turn(true, true, 583_325_201).expect(opened);
+    let quick = tool_first_turn(true, true, 583_325_201, false).expect(opened);
     assert!(
         quick.is_empty(),
         "a quick O tool turn sends no Legacy panel chrome: {quick:?}"
@@ -182,7 +233,12 @@ fn o_channel_panel_shows_a_first_tool_before_the_status_interval() {
         "{bodies:?} {quick:?}"
     );
     assert!(
-        tool_first_turn(false, false, 583_325_301).is_none(),
+        tool_first_turn(false, false, 583_325_301, false).is_none(),
         "on a Legacy channel a tool call alone starts no bridge and no panel write"
     );
+}
+
+#[test]
+fn c1_o_direct_bash_pins_current_native_row_before_body() {
+    tool_first_turn(true, false, 721_201_101, true).expect("O Bash opens the real bridge");
 }

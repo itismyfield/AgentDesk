@@ -95,8 +95,8 @@ fn b1_fresh_writer_pins_after_real_boundary_for_existing_and_enoent() {
         let pin = observed(&token, &path)
             .expect("Applied writer must reach token sink")
             .unwrap();
-        assert_eq!(pin.0, "first-a");
-        assert_eq!(pin.2.0, if exists { past.len() as u64 } else { 0 });
+        assert_eq!(pin.uuid, "first-a");
+        assert_eq!(pin.range.0, if exists { past.len() as u64 } else { 0 });
         assert!(!token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
         tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
     }
@@ -134,8 +134,8 @@ fn b2_idle_leaf_collects_for_turn_without_enabling_cancel_gate() {
     let pin = observed(&token, &path)
         .expect("idle receipt belongs to its turn")
         .unwrap();
-    assert_eq!(pin.0, "idle-a");
-    assert_eq!(pin.2.0, past.len() as u64);
+    assert_eq!(pin.uuid, "idle-a");
+    assert_eq!(pin.range.0, past.len() as u64);
     assert_eq!(
         CancelToken::new().native_stop.receipt_sink().observed(),
         None,
@@ -238,7 +238,7 @@ fn b5_crlf_wrapper_is_exact_but_replacement_inode_is_rejected() {
                 observed(&token, &path)
                     .expect("exact frame receipt")
                     .unwrap()
-                    .0,
+                    .uuid,
                 "exact-a"
             );
         }
@@ -304,7 +304,7 @@ fn b6_reader_observes_native_user_appended_after_applied_and_seal() {
             .observed()
             .unwrap()
             .unwrap()
-            .0,
+            .uuid,
         "late-a"
     );
     assert_eq!(tmux.sends(), ["load", "paste", "Enter"]);
@@ -433,7 +433,7 @@ fn b8_managed_receipt_and_token_share_one_writer_snapshot() {
         managed.exact_user_receipt(),
         "Native collection preserves the existing owner's receipt"
     );
-    assert_eq!(observed(&token, &path).unwrap().unwrap().0, "managed-a");
+    assert_eq!(observed(&token, &path).unwrap().unwrap().uuid, "managed-a");
     assert!(
         managed.exact_user_receipt(),
         "Native positional reads cannot disturb the managed FD cursor"
@@ -526,6 +526,191 @@ fn b4_guarded_draft_hold_keeps_zero_keys_and_no_native_pin() {
     assert!(
         tmux.sends().is_empty(),
         "draft hold cannot submit or replay"
+    );
+    tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+}
+
+#[test]
+fn p2_cap_rejects_partial_nonuser_over_sixteen_mib_through_reader() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cap.jsonl");
+    std::fs::write(&path, "").unwrap();
+    let session = "p2-cap";
+    binding(session, &path);
+    let token = Arc::new(CancelToken::new());
+    let tmux = ScriptedTmux::new(&view("", false));
+    let _spy = ready();
+    fresh(session, &path, "own", &token).unwrap();
+    // The observation entry is the real reader, not a direct receipt helper.
+    let bytes = format!(
+        "{{\"type\":\"system\",\"padding\":\"{}",
+        "x".repeat(16 * 1024 * 1024)
+    ) + "\n";
+    // A short terminal makes the actual reader return after its first observation;
+    // the receipt still has to bound the entire non-user range behind it.
+    std::fs::write(
+        &path,
+        format!("{{\"type\":\"system\",\"subtype\":\"stop_hook_summary\"}}\n{bytes}"),
+    )
+    .unwrap();
+    assert_eq!(
+        observed(&token, &path),
+        Some(Err(())),
+        "cap includes a partial line"
+    );
+    assert!(
+        !token.native_stop.receipt_sink().retains_receipt(),
+        "decided rejection releases its FD"
+    );
+    tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+}
+
+#[test]
+fn p2_new_pane_rearms_a_rejected_token_but_same_pane_cannot() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rearm.jsonl");
+    let session = "p2-rearm";
+    std::fs::write(&path, "").unwrap();
+    binding(session, &path);
+    let tmux = ScriptedTmux::new(&view("", false));
+    let _spy = ready();
+    let token = Arc::new(CancelToken::new());
+    tmux.on_enter(&path, &user("foreign", "first-foreign"));
+    fresh(session, &path, "own", &token).unwrap();
+    assert_eq!(observed(&token, &path), Some(Err(())));
+    // Another Applied attempt on the same pane must not erase the first foreign user.
+    tmux.on_enter(&path, &user("own", "same-pane-a"));
+    fresh(session, &path, "own", &token).unwrap();
+    assert_eq!(
+        observed(&token, &path),
+        Some(Err(())),
+        "same incarnation remains immutable"
+    );
+    std::fs::write(
+        crate::services::tmux_common::session_temp_path(session, "spawn_nonce"),
+        "new-incarnation",
+    )
+    .unwrap();
+    tmux.on_enter(&path, &user("own", "new-pane-a"));
+    fresh(session, &path, "own", &token).unwrap();
+    assert!(
+        observed(&token, &path).unwrap().is_ok(),
+        "new pane must rearm after rejection"
+    );
+    tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+}
+
+#[test]
+fn p2_fixed_jsonl_digest_and_verified_field_round_trip() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("digest.jsonl");
+    let session = "p2-digest";
+    std::fs::write(&path, "").unwrap();
+    binding(session, &path);
+    let token = Arc::new(CancelToken::new());
+    let tmux = ScriptedTmux::new(&view("", false));
+    let _spy = ready();
+    let row = r#"{"message":{"content":"own","role":"user"},"sessionId":"receipt-sid","type":"user","uuid":"golden"}"#;
+    tmux.on_enter(&path, row);
+    fresh(session, &path, "own", &token).unwrap();
+    let pin = observed(&token, &path).unwrap().unwrap();
+    let serialized = serde_json::to_value(&pin).unwrap();
+    let golden = "448daec4cbf17279aa3cffa73e7b4ba652afa2c134ac174f90af48a064241a0c";
+    eprintln!("FIXED_JSONL_BLAKE3={golden}");
+    assert_eq!(
+        serialized["row_digest"], golden,
+        "stable, named digest format"
+    );
+    let decoded: NativeUserPin = serde_json::from_value(serialized).unwrap();
+    assert_eq!(decoded, pin);
+    tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+}
+
+#[test]
+fn p2_missing_binding_or_unreadable_marker_stays_pending_until_retry() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("transient.jsonl");
+    let session = "p2-transient";
+    std::fs::write(&path, "").unwrap();
+    binding(session, &path);
+    let token = Arc::new(CancelToken::new());
+    let tmux = ScriptedTmux::new(&view("", false));
+    let _spy = ready();
+    tmux.on_enter(&path, &user("own", "a"));
+    fresh(session, &path, "own", &token).unwrap();
+    tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+    assert_eq!(
+        observed(&token, &path),
+        None,
+        "temporarily missing binding is pending"
+    );
+    binding(session, &path);
+    let marker = crate::services::tmux_common::session_temp_path(session, "spawn_nonce");
+    std::fs::create_dir(&marker).unwrap();
+    assert_eq!(
+        observed(&token, &path),
+        None,
+        "unreadable marker is pending"
+    );
+    std::fs::remove_dir(marker).unwrap();
+    assert!(observed(&token, &path).unwrap().is_ok());
+    tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+}
+
+#[test]
+fn p2_reader_scans_each_appended_byte_once_and_releases_decided_fd() {
+    use crate::services::claude_tui::input::native_read_byte_total;
+    use std::io::Write;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("linear.jsonl");
+    let session = "p2-linear";
+    std::fs::write(&path, "").unwrap();
+    binding(session, &path);
+    let token = Arc::new(CancelToken::new());
+    let _tmux = ScriptedTmux::new(&view("", false));
+    let _spy = ready();
+    fresh(session, &path, "own", &token).unwrap();
+    let before = native_read_byte_total();
+    for _ in 0..12 {
+        let row = json!({"type":"system","padding":"x".repeat(64*1024)});
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap(),
+            "{row}"
+        )
+        .unwrap();
+        assert_eq!(observed(&token, &path), None);
+    }
+    let read = native_read_byte_total() - before;
+    let growth = std::fs::metadata(&path).unwrap().len();
+    assert!(
+        read <= growth * 2,
+        "reader read {read} for {growth} appended bytes"
+    );
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap(),
+        "{}",
+        user("own", "a")
+    )
+    .unwrap();
+    assert_eq!(observed(&token, &path).unwrap().unwrap().uuid, "a");
+    assert!(!token.native_stop.receipt_sink().retains_receipt());
+    let decided = native_read_byte_total();
+    assert!(observed(&token, &path).unwrap().is_ok());
+    assert_eq!(
+        native_read_byte_total(),
+        decided,
+        "cached decision does not reopen or rescan"
     );
     tui_prompt_dedupe::clear_tmux_runtime_binding(session);
 }

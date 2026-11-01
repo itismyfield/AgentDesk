@@ -56,6 +56,19 @@ mod replay_hold;
 mod replay_decision;
 use replay_decision::observe_restore_inflight_snapshot;
 
+async fn restore_admitted_native_stop_pin(
+    shared: &Arc<SharedData>,
+    state: &inflight::InflightTurnState,
+) {
+    let snapshot = super::mailbox_snapshot(shared, ChannelId::new(state.channel_id)).await;
+    if snapshot.active_user_message_id.map(|id| id.get())
+        == Some(state.effective_finalizer_turn_id())
+        && let Some(token) = snapshot.cancel_token
+    {
+        super::inflight::restore_native_stop_pin(state, &token);
+    }
+}
+
 pub(in crate::services::discord) async fn restore_inflight_turns(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -747,6 +760,7 @@ pub(in crate::services::discord) async fn restore_inflight_states(
 
                 let finish_mailbox_on_completion =
                     reregister_active_turn_from_inflight(shared, &state).await;
+                restore_admitted_native_stop_pin(shared, &state).await;
 
                 // Spawn the tmux watcher immediately rather than deferring to
                 // restore_tmux_watchers(): the "watcher will adopt" approach raced
@@ -1905,6 +1919,7 @@ pub(in crate::services::discord) async fn restore_inflight_states(
 
             let finish_mailbox_on_completion =
                 reregister_active_turn_from_inflight(shared, &state).await;
+            restore_admitted_native_stop_pin(shared, &state).await;
 
             // #4380 backstop: `reregister_active_turn_from_inflight` stamps
             // `readopted_from_inflight`, which the watcher-yield escape hatch honours
@@ -2138,6 +2153,8 @@ pub(in crate::services::discord) async fn restore_inflight_states(
             &tmux_session_name,
             "recovery kickoff",
         );
+
+        super::inflight::restore_native_stop_pin(&state, &cancel_token);
 
         {
             let seed = crate::services::discord::scheduled_turn::channel_session_seed(

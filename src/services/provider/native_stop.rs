@@ -11,31 +11,59 @@ pub(crate) struct State {
     input: Arc<ReceiptSink>,
 }
 
-/// Native UUID, open file identity, complete byte range and exact row hash.
-pub(crate) type NativeUserPin = (String, (u64, u64), (u64, u64), u64);
+/// Stable evidence of one native input; no prompt text is persisted here.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct NativeUserPin {
+    pub(crate) uuid: String,
+    pub(crate) source_file: (u64, u64),
+    pub(crate) range: (u64, u64),
+    pub(crate) receipt_start: u64,
+    pub(crate) row_digest: String,
+    pub(crate) frame_digest: String,
+    pub(crate) session_id: String,
+    pub(crate) output_path: String,
+    pub(crate) tmux_session: String,
+    pub(crate) spawn_nonce: Option<String>,
+    pub(crate) direct: bool,
+}
+
+type PinObserver = Arc<dyn Fn(&NativeUserPin) -> bool + Send + Sync>;
 
 /// The writer's receipt is observational; it grants no cancellation authority.
 #[derive(Default)]
 pub(crate) struct ReceiptSink {
     inner: Mutex<WriterReceipt>,
+    accepted: OnceLock<NativeUserPin>,
+    rejected: AtomicBool,
+    observer: OnceLock<PinObserver>,
+    persisted: AtomicBool,
 }
 #[derive(Default)]
 struct WriterReceipt {
     receipt: Option<crate::services::claude_tui::input::UserReceipt>,
+    pane: Option<Arc<crate::services::claude_tui::input::PaneIdentity>>,
     applied: bool,
-    observed: Option<Result<NativeUserPin, ()>>,
 }
 
 impl ReceiptSink {
     pub(crate) fn receipt(&self, receipt: crate::services::claude_tui::input::UserReceipt) {
         let mut input = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if !input.applied && input.observed.is_none() {
+        if self.accepted.get().is_some() {
+            return;
+        }
+        let pane = receipt.pane_identity();
+        if input.pane.as_ref().is_some_and(|old| **old != *pane) {
+            input.applied = false;
+            self.rejected.store(false, Ordering::Release);
+        }
+        if !input.applied && !self.rejected.load(Ordering::Acquire) {
+            input.pane = Some(pane);
             input.receipt = Some(receipt);
         }
     }
     pub(crate) fn finished(&self, run: &crate::services::claude_tui::host_input::InputRun) {
         let mut input = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if input.applied || input.observed.is_some() {
+        if input.applied || self.cached().is_some() {
             return;
         }
         if *run == crate::services::claude_tui::host_input::InputRun::Applied {
@@ -44,23 +72,74 @@ impl ReceiptSink {
                 receipt.seal();
             }
         } else {
-            input.observed = Some(Err(()));
+            input.receipt = None;
+            self.rejected.store(true, Ordering::Release);
         }
+    }
+    fn cached(&self) -> Option<Result<NativeUserPin, ()>> {
+        self.accepted
+            .get()
+            .cloned()
+            .map(Ok)
+            .or_else(|| self.rejected.load(Ordering::Acquire).then_some(Err(())))
     }
     pub(crate) fn observe(&self) -> Option<Result<NativeUserPin, ()>> {
-        let mut input = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if input.applied && input.observed.is_none() {
-            input.observed = match input.receipt.as_mut() {
-                Some(receipt) => receipt.try_pin_native_user().transpose(),
-                None => Some(Err(())),
-            };
+        if let Some(result) = self.cached() {
+            self.notify();
+            return Some(result);
         }
-        input.observed.clone()
+        {
+            let mut input = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if input.applied && self.cached().is_none() {
+                let result = input
+                    .receipt
+                    .as_mut()
+                    .map_or(Err(()), |r| r.try_pin_native_user());
+                match result {
+                    Ok(Some(pin)) => {
+                        let _ = self.accepted.set(pin);
+                    }
+                    Err(()) => self.rejected.store(true, Ordering::Release),
+                    Ok(None) => {}
+                }
+                if self.cached().is_some() {
+                    input.receipt = None;
+                }
+            }
+        }
+        // Source and receipt locks are released before a callback takes the row lock.
+        self.notify();
+        self.cached()
     }
-
+    pub(crate) fn adopt(&self, pin: NativeUserPin) {
+        {
+            let mut input = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if self.cached().is_none() {
+                let _ = self.accepted.set(pin);
+                input.receipt = None;
+            }
+        }
+        self.notify();
+    }
+    pub(crate) fn on_pin(&self, observer: PinObserver) {
+        let _ = self.observer.set(observer);
+        self.notify();
+    }
+    fn notify(&self) {
+        if !self.persisted.load(Ordering::Acquire)
+            && let (Some(pin), Some(observer)) = (self.accepted.get(), self.observer.get())
+            && observer(pin)
+        {
+            self.persisted.store(true, Ordering::Release);
+        }
+    }
+    #[cfg(all(test, unix))]
+    pub(crate) fn retains_receipt(&self) -> bool {
+        self.inner.lock().unwrap().receipt.is_some()
+    }
     #[cfg(test)]
     pub(crate) fn observed(&self) -> Option<Result<NativeUserPin, ()>> {
-        self.inner.lock().unwrap().observed.clone()
+        self.cached()
     }
 }
 

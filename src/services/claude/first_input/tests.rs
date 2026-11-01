@@ -285,7 +285,7 @@ fn b1_owned_launch_passes_writer_source_across_the_owner_callback() {
             .observed()
             .unwrap()
             .unwrap()
-            .0,
+            .uuid,
         "owned-a"
     );
     assert_eq!(

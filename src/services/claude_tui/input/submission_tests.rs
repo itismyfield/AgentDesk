@@ -60,6 +60,7 @@ echo "$*" >> "$d/argv"
 case "$2" in
 display-message) for last do :; done; case "$last" in '#{pane_dead}') echo 0 ;; *) echo 1 ;; esac ;;
 capture-pane) cat "$d/screen" ;;
+list-panes) if [ -f "$d/pane_model" ]; then if [ -f "$d/dead" ]; then echo 1; else echo 0; fi; fi ;;
 load-buffer|paste-buffer|send-keys)
   n=$(cat "$d/sent" 2>/dev/null || echo 0); echo $((n + 1)) > "$d/sent"
   for last do :; done
@@ -70,7 +71,8 @@ load-buffer|paste-buffer|send-keys)
     python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["managed_submission"]["phase"])' "$(cat "$d/row")" >> "$d/phases"
   fi
   [ "$(cat "$d/fail" 2>/dev/null)" != "$n" ] || exit 1
-  if [ "$key" = Enter ] && [ -f "$d/on_enter" ]; then cat "$d/on_enter" >> "$(cat "$d/on_enter_target")"; fi ;;
+  if [ "$key" = Enter ] && [ -f "$d/on_enter" ]; then cat "$d/on_enter" >> "$(cat "$d/on_enter_target")"; fi
+  if [ "$key" = Enter ] && [ -f "$d/die_on_enter" ]; then touch "$d/dead"; fi ;;
 esac
 exit 0
 "#
@@ -127,6 +129,27 @@ exit 0
             .filter(|argv| argv.split(' ').any(|arg| arg == target))
             .filter_map(|argv| argv.split(' ').nth(1).map(str::to_string))
             .collect()
+    }
+
+    pub(crate) fn die_on_enter(&self) {
+        fs::write(self.dir.path().join("pane_model"), "1").unwrap();
+        fs::write(self.dir.path().join("die_on_enter"), "1").unwrap();
+    }
+
+    pub(crate) fn set_dead(&self, dead: bool) {
+        let flag = self.dir.path().join("dead");
+        fs::write(self.dir.path().join("pane_model"), "1").unwrap();
+        if dead {
+            fs::write(flag, "1").unwrap();
+        } else {
+            if flag.exists() {
+                fs::remove_file(flag).unwrap();
+            }
+            let die = self.dir.path().join("die_on_enter");
+            if die.exists() {
+                fs::remove_file(die).unwrap();
+            }
+        }
     }
 
     pub(crate) fn clear(&self) {

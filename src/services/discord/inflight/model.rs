@@ -150,6 +150,9 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// Submission-boundary evidence; absent means LegacyUnknown, not "unsubmitted".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed_submission: Option<super::managed_submission::ManagedSubmissionRecord>,
+    /// Proof recorded while this native input was live; old rows carry no proof.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_stop_user_pin: Option<super::native_stop_pin::VerifiedNativeUserPin>,
     /// Input capability of the live attempt that installed the boundary; never persisted.
     #[serde(skip)]
     managed_submission_capability: Option<super::managed_submission::ManagedSubmission>,
@@ -1061,6 +1064,7 @@ impl InflightTurnState {
             terminal_receipt: None,
             intake_outbox_id: None,
             managed_submission: None,
+            native_stop_user_pin: None,
             managed_submission_capability: None,
             busy_followup_retry_user_msg_id: user_msg_id,
             finalizer_turn_id,

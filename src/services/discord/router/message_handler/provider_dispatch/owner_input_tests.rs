@@ -1489,9 +1489,9 @@ fn b2_dispatch_idle_receipt_uses_actual_turn_and_preserves_settle() {
         .observed()
         .expect("dispatch must forward the actual turn's receipt")
         .unwrap();
-    assert_eq!(pin.0, "dispatch-idle-a");
+    assert_eq!(pin.uuid, "dispatch-idle-a");
     assert_eq!(
-        pin.2.0, before,
+        pin.range.0, before,
         "reader/prelaunch offset cannot borrow the past input"
     );
     assert_eq!(rig.events(), ["paste", "Enter"]);

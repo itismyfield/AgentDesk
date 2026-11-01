@@ -1560,6 +1560,8 @@ src/
 │   │   │   │   ├── legacy_replay_coordinate.rs
 │   │   │   │   ├── serde_adapters.rs
 │   │   │   │   └── turn_kinds.rs
+│   │   │   ├── native_stop_pin/
+│   │   │   │   └── tests.rs
 │   │   │   ├── o_seed_observation/
 │   │   │   │   └── terminal_barrier_test.rs
 │   │   │   ├── rebind_reap/
@@ -1631,6 +1633,7 @@ src/
 │   │   │   ├── managed_submission.rs
 │   │   │   ├── managed_submission_tests.rs
 │   │   │   ├── model.rs
+│   │   │   ├── native_stop_pin.rs
 │   │   │   ├── o_seed_observation.rs
 │   │   │   ├── o_seed_observation_tests.rs
 │   │   │   ├── orphan_relay_reclaim.rs

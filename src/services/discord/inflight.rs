@@ -23,6 +23,13 @@ pub(in crate::services::discord) use host_recovery_guard::{marker_witness, with_
 #[cfg(test)]
 mod invariant_test_capture;
 mod model;
+mod native_stop_pin;
+pub(in crate::services::discord) use native_stop_pin::{
+    bind_native_stop_pin, restore_native_stop_pin,
+};
+#[cfg(all(test, unix))]
+#[path = "inflight/native_stop_pin/tests.rs"]
+mod native_stop_pin_tests;
 pub(crate) mod read_only_owner_snapshot;
 pub(in crate::services::discord) mod terminal_delivery_evidence_loss;
 mod terminal_receipt_stamp;
@@ -616,6 +623,7 @@ fn bump_save_generation_for_write(
     }
     super::relay_recovery::circuit_evidence::carry_forward(existing.as_ref(), state)?;
     managed_submission::carry_forward(existing.as_ref(), state);
+    native_stop_pin::carry_forward(existing.as_ref(), state);
     state.carry_before_start_receipt_from(existing.as_ref())?;
     let existing_generation = existing
         .map(|existing| existing.save_generation)
