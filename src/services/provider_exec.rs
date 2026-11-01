@@ -88,10 +88,10 @@ fn execute_simple_blocking_inner(
     };
     match adapter {
         ProviderExecutionAdapter::Claude => {
-            claude::execute_command_simple_cancellable(&prompt, cancel_token.as_deref())
+            claude::execute_command_simple_cancellable(&prompt, cancel_token)
         }
         ProviderExecutionAdapter::Codex => {
-            codex::execute_command_simple_cancellable(&prompt, cancel_token.as_deref())
+            codex::execute_command_simple_cancellable(&prompt, cancel_token)
         }
         ProviderExecutionAdapter::Gemini => {
             gemini::execute_command_simple_cancellable(&prompt, cancel_token.as_deref())

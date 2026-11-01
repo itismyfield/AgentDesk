@@ -957,45 +957,12 @@ mod simple_timeout_2387_tests {
     }
 }
 
+/// One headless `codex exec` call that returns the text answer. Blocking: call from spawn_blocking.
 pub fn execute_command_simple_cancellable(
     prompt: &str,
-    cancel_token: Option<&CancelToken>,
-) -> Result<String, String> {
-    execute_command_simple_cancellable_borrow(prompt, None, false, None, None, cancel_token)
-}
-
-fn execute_command_simple_cancellable_borrow(
-    prompt: &str,
-    model: Option<&str>,
-    readonly_mode: bool,
-    fast_mode_enabled: Option<bool>,
-    goals_enabled: Option<bool>,
-    cancel_token: Option<&CancelToken>,
-) -> Result<String, String> {
-    // Borrow-only variant: keeps the existing pre-spawn race check and
-    // child-pid registration, but does not spawn a mid-flight watcher
-    // because we cannot promote the borrow to an `Arc` for thread-safe
-    // sharing.
-    execute_command_simple_inner(
-        prompt,
-        model,
-        readonly_mode,
-        fast_mode_enabled,
-        goals_enabled,
-        cancel_token,
-        None,
-    )
-}
-
-fn execute_command_simple_inner(
-    prompt: &str,
-    model: Option<&str>,
-    readonly_mode: bool,
-    fast_mode_enabled: Option<bool>,
-    goals_enabled: Option<bool>,
-    cancel_token: Option<&CancelToken>,
     cancel_token_arc: Option<std::sync::Arc<CancelToken>>,
 ) -> Result<String, String> {
+    let cancel_token = cancel_token_arc.as_deref();
     let session_selection =
         crate::services::provider_hosting::resolve_provider_session_selection_with_capability(
             &ProviderKind::Codex,
@@ -1016,11 +983,7 @@ fn execute_command_simple_inner(
     let working_dir_arg = working_dir.to_string_lossy().to_string();
     let args = build_codex_exec_args(
         &CodexLaunchOptions::new(prompt)
-            .with_model(model)
             .with_reasoning_effort(Some("low"))
-            .with_readonly_mode(readonly_mode)
-            .with_fast_mode_enabled(fast_mode_enabled)
-            .with_goals_enabled(goals_enabled)
             .with_cwd(Some(&working_dir_arg)),
     );
 
@@ -1044,14 +1007,9 @@ fn execute_command_simple_inner(
         return Err("Codex request cancelled".to_string());
     }
 
-    // ADR #2175: mid-flight cancel watcher. `wait_with_output` blocks the
-    // calling thread, so without a watcher the registered child PID would only
-    // be killed by an external pid-aware interrupt path (e.g. tmux turn
-    // bridge). Voice foreground/summary call sites do not have that external
-    // path, so we spawn a lightweight thread that polls the cancel token and
-    // SIGTERMs the child PID tree if a cancel arrives before natural exit.
+    // `wait_with_output` blocks this thread, so a watcher kills the child tree when a cancel arrives mid-flight.
     let cancel_watcher =
-        crate::services::process::spawn_simple_cancel_watcher(cancel_token_arc, child_pid);
+        crate::services::process::spawn_simple_cancel_watcher(cancel_token_arc.clone(), child_pid);
 
     let output_result = child.wait_with_output();
     cancel_watcher.disarm();
