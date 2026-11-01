@@ -482,39 +482,7 @@ async fn orphan_owner_policy_has_no_js_decisions_pg() {
 }
 
 fn owner_shared(pool: &PgPool) -> std::sync::Arc<crate::services::discord::SharedData> {
-    use super::super::*;
-    run_bot_build_shared_data(
-        DiscordBotSettings::default(),
-        &ProviderKind::Claude,
-        RuntimeServices {
-            initial_skills: Vec::new(),
-            token_hash: "orphan-owner-test".into(),
-            api_port: 9,
-            voice_barge_in: Arc::new(voice_barge_in::VoiceBargeInRuntime::disabled()),
-            health_registry: Arc::new(health::HealthRegistry::new()),
-            pg_pool: Some(pool.clone()),
-            engine: None,
-        },
-        ProcessLifecycleCounters {
-            global_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            global_finalizing: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            shutdown_remaining: Arc::new(std::sync::atomic::AtomicUsize::new(1)),
-        },
-        UiFeatureFlags {
-            placeholder_live_events_enabled: false,
-            status_panel_v2_enabled: false,
-            two_message_panel_enabled: false,
-        },
-        RestoredSessionState {
-            model_overrides: &[],
-            node_overrides: &[],
-            fast_mode_channels: &[],
-            fast_mode_reset_entries: &[],
-            fast_mode_reset_channels: &[],
-            codex_goals_channels: &[],
-            codex_goals_reset_channels: &[],
-        },
-    )
+    crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
