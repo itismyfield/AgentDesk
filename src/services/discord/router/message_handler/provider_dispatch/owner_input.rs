@@ -761,4 +761,4 @@ mod codex_tests;
 mod herdr_tests;
 #[cfg(test)]
 #[path = "owner_input_tests.rs"]
-mod tests;
+pub(super) mod tests;

@@ -20,7 +20,8 @@ use routine_metadata::persist_boundary_before_provider_clear;
 mod entrypoints;
 pub(in crate::services::discord) use entrypoints::*;
 
-/// Each start's resolved role, session key, tmux session, channel name, workspace and session.
+/// Each start's resolved role, session key, tmux session, channel name, workspace, source and
+/// session.
 #[cfg(test)]
 pub(in crate::services::discord) static STARTS_RESOLVED: std::sync::Mutex<Vec<(u64, String)>> =
     std::sync::Mutex::new(Vec::new());
@@ -1001,7 +1002,7 @@ async fn start_reserved_headless_turn_admitted(
         execution_mode: Some("discord_turn".to_string()),
     };
     #[cfg(test)]
-    let seen = (&provider_execution_context, &current_path);
+    let seen = (&provider_execution_context, &current_path, source);
     #[cfg(test)]
     let seen = (channel_id.get(), format!("{seen:?} {session_id:?}"));
     #[cfg(test)]

@@ -1374,3 +1374,42 @@ mod not_sent;
 
 #[path = "owner_provenance_tests.rs"]
 mod provenance;
+
+/// One input admitted, granted and claimed on `channel`'s own owner, carried as the turn the drive's
+/// idle start hands over; the receiver hears that input's settlement.
+pub(in crate::services::discord) async fn claimed_owner_turn(
+    channel: u64,
+    text: &str,
+) -> (
+    OwnerTurn,
+    tokio::sync::oneshot::Receiver<Result<(), String>>,
+) {
+    let registry = Box::leak(Box::new(ChannelMailboxRegistry::default()));
+    let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(channel));
+    let dir = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap();
+    let path = dir.join(format!("claude/claimed-owner/{channel}.json"));
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    mailbox.v2_adopt(path, "input-owner".into()).await.unwrap();
+    let original: PendingQueueItem = serde_json::from_value(json!({"author_id":7,
+        "message_id":channel,"channel_id":channel,"source_message_ids":[channel],
+        "queued_generation":1,"text":text}))
+    .unwrap();
+    let admitted = admit(&mailbox, &original, AdmissionTicket::new()).await;
+    use crate::services::discord::queue_io::input_owner::admission::Admission;
+    assert!(matches!(admitted, Admission::Accepted(_)), "{admitted:?}");
+    let granted = mailbox.v2_request(|slot| {
+        let owner = slot.as_mut().ok_or("no owner")?;
+        let front = owner.front().ok_or("no front")?;
+        owner.grant_front(&front).map(|()| front)
+    });
+    let front = granted.await.unwrap();
+    let claim = claim_turn(&mailbox, front.1.message_id, &front).await;
+    let claim = claim.unwrap().expect("the granted front's claim");
+    let (settled, answer) = tokio::sync::oneshot::channel();
+    let owner = OwnerTurn {
+        mailbox,
+        claim,
+        settled,
+    };
+    (owner, answer)
+}

@@ -22,6 +22,8 @@ struct Start {
     metadata: fn(&str) -> Value,
     label: Option<fn(&str) -> String>,
     dm_user: Option<u64>,
+    /// Kept flat, as a scheduled seam kept it before its provenance had keys of its own.
+    flat: bool,
 }
 
 /// The two runs' resolved choices with each channel's own names written as `SIDE` and `CH`.
@@ -43,6 +45,11 @@ async fn legacy_and_owned(start: Start) -> (String, String) {
         .set("test-token".into())
         .unwrap();
     let workdir = tempfile::tempdir().unwrap();
+    // The agent binding a flat scheduled start's hint is read from.
+    let bound = "INSERT INTO agents(id,name,provider,discord_channel_cc) VALUES('agent7272','A','claude','sideowned-agent')";
+    if start.flat {
+        sqlx::query(bound).execute(&pool).await.unwrap();
+    }
     let mut seen = Vec::new();
     for (channel, side, user) in [
         (LEGACY, "sidelegacy", 7_272_001),
@@ -61,7 +68,10 @@ async fn legacy_and_owned(start: Start) -> (String, String) {
         if channel == LEGACY {
             legacy(&registry, (start.source, metadata, label, user)).await;
         } else {
-            let context = kept(start.source, metadata, label, user, side);
+            let context = match start.flat {
+                true => flat(metadata),
+                false => kept(start.source, metadata, label, user, side),
+            };
             // The stub CLI ends the turn after its start resolved; only the choices are compared.
             let _settled = owned(&shared, context).await;
         }
@@ -170,28 +180,43 @@ fn kept(
     kept
 }
 
-/// The start admitted under its turn's ticket on the owned channel, then its front started by
-/// the drive's idle start.
+/// A scheduled start's context as the seam kept it before its provenance had keys of its own.
+fn flat(metadata: Value) -> Value {
+    let mut kept = metadata;
+    (kept["provider"], kept["delivery_id"]) = (json!("claude"), json!("delivery-7272"));
+    kept["origin"] = json!("scheduled");
+    kept
+}
+
+/// The start admitted under its turn's ticket by the owned channel's owner before a restart, then
+/// its front started by the restored owner's idle start.
 async fn owned(shared: &Arc<SharedData>, context: Value) -> Result<(), String> {
     let mailbox = shared.mailbox(OWNED);
     let dir = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap();
     let dir = dir.join("claude/provenance-owner");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(format!("{}.json", OWNED.get()));
-    mailbox.v2_adopt(path, "input-owner".into()).await.unwrap();
+    let before = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
+    let kept_by = before.handle(OWNED);
+    kept_by
+        .v2_adopt(path.clone(), "input-owner".into())
+        .await
+        .unwrap();
     // A process generation settles the synthetic original, as a running process has one.
     let generation = crate::services::discord::runtime_store::generation_path().unwrap();
     std::fs::create_dir_all(generation.parent().unwrap()).unwrap();
     std::fs::write(generation, "5").unwrap();
     let turn = format!("discord:{}:9100000000000757002", OWNED.get());
     let (original, ticket) = routine::synthetic_original(&turn, OWNED.get(), PROMPT, 1)?;
-    let admitted = admission::admit_with_context(&mailbox, &original, ticket, context).await;
+    let admitted = admission::admit_with_context(&kept_by, &original, ticket, context).await;
     let admitted = match admitted {
         admission::Admission::Accepted(_) => Ok(()),
         admission::Admission::Pending(_) => Err("pending".to_string()),
         admission::Admission::Rejected(reason) => Err(format!("{reason:?}")),
     };
     assert_eq!(admitted, Ok(()), "the start is admitted");
+    drop((kept_by, before));
+    mailbox.v2_adopt(path, "input-owner".into()).await.unwrap();
     let granted = mailbox.v2_request(|slot| {
         let owner = slot.as_mut().ok_or("no owner")?;
         let front = owner.front().ok_or("no front")?;
@@ -241,6 +266,7 @@ async fn an_owned_scheduled_snapshot_start_resolves_as_its_legacy_start_pg() {
         },
         label: Some(|side| format!("snap-{side}")),
         dm_user: None,
+        flat: false,
     })
     .await;
     assert!(
@@ -265,6 +291,7 @@ async fn an_owned_labelled_routine_start_resolves_as_its_legacy_start_pg() {
         metadata: routine("persistent"),
         label: Some(|side| format!("routine-{side}")),
         dm_user: None,
+        flat: false,
     })
     .await;
     assert!(
@@ -289,6 +316,7 @@ async fn an_owned_dm_routine_start_resolves_as_its_legacy_start_pg() {
         metadata: routine("dm"),
         label: None,
         dm_user: Some(0),
+        flat: false,
     })
     .await;
     assert!(legacy.contains("dm-USER"), "{legacy}");
@@ -310,6 +338,7 @@ async fn an_owned_fresh_routine_start_resolves_as_its_legacy_start_pg() {
         metadata: routine("fresh"),
         label: Some(|side| format!("fresh-{side}")),
         dm_user: None,
+        flat: false,
     })
     .await;
     assert!(
@@ -319,5 +348,32 @@ async fn an_owned_fresh_routine_start_resolves_as_its_legacy_start_pg() {
     assert_eq!(
         owned, legacy,
         "same session key, tmux session and cold start"
+    );
+}
+
+/// A scheduled start kept flat before a restart starts as its legacy start: the snapshot's session
+/// key and tmux session, cold, as a scheduled message.
+#[tokio::test]
+async fn an_owned_flat_scheduled_start_kept_before_a_restart_resolves_as_its_legacy_start_pg() {
+    let test = "services::discord::router::message_handler::provider_dispatch::owner_input::tests::provenance::an_owned_flat_scheduled_start_kept_before_a_restart_resolves_as_its_legacy_start_pg";
+    if !api_child(test) {
+        return;
+    }
+    let (legacy, owned) = legacy_and_owned(Start {
+        source: "scheduled_message",
+        metadata: |side| {
+            json!({"agent_id":"agent7272","scheduled_message_id":"sm-7272",
+            "scheduled_snapshot_session_label":format!("snap-{side}")})
+        },
+        label: Some(|side| format!("snap-{side}")),
+        dm_user: None,
+        flat: true,
+    })
+    .await;
+    let scheduled = legacy.contains("snap-SIDE") && legacy.contains("scheduled_message");
+    assert!(scheduled && legacy.ends_with("None"), "{legacy}");
+    assert_eq!(
+        owned, legacy,
+        "same session key, tmux session, channel, source and cold start"
     );
 }
