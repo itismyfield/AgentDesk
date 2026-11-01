@@ -3,7 +3,7 @@ use crate::services::cluster::stream_relay::RelayProducer;
 use crate::services::discord::inflight::{
     InflightTurnIdentity, load_inflight_state, save_inflight_state,
 };
-use crate::services::discord::outbound::o_delivery_evidence::tests::Fixture;
+use crate::services::discord::outbound::o_delivery_evidence::tests::{Fixture, bounded};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 thread_local! {
@@ -137,8 +137,11 @@ async fn plan(
         status_panel_msg_id: None,
     };
     let sends = f.sends.load(Ordering::SeqCst);
-    let TerminalRelayPlanOutcome::Proceed(result) =
-        run_terminal_relay_plan(&context, locals, &mut state).await
+    let TerminalRelayPlanOutcome::Proceed(result) = bounded(
+        "run_terminal_relay_plan",
+        run_terminal_relay_plan(&context, locals, &mut state),
+    )
+    .await
     else {
         panic!("orphan seam bypassed")
     };
@@ -465,9 +468,12 @@ async fn soft_ack_cases(cases: &[u64], injected: bool) {
         let target = ack
             .as_ref()
             .expect("ordinary frame still carries an ACK target");
-        while handle.metrics().snapshot().frames_delivered == 0 {
-            tokio::task::yield_now().await;
-        }
+        bounded("stream relay frame delivery", async {
+            while handle.metrics().snapshot().frames_delivered == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
         assert_eq!(
             handle.metrics().snapshot().last_delivered_sequence,
             Some(target.sequence),
@@ -597,7 +603,7 @@ async fn soft_ack_cases(cases: &[u64], injected: bool) {
                 "O lookup must execute before ACK timeout"
             );
         }
-        handle.shutdown().await;
+        bounded("stream relay shutdown", handle.shutdown()).await;
     }
     pool.close().await;
     db.drop().await;
@@ -1199,38 +1205,41 @@ async fn prepare_then_plan(
     let mut body = frame.body.take().unwrap();
     let (mut frozen, mut placeholder, mut panel) = (Vec::new(), None, None);
     let (mut restored_placeholder, mut sent, mut edit) = (false, 0, String::new());
-    run_terminal_preflight_prepare(
-        &TerminalPreflightContext {
-            http,
-            shared,
-            channel_id: ChannelId::new(f.row.channel_id),
-            watcher_provider: &provider,
-            tmux_session_name: &session,
-            output_path: &output,
-            host: &host,
-        },
-        TerminalPreflightLocals {
-            current_offset: f.row.last_offset + frame.tail.len() as u64,
-            single_message_panel_footer_mode: false,
-            all_data: &frame.tail,
-            terminal_kind: Some(WatcherTerminalKind::SoftStopHookSummary),
-            fresh_assistant_text_seen: frame.fresh,
-            tool_state: &tools,
-            turn_is_external_input_for_session: false,
-            task_notification_kind: None,
-            data_start_offset: frame.batch_start,
-            turn_identity_for_panel: &None,
-        },
-        &mut TerminalPreflightState {
-            watcher_streaming_rollover_frozen_msg_ids: &mut frozen,
-            placeholder_msg_id: &mut placeholder,
-            placeholder_from_restored_inflight: &mut restored_placeholder,
-            status_panel_msg_id: &mut panel,
-            full_response: &mut body,
-            response_sent_offset: &mut sent,
-            last_edit_text: &mut edit,
-            restored_response_seed: &mut frame.seed,
-        },
+    bounded(
+        "run_terminal_preflight_prepare",
+        run_terminal_preflight_prepare(
+            &TerminalPreflightContext {
+                http,
+                shared,
+                channel_id: ChannelId::new(f.row.channel_id),
+                watcher_provider: &provider,
+                tmux_session_name: &session,
+                output_path: &output,
+                host: &host,
+            },
+            TerminalPreflightLocals {
+                current_offset: f.row.last_offset + frame.tail.len() as u64,
+                single_message_panel_footer_mode: false,
+                all_data: &frame.tail,
+                terminal_kind: Some(WatcherTerminalKind::SoftStopHookSummary),
+                fresh_assistant_text_seen: frame.fresh,
+                tool_state: &tools,
+                turn_is_external_input_for_session: false,
+                task_notification_kind: None,
+                data_start_offset: frame.batch_start,
+                turn_identity_for_panel: &None,
+            },
+            &mut TerminalPreflightState {
+                watcher_streaming_rollover_frozen_msg_ids: &mut frozen,
+                placeholder_msg_id: &mut placeholder,
+                placeholder_from_restored_inflight: &mut restored_placeholder,
+                status_panel_msg_id: &mut panel,
+                full_response: &mut body,
+                response_sent_offset: &mut sent,
+                last_edit_text: &mut edit,
+                restored_response_seed: &mut frame.seed,
+            },
+        ),
     )
     .await;
     let frame = EvidenceFrame {

@@ -100,6 +100,19 @@ pub(in crate::services::discord) fn snowflake(age_secs: i64) -> u64 {
     ((chrono::Utc::now().timestamp_millis() - age_secs * 1000 - 1_420_070_400_000) as u64) << 22
 }
 
+/// The i7441 tests hold the process-wide env and PG test locks for their whole body, so an
+/// unbounded await parks every test waiting on them; a bound fails by name and unwinds both locks.
+const SEAM_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+pub(in crate::services::discord) async fn bounded<T>(
+    seam: &str,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    tokio::time::timeout(SEAM_LIMIT, future)
+        .await
+        .unwrap_or_else(|_| panic!("{seam} did not finish within {SEAM_LIMIT:?}"))
+}
+
 impl Fixture {
     pub async fn new(channel: u64, provider: ProviderKind, bodies: &[&str]) -> Self {
         Self::new_mode(channel, provider, bodies, false).await
@@ -289,7 +302,7 @@ impl Fixture {
         let mut writer = ChannelWriter::new(channel_store, gate, port.clone(), Lease, Alarms);
         for piece in work {
             assert_eq!(
-                writer.deliver(&piece).await,
+                bounded("fixture writer delivery", writer.deliver(&piece)).await,
                 crate::services::tui_o::writer::deliver::Step::Done
             );
         }
