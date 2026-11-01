@@ -4,6 +4,50 @@ pub(crate) struct DispatchPostgresTestDb {
     database_name: String,
     database_url: String,
     label: String,
+    dropped: bool,
+}
+
+/// Bounds the unwind-path drop so a dead PG server cannot turn a failed test into a hang.
+const UNWIND_DROP_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+impl Drop for DispatchPostgresTestDb {
+    /// A panicking test never reaches `drop().await`; drop its database here, while P is still held.
+    fn drop(&mut self) {
+        if self.dropped || !std::thread::panicking() {
+            return;
+        }
+        let (admin_url, database_name, label) = (
+            self.admin_url.clone(),
+            self.database_name().to_string(),
+            format!("{} unwind", self.label),
+        );
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        // Own thread and runtime: the panicking thread may be inside a runtime that cannot block_on.
+        let spawned = std::thread::Builder::new()
+            .name(format!("unwind drop {database_name}"))
+            .spawn(move || {
+                let result = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| error.to_string())
+                    .and_then(|runtime| {
+                        runtime.block_on(crate::db::postgres::drop_test_database(
+                            &admin_url,
+                            &database_name,
+                            &label,
+                        ))
+                    });
+                let _ = done_tx.send(result);
+            });
+        let outcome = spawned.map_err(|error| error.to_string()).and_then(|_| {
+            done_rx
+                .recv_timeout(UNWIND_DROP_LIMIT)
+                .map_err(|error| format!("unwind drop did not report: {error}"))?
+        });
+        if let Err(error) = outcome {
+            eprintln!("LEAKED-TEST-DATABASE {}: {error}", self.database_name);
+        }
+    }
 }
 
 impl DispatchPostgresTestDb {
@@ -31,6 +75,7 @@ impl DispatchPostgresTestDb {
             database_name,
             database_url,
             label: label.to_string(),
+            dropped: false,
         })
     }
 
@@ -55,7 +100,12 @@ impl DispatchPostgresTestDb {
             database_name,
             database_url,
             label: label.to_string(),
+            dropped: false,
         }
+    }
+
+    pub(crate) fn database_name(&self) -> &str {
+        &self.database_name
     }
 
     pub(crate) async fn connect_and_migrate(&self) -> sqlx::PgPool {
@@ -83,10 +133,15 @@ impl DispatchPostgresTestDb {
         pool
     }
 
-    pub(crate) async fn drop(self) {
-        crate::db::postgres::drop_test_database(&self.admin_url, &self.database_name, &self.label)
-            .await
-            .unwrap_or_else(|err| panic!("drop {} postgres test db: {err}", self.label));
+    pub(crate) async fn drop(mut self) {
+        let result = crate::db::postgres::drop_test_database(
+            &self.admin_url,
+            &self.database_name,
+            &self.label,
+        )
+        .await;
+        self.dropped = true;
+        result.unwrap_or_else(|err| panic!("drop {} postgres test db: {err}", self.label));
     }
 }
 
