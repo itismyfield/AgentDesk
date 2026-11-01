@@ -126,7 +126,7 @@ impl Home {
         pids
     }
 
-    pub fn state(&self) -> State {
+    pub(super) fn state(&self) -> State {
         use std::os::unix::fs::MetadataExt;
         State {
             config: std::fs::read(self.home.join(".config/herdr/config.toml")).ok(),
