@@ -1371,3 +1371,6 @@ async fn a_busy_channel_leaves_a_start_for_its_own_turn() {
 
 #[path = "owner_input_not_sent_tests.rs"]
 mod not_sent;
+
+#[path = "owner_provenance_tests.rs"]
+mod provenance;
