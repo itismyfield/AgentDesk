@@ -173,12 +173,17 @@ pub(crate) fn probe_source(socket: &Path) -> Result<Arc<dyn PeerSource>, String>
     Ok(peer_source(socket, &Arc::new(transport)))
 }
 
-/// The pid the server on `socket` reports in its hello, when one answers.
-pub(crate) fn accepting_pid(socket: &Path) -> Option<u32> {
+/// The pid of the server on `socket` that answered a hello within `wait`; a socket that only
+/// accepts is no server yet.
+pub(crate) fn accepting_pid(socket: &Path, wait: Duration) -> Option<u32> {
     let endpoint = HerdrEndpoint::new("autostart", "autostart", socket, "autostart").ok()?;
-    let transport =
-        HerdrSocketTransport::new(&endpoint, HerdrSocketConfig::default(), LineJsonFraming);
-    transport.server_witness().ok().map(|witness| witness.pid)
+    let config = HerdrSocketConfig {
+        io_timeout: wait,
+        read_deadline: wait,
+        ..HerdrSocketConfig::default()
+    };
+    let transport = HerdrSocketTransport::new(&endpoint, config, LineJsonFraming);
+    transport.hello().ok().map(|hello| hello.witness.pid)
 }
 
 impl SocketHerdrLaunchHost {

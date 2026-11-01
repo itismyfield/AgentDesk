@@ -330,11 +330,10 @@ async fn ready(socket: &Path, child: Child, wait: Duration, value: &mut Value) -
     loop {
         let exited = child.exited.lock().ok().and_then(|slot| *slot);
         let owned = socket.to_path_buf();
-        let accepting =
-            tokio::task::spawn_blocking(move || super::super::launch_host::accepting_pid(&owned))
-                .await
-                .ok()
-                .flatten();
+        let left = deadline.saturating_duration_since(Instant::now());
+        let wait = left.clamp(Duration::from_millis(50), Duration::from_secs(1));
+        let hello = move || super::super::launch_host::accepting_pid(&owned, wait);
+        let accepting = tokio::task::spawn_blocking(hello).await.ok().flatten();
         match accepting {
             Some(pid) if pid == child.pid => return Ensured::Started(pid),
             Some(pid) => {
@@ -395,3 +394,7 @@ pub(crate) fn scoped_context(socket: &Path, context: Context) -> impl Drop + use
     }
     Scoped(socket.into())
 }
+
+#[cfg(test)]
+#[path = "spawn_tests.rs"]
+mod tests;
