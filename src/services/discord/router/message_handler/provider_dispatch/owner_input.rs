@@ -261,6 +261,11 @@ impl OwnerTurn {
     pub(in crate::services::discord) fn front(&self) -> &Front {
         self.claim.front()
     }
+
+    /// No effect began: leave the original at the owner's front until another real wake.
+    pub(in crate::services::discord) fn defer_before_submit(self, reason: &str) {
+        let _ = self.settled.send(Err(effect::unsent(reason.into())));
+    }
 }
 
 type Shared = std::sync::Arc<crate::services::discord::SharedData>;

@@ -480,7 +480,7 @@ async fn assert_kept(
 }
 
 /// A one-agent config for the real creators, with a fake Claude binary that never starts.
-fn d1_fixture_config(
+pub(super) fn d1_fixture_config(
     f: &crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture,
     ids: &[u64],
 ) -> (Vec<crate::config::TestEnvVarGuard>, crate::config::Config) {
@@ -505,7 +505,7 @@ fn d1_fixture_config(
 }
 
 /// Stamps the markers and incarnation a spawned Claude pane `name` would carry.
-fn d1_execution_proof(
+pub(super) fn d1_execution_proof(
     name: &str,
     channel: u64,
 ) -> crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation {

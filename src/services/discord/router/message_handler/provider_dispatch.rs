@@ -244,7 +244,13 @@ pub(super) fn producer_error(
         Some(SubmissionFailure::SubmissionIndeterminate) => {
             tracing::warn!(channel_id, "provider failed after the submission fence");
         }
-        Some(SubmissionFailure::ProviderExecutionFailed) | None => {}
+        Some(SubmissionFailure::ProviderExecutionFailed) | None => {
+            // The owner's NotSent outcome is a held input, not a failed provider response.
+            if error.starts_with("NotSent(") {
+                tracing::info!(channel_id, %error, "input not submitted; provider error withheld");
+                return None;
+            }
+        }
     }
     Some(StreamMessage::Error {
         message: error,

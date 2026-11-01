@@ -1413,3 +1413,6 @@ pub(in crate::services::discord) async fn claimed_owner_turn(
     };
     (owner, answer)
 }
+
+#[path = "owner_input_rollback_tests.rs"]
+mod rollback;

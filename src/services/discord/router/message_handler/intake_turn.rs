@@ -1718,6 +1718,21 @@ pub(super) async fn handle_text_message(
         };
         #[cfg(unix)]
         if let Some(diagnostic) = tui_busy_diagnostic {
+            if let Some(owner) = owner {
+                busy_retry::defer_owned_front(
+                    busy_retry::FinalizeEnqueueContext {
+                        shared, http, provider: &provider, channel_id, user_msg_id,
+                        placeholder_msg_id, turn_start_attempt: _turn_start_attempt,
+                        session_retry_context: None,
+                        feedback_reminder: feedback_reminder.as_deref(),
+                        wip_warning: wip_warning.as_deref(),
+                    },
+                    &cancel_token,
+                ).await;
+                owner.defer_before_submit("hosted_tui_busy_pre_submit");
+                intake_latency.log(channel_id.get(), provider_label, "deferred_busy");
+                return Ok(IntakeExecution::deferred(channel_id));
+            }
             let bot_owner_provider = super::super::super::resolve_discord_bot_provider(token);
             let queue_kickoff_scheduled_by_release = release_mailbox_after_hosted_tui_busy_pre_submit(
                 shared,
