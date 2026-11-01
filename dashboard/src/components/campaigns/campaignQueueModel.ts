@@ -1,5 +1,6 @@
 import type { Campaign, CampaignNode } from "../../api/campaigns";
 import type { KanbanCard } from "../../types";
+import { parsePgTimestamp } from "../../lib/pgTimestamp";
 import { cardTitle, isOpenKanbanCard } from "../agent-manager/kanban-utils";
 import { campaignTaskNumber } from "./campaignModel";
 
@@ -69,7 +70,10 @@ export function cardWithBody(card: KanbanCard | undefined, full: KanbanCard | nu
 /** The list summary was written after the full card on hand, so that card's body may be outdated. */
 export function summaryOutdatesFull(card: KanbanCard | undefined, full: KanbanCard | null): boolean {
   if (!card || isFullCard(card) || full?.id !== card.id) return false;
-  return Date.parse(card.updated_at) > Date.parse(full.updated_at);
+  const summaryAt = parsePgTimestamp(card.updated_at);
+  const fullAt = parsePgTimestamp(full.updated_at);
+  // An unreadable time still counts any change, so the body is read again before saving.
+  return summaryAt !== null && fullAt !== null ? summaryAt > fullAt : card.updated_at !== full.updated_at;
 }
 
 export type QueueSort = "priority" | "recent" | "oldest" | "number";

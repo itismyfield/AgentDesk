@@ -116,3 +116,15 @@ it("calls a summary outdating only when it was written after the full card", () 
   expect(summaryOutdatesFull(card("c", { updated_at: "2026-10-03T00:00:00Z" }), full)).toBe(false);
   expect(summaryOutdatesFull(summaryAt("2026-10-03T00:00:00Z"), null)).toBe(false);
 });
+
+it("compares the server's PG text timestamps, and counts any change when a time cannot be read", () => {
+  const fullAt = (updated_at: string) => card("c", { description: "body", updated_at });
+  const summaryAt = (updated_at: string) => {
+    const { description: _dropped, ...summary } = card("c", { updated_at });
+    return summary as KanbanCard;
+  };
+  expect(summaryOutdatesFull(summaryAt("2026-11-01 11:05:24.000001+09"), fullAt("2026-11-01 11:05:23.123456+09"))).toBe(true);
+  expect(summaryOutdatesFull(summaryAt("2026-11-01 11:05:23.123456+09"), fullAt("2026-11-01 11:05:23.123456+09"))).toBe(false);
+  expect(summaryOutdatesFull(summaryAt("later"), fullAt("earlier"))).toBe(true);
+  expect(summaryOutdatesFull(summaryAt("same"), fullAt("same"))).toBe(false);
+});
