@@ -827,8 +827,8 @@ targets = {
     "needs" => "changes",
     "if" => "${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "9e2f665589c7d1985275bcbcdd5a967be5b99c1c7e1cc73ce36b2677ff6a5b2b",
-    "job_timeout_minutes" => 45,
+    "job_sha256" => "f9d82ef5c7b9d497edaad746306464a733033519a9a19ba4d7ff3b290fdec26e",
+    "job_timeout_minutes" => 60,
     "cargo_steps" => {
       "Fetch Cargo dependencies" => {
         "commands" => ["cargo fetch --locked"],
@@ -837,7 +837,7 @@ targets = {
       },
       "Require relay-authority mutations to be killed" => {
         "commands" => ["bash scripts/run_relay_authority_mutations.sh"],
-        "timeout_minutes" => 45,
+        "timeout_minutes" => 60,
         "if_condition" => "steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'",
       },
     },

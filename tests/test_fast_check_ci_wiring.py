@@ -875,7 +875,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertEqual(mutation["if"], RUST_REQUIRED_IF)
         self.assertEqual(mutation["needs"], "changes")
         self.assertEqual(mutation["runs-on"], "ubuntu-latest")
-        self.assertEqual(mutation["timeout-minutes"], 45)
+        self.assertEqual(mutation["timeout-minutes"], 60)
         self.assertEqual(mutation["env"]["CARGO_PROFILE_DEV_DEBUG"], "0")
         self.assertEqual(mutation["env"]["CARGO_PROFILE_TEST_DEBUG"], "0")
         setup = [step for step in mutation["steps"] if "uses" in step and step.get("id") != "mutation_paths"]
@@ -894,7 +894,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
             r'          CARGO_PROFILE_DEV_DEBUG: "0"\n'
             r'          CARGO_PROFILE_TEST_DEBUG: "0"\n'
             r"        shell: bash\n"
-            r"        timeout-minutes: 45\n"
+            r"        timeout-minutes: 60\n"
             r"        run: bash scripts/run_relay_authority_mutations\.sh$",
         )
 
@@ -2474,7 +2474,7 @@ jobs:
             ("quoted step name changes the pinned scalar style", judge, "      - name: Judge required checks\n", '      - name: "Judge required checks"\n'),
             ("explicit str tag is not discarded", judge, "          BASH_ENV: /dev/null\n", "          BASH_ENV: !!str /dev/null\n"),
             ("judge timeout leading zero is not decimal 15", judge, "    timeout-minutes: 15\n", "    timeout-minutes: 015\n"),
-            ("job timeout leading zero is not decimal 45", mutations, "    timeout-minutes: 45\n", "    timeout-minutes: 055\n"),
+            ("job timeout leading zero is not decimal 60", mutations, "    timeout-minutes: 60\n", "    timeout-minutes: 074\n"),
         )
         for label, job, old, new in cases:
             with self.subTest(case=label):
