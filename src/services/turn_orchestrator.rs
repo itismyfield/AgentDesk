@@ -3837,7 +3837,7 @@ mod actor_hydrate_regression_tests {
         let handle_b = handle.clone();
         let task_a = tokio::spawn(async move {
             handle_a
-                .cancel_active_turn_with_reason("voice_barge_in_live_cut".to_string())
+                .cancel_active_turn_with_reason("operator_stop_live_cut".to_string())
                 .await
         });
         let task_b = tokio::spawn(async move {
@@ -3865,7 +3865,7 @@ mod actor_hydrate_regression_tests {
         // task the actor dequeued first; the loser's later message
         // must NOT mutate the label.
         let winner_label = if !res_a.already_stopping {
-            "voice_barge_in_live_cut"
+            "operator_stop_live_cut"
         } else {
             "watchdog_timeout"
         };

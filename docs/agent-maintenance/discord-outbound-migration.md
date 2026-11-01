@@ -113,6 +113,10 @@
 > `auto-queue-monitor` label now matches its live script producer. No delivery
 > verb or v3 callsite changed.)
 
+> Last refreshed: 2026-11-01 (meetings, agent quality rollups and voice were
+> removed, so `quality_regression_alerter`, the meeting notifications and the
+> voice producers no longer exist. Older notes below keep their history.)
+
 > Last refreshed: 2026-07-11 (#4448 review follow-up — quality regression
 > cooldowns and terminal auto-queue entry failures now commit their
 > `message_outbox` obligation in the same PostgreSQL transaction as the owning

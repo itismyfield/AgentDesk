@@ -4,7 +4,8 @@ Issue #1175 finished the remaining #1006 producer families after the core
 dispatch, review, placeholder, gateway, and CLI text/DM helpers landed in
 #1188/#1189. Issue #2535 removed the final legacy outbound bridge by migrating
 issue announcements, monitoring status, meeting notifications, and routine
-Discord summaries to direct v3 envelopes.
+Discord summaries to direct v3 envelopes. Meetings and their notifications were
+removed later (2026-11).
 
 ## Migrated in this slice
 

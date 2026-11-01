@@ -4365,7 +4365,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/services/discord/recovery_engine.rs` | Restart-time inflight turn recovery. |
 | `src/services/discord/placeholder_controller/queued_card_gate.rs` | #5035: sole enforcement point for destroying a channel's queued `📬` card. Evaluates contract G (G1 ∧ G2) under the channel persist lock over the whole mailbox queue and hands out a `QueuedCardTeardown` token no other module can construct. |
 | `src/services/discord/gateway.rs` / `discord_io.rs` / `queue_io.rs` | Discord gateway bridge and outbound/inbound message plumbing. |
-| `src/services/discord/commands/` | Slash command handlers for session, config, diagnostics, meetings, models, receipts, skills. |
+| `src/services/discord/commands/` | Slash command handlers for session, config, diagnostics, models, receipts, skills. |
 | `src/services/discord/agentdesk_config.rs` | YAML/DB/legacy config source-of-truth handling. |
 | `src/services/discord/prompt_builder/` / `shared_memory.rs` | Turn prompt assembly and org/shared memory context. |
 
