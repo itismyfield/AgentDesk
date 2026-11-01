@@ -121,6 +121,8 @@ async fn policy_phase_gate_owner_boundary_matrix_pg() {
     array["merge_verified"] = json!({"status":["pass"],"result":"fail"});
     let mut non_string_result = checks.clone();
     non_string_result["merge_verified"] = json!({"result":["pass"]});
+    let mut non_string_result_object = checks.clone();
+    non_string_result_object["merge_verified"] = json!({"result":{"toString":1}});
     let mut fail = checks.clone();
     fail["issue_closed"] = json!("fail");
     let mut extra = checks.clone();
@@ -214,6 +216,13 @@ async fn policy_phase_gate_owner_boundary_matrix_pg() {
             "non_string_result",
             context(),
             json!({"checks":non_string_result}),
+            false,
+            Value::Null,
+        ),
+        (
+            "non_string_result_object",
+            context(),
+            json!({"checks":non_string_result_object}),
             false,
             Value::Null,
         ),
