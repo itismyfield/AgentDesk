@@ -521,7 +521,7 @@ pub(in crate::services::discord) mod capsule_observation {
                 restored_response_seed: capsule
                     .turn
                     .as_ref()
-                    .map(|turn| turn.restored_response_seed.clone())
+                    .map(|turn| turn.restored_response_seed.body.clone())
                     .unwrap_or_default(),
                 authority: capsule.authority,
                 opened_source:

@@ -86,11 +86,13 @@ fn transition_execution_refuses_a_left_session_without_its_pinned_source() {
     let visit = Visit {
         session: "c".into(),
         pin: Some(current.clone()),
+        pinned_at: None,
         since: None,
         seen,
     };
     let left = Left {
         pin: None,
+        pinned_at: None,
         left_at: seen,
     };
     let history = SourceHistory {

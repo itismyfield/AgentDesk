@@ -625,7 +625,10 @@ pub async fn agent_dispatched_sessions(
     Path(id): Path<String>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let pool = state.pg_pool_ref().ok_or_else(pg_required_error)?;
-    let guild_id = state.config.discord.guild_id.as_deref();
+    let guild_id = state
+        .config
+        .onboarding
+        .effective_guild_id(&state.config.discord);
     match load_agent_dispatched_sessions_pg_json(pool, &id, guild_id).await {
         Ok(sessions) => Ok((
             StatusCode::OK,

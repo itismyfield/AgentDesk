@@ -169,17 +169,26 @@ mod test_override {
 pub(crate) mod test_override {
     use crate::services::agent_protocol::RuntimeHandoffKind;
 
-    /// Binds a tmux session as a Claude TUI until dropped, so session-keyed gates see a TUI kind.
+    /// Keeps a tmux runtime binding registered until dropped, so a panicking test cannot leave it behind.
     pub(crate) struct TuiSessionGuard(String);
 
     pub(crate) fn bind_claude_tui_session(
         tmux_session: &str,
         output_path: &str,
     ) -> TuiSessionGuard {
+        bind_tui_session(tmux_session, RuntimeHandoffKind::ClaudeTui, output_path)
+    }
+
+    /// Binds a tmux session as a Claude or Codex TUI until dropped.
+    pub(crate) fn bind_tui_session(
+        tmux_session: &str,
+        runtime_kind: RuntimeHandoffKind,
+        output_path: &str,
+    ) -> TuiSessionGuard {
         crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
             tmux_session,
             crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
-                runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                runtime_kind,
                 output_path: output_path.to_string(),
                 relay_output_path: None,
                 input_fifo_path: None,
@@ -225,7 +234,8 @@ pub(crate) mod test_override {
             .collect();
         let ids: Vec<_> = channels.iter().map(|(id, _)| *id).collect();
         let config = serde_json::from_value(serde_json::json!({
-            "server": {}, "agents": agents, "tui_o": {"writer": {"channels": ids}}
+            "server": {}, "agents": agents,
+            "tui_o": {"writer": {"channels": ids, "all_tui": false}, "turn": {"all_owned": false}}
         }))
         .unwrap();
         BootChannels::validate(&config).unwrap()

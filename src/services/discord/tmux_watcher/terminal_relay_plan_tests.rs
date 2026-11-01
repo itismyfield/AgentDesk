@@ -1078,7 +1078,7 @@ pub(super) async fn admitted_losses_under_root(
         turn_data_start_offset: FRAME_START,
         all_data: &all_data,
         full_response: &full_response,
-        current_response: LOST_BODY,
+        restored_response_seed: &Default::default(),
         response_sent_offset: SENT_PREFIX,
         has_assistant_response: true,
         terminal_kind: Some(WatcherTerminalKind::SoftStopHookSummary),

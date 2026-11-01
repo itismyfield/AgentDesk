@@ -156,103 +156,49 @@ test("00-escalation escalationCardTitle uses github issue number", () => {
   assert.strictEqual(funcs.escalationCardTitle("missing"), "missing");
 });
 
-test("00-escalation enqueueEscalation uses typed kv facade instead of raw db", () => {
-  var fs = require("fs");
-  var content = fs.readFileSync(__dirname + "/../00-escalation.js", "utf8");
-
-  var getFunc = new Function(
-    "require", "module", "agentdesk",
-    content + "; return { enqueueEscalation };"
-  );
-
-  var setCalls = [];
-  var getCalls = [];
-  var dbCalls = [];
-
-  var mockAgentdesk = {
-    // #3335: 00-escalation.js now registers a hook-less helper policy
-    registerPolicy: function() {},
-    cards: { get: function(id) { return { id: id, title: "Test Card" }; } },
-    db: {
-      query: function(sql, params) { dbCalls.push({ sql: sql, params: params }); return []; },
-      execute: function(sql, params) { dbCalls.push({ sql: sql, params: params }); }
-    },
-    kv: {
-      get: function(key) { getCalls.push(key); return null; },
-      set: function(key, value, ttl) { setCalls.push({ key, value, ttl }); },
-      delete: function(key) {}
-    }
+test("00-escalation enqueueEscalation delegates to its owner without generic kv/db", () => {
+  const content = require("fs").readFileSync(__dirname + "/../00-escalation.js", "utf8");
+  const calls = [];
+  function forbidden() { throw new Error("escalation must use its Rust owner"); }
+  const ad = {
+    registerPolicy() {},
+    cards: { get() { return { github_issue_number: 42 }; } },
+    kv: { get: forbidden, set: forbidden, delete: forbidden },
+    db: { query: forbidden, execute: forbidden },
+    escalation: { enqueue(...args) { calls.push(args); } }
   };
-
-  var funcs = getFunc(require, {}, mockAgentdesk);
-  funcs.enqueueEscalation("card-123", "test_reason");
-
-  assert.strictEqual(dbCalls.length, 0, "Should not call agentdesk.db");
-  assert.strictEqual(getCalls.length, 1);
-  assert.strictEqual(getCalls[0], "pm_pending:card-123");
-  assert.strictEqual(setCalls.length, 1);
-  assert.strictEqual(setCalls[0].key, "pm_pending:card-123");
-  assert.strictEqual(setCalls[0].ttl, 600); // ESCALATION_PENDING_TTL_SEC is usually 600
-  var parsed = JSON.parse(setCalls[0].value);
-  assert.deepStrictEqual(parsed.reasons, ["test_reason"]);
+  const enqueue = new Function("agentdesk", content + "; return enqueueEscalation;")(ad);
+  enqueue("card-123", "test_reason");
+  enqueue("", "test_reason");
+  enqueue("card-123", "");
+  assert.deepStrictEqual(calls, [["card-123", "#42 (card-123)", "test_reason"]]);
 });
 
-test("00-escalation flushEscalations uses typed kv facade for writes/deletes", () => {
-  var fs = require("fs");
-  var content = fs.readFileSync(__dirname + "/../00-escalation.js", "utf8");
-
-  var getFunc = new Function(
-    "require", "module", "agentdesk",
-    content + "; return { flushEscalations };"
-  );
-
-  var setCalls = [];
-  var getCalls = [];
-  var delCalls = [];
-  var dbCalls = [];
-
-  var mockAgentdesk = {
-    // #3335: 00-escalation.js now registers a hook-less helper policy
-    registerPolicy: function() {},
-    cards: { get: function(id) { return { id: id, title: "Test Card", status: "review", review_status: "dilemma_pending" }; } },
-    pipeline: {
-      getConfig: function() { return {}; },
-      isTerminal: function() { return false; }
-    },
-    config: {
-      get: function(key) { if (key === "server_port") return "8080"; return null; }
-    },
-    http: {
-      post: function(url, body) { return { status: 200 }; }
-    },
-    log: { info: function() {}, warn: function() {} },
-    db: {
-      query: function(sql, params) {
-        if (sql.includes("pm_pending:%")) {
-          return [
-            { key: "pm_pending:card-123", value: JSON.stringify({ reasons: ["test"] }) },
-            { key: "pm_pending:invalid", value: "invalid-json" }
-          ];
-        }
-        dbCalls.push({ sql: sql, params: params });
-        return [];
+test("00-escalation flushEscalations delegates lifecycle and only stamps successful emits", () => {
+  const content = require("fs").readFileSync(__dirname + "/../00-escalation.js", "utf8");
+  const prepared = [], sent = [], emitted = [];
+  function forbidden() { throw new Error("escalation must use its Rust owner"); }
+  const ad = {
+    registerPolicy() {},
+    cards: { get(id) { return id === "inactive" ? null : { status: "review", review_status: "dilemma_pending" }; } },
+    pipeline: { getConfig() { return {}; }, isTerminal() { return false; } },
+    config: { get() { return "8080"; } },
+    kv: { get: forbidden, set: forbidden, delete: forbidden },
+    db: { query: forbidden, execute: forbidden },
+    log: { warn() {} },
+    http: { post(url, body) { emitted.push(body); return body.card_id === "fail" ? {error: "offline"} : {status: 200}; } },
+    escalation: {
+      pending() { return ["ready", "cooldown", "inactive", "fail"].map(card_id => ({card_id, value: "opaque"})); },
+      prepare(row, fingerprint) {
+        prepared.push([row.card_id, fingerprint]);
+        return row.card_id === "ready" || row.card_id === "fail" ? {reasons: ["reason"]} : null;
       },
-      execute: function(sql, params) { dbCalls.push({ sql: sql, params: params }); }
-    },
-    kv: {
-      get: function(key) { getCalls.push(key); return null; },
-      set: function(key, value, ttl) { setCalls.push({ key, value, ttl }); },
-      delete: function(key) { delCalls.push(key); }
+      sent(...args) { sent.push(args); }
     }
   };
-
-  var funcs = getFunc(require, {}, mockAgentdesk);
-  funcs.flushEscalations();
-
-  assert.strictEqual(dbCalls.length, 0, "Should not call agentdesk.db except for prefix scan");
-  assert.ok(getCalls.includes("pm_decision_sent:card-123"));
-  assert.ok(delCalls.includes("pm_pending:invalid"));
-  assert.ok(delCalls.includes("pm_pending:card-123"));
-  assert.strictEqual(setCalls.length, 1);
-  assert.strictEqual(setCalls[0].key, "pm_decision_sent:card-123");
+  const flush = new Function("agentdesk", content + "; return flushEscalations;")(ad);
+  flush();
+  assert.deepStrictEqual(prepared, [["ready", "review:dilemma_pending"], ["cooldown", "review:dilemma_pending"], ["inactive", null], ["fail", "review:dilemma_pending"]]);
+  assert.deepStrictEqual(emitted, [{card_id: "ready", reasons: ["reason"]}, {card_id: "fail", reasons: ["reason"]}]);
+  assert.deepStrictEqual(sent, [["ready", "review:dilemma_pending"]]);
 });

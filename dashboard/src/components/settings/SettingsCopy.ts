@@ -12,12 +12,6 @@ export interface SettingCopy {
 
 // Server labels for /api/settings/config are internal; these replace them on screen.
 const CONFIG_KEY_COPY: Record<string, SettingCopy> = {
-  kanban_manager_channel_id: {
-    labelKo: "칸반 알림 채널 ID",
-    labelEn: "Kanban alert channel ID",
-    hintKo: "카드 상태 변경과 자동화 명령을 주고받는 Discord 채널이에요.",
-    hintEn: "Discord channel for card status changes and automation commands.",
-  },
   deadlock_manager_channel_id: {
     labelKo: "막힘 감지 알림 채널 ID",
     labelEn: "Stuck-work alert channel ID",

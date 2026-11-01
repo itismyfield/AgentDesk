@@ -44,6 +44,47 @@ pub(in crate::services::discord) struct RestoredWatcherTurn {
     /// Missing legacy components preserve the seed.
     pub(super) delivery_source:
         Option<super::super::outbound::delivery_record::ExactJsonlSourceIdentity>,
+    /// Records the producer actually read to build `full_response`; unknown for every other seed.
+    pub(super) body_source: Option<SeedBodySource>,
+    /// Turn nonce of the restored row, naming the turn whose bridge queued its headless outbox row.
+    pub(super) producer_turn_nonce: Option<String>,
+}
+
+/// The transcript range one producer read for a seed body, in that file and session generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) struct SeedBodySource {
+    pub(in crate::services::discord) range: (u64, u64),
+    pub(in crate::services::discord) file: (u64, u64),
+    pub(in crate::services::discord) generation_mtime_ns: i64,
+}
+
+impl RestoredWatcherTurn {
+    /// The row's `turn_start_offset` stays the turn identity; the body range starts where the
+    /// producer read, and is unknown without that start, its file or a session generation.
+    pub(in crate::services::discord) fn read_by_producer(
+        mut self,
+        read: Option<crate::services::agent_protocol::TurnReadSource>,
+        end: u64,
+        tmux_session_name: &str,
+    ) -> Self {
+        self.body_source = read.and_then(|read| {
+            let crate::services::cluster::stream_relay::SourceFileIdentity::Unix { dev, ino } =
+                read.file
+            else {
+                return None;
+            };
+            let generation_mtime_ns =
+                super::super::outbound::delivery_record::current_generation_mtime_ns(
+                    tmux_session_name,
+                );
+            (read.start < end && generation_mtime_ns != 0).then_some(SeedBodySource {
+                range: (read.start, end),
+                file: (dev, ino),
+                generation_mtime_ns,
+            })
+        });
+        self
+    }
 }
 
 #[derive(Debug)]
@@ -139,6 +180,8 @@ pub(in crate::services::discord) fn restored_watcher_turn_from_inflight(
             .collect(),
         same_turn_rewind: false,
         delivery_source,
+        body_source: None,
+        producer_turn_nonce: state.turn_nonce.clone().filter(|nonce| !nonce.is_empty()),
     })
 }
 

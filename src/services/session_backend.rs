@@ -939,6 +939,7 @@ pub(crate) fn read_claude_tui_output_file_until_result_with_harvest(
         sender,
         cancel_token,
         probe,
+        // `o_delivery_manifest::BodyComposer` replays bridge bodies with this same parser.
         move |line, state_sender, state| {
             if let Some(token) = &native {
                 let _ = token.native_stop.observe_native_input();

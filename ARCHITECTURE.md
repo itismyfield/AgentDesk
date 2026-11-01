@@ -391,20 +391,29 @@ src/
 │   │   ├── db_ops.rs
 │   │   ├── dispatch_ops.rs
 │   │   ├── dm_reply_ops.rs
+│   │   ├── escalation_ops.rs
+│   │   ├── escalation_owner_tests.rs
 │   │   ├── exec_ops.rs
 │   │   ├── http_ops.rs
 │   │   ├── kanban_ops.rs
 │   │   ├── kv_ops.rs
 │   │   ├── log_ops.rs
 │   │   ├── message_ops.rs
+│   │   ├── orphan_recovery_ops.rs
+│   │   ├── phase_gate_ops.rs
+│   │   ├── phase_gate_owner_tests.rs
 │   │   ├── pipeline_ops.rs
+│   │   ├── pr_tracking_ops.rs
+│   │   ├── pr_tracking_owner_tests.rs
 │   │   ├── queue_ops.rs
 │   │   ├── read_bridge.rs
 │   │   ├── review_automation_ops.rs
 │   │   ├── review_ops.rs
 │   │   ├── runtime_ops.rs
 │   │   ├── timeouts_ops.rs
-│   │   └── turn_ops.rs
+│   │   ├── turn_ops.rs
+│   │   ├── unsent_notify_ops.rs
+│   │   └── unsent_notify_tests.rs
 │   ├── hooks.rs
 │   ├── intent.rs
 │   ├── loader.rs
@@ -897,10 +906,12 @@ src/
 │   │   │   │   └── tests/
 │   │   │   │       ├── session_start_retry_tests.rs
 │   │   │   │       ├── source_guard_tests.rs
+│   │   │   │       ├── too_early_tests.rs
 │   │   │   │       └── tq_tests.rs
 │   │   │   ├── ordered_queue.rs
 │   │   │   ├── queue_retention.rs
 │   │   │   ├── response_window.rs
+│   │   │   ├── too_early.rs
 │   │   │   └── transport_retry.rs
 │   │   ├── hook_server/
 │   │   │   ├── observation_ingress/
@@ -913,7 +924,8 @@ src/
 │   │   │   ├── observation_ingress.rs
 │   │   │   ├── observation_ingress_tests.rs
 │   │   │   ├── rehydration_ingress_tests.rs
-│   │   │   └── relay_receipts.rs
+│   │   │   ├── relay_receipts.rs
+│   │   │   └── resume_renumber_tests.rs
 │   │   ├── hosting/
 │   │   │   ├── followup_support.rs
 │   │   │   ├── fresh_hold_tests.rs
@@ -938,6 +950,8 @@ src/
 │   │   │   └── user_receipt.rs
 │   │   ├── session/
 │   │   │   └── auto_compact_launch_tests.rs
+│   │   ├── source_verify/
+│   │   │   └── renumber.rs
 │   │   ├── busy_inject.rs
 │   │   ├── busy_inject_tests.rs
 │   │   ├── composer_lock.rs
@@ -2535,6 +2549,8 @@ src/
 │   │   │   │   ├── restarted_herdr_sweep_tests.rs
 │   │   │   │   └── retire_tests.rs
 │   │   │   ├── turn_retirement/
+│   │   │   │   ├── claude.rs
+│   │   │   │   ├── claude_tests.rs
 │   │   │   │   ├── codex.rs
 │   │   │   │   └── codex_tests.rs
 │   │   │   ├── foreign_recovery.rs
@@ -3236,6 +3252,7 @@ src/
 │   │   │   └── transport.rs
 │   │   ├── dtos.rs
 │   │   ├── mod.rs
+│   │   ├── notify_recovery.rs
 │   │   ├── outbox_claiming.rs
 │   │   ├── outbox_queue.rs
 │   │   ├── outbox_queue_replay_tests.rs
@@ -3622,6 +3639,8 @@ src/
 │   ├── slo/
 │   │   └── mod.rs
 │   ├── stale_turn_reconciler/
+│   │   ├── owner_boundary_tests.rs
+│   │   ├── policy_maintenance.rs
 │   │   └── test_barriers.rs
 │   ├── stream_json_cli/
 │   │   ├── dialects/
@@ -3846,9 +3865,13 @@ src/
 │   │   │   │   ├── migration_tests.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── late_adopt/
+│   │   │   │   ├── claude/
+│   │   │   │   │   ├── prefix.rs
+│   │   │   │   │   └── prefix_tests.rs
 │   │   │   │   ├── codex/
 │   │   │   │   │   ├── prefix.rs
 │   │   │   │   │   └── prefix_tests.rs
+│   │   │   │   ├── claude.rs
 │   │   │   │   └── codex.rs
 │   │   │   ├── local_retry/
 │   │   │   │   └── notice_selection.rs
@@ -3909,6 +3932,7 @@ src/
 │   │   │   ├── historical_hops.rs
 │   │   │   ├── host.rs
 │   │   │   ├── host_bo_provider_tests.rs
+│   │   │   ├── host_claude_takeover_tests.rs
 │   │   │   ├── host_codex_takeover_tests.rs
 │   │   │   ├── host_codex_turn_mark_tests.rs
 │   │   │   ├── host_first_init_tests.rs
@@ -4100,6 +4124,7 @@ src/
 │   │   ├── observation.rs
 │   │   ├── pending.rs
 │   │   ├── pending_history_tests.rs
+│   │   ├── pending_renumber_tests.rs
 │   │   ├── pending_tests.rs
 │   │   ├── prompt_identity.rs
 │   │   ├── prompt_identity_tests.rs
@@ -4241,6 +4266,7 @@ src/
 │   ├── dispatch_watchdog.rs
 │   ├── dispatched_sessions.rs
 │   ├── dispatches_followup.rs
+│   ├── escalation_cooldown.rs
 │   ├── explicit_auth_route.rs
 │   ├── gemini.rs
 │   ├── github_issue_creation.rs
@@ -4327,6 +4353,11 @@ src/
 │   ├── turn_summary_line.rs
 │   └── turn_summary_line_tests.rs
 ├── supervisor/
+│   ├── orphan_recovery/
+│   │   ├── boot.rs
+│   │   ├── mod.rs
+│   │   └── policy.rs
+│   ├── decision_log_pg_tests.rs
 │   └── mod.rs
 ├── test_support/
 │   ├── serial_runtime.rs

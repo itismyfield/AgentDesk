@@ -101,7 +101,7 @@ impl Lane {
         judge_restore(
             tmux,
             records,
-            pinned.as_ref(),
+            (pinned.as_ref(), None),
             &marker,
             Some(&launch),
             Path::is_file,
@@ -572,7 +572,7 @@ fn pending_without_a_current_execution_is_never_restored() {
         judge_restore(
             tmux,
             records,
-            None,
+            (None, None),
             &unreadable,
             Some(&launch),
             |_| true,
@@ -1484,7 +1484,7 @@ mod verified_adoption {
         judge_restore(
             tmux,
             records,
-            pinned.as_ref(),
+            (pinned.as_ref(), None),
             &marker,
             Some(&launch),
             Path::is_file,
@@ -2076,3 +2076,7 @@ fn a_hook_naming_a_headless_sdk_transcript_never_becomes_the_pane_source() {
 
 #[path = "pending_history_tests.rs"]
 mod history;
+
+#[cfg(unix)]
+#[path = "pending_renumber_tests.rs"]
+mod renumber;

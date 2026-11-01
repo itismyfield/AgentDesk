@@ -120,11 +120,13 @@ pub(super) fn run(turn: FreshTurn<'_>) -> Result<(), String> {
         }
         return Err(reason.to_string());
     }
-    emit_claude_tui_watcher_handoff(
+    emit_claude_tui_watcher_handoff_read_from(
         &sender,
         transcript_path_string,
         tmux_session_name,
         transcript_path,
+        turn_read_start_offset,
+        harvest.source_file,
     );
     let transcript_len = std::fs::metadata(transcript_path)
         .map(|meta| meta.len())

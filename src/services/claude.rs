@@ -1901,6 +1901,44 @@ pub(crate) fn emit_claude_tui_watcher_handoff(
     tmux_session_name: &str,
     transcript_path: &std::path::Path,
 ) {
+    handoff_claude_tui_watcher(
+        sender,
+        transcript_path_string,
+        tmux_session_name,
+        transcript_path,
+        None,
+    );
+}
+
+/// Hands off a turn the producer read from `start` in `file`, so its body can be re-read later.
+#[cfg(unix)]
+pub(crate) fn emit_claude_tui_watcher_handoff_read_from(
+    sender: &Sender<StreamMessage>,
+    transcript_path_string: &str,
+    tmux_session_name: &str,
+    transcript_path: &std::path::Path,
+    start: u64,
+    file: Option<crate::services::cluster::stream_relay::SourceFileIdentity>,
+) {
+    let turn_read =
+        file.map(|file| crate::services::agent_protocol::TurnReadSource { start, file });
+    handoff_claude_tui_watcher(
+        sender,
+        transcript_path_string,
+        tmux_session_name,
+        transcript_path,
+        turn_read,
+    );
+}
+
+#[cfg(unix)]
+fn handoff_claude_tui_watcher(
+    sender: &Sender<StreamMessage>,
+    transcript_path_string: &str,
+    tmux_session_name: &str,
+    transcript_path: &std::path::Path,
+    turn_read: Option<crate::services::agent_protocol::TurnReadSource>,
+) {
     let last_offset = std::fs::metadata(transcript_path)
         .map(|meta| meta.len())
         .unwrap_or(0);
@@ -1921,6 +1959,7 @@ pub(crate) fn emit_claude_tui_watcher_handoff(
             transcript_path: transcript_path_string.to_string(),
             tmux_session_name: tmux_session_name.to_string(),
             last_offset,
+            turn_read,
         },
     });
 }
@@ -3029,6 +3068,7 @@ mod local_tmux_lifecycle_tests {
                         transcript_path: actual_path,
                         tmux_session_name,
                         last_offset,
+                        ..
                     },
             } => {
                 assert_eq!(actual_path, transcript_path);

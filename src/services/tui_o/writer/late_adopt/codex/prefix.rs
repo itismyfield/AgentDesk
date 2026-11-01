@@ -13,7 +13,7 @@ use crate::services::tui_o::shadow::{MAX_READ_BYTES, ShadowProvider, SourceId};
 use crate::services::tui_prompt_dedupe::is_codex_context_record;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum Verdict {
+pub(in crate::services::tui_o::writer::late_adopt) enum Verdict {
     /// Every byte is a complete record O may read from offset 0 with no Legacy body before it.
     Eligible(Prefix),
     /// The file ends inside a record or could not be read; the same rollout is judged again.
@@ -24,11 +24,11 @@ pub(super) enum Verdict {
 
 /// The judged bytes, so a later judgement can tell whether anything changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct Prefix {
-    pub(super) len: u64,
-    pub(super) sha256: String,
+pub(in crate::services::tui_o::writer::late_adopt) struct Prefix {
+    pub(in crate::services::tui_o::writer::late_adopt) len: u64,
+    pub(in crate::services::tui_o::writer::late_adopt) sha256: String,
     /// End of the first user prompt's record, once one is written.
-    pub(super) prompt_end: Option<u64>,
+    pub(in crate::services::tui_o::writer::late_adopt) prompt_end: Option<u64>,
 }
 
 pub(super) fn judge(source: &SourceId) -> Verdict {
@@ -68,7 +68,9 @@ fn judged(source: &SourceId) -> Result<Verdict, Verdict> {
     }))
 }
 
-fn read(source: &SourceId) -> Result<Vec<u8>, Verdict> {
+pub(in crate::services::tui_o::writer::late_adopt) fn read(
+    source: &SourceId,
+) -> Result<Vec<u8>, Verdict> {
     let shown = source.path.display();
     let wait = |error: std::io::Error| Verdict::Wait(format!("source {shown}: {error}"));
     let file = std::fs::File::open(&source.path).map_err(wait)?;

@@ -15,6 +15,9 @@ pub(super) struct WatcherRuntimeHandoffContext<'a> {
     pub(super) done: bool,
     #[cfg(unix)]
     pub(super) host: super::super::tmux::WatchHost,
+    /// Where the producer read the handed-off body, so the watcher can re-read those records.
+    #[cfg(unix)]
+    pub(super) turn_read: Option<crate::services::agent_protocol::TurnReadSource>,
 }
 
 pub(super) struct WatcherRuntimeHandoffState<'a> {
@@ -409,7 +412,8 @@ pub(super) fn handle_watcher_runtime_handoff(
                     inflight_state,
                     &tmux_session_name,
                     true,
-                );
+                )
+                .map(|turn| turn.read_by_producer(ctx.turn_read, last_offset, &tmux_session_name));
                 if let Ok(mut guard) = resume_offset.lock() {
                     *guard = Some(last_offset);
                 }

@@ -308,11 +308,11 @@ fn audited_fields_have_their_traced_class() {
         ("runtime.tui_hook_buffer_ttl_secs", Restart),
         ("runtime.tui_unclaimed_stop_delay_ms", Restart),
         ("runtime.tui_hook_registry_enabled", Live),
+        ("kanban.manager_channel_id", Restart),
         ("policies/default-pipeline.yaml", Restart),
         // Copied into kv_meta / the runtime-config blob or the DB at boot.
         ("review.enabled", SeededAtBoot),
         ("review.max_rounds", SeededAtBoot),
-        ("kanban.manager_channel_id", SeededAtBoot),
         ("runtime.max_entry_retries", SeededAtBoot),
         ("runtime.requested_timeout_min", SeededAtBoot),
         ("github.repos", SeededAtBoot),
