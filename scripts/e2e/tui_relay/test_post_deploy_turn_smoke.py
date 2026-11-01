@@ -408,6 +408,23 @@ class UserVisibleTurnVerdict(unittest.TestCase):
         self.assertIn(CLEAR_REFUSAL, line)
         self.assertIn("AFTER_CLEAR body withheld after !clear (0 deliveries)", line)
 
+    def test_unreadable_or_mismatched_config_fails_the_verdict(self):
+        report = self.saved(SAVED_PASS)
+        self.config.write_text(self.config.read_text(encoding="utf-8").replace(
+            f"id: '{SAVED_CHANNEL}'", "id: '1509350490461180105'"), encoding="utf-8")
+        self.config.rename(self.root / "mismatched.yaml")
+        for case in ("missing", "mismatched", "replaced agent only"):
+            if case == "mismatched":
+                (self.root / "mismatched.yaml").rename(self.config)
+            elif case == "replaced agent only":
+                self.config.write_text("agents:\n  - id: adk-claude-tui-e2e\n"
+                                       f"    channels: {{claude: {{id: '{SAVED_CHANNEL}'}}}}\n", encoding="utf-8")
+            with self.subTest(config=case):
+                rc, line = self.judge_cli(report, driver_rc=0)
+                self.assertEqual(rc, 1, line)
+                self.assertTrue(line.startswith("relay E-50 cell=claude-tui result=FAIL path=unreadable "), line)
+                self.assertIn("configured session host unreadable", line)
+
     def test_unbound_or_incomplete_reports_fail(self):
         def classify(report):
             return turn_smoke.classify(
@@ -451,6 +468,8 @@ class UserVisibleTurnVerdict(unittest.TestCase):
         self.config.write_text("agents: []\n", encoding="utf-8")
         self.assertEqual(path_cli(), (2, ""))
         self.config.write_text("[", encoding="utf-8")
+        self.assertEqual(path_cli(), (2, ""))
+        self.config.write_text("agents:\n  - id: adk-claude-tui-e2e\n    channels: {claude: {id: '1'}}\n", encoding="utf-8")
         self.assertEqual(path_cli(), (2, ""))
 
 
@@ -552,6 +571,34 @@ class GatewayReadyTest(unittest.TestCase):
         ready, detail = self.wait(0.5)
         self.assertFalse(ready, detail)
         self.assertGreaterEqual(self.calls["read"], 1)
+
+    def test_ready_only_after_the_deadline_is_not_ready(self):
+        clock, timeouts = [0.0], []
+
+        def slow_detail(base_url, path, *, timeout):  # noqa: ARG001
+            timeouts.append(timeout)
+            clock[0] += 0.8
+            return 200, {"fully_recovered": True,
+                         "providers": [{"name": "claude", "runtime_role": "gateway", "connected": True}]}
+
+        class SlowClient:
+            def __init__(self, *, base_url, timeout_s):  # noqa: ARG002
+                timeouts.append(timeout_s)
+
+            def fetch_messages(self, channel_id, *, limit):  # noqa: ARG002
+                clock[0] += 0.8
+                return []
+
+        with patch.object(turn_smoke.cell_driver, "_read_api_json", slow_detail), \
+             patch.object(turn_smoke.cell_driver.discord, "DiscordClient", SlowClient), \
+             redirect_stdout(io.StringIO()):
+            ready, detail = turn_smoke.wait_gateway_ready(
+                base_url=self.base_url, cell="claude-tui", channel_id="222", deadline_s=1.0,
+                clock=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+        self.assertFalse(ready, detail)
+        self.assertIn("not ready after 1.6s", detail)
+        self.assertEqual(timeouts[0], 1.0)
+        self.assertAlmostEqual(timeouts[1], 0.2, places=6)
 
     def test_cli_exits_1_with_one_fail_line_when_not_ready(self):
         self.details = [(False, False)]

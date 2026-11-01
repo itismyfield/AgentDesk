@@ -270,12 +270,16 @@ def wait_gateway_ready(
         try:
             _, detail = cell_driver._read_api_json(base_url, "/api/health/detail", timeout=request_s)  # noqa: SLF001
             observation = gateway_observation(detail, provider=cell_driver.cell_provider(cell))
-            if observation is None:
+            remaining = deadline_s - (clock() - started)
+            if observation is None and remaining > 0:
                 read_started = clock()
-                client = cell_driver.discord.DiscordClient(base_url=base_url, timeout_s=request_s)
+                client = cell_driver.discord.DiscordClient(base_url=base_url, timeout_s=max(0.1, min(10.0, remaining)))
                 client.fetch_messages(channel_id, limit=1)
-                return True, (f"ready after {clock() - started:.1f}s "
-                              f"(gateway connected; Discord read {clock() - read_started:.1f}s)")
+                # A read that answers only after the deadline does not make the gateway ready in time.
+                if clock() - started <= deadline_s:
+                    return True, (f"ready after {clock() - started:.1f}s "
+                                  f"(gateway connected; Discord read {clock() - read_started:.1f}s)")
+                observation = "Discord read answered after the deadline"
         except Exception as error:  # noqa: BLE001 - an unanswered probe is "not ready yet"
             observation = f"{type(error).__name__}: {error}"[:300]
         print(f"gateway-ready waiting {clock() - started:.1f}s: {observation}", flush=True)
@@ -586,7 +590,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "cell-path":
         try:
             print(cell_path(Path(args.config), args.cell, args.channel_id))
-        except (OSError, SmokeConfigError, yaml.YAMLError) as error:
+        except (OSError, ValueError, yaml.YAMLError) as error:
             print(f"{type(error).__name__}: {error}", file=sys.stderr)
             return 2
         return 0
@@ -655,8 +659,10 @@ def main(argv: list[str] | None = None) -> int:
         passed, detail = outcome["classification"] == "PASS", outcome["observed_reason"]
         try:
             path_part = f" path={cell_path(Path(args.config), args.cell, args.channel_id)}"
-        except (OSError, SmokeConfigError, yaml.YAMLError):
-            path_part = " path=unreadable"
+        except (OSError, ValueError, yaml.YAMLError) as error:
+            # A verdict the current configuration cannot be bound to is not a pass.
+            path_part, passed = " path=unreadable", False
+            detail += f"; configured session host unreadable: {type(error).__name__}: {error}"
     print(f"relay {args.scenario} cell={args.cell} result={'pass' if passed else 'FAIL'}{path_part} {detail}")
     return 0 if passed else 1
 
