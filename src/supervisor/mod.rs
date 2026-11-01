@@ -552,8 +552,7 @@ impl RuntimeSupervisor {
         executed: bool,
     ) -> Result<(), String> {
         if let Some(pool) = self.pg_pool.as_ref() {
-            let evidence_json =
-                decision_log_evidence(signal, evidence, chosen_action, executed).to_string();
+            let evidence_json = decision_log_evidence(signal, evidence, chosen_action, executed);
             let signal = signal.to_string();
             let chosen_action = chosen_action.to_string();
             let session_key = session_key.map(str::to_string);
@@ -567,7 +566,8 @@ impl RuntimeSupervisor {
                          VALUES ($1, $2, $3, $4, $5, $6)",
                     )
                     .bind(&signal)
-                    .bind(&evidence_json)
+                    // evidence_json is JSONB: a text bind is rejected, so bind the object as JSON.
+                    .bind(sqlx::types::Json(&evidence_json))
                     .bind(&chosen_action)
                     .bind(SUPERVISOR_ACTOR)
                     .bind(session_key.as_deref())
@@ -884,6 +884,9 @@ impl std::fmt::Display for SupervisorAction {
         }
     }
 }
+
+#[cfg(test)]
+mod decision_log_pg_tests;
 
 #[cfg(test)]
 mod tests {
