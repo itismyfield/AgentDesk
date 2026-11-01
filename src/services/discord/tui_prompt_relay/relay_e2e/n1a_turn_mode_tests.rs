@@ -387,7 +387,7 @@ fn n1c_hook_observed_direct_prompt_in_a_confirmed_channel_posts_its_notice_witho
         h.attach_tmux_watcher(tmux, "n1c-hook-direct.jsonl");
         let turn = crate::services::tui_o::turn_mode::TurnConfig {
             channels: [CHANNEL_ID].into(),
-            all_owned: false,
+            all_owned: Some(false),
         };
         let confirm = crate::services::discord::tui_direct_pending_start::turn_retirement::confirm_turn_channels;
         assert_eq!(

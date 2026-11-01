@@ -62,14 +62,15 @@ body take the channel for that process: it stays on Legacy until the next restar
 1. Add the channel ID to `tui_o.writer.channels` in `agentdesk.yaml` on every node. All nodes must
    carry the same list. Saving the file only marks the change as restart-required.
    Separately select this channel in `tui_o.turn.channels`, keeping `tui_o.turn.all_owned: false`
-   for the single-channel run. Its default is an empty list with `all_owned: false`, so writer
-   selection alone does not confirm turn mode. Verify the effective boot selection on every producer
-   (`src/services/tui_o/turn_mode.rs:8–80`).
+   for the single-channel run. Its default is an empty list with `all_owned` unset, which selects
+   every owned channel, so a single-channel run must name the channel and set `all_owned: false`. Verify the effective boot selection on every producer
+   (`TurnConfig` in `src/services/tui_o/turn_mode.rs`).
 2. Restart the gateway node through the managed restart path. The new list applies at boot only.
 3. Restart any standby or runner node the same way, so no node keeps the old list.
 
-To select every TUI channel at once, set `tui_o.writer.all_tui: true` and leave
-`tui_o.writer.channels` empty or absent; a file with both refuses to load. Every binding in
+Every TUI channel is selected by default: `tui_o.writer.all_tui` unset with `tui_o.writer.channels`
+empty or absent selects them all, as does `all_tui: true`; a file with `all_tui: true` and a list
+refuses to load, and `all_tui: false` with no list selects nothing. Every binding in
 `agents[].channels` that resolves to a Claude or Codex TUI is selected and the rest are skipped.
 Apply it as above: the same file on every node, then managed restarts. No redeploy is needed. Each
 TUI channel is still adopted only through §1 and §3.1; the others stay on Legacy for that process.
@@ -80,7 +81,7 @@ Every node must keep an adopted channel selected for as long as it exists. On th
 with `<runtime_root>/o_store/<channel>/init` (or named by `o_era`) stays on O even when the
 selection drops it, but that only protects the home's own restart. A standby whose selection
 dropped it serves it as an ordinary Legacy channel once it takes the gateway lease, and an empty
-selection (no list and no `all_tui`, or `all_tui` with no TUI binding) turns O off everywhere,
+selection (`all_tui: false` with no list, or no TUI binding) turns O off everywhere,
 committed channels included. Both are unsupported handbacks.
 
 If the home logs `[tui_o] committed channel missing from writer selection` and `/api/health` shows

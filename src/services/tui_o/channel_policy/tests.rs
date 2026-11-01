@@ -86,7 +86,7 @@ fn boot_membership_survives_reload_until_restart() {
 
 fn writer_config(channels: &[u64], cluster: serde_json::Value) -> Config {
     serde_json::from_value(serde_json::json!({
-        "server": {}, "cluster": cluster, "tui_o": {"writer": {"channels": channels}},
+        "server": {}, "cluster": cluster, "tui_o": {"writer": {"channels": channels, "all_tui": false}},
         "agents": [{"id": "w", "name": "W", "channels": {"claude": {"id": "41", "runtime": "tui"}}}],
     }))
     .unwrap()
@@ -530,7 +530,7 @@ fn boot_config(selected: &[u64], registered: &[u64], cluster: serde_json::Value)
     let agents: Vec<_> = registered.iter().map(agent).collect();
     serde_json::from_value(serde_json::json!({
         "server": {}, "cluster": cluster, "agents": agents,
-        "tui_o": {"writer": {"channels": selected}},
+        "tui_o": {"writer": {"channels": selected, "all_tui": false}},
     }))
     .unwrap()
 }

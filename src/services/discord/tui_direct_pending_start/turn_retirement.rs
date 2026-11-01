@@ -8,6 +8,8 @@ use crate::services::tui_o::shadow::tap::TuiOConfig;
 use crate::services::tui_o::turn_mode::TurnConfig;
 use std::path::{Path, PathBuf};
 
+#[path = "turn_retirement/claude.rs"]
+pub(in crate::services::discord) mod claude;
 #[path = "turn_retirement/codex.rs"]
 pub(in crate::services::discord) mod codex;
 
@@ -183,6 +185,21 @@ pub(in crate::services::discord) fn confirm_turn_channels(
     if *provider == ProviderKind::Codex {
         return codex::confirm_codex_channels(config, owned);
     }
+    // A Claude takeover's turn may still run on Legacy; its own task confirms it once it ended.
+    let takeover = |channel| match claude::takeover_source(channel) {
+        Ok(None) => false,
+        taken => {
+            tracing::info!(
+                channel,
+                ?taken,
+                "[tui_o] Claude takeover turn mode waits for its end"
+            );
+            if let Some(config) = config {
+                claude::spawn_confirm(channel, config.clone());
+            }
+            true
+        }
+    };
     let retire = |channel| match retire_channel(provider, channel) {
         Ok(Retirement {
             removed,
@@ -204,6 +221,7 @@ pub(in crate::services::discord) fn confirm_turn_channels(
             false
         }
     };
+    let retire = |channel| !takeover(channel) && retire(channel);
     crate::services::tui_o::turn_mode::confirm_selected(config, owned, retire)
 }
 

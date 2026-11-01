@@ -42,6 +42,20 @@ pub(super) fn append_streamed_text_chunk(full_response: &mut String, content: &s
     // IS the retained prefix, so the record needs no clone of the body on this
     // per-streaming-tick hot path.
     let before_len = full_response.len();
+    compose_streamed_text_chunk(full_response, content);
+    body_mutation_telemetry::observe_body_append(
+        body_mutation_telemetry::BodyMutationSite::AppendStreamedTextChunk,
+        body_mutation_telemetry::BodyMutationCorrelation::unavailable(),
+        before_len,
+        full_response,
+    );
+}
+
+/// The bridge's `Text` composition without telemetry, also replayed to re-derive a bridge body.
+pub(in crate::services::discord) fn compose_streamed_text_chunk(
+    full_response: &mut String,
+    content: &str,
+) {
     if full_response.ends_with("\n\n") && !streamed_text_inside_open_code_fence(full_response) {
         full_response.push_str(content.trim_start_matches('\n'));
     } else if !streamed_text_inside_open_code_fence(full_response)
@@ -55,12 +69,6 @@ pub(super) fn append_streamed_text_chunk(full_response: &mut String, content: &s
     } else {
         full_response.push_str(content);
     }
-    body_mutation_telemetry::observe_body_append(
-        body_mutation_telemetry::BodyMutationSite::AppendStreamedTextChunk,
-        body_mutation_telemetry::BodyMutationCorrelation::unavailable(),
-        before_len,
-        full_response,
-    );
 }
 
 /// #3608: append the tool-use paragraph separator to `full_response`.
@@ -96,9 +104,7 @@ pub(super) fn append_tool_boundary_separator(
         return;
     }
     let before = full_response.clone();
-    let trimmed = full_response.trim_end();
-    full_response.truncate(trimmed.len());
-    full_response.push_str("\n\n");
+    compose_tool_boundary_separator(full_response, false);
     body_mutation_telemetry::observe_body_mutation(
         body_mutation_telemetry::BodyMutationSite::AppendToolBoundarySeparator,
         correlation,
@@ -107,7 +113,22 @@ pub(super) fn append_tool_boundary_separator(
     );
 }
 
-// O's stream representation retains every consumed byte across tool boundaries.
+/// The bridge's `ToolUse` separator without telemetry; O's stream representation retains every
+/// consumed byte across tool boundaries, the trimmed form drops the body's trailing whitespace.
+pub(in crate::services::discord) fn compose_tool_boundary_separator(
+    full_response: &mut String,
+    preserve_progress: bool,
+) {
+    if full_response.is_empty() || (preserve_progress && full_response.ends_with("\n\n")) {
+        return;
+    }
+    if !preserve_progress {
+        let trimmed = full_response.trim_end().len();
+        full_response.truncate(trimmed);
+    }
+    full_response.push_str("\n\n");
+}
+
 pub(super) fn append_tool_boundary_separator_for_stream(
     full_response: &mut String,
     correlation: body_mutation_telemetry::BodyMutationCorrelation<'_>,
@@ -120,7 +141,7 @@ pub(super) fn append_tool_boundary_separator_for_stream(
         return;
     }
     let before = full_response.clone();
-    full_response.push_str("\n\n");
+    compose_tool_boundary_separator(full_response, true);
     body_mutation_telemetry::observe_body_mutation(
         body_mutation_telemetry::BodyMutationSite::AppendToolBoundarySeparator,
         correlation,

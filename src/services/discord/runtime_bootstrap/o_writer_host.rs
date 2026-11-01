@@ -166,8 +166,12 @@ impl HostIo for GatewayHost {
 
     fn late_adopt_enabled(&self) -> bool {
         crate::config_live_reload::current()
-            .map(|config| config.tui_o.as_ref().is_some_and(|o| o.writer.late_adopt))
-            .unwrap_or_else(|| self.boot.as_ref().is_some_and(|o| o.writer.late_adopt))
+            .map(|config| {
+                crate::services::tui_o::channel_policy::tui_o_of(&config)
+                    .writer
+                    .late_adopt()
+            })
+            .unwrap_or_else(|| self.boot.as_ref().is_some_and(|o| o.writer.late_adopt()))
     }
 
     /// Open intake, sessions of other nodes and node overrides.
@@ -381,7 +385,11 @@ fn parts(
             alarms,
             self_id_wait: SELF_ID_WAIT,
             configured_id,
-            turn: config.map(|c| c.turn.clone()).unwrap_or_default(),
+            // Turn edits apply at restart, so a host made later keeps the boot selection.
+            turn: boot.as_ref().map_or_else(
+                || config.map_or_else(TurnConfig::off, |c| c.turn.clone()),
+                |boot| boot.turn().clone(),
+            ),
             #[cfg(test)]
             rest: None,
             boot: config.cloned(),
@@ -434,11 +442,23 @@ pub(super) mod test_host {
             alarms,
             self_id_wait,
             configured_id: configured_id.map(str::to_owned),
-            turn: TurnConfig::default(),
+            turn: TurnConfig::off(),
             rest: None,
             boot: None,
             execution: BTreeMap::new(),
         }
+    }
+
+    /// The Claude gateway host's parts as the boot builds them, posting through `rest` as the
+    /// node clustering configured as `configured_id`.
+    pub(in crate::services::discord::runtime_bootstrap) fn claude_parts(
+        shared: &Arc<SharedData>,
+        rest: Arc<serenity::Http>,
+        configured_id: &str,
+    ) -> host::HostParts<impl HostIo> {
+        let mut parts = parts_with_rest(shared, &ProviderKind::Claude, None, Some(rest));
+        Arc::get_mut(&mut parts.io).unwrap().configured_id = Some(configured_id.to_owned());
+        parts
     }
 }
 
@@ -532,7 +552,7 @@ mod fence_tests {
                 .get()
                 .cloned()
                 .or_else(|| Some("fence-local".into())),
-            turn: TurnConfig::default(),
+            turn: TurnConfig::off(),
             rest: None,
             boot: None,
             execution: BTreeMap::new(),
@@ -601,7 +621,7 @@ mod repost_tests {
                 alarms: Arc::new(AlarmRouter::for_process(None, None)),
                 self_id_wait: Duration::ZERO,
                 configured_id: None,
-                turn: TurnConfig::default(),
+                turn: TurnConfig::off(),
                 rest: None,
                 boot: None,
                 execution: BTreeMap::new(),

@@ -374,7 +374,7 @@ mod windows_tests {
                 root.path(),
                 Ok(&opened),
                 &id,
-                None,
+                (None, None),
                 &SourceHistory::default(),
             ),
             SourceVerdict::Rejected(SourceRejection::IdentityUnavailable)

@@ -15,6 +15,11 @@ use crate::services::claude_tui::hook_server::HookEventKind;
 use crate::services::cluster::stream_relay::SourceFileIdentity;
 use crate::services::tui_prompt_dedupe::binding_events::{HookSignal, SourceId};
 
+mod renumber;
+#[cfg(test)]
+pub(crate) use renumber::boot_time_for_tests;
+use renumber::renumbered;
+
 /// Longest first line read to learn whose transcript a file is.
 const FIRST_RECORD_LIMIT: u64 = 1 << 20;
 
@@ -88,6 +93,8 @@ pub(crate) struct SourceHistory {
 pub(crate) struct Visit {
     pub session: String,
     pub pin: Option<SourceId>,
+    /// Commit time of the record that pinned `pin`.
+    pub pinned_at: Option<DateTime<Utc>>,
     pub since: Option<DateTime<Utc>>,
     pub seen: DateTime<Utc>,
 }
@@ -96,6 +103,8 @@ pub(crate) struct Visit {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Left {
     pub pin: Option<SourceId>,
+    /// Commit time of the record that pinned `pin`.
+    pub pinned_at: Option<DateTime<Utc>>,
     pub left_at: DateTime<Utc>,
 }
 
@@ -212,6 +221,9 @@ pub(crate) enum PinJudgment {
     Recheck,
     /// The pinned file was replaced, rewritten or removed: the pin stays and nothing binds over it.
     Anomaly,
+    /// A stat found the pinned inode on a device renumbered since an earlier boot; only its first
+    /// record can prove it is the pinned file.
+    Renumbered,
     /// A complete first record naming another session, or none.
     Foreign,
     /// Its own first record but no file identity to pin.
@@ -220,25 +232,33 @@ pub(crate) enum PinJudgment {
 
 /// The one rule every hook, restore and registration of a Claude source goes through: a pin on
 /// `session`'s `path` admits only its own file, and without one only a verified first record binds.
+/// `pinned_at` is when the pin was committed; a reboot may renumber only an earlier boot's pin.
 pub(crate) fn judge_pin(
     pin: Option<&SourceId>,
+    pinned_at: Option<DateTime<Utc>>,
     session: &str,
     path: &Path,
     seen: Observation,
 ) -> PinJudgment {
-    use PinJudgment::{Anomaly, Foreign, Pending, Recheck, Unidentified, Unpinned, Verified};
+    use PinJudgment::{
+        Anomaly, Foreign, Pending, Recheck, Renumbered, Unidentified, Unpinned, Verified,
+    };
     let pin = pin.filter(|pin| pin.session_id == session && pin.path == path);
     let pinned_file = pin.map(|pin| (pin.dev, pin.ino));
+    let renumbered = |file| pin.is_some_and(|pin| renumbered(pin, pinned_at, file));
     let (file, first) = match seen {
+        // A checked identity was proven by its own first record.
         Observation::Checked(source) => {
+            let checked = (source.dev, source.ino);
             return match pinned_file {
-                Some(file) if file != (source.dev, source.ino) => Anomaly,
+                Some(file) if file != checked && !renumbered(checked) => Anomaly,
                 _ => Verified(source.clone()),
             };
         }
         Observation::Stat(Ok(file)) => {
             return match pin {
                 Some(pin) if pinned_file == Some(file) => Verified(pin.clone()),
+                Some(_) if renumbered(file) => Renumbered,
                 Some(_) => Anomaly,
                 None => Unpinned,
             };
@@ -260,9 +280,16 @@ pub(crate) fn judge_pin(
         SourceFileIdentity::Unavailable => None,
     };
     let own = matches!(first, FirstRecord::Session(id) if id == session);
+    #[cfg(test)]
+    let renumbered_own = own || n2b_mutant("renumber-skip-first-record");
+    #[cfg(not(test))]
+    let renumbered_own = own;
     match (pin, identity) {
         // A file rewritten or truncated in place keeps its inode, so its first record decides too.
         (Some(pin), Some(file)) if own && pinned_file == Some(file) => Verified(pin.clone()),
+        (Some(pin), Some(file)) if renumbered_own && renumbered(file) => {
+            Verified(renumber::under_new_device(pin, file))
+        }
         (Some(_), _) => Anomaly,
         (None, _) if *first == FirstRecord::NotWritten => Pending,
         (None, _) if !own => Foreign,
@@ -320,7 +347,7 @@ pub(crate) fn verify_claude_source(
     projects_root: &Path,
     opened: Result<&OpenedTranscript, &io::Error>,
     bound: &str,
-    pin: Option<&SourceId>,
+    (pin, pinned_at): (Option<&SourceId>, Option<DateTime<Utc>>),
     history: &SourceHistory,
 ) -> SourceVerdict {
     use SourceVerdict::{Anomaly, PendingConflict, Rejected};
@@ -334,7 +361,7 @@ pub(crate) fn verify_claude_source(
         if pin.is_some_and(|pin| pin.path != hook.transcript_path) {
             return Anomaly;
         }
-        return judged(pin, hook, seen, true);
+        return judged((pin, pinned_at), hook, seen, true);
     }
     if let Some(left) = history.left.get(session) {
         let older = published.is_some_and(|t| history.bounds(left).iter().any(|b| t <= *b));
@@ -352,7 +379,13 @@ pub(crate) fn verify_claude_source(
         if !proven {
             return PendingConflict;
         }
-        return judged(left.pin.as_ref(), hook, seen, false);
+        let pinned_at = left.pinned_at;
+        #[cfg(test)]
+        let pinned_at = match n2b_mutant("renumber-left-at") {
+            true => Some(left.left_at),
+            false => pinned_at,
+        };
+        return judged((left.pin.as_ref(), pinned_at), hook, seen, false);
     }
     let awaited = (history.awaiting.as_ref()).is_some_and(|waiting| waiting.session == session);
     let moved = [&history.current, &history.awaiting].into_iter().flatten();
@@ -378,7 +411,7 @@ pub(crate) fn verify_claude_source(
     };
     #[cfg(test)]
     let background = background && !n2b_mutant("u10-off");
-    match judged(None, hook, seen, false) {
+    match judged((None, None), hook, seen, false) {
         SourceVerdict::Rotate(_)
             if !awaited && background && published.is_some() && !since.is_empty() =>
         {
@@ -395,13 +428,19 @@ pub(crate) fn verify_claude_source(
 
 /// What `pin`, the bound session's or the one a left session had, makes of the hook's file.
 fn judged(
-    pin: Option<&SourceId>,
+    (pin, pinned_at): (Option<&SourceId>, Option<DateTime<Utc>>),
     hook: &ClaudeHookSource,
     seen: Observation,
     bound: bool,
 ) -> SourceVerdict {
     use SourceVerdict::{Anomaly, Confirm, Current, Pending, Recheck, Rejected, Rotate};
-    match judge_pin(pin, &hook.session_id, &hook.transcript_path, seen) {
+    match judge_pin(
+        pin,
+        pinned_at,
+        &hook.session_id,
+        &hook.transcript_path,
+        seen,
+    ) {
         PinJudgment::Verified(id) if bound && pin == Some(&id) => Current,
         PinJudgment::Verified(id) => {
             #[cfg(unix)]
@@ -423,7 +462,8 @@ fn judged(
             }
         }
         PinJudgment::Pending | PinJudgment::Unpinned => Pending,
-        PinJudgment::Recheck => Recheck,
+        // An opened file is judged by its first record, so a stat-only renumber never comes here.
+        PinJudgment::Recheck | PinJudgment::Renumbered => Recheck,
         PinJudgment::Anomaly => Anomaly,
         PinJudgment::Foreign => Rejected(SourceRejection::FirstRecordMismatch),
         PinJudgment::Unidentified => Rejected(SourceRejection::IdentityUnavailable),
@@ -570,7 +610,15 @@ mod tests {
         let left_at = DateTime::<Utc>::UNIX_EPOCH;
         let left = rest.iter().map(|source| {
             let pin = source.source_id();
-            (source.session_id.clone(), Left { pin, left_at })
+            let pinned_at = None;
+            (
+                source.session_id.clone(),
+                Left {
+                    pin,
+                    pinned_at,
+                    left_at,
+                },
+            )
         });
         let history = SourceHistory {
             left: left.collect(),
@@ -578,7 +626,7 @@ mod tests {
         };
         let pin = bound.and_then(ClaudeSource::source_id);
         let bound = bound.map_or("", |bound| bound.session_id.as_str());
-        verify_claude_source(hook, root, opened, bound, pin.as_ref(), &history)
+        verify_claude_source(hook, root, opened, bound, (pin.as_ref(), None), &history)
     }
 
     /// Opens the payload's file and applies the verdict to the history as the binding would.
