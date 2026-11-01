@@ -276,6 +276,13 @@ pub(super) fn execute(
     start
         .spend(&target, turn.prompt, &turn.cancel)
         .map_err(|refusal| format!("replay start refused: {refusal:?}"))?;
+    // The session comes back from Herdr first, then the owner or the driver runs it on tmux under
+    // a clearance that tears nothing down.
+    let (tmux, returned, mut turn) = (TurnHost::Tmux, TeardownClearance::Returned, turn);
+    if let TurnHost::Return(plan) = turn.host {
+        return_to_tmux(&turn, plan)?;
+        (turn.host, turn.teardown) = (&tmux, Some(&returned));
+    }
     #[cfg(unix)]
     if let Some(owner) = owner {
         return owner_input::execute_owned(turn, sender, owner);
@@ -304,18 +311,9 @@ fn drive(turn: StreamingTurn<'_>, sender: Sender<StreamMessage>) -> Result<(), S
                 herdr_turn(&turn, plan, sender)
             });
         }
-        // The session comes back from Herdr, then runs on tmux under a clearance that tears
-        // nothing down.
-        TurnHost::Return(plan) => return_to_tmux(&turn, plan)?,
+        // `execute` brings a returning session back before any driver runs.
+        TurnHost::Return(_) => return Err("herdr return: not returned before the turn".into()),
     }
-    let returned = TeardownClearance::Returned;
-    let turn = match turn.host {
-        TurnHost::Return(_) => StreamingTurn {
-            teardown: Some(&returned),
-            ..turn
-        },
-        _ => turn,
-    };
     #[cfg(test)]
     count_dispatch(turn.channel_id)?;
     #[cfg(test)]

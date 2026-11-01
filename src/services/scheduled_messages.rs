@@ -54,7 +54,7 @@ pub(crate) const LEASE_SECS: i64 = 120;
 /// late live turn cannot race a second user-visible delivery.
 const AGENT_COMPLETION_TIMEOUT_SECS: i64 = 1800;
 const RUNTIME_DEFER_SECS: i64 = 15;
-const OUTBOX_SOURCE: &str = "scheduled_message";
+pub(crate) const OUTBOX_SOURCE: &str = "scheduled_message";
 
 // ── Scheduler loop ──────────────────────────────────────────────────────────
 

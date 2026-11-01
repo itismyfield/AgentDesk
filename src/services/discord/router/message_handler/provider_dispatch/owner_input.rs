@@ -528,7 +528,7 @@ fn take_owned(
         TurnHost::Tmux => "tmux",
         TurnHost::Herdr(_) => "herdr",
         TurnHost::Refused(refusal) => return Some(Taken::Done(Err(refusal.to_string()))),
-        // Only the legacy driver brings a session back from Herdr; the owner writes nothing first.
+        // `execute` brings a returning session back first; one still returning is never written.
         TurnHost::Return(_) => return Some(Taken::Done(Err("NotSent(\"host_returning\")".into()))),
     };
     let route = target::route(
