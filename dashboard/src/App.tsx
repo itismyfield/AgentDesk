@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { KanbanCard, WSEvent } from "./types";
 import { onApiError } from "./api/client";
 import { KanbanProvider } from "./contexts/KanbanContext";
-import { OfficeProvider } from "./contexts/OfficeContext";
+import { WorkspaceProvider } from "./contexts/WorkspaceContext";
 import { SettingsProvider } from "./contexts/SettingsContext";
 import { useNotifications } from "./components/NotificationCenter";
 import { useDashboardSocket } from "./app/useDashboardSocket";
@@ -11,7 +11,6 @@ import {
   dashboardBootstrapQueryKey,
   fetchDashboardBootstrap,
 } from "./app/bootstrapQuery";
-import { warmStatsEntryCache } from "./app/statsWarmup";
 import AppShell from "./app/AppShell";
 import { useI18n } from "./i18n";
 
@@ -26,18 +25,14 @@ export default function App() {
   useEffect(() => {
     const lastFired = new Map<string, number>();
     onApiError((url, error) => {
-      // #2050 P3 finding 23 — normalize throttle key to endpoint without
-      // query so the same base path under different filters shares a
-      // throttle slot. Previously /api/dispatches?status=A and
-      // /api/dispatches?status=B were independent keys, allowing a single
-      // server outage to flood the toast stack.
+      // Throttle per endpoint (query stripped) so one outage can't flood toasts.
       const apiPath = url.replace(/^\/api\//, "");
       const throttleKey = url.replace(/\?.*$/, "");
       const now = Date.now();
       const last = lastFired.get(throttleKey) ?? 0;
       if (now - last < 3000) return;
       lastFired.set(throttleKey, now);
-      pushNotification(`API error: ${apiPath} - ${error.message}`, "error");
+      pushNotification(`API 오류: ${apiPath} - ${error.message}`, "error");
     });
     return () => onApiError(null);
   }, [pushNotification]);
@@ -46,7 +41,7 @@ export default function App() {
     if (event.type === "kanban_card_created") {
       const card = event.payload as KanbanCard;
       if (card.status === "requested") {
-        pushNotification(`칸반 요청 발사: ${card.title}`, "info");
+        pushNotification(`새 작업 접수: ${card.title}`, "info");
       }
     }
   };
@@ -54,11 +49,6 @@ export default function App() {
   const { wsConnected, lastEventTs } = useDashboardSocket(handleWsEvent);
   const { t } = useI18n();
   const data = bootstrapQuery.data;
-
-  useEffect(() => {
-    if (!data) return undefined;
-    return warmStatsEntryCache();
-  }, [data]);
 
   if (!data) {
     return (
@@ -77,24 +67,17 @@ export default function App() {
   }
 
   return (
-    <OfficeProvider
+    <WorkspaceProvider
       initialAgents={data.agents}
-      initialAllAgents={data.allAgents}
       initialDepartments={data.departments}
-      initialAllDepartments={data.allDepartments}
       initialSessions={data.sessions}
-      initialRoundTableMeetings={data.roundTableMeetings}
-      initialAuditLogs={data.auditLogs}
       pushNotification={pushNotification}
     >
       <SettingsProvider
         initialSettings={data.settings}
         initialStats={data.stats}
       >
-        <KanbanProvider
-          initialCards={data.kanbanCards}
-          initialDispatches={data.taskDispatches}
-        >
+        <KanbanProvider>
           <AppShell
             wsConnected={wsConnected}
             wsLastEventTs={lastEventTs}
@@ -105,6 +88,6 @@ export default function App() {
           />
         </KanbanProvider>
       </SettingsProvider>
-    </OfficeProvider>
+    </WorkspaceProvider>
   );
 }

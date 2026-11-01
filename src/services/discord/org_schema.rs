@@ -4,7 +4,6 @@ use std::fs;
 use poise::serenity_prelude::ChannelId;
 use serde::Deserialize;
 
-use super::meeting::{MeetingAgentConfig, MeetingConfig, SummaryAgentConfig, SummaryAgentRule};
 use super::runtime_store::org_schema_path;
 use super::settings::{
     MemoryConfigOverride, RegisteredChannelBinding, RoleBinding, resolve_memory_settings,
@@ -44,7 +43,6 @@ pub(super) struct OrgSchema {
     pub skills_root: Option<String>,
     pub agents: HashMap<String, AgentDef>,
     pub channels: Option<ChannelsConfig>,
-    pub meeting: Option<MeetingDef>,
     pub suffix_map: Option<HashMap<String, String>>,
     #[serde(default)]
     pub provider_auth_profiles: Option<HashMap<String, ProviderAuthProfileDef>>,
@@ -56,12 +54,6 @@ pub(super) struct OrgSchema {
 pub(super) struct AgentDef {
     pub display_name: String,
     pub prompt_file: Option<String>,
-    pub keywords: Option<Vec<String>>,
-    pub domain_summary: Option<String>,
-    pub strengths: Option<Vec<String>>,
-    pub task_types: Option<Vec<String>>,
-    pub anti_signals: Option<Vec<String>>,
-    pub provider_hint: Option<String>,
     pub provider: Option<String>,
     pub model: Option<String>,
     pub workspace: Option<String>,
@@ -99,33 +91,6 @@ pub(super) struct ChannelBinding {
 pub(super) struct ChannelsByName {
     pub enabled: Option<bool>,
     pub mappings: Option<HashMap<String, ChannelBinding>>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct MeetingDef {
-    pub channel_name: String,
-    pub max_rounds: Option<u32>,
-    pub max_participants: Option<usize>,
-    pub summary_agent: Option<SummaryAgentDef>,
-    /// Explicit list of agent role_ids eligible for meetings.
-    /// When omitted, all agents in the schema are eligible.
-    pub available_agents: Option<Vec<String>>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-pub(super) enum SummaryAgentDef {
-    Static(String),
-    Dynamic {
-        rules: Option<Vec<SummaryRuleDef>>,
-        default: String,
-    },
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct SummaryRuleDef {
-    pub keywords: Vec<String>,
-    pub agent: String,
 }
 
 // ─── Loading ────────────────────────────────────────────────────────────────
@@ -739,87 +704,6 @@ pub(super) fn load_shared_prompt_path() -> Option<String> {
             let legacy = root.join("_shared.md");
             legacy.exists().then(|| legacy.display().to_string())
         })
-}
-
-pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
-    let schema = load_org_schema()?;
-    let meeting_def = schema.meeting.as_ref()?;
-
-    let summary_agent = match &meeting_def.summary_agent {
-        Some(SummaryAgentDef::Static(agent)) => SummaryAgentConfig::Static(agent.clone()),
-        Some(SummaryAgentDef::Dynamic { rules, default }) => {
-            let parsed_rules = rules
-                .as_ref()
-                .map(|rs| {
-                    rs.iter()
-                        .map(|r| SummaryAgentRule {
-                            keywords: r.keywords.clone(),
-                            agent: r.agent.clone(),
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            SummaryAgentConfig::Dynamic {
-                rules: parsed_rules,
-                default: default.clone(),
-            }
-        }
-        None => return None,
-    };
-
-    let prompts_root = schema.prompts_root.as_deref().map(expand_tilde);
-    // Use explicit meeting.available_agents as-is when present. Only absence
-    // falls back to the full registry.
-    let eligible_agents: Box<dyn Iterator<Item = (&String, &AgentDef)>> =
-        if let Some(explicit_list) = meeting_def.available_agents.as_ref() {
-            Box::new(
-                schema
-                    .agents
-                    .iter()
-                    .filter(|(role_id, _)| explicit_list.contains(role_id)),
-            )
-        } else {
-            Box::new(schema.agents.iter())
-        };
-    let available_agents: Vec<MeetingAgentConfig> = eligible_agents
-        .map(|(role_id, def)| {
-            let prompt_file = def
-                .prompt_file
-                .as_deref()
-                .map(expand_tilde)
-                .or_else(|| {
-                    prompts_root
-                        .as_ref()
-                        .map(|root| format!("{}/agents/{}/IDENTITY.md", root, role_id))
-                })
-                .unwrap_or_default();
-            MeetingAgentConfig {
-                role_id: role_id.clone(),
-                display_name: def.display_name.clone(),
-                keywords: def.keywords.clone().unwrap_or_default(),
-                prompt_file,
-                domain_summary: def.domain_summary.clone(),
-                strengths: def.strengths.clone().unwrap_or_default(),
-                task_types: def.task_types.clone().unwrap_or_default(),
-                anti_signals: def.anti_signals.clone().unwrap_or_default(),
-                provider_hint: def.provider_hint.clone().or_else(|| def.provider.clone()),
-                provider: def.provider.as_deref().and_then(ProviderKind::from_str),
-                model: def.model.clone(),
-                reasoning_effort: None,
-                workspace: def.workspace.as_deref().map(expand_tilde),
-                peer_agents_enabled: def.peer_agents.unwrap_or(true),
-                memory: resolve_memory_settings(def.memory.as_ref(), None),
-            }
-        })
-        .collect();
-
-    Some(MeetingConfig {
-        channel_name: meeting_def.channel_name.clone(),
-        max_rounds: meeting_def.max_rounds.unwrap_or(3),
-        max_participants: meeting_def.max_participants.unwrap_or(5),
-        summary_agent,
-        available_agents,
-    })
 }
 
 pub(super) fn list_registered_channel_bindings() -> Vec<RegisteredChannelBinding> {

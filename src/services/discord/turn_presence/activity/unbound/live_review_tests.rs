@@ -943,7 +943,6 @@ async fn hosted_row_during_publication_inventory(kind: Changed, id: u64) {
         has_reply_boundary: false,
         merge_consecutive: false,
         pending_uploads: Vec::new(),
-        voice_announcement: None,
     };
     let context = crate::services::discord::queue_persistence_context(
         &rig.shared,

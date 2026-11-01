@@ -598,21 +598,6 @@ pub(super) fn metadata_silent_flag(metadata: Option<&serde_json::Value>) -> bool
         .unwrap_or(false)
 }
 
-pub(super) fn metadata_turn_source(
-    source: Option<&str>,
-    metadata: Option<&serde_json::Value>,
-) -> crate::dispatch::Source {
-    source
-        .and_then(crate::dispatch::Source::from_label)
-        .or_else(|| {
-            metadata
-                .and_then(|value| value.get("source").or_else(|| value.get("turn_source")))
-                .and_then(serde_json::Value::as_str)
-                .and_then(crate::dispatch::Source::from_label)
-        })
-        .unwrap_or_default()
-}
-
 pub(super) fn normalize_delivery_bot_name(value: &str) -> Option<String> {
     let value = value.trim();
     if value.is_empty()

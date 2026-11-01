@@ -417,7 +417,8 @@ fn owner_host_boot_wires_every_runtime_role_without_native_end_on_transport_loss
     let boot = include_str!("../../../runtime_bootstrap.rs");
     let spawn = "o_writer_host::spawn_execution(&shared, &provider, Some(tui_o));";
     assert!(
-        boot[boot.find("if !modules.gateway {").unwrap()..boot.find("let voice_receiver").unwrap()]
+        boot[boot.find("if !modules.gateway {").unwrap()
+            ..boot.find("let mut handback_breaker").unwrap()]
             .contains(spawn)
     );
     assert!(

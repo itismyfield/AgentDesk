@@ -27,7 +27,6 @@ fn user_intervention(id: u64, text: &str) -> Intervention {
         has_reply_boundary: false,
         merge_consecutive: false,
         pending_uploads: Vec::new(),
-        voice_announcement: None,
     }
 }
 
@@ -376,7 +375,6 @@ async fn c1_actor_unreachable_race_loss_clears_only_matching_pending_attempt() {
         false,
         false,
         &[],
-        &None,
         false,
         &None,
         Some(attempt),

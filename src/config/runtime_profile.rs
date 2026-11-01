@@ -15,7 +15,6 @@ pub enum RuntimeProfile {
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 pub struct RuntimeModulePlan {
     pub gateway: bool,
-    pub voice: bool,
     pub dashboard: bool,
     pub admin_api: bool,
     #[serde(rename = "leader_services")]
@@ -35,7 +34,6 @@ impl RuntimeProfile {
         let full = self.is_full();
         RuntimeModulePlan {
             gateway: full,
-            voice: full,
             dashboard: full,
             admin_api: full,
             hub_services: full,
@@ -118,7 +116,7 @@ mod tests {
         assert!(cluster.runtime_profile.validate(&cluster).is_ok());
         assert_eq!(
             serde_json::to_value(cluster.runtime_profile.modules()).unwrap(),
-            serde_json::json!({"gateway":false,"voice":false,"dashboard":false,"admin_api":false,"leader_services":false})
+            serde_json::json!({"gateway":false,"dashboard":false,"admin_api":false,"leader_services":false})
         );
         cluster.role = ClusterRole::Auto;
         assert!(cluster.runtime_profile.validate(&cluster).is_err());

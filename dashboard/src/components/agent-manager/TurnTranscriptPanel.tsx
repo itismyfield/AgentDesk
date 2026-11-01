@@ -212,7 +212,7 @@ export default function TurnTranscriptPanel({
               ? tr("복사됨", "Copied")
               : copyState === "error"
                 ? tr("복사 실패", "Copy failed")
-                : tr("Copy all", "Copy all")}
+                : tr("전체 복사", "Copy all")}
           </button>
         </div>
       </div>

@@ -16,9 +16,7 @@ mod claude_stop_delivery;
 mod claude_stop_identity;
 mod claude_stop_pane;
 mod native_stop;
-pub(in crate::services::discord) use native_stop::{
-    NativeStop, empty as empty_native_stop, protected as native_preserve_stop,
-};
+pub(in crate::services::discord) use native_stop::NativeStop;
 #[cfg(unix)]
 mod codex_stop_delivery;
 mod interrupt_policy;

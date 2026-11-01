@@ -26,13 +26,10 @@ async fn legacy_actual_component_text_and_startup_preserve_results_without_conse
         ctx.cache.current_user().id.get(),
     ));
     let shared = crate::services::discord::make_shared_data_for_tests();
-    let voice_config = crate::voice::VoiceConfig::default();
     let data = Data {
         shared: shared.clone(),
         token: "test-token".into(),
         provider: ProviderKind::Claude,
-        voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
-        voice_config,
     };
     let reads = STORE_READS.load(Ordering::SeqCst);
     let clicks = [
@@ -206,13 +203,10 @@ async fn actual_component_owner_guard_precedes_store_for_allowed_allowall_and_mi
         ctx.cache.current_user().id.get(),
     ));
     let shared = crate::services::discord::make_shared_data_for_tests();
-    let voice_config = crate::voice::VoiceConfig::default();
     let data = Data {
         shared: shared.clone(),
         token: "test-token".into(),
         provider: ProviderKind::Claude,
-        voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
-        voice_config,
     };
     let component = component_fixture("hresume:v1:owner_guard_fixture:yes");
     let reads = STORE_READS.load(Ordering::SeqCst);
@@ -298,13 +292,10 @@ async fn actual_component_rejects_stale_nonce_and_wrong_message_before_peer_or_a
     let mut clicked = component_fixture("hresume:v1:stale_nonce:yes");
     let actor = clicked.user.id.get();
     shared.settings.write().await.owner_user_id = Some(actor);
-    let voice_config = crate::voice::VoiceConfig::default();
     let data = Data {
         shared,
         token: "test-token".into(),
         provider: ProviderKind::Claude,
-        voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
-        voice_config,
     };
     let config = root.path().join("config.toml");
     let snapshot = store()
@@ -496,7 +487,7 @@ async fn actual_owner_retry_card_apply_and_duplicate_use_one_original_mailbox_pa
     let _peer = ScopedPeer(previous);
     let fixture_config = crate::runtime_layout::config_file_path(runtime.path());
     std::fs::create_dir_all(fixture_config.parent().unwrap()).unwrap();
-    std::fs::write(&fixture_config,serde_json::to_vec(&json!({"server":{},"agents":[{"id":"service-consent","name":"Consent fixture","provider":"claude","voice_enabled":false,"channels":{"claude":{"id":discord_mock::CHANNEL_ID.to_string(),"name":"service-consent-cc","workspace":config_dir.path(),"runtime":"tui"}}}]})).unwrap()).unwrap();
+    std::fs::write(&fixture_config,serde_json::to_vec(&json!({"server":{},"agents":[{"id":"service-consent","name":"Consent fixture","provider":"claude","channels":{"claude":{"id":discord_mock::CHANNEL_ID.to_string(),"name":"service-consent-cc","workspace":config_dir.path(),"runtime":"tui"}}}]})).unwrap()).unwrap();
     let _config = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_CONFIG",
         &fixture_config,
@@ -560,7 +551,6 @@ async fn actual_owner_retry_card_apply_and_duplicate_use_one_original_mailbox_pa
         has_reply_boundary: true,
         merge_consecutive: false,
         pending_uploads: Vec::new(),
-        voice_announcement: None,
     };
     let enqueued = shared
         .mailbox(message.channel_id)
@@ -644,13 +634,10 @@ async fn actual_owner_retry_card_apply_and_duplicate_use_one_original_mailbox_pa
             })
         },
     ));
-    let voice_config = crate::voice::VoiceConfig::default();
     let data = Data {
         shared: shared.clone(),
         token: "test-token".into(),
         provider: ProviderKind::Claude,
-        voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
-        voice_config,
     };
     let retry_result = crate::services::discord::commands::handle_text_command(
         &ctx,
@@ -1042,7 +1029,6 @@ async fn actual_applied_startup_keeps_failed_consent_retryable_and_releases_late
                     has_reply_boundary: false,
                     merge_consecutive: false,
                     pending_uploads: Vec::new(),
-                    voice_announcement: None,
                 },
                 QueuePersistenceContext::new(&provider, &shared.token_hash, None),
             )
@@ -1226,7 +1212,6 @@ async fn actual_held_boot_channel_replays_only_its_applied_consent_once_after_me
                 has_reply_boundary: false,
                 merge_consecutive: false,
                 pending_uploads: Vec::new(),
-                voice_announcement: None,
             }],
             None,
         )

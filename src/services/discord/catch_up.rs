@@ -202,12 +202,7 @@ fn catch_up_candidate_allowed_for_bot(
     if candidate.disk_checkpoint.is_some()
         || scan_progress::has_file(provider, candidate.channel_id)
     {
-        return settings::bot_settings_allow_channel(
-            settings,
-            provider,
-            candidate.channel_id,
-            false,
-        );
+        return settings::bot_settings_allow_channel(settings, candidate.channel_id, false);
     }
 
     settings::validate_bot_channel_routing(
@@ -1507,7 +1502,6 @@ mod catch_up_recovery_tests {
                     has_reply_boundary: false,
                     merge_consecutive: false,
                     pending_uploads: Vec::new(),
-                    voice_announcement: None,
                 },
             )
             .await;

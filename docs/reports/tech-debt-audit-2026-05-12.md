@@ -2,6 +2,7 @@
 
 <!-- doc-path-refs: removed src/server/routes/routes_tests.rs src/integration_tests.rs src/services/onboarding.rs src/server/auth.rs policies/merge-automation.js -->
 <!-- doc-path-refs: proposed watchdog_prealert.rs tmux_stall_detection.rs envvars.rs tmux_output_parser.rs migrations/POLICY.md -->
+<!-- doc-path-refs: removed src/voice src/voice/commands.rs src/voice/metrics.rs src/voice/receiver.rs src/voice/stt.rs src/voice/tts/edge.rs src/voice/tts/mod.rs src/services/discord/voice_barge_in/runtime_lifecycle.rs src/services/discord/voice_barge_in/stt.rs -->
 
 > 2026-10-25 주: 2026-05-12 시점 기록이다. 그 뒤 삭제된 파일과 제안만 되고 만들어지지 않은 파일은 이 문서 머리의 `doc-path-refs` 주석에 적었다.
 
@@ -201,7 +202,7 @@
 | `policies/auto-queue.js` | 1,582 | Phase gate + dispatch + lifecycle + error recovery | phase-gate-verdict / dispatch-activation / lifecycle / error-recovery | P0 |
 | `policies/merge-automation.js` | 2,501 | PR merge check + conflict + GitHub API + Discord notify | github-pr-adapter / merge-conflict-resolver / notification-dispatcher | P0 |
 | `dashboard/src/components/SettingsView.tsx` | 3,832 | UI + API + validation + state + persistence | `SettingsForm` / `SettingsValidator` / `useSettingsPersistence` | P1 |
-| `dashboard/src/components/agent-manager/KanbanTab.tsx` | 3,882 | Kanban + card + dispatch + timeline + auto-queue panel | `KanbanBoardController` / `CardEditor` / `DispatchTracker` / `TimelineRenderer` | P1 |
+| `dashboard/src/components/agent-manager/KanbanTab.tsx` (removed) | 3,882 | Kanban + card + dispatch + timeline + auto-queue panel | `KanbanBoardController` / `CardEditor` / `DispatchTracker` / `TimelineRenderer` | P1 |
 | `scripts/deploy-release.sh` | 1,048 | Build + sign + copy + health-check + cluster + manifest + cleanup | `binary-signer` / `artifact-promoter` / `health-verifier` / `cluster-deployer` | P1 |
 
 **핵심 부채:** 정책 파일 26개에서 `agentdesk.db.query()` 126회 직접 호출 (DB facade 부재), `deploy.sh`/`deploy-release.sh` 중복 로직, 하드코딩 (`com.itismyfield.agentdesk`, `$HOME/ObsidianVault/...`), e2e 테스트가 정책/대시보드 배포 검증 안 함.

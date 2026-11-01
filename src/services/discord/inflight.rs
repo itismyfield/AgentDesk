@@ -287,7 +287,6 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::InflightRestartMode;
 use super::runtime_store::{discord_inflight_root, sync_removed};
-use crate::dispatch::Source;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 // #3552: short alias for the invariant-severity hint forwarded to observability.
 use crate::services::observability::InvariantSeverity as ObsSeverity;
@@ -304,10 +303,10 @@ use crate::services::provider::ProviderKind;
 // FIX #6 (Codex P2): bump v8→v9. v9 persists the originating Intervention's
 // follow-up requeue context (`followup_reply_context`,
 // `followup_has_reply_boundary`, `followup_merge_consecutive`,
-// `followup_pending_uploads`, `followup_voice_announcement`) so a follow-up
+// `followup_pending_uploads`) so a follow-up
 // that hit a PRE-submit busy-timeout with requeue enabled can rebuild the
 // retry Intervention faithfully instead of dropping its attachments / reply
-// context / voice metadata. All five fields are `#[serde(default)]`, so v8 rows
+// context. All these fields are `#[serde(default)]`, so v8 rows
 // (and rows written by binaries that pre-date this field) still deserialize and
 // simply yield empty/None — no recovery regression, full compat each direction.
 const INFLIGHT_STATE_VERSION: u32 = 9;
@@ -1122,19 +1121,6 @@ mod stall_recovery_tests {
             Some("/tmp/in.fifo".to_string()),
             0,
         );
-        let announcement = crate::voice::prompt::VoiceTranscriptAnnouncement {
-            transcript: "전투 시스템 고쳐줘".to_string(),
-            user_id: "7".to_string(),
-            utterance_id: "utt-1".to_string(),
-            language: "ko".to_string(),
-            verbose_progress: false,
-            started_at: None,
-            completed_at: None,
-            samples_written: None,
-            control_channel_id: None,
-            stt_mode: None,
-            stt_latency_ms: None,
-        };
         state.set_followup_requeue_context(
             Some("quoted reply context".to_string()),
             true,
@@ -1147,7 +1133,6 @@ mod stall_recovery_tests {
                     "upload://b.png",
                 ),
             ],
-            Some(announcement.clone()),
             true,
         );
 
@@ -1171,7 +1156,6 @@ mod stall_recovery_tests {
                 )
             ]
         );
-        assert_eq!(loaded[0].followup_voice_announcement, Some(announcement));
         assert!(loaded[0].followup_preserve_on_cancel);
 
         // A JSON row that omits the new fields entirely (legacy v8 / pre-field
@@ -1182,7 +1166,6 @@ mod stall_recovery_tests {
         obj.remove("followup_has_reply_boundary");
         obj.remove("followup_merge_consecutive");
         obj.remove("followup_pending_uploads");
-        obj.remove("followup_voice_announcement");
         obj.remove("followup_preserve_on_cancel");
         let legacy: InflightTurnState =
             serde_json::from_value(value).expect("legacy row must deserialize");
@@ -1190,7 +1173,6 @@ mod stall_recovery_tests {
         assert!(!legacy.followup_has_reply_boundary);
         assert!(!legacy.followup_merge_consecutive);
         assert!(legacy.followup_pending_uploads.is_empty());
-        assert_eq!(legacy.followup_voice_announcement, None);
         assert!(!legacy.followup_preserve_on_cancel);
     }
 

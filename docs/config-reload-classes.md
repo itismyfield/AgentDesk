@@ -37,33 +37,6 @@ seconds with content comparison, independently of native filesystem notification
 | `discord.owner_id` | restart | `src/services/discord/settings/read.rs` load_bot_settings (owner_user_id into SharedData.settings) |
 | `discord.scheduled_message_required_mention_user_ids` | restart | `src/server/routes/scheduled_messages/discord_mentions.rs` required_from_state (AppState.config) |
 | `providers` | restart | `src/services/provider_hosting.rs` install_provider_hosting_config (process-global map) |
-| `voice.enabled` | restart | `src/services/discord/voice_barge_in/runtime_lifecycle.rs` VoiceBargeInRuntime::from_voice_config (runtime_bootstrap.rs:run_bot) |
-| `voice.verbose_progress` | restart | `src/services/discord/voice_barge_in/runtime_lifecycle.rs` VoiceBargeInRuntime::from_voice_config (AtomicBool) |
-| `voice.audio.recordings_dir` | restart | `src/voice/receiver.rs` VoiceReceiverConfig::from_voice_config (runtime_bootstrap/voice.rs:run_bot_init_voice_workers) |
-| `voice.audio.transcripts_dir` | restart | `src/services/discord/voice_barge_in/utility.rs` transcript_dirs_from_config (via from_voice_config) |
-| `voice.audio.tts_cache_dir` | live | `src/voice/config.rs` VoiceAudioDirs (no daemon reader) |
-| `voice.audio.temp_dir` | restart | `src/server/worker_registry/registry.rs` start_worker (MaintenanceScheduler voice_cache_sweep::Config::from_voice_config) |
-| `voice.stt` | restart | `src/services/discord/voice_barge_in/runtime_lifecycle.rs` VoiceBargeInRuntime::from_voice_config (VoiceSttRuntime::from_voice_config) |
-| `voice.tts` | restart | `src/services/discord/voice_barge_in/runtime_lifecycle.rs` VoiceBargeInRuntime::from_voice_config (TtsRuntime::from_voice_config) |
-| `voice.thresholds.speech_start_db` | restart | `src/voice/stt.rs` SttConfig::from_voice_config (via VoiceSttRuntime at boot) |
-| `voice.idle.segment_idle_ms` | restart | `src/voice/receiver.rs` VoiceReceiverConfig::from_voice_config |
-| `voice.idle.utterance_idle_ms` | restart | `src/voice/receiver.rs` VoiceReceiverConfig::from_voice_config |
-| `voice.idle.channel_idle_disconnect_secs` | live | `src/voice/config.rs` VoiceIdleTimings (no daemon reader) |
-| `voice.idle.wake_listen_window_secs` | live | `src/voice/config.rs` VoiceIdleTimings (no daemon reader) |
-| `voice.barge_in` | restart | `src/services/discord/voice_barge_in/runtime_lifecycle.rs` VoiceBargeInRuntime::from_voice_config |
-| `voice.wake_words` | restart | `src/services/discord/voice_barge_in/runtime_lifecycle.rs` VoiceBargeInRuntime::from_voice_config (voice_config_state RwLock) |
-| `voice.allowed_user_ids` | restart | `src/voice/receiver.rs` VoiceReceiverConfig::from_voice_config |
-| `voice.lobby_channel_id` | restart | `src/services/discord/runtime_bootstrap/voice.rs` run_bot_spawn_voice_auto_join (auto_join_channel_ids_with_lobby) |
-| `voice.active_agent_ttl_seconds` | live | `src/voice/commands.rs` resolve_voice_lobby_route (cached_config from voice_barge_in/routing.rs:resolve_voice_turn_target) |
-| `voice.foreground.provider` | live | `src/services/discord/voice_barge_in/routing.rs` resolve_effective_foreground_config (cached_config 5s TTL) |
-| `voice.foreground.model` | live | `src/services/discord/voice_barge_in/routing.rs` resolve_effective_foreground_config |
-| `voice.foreground.max_chars` | live | `src/services/discord/voice_barge_in/routing.rs` resolve_effective_foreground_config |
-| `voice.foreground.timeout_ms` | live | `src/services/discord/voice_barge_in/routing.rs` resolve_effective_foreground_config |
-| `voice.conductor.max_wait_secs` | live | `src/server/routes/voice_conductor.rs` say (live_voice_config reads the validated snapshot) -> services/voice_conductor.rs:gather |
-| `voice.spoken_result.max_chars` | live | `src/services/discord/voice_barge_in/final_result_playback.rs` spawn_spoken_result_playback (cached_config) |
-| `voice.default_sensitivity_mode` | live | `src/server/routes/voice_config.rs` (load_editable_config re-reads disk) |
-| `voice.auto_join_channel_ids` | restart | `src/services/discord/runtime_bootstrap/voice.rs` run_bot_spawn_voice_auto_join |
-| `voice.keep_recordings` | restart | `src/voice/receiver.rs` VoiceReceiverConfig::from_voice_config |
 | `shared_prompt` | live | `src/services/discord/settings/content.rs` load_shared_prompt_for_profile (agentdesk_config::load_shared_prompt_path reads the validated snapshot) |
 | `mcp_servers` | restart | `src/bootstrap.rs` initialize (mcp_config sync_*_mcp_servers write provider configs once) |
 | `review_mcp_allowlist` | live | `src/services/mcp_config.rs` review_mcp_allowlist via claude_mcp_config_arg (validated snapshot per Claude spawn) |
@@ -72,15 +45,6 @@ seconds with content comparison, independently of native filesystem notification
 | `agents.*.memory_group` | live | `src/services/discord/settings/memory.rs` resolve_agent_memory_settings (AgentDef from the validated snapshot in agentdesk_config role binding) |
 | `agents.*.name` | seeded-at-boot | `src/db/postgres/agent_sync.rs` upsert_agent_from_config_pg (agents.name) |
 | `agents.*.name_ko` | seeded-at-boot | `src/db/postgres/agent_sync.rs` upsert_agent_from_config_pg (agents.name_ko) |
-| `agents.*.aliases` | live | `src/voice/commands.rs` resolve_voice_lobby_route (agent_voice_aliases on cached_config) |
-| `agents.*.wake_word` | live | `src/voice/commands.rs` transcript_after_agent_wake_word (cached_config) |
-| `agents.*.voice_enabled` | live | `src/voice/commands.rs` resolve_voice_lobby_route (cached_config) |
-| `agents.*.sensitivity_mode` | live | `src/server/routes/voice_config.rs` (disk re-read; DTO display/edit) |
-| `agents.*.voice.channel_id` | restart | `src/services/discord/runtime_bootstrap/voice.rs` voice_auto_join_provider_map (run_bot_spawn_voice_auto_join) |
-| `agents.*.voice.foreground.provider` | restart | `src/services/discord/runtime_bootstrap/voice.rs` voice_auto_join_provider_map |
-| `agents.*.voice.foreground.model` | live | `src/services/discord/voice_barge_in/routing.rs` resolve_effective_foreground_config (cached_config) |
-| `agents.*.voice.foreground.max_chars` | live | `src/services/discord/voice_barge_in/routing.rs` resolve_effective_foreground_config |
-| `agents.*.voice.foreground.timeout_ms` | live | `src/services/discord/voice_barge_in/routing.rs` resolve_effective_foreground_config |
 | `agents.*.provider` | seeded-at-boot | `src/db/postgres/agent_sync.rs` upsert_agent_from_config_pg (agents.provider) |
 | `agents.*.channels.*.id` | seeded-at-boot | `src/db/postgres/agent_sync.rs` upsert_agent_from_config_pg (discord_channel_id/alt/cc/cdx) |
 | `agents.*.channels.*.name` | seeded-at-boot | `src/db/postgres/agent_sync.rs` upsert_agent_from_config_pg (target fallback when id absent) |
@@ -94,21 +58,15 @@ seconds with content comparison, independently of native filesystem notification
 | `agents.*.channels.*.reasoning_effort` | live | `src/services/discord/agentdesk_config.rs` role_binding_from_channel |
 | `agents.*.channels.*.thread_inherit` | live | `src/services/discord/agentdesk_config.rs` thread_inheritance_enabled (validated snapshot per intake) |
 | `agents.*.channels.*.peer_agents` | live | `src/services/discord/agentdesk_config.rs` role_binding_from_channel |
-| `agents.*.channels.*.quality_feedback_injection` | live | `src/services/discord/agentdesk_config.rs` role_binding_from_channel |
 | `agents.*.channels.*.dispatch_profile` | live | `src/services/discord/agentdesk_config.rs` resolve_dispatch_profile |
 | `agents.*.channels.*.isolate_override` | live | `src/services/discord/agentdesk_config.rs` resolve_worktree_isolation_policy |
 | `agents.*.channels.*.cache_ttl_minutes` | live | `src/services/discord/agentdesk_config.rs` resolve_cache_ttl_minutes |
-| `agents.*.keywords` | live | `src/voice/commands.rs` agent_voice_aliases / `src/services/discord/agentdesk_config.rs` load_meeting_config fallback |
+| `agents.*.keywords` | live | `src/config/agent_memory.rs` AgentDef (still parsed; nothing reads it since voice aliases and meetings were removed) |
 | `agents.*.peer_keywords` | live | `src/services/discord/agentdesk_config.rs` load_peer_agents (directory only; validated snapshot per prompt) |
 | `agents.*.peer_directory` | live | `src/services/discord/agentdesk_config.rs` load_peer_agents (validated snapshot per prompt) |
 | `agents.*.department` | seeded-at-boot | `src/db/postgres/agent_sync.rs` upsert_agent_from_config_pg (agents.department) |
 | `agents.*.avatar_emoji` | seeded-at-boot | `src/db/postgres/agent_sync.rs` upsert_agent_from_config_pg (agents.avatar_emoji) |
 | `agents.*.preferred_intake_node_labels` | seeded-at-boot | `src/db/postgres/agent_sync.rs` upsert_agent_from_config_pg (COALESCE: absent key keeps DB value) |
-| `meeting.channel_name` | live | `src/services/discord/agentdesk_config.rs` load_meeting_config (validated snapshot per meeting start) |
-| `meeting.max_rounds` | live | `src/services/discord/agentdesk_config.rs` load_meeting_config (validated snapshot per meeting start) |
-| `meeting.max_participants` | live | `src/services/discord/agentdesk_config.rs` load_meeting_config (validated snapshot per meeting start) |
-| `meeting.summary_agent` | live | `src/services/discord/agentdesk_config.rs` load_meeting_config (validated snapshot per meeting start) |
-| `meeting.available_agents` | live | `src/services/discord/agentdesk_config.rs` meeting_agent_from_entry via load_meeting_config (validated values and presence metadata per meeting) |
 | `github.repos` | seeded-at-boot | `src/db/postgres/shared_config.rs` startup_reseed (register_repo INSERT ... ON CONFLICT DO NOTHING into github_repos) |
 | `github.repo_dirs` | restart | `src/services/cluster/readiness.rs` collect (config captured by readiness::spawn_probe at node_registry::bootstrap) |
 | `github.sync_interval_minutes` | restart | `src/server/worker_registry/registry.rs` start_worker (GithubSync arm captures sync_interval) |

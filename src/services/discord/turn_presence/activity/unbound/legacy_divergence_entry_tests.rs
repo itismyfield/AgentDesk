@@ -243,7 +243,6 @@ async fn legacy_divergence_discord_input_behind_backlog_reaches_provider_pg() {
         has_reply_boundary: false,
         merge_consecutive: false,
         pending_uploads: Vec::new(),
-        voice_announcement: None,
     };
     let enqueued =
         discord::mailbox_enqueue_intervention(&rig.shared, &ProviderKind::Claude, channel, queued)
@@ -251,13 +250,10 @@ async fn legacy_divergence_discord_input_behind_backlog_reaches_provider_pg() {
     assert!(enqueued.enqueued);
     let _first_result = input_result_for_tests((channel.get(), "backlog completed".into()));
     let mut first = ProviderProbe::arm(channel);
-    let voice_config = crate::voice::VoiceConfig::default();
     let data = Data {
         shared: rig.shared.clone(),
         token: "test-token".into(),
         provider: ProviderKind::Claude,
-        voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
-        voice_config,
     };
     let event = serenity::FullEvent::Message {
         new_message: message,

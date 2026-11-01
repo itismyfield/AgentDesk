@@ -60,7 +60,7 @@ export function SettingsMachineCard({ node, localId, leaseTtlSeconds, stale, ses
           <div className="mt-2 flex flex-wrap gap-2">
             <StatusBadge tone={role === "Hub" ? "info" : "idle"}>{role || nodeRoleLabel(node.effective_role, tr)}</StatusBadge>
             <StatusBadge tone={online ? "healthy" : "warning"}>
-              {stale ? tr("정보 만료", "Stale") : online ? tr("Heartbeat 정상", "Heartbeat online") : tr("Heartbeat 미확인", "Heartbeat unavailable")}
+              {stale ? tr("정보 만료", "Stale") : online ? tr("연결 신호 정상", "Heartbeat online") : tr("연결 신호 없음", "Heartbeat unavailable")}
             </StatusBadge>
           </div>
         </div>
@@ -71,7 +71,7 @@ export function SettingsMachineCard({ node, localId, leaseTtlSeconds, stale, ses
     <p className="mt-1 text-xs text-th-text-muted">{probe ? `${nodePlatformLabel(probe.os, tr)} / ${probe.arch}` : unknown} · {runtimeModeLabel(probe?.runtime_profile, tr)}</p>
     <SettingsMachineResources resources={node.capabilities.machine_resources} history={history.data ?? []} stale={stale || !online} now={now} tr={tr} />
     {history.isError && <p className="mt-2 text-xs text-th-text-muted">{tr(
-      "저장된 이력을 불러오지 못했습니다. 다음 갱신 때 다시 시도합니다.",
+      "저장된 이력을 불러오지 못했어요. 다음에 다시 시도해요.",
       "Saved history is unavailable. It will be retried on the next refresh.",
     )}</p>}
     <details className="mt-4 rounded-md border border-th-border p-3">
@@ -80,9 +80,9 @@ export function SettingsMachineCard({ node, localId, leaseTtlSeconds, stale, ses
       <Detail label={tr("장치 ID", "Device ID")}>{node.instance_id}</Detail>
       <Detail label={tr("등록된 API 주소", "Advertised API address")}>{origin || tr("등록 안 됨", "Not advertised")}</Detail>
       <Detail label={tr("프로세스 ID", "Process ID")}>{node.process_id ?? unknown}</Detail>
-      <Detail label={tr("마지막 heartbeat", "Last heartbeat")}>{machineTimestamp(node.last_heartbeat_at, tr)}</Detail>
+      <Detail label={tr("마지막 연결 신호", "Last heartbeat")}>{machineTimestamp(node.last_heartbeat_at, tr)}</Detail>
       <Detail label={tr("최초 등록 시각", "First registered")}>{machineTimestamp(node.started_at, tr)}</Detail>
-      <Detail label={tr("실행 backend", "Execution backends")}>{probe?.backends.join(", ") || unknown}</Detail>
+      <Detail label={tr("실행 방식", "Execution backends")}>{probe?.backends.join(", ") || unknown}</Detail>
       <Detail label={tr("장치 라벨", "Device labels")}>{node.labels?.join(", ") || tr("없음", "None")}</Detail>
     </dl>
     </details>
@@ -117,7 +117,7 @@ export function SettingsMachineCard({ node, localId, leaseTtlSeconds, stale, ses
         })}
       </div>
       <p className="mt-3 text-xs leading-5 text-th-text-muted">{tr(
-        "실행 준비 상태는 로컬 CLI·인증 설정 검사 결과입니다.",
+        "실행 준비 상태는 이 장치의 CLI와 로그인 설정을 검사한 결과예요.",
         "Readiness checks local CLI and credential configuration.",
       )}</p>
     </div>

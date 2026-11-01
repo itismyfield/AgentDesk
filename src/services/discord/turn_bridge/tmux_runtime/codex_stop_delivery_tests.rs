@@ -1004,7 +1004,6 @@ fn act7_slash_stop_effect_keeps_host_owned_and_dormant_matches_base() {
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         };
         let enqueue = crate::services::discord::mailbox_enqueue_intervention(
             &case.shared,

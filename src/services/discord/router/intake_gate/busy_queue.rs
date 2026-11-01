@@ -14,7 +14,5 @@ pub(super) fn spec(live: &LiveText<'_>) -> SoftInterventionSpec {
         has_reply_boundary: live.has_reply_boundary,
         merge_consecutive: live.merge_consecutive,
         pending_uploads: live.uploads.to_vec(),
-        voice_announcement: live.voice_announcement.cloned(),
     }
-    .for_queue()
 }

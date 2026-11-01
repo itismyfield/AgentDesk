@@ -772,7 +772,7 @@ targets = {
     "needs" => "changes",
     "if" => "${{ !github.event.pull_request.draft && needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true' }}",
     "runs_on" => '${{ matrix.os }}',
-    "job_sha256" => "148f6669238504a554aa6f1c312f502c84eab13886df25c205ae4c08bb460aa5",
+    "job_sha256" => "959bbf84d5672397470445b0aa15245bdebe413b43485dbd03189c2a2550d627",
     "cargo_steps" => {
       "cargo check" => {
         "commands" => ["cargo check --workspace --all-targets"],
@@ -786,7 +786,7 @@ targets = {
     "needs" => "changes",
     "if" => "${{ !github.event.pull_request.draft && needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true' }}",
     "runs_on" => '${{ matrix.os }}',
-    "job_sha256" => "5af310f0434fc4ee5227d916f2b9bf1113ea1d9e3b43f644890fe428dfccd9fc",
+    "job_sha256" => "d01dcdf5b05e0b25e87fd5af17acb4881ab91aab92ebe0914527a3ff3fdcecad",
     "cargo_steps" => {
       "Writer namespace exact Windows targets" => {
         "commands" => ["./scripts/ci/run-writer-namespace-windows-targets.sh"],

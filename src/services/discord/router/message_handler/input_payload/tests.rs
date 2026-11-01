@@ -43,12 +43,10 @@ fn shared_payload_preserves_literal_text_attachment_only_and_author_bytes() {
 }
 
 #[test]
-fn fresh_source_keeps_rawv1_selected_preludes_voice_and_assets_without_rendering() {
+fn fresh_source_keeps_rawv1_selected_preludes_and_assets_without_rendering() {
     let original: crate::services::turn_orchestrator::PendingQueueItem = serde_json::from_value(json!({
         "author_id":7,"message_id":100,"channel_id":7272,"source_message_ids":[100],
-        "queued_generation":5,"text":"body\r\n_ literal WIP","pending_uploads":["file one","file two"], "voice_announcement":{
-            "transcript":"voice", "user_id":"42", "utterance_id":"fresh", "language":"ko-KR", "verbose_progress":true,
-            "started_at":null,"completed_at":null,"samples_written":null,"control_channel_id":null,"stt_mode":null,"stt_latency_ms":null}})).unwrap();
+        "queued_generation":5,"text":"body\r\n_ literal WIP","pending_uploads":["file one","file two"]})).unwrap();
     let mut context = RetryPromptContext::raw(Some("quoted\r\n[WIP 리마인더] literal".into()));
     context.selected = Preludes {
         recovery: Some("user: prior".into()),
@@ -65,10 +63,6 @@ fn fresh_source_keeps_rawv1_selected_preludes_voice_and_assets_without_rendering
     );
     assert_eq!(fresh.text, original.text);
     assert_eq!(fresh.pending_uploads, original.pending_uploads);
-    assert_eq!(
-        serde_json::to_value(&fresh.voice_announcement).unwrap(),
-        serde_json::to_value(&original.voice_announcement).unwrap()
-    );
     assert_eq!(serde_json::to_value(&original).unwrap(), before);
     let empty = fresh_source(&original, &RetryPromptContext::raw(None)).unwrap();
     assert!(
@@ -84,7 +78,6 @@ fn fresh_source_keeps_rawv1_selected_preludes_voice_and_assets_without_rendering
         false,
         false,
         Vec::new(),
-        None,
     );
     assert!(
         carrier.retry_prompt_context_is_empty(),

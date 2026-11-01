@@ -38,19 +38,10 @@ pub struct TokenAnalyticsQuery {
     fresh: Option<String>,
 }
 
-/// In-process cache for the heavy token-analytics computation. Each call to
-/// `collect_token_analytics` does a multi-hundred-MB filesystem scan across
-/// `~/.claude/projects` + `~/.codex/sessions`, which takes ~1-9 s depending
-/// on workspace age. The HTTP-level SWR cache (Cache-Control: max-age=15)
-/// already absorbs same-tab re-entry, but cross-tab / new-session loads still
-/// hit the origin and pay the full cost.
-///
-/// 30 s TTL is short enough that "live" data is still close-to-current
-/// (token usage doesn't materially shift in 30 s) and long enough to cover
-/// the typical "open dashboard, navigate around, settle on /stats" pattern.
-/// The cache holds at most 3 entries (7d / 30d / 90d), so no LRU eviction
-/// is needed.
-const TOKEN_ANALYTICS_CACHE_TTL: StdDuration = StdDuration::from_secs(30);
+/// A token-analytics scan of `~/.claude/projects` + `~/.codex/sessions` takes
+/// 17-84 s, so entries are kept per period (7d / 30d / 90d) and served stale
+/// past this TTL while one background scan refreshes them.
+const TOKEN_ANALYTICS_CACHE_TTL: StdDuration = StdDuration::from_secs(10 * 60);
 
 struct CachedAnalytics {
     cached_at: Instant,
@@ -68,16 +59,19 @@ fn token_analytics_cache() -> &'static Mutex<HashMap<String, CachedAnalytics>> {
 static TOKEN_ANALYTICS_COLLECT_LOCKS: LazyLock<KeyedLocks> = LazyLock::new(KeyedLocks::default);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TokenAnalyticsCacheState {
+pub(crate) enum CacheState {
     Hit,
+    /// Served past the TTL while a background collect refreshes the entry.
+    Stale,
     Miss,
     Bypass,
 }
 
-impl TokenAnalyticsCacheState {
+impl CacheState {
     fn as_header_value(self) -> &'static str {
         match self {
             Self::Hit => "hit",
+            Self::Stale => "stale",
             Self::Miss => "miss",
             Self::Bypass => "bypass",
         }
@@ -86,16 +80,17 @@ impl TokenAnalyticsCacheState {
 
 pub(crate) struct TokenAnalyticsCacheResult {
     pub(crate) data: Arc<receipt::TokenAnalyticsData>,
-    pub(crate) cache_state: TokenAnalyticsCacheState,
+    pub(crate) cache_state: CacheState,
 }
 
-fn read_cached_token_analytics(period: &str) -> Option<Arc<receipt::TokenAnalyticsData>> {
+/// The cached entry and whether it is still within the TTL.
+fn read_cached_token_analytics(period: &str) -> Option<(Arc<receipt::TokenAnalyticsData>, bool)> {
     let cache = token_analytics_cache().lock().ok()?;
     let entry = cache.get(period)?;
-    if entry.cached_at.elapsed() > TOKEN_ANALYTICS_CACHE_TTL {
-        return None;
-    }
-    Some(Arc::clone(&entry.data))
+    Some((
+        Arc::clone(&entry.data),
+        entry.cached_at.elapsed() <= TOKEN_ANALYTICS_CACHE_TTL,
+    ))
 }
 
 fn cached_token_analytics_refresh_generation(period: &str) -> u64 {
@@ -142,34 +137,74 @@ fn write_cached_token_analytics(
     }
 }
 
-/// Shared cache-or-compute helper for the token-analytics filesystem scan.
-/// Used by both `/api/token-analytics` and `/api/home/kpi-trends` so the
-/// dashboard's first paint pays at most one ~9 s scan per period instead of
-/// one per endpoint (#1303).
-///
-/// Cache misses are single-flighted per canonical period. If `/api/home/kpi-trends`
-/// and `/api/token-analytics` miss concurrently, one request performs the scan
-/// while the other waits, rechecks the cache, and reuses the result. The first
-/// explicit `fresh=1` request also scans, but concurrent refreshes for the same
-/// period coalesce behind the period lock and reuse the new cache write.
-/// The locked recheck-scan-write runs in a detached task, so a request aborted
-/// mid-scan still fills the cache and later requests wait for that scan.
-///
-/// Returns `None` only when the blocking task panics; the caller is expected
-/// to surface a graceful fallback (empty arrays + warn log) rather than 5xx.
+/// Cache-or-collect shared by `/api/token-analytics` and `/api/home/kpi-trends`.
+/// Only a period with no entry at all waits for a scan; a stale entry is
+/// returned at once and refreshed by one detached, single-flight collect.
+/// Misses and `fresh=1` refreshes run detached under the period lock too, so an
+/// aborted request still fills the cache. `None` means the scan task panicked.
 pub(crate) async fn cached_or_collect_token_analytics(
     period_id: &str,
     days: i64,
     label: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Option<TokenAnalyticsCacheResult> {
-    if let Some(cached) = read_cached_token_analytics(period_id) {
-        return Some(TokenAnalyticsCacheResult {
-            data: cached,
-            cache_state: TokenAnalyticsCacheState::Hit,
-        });
+    cached_or_collect_token_analytics_using(period_id, days, label, now, scan_token_analytics).await
+}
+
+fn scan_token_analytics(
+    start: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+    label: String,
+    period: String,
+) -> receipt::TokenAnalyticsData {
+    receipt::collect_token_analytics(start, now, &label, &period)
+}
+
+async fn cached_or_collect_token_analytics_using<Collect>(
+    period_id: &str,
+    days: i64,
+    label: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    collect: Collect,
+) -> Option<TokenAnalyticsCacheResult>
+where
+    Collect: FnOnce(
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+            String,
+            String,
+        ) -> receipt::TokenAnalyticsData
+        + Send
+        + 'static,
+{
+    match read_cached_token_analytics(period_id) {
+        Some((data, true)) => Some(TokenAnalyticsCacheResult {
+            data,
+            cache_state: CacheState::Hit,
+        }),
+        Some((data, false)) => {
+            let refresh = collect_token_analytics_under_lock(
+                period_id.to_string(),
+                days,
+                label.to_string(),
+                now,
+                false,
+                0,
+                collect,
+            );
+            TOKEN_ANALYTICS_COLLECT_LOCKS.spawn_if_idle(period_id, async move {
+                refresh.await;
+            });
+            Some(TokenAnalyticsCacheResult {
+                data,
+                cache_state: CacheState::Stale,
+            })
+        }
+        None => {
+            collect_token_analytics_with_lock_using(period_id, days, label, now, false, collect)
+                .await
+        }
     }
-    collect_token_analytics_with_lock(period_id, days, label, now, false).await
 }
 
 async fn collect_token_analytics_with_lock(
@@ -185,9 +220,7 @@ async fn collect_token_analytics_with_lock(
         label,
         now,
         bypass_cache,
-        |start, now, label_owned, period_owned| {
-            receipt::collect_token_analytics(start, now, &label_owned, &period_owned)
-        },
+        scan_token_analytics,
     )
     .await
 }
@@ -259,14 +292,16 @@ where
         read_cached_token_analytics_refreshed_after(&period_id, refresh_generation_before_wait)
     } else {
         read_cached_token_analytics(&period_id)
+            .filter(|(_, fresh)| *fresh)
+            .map(|(data, _)| data)
     };
     if let Some(cached) = cached {
         return Some(TokenAnalyticsCacheResult {
             data: cached,
             cache_state: if bypass_cache {
-                TokenAnalyticsCacheState::Bypass
+                CacheState::Bypass
             } else {
-                TokenAnalyticsCacheState::Hit
+                CacheState::Hit
             },
         });
     }
@@ -291,9 +326,9 @@ where
     Some(TokenAnalyticsCacheResult {
         data,
         cache_state: if bypass_cache {
-            TokenAnalyticsCacheState::Bypass
+            CacheState::Bypass
         } else {
-            TokenAnalyticsCacheState::Miss
+            CacheState::Miss
         },
     })
 }
@@ -347,43 +382,60 @@ pub async fn prewarm_token_analytics_cache() {
     }
 }
 
-/// Short `/api/receipt` cache keyed by the resolved window (period and start):
-/// tabs share one scan, and a new day or rate-limit window gets a new key.
-const RECEIPT_CACHE_TTL: StdDuration = StdDuration::from_secs(30);
+/// `/api/receipt` keeps one entry per period, valid only for the window start it
+/// was collected for (a new day or rate-limit window misses); past this TTL the
+/// entry is served stale while one background collect refreshes it.
+const RECEIPT_CACHE_TTL: StdDuration = StdDuration::from_secs(10 * 60);
 
-type CachedReceipt = (Instant, Arc<receipt::ReceiptData>);
+struct CachedReceipt {
+    window: i64,
+    cached_at: Instant,
+    data: Arc<receipt::ReceiptData>,
+}
 
-static RECEIPT_CACHE: LazyLock<Mutex<HashMap<String, CachedReceipt>>> =
+static RECEIPT_CACHE: LazyLock<Mutex<HashMap<&'static str, CachedReceipt>>> =
     LazyLock::new(Default::default);
 static RECEIPT_COLLECT_LOCKS: LazyLock<KeyedLocks> = LazyLock::new(KeyedLocks::default);
 
 /// Minute precision keeps the rolling fallback windows (`now - N days`) shareable.
-fn receipt_cache_key(period_id: &str, start: chrono::DateTime<chrono::Utc>) -> String {
-    format!("{period_id}@{}", start.timestamp().div_euclid(60))
+fn receipt_window(start: chrono::DateTime<chrono::Utc>) -> i64 {
+    start.timestamp().div_euclid(60)
 }
 
-fn read_cached_receipt(key: &str) -> Option<Arc<receipt::ReceiptData>> {
+/// The period's entry if it covers `window`, and whether it is within the TTL.
+fn read_cached_receipt(period_id: &str, window: i64) -> Option<(Arc<receipt::ReceiptData>, bool)> {
     let cache = RECEIPT_CACHE.lock().ok()?;
-    let (cached_at, data) = cache.get(key)?;
-    (cached_at.elapsed() <= RECEIPT_CACHE_TTL).then(|| Arc::clone(data))
+    let entry = cache
+        .get(period_id)
+        .filter(|entry| entry.window == window)?;
+    Some((
+        Arc::clone(&entry.data),
+        entry.cached_at.elapsed() <= RECEIPT_CACHE_TTL,
+    ))
 }
 
-fn write_cached_receipt(key: String, data: Arc<receipt::ReceiptData>) {
+fn write_cached_receipt(period_id: &'static str, window: i64, data: Arc<receipt::ReceiptData>) {
     if let Ok(mut cache) = RECEIPT_CACHE.lock() {
-        cache.retain(|_, (cached_at, _)| cached_at.elapsed() <= RECEIPT_CACHE_TTL);
-        cache.insert(key, (Instant::now(), data));
+        cache.insert(
+            period_id,
+            CachedReceipt {
+                window,
+                cached_at: Instant::now(),
+                data,
+            },
+        );
     }
 }
 
-/// Cache-or-collect for one receipt window (flag = served from cache). Misses
-/// run single-flight in a detached task, so an aborted request still fills it.
+/// Cache-or-collect for one receipt window. Misses and stale refreshes run
+/// single-flight in a detached task, so an aborted request still fills it.
 async fn cached_or_collect_receipt_using<Collect>(
     period_id: &'static str,
     start: chrono::DateTime<chrono::Utc>,
     now: chrono::DateTime<chrono::Utc>,
     label: &'static str,
     collect: Collect,
-) -> Result<(Arc<receipt::ReceiptData>, bool), String>
+) -> Result<(Arc<receipt::ReceiptData>, CacheState), String>
 where
     Collect: FnOnce(
             chrono::DateTime<chrono::Utc>,
@@ -393,14 +445,11 @@ where
         + Send
         + 'static,
 {
-    let key = receipt_cache_key(period_id, start);
-    if let Some(cached) = read_cached_receipt(&key) {
-        return Ok((cached, true));
-    }
-    let task_key = key.clone();
+    let window = receipt_window(start);
+    let lock_key = format!("{period_id}@{window}");
     let work = async move {
-        if let Some(cached) = read_cached_receipt(&task_key) {
-            return Ok((cached, true));
+        if let Some((cached, true)) = read_cached_receipt(period_id, window) {
+            return Ok((cached, CacheState::Hit));
         }
         let started = Instant::now();
         let data = tokio::task::spawn_blocking(move || collect(start, now, label))
@@ -413,13 +462,24 @@ where
             "receipt collected"
         );
         let data = Arc::new(data);
-        write_cached_receipt(task_key, Arc::clone(&data));
-        Ok((data, false))
+        write_cached_receipt(period_id, window, Arc::clone(&data));
+        Ok((data, CacheState::Miss))
     };
-    RECEIPT_COLLECT_LOCKS
-        .run_detached(&key, work)
-        .await
-        .map_err(|error| format!("collection failed: {error}"))?
+    match read_cached_receipt(period_id, window) {
+        Some((cached, true)) => Ok((cached, CacheState::Hit)),
+        Some((cached, false)) => {
+            RECEIPT_COLLECT_LOCKS.spawn_if_idle(&lock_key, async move {
+                if let Err(error) = work.await {
+                    tracing::warn!(period = period_id, %error, "receipt refresh failed");
+                }
+            });
+            Ok((cached, CacheState::Stale))
+        }
+        None => RECEIPT_COLLECT_LOCKS
+            .run_detached(&lock_key, work)
+            .await
+            .map_err(|error| format!("collection failed: {error}"))?,
+    }
 }
 
 /// GET /api/receipt?period=month
@@ -488,13 +548,13 @@ pub async fn get_receipt(
     };
 
     let started = Instant::now();
-    let (data, from_cache) =
+    let (data, cache_state) =
         cached_or_collect_receipt_using(period_id, start, now, label, receipt::collect)
             .await
             .map_err(AppError::internal)?;
     tracing::info!(
         period = period_id,
-        cache_state = if from_cache { "hit" } else { "miss" },
+        cache_state = cache_state.as_header_value(),
         elapsed_ms = started.elapsed().as_millis(),
         "receipt responded"
     );
@@ -606,6 +666,7 @@ mod tests {
             period_label: label.to_string(),
             period_start: "2026-01-01T00:00:00Z".to_string(),
             period_end: "2026-01-01T00:00:00Z".to_string(),
+            generated_at: "2026-01-01T00:00:00Z".to_string(),
             models: Vec::new(),
             subtotal: 0.0,
             cache_discount: 0.0,
@@ -643,9 +704,10 @@ mod tests {
 
     #[test]
     fn token_analytics_cache_state_header_values_are_stable() {
-        assert_eq!(TokenAnalyticsCacheState::Hit.as_header_value(), "hit");
-        assert_eq!(TokenAnalyticsCacheState::Miss.as_header_value(), "miss");
-        assert_eq!(TokenAnalyticsCacheState::Bypass.as_header_value(), "bypass");
+        assert_eq!(CacheState::Hit.as_header_value(), "hit");
+        assert_eq!(CacheState::Stale.as_header_value(), "stale");
+        assert_eq!(CacheState::Miss.as_header_value(), "miss");
+        assert_eq!(CacheState::Bypass.as_header_value(), "bypass");
     }
 
     #[test]
@@ -661,12 +723,8 @@ mod tests {
     #[test]
     fn token_analytics_response_sets_cache_and_period_headers() {
         let data = empty_token_analytics_data("30d");
-        let response = build_token_analytics_response(
-            &data,
-            "30d",
-            123,
-            TokenAnalyticsCacheState::Hit.as_header_value(),
-        );
+        let response =
+            build_token_analytics_response(&data, "30d", 123, CacheState::Hit.as_header_value());
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
@@ -736,13 +794,9 @@ mod tests {
         let first_state = first_result.expect("first result").cache_state;
         let second_state = second_result.expect("second result").cache_state;
         assert!(
-            matches!(first_state, TokenAnalyticsCacheState::Miss)
-                || matches!(second_state, TokenAnalyticsCacheState::Miss)
+            matches!(first_state, CacheState::Miss) || matches!(second_state, CacheState::Miss)
         );
-        assert!(
-            matches!(first_state, TokenAnalyticsCacheState::Hit)
-                || matches!(second_state, TokenAnalyticsCacheState::Hit)
-        );
+        assert!(matches!(first_state, CacheState::Hit) || matches!(second_state, CacheState::Hit));
     }
 
     /// Starts a token-analytics miss whose collect blocks until `release` is
@@ -812,7 +866,7 @@ mod tests {
         )
         .await
         .expect("second result");
-        assert_eq!(again.cache_state, TokenAnalyticsCacheState::Hit);
+        assert_eq!(again.cache_state, CacheState::Hit);
         assert_eq!(collect_count.load(Ordering::SeqCst), 1);
     }
 
@@ -851,7 +905,7 @@ mod tests {
             .expect("second task")
             .expect("second result");
         assert_eq!(collect_count.load(Ordering::SeqCst), 1);
-        assert_eq!(second.cache_state, TokenAnalyticsCacheState::Hit);
+        assert_eq!(second.cache_state, CacheState::Hit);
     }
 
     #[tokio::test]
@@ -883,13 +937,27 @@ mod tests {
         .await
         .expect("the period lock must not stay held after a panic")
         .expect("next result");
-        assert_eq!(next.cache_state, TokenAnalyticsCacheState::Miss);
+        assert_eq!(next.cache_state, CacheState::Miss);
     }
 
     /// A receipt window no other test uses, so parallel tests never share a key.
     fn unique_receipt_start() -> chrono::DateTime<chrono::Utc> {
         let suffix = TEST_PERIOD_SUFFIX.fetch_add(1, Ordering::SeqCst) as i64;
         chrono::DateTime::from_timestamp(1_000_000 + suffix * 86_400, 0).expect("test start")
+    }
+
+    /// A receipt period no other test uses, so parallel tests never share an entry.
+    fn unique_receipt_period(name: &str) -> &'static str {
+        let suffix = TEST_PERIOD_SUFFIX.fetch_add(1, Ordering::SeqCst);
+        Box::leak(format!("test-{name}-{suffix}").into_boxed_str())
+    }
+
+    fn expired_instant() -> Instant {
+        Instant::now()
+            .checked_sub(
+                TOKEN_ANALYTICS_CACHE_TTL.max(RECEIPT_CACHE_TTL) + StdDuration::from_secs(1),
+            )
+            .expect("expired instant")
     }
 
     fn counting_receipt_collect(
@@ -912,20 +980,21 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_receipt_requests_for_one_window_collect_once() {
+        let period = unique_receipt_period("month");
         let start = unique_receipt_start();
         let now = chrono::Utc::now();
         let collect_count = Arc::new(AtomicUsize::new(0));
 
         let (first, second) = tokio::join!(
             cached_or_collect_receipt_using(
-                "month",
+                period,
                 start,
                 now,
                 "This Month",
                 counting_receipt_collect(&collect_count, StdDuration::from_millis(50)),
             ),
             cached_or_collect_receipt_using(
-                "month",
+                period,
                 start,
                 now,
                 "This Month",
@@ -934,20 +1003,20 @@ mod tests {
         );
 
         assert_eq!(collect_count.load(Ordering::SeqCst), 1);
-        let mut from_cache = [first.expect("first").1, second.expect("second").1];
-        from_cache.sort();
-        assert_eq!(from_cache, [false, true]);
+        let states = [first.expect("first").1, second.expect("second").1];
+        assert!(states.contains(&CacheState::Miss) && states.contains(&CacheState::Hit));
     }
 
     #[tokio::test]
     async fn aborted_receipt_request_still_fills_the_cache() {
+        let period = unique_receipt_period("week");
         let start = unique_receipt_start();
         let collect_count = Arc::new(AtomicUsize::new(0));
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
         let count = Arc::clone(&collect_count);
         let first = tokio::spawn(cached_or_collect_receipt_using(
-            "week",
+            period,
             start,
             chrono::Utc::now(),
             "This Week",
@@ -963,10 +1032,10 @@ mod tests {
         assert!(matches!(first.await, Err(error) if error.is_cancelled()));
         release_tx.send(()).expect("release collect");
 
-        let key = receipt_cache_key("week", start);
+        let window = receipt_window(start);
         let mut cached = false;
         for _ in 0..500 {
-            if read_cached_receipt(&key).is_some() {
+            if read_cached_receipt(period, window).is_some() {
                 cached = true;
                 break;
             }
@@ -977,8 +1046,8 @@ mod tests {
             "the aborted request's collect must still write the cache"
         );
 
-        let (_, from_cache) = cached_or_collect_receipt_using(
-            "week",
+        let (_, state) = cached_or_collect_receipt_using(
+            period,
             start,
             chrono::Utc::now(),
             "This Week",
@@ -986,18 +1055,20 @@ mod tests {
         )
         .await
         .expect("second result");
-        assert!(from_cache);
+        assert_eq!(state, CacheState::Hit);
         assert_eq!(collect_count.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
     async fn receipt_windows_with_another_start_or_period_collect_separately() {
+        let today = unique_receipt_period("today");
+        let week = unique_receipt_period("week");
         let start = unique_receipt_start();
         let next_day = start + chrono::Duration::days(1);
         let now = chrono::Utc::now();
         let collect_count = Arc::new(AtomicUsize::new(0));
-        for (period_id, window_start) in [("today", start), ("today", next_day), ("week", start)] {
-            let (data, from_cache) = cached_or_collect_receipt_using(
+        for (period_id, window_start) in [(today, start), (today, next_day), (week, start)] {
+            let (data, state) = cached_or_collect_receipt_using(
                 period_id,
                 window_start,
                 now,
@@ -1006,39 +1077,136 @@ mod tests {
             )
             .await
             .expect("receipt result");
-            assert!(
-                !from_cache,
+            assert_eq!(
+                state,
+                CacheState::Miss,
                 "{period_id}@{window_start} must not reuse another window"
             );
             assert_eq!(data.period_label, period_id);
         }
         assert_eq!(collect_count.load(Ordering::SeqCst), 3);
+        assert!(
+            read_cached_receipt(today, receipt_window(start)).is_none(),
+            "a new window replaces the period's previous entry"
+        );
     }
 
-    #[test]
-    fn receipt_cache_write_drops_expired_windows() {
-        let expired_key = receipt_cache_key("today", unique_receipt_start());
-        let expired_at = Instant::now()
-            .checked_sub(RECEIPT_CACHE_TTL + StdDuration::from_secs(1))
-            .expect("expired instant");
+    #[tokio::test]
+    async fn stale_receipt_is_served_while_one_background_collect_refreshes_it() {
+        let period = unique_receipt_period("month");
+        let start = unique_receipt_start();
+        let window = receipt_window(start);
         RECEIPT_CACHE.lock().unwrap().insert(
-            expired_key.clone(),
-            (expired_at, Arc::new(empty_receipt_data("old day"))),
+            period,
+            CachedReceipt {
+                window,
+                cached_at: expired_instant(),
+                data: Arc::new(empty_receipt_data("stale")),
+            },
         );
+        let collect_count = Arc::new(AtomicUsize::new(0));
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let count = Arc::clone(&collect_count);
+        let now = chrono::Utc::now();
 
-        let fresh_key = receipt_cache_key("today", unique_receipt_start());
-        write_cached_receipt(fresh_key.clone(), Arc::new(empty_receipt_data("new day")));
+        let (data, state) =
+            cached_or_collect_receipt_using(period, start, now, "fresh", move |_, _, label| {
+                count.fetch_add(1, Ordering::SeqCst);
+                let _ = release_rx.recv();
+                empty_receipt_data(label)
+            })
+            .await
+            .expect("stale result");
+        assert_eq!(
+            (data.period_label.as_str(), state),
+            ("stale", CacheState::Stale)
+        );
+        let (_, again) = cached_or_collect_receipt_using(
+            period,
+            start,
+            now,
+            "fresh",
+            counting_receipt_collect(&collect_count, StdDuration::ZERO),
+        )
+        .await
+        .expect("second stale result");
+        assert_eq!(again, CacheState::Stale);
 
-        // Read before asserting: a panic under the guard would poison the cache for other tests.
-        let (has_expired, has_fresh) = {
-            let cache = RECEIPT_CACHE.lock().unwrap();
-            (
-                cache.contains_key(&expired_key),
-                cache.contains_key(&fresh_key),
-            )
-        };
-        assert!(!has_expired, "an expired window must be dropped on write");
-        assert!(has_fresh);
+        release_tx.send(()).expect("release refresh");
+        let mut refreshed = None;
+        for _ in 0..500 {
+            if let Some((data, true)) = read_cached_receipt(period, window) {
+                refreshed = Some(data);
+                break;
+            }
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }
+        assert_eq!(refreshed.expect("refreshed entry").period_label, "fresh");
+        assert_eq!(collect_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn stale_token_analytics_are_served_while_one_background_scan_refreshes_them() {
+        let suffix = TEST_PERIOD_SUFFIX.fetch_add(1, Ordering::SeqCst);
+        let period = format!("test-stale-refresh-{suffix}");
+        let mut stale = empty_token_analytics_data(&period);
+        stale.generated_at = "stale".to_string();
+        token_analytics_cache().lock().unwrap().insert(
+            period.clone(),
+            CachedAnalytics {
+                cached_at: expired_instant(),
+                refresh_generation: 0,
+                data: Arc::new(stale),
+            },
+        );
+        let collect_count = Arc::new(AtomicUsize::new(0));
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let count = Arc::clone(&collect_count);
+        let now = chrono::Utc::now();
+
+        let first = cached_or_collect_token_analytics_using(
+            &period,
+            1,
+            "Test Period",
+            now,
+            move |_, _, _, period| {
+                count.fetch_add(1, Ordering::SeqCst);
+                let _ = release_rx.recv();
+                let mut data = empty_token_analytics_data(&period);
+                data.generated_at = "fresh".to_string();
+                data
+            },
+        )
+        .await
+        .expect("stale result");
+        assert_eq!(first.cache_state, CacheState::Stale);
+        assert_eq!(first.data.generated_at, "stale");
+        let second_count = Arc::clone(&collect_count);
+        let second = cached_or_collect_token_analytics_using(
+            &period,
+            1,
+            "Test Period",
+            now,
+            move |_, _, _, period| {
+                second_count.fetch_add(1, Ordering::SeqCst);
+                empty_token_analytics_data(&period)
+            },
+        )
+        .await
+        .expect("second stale result");
+        assert_eq!(second.cache_state, CacheState::Stale);
+
+        release_tx.send(()).expect("release refresh");
+        let mut refreshed = None;
+        for _ in 0..500 {
+            if let Some((data, true)) = read_cached_token_analytics(&period) {
+                refreshed = Some(data);
+                break;
+            }
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }
+        assert_eq!(refreshed.expect("refreshed entry").generated_at, "fresh");
+        assert_eq!(collect_count.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -1065,7 +1233,7 @@ mod tests {
         .await
         .expect("initial result");
 
-        assert_eq!(first.cache_state, TokenAnalyticsCacheState::Miss);
+        assert_eq!(first.cache_state, CacheState::Miss);
         assert_eq!(first.data.generated_at, "initial-cache");
 
         let refresh_count = Arc::clone(&collect_count);
@@ -1090,7 +1258,7 @@ mod tests {
             2,
             "manual refresh should bypass cache entries written before it began waiting"
         );
-        assert_eq!(refresh.cache_state, TokenAnalyticsCacheState::Bypass);
+        assert_eq!(refresh.cache_state, CacheState::Bypass);
         assert_eq!(refresh.data.generated_at, "manual-refresh");
     }
 
@@ -1141,10 +1309,10 @@ mod tests {
         );
         assert_eq!(
             normal_result.expect("normal miss result").cache_state,
-            TokenAnalyticsCacheState::Miss
+            CacheState::Miss
         );
         let refresh = refresh_result.expect("refresh result");
-        assert_eq!(refresh.cache_state, TokenAnalyticsCacheState::Bypass);
+        assert_eq!(refresh.cache_state, CacheState::Bypass);
         assert_eq!(refresh.data.generated_at, "manual-refresh");
     }
 
@@ -1191,11 +1359,11 @@ mod tests {
         );
         assert_eq!(
             first_result.expect("first result").cache_state,
-            TokenAnalyticsCacheState::Bypass
+            CacheState::Bypass
         );
         assert_eq!(
             second_result.expect("second result").cache_state,
-            TokenAnalyticsCacheState::Bypass
+            CacheState::Bypass
         );
     }
 }

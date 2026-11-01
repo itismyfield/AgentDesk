@@ -228,7 +228,6 @@ async fn invoke(branch: Branch, root: &Path) -> Outcome {
                 has_reply_boundary: false,
                 merge_consecutive: false,
                 pending_uploads: Vec::new(),
-                voice_announcement: None,
             };
             crate::services::discord::mailbox_enqueue_intervention(
                 &shared,
@@ -302,14 +301,10 @@ async fn invoke(branch: Branch, root: &Path) -> Outcome {
     );
     transport.calls.lock().unwrap().clear();
     let original = serde_json::to_value(&message).unwrap();
-    let mut voice_config = crate::voice::VoiceConfig::default();
-    voice_config.audio.recordings_dir = root.join("recordings");
     let data = Arc::new(Data {
         shared: shared.clone(),
         token: "test-token".into(),
         provider: ProviderKind::Claude,
-        voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
-        voice_config,
     });
     let ctx = transport.ctx.clone();
     let event = serenity::FullEvent::Message {
@@ -399,7 +394,7 @@ fn run(test: &str, branches: &[Branch]) {
     );
     std::fs::create_dir(root.join("workspace")).unwrap();
     let agents: Vec<_> = Branch::ALL.into_iter().map(|branch| json!({
-        "id": format!("c2b-live-{}", branch as u64), "name": format!("C2b fixture {}", branch as u64), "voice_enabled": false,
+        "id": format!("c2b-live-{}", branch as u64), "name": format!("C2b fixture {}", branch as u64),
         "provider": "claude", "channels": {"claude": {"id": branch.channel().to_string(), "name": "c2b-live-cc", "workspace": root.join("workspace"), "runtime": "tui"}}
     })).collect();
     std::fs::write(

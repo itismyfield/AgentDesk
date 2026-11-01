@@ -195,7 +195,7 @@ async fn announce_bot_removed_commands_only_get_an_answer() {
         ("!fast on", Some("/fast")),
         ("!goals on", Some("/goals")),
         ("!allowall off", Some("/allowall")),
-        ("!vc join", Some("/voice")),
+        ("!vc join", None),
         ("!metrics", None),
         ("!allowedtools", None),
         ("!sessions", None),

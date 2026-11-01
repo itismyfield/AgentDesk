@@ -3,13 +3,14 @@ import { ZodError } from "zod";
 import { beginAuthentication } from "./authState";
 import { ApiRequestError, onApiError, readCachedGet } from "./httpClient";
 import {
-  getServerCampaign, getServerCampaigns, serverCampaignDocumentSchema,
-  type ServerCampaignDetailResponse, type ServerCampaignListResponse,
+  getServerCampaign, getServerCampaignSummaries, serverCampaignDocumentSchema,
+  type ServerCampaignDetailResponse,
 } from "./serverCampaigns";
 import { serverCampaignFixtures as fixtures } from "./serverCampaignsFixtures";
 import sharedPreparedDetail from "../../../tests/fixtures/server_campaigns/detail-prepared.json";
 
 const listUrl = "/api/server-campaigns";
+const summaryUrl = `${listUrl}?view=summary&limit=100&offset=0`;
 const detailUrl = `${listUrl}/release`;
 const fetchMock = vi.fn<typeof fetch>();
 function response(payload: unknown, status = 200) {
@@ -27,22 +28,34 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-it("reads the server list and encoded detail with GET and no body", async () => {
+it("reads the summary list and encoded detail with GET and no body", async () => {
   fetchMock
     .mockResolvedValueOnce(response({ campaigns: [fixtures.prepared] }))
     .mockResolvedValueOnce(response({ campaign: fixtures.prepared }));
-  const list = await getServerCampaigns();
+  const list = await getServerCampaignSummaries();
   const detail = await getServerCampaign("release /한글?#%");
   expect(list[0].definition.title).toBe("Release");
   expect(detail.view.execution_mode).toBe("server");
   expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
-    listUrl, `${listUrl}/release%20%2F%ED%95%9C%EA%B8%80%3F%23%25`,
+    summaryUrl, `${listUrl}/release%20%2F%ED%95%9C%EA%B8%80%3F%23%25`,
   ]);
   for (const [, options] of fetchMock.mock.calls) {
     expect(options?.method).toBe("GET");
     expect(options?.body).toBeUndefined();
   }
-  expect(readCachedGet<ServerCampaignListResponse>(listUrl)?.data.campaigns).toEqual(list);
+});
+
+it("keeps only picker fields from summary documents, with or without node payloads", async () => {
+  const { nodes: _nodes, ...definition } = fixtures.failedRunning.definition;
+  const { nodes: _views, sessions: _sessions, unreconciled_actions: _actions, commands: _commands, ...view } = fixtures.failedRunning.view;
+  fetchMock.mockResolvedValueOnce(response({ campaigns: [{ definition, view }, fixtures.prepared] }));
+  const [bare, full] = await getServerCampaignSummaries();
+  expect(bare).toEqual({
+    definition: { repository: "adk", title: "Release", goal: "Integrate and verify the release" },
+    view: { campaign_id: "release", as_of: view.as_of, display: "running", stop_mode: null, failed_count: 1, blocked_count: 1 },
+  });
+  expect(Object.keys(full.definition)).not.toContain("nodes");
+  expect(Object.keys(full.view)).not.toContain("nodes");
 });
 
 it.each(Object.entries(fixtures))("parses the %s fixture through an actual fetch Response", async (_name, fixture) => {
@@ -113,9 +126,9 @@ it.each(["alive", "gone"] as const)("requires %s observation evidence fields", (
 
 it.each(["list", "detail"] as const)("rejects malformed %s reads before they can overwrite a validated cache", async (kind) => {
   vi.useFakeTimers();
-  const read = () => kind === "list" ? getServerCampaigns() : getServerCampaign("release");
+  const read = () => kind === "list" ? getServerCampaignSummaries() : getServerCampaign("release");
   const envelope = (document: unknown) => kind === "list" ? { campaigns: [document] } : { campaign: document };
-  const url = kind === "list" ? listUrl : detailUrl;
+  const url = kind === "list" ? summaryUrl : detailUrl;
   fetchMock.mockResolvedValueOnce(response(envelope(fixtures.prepared)));
   await read();
   const cached = readCachedGet(url);
@@ -132,12 +145,12 @@ it.each(["list", "detail"] as const)("rejects malformed %s reads before they can
 it("accepts an explicit empty list and rejects a missing list field", async () => {
   vi.useFakeTimers();
   fetchMock.mockResolvedValueOnce(response({ campaigns: [] }));
-  expect(await getServerCampaigns()).toEqual([]);
+  expect(await getServerCampaignSummaries()).toEqual([]);
   fetchMock.mockImplementation(async () => response({}));
-  const result = getServerCampaigns().catch((error: unknown) => error);
+  const result = getServerCampaignSummaries().catch((error: unknown) => error);
   await vi.runAllTimersAsync();
   expect(await result).toBeInstanceOf(ZodError);
-  expect(readCachedGet<ServerCampaignListResponse>(listUrl)?.data.campaigns).toEqual([]);
+  expect(readCachedGet<{ campaigns: unknown[] }>(summaryUrl)?.data.campaigns).toEqual([]);
 });
 
 it.each([404, 503])("preserves HTTP %s status, message and server code without falling back", async (status) => {
@@ -159,7 +172,7 @@ it.each([404, 503])("preserves HTTP %s status, message and server code without f
 it.each(["list", "detail"] as const)("starts a separate %s fetch while an older read is in flight", async (kind) => {
   let finishOld!: (value: Response) => void;
   const envelope = (document: unknown) => kind === "list" ? { campaigns: [document] } : { campaign: document };
-  const read = () => kind === "list" ? getServerCampaigns() : getServerCampaign("release");
+  const read = () => kind === "list" ? getServerCampaignSummaries() : getServerCampaign("release");
   fetchMock
     .mockImplementationOnce(() => new Promise<Response>((resolve) => { finishOld = resolve; }))
     .mockResolvedValueOnce(response(envelope(fixtures.eventAdvanced)));
@@ -170,12 +183,10 @@ it.each(["list", "detail"] as const)("starts a separate %s fetch while an older 
     const current = await newer;
     finishOld(response(envelope(fixtures.stoppingUnknown)));
     const previous = await older;
-    const currentDocument = Array.isArray(current) ? current[0] : current;
-    const previousDocument = Array.isArray(previous) ? previous[0] : previous;
-    expect(currentDocument.view.last_event_sequence).toBe(24);
-    expect(previousDocument.view.last_event_sequence).toBe(23);
-    expect(currentDocument.view.definition_revision).toBe(previousDocument.view.definition_revision);
-    expect(currentDocument.view.control_version).toBe(previousDocument.view.control_version);
+    const currentView = (Array.isArray(current) ? current[0] : current).view;
+    const previousView = (Array.isArray(previous) ? previous[0] : previous).view;
+    expect(currentView.as_of).toBe("2026-10-28T05:00:01Z");
+    expect(previousView.as_of).toBe("2026-10-28T05:00:00Z");
   } finally {
     finishOld(response(envelope(fixtures.stoppingUnknown)));
     await Promise.allSettled([older, newer]);
@@ -187,7 +198,7 @@ it.each(["list", "detail"] as const)("forwards cancellation for %s reads to the 
   fetchMock.mockImplementation((_url, options) => new Promise((_resolve, reject) => {
     options?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
   }));
-  const pending = kind === "list" ? getServerCampaigns({ signal: controller.signal })
+  const pending = kind === "list" ? getServerCampaignSummaries({ signal: controller.signal })
     : getServerCampaign("release", { signal: controller.signal });
   const rejected = expect(pending).rejects.toMatchObject({ name: "AbortError" });
   controller.abort();
@@ -200,17 +211,17 @@ it.each(["list", "detail"] as const)("forwards suppressErrorToast for %s reads",
   const listener = vi.fn();
   onApiError(listener);
   fetchMock.mockImplementation(async () => response({ error: "Missing" }, 404));
-  const read = (suppressErrorToast?: boolean) => kind === "list" ? getServerCampaigns({ suppressErrorToast })
+  const read = (suppressErrorToast?: boolean) => kind === "list" ? getServerCampaignSummaries({ suppressErrorToast })
     : getServerCampaign("release", { suppressErrorToast });
   await expect(read()).rejects.toBeInstanceOf(ApiRequestError);
   expect(listener).not.toHaveBeenCalled();
   await expect(read(false)).rejects.toBeInstanceOf(ApiRequestError);
-  expect(listener).toHaveBeenCalledExactlyOnceWith(kind === "list" ? listUrl : detailUrl, expect.any(ApiRequestError));
+  expect(listener).toHaveBeenCalledExactlyOnceWith(kind === "list" ? summaryUrl : detailUrl, expect.any(ApiRequestError));
 });
 
 it("preserves server progress, reasons and command refusals across independent branches", async () => {
-  fetchMock.mockResolvedValueOnce(response({ campaigns: [fixtures.failedRunning, fixtures.failedBlockedComplete, fixtures.reviewWaiting] }));
-  const [running, blocked, waiting] = (await getServerCampaigns()).map((document) => document.view);
+  for (const fixture of [fixtures.failedRunning, fixtures.failedBlockedComplete, fixtures.reviewWaiting]) fetchMock.mockResolvedValueOnce(response({ campaign: fixture }));
+  const [running, blocked, waiting] = [(await getServerCampaign("release")).view, (await getServerCampaign("release")).view, (await getServerCampaign("release")).view];
   expect(running.display).toBe("running");
   expect(blocked.display).toBe("unable_to_progress");
   expect(blocked).toMatchObject({ control: "running", failed_count: 1, blocked_count: 1 });
@@ -250,8 +261,8 @@ it("keeps Unknown sessions and old action bindings through stop until Gone and r
 });
 
 it("distinguishes retry preparation from resume without resetting a failed series in the browser", async () => {
-  fetchMock.mockResolvedValueOnce(response({ campaigns: [fixtures.resumeWithoutRetry, fixtures.retryPrepared] }));
-  const [resume, retry] = (await getServerCampaigns()).map((document) => document.view);
+  fetchMock.mockResolvedValueOnce(response({ campaign: fixtures.resumeWithoutRetry })).mockResolvedValueOnce(response({ campaign: fixtures.retryPrepared }));
+  const [resume, retry] = [(await getServerCampaign("release")).view, (await getServerCampaign("release")).view];
   expect(resume.nodes[0].runtime).toMatchObject({ series: 1, disposition: "failed", repair_cycles: 3 });
   expect(retry.nodes[0].runtime).toMatchObject({ series: 2, disposition: "pending", repair_cycles: 0 });
   for (const view of [resume, retry]) {

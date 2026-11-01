@@ -760,7 +760,6 @@ pub(crate) mod test_queue {
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         };
         shared
             .mailbox(channel)

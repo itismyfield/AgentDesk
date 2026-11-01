@@ -24,9 +24,6 @@ pub(in crate::services::discord) struct FinalizeContext {
     /// `cancelled`. Keeping this per-site avoids changing provider-watchdog
     /// semantics on the watcher path.
     pub(in crate::services::discord) allow_completion_cleanup: bool,
-    /// Whether to drain voice barge-in deferred prompts as part of finalize.
-    /// The bridge branches drain voice; the watcher path did NOT.
-    pub(in crate::services::discord) drain_voice: bool,
     /// Legacy context bit for paths that historically owned post-finalize queue
     /// admission. Queue drain is now driven by the #4048 completion-event
     /// listener; this bit remains as part of the backstop/no-owner context shape
@@ -45,20 +42,18 @@ impl FinalizeContext {
         Self {
             clear_inflight: true,
             allow_completion_cleanup: false,
-            drain_voice: false,
             kickoff_queue: false,
             expected_idempotent_guard_miss: true,
         }
     }
 
     /// Bridge non-delegation / missing-handoff branches: bridge owns the
-    /// inflight clear elsewhere, marks completion-cleanup on non-cancel, drains
-    /// voice, and leaves queue admission to the completion-event listener.
+    /// inflight clear elsewhere, marks completion-cleanup on non-cancel, and
+    /// leaves queue admission to the completion-event listener.
     pub(in crate::services::discord) fn bridge() -> Self {
         Self {
             clear_inflight: false,
             allow_completion_cleanup: true,
-            drain_voice: true,
             kickoff_queue: false,
             expected_idempotent_guard_miss: false,
         }
@@ -66,14 +61,13 @@ impl FinalizeContext {
 
     /// Watcher terminal via `finish_restored_watcher_active_turn`: the watcher
     /// clears inflight inline before submitting, does NOT mark completion
-    /// cleanup, does NOT drain voice. Queue admission is now driven by the
+    /// cleanup. Queue admission is now driven by the
     /// #4048 completion-event listener; watcher-specific dispatch_ok guards
     /// remain outside finalizer cleanup.
     pub(in crate::services::discord) fn watcher() -> Self {
         Self {
             clear_inflight: false,
             allow_completion_cleanup: false,
-            drain_voice: false,
             kickoff_queue: false,
             expected_idempotent_guard_miss: false,
         }
@@ -97,14 +91,13 @@ impl FinalizeContext {
 
     /// Monitor-auto-turn / recovery terminal (#3016 phase 4): the caller owns
     /// the inflight clear (or there is none — synthetic monitor turn / recovery
-    /// already cleared it), does NOT mark completion-cleanup, does NOT drain
-    /// voice, and keeps the legacy queue-admission context bit. The actual
+    /// already cleared it), does NOT mark completion-cleanup, and keeps the
+    /// legacy queue-admission context bit. The actual
     /// drain trigger is now the #4048 completion-event listener.
     pub(in crate::services::discord) fn monitor() -> Self {
         Self {
             clear_inflight: false,
             allow_completion_cleanup: false,
-            drain_voice: false,
             kickoff_queue: true,
             expected_idempotent_guard_miss: false,
         }
@@ -118,7 +111,6 @@ impl FinalizeContext {
         Self {
             clear_inflight: true,
             allow_completion_cleanup: false,
-            drain_voice: false,
             kickoff_queue: true,
             expected_idempotent_guard_miss: true,
         }
@@ -126,13 +118,12 @@ impl FinalizeContext {
 
     /// Deadline-armed gate-timeout backstop, fired from the reconciler with no
     /// caller to have cleared inflight: finalize fully (clear inflight here),
-    /// no completion-cleanup or voice drain (watcher semantics), and preserve
+    /// no completion-cleanup (watcher semantics), and preserve
     /// the legacy queue-admission context bit for cleanup/outcome semantics.
     pub(super) fn gate_backstop() -> Self {
         Self {
             clear_inflight: true,
             allow_completion_cleanup: false,
-            drain_voice: false,
             kickoff_queue: true,
             expected_idempotent_guard_miss: true,
         }
@@ -147,7 +138,6 @@ impl FinalizeContext {
         Self {
             clear_inflight: false,
             allow_completion_cleanup: false,
-            drain_voice: false,
             kickoff_queue: false,
             expected_idempotent_guard_miss: false,
         }
@@ -167,7 +157,7 @@ mod tests {
     /// expecting the identity-guard miss. That single difference is what
     /// downgrades the now-deterministic late guarded miss from WARN to debug
     /// WITHOUT changing any finalize side effect (inflight/completion-cleanup/
-    /// voice/queue semantics stay exactly the watcher path's).
+    /// queue semantics stay exactly the watcher path's).
     #[test]
     fn watcher_after_pre_panel_release_only_flips_expected_guard_miss() {
         let base = FinalizeContext::watcher();
@@ -185,7 +175,6 @@ mod tests {
             after.allow_completion_cleanup,
             base.allow_completion_cleanup
         );
-        assert_eq!(after.drain_voice, base.drain_voice);
         assert_eq!(after.kickoff_queue, base.kickoff_queue);
     }
 }

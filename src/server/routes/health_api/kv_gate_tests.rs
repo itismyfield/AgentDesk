@@ -31,13 +31,12 @@ async fn health_gate_kv_timeout_does_not_report_fallback_as_effective() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let seed = db.connect_and_migrate().await;
-    crate::db::meetings::upsert_kv_meta_pg(
-        &seed,
-        "runtime-config",
-        r#"{"dispatchRateLimitGateDangerPct":77}"#,
-    )
-    .await
-    .unwrap();
+    sqlx::query("INSERT INTO kv_meta (key, value) VALUES ($1, $2)")
+        .bind("runtime-config")
+        .bind(r#"{"dispatchRateLimitGateDangerPct":77}"#)
+        .execute(&seed)
+        .await
+        .unwrap();
     let proxy = PgWireProxy::start(&db.database_url, Duration::ZERO).await;
     let pool = proxy.pool(8);
     let mut engine_config = crate::config::Config::default();

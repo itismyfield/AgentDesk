@@ -612,21 +612,15 @@ mod prompt_reuse_tests {
 
 /// Coarse-grained classification of who triggered a cancellation.
 ///
-/// Issue #2335 (a): downstream branches (e.g. should we still speak the
-/// partial summary?) need to distinguish "user explicitly told us to stop"
+/// Downstream branches need to distinguish "user explicitly told us to stop"
 /// from "the watchdog/timeout expired". The free-form `cancel_source` label
 /// remains for tracing, but consumers should branch on this enum to avoid
 /// brittle string matching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CancelSource {
-    /// User talked over an in-flight playback / turn ("live PCM cut" or the
-    /// explicit-stop barge-in path).
-    UserBargeIn,
-    /// User explicitly asked to stop via a non-voice control surface.
+    /// User explicitly asked to stop.
     ExplicitStop,
-    /// Foreground/background summary or ack generation timed out.
-    SummaryTimeout,
-    /// Surrounding session is being torn down (guild leave, restart, etc.).
+    /// Surrounding session is being torn down (restart, shutdown, etc.).
     SessionTeardown,
     /// Long-running watchdog deadline elapsed.
     WatchdogTimeout,
@@ -639,9 +633,7 @@ impl CancelSource {
     /// systems (e.g. dispatch row `cancel_reason`).
     pub fn as_label(self) -> &'static str {
         match self {
-            CancelSource::UserBargeIn => "user_barge_in",
             CancelSource::ExplicitStop => "explicit_stop",
-            CancelSource::SummaryTimeout => "summary_timeout",
             CancelSource::SessionTeardown => "session_teardown",
             CancelSource::WatchdogTimeout => "watchdog_timeout",
             CancelSource::Other => "other",
@@ -654,23 +646,10 @@ impl CancelSource {
     pub fn classify(label: &str) -> Self {
         // Order matters: more specific substrings first.
         let lower = label.to_ascii_lowercase();
-        if lower.contains("watchdog") || lower.contains("ack_timeout") {
+        if lower.contains("watchdog") {
             return CancelSource::WatchdogTimeout;
         }
-        if lower.contains("summary_timeout")
-            || lower.contains("text_reply_timeout")
-            || lower.contains("background_summary")
-        {
-            return CancelSource::SummaryTimeout;
-        }
-        if lower.contains("live_cut") || lower.contains("barge_in") {
-            return CancelSource::UserBargeIn;
-        }
-        if lower.contains("teardown")
-            || lower.contains("guild_teardown")
-            || lower.contains("shutdown")
-            || lower.contains("restart")
-        {
+        if lower.contains("teardown") || lower.contains("shutdown") || lower.contains("restart") {
             return CancelSource::SessionTeardown;
         }
         if lower.contains("explicit_stop") || lower.contains("user_cancel") {
@@ -1629,33 +1608,16 @@ mod cancel_token_tests {
         assert!(cancel_requested(Some(&token)));
     }
 
-    /// Issue #2335 (a): free-form labels used today by the voice paths must
-    /// classify into the new [`CancelSource`] enum so downstream branches
-    /// can distinguish timeout-vs-user-cancel without string parsing.
+    /// Free-form cancel labels classify into [`CancelSource`] so downstream
+    /// branches can distinguish timeout-vs-user-cancel without string parsing.
     #[test]
-    fn cancel_source_classifies_known_voice_labels() {
+    fn cancel_source_classifies_known_labels() {
         assert_eq!(
-            CancelSource::classify("voice_barge_in_explicit_stop"),
-            CancelSource::UserBargeIn
+            CancelSource::classify("routine_explicit_stop"),
+            CancelSource::ExplicitStop
         );
         assert_eq!(
-            CancelSource::classify("voice_barge_in_live_cut"),
-            CancelSource::UserBargeIn
-        );
-        assert_eq!(
-            CancelSource::classify("voice_background_summary_timeout"),
-            CancelSource::SummaryTimeout
-        );
-        assert_eq!(
-            CancelSource::classify("voice_channel_text_reply_timeout"),
-            CancelSource::SummaryTimeout
-        );
-        assert_eq!(
-            CancelSource::classify("voice_foreground_ack_timeout"),
-            CancelSource::WatchdogTimeout
-        );
-        assert_eq!(
-            CancelSource::classify("voice_guild_teardown"),
+            CancelSource::classify("dcserver_restart"),
             CancelSource::SessionTeardown
         );
         assert_eq!(
@@ -1675,41 +1637,35 @@ mod cancel_token_tests {
     fn set_cancel_source_populates_kind() {
         let token = CancelToken::new();
         assert_eq!(token.cancel_source_kind(), None);
-        token.set_cancel_source("voice_barge_in_explicit_stop");
+        token.set_cancel_source("explicit_stop");
         assert_eq!(
             token.cancel_source_kind(),
-            Some(CancelSource::UserBargeIn),
+            Some(CancelSource::ExplicitStop),
             "set_cancel_source should auto-classify into the enum"
         );
 
         // Explicit kind setter overrides classification when called first.
         let token = CancelToken::new();
         token.set_cancel_source_kind(CancelSource::SessionTeardown);
-        token.set_cancel_source("voice_barge_in_live_cut");
+        token.set_cancel_source("explicit_stop");
         assert_eq!(
             token.cancel_source_kind(),
             Some(CancelSource::SessionTeardown),
             "explicit set_cancel_source_kind must win over later free-form auto-classification"
         );
-        assert_eq!(
-            token.cancel_source().as_deref(),
-            Some("voice_barge_in_live_cut")
-        );
+        assert_eq!(token.cancel_source().as_deref(), Some("explicit_stop"));
     }
 
     #[test]
-    fn cleanup_adapter_preserves_existing_voice_cancel_source_and_kind() {
+    fn cleanup_adapter_preserves_existing_cancel_source_and_kind() {
         let token = CancelToken::new();
-        token.set_cancel_source("voice_barge_in_explicit_stop");
-        token.set_cancel_source_kind(CancelSource::UserBargeIn);
+        token.set_cancel_source("explicit_stop");
+        token.set_cancel_source_kind(CancelSource::ExplicitStop);
 
         token.cancel_with_tmux_cleanup();
 
-        assert_eq!(
-            token.cancel_source().as_deref(),
-            Some("voice_barge_in_explicit_stop")
-        );
-        assert_eq!(token.cancel_source_kind(), Some(CancelSource::UserBargeIn));
+        assert_eq!(token.cancel_source().as_deref(), Some("explicit_stop"));
+        assert_eq!(token.cancel_source_kind(), Some(CancelSource::ExplicitStop));
     }
 
     #[test]
@@ -1725,7 +1681,7 @@ mod cancel_token_tests {
     #[test]
     fn concurrent_cleanup_cannot_downgrade_primary_cancel_source() {
         let token = Arc::new(CancelToken::new());
-        token.set_cancel_source("voice_barge_in_live_cut");
+        token.set_cancel_source("explicit_stop");
         let barrier = Arc::new(Barrier::new(3));
         let mut cleaners = Vec::new();
         for _ in 0..2 {
@@ -1741,63 +1697,54 @@ mod cancel_token_tests {
             cleaner.join().unwrap();
         }
 
-        assert_eq!(
-            token.cancel_source().as_deref(),
-            Some("voice_barge_in_live_cut")
-        );
-        assert_eq!(token.cancel_source_kind(), Some(CancelSource::UserBargeIn));
+        assert_eq!(token.cancel_source().as_deref(), Some("explicit_stop"));
+        assert_eq!(token.cancel_source_kind(), Some(CancelSource::ExplicitStop));
     }
 
     #[test]
-    fn cleanup_first_upgrades_to_specific_voice_source() {
+    fn cleanup_first_upgrades_to_specific_source() {
         let token = CancelToken::new();
         token.cancel_with_tmux_cleanup();
-        token.set_cancel_source("voice_barge_in_live_cut");
+        token.set_cancel_source("explicit_stop");
 
-        assert_eq!(
-            token.cancel_source().as_deref(),
-            Some("voice_barge_in_live_cut")
-        );
-        assert_eq!(token.cancel_source_kind(), Some(CancelSource::UserBargeIn));
+        assert_eq!(token.cancel_source().as_deref(), Some("explicit_stop"));
+        assert_eq!(token.cancel_source_kind(), Some(CancelSource::ExplicitStop));
     }
 
     #[test]
-    fn concurrent_cleanup_and_voice_source_never_leave_provisional_kind() {
+    fn concurrent_cleanup_and_specific_source_never_leave_provisional_kind() {
         for cleanup_first in [true, false] {
             let token = Arc::new(CancelToken::new());
             let cleanup_ready = Arc::new(Barrier::new(2));
-            let voice_ready = Arc::new(Barrier::new(2));
+            let source_ready = Arc::new(Barrier::new(2));
             let cleanup_token = Arc::clone(&token);
             let cleanup_ready_for_thread = Arc::clone(&cleanup_ready);
-            let voice_ready_for_thread = Arc::clone(&voice_ready);
+            let source_ready_for_thread = Arc::clone(&source_ready);
             let cleanup = thread::spawn(move || {
                 if cleanup_first {
                     cleanup_token.cancel_with_tmux_cleanup();
                     cleanup_ready_for_thread.wait();
-                    voice_ready_for_thread.wait();
+                    source_ready_for_thread.wait();
                 } else {
                     cleanup_ready_for_thread.wait();
-                    voice_ready_for_thread.wait();
+                    source_ready_for_thread.wait();
                     cleanup_token.cancel_with_tmux_cleanup();
                 }
             });
-            let voice_token = Arc::clone(&token);
+            let source_token = Arc::clone(&token);
             if cleanup_first {
                 cleanup_ready.wait();
-                voice_token.set_cancel_source("voice_barge_in_explicit_stop");
-                voice_ready.wait();
+                source_token.set_cancel_source("explicit_stop");
+                source_ready.wait();
             } else {
-                voice_token.set_cancel_source("voice_barge_in_explicit_stop");
+                source_token.set_cancel_source("explicit_stop");
                 cleanup_ready.wait();
-                voice_ready.wait();
+                source_ready.wait();
             }
             cleanup.join().unwrap();
 
-            assert_eq!(
-                token.cancel_source().as_deref(),
-                Some("voice_barge_in_explicit_stop")
-            );
-            assert_eq!(token.cancel_source_kind(), Some(CancelSource::UserBargeIn));
+            assert_eq!(token.cancel_source().as_deref(), Some("explicit_stop"));
+            assert_eq!(token.cancel_source_kind(), Some(CancelSource::ExplicitStop));
         }
     }
 
@@ -1805,15 +1752,15 @@ mod cancel_token_tests {
     fn explicit_kind_pair_update_excludes_cleanup_interleaving() {
         let token = CancelToken::new();
 
-        token.set_cancel_source_kind_with_interleaving(CancelSource::UserBargeIn, |token| {
+        token.set_cancel_source_kind_with_interleaving(CancelSource::ExplicitStop, |token| {
             assert!(
                 token.cancel_source.try_lock().is_err(),
                 "the label lock must remain held after the kind write"
             );
         });
 
-        assert_eq!(token.cancel_source_kind(), Some(CancelSource::UserBargeIn));
-        assert_eq!(token.cancel_source().as_deref(), Some("user_barge_in"));
+        assert_eq!(token.cancel_source_kind(), Some(CancelSource::ExplicitStop));
+        assert_eq!(token.cancel_source().as_deref(), Some("explicit_stop"));
     }
 }
 

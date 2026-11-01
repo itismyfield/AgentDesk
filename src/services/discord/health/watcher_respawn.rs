@@ -699,7 +699,7 @@ fn pending_absent_channels(provider: &ProviderKind) -> Vec<ChannelId> {
 /// deleted the inflight file, the fallback `first()` runtime — which is not the
 /// channel's owner — can return `None`. Clearing on `None` stranded the channel
 /// before the channel-aware respawn (`rebind_inflight`, which resolves its OWN
-/// owning runtime via `resolve_direct_meeting_runtime`) was ever attempted, so
+/// owning runtime via `resolve_direct_channel_runtime`) was ever attempted, so
 /// the next zero-candidate pass permanently lost the watcher. The invariant:
 /// the absence entry survives until a watcher is CONFIRMED present or a respawn
 /// SUCCEEDS. `None` means "ownership/liveness not yet resolvable" — keep

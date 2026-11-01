@@ -26,17 +26,6 @@ backlog → ready → requested → in_progress → review → done
 | `failed` | Failed | ready (retry) |
 | `blocked` | Stalled | in_progress (manual unblock) |
 
-### XP Rewards
-
-Agents earn XP on card completion:
-
-| Priority | XP | Chain Bonus |
-|----------|-----|------------|
-| low | 5 | +2 per depth (max +6) |
-| medium | 10 | +2 per depth |
-| high | 18 | +2 per depth |
-| urgent | 30 | +2 per depth |
-
 ---
 
 ## Auto-Queue System
@@ -184,7 +173,7 @@ On `onTick`, scans `backlog` cards without `assigned_agent_id`:
 
 1. Agent session ends → `OnSessionStatusChange` hook
 2. Dispatch status → `completed` + result_summary saved
-3. `OnDispatchCompleted` hook → review entry, review automation, XP rewards
+3. `OnDispatchCompleted` hook → review entry, review automation
 
 ---
 
@@ -226,26 +215,6 @@ On `onTick`, scans `backlog` cards without `assigned_agent_id`:
 - `src/supervisor/mod.rs` exposes a policy bridge for supervisor signals such as orphan, deadlock, or stale inflight candidates.
 - Orphan recovery fails the stale dispatch, returns the card to a dispatchable state, and records an auditable supervisor decision instead of falsely advancing work.
 - Startup recovery in `src/services/discord/runtime_bootstrap.rs` re-delivers truly orphaned pending dispatches after restart when the agent still needs the work.
-
----
-
-## Meeting System
-
-`src/services/discord/meeting_orchestrator.rs` — round-table meeting orchestration, re-exported as `crate::services::discord::meeting`.
-
-### Meeting Flow
-
-1. Start from the dashboard Meetings page or `POST /api/round-table-meetings/start`
-2. Participant selection (auto or manual per settings)
-3. Round progression:
-   - Primary provider works one round
-   - Reviewer provider reviews + provides feedback
-   - Repeat (up to max_rounds)
-4. Summary agent generates final summary
-5. Transcript + summary saved to DB
-
-### Meeting States
-`SelectingParticipants → InProgress → Concluding → Completed`
 
 ---
 

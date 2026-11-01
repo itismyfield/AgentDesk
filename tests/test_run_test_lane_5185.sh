@@ -1018,7 +1018,7 @@ fi
 # 4i. Only stdout is parsed: a child's stderr merged in split `... ok` into
 #     `... okno server running ...` and a passed test went lane-missing.
 # --------------------------------------------------------------------------
-TMUX_ID=services::discord::health::runtime_resolve::direct_meeting_candidate_tests::explicit_owner_does_not_wait_for_unrelated_live_probes
+TMUX_ID=services::discord::health::runtime_resolve::direct_channel_candidate_tests::explicit_owner_does_not_wait_for_unrelated_live_probes
 TMUX_STDERR='no server running on /tmp/tmux-1001/default'
 write_ids a::b "$TMUX_ID" >/dev/null
 cat >"$LEDGER" <<'EOF'

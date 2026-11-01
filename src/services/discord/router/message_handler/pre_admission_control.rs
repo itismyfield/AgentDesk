@@ -212,7 +212,7 @@ pub(super) async fn resolve(
         PreAdmissionRoute::Continue(kind) => PreAdmission::Continue(kind),
         PreAdmissionRoute::GoalLifecycle(command) => {
             if should_add_turn_pending_reaction(dispatch_id_for_thread)
-                && !super::super::super::voice_barge_in::is_synthetic_voice_message_id(user_msg_id)
+                && !super::super::super::is_internal_message_id(user_msg_id)
             {
                 tv_clear_current(shared, http, channel_id, user_msg_id, "intake_goal").await;
             }
@@ -224,7 +224,7 @@ pub(super) async fn resolve(
         }
         control => {
             if should_add_turn_pending_reaction(dispatch_id_for_thread)
-                && !super::super::super::voice_barge_in::is_synthetic_voice_message_id(user_msg_id)
+                && !super::super::super::is_internal_message_id(user_msg_id)
             {
                 tv_clear_current(
                     shared,

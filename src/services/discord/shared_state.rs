@@ -753,12 +753,6 @@ pub(in crate::services::discord) mod restart_lifecycle_tests {
 
     const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
 
-    /// #5485 S2a: stop a test-spawned voice worker through owner state — the
-    /// PCM harness holds a `ShutdownReader`, never a writable `Arc` of its own.
-    pub(in crate::services::discord) fn stop_pcm_worker_for_test(r: &super::RestartLifecycle) {
-        r.shutting_down.store(true, Ordering::Relaxed);
-    }
-
     /// #5485 S2a A1: `shutdown_reader()` is a view of the live flag, never a
     /// snapshot, and every clone shares that one allocation.
     #[tokio::test]

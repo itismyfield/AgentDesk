@@ -397,6 +397,50 @@ impl ChannelStore {
         self.apply_resolved_boundaries()?;
         Ok(())
     }
+
+    /// Appends/fsyncs a start of 0 for a fresh Codex source's `Pending{[0]}` link bound at `seq`,
+    /// then applies it through the resolution path.
+    pub(crate) fn resolve_codex_fresh_boundary(
+        &mut self,
+        source: &SourceId,
+        seq: u64,
+    ) -> Result<(), StoreError> {
+        let file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(self.dir.join(LEDGER_FILE))?;
+        let mut file = durable::LockedFile::try_lock(file)?;
+        if ledger::resolution(&mut file, source)?.is_some() {
+            return Err(StoreError::Rejected(
+                "boundary already resolved; reopen the writer".into(),
+            ));
+        }
+        let rotation = self.rotation()?;
+        let link = rotation
+            .link(source)
+            .ok_or_else(|| damage("missing pending link"))?;
+        if link.boundary
+            != (Boundary::Pending {
+                candidates: vec![0],
+            })
+            || link.seq != seq
+            || link.parent.is_some()
+            || link.hot_candidate.is_some()
+            || self.ledger.boundary_resolved(source).is_some()
+        {
+            return Err(damage("stale Codex fresh boundary"));
+        }
+        self.append_ledger(LedgerEntry::BoundaryResolved {
+            source: source.clone(),
+            from: 0,
+            excluded_range: 0..0,
+            operator: "codex_fresh_launch".into(),
+            at: Utc::now(),
+            evidence: None,
+        })?;
+        self.apply_resolved_boundaries()?;
+        Ok(())
+    }
 }
 
 impl OStore {

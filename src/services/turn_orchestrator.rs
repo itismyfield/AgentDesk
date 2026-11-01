@@ -2727,7 +2727,6 @@ mod actor_hydrate_regression_tests {
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         }
     }
 
@@ -3838,7 +3837,7 @@ mod actor_hydrate_regression_tests {
         let handle_b = handle.clone();
         let task_a = tokio::spawn(async move {
             handle_a
-                .cancel_active_turn_with_reason("voice_barge_in_live_cut".to_string())
+                .cancel_active_turn_with_reason("operator_stop_live_cut".to_string())
                 .await
         });
         let task_b = tokio::spawn(async move {
@@ -3866,7 +3865,7 @@ mod actor_hydrate_regression_tests {
         // task the actor dequeued first; the loser's later message
         // must NOT mutate the label.
         let winner_label = if !res_a.already_stopping {
-            "voice_barge_in_live_cut"
+            "operator_stop_live_cut"
         } else {
             "watchdog_timeout"
         };
@@ -4262,7 +4261,6 @@ mod active_turn_kind_tests {
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         }
     }
 
@@ -4799,7 +4797,6 @@ mod enqueue_refusal_reason_tests {
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         }
     }
 
@@ -4966,7 +4963,6 @@ mod no_ttl_evict_tests {
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         }
     }
 
@@ -5167,33 +5163,10 @@ mod persistence_tests {
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }
 
-    fn voice_announcement(
-        transcript: &str,
-        utterance_id: &str,
-    ) -> crate::voice::prompt::VoiceTranscriptAnnouncement {
-        crate::voice::prompt::VoiceTranscriptAnnouncement {
-            transcript: transcript.to_string(),
-            user_id: "42".to_string(),
-            utterance_id: utterance_id.to_string(),
-            language: "ko-KR".to_string(),
-            verbose_progress: true,
-            started_at: Some("2026-05-24T21:00:00+09:00".to_string()),
-            completed_at: Some("2026-05-24T21:00:01+09:00".to_string()),
-            samples_written: Some(48_000),
-            control_channel_id: Some(300),
-            stt_mode: Some("file".to_string()),
-            stt_latency_ms: Some(120),
-        }
-    }
-
-    fn make_intervention(
-        message_id: u64,
-        text: &str,
-        voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
-    ) -> Intervention {
+    fn make_intervention(message_id: u64, text: &str) -> Intervention {
         Intervention {
             author_id: UserId::new(100),
-            author_is_bot: voice_announcement.is_some(),
+            author_is_bot: false,
             message_id: MessageId::new(message_id),
             queued_generation: crate::services::discord::runtime_store::process_generation(),
             source_message_ids: vec![MessageId::new(message_id)],
@@ -5206,7 +5179,6 @@ mod persistence_tests {
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement,
         }
     }
 
@@ -5231,7 +5203,7 @@ mod persistence_tests {
             let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
             let registry = ChannelMailboxRegistry::default();
             let handle = registry.handle(channel_id);
-            let head = make_intervention(4_024_211, "head", None);
+            let head = make_intervention(4_024_211, "head");
             handle
                 .replace_queue(vec![head.clone()], persistence.clone())
                 .await;
@@ -5267,7 +5239,7 @@ mod persistence_tests {
             let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
             let registry = ChannelMailboxRegistry::default();
             let handle = registry.handle(channel_id);
-            let head = make_intervention(4_024_221, "head", None);
+            let head = make_intervention(4_024_221, "head");
             handle
                 .replace_queue(vec![head.clone()], persistence.clone())
                 .await;
@@ -5314,7 +5286,7 @@ mod persistence_tests {
             let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
             let registry = ChannelMailboxRegistry::default();
             let handle = registry.handle(channel_id);
-            let marker_a = make_intervention(4_024_223, "marker-a", None);
+            let marker_a = make_intervention(4_024_223, "marker-a");
             save_channel_pending_dispatch_marker(
                 &provider, token_hash, channel_id, &marker_a, None,
             )
@@ -5371,9 +5343,9 @@ mod persistence_tests {
             let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
             let registry = ChannelMailboxRegistry::default();
             let handle = registry.handle(channel_id);
-            let marker = make_intervention(4_024_226, "marker", None);
+            let marker = make_intervention(4_024_226, "marker");
             handle.replace_queue(Vec::new(), persistence.clone()).await;
-            let reserved = make_intervention(4_024_225, "reserved", None);
+            let reserved = make_intervention(4_024_225, "reserved");
             handle
                 .replace_queue(vec![reserved.clone()], persistence.clone())
                 .await;
@@ -5430,7 +5402,7 @@ mod persistence_tests {
             let provider = ProviderKind::Claude;
             let token_hash = "dispatch-marker-boot-empty";
             let channel_id = ChannelId::new(4_024_230);
-            let marker = make_intervention(4_024_231, "marker head", None);
+            let marker = make_intervention(4_024_231, "marker head");
             let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
             save_channel_pending_dispatch_marker(&provider, token_hash, channel_id, &marker, None)
                 .unwrap();
@@ -5478,7 +5450,7 @@ mod persistence_tests {
             let provider = ProviderKind::Claude;
             let token_hash = "dispatch-marker-boot-consumed-window";
             let channel_id = ChannelId::new(4_024_232);
-            let marker = make_intervention(4_024_233, "marker consumed", None);
+            let marker = make_intervention(4_024_233, "marker consumed");
             let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
             save_channel_pending_dispatch_marker(&provider, token_hash, channel_id, &marker, None)
                 .unwrap();
@@ -5520,8 +5492,8 @@ mod persistence_tests {
             let provider = ProviderKind::Claude;
             let token_hash = "dispatch-marker-boot-replaced-window";
             let channel_id = ChannelId::new(4_024_234);
-            let stale_marker = make_intervention(4_024_235, "stale marker", None);
-            let live_marker = make_intervention(4_024_236, "live replacement", None);
+            let stale_marker = make_intervention(4_024_235, "stale marker");
+            let live_marker = make_intervention(4_024_236, "live replacement");
             let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
             save_channel_pending_dispatch_marker(
                 &provider,
@@ -5584,7 +5556,7 @@ mod persistence_tests {
             let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
             let registry = ChannelMailboxRegistry::default();
             let handle = registry.handle(channel_id);
-            let marker = make_intervention(4_024_243, "active marker", None);
+            let marker = make_intervention(4_024_243, "active marker");
             handle.replace_queue(Vec::new(), persistence.clone()).await;
             handle
                 .restore_active_turn(
@@ -5617,7 +5589,7 @@ mod persistence_tests {
             let provider = ProviderKind::Claude;
             let token_hash = "dispatch-marker-boot-duplicate";
             let channel_id = ChannelId::new(4_024_240);
-            let queued = make_intervention(4_024_241, "queued", None);
+            let queued = make_intervention(4_024_241, "queued");
             let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
             let registry = ChannelMailboxRegistry::default();
             let handle = registry.handle(channel_id);
@@ -5655,7 +5627,7 @@ mod persistence_tests {
             let provider = ProviderKind::Claude;
             let token_hash = "dispatch-marker-boot-active";
             let channel_id = ChannelId::new(4_024_244);
-            let marker = make_intervention(4_024_245, "active marker", None);
+            let marker = make_intervention(4_024_245, "active marker");
             let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
             let registry = ChannelMailboxRegistry::default();
             let handle = registry.handle(channel_id);
@@ -5698,7 +5670,7 @@ mod persistence_tests {
             let provider = ProviderKind::Claude;
             let token_hash = "dispatch-marker-boot-recovery-active";
             let channel_id = ChannelId::new(4_024_255);
-            let marker = make_intervention(4_024_256, "recovery active marker", None);
+            let marker = make_intervention(4_024_256, "recovery active marker");
             let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
             let registry = ChannelMailboxRegistry::default();
             let handle = registry.handle(channel_id);
@@ -5745,7 +5717,7 @@ mod persistence_tests {
             let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
             let registry = ChannelMailboxRegistry::default();
             let handle = registry.handle(channel_id);
-            let head = make_intervention(4_024_258, "reserved head", None);
+            let head = make_intervention(4_024_258, "reserved head");
             handle
                 .replace_queue(vec![head.clone()], persistence.clone())
                 .await;
@@ -5789,8 +5761,8 @@ mod persistence_tests {
             let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
             let registry = ChannelMailboxRegistry::default();
             let handle = registry.handle(channel_id);
-            let marker_a = make_intervention(4_024_247, "marker only", None);
-            let queued_b = make_intervention(4_024_248, "queued b", None);
+            let marker_a = make_intervention(4_024_247, "marker only");
+            let queued_b = make_intervention(4_024_248, "queued b");
             handle
                 .replace_queue(vec![queued_b.clone()], persistence.clone())
                 .await;
@@ -5840,7 +5812,7 @@ mod persistence_tests {
             let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
             let registry = ChannelMailboxRegistry::default();
             let handle = registry.handle(channel_id);
-            let head = make_intervention(4_797_202, "pending A", None);
+            let head = make_intervention(4_797_202, "pending A");
             handle
                 .replace_queue(vec![head.clone()], persistence.clone())
                 .await;
@@ -5880,7 +5852,7 @@ mod persistence_tests {
             let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
             let registry = ChannelMailboxRegistry::default();
             let handle = registry.handle(channel_id);
-            let head = make_intervention(4_797_204, "active A", None);
+            let head = make_intervention(4_797_204, "active A");
             assert!(
                 handle
                     .try_start_turn(
@@ -5905,7 +5877,7 @@ mod persistence_tests {
     }
 
     fn merged_intervention(primary: u64, source: u64) -> Intervention {
-        let mut intervention = make_intervention(primary, "merged retry", None);
+        let mut intervention = make_intervention(primary, "merged retry");
         intervention.source_message_ids = vec![MessageId::new(source), MessageId::new(primary)];
         intervention
     }
@@ -5920,7 +5892,7 @@ mod persistence_tests {
             let channel_id = ChannelId::new(4_797_205);
             let persistence = QueuePersistenceContext::new(&provider, "merged-pending", None);
             let handle = ChannelMailboxRegistry::default().handle(channel_id);
-            let source = make_intervention(4_797_206, "source A", None);
+            let source = make_intervention(4_797_206, "source A");
             handle
                 .replace_queue(vec![source.clone()], persistence.clone())
                 .await;
@@ -5984,7 +5956,7 @@ mod persistence_tests {
             let channel_id = ChannelId::new(4_797_211);
             let persistence = QueuePersistenceContext::new(&provider, "merged-queued", None);
             let handle = ChannelMailboxRegistry::default().handle(channel_id);
-            let source = make_intervention(4_797_212, "queued A", None);
+            let source = make_intervention(4_797_212, "queued A");
             handle
                 .replace_queue(vec![source.clone()], persistence.clone())
                 .await;
@@ -6018,7 +5990,7 @@ mod persistence_tests {
             let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
             let registry = ChannelMailboxRegistry::default();
             let handle = registry.handle(channel_id);
-            let head = make_intervention(4_024_250, "head", None);
+            let head = make_intervention(4_024_250, "head");
             handle
                 .replace_queue(vec![head.clone()], persistence.clone())
                 .await;
@@ -6051,7 +6023,7 @@ mod persistence_tests {
             let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
             let registry = ChannelMailboxRegistry::default();
             let handle = registry.handle(channel_id);
-            let head = make_intervention(4_024_267, "slow live dispatch", None);
+            let head = make_intervention(4_024_267, "slow live dispatch");
             handle
                 .replace_queue(vec![head.clone()], persistence.clone())
                 .await;
@@ -6098,8 +6070,8 @@ mod persistence_tests {
             let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
             let registry = ChannelMailboxRegistry::default();
             let handle = registry.handle(channel_id);
-            let dropped = make_intervention(4_024_260, "stale dispatch", None);
-            let next = make_intervention(4_024_261, "next dispatch", None);
+            let dropped = make_intervention(4_024_260, "stale dispatch");
+            let next = make_intervention(4_024_261, "next dispatch");
             handle
                 .replace_queue(vec![dropped.clone(), next.clone()], persistence.clone())
                 .await;
@@ -6148,7 +6120,7 @@ mod persistence_tests {
             let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
             let registry = ChannelMailboxRegistry::default();
             let handle = registry.handle(channel_id);
-            let head = make_intervention(4_024_263, "task died before claim", None);
+            let head = make_intervention(4_024_263, "task died before claim");
             handle
                 .replace_queue(vec![head.clone()], persistence.clone())
                 .await;
@@ -6191,7 +6163,7 @@ mod persistence_tests {
             let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
             let registry = ChannelMailboxRegistry::default();
             let handle = registry.handle(channel_id);
-            let head = make_intervention(4_024_265, "valve-cleared head", None);
+            let head = make_intervention(4_024_265, "valve-cleared head");
             handle
                 .replace_queue(vec![head.clone()], persistence.clone())
                 .await;
@@ -6259,7 +6231,7 @@ mod persistence_tests {
             let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
             let registry = ChannelMailboxRegistry::default();
             let handle = registry.handle(channel_id);
-            let head = make_intervention(4_024_251, "head", None);
+            let head = make_intervention(4_024_251, "head");
             handle
                 .replace_queue(vec![head.clone()], persistence.clone())
                 .await;
@@ -6306,7 +6278,7 @@ mod persistence_tests {
                 let handle = registry.handle(channel_id);
                 let queue: Vec<Intervention> = ids
                     .iter()
-                    .map(|id| make_intervention(*id, "queued", None))
+                    .map(|id| make_intervention(*id, "queued"))
                     .collect();
                 handle.replace_queue(queue, persistence.clone()).await;
                 let ids_of = |queue: &[Intervention]| -> Vec<u64> {
@@ -6361,7 +6333,7 @@ mod persistence_tests {
             let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
             let registry = ChannelMailboxRegistry::default();
             let handle = registry.handle(channel_id);
-            let head = make_intervention(4_024_253, "purged draft", None);
+            let head = make_intervention(4_024_253, "purged draft");
             handle
                 .replace_queue(vec![head.clone()], persistence.clone())
                 .await;
@@ -6411,7 +6383,7 @@ mod persistence_tests {
             &provider,
             token_hash,
             channel_id,
-            &[make_intervention(2_867_002, "must persist", None)],
+            &[make_intervention(2_867_002, "must persist")],
             None,
         )
         .expect_err("direct pending queue write must surface persistence failure");
@@ -6423,7 +6395,7 @@ mod persistence_tests {
         let handle = registry.handle(channel_id);
         let result = handle
             .enqueue(
-                make_intervention(2_867_003, "must not be accepted without disk", None),
+                make_intervention(2_867_003, "must not be accepted without disk"),
                 persistence,
             )
             .await;
@@ -6463,7 +6435,6 @@ mod persistence_tests {
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         };
 
         save_channel_queue(&provider, token_hash, channel_id, &[intervention], None).unwrap();
@@ -6484,43 +6455,6 @@ mod persistence_tests {
     }
 
     #[test]
-    fn pending_queue_roundtrip_preserves_voice_announcement_payload() {
-        let _lock = lock_test_env();
-        let tmp = tempfile::tempdir().unwrap();
-        let _env_guard = EnvGuard::set_root(tmp.path());
-
-        let provider = ProviderKind::Codex;
-        let token_hash = "voice_announcement_roundtrip";
-        let channel_id = ChannelId::new(2_777_001);
-        let announcement =
-            voice_announcement("큐에 들어간 음성 요청 처리해줘", "issue-2777-roundtrip");
-        let intervention = make_intervention(
-            2_777_002,
-            "ADK_VOICE_TRANSCRIPT v1\n큐에 들어간 음성 요청 처리해줘",
-            Some(announcement.clone()),
-        );
-
-        save_channel_queue(
-            &provider,
-            token_hash,
-            channel_id,
-            std::slice::from_ref(&intervention),
-            None,
-        )
-        .unwrap();
-
-        let saved = read_saved_items(tmp.path(), &provider, token_hash, channel_id);
-        assert_eq!(saved[0].voice_announcement.as_ref(), Some(&announcement));
-
-        let (loaded, _) = load_pending_queues(&provider, token_hash);
-        assert_eq!(
-            loaded[&channel_id][0].voice_announcement.as_ref(),
-            Some(&announcement),
-            "post-restart disk load must not depend on the in-memory announcement TTL"
-        );
-    }
-
-    #[test]
     fn pending_queue_roundtrip_preserves_upload_context() {
         let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
@@ -6529,7 +6463,7 @@ mod persistence_tests {
         let provider = ProviderKind::Codex;
         let token_hash = "upload_context_roundtrip";
         let channel_id = ChannelId::new(2_840_001);
-        let mut intervention = make_intervention(2_840_002, "", None);
+        let mut intervention = make_intervention(2_840_002, "");
         intervention.pending_uploads = vec![
             "[File uploaded] report.pdf → /runtime/discord_uploads/1/report.pdf (123 bytes)".into(),
         ];
@@ -6564,7 +6498,7 @@ mod persistence_tests {
         let channel_id = ChannelId::new(2_840_011);
         let source_a = MessageId::new(2_840_012);
         let source_b = MessageId::new(2_840_013);
-        let mut intervention = make_intervention(source_b.get(), "merged sources", None);
+        let mut intervention = make_intervention(source_b.get(), "merged sources");
         intervention.queued_generation = 72;
         intervention.source_message_ids = vec![source_a, source_b];
         intervention.source_message_queued_generations = vec![
@@ -6661,90 +6595,6 @@ mod persistence_tests {
     // and must stay held across the awaits. Test-only.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
-    async fn actor_hydrate_from_disk_preserves_voice_announcement_payload() {
-        let _lock = lock_test_env();
-        let tmp = tempfile::tempdir().unwrap();
-        let _env_guard = EnvGuard::set_root(tmp.path());
-
-        let provider = ProviderKind::Claude;
-        let token_hash = "voice_announcement_actor_hydrate";
-        let channel_id = ChannelId::new(2_777_011);
-        let announcement = voice_announcement(
-            "재시작 후 hydrate 된 음성 요청 처리해줘",
-            "issue-2777-hydrate",
-        );
-        let intervention = make_intervention(
-            2_777_012,
-            "ADK_VOICE_TRANSCRIPT v1\n재시작 후 hydrate 된 음성 요청 처리해줘",
-            Some(announcement.clone()),
-        );
-        save_channel_queue(
-            &provider,
-            token_hash,
-            channel_id,
-            std::slice::from_ref(&intervention),
-            None,
-        )
-        .unwrap();
-
-        let registry = ChannelMailboxRegistry::default();
-        let handle = registry.handle(channel_id);
-        let result = handle
-            .hydrate_pending_queue_from_disk(QueuePersistenceContext::new(
-                &provider, token_hash, None,
-            ))
-            .await;
-
-        assert_eq!(result.absorbed, 1);
-        assert_eq!(result.queue_len_after, 1);
-        let snapshot = handle.snapshot().await;
-        assert_eq!(
-            snapshot.intervention_queue[0].voice_announcement.as_ref(),
-            Some(&announcement)
-        );
-    }
-
-    // SAFETY (await_holding_lock): `TEST_ENV_LOCK` serializes env-mutating tests
-    // and must stay held across the awaits. Test-only.
-    #[allow(clippy::await_holding_lock)]
-    #[tokio::test]
-    async fn restart_drain_persists_voice_announcement_payload() {
-        let _lock = lock_test_env();
-        let tmp = tempfile::tempdir().unwrap();
-        let _env_guard = EnvGuard::set_root(tmp.path());
-
-        let provider = ProviderKind::Claude;
-        let token_hash = "voice_announcement_restart_drain";
-        let channel_id = ChannelId::new(2_777_021);
-        let announcement = voice_announcement(
-            "restart drain 중인 음성 요청 처리해줘",
-            "issue-2777-restart-drain",
-        );
-        let intervention = make_intervention(
-            2_777_022,
-            "ADK_VOICE_TRANSCRIPT v1\nrestart drain 중인 음성 요청 처리해줘",
-            Some(announcement.clone()),
-        );
-        let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
-        let registry = ChannelMailboxRegistry::default();
-        let handle = registry.handle(channel_id);
-        handle
-            .replace_queue(vec![intervention], persistence.clone())
-            .await;
-
-        let path = queue_file_path(tmp.path(), &provider, token_hash, channel_id);
-        std::fs::remove_file(&path).unwrap();
-        let result = handle.restart_drain(persistence).await;
-
-        assert_eq!(result.queued_count, 1);
-        let saved = read_saved_items(tmp.path(), &provider, token_hash, channel_id);
-        assert_eq!(saved[0].voice_announcement.as_ref(), Some(&announcement));
-    }
-
-    // SAFETY (await_holding_lock): `TEST_ENV_LOCK` serializes env-mutating tests
-    // and must stay held across the awaits. Test-only.
-    #[allow(clippy::await_holding_lock)]
-    #[tokio::test]
     async fn restart_drain_all_reports_pending_queue_persistence_errors() {
         let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
@@ -6758,7 +6608,7 @@ mod persistence_tests {
         registry
             .handle(channel_id)
             .replace_queue(
-                vec![make_intervention(1, "queued item", None)],
+                vec![make_intervention(1, "queued item")],
                 QueuePersistenceContext::new(&provider, token_hash, None),
             )
             .await;
@@ -6816,7 +6666,6 @@ mod purge_queue_tests {
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         }
     }
 
@@ -6989,7 +6838,6 @@ mod finish_cancelled_turn_tests {
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         }
     }
 

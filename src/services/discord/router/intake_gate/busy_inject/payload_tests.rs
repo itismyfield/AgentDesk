@@ -43,7 +43,6 @@ fn live<'a>(message: &'a serenity::Message, uploads: &'a [Upload]) -> LiveText<'
         reply_context: None,
         has_reply_boundary: false,
         uploads,
-        voice_announcement: None,
         merge_consecutive: false,
     }
 }
@@ -325,11 +324,10 @@ async fn pane_veto_hands_back_one_normal_busy_queue_payload_with_uploads_pg() {
     assert_eq!(queued.pending_uploads, normal.pending_uploads);
     assert_eq!(queued.pending_uploads, uploads);
     assert_eq!(queued.text.as_bytes(), b"inspect\nboth");
-    assert!(queued.voice_announcement.is_none());
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn incomplete_uploads_and_unresolved_voice_never_attempt_pane_input() {
+async fn incomplete_uploads_never_attempt_pane_input() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let channel = 7_196_104;
     let (shared, pane) = seeded_runtime(channel, None).await;
@@ -340,18 +338,6 @@ async fn incomplete_uploads_and_unresolved_voice_never_attempt_pane_input() {
     assert_eq!(readiness(&incomplete_live), Some("uploads_not_ready"));
     assert!(
         attempt(&shared, &ProviderKind::Claude, &incomplete_live)
-            .await
-            .is_none()
-    );
-    let voice = message(
-        channel,
-        "🎙️ \"원문\"\n||ADK_VOICE_ANNOUNCE_REF v1 key=voice:1:7196104:fixture||",
-        0,
-    );
-    let voice_live = live(&voice, &[]);
-    assert_eq!(readiness(&voice_live), Some("voice_claim_deferred"));
-    assert!(
-        attempt(&shared, &ProviderKind::Claude, &voice_live)
             .await
             .is_none()
     );
@@ -377,10 +363,7 @@ async fn plain_text_bytes_and_unregistered_command_routes_stay_unchanged_pg() {
     let channel = 7_196_106;
     let (shared, pane) = seeded_runtime(channel, None).await;
     let _gate = test_support::open_gate(channel);
-    for (n, text) in ["!pwd", "DISPATCH: task", "/meeting task"]
-        .into_iter()
-        .enumerate()
-    {
+    for (n, text) in ["!pwd", "DISPATCH: task"].into_iter().enumerate() {
         let mut message = message(channel, text, 0);
         message.id = MessageId::new(channel + 200 + n as u64);
         let live = live(&message, &[]);
@@ -394,41 +377,6 @@ async fn plain_text_bytes_and_unregistered_command_routes_stay_unchanged_pg() {
     }
     assert_eq!(pane.tmux_calls(), 0);
     assert!(pane.keys().is_empty());
-}
-
-#[test]
-fn normal_busy_voice_spec_keeps_readable_ref_uploads_and_no_accepted_payload() {
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    let uploads = [Upload::Local(FIRST.into())];
-    let text = "🎙️ \"원문\"\n||ADK_VOICE_ANNOUNCE_REF v1 key=voice:1:7196104:fixture||";
-    let message = message(7_196_107, text, 1);
-    let announcement = crate::voice::prompt::voice_transcript_announcement_meta(
-        "원문",
-        200,
-        "utt-i7196",
-        "ko-KR",
-        false,
-        "2026-10-20T00:00:00Z",
-        "2026-10-20T00:00:01Z",
-        48_000,
-        None,
-        None,
-        None,
-    );
-    let mut live = live(&message, &uploads);
-    live.voice_announcement = Some(&announcement);
-    live.merge_consecutive = true;
-    assert_eq!(readiness(&live), Some("voice_claim_deferred"));
-    let normal = super::super::busy_queue::spec(&live).into_intervention();
-    let (handback, _) = handback(&live);
-    assert_eq!(normal.pending_uploads, uploads);
-    assert_eq!(normal.text.as_bytes(), text.as_bytes());
-    assert!(normal.voice_announcement.is_none());
-    assert!(!normal.merge_consecutive);
-    assert_eq!(handback.pending_uploads, normal.pending_uploads);
-    assert_eq!(handback.text, normal.text);
-    assert!(handback.voice_announcement.is_none());
-    assert!(!handback.merge_consecutive);
 }
 
 #[tokio::test(flavor = "current_thread")]

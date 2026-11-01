@@ -571,7 +571,7 @@ pub(super) async fn run_post_loop_finalize(
             // cancel_token release + `mark_completion_cleanup`/`cancelled`
             // + counter decrement gated on `removed_token.is_some()` +
             // watchdog override clear + dispatch_thread_parents retain +
-            // voice drain + dispatch_role_overrides cleanup). The ledger
+            // dispatch_role_overrides cleanup). The ledger
             // gate makes a transitional double-finalize with a still-direct
             // watcher (phase 3 routes it) a harmless idempotent no-op.
             let outcome = shared_owned
@@ -604,25 +604,15 @@ pub(super) async fn run_post_loop_finalize(
             // one finalizer; an `AlreadyFinalized` (someone else won, e.g. a
             // sweeper/watcher race) is the normal/info path and must NOT
             // emit a false `[invariant]` ERROR.
-            let (this_finalized, finalize_owned, has_pending_after_voice) = match outcome {
+            let (this_finalized, finalize_owned, has_pending) = match outcome {
                 super::super::turn_finalizer::FinalizeOutcome::Finalized {
                     removed_token,
                     has_pending,
                     ..
                 } => (removed_token.is_some(), true, has_pending),
+                // Something else finalized first (rare sweeper race).
                 super::super::turn_finalizer::FinalizeOutcome::AlreadyFinalized
-                | super::super::turn_finalizer::FinalizeOutcome::Deferred => {
-                    // Something else finalized first (rare sweeper race —
-                    // the watcher handle is gone in this branch). This
-                    // branch always drained deferred voice work before
-                    // #3016, so drain it here too rather than leaking
-                    // deferred voice prompts.
-                    let voice_deferred_enqueued = shared_owned
-                        .voice_barge_in
-                        .drain_deferred_after_turn(&shared_owned, &provider, channel_id)
-                        .await;
-                    (false, true, voice_deferred_enqueued)
-                }
+                | super::super::turn_finalizer::FinalizeOutcome::Deferred => (false, true, false),
             };
             let _ = this_finalized;
             record_turn_bridge_invariant(
@@ -637,11 +627,11 @@ pub(super) async fn run_post_loop_finalize(
                 "missing watcher handoff finalizer must leave the turn finalized by some authority",
                 serde_json::json!({
                     "this_finalized": this_finalized,
-                    "has_pending": has_pending_after_voice,
+                    "has_pending": has_pending,
                     "watcher_owner_channel_id": watcher_owner_channel_id.get(),
                 }),
             );
-            has_pending_after_voice
+            has_pending
         }
     } else {
         // #1452 non-delegation path: we are finalizing on the bridge side
@@ -692,26 +682,15 @@ pub(super) async fn run_post_loop_finalize(
         // `mailbox_finalize_owed` before the bridge revoked it) emits a
         // false `[invariant]` ERROR for completely normal exactly-once
         // behaviour — the pre-#3016 code treated that as an info path.
-        let (this_finalized, finalize_owned, has_pending_after_voice) = match outcome {
+        let (this_finalized, finalize_owned, has_pending) = match outcome {
             super::super::turn_finalizer::FinalizeOutcome::Finalized {
                 removed_token,
                 has_pending,
                 ..
             } => (removed_token.is_some(), true, has_pending),
+            // The watcher won the finalize race (or the gate-timeout deferred).
             super::super::turn_finalizer::FinalizeOutcome::AlreadyFinalized
-            | super::super::turn_finalizer::FinalizeOutcome::Deferred => {
-                // The watcher won the finalize race (or the gate-timeout
-                // deferred), so the bridge's `do_finalize` did NOT run and
-                // the watcher's finalize context does not drain voice. The
-                // pre-#3016 `watcher_already_finalized` branch still drained
-                // deferred voice barge-in work here, so we must too —
-                // otherwise prompts deferred during the turn stay stuck.
-                let voice_deferred_enqueued = shared_owned
-                    .voice_barge_in
-                    .drain_deferred_after_turn(&shared_owned, &provider, channel_id)
-                    .await;
-                (false, true, voice_deferred_enqueued)
-            }
+            | super::super::turn_finalizer::FinalizeOutcome::Deferred => (false, true, false),
         };
         let _ = this_finalized;
         record_turn_bridge_invariant(
@@ -726,10 +705,10 @@ pub(super) async fn run_post_loop_finalize(
             "turn_bridge finalization expected the turn to be finalized by some authority",
             serde_json::json!({
                 "this_finalized": this_finalized,
-                "has_pending": has_pending_after_voice,
+                "has_pending": has_pending,
             }),
         );
-        has_pending_after_voice
+        has_pending
     };
 
     PostLoopFinalizeOutput {

@@ -107,10 +107,10 @@ describe("ReceiptWidget slow aggregation", () => {
 
     await press("This Week");
     await advance(40_000);
-    expect(view.textContent).toContain("SYNCING · 40s");
+    expect(view.textContent).toContain("Syncing · 40s");
     await press("All");
     await advance(2_000);
-    expect(view.textContent).toContain("SYNCING · 2s");
+    expect(view.textContent).toContain("Syncing · 2s");
     expect(receiptCalls(fetchMock)).toEqual([
       "/api/receipt?period=month", "/api/receipt?period=week", "/api/receipt?period=all",
     ]);

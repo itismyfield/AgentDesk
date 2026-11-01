@@ -9,7 +9,6 @@ use std::pin::Pin;
 
 use serde_json::Value;
 
-use crate::services::discord::DispatchProfile;
 use crate::services::discord::settings::{MemoryBackendKind, ResolvedMemorySettings, RoleBinding};
 use crate::services::provider::ProviderKind;
 
@@ -42,32 +41,6 @@ impl TokenUsage {
         self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
         self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
     }
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct RecallRequest {
-    // reason: populated by all discord recall constructors for parity with
-    // CaptureRequest but not yet consumed on the recall path; kept as a stable
-    // request field rather than churning the (out-of-scope) discord call sites.
-    // See #3034.
-    #[allow(dead_code)]
-    pub provider: ProviderKind,
-    pub role_id: String,
-    pub channel_id: u64,
-    pub channel_name: Option<String>,
-    pub session_id: String,
-    pub dispatch_profile: DispatchProfile,
-    pub user_text: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct RecallResponse {
-    pub shared_knowledge: Option<String>,
-    pub longterm_catalog: Option<String>,
-    pub external_recall: Option<String>,
-    pub memento_context_loaded: bool,
-    pub warnings: Vec<String>,
-    pub token_usage: TokenUsage,
 }
 
 #[derive(Clone, Debug)]
@@ -115,7 +88,6 @@ pub(crate) struct CaptureResult {
 }
 
 pub(crate) trait MemoryBackend: Send + Sync {
-    fn recall<'a>(&'a self, request: RecallRequest) -> MemoryFuture<'a, RecallResponse>;
     fn capture<'a>(&'a self, request: CaptureRequest) -> MemoryFuture<'a, CaptureResult>;
     fn reflect<'a>(&'a self, request: ReflectRequest) -> MemoryFuture<'a, CaptureResult> {
         Box::pin(async move {

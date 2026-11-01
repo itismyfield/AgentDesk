@@ -566,7 +566,18 @@ impl Drop for NativeHerdrRig {
         );
         let _ = std::fs::write(self.root.path().join("stop"), b"stop");
         for _ in 0..1000 {
-            if self.child.try_wait().unwrap().is_some() {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                // The server child's own panic would otherwise vanish with the temp dir.
+                if !status.success() {
+                    let log = std::fs::read_to_string(self.root.path().join("server.log"))
+                        .unwrap_or_default();
+                    let failure = format!("native herdr server exited with {status}:\n{log}");
+                    if thread::panicking() {
+                        eprintln!("{failure}");
+                    } else {
+                        panic!("{failure}");
+                    }
+                }
                 return;
             }
             thread::sleep(Duration::from_millis(5));
@@ -599,12 +610,18 @@ pub(crate) fn native_server_child() -> bool {
             thread::sleep(Duration::from_millis(2));
             continue;
         };
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
+        // BSD hands accepted sockets the listener's O_NONBLOCK; reads must wait for the client.
+        stream.set_nonblocking(false).unwrap();
+        // macOS refuses socket options once the peer closed, as its request-less peer-token dial does.
+        match stream.set_read_timeout(Some(Duration::from_secs(2))) {
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => continue,
+            other => other.unwrap(),
+        }
         let mut writer = stream.try_clone().unwrap();
         let mut line = String::new();
-        let _ = BufReader::new(stream).read_line(&mut line);
+        if let Err(error) = BufReader::new(stream).read_line(&mut line) {
+            panic!("native herdr rig failed to read a request: {error}");
+        }
         let Ok(request) = serde_json::from_str::<Value>(&line) else {
             continue;
         };

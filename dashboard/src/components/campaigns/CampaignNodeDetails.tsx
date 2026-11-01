@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { updateCampaignNode, type Campaign, type CampaignNode, type CampaignNodeLive } from "../../api/campaigns";
 import { ApiRequestError } from "../../api/httpClient";
+import { Select } from "../common/Select";
 import { WidgetState } from "../common/WidgetState";
 import { NODE_STATUSES, safeCampaignLink } from "./campaignModel";
 import { Badge, LABELS, cardStatusLabel, dispatchLabel, queueLabel, sessionLabel, type Tr } from "./campaignPresentation";
@@ -74,7 +75,7 @@ export default function CampaignNodeDetails({
           <div className="campaign-edit-grid grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
             <label>
               {tr("상태", "Status")}
-              <select
+              <Select
                 value={draft.status}
                 onChange={(event) =>
                   patch({
@@ -87,7 +88,7 @@ export default function CampaignNodeDetails({
                     {tr(...LABELS[status])}
                   </option>
                 ))}
-              </select>
+              </Select>
             </label>
             <label>
               {tr("단계", "Stage")}
@@ -188,7 +189,7 @@ export default function CampaignNodeDetails({
               <h4>{tr("실제 실행 상태", "Live execution")}</h4>
               <dl className="campaign-detail-grid grid grid-cols-1 gap-4 text-sm sm:grid-cols-2 [&_dt]:mb-1 [&_dt]:text-xs [&_dd]:[overflow-wrap:anywhere]">
                 <div>
-                  <dt>{tr("보드 칸", "Board column")}</dt>
+                  <dt>{tr("이슈 카드 단계", "Issue card step")}</dt>
                   <dd>{cardStatusLabel(live.card_status, tr)}</dd>
                 </div>
                 <div>

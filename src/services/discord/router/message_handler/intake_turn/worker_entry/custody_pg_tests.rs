@@ -297,7 +297,6 @@ async fn custody_pg_old_open_accepted_spawned_local_claim_and_old_effect_zero_pg
             has_nonportable_uploads: false,
             attachments: vec![],
             preloaded_uploads: vec![],
-            voice_announcement: None,
         };
         let http = Arc::new(serenity::http::Http::new("fixture"));
         let deps = IntakeDeps {
@@ -778,7 +777,6 @@ async fn custody_pg_duplicate_stage_ack_and_mixed_source_read_fail_closed_pg() {
         has_nonportable_uploads: false,
         attachments: vec![],
         preloaded_uploads: vec![],
-        voice_announcement: None,
     };
     assert!(matches!(
         admit_text_intake(&deps, &submission).await,

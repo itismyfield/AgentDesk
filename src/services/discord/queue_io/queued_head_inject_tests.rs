@@ -675,7 +675,6 @@ async fn s2b_a_head_whose_author_is_not_named_stays_queued_pg() {
                 has_reply_boundary: false,
                 merge_consecutive: false,
                 pending_uploads: Vec::new(),
-                voice_announcement: None,
             };
             let persistence = crate::services::discord::queue_persistence_context(
                 &fixture.shared,

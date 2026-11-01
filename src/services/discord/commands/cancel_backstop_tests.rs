@@ -187,7 +187,6 @@ pub(super) async fn invoke_real_slash_action_with_options(
             shard_index: 0,
             shard_init: 0,
             shard_total: 1,
-            voice_manager: None,
             ws_url: Arc::new(tokio::sync::Mutex::new("ws://127.0.0.1:1".into())),
             cache: ctx.cache.clone(),
             http: ctx.http.clone(),
@@ -271,7 +270,6 @@ fn pending(author: serenity::UserId, id: serenity::MessageId) -> Intervention {
         has_reply_boundary: false,
         merge_consecutive: false,
         pending_uploads: Vec::new(),
-        voice_announcement: None,
     }
 }
 
@@ -341,13 +339,10 @@ fn actual_stop_action_keeps_hold_and_arms_pending_queue_backstop_pg() {
             "fixture enqueue must not arm the command's backstop"
         );
         let transport = ActionTransport::new(discord_mock::DiscordMockState::new()).await;
-        let voice_config = crate::voice::VoiceConfig::default();
         let data = Data {
             shared: shared.clone(),
             token: "test-token".into(),
             provider: ProviderKind::Claude,
-            voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
-            voice_config,
         };
         invoke_real_stop_action(&transport.ctx, &data, channel, author).await;
         {
@@ -470,13 +465,10 @@ fn native_idle_slash_recovery(missing: bool, completed: bool) {
     ));
     let mut events = shared.turn_completion_events.subscribe();
     let transport = ActionTransport::new(discord_mock::DiscordMockState::new()).await;
-    let voice_config = crate::voice::VoiceConfig::default();
     let data = Data {
         shared: shared.clone(),
         token: "test-token".into(),
         provider: ProviderKind::Claude,
-        voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
-        voice_config,
     };
     invoke_real_stop_action(&transport.ctx, &data, channel, author).await;
     assert!(

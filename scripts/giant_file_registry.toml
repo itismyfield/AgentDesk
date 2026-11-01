@@ -77,7 +77,6 @@ grandfathered_baseline_paths = [
   "src/server/routes/escalation.rs",
   "src/server/routes/health_api.rs",
   "src/server/routes/kanban.rs",
-  "src/server/routes/meetings.rs",
   "src/server/routes/resume.rs",
   "src/server/routes/review_verdict/decision_route.rs",
   "src/services/auto_queue.rs",
@@ -146,7 +145,6 @@ grandfathered_baseline_paths = [
   "src/services/dispatches/discord_delivery/orchestration.rs",
   "src/services/dispatches/outbox_route.rs",
   "src/services/gemini.rs",
-  "src/services/memory/memento.rs",
   "src/services/observability/pg_io.rs",
   "src/services/onboarding/mod.rs",
   "src/services/opencode.rs",
@@ -390,13 +388,6 @@ deadline = "2027-01-31"
 decompose_issue = "#4710"
 
 [[entry]]
-file = "src/server/routes/meetings.rs"
-decision = "shrink"
-owner = "server-runtime"
-deadline = "2027-01-31"
-decompose_issue = "#4710"
-
-[[entry]]
 file = "src/server/routes/resume.rs"
 decision = "shrink"
 owner = "server-runtime"
@@ -497,13 +488,6 @@ decompose_issue = "#4711"
 
 [[entry]]
 file = "src/services/gemini.rs"
-decision = "shrink"
-owner = "server-runtime"
-deadline = "2027-01-31"
-decompose_issue = "#4710"
-
-[[entry]]
-file = "src/services/memory/memento.rs"
 decision = "shrink"
 owner = "server-runtime"
 deadline = "2027-01-31"

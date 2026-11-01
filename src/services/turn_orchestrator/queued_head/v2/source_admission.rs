@@ -148,7 +148,6 @@ impl Owner {
                 .collect();
             let exact = original.reply_context.is_none()
                 && original.pending_uploads.is_empty()
-                && original.voice_announcement.is_none()
                 && original.source_text_segments.len() == ids.len()
                 && ids
                     .iter()

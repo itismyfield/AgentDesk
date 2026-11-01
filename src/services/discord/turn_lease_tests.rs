@@ -205,7 +205,6 @@ async fn operator_release_preserves_queue_and_provider_and_is_idempotent() {
                     has_reply_boundary: false,
                     merge_consecutive: false,
                     pending_uploads: vec![],
-                    voice_announcement: None,
                 };
                 assert!(
                     mailbox
