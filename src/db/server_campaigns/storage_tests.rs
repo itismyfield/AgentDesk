@@ -903,7 +903,7 @@ async fn later_branch_migrations_upgrade_a_main_database_already_at_0161_pg() {
     }
     // Each later file leaves (or, with `!`, drops) at least one object of its own,
     // so a partial apply cannot pass.
-    let expected: [(i64, &[&str]); 6] = [
+    let expected: [(i64, &[&str]); 8] = [
         (
             163,
             &["table:channel_home_preferences", "constraint:chp_mode_home"],
@@ -951,6 +951,21 @@ async fn later_branch_migrations_upgrade_a_main_database_already_at_0161_pg() {
                 "!column:agents.xp",
             ],
         ),
+        (
+            169,
+            &[
+                "!table:voice_turn_link",
+                "!table:voice_background_handoff_meta",
+                "!table:voice_transcript_announcement_meta",
+            ],
+        ),
+        (
+            170,
+            &[
+                "index:idx_routine_runs_routine_newest",
+                "!index:idx_routine_runs_routine_id",
+            ],
+        ),
     ];
     assert_eq!(
         expected
@@ -974,6 +989,9 @@ async fn later_branch_migrations_upgrade_a_main_database_already_at_0161_pg() {
                 }
                 "constraint" => "SELECT EXISTS(SELECT 1 FROM pg_constraint WHERE conname=$1)",
                 "function" => "SELECT EXISTS(SELECT 1 FROM pg_proc WHERE proname=$1)",
+                "index" => {
+                    "SELECT EXISTS(SELECT 1 FROM pg_indexes WHERE schemaname='public' AND indexname=$1)"
+                }
                 other => panic!("unknown schema object kind {other}"),
             };
             let present: bool = sqlx::query_scalar(query)
