@@ -61,23 +61,6 @@ fn held(session_name: &str, readiness: PromptReadinessKind, capture: Option<&str
     held_error(session_name, readiness, reason)
 }
 
-/// Reads the composer with attributes just before a follow-up types; anything but an empty composer
-/// refuses with an error the turn bridge requeues.
-pub(super) fn refuse_composer_draft(
-    session_name: &str,
-    readiness: PromptReadinessKind,
-) -> Result<(), String> {
-    let capture = host_input::observe_draft(session_name);
-    if capture
-        .as_deref()
-        .map(|c| composer_owner_in_session(session_name, c))
-        == Some(ComposerOwner::Empty)
-    {
-        return Ok(());
-    }
-    Err(held(session_name, readiness, capture.as_deref()))
-}
-
 /// Before clearing a draft the pane text called stranded: only a prompt AgentDesk typed may be
 /// cleared (`Ok(true)`), an empty composer needs nothing, anything else refuses as a submit would.
 pub(crate) fn stranded_draft_is_ours(

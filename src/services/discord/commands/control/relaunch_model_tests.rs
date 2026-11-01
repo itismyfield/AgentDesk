@@ -3,12 +3,12 @@
 
 use super::*;
 
-const TOKEN: &str = "test-token";
+pub(super) const TOKEN: &str = "test-token";
 
 impl Fixture {
     /// Names `node`, else this node, as the owner on the channel's sessions row, as a save checks;
     /// returns the owner it named before.
-    async fn own(&self, node: Option<String>) -> String {
+    pub(super) async fn own(&self, node: Option<String>) -> String {
         let local =
             crate::services::cluster::node_registry::resolve_self_instance_id_without_config;
         let pool = self.shared.pg_pool.as_ref().unwrap();
@@ -29,7 +29,7 @@ impl Fixture {
 
     /// Saves `model` for the channel through the real save, its pending fast change dropped so the
     /// model change stands alone.
-    async fn save_model(&self, model: Option<&str>) {
+    pub(super) async fn save_model(&self, model: Option<&str>) {
         let keys = &self.shared.overrides.fast_mode_session_reset_pending;
         keys.clear();
         let save = super::super::super::config::update_channel_model_override;
@@ -42,13 +42,13 @@ impl Fixture {
         let _ = self.shared.http.cached_bot_token.set(TOKEN.to_string());
     }
 
-    async fn relaunch_pending(&self) -> bool {
+    pub(super) async fn relaunch_pending(&self) -> bool {
         let key = self.channel.get().to_string();
         let settings = self.shared.settings.read().await;
         settings.channel_relaunch_pending.contains(&key)
     }
 
-    fn stored_relaunch_pending(&self) -> bool {
+    pub(super) fn stored_relaunch_pending(&self) -> bool {
         let stored = crate::services::discord::settings::load_bot_settings(TOKEN);
         let key = self.channel.get().to_string();
         stored.channel_relaunch_pending.contains(&key)
@@ -56,7 +56,7 @@ impl Fixture {
 
     /// A restart: memory starts empty, the boot audit rewrites the settings file, and the settings
     /// are read back from disk.
-    async fn restart(&self) {
+    pub(super) async fn restart(&self) {
         self.shared
             .settings
             .write()
@@ -71,7 +71,7 @@ impl Fixture {
         *self.shared.settings.write().await = stored;
     }
 
-    async fn requested_model(&self) -> Option<String> {
+    pub(super) async fn requested_model(&self) -> Option<String> {
         let resolve = crate::services::discord::commands::resolve_model_for_turn;
         resolve(&self.shared, self.channel, &ProviderKind::Claude).await
     }
@@ -88,7 +88,7 @@ fn manage_bot_in_yaml() {
     std::fs::write(path, yaml).unwrap();
 }
 
-fn relaunched_as(reset: &Option<ManagedReset>, name: &str) -> bool {
+pub(super) fn relaunched_as(reset: &Option<ManagedReset>, name: &str) -> bool {
     matches!(reset, Some(ManagedReset::Applied(Some(applied))) if applied == name)
 }
 
@@ -299,7 +299,7 @@ async fn a_new_save_restores_the_retry_of_each_tui_sharing_it_pg() {
 }
 
 /// A transcript holding one answer of `session` by `old`, then, past the returned offset, `new`.
-fn transcript(dir: &Path, old: &str, new: Option<Value>) -> (PathBuf, u64) {
+pub(super) fn transcript(dir: &Path, old: &str, new: Option<Value>) -> (PathBuf, u64) {
     let path = dir.join("session.jsonl");
     let answer = |model: &str| {
         serde_json::json!({"type": "assistant", "sessionId": SESSION,
@@ -312,9 +312,10 @@ fn transcript(dir: &Path, old: &str, new: Option<Value>) -> (PathBuf, u64) {
     (path, before.len() as u64)
 }
 
-fn model_confirm(transcript: PathBuf, offset: u64) -> Confirm {
+pub(super) fn model_confirm(transcript: PathBuf, offset: u64) -> Confirm {
     let model = super::super::relaunch_confirm::ModelCheck {
         requested: Some("sonnet".to_string()),
+        effort: None,
         transcript: Some(transcript),
         offset,
     };

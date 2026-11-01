@@ -2064,6 +2064,8 @@ pub(super) async fn handle_text_message(
 
         let (native_fast_mode_override, codex_goals_override) =
             feature_settings::overrides_for_turn(shared, &provider, fast_mode_channel_id).await;
+        let effort_for_turn =
+            super::super::super::commands::channel_effort_level(shared, &provider, channel_id).await;
 
         // Fetch context compact percent from ADK settings (provider-specific)
         let ctx_thresholds =
@@ -2142,6 +2144,7 @@ pub(super) async fn handle_text_message(
                                 channel_id: channel_id.get(),
                                 model: model_for_turn.as_deref(),
                                 native_fast_mode: native_fast_mode_override,
+                                effort: effort_for_turn.as_deref(),
                                 codex_goals: codex_goals_override,
                                 compact_percent: compact_percent_for_claude,
                                 compact_lower_bound_tokens,

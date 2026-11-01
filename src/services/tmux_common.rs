@@ -992,9 +992,7 @@ pub(crate) fn tmux_capture_indicates_generic_ready_banner(capture: &str) -> bool
 /// overlay. Requiring the pair is the load-bearing guard against false
 /// "selector still open" failures.
 ///
-/// This is the post-submit validation for `/effort` passthrough: if this
-/// returns true after we drive the slider, the selection did NOT confirm and
-/// the pane is stranded on the overlay.
+/// An overlay a person opened locally is a modal no machine key may be sent into.
 pub(crate) fn tmux_capture_indicates_claude_tui_selector_open(capture: &str) -> bool {
     let non_empty = capture
         .lines()

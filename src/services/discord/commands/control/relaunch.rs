@@ -49,6 +49,8 @@ pub(super) struct Requested {
     pub(super) fast: Option<bool>,
     /// The model a model change asks for; `None` when no model change is part of the relaunch.
     pub(super) model: Option<Option<String>>,
+    /// The effort level the channel saved for its launch.
+    pub(super) effort: Option<String>,
 }
 
 struct Target {
@@ -256,12 +258,14 @@ pub(super) async fn run(
         Relaunch::Relaunched => {
             // Only a record or answer written after the old process ended is the new process's.
             let at = super::relaunch_confirm::now();
+            let requested_effort = requested.effort;
             let model = requested.model.map(|requested| {
                 let ended = transcript
                     .as_ref()
                     .and_then(|path| std::fs::metadata(path).ok());
                 super::relaunch_confirm::ModelCheck {
                     requested,
+                    effort: requested_effort,
                     offset: ended.map_or(0, |meta| meta.len()),
                     transcript,
                 }

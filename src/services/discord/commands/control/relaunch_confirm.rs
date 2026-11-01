@@ -19,6 +19,8 @@ pub(super) struct Confirm {
 /// Where the new process's first answer shows the model a model change brought up.
 pub(super) struct ModelCheck {
     pub(super) requested: Option<String>,
+    /// The effort level asked for, when the channel saved one.
+    pub(super) effort: Option<String>,
     pub(super) transcript: Option<std::path::PathBuf>,
     /// The transcript's length when the old process ended; what lies before it is the old one's.
     pub(super) offset: u64,
@@ -152,7 +154,10 @@ fn observed(confirm: &Confirm, record: &Record) -> String {
 }
 
 enum Answer {
-    Model(String),
+    Model {
+        model: String,
+        effort: Option<String>,
+    },
     Failed,
 }
 
@@ -172,17 +177,37 @@ fn first_answer(transcript: &Path, offset: u64, session: &str) -> Option<Answer>
     if record["isApiErrorMessage"].as_bool() == Some(true) {
         return Some(Answer::Failed);
     }
-    let model = record["message"]["model"].as_str().unwrap_or("미상");
-    Some(Answer::Model(model.to_string()))
+    let model = record["message"]["model"]
+        .as_str()
+        .unwrap_or("미상")
+        .to_string();
+    let effort = record["effort"].as_str().map(str::to_string);
+    Some(Answer::Model { model, effort })
 }
 
 fn answered(check: &ModelCheck, answer: Option<Answer>) -> String {
     let requested = check.requested.as_deref().unwrap_or("기본값");
-    match answer {
-        Some(Answer::Model(model)) => format!("응답 모델 `{model}`(요청 `{requested}`)."),
-        Some(Answer::Failed) => format!("모델 적용 미확인(응답 오류, 요청 `{requested}`)."),
-        None => format!("응답 모델 미확인(요청 `{requested}`)."),
-    }
+    let (model, effort) = match answer {
+        Some(Answer::Model { model, effort }) => (
+            format!("응답 모델 `{model}`(요청 `{requested}`)"),
+            Some(effort),
+        ),
+        Some(Answer::Failed) => (
+            format!("모델 적용 미확인(응답 오류, 요청 `{requested}`)"),
+            None,
+        ),
+        None => (format!("응답 모델 미확인(요청 `{requested}`)"), None),
+    };
+    let Some(asked) = check.effort.as_deref() else {
+        return format!("{model}.");
+    };
+    // An effort the answer does not show as asked is never reported as applied.
+    let effort = match effort.flatten() {
+        Some(seen) if seen == asked => format!("응답 effort `{seen}`(요청 `{asked}`)"),
+        Some(seen) => format!("응답 effort `{seen}`(요청 `{asked}`와 다름)"),
+        None => format!("effort 적용 미확인(요청 `{asked}`)"),
+    };
+    format!("{model} · {effort}.")
 }
 
 /// The notice ending the wait when the channel moved to another session.

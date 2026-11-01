@@ -276,6 +276,8 @@ pub(crate) struct ClaudeTuiLaunchSettings<'a> {
     pub(crate) model: Option<&'a str>,
     /// `None` leaves fast mode to the CLI's own settings.
     pub(crate) fast_mode: Option<bool>,
+    /// `None` leaves the effort to the environment and the CLI's own settings.
+    pub(crate) effort: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -317,6 +319,15 @@ pub fn prepare_claude_tui_launch_with_fast(
     config: &ClaudeTuiLaunchConfig,
     fast_mode: Option<bool>,
 ) -> Result<ClaudeTuiSessionFiles, String> {
+    prepare_claude_tui_launch_with_settings(config, fast_mode, None)
+}
+
+/// [`prepare_claude_tui_launch_with_fast`] whose launch also takes the channel's effort level.
+pub(crate) fn prepare_claude_tui_launch_with_settings(
+    config: &ClaudeTuiLaunchConfig,
+    fast_mode: Option<bool>,
+    effort: Option<&str>,
+) -> Result<ClaudeTuiSessionFiles, String> {
     let files = config.session_files();
     let result = (|| {
         // A freshly prepared hosted pane must never inherit a disarmed or
@@ -339,7 +350,12 @@ pub fn prepare_claude_tui_launch_with_fast(
             },
             fast_mode,
         )?;
-        write_launch_script(&files.launch_script_path, config, &files.hook_settings_path)
+        write_launch_script(
+            &files.launch_script_path,
+            config,
+            &files.hook_settings_path,
+            effort,
+        )
     })();
     if let Err(error) = result {
         files.cleanup_best_effort();
@@ -384,6 +400,7 @@ fn write_launch_script(
     path: &Path,
     config: &ClaudeTuiLaunchConfig,
     hook_settings_path: &Path,
+    effort: Option<&str>,
 ) -> Result<(), String> {
     // This is the final pre-exec launch artifact. Registering here marks the
     // pane as AgentDesk-launched before it can receive its first prompt, and
@@ -394,7 +411,11 @@ fn write_launch_script(
             format!("create TUI launch script dir {}: {error}", parent.display())
         })?;
     }
-    let args = build_claude_tui_args(config, hook_settings_path)
+    let mut args = build_claude_tui_args(config, hook_settings_path);
+    if let Some(effort) = effort {
+        args.extend(["--effort".to_string(), effort.to_string()]);
+    }
+    let args = args
         .into_iter()
         .map(|arg| shell_escape(&arg))
         .collect::<Vec<_>>()
@@ -430,6 +451,10 @@ fn write_launch_script(
     // revisited. Track upstream PY6 changes and reflect them in this
     // comment + the unit tests.
     let mut env_exports = String::new();
+    // The effort variable outranks `--effort`, so an inherited one would hide the channel's level.
+    if effort.is_some() {
+        env_exports.push_str("unset CLAUDE_CODE_EFFORT_LEVEL\n");
+    }
     // #5172 R1: snapshot the YAML provider setting for each new launch. Its
     // absolute value is independent of the launch model and later model changes.
     // #5935: an unset provider setting exports nothing — the inherited window is
@@ -584,7 +609,7 @@ mod tests {
             },
         )
         .unwrap();
-        write_launch_script(&launch_script_path, &config, &hook_settings_path).unwrap();
+        write_launch_script(&launch_script_path, &config, &hook_settings_path, None).unwrap();
 
         let settings = std::fs::read_to_string(&hook_settings_path).unwrap();
         let script = std::fs::read_to_string(&launch_script_path).unwrap();
@@ -640,6 +665,7 @@ mod tests {
             &launch_script_path,
             &config,
             Path::new("/tmp/settings.json"),
+            None,
         )
         .unwrap();
 
@@ -665,6 +691,7 @@ mod tests {
             &launch_script_path,
             &config,
             Path::new("/tmp/settings.json"),
+            None,
         )
         .unwrap();
         let sonnet_script = std::fs::read_to_string(&launch_script_path).unwrap();
@@ -677,6 +704,7 @@ mod tests {
             &launch_script_path,
             &config,
             Path::new("/tmp/settings.json"),
+            None,
         )
         .unwrap();
         let opus_script = std::fs::read_to_string(&launch_script_path).unwrap();
@@ -745,6 +773,7 @@ mod tests {
             &files.launch_script_path,
             &config,
             &files.hook_settings_path,
+            None,
         )
         .unwrap();
 

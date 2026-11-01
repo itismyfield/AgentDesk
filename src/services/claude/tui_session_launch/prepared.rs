@@ -63,10 +63,8 @@ pub(super) fn prepare(
         model: launch.model.map(str::to_string),
         resume,
     };
-    let session_files = crate::services::claude_tui::session::prepare_claude_tui_launch_with_fast(
-        &launch_config,
-        launch.fast_mode,
-    )?;
+    let prepare = crate::services::claude_tui::session::prepare_claude_tui_launch_with_settings;
+    let session_files = prepare(&launch_config, launch.fast_mode, launch.effort)?;
     session_prompt::record(launch_config.system_prompt.as_deref(), resume);
     let launch_script_path = session_files.launch_script_path.clone();
     *prepared_session_files = Some(session_files);

@@ -604,6 +604,7 @@ pub fn execute_command_streaming(
     report_provider: Option<ProviderKind>,
     model_override: Option<&str>,
     fast_mode_enabled: Option<bool>,
+    effort: Option<&str>,
     compact_percent: Option<u64>,
     compact_lower_bound_tokens: u64,
     _cache_ttl_minutes: Option<u32>,
@@ -714,6 +715,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
                     let launch = crate::services::claude_tui::session::ClaudeTuiLaunchSettings {
                         model: model_override,
                         fast_mode: fast_mode_enabled,
+                        effort,
                     };
                     return execute_streaming_local_tui_tmux(
                         prompt,

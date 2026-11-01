@@ -845,6 +845,8 @@ pub(super) struct DiscordBotSettings {
     pub(super) channel_codex_goals_reset_pending: std::collections::HashSet<String>,
     /// channel_id (string) → pending same-session relaunch of the channel's local Claude TUI
     pub(super) channel_relaunch_pending: std::collections::HashSet<String>,
+    /// channel_id (string) → effort level a local Claude TUI launches with
+    pub(super) channel_effort_levels: std::collections::HashMap<String, String>,
     /// channel_id (string) → selected cluster node instance for intake routing
     pub(super) channel_node_overrides: std::collections::HashMap<String, String>,
     /// Discord user ID of the registered owner (must be configured explicitly)
@@ -874,6 +876,7 @@ impl Default for DiscordBotSettings {
             channel_codex_goals: std::collections::HashMap::new(),
             channel_codex_goals_reset_pending: std::collections::HashSet::new(),
             channel_relaunch_pending: std::collections::HashSet::new(),
+            channel_effort_levels: std::collections::HashMap::new(),
             channel_node_overrides: std::collections::HashMap::new(),
             owner_user_id: None,
             allowed_user_ids: Vec::new(),

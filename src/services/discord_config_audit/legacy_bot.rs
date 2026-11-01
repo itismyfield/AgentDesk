@@ -120,6 +120,18 @@ pub(super) fn parse_legacy_bot_entry(entry_key: &str, entry_value: &Value) -> Le
                     .collect()
             })
             .unwrap_or_default(),
+        channel_effort_levels: entry_value
+            .get("channel_effort_levels")
+            .and_then(Value::as_object)
+            .map(|obj| {
+                let levels = obj
+                    .iter()
+                    .filter_map(|(id, level)| Some((id, level.as_str()?)));
+                levels
+                    .map(|(id, level)| (id.clone(), level.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 

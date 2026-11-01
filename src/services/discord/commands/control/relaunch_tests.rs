@@ -173,12 +173,26 @@ impl Fixture {
         session: &str,
         model: Option<&str>,
     ) -> (Vec<String>, Value) {
+        let (args, settings, _) = self.launch_with(channel, name, session, model, None);
+        (args, settings)
+    }
+
+    /// As `launch`, with `effort` too; also the effort variable the CLI saw, `-` when unset.
+    fn launch_with(
+        &self,
+        channel: ChannelId,
+        name: &str,
+        session: &str,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> (Vec<String>, Value, String) {
         use std::os::unix::fs::PermissionsExt as _;
         let bin = tempfile::tempdir().unwrap();
         let (claude, argv) = (bin.path().join("claude"), bin.path().join("argv"));
-        let settings = bin.path().join("settings.json");
+        let (settings, env) = (bin.path().join("settings.json"), bin.path().join("env"));
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{argv}.tmp'\nwhile [ $# -gt 0 ]; do [ \"$1\" = --settings ] && cp \"$2\" '{}'; shift; done\nmv '{argv}.tmp' '{argv}'\n",
+            "#!/bin/sh\nprintf '%s' \"${{CLAUDE_CODE_EFFORT_LEVEL--}}\" > '{}'\nprintf '%s\\n' \"$@\" > '{argv}.tmp'\nwhile [ $# -gt 0 ]; do [ \"$1\" = --settings ] && cp \"$2\" '{}'; shift; done\nmv '{argv}.tmp' '{argv}'\n",
+            env.display(),
             settings.display(),
             argv = argv.display()
         );
@@ -212,6 +226,7 @@ impl Fixture {
                         None,
                         model,
                         Some(true),
+                        effort,
                         None,
                         0,
                         None,
@@ -230,7 +245,8 @@ impl Fixture {
         let args = std::fs::read_to_string(&argv).expect("the CLI ran");
         let settings = std::fs::read(&settings).expect("the CLI got a settings file");
         let args = args.lines().map(str::to_string).collect();
-        (args, serde_json::from_slice(&settings).unwrap())
+        let env = std::fs::read_to_string(&env).expect("the CLI saw its environment");
+        (args, serde_json::from_slice(&settings).unwrap(), env)
     }
 
     async fn session_id(&self) -> Option<String> {
@@ -665,3 +681,6 @@ async fn clear_aborts_the_pending_confirmation() {
 
 #[path = "relaunch_model_tests.rs"]
 mod model_tests;
+
+#[path = "relaunch_effort_tests.rs"]
+mod effort_tests;

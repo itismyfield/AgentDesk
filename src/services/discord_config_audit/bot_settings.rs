@@ -57,6 +57,7 @@ pub(super) fn audit_bot_settings(
             || !legacy.channel_codex_goals.is_empty()
             || !legacy.channel_codex_goals_reset_pending.is_empty()
             || !legacy.channel_relaunch_pending.is_empty()
+            || !legacy.channel_effort_levels.is_empty()
         {
             let mut runtime_entry = Map::new();
             if !legacy.channel_model_overrides.is_empty() {
@@ -93,6 +94,12 @@ pub(super) fn audit_bot_settings(
                 runtime_entry.insert(
                     "channel_relaunch_pending".to_string(),
                     serde_json::json!(legacy.channel_relaunch_pending),
+                );
+            }
+            if !legacy.channel_effort_levels.is_empty() {
+                runtime_entry.insert(
+                    "channel_effort_levels".to_string(),
+                    serde_json::json!(legacy.channel_effort_levels),
                 );
             }
             runtime_only_entries.insert(legacy.hash_key.clone(), Value::Object(runtime_entry));

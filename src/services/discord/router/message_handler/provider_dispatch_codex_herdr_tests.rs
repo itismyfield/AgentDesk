@@ -1106,6 +1106,7 @@ async fn each_provider_follows_only_its_own_herdr_switch_at_intake_and_dispatch_
                 channel_id: channel,
                 model: None,
                 native_fast_mode: None,
+                effort: None,
                 codex_goals: None,
                 compact_percent: None,
                 compact_lower_bound_tokens: 0,

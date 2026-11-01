@@ -262,6 +262,64 @@ pub(in crate::services::discord) async fn update_channel_model_override(
     Ok(true)
 }
 
+/// The effort levels a Claude TUI launch accepts.
+pub(in crate::services::discord) const EFFORT_LEVELS: [&str; 5] =
+    ["low", "medium", "high", "xhigh", "max"];
+
+/// The saved effort level a local Claude TUI on the channel launches with, if it is one the CLI takes.
+pub(in crate::services::discord) async fn channel_effort_level(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+) -> Option<String> {
+    if !matches!(provider, ProviderKind::Claude) {
+        return None;
+    }
+    let settings = shared.settings.read().await;
+    let level = settings
+        .channel_effort_levels
+        .get(&channel_id.get().to_string())?;
+    EFFORT_LEVELS
+        .contains(&level.as_str())
+        .then(|| level.clone())
+}
+
+/// Saves the effort level a local Claude TUI launches with and asks for its same-session relaunch;
+/// a Herdr channel and the non-TUI drivers refuse it with the setting left as it was.
+pub(in crate::services::discord) async fn update_channel_effort(
+    shared: &Arc<SharedData>,
+    token: &str,
+    channel_id: serenity::ChannelId,
+    provider: &ProviderKind,
+    level: &str,
+) -> io::Result<bool> {
+    shared.check_settings_owner(provider, channel_id).await?;
+    if claude_herdr_fast_unavailable(provider, channel_id) {
+        return Err(io::Error::other(
+            "Herdr 채널의 Claude TUI에는 /effort 설정이 적용되지 않습니다. 설정과 현재 세션을 유지했습니다.",
+        ));
+    }
+    if !claude_local_tui_relaunch_applies(provider, channel_id) {
+        return Err(io::Error::other(
+            "/effort는 로컬 Claude TUI 채널에서만 저장할 수 있습니다.",
+        ));
+    }
+    let mut settings = shared.settings.write().await;
+    let key = channel_id.get().to_string();
+    if settings.channel_effort_levels.get(&key).map(String::as_str) == Some(level) {
+        return Ok(false);
+    }
+    let mut candidate = settings.clone();
+    candidate
+        .channel_effort_levels
+        .insert(key.clone(), level.to_string());
+    candidate.channel_relaunch_pending.insert(key);
+    candidate.try_save_bot_settings(token)?;
+    super::super::control::forget_relaunch_failures(channel_id);
+    *settings = candidate;
+    Ok(true)
+}
+
 pub(in crate::services::discord) async fn update_channel_fast_mode(
     shared: &Arc<SharedData>,
     token: &str,

@@ -285,10 +285,15 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
                 }
                 false => None,
             };
+            let effort = match relaunch_pending {
+                true => super::config::channel_effort_level(shared, provider, channel_id).await,
+                false => None,
+            };
             let requested = relaunch::Requested {
                 feature: fast_mode_channel_id,
                 fast,
                 model,
+                effort,
             };
             let source = plan.reset_source;
             let outcome =
@@ -399,6 +404,7 @@ async fn relaunch_on_fast_drift(
         feature: fast_mode_channel_id,
         fast: desired,
         model: None,
+        effort: None,
     };
     match relaunch::run(
         http,
