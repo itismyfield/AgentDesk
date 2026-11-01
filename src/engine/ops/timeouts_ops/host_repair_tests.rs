@@ -631,24 +631,29 @@ async fn session_command_api_reaches_tmux_only_for_legacy_rows_pg() {
     db.drop().await;
 }
 
-/// Runs the real `policies/timeouts/active-monitor.js` `_section_I` on the real ops; only
-/// the tmux probe is faked (every probe answers dead). Returns the probed tmux names.
+/// Runs the real timeout policy's 30s entry point; neighboring sections are inert.
 fn run_section_i(pool: &PgPool) -> Vec<String> {
+    run_policy_tick(pool, |_| HostLiveness::DeadOrAbsent, None, false).0
+}
+
+fn run_policy_tick(
+    pool: &PgPool,
+    liveness: fn(&str) -> HostLiveness,
+    inflights: Option<Value>,
+    watch_legacy: bool,
+) -> (Vec<String>, i32) {
     let read = |path: &str| {
         std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path))
             .unwrap()
     };
-    let (helpers, monitor) = (
-        read("policies/lib/timeouts-helpers.js"),
-        read("policies/timeouts/active-monitor.js"),
-    );
+    let helpers = read("policies/lib/timeouts-helpers.js");
+    let monitor = read("policies/timeouts/active-monitor.js");
+    let entry = read("policies/timeouts.js");
     let probed = Arc::new(Mutex::new(Vec::new()));
     let runtime = rquickjs::Runtime::new().unwrap();
     let context = rquickjs::Context::full(&runtime).unwrap();
-    context.with(|ctx| {
-        ctx.globals()
-            .set("agentdesk", Object::new(ctx.clone()).unwrap())
-            .unwrap();
+    let legacy_calls = context.with(|ctx| {
+        ctx.globals().set("agentdesk", Object::new(ctx.clone()).unwrap()).unwrap();
         crate::engine::ops::log_ops::register_log_ops(&ctx).unwrap();
         crate::engine::ops::kv_ops::register_kv_ops(&ctx, Some(pool.clone())).unwrap();
         crate::engine::ops::exec_ops::register_exec_ops(&ctx).unwrap();
@@ -656,34 +661,43 @@ fn run_section_i(pool: &PgPool) -> Vec<String> {
         let ad: Object = ctx.globals().get("agentdesk").unwrap();
         let timeouts: Object = ad.get("timeouts").unwrap();
         let (pool, probed) = (pool.clone(), probed.clone());
-        let observe = move |session_key: String| -> String {
-            observe_session_host_with(Some(&pool), &session_key, |session, _| {
+        timeouts.set("__observeSessionHostRaw", Function::new(ctx.clone(), move |key: String| {
+            observe_session_host_with(Some(&pool), &key, |session, _| {
                 probed.lock().unwrap().push(session.name.to_string());
-                HostLiveness::DeadOrAbsent
+                liveness(session.name)
             })
-        };
-        timeouts
-            .set(
-                "__observeSessionHostRaw",
-                Function::new(ctx.clone(), observe).unwrap(),
-            )
-            .unwrap();
+        }).unwrap()).unwrap();
+        if let Some(rows) = inflights {
+            let inflight: Object = ad.get("inflight").unwrap();
+            inflight.set("__listRaw", Function::new(ctx.clone(), move || rows.to_string()).unwrap()).unwrap();
+        }
         let script = format!(
             "(function() {{
+                var legacyCalls = 0;
+                if ({watch_legacy}) {{
+                    ['listStaleWorkingSessions', 'listDeadlockCandidates', 'repairStaleSession'].forEach(function(name) {{
+                        agentdesk.timeouts[name] = function() {{ legacyCalls++; return []; }};
+                    }});
+                }}
                 var helpers = {{ exports: {{}} }};
                 (function(module, exports) {{ {helpers} }})(helpers, helpers.exports);
                 var monitor = {{ exports: {{}} }};
                 (function(module) {{ {monitor} }})(monitor);
-                var timeouts = {{}};
-                monitor.exports(timeouts, helpers.exports);
-                timeouts._section_I();
-                return true;
+                var root = {{ exports: {{}} }};
+                var require = function(name) {{
+                    if (name === './lib/timeouts-helpers') return helpers.exports;
+                    if (name === './timeouts/active-monitor') return monitor.exports;
+                    return function(t) {{ ['I0','J','K'].forEach(function(s) {{ t['_section_' + s] = function() {{}}; }}); }};
+                }};
+                (function(module, require) {{ {entry} }})(root, require);
+                root.exports.policy.onTick30s({{}});
+                return legacyCalls;
             }})()"
         );
-        assert!(ctx.eval::<bool, _>(script).unwrap());
+        ctx.eval::<i32, _>(script).unwrap()
     });
     let probed = probed.lock().unwrap().clone();
-    probed
+    (probed, legacy_calls)
 }
 
 // The real `_section_I` hands each row's full key to the facade: a Herdr row with or
@@ -755,6 +769,133 @@ async fn section_i_defers_herdr_rows_and_repairs_legacy_rows_pg() {
         .await
         .unwrap();
     assert_eq!(counters, 2, "Herdr deadlock counters are not consumed");
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn policy_owner_preserves_the_four_automatic_counterexamples_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (db, original) = setup().await;
+    let pool =
+        crate::services::stale_turn_reconciler::owner_boundary_tests::frozen_clock_pool(&original)
+            .await;
+    for (index, (name, age)) in [
+        ("six-missing", 360),
+        ("eleven-dispatch", 660),
+        ("thirty-one-ambiguous", 1860),
+        ("eleven-ready-inflight", 660),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        seed(&pool, name, 400 + index, None, "pending").await;
+        sqlx::query("UPDATE sessions SET last_heartbeat = NOW() - ($2::bigint * INTERVAL '1 second'), active_dispatch_id = CASE WHEN $3 THEN active_dispatch_id ELSE NULL END WHERE session_key = $1")
+            .bind(key(name)).bind(age as i64).bind(name == "eleven-dispatch").execute(&pool).await.unwrap();
+    }
+    let rows = json!([{"session_key": key("eleven-ready-inflight"), "tmux_session_name": tmux_name("eleven-ready-inflight"), "updated_at": "2026-10-31 23:49:00"}]);
+    run_policy_tick(
+        &pool,
+        |name| {
+            if name.ends_with("ambiguous") || name.ends_with("inflight") {
+                HostLiveness::Live
+            } else {
+                HostLiveness::DeadOrAbsent
+            }
+        },
+        Some(rows),
+        false,
+    );
+    for (name, expected) in [
+        ("six-missing", "turn_active"),
+        ("eleven-dispatch", "idle"),
+        ("thirty-one-ambiguous", "idle"),
+        ("eleven-ready-inflight", "turn_active"),
+    ] {
+        assert_eq!(snapshot(&pool, name).await[0], expected, "{name}");
+    }
+    assert_eq!(
+        snapshot(&pool, "eleven-dispatch").await,
+        json!(["idle", "none", "Dispatch failed", "failed", STALE_REASON, 1])
+    );
+    pool.close().await;
+    original.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn policy_owner_strict_ten_thirty_minute_and_null_boundaries_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (db, original) = setup().await;
+    let pool =
+        crate::services::stale_turn_reconciler::owner_boundary_tests::frozen_clock_pool(&original)
+            .await;
+    for (index, (name, age)) in [
+        ("before-ten", Some(599_i64)),
+        ("equal-ten", Some(600)),
+        ("after-ten", Some(601)),
+        ("before-thirty", Some(1799)),
+        ("equal-thirty", Some(1800)),
+        ("after-thirty", Some(1801)),
+        ("null-heartbeat", None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        seed(&pool, name, 500 + index, None, "pending").await;
+        sqlx::query("UPDATE sessions SET last_heartbeat = NOW() - ($2::bigint * INTERVAL '1 second') WHERE session_key = $1").bind(key(name)).bind(age).execute(&pool).await.unwrap();
+    }
+    let thirty: Value = serde_json::from_str(&super::super::list_deadlock_candidates_raw(
+        Some(&pool),
+        30,
+        50,
+    ))
+    .unwrap();
+    let keys: Vec<_> = thirty["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["session_key"].as_str().unwrap())
+        .collect();
+    assert_eq!(keys, [key("after-thirty")]);
+    run_policy_tick(
+        &pool,
+        |_| HostLiveness::DeadOrAbsent,
+        Some(json!([])),
+        false,
+    );
+    for (name, expected) in [
+        ("before-ten", "turn_active"),
+        ("equal-ten", "turn_active"),
+        ("after-ten", "idle"),
+        ("before-thirty", "idle"),
+        ("equal-thirty", "idle"),
+        ("after-thirty", "idle"),
+        ("null-heartbeat", "turn_active"),
+    ] {
+        assert_eq!(snapshot(&pool, name).await[0], expected, "{name}");
+    }
+    pool.close().await;
+    original.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn policy_tick_calls_owner_without_js_candidate_or_repair_decisions_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (db, pool) = setup().await;
+    seed(&pool, "owner-bridge", 600, None, "pending").await;
+    let (probed, legacy_calls) =
+        run_policy_tick(&pool, |_| HostLiveness::DeadOrAbsent, Some(json!([])), true);
+    assert_eq!(
+        legacy_calls, 0,
+        "the policy tick must not select candidates or construct repairs in JS"
+    );
+    assert_eq!(probed, [tmux_name("owner-bridge")]);
+    assert_eq!(
+        snapshot(&pool, "owner-bridge").await,
+        json!(["idle", "none", "Dispatch failed", "failed", STALE_REASON, 1])
+    );
     pool.close().await;
     db.drop().await;
 }

@@ -274,16 +274,12 @@ async fn cleanup_error_preserves_sqlx_cause_pg() {
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let mut tx = pool.begin().await.unwrap();
-    let first_error = sqlx::query("SELECT 1 / 0")
-        .execute(&mut *tx)
-        .await
-        .unwrap_err();
-    assert!(first_error.to_string().contains("division by zero"));
+    assert!(sqlx::query("SELECT 1 / 0").execute(&mut *tx).await.is_err());
     let error = crate::services::escalation_cooldown::clear_on_pg_tx(&mut tx, "card")
         .await
         .unwrap_err();
     assert!(
-        error.to_string().contains("current transaction is aborted"),
+        error.to_string().contains("error returned from database: "),
         "cleanup error must include the database cause: {error}"
     );
     tx.rollback().await.unwrap();

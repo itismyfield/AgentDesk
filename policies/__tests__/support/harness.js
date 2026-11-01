@@ -164,15 +164,7 @@ function createAgentdeskMock(options) {
     autoQueueResumes: [],
     autoQueueSavedPhaseGates: [],
     autoQueueClearedPhaseGates: [],
-    timeoutClearFreshCounterCalls: [],
-    timeoutStaleWorkingScans: [],
-    timeoutDeadlockCandidateScans: [],
     timeoutHostObservations: [],
-    timeoutRepairCalls: [],
-    timeoutDispatchTypeLookups: [],
-    timeoutTerminationRecords: [],
-    timeoutInactiveCounterCleanups: 0,
-    timeoutHistoryCleanupCalls: [],
     retrospectiveCalls: [],
     runtimeSignals: [],
     httpPosts: [],
@@ -367,26 +359,12 @@ function createAgentdeskMock(options) {
       refreshInventoryDocs() {}
     },
     timeouts: {
-      clearDeadlockCountersForFreshSessions(staleScanMinutes) {
-        state.timeoutClearFreshCounterCalls.push({ staleScanMinutes });
-        if (typeof timeouts.clearDeadlockCountersForFreshSessions === "function") {
-          return clone(timeouts.clearDeadlockCountersForFreshSessions(staleScanMinutes, state));
-        }
-        return { ok: true, deleted: 0 };
-      },
-      listStaleWorkingSessions(graceMinutes) {
-        state.timeoutStaleWorkingScans.push({ graceMinutes });
-        if (typeof timeouts.listStaleWorkingSessions === "function") {
-          return clone(timeouts.listStaleWorkingSessions(graceMinutes, state));
-        }
-        return clone(timeouts.staleWorkingSessions || []);
-      },
-      listDeadlockCandidates(staleScanMinutes, limit) {
-        state.timeoutDeadlockCandidateScans.push({ staleScanMinutes, limit });
-        if (typeof timeouts.listDeadlockCandidates === "function") {
-          return clone(timeouts.listDeadlockCandidates(staleScanMinutes, limit, state));
-        }
-        return clone(timeouts.deadlockCandidates || []);
+      maintainStaleSessions(...args) {
+        if (!state.timeoutMaintenanceCalls) state.timeoutMaintenanceCalls = [];
+        state.timeoutMaintenanceCalls.push(args);
+        return typeof timeouts.maintainStaleSessions === "function"
+          ? clone(timeouts.maintainStaleSessions(state))
+          : { ok: true };
       },
       observeSessionHost(sessionKey) {
         state.timeoutHostObservations.push(sessionKey);
@@ -401,44 +379,6 @@ function createAgentdeskMock(options) {
           return { state: liveness, session_id: 1, tmux_name: name };
         }
         return { state: "unknown", reason: "probe_failed" };
-      },
-      repairStaleSession(sessionKey, request) {
-        state.timeoutRepairCalls.push({ sessionKey, request: clone(request || {}) });
-        if (typeof timeouts.repairStaleSession === "function") {
-          return clone(timeouts.repairStaleSession(sessionKey, request || {}, state));
-        }
-        return { ok: true, repaired: true, rows_affected: 1, dispatch_rows_affected: 1, dispatch_error: null };
-      },
-      getDispatchType(dispatchId) {
-        state.timeoutDispatchTypeLookups.push({ dispatchId });
-        if (typeof timeouts.getDispatchType === "function") {
-          return timeouts.getDispatchType(dispatchId, state);
-        }
-        if (timeouts.dispatchTypes && Object.prototype.hasOwnProperty.call(timeouts.dispatchTypes, dispatchId)) {
-          return timeouts.dispatchTypes[dispatchId];
-        }
-        return null;
-      },
-      recordDeadlockTermination(payload) {
-        state.timeoutTerminationRecords.push(clone(payload || {}));
-        if (typeof timeouts.recordDeadlockTermination === "function") {
-          return clone(timeouts.recordDeadlockTermination(payload || {}, state));
-        }
-        return { ok: true, rows_affected: 1 };
-      },
-      cleanupDeadlockCountersForInactiveSessions() {
-        state.timeoutInactiveCounterCleanups += 1;
-        if (typeof timeouts.cleanupDeadlockCountersForInactiveSessions === "function") {
-          return clone(timeouts.cleanupDeadlockCountersForInactiveSessions(state));
-        }
-        return { ok: true, deleted: 0 };
-      },
-      cleanupDeadlockHistoryBefore(cutoffMs) {
-        state.timeoutHistoryCleanupCalls.push({ cutoffMs });
-        if (typeof timeouts.cleanupDeadlockHistoryBefore === "function") {
-          return clone(timeouts.cleanupDeadlockHistoryBefore(cutoffMs, state));
-        }
-        return { ok: true, deleted: 0 };
       }
     },
     http: {
