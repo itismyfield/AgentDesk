@@ -1873,10 +1873,16 @@ mod tests {
         let stop = AtomicBool::new(false);
         let mut received = 0;
         let mut batches = Vec::new();
+        let expected_wait_ms = [250, 500, 500, 500, 500, 400];
         process_hot_reload_events(
             &stop,
-            |_| {
+            |wait| {
                 assert!(received < 32, "a busy queue must not starve reloads");
+                assert_eq!(
+                    wait,
+                    Duration::from_millis(expected_wait_ms[received % expected_wait_ms.len()]),
+                    "receive timeout must respect the remaining batch budget"
+                );
                 let pending = rx.try_recv().expect("the event queue stays nonempty");
                 if received > 0 {
                     clock.set(clock.get() + Duration::from_millis(400));
