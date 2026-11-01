@@ -4,7 +4,8 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{LazyLock, Mutex, PoisonError};
 
-use crate::services::observability::turn_lifecycle::{RecoveryDetails, TurnEvent};
+/// The lifecycle session-notice class this notice posts under, as a failed resume does.
+const REASON: &str = "lifecycle.session_resume_failed";
 
 /// Lost sessions this process already announced, by channel; the outbox key covers a restart.
 static ANNOUNCED: LazyLock<Mutex<HashSet<(u64, String)>>> = LazyLock::new(Default::default);
@@ -31,20 +32,11 @@ pub(super) fn announce(
     if !claimed {
         return;
     }
+    // A session notice shows only its first line, so the whole notice is that line.
     let short: String = requested.chars().take(8).collect();
-    let event = TurnEvent::SessionResumeFailedWithRecovery(RecoveryDetails {
-        reason: format!("이전 세션 `{short}`의 대화 기록을 이 작업 폴더·계정에서 찾지 못함"),
-        recovery_action: "새 세션으로 시작 — 이전 대화 맥락은 이어지지 않습니다".to_string(),
-        previous_session_key: None,
-        recovered_session_key: None,
-        recovery: None,
-    });
-    let (Some(reason), Some(content)) = (
-        event.notification_reason_code(),
-        event.notification_content(),
-    ) else {
-        return;
-    };
+    let content = format!(
+        "♻️ 이전 세션 {short} 기록을 찾지 못해 새 세션으로 시작했습니다. 이전 대화 맥락은 이어지지 않습니다."
+    );
     #[cfg(test)]
     (POSTED.lock().unwrap_or_else(PoisonError::into_inner)).push(requested.to_string());
     let session_key = format!("claude_resume_lost:{requested}");
@@ -52,7 +44,7 @@ pub(super) fn announce(
         pool,
         &format!("channel:{channel}"),
         Some(&session_key),
-        reason,
+        REASON,
         &content,
     );
 }

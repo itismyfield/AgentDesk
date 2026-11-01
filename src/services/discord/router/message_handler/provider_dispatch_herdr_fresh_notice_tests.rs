@@ -14,6 +14,17 @@ pub(super) fn notices(fx: &Fixture, session: &str) -> i64 {
     fx.rt.block_on(query.fetch_one(&fx.pool)).unwrap()
 }
 
+/// What the channel is shown for the lost session `session`: the outbox's rendered notice.
+fn shown(fx: &Fixture, session: &str) -> String {
+    let query = sqlx::query_scalar(
+        "SELECT session_notice->>'content' FROM message_outbox
+          WHERE target = $1 AND session_key = $2",
+    )
+    .bind(format!("channel:{CHANNEL}"))
+    .bind(format!("claude_resume_lost:{session}"));
+    fx.rt.block_on(query.fetch_one(&fx.pool)).unwrap()
+}
+
 // A session whose transcript is gone starts fresh on Herdr with one channel notice in the outbox;
 // its launch tried again after a restart posts no second one.
 #[test]
@@ -28,6 +39,20 @@ fn a_herdr_resume_without_its_transcript_posts_one_notice_across_a_restart_pg() 
     let (first, _) = fx.turn(&HostedRecord::Legacy, &ports, || {});
     assert!(first.unwrap_err().contains("NotSent"));
     assert_eq!(notices(&fx, &session), 1);
+    // The one shown line says the session started fresh without its context, and no path.
+    let line = shown(&fx, &session);
+    for told in [
+        "새 세션으로 시작",
+        "이전 대화 맥락은 이어지지 않습니다",
+        &session[..8],
+    ] {
+        assert!(line.contains(told), "{told}: {line}");
+    }
+    let dir = path.parent().unwrap().display().to_string();
+    assert!(
+        !line.contains(&dir) && !line.contains('\n') && !line.contains("줄)"),
+        "{line}"
+    );
 
     crate::services::claude::fresh_notice::forget_for_tests(&session);
     let again = fx.ports(&launcher);
