@@ -932,13 +932,19 @@ pub(crate) fn read_claude_tui_output_file_until_result_with_harvest(
     cancel_token: Option<Arc<CancelToken>>,
     probe: SessionProbe,
 ) -> Result<(ReadOutputResult, ReadHarvestStats), ReadOutputFailure> {
+    let native = cancel_token.clone();
     read_output_file_until_result_using(
         output_path,
         start_offset,
         sender,
         cancel_token,
         probe,
-        process_claude_transcript_line,
+        move |line, state_sender, state| {
+            if let Some(token) = &native {
+                let _ = token.native_stop.observe_native_input();
+            }
+            process_claude_transcript_line(line, state_sender, state)
+        },
     )
 }
 
@@ -948,7 +954,7 @@ fn read_output_file_until_result_using(
     sender: Sender<StreamMessage>,
     cancel_token: Option<Arc<CancelToken>>,
     probe: SessionProbe,
-    process_line: fn(&str, &Sender<StreamMessage>, &mut StreamLineState) -> bool,
+    mut process_line: impl FnMut(&str, &Sender<StreamMessage>, &mut StreamLineState) -> bool,
 ) -> Result<(ReadOutputResult, ReadHarvestStats), ReadOutputFailure> {
     let mut state = StreamLineState::new();
     let SessionProbe {

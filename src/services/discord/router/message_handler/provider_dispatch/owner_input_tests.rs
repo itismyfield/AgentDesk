@@ -1413,3 +1413,93 @@ pub(in crate::services::discord) async fn claimed_owner_turn(
     };
     (owner, answer)
 }
+
+#[test]
+fn b2_dispatch_idle_receipt_uses_actual_turn_and_preserves_settle() {
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+    use crate::services::tui_prompt_dedupe::{self, TuiRuntimeBinding};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig(
+        "b2-idle-dispatch",
+        7_212_802,
+        "normal",
+        view("", false),
+        IDLE,
+    );
+    let path = rig.transcript();
+    let past = json!({"type":"user","uuid":"past","sessionId":"receipt-sid","message":{"role":"user","content":PROMPT}});
+    use std::io::Write;
+    writeln!(
+        fs::OpenOptions::new().append(true).open(&path).unwrap(),
+        "{past}"
+    )
+    .unwrap();
+    let before = fs::metadata(&path).unwrap().len();
+    fs::write(rig.renderer.join("native-sid"), "receipt-sid").unwrap();
+    fs::write(rig.renderer.join("native-uuid"), "dispatch-idle-a").unwrap();
+    tui_prompt_dedupe::register_tmux_runtime_binding(
+        &rig.name,
+        TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            output_path: path.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some("receipt-sid".into()),
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
+    let claim = rig.claim(&rig.granted_front()).unwrap();
+    let registration = rig.registration(
+        &ProviderKind::Claude,
+        target::Phase::Idle,
+        &path,
+        Execution::LocalTui,
+    );
+    let (settled, _) = tokio::sync::oneshot::channel();
+    let mut written_token = None;
+    let result = rig.with_turn(&ProviderKind::Claude, Some(&rig.name), |turn, sender| {
+        written_token = Some(turn.cancel.clone());
+        execute_front(turn, sender, claim, registration, settled)
+    });
+    assert_eq!(result, Ok(()));
+    wait("native user append", || {
+        fs::read_to_string(&path)
+            .unwrap()
+            .contains("dispatch-idle-a")
+    });
+    writeln!(
+        fs::OpenOptions::new().append(true).open(&path).unwrap(),
+        "{{\"type\":\"system\",\"subtype\":\"stop_hook_summary\"}}"
+    )
+    .unwrap();
+    let token = written_token.unwrap();
+    let (sender, _receiver) = std::sync::mpsc::channel();
+    crate::services::session_backend::read_claude_tui_output_file_until_result_with_harvest(
+        &path.display().to_string(),
+        0,
+        sender,
+        Some(token.clone()),
+        crate::services::provider::SessionProbe::process(|| true),
+    )
+    .unwrap();
+    let pin = token
+        .native_stop
+        .receipt_sink()
+        .observed()
+        .expect("dispatch must forward the actual turn's receipt")
+        .unwrap();
+    assert_eq!(pin.0, "dispatch-idle-a");
+    assert_eq!(
+        pin.2.0, before,
+        "reader/prelaunch offset cannot borrow the past input"
+    );
+    assert_eq!(rig.events(), ["paste", "Enter"]);
+    rig.delivered();
+    assert_eq!(
+        CancelToken::new().native_stop.receipt_sink().observed(),
+        None,
+        "new recovery/direct tokens have no submitted receipt"
+    );
+    tui_prompt_dedupe::clear_tmux_runtime_binding(&rig.name);
+}

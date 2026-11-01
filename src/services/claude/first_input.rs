@@ -7,27 +7,29 @@ pub(crate) struct Submitted {
     hook_events_after: chrono::DateTime<chrono::Utc>,
 }
 
-pub(super) fn submit(
+pub(crate) fn submit(
     transcript_path_string: &str,
     fresh_turn_start_offset: u64,
     cancel_token: Option<&CancelToken>,
     tmux_session_name: &str,
     prompt: &str,
 ) -> Result<Submitted, SubmissionError> {
-    submit_using(
-        transcript_path_string,
-        fresh_turn_start_offset,
-        || {
-            crate::services::claude_tui::input::send_prompt_with_readiness(
-                tmux_session_name,
-                prompt,
-                crate::services::claude_tui::input::PromptReadinessKind::FreshTurn,
-                cancel_token,
-            )
-        },
-        std::thread::sleep,
-        tmux_session_name,
-    )
+    crate::services::claude_tui::guarded_outcome::with_receipt_sink(cancel_token, || {
+        submit_using(
+            transcript_path_string,
+            fresh_turn_start_offset,
+            || {
+                crate::services::claude_tui::input::send_prompt_with_readiness(
+                    tmux_session_name,
+                    prompt,
+                    crate::services::claude_tui::input::PromptReadinessKind::FreshTurn,
+                    cancel_token,
+                )
+            },
+            std::thread::sleep,
+            tmux_session_name,
+        )
+    })
 }
 
 /// The first prompt of an execution the caller just created, for the input owner's effect; the
@@ -66,7 +68,9 @@ pub(super) fn submit_owned(
         transcript_path_string.to_owned(),
         tmux_session_name.to_owned(),
     );
+    let sid = resolved_session_id.to_owned();
     let submit = Box::new(move |frame: String| {
+        crate::services::claude_tui::guarded_outcome::set_fresh_receipt_source(&transcript, &sid);
         let submitted = submit(
             &transcript,
             fresh_turn_start_offset,

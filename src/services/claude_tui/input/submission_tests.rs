@@ -213,7 +213,10 @@ def event(name):
     with (root/'events').open('a') as out: out.write(name+'\n')
 def record(content):
     with (root/'transcript').open('a') as out:
-        out.write(json.dumps({'type':'user','message':{'content':content}})+'\n')
+        row = {'type':'user','message':{'content':content}}
+        if (root/'native-sid').exists():
+            row.update(sessionId=(root/'native-sid').read_text(), uuid=(root/'native-uuid').read_text())
+        out.write(json.dumps(row)+'\n')
 render('before')
 (root/'ready').write_text('ready')
 if mode == 'fresh':

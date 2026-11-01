@@ -4,7 +4,6 @@ use super::host_input::InputRun;
 #[cfg(test)]
 use super::input;
 use super::input::{PreparationHold, UserReceipt};
-#[cfg(test)]
 use crate::services::provider::CancelToken;
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -85,6 +84,23 @@ struct Scope {
     fresh_path: Option<String>,
 }
 thread_local! { static OWNER: RefCell<Option<Scope>> = const { RefCell::new(None) }; }
+thread_local! {
+    static RECEIPT_SINK: RefCell<Option<Arc<crate::services::provider::native_stop::ReceiptSink>>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn with_receipt_sink<R>(cancel: Option<&CancelToken>, run: impl FnOnce() -> R) -> R {
+    struct Restore(Option<Arc<crate::services::provider::native_stop::ReceiptSink>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            RECEIPT_SINK.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(
+        RECEIPT_SINK
+            .with(|slot| slot.replace(cancel.map(|token| token.native_stop.receipt_sink()))),
+    );
+    run()
+}
 struct Restore(Option<Scope>);
 impl Drop for Restore {
     fn drop(&mut self) {
@@ -130,12 +146,10 @@ fn scoped<R>(owner: Option<Arc<dyn Owner>>, run: impl FnOnce() -> R) -> (R, Scop
         let (receipt_sid, fresh_path) = slot
             .borrow()
             .as_ref()
-            .filter(|scope| {
-                scope
-                    .owner
-                    .as_ref()
-                    .zip(owner.as_ref())
-                    .is_some_and(|(a, b)| Arc::ptr_eq(a, b))
+            .filter(|scope| match (&scope.owner, &owner) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
             })
             .map(|scope| (scope.receipt_sid.clone(), scope.fresh_path.clone()))
             .unwrap_or_default();
@@ -191,8 +205,9 @@ pub(crate) fn receipt(session: &str, prompt: &str) {
             scope.as_ref().and_then(|s| s.fresh_path.clone()),
         )
     });
-    if let Some(owner) = owner {
-        let sid = sid.or_else(|| owner.native_session_id());
+    let sink = RECEIPT_SINK.with(|slot| slot.borrow().clone());
+    if owner.is_some() || sink.is_some() {
+        let sid = sid.or_else(|| owner.as_ref().and_then(|owner| owner.native_session_id()));
         let receipt = if let Some(path) = fresh_path {
             sid.as_deref()
                 .and_then(|sid| UserReceipt::before_fresh(session, prompt, &path, sid))
@@ -200,25 +215,37 @@ pub(crate) fn receipt(session: &str, prompt: &str) {
             UserReceipt::before(session, prompt, sid.as_deref())
         };
         if let Some(receipt) = receipt {
-            owner.receipt(receipt);
+            if let Some(sink) = sink
+                && let Some(copy) = receipt.copy_for_native()
+            {
+                sink.receipt(copy);
+            }
+            if let Some(owner) = owner {
+                owner.receipt(receipt);
+            }
         }
     }
 }
 
 #[cfg(unix)]
 pub(crate) fn fresh_receipt(session: &str, prompt: &str, path: &str, sid: &str) {
-    set_receipt_session_id(sid);
-    OWNER.with(|slot| {
-        if let Some(scope) = slot.borrow_mut().as_mut() {
-            scope.fresh_path = Some(path.to_owned());
-        }
-    });
+    set_fresh_receipt_source(path, sid);
     let owner = OWNER.with(|slot| slot.borrow().as_ref().and_then(|scope| scope.owner.clone()));
     if let Some(owner) = owner
         && let Some(receipt) = UserReceipt::before_fresh(session, prompt, path, sid)
     {
         owner.receipt(receipt);
     }
+}
+
+#[cfg(unix)]
+pub(crate) fn set_fresh_receipt_source(path: &str, sid: &str) {
+    set_receipt_session_id(sid);
+    OWNER.with(|slot| {
+        if let Some(scope) = slot.borrow_mut().as_mut() {
+            scope.fresh_path = Some(path.to_owned());
+        }
+    });
 }
 pub(crate) fn begin() {
     let owner = OWNER.with(|slot| slot.borrow().as_ref().and_then(|scope| scope.owner.clone()));
@@ -227,6 +254,9 @@ pub(crate) fn begin() {
     }
 }
 pub(crate) fn finish(run: &InputRun) {
+    if let Some(sink) = RECEIPT_SINK.with(|slot| slot.borrow().clone()) {
+        sink.finished(run);
+    }
     let owner = OWNER.with(|slot| {
         slot.borrow_mut().as_mut().and_then(|scope| {
             scope.result = Some(run.clone());

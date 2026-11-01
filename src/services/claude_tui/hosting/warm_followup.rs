@@ -378,11 +378,13 @@ fn run_claude_tui_warm_followup_submit_and_stream(
     }
     guarded_outcome::set_receipt_session_id(resolved_session_id);
     let turn_started_at = chrono::Utc::now();
-    if let Err(error) = crate::services::claude_tui::input::send_warm_followup_owned(
-        tmux_session_name,
-        prompt,
-        cancel_token.as_deref(),
-    ) {
+    if let Err(error) = guarded_outcome::with_receipt_sink(cancel_token.as_deref(), || {
+        crate::services::claude_tui::input::send_warm_followup_owned(
+            tmux_session_name,
+            prompt,
+            cancel_token.as_deref(),
+        )
+    }) {
         return match error {
             SubmissionError::Guarded(run) => ClaudeTuiWarmFollowupSubmitOutcome::Stopped(run),
             SubmissionError::Legacy(error) => {

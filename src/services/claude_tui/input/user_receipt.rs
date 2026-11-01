@@ -4,6 +4,7 @@ use crate::services::tui_prompt_dedupe::binding_context::{self, SpawnNonceMarker
 use crate::services::tui_prompt_dedupe::{self, TuiRuntimeBinding};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::sync::Arc;
 
 /// A pane stays the same across handoff and SID rehydration, but not a respawn.
 #[derive(Debug, PartialEq, Eq)]
@@ -35,7 +36,7 @@ impl PaneIdentity {
 #[derive(Debug)]
 pub(crate) struct UserReceipt {
     session: String,
-    pane: PaneIdentity,
+    pane: Arc<PaneIdentity>,
     sid: String,
     file: Option<File>,
     offset: u64,
@@ -45,6 +46,123 @@ pub(crate) struct UserReceipt {
 }
 
 impl UserReceipt {
+    /// Share the writer's snapshot, never recapture its boundary for a second consumer.
+    pub(crate) fn copy_for_native(&self) -> Option<Self> {
+        Some(Self {
+            session: self.session.clone(),
+            pane: self.pane.clone(),
+            sid: self.sid.clone(),
+            file: match &self.file {
+                Some(file) => Some(file.try_clone().ok()?),
+                None => None,
+            },
+            offset: self.offset,
+            end: None,
+            ended: false,
+            frame: self.frame.clone(),
+        })
+    }
+
+    /// JSONL may arrive after seal. Only the first real user beyond the writer can qualify.
+    pub(crate) fn try_pin_native_user(
+        &mut self,
+    ) -> Result<Option<crate::services::provider::native_stop::NativeUserPin>, ()> {
+        #[cfg(not(unix))]
+        {
+            Err(())
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{FileExt, MetadataExt};
+            let session = self.session.clone();
+            crate::services::tmux_common::with_tmux_source_authority(&session, |authority| {
+                let current =
+                    tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(
+                        authority,
+                    )
+                    .ok_or(())?;
+                if PaneIdentity::from_binding(&self.session, &current).as_ref()
+                    != Some(self.pane.as_ref())
+                    || current
+                        .session_id
+                        .as_deref()
+                        .is_some_and(|sid| sid != self.sid)
+                {
+                    return Err(());
+                }
+                if self.file.is_none() {
+                    match open(&current.output_path) {
+                        Ok(file) => self.file = Some(file),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            return Ok(None);
+                        }
+                        Err(_) => return Err(()),
+                    }
+                }
+                let file = self.file.as_ref().ok_or(())?;
+                let metadata = file.metadata().map_err(|_| ())?;
+                if !same_file(file, &self.pane.output_path) || metadata.len() < self.offset {
+                    return Err(());
+                }
+                let size = (metadata.len() - self.offset).min(16 * 1024 * 1024) as usize;
+                let mut bytes = vec![0; size];
+                // A cloned FD shares its seek cursor with the managed owner; positional I/O does not.
+                file.read_exact_at(&mut bytes, self.offset)
+                    .map_err(|_| ())?;
+                let mut offset = self.offset;
+                for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+                    if !line.ends_with(b"\n") {
+                        return Ok(None);
+                    }
+                    let start = offset;
+                    offset += line.len() as u64;
+                    let record: serde_json::Value = serde_json::from_slice(line).map_err(|_| ())?;
+                    if record["isSidechain"] == true {
+                        continue;
+                    }
+                    let Some((_, uuid)) =
+                        tui_prompt_dedupe::extract_claude_transcript_user_prompt_with_entry_id(
+                            &record,
+                        )
+                    else {
+                        continue;
+                    };
+                    let exact = user_text(&record).is_some_and(|text| {
+                        super::super::busy_inject::exact_receipt(
+                            &text.replace("\r\n", "\n").replace('\r', "\n"),
+                            &self.frame,
+                        )
+                    });
+                    if record["sessionId"].as_str() != Some(self.sid.as_str())
+                        || !exact
+                        || !same_file(file, &self.pane.output_path)
+                    {
+                        return Err(());
+                    }
+                    if PaneIdentity::from_binding(&self.session, &current).as_ref()
+                        != Some(self.pane.as_ref())
+                    {
+                        return Err(());
+                    }
+                    use std::hash::{Hash, Hasher};
+                    let mut hash = std::collections::hash_map::DefaultHasher::new();
+                    line.hash(&mut hash);
+                    return Ok(Some((
+                        uuid.ok_or(())?,
+                        (metadata.dev(), metadata.ino()),
+                        (start, offset),
+                        hash.finish(),
+                    )));
+                }
+                if metadata.len() - self.offset > size as u64 {
+                    Err(())
+                } else {
+                    Ok(None)
+                }
+            })
+        }
+    }
+
     pub(crate) fn before(session: &str, prompt: &str, sid: Option<&str>) -> Option<Self> {
         crate::services::tmux_common::with_tmux_source_authority(session, |authority| {
             let mut binding =
@@ -87,7 +205,7 @@ impl UserReceipt {
         binding: TuiRuntimeBinding,
         allow_missing: bool,
     ) -> Option<Self> {
-        let pane = PaneIdentity::from_binding(session, &binding)?;
+        let pane = Arc::new(PaneIdentity::from_binding(session, &binding)?);
         let sid = binding.session_id.clone()?;
         let (file, offset) = match open(&binding.output_path) {
             Ok(mut file) => {
@@ -124,7 +242,9 @@ impl UserReceipt {
             else {
                 return;
             };
-            if PaneIdentity::from_binding(&self.session, &current).as_ref() != Some(&self.pane) {
+            if PaneIdentity::from_binding(&self.session, &current).as_ref()
+                != Some(self.pane.as_ref())
+            {
                 return;
             }
             if self.file.is_none() {
@@ -208,7 +328,9 @@ impl UserReceipt {
             else {
                 return false;
             };
-            if PaneIdentity::from_binding(&self.session, &current).as_ref() != Some(&self.pane) {
+            if PaneIdentity::from_binding(&self.session, &current).as_ref()
+                != Some(self.pane.as_ref())
+            {
                 return false;
             }
             self.matches_through(end)

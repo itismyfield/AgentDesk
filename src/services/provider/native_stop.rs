@@ -8,6 +8,60 @@ pub(crate) struct State {
     inner: Mutex<Inner>,
     notice: AtomicBool,
     bridges: Mutex<Vec<Weak<()>>>,
+    input: Arc<ReceiptSink>,
+}
+
+/// Native UUID, open file identity, complete byte range and exact row hash.
+pub(crate) type NativeUserPin = (String, (u64, u64), (u64, u64), u64);
+
+/// The writer's receipt is observational; it grants no cancellation authority.
+#[derive(Default)]
+pub(crate) struct ReceiptSink {
+    inner: Mutex<WriterReceipt>,
+}
+#[derive(Default)]
+struct WriterReceipt {
+    receipt: Option<crate::services::claude_tui::input::UserReceipt>,
+    applied: bool,
+    observed: Option<Result<NativeUserPin, ()>>,
+}
+
+impl ReceiptSink {
+    pub(crate) fn receipt(&self, receipt: crate::services::claude_tui::input::UserReceipt) {
+        let mut input = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if !input.applied && input.observed.is_none() {
+            input.receipt = Some(receipt);
+        }
+    }
+    pub(crate) fn finished(&self, run: &crate::services::claude_tui::host_input::InputRun) {
+        let mut input = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if input.applied || input.observed.is_some() {
+            return;
+        }
+        if *run == crate::services::claude_tui::host_input::InputRun::Applied {
+            input.applied = true;
+            if let Some(receipt) = &mut input.receipt {
+                receipt.seal();
+            }
+        } else {
+            input.observed = Some(Err(()));
+        }
+    }
+    pub(crate) fn observe(&self) -> Option<Result<NativeUserPin, ()>> {
+        let mut input = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if input.applied && input.observed.is_none() {
+            input.observed = match input.receipt.as_mut() {
+                Some(receipt) => receipt.try_pin_native_user().transpose(),
+                None => Some(Err(())),
+            };
+        }
+        input.observed.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observed(&self) -> Option<Result<NativeUserPin, ()>> {
+        self.inner.lock().unwrap().observed.clone()
+    }
 }
 
 #[derive(Default)]
@@ -27,6 +81,14 @@ pub(crate) struct Attempt {
 }
 
 impl State {
+    pub(crate) fn receipt_sink(&self) -> Arc<ReceiptSink> {
+        self.input.clone()
+    }
+
+    pub(crate) fn observe_native_input(&self) -> Option<Result<NativeUserPin, ()>> {
+        self.input.observe()
+    }
+
     /// Every bridge holds its own lifetime guard, including overlapping recovered bridges.
     pub(crate) fn register_bridge(&self) -> Arc<()> {
         let guard = Arc::new(());

@@ -64,7 +64,6 @@ fn submit(
     readiness: PromptReadinessKind,
     cancel: Option<&CancelToken>,
 ) -> Result<(), SubmissionError> {
-    guarded_outcome::receipt(session, prompt);
     let request = Request {
         session,
         prompt,
@@ -147,6 +146,7 @@ fn run(
         if !authority.admits(session) {
             return InputRun::Refused(InputRefusal::IdentityMismatch);
         }
+        guarded_outcome::receipt(session, request.prompt);
         if cancel_requested(request.cancel) {
             return InputRun::Cancelled { confirmed: 0 };
         }

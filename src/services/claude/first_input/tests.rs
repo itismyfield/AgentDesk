@@ -204,3 +204,95 @@ fn owned_first_prompt_keeps_its_ticket_for_the_observer() {
     assert_eq!(std::fs::read(pane.join("payloads")).unwrap().len(), 1);
     assert_eq!(std::fs::read(pane.join("enters")).unwrap().len(), 1);
 }
+
+#[test]
+fn b1_owned_launch_passes_writer_source_across_the_owner_callback() {
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+    use crate::services::claude_tui::guarded_outcome;
+    use crate::services::tui_prompt_dedupe::{self, TuiRuntimeBinding};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let fixture = Fixture::after_shared_test_env_lock();
+    let (name, prompt) = ("b1-owned-source", "owned source");
+    frame_renderer(
+        &fixture,
+        name,
+        prompt,
+        &screen(""),
+        &screen(prompt),
+        &screen(""),
+    );
+    let nonce = "00112233445566778899aabbccddee12";
+    let root = crate::services::tmux_common::current_tmux_owner_marker();
+    let context = serde_json::json!({"schema":1,"provider":"claude","created_at":chrono::Utc::now(),
+        "execution_nonce":nonce,"tmux_session":name,"channel_id":7212801,"owner_runtime_root":root,
+        "host":"owned-source-test","expected_native_session_id":null,"launch_mode":"fresh","provider_root":null});
+    let _incarnation = tui_prompt_dedupe::binding_context::PreparedIncarnation::create(
+        serde_json::from_value(context).unwrap(),
+    )
+    .unwrap();
+    let marker = crate::services::tmux_common::session_temp_path(name, "spawn_nonce");
+    std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+    std::fs::write(marker, nonce).unwrap();
+    let path = fixture.root.path().join("owned-source.jsonl");
+    tui_prompt_dedupe::register_tmux_runtime_binding(
+        name,
+        TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            output_path: path.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some("owned-sid".into()),
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
+    let hook: crate::services::claude_tui::owner_input::LaunchHook =
+        Box::new(move |_, _, source, _, submit| {
+            assert_eq!(source["expected_session_id"], "owned-sid");
+            guarded_outcome::with_owner(None, || submit(prompt.into()))
+                .map_err(|error| format!("{error:?}"))
+        });
+    let token = std::sync::Arc::new(CancelToken::new());
+    submit_owned(
+        hook,
+        path.to_str().unwrap(),
+        0,
+        Some(token.clone()),
+        name,
+        "owned-sid",
+    )
+    .unwrap_or_else(|error| panic!("owned submit failed: {error:?}"));
+    assert!(
+        !path.exists(),
+        "Applied is independent from a delayed JSONL append"
+    );
+    std::fs::write(&path,format!("{}\n{}\n",
+        serde_json::json!({"type":"user","uuid":"owned-a","sessionId":"owned-sid","message":{"content":prompt}}),
+        serde_json::json!({"type":"system","subtype":"stop_hook_summary"}))).unwrap();
+    let (sender, _receiver) = std::sync::mpsc::channel();
+    crate::services::session_backend::read_claude_tui_output_file_until_result_with_harvest(
+        path.to_str().unwrap(),
+        0,
+        sender,
+        Some(token.clone()),
+        crate::services::provider::SessionProbe::process(|| true),
+    )
+    .unwrap();
+    assert_eq!(
+        token
+            .native_stop
+            .receipt_sink()
+            .observed()
+            .unwrap()
+            .unwrap()
+            .0,
+        "owned-a"
+    );
+    assert_eq!(
+        std::fs::read(fixture.root.path().join(name).join("enters"))
+            .unwrap()
+            .len(),
+        1
+    );
+    tui_prompt_dedupe::clear_tmux_runtime_binding(name);
+}

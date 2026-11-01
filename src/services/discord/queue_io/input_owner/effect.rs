@@ -183,15 +183,26 @@ impl BusyClaude {
 }
 
 /// An idle Claude tmux pane: main's warm submission, whose stash the owner scope admits.
-pub(crate) fn idle_claude(session: String) -> Leaf {
+pub(crate) fn idle_claude(
+    session: String,
+    receipt: Arc<crate::services::provider::CancelToken>,
+) -> Leaf {
     use crate::services::claude_tui::guarded_outcome::SubmissionError;
     Box::new(move |frame| {
-        match crate::services::claude_tui::input::send_warm_followup_owned(&session, &frame, None) {
-            Ok(()) => Ok(Completion::Submitted),
-            Err(SubmissionError::Held(hold)) if hold.modal => Ok(Completion::NotSent(MODAL.into())),
-            Err(SubmissionError::Held(hold)) => Ok(Completion::NotSent(format!("held: {hold:?}"))),
-            Err(error) => Ok(Completion::WriteUncertain(format!("{error:?}"))),
-        }
+        crate::services::claude_tui::guarded_outcome::with_receipt_sink(Some(&receipt), || {
+            match crate::services::claude_tui::input::send_warm_followup_owned(
+                &session, &frame, None,
+            ) {
+                Ok(()) => Ok(Completion::Submitted),
+                Err(SubmissionError::Held(hold)) if hold.modal => {
+                    Ok(Completion::NotSent(MODAL.into()))
+                }
+                Err(SubmissionError::Held(hold)) => {
+                    Ok(Completion::NotSent(format!("held: {hold:?}")))
+                }
+                Err(error) => Ok(Completion::WriteUncertain(format!("{error:?}"))),
+            }
+        })
     })
 }
 
@@ -240,3 +251,7 @@ pub(crate) use herdr::BusyClaudeHerdr;
 #[cfg(test)]
 #[path = "effect_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "native_receipt_tests.rs"]
+mod native_receipt_tests;
