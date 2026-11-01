@@ -66,6 +66,12 @@ export function cardWithBody(card: KanbanCard | undefined, full: KanbanCard | nu
   return full?.id === card.id ? { ...card, description: full.description, metadata: full.metadata } : undefined;
 }
 
+/** The list summary was written after the full card on hand, so that card's body may be outdated. */
+export function summaryOutdatesFull(card: KanbanCard | undefined, full: KanbanCard | null): boolean {
+  if (!card || isFullCard(card) || full?.id !== card.id) return false;
+  return Date.parse(card.updated_at) > Date.parse(full.updated_at);
+}
+
 export type QueueSort = "priority" | "recent" | "oldest" | "number";
 export interface QueueFilters { query: string; status: string; repo: string; sort: QueueSort }
 export const EMPTY_QUEUE_FILTERS: QueueFilters = { query: "", status: "all", repo: "all", sort: "priority" };

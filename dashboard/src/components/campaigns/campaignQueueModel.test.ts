@@ -5,6 +5,7 @@ import { cardTitle } from "../agent-manager/kanban-utils";
 import { campaignTaskNumber, campaignTaskTitle } from "./campaignModel";
 import {
   EMPTY_QUEUE_FILTERS, campaignNodeFromCard, cardWithBody, filterQueueCards, parseQueueLocation, queueCards, queueLocationQuery,
+  summaryOutdatesFull,
 } from "./campaignQueueModel";
 import { makeCampaignNode } from "./campaignTestFixtures";
 
@@ -101,4 +102,17 @@ it("keeps the body of the last full read when the list swaps in a summary", () =
   expect(cardWithBody(summary as KanbanCard, full)).toMatchObject({ title: "renamed", description: "long body" });
   expect(cardWithBody(card("c", { description: null }), full)?.description).toBeNull();
   expect(cardWithBody(summary as KanbanCard, card("other", { description: "x" }))).toBeUndefined();
+});
+
+it("calls a summary outdating only when it was written after the full card", () => {
+  const full = card("c", { description: "body", updated_at: "2026-10-02T00:00:00Z" });
+  const summaryAt = (updated_at: string) => {
+    const { description: _dropped, ...summary } = card("c", { updated_at });
+    return summary as KanbanCard;
+  };
+  expect(summaryOutdatesFull(summaryAt("2026-10-03T00:00:00Z"), full)).toBe(true);
+  expect(summaryOutdatesFull(summaryAt("2026-10-02T00:00:00Z"), full)).toBe(false);
+  expect(summaryOutdatesFull(summaryAt("2026-10-01T00:00:00Z"), full)).toBe(false);
+  expect(summaryOutdatesFull(card("c", { updated_at: "2026-10-03T00:00:00Z" }), full)).toBe(false);
+  expect(summaryOutdatesFull(summaryAt("2026-10-03T00:00:00Z"), null)).toBe(false);
 });

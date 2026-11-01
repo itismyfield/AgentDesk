@@ -9,7 +9,7 @@ import { Drawer } from "../common/overlay/Drawer";
 import { Modal } from "../common/overlay/Modal";
 import { WidgetState } from "../common/WidgetState";
 import type { Tr } from "./campaignPresentation";
-import { cardWithBody, isFullCard } from "./campaignQueueModel";
+import { cardWithBody, isFullCard, summaryOutdatesFull } from "./campaignQueueModel";
 import QueueAddToCampaign from "./QueueAddToCampaign";
 import type { useQueueCardActions } from "./useQueueCardActions";
 
@@ -24,20 +24,28 @@ export default function QueueCardDetail({ cardId, card, agents, campaigns, local
   const [loaded, setLoaded] = useState<{ id: string; error: string | null } | null>(null);
   const [full, setFull] = useState<KanbanCard | null>(null);
   const [reads, setReads] = useState(0);
+  const [rereadError, setRereadError] = useState<string | null>(null);
   useEffect(() => {
     let current = true;
     actions.load(cardId).then(
-      (value) => { if (current) { setFull(value); setLoaded({ id: cardId, error: null }); } },
-      // A failed re-read keeps the card already on screen.
-      (cause) => { if (current && reads === 0) setLoaded({ id: cardId, error: cause instanceof Error ? cause.message : String(cause) }); },
+      (value) => { if (current) { setFull(value); setLoaded({ id: cardId, error: null }); setRereadError(null); } },
+      (cause) => {
+        if (!current) return;
+        const message = cause instanceof Error ? cause.message : String(cause);
+        // A failed first read replaces the drawer; a failed re-read keeps the card on screen and says so.
+        if (reads === 0) setLoaded({ id: cardId, error: message }); else setRereadError(message);
+      },
     );
     return () => { current = false; };
   }, [cardId, actions, reads]);
   // Writes and WS events bring full cards; keep the newest one.
   useEffect(() => { if (card && isFullCard(card)) setFull(card); }, [card]);
   // A newer summary means the body may have changed too, so the full card is read again.
-  const summaryIsNewer = !!card && !isFullCard(card) && !!full && full.id === card.id && card.updated_at !== full.updated_at;
-  useEffect(() => { if (summaryIsNewer) setReads((value) => value + 1); }, [summaryIsNewer]);
+  const outdated = summaryOutdatesFull(card, full);
+  useEffect(() => { if (outdated) setReads((value) => value + 1); }, [outdated]);
+  const saveLock = !outdated ? null : rereadError
+    ? { reason: tr("최신 카드를 읽지 못해 저장을 잠갔어요.", "Saving is locked: the newest card did not load."), onRetry: () => { setRereadError(null); setReads((value) => value + 1); } }
+    : { reason: tr("새 버전을 확인하고 있어요. 확인이 끝나면 저장할 수 있어요.", "Checking a newer version; you can save once it loads.") };
   const shown = useMemo(() => cardWithBody(card, full), [card, full]);
   const ready = loaded?.id === cardId && !loaded.error && shown;
   if (!ready) return <Drawer open onClose={onClose} title={tr("카드 상세", "Card details")} width="min(820px, 100vw)">
@@ -45,12 +53,13 @@ export default function QueueCardDetail({ cardId, card, agents, campaigns, local
       ? <WidgetState kind="error" title={tr("카드를 불러오지 못했습니다.", "Could not load the card.")} description={loaded.error} />
       : <WidgetState kind="loading" title={tr("카드를 불러오고 있습니다.", "Loading the card.")} />}
   </Drawer>;
-  return <LoadedCardDetail card={shown} agents={agents} campaigns={campaigns} locale={locale} tr={tr} actions={actions}
+  return <LoadedCardDetail card={shown} agents={agents} campaigns={campaigns} locale={locale} tr={tr} actions={actions} saveLock={saveLock}
     onClose={onClose} onNeedsAssignee={onNeedsAssignee} onCampaignSaved={onCampaignSaved} />;
 }
 
-function LoadedCardDetail({ card, agents, campaigns, locale, tr, actions, onClose, onNeedsAssignee, onCampaignSaved }: {
+function LoadedCardDetail({ card, agents, campaigns, locale, tr, actions, saveLock, onClose, onNeedsAssignee, onCampaignSaved }: {
   card: KanbanCard; agents: Agent[]; campaigns: Campaign[]; locale: UiLanguage; tr: Tr; actions: Actions;
+  saveLock: { reason: string; onRetry?: () => void } | null;
   onClose: () => void; onNeedsAssignee: (card: KanbanCard) => void; onCampaignSaved: (campaign: Campaign) => void;
 }) {
   const dispatches = useTaskDispatches();
@@ -100,7 +109,7 @@ function LoadedCardDetail({ card, agents, campaigns, locale, tr, actions, onClos
         await actions.update(id, patch);
       }}
       onRetryCard={actions.retry} onRedispatchCard={actions.redispatch} onDeleteCard={actions.remove}
-      invalidateCardActivity={invalidateCardActivity}
+      invalidateCardActivity={invalidateCardActivity} saveLock={saveLock}
       extra={<QueueAddToCampaign key={card.id} card={card} campaigns={campaigns} tr={tr} onAdded={onCampaignSaved} />} />
     {cancelling && <Modal open onClose={() => { if (cancelling !== "sending") setCancelling(null); }} title={tr("카드를 취소할까요?", "Cancel this card?")} size="sm"
       description={card.github_issue_number

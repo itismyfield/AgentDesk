@@ -111,6 +111,8 @@ export interface KanbanCardDetailProps {
   invalidateCardActivity: (cardId: string) => void;
   /** Shown under the card heading, e.g. putting the card into a campaign. */
   extra?: ReactNode;
+  /** Saving would send this body back, so it stays off while a newer version is unread. */
+  saveLock?: { reason: string; onRetry?: () => void } | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -153,6 +155,7 @@ export default function KanbanCardDetail({
   onDeleteCard,
   invalidateCardActivity,
   extra,
+  saveLock,
 }: KanbanCardDetailProps) {
 
   const agentMap = new Map(agents.map((agent) => [agent.id, agent]));
@@ -175,6 +178,7 @@ export default function KanbanCardDetail({
   };
 
   const handleSaveCard = async () => {
+    if (saveLock) return;
     setSavingCard(true);
     setActionError(null);
     try {
@@ -534,6 +538,16 @@ export default function KanbanCardDetail({
         />
 
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
+          {saveLock && (
+            <div role="status" className="flex min-w-0 flex-wrap items-center gap-2 text-xs leading-5 break-keep text-th-text-secondary" data-testid="card-save-lock">
+              <span>{saveLock.reason}</span>
+              {saveLock.onRetry && (
+                <button type="button" onClick={saveLock.onRetry} className="min-h-11 rounded-md border border-th-border-subtle px-3 text-xs font-medium text-th-text-primary">
+                  {tr("다시 읽기", "Load again")}
+                </button>
+              )}
+            </div>
+          )}
           <div className="flex flex-col-reverse gap-2 sm:flex-row">
             <SurfaceActionButton
               onClick={onClose}
@@ -544,7 +558,7 @@ export default function KanbanCardDetail({
             </SurfaceActionButton>
             <SurfaceActionButton
               onClick={() => void handleSaveCard()}
-              disabled={savingCard || !editor.title.trim()}
+              disabled={savingCard || !editor.title.trim() || !!saveLock}
               tone="info"
               className="text-sm"
               style={{ color: "var(--th-text-primary)" }}
