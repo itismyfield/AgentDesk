@@ -3,7 +3,9 @@
 
 use super::{connect_for_startup, register_repo, sync_agents_from_config_pg};
 use crate::config::{ClusterRole, Config};
-use crate::services::settings::{KvSeedAction, config_default_seed_actions};
+use crate::services::settings::{
+    KvSeedAction, RETIRED_CONFIG_KEY_PREFIXES, config_default_seed_actions,
+};
 use sqlx::PgPool;
 use std::collections::BTreeSet;
 
@@ -33,6 +35,13 @@ pub async fn startup_reseed(pool: &PgPool, config: &Config) -> Result<(), String
     }
 
     apply_kv_seed_actions(pool, &config_default_seed_actions(config)).await?;
+    for prefix in RETIRED_CONFIG_KEY_PREFIXES {
+        sqlx::query("DELETE FROM kv_meta WHERE starts_with(key, $1)")
+            .bind(prefix)
+            .execute(pool)
+            .await
+            .map_err(|error| format!("delete retired kv_meta prefix {prefix}: {error}"))?;
+    }
     upsert_kv_meta(pool, "server_port", &config.server.port.to_string()).await?;
     crate::services::settings::seed_runtime_config_defaults_pg(pool, config).await?;
 
@@ -138,4 +147,73 @@ fn normalized_repo_ids(repo_ids: &[String]) -> Vec<String> {
         deduped.insert(repo_id.to_string());
     }
     deduped.into_iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn startup_reseed_removes_retired_keys_and_literal_prefixes_pg() {
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let retired = [
+            "merge_automation_enabled",
+            "merge_strategy",
+            "merge_strategy_mode",
+            "merge_allowed_authors",
+            "maxReviewRounds",
+            "maxChainDepth",
+            "inProgressStaleMin",
+            "requestedAckTimeoutMin",
+            "long_turn_alert_interval_min",
+            "health_port",
+            "test_tier_write",
+            "kanban_manager_channel_id",
+            "merge_strategy_mode:card:one",
+            "merge_strategy_mode:card:two",
+            "merge_strategy_mode:card:",
+            "escalation_thread:one",
+            "escalation_thread:two",
+            "escalation_thread:",
+        ];
+        let retained = [
+            "max_review_rounds",
+            "merge_strategy_mode:cards:keep",
+            "merge_strategy_mode:card",
+            "merge_strategy_mode_extra",
+            "escalation_other:keep",
+            "escalation_thread",
+            "mergeXstrategyXmode:card:keep",
+            "escalationXthread:keep",
+        ];
+        for key in retired.iter().chain(&retained) {
+            upsert_kv_meta(&pool, key, "7").await.unwrap();
+        }
+        let mut config = Config::default();
+        config.review.max_rounds = Some(7);
+        config.kanban.manager_channel_id = Some("1234567890123456789".into());
+        for _ in 0..2 {
+            startup_reseed(&pool, &config).await.unwrap();
+            for key in retired {
+                let value: Option<String> =
+                    sqlx::query_scalar("SELECT value FROM kv_meta WHERE key = $1")
+                        .bind(key)
+                        .fetch_optional(&pool)
+                        .await
+                        .unwrap();
+                assert_eq!(value, None, "retired key {key} must be deleted at boot");
+            }
+            for key in retained {
+                let value: String = sqlx::query_scalar("SELECT value FROM kv_meta WHERE key = $1")
+                    .bind(key)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                assert_eq!(value, "7", "adjacent/live key {key} must survive boot");
+            }
+        }
+        pool.close().await;
+        db.drop().await;
+    }
 }

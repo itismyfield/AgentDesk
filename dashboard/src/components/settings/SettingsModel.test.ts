@@ -14,7 +14,7 @@ describe("settings panels", () => {
   });
 
   it("places server config keys where people look for them", () => {
-    expect(configEntryPlacement(entry("kanban_manager_channel_id", "pipeline"))).toEqual({ panel: "connections", section: "channels" });
+    expect(configEntryPlacement(entry("deadlock_manager_channel_id", "pipeline"))).toEqual({ panel: "connections", section: "channels" });
     expect(configEntryPlacement(entry("server_port", "system"))).toEqual({ panel: "machine", section: "server" });
     expect(configEntryPlacement(entry("context_compact_percent", "context"))).toEqual({ panel: "ai", section: "context" });
     expect(configEntryPlacement(entry("requested_timeout_min", "timeout"))).toEqual({ panel: "workflow", section: "timeouts" });
