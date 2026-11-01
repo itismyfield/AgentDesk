@@ -92,9 +92,8 @@ pub(crate) fn recorded_process(os: &dyn ProcessOs, stamp: &ProcessStamp) -> Reco
     }
 }
 
-/// `stamp`'s process is gone: proven absent, or, given the host's boot, its pid now runs another
-/// process and the recorded one started before that boot, so it cannot still run. Else the one
-/// reading that kept it.
+/// `stamp`'s process is gone: proven absent, or its pid runs another process and it started
+/// before `rebooted`. Else the reading that kept it.
 pub(crate) fn original_gone(
     os: &dyn ProcessOs,
     stamp: &ProcessStamp,

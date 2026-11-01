@@ -212,9 +212,8 @@ async fn asked_since(before: usize) -> usize {
     ensured_on_this_thread() - before
 }
 
-/// Only witnesses decide: another server than the granted one holds, the granted server never
-/// holds whatever its policy reads, an absent server holds and is asked for, and a socket that
-/// cannot be judged keeps the existing path.
+/// Only witnesses decide: a replaced or absent server holds (an absent one is asked for), the
+/// granted server never holds, and an unjudgeable socket keeps the existing path.
 #[tokio::test(flavor = "current_thread")]
 async fn a_row_is_held_only_while_its_granted_server_is_replaced_or_absent_pg() {
     let fx = Fx::new().await;

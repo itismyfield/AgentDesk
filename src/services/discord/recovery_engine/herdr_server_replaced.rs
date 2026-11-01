@@ -1,6 +1,5 @@
-//! A local user_default channel whose Bound or Pending row ran on a herdr server that is gone or
-//! replaced: start the server, observe its policy, then end the old execution through the
-//! existing proofs. The held input stays queued until the row is Retired and runs once after.
+//! A row whose granted herdr server is gone or replaced: start the server, observe its policy,
+//! retire the old execution through the existing proofs, then wake the held queue.
 
 use std::collections::HashSet;
 use std::sync::{LazyLock, Mutex, PoisonError};

@@ -74,9 +74,8 @@ pub(in crate::services::discord) async fn hold_queue(
     true
 }
 
-/// A local user_default channel whose Bound or Pending row ran on a server that no longer
-/// answers, or that another server replaced: its inputs wait in the queue for the replaced-server
-/// owner. Only witnesses are compared, so the policy of a kept server never holds its inputs.
+/// Holds inputs while the row's granted server is absent or replaced; only witnesses are
+/// compared, so a kept server's policy never holds them.
 pub(in crate::services::discord) async fn server_replaced_hold(
     shared: &SharedData,
     provider: &ProviderKind,
