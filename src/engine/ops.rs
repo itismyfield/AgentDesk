@@ -21,6 +21,7 @@ pub(crate) use kanban_ops::reopen_done_auto_queue_entries_on_pg_tx;
 mod kv_ops;
 mod log_ops;
 pub(crate) mod message_ops;
+mod orphan_recovery_ops;
 mod pipeline_ops;
 mod quality_ops;
 mod queue_ops;
@@ -87,6 +88,7 @@ fn register_globals_pg_only(
     queue_ops::register_queue_ops(ctx, pg_pool.clone())?;
     auto_queue_ops::register_auto_queue_ops(ctx, pg_pool.clone(), supervisor_bridge.clone())?;
     runtime_ops::register_runtime_ops(ctx, pg_pool.clone(), supervisor_bridge)?;
+    orphan_recovery_ops::register_orphan_recovery_ops(ctx)?;
     message_ops::register_message_ops(ctx, pg_pool.clone())?;
     exec_ops::register_exec_ops(ctx)?;
     pipeline_ops::register_pipeline_ops(ctx, pg_pool.clone())?;

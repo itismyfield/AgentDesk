@@ -398,6 +398,7 @@ src/
 │   │   ├── kv_ops.rs
 │   │   ├── log_ops.rs
 │   │   ├── message_ops.rs
+│   │   ├── orphan_recovery_ops.rs
 │   │   ├── pipeline_ops.rs
 │   │   ├── quality_ops.rs
 │   │   ├── queue_ops.rs
@@ -4311,6 +4312,10 @@ src/
 │   ├── turn_summary_line_tests.rs
 │   └── voice_conductor.rs
 ├── supervisor/
+│   ├── orphan_recovery/
+│   │   ├── boot.rs
+│   │   ├── mod.rs
+│   │   └── policy.rs
 │   └── mod.rs
 ├── test_support/
 │   ├── serial_runtime.rs
