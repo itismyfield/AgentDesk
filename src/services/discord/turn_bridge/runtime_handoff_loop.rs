@@ -729,6 +729,8 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                             done,
                             #[cfg(unix)]
                             host,
+                            #[cfg(unix)]
+                            turn_read: None,
                         },
                         WatcherRuntimeHandoffState {
                             inflight_state,
@@ -750,6 +752,9 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                     transcript_path,
                     tmux_session_name,
                     last_offset,
+                    #[cfg(unix)]
+                    turn_read,
+                    ..
                 } => {
                     guarded_save_outcome = Some(handle_watcher_runtime_handoff(
                         WatcherRuntimeHandoffContext {
@@ -765,6 +770,8 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                             done,
                             #[cfg(unix)]
                             host,
+                            #[cfg(unix)]
+                            turn_read,
                         },
                         WatcherRuntimeHandoffState {
                             inflight_state,
@@ -802,6 +809,8 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                             done,
                             #[cfg(unix)]
                             host,
+                            #[cfg(unix)]
+                            turn_read: None,
                         },
                         WatcherRuntimeHandoffState {
                             inflight_state,

@@ -938,6 +938,7 @@ pub(crate) fn read_claude_tui_output_file_until_result_with_harvest(
         sender,
         cancel_token,
         probe,
+        // `o_delivery_manifest::BodyComposer` replays bridge bodies with this same parser.
         process_claude_transcript_line,
     )
 }

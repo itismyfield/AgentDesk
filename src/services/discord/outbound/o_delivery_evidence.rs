@@ -15,6 +15,8 @@ use poise::serenity_prelude::{self as serenity, ChannelId, MessageId};
 use std::{path::Path, sync::Arc};
 use tokio::time::Instant;
 
+pub(in crate::services::discord) use super::o_delivery_manifest::BodyProducer;
+
 #[derive(Debug)]
 pub(in crate::services::discord) struct TailCovered {
     _private: (),
@@ -323,6 +325,96 @@ pub(in crate::services::discord) async fn tail(
             .min(std::time::Duration::from_secs(1));
         tokio::time::sleep(pause).await;
     }
+}
+
+/// Claude can date a late body record after the bridge queued that body on the same host.
+const HEADLESS_OUTBOX_SKEW_MS: i64 = 5_000;
+
+/// The bridge queues the Discord-formatted body, once prefixed by a single session-banner line.
+fn headless_content_matches(content: &str, bodies: &[&str]) -> bool {
+    bodies.iter().any(|body| {
+        !body.trim().is_empty()
+            && (content == *body
+                || content
+                    .split_once("\n\n")
+                    .is_some_and(|(line, rest)| !line.contains('\n') && rest == *body))
+    })
+}
+
+/// A headless bridge body leaves a sent `message_outbox` row, not an O receipt; only a row with
+/// this body queued after the records that wrote it covers it, never an earlier turn's answer.
+pub(in crate::services::discord) async fn headless_outbox(
+    shared: &SharedData,
+    frame: Frame<'_>,
+    producer: manifest::BodyProducer,
+    deadline: Instant,
+) -> Option<TailCovered> {
+    let pool = shared.pg_pool.as_ref()?;
+    let (provider, path) = (frame.provider.clone(), frame.path.to_path_buf());
+    let (channel, file, range) = (frame.channel.get(), frame.file, frame.range);
+    let body = frame.body.to_string();
+    let written = tokio::time::timeout_at(
+        deadline,
+        tokio::task::spawn_blocking(move || {
+            manifest::body_written_ms(
+                manifest::Query {
+                    provider: &provider,
+                    channel,
+                    path: &path,
+                    file,
+                    range,
+                },
+                &body,
+                producer,
+                deadline,
+            )
+        }),
+    )
+    .await
+    .ok()?
+    .ok()??;
+    let floor = chrono::DateTime::from_timestamp_millis(written - HEADLESS_OUTBOX_SKEW_MS)?;
+    let rows: Vec<String> = tokio::time::timeout_at(
+        deadline,
+        sqlx::query_scalar(
+            "SELECT content FROM message_outbox
+              WHERE target = $1 AND source = 'headless_turn' AND status = 'sent'
+                AND created_at >= $2
+              ORDER BY id DESC LIMIT 32",
+        )
+        .bind(format!("channel:{channel}"))
+        .bind(floor)
+        .fetch_all(pool),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    let formatted = if shared.ui.status_panel_v2_enabled {
+        crate::services::discord::formatting::format_for_discord_with_status_panel(
+            frame.body,
+            frame.provider,
+        )
+    } else {
+        crate::services::discord::formatting::format_for_discord_with_provider(
+            frame.body,
+            frame.provider,
+        )
+    };
+    let bodies = [frame.body, formatted.as_str()];
+    if !rows
+        .iter()
+        .any(|content| headless_content_matches(content, &bodies))
+    {
+        return None;
+    }
+    tracing::info!(
+        channel_id = channel,
+        frame_start = range.0,
+        frame_end = range.1,
+        body_bytes = frame.body.len(),
+        "terminal frame covered by its headless outbox delivery"
+    );
+    Some(TailCovered { _private: () })
 }
 
 #[cfg(test)]

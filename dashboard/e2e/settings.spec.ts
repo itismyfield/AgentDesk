@@ -206,12 +206,11 @@ const MOCK_SETTINGS_PIPELINE_STAGES = [
 
 const NOW_SECONDS = Math.floor(Date.now() / 1000);
 const GIB = 1024 ** 3;
-const KANBAN_CHANNEL_ID = "1234567890123456789";
+const ALERT_CHANNEL_ID = "1234567890123456789";
 
 const CONFIG_ENTRIES = [
-  { key: "kanban_manager_channel_id", value: KANBAN_CHANNEL_ID, category: "pipeline", label_ko: "칸반매니저 채널 ID", label_en: "Kanban Manager Channel ID", editable: true, restart_behavior: "persist-live-override" },
   { key: "deadlock_manager_channel_id", value: "", category: "pipeline", label_ko: "데드락 매니저 채널 ID", label_en: "Deadlock Manager Channel ID", editable: true, restart_behavior: "persist-live-override" },
-  { key: "agent_quality_monitoring_channel_id", value: "", category: "quality", label_ko: "에이전트 품질 알림 채널 ID", label_en: "Agent Quality Alert Channel ID", editable: true },
+  { key: "agent_quality_monitoring_channel_id", value: ALERT_CHANNEL_ID, category: "quality", label_ko: "에이전트 품질 알림 채널 ID", label_en: "Agent Quality Alert Channel ID", editable: true },
   { key: "review_enabled", value: "true", category: "review", label_ko: "리뷰 활성화", label_en: "Review Enabled", editable: true, restart_behavior: "persist-live-override" },
   { key: "max_review_rounds", value: "3", default: "3", category: "review", label_ko: "최대 리뷰 라운드", label_en: "Max Review Rounds", editable: true, restart_behavior: "persist-live-override" },
   { key: "server_port", value: "8791", category: "system", label_ko: "서버 포트", label_en: "Server Port", editable: false, restart_behavior: "config-only" },
@@ -406,8 +405,8 @@ async function mockSettings(page: Page, overrides: { onboarding?: unknown } = {}
   await page.route(/\/api\/onboarding\/status$/, (route) => route.fulfill({ json: overrides.onboarding ?? ONBOARDING_STATUS }));
   await page.route(/\/api\/discord\/channels\/\d+$/, (route) => {
     const id = route.request().url().split("/").pop();
-    return id === KANBAN_CHANNEL_ID
-      ? route.fulfill({ json: { id, name: "adk-kanban", guild_id: ONBOARDING_STATUS.guild_id } })
+    return id === ALERT_CHANNEL_ID
+      ? route.fulfill({ json: { id, name: "adk-alerts", guild_id: ONBOARDING_STATUS.guild_id } })
       : route.fulfill({ status: 404, json: { error: "channel not found" } });
   });
   await page.route(/\/api\/provider-auth-profiles$/, (route) => route.fulfill({ json: PROVIDER_PROFILES }));
@@ -625,7 +624,7 @@ test.describe("settings", () => {
     await expect(page.getByTestId("settings-connection-server")).toContainText("연결됨");
     await expect(page.getByTestId("settings-connection-owner")).toContainText("설정됨");
     await expect(page.getByTestId("settings-connection-ai")).toContainText("Claude, Codex 사용 중");
-    await expect(page.getByTestId("settings-channel-name-kanban_manager_channel_id")).toHaveText("#adk-kanban");
+    await expect(page.getByTestId("settings-channel-name-agent_quality_monitoring_channel_id")).toHaveText("#adk-alerts");
     await expect(page.getByTestId("settings-channel-name-deadlock_manager_channel_id")).toContainText("아직 채널을 정하지 않았어요");
     await page.getByLabel("막힘 감지 알림 채널 ID").fill("12ab");
     await expect(page.getByTestId("settings-channel-name-deadlock_manager_channel_id")).toContainText("17~20자리 숫자");

@@ -371,6 +371,7 @@ fn n1c_boot_confirms_only_selected_committed_channels_after_full_retirement() {
     };
 
     let mut config = TuiOConfig::default();
+    config.turn = crate::services::tui_o::turn_mode::TurnConfig::off();
     assert!(confirm_at_boot(&ProviderKind::Claude, None).is_empty());
     assert!(confirm_at_boot(&ProviderKind::Claude, Some(&config)).is_empty());
     assert!(synthetic.exists(), "an empty selection retires nothing");

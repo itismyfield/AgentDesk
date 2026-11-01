@@ -55,6 +55,7 @@ struct Fixture {
     /// How the fake API answers name lookups ("answer", "fail" or "slow"), and who wrote every
     /// Discord message it serves.
     names: Arc<std::sync::Mutex<(&'static str, u64)>>,
+    reactions: Arc<std::sync::Mutex<Vec<(Method, u64, String)>>>,
     server: tokio::task::JoinHandle<()>,
     _rest: crate::services::discord::shared_state::test_rest::Guard,
 }
@@ -163,6 +164,8 @@ impl Fixture {
             .join("claude")
             .join(&shared.token_hash)
             .join(format!("{channel}.json"));
+        let reactions = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded_reactions = reactions.clone();
         let rest_app = Router::new().route("/gateway", axum::routing::get(
             |ws: axum::extract::ws::WebSocketUpgrade| async {
                 ws.on_upgrade(|mut socket| async move {
@@ -173,24 +176,29 @@ impl Fixture {
             let (counted_gets, refused) = (counted_gets.clone(), refused.clone());
             let counted_parent_gets = counted_parent_gets.clone();
             let queue_path = queue_path.clone();
+            let recorded_reactions = recorded_reactions.clone();
             let (lookup, writer) = *named.lock().unwrap();
             async move {
             use axum::response::IntoResponse;
-            if method == Method::DELETE
+            if matches!(method, Method::DELETE | Method::PUT)
                 && let Some((message, reaction)) = uri.path()
                     .strip_prefix(&format!("/api/v10/channels/{channel}/messages/"))
                     .and_then(|tail| tail.split_once("/reactions/"))
                 && reaction.strip_suffix("/@me").is_some_and(|emoji| !emoji.is_empty() && !emoji.contains('/'))
             {
                 let message = message.parse::<u64>().expect("reaction source id");
+                recorded_reactions.lock().unwrap().push((method.clone(), message, reaction.to_ascii_uppercase()));
                 let disk: Value = serde_json::from_slice(&std::fs::read(&queue_path).unwrap()).unwrap();
                 let committed = disk["terminal_identities"].as_array().is_some_and(|identities| {
                     identities.iter().any(|identity| identity["sources"].as_array().is_some_and(|sources| {
                         sources.iter().any(|source| source["message_id"].as_u64() == Some(message))
                     }))
                 });
-                assert!(committed, "queued reaction cannot be removed before its source consume commits: {uri}");
+                assert!(committed, "queued reaction cannot change before its source consume commits: {method} {uri}");
                 return StatusCode::NO_CONTENT.into_response();
+            }
+            if method != Method::GET {
+                recorded_reactions.lock().unwrap().push((method.clone(), 0, uri.path().into()));
             }
             assert_eq!(method, Method::GET, "queued injection cannot publish or tear down a queued card before consume: {uri}");
             let user = |id: &str| json!({"id": id, "username": "s2b username",
@@ -289,6 +297,7 @@ impl Fixture {
             parent_gets,
             refuse_reads,
             names,
+            reactions,
             server,
             _rest: rest,
         }
@@ -1660,3 +1669,204 @@ async fn unread_idle_composer_consumes_the_queued_head_without_notice_pg() {
 #[cfg(unix)]
 #[path = "queued_head_owner_entry_tests.rs"]
 mod owner_entry;
+#[tokio::test(flavor = "current_thread")]
+async fn queued_busy_injection_marks_committed_source_observed_pg() {
+    queued_busy_injection_marks_committed_source(true).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn queued_busy_injection_marks_committed_source_unobserved_pg() {
+    queued_busy_injection_marks_committed_source(false).await;
+}
+
+async fn queued_busy_injection_marks_committed_source(observed: bool) {
+    use crate::services::discord::turn_presence::supervisor::{self, tests::LiveSupervisor};
+    use crate::services::turn_orchestrator::{InterventionMode, SourceMessageQueuedGeneration};
+
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let fixture = Fixture::build(7_646_001 + u64::from(observed), "all").await;
+    let channel = fixture.channel;
+    let _gate = router::busy_inject_support::open_gate(channel.get());
+    fixture
+        .shared
+        .turn_view_reconciler
+        .enable_test_http_reactions();
+    let message = MessageId::new(1_566_355_276_536_352_819 + u64::from(observed));
+    let generation = runtime_store::process_generation();
+    let item = Intervention {
+        author_id: UserId::new(200),
+        author_is_bot: false,
+        message_id: message,
+        queued_generation: generation,
+        source_message_ids: vec![message],
+        source_message_queued_generations: vec![SourceMessageQueuedGeneration::user_instruction(
+            message, generation,
+        )],
+        source_text_segments: Vec::new(),
+        text: "지금 상태를 알려 줘".into(),
+        mode: InterventionMode::Soft,
+        created_at: std::time::Instant::now(),
+        reply_context: None,
+        has_reply_boundary: false,
+        merge_consecutive: false,
+        pending_uploads: Vec::new(),
+    };
+    let enqueued = queue_io::with_post_enqueue_idle_queue_kick_suppressed(
+        crate::services::discord::mailbox_enqueue_intervention(
+            &fixture.shared,
+            &ProviderKind::Claude,
+            channel,
+            item,
+        ),
+    )
+    .await;
+    assert!(enqueued.enqueued && enqueued.persistence_error.is_none());
+    use crate::services::discord::turn_presence::activity::tests::{
+        BindingRoot, ReadyPane, bind_turn_mode_transcript,
+    };
+    let events = tempfile::tempdir().unwrap();
+    let _events = BindingRoot::enter(events.path());
+    let session = fixture.pane.session();
+    let _ready = observed.then(|| ReadyPane::mark(&session));
+    if observed {
+        fixture.pane.set(
+            InjectPane::TRANSCRIPT,
+            &format!(
+                "{}\n",
+                json!({"type":"user","uuid":"queued-reaction-turn","message":{"content":"go"}})
+            ),
+        );
+    }
+    let _turn = observed.then(|| {
+        bind_turn_mode_transcript(
+            &fixture.shared,
+            &ProviderKind::Claude,
+            channel.get(),
+            &session,
+            &fixture.pane.path(InjectPane::TRANSCRIPT),
+        )
+    });
+    let presence = observed
+        .then(|| LiveSupervisor::new(fixture.shared.clone(), ProviderKind::Claude, channel.get()));
+    assert_eq!(
+        supervisor::observes(&ProviderKind::Claude, channel.get()),
+        observed
+    );
+
+    if observed {
+        assert_eq!(
+            crate::services::discord::turn_presence::activity::tests::settled_reason(
+                &fixture.shared,
+                &ProviderKind::Claude,
+                channel.get(),
+            )
+            .await,
+            "open",
+            "the real reader must observe the fixture's busy turn"
+        );
+    }
+    let (after_effect, resume) = inject_hook::park_queued(channel.get(), "after_effect");
+    let caller = fixture.spawn_kick();
+    reached(&after_effect).await;
+    assert_eq!(fixture.disk()["head_injection"]["phase"], "may_have_sent");
+    assert!(
+        fixture.reactions.lock().unwrap().is_empty(),
+        "no reaction or queue card before consume"
+    );
+    resume.notify_one();
+    caller.await.unwrap();
+    assert!(fixture.queue().await.is_empty());
+    assert_eq!(
+        fixture.disk()["terminal_identities"][0]["primary"],
+        message.get()
+    );
+    assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"]);
+    assert!(
+        ATTEMPT_ROWS
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|row| row.channel_id == channel.get() && row.outcome == "injected")
+    );
+    let reactions = fixture.reactions.lock().unwrap().clone();
+    let puts: Vec<_> = reactions
+        .iter()
+        .filter(|(method, _, _)| *method == Method::PUT)
+        .collect();
+    let expected = if observed {
+        "%E2%8F%B3/@ME"
+    } else {
+        "%F0%9F%93%A5/@ME"
+    };
+    assert_eq!(
+        puts,
+        [&(Method::PUT, message.get(), expected.into())],
+        "committed queued injection must PUT its live-path marker"
+    );
+    assert_eq!(
+        &reactions[..reactions.len() - 1],
+        [
+            (Method::DELETE, message.get(), "%F0%9F%93%AC/@ME".into()),
+            (Method::DELETE, message.get(), "%E2%9E%95/@ME".into()),
+            (Method::DELETE, message.get(), "%F0%9F%94%84/@ME".into()),
+        ],
+        "queue markers are removed before the injected marker is added"
+    );
+    assert_eq!(
+        fixture
+            .shared
+            .turn_view_reconciler
+            .pending_injected_count(channel),
+        usize::from(observed)
+    );
+    if let Some(presence) = presence {
+        let transcript =
+            std::fs::read_to_string(fixture.pane.path(InjectPane::TRANSCRIPT)).unwrap();
+        fixture.pane.idle();
+        fixture.pane.set(
+            InjectPane::TRANSCRIPT,
+            &format!("{transcript}{{\"type\":\"system\",\"subtype\":\"turn_duration\"}}\n"),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                presence.tick().await;
+                if presence.state()["activity"] == "idle"
+                    && fixture
+                        .reactions
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|(method, id, emoji)| {
+                            *method == Method::PUT
+                                && *id == message.get()
+                                && emoji == "%E2%9C%85/@ME"
+                        })
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "idle must replace the queued injection hourglass with a checkmark: {}",
+                presence.state()
+            )
+        });
+        assert_eq!(
+            &fixture.reactions.lock().unwrap()[reactions.len()..],
+            [
+                (Method::DELETE, message.get(), "%E2%8F%B3/@ME".into()),
+                (Method::PUT, message.get(), "%E2%9C%85/@ME".into()),
+            ]
+        );
+        assert_eq!(
+            fixture
+                .shared
+                .turn_view_reconciler
+                .pending_injected_count(channel),
+            0
+        );
+    }
+}

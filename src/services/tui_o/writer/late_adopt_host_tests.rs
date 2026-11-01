@@ -394,7 +394,7 @@ async fn late_adopt_coalesced_bound_rotation_rejects_before_pin() {
     .expect("valid coalesced binding history");
     assert_eq!(events.len(), 6);
     tokio::time::sleep(Duration::from_secs(30)).await;
-    assert_eq!(adoption(CHANNEL), Adoption::Released);
+    assert_eq!(adoption(CHANNEL), Adoption::Deferred);
     assert!(!init_path(&f.harness, CHANNEL).exists());
     assert!(f.harness.port.posts().is_empty());
     handle.stop_and_join().await.unwrap();
@@ -565,13 +565,9 @@ async fn late_adopt_bind_after_the_reservation_boundary_releases_naming_its_seq(
         startup_binds(&f, &sources);
         f.legacy.frontier.store(end, Ordering::SeqCst);
         tokio::time::sleep(Duration::from_secs(30)).await;
-        assert_eq!(adoption(CHANNEL), Adoption::Released, "again {again}");
-        let detail = released_detail(&f);
-        let (rotated, current) = (next.path.display(), f.path.display());
-        let expected = format!(
-            "source {rotated} was bound while the adoption waited (seq 5; baseline {current}@4; boundary 4;"
-        );
-        assert!(detail.contains(&expected), "again {again}: {detail}");
+        // The bind after the boundary rebases the wait onto it instead of releasing the channel.
+        assert_eq!(adoption(CHANNEL), Adoption::Deferred, "again {again}");
+        assert!(f.io.alarms.released().is_empty(), "again {again}");
         assert!(!init_path(&f.harness, CHANNEL).exists());
         assert!(f.harness.port.posts().is_empty());
         handle.stop_and_join().await.unwrap();
@@ -625,24 +621,23 @@ async fn late_adopt_successor_host_keeps_the_reservation_boundary() {
         Adoption::Deferred,
         "the reservation is kept"
     );
-    let next = delivered_elsewhere(&f, "between-hosts", "s5");
+    // A transcript bound between the hosts with its first prompt and no output yet: only the kept
+    // boundary makes it new, so the successor takes it over from its first byte.
+    let between = f.harness._runtime.path().join("between-hosts.jsonl");
+    let prompt = serde_json::json!({"type": "user", "sessionId": "s5", "uuid": "u5",
+        "message": {"role": "user", "content": "hi"}});
+    std::fs::write(&between, format!("{prompt}\n")).unwrap();
+    let next = source_id_for("s5", &between).unwrap();
     sources.push(next.clone());
     startup_binds(&f, &sources);
-    // Legacy delivered the new transcript, so only the kept boundary refuses it.
-    *f.io.legacy.lock().unwrap() = Some(Arc::new(Legacy {
-        path: next.path.clone(),
-        frontier: AtomicU64::new(std::fs::metadata(&next.path).unwrap().len()),
-    }));
     let handle = f.start();
     tokio::time::sleep(Duration::from_secs(30)).await;
-    assert_eq!(adoption(CHANNEL), Adoption::Released);
-    let (rotated, current) = (next.path.display(), f.path.display());
-    let expected = format!(
-        "source {rotated} was bound while the adoption waited (seq 5; baseline {current}@4; boundary 4;"
-    );
-    let detail = released_detail(&f);
-    assert!(detail.contains(&expected), "{detail}");
-    assert!(!init_path(&f.harness, CHANNEL).exists());
+    assert_eq!(adoption(CHANNEL), Adoption::Committed);
+    let init = f.harness.store.read_init(CHANNEL).unwrap().unwrap();
+    let starts: Vec<_> = (init.sources.iter())
+        .map(|source| (source.source_id.clone(), source.delivery_start))
+        .collect();
+    assert_eq!(starts, [(next, 0)]);
     assert!(f.harness.port.posts().is_empty());
     handle.stop_and_join().await.unwrap();
 }

@@ -18,6 +18,17 @@ SOURCE = Path(sys.argv[1]).read_text()
 REPO_ROOT = Path(sys.argv[2])
 
 
+def rust_database_default(name):
+    source = (REPO_ROOT / "src/config.rs").read_text()
+    match = re.search(
+        r'fn default_database_' + re.escape(name)
+        + r'\(\) -> String\s*\{\s*"([^"]+)"\.into\(\)\s*\}', source,
+    )
+    if not match:
+        raise AssertionError(f"Rust database default is not a string literal: {name}")
+    return match.group(1)
+
+
 def function(name):
     match = re.search(r"^" + re.escape(name) + r"\(\) \{\n.*?^\}(?=\n\n)", SOURCE, re.M | re.S)
     if not match:
@@ -85,6 +96,23 @@ class DeployConfigPaths(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((output / "PGHOST").read_text(), "selected-host")
+        self.assertEqual((output / "PGUSER").read_text(), "test-user")
+        self.assertEqual((output / "PGDATABASE").read_text(), "test-db")
+
+    def test_pg_probe_defaults_missing_fields_like_rust(self):
+        self.selected.write_text("database: { enabled: true }\n")
+        output = self.root / "conninfo"
+        output.mkdir()
+        result = self.run_shell(
+            function("_pg_write_probe_conninfo")
+            + f"\n_pg_write_probe_conninfo 25432 {shlex.quote(str(output))} "
+            + shlex.quote(str(self.root / "pgpass")) + "\n"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((output / "PGHOSTADDR").read_text(), "127.0.0.1")
+        self.assertEqual((output / "PGPORT").read_text(), "25432")
+        for field, name in [("PGHOST", "host"), ("PGUSER", "user"), ("PGDATABASE", "name")]:
+            self.assertEqual((output / field).read_text(), rust_database_default(name))
 
     def test_policy_rewrite_only_edits_the_selected_file(self):
         start = SOURCE.index("\nAGENTDESK_YAML=")

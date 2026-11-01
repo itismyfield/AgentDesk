@@ -18,7 +18,6 @@ pub(super) struct TerminalPreflightLocals<'a> {
     pub(super) terminal_kind: Option<WatcherTerminalKind>,
     pub(super) fresh_assistant_text_seen: bool,
     pub(super) tool_state: &'a WatcherToolState,
-    pub(super) restored_response_seed: &'a String,
     pub(super) turn_is_external_input_for_session: bool,
     pub(super) task_notification_kind: Option<TaskNotificationKind>,
     pub(super) data_start_offset: u64,
@@ -34,6 +33,8 @@ pub(super) struct TerminalPreflightState<'a> {
     pub(super) full_response: &'a mut String,
     pub(super) response_sent_offset: &'a mut usize,
     pub(super) last_edit_text: &'a mut String,
+    /// Emptied with `full_response`'s seed prefix, so a discarded seed never proves the rest.
+    pub(super) restored_response_seed: &'a mut RestoredResponseSeed,
 }
 
 pub(super) struct TerminalPreflightPrepared {
@@ -432,7 +433,6 @@ pub(super) async fn run_terminal_preflight_prepare(
         terminal_kind,
         fresh_assistant_text_seen,
         tool_state,
-        restored_response_seed,
         turn_is_external_input_for_session,
         task_notification_kind,
         data_start_offset,
@@ -508,7 +508,9 @@ pub(super) async fn run_terminal_preflight_prepare(
     let fresh_seen = fresh_assistant_text_seen;
     let drop_seed = local_cmd_no_output(&all_data, terminal_kind, fresh_seen, &tool_state);
     let restored_seed_delivery_confirmed = drop_seed
-        && restored_response_seed
+        && state
+            .restored_response_seed
+            .body
             .get(*state.response_sent_offset..)
             .is_some_and(|seed_body| {
                 !seed_body.trim().is_empty()
@@ -523,7 +525,7 @@ pub(super) async fn run_terminal_preflight_prepare(
         &mut *state.full_response,
         &mut *state.response_sent_offset,
         &mut *state.last_edit_text,
-        &restored_response_seed,
+        &state.restored_response_seed.body,
         inflight_before_relay.is_some(),
         fresh_assistant_text_seen,
         drop_seed,
@@ -533,10 +535,11 @@ pub(super) async fn run_terminal_preflight_prepare(
             provider = %watcher_provider.as_str(),
             channel_id = channel_id.get(),
             tmux_session = %tmux_session_name,
-            restored_response_seed_len = restored_response_seed.len(),
+            restored_response_seed_len = state.restored_response_seed.body.len(),
             fresh_response_len = state.full_response.len(),
             "watcher: discarded restored response seed before no-inflight terminal relay"
         );
+        *state.restored_response_seed = RestoredResponseSeed::default();
     }
     let has_assistant_response = !state.full_response.trim().is_empty();
     let current_response = state

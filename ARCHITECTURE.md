@@ -897,10 +897,12 @@ src/
 │   │   │   │   └── tests/
 │   │   │   │       ├── session_start_retry_tests.rs
 │   │   │   │       ├── source_guard_tests.rs
+│   │   │   │       ├── too_early_tests.rs
 │   │   │   │       └── tq_tests.rs
 │   │   │   ├── ordered_queue.rs
 │   │   │   ├── queue_retention.rs
 │   │   │   ├── response_window.rs
+│   │   │   ├── too_early.rs
 │   │   │   └── transport_retry.rs
 │   │   ├── hook_server/
 │   │   │   ├── observation_ingress/
@@ -913,7 +915,8 @@ src/
 │   │   │   ├── observation_ingress.rs
 │   │   │   ├── observation_ingress_tests.rs
 │   │   │   ├── rehydration_ingress_tests.rs
-│   │   │   └── relay_receipts.rs
+│   │   │   ├── relay_receipts.rs
+│   │   │   └── resume_renumber_tests.rs
 │   │   ├── hosting/
 │   │   │   ├── followup_support.rs
 │   │   │   ├── fresh_hold_tests.rs
@@ -939,6 +942,8 @@ src/
 │   │   ├── session/
 │   │   │   ├── auto_compact_launch_tests.rs
 │   │   │   └── fast_launch_tests.rs
+│   │   ├── source_verify/
+│   │   │   └── renumber.rs
 │   │   ├── busy_inject.rs
 │   │   ├── busy_inject_tests.rs
 │   │   ├── composer_lock.rs
@@ -2538,6 +2543,8 @@ src/
 │   │   │   │   ├── restarted_herdr_sweep_tests.rs
 │   │   │   │   └── retire_tests.rs
 │   │   │   ├── turn_retirement/
+│   │   │   │   ├── claude.rs
+│   │   │   │   ├── claude_tests.rs
 │   │   │   │   ├── codex.rs
 │   │   │   │   └── codex_tests.rs
 │   │   │   ├── foreign_recovery.rs
@@ -3848,9 +3855,13 @@ src/
 │   │   │   │   ├── migration_tests.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── late_adopt/
+│   │   │   │   ├── claude/
+│   │   │   │   │   ├── prefix.rs
+│   │   │   │   │   └── prefix_tests.rs
 │   │   │   │   ├── codex/
 │   │   │   │   │   ├── prefix.rs
 │   │   │   │   │   └── prefix_tests.rs
+│   │   │   │   ├── claude.rs
 │   │   │   │   └── codex.rs
 │   │   │   ├── local_retry/
 │   │   │   │   └── notice_selection.rs
@@ -3911,6 +3922,7 @@ src/
 │   │   │   ├── historical_hops.rs
 │   │   │   ├── host.rs
 │   │   │   ├── host_bo_provider_tests.rs
+│   │   │   ├── host_claude_takeover_tests.rs
 │   │   │   ├── host_codex_takeover_tests.rs
 │   │   │   ├── host_codex_turn_mark_tests.rs
 │   │   │   ├── host_first_init_tests.rs
@@ -4102,6 +4114,7 @@ src/
 │   │   ├── observation.rs
 │   │   ├── pending.rs
 │   │   ├── pending_history_tests.rs
+│   │   ├── pending_renumber_tests.rs
 │   │   ├── pending_tests.rs
 │   │   ├── prompt_identity.rs
 │   │   ├── prompt_identity_tests.rs
@@ -4329,6 +4342,7 @@ src/
 │   ├── turn_summary_line.rs
 │   └── turn_summary_line_tests.rs
 ├── supervisor/
+│   ├── decision_log_pg_tests.rs
 │   └── mod.rs
 ├── test_support/
 │   ├── serial_runtime.rs

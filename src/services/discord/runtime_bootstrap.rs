@@ -304,10 +304,10 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     // doctor handles only health-registered runtimes, which register after their reaper.
     super::inflight::reap_inflight_rows_at_boot_blocking(&provider, shared.pg_pool.clone()).await;
     // Turn mode is fixed before the relay restores pending starts for the channels it confirms.
-    let confirmed = super::tui_direct_pending_start::turn_retirement::confirm_at_boot(
-        &provider,
-        boot_config.tui_o.as_ref(),
-    );
+    let tui_o =
+        crate::services::tui_o::shadow::tap::TuiOConfig::or_default(boot_config.tui_o.as_ref());
+    let confirmed =
+        super::tui_direct_pending_start::turn_retirement::confirm_at_boot(&provider, Some(tui_o));
     super::turn_presence::supervisor::register(&provider, &confirmed);
     super::tui_prompt_relay::spawn_tui_prompt_relay(shared.clone(), provider.clone());
 
@@ -324,8 +324,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     // semantics.
     let _ = shared.http.cached_bot_token.set(token.to_string());
     // Presence sends only after the token is set, and only where turn mode is configured.
-    let turn = boot_config.tui_o.as_ref().map(|config| &config.turn);
-    if turn.is_some_and(|turn| turn.all_owned || !turn.channels.is_empty()) {
+    if tui_o.turn.selects_any() {
         super::turn_presence::supervisor::spawn(shared.clone(), provider.clone());
     }
 
@@ -335,7 +334,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             .await;
         spawns::run_bot_spawn_execution_runtime_tasks(&shared, &provider);
         run_bot_spawn_sigterm_handler(&shared, provider.clone());
-        o_writer_host::spawn_execution(&shared, &provider, boot_config.tui_o.as_ref());
+        o_writer_host::spawn_execution(&shared, &provider, Some(tui_o));
         // REST workers persist the same mailbox state as Gateway runtimes.
         // Restore it before polling new intake; never replay Discord history.
         queued_recovery::restore_worker_queues(&shared, &provider).await;
@@ -390,7 +389,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             // a routing/config race fail closed instead of restoring the old
             // health-blind empty registry.
             register_standby_and_settle_reconcile(&health_registry, &provider, &shared).await;
-            o_writer_host::spawn_execution(&shared, &provider, boot_config.tui_o.as_ref());
+            o_writer_host::spawn_execution(&shared, &provider, Some(tui_o));
             // Standby intake can execute a full turn, so it gets the same
             // marker fence and acknowledgement path as a gateway runtime.
             spawns::run_bot_spawn_execution_runtime_tasks(&shared, &provider);
@@ -419,7 +418,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     spawns::run_bot_spawn_execution_runtime_tasks(&shared, &provider);
     run_bot_maybe_spawn_intake_worker(&shared, &provider);
     let pg_gateway = gateway_lease.is_some();
-    o_writer_host::spawn(&shared, &provider, boot_config.tui_o.as_ref(), pg_gateway);
+    o_writer_host::spawn(&shared, &provider, Some(tui_o), pg_gateway);
     run_bot_spawn_sigterm_handler(&shared, provider.clone());
 
     run_bot_start_gateway_runtime(

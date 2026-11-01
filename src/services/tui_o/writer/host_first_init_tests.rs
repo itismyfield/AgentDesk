@@ -427,6 +427,9 @@ async fn a_transition_waits_while_its_activation_waits_on_the_serial_lock() {
 #[path = "host_codex_takeover_tests.rs"]
 mod codex_takeover;
 
+#[path = "host_claude_takeover_tests.rs"]
+mod claude_takeover;
+
 #[cfg(unix)]
 struct SettledResume {
     _tmux: crate::services::provider_teardown::tests::test_support::FakeTmux,

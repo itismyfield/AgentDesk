@@ -307,17 +307,19 @@ impl Candidate<'_> {
             SpawnNonceMarker::Known(nonce) => Some(nonce),
             _ => None,
         };
-        let (pin, history) = match &self.proposal {
+        let (pinned, history) = match &self.proposal {
             Some(p) => {
-                binding_events::claude_history(p.channel_id, p.tmux_session, nonce.as_deref())?
+                binding_events::claude_history_at(p.channel_id, p.tmux_session, nonce.as_deref())?
             }
             None => (None, SourceHistory::default()),
         };
+        let (pin, pinned_at) = pinned.unzip();
         #[cfg(test)]
         let (pin, history) = n2b_seams::checked((pin, history));
         let pin = pin.filter(|pin| {
             pin.session_id == bound_session && pin.path == Path::new(&bound.output_path)
         });
+        let pinned_at = pinned_at.flatten();
         let source = ClaudeHookSource::from_signal(payload, self.hook, candidate.into());
         if let Err(error) = self.opened {
             tracing::warn!(candidate, %error, "Claude transcript unreadable; judged against its pin");
@@ -328,7 +330,7 @@ impl Candidate<'_> {
             self.root,
             opened,
             &bound_session,
-            pin.as_ref(),
+            (pin.as_ref(), pinned_at),
             &history,
         );
         let reclaimable = self.reclaimable(&history);

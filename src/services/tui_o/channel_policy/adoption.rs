@@ -66,6 +66,15 @@ pub(crate) struct TurnMark {
     pub(crate) order: u64,
 }
 
+/// A late reservation's floors from its first read: the deferred `baseline` (0 unless clean), and
+/// `takeover_after` with the Legacy sends read before it, the floor a takeover judges from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LateBoundary {
+    pub(crate) baseline: u64,
+    pub(crate) takeover_after: u64,
+    pub(crate) sends: (u64, u64),
+}
+
 /// One selected channel's adoption and the lock every transition of it takes.
 #[derive(Clone, Debug)]
 pub(crate) struct Candidate {
@@ -73,9 +82,9 @@ pub(crate) struct Candidate {
     sends: Arc<LegacySends>,
     /// Immutable boot origin, shared by every clone, distinct from ordinary Deferred retries.
     late_origin: bool,
-    /// The binding seq a late reservation baselines on: fixed by its first host's first read and
-    /// kept for every host that takes the reservation over.
-    late_boundary: Arc<OnceLock<u64>>,
+    /// Fixed by the reservation's first host's first read and kept for every host that takes the
+    /// reservation over.
+    late_boundary: Arc<OnceLock<LateBoundary>>,
     turn_mark: Arc<Mutex<Option<TurnMark>>>,
     baseline_order: Arc<AtomicU64>,
     /// Test builds: set when a claim released a pending adoption, cleared once a sink saw a body.
@@ -160,12 +169,12 @@ impl Candidate {
     }
 
     /// The late reservation's binding boundary, once fixed.
-    pub(crate) fn late_boundary(&self) -> Option<u64> {
+    pub(crate) fn late_boundary(&self) -> Option<LateBoundary> {
         self.late_boundary.get().copied()
     }
 
     /// Fixes the boundary `judge` returns unless one is fixed already, and returns the fixed one.
-    pub(crate) fn fix_late_boundary(&self, judge: impl FnOnce() -> u64) -> u64 {
+    pub(crate) fn fix_late_boundary(&self, judge: impl FnOnce() -> LateBoundary) -> LateBoundary {
         *self.late_boundary.get_or_init(judge)
     }
 

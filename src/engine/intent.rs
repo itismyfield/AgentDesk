@@ -526,4 +526,62 @@ mod tests {
         assert!(msg.contains("supervisor_audit_only"));
         assert!(!msg.contains("requires engine"));
     }
+
+    /// Contract: a deferred audit-only signal intent succeeds and leaves one escalation
+    /// row whose evidence is the decision-log JSON object.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn emit_supervisor_signal_intent_records_audit_only_decision_pg() {
+        use sqlx::Row as _;
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let mut config = crate::config::Config::default();
+        config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+        config.policies.hot_reload = false;
+        let engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone()))
+            .expect("create policy engine");
+
+        let result = execute_intents_with_backends(
+            Some(&pool),
+            Some(&engine),
+            vec![Intent::EmitSupervisorSignal {
+                signal_name: "StaleInflight".to_string(),
+                evidence: json!({
+                    "session_key": "session-stale",
+                    "dispatch_id": "dispatch-stale",
+                    "supervisor_audit_only": true,
+                }),
+            }],
+        );
+        assert_eq!(result.errors, 0, "audit-only intent must not fail");
+
+        let rows = sqlx::query(
+            "SELECT signal, chosen_action, session_key, dispatch_id,
+                    jsonb_typeof(evidence_json) AS kind, evidence_json
+             FROM runtime_decisions",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.get::<String, _>("signal"), "StaleInflight");
+        assert_eq!(row.get::<String, _>("chosen_action"), "Escalate");
+        assert_eq!(
+            row.get::<Option<String>, _>("session_key").as_deref(),
+            Some("session-stale")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("dispatch_id").as_deref(),
+            Some("dispatch-stale")
+        );
+        assert_eq!(row.get::<String, _>("kind"), "object");
+        let stored: serde_json::Value = row.get("evidence_json");
+        assert_eq!(stored["supervisor_audit_only"], json!(true));
+        assert_eq!(stored["supervisor_signal_support"], json!("audit_only"));
+        assert_eq!(stored["supervisor_chosen_action"], json!("Escalate"));
+        assert_eq!(stored["supervisor_action_executed"], json!(false));
+
+        pool.close().await;
+        db.drop().await;
+    }
 }

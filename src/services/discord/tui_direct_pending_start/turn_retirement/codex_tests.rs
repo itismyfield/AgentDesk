@@ -13,7 +13,7 @@ use crate::services::tui_o::turn_mode::{TestConfirmation, transcript_turns};
 fn selecting(channel: u64) -> TurnConfig {
     TurnConfig {
         channels: [channel].into(),
-        all_owned: false,
+        all_owned: Some(false),
     }
 }
 

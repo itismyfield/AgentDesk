@@ -135,6 +135,7 @@ pub(super) async fn mend(
     }
     drop(_transition);
     super::catch_up_race::confirmed(shared, &request.provider, channel, &sources).await;
+    super::catch_up_race::mark_confirmed(shared, &request.provider, channel, &sources).await;
     tracing::info!(
         channel_id = channel.get(),
         head_message_id = primary,
