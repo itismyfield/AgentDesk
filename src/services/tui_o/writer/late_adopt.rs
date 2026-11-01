@@ -4,14 +4,15 @@ use tokio::sync::watch;
 
 use super::adoption::{self, Hold, Refused};
 use super::binding::{BindingEvent, BindingEvents, BindingRecord, BindingTarget};
-use super::deferred::{self, Waiting};
+use super::deferred::{self, Retried, Waiting};
 use super::host::{Custody, HostIo, release, until_owned};
-use crate::services::tui_o::channel_policy::{Adoption, Candidate};
+use crate::services::tui_o::channel_policy::{Adoption, Candidate, LateBoundary};
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
 use crate::services::tui_o::store::OStore;
 
-mod codex;
+pub(super) mod claude;
+pub(super) mod codex;
 
 /// Subscribe before reading; a closed notice still gets the bounded disk fallback.
 pub(super) struct Wake {
@@ -69,15 +70,15 @@ pub(super) fn baseline(events: &[BindingEvent], boundary: u64) -> Option<(Source
     bound.map(|(source, seq)| (source.clone(), seq))
 }
 
-/// The reservation's boundary: the end of its first read when this process's Legacy had started
-/// no body and held no custody for the channel, else 0 so the whole log is the baseline.
+/// The reservation's boundary: its first read's end if Legacy had sent no body and held no custody,
+/// else 0 so the whole log is the baseline; a takeover only judges binds after that read.
 fn reservation_boundary<I: HostIo>(
     io: &I,
-    channel: u64,
-    provider: ShadowProvider,
+    (channel, provider): (u64, ShadowProvider),
     candidate: &Candidate,
+    sends: (u64, u64),
     events: &[BindingEvent],
-) -> u64 {
+) -> LateBoundary {
     candidate.fix_late_boundary(|| {
         let end = events.last().map_or(0, |event| event.seq);
         let started = || {
@@ -96,7 +97,11 @@ fn reservation_boundary<I: HostIo>(
             ?custody,
             "[tui_o] late reservation boundary fixed"
         );
-        boundary
+        LateBoundary {
+            baseline: boundary,
+            takeover_after: end,
+            sends,
+        }
     })
 }
 
@@ -115,6 +120,17 @@ pub(crate) async fn activate<I: HostIo>(
     let alarms = io.alarms();
     let mut wake = Wake::new(log, channel);
     let mut checked = false;
+    let at = claude::Channel {
+        io,
+        channel,
+        store,
+        log,
+        candidate,
+        gate,
+    };
+    // A source bound while a deferred handoff waited, with the floor its old source's proof gave.
+    let mut rebased: Option<deferred::Rebased> = None;
+    let (mut short, mut logged) = (0, None);
     loop {
         if candidate.peek() != Adoption::Deferred {
             return false;
@@ -135,6 +151,10 @@ pub(crate) async fn activate<I: HostIo>(
                     checked = true;
                 }
             }
+            let sends = {
+                let _adoption = candidate.lock();
+                candidate.sends()
+            };
             let events = log
                 .binding_events_since(channel, 0)
                 .map(super::renumbered::first_named);
@@ -145,8 +165,60 @@ pub(crate) async fn activate<I: HostIo>(
                     return false;
                 }
             };
-            let boundary = reservation_boundary(io, channel, provider, candidate, &events);
-            if let Some(bound) = baseline(&events, boundary) {
+            let boundary = reservation_boundary(io, (channel, provider), candidate, sends, &events);
+            let floor = rebased.as_ref().map_or(
+                Ok(claude::Floor {
+                    seq: boundary.takeover_after,
+                    sends: boundary.sends,
+                }),
+                |rebased| rebased.floor.clone(),
+            );
+            let looked = match &floor {
+                Ok(floor) => claude::look(&at, &events, *floor).await,
+                Err(detail) => {
+                    claude::Look::Pass(format!("old source completion unproven: {detail}"))
+                }
+            };
+            match looked {
+                claude::Look::Committed => {
+                    tracing::info!(channel, ?floor, "[tui_o] Claude takeover committed");
+                    return true;
+                }
+                claude::Look::Final(detail) => {
+                    release(candidate, &alarms, channel, &detail);
+                    return false;
+                }
+                claude::Look::Wait(detail) => {
+                    if logged.as_ref() != Some(&detail) {
+                        tracing::info!(channel, detail, "[tui_o] Claude takeover waits");
+                        logged = Some(detail);
+                    }
+                    // Claude writes the turn's output records after its prompt; look again soon.
+                    if short < 40 {
+                        short += 1;
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                        continue;
+                    }
+                    wake.wait().await;
+                    continue;
+                }
+                claude::Look::Pass(detail) => {
+                    if logged.as_ref() != Some(&detail) {
+                        tracing::info!(
+                            channel,
+                            detail,
+                            "[tui_o] Claude takeover skips this source"
+                        );
+                        logged = Some(detail);
+                    }
+                }
+            }
+            short = 0;
+            let (bound, owed) = match rebased.take() {
+                Some(rebased) => (Some(rebased.new), rebased.owed),
+                None => (baseline(&events, boundary.baseline), Vec::new()),
+            };
+            if let Some(bound) = bound {
                 let seq = events.last().map_or(0, |event| event.seq);
                 let waiting = Waiting {
                     io,
@@ -159,13 +231,21 @@ pub(crate) async fn activate<I: HostIo>(
                     legacy: io.legacy(),
                     bound,
                     late: true,
+                    owed,
                 };
-                return deferred::retry(
+                let retried = deferred::retry(
                     waiting,
                     Refused::retry("late binding awaits safe Legacy cursor"),
                     seq,
-                )
-                .await;
+                );
+                match retried.await {
+                    Retried::Committed => return true,
+                    Retried::Left => return false,
+                    Retried::Rebase(next) => {
+                        rebased = Some(next);
+                        continue;
+                    }
+                }
             }
             let no_bound_source = first_bound(&events).is_none()
                 && !events.iter().any(|event| {

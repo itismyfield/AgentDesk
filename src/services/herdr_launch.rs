@@ -423,6 +423,14 @@ pub(crate) async fn launch_herdr_session(
     match &observed.record {
         HostedRecord::Legacy => {}
         HostedRecord::Known(record) if record.state == HostedState::Retired => {
+            // The successor overwrites the row, so a Claude takeover keeps this end first.
+            if let Ok(channel) = owner.channel_id.parse() {
+                crate::services::discord::note_takeover_ended(
+                    channel,
+                    &record.execution_nonce,
+                    "herdr_retired",
+                );
+            }
             #[cfg(unix)]
             {
                 retired_hold::before_fresh(&owner, record).await?;

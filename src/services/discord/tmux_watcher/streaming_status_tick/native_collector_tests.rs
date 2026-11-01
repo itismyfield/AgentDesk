@@ -642,7 +642,7 @@ fn native_collector_case(test_name: &str, mode: u8) {
                     turn_data_start_offset: 0,
                     all_data: &buffer,
                     full_response: &turn.full_response,
-                    current_response: &turn.full_response,
+                    restored_response_seed: &turn.restored_response_seed,
                     response_sent_offset: turn.response_sent_offset,
                     has_assistant_response: true,
                     terminal_kind: turn.terminal_kind,

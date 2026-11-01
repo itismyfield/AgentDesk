@@ -7,7 +7,7 @@ use super::Wake;
 use crate::services::tui_o::channel_policy::{Adoption, Candidate};
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
-use crate::services::tui_o::store::{InitSource, OStore};
+use crate::services::tui_o::store::{InitOrigin, InitSource, OStore};
 use crate::services::tui_o::writer::activation;
 use crate::services::tui_o::writer::adoption;
 use crate::services::tui_o::writer::binding::{
@@ -16,21 +16,21 @@ use crate::services::tui_o::writer::binding::{
 use crate::services::tui_o::writer::host::{FencedFacts, HostIo, release, until_owned};
 use crate::services::tui_o::writer::renumbered;
 
-mod prefix;
+pub(super) mod prefix;
 use prefix::{Prefix, Verdict};
 
 /// Legacy's sends, then the last binding seq: only a rollout bound after it, with no Legacy send
 /// started since, may be taken.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Baseline {
-    sends: (u64, u64),
-    seq: u64,
-    order: u64,
-    turn_mark: bool,
+pub(super) struct Baseline {
+    pub(super) sends: (u64, u64),
+    pub(super) seq: u64,
+    pub(super) order: u64,
+    pub(super) turn_mark: bool,
 }
 
 impl Baseline {
-    fn detail(self) -> String {
+    pub(super) fn detail(self) -> String {
         format!(
             "baseline={} order={} sends={:?} seq={}",
             if self.turn_mark { "turn" } else { "host" },
@@ -43,7 +43,7 @@ impl Baseline {
 
 /// Why a takeover attempt did not commit.
 #[derive(Debug)]
-enum Taken {
+pub(super) enum Taken {
     /// The same rollout is judged again on the next wake.
     Retry(String),
     /// An eligible marked prefix hit a transient commit blocker.
@@ -57,7 +57,7 @@ enum Taken {
 }
 
 impl Taken {
-    fn detail(&self) -> &str {
+    pub(super) fn detail(&self) -> &str {
         match self {
             Self::Retry(detail)
             | Self::Soon(detail)
@@ -68,13 +68,17 @@ impl Taken {
     }
 }
 
-struct Takeover<'a, I: HostIo> {
-    io: &'a I,
-    channel: u64,
-    store: &'a OStore,
-    log: &'a I::Bindings,
-    candidate: &'a Candidate,
-    gate: &'a OwnershipGate,
+/// One provider's takeover: its prefix judge and the origin its init records.
+pub(super) struct Takeover<'a, I: HostIo> {
+    pub(super) io: &'a I,
+    pub(super) channel: u64,
+    pub(super) store: &'a OStore,
+    pub(super) log: &'a I::Bindings,
+    pub(super) candidate: &'a Candidate,
+    pub(super) gate: &'a OwnershipGate,
+    pub(super) provider: ShadowProvider,
+    pub(super) judge: fn(&SourceId) -> Verdict,
+    pub(super) origin: InitOrigin,
 }
 
 /// Waits for a rollout bound after the baseline that holds no output yet and commits it; false
@@ -96,6 +100,9 @@ pub(super) async fn activate<I: HostIo>(
         log,
         candidate,
         gate,
+        provider: ShadowProvider::Codex,
+        judge: prefix::judge,
+        origin: InitOrigin::LateCodexTakeover,
     };
     let (mut baseline, mut logged) = (None, None);
     let (mut retry_order, mut short_retries) = (0, 0);
@@ -161,7 +168,7 @@ pub(super) async fn activate<I: HostIo>(
 }
 
 impl<I: HostIo> Takeover<'_, I> {
-    fn events(&self) -> Result<Vec<BindingEvent>, Taken> {
+    pub(super) fn events(&self) -> Result<Vec<BindingEvent>, Taken> {
         let events = self.log.binding_events_since(self.channel, 0);
         events.map(renumbered::first_named).map_err(Taken::Final)
     }
@@ -225,7 +232,7 @@ impl<I: HostIo> Takeover<'_, I> {
     }
 
     /// The intake fence is held from before the final checks until the init is published.
-    async fn commit(
+    pub(super) async fn commit(
         &self,
         at: Baseline,
         bound: &(SourceId, u64),
@@ -253,7 +260,7 @@ impl<I: HostIo> Takeover<'_, I> {
             hold,
             facts,
             queued_bodies,
-        } = (io.intake_fence(channel, ShadowProvider::Codex).await).map_err(Taken::Retry)?;
+        } = (io.intake_fence(channel, self.provider).await).map_err(Taken::Retry)?;
         let taken = (|| {
             #[cfg(test)]
             activation::test_hook::run(channel, activation::test_hook::Step::AfterFence)
@@ -272,19 +279,19 @@ impl<I: HostIo> Takeover<'_, I> {
             };
             // Custody reads are not atomic; the fence, the sends and the relay are judged too.
             let local = || {
-                let custody = io.local_custody(channel, ShadowProvider::Codex)?;
+                let custody = io.local_custody(channel, self.provider)?;
                 Ok(custody.blocks_takeover() || io.relaying(channel))
             };
             let result = self.gate.admit(|epoch| {
                 (epoch == expected).then(|| {
-                    activation::activate_codex_takeover(
+                    activation::activate_takeover(
                         self.store,
                         channel,
-                        facts,
-                        queued_bodies,
+                        (facts, queued_bodies),
                         local,
                         self.candidate,
                         sources,
+                        self.origin,
                     )
                 })
             });
@@ -329,7 +336,7 @@ impl<I: HostIo> Takeover<'_, I> {
                 "the binding moved while O fenced the takeover".into(),
             ));
         }
-        match prefix::judge(source) {
+        match (self.judge)(source) {
             Verdict::Eligible(now) if now == *prefix => {}
             Verdict::Eligible(_) => {
                 return Err(Taken::Again(
@@ -348,7 +355,10 @@ impl<I: HostIo> Takeover<'_, I> {
 }
 
 /// The source the log binds now with the seq that bound it, when that seq is above `after`.
-fn bound_after(events: &[BindingEvent], after: u64) -> Option<(SourceId, u64)> {
+pub(in crate::services::tui_o::writer) fn bound_after(
+    events: &[BindingEvent],
+    after: u64,
+) -> Option<(SourceId, u64)> {
     let (source, _) = adoption::current(events)?;
     let seq = events.iter().rev().find_map(|event| match &event.record {
         BindingRecord::Bound {

@@ -211,6 +211,16 @@ pub(super) async fn queued_attempt(
                     &source_generations,
                 )
                 .await;
+                // A live source is marked by its intake caller after this owner returns.
+                if _source.is_none() {
+                    super::catch_up_race::mark_confirmed(
+                        &shared,
+                        &request.provider,
+                        request.channel_id,
+                        &source_generations,
+                    )
+                    .await;
+                }
             }
             // A committed NotSent is the actor's proof that the head is back at the queue front.
             if let (InjectAttempt::NotSent(veto), Some(turn_id)) = (&attempt, turn_id) {

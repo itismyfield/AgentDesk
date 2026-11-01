@@ -97,7 +97,7 @@ async fn d4b_two_hosted_channels_repost_by_default_with_wire_controls_pg() {
                 alarms: Arc::new(AlarmRouter::for_process(None, None)),
                 self_id_wait: Duration::ZERO,
                 configured_id: None,
-                turn: TurnConfig::default(),
+                turn: TurnConfig::off(),
                 rest: None,
                 boot: None,
             },

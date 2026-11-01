@@ -224,6 +224,7 @@ fn execution(current: &SourceId, seen: DateTime<Utc>) -> (Option<SourceId>, Sour
     let visit = Visit {
         session: current.session_id.clone(),
         pin: Some(current.clone()),
+        pinned_at: None,
         since: None,
         seen,
     };

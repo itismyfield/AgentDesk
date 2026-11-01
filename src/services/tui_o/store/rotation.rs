@@ -18,6 +18,16 @@ use crate::services::tui_o::writer::binding::{
 pub const CHECKPOINT_FILE: &str = "binding_checkpoint";
 pub const BOUNDARY_FILE: &str = "boundary";
 pub(crate) const FRESH_SELECTION_FILE: &str = "fresh_selection";
+pub(crate) const TAKEOVER_END_FILE: &str = "takeover_end";
+
+/// The end of the execution a late takeover took; its source and nonce tie it to that init.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TakeoverEnd {
+    pub(crate) source: SourceId,
+    pub(crate) nonce: String,
+    pub(crate) basis: String,
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -444,6 +454,27 @@ impl OStore {
             }
             read => Ok(read.map(|checkpoint| checkpoint.seq)),
         }
+    }
+
+    /// The channel's rotation record read without opening the channel.
+    pub fn peek_rotation(&self, channel: u64) -> Result<Rotation, StoreError> {
+        let read = durable::read_json(&self.channel_dir(channel).join(BOUNDARY_FILE))?;
+        Ok(read.unwrap_or_default())
+    }
+
+    pub(crate) fn takeover_end(&self, channel: u64) -> Result<Option<TakeoverEnd>, StoreError> {
+        durable::read_json(&self.channel_dir(channel).join(TAKEOVER_END_FILE))
+    }
+
+    /// Kept beside the init, so neither a later execution nor a restart loses it.
+    pub(crate) fn keep_takeover_end(
+        &self,
+        channel: u64,
+        end: &TakeoverEnd,
+    ) -> Result<(), StoreError> {
+        let bytes = serde_json::to_vec(end)?;
+        let path = self.channel_dir(channel).join(TAKEOVER_END_FILE);
+        Ok(durable::replace(&path, &bytes)?)
     }
 
     /// The channel's stored cursors, read without opening the channel; an unreadable cursor is an

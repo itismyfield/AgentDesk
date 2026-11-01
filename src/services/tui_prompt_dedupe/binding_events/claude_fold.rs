@@ -12,6 +12,9 @@ use crate::services::claude_tui::source_verify::{Left, SourceHistory, Visit};
 /// Left sessions kept per execution; past it the history is marked incomplete instead.
 const LEFT_LIMIT: usize = 1024;
 
+/// A verified pin and the commit time of the record that pinned it.
+type Pin = (Option<super::SourceId>, Option<DateTime<Utc>>);
+
 /// How one Claude record moves its pane, judged before it applies; the writer's waiting Pending
 /// and the fold both follow this one judgment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -198,17 +201,11 @@ impl ClaudeFold {
             } => {
                 let waiting = self.history.awaiting.take();
                 if let Some(waiting) = waiting.filter(|w| hooked && w.session != *session) {
-                    self.leave(waiting.session, None, at);
+                    self.leave(waiting.session, (None, None), at);
                 }
                 self.history.left.remove(session);
                 let since = hooked.then_some(at);
-                let (session, pin) = (session.clone(), None);
-                self.history.awaiting = Some(Visit {
-                    session,
-                    pin,
-                    since,
-                    seen: at,
-                });
+                self.history.awaiting = Some(visit(session, (None, None), since, at));
                 self.awaiting_seq = Some(record.seq);
                 return;
             }
@@ -218,7 +215,11 @@ impl ClaudeFold {
                 source,
             } => (source, self.awaiting_seq == Some(*pending_seq)),
         };
-        let pin = verified.then(|| source.clone());
+        // A pin carries the commit time of its own record, never a visit's or a move's.
+        let pin = (
+            verified.then(|| source.clone()),
+            verified.then_some(record.committed_at),
+        );
         let session = &source.session_id;
         if valid && step == Step::Resolve {
             let since = self.history.awaiting.as_ref().and_then(|w| w.since);
@@ -250,7 +251,7 @@ impl ClaudeFold {
                 #[cfg(not(test))]
                 let leaves = true;
                 if let Some(waiting) = leaves.then(|| self.history.awaiting.take()).flatten() {
-                    self.leave(waiting.session, None, at);
+                    self.leave(waiting.session, (None, None), at);
                     self.awaiting_seq = None;
                 }
                 self.confirm(session, pin, at);
@@ -260,10 +261,10 @@ impl ClaudeFold {
     }
 
     /// A hook naming the session the pane already has: it pins it and dates the visit if undated.
-    fn confirm(&mut self, session: &str, pin: Option<super::SourceId>, at: DateTime<Utc>) {
+    fn confirm(&mut self, session: &str, pin: Pin, at: DateTime<Utc>) {
         if self.current_is(session) {
             let current = self.history.current.as_mut().expect("current checked");
-            current.pin = pin;
+            (current.pin, current.pinned_at) = pin;
             current.since.get_or_insert(at);
         } else {
             self.history.current = Some(visit(session, pin, Some(at), at));
@@ -271,15 +272,9 @@ impl ClaudeFold {
     }
 
     /// The pane moved to `session` at `since`: the current and waiting sessions are left then.
-    fn adopt(
-        &mut self,
-        session: &str,
-        pin: Option<super::SourceId>,
-        since: DateTime<Utc>,
-        seen: DateTime<Utc>,
-    ) {
+    fn adopt(&mut self, session: &str, pin: Pin, since: DateTime<Utc>, seen: DateTime<Utc>) {
         if let Some(current) = self.history.current.take().filter(|c| c.session != session) {
-            self.leave(current.session, current.pin, since);
+            self.leave(current.session, (current.pin, current.pinned_at), since);
         }
         let waiting = self.history.awaiting.take();
         #[cfg(test)]
@@ -288,21 +283,22 @@ impl ClaudeFold {
         }
         self.awaiting_seq = None;
         if let Some(waiting) = waiting.filter(|w| w.session != session) {
-            self.leave(waiting.session, None, since);
+            self.leave(waiting.session, (None, None), since);
         }
         self.history.left.remove(session);
         self.history.current = Some(visit(session, pin, Some(since), seen));
     }
 
     /// A record no hook proved: it names the current session without making a left one.
-    fn observe(&mut self, session: &str, pin: Option<super::SourceId>, seen: DateTime<Utc>) {
+    fn observe(&mut self, session: &str, pin: Pin, seen: DateTime<Utc>) {
         if self.current_is(session) {
-            self.history.current.as_mut().expect("current checked").pin = pin;
+            let current = self.history.current.as_mut().expect("current checked");
+            (current.pin, current.pinned_at) = pin;
         } else {
             #[cfg(test)]
             if super::n2b_mutant("observed") {
                 if let Some(current) = self.history.current.take() {
-                    self.leave(current.session, current.pin, seen);
+                    self.leave(current.session, (current.pin, current.pinned_at), seen);
                 }
             }
             self.history.current = Some(visit(session, pin, None, seen));
@@ -310,13 +306,18 @@ impl ClaudeFold {
         self.history.left.remove(session);
     }
 
-    fn leave(&mut self, session: String, pin: Option<super::SourceId>, left_at: DateTime<Utc>) {
+    fn leave(&mut self, session: String, (pin, pinned_at): Pin, left_at: DateTime<Utc>) {
         let history = &mut self.history;
         if !history.left.contains_key(&session) && history.left.len() >= LEFT_LIMIT {
             history.complete = false;
             return;
         }
-        history.left.insert(session, Left { pin, left_at });
+        let left = Left {
+            pin,
+            pinned_at,
+            left_at,
+        };
+        history.left.insert(session, left);
     }
 
     fn current_is(&self, session: &str) -> bool {
@@ -352,7 +353,7 @@ impl ClaudeFold {
 
 fn visit(
     session: &str,
-    pin: Option<super::SourceId>,
+    (pin, pinned_at): Pin,
     since: Option<DateTime<Utc>>,
     seen: DateTime<Utc>,
 ) -> Visit {
@@ -360,6 +361,7 @@ fn visit(
     Visit {
         session,
         pin,
+        pinned_at,
         since,
         seen,
     }

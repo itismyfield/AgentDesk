@@ -215,6 +215,7 @@ pub(super) fn observe(
             transcript_path: transcript,
             tmux_session_name: logical.to_owned(),
             last_offset: handoff_end(),
+            turn_read: None,
         },
     });
     Ok(())

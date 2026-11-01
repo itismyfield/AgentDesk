@@ -3,7 +3,7 @@ pub(in crate::services::discord) mod before_start_stop;
 mod bridge_entry_persist;
 mod bridge_latency_spans;
 mod cancel_finalize_policy;
-mod chunk_compose;
+pub(in crate::services::discord) mod chunk_compose;
 mod completion_guard;
 mod completion_postlude;
 mod context_window;
