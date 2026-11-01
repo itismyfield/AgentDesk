@@ -32,6 +32,7 @@ pub(in crate::services::discord::turn_bridge) struct HeadlessDeliveryInputs<'a> 
     pub(in crate::services::discord::turn_bridge) cancel_token: Option<&'a CancelToken>,
 }
 
+#[derive(Clone, Copy)]
 pub(super) struct HeadlessDeliveryRuntimeArguments<'a> {
     pub(super) shared: &'a Arc<SharedData>,
     pub(super) channel_id: ChannelId,
