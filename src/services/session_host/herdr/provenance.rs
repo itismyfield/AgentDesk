@@ -147,6 +147,20 @@ fn procargs2_environ(raw: &[u8]) -> Option<Vec<String>> {
     Some(environ)
 }
 
+/// The argc arguments in a macOS `KERN_PROCARGS2` buffer, after the exec path and its padding.
+fn procargs2_argv(raw: &[u8]) -> Option<Vec<String>> {
+    let argc = usize::try_from(i32::from_ne_bytes(raw.get(..4)?.try_into().ok()?)).ok()?;
+    let rest = &raw[4..];
+    let path_end = rest.iter().position(|byte| *byte == 0)?;
+    let args_start = path_end + rest[path_end..].iter().position(|byte| *byte != 0)?;
+    let argv: Vec<String> = rest[args_start..]
+        .split(|byte| *byte == 0)
+        .take(argc)
+        .map(|arg| String::from_utf8_lossy(arg).into_owned())
+        .collect();
+    (argv.len() == argc).then_some(argv)
+}
+
 /// The exec path a macOS `KERN_PROCARGS2` buffer starts with, after argc.
 fn procargs2_exec_path(raw: &[u8]) -> Option<String> {
     let rest = raw.get(4..)?;
@@ -304,6 +318,11 @@ pub(crate) fn process_environ(pid: u32) -> Result<Vec<String>, RestoreUnverified
 }
 
 #[cfg(target_os = "macos")]
+pub(crate) fn process_argv(pid: u32) -> Result<Vec<String>, RestoreUnverified> {
+    procargs2_argv(&procargs2(pid)?).ok_or(RestoreUnverified::ProcessUnreadable)
+}
+
+#[cfg(target_os = "macos")]
 pub(crate) fn process_exec_path(pid: u32) -> Option<String> {
     procargs2_exec_path(&procargs2(pid).ok()?)
 }
@@ -316,6 +335,13 @@ pub(crate) fn process_environ(pid: u32) -> Result<Vec<String>, RestoreUnverified
 }
 
 #[cfg(target_os = "linux")]
+pub(crate) fn process_argv(pid: u32) -> Result<Vec<String>, RestoreUnverified> {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline"))
+        .map_err(|_| RestoreUnverified::ProcessUnreadable)?;
+    linux_environ(&raw)
+}
+
+#[cfg(target_os = "linux")]
 pub(crate) fn process_exec_path(pid: u32) -> Option<String> {
     let path = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
     Some(path.to_string_lossy().into_owned())
@@ -323,6 +349,11 @@ pub(crate) fn process_exec_path(pid: u32) -> Option<String> {
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub(crate) fn process_environ(_pid: u32) -> Result<Vec<String>, RestoreUnverified> {
+    Err(RestoreUnverified::PlatformUnsupported)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub(crate) fn process_argv(_pid: u32) -> Result<Vec<String>, RestoreUnverified> {
     Err(RestoreUnverified::PlatformUnsupported)
 }
 

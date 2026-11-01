@@ -143,15 +143,20 @@ pub(crate) fn record(
     value
 }
 
-/// One next-restart check of `socket` with a fresh cache; it writes no config or file and starts no server.
+/// One next-restart check of `socket` with a fresh cache, and whether a server answers there and
+/// could be started, as a dry run; it writes no config or file and starts no server.
 #[cfg(unix)]
-pub(crate) async fn probe(socket: &Path) -> Result<Value, String> {
+pub(crate) async fn probe(
+    socket: &Path,
+    env: super::super::autostart::Environment,
+) -> Result<Value, String> {
     let source = super::super::launch_host::probe_source(socket)?;
     let cache = ProofCache::default();
     let result = cache.next_restart(source, &super::LocalChecker).await;
     let mut value = record(socket, &cache, &result);
     value["socket"] = socket.display().to_string().into();
     value["observation"] = "probe_once; nothing outlives this process".into();
+    value["autostart"] = super::super::autostart::assess(socket, env).await;
     Ok(value)
 }
 

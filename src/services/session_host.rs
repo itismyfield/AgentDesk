@@ -3,6 +3,8 @@
 //! destruction, execution identity and cancel routing stay with their owners.
 
 mod herdr {
+    #[cfg(unix)]
+    pub(crate) mod autostart;
     pub(crate) mod contract;
     #[cfg(unix)]
     pub(crate) mod launch_host;
@@ -44,6 +46,8 @@ mod traits;
 
 pub(crate) use herdr::contract::ServerWitness;
 // Dedicated Herdr config upkeep: the boot pass, the 30-second task, doctor and health.
+#[cfg(unix)]
+pub(crate) use herdr::autostart;
 #[cfg(unix)]
 pub(crate) use herdr::managed_config;
 #[cfg(all(test, unix))]

@@ -3508,6 +3508,13 @@ src/
 │   │   └── trusted_target.rs
 │   ├── session_host/
 │   │   ├── herdr/
+│   │   │   ├── autostart/
+│   │   │   │   ├── candidate.rs
+│   │   │   │   ├── candidate_tests.rs
+│   │   │   │   ├── presence.rs
+│   │   │   │   ├── presence_tests.rs
+│   │   │   │   ├── selector.rs
+│   │   │   │   └── selector_tests.rs
 │   │   │   ├── managed_config/
 │   │   │   │   ├── maintenance.rs
 │   │   │   │   ├── maintenance_tests.rs
@@ -3560,6 +3567,8 @@ src/
 │   │   │   │   ├── witness_codec.rs
 │   │   │   │   ├── writer_compat.rs
 │   │   │   │   └── writer_compat_tests.rs
+│   │   │   ├── autostart.rs
+│   │   │   ├── autostart_real_tests.rs
 │   │   │   ├── contract.rs
 │   │   │   ├── launch_host.rs
 │   │   │   ├── launch_host_real_tests.rs
