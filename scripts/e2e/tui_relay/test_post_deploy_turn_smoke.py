@@ -16,6 +16,7 @@ import json
 import tempfile
 import itertools
 import sys
+import time
 import unittest
 from argparse import Namespace
 from contextlib import redirect_stdout
@@ -330,206 +331,238 @@ class HerdrTurnSmoke(unittest.TestCase):
                              "--log-excerpt", "/unused", "--driver-rc", "0"]), 0)
 
 
-class ConfiguredHerdrClassification(unittest.TestCase):
+SAVED = FIXTURES / "saved"
+SAVED_CHANNEL = "1559670200419352696"
+SAVED_PASS = "e50-herdr-pass-20261101T175451Z.json"
+CLEAR_REFUSAL = "세션을 초기화하지 못했어요: herdr clear refused: rotation_unsettled(59)"
+
+
+class UserVisibleTurnVerdict(unittest.TestCase):
+    """E-50 is judged by the bodies the user saw, whatever session host runs the channel.
+
+    ``saved/`` holds the 11-01 and 11-02 deploy smoke rows from
+    ~/.adk/release/logs/post-deploy-smoke-turns-<stamp>/report.claude-tui.json, trimmed to
+    the fields the judge reads (long reasons cut at 400 characters).
+    """
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.config = Path(self.tmp.name) / "fixture.yaml"
-        self.config.write_text("agents:\n  - id: adk-claude-tui-2-e2e\n    channels: {claude: {id: '222'}}\nsession_hosts:\n  herdr:\n    endpoints: {local: {}}\n    channels: {222: local}\n")
-        self.markers = turn_smoke.expected_markers(SCENARIOS, "E-50", RUN_ID)
-        self.logs = {"cell_lines": 1, **dict.fromkeys(turn_smoke.LOG_COUNTERS, 0)}
+        self.root = Path(self.tmp.name)
+        self.config = self.root / "agentdesk.yaml"
+        self.write_config(herdr=True)
 
-    def row(self, scenario="E-1"):
-        refusal = "세션을 초기화하지 못했어요: herdr clear refused: rotation_unsettled(59)"
-        row = {"id": scenario, "run_id": RUN_ID, "cell": "claude-tui", "channel_id": "222",
-                "status": "fail", "reason": "RuntimeError: turn/start HTTP 422: " + json.dumps(
-                    {"status": "invalid_target", "error": "herdr turn refused: executor_not_wired"}),
-                **({"reason": "assertion: text !clear refused by the server: " + refusal,
-                    "clear_refusal": {"stage": "clear_ack", "after_id": "100", "reply": {
-                        "id": "101", "channel_id": "222", "author": {"bot": True}, "content": refusal}},
-                    "marker_counts": {m: (0 if m.endswith(":AFTER_CLEAR]") else 1) for m in self.markers}}
-                   if scenario == "E-50" else {})}
-        row["assertions"] = []
-        row["failure_attribution"] = {"source": "exception" if scenario == "E-1" else "assertion",
-                                    "raw_reason": row["reason"].removeprefix("assertion: ")}
-        return row
+    def write_config(self, *, herdr):
+        mapped = SAVED_CHANNEL if herdr else "1509350490461180100"
+        self.config.write_text(
+            "agents:\n  - id: adk-claude-tui-2-e2e\n"
+            f"    channels: {{claude: {{id: '{SAVED_CHANNEL}'}}}}\n"
+            f"session_hosts:\n  herdr:\n    channels: {{{mapped}: local}}\n", encoding="utf-8")
 
-    def classify(self, row, **overrides):
-        report = {"cell": "claude-tui", "channel_id": "222", "run_id": RUN_ID, "scenarios": [row],
-                  "coverage_class_violations": []}
-        args = dict(report=report, scenario_id=row["id"], cell="claude-tui", channel_id="222",
-                    run_id=RUN_ID, config_path=self.config, driver_rc=1, markers=self.markers,
-                    log_counts=self.logs)
-        args.update(overrides)
-        return turn_smoke.classify(**args)["classification"]
+    def saved(self, name):
+        return json.loads((SAVED / name).read_text(encoding="utf-8"))
 
-    def test_exact_e1_only(self):
-        row = self.row()
-        self.assertEqual(self.classify(row), "KNOWN_GAP")
-        for reason in (row["reason"].replace("422", "409"), row["reason"].replace("422", "503"),
-                       row["reason"].replace("executor_not_wired", "executor_not_wired extra"),
-                       row["reason"].replace("invalid_target", "busy"), "RuntimeError: turn/start HTTP 422: broken"):
-            with self.subTest(reason=reason):
-                self.assertEqual(self.classify({**row, "reason": reason, "failure_attribution": {
-                    **row["failure_attribution"], "raw_reason": reason}}), "FAIL")
-        self.assertEqual(self.classify({**row, "teardown_error": "failed"}), "FAIL")
-        self.assertEqual(self.classify(row, driver_rc=0), "FAIL")
+    def judge_cli(self, report, *, driver_rc):
+        path = self.root / "report.json"
+        path.write_text(json.dumps(report), encoding="utf-8")
+        output = io.StringIO()
+        with redirect_stdout(output):
+            rc = turn_smoke.main([
+                "judge", "--config", str(self.config), "--run-id", report["run_id"], "--report", str(path),
+                "--scenarios", str(SCENARIOS), "--scenario", "E-50", "--cell", "claude-tui",
+                "--channel-id", SAVED_CHANNEL, "--log-excerpt", str(FIXTURES / "turns-clean.dcserver.log"),
+                "--driver-rc", str(driver_rc)])
+        return rc, output.getvalue().strip()
 
-    def test_config_and_run_binding_fail_closed(self):
-        row = self.row()
-        for key in ("cell", "channel_id", "run_id"):
-            self.assertEqual(self.classify({**row, key: "other"}), "FAIL")
-        self.assertEqual(self.classify(row, report=None), "FAIL")
-        self.assertEqual(self.classify(row, report={"cell": "claude-tui", "channel_id": "222",
-                        "run_id": RUN_ID, "scenarios": [row, row]}), "FAIL")
-        self.config.write_text(self.config.read_text().replace("channels: {222: local}", "channels: {333: local}"))
-        self.assertEqual(self.classify(row), "FAIL")
-        self.config.write_text("[")
-        self.assertEqual(self.classify(row), "FAIL")
-        self.config.unlink()
-        self.assertEqual(self.classify(row), "FAIL")
+    def test_saved_herdr_run_with_every_body_delivered_is_a_plain_pass(self):
+        rc, line = self.judge_cli(self.saved(SAVED_PASS), driver_rc=0)
+        self.assertEqual(rc, 0, line)
+        self.assertTrue(line.startswith(
+            "relay E-50 cell=claude-tui result=pass path=herdr deliveries T1=1 T2=1 AFTER_CLEAR=1 "), line)
+        self.write_config(herdr=False)
+        rc, line = self.judge_cli(self.saved(SAVED_PASS), driver_rc=0)
+        self.assertEqual(rc, 0, line)
+        self.assertIn(" result=pass path=tui ", line)
 
-    def test_e50_exact_refusal_and_boundaries(self):
-        row = self.row("E-50")
-        self.assertEqual(self.classify(row), "KNOWN_GAP")
-        for number in ("1", "99999999999999999999"):
-            changed = copy.deepcopy(row)
-            changed["reason"] = changed["reason"].replace("(59)", f"({number})")
-            changed["clear_refusal"]["reply"]["content"] = changed["clear_refusal"]["reply"]["content"].replace("(59)", f"({number})")
-            changed["failure_attribution"]["raw_reason"] = changed["reason"].removeprefix("assertion: ")
-            self.assertEqual(self.classify(changed), "KNOWN_GAP")
-        for replacement in ("rotation_unread", "turn_in_progress", "rotation_unsettled(0)",
-                            "rotation_unsettled(-1)", "rotation_unsettled(1) extra"):
-            changed = copy.deepcopy(row)
-            for target in (changed, changed["clear_refusal"]["reply"]):
-                key = "reason" if target is changed else "content"
-                target[key] = target[key].replace("rotation_unsettled(59)", replacement)
-            changed["failure_attribution"]["raw_reason"] = changed["reason"].removeprefix("assertion: ")
-            self.assertEqual(self.classify(changed), "FAIL")
-        for key, value in (("id", "99"), ("id", "100"), ("channel_id", "333"), ("author", {"bot": False}),
-                           ("content", "herdr clear refused: rotation_unsettled(59)")):
-            changed = copy.deepcopy(row)
-            changed["clear_refusal"]["reply"][key] = value
-            self.assertEqual(self.classify(changed), "FAIL")
-        changed = copy.deepcopy(row)
-        changed["clear_refusal"]["after_id"] = ""
-        self.assertEqual(self.classify(changed), "FAIL")
-        for marker in self.markers:
-            for hits in (0, 2):
-                if marker.endswith(":AFTER_CLEAR]") and hits == 0:
-                    continue
-                self.assertEqual(self.classify({**row, "marker_counts": {**row["marker_counts"], marker: hits}}), "FAIL")
-        self.assertEqual(self.classify(row, log_counts=None), "FAIL")
-        self.assertEqual(self.classify(row, log_counts={**self.logs, "warm_followup_kill": 1}), "FAIL")
-        self.assertEqual(self.classify({**row, "wait_timeouts": [{}]}), "FAIL")
+    def test_saved_runs_whose_bodies_never_arrived_still_fail(self):
+        for name, finding in (("e50-t1-not-committed-20261101T214319Z.json", "T1 body not delivered"),
+                              ("e50-socket-timeout-20261101T192638Z.json", "T1 delivery count unobserved")):
+            with self.subTest(name=name):
+                rc, line = self.judge_cli(self.saved(name), driver_rc=1)
+                self.assertEqual(rc, 1, line)
+                self.assertTrue(line.startswith("relay E-50 cell=claude-tui result=FAIL path=herdr "), line)
+                self.assertIn(finding, line)
 
-    def test_full_judge_required_for_unexpected_pass(self):
-        row = {**self.row("E-50"), "status": "pass", "reason": None,
-               "marker_counts": dict.fromkeys(self.markers, 1)}
-        row.pop("clear_refusal")
-        self.assertEqual(self.classify(row, driver_rc=0), "UNEXPECTED_PASS")
-        self.assertEqual(self.classify(row, driver_rc=0, log_counts=None), "FAIL")
-        self.config.write_text(self.config.read_text().replace("channels: {222: local}", "channels: {333: local}"))
-        self.assertEqual(self.classify(row, driver_rc=0), "PASS")
+    def test_visible_clear_refusal_fails_with_the_reply_the_user_saw(self):
+        report = self.saved(SAVED_PASS)
+        row = report["scenarios"][0]
+        row.update(status="fail", reason="assertion: text !clear refused by the server: " + CLEAR_REFUSAL,
+                   assertions=[], failure_attribution={
+                       "source": "assertion", "raw_reason": "text !clear refused by the server: " + CLEAR_REFUSAL},
+                   clear_refusal={"stage": "clear_ack", "after_id": "100", "reply": {
+                       "id": "101", "channel_id": SAVED_CHANNEL, "author": {"bot": True}, "content": CLEAR_REFUSAL}})
+        row["marker_counts"] = {m: (0 if m.endswith(":AFTER_CLEAR]") else 1) for m in row["marker_counts"]}
+        rc, line = self.judge_cli(report, driver_rc=1)
+        self.assertEqual(rc, 1, line)
+        self.assertTrue(line.startswith("relay E-50 cell=claude-tui result=FAIL path=herdr "), line)
+        self.assertIn(CLEAR_REFUSAL, line)
+        self.assertIn("AFTER_CLEAR body withheld after !clear (0 deliveries)", line)
 
-    def test_driver_collects_current_clear_refusal(self):
-        original = LiveShapedDiscord.send
-        def refusing(client, channel, content):
-            if not content.startswith("!clear"):
-                return original(client, channel, content)
-            sent = client._post(content, author=assertions.OUR_BOT_ID)
-            client._post("세션을 초기화하지 못했어요: herdr clear refused: rotation_unsettled(59)", author=client.provider_bot)
-            return sent
-        with patch.object(LiveShapedDiscord, "send", refusing):
+    def test_unbound_or_incomplete_reports_fail(self):
+        def classify(report):
+            return turn_smoke.classify(
+                report=report, scenario_id="E-50", cell="claude-tui", channel_id=SAVED_CHANNEL,
+                run_id=self.saved(SAVED_PASS)["run_id"], driver_rc=0, log_counts={"cell_lines": 1},
+                markers=turn_smoke.expected_markers(SCENARIOS, "E-50", self.saved(SAVED_PASS)["run_id"]),
+            )["classification"]
+
+        self.assertEqual(classify(self.saved(SAVED_PASS)), "PASS")
+        mutations = {
+            "report cell": lambda r: r.update(cell="codex-tui"),
+            "report channel": lambda r: r.update(channel_id="333"),
+            "report run": lambda r: r.update(run_id="other"),
+            "row cell": lambda r: r["scenarios"][0].update(cell="codex-tui"),
+            "row channel": lambda r: r["scenarios"][0].update(channel_id="333"),
+            "row run": lambda r: r["scenarios"][0].update(run_id="other"),
+            "two rows": lambda r: r["scenarios"].append(copy.deepcopy(r["scenarios"][0])),
+            "coverage violation": lambda r: r.update(coverage_class_violations=["regression"]),
+            "violations missing": lambda r: r.pop("coverage_class_violations"),
+            "teardown error": lambda r: r["scenarios"][0].update(teardown_error="failed"),
+            "dirty residue": lambda r: r["scenarios"][0].update(dirty_active_residue={"possible": True}),
+        }
+        for name, mutate in mutations.items():
+            report = self.saved(SAVED_PASS)
+            mutate(report)
+            with self.subTest(mutation=name):
+                self.assertEqual(classify(report), "FAIL")
+        self.assertEqual(classify(None), "FAIL")
+
+    def test_cell_path_names_the_configured_host_and_unreadable_config_is_not_a_guess(self):
+        def path_cli():
+            output = io.StringIO()
+            with redirect_stdout(output), patch("sys.stderr", io.StringIO()):
+                rc = turn_smoke.main(["cell-path", "--config", str(self.config), "--cell", "claude-tui",
+                                      "--channel-id", SAVED_CHANNEL])
+            return rc, output.getvalue().strip()
+
+        self.assertEqual(path_cli(), (0, "herdr"))
+        self.write_config(herdr=False)
+        self.assertEqual(path_cli(), (0, "tui"))
+        self.config.write_text("agents: []\n", encoding="utf-8")
+        self.assertEqual(path_cli(), (2, ""))
+        self.config.write_text("[", encoding="utf-8")
+        self.assertEqual(path_cli(), (2, ""))
+
+
+class StepTimings(unittest.TestCase):
+    def test_report_and_verdict_name_each_step_duration(self):
+        result = run_live_shaped("E-50", "claude-tui")
+        self.assertEqual(result["status"], "pass", result.get("reason"))
+        steps = [next(iter(step)) for step in next(
+            s for s in driver.load_scenarios(SCENARIOS, cell="claude-tui") if s["id"] == "E-50")["steps"]]
+        self.assertEqual([row["step"] for row in result["step_timings"]], [*steps, "final_checks"])
+        self.assertEqual(result["step_timings"][0]["started_s"], 0.0)
+        for earlier, later in zip(result["step_timings"], result["step_timings"][1:]):
+            self.assertAlmostEqual(earlier["started_s"] + earlier["duration_s"], later["started_s"], places=1)
+
+    def test_a_hung_read_shows_as_the_step_the_run_ended_in(self):
+        # 11-01 19:26Z: the read after T1 hung 30 s and the run ended with a bare TimeoutError.
+        original = LiveShapedDiscord.fetch_messages
+
+        def hanging(client, channel_id, *, after_id=None, limit=100):
+            if any("[E2E:E50:" in m["content"] and m["author"]["id"] != assertions.OUR_BOT_ID for m in client.messages):
+                driver.time.sleep(30)
+                raise TimeoutError("timed out")
+            return original(client, channel_id, after_id=after_id, limit=limit)
+
+        with patch.object(LiveShapedDiscord, "fetch_messages", hanging):
             result = run_live_shaped("E-50", "claude-tui")
-        self.assertEqual(result["status"], "fail")
-        self.assertEqual(result["clear_refusal"]["stage"], "clear_ack")
-        self.assertNotIn("wait_timeouts", result)
-        channel = CHANNELS["claude-tui"]
-        self.config.write_text(self.config.read_text().replace("222", channel))
-        self.assertEqual(self.classify(result, channel_id=channel, report={"run_id": RUN_ID,
-                         "cell": "claude-tui", "channel_id": channel, "scenarios": [result], "coverage_class_violations": []}), "KNOWN_GAP")
-        for variant in ("old", "foreign", "human", "unknown_boundary"):
-            def bad_reply(client, channel, content):
-                sent = refusing(client, channel, content)
-                if content.startswith("!clear"):
-                    reply = client.messages[-1]
-                    if variant == "old":
-                        reply["id"] = sent["id"]
-                    elif variant == "foreign":
-                        reply["channel_id"] = "other"
-                    elif variant == "human":
-                        reply["author"]["bot"] = False
-                    else:
-                        return {}
-                return sent
-            with self.subTest(variant=variant), patch.object(LiveShapedDiscord, "send", bad_reply):
-                rejected = run_live_shaped("E-50", "claude-tui")
-                self.assertEqual(rejected["status"], "fail")
-                self.assertNotIn("clear_refusal", rejected)
+        self.assertEqual(result["reason"], "TimeoutError: timed out")
+        self.assertEqual([row["step"] for row in result["step_timings"]],
+                         ["send_discord_prompt", "wait_for_discord_text"])
+        self.assertGreaterEqual(result["step_timings"][-1]["duration_s"], 30.0)
+        passed, detail = verdict(result, "E-50", "claude-tui", "turns-clean.dcserver.log")
+        self.assertFalse(passed)
+        self.assertRegex(detail, r"; steps: send_discord_prompt \d+\.\ds, wait_for_discord_text 3\d\.\ds$")
 
-    def test_e1_driver_failure_is_classified_without_changing_report(self):
-        reason = "turn/start HTTP 422: " + json.dumps({"status": "invalid_target",
-                  "error": "herdr turn refused: executor_not_wired"})
-        with patch.object(LiveShapedDiscord, "send_prompt", create=True, side_effect=RuntimeError(reason)):
-            result = run_live_shaped("E-1", "claude-tui")
-        self.assertEqual(result["failure_attribution"]["source"], "exception")
-        before = copy.deepcopy(result)
-        channel = CHANNELS["claude-tui"]
-        self.config.write_text(self.config.read_text().replace("222", channel))
-        report = {"run_id": RUN_ID, "cell": "claude-tui", "channel_id": channel, "scenarios": [result], "coverage_class_violations": []}
-        self.assertEqual(self.classify(result, channel_id=channel, report=report), "KNOWN_GAP")
-        self.assertEqual(result, before)
-        for evidence in ({"teardown_error": "failed"}, {"assertions": [{"passed": False}]},
-                         {"failure_attribution": {"source": "harness", "raw_reason": result["reason"]}}):
-            changed = {**result, **evidence}
-            self.assertEqual(self.classify(changed, channel_id=channel,
-                             report={**report, "scenarios": [changed]}), "FAIL")
 
-    def test_missing_reply_channel_is_not_inferred(self):
-        row = self.row("E-50")
-        self.assertEqual(self.classify(row), "KNOWN_GAP")
-        for value in (None, "", "333"):
-            changed = copy.deepcopy(row)
-            changed["clear_refusal"]["reply"]["channel_id"] = value
-            self.assertEqual(self.classify(changed), "FAIL")
-        del row["clear_refusal"]["reply"]["channel_id"]
-        self.assertEqual(self.classify(row), "FAIL")
+class GatewayReadyTest(unittest.TestCase):
+    def setUp(self):
+        self.details = []
+        self.read_delay = 0.0
+        self.calls = {"detail": 0, "read": 0}
+        fixture = self
 
-    def test_missing_failure_attribution_fails_closed(self):
-        for scenario in ("E-1", "E-50"):
-            row = self.row(scenario)
-            self.assertEqual(self.classify(row), "KNOWN_GAP")
-            for value in (None, [], "", {}, {"source": "harness", "raw_reason": row["failure_attribution"]["raw_reason"]},
-                          {**row["failure_attribution"], "raw_reason": "other"}):
-                with self.subTest(scenario=scenario, attribution=value):
-                    self.assertEqual(self.classify({**row, "failure_attribution": value}), "FAIL")
-            del row["failure_attribution"]
-            with self.subTest(scenario=scenario, missing="failure_attribution"):
-                self.assertEqual(self.classify(row), "FAIL")
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
 
-    def test_missing_coverage_class_violations_fails_closed(self):
-        for scenario in ("E-1", "E-50"):
-            row = self.row(scenario)
-            report = {"cell": "claude-tui", "channel_id": "222", "run_id": RUN_ID, "scenarios": [row]}
-            self.assertEqual(self.classify(row, report={**report, "coverage_class_violations": []}), "KNOWN_GAP")
-            for value in (None, {}, "", 0, False, ["regression"]):
-                with self.subTest(scenario=scenario, violations=value):
-                    self.assertEqual(self.classify(row, report={**report, "coverage_class_violations": value}), "FAIL")
-            with self.subTest(scenario=scenario, missing="coverage_class_violations"):
-                self.assertEqual(self.classify(row, report=report), "FAIL")
+            def reply(self, payload):
+                body = json.dumps(payload).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
 
-    def test_missing_assertions_fails_closed(self):
-        for scenario in ("E-1", "E-50"):
-            row = self.row(scenario)
-            self.assertEqual(self.classify(row), "KNOWN_GAP")
-            changed = copy.deepcopy(row)
-            del changed["assertions"]
-            with self.subTest(scenario=scenario, missing="assertions"):
-                self.assertEqual(self.classify(changed), "FAIL")
-            for value in (None, {}, "", 0):
-                with self.subTest(scenario=scenario, assertions=value):
-                    self.assertEqual(self.classify({**row, "assertions": value}), "FAIL")
+            def do_GET(self):
+                if self.path == "/api/health/detail":
+                    fixture.calls["detail"] += 1
+                    recovered, connected = (fixture.details.pop(0) if len(fixture.details) > 1
+                                            else fixture.details[0])
+                    self.reply({"fully_recovered": recovered, "providers": [
+                        {"name": "claude", "runtime_role": "gateway", "connected": connected},
+                        {"name": "codex", "runtime_role": "gateway", "connected": True}]})
+                elif self.path.startswith("/api/discord/channels/222/messages?"):
+                    fixture.calls["read"] += 1
+                    time.sleep(fixture.read_delay)
+                    self.reply([])
+                else:
+                    self.send_error(404)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(thread.join)
+        self.addCleanup(self.server.shutdown)
+        self.base_url = f"http://127.0.0.1:{self.server.server_port}"
+
+    def wait(self, deadline_s):
+        with redirect_stdout(io.StringIO()):
+            return turn_smoke.wait_gateway_ready(base_url=self.base_url, cell="claude-tui", channel_id="222",
+                                                 deadline_s=deadline_s, interval_s=0.01)
+
+    def test_ready_only_after_recovery_connection_and_a_channel_read(self):
+        self.details = [(False, False), (True, False), (True, True)]
+        ready, detail = self.wait(10)
+        self.assertTrue(ready, detail)
+        self.assertEqual(self.calls, {"detail": 3, "read": 1})
+
+    def test_a_gateway_that_never_connects_is_not_ready_at_the_deadline(self):
+        self.details = [(True, False)]
+        ready, detail = self.wait(0.3)
+        self.assertFalse(ready)
+        self.assertIn("gateway not connected: claude", detail)
+        self.assertEqual(self.calls["read"], 0)
+
+    def test_a_channel_read_that_outlasts_the_deadline_is_not_ready(self):
+        self.details = [(True, True)]
+        self.read_delay = 1.5
+        ready, detail = self.wait(0.5)
+        self.assertFalse(ready, detail)
+        self.assertGreaterEqual(self.calls["read"], 1)
+
+    def test_cli_exits_1_with_one_fail_line_when_not_ready(self):
+        self.details = [(False, False)]
+        output = io.StringIO()
+        with redirect_stdout(output):
+            rc = turn_smoke.main(["gateway-ready", "--base-url", self.base_url, "--cell", "claude-tui",
+                                  "--channel-id", "222", "--deadline-s", "0.3"])
+        self.assertEqual(rc, 1)
+        lines = output.getvalue().splitlines()
+        self.assertEqual([line for line in lines if line.startswith("gateway-ready FAIL")], [lines[-1]])
+        self.assertIn("startup recovery not finished", lines[-1])
 
 
 class CellResetTest(unittest.TestCase):
@@ -905,6 +938,7 @@ POST_DEPLOY_SMOKE_STAMP=fixture; POST_DEPLOY_SMOKE_TMP_DIR=$fixture
 POST_DEPLOY_SMOKE_CLAUDE_TURNS_DEADLINE_S=120; POST_DEPLOY_SMOKE_CODEX_TURNS_DEADLINE_S=150
 POST_DEPLOY_SMOKE_E35_DEADLINE_S=900; POST_DEPLOY_SMOKE_LOG_PATH=$ADK_REL/logs/dcserver.stdout.log
 POST_DEPLOY_SMOKE_LOG_FINGERPRINT_CAP=4096; POST_DEPLOY_SMOKE_TURN_COVERAGE=''
+POST_DEPLOY_SMOKE_GATEWAY_READY_S=120; POST_DEPLOY_SMOKE_RELAY_PATH=''
 _post_deploy_smoke_note() { printf '%s\\n' "$1"; }
 _post_deploy_smoke_fail() { printf 'FAIL: %s\\n' "$1"; }
 _post_deploy_smoke_resolve_cluster_standby() { printf false; }
@@ -918,7 +952,7 @@ python3() {
     case "${1:-}" in
         scripts/e2e/post_deploy_turn_smoke.py|*/scripts/e2e/post_deploy_turn_smoke.py)
             shift
-            command python3 -c 'import sys; from pathlib import Path; sys.path.insert(0, str(Path(sys.argv[1]) / "scripts/e2e")); import post_deploy_turn_smoke as smoke; smoke.cell_driver.lease.DEFAULT_LEASE_DIR = Path(sys.argv[2]) / "leases"; a = sys.argv[3:]; print("relay fixture result=pass") if a[0] == "judge" else None; sys.exit(0 if a[0] == "judge" else smoke.main(a))' "$REPO" "$fixture" "$@"
+            command python3 -c 'import sys; from pathlib import Path; sys.path.insert(0, str(Path(sys.argv[1]) / "scripts/e2e")); import post_deploy_turn_smoke as smoke; smoke.cell_driver.lease.DEFAULT_LEASE_DIR = Path(sys.argv[2]) / "leases"; a = sys.argv[3:]; print("relay fixture result=pass") if a[0] == "judge" else None; sys.exit(0 if a[0] in ("judge", "gateway-ready") else smoke.main(a))' "$REPO" "$fixture" "$@"
             return ;;
     esac
     command python3 "$@"

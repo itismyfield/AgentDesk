@@ -1,0 +1,32 @@
+{
+ "schema_version": 2,
+ "run_id": "20261101T192638Z-50706-E-50-claude-tui",
+ "cell": "claude-tui",
+ "provider": "claude",
+ "runtime": "tui",
+ "channel_id": "1559670200419352696",
+ "coverage_class_violations": [],
+ "scenarios": [
+  {
+   "id": "E-50",
+   "run_id": "20261101T192638Z-50706-E-50-claude-tui",
+   "cell": "claude-tui",
+   "channel_id": "1559670200419352696",
+   "status": "fail",
+   "reason": "TimeoutError: timed out",
+   "failure_attribution": {
+    "source": "exception",
+    "raw_reason": "TimeoutError: timed out"
+   },
+   "prompt_sends": [
+    {
+     "step": "send_discord_prompt",
+     "send_state": "acknowledged",
+     "message_id": "1566534300201910396"
+    }
+   ],
+   "started_at": "2026-11-02T04:27:51",
+   "completed_at": "2026-11-02T04:28:23"
+  }
+ ]
+}
