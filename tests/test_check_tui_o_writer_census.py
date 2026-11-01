@@ -419,6 +419,22 @@ class FlipReadinessTests(unittest.TestCase):
             with self.subTest(ready=ready, args=args):
                 with mock.patch.object(census, "check", return_value=passing), \
                         mock.patch.object(census, "flip_readiness", return_value=(ready, "v")), \
+                        mock.patch.object(census, "body_probe_snapshot", return_value={
+                            "coverage": True, "pending": 0, "census_hash": "0" * 64,
+                        }), \
+                        mock.patch("sys.stdout"):
+                    self.assertEqual(census.main(args), rc)
+
+    def test_require_flip_ready_also_requires_body_probe_coverage(self) -> None:
+        for coverage, args, rc in ((False, [], 0), (False, ["--require-flip-ready"], 1),
+                                   (True, ["--require-flip-ready"], 0)):
+            with self.subTest(coverage=coverage, args=args):
+                with mock.patch.object(census, "check", return_value=(True, "OK")), \
+                        mock.patch.object(census, "flip_readiness", return_value=(True, "v")), \
+                        mock.patch.object(census, "body_probe_snapshot", return_value={
+                            "coverage": coverage, "pending": int(not coverage),
+                            "census_hash": "0" * 64,
+                        }), \
                         mock.patch("sys.stdout"):
                     self.assertEqual(census.main(args), rc)
 
