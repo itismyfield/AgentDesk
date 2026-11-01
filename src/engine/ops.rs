@@ -22,6 +22,9 @@ mod kv_ops;
 mod log_ops;
 pub(crate) mod message_ops;
 mod pipeline_ops;
+mod pr_tracking_ops;
+#[cfg(test)]
+mod pr_tracking_owner_tests;
 mod quality_ops;
 mod queue_ops;
 mod read_bridge;
@@ -84,6 +87,7 @@ fn register_globals_pg_only(
     kv_ops::register_kv_ops_with_reads(ctx, pg_pool.clone(), reads)?;
     review_ops::register_review_ops(ctx, pg_pool.clone())?;
     review_automation_ops::register_review_automation_ops(ctx, pg_pool.clone())?;
+    pr_tracking_ops::register_pr_tracking_ops(ctx, pg_pool.clone())?;
     queue_ops::register_queue_ops(ctx, pg_pool.clone())?;
     auto_queue_ops::register_auto_queue_ops(ctx, pg_pool.clone(), supervisor_bridge.clone())?;
     runtime_ops::register_runtime_ops(ctx, pg_pool.clone(), supervisor_bridge)?;
