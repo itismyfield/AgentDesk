@@ -2909,7 +2909,8 @@ pub(crate) mod test_env_lock {
             }
             held.set(true);
         });
-        let lock = crate::test_support::lock_holder::ENV_LOCK.lock(mutex);
+        let lock = crate::test_support::lock_holder::ENV_LOCK
+            .hold(|| mutex.lock().unwrap_or_else(|poison| poison.into_inner()));
         SharedTestEnvLockGuard { _lock: lock }
     }
 }

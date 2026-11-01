@@ -831,7 +831,11 @@ impl Drop for PostgresTestLifecycleGuard {
 #[track_caller]
 pub(crate) fn lock_test_lifecycle() -> PostgresTestLifecycleGuard {
     let mutex = POSTGRES_TEST_LIFECYCLE_LOCK.get_or_init(|| std::sync::Mutex::new(()));
-    let guard = crate::test_support::lock_holder::PG_LIFECYCLE_LOCK.lock(mutex);
+    let guard = crate::test_support::lock_holder::PG_LIFECYCLE_LOCK.hold(|| {
+        mutex
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    });
     PG_LIFECYCLE_HELD.with(|depth| depth.set(depth.get() + 1));
     PostgresTestLifecycleGuard { _guard: guard }
 }
