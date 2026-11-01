@@ -7,6 +7,8 @@ mod dispatch_query;
 mod dispatch_status;
 mod dispatch_summary;
 #[cfg(test)]
+mod fresh_worktree_pg_tests;
+#[cfg(test)]
 pub(crate) mod test_support;
 mod types;
 

@@ -12,6 +12,7 @@ use super::{NextRestartProof, ProofCache, Unverified};
 struct Observed {
     policy: BTreeMap<PathBuf, Value>,
     checker: BTreeMap<PathBuf, Value>,
+    server: BTreeMap<PathBuf, String>,
 }
 static OBSERVED: OnceLock<Mutex<Observed>> = OnceLock::new();
 
@@ -29,6 +30,17 @@ pub(crate) fn checker(socket: &Path, stdout: &[u8], stderr: &[u8]) {
                 "last_error_line": String::from_utf8_lossy(stderr).lines()
                     .rfind(|line| !line.trim().is_empty()).unwrap_or("")
                     .chars().rev().take(256).collect::<String>().chars().rev().collect::<String>()}),
+        );
+    }
+}
+
+/// The version and protocol the socket's last pong reported, shown beside every reason.
+pub(crate) fn server(socket: &Path, version: &str, protocol: u32) {
+    if let Ok(mut observed) = OBSERVED.get_or_init(Mutex::default).lock() {
+        let shown = version.chars().take(64).collect::<String>();
+        observed.server.insert(
+            socket.into(),
+            format!("herdr {shown} / protocol {protocol}"),
         );
     }
 }
@@ -82,7 +94,7 @@ pub(crate) fn record(
                     "On the execution node, start bare herdr if absent and recheck the configured socket; AgentDesk never starts or restarts it."
                 }
                 Unverified::Unsupported => {
-                    "Use a verified herdr 0.9.3 / protocol 22 server on the execution node, then retry."
+                    "Use a stable herdr release of protocol 22, version 0.9.3 or newer, on the execution node, then retry; `server` shows what the socket reported."
                 }
                 Unverified::Identity if !super::peer::SUPPORTED => {
                     "This platform has no loaded-image adapter, so a user-default server cannot be verified here; keep legacy_dedicated."
@@ -119,10 +131,13 @@ pub(crate) fn record(
             String::new(),
         ),
     };
-    let value = json!({"next_restart_ready": ready,
+    let mut value = json!({"next_restart_ready": ready,
     "startup_proof": startup, "reason": reason, "action": action, "witness": witness,
     "observation": "last_check_only; a fresh create rechecks at its fence, while existing input mutations compare only the recorded server witness"});
     if let Ok(mut observed) = OBSERVED.get_or_init(Mutex::default).lock() {
+        if let Some(server) = observed.server.get(socket) {
+            value["server"] = server.clone().into();
+        }
         observed.policy.insert(socket.into(), value.clone());
     }
     value

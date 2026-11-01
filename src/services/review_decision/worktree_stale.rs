@@ -72,9 +72,13 @@ pub(super) fn commit_is_on_remote_mainline(repo_dir: &str, commit: &str) -> Opti
     if repo_dir.trim().is_empty() || commit.trim().is_empty() {
         return None;
     }
-    let refs = ["origin/main", "origin/master"];
+    use crate::services::git::commit_resolver::{default_first_candidates, origin_default_branch};
+    let refs = default_first_candidates(
+        origin_default_branch(repo_dir).map(|branch| format!("origin/{branch}")),
+        &["origin/main", "origin/master"],
+    );
     let mut saw_ref = false;
-    for remote_ref in refs {
+    for remote_ref in &refs {
         let exists = crate::services::git::GitCommand::new()
             .repo(repo_dir)
             .args(["rev-parse", "--verify", remote_ref])
@@ -87,7 +91,7 @@ pub(super) fn commit_is_on_remote_mainline(repo_dir: &str, commit: &str) -> Opti
         saw_ref = true;
         let merged = crate::services::git::GitCommand::new()
             .repo(repo_dir)
-            .args(["merge-base", "--is-ancestor", commit, remote_ref])
+            .args(["merge-base", "--is-ancestor", commit, remote_ref.as_str()])
             .run_output()
             .ok()
             .is_some_and(|output| output.status.success());

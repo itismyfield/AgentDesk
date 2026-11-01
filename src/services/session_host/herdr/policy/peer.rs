@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use std::time::SystemTime;
 
 use super::super::contract::{ServerHello, ServerWitness};
-use super::super::model::{HERDR_PROTOCOL, VERIFIED_HERDR_VERSIONS};
+use super::super::model::supported_herdr_server;
 use super::super::provenance::{self, PeerToken, ProcessStart, StartIdentity};
 use super::PeerSource;
 use super::Unverified;
@@ -38,7 +38,6 @@ pub(crate) struct PeerObservation {
     /// Reread after the environment and loaded-image observations.
     pub current: ServerWitness,
     pub process: ProcessStart,
-    pub protocol: u32,
     pub environment: PeerEnvironment,
     pub executable: ExecutableImage,
 }
@@ -61,11 +60,12 @@ pub(crate) fn validate(observed: PeerObservation) -> Result<PeerSnapshot, Unveri
         hello,
         current,
         process,
-        protocol,
         environment,
         executable,
     } = observed;
-    if protocol != HERDR_PROTOCOL || !VERIFIED_HERDR_VERSIONS.contains(&hello.version.as_str()) {
+    if !supported_herdr_server(&hello.version, hello.protocol) {
+        tracing::warn!(socket = %expected_socket.display(), version = %hello.version,
+            protocol = hello.protocol, "herdr user-default server version or protocol unsupported");
         return Err(Unverified::Unsupported);
     }
     if hello.witness != current
@@ -196,7 +196,6 @@ impl PeerSource for SocketPeerSource {
             hello,
             current,
             process,
-            protocol: HERDR_PROTOCOL,
             environment: PeerEnvironment {
                 home: values("HOME"),
                 xdg_config_home: values("XDG_CONFIG_HOME"),

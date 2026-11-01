@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run and judge the P11 M2 activation gates X1 and X2 against real Herdr 0.9.3 servers.
+"""Run and judge the P11 M2 activation gates X1 and X2 against real Herdr servers.
 
 Each test runs alone (`--ignored --exact`) with a scratch copy of the server binary, a run root
 under the scratch directory and a pid ledger. Both must pass on one clean head:
@@ -7,7 +7,7 @@ under the scratch directory and a pid ledger. Both must pass on one clean head:
   W1  the test really ran: `running 1 test` and its own line, not `ignored`
   W2  `test result: ok. 1 passed; 0 failed; 0 ignored`, and cargo exited 0 within its time
   W3  its one write went to a process other than the test, whose binary is the scratch copy with
-      the pinned hash; that process is the server the test started on that socket (pid and
+      the hash read when the run began; that process is the server the test started on that socket (pid and
       start), and that server's own log took the request id once as a pane close (N-2)
   W4  one terminate result log naming the bound execution, with the expected result; one
       snapshot per server and phase, the target's after one exactly its before one less the
@@ -34,7 +34,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-PINNED_SHA256 = "5173a3e0ae42d5d1ab7ebfa5d5e6329f7c3d23f8e1a3677c7ce3231da2884157"
 TESTS = {
     "x1": (
         "services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::real",
@@ -91,7 +90,8 @@ def log_requests(log: str) -> list[tuple[str, str]]:
     return found
 
 
-def judge(name: str, output: str, *, bin_path: str, read_log, returncode: int | None) -> list[str]:
+def judge(name: str, output: str, *, bin_path: str, image_sha: str, read_log,
+          returncode: int | None) -> list[str]:
     """Why one test's run is not a PASS; empty when it is. `returncode` is None on a timeout."""
     module, test, result, write_outcome = TESTS[name]
     failures = []
@@ -129,8 +129,8 @@ def judge(name: str, output: str, *, bin_path: str, read_log, returncode: int | 
         exe = exes[0]
         if os.path.realpath(exe.get("path", "")) != os.path.realpath(bin_path):
             failures.append(f"W3: the write's process runs {exe.get('path')}, not {bin_path}")
-        if exe.get("sha256") != PINNED_SHA256:
-            failures.append(f"W3: binary sha256 {exe.get('sha256')} is not the pinned 0.9.3")
+        if exe.get("sha256") != image_sha:
+            failures.append(f"W3: binary sha256 {exe.get('sha256')} is not the scratch copy {image_sha}")
     failures += correlate(write, lines_of(output, "X_SERVER"), read_log)
     # W4
     executions = lines_of(output, "X_EXECUTION")
@@ -333,10 +333,9 @@ def main() -> int:
     if not binary.exists() or sha256(str(binary)) != sha256(args.herdr_src):
         shutil.copy2(args.herdr_src, binary)
     say(f"herdr source={args.herdr_src} sha256={sha256(args.herdr_src)}")
-    say(f"herdr copy={binary} sha256={sha256(str(binary))} pinned={PINNED_SHA256}")
-    if sha256(str(binary)) != PINNED_SHA256:
-        say("P11_M2_ACTIVATION FAIL: the scratch binary is not the pinned 0.9.3")
-        return 1
+    # Any herdr the adapter's protocol gate admits may run; W3 pins the bytes copied for this run.
+    image_sha = sha256(str(binary))
+    say(f"herdr copy={binary} sha256={image_sha}")
     before = production_sockets()
     say("production sockets (read only): " + json.dumps(before))
     production = {row.split(" ")[0] for row in before}
@@ -365,7 +364,8 @@ def main() -> int:
             output, returncode = output + "\nTIMEOUT", None
         heads[name].append(head_state(args.worktree))
         (out / f"{name}.log").write_text(output)
-        verdicts[name] = judge(name, output, bin_path=str(binary), returncode=returncode,
+        verdicts[name] = judge(name, output, bin_path=str(binary), image_sha=image_sha,
+                               returncode=returncode,
                                read_log=lambda path: Path(path).read_text() if path else "")
         say(f"{name.upper()} {'PASS' if not verdicts[name] else 'FAIL'} head={head} "
             f"log={out / (name + '.log')} " + "; ".join(verdicts[name]))

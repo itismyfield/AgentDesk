@@ -89,6 +89,8 @@ struct Server {
     serving: Arc<AtomicU32>,
     /// Every connection in accept order: the method it carried, if any, and its bytes.
     conns: Arc<Mutex<Vec<Conn>>>,
+    /// The result every ping gets.
+    pong: Arc<Mutex<Value>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -108,7 +110,11 @@ fn serve(reply: Reply) -> Server {
     let serving = Arc::new(AtomicU32::new(7));
     let conns = Arc::new(Mutex::new(Vec::new()));
     let stop = Arc::new(AtomicBool::new(false));
+    let pong = Arc::new(Mutex::new(
+        json!({"type": "pong", "version": "0.9.3", "protocol": 22}),
+    ));
     let (process, seen, stopped) = (serving.clone(), conns.clone(), stop.clone());
+    let answered = pong.clone();
     let thread = std::thread::spawn(move || {
         while !stopped.load(Ordering::SeqCst) {
             let Ok((stream, _)) = listener.accept() else {
@@ -120,7 +126,7 @@ fn serve(reply: Reply) -> Server {
                 seen.push((None, 0));
                 seen.len() - 1
             };
-            answer(stream, &reply, &process, &|conn| {
+            answer(stream, &reply, &answered, &process, &|conn| {
                 seen.lock().unwrap()[index] = conn
             });
         }
@@ -129,6 +135,7 @@ fn serve(reply: Reply) -> Server {
         path,
         serving,
         conns,
+        pong,
         stop,
         thread: Some(thread),
     }
@@ -143,6 +150,7 @@ fn socket_number() -> u64 {
 fn answer(
     stream: UnixStream,
     reply: &Reply,
+    pong: &Mutex<Value>,
     serving: &AtomicU32,
     record: &dyn Fn((Option<Value>, usize)),
 ) {
@@ -158,7 +166,7 @@ fn answer(
     };
     record((Some(request.clone()), line.len()));
     let result = match request["method"].as_str() {
-        Some("ping") => json!({"type": "pong", "version": "0.9.3", "protocol": 22}),
+        Some("ping") => pong.lock().unwrap().clone(),
         _ => reply(&request, serving),
     };
     let body = json!({"id": request["id"], "result": result});
@@ -392,6 +400,38 @@ fn socket_launch_types_nothing_into_a_replaced_server_and_keeps_the_pane() {
 }
 
 // An unknown endpoint or a request that fails the local checks reaches no server.
+// A readable pong of another protocol is an unsupported server at E7 and in the user-default
+// probe, and the probe names what that socket answered last rather than an earlier pong.
+#[tokio::test]
+async fn a_pong_of_another_protocol_is_unsupported_at_both_gates_and_named_in_the_probe() {
+    use crate::services::session_host::herdr::policy::diagnostics;
+    let server = serve(Box::new(|_, _| json!({"type": "ok"})));
+    let host = launch_host(&server);
+    let (endpoint, transport) = &host.endpoints[0];
+    let e7 = || read_restore_resume_with(transport.as_ref(), endpoint, &Bootstrapped);
+    assert!(matches!(e7(), RestoreResume::Off { .. }));
+    for protocol in [23, 21] {
+        *server.pong.lock().unwrap() =
+            json!({"type": "pong", "version": "0.9.5", "protocol": protocol});
+        assert_eq!(
+            e7(),
+            RestoreResume::Unverified(RestoreUnverified::VersionNotVerified),
+            "{protocol}"
+        );
+        let probe = diagnostics::probe(&server.path).await.unwrap();
+        assert_eq!(
+            probe["reason"],
+            "next_restart_policy_unverified:Unsupported"
+        );
+        assert_eq!(probe["next_restart_ready"], false);
+        assert_eq!(
+            probe["server"],
+            format!("herdr 0.9.5 / protocol {protocol}")
+        );
+    }
+    assert_eq!(server.methods().iter().filter(|m| *m != "ping").count(), 0);
+}
+
 #[test]
 fn socket_launch_refuses_unknown_endpoints_and_bad_requests_before_any_call() {
     let (_dir, cwd) = workdir();
@@ -446,6 +486,47 @@ fn process_info(shell: Value, foreground: Option<&[u32]>) -> Value {
     json!({"type": "pane_process_info", "process_info": info})
 }
 
+#[test]
+fn launch_evidence_waits_for_unreported_foreground_to_be_listed() {
+    use crate::services::session_host::herdr::pane_probe::tests::{
+        FakeOs, NONCE, context, env_naming,
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let reads = AtomicU32::new(0);
+    let server = serve(Box::new(move |request, _| {
+        if request["method"] != "pane.process_info" {
+            return json!({"type": "ok"});
+        }
+        let foreground = (reads.fetch_add(1, Ordering::SeqCst) > 0).then_some(&[20][..]);
+        process_info(json!(10), foreground)
+    }));
+    let mut host = launch_host(&server);
+    host.provider_window = Duration::from_secs(2);
+    host.os = Box::new(FakeOs::launched(env_naming(&context(NONCE))));
+    let probe = EvidenceProbe {
+        location: HostedLocation {
+            host: "herdr".into(),
+            execution_node: "mac-mini".into(),
+            endpoint_config_key: "pilot".into(),
+            socket_addr: server.path.display().to_string(),
+            named_session: "adk".into(),
+            pane_id: "w1:p1".into(),
+        },
+        provider: "claude".into(),
+        execution_nonce: NONCE.into(),
+        launched_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
+        witness: host
+            .restore_resume(&launch_endpoint(&server))
+            .admitted_witness()
+            .unwrap(),
+    };
+    assert_eq!(
+        host.launch_evidence(&probe)
+            .map(|e| (e.binding_nonce, e.root.pid, e.provider_process.pid)),
+        Ok((NONCE.into(), 10, 20))
+    );
+}
+
 // The probe reads the located pane on its own connections, each from the launch's server.
 #[test]
 fn launch_evidence_probes_the_located_pane_on_the_launch_server() {
@@ -492,6 +573,7 @@ fn launch_evidence_probes_the_located_pane_on_the_launch_server() {
     for (reply, expected) in cases {
         let server = serve(Box::new(move |_, _| reply.clone()));
         let mut host = launch_host(&server);
+        host.provider_window = Duration::from_millis(700);
         host.os = Box::new(FakeOs::launched(environ.clone()));
         let probed = host.launch_evidence(&probe_on(&server, &host));
         match expected {

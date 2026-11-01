@@ -51,6 +51,7 @@ impl Fixture {
                 witness: witness.clone(),
                 started,
                 version: "0.9.3".into(),
+                protocol: 22,
                 connected_at: started + Duration::from_secs(5),
             },
             current: witness.clone(),
@@ -58,7 +59,6 @@ impl Fixture {
                 identity: witness.start,
                 wall_clock: started,
             },
-            protocol: 22,
             environment: PeerEnvironment {
                 home: vec![self.root.path().to_str().unwrap().into()],
                 ..PeerEnvironment::default()
@@ -162,9 +162,9 @@ fn policy_peer_checks_version_protocol_start_and_current_witness() {
     let fixture = Fixture::new();
     type Edit = fn(&mut PeerObservation);
     let edits: [(Edit, Unverified); 8] = [
-        (|peer| peer.protocol = 23, Unverified::Unsupported),
+        (|peer| peer.hello.protocol = 23, Unverified::Unsupported),
         (
-            |peer| peer.hello.version = "0.9.4".into(),
+            |peer| peer.hello.version = "0.9.2".into(),
             Unverified::Unsupported,
         ),
         (|peer| peer.current.pid += 1, Unverified::Peer),
@@ -196,6 +196,45 @@ fn policy_peer_checks_version_protocol_start_and_current_witness() {
             validate(observed),
             Err(expected),
             "peer observation source contract"
+        );
+    }
+}
+
+// Newer stable releases of our protocol pass; another protocol, an older release or any
+// version that is not a plain `MAJOR.MINOR.PATCH` is refused rather than guessed.
+#[cfg(unix)]
+#[test]
+fn policy_peer_admits_newer_stable_releases_of_its_protocol_only() {
+    let fixture = Fixture::new();
+    let judged = |version: &str, protocol| {
+        let mut observed = fixture.observation();
+        observed.hello.version = version.into();
+        observed.hello.protocol = protocol;
+        validate(observed).map(|_| ())
+    };
+    for version in ["0.9.3", "0.9.4", "0.9.5", "0.10.0", "1.0.0"] {
+        assert_eq!(judged(version, 22), Ok(()), "{version}");
+    }
+    for (version, protocol) in [
+        ("0.9.5", 23),
+        ("0.9.5", 21),
+        ("0.9.2", 22),
+        ("0.8.10", 22),
+        ("", 22),
+        ("0.9", 22),
+        ("0.9.5.1", 22),
+        ("0..5", 22),
+        ("0.9.5-preview.2026-10-14-fbd2ae23927f", 22),
+        ("0.9.5+build", 22),
+        ("v0.9.5", 22),
+        (" 0.9.5", 22),
+        ("0.9.05", 22),
+        ("0.9.18446744073709551616", 22),
+    ] {
+        assert_eq!(
+            judged(version, protocol),
+            Err(Unverified::Unsupported),
+            "{version:?} / {protocol}"
         );
     }
 }

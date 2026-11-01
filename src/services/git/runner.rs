@@ -54,9 +54,6 @@ impl GitCommand {
         self
     }
 
-    // #3034: test-only builder setter — exercised by the runner timeout tests;
-    // production callers rely on the default timeout.
-    #[allow(dead_code)]
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
@@ -141,8 +138,8 @@ impl GitCommand {
                     if started_at.elapsed() >= self.timeout {
                         let _ = child.kill();
                         let status = child.wait().ok();
-                        let stdout = join_pipe(stdout_handle);
-                        let stderr = join_pipe(stderr_handle);
+                        let stdout = join_pipe_after_kill(stdout_handle);
+                        let stderr = join_pipe_after_kill(stderr_handle);
                         return Err(GitCommandError::timed_out(
                             context,
                             self.timeout,
@@ -155,8 +152,8 @@ impl GitCommand {
                 }
                 Err(source) => {
                     let _ = child.kill();
-                    let stdout = join_pipe(stdout_handle);
-                    let stderr = join_pipe(stderr_handle);
+                    let stdout = join_pipe_after_kill(stdout_handle);
+                    let stderr = join_pipe_after_kill(stderr_handle);
                     return Err(GitCommandError::wait(context, source, stdout, stderr));
                 }
             }
@@ -191,6 +188,20 @@ fn join_pipe(handle: Option<thread::JoinHandle<Vec<u8>>>) -> Vec<u8> {
     handle
         .and_then(|handle| handle.join().ok())
         .unwrap_or_default()
+}
+
+/// Helpers spawned by a killed git (ssh, remote-https, upload-pack) can keep its pipes open,
+/// so give the readers a short grace and then stop waiting instead of outliving the timeout.
+fn join_pipe_after_kill(handle: Option<thread::JoinHandle<Vec<u8>>>) -> Vec<u8> {
+    let give_up_at = Instant::now() + POLL_INTERVAL * 10;
+    while handle.as_ref().is_some_and(|handle| !handle.is_finished()) && Instant::now() < give_up_at
+    {
+        thread::sleep(POLL_INTERVAL);
+    }
+    match handle {
+        Some(handle) if handle.is_finished() => join_pipe(Some(handle)),
+        _ => Vec::new(),
+    }
 }
 
 #[derive(Debug, Clone)]

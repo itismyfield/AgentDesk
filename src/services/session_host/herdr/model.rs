@@ -12,9 +12,28 @@ use crate::services::session_host::model::{HostError, HostKind, HostLiveness, Ho
 
 pub(crate) const HERDR_PROTOCOL: u32 = 22;
 pub(crate) const ENDPOINT_MISSING: &str = "endpoint_missing";
-/// Server versions whose restore-on-start behavior was measured; protocol 22 alone cannot
-/// tell 0.9.0 from 0.9.3, so E7 admits only these pong versions.
-pub(crate) const VERIFIED_HERDR_VERSIONS: &[&str] = &["0.9.3"];
+/// Oldest release whose restore-on-start behavior was measured; protocol 22 alone cannot tell
+/// 0.9.0 from 0.9.3, so older releases of the same protocol stay refused.
+pub(crate) const MIN_HERDR_VERSION: [u64; 3] = [0, 9, 3];
+
+/// The one server gate for the user-default peer and E7: our protocol and a stable
+/// `MAJOR.MINOR.PATCH` release at or above the minimum. Pre-release or unreadable versions fail.
+pub(crate) fn supported_herdr_server(version: &str, protocol: u32) -> bool {
+    protocol == HERDR_PROTOCOL && stable_release(version).is_some_and(|v| v >= MIN_HERDR_VERSION)
+}
+
+fn stable_release(version: &str) -> Option<[u64; 3]> {
+    let mut parts = version.split('.');
+    let mut release = [0; 3];
+    for slot in &mut release {
+        let part = parts.next()?;
+        let canonical = !part.is_empty()
+            && part.bytes().all(|byte| byte.is_ascii_digit())
+            && (part == "0" || !part.starts_with('0'));
+        *slot = canonical.then(|| part.parse().ok()).flatten()?;
+    }
+    parts.next().is_none().then_some(release)
+}
 
 fn endpoint_missing() -> HostError {
     HostError::Unsupported(HostKind::Herdr, ENDPOINT_MISSING)
