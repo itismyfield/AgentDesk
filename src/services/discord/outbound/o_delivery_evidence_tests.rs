@@ -1756,3 +1756,62 @@ async fn renumbered_source_keeps_its_terminal_manifest_but_a_replacement_does_no
     );
     assert!(manifest::build_terminal(&f.root, query(replaced), deadline).is_none());
 }
+
+/// Like the writer, the observer never guesses between two stored variants of one file, even when
+/// the live stat matches one of them exactly; the same stored source listed twice is still found.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn stored_variants_of_one_file_find_no_source_but_a_repeated_source_does() {
+    use crate::services::tui_o::shadow::capture::{file_identity, renumber};
+    use crate::services::tui_o::store::rotation::{Boundary, Rotation, SourceLink};
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    for (channel, linked_dev) in [(744_801, Some(1 << 41)), (744_802, None)] {
+        let f = Fixture::new(channel, ProviderKind::Claude, &["linked answer"]).await;
+        let linked = SourceId {
+            dev: linked_dev.map_or(f.source.dev, |shift| f.source.dev ^ shift),
+            ..f.source.clone()
+        };
+        let boundary = f
+            .root
+            .join("o_store")
+            .join(channel.to_string())
+            .join("boundary");
+        assert!(!boundary.exists());
+        let link = SourceLink {
+            source: linked.clone(),
+            seq: 1,
+            parent: None,
+            committed_at: chrono::Utc::now(),
+            boundary: Boundary::Owed { from: 0 },
+            hot_candidate: None,
+        };
+        let rotation = Rotation {
+            links: [(
+                crate::services::tui_o::store::spool::source_key(&linked),
+                link,
+            )]
+            .into(),
+            successors: Default::default(),
+        };
+        std::fs::write(&boundary, serde_json::to_vec(&rotation).unwrap()).unwrap();
+        let source = |file| delivery_evidence::source(&f.root, channel, &f.source.path, file);
+        let exact = file_identity(&std::fs::metadata(&f.source.path).unwrap());
+        assert_eq!(exact, (f.source.dev, f.source.ino));
+        let _reboot = renumber::shift(&f.source.path, 1 << 40);
+        let renumbered = file_identity(&std::fs::metadata(&f.source.path).unwrap());
+        assert_eq!(renumbered, (f.source.dev ^ (1 << 40), f.source.ino));
+        for live in [exact, renumbered] {
+            let found = source(live).map(|cursor| cursor.source);
+            if linked_dev.is_some() {
+                assert_eq!(found, None, "two stored variants, live {live:?}");
+            } else {
+                assert_eq!(
+                    found,
+                    Some(f.source.clone()),
+                    "repeated source, live {live:?}"
+                );
+            }
+        }
+    }
+}
