@@ -1,7 +1,8 @@
 //! Transcript-only turn summaries; durable opening marks distinguish replay from backfill.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -28,6 +29,9 @@ pub(super) struct TurnSummaryRun {
     inputs: SummaryInputs,
     provider: ShadowProvider,
     open: Option<Turn>,
+    /// Claude turns are per transcript, so another transcript's unclosed turn cannot absorb this one.
+    source: Option<PathBuf>,
+    parked: HashMap<PathBuf, Turn>,
 }
 
 struct Turn {
@@ -46,6 +50,26 @@ impl TurnSummaryRun {
             inputs,
             provider,
             open: None,
+            source: None,
+            parked: HashMap::new(),
+        }
+    }
+
+    /// Records that follow come from the transcript at `path` until the next call.
+    pub(super) fn enter(&mut self, path: &Path) {
+        if self.provider != ShadowProvider::Claude || self.source.as_deref() == Some(path) {
+            return;
+        }
+        #[cfg(test)]
+        if crate::services::claude_tui::source_verify::n2b_mutant("summary-channel-wide") {
+            return;
+        }
+        // The first named transcript keeps what was derived before any transcript was named.
+        if let Some(previous) = self.source.replace(path.to_owned()) {
+            let resumed = self.parked.remove(path);
+            if let Some(turn) = std::mem::replace(&mut self.open, resumed) {
+                self.parked.insert(previous, turn);
+            }
         }
     }
 
