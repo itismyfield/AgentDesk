@@ -118,29 +118,16 @@ pub async fn get(
     Ok(revalidated_json(&headers, &body))
 }
 
-/// `live` and `issue_drift` change without a new revision, so the ETag hashes the
-/// whole body (object keys serialize sorted); a matching If-None-Match gets 304.
+/// `live` and `issue_drift` change without a new revision, so the ETag hashes the whole body.
 fn revalidated_json(headers: &HeaderMap, body: &Value) -> Response {
     let body = body.to_string();
-    let etag = format!("\"{}\"", blake3::hash(body.as_bytes()).to_hex());
-    let unchanged = headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|tags| {
-            tags.split(',')
-                .map(|tag| tag.trim().trim_start_matches("W/"))
-                .any(|tag| tag == etag || tag == "*")
-        });
-    let mut response = if unchanged {
-        StatusCode::NOT_MODIFIED.into_response()
-    } else {
+    let etag = super::etag::json_etag(&body);
+    let mut response = super::etag::revalidate(headers, &etag, || {
         ([(header::CONTENT_TYPE, "application/json")], body).into_response()
-    };
-    let response_headers = response.headers_mut();
-    response_headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-    if let Ok(etag) = HeaderValue::from_str(&etag) {
-        response_headers.insert(header::ETAG, etag);
-    }
+    });
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     response
 }
 

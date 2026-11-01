@@ -1,7 +1,7 @@
 use axum::{
     Json,
     extract::{Query, State},
-    http::{HeaderValue, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
@@ -51,7 +51,7 @@ fn read_analytics_cache(key: &str) -> Option<CachedJson> {
 }
 
 fn write_analytics_cache(key: String, body: Value) -> CachedJson {
-    let etag = compute_etag(&body);
+    let etag = super::etag::json_etag(&body.to_string());
     let entry = CachedJson {
         cached_at: Instant::now(),
         body,
@@ -77,45 +77,6 @@ fn prune_expired_analytics_cache_entries(cache: &mut HashMap<String, CachedJson>
     let drop_count = cache.len() - ANALYTICS_CACHE_MAX_ENTRIES;
     for (key, _) in by_age.into_iter().take(drop_count) {
         cache.remove(&key);
-    }
-}
-
-/// #2049 Finding 10: deterministic ETag computed over a *canonicalized* JSON
-/// rendering of the response (BTreeMap-backed sort) and hashed with BLAKE3.
-/// `serde_json::to_string` of a `Value` whose underlying object is a `Map`
-/// uses insertion order, so the original `DefaultHasher` could see different
-/// strings for logically-equal payloads (e.g. across re-renders) and produce
-/// flapping ETags. Canonicalization + BLAKE3 fixes that.
-fn compute_etag(body: &Value) -> String {
-    let canonical = canonical_json_string(body);
-    let hash = blake3::hash(canonical.as_bytes());
-    let hex = hash.to_hex();
-    // 64-char hex hash is plenty for cache validation; truncate to 32 to keep
-    // the header tame.
-    format!("\"{}\"", &hex.as_str()[..32])
-}
-
-/// Canonical JSON serialization: object keys sorted lexically at every depth,
-/// arrays preserved in order. Used by `compute_etag` so two `Value`s that
-/// serialize the same data produce byte-identical strings regardless of
-/// HashMap iteration order.
-fn canonical_json_string(value: &Value) -> String {
-    let canonical = canonicalize(value);
-    serde_json::to_string(&canonical).unwrap_or_default()
-}
-
-fn canonicalize(value: &Value) -> Value {
-    match value {
-        Value::Object(map) => {
-            let mut sorted: std::collections::BTreeMap<String, Value> =
-                std::collections::BTreeMap::new();
-            for (k, v) in map {
-                sorted.insert(k.clone(), canonicalize(v));
-            }
-            Value::Object(sorted.into_iter().collect())
-        }
-        Value::Array(arr) => Value::Array(arr.iter().map(canonicalize).collect()),
-        other => other.clone(),
     }
 }
 
@@ -158,23 +119,26 @@ fn json_response<T: Serialize>(status: StatusCode, body: T) -> (StatusCode, Json
     (status, Json(response_value(body)))
 }
 
-fn build_analytics_response(entry: &CachedJson, cache_state: &'static str) -> Response {
-    let mut response = (StatusCode::OK, Json(entry.body.clone())).into_response();
+fn build_analytics_response(
+    request: &HeaderMap,
+    entry: &CachedJson,
+    cache_state: &'static str,
+) -> Response {
+    let mut response = super::etag::revalidate(request, &entry.etag, || {
+        (StatusCode::OK, Json(entry.body.clone())).into_response()
+    });
     let headers = response.headers_mut();
     headers.insert(
         "Cache-Control",
         HeaderValue::from_static("private, max-age=30, stale-while-revalidate=120"),
     );
-    if let Ok(value) = HeaderValue::from_str(&entry.etag) {
-        headers.insert("ETag", value);
-    }
     headers.insert("X-Analytics-Cache", HeaderValue::from_static(cache_state));
     response
 }
 
-fn cache_miss_response<T: Serialize>(cache_key: String, body: T) -> Response {
+fn cache_miss_response<T: Serialize>(request: &HeaderMap, cache_key: String, body: T) -> Response {
     let entry = write_analytics_cache(cache_key, response_value(body));
-    build_analytics_response(&entry, "miss")
+    build_analytics_response(request, &entry, "miss")
 }
 
 fn analytics_error(status: StatusCode, message: String) -> Response {
@@ -254,6 +218,7 @@ pub struct SkillsTrendQuery {
 pub async fn analytics(
     State(state): State<AppState>,
     Query(params): Query<AnalyticsQuery>,
+    headers: HeaderMap,
 ) -> Response {
     let filters = crate::services::observability::AnalyticsFilters {
         provider: params.provider.clone(),
@@ -273,7 +238,7 @@ pub async fn analytics(
         filters.event_limit,
     ));
     if let Some(entry) = read_analytics_cache(&cache_key) {
-        return build_analytics_response(&entry, "hit");
+        return build_analytics_response(&headers, &entry, "hit");
     }
 
     let Some(pool) = state.pg_pool_ref() else {
@@ -288,10 +253,10 @@ pub async fn analytics(
     let flight = singleflight_handle(&cache_key);
     let _guard = flight.lock().await;
     if let Some(entry) = read_analytics_cache(&cache_key) {
-        return build_analytics_response(&entry, "hit");
+        return build_analytics_response(&headers, &entry, "hit");
     }
     match analytics_service::query_analytics_pg(pool, &filters).await {
-        Ok(body) => cache_miss_response(cache_key, body),
+        Ok(body) => cache_miss_response(&headers, cache_key, body),
         Err(error) => analytics_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("query analytics: {error}"),
@@ -324,6 +289,7 @@ pub async fn policy_hooks(Query(params): Query<PolicyHooksQuery>) -> (StatusCode
 pub async fn invariants(
     State(state): State<AppState>,
     Query(params): Query<InvariantsQuery>,
+    headers: HeaderMap,
 ) -> Response {
     let filters = crate::services::observability::InvariantAnalyticsFilters {
         provider: params.provider.clone(),
@@ -339,7 +305,7 @@ pub async fn invariants(
         filters.limit,
     );
     if let Some(entry) = read_analytics_cache(&cache_key) {
-        return build_analytics_response(&entry, "hit");
+        return build_analytics_response(&headers, &entry, "hit");
     }
 
     let Some(pool) = state.pg_pool_ref() else {
@@ -349,7 +315,7 @@ pub async fn invariants(
         );
     };
     match analytics_service::query_invariants_pg(pool, &filters).await {
-        Ok(body) => cache_miss_response(cache_key, body),
+        Ok(body) => cache_miss_response(&headers, cache_key, body),
         Err(error) => analytics_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("query invariant analytics: {error}"),
@@ -361,13 +327,14 @@ pub async fn invariants(
 pub async fn activity_heatmap(
     State(state): State<AppState>,
     Query(params): Query<HeatmapQuery>,
+    headers: HeaderMap,
 ) -> Response {
     let date = params
         .date
         .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
     let cache_key = format!("activity_heatmap|{}", date);
     if let Some(entry) = read_analytics_cache(&cache_key) {
-        return build_analytics_response(&entry, "hit");
+        return build_analytics_response(&headers, &entry, "hit");
     }
 
     let Some(pool) = state.pg_pool_ref() else {
@@ -377,7 +344,7 @@ pub async fn activity_heatmap(
         );
     };
     match analytics_service::activity_heatmap_pg(pool, date).await {
-        Ok(body) => cache_miss_response(cache_key, body),
+        Ok(body) => cache_miss_response(&headers, cache_key, body),
         Err(error) => analytics_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("query activity heatmap: {error}"),
@@ -432,11 +399,12 @@ pub async fn rate_limits(State(state): State<AppState>) -> (StatusCode, Json<Val
 pub async fn skills_trend(
     State(state): State<AppState>,
     Query(params): Query<SkillsTrendQuery>,
+    headers: HeaderMap,
 ) -> Response {
     let days = params.days.unwrap_or(30).clamp(1, 90);
     let cache_key = format!("skills_trend|{}", days);
     if let Some(entry) = read_analytics_cache(&cache_key) {
-        return build_analytics_response(&entry, "hit");
+        return build_analytics_response(&headers, &entry, "hit");
     }
 
     let Some(pool) = state.pg_pool_ref() else {
@@ -463,6 +431,7 @@ pub async fn skills_trend(
     };
 
     cache_miss_response(
+        &headers,
         cache_key,
         analytics_service::skills_trend_from_days(usage.into_iter().map(|record| record.day)),
     )

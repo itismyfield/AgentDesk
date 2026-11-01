@@ -22,6 +22,7 @@ pub mod dm_reply;
 pub mod docs;
 mod domains;
 pub(crate) mod e2e_control;
+mod etag;
 pub mod escalation;
 mod execution_requirements;
 pub mod github;
