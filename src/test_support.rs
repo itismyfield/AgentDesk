@@ -1,6 +1,7 @@
-//! Test-only serialized runtimes and Rust source scanning for `include_str!` guards.
+//! Test-only serialized runtimes, E/P lock holder records, and Rust source scanning for `include_str!` guards.
 //! The lexer handles comments and literals without resolving names or evaluating `cfg`.
 
+pub(crate) mod lock_holder;
 pub(crate) mod serial_runtime;
 
 use std::fmt;

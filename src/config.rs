@@ -2882,6 +2882,7 @@ pub(crate) mod test_env_lock {
 
     impl Drop for SharedTestEnvLockGuard {
         fn drop(&mut self) {
+            crate::test_support::lock_holder::ENV_LOCK.release();
             SHARED_TEST_ENV_LOCK_HELD.with(|held| held.set(false));
         }
     }
@@ -2895,6 +2896,7 @@ pub(crate) mod test_env_lock {
         );
     }
 
+    #[track_caller]
     pub(crate) fn acquire_shared_test_env_lock() -> SharedTestEnvLockGuard {
         // Resolve the mutex first: the accessor carries the `E`-after-`P`
         // ordering tripwire, and running it before the re-entry flag is armed
@@ -2907,7 +2909,7 @@ pub(crate) mod test_env_lock {
             }
             held.set(true);
         });
-        let lock = mutex.lock().unwrap_or_else(|poison| poison.into_inner());
+        let lock = crate::test_support::lock_holder::ENV_LOCK.lock(mutex);
         SharedTestEnvLockGuard { _lock: lock }
     }
 }
@@ -2947,6 +2949,7 @@ pub(crate) struct PinnedRuntimeHost {
 /// one thread panics by design — which is why the root's env key is spelled out
 /// below rather than reached through that helper.
 #[cfg(test)]
+#[track_caller]
 pub(crate) fn pin_runtime_host_for_test() -> PinnedRuntimeHost {
     let env_lock = test_env_lock::acquire_shared_test_env_lock();
     let root = tempfile::tempdir().expect("tempdir");

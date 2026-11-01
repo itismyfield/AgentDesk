@@ -3,7 +3,9 @@ use crate::services::cluster::stream_relay::RelayProducer;
 use crate::services::discord::inflight::{
     InflightTurnIdentity, load_inflight_state, save_inflight_state,
 };
-use crate::services::discord::outbound::o_delivery_evidence::tests::{Fixture, bounded};
+use crate::services::discord::outbound::o_delivery_evidence::tests::{
+    Fixture, bounded, force_seam_stall,
+};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 thread_local! {
@@ -73,17 +75,10 @@ async fn plan(
     let provider = f.row.provider_kind().unwrap();
     let session = f.row.tmux_session_name.clone().unwrap();
     let output = f.source.path.display().to_string();
-    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+    let binding = crate::services::tui_o::cutover::test_override::bind_tui_session(
         &session,
-        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
-            runtime_kind: f.row.runtime_kind.unwrap(),
-            output_path: output.clone(),
-            relay_output_path: None,
-            input_fifo_path: None,
-            session_id: None,
-            last_offset: 0,
-            relay_last_offset: None,
-        },
+        f.row.runtime_kind.unwrap(),
+        &output,
     );
     let context = TerminalRelayPlanContext {
         evidence_source: Some((f.source.dev, f.source.ino)),
@@ -145,7 +140,7 @@ async fn plan(
     else {
         panic!("orphan seam bypassed")
     };
-    crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
+    drop(binding);
     flush_dlq_tasks().await;
     assert_eq!(result.watcher_direct_fallback_authorized, authorized);
     assert_eq!(
@@ -274,6 +269,111 @@ async fn i7441b_actual_o_terminal_denials_and_true_orphans_pg() {
     }
     pool.close().await;
     db.drop().await;
+}
+
+/// One real denial-0 terminal plan on its own thread: env lock, PG test DB, O fixture, binding.
+fn run_plan_case(
+    channel: u64,
+    stall: bool,
+    created: std::sync::mpsc::Sender<String>,
+) -> std::thread::Result<()> {
+    std::thread::Builder::new()
+        .name(format!("i7441 plan case {channel}"))
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let root = tempfile::tempdir().unwrap();
+                let _root = crate::config::set_agentdesk_root_for_test(root.path());
+                let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+                    "i7441_stall",
+                    "seam timeout cleanup",
+                )
+                .await;
+                created.send(db.database_name().to_string()).unwrap();
+                let pool = db.connect_and_migrate().await;
+                let f = Fixture::new(channel, ProviderKind::Claude, &["stalled tail"]).await;
+                let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
+                    channel,
+                    crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+                )]);
+                let (http, _http) = f.http().await;
+                let shared = crate::services::discord::make_shared_data_for_tests_with_storage(
+                    Some(pool.clone()),
+                );
+                save_inflight_state(&f.row).unwrap();
+                crate::services::discord::inflight::clear_inflight_state_for_captured_episode(
+                    &ProviderKind::Claude,
+                    channel,
+                    &InflightTurnIdentity::from_state(&f.row),
+                    f.row.turn_nonce.as_deref(),
+                );
+                if stall {
+                    force_seam_stall(
+                        "run_terminal_relay_plan",
+                        std::time::Duration::from_millis(300),
+                    );
+                }
+                plan(&f, &shared, &http, None, None, &mut None, false, (0, 0)).await;
+                pool.close().await;
+                db.drop().await;
+            })
+        })
+        .unwrap()
+        .join()
+}
+
+/// Whether `database` still exists on the shared PG test server.
+fn test_database_exists(database: &str) -> bool {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let admin_url = crate::dispatch::test_support::postgres_admin_database_url();
+            let admin = crate::db::postgres::connect_test_pool(&admin_url, "stall leak probe")
+                .await
+                .unwrap();
+            let found: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
+                    .bind(database)
+                    .fetch_one(&admin)
+                    .await
+                    .unwrap();
+            admin.close().await;
+            found
+        })
+}
+
+#[test]
+fn i7441_seam_timeout_unwinds_binding_and_test_db_for_the_next_test_pg() {
+    let (channel, session) = (744_900, "test-744900");
+    let (created, names) = std::sync::mpsc::channel();
+    let stalled = run_plan_case(channel, true, created.clone())
+        .expect_err("a stalled seam must fail its test");
+    let message = stalled
+        .downcast_ref::<String>()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        message.contains("run_terminal_relay_plan did not finish within 300ms"),
+        "{message}"
+    );
+    assert!(
+        crate::services::tui_prompt_dedupe::peek_tmux_runtime_binding(session).is_none(),
+        "the timed-out plan left its tmux runtime binding registered"
+    );
+    let stalled_db = names.recv().unwrap();
+    assert!(
+        !test_database_exists(&stalled_db),
+        "the timed-out test left PG test DB {stalled_db}"
+    );
+
+    run_plan_case(channel, false, created).expect("the next test runs on the released locks");
+    assert!(!test_database_exists(&names.recv().unwrap()));
+    assert!(crate::services::tui_prompt_dedupe::peek_tmux_runtime_binding(session).is_none());
 }
 
 #[tokio::test(flavor = "current_thread")]

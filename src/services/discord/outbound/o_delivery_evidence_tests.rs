@@ -104,13 +104,43 @@ pub(in crate::services::discord) fn snowflake(age_secs: i64) -> u64 {
 /// unbounded await parks every test waiting on them; a bound fails by name and unwinds both locks.
 const SEAM_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
 
+thread_local! {
+    static FORCED_STALL: std::cell::Cell<Option<(&'static str, std::time::Duration)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Makes `seam` never finish on this thread under `limit`, to drive the real timeout unwind.
+pub(in crate::services::discord) fn force_seam_stall(
+    seam: &'static str,
+    limit: std::time::Duration,
+) {
+    FORCED_STALL.set(Some((seam, limit)));
+}
+
 pub(in crate::services::discord) async fn bounded<T>(
     seam: &str,
     future: impl std::future::Future<Output = T>,
 ) -> T {
-    tokio::time::timeout(SEAM_LIMIT, future)
+    match FORCED_STALL.get() {
+        Some((stalled, limit)) if stalled == seam => {
+            let stall = async {
+                std::future::pending::<()>().await;
+                future.await
+            };
+            bounded_with(limit, seam, stall).await
+        }
+        _ => bounded_with(SEAM_LIMIT, seam, future).await,
+    }
+}
+
+pub(in crate::services::discord) async fn bounded_with<T>(
+    limit: std::time::Duration,
+    seam: &str,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    tokio::time::timeout(limit, future)
         .await
-        .unwrap_or_else(|_| panic!("{seam} did not finish within {SEAM_LIMIT:?}"))
+        .unwrap_or_else(|_| panic!("{seam} did not finish within {limit:?}"))
 }
 
 impl Fixture {
