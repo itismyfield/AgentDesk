@@ -1717,3 +1717,42 @@ fn body_reread_rejects_a_file_changed_mid_read() {
         }
     }
 }
+
+/// A reboot renumbers the transcript volume's dev while the writer keeps the source it stored, so
+/// the terminal manifest finds that source by path and inode; a file replaced at the path is not it.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn renumbered_source_keeps_its_terminal_manifest_but_a_replacement_does_not() {
+    use crate::services::tui_o::shadow::capture::{file_identity, renumber};
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let f = Fixture::new(744_800, ProviderKind::Claude, &["renumbered answer"]).await;
+    let live = || file_identity(&std::fs::metadata(&f.source.path).unwrap());
+    let query = |file| manifest::Query {
+        provider: &ProviderKind::Claude,
+        channel: f.row.channel_id,
+        path: &f.source.path,
+        file,
+        range: (f.row.turn_start_offset.unwrap(), f.row.last_offset),
+    };
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    let _reboot = renumber::shift(&f.source.path, 1 << 40);
+    let renumbered = live();
+    assert_eq!(renumbered, (f.source.dev ^ (1 << 40), f.source.ino));
+    let cursor =
+        delivery_evidence::source(&f.root, f.row.channel_id, &f.source.path, renumbered).unwrap();
+    assert_eq!(cursor.source, f.source);
+    let plan = manifest::build_terminal(&f.root, query(renumbered), deadline).unwrap();
+    assert_eq!((plan.source, plan.body), (f.source.clone(), f.body.clone()));
+
+    let _old_inode = std::fs::File::open(&f.source.path).unwrap();
+    let staged = f.source.path.with_extension("replacement");
+    std::fs::copy(&f.source.path, &staged).unwrap();
+    std::fs::rename(&staged, &f.source.path).unwrap();
+    let replaced = live();
+    assert_ne!(replaced.1, f.source.ino);
+    assert!(
+        delivery_evidence::source(&f.root, f.row.channel_id, &f.source.path, replaced).is_none()
+    );
+    assert!(manifest::build_terminal(&f.root, query(replaced), deadline).is_none());
+}
