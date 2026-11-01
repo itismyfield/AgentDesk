@@ -825,6 +825,11 @@
       "path": "migrations/postgres/0169_drop_voice_tables.sql",
       "sha256": "39bbaa9543324654e82fb5a632f69d8ae1fd1499474acfcdb2b4f336a5facd01",
       "version": 169
+    },
+    {
+      "path": "migrations/postgres/0170_routine_runs_newest_first_index.sql",
+      "sha256": "9525b92107be07f19d5415f216a604dc54edcc90e093463d170134a4bd1d88be",
+      "version": 170
     }
   ],
   "version": 1
