@@ -4,8 +4,8 @@ use super::*;
 use crate::services::discord::health::{HealthRegistry, register_bot_auth_for_tests};
 use crate::services::turn_orchestrator::ChannelMailboxHandle;
 
-/// The metadata the owner holds for a routine of `strategy` that the launch handed it.
-async fn admitted_metadata(strategy: &str) -> Value {
+/// The context the owner holds for a routine of `strategy` that the launch handed it.
+async fn admitted_context(strategy: &str) -> Value {
     let _root = crate::config::TestRuntimeRootGuard::new();
     settled_generation();
     let (handle, _) = owner().await;
@@ -64,17 +64,22 @@ async fn admitted_metadata(strategy: &str) -> Value {
     let context = context.await.unwrap().expect("admitted context");
     pool.close().await;
     db.drop().await;
-    context["metadata"].clone()
+    context
 }
 
 #[tokio::test]
 async fn a_persistent_routine_reaches_the_owner_persistent_and_a_fresh_one_fresh_pg() {
-    let persistent = admitted_metadata("persistent").await;
+    let context = admitted_context("persistent").await;
+    // What the legacy start would be given, so the owner's start resolves the same way.
+    assert_eq!(context["source"], "routine", "{context}");
+    assert!(context["channel_name_hint"].is_string(), "{context}");
+    assert!(context["synthetic_label"].is_string(), "{context}");
+    let persistent = context["metadata"].clone();
     assert_eq!(
         persistent["execution_strategy"], "persistent",
         "{persistent}"
     );
     assert!(persistent["routine_id"].is_string(), "{persistent}");
-    let fresh = admitted_metadata("fresh").await;
+    let fresh = admitted_context("fresh").await["metadata"].clone();
     assert_eq!(fresh["execution_strategy"], "fresh", "{fresh}");
 }

@@ -31,7 +31,7 @@ fn screen(draft: &str) -> Value {
 /// Every thread admits Herdr input, as an unstopped node does.
 fn open() {
     let stop = std::env::temp_dir().join(format!("adk-och-none-{}", uuid::Uuid::new_v4()));
-    std::mem::forget(force_for_test(Admission::new(None, Some(stop))));
+    std::mem::forget(force_for_test(Admission::new(true, Some(stop))));
 }
 
 /// A Bound Codex execution on a real rig's pane, owned by a logical session that is not its pane

@@ -354,7 +354,7 @@ fn a_dispatched_return_after_a_fresh_move_resumes_the_herdr_session_on_tmux_pg()
         let runtime = fx.rt.handle().clone();
         let run = scope.spawn(move || {
             let _runtime = runtime.enter();
-            execute(turn, start("test").unwrap(), sender)
+            execute(turn, start("test").unwrap(), sender, None)
         });
         eventually("the relaunch", || {
             relaunched().is_some() || run.is_finished()

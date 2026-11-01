@@ -141,7 +141,7 @@ fn attempt(channel: u64, logged: bool, writer: Option<&str>, screen: Value) -> A
     // Every thread admits Herdr input, as an unstopped node does.
     let open = || {
         let stop = std::env::temp_dir().join(format!("adk-oh-none-{}", uuid::Uuid::new_v4()));
-        std::mem::forget(force_for_test(Admission::new(None, Some(stop))));
+        std::mem::forget(force_for_test(Admission::new(true, Some(stop))));
     };
     open();
     let runtime = tokio::runtime::Builder::new_multi_thread()

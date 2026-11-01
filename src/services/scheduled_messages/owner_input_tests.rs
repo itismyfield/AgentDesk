@@ -45,6 +45,10 @@ async fn postgres_accepted_snapshot_waits_for_exact_owner_then_settles_recorded_
         let input=ChannelMailboxHandle::restore_owner_input(serde_json::from_str(error.strip_prefix("owner-input:").unwrap()).unwrap()).unwrap();
         assert!(input.original["text"].as_str().unwrap().contains("Frozen snapshot"));
         assert!(input.context["scheduled_snapshot_session_label"].is_string());
+        // The legacy start's source, channel hint and snapshot label, kept for the owner's start.
+        assert_eq!(input.context["source"], OUTBOX_SOURCE);
+        assert!(input.context["channel_name_hint"].is_string());
+        assert_eq!(input.context["synthetic_label"], input.context["scheduled_snapshot_session_label"]);
         let running=db::list_running_agent_deliveries_pg(&pool,"owner-poller",LEASE_SECS,10).await.unwrap().pop().expect("accepted input must be released to the poller in this tick");
         let empty_registry=ChannelMailboxRegistry::default();
         let empty=empty_registry.handle(poise::serenity_prelude::ChannelId::new(123456789));

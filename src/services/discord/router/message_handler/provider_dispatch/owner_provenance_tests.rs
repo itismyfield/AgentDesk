@@ -63,15 +63,11 @@ async fn legacy_and_owned(start: Start) -> (String, String) {
             legacy(&registry, (start.source, metadata, label, user)).await;
         } else {
             let context = kept(start.source, metadata, label, user, side);
-            let started = owned(&shared, context).await;
-            assert!(started.is_ok(), "the owner's start: {started:?}");
+            // The stub CLI ends the turn after its start resolved; only the choices are compared.
+            let _settled = owned(&shared, context).await;
         }
-        let resolved = STARTS_RESOLVED
-            .lock()
-            .unwrap()
-            .iter()
-            .rev()
-            .find(|s| s.0 == channel.get());
+        let starts = STARTS_RESOLVED.lock().unwrap().clone();
+        let resolved = starts.iter().rev().find(|(at, _)| *at == channel.get());
         let resolved = resolved.map(|(_, s)| s.clone()).unwrap_or_default();
         let resolved = resolved
             .replace(side, "SIDE")
@@ -184,10 +180,19 @@ async fn owned(shared: &Arc<SharedData>, context: Value) -> Result<(), String> {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(format!("{}.json", OWNED.get()));
     mailbox.v2_adopt(path, "input-owner".into()).await.unwrap();
+    // A process generation settles the synthetic original, as a running process has one.
+    let generation = crate::services::discord::runtime_store::generation_path().unwrap();
+    std::fs::create_dir_all(generation.parent().unwrap()).unwrap();
+    std::fs::write(generation, "5").unwrap();
     let turn = format!("discord:{}:9100000000000757002", OWNED.get());
     let (original, ticket) = routine::synthetic_original(&turn, OWNED.get(), PROMPT, 1)?;
     let admitted = admission::admit_with_context(&mailbox, &original, ticket, context).await;
-    assert!(matches!(admitted, admission::Admission::Accepted(_)));
+    let admitted = match admitted {
+        admission::Admission::Accepted(_) => Ok(()),
+        admission::Admission::Pending(_) => Err("pending".to_string()),
+        admission::Admission::Rejected(reason) => Err(format!("{reason:?}")),
+    };
+    assert_eq!(admitted, Ok(()), "the start is admitted");
     let granted = mailbox.v2_request(|slot| {
         let owner = slot.as_mut().ok_or("no owner")?;
         let front = owner.front().ok_or("no front")?;

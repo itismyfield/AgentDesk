@@ -106,7 +106,7 @@ impl crate::services::codex_tui::busy_inject::Ledger for Typing<'_> {
 fn attempt(rig: &Rig, case: usize, ledger: &Typing<'_>) -> (Outcome, usize) {
     let _registry = rig.rig.registry_on_this_thread();
     std::mem::forget(force_for_test(Admission::new(
-        None,
+        true,
         Some(std::env::temp_dir().join(format!("adk-bch-none-{}", uuid::Uuid::new_v4()))),
     )));
     let nonce = format!("{case:032x}");

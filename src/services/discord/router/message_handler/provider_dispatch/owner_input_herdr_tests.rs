@@ -259,6 +259,8 @@ impl HerdrOwner {
             model: None,
             hook_endpoint: None,
             cancel: None,
+            session_id: None,
+            force_fresh: false,
         }
     }
 
@@ -771,5 +773,5 @@ fn owned_herdr_ready_before_content_pins_the_bound_pane() {
 /// Herdr input admitted on this thread, as on an unstopped node.
 fn admit_herdr_here() {
     let stop = std::env::temp_dir().join(format!("adk-oh-none-{}", uuid::Uuid::new_v4()));
-    std::mem::forget(force_for_test(Admission::new(None, Some(stop))));
+    std::mem::forget(force_for_test(Admission::new(true, Some(stop))));
 }
