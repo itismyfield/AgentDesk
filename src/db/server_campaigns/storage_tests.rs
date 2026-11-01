@@ -948,7 +948,7 @@ async fn later_branch_migrations_upgrade_a_main_database_already_at_0161_pg() {
                 "!table:agent_quality_daily",
                 "!table:quality_regression_cooldowns",
                 "!table:agent_prompt_commits",
-                "!column:agents.xp",
+                "column:agents.xp",
             ],
         ),
         (
@@ -957,6 +957,8 @@ async fn later_branch_migrations_upgrade_a_main_database_already_at_0161_pg() {
                 "!table:voice_turn_link",
                 "!table:voice_background_handoff_meta",
                 "!table:voice_transcript_announcement_meta",
+                "!function:voice_background_handoff_meta_touch_updated_at",
+                "!function:voice_transcript_announcement_meta_touch_updated_at",
             ],
         ),
         (

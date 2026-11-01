@@ -817,13 +817,13 @@
       "version": 167
     },
     {
-      "path": "migrations/postgres/0168_drop_meetings_quality_rollups_xp.sql",
-      "sha256": "91f50ded9d7b8e382eb34d2c4abffe660957f6dd7f4b533ae5e6ef6c80fc1bee",
+      "path": "migrations/postgres/0168_drop_meetings_quality_rollups.sql",
+      "sha256": "b19657cd28a7ecafc2c4dbb714bd702b7358cd938576ee767a30ff35db776e19",
       "version": 168
     },
     {
       "path": "migrations/postgres/0169_drop_voice_tables.sql",
-      "sha256": "39bbaa9543324654e82fb5a632f69d8ae1fd1499474acfcdb2b4f336a5facd01",
+      "sha256": "30ca1b3182efd5d644b85cc12e5094f389d7da774f50e20a506be4ce62ae67db",
       "version": 169
     },
     {
