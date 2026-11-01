@@ -79,6 +79,11 @@ pub(crate) fn classify(socket: &Path, os: &dyn PresenceOs) -> Presence {
 
 /// `classify`, setting aside the launchers in `excused`: ones already waited out.
 pub(crate) fn classify_except(socket: &Path, os: &dyn PresenceOs, excused: &[u32]) -> Presence {
+    scan(socket, os, excused).0
+}
+
+/// The presence, and every launcher of this one process table that selects the socket.
+fn scan(socket: &Path, os: &dyn PresenceOs, excused: &[u32]) -> (Presence, Vec<u32>) {
     let mut kind = AbsentKind::NoFile;
     for reading in 0..CONFIRMATIONS {
         if reading > 0 {
@@ -86,19 +91,20 @@ pub(crate) fn classify_except(socket: &Path, os: &dyn PresenceOs, excused: &[u32
         }
         match once(socket, os) {
             Ok(absent) => kind = absent,
-            Err(other) => return other,
+            Err(other) => return (other, Vec::new()),
         }
     }
     let Some(dir) = socket.parent() else {
-        return Presence::Unknown(Unknown::SocketDirMissing);
+        return (Presence::Unknown(Unknown::SocketDirMissing), Vec::new());
     };
     if !os.local_filesystem(dir) {
-        return Presence::Unknown(Unknown::NotLocalFilesystem);
+        return (Presence::Unknown(Unknown::NotLocalFilesystem), Vec::new());
     }
     let processes = match os.herdr_processes() {
         Ok(processes) => processes,
-        Err(why) => return Presence::Unknown(Unknown::ProcessTable(why)),
+        Err(why) => return (Presence::Unknown(Unknown::ProcessTable(why)), Vec::new()),
     };
+    let mut launchers = Vec::new();
     for process in processes {
         let selection = match (&process.argv, &process.environ) {
             (Some(argv), Some(environ)) => super::selector::select(argv, environ),
@@ -108,21 +114,35 @@ pub(crate) fn classify_except(socket: &Path, os: &dyn PresenceOs, excused: &[u32
             },
         };
         let waited_out = selection.role == Role::Launcher && excused.contains(&process.pid);
-        if selection.role == Role::Other || waited_out {
-            continue;
-        }
-        if selection
+        let selects = selection
             .socket
             .as_deref()
-            .is_none_or(|path| same_socket(path, socket))
-        {
-            return Presence::Unknown(Unknown::HerdrProcess {
-                pid: process.pid,
-                role: selection.role,
-            });
+            .is_none_or(|path| same_socket(path, socket));
+        if selection.role == Role::Other || waited_out || !selects {
+            continue;
         }
+        if selection.role != Role::Launcher {
+            let role = selection.role;
+            return (
+                Presence::Unknown(Unknown::HerdrProcess {
+                    pid: process.pid,
+                    role,
+                }),
+                Vec::new(),
+            );
+        }
+        launchers.push(process.pid);
     }
-    Presence::Absent(kind)
+    match launchers.first() {
+        Some(&pid) => {
+            let role = Role::Launcher;
+            (
+                Presence::Unknown(Unknown::HerdrProcess { pid, role }),
+                launchers,
+            )
+        }
+        None => (Presence::Absent(kind), launchers),
+    }
 }
 
 /// Rounds a launcher seen at the first reading gets to start its server; each round is one
@@ -132,17 +152,13 @@ pub(crate) const GRACE_ROUNDS: usize = 30;
 /// The presence a start may act on and the launchers waited out: one still idle after the grace is
 /// set aside (a client that only reconnects), while one appearing during it refuses this attempt.
 pub(crate) fn settle(socket: &Path, os: &dyn PresenceOs, rounds: usize) -> (Presence, Vec<u32>) {
-    let mut excused = Vec::new();
-    let mut presence = classify(socket, os);
-    while let Presence::Unknown(Unknown::HerdrProcess {
-        pid,
-        role: Role::Launcher,
-    }) = presence
-    {
-        excused.push(pid);
-        presence = classify_except(socket, os, &excused);
+    // Only the launchers of the first table get the grace; one seen later refuses this attempt.
+    let (mut presence, excused) = scan(socket, os, &[]);
+    if excused.is_empty() {
+        return (presence, excused);
     }
-    if excused.is_empty() || !matches!(presence, Presence::Absent(_)) {
+    presence = classify_except(socket, os, &excused);
+    if !matches!(presence, Presence::Absent(_)) {
         return (presence, excused);
     }
     for _ in 0..rounds {

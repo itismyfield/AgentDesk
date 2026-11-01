@@ -369,6 +369,28 @@ fn a_launcher_appearing_in_the_grace_refuses_this_attempt() {
 }
 
 #[test]
+fn only_the_launchers_of_the_first_table_get_the_grace() {
+    let one = vec![process(42, &[], &[])];
+    let two = vec![process(42, &[], &[]), process(43, &[], &[])];
+    // 43 appears at the second table, while the first one's launchers are being set aside.
+    let late = Timeline::new(vec![one.clone(), two.clone(), one], None);
+    let (presence, excused) = settle(Path::new(SOCKET), &late, 30);
+    let launcher = |pid| {
+        Presence::Unknown(Unknown::HerdrProcess {
+            pid,
+            role: Role::Launcher,
+        })
+    };
+    assert_eq!((presence, excused), (launcher(43), vec![42]));
+    let both = Timeline::new(vec![two], None);
+    let (presence, excused) = settle(Path::new(SOCKET), &both, 2);
+    assert_eq!(
+        (presence, excused),
+        (Presence::Absent(AbsentKind::NoFile), vec![42, 43])
+    );
+}
+
+#[test]
 fn a_server_selecting_the_socket_gets_no_grace() {
     let binding = Timeline::new(vec![vec![process(41, &["server"], &[])]], None);
     let (presence, excused) = settle(Path::new(SOCKET), &binding, 30);
