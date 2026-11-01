@@ -540,7 +540,10 @@ fn idle_sends_the_same_sequence_without_receipt_or_restore_verdicts() {
             admitted: Cell::new(true),
         };
         let request = request(&name);
-        assert_eq!(run(&authority, true, &request), InputRun::Applied);
+        assert_eq!(
+            run(&authority, true, (&request, &Default::default())),
+            InputRun::Applied
+        );
         wait("one Enter", || events(&root).len() == 3);
         assert_eq!(events(&root), ["C-s", "paste", "Enter"]);
         assert_eq!(fs::read_to_string(root.join("body")).unwrap(), PROMPT);
@@ -579,7 +582,7 @@ fn idle_menu_blocks_every_key_and_empty_or_unread_never_stashes() {
             admitted: Cell::new(true),
         };
         let request = request(&name);
-        let got = run(&authority, allowed, &request);
+        let got = run(&authority, allowed, (&request, &Default::default()));
         if expected.is_empty() {
             assert!(matches!(got, InputRun::Refused(_)));
         } else {
@@ -610,11 +613,13 @@ fn idle_fence_and_revoked_authority_precede_every_key() {
         admitted: Cell::new(false),
     };
     assert!(matches!(
-        run(&authority, true, &request),
+        run(&authority, true, (&request, &Default::default())),
         InputRun::Refused(_)
     ));
     authority.admitted.set(true);
-    let got = with_scope(Some(Arc::new(Fence)), || run(&authority, true, &request));
+    let got = with_scope(Some(Arc::new(Fence)), || {
+        run(&authority, true, (&request, &Default::default()))
+    });
     assert_eq!(got, refused(Refusal::SubmissionFence));
     assert!(events(&root).is_empty());
 }
@@ -664,7 +669,7 @@ esac
         fs::write(dir.path().join("before"), before).unwrap();
         fs::write(dir.path().join("calls"), "").unwrap();
         fs::write(dir.path().join("events"), "").unwrap();
-        let result = run(&authority, allowed, &request);
+        let result = run(&authority, allowed, (&request, &Default::default()));
         if expected.is_empty() {
             assert!(matches!(result, InputRun::Refused(_)));
         } else {
@@ -685,13 +690,16 @@ esac
     fs::write(dir.path().join("events"), "").unwrap();
     fs::write(&transcript, "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"go\"}}\n{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"working\"}]}}\n").unwrap();
     assert!(observe_claude_jsonl_turn_state(&transcript).is_busy());
-    assert_eq!(run(&authority, true, &request), InputRun::Applied);
+    assert_eq!(
+        run(&authority, true, (&request, &Default::default())),
+        InputRun::Applied
+    );
     assert_eq!(events(dir.path()), ["paste", "Enter"]);
 
     fs::write(dir.path().join("calls"), "").unwrap();
     fs::write(dir.path().join("events"), "").unwrap();
     let contended = composer_lock::with_composer_mutation_lock("scripted-idle", || {
-        run(&authority, true, &request)
+        run(&authority, true, (&request, &Default::default()))
     });
     assert_eq!(contended, refused(Refusal::WriterContended));
     assert_eq!(fs::read_to_string(dir.path().join("calls")).unwrap(), "");

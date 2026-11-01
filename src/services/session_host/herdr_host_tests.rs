@@ -1969,6 +1969,11 @@ fn herdr_items_have_no_production_caller() {
         ),
         // Consent reads the registered launch adapter; it never constructs or routes to a host.
         ("src/services/discord/router/herdr_consent.rs", 0),
+        // The owner front reads its registered Herdr pane through the endpoints, never a host.
+        (
+            "src/services/discord/router/message_handler/provider_dispatch/owner_input.rs",
+            0,
+        ),
     ];
     const NEEDLES: &[&str] = &[
         "HerdrHost",

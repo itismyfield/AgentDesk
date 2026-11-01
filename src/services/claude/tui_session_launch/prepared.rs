@@ -83,3 +83,82 @@ pub(super) fn prepare(
     );
     Ok((prepared, command))
 }
+
+/// A requested session whose transcript is gone, launched as a fresh session in its place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::services::claude) struct FreshSubstitution {
+    pub requested: String,
+    pub substituted: String,
+    pub missing_transcript: std::path::PathBuf,
+}
+
+/// The launch's native session: the requested one when its transcript exists, otherwise a fresh
+/// one that names the session it replaced.
+pub(in crate::services::claude) fn resolve(
+    working_dir: &std::path::Path,
+    requested_session_id: Option<&str>,
+    claude_home: Option<&std::path::Path>,
+) -> Result<(ClaudeTuiSessionResolution, Option<FreshSubstitution>), String> {
+    use crate::services::claude_tui::transcript_tail::claude_transcript_path;
+    let session_id = match requested_session_id {
+        Some(sid) if is_valid_session_id(sid) => sid.to_string(),
+        Some(_) => return Err("Invalid session ID format".to_string()),
+        None => uuid::Uuid::new_v4().to_string(),
+    };
+    let transcript_path = claude_transcript_path(working_dir, &session_id, claude_home)?;
+    if requested_session_id.is_none() || transcript_path.exists() {
+        let resume = requested_session_id.is_some();
+        let resolution = ClaudeTuiSessionResolution {
+            session_id,
+            transcript_path,
+            resume,
+        };
+        return Ok((resolution, None));
+    }
+    let fresh = uuid::Uuid::new_v4().to_string();
+    let resolution = ClaudeTuiSessionResolution {
+        transcript_path: claude_transcript_path(working_dir, &fresh, claude_home)?,
+        session_id: fresh.clone(),
+        resume: false,
+    };
+    let substitution = FreshSubstitution {
+        requested: session_id,
+        substituted: fresh,
+        missing_transcript: transcript_path,
+    };
+    Ok((resolution, Some(substitution)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A requested session without a transcript reports which fresh session replaced it; a live
+    /// transcript resumes and no request starts fresh, neither reporting a substitution.
+    #[test]
+    fn forced_fresh_reports_substitution() {
+        let (cwd, home) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let resolve = |sid| resolve(cwd.path(), sid, Some(home.path())).unwrap();
+        let stale = uuid::Uuid::new_v4().to_string();
+        let (resolution, substitution) = resolve(Some(&stale));
+        let substitution = substitution.expect("a missing transcript is a substitution");
+        assert_eq!(substitution.requested, stale);
+        assert_eq!(substitution.substituted, resolution.session_id);
+        assert_ne!(resolution.session_id, stale);
+        assert!(!resolution.resume);
+        assert!(
+            substitution
+                .missing_transcript
+                .ends_with(format!("{stale}.jsonl"))
+        );
+        std::fs::create_dir_all(substitution.missing_transcript.parent().unwrap()).unwrap();
+        std::fs::write(&substitution.missing_transcript, "").unwrap();
+        let (resumed, none) = resolve(Some(&stale));
+        assert_eq!(
+            (resumed.session_id, resumed.resume, none),
+            (stale.clone(), true, None)
+        );
+        let (fresh, none) = resolve(None);
+        assert_eq!((fresh.resume, none), (false, None));
+    }
+}

@@ -8,6 +8,15 @@ pub(crate) fn hydrate_pending_queue_into_state(
     persistence: QueuePersistenceContext,
     restored_override: Option<ChannelId>,
 ) -> HydratePendingQueueResult {
+    // A V2 owner holds the queue: what a V1 read found (a foreign writer's file) is never hydrated.
+    #[cfg(test)]
+    if let Some(queue_len_after) = state.v2_len() {
+        return HydratePendingQueueResult {
+            queue_len_after,
+            persistence_error: Some("the V2 owner holds this queue; V1 hydrate refused".into()),
+            ..Default::default()
+        };
+    }
     state.last_persistence = Some(persistence.clone());
     // Items read from a file a clear could not rewrite were discarded by that clear.
     let mut disk_items = match queue_trusted(state, &persistence) {

@@ -1850,7 +1850,14 @@ async fn a_deliver_waiting_on_a_handback_claims_behind_it_and_the_kick_runs_the_
                     let start =
                         crate::services::discord::queue_io::mailbox_try_start_turn_behind_queue;
                     let token = Arc::new(CancelToken::new());
-                    let claimed = start(&shared, kicked, token, head.author_id, head.message_id);
+                    let claimed = start(
+                        &shared,
+                        kicked,
+                        token,
+                        head.author_id,
+                        head.message_id,
+                        None,
+                    );
                     let claimed = claimed.await;
                     drop(lease);
                     format!("{} claimed={claimed}", head.text)
@@ -1916,7 +1923,15 @@ async fn a_headless_claim_returns_the_token_it_registered() {
         };
         let claim = crate::services::discord::router::claim_reserved_headless_turn;
         let identity = (ProviderKind::Claude, None);
-        let claimed = claim(&shared, channel, UserId::new(100), &reservation, identity).await;
+        let claimed = claim(
+            &shared,
+            channel,
+            UserId::new(100),
+            &reservation,
+            identity,
+            None,
+        )
+        .await;
         let Ok((_transition, token)) = claimed else {
             panic!("an idle channel claims");
         };

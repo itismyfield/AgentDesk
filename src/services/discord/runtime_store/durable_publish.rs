@@ -302,7 +302,6 @@ pub(crate) fn critical_publish_status(
     }
 }
 
-#[cfg(test)]
 pub(crate) fn retry_published_status(path: &Path, context: AtomicWriteContext<'_>) -> FlushStatus {
     let status = flush_published(&trusted_root(&context), path);
     log_flush_status(path, &context, &status);

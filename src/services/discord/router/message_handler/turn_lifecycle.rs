@@ -17,7 +17,10 @@ pub(in crate::services::discord) async fn mailbox_try_start_turn_with_terminal_m
     cancel_token: Arc<CancelToken>,
     request_owner: UserId,
     user_msg_id: MessageId,
-    session_key: Option<&str>,
+    (session_key, front): (
+        Option<&str>,
+        Option<crate::services::turn_orchestrator::OwnerFront>,
+    ),
 ) -> bool {
     // #5937 — every bail-out below returns through this one closure, so none of
     // them can drift back to the unordered claim that lets text intake overtake
@@ -31,6 +34,7 @@ pub(in crate::services::discord) async fn mailbox_try_start_turn_with_terminal_m
             cancel_token,
             request_owner,
             user_msg_id,
+            front,
         )
         .await
     };
@@ -241,7 +245,7 @@ mod tests {
             Arc::new(CancelToken::new()),
             UserId::new(5_937),
             arrival,
-            None,
+            (None, None),
         )
         .await;
 

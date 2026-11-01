@@ -142,6 +142,30 @@ fn recovery_known_id_arms(
     arms
 }
 
+/// Ids a read-only V2 queue file keeps count as queued, so catch-up never takes them again on a
+/// binary that cannot write that file; an input owner holding the file admits by ticket instead.
+pub(in crate::services::discord) async fn merge_v2_held_sources(
+    shared: &crate::services::discord::SharedData,
+    channel: poise::serenity_prelude::ChannelId,
+    arms: &mut std::collections::HashMap<u64, RecoveryKnownIdArm>,
+    ids: &mut std::collections::HashSet<u64>,
+) {
+    #[cfg(test)]
+    if shared
+        .mailbox(channel)
+        .v2_request(|slot| Ok(slot.is_some()))
+        .await
+        == Ok(true)
+    {
+        return;
+    }
+    let held = crate::services::turn_orchestrator::v2_held_sources;
+    for id in held(&shared.provider, &shared.token_hash, channel) {
+        arms.entry(id).or_insert(RecoveryKnownIdArm::Queued);
+        ids.insert(id);
+    }
+}
+
 #[cfg(test)]
 pub(in crate::services::discord) fn recovery_known_message_ids(
     snapshot: &ChannelMailboxSnapshot,

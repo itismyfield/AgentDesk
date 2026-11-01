@@ -1146,24 +1146,21 @@ pub(crate) fn inject_steering_prompt(session_name: &str, prompt: &str) -> Result
 /// remained in the editor.
 pub(crate) use super::host_input::submit_codex_followup_prompt;
 
-pub(super) fn submit_codex_followup_prompt_under_lock(
+/// The submit plan of `prompt` and the pane bytes of the one snapshot taken before the prompt's
+/// keys; only `dismiss` lets it clear an action banner first. The caller holds the composer lock.
+pub(crate) fn admit_codex_prompt_under_lock(
     session_name: &str,
     prompt: &str,
-    cancel_token: Option<&CancelToken>,
-    effect: Option<&super::host_input::VerifiedEffect<'_>>,
-) -> CodexFollowupPromptSubmitOutcome {
-    let actions = match plan_prompt_submit(prompt) {
-        Ok(actions) => actions,
-        Err(error) => {
-            return CodexFollowupPromptSubmitOutcome::NotSubmitted { error };
-        }
-    };
+    dismiss: bool,
+) -> Result<(Vec<TuiInputAction>, Option<String>), String> {
+    let actions = plan_prompt_submit(prompt)?;
     // The warm-flow post-wait probe cannot make the send atomic with tmux.
     // Take one final canonical snapshot immediately before mutating the
     // composer so a just-arrived user draft or active turn is never appended
     // to or submitted as the Discord follow-up.
     let (mut final_snapshot, mut before) = submission_snapshot_with_pane(session_name);
-    if snapshot_allows_guarded_submission(&final_snapshot)
+    if dismiss
+        && snapshot_allows_guarded_submission(&final_snapshot)
         && inline_banner::pane_has_dismissible_action_banner(&final_snapshot.pane_tail)
     {
         let _ = inline_banner::dismiss_action_banner_once(session_name);
@@ -1172,10 +1169,21 @@ pub(super) fn submit_codex_followup_prompt_under_lock(
     if !snapshot_allows_guarded_submission(&final_snapshot)
         || inline_banner::pane_has_dismissible_action_banner(&final_snapshot.pane_tail)
     {
-        return CodexFollowupPromptSubmitOutcome::NotSubmitted {
-            error: "Codex TUI warm follow-up final pane snapshot rejected submit".to_string(),
-        };
+        return Err("Codex TUI warm follow-up final pane snapshot rejected submit".to_string());
     }
+    Ok((actions, before))
+}
+
+pub(super) fn submit_codex_followup_prompt_under_lock(
+    session_name: &str,
+    prompt: &str,
+    cancel_token: Option<&CancelToken>,
+    effect: Option<&super::host_input::VerifiedEffect<'_>>,
+) -> CodexFollowupPromptSubmitOutcome {
+    let (actions, before) = match admit_codex_prompt_under_lock(session_name, prompt, true) {
+        Ok(admitted) => admitted,
+        Err(error) => return CodexFollowupPromptSubmitOutcome::NotSubmitted { error },
+    };
     let submit = match effect {
         Some(effect) => host_input::run_prompt_submission_guarded(
             session_name,

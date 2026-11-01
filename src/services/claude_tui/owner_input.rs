@@ -23,6 +23,9 @@ struct Scope {
     known_before: AtomicBool,
     keyed: AtomicBool,
     holder: crate::services::tui_input::writer_lease::Holder,
+    /// A Herdr owner's physical writer `socket_path#pane_id`; `target.owner` stays the logical
+    /// session history names.
+    writer: Mutex<Option<String>>,
     #[cfg(unix)]
     epoch: Mutex<Option<crate::services::tui_input::target_epoch::LiveEpoch>>,
     refused: Mutex<Option<submission_fence::PreSubmitPersistenceRefused>>,
@@ -97,6 +100,29 @@ pub(crate) fn load_failed() {
     }
 }
 
+/// The leaf's typed veto came before any key; a key already sent keeps it from proving unsent,
+/// and a refusal the scope already recorded keeps its own reason.
+#[cfg(unix)]
+pub(crate) fn vetoed(reason: &str) {
+    if let Some(scope) = current()
+        && !scope.keyed.load(Ordering::SeqCst)
+        && (scope.refused.lock().unwrap_or_else(|e| e.into_inner())).is_none()
+    {
+        scope.refuse(format!("vetoed: {reason}"));
+    }
+}
+
+/// The first payload key, with no C-s before it, was held before tmux ran it: nothing reached
+/// the pane, so the attempt still proves not-sent.
+#[cfg(unix)]
+pub(crate) fn first_key_held(reason: &str) {
+    if let Some(scope) = current() {
+        scope.allowed.store(false, Ordering::SeqCst);
+        scope.keyed.store(false, Ordering::SeqCst);
+    }
+    vetoed(reason);
+}
+
 /// `None` without an owner on this thread; otherwise whether this owner may write `physical`,
 /// holding it for the owner's lifetime. A foreign host or tmux owner fails closed.
 pub(crate) fn hold_content(host: &str, physical: &str, key: &str) -> Option<Result<(), String>> {
@@ -111,9 +137,35 @@ pub(crate) fn hold_content(host: &str, physical: &str, key: &str) -> Option<Resu
             "owner {} cannot write {key}",
             scope.target["owner"]
         ))
+    } else if host == "herdr" && !scope.holds_writer(physical) {
+        Err(format!(
+            "owner writer {:?} cannot write {key}",
+            scope.writer()
+        ))
     } else {
         scope.holder.hold(key)
     })
+}
+
+/// Couples a Herdr owner to the physical writer its launch or binding observed, once; another
+/// writer later is refused. Without an owner it does nothing.
+#[cfg(unix)]
+pub(crate) fn bind_writer(physical: &str) -> Result<(), String> {
+    let Some(scope) = current() else {
+        return Ok(());
+    };
+    if scope.target["host"] != "herdr" {
+        return Err("only a Herdr owner binds a physical writer".into());
+    }
+    let mut writer = scope.writer.lock().unwrap_or_else(|e| e.into_inner());
+    match writer.as_deref() {
+        Some(bound) if bound != physical => Err(format!("writer {bound} cannot become {physical}")),
+        Some(_) => Ok(()),
+        None => {
+            *writer = Some(physical.into());
+            Ok(())
+        }
+    }
 }
 
 /// The pinned pane id and the identity condition the tmux server checks atomically around an
@@ -188,6 +240,9 @@ impl submission_fence::SubmissionFence for Scope {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
+    fn stash_any_channel(&self) -> bool {
+        true
+    }
     fn idle_stash_context(&self) -> Option<submission_fence::IdleStashContext> {
         Some(submission_fence::IdleStashContext {
             channel: self.channel,
@@ -238,7 +293,118 @@ impl guarded_outcome::Owner for Scope {
         }
     }
 }
-#[cfg(all(test, unix))]
+/// Writes the reserved frame as a created execution's first prompt inside the owner's scope.
+#[cfg(unix)]
+pub(crate) type CreatedSubmit =
+    Box<dyn FnOnce(String) -> Result<(), guarded_outcome::SubmissionError> + Send>;
+/// What the driver observed of the execution it hands over: created now, pending from an earlier
+/// launch, or already bound.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Lineage {
+    Created,
+    Pending,
+    Existing,
+}
+/// The first prompt of an execution this thread's driver observed: its lineage, its own target
+/// and source read after the create or attach, its physical writer, and the driver's submit.
+#[cfg(unix)]
+pub(crate) type LaunchHook = Box<
+    dyn FnOnce(
+        Lineage,
+        serde_json::Value,
+        serde_json::Value,
+        Option<String>,
+        CreatedSubmit,
+    ) -> Result<(), String>,
+>;
+/// A driver's first prompt either failed before the owner took it, as any launch failure, or was
+/// settled by the owner, which leaves no observer, resend or teardown to the driver.
+#[cfg(unix)]
+#[derive(Debug)]
+pub(crate) enum OwnedLaunch {
+    Before(guarded_outcome::SubmissionError),
+    Settled(String),
+}
+#[cfg(unix)]
+impl From<guarded_outcome::SubmissionError> for OwnedLaunch {
+    fn from(error: guarded_outcome::SubmissionError) -> Self {
+        Self::Before(error)
+    }
+}
+#[cfg(unix)]
+impl From<String> for OwnedLaunch {
+    fn from(error: String) -> Self {
+        Self::Before(error.into())
+    }
+}
+#[cfg(unix)]
+thread_local! { static LAUNCH: RefCell<Option<LaunchHook>> = const { RefCell::new(None) }; }
+
+/// The owner waiting for the first prompt of the execution this thread's launch creates; `None`
+/// leaves the launch's own first prompt as it is.
+#[cfg(unix)]
+pub(crate) fn launch_hook() -> Option<LaunchHook> {
+    LAUNCH.with(|hook| hook.borrow_mut().take())
+}
+
+/// Refuses a write that is not the created execution's first prompt while an owner waits for it.
+#[cfg(unix)]
+pub(crate) fn launch_refuses_live() -> Result<(), String> {
+    match LAUNCH.with(|hook| hook.borrow().is_some()) {
+        true => Err("owner launch: a live session takes no first prompt".into()),
+        false => Ok(()),
+    }
+}
+
+/// The created tmux execution's target, read from its spawn marker and binding context as the
+/// owner's live epoch reads them.
+#[cfg(unix)]
+pub(crate) fn created_tmux_target(
+    provider: &str,
+    session: &str,
+) -> Result<serde_json::Value, String> {
+    use crate::services::tui_prompt_dedupe::binding_context::{self, SpawnNonceMarker};
+    let SpawnNonceMarker::Known(nonce) = binding_context::observe_spawn_nonce_marker(session)
+    else {
+        return Err("created session has no known spawn nonce".into());
+    };
+    let context = binding_context::execution_context(provider, &nonce)?;
+    if context.tmux_session != session {
+        return Err("created session names another execution".into());
+    }
+    Ok(serde_json::json!({"host":"tmux","owner":session,
+        "root":context.owner_runtime_root,"execution_nonce":nonce}))
+}
+
+/// Hands this thread's next created first prompt to `hook` until the guard drops.
+#[cfg(unix)]
+pub(crate) fn install_launch(hook: LaunchHook) -> LaunchGuard {
+    LAUNCH.with(|slot| *slot.borrow_mut() = Some(hook));
+    LaunchGuard
+}
+#[cfg(unix)]
+pub(crate) struct LaunchGuard;
+#[cfg(unix)]
+impl LaunchGuard {
+    /// A driver that ended well without handing its first prompt over wrote nothing owned.
+    pub(crate) fn finish(self, driven: Result<(), String>) -> Result<(), String> {
+        match driven {
+            Ok(()) if LAUNCH.with(|hook| hook.borrow().is_some()) => {
+                Err("NotSent(\"launch_not_owned\")".into())
+            }
+            other => other,
+        }
+    }
+}
+#[cfg(unix)]
+impl Drop for LaunchGuard {
+    fn drop(&mut self) {
+        LAUNCH.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+#[cfg(unix)]
 pub(crate) fn capture_scope<R>(
     provider: String,
     target: serde_json::Value,
@@ -265,6 +431,7 @@ pub(crate) fn capture_scope<R>(
         known_before: AtomicBool::new(false),
         keyed: AtomicBool::new(false),
         holder: Default::default(),
+        writer: Mutex::new(None),
         epoch: Mutex::new(None),
         refused: Mutex::new(None),
     });
@@ -352,10 +519,30 @@ impl Scope {
         *self.refused.lock().unwrap_or_else(|e| e.into_inner()) =
             Some(submission_fence::PreSubmitPersistenceRefused { reason });
     }
+    fn writer(&self) -> Option<String> {
+        self.writer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+    /// Whether this Herdr owner writes `physical`; an owner its launch bound to no pane takes
+    /// the pane of its first content write and no other after it.
+    fn holds_writer(&self, physical: &str) -> bool {
+        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        writer.get_or_insert_with(|| physical.into()) == physical
+    }
     fn ready(&self) -> Result<(), ReadyRefusal> {
         if self.target["host"] != "tmux" {
-            return (self.pin)(None, "herdr:conservative-writer".into())
-                .map_err(ReadyRefusal::Lease);
+            // Before any content names its pane, the owner pins its own target, never all Herdr.
+            let physical = self.writer().unwrap_or_else(|| {
+                let (root, owner) = (&self.target["root"], &self.target["owner"]);
+                format!(
+                    "{}#{}",
+                    root.as_str().unwrap_or(""),
+                    owner.as_str().unwrap_or("")
+                )
+            });
+            return (self.pin)(None, format!("herdr:{physical}")).map_err(ReadyRefusal::Lease);
         }
         #[cfg(unix)]
         {
@@ -391,12 +578,10 @@ fn pin_key(record: &PaneEpoch) -> Result<String, String> {
     ))
     .map_err(|e| e.to_string())
 }
-#[cfg(test)]
 pub(crate) struct NotSentProof {
     attempt: serde_json::Value,
     reason: String,
 }
-#[cfg(test)]
 impl NotSentProof {
     pub(crate) fn into_reason(self, key: &serde_json::Value) -> Result<String, String> {
         if self.attempt != *key {

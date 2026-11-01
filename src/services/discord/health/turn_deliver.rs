@@ -7,6 +7,8 @@ mod inject_codex_tests;
 #[cfg(all(test, unix))]
 pub(crate) mod inject_tests;
 mod prepared;
+#[cfg(test)]
+mod start_outcome_tests;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -23,6 +25,8 @@ use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::{
     Intervention, InterventionMode, SourceMessageQueuedGeneration,
 };
+#[cfg(unix)]
+pub(in crate::services::discord) use inject::CodexLedger;
 use inject::InjectMode;
 pub(crate) use inject::{
     InjectAttempt, Origin as InjectOrigin, SOURCE_OWNED, attempt as inject_human_input,
@@ -115,10 +119,33 @@ pub(crate) async fn preflight_human_input(
 }
 
 enum StartAttempt {
+    Accepted(String),
     Started(String),
     Busy,
     Unavailable(String),
     InvalidTarget(String),
+}
+
+impl From<Result<router::HeadlessTurnStartOutcome, router::HeadlessTurnStartError>>
+    for StartAttempt
+{
+    fn from(
+        result: Result<router::HeadlessTurnStartOutcome, router::HeadlessTurnStartError>,
+    ) -> Self {
+        match result {
+            Ok(outcome) => {
+                if outcome.status.is_accepted() {
+                    Self::Accepted(outcome.turn_id)
+                } else {
+                    // Command consumption keeps the legacy delivery response.
+                    Self::Started(outcome.turn_id)
+                }
+            }
+            Err(router::HeadlessTurnStartError::Conflict(_)) => Self::Busy,
+            Err(router::HeadlessTurnStartError::InvalidTarget(error)) => Self::InvalidTarget(error),
+            Err(router::HeadlessTurnStartError::Internal(error)) => Self::Unavailable(error),
+        }
+    }
 }
 
 /// What holds the mailbox slot when a start was refused.
@@ -216,6 +243,10 @@ trait DeliveryPorts: Send + Sync {
     async fn enqueue(&self) -> Result<String, String>;
     fn inject_mode(&self) -> InjectMode;
     async fn try_inject(&self) -> InjectAttempt;
+    /// Whether the channel's input owner takes this input; then no pane is written here.
+    async fn owner_takes(&self) -> bool {
+        false
+    }
 }
 
 async fn deliver_with_ports<P: DeliveryPorts>(
@@ -223,7 +254,7 @@ async fn deliver_with_ports<P: DeliveryPorts>(
 ) -> Result<HumanInputDelivery, HumanInputError> {
     // A busy TUI pane takes the input whoever holds it; a veto keeps the start-or-queue below.
     let mut inject_veto = None;
-    if ports.inject_mode() != InjectMode::Off {
+    if ports.inject_mode() != InjectMode::Off && !ports.owner_takes().await {
         match ports.try_inject().await {
             InjectAttempt::NotSent(veto) => inject_veto = Some(veto.to_string()),
             InjectAttempt::Injected { turn_id } => {
@@ -253,6 +284,13 @@ async fn deliver_with_ports<P: DeliveryPorts>(
     }
     if ports.external_hold().await.is_none() {
         match ports.try_start().await {
+            StartAttempt::Accepted(turn_id) => {
+                return Ok(HumanInputDelivery::Queued {
+                    turn_id,
+                    reason: "accepted".to_string(),
+                    inject_veto,
+                });
+            }
             StartAttempt::Started(turn_id) => return Ok(HumanInputDelivery::Started { turn_id }),
             StartAttempt::Unavailable(error) => {
                 return Err(HumanInputError::RuntimeUnavailable(error));
@@ -275,6 +313,13 @@ async fn deliver_with_ports<P: DeliveryPorts>(
         // A refused start with an empty slot is a session transition or a turn
         // that just ended; one more start attempt avoids queueing behind nothing.
         (MailboxHolder::Nothing, None) => match ports.try_start().await {
+            StartAttempt::Accepted(turn_id) => {
+                return Ok(HumanInputDelivery::Queued {
+                    turn_id,
+                    reason: "accepted".to_string(),
+                    inject_veto,
+                });
+            }
             StartAttempt::Started(turn_id) => return Ok(HumanInputDelivery::Started { turn_id }),
             StartAttempt::Unavailable(error) => {
                 return Err(HumanInputError::RuntimeUnavailable(error));
@@ -337,7 +382,7 @@ impl DeliveryPorts for LivePorts {
             return StartAttempt::Unavailable(imsg_reply::UNBOUND.to_string());
         }
         match self.start_reserved(reservation).await {
-            StartAttempt::Started(turn_id) => StartAttempt::Started(turn_id),
+            committed @ (StartAttempt::Started(_) | StartAttempt::Accepted(_)) => committed,
             _ if !reply.release_episode(&episode).await => {
                 StartAttempt::Unavailable(imsg_reply::UNBOUND.to_string())
             }
@@ -381,6 +426,12 @@ impl DeliveryPorts for LivePorts {
 
     fn inject_mode(&self) -> InjectMode {
         inject::mode(self.request.channel_id.get())
+    }
+
+    async fn owner_takes(&self) -> bool {
+        let (provider, channel) = (&self.request.provider, self.request.channel_id);
+        super::super::queue_io::input_ingress::adopt(&self.shared, provider, channel).await
+            != Ok(false)
     }
 
     async fn try_inject(&self) -> InjectAttempt {
@@ -438,16 +489,7 @@ impl LivePorts {
             reservation,
         )
         .await;
-        match result {
-            Ok(outcome) => StartAttempt::Started(outcome.turn_id),
-            Err(router::HeadlessTurnStartError::Conflict(_)) => StartAttempt::Busy,
-            Err(router::HeadlessTurnStartError::InvalidTarget(error)) => {
-                StartAttempt::InvalidTarget(error)
-            }
-            Err(router::HeadlessTurnStartError::Internal(error)) => {
-                StartAttempt::Unavailable(error)
-            }
-        }
+        result.into()
     }
 }
 
@@ -681,6 +723,7 @@ mod tests {
         mode: InjectMode,
         inject: InjectAttempt,
         injects: AtomicUsize,
+        owner: bool,
     }
 
     fn ports(starts: Vec<StartAttempt>, holder: MailboxHolder) -> FakePorts {
@@ -694,6 +737,7 @@ mod tests {
             mode: InjectMode::Off,
             inject: InjectAttempt::Injected { turn_id: None },
             injects: AtomicUsize::new(0),
+            owner: false,
         }
     }
 
@@ -721,6 +765,20 @@ mod tests {
             self.injects.fetch_add(1, Ordering::SeqCst);
             self.inject.clone()
         }
+        async fn owner_takes(&self) -> bool {
+            self.owner
+        }
+    }
+
+    /// A channel its input owner holds takes no health pane write: the input goes to the start,
+    /// which the owner admits.
+    #[tokio::test]
+    async fn an_owner_channel_skips_the_pane_injection() {
+        let accepted = StartAttempt::Accepted("discord:7:2".into());
+        let mut fake = ports(vec![accepted], MailboxHolder::Turn);
+        (fake.mode, fake.owner) = (InjectMode::All, true);
+        assert_eq!(run(&fake).await, "queued discord:7:2 accepted enqueue=0");
+        assert_eq!(fake.injects.load(Ordering::SeqCst), 0);
     }
 
     /// `<delivery> <turn_id> [reason] [veto=..] enqueue=N` for compact expectations.

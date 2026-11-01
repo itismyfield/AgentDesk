@@ -17,7 +17,25 @@ use crate::services::stream_json_cli::{
 use crate::services::turn_host::{HerdrRefusal, HerdrTurnPlan, ReturnPlan, TurnHost};
 use crate::services::{claude, claude_tui, codex, gemini, opencode, qwen};
 
+#[cfg(unix)]
+mod owner_input;
+#[cfg(unix)]
+pub(in crate::services::discord) use owner_input::{
+    OwnerTurn, admit_start as owner_admit_start, recover as owner_recover, wake as owner_wake,
+};
 pub(super) mod replay_scope;
+
+/// No input owner runs a turn off unix.
+#[cfg(not(unix))]
+pub(in crate::services::discord) enum OwnerTurn {}
+#[cfg(not(unix))]
+impl OwnerTurn {
+    pub(in crate::services::discord) fn front(
+        &self,
+    ) -> &crate::services::turn_orchestrator::OwnerFront {
+        match *self {}
+    }
+}
 
 pub(super) struct StreamingTurn<'a> {
     pub pool: Option<&'a sqlx::PgPool>,
@@ -240,6 +258,7 @@ pub(super) fn execute(
     turn: StreamingTurn<'_>,
     start: ReplayStart,
     sender: Sender<StreamMessage>,
+    owner: Option<OwnerTurn>,
 ) -> Result<(), String> {
     let start = if start.receipt_id().is_some() {
         let scope = replay_scope::selected(turn.provider, turn.channel_id, turn.tmux_session_name);
@@ -257,6 +276,32 @@ pub(super) fn execute(
     start
         .spend(&target, turn.prompt, &turn.cancel)
         .map_err(|refusal| format!("replay start refused: {refusal:?}"))?;
+    // The session comes back from Herdr first, then the owner or the driver runs it on tmux under
+    // a clearance that tears nothing down.
+    let (tmux, returned, mut turn) = (TurnHost::Tmux, TeardownClearance::Returned, turn);
+    if let TurnHost::Return(plan) = turn.host {
+        return_to_tmux(&turn, plan)?;
+        (turn.host, turn.teardown) = (&tmux, Some(&returned));
+    }
+    #[cfg(unix)]
+    if let Some(owner) = owner {
+        return owner_input::execute_owned(turn, sender, owner);
+    }
+    #[cfg(not(unix))]
+    if let Some(owner) = owner {
+        match owner {}
+    }
+    #[cfg(all(test, unix))]
+    match owner_input::take(&turn) {
+        Some(owner_input::Taken::Done(result)) => return result,
+        Some(owner_input::Taken::Launch(guard)) => return guard.finish(drive(turn, sender)),
+        None => {}
+    }
+    drive(turn, sender)
+}
+
+/// The turn's driver, Herdr or tmux, after its start was spent.
+fn drive(turn: StreamingTurn<'_>, sender: Sender<StreamMessage>) -> Result<(), String> {
     match turn.host {
         TurnHost::Tmux => {}
         TurnHost::Refused(refusal) => return Err(refusal.to_string()),
@@ -266,18 +311,9 @@ pub(super) fn execute(
                 herdr_turn(&turn, plan, sender)
             });
         }
-        // The session comes back from Herdr, then runs on tmux under a clearance that tears
-        // nothing down.
-        TurnHost::Return(plan) => return_to_tmux(&turn, plan)?,
+        // `execute` brings a returning session back before any driver runs.
+        TurnHost::Return(_) => return Err("herdr return: not returned before the turn".into()),
     }
-    let returned = TeardownClearance::Returned;
-    let turn = match turn.host {
-        TurnHost::Return(_) => StreamingTurn {
-            teardown: Some(&returned),
-            ..turn
-        },
-        _ => turn,
-    };
     #[cfg(test)]
     count_dispatch(turn.channel_id)?;
     #[cfg(test)]
@@ -961,7 +997,7 @@ pub(super) mod tests {
                 submission: None,
             };
             tokio::task::block_in_place(|| {
-                execute(turn, crate::services::discord::router::intake_dispatch::replay_admission::dormant_start("test").unwrap(), sender)
+                execute(turn, crate::services::discord::router::intake_dispatch::replay_admission::dormant_start("test").unwrap(), sender, None)
             })
         };
 

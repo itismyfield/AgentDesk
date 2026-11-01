@@ -256,6 +256,18 @@ fn a_failed_launch_under_another_account_never_moves_the_running_session_s_accou
 // ends it, then the Herdr one, by one `/exit` each; its tmux turn resumes the Herdr session.
 #[test]
 fn a_dispatched_return_after_a_fresh_move_resumes_the_herdr_session_on_tmux_pg() {
+    dispatched_return(false);
+}
+
+/// The owner's input on a channel whose session returns from Herdr runs once that session is back
+/// on tmux, and the channel's next input is a plain tmux turn.
+#[test]
+fn an_owned_input_returns_the_herdr_session_to_tmux_before_it_runs_pg() {
+    dispatched_return(true);
+}
+
+fn dispatched_return(owned: bool) {
+    use super::super::owner_input::tests::claimed_owner_turn;
     use crate::db::dispatched_sessions::hosted_execution::{
         HostedLookup, HostedLookupKey, load_hosted_execution_pg,
     };
@@ -319,6 +331,8 @@ fn a_dispatched_return_after_a_fresh_move_resumes_the_herdr_session_on_tmux_pg()
         let stamped = std::fs::read_to_string(&spawn).unwrap_or_default();
         Some(stamped.trim().to_owned()).filter(|nonce| ![&n0, &n1].contains(&nonce))
     };
+    let owned = owned.then(|| fx.rt.block_on(claimed_owner_turn(CHANNEL, "질문")));
+    let (owner, settled) = owned.unzip();
     let cancel = Arc::new(CancelToken::new());
     let (sender, _receiver) = std::sync::mpsc::channel();
     let provider = ProviderKind::Claude;
@@ -354,7 +368,7 @@ fn a_dispatched_return_after_a_fresh_move_resumes_the_herdr_session_on_tmux_pg()
         let runtime = fx.rt.handle().clone();
         let run = scope.spawn(move || {
             let _runtime = runtime.enter();
-            execute(turn, start("test").unwrap(), sender)
+            execute(turn, start("test").unwrap(), sender, owner)
         });
         eventually("the relaunch", || {
             relaunched().is_some() || run.is_finished()
@@ -366,6 +380,18 @@ fn a_dispatched_return_after_a_fresh_move_resumes_the_herdr_session_on_tmux_pg()
     assert_eq!(stand_in.tmux.lock().unwrap().exits, 1);
     assert_eq!(stand_in.herdr.lock().unwrap().exits, 1);
     assert_eq!(fx.row(), Some(HostedState::Retired));
+    let next = crate::services::turn_host::for_turn(Some(&fx.pool), &provider, CHANNEL, Some(&key));
+    let next = fx.rt.block_on(next);
+    assert!(
+        matches!(next, TurnHost::Tmux),
+        "the next input runs on tmux"
+    );
+    // The owner's input goes to the relaunched execution and waits for its resumed start, which
+    // this fixture sends only after the turn was cancelled.
+    if let Some(settled) = settled {
+        let awaited = format!("no resumed start of {s_b} by {n2}");
+        assert_eq!(settled.blocking_recv(), Ok(Err(awaited)), "{ended:?}");
+    }
     let context = execution_context("claude", &n2).unwrap();
     let resumed = (
         context.launch_mode.as_str(),

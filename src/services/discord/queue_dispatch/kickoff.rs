@@ -117,6 +117,12 @@ async fn kickoff_queue_channel_inner(
     lane: KickoffLane,
 ) -> IdleQueueKickoffChannelOutcome {
     let shared = deps.shared;
+    // An owner's queue is driven by its owner after a completion, never dequeued here.
+    #[cfg(unix)]
+    if queue_io::input_ingress::installed(&shared.mailbox(channel_id)).await == Ok(true) {
+        router::message_handler::owner_wake(shared, channel_id);
+        return IdleQueueKickoffChannelOutcome::default();
+    }
     let settings_snapshot = shared.settings.read().await.clone();
     let thread_parent = match session_runtime::validate_rest_channel_routing_with_parent(
         deps.http,
@@ -202,16 +208,7 @@ async fn kickoff_queue_channel_inner(
         return IdleQueueKickoffChannelOutcome::default();
     };
 
-    let owner_name = if intervention.author_id.get() <= 1 {
-        "system".to_string()
-    } else {
-        intervention
-            .author_id
-            .to_user(deps.http)
-            .await
-            .map(|u| u.name.clone())
-            .unwrap_or_else(|_| format!("user-{}", intervention.author_id.get()))
-    };
+    let owner_name = queued_owner_name(deps.http, intervention.author_id).await;
 
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
@@ -343,6 +340,20 @@ async fn kickoff_queue_channel_inner(
 /// turn running. This bridges the gap where restored pending queues or
 /// handoff injections sit idle because no turn-completion event triggers
 /// the dequeue chain.
+/// The name a queued turn runs under: its author's Discord name, or a stable stand-in.
+pub(in crate::services::discord) async fn queued_owner_name(
+    http: &serenity::Http,
+    author: UserId,
+) -> String {
+    match author.get() {
+        0 | 1 => "system".to_string(),
+        id => author
+            .to_user(http)
+            .await
+            .map_or_else(|_| format!("user-{id}"), |u| u.name),
+    }
+}
+
 pub(in crate::services::discord) async fn kickoff_idle_queues(
     ctx: &serenity::Context,
     shared: &Arc<SharedData>,

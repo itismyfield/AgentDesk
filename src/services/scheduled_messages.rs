@@ -17,6 +17,10 @@ use std::sync::Arc;
 
 pub(crate) mod context_snapshot;
 mod evidence;
+mod owner_input;
+use owner_input::AgentTurnStartDisposition;
+#[cfg(test)]
+use owner_input::start_disposition;
 mod external_delivery;
 pub(crate) mod provider_targets;
 mod push_handoff;
@@ -50,7 +54,7 @@ pub(crate) const LEASE_SECS: i64 = 120;
 /// late live turn cannot race a second user-visible delivery.
 const AGENT_COMPLETION_TIMEOUT_SECS: i64 = 1800;
 const RUNTIME_DEFER_SECS: i64 = 15;
-const OUTBOX_SOURCE: &str = "scheduled_message";
+pub(crate) const OUTBOX_SOURCE: &str = "scheduled_message";
 
 // ── Scheduler loop ──────────────────────────────────────────────────────────
 
@@ -211,6 +215,7 @@ async fn fire_agent(pool: &PgPool, health_registry: Option<&HealthRegistry>, fir
         return;
     };
     match start_agent_turn(pool, health_registry, fire).await {
+        Ok(AgentTurnStartDisposition::Accepted | AgentTurnStartDisposition::Pending) => {}
         Ok(AgentTurnStartDisposition::Started) => {
             // Delivery stays running; poll_agent_delivery owns completion.
         }
@@ -253,17 +258,6 @@ async fn fire_agent(pool: &PgPool, health_registry: Option<&HealthRegistry>, fir
             }
         }
     }
-}
-
-enum AgentTurnStartDisposition {
-    Started,
-    /// A lifecycle command was consumed before provider/bridge spawn. Repeating
-    /// it could repeat the lifecycle side effect, so terminalize instead.
-    Consumed(String),
-    /// #4658: the referenced context snapshot could not be validated
-    /// (missing/digest mismatch) and `on_context_failure='fail'`. Deterministic —
-    /// no re-arm; terminalize the delivery with the recorded reason.
-    SnapshotInvalid(String),
 }
 
 fn runtime_defer_until(now: DateTime<Utc>) -> DateTime<Utc> {
@@ -417,6 +411,21 @@ async fn start_agent_turn(
         *target.borrow_mut() = Some((provider.clone(), owner_channel.get(), turn_channel.get()));
     });
 
+    let target = (turn_id.as_str(), turn_channel_num, prompt.as_str());
+    let started_as = (
+        Some(primary_channel.as_str()),
+        snapshot_session_label.as_deref(),
+    );
+    let owned = owner_input::owned(
+        pool,
+        fire,
+        target,
+        (&provider, metadata.as_ref(), started_as),
+    );
+    if let Some(disposition) = owned.await? {
+        return Ok(disposition);
+    }
+
     let outcome = start_reserved_headless_agent_turn_with_owner_channel(
         health_registry,
         owner_channel,
@@ -432,58 +441,7 @@ async fn start_agent_turn(
     .await
     .map_err(|error| anyhow!("start scheduled message turn for {agent_id}: {error}"))?;
 
-    if outcome.status.as_str() != "started" {
-        return Ok(AgentTurnStartDisposition::Consumed(turn_id));
-    }
-
-    // `HeadlessTurnStartError` is a pre-spawn contract. After `Started`, never
-    // bubble a database/mismatch problem into the retry path: the committed
-    // launch is ambiguous and a replacement could duplicate a late relay.
-    if outcome.turn_id != turn_id {
-        tracing::error!(
-            expected_turn_id = turn_id,
-            actual_turn_id = outcome.turn_id,
-            "[smsg] started turn id mismatched its reservation; leaving launch committed and fail-closed"
-        );
-    } else {
-        match db::mark_delivery_agent_turn_started_pg(
-            pool,
-            &message.id,
-            &fire.delivery_id,
-            &fire.claim_token,
-            &turn_id,
-            LEASE_SECS,
-        )
-        .await
-        {
-            Ok(true) => {}
-            Ok(false) => tracing::warn!(
-                delivery_id = fire.delivery_id,
-                turn_id,
-                "[smsg] launched turn could not record its runtime acknowledgement; launch remains fail-closed"
-            ),
-            Err(error) => tracing::warn!(
-                delivery_id = fire.delivery_id,
-                turn_id,
-                "[smsg] failed to record runtime acknowledgement; launch remains fail-closed: {error}"
-            ),
-        }
-    }
-    match db::release_agent_delivery_to_poller_pg(pool, &fire.delivery_id, &fire.claim_token).await
-    {
-        Ok(true) => {}
-        Ok(false) => tracing::warn!(
-            delivery_id = fire.delivery_id,
-            turn_id,
-            "[smsg] started turn could not be released to poller; lease adoption will recover it"
-        ),
-        Err(error) => tracing::warn!(
-            delivery_id = fire.delivery_id,
-            turn_id,
-            "[smsg] failed to release started turn to poller; lease adoption will recover it: {error}"
-        ),
-    }
-    Ok(AgentTurnStartDisposition::Started)
+    Ok(owner_input::consume_start(pool, fire, &turn_id, outcome).await)
 }
 
 pub(crate) fn build_agent_prompt(message: &ScheduledMessageRow) -> String {
@@ -525,6 +483,19 @@ async fn poll_agent_delivery(pool: &PgPool, delivery: RunningAgentDelivery) -> b
         return false;
     };
 
+    let mut connection = match pool.acquire().await {
+        Ok(connection) => connection,
+        Err(_) => return false,
+    };
+    match owner_input::may_observe(&mut connection, &delivery).await {
+        Ok(true) => {}
+        Ok(false) => return false,
+        Err(error) => {
+            tracing::warn!(delivery_id=delivery.delivery_id,%error,"[smsg] owner observation stopped");
+            return false;
+        }
+    }
+    drop(connection);
     match find_turn_delivery_evidence(
         pool,
         &delivery.delivery_id,
@@ -634,6 +605,9 @@ async fn resolve_agent_delivery_inner(
         return Ok(false);
     }
 
+    if !owner_input::may_observe(&mut tx, delivery).await? {
+        return Ok(false);
+    }
     let evidence = find_turn_delivery_evidence_on_connection(
         &mut tx,
         &delivery.delivery_id,
@@ -1236,5 +1210,20 @@ mod tests {
         assert!(!agent_start_error_is_runtime_unavailable(&anyhow::anyhow!(
             "agent mailbox is busy for channel 123"
         )));
+    }
+}
+
+#[cfg(test)]
+mod accepted_classification_tests {
+    use super::*;
+    #[test]
+    fn accepted_is_never_a_consumed_command() {
+        assert!(!matches!(
+            start_disposition(
+                crate::services::discord::HeadlessTurnStartStatus::Accepted,
+                "same-turn"
+            ),
+            AgentTurnStartDisposition::Consumed(_)
+        ));
     }
 }

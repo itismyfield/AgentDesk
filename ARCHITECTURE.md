@@ -878,6 +878,7 @@ src/
 │   │   │   ├── ownership.rs
 │   │   │   ├── receipt.rs
 │   │   │   ├── receipt_interleave_tests.rs
+│   │   │   ├── receipt_scope_tests.rs
 │   │   │   ├── screen.rs
 │   │   │   ├── screen_identity_tests.rs
 │   │   │   ├── screen_tests.rs
@@ -923,7 +924,8 @@ src/
 │   │   │   ├── host_draft.rs
 │   │   │   ├── host_draft_tests.rs
 │   │   │   ├── mod.rs
-│   │   │   └── warm_followup.rs
+│   │   │   ├── warm_followup.rs
+│   │   │   └── warm_followup_owner_tests.rs
 │   │   ├── input/
 │   │   │   ├── tests/
 │   │   │   │   └── prompt_ready_setup_tests.rs
@@ -1092,6 +1094,8 @@ src/
 │   │   ├── herdr_turn/
 │   │   │   ├── first_input/
 │   │   │   │   └── pg_tests.rs
+│   │   │   ├── busy.rs
+│   │   │   ├── busy_tests.rs
 │   │   │   ├── composer_tests.rs
 │   │   │   └── first_input.rs
 │   │   ├── tui_session_launch/
@@ -1186,6 +1190,8 @@ src/
 │   ├── discord/
 │   │   ├── abandon_request_store/
 │   │   │   └── probe_contract_tests.rs
+│   │   ├── agent_handoff/
+│   │   │   └── accepted_tests.rs
 │   │   ├── busy_followup_retry_store/
 │   │   │   ├── hold_release_tests.rs
 │   │   │   ├── policy.rs
@@ -1212,6 +1218,7 @@ src/
 │   │   │   ├── i7441_tests.rs
 │   │   │   ├── injected_catch_up_tests.rs
 │   │   │   ├── merged_alias_tests.rs
+│   │   │   ├── owner_pending_recovery_tests.rs
 │   │   │   ├── phase1_sweep.rs
 │   │   │   ├── phase2.rs
 │   │   │   ├── phase2_age_tests.rs
@@ -1467,7 +1474,8 @@ src/
 │   │   │   │   ├── inject_codex_tests.rs
 │   │   │   │   ├── inject_codex_v2_tests.rs
 │   │   │   │   ├── inject_tests.rs
-│   │   │   │   └── prepared.rs
+│   │   │   │   ├── prepared.rs
+│   │   │   │   └── start_outcome_tests.rs
 │   │   │   ├── unbound_owners/
 │   │   │   │   └── tests.rs
 │   │   │   ├── watcher_respawn/
@@ -1516,6 +1524,7 @@ src/
 │   │   │   ├── http_force_purge_tests.rs
 │   │   │   ├── http_force_terminal_tests.rs
 │   │   │   ├── http_force_tests.rs
+│   │   │   ├── http_force_v2_tests.rs
 │   │   │   ├── http_force_writer_tests.rs
 │   │   │   ├── retired_exclusion.rs
 │   │   │   └── root_replaced.rs
@@ -1792,6 +1801,31 @@ src/
 │   │   │   ├── input_effect_tests.rs
 │   │   │   └── kickoff.rs
 │   │   ├── queue_io/
+│   │   │   ├── input_owner/
+│   │   │   │   ├── effect/
+│   │   │   │   │   ├── codex.rs
+│   │   │   │   │   ├── codex_herdr_tests.rs
+│   │   │   │   │   ├── herdr.rs
+│   │   │   │   │   └── herdr_tests.rs
+│   │   │   │   ├── admission.rs
+│   │   │   │   ├── admission_tests.rs
+│   │   │   │   ├── drive.rs
+│   │   │   │   ├── drive_tests.rs
+│   │   │   │   ├── effect.rs
+│   │   │   │   ├── effect_tests.rs
+│   │   │   │   ├── ingress.rs
+│   │   │   │   ├── ingress_tests.rs
+│   │   │   │   ├── mod.rs
+│   │   │   │   ├── notice.rs
+│   │   │   │   ├── notice_tests.rs
+│   │   │   │   ├── origin.rs
+│   │   │   │   ├── pump.rs
+│   │   │   │   ├── pump_tests.rs
+│   │   │   │   ├── recovery.rs
+│   │   │   │   ├── routine.rs
+│   │   │   │   ├── start.rs
+│   │   │   │   ├── start_tests.rs
+│   │   │   │   └── target.rs
 │   │   │   ├── transport/
 │   │   │   │   └── tests.rs
 │   │   │   ├── auto_queue_eligibility.rs
@@ -1804,7 +1838,9 @@ src/
 │   │   │   ├── queued_head_inject.rs
 │   │   │   ├── queued_head_inject_tests.rs
 │   │   │   ├── queued_head_mend_tests.rs
+│   │   │   ├── queued_head_owner_entry_tests.rs
 │   │   │   ├── retained_notice.rs
+│   │   │   ├── retained_notice_tests.rs
 │   │   │   ├── transport.rs
 │   │   │   ├── turn_admission.rs
 │   │   │   └── turn_admission_tests.rs
@@ -1974,6 +2010,7 @@ src/
 │   │   │   │   │   ├── codex_turn_hold.rs
 │   │   │   │   │   ├── fallback_queued_tests.rs
 │   │   │   │   │   ├── final_guards.rs
+│   │   │   │   │   ├── owner_ingress_tests.rs
 │   │   │   │   │   ├── replay_hold.rs
 │   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   ├── attachment.rs
@@ -2070,6 +2107,12 @@ src/
 │   │   │   │   │   ├── system_prompt_tests.rs
 │   │   │   │   │   └── worker_entry.rs
 │   │   │   │   ├── provider_dispatch/
+│   │   │   │   │   ├── owner_input.rs
+│   │   │   │   │   ├── owner_input_codex_tests.rs
+│   │   │   │   │   ├── owner_input_herdr_tests.rs
+│   │   │   │   │   ├── owner_input_not_sent_tests.rs
+│   │   │   │   │   ├── owner_input_tests.rs
+│   │   │   │   │   ├── owner_provenance_tests.rs
 │   │   │   │   │   ├── producer_error_test_support.rs
 │   │   │   │   │   └── replay_scope.rs
 │   │   │   │   ├── provider_isolation/
@@ -2093,6 +2136,8 @@ src/
 │   │   │   │   ├── input_payload.rs
 │   │   │   │   ├── intake_turn.rs
 │   │   │   │   ├── latency_spans.rs
+│   │   │   │   ├── owned_turn_start.rs
+│   │   │   │   ├── owned_turn_start_tests.rs
 │   │   │   │   ├── pre_admission_control.rs
 │   │   │   │   ├── provider_dispatch.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_activation_tests.rs
@@ -3388,6 +3433,7 @@ src/
 │   │   └── upgrade.rs
 │   ├── queue/
 │   │   ├── cancel_effects.rs
+│   │   ├── cancel_effects_v2_tests.rs
 │   │   ├── herdr_stop.rs
 │   │   └── http_force.rs
 │   ├── qwen/
@@ -3415,12 +3461,19 @@ src/
 │   │   │   ├── execution.rs
 │   │   │   ├── launch.rs
 │   │   │   ├── owned_session.rs
+│   │   │   ├── owner_custody_tests.rs
+│   │   │   ├── owner_input.rs
+│   │   │   ├── owner_input_tests.rs
+│   │   │   ├── owner_launch_tests.rs
+│   │   │   ├── owner_review_tests.rs
 │   │   │   ├── reliability.rs
 │   │   │   └── start_deferral.rs
 │   │   ├── discord_log/
 │   │   │   └── failure_alert.rs
 │   │   ├── loader/
 │   │   │   └── discovery.rs
+│   │   ├── store/
+│   │   │   └── agent_start.rs
 │   │   ├── action.rs
 │   │   ├── agent_executor.rs
 │   │   ├── discord_log.rs
@@ -3438,6 +3491,8 @@ src/
 │   │   ├── context_snapshot.rs
 │   │   ├── evidence.rs
 │   │   ├── external_delivery.rs
+│   │   ├── owner_input.rs
+│   │   ├── owner_input_tests.rs
 │   │   ├── postgres_tests.rs
 │   │   ├── provider_targets.rs
 │   │   ├── push_handoff.rs
@@ -3603,6 +3658,10 @@ src/
 │   │   │   └── pane.rs
 │   │   ├── human_frame/
 │   │   │   ├── history/
+│   │   │   │   ├── v2/
+│   │   │   │   │   ├── collision.rs
+│   │   │   │   │   ├── migration.rs
+│   │   │   │   │   └── s4_tests.rs
 │   │   │   │   ├── append.rs
 │   │   │   │   ├── append_tests.rs
 │   │   │   │   ├── checked_tests.rs
@@ -3612,6 +3671,7 @@ src/
 │   │   │   │   ├── screen.rs
 │   │   │   │   ├── screen_tests.rs
 │   │   │   │   ├── v2.rs
+│   │   │   │   ├── v2_compaction_tests.rs
 │   │   │   │   └── v2_tests.rs
 │   │   │   └── history.rs
 │   │   ├── submission_tmux/
@@ -4094,14 +4154,23 @@ src/
 │   │   │   │   ├── source_admission/
 │   │   │   │   │   ├── tests/
 │   │   │   │   │   │   └── pg_tests.rs
+│   │   │   │   │   ├── context_tests.rs
+│   │   │   │   │   ├── front_tests.rs
 │   │   │   │   │   └── tests.rs
 │   │   │   │   ├── actor.rs
 │   │   │   │   ├── attempt.rs
 │   │   │   │   ├── commit.rs
+│   │   │   │   ├── control.rs
+│   │   │   │   ├── control_tests.rs
+│   │   │   │   ├── migration.rs
+│   │   │   │   ├── migration_tests.rs
 │   │   │   │   ├── owner_tests.rs
+│   │   │   │   ├── projection.rs
+│   │   │   │   ├── projection_tests.rs
 │   │   │   │   ├── retained.rs
 │   │   │   │   ├── source_admission.rs
-│   │   │   │   └── sources.rs
+│   │   │   │   ├── sources.rs
+│   │   │   │   └── unit_tests.rs
 │   │   │   ├── compat.rs
 │   │   │   ├── compat_tests.rs
 │   │   │   ├── mend.rs

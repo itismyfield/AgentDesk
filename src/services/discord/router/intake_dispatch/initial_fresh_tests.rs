@@ -34,6 +34,7 @@ impl IntakeSubmission {
             preserve_on_cancel: false,
             has_nonportable_uploads: false,
             attachments: Vec::new(),
+            owner: None,
             preloaded_uploads: Vec::new(),
         }
     }
@@ -79,6 +80,7 @@ fn input() -> IntakeSubmission {
         has_nonportable_uploads: false,
         attachments: Vec::new(),
         preloaded_uploads: Vec::new(),
+        owner: None,
     }
 }
 

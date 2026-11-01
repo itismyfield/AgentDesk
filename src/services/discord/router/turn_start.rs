@@ -18,6 +18,14 @@ pub(crate) struct HeadlessTurnStartOutcome {
 }
 
 impl HeadlessTurnStartOutcome {
+    pub(crate) fn accepted(turn_id: String) -> Self {
+        Self {
+            turn_id,
+            status: HeadlessTurnStartStatus::Accepted,
+            owned_session_key: None,
+        }
+    }
+
     pub(crate) fn started(turn_id: String, owned_session_key: Option<String>) -> Self {
         Self {
             turn_id,
@@ -37,6 +45,8 @@ impl HeadlessTurnStartOutcome {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HeadlessTurnStartStatus {
+    // Owner admission stays dormant until its production ingress is wired.
+    Accepted,
     Started,
     Consumed,
 }
@@ -44,8 +54,16 @@ pub(crate) enum HeadlessTurnStartStatus {
 impl HeadlessTurnStartStatus {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
+            Self::Accepted => "accepted",
             Self::Started => "started",
             Self::Consumed => "consumed",
+        }
+    }
+
+    pub(crate) fn is_accepted(self) -> bool {
+        match self {
+            Self::Accepted => true,
+            Self::Started | Self::Consumed => false,
         }
     }
 }
@@ -168,6 +186,19 @@ fn headless_turn_message_id_seed_impl(now_millis: u64, process_id: u32) -> u64 {
         + (u64::from(process_id) % HEADLESS_TURN_MESSAGE_IDS_PER_MILLI)
 }
 
+/// The reservation of an owner front's start: its turn is the one its original was admitted as.
+pub(in crate::services::discord) fn owner_headless_turn(
+    message: MessageId,
+) -> HeadlessTurnReservation {
+    let placeholder_msg_id = next_headless_turn_message_id();
+    let admission = TurnAdmissionOrder::BehindQueue;
+    HeadlessTurnReservation {
+        user_msg_id: message,
+        placeholder_msg_id,
+        admission,
+    }
+}
+
 pub(in crate::services::discord) fn reserve_headless_turn() -> HeadlessTurnReservation {
     HeadlessTurnReservation {
         user_msg_id: next_headless_turn_message_id(),
@@ -177,13 +208,15 @@ pub(in crate::services::discord) fn reserve_headless_turn() -> HeadlessTurnReser
 }
 
 /// Waits out the channel's session transition, then claims the mailbox slot for a reserved
-/// headless turn in the reservation's admission order; the guard is held until the start ends.
+/// headless turn in the reservation's admission order, or as the owner's granted `front`; the
+/// guard is held until the start ends.
 pub(in crate::services::discord) async fn claim_reserved_headless_turn(
     shared: &SharedData,
     channel_id: ChannelId,
     request_owner: UserId,
     reservation: &HeadlessTurnReservation,
     (provider, role_id): (ProviderKind, Option<String>),
+    front: Option<crate::services::turn_orchestrator::OwnerFront>,
 ) -> Result<(tokio::sync::OwnedMutexGuard<()>, Arc<CancelToken>), HeadlessTurnStartError> {
     let channel = channel_id.get();
     let transition = shared.acquire_session_transition(channel_id).await;
@@ -197,13 +230,13 @@ pub(in crate::services::discord) async fn claim_reserved_headless_turn(
     let (token, message) = (cancel_token.clone(), reservation.user_msg_id);
     let claim = async move {
         match reservation.admission {
-            TurnAdmissionOrder::Immediate => {
+            TurnAdmissionOrder::Immediate if front.is_none() => {
                 let start = super::super::mailbox_try_start_turn;
                 start(shared, channel_id, token, request_owner, message).await
             }
-            TurnAdmissionOrder::BehindQueue => {
+            _ => {
                 let start = super::super::queue_io::mailbox_try_start_turn_behind_queue;
-                start(shared, channel_id, token, request_owner, message).await
+                start(shared, channel_id, token, request_owner, message, front).await
             }
         }
     };

@@ -1666,6 +1666,9 @@ async fn unread_idle_composer_consumes_the_queued_head_without_notice_pg() {
     ));
 }
 
+#[cfg(unix)]
+#[path = "queued_head_owner_entry_tests.rs"]
+mod owner_entry;
 #[tokio::test(flavor = "current_thread")]
 async fn queued_busy_injection_marks_committed_source_observed_pg() {
     queued_busy_injection_marks_committed_source(true).await;

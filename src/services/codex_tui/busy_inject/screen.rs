@@ -30,7 +30,7 @@ const QUEUE_HEADERS: &[&str] = &[
 const MAX_COMPOSER_ROWS: usize = 40;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum Composer {
+pub(crate) enum Composer {
     /// Only the dimmed placeholder, or nothing, after the prompt mark.
     Empty,
     /// The composer's text, rows joined by newlines.
@@ -39,7 +39,7 @@ pub(super) enum Composer {
     Unread,
 }
 
-pub(super) struct Screen {
+pub(crate) struct Screen {
     /// A Codex modal or a screen that hides the composer.
     pub modal: bool,
     pub queued: bool,
@@ -48,7 +48,7 @@ pub(super) struct Screen {
     pub attachments: bool,
 }
 
-pub(super) fn read(capture: &str) -> Screen {
+pub(crate) fn read(capture: &str) -> Screen {
     let raw: Vec<&str> = capture.lines().collect();
     let plain: Vec<String> = raw
         .iter()
@@ -198,7 +198,7 @@ fn sgr_dim(params: &str, mut dim: bool) -> bool {
 }
 
 /// Unknown editor semantics never turn a displayed draft into a proven append position.
-pub(super) fn append_veto(capture: &str, shown: &Screen) -> Option<super::Veto> {
+pub(crate) fn append_veto(capture: &str, shown: &Screen) -> Option<super::Veto> {
     use super::Veto;
     let plain = strip_ansi_escape_sequences(capture);
     let rows: Vec<_> = plain.lines().collect();

@@ -1229,3 +1229,6 @@ fn e07_purge_records_on_the_exclusion_actor_pg() {
 
 #[path = "http_force_e08_tests.rs"]
 mod e08;
+
+#[path = "http_force_v2_tests.rs"]
+mod v2;

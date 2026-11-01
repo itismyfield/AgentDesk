@@ -126,6 +126,7 @@ fn submission(id: u64, origin: IntakeOrigin) -> IntakeSubmission {
         has_nonportable_uploads: false,
         attachments: Vec::new(),
         preloaded_uploads: Vec::new(),
+        owner: None,
     }
 }
 #[tokio::test(flavor = "current_thread")]

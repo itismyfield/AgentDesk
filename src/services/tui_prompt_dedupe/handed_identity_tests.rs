@@ -550,3 +550,342 @@ fn response_native_turn_must_match_the_receipt_before_first_settlement() {
         }
     }
 }
+
+/// What the real observer and the append readers make of one V1 append state, in the V1 store or
+/// after the history migrated to V2, before and after the observer's memory restarts.
+fn migrated_append_world(v2: bool, state: &str, separator: bool) -> (Vec<String>, usize) {
+    let ledger = crate::config::runtime_root()
+        .unwrap()
+        .join("runtime/injected_frames.json");
+    let _ = std::fs::remove_file(&ledger);
+    let tmux = format!("migrated-{state}-{v2}-{}", uuid::Uuid::new_v4());
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("native.jsonl");
+    std::fs::write(&path, "").unwrap();
+    lifecycle(&path, "task_started", "t0");
+    let framed = frame("migrated body  ");
+    let prompt = if separator {
+        format!("draft note\n{framed}")
+    } else {
+        framed.clone()
+    };
+    let nonce = "mmmm7504";
+    let mut rx = subscribe_observed_prompts();
+    assert!(register_injected_steer(
+        "codex",
+        &tmux,
+        nonce,
+        "t0",
+        Some(761)
+    ));
+    register_append(&path, &tmux, nonce, "t0", &framed, separator, Some(761));
+    let turn = if state == "handed" { "t1" } else { "t0" };
+    if state == "handed" {
+        lifecycle(&path, "task_complete", "t0");
+        lifecycle(&path, "task_started", "t1");
+    }
+    if state != "admitted" {
+        bind(&path, &tmux, &prompt, "row-m", turn, false);
+    }
+    match state {
+        "joined" => assert!(append::settle(
+            nonce,
+            &tmux,
+            "row-m",
+            append::Decision::Joined
+        )),
+        "handed" => assert!(append::settle(
+            nonce,
+            &tmux,
+            "row-m",
+            append::Decision::HandedPending
+        )),
+        _ => {}
+    }
+    let restart = || {
+        let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+        state
+            .injected_steer_by_tmux
+            .remove(&PromptKey::new("codex", &tmux));
+        state
+            .native_turn_by_tmux
+            .remove(&PromptKey::new("codex", &tmux));
+    };
+    restart();
+    if v2 {
+        let empty = serde_json::json!({"namespace":"migration","head_injection":null,
+            "retained_inputs":[],"terminal_identities":[]});
+        history::v2::Registry::runtime()
+            .unwrap()
+            .project(&empty)
+            .unwrap();
+        let file = std::fs::read_to_string(&ledger).unwrap();
+        assert!(file.starts_with("{\"version\":2,"), "{file}");
+    }
+    let mut out = Vec::new();
+    let read = |out: &mut Vec<String>| {
+        let p = append::projection("codex", &tmux, nonce);
+        out.push(format!(
+            "projection={:?}",
+            p.map(|p| (
+                p.target_turn,
+                p.admitted,
+                p.bound,
+                p.row,
+                p.native_turn,
+                p.decision
+            ))
+        ));
+        out.push(format!(
+            "replay_start={:?}",
+            append::replay_start(&tmux, &path)
+        ));
+        out.push(format!(
+            "pending={}",
+            append::pending_candidate("codex", &tmux, std::slice::from_ref(&prompt), None)
+        ));
+    };
+    read(&mut out);
+    if state == "admitted" {
+        // The native observer's bind of the completion row, as the rollout reader calls it.
+        let record = serde_json::json!({"type":"event_msg","payload":{
+            "type":"item_completed","turn_id":turn,
+            "item":{"type":"UserMessage","id":"row-m","content":[{"type":"text","text":prompt,"text_elements":[]}]}
+        }});
+        let start = std::fs::metadata(&path).unwrap().len();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(file, "{record}").unwrap();
+        let bound = append::bind_record_at(&path, start, &record);
+        out.push(format!(
+            "bind={:?}",
+            bound.map(|r| (r.attempt.id, r.row, r.native_turn))
+        ));
+    }
+    let at = Utc::now();
+    for _ in 0..2 {
+        out.push(format!(
+            "observed={:?}",
+            observe_codex_prompt_in_turn_at(&tmux, &prompt, Some("row-m"), Some(turn), at)
+        ));
+        read(&mut out);
+        restart();
+    }
+    let published = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter(|event| event.tmux_session_name == tmux)
+        .count();
+    (out, published)
+}
+
+/// A V1 append migrated into V2 binds, settles, replays and is observed as in V1 for every stored
+/// state, with or without a draft before the frame, and is handed off at most once.
+#[test]
+fn a_migrated_v1_append_binds_settles_and_replays_as_in_v1() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let _serial = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    for state in ["admitted", "bound", "joined", "handed"] {
+        for separator in [false, true] {
+            let (v1, v1_published) = migrated_append_world(false, state, separator);
+            let (v2, v2_published) = migrated_append_world(true, state, separator);
+            assert_eq!(v2, v1, "{state} separator={separator}");
+            assert_eq!(v2_published, v1_published, "{state} separator={separator}");
+            assert!(
+                v2_published <= 1,
+                "{state} separator={separator}: {v2_published}"
+            );
+            assert!(
+                v1.iter()
+                    .any(|line| line.contains("bound: true")
+                        || line.contains(", true, Some(\"row-m\")")),
+                "{state} separator={separator}: the append reaches its row: {v1:?}"
+            );
+        }
+    }
+}
+
+/// A bound append whose row landed in a new turn, migrated before any decision, is handed off
+/// exactly once by the first observer; a cold re-observation publishes nothing more.
+#[test]
+fn a_migrated_undecided_append_in_a_new_turn_hands_off_exactly_once() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let _serial = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let ledger = crate::config::runtime_root()
+        .unwrap()
+        .join("runtime/injected_frames.json");
+    let _ = std::fs::remove_file(&ledger);
+    let tmux = format!("migrated-handoff-{}", uuid::Uuid::new_v4());
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("native.jsonl");
+    std::fs::write(&path, "").unwrap();
+    let prompt = frame("a migrated late input");
+    register_append(&path, &tmux, "hhhh7504", "t0", &prompt, false, Some(764));
+    bind(&path, &tmux, &prompt, "row-h", "t1", false);
+    let empty = serde_json::json!({"namespace":"migration","head_injection":null,
+        "retained_inputs":[],"terminal_identities":[]});
+    history::v2::Registry::runtime()
+        .unwrap()
+        .project(&empty)
+        .unwrap();
+    assert!(
+        std::fs::read_to_string(&ledger)
+            .unwrap()
+            .starts_with("{\"version\":2,")
+    );
+    let mut rx = subscribe_observed_prompts();
+    let mut published = || {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|event| event.tmux_session_name == tmux)
+            .count()
+    };
+    let observe =
+        || observe_codex_prompt_in_turn_at(&tmux, &prompt, Some("row-h"), Some("t1"), Utc::now());
+    assert_eq!(observe(), PromptObservation::PublishedSshDirect);
+    assert_eq!(published(), 1);
+    {
+        let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+        let key = PromptKey::new("codex", &tmux);
+        state.injected_steer_by_tmux.remove(&key);
+        state.native_turn_by_tmux.remove(&key);
+        state.relayed_entry_ids_by_tmux.remove(&key);
+        state.recent_observed_by_tmux.remove(&key);
+    }
+    assert_eq!(observe(), PromptObservation::InjectedDeferred);
+    assert_eq!(published(), 0);
+    assert_eq!(
+        append::projection("codex", &tmux, "hhhh7504")
+            .unwrap()
+            .decision,
+        Some(append::Decision::HandedPending)
+    );
+}
+
+/// One migrated V1 append A beside a V2 attempt B on the same transcript; returns A's bind and
+/// B's receipt for the row both could own, in the case's order, then again after a restart.
+#[cfg(unix)]
+fn migrated_rival(case: &str) -> [(Option<String>, Option<bool>, bool); 2] {
+    use std::os::unix::fs::MetadataExt;
+    let ledger = crate::config::runtime_root()
+        .unwrap()
+        .join("runtime/injected_frames.json");
+    let _ = std::fs::remove_file(&ledger);
+    let tmux = format!("rival-{case}-{}", uuid::Uuid::new_v4());
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("native.jsonl");
+    std::fs::write(&path, "").unwrap();
+    lifecycle(&path, "task_started", "t0");
+    let framed = frame("rival body");
+    let nonce = "rrrr7504";
+    assert!(register_injected_steer(
+        "codex",
+        &tmux,
+        nonce,
+        "t0",
+        Some(762)
+    ));
+    register_append(&path, &tmux, nonce, "t0", &framed, false, Some(762));
+    let record = serde_json::json!({"type":"event_msg","payload":{"type":"item_completed",
+        "turn_id":"t0","item":{"type":"UserMessage","id":"row-r",
+        "content":[{"type":"text","text":framed,"text_elements":[]}]}}});
+    let start = std::fs::metadata(&path).unwrap().len();
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    writeln!(file, "{record}").unwrap();
+    let bind = || append::bind_record_at(&path, start, &record).map(|r| r.attempt.id);
+    if case == "owned" {
+        assert_eq!(
+            bind().as_deref(),
+            Some(nonce),
+            "A owns the row before B exists"
+        );
+    }
+    let empty = serde_json::json!({"namespace":"migration","head_injection":null,
+        "retained_inputs":[],"terminal_identities":[]});
+    history::v2::Registry::runtime()
+        .unwrap()
+        .project(&empty)
+        .unwrap();
+    let meta = std::fs::metadata(&path).unwrap();
+    let attempt = serde_json::json!({"nonce":"rival-b","provider":"codex",
+        "target":{"host":"tmux","owner":tmux,"root":"/tmp","execution_nonce":"spawn"},
+        "source":{"kind":"existing","session_id":"native","transcript":path,
+            "file":[meta.dev(), meta.ino()],"offset":0}});
+    let identity = serde_json::json!({"primary":763,"queued_generation":1,
+        "sources":[{"message_id":763,"queued_generation":1}]});
+    let b_frame = if case == "other_frame" {
+        frame("other body")
+    } else {
+        framed.clone()
+    };
+    let mut input = serde_json::json!({"identity":identity,"attempt":attempt,
+        "original":{"author_id":7},"payload":{"frame":b_frame}});
+    history::v2::Registry::runtime()
+        .unwrap()
+        .prepare("rival", &input)
+        .unwrap();
+    if case == "abandoned" {
+        input["phase"] = "reserved".into();
+        let not_sent = serde_json::json!({"namespace":"rival","head_injection":null,
+            "retained_inputs":[{"input":input,"disposition":"known_not_sent"}],
+            "terminal_identities":[]});
+        history::v2::Registry::runtime()
+            .unwrap()
+            .project(&not_sent)
+            .unwrap();
+    }
+    let key = serde_json::json!({"identity":identity,"attempt":attempt});
+    let receipt = || {
+        history::v2::Registry::runtime().unwrap().receipt(
+            "rival",
+            &key,
+            (&path, start, "codex", Some("row-r"), &b_frame),
+        )
+    };
+    let round = || {
+        let (a, b) = if case == "receipt_first" {
+            let b = receipt();
+            (bind(), b)
+        } else {
+            (bind(), receipt())
+        };
+        let known = matches!(
+            history::observed_attempt("codex", &tmux, std::slice::from_ref(&framed), Some("row-r")),
+            history::ObservedAttempt::Known(_)
+        );
+        (a, b, known)
+    };
+    let first = round();
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state
+        .injected_steer_by_tmux
+        .remove(&PromptKey::new("codex", &tmux));
+    state
+        .native_turn_by_tmux
+        .remove(&PromptKey::new("codex", &tmux));
+    drop(state);
+    [first, round()]
+}
+
+/// A migrated append and a same-frame V2 attempt leave their row unowned in either order and after
+/// a restart; another frame, an owner's re-read or an abandoned rival still bind.
+#[cfg(unix)]
+#[test]
+fn a_migrated_append_and_a_same_frame_v2_attempt_leave_their_row_unowned() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let _serial = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let a = Some("rrrr7504".to_string());
+    for case in ["receipt_first", "bind_first"] {
+        let unowned = (None, None, false);
+        assert_eq!(migrated_rival(case), [unowned.clone(), unowned], "{case}");
+    }
+    for case in ["other_frame", "owned", "abandoned"] {
+        assert_eq!(
+            migrated_rival(case),
+            [(a.clone(), None, true), (a.clone(), None, true)],
+            "{case}"
+        );
+    }
+}

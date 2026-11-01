@@ -28,6 +28,10 @@ pub(crate) trait SubmissionFence: Send + Sync {
     fn idle_stash_admits(&self, _target: &str) -> bool {
         false
     }
+    /// The input owner parks a visible draft on any channel, not only the listed ones.
+    fn stash_any_channel(&self) -> bool {
+        false
+    }
     fn claim_idle_stash(&self, _target: &str) -> Result<(), PreSubmitPersistenceRefused> {
         Err(PreSubmitPersistenceRefused {
             reason: "no managed idle-stash authority".into(),

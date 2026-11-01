@@ -13,6 +13,8 @@ pub(crate) struct PreparationHold {
     pub(crate) reason: &'static str,
     pub(crate) phase: EffectPhase,
     pub(crate) detail: String,
+    /// A modal refused the pane at the capture before any key; legacy callers read the reason.
+    pub(crate) modal: bool,
 }
 
 impl PreparationHold {
@@ -26,6 +28,7 @@ impl PreparationHold {
             reason,
             phase: EffectPhase::BeforePayload,
             detail,
+            modal: false,
         }
     }
 
@@ -39,6 +42,7 @@ impl PreparationHold {
             reason: "submission_uncertain",
             phase: EffectPhase::PayloadUncertain,
             detail,
+            modal: false,
         }
     }
 
@@ -59,7 +63,11 @@ pub(crate) fn readiness_failure(session: &str, error: String) -> SubmissionError
 }
 
 #[cfg(unix)]
-pub(super) fn idle_stash_stopped(session: &str, error: SubmissionError) -> SubmissionError {
+pub(super) fn idle_stash_stopped(
+    session: &str,
+    error: SubmissionError,
+    modal: bool,
+) -> SubmissionError {
     use crate::services::tui_input::submission::Refusal;
     use host_input::{InputRefusal, InputRun};
     match error {
@@ -70,6 +78,7 @@ pub(super) fn idle_stash_stopped(session: &str, error: SubmissionError) -> Submi
             reason: "composer_not_ready",
             phase: EffectPhase::BeforePayload,
             detail: "claude tui idle preparation held before payload".into(),
+            modal,
         }),
         other => other,
     }
@@ -89,6 +98,7 @@ mod idle_injection_tests {
             let held = idle_stash_stopped(
                 &session,
                 SubmissionError::Guarded(InputRun::Refused(InputRefusal::Composer(refusal))),
+                false,
             );
             assert!(matches!(held, SubmissionError::Held(ref hold) if hold.may_requeue()));
             assert!(!crate::services::claude_tui::composer_lock::draft_guarded(
@@ -101,6 +111,7 @@ mod idle_injection_tests {
                 confirmed: 0,
                 cause: StopCause::Send("tmux write failed".into()),
             }),
+            false,
         );
         assert!(matches!(
             failed,

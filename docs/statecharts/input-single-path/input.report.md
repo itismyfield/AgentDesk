@@ -1,5 +1,4 @@
 # InputPath
-<!-- doc-path-refs: proposed drive.rs -->
 
 Model written against AgentDesk `origin/main` `0a9b3f99cf` (2026-10-30, landed #7272 S1~S4 4a) plus the unlanded 4f design `design-4f-r1` (base `6745f803d3`) and its review carry `carry-design-4f-r1` (P1 9, mac decisions mac-0954). It models #7272: every Discord input to a Claude TUI channel goes through the owner line and one drive task that reads the composer, parks a draft with C-s, pastes, presses Enter and settles. Every counterexample was replayed by reading the landed code and the 4f design (no build or test run); see the table at the end.
 
