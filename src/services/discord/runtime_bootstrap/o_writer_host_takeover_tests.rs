@@ -471,6 +471,7 @@ fn claude_takeover_commits_while_a_discord_turn_holds_the_mailbox_and_its_row_pg
 async fn busy_takeover() {
     use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
     use crate::services::provider::{CancelToken, ProviderKind};
+    use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send};
     use crate::services::tui_o::store::InitOrigin;
     use crate::services::tui_o::writer::host;
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
@@ -595,11 +596,23 @@ async fn busy_takeover() {
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(rest.posts_with(reply), 1, "O posts the answer once");
     assert_eq!(rest.posts_with("the delivered old answer"), 0);
-    let claim = o_owns_tui_output_for_channel_reserving(channel, Some(ClaudeTui));
+    // Legacy's own body send for the same answer goes through the one gate every body takes.
+    let sends = AtomicUsize::new(0);
+    let legacy_send = || async {
+        sends.fetch_add(1, Ordering::SeqCst);
+        ChannelId::new(channel)
+            .say(&*rest.http, reply)
+            .await
+            .is_ok()
+    };
+    let body = Some(BodyClaim::new(channel, Some(ClaudeTui)));
+    let sent = claim_then_send(body, legacy_send).await;
     assert!(
-        matches!(claim.map(|claim| claim.owned), Ok(true)),
-        "O owns the answer's body: Legacy sends none of it"
+        matches!(sent, Ok(BodySend::OwnedByO)),
+        "O owns the answer's body: {sent:?}"
     );
+    assert_eq!(sends.load(Ordering::SeqCst), 0, "Legacy's send never runs");
+    assert_eq!(rest.posts_with(reply), 1, "the answer is posted once, by O");
     for handle in handles.drain(..) {
         let stopped = tokio::time::timeout(Duration::from_secs(20), handle.stop_and_join());
         stopped.await.expect("the writer stops").unwrap();
