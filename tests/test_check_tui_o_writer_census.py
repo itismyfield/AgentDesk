@@ -74,7 +74,10 @@ class CensusGateTests(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
 
     def run_gate(self) -> tuple[bool, str]:
-        with mock.patch.multiple(census, **self.maps):
+        # Synthetic pin trees omit the manifest, which has its own parser fixtures.
+        with mock.patch.multiple(census, **self.maps), mock.patch.object(
+            census, "body_probe_snapshot", return_value={"error": None}
+        ):
             return census.check(self.root, pinned_test_only_files=[])
 
     def assert_fails_with(self, reason: str) -> None:
