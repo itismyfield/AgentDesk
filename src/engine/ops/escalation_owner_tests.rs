@@ -268,3 +268,45 @@ async fn policy_expiry_and_invalid_pending_compatibility_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cleanup_error_preserves_sqlx_cause_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let mut tx = pool.begin().await.unwrap();
+    let first_error = sqlx::query("SELECT 1 / 0")
+        .execute(&mut *tx)
+        .await
+        .unwrap_err();
+    assert!(first_error.to_string().contains("division by zero"));
+    let error = crate::services::escalation_cooldown::clear_on_pg_tx(&mut tx, "card")
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("current transaction is aborted"),
+        "cleanup error must include the database cause: {error}"
+    );
+    tx.rollback().await.unwrap();
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn policy_null_pending_value_emits_once_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    seed(&pool).await;
+    sqlx::query("INSERT INTO kv_meta (key, value) VALUES ('pm_pending:card', NULL)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let policy = Policy::new(&pool);
+    assert_eq!(
+        policy.eval("flushEscalations(); flushEscalations(); return emitted;"),
+        json!([{"card_id": "card", "reasons": []}])
+    );
+    assert_eq!(keys(&pool).await, vec!["pm_decision_sent:card"]);
+    drop(policy);
+    pool.close().await;
+    db.drop().await;
+}

@@ -21,7 +21,7 @@ pub(crate) enum Command {
     Pending,
     Prepare {
         card_id: String,
-        value: String,
+        value: Option<String>,
         fingerprint: Option<String>,
     },
     Sent {
@@ -45,7 +45,9 @@ pub(crate) async fn clear_on_pg_tx(
         .bind(keys(card_id).to_vec())
         .execute(&mut **tx)
         .await
-        .with_context(|| format!("clear postgres escalation state for {card_id}"))?;
+        .map_err(|error| {
+            anyhow::anyhow!("clear postgres escalation state for {card_id}: {error}")
+        })?;
     Ok(())
 }
 
@@ -114,7 +116,7 @@ pub(crate) async fn execute(pool: &PgPool, command: Command) -> Result<Value> {
     match command {
         Command::Pending => {
             // The policy has always scanned the pending snapshot even when its TTL expired.
-            let rows: Vec<(String, String)> =
+            let rows: Vec<(String, Option<String>)> =
                 sqlx::query_as("SELECT key, value FROM kv_meta WHERE key LIKE $1")
                     .bind(format!("{PENDING_PREFIX}%"))
                     .fetch_all(pool)
@@ -163,7 +165,7 @@ pub(crate) async fn execute(pool: &PgPool, command: Command) -> Result<Value> {
                 let _ = delete(pool, &sent).await;
                 return Ok(Value::Null);
             };
-            let entry = match serde_json::from_str::<Value>(&value) {
+            let entry = match serde_json::from_str::<Value>(value.as_deref().unwrap_or("null")) {
                 Ok(entry) => entry,
                 Err(_) => {
                     let _ = delete(pool, &pending).await;
