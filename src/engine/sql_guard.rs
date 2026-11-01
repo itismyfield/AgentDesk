@@ -132,7 +132,12 @@ pub fn detect_core_table_write(sql: &str) -> Option<SqlGuardViolation> {
         });
     }
 
-    if pr_tracking_mutation_re().is_match(sql) {
+    // A broken guard expression must reject raw SQL rather than allow writes.
+    let tracking_write = match pr_tracking_mutation_re() {
+        Ok(pattern) => pattern.is_match(sql),
+        Err(_) => true,
+    };
+    if tracking_write {
         return Some(SqlGuardViolation {
             target: SqlGuardTarget::PrTracking,
         });
@@ -201,11 +206,11 @@ fn auto_queue_entries_mutation_re() -> &'static Regex {
     })
 }
 
-fn pr_tracking_mutation_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
+fn pr_tracking_mutation_re() -> &'static Result<Regex, regex::Error> {
+    static RE: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
             r#"(?i)\b(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|MERGE\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?)\s+(?:["`]?\w+["`]?\s*\.\s*)?["`]?pr_tracking\b"#,
-        ).unwrap()
+        )
     })
 }
