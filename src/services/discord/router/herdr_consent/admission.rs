@@ -5,8 +5,10 @@ use super::*;
 use crate::db::dispatched_sessions::hosted_execution::{
     self as hosted, HostedLookup, HostedRecord, HostedState,
 };
-use crate::services::session_host::herdr_endpoints;
-use crate::services::session_host::policy::{LocalChecker, ProofCache, Unverified};
+use crate::services::session_host::{
+    herdr_endpoints,
+    policy::{LocalChecker, ProofCache, Unverified},
+};
 use consent::{ConsentKey, IntentRef, Preview, Question, workflow::Request};
 use refusal::Code;
 pub(in crate::services::discord) use refusal::Refusal;
