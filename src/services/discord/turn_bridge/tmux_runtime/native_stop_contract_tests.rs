@@ -979,6 +979,17 @@ fn preserve_stop_completed_owner_keeps_natural_first() {
         let (token, path) = generating_turn(&fx, session);
         start(&shared, channel, &token).await;
         let row = native_inflight_row(channel, &token, session);
+        let state =
+            inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get()).unwrap();
+        let _owner = discord::live_bridge::register_without_requeue(
+            &shared,
+            &ProviderKind::Claude,
+            &state,
+            &token,
+        )
+        .await
+        .unwrap()
+        .expect("the completed turn has a live original owner");
         append(
             &path,
             serde_json::json!({"type":"system","subtype":"turn_duration"}),
