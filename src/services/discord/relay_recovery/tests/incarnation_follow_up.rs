@@ -187,9 +187,18 @@ async fn force_purge_finish_never_reaches_a_successor_actor() {
     };
     let purge = crate::services::queue::force_purge_channel_mailbox(Some(&registry), &target, None);
     tokio::pin!(purge);
-    assert!(futures::poll!(purge.as_mut()).is_pending());
+    // The purge reaches the actor after its V2 capture round trip; drive it only until the old
+    // actor has accepted it, so the finish that follows still runs after the successor starts.
+    let mut accepted = false;
+    for _ in 0..8 {
+        assert!(futures::poll!(purge.as_mut()).is_pending());
+        if old.snapshot().await.cancel_token.is_none() {
+            accepted = true;
+            break;
+        }
+    }
     assert!(
-        old.snapshot().await.cancel_token.is_none(),
+        accepted,
         "the old actor accepted the purge and released the killed anchor"
     );
     assert_eq!(
