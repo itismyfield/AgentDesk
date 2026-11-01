@@ -282,6 +282,7 @@ jobs:
               - 'src/services/codex/**'
               - 'src/services/dispatched_sessions/**'
               - 'src/services/dispatches/**'
+              - 'src/services/legacy_body_census/**'
               # queue/ and the cancel lookup wire the forced Herdr cancel behind cfg(unix).
               - 'src/services/queue/**'
               - 'src/services/session_forwarding/cancel_lookup.rs'
