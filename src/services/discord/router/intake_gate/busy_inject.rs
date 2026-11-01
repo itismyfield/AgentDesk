@@ -319,21 +319,11 @@ async fn settle(
     let identity = TurnViewIdentity::IntakeHttp(ctx.http.clone());
     let reconciler = &shared.turn_view_reconciler;
     let source = "busy_inject_reaction";
-    if reaction == INJECTED_REACTION
-        && crate::services::discord::turn_presence::supervisor::observes(
-            &data.provider,
-            channel.get(),
-        )
-    {
+    if reaction == INJECTED_REACTION {
         reconciler
-            .note_busy_injected(shared, target, identity)
+            .note_confirmed_injection(shared, &data.provider, target, identity)
             .await;
     } else {
-        let reaction = if reaction == INJECTED_REACTION {
-            '📥'
-        } else {
-            reaction
-        };
         reconciler
             .note_untracked_reaction_added(shared, target, identity, reaction, source)
             .await;

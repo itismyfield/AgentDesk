@@ -3,6 +3,7 @@
 use super::queued_provider::QueuedProvider;
 use super::queued_support::ATTEMPT_UNNAMED;
 use super::*;
+use crate::services::discord::turn_view_reconciler::{TurnViewIdentity, TurnViewTarget};
 
 pub(super) async fn queued_attempt(
     shared: &Arc<SharedData>,
@@ -211,6 +212,26 @@ pub(super) async fn queued_attempt(
                     &source_generations,
                 )
                 .await;
+                // A live source is marked by its intake caller after this owner returns.
+                if _source.is_none()
+                    && let Some(http) = shared.serenity_http_or_token_fallback()
+                {
+                    for source in &source_generations {
+                        let target = TurnViewTarget::intake_user_message(
+                            request.channel_id,
+                            source.message_id,
+                        );
+                        shared
+                            .turn_view_reconciler
+                            .note_confirmed_injection(
+                                &shared,
+                                &request.provider,
+                                target,
+                                TurnViewIdentity::IntakeHttp(http.clone()),
+                            )
+                            .await;
+                    }
+                }
             }
             // A committed NotSent is the actor's proof that the head is back at the queue front.
             if let (InjectAttempt::NotSent(veto), Some(turn_id)) = (&attempt, turn_id) {

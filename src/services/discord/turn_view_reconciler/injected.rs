@@ -6,6 +6,31 @@ pub(super) struct Pending {
 }
 
 impl TurnViewReconciler {
+    /// Uses a pending marker only when the provider can later complete it on idle.
+    pub(in crate::services::discord) async fn note_confirmed_injection(
+        &self,
+        shared: &SharedData,
+        provider: &crate::services::provider::ProviderKind,
+        target: TurnViewTarget,
+        identity: TurnViewIdentity,
+    ) {
+        if crate::services::discord::turn_presence::supervisor::observes(
+            provider,
+            target.channel_id.get(),
+        ) {
+            self.note_busy_injected(shared, target, identity).await;
+        } else {
+            self.note_untracked_reaction_added(
+                shared,
+                target,
+                identity,
+                '📥',
+                "busy_inject_reaction",
+            )
+            .await;
+        }
+    }
+
     #[cfg(test)]
     pub(in crate::services::discord) fn pending_injected_count(&self, channel: ChannelId) -> usize {
         self.injected
