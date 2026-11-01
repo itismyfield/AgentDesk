@@ -36,6 +36,17 @@ config는 socket peer의 실제 HOME/XDG/config 환경과 실행 파일 identity
 
 현재 false가 검증돼 fresh가 준비되어도 `startup_proof=awaiting_server_restart`일 수 있다. 즉시 launch를 위해 서버를 재시작하지 않는다. true/invalid로 바뀌면 신규 create는 막히지만 같은 witness와 정확한 execution의 이미 승인된 입력·Cancel·Terminate 허가는 별도 증거로 유지된다.
 
+## 서버 자동 기동
+
+실행 노드의 AgentDesk는 로컬 user_default 입력이 서버를 필요로 할 때 실행 사용자의 기본 서버(`~/.config/herdr/herdr.sock`)가 꺼져 있으면 직접 띄운다. 띄우는 지점은 intake admission, fresh launch의 create permit, `!herdr consent retry`의 새 카드 준비다. health·doctor·probe·카드 클릭·주기 작업은 띄우지 않는다.
+
+- 부재 판정: 소켓이 없거나 연결이 거부되는 판독이 3회 연속이고, 소켓 디렉터리가 APFS이며, 이 사용자의 herdr 중 이 소켓을 고르는 server·launcher가 없어야 한다. 막 실행된 TUI client(launcher)는 약 10초 유예를 받는다. 그동안 서버가 뜨면 띄우지 않는다. 유예 뒤에도 서버 없이 남아 있는 client는 제외하고 진행한다. 유예 중 새 launcher가 나타나면 이번 시도는 띄우지 않는다.
+- 사전 조건: macOS, 기본 소켓, 실행 사용자 소유이고 group·other 쓰기가 없는 디렉터리, `session.resume_agents_on_restore = false`가 명시된 config, 그 config를 통과시키는 `herdr config check`. 바이너리는 PATH, Homebrew, `/usr/local/bin`, `~/.local/bin`, `~/.cargo/bin` 순으로 찾는다. `~/.adk` 아래 사본은 쓰지 않는다. native arm64 단일 아키텍처 이미지이고 APFS에 있으며 `--version`이 0.9.3 이상 안정판이어야 한다.
+- 기동: 소켓 디렉터리 `flock`과 프로세스 안 잠금 아래에서 다시 판정한 뒤 `herdr server`를 자체 세션(setsid)으로 실행한다. 환경은 HOME·USER·LOGNAME·SHELL·고정 PATH·TERM·TMPDIR·LANG·LC_ALL·SSH_AUTH_SOCK만 넘긴다. AgentDesk가 끝나도 서버는 남는다. AgentDesk는 서버를 멈추거나 신호를 보내거나 소켓을 지우지 않는다.
+- 상한: 같은 소켓은 10분에 3번까지만 띄운다. 기록과 서버 출력은 runtime 아래 `runtime/herdr_autostart/`에 남는다.
+- 기동은 권한이 아니다. fresh launch는 새 서버에서도 기존 next-restart 판정과 create fence를 통과해야 한다. 이전 실행이 남은 채널은 서버가 떠도 지금처럼 보류된다(후속 조각).
+- 진단: health의 endpoint `autostart`에 마지막 판정(`presence`, `reason`, `action`)이 남는다. `agentdesk herdr probe-user-default`는 같은 판정을 dry run으로 보여 주며 아무것도 띄우지 않는다. 사용자가 `herdr server stop`으로 멈춘 서버도 다음 입력 때 다시 띄운다.
+
 ## 카나리 순서
 
 1. 코디네이터가 실행 노드·사용자·시험 채널·rollback 설정을 별도 승인한다. 이 문서는 운영 설정 변경을 승인하지 않는다. 첫 카나리는 시험 채널 intake를 실행 노드 gateway가 처리하는 로컬 경로로 한정한다.

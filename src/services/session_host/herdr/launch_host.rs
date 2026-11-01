@@ -200,6 +200,23 @@ impl SocketHerdrLaunchHost {
         })
     }
 
+    /// The current next-restart policy of `launch`'s server, recorded for health and remembered
+    /// as the witness later mutations of this endpoint compare against.
+    pub(crate) async fn observe_policy(
+        &self,
+        launch: &HerdrLaunchEndpoint,
+    ) -> Result<super::policy::NextRestartProof, String> {
+        let source = self.source(launch).ok_or("endpoint is not configured")?;
+        let checked = self.policy.next_restart(source, &LocalChecker).await;
+        super::policy::diagnostics::record(Path::new(&launch.socket_addr), &self.policy, &checked);
+        let proof = checked.map_err(|why| format!("next_restart_policy_unverified: {why:?}"))?;
+        self.witnessed
+            .lock()
+            .map_err(|_| "policy cache unavailable")?
+            .insert(launch.clone(), proof.witness().clone());
+        Ok(proof)
+    }
+
     fn source(&self, launch: &HerdrLaunchEndpoint) -> Option<Arc<dyn PeerSource>> {
         self.endpoints
             .iter()
@@ -432,19 +449,9 @@ impl HerdrLaunchHost for SocketHerdrLaunchHost {
             if self.mode(launch) != EndpointMode::UserDefault {
                 return Err("endpoint mode is not user_default".into());
             }
-            let source = self.source(launch).ok_or("endpoint is not configured")?;
-            let checked = self.policy.next_restart(source, &LocalChecker).await;
-            super::policy::diagnostics::record(
-                Path::new(&launch.socket_addr),
-                &self.policy,
-                &checked,
-            );
-            let proof =
-                checked.map_err(|why| format!("next_restart_policy_unverified: {why:?}"))?;
-            self.witnessed
-                .lock()
-                .map_err(|_| "policy cache unavailable")?
-                .insert(launch.clone(), proof.witness().clone());
+            // A start only makes a server answer; the policy below still decides the permit.
+            super::autostart::spawn::ensure(launch).await;
+            let proof = self.observe_policy(launch).await?;
             CreatePermit::new(launch.clone(), proof).map_err(|why| format!("{why:?}"))
         })
     }

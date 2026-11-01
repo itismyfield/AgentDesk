@@ -267,3 +267,118 @@ fn the_process_table_keeps_unreadable_live_herdr_rows_and_drops_zombies() {
         stale().with_processes(table("  12   501 Z    herdr\n", 501, 15, |_| (None, None)));
     assert_eq!(zombie_only.run(), Presence::Absent(AbsentKind::Refused));
 }
+
+/// A missing socket that starts answering after `answers_after` pauses, with one process table
+/// per scan (the last one repeats).
+struct Timeline {
+    tables: Vec<Vec<HerdrProcess>>,
+    answers_after: Option<usize>,
+    pauses: Cell<usize>,
+    scans: Cell<usize>,
+}
+
+impl Timeline {
+    fn new(tables: Vec<Vec<HerdrProcess>>, answers_after: Option<usize>) -> Self {
+        Self {
+            tables,
+            answers_after,
+            pauses: Cell::new(0),
+            scans: Cell::new(0),
+        }
+    }
+
+    fn answering(&self) -> bool {
+        self.answers_after
+            .is_some_and(|after| self.pauses.get() >= after)
+    }
+}
+
+impl PresenceOs for Timeline {
+    fn euid(&self) -> u32 {
+        EUID
+    }
+    fn entry(&self, _: &Path) -> std::io::Result<Entry> {
+        if self.answering() {
+            socket()
+        } else {
+            missing()
+        }
+    }
+    fn is_dir(&self, _: &Path) -> bool {
+        true
+    }
+    fn connect(&self, _: &Path) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn pause(&self) {
+        self.pauses.set(self.pauses.get() + 1);
+    }
+    fn herdr_processes(&self) -> Result<Vec<HerdrProcess>, String> {
+        let scan = self.scans.get();
+        self.scans.set(scan + 1);
+        Ok(self.tables[scan.min(self.tables.len() - 1)].clone())
+    }
+    fn local_filesystem(&self, _: &Path) -> bool {
+        true
+    }
+}
+
+#[test]
+fn a_launcher_still_idle_after_the_grace_is_set_aside() {
+    let idle = Timeline::new(vec![vec![process(42, &[], &[])]], None);
+    let (presence, excused) = settle(Path::new(SOCKET), &idle, 5);
+    assert_eq!(
+        (presence, excused),
+        (Presence::Absent(AbsentKind::NoFile), vec![42])
+    );
+    assert_eq!(
+        idle.scans.get(),
+        7,
+        "first reading, the set-aside reading and five rounds"
+    );
+}
+
+#[test]
+fn a_launcher_that_starts_its_server_in_the_grace_leaves_nothing_to_start() {
+    let starting = Timeline::new(vec![vec![process(42, &[], &[])]], Some(8));
+    let (presence, _) = settle(Path::new(SOCKET), &starting, 30);
+    assert_eq!(presence, Presence::Present);
+}
+
+#[test]
+fn a_launcher_appearing_in_the_grace_refuses_this_attempt() {
+    let first = vec![process(42, &[], &[])];
+    let both = vec![
+        process(42, &[], &[]),
+        process(43, &["session", "attach", "default"], &[]),
+    ];
+    // 43 shows in one scan only: even a launcher that vanished again refuses this attempt.
+    let crowded = Timeline::new(
+        vec![first.clone(), first.clone(), first.clone(), both, first],
+        None,
+    );
+    let (presence, excused) = settle(Path::new(SOCKET), &crowded, 30);
+    assert_eq!(
+        presence,
+        Presence::Unknown(Unknown::HerdrProcess {
+            pid: 43,
+            role: Role::Launcher
+        })
+    );
+    assert_eq!(excused, vec![42]);
+}
+
+#[test]
+fn a_server_selecting_the_socket_gets_no_grace() {
+    let binding = Timeline::new(vec![vec![process(41, &["server"], &[])]], None);
+    let (presence, excused) = settle(Path::new(SOCKET), &binding, 30);
+    assert_eq!(
+        presence,
+        Presence::Unknown(Unknown::HerdrProcess {
+            pid: 41,
+            role: Role::Server
+        })
+    );
+    assert!(excused.is_empty());
+    assert_eq!(binding.scans.get(), 1);
+}

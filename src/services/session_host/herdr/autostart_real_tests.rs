@@ -9,6 +9,9 @@ use serde_json::Value;
 
 use super::*;
 
+#[path = "autostart/spawn_real_tests.rs"]
+mod spawn;
+
 /// A started server with the environment and arguments that address it again.
 type Server = (Child, Vec<(String, String)>, Vec<String>);
 

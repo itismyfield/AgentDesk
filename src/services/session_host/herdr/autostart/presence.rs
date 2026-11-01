@@ -74,6 +74,11 @@ pub(crate) trait PresenceOs {
 const CONFIRMATIONS: usize = 3;
 
 pub(crate) fn classify(socket: &Path, os: &dyn PresenceOs) -> Presence {
+    classify_except(socket, os, &[])
+}
+
+/// `classify`, setting aside the launchers in `excused`: ones already waited out.
+pub(crate) fn classify_except(socket: &Path, os: &dyn PresenceOs, excused: &[u32]) -> Presence {
     let mut kind = AbsentKind::NoFile;
     for reading in 0..CONFIRMATIONS {
         if reading > 0 {
@@ -102,7 +107,8 @@ pub(crate) fn classify(socket: &Path, os: &dyn PresenceOs) -> Presence {
                 socket: None,
             },
         };
-        if selection.role == Role::Other {
+        let waited_out = selection.role == Role::Launcher && excused.contains(&process.pid);
+        if selection.role == Role::Other || waited_out {
             continue;
         }
         if selection
@@ -117,6 +123,36 @@ pub(crate) fn classify(socket: &Path, os: &dyn PresenceOs) -> Presence {
         }
     }
     Presence::Absent(kind)
+}
+
+/// Rounds a launcher seen at the first reading gets to start its server; each round is one
+/// `classify` and a pause, about ten seconds in all.
+pub(crate) const GRACE_ROUNDS: usize = 30;
+
+/// The presence a start may act on and the launchers waited out: one still idle after the grace is
+/// set aside (a client that only reconnects), while one appearing during it refuses this attempt.
+pub(crate) fn settle(socket: &Path, os: &dyn PresenceOs, rounds: usize) -> (Presence, Vec<u32>) {
+    let mut excused = Vec::new();
+    let mut presence = classify(socket, os);
+    while let Presence::Unknown(Unknown::HerdrProcess {
+        pid,
+        role: Role::Launcher,
+    }) = presence
+    {
+        excused.push(pid);
+        presence = classify_except(socket, os, &excused);
+    }
+    if excused.is_empty() || !matches!(presence, Presence::Absent(_)) {
+        return (presence, excused);
+    }
+    for _ in 0..rounds {
+        os.pause();
+        presence = classify_except(socket, os, &excused);
+        if !matches!(presence, Presence::Absent(_)) {
+            return (presence, excused);
+        }
+    }
+    (presence, excused)
 }
 
 /// One reading: `Ok` is absent of that kind, `Err` the final present or unknown answer.

@@ -287,6 +287,10 @@ pub(in crate::services::discord) async fn retry(
             let prepared = if consent.state != State::Applied || consent.needs_new_generation() {
                 let revision = consent.preview.revision.checked_add(1);
                 let revision = revision.ok_or("consent revision exhausted")?;
+                // A fresh card needs a live server; its preview then names that new server.
+                if let Some(target) = endpoint(consent.channel) {
+                    crate::services::session_host::autostart::spawn::ensure(&target).await;
+                }
                 Some(preview::prepare(peer, revision).await?)
             } else {
                 None

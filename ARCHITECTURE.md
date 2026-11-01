@@ -3513,8 +3513,11 @@ src/
 │   │   │   │   ├── candidate_tests.rs
 │   │   │   │   ├── presence.rs
 │   │   │   │   ├── presence_tests.rs
+│   │   │   │   ├── record.rs
 │   │   │   │   ├── selector.rs
-│   │   │   │   └── selector_tests.rs
+│   │   │   │   ├── selector_tests.rs
+│   │   │   │   ├── spawn.rs
+│   │   │   │   └── spawn_real_tests.rs
 │   │   │   ├── managed_config/
 │   │   │   │   ├── maintenance.rs
 │   │   │   │   ├── maintenance_tests.rs
@@ -3569,6 +3572,7 @@ src/
 │   │   │   │   └── writer_compat_tests.rs
 │   │   │   ├── autostart.rs
 │   │   │   ├── autostart_real_tests.rs
+│   │   │   ├── autostart_tests.rs
 │   │   │   ├── contract.rs
 │   │   │   ├── launch_host.rs
 │   │   │   ├── launch_host_real_tests.rs

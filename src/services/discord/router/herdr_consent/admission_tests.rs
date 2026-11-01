@@ -3,6 +3,7 @@ use crate::services::discord::router::intake_dispatch::{
     self as intake, IntakeAdmission, QueuedAdmissionDisposition,
 };
 use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
+use crate::services::session_host::autostart::spawn::ensured_on_this_thread;
 use crate::services::turn_orchestrator::QueuePersistenceContext;
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 use std::sync::atomic::Ordering;
@@ -150,6 +151,7 @@ async fn legacy_actual_intake_and_attachment_gates_preserve_all_origins_without_
     let f = Fixture::new("disabled").await;
     let _boot = session_hosts::force_for_test(Some("node"), &[(discord_mock::CHANNEL_ID, "node")]);
     let reads = STORE_READS.load(Ordering::SeqCst);
+    let ensured = ensured_on_this_thread();
     let deps = f.deps();
     let original = request(8_916_099);
     let frame = std::mem::size_of_val(&check(&deps, &ProviderKind::Claude, &original));
@@ -222,6 +224,11 @@ async fn legacy_actual_intake_and_attachment_gates_preserve_all_origins_without_
         STORE_READS.load(Ordering::SeqCst),
         reads,
         "legacy_all_origins_store_reads_zero_contract"
+    );
+    assert_eq!(
+        ensured_on_this_thread(),
+        ensured,
+        "legacy_all_origins_never_reach_server_autostart_contract"
     );
     assert!(
         !f.root.path().join("runtime/herdr_policy").exists(),
@@ -378,6 +385,35 @@ async fn legacy_actual_queued_entry_retains_local_admission_without_consent_io()
         0,
         "legacy_actual_queued_entry_cards_zero_contract"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_local_user_default_input_asks_for_its_server_before_any_row() {
+    let f = Fixture::new("disabled").await;
+    let request = request(8_916_120);
+    let remote =
+        session_hosts::force_for_test(Some("other"), &[(discord_mock::CHANNEL_ID, "node")])
+            .with_mode(EndpointMode::UserDefault);
+    let before = ensured_on_this_thread();
+    assert!(
+        check(&f.deps(), &ProviderKind::Claude, &request)
+            .await
+            .is_none()
+    );
+    assert_eq!(
+        ensured_on_this_thread(),
+        before,
+        "another node's channel asks nothing"
+    );
+    drop(remote);
+    let _local = session_hosts::force_for_test(Some("node"), &[(discord_mock::CHANNEL_ID, "node")])
+        .with_mode(EndpointMode::UserDefault);
+    let assessed = check(&f.deps(), &ProviderKind::Claude, &request).await;
+    assert!(
+        assessed.is_some(),
+        "the local user_default input is assessed"
+    );
+    assert_eq!(ensured_on_this_thread(), before + 1);
 }
 
 #[tokio::test(flavor = "current_thread")]
