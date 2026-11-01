@@ -3,6 +3,7 @@
 use crate::services::{
     provider::ProviderKind,
     tui_o::{
+        shadow::capture::FileMatch,
         shadow::identity::{self, RecordFact, UnitContent},
         shadow::{self, CapturedRecord, ShadowProvider, SourceId, UnitKey, UnitKind},
         store::delivery_evidence,
@@ -334,7 +335,10 @@ fn build_with_prefix_limit(
         return None;
     }
     let mut file = File::open(query.path).ok()?;
-    if shadow::capture::file_identity(&file.metadata().ok()?) != query.file {
+    // A reboot may renumber the volume's dev; the stored source's path and inode still name the
+    // file, and the cursor's prefix hash below proves its bytes.
+    let opened = shadow::capture::file_identity(&file.metadata().ok()?);
+    if shadow::capture::file_match(&cursor.source, opened) == FileMatch::Other {
         return None;
     }
     let selection_start = start.saturating_sub(1);
@@ -384,7 +388,7 @@ fn build_with_prefix_limit(
         bytes.extend_from_slice(&chunk[..read]);
         position += read as u64;
     }
-    if shadow::capture::file_identity(&file.metadata().ok()?) != query.file
+    if shadow::capture::file_identity(&file.metadata().ok()?) != opened
         || Instant::now() >= deadline
     {
         return None;

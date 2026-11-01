@@ -190,11 +190,13 @@ fn update_guard(guard: &mut Vec<u8>, chunk: &[u8]) {
 }
 
 impl SourceCapture {
-    /// Opens `source.path` read-only at `start_offset`; a torn first line is skipped.
+    /// Opens `source.path` read-only at `start_offset`; a torn first line is skipped. A renumbered
+    /// dev passes as every poll's `Fingerprint::path` check does; the capture keeps the stored source.
     pub fn open(source: SourceId, start_offset: u64) -> io::Result<Self> {
         let file = File::open(&source.path)?;
         let meta = file.metadata()?;
-        if file_identity(&meta) != (source.dev, source.ino) || start_offset > meta.len() {
+        let replaced = file_match(&source, file_identity(&meta)) == FileMatch::Other;
+        if replaced || start_offset > meta.len() {
             return Err(io::ErrorKind::InvalidInput.into());
         }
         Self::opened(source, file, &meta, start_offset)
