@@ -375,6 +375,12 @@ function createAgentdeskMock(options) {
           ? clone(timeouts.maintainStaleSessions(state))
           : { ok: true };
       },
+      maintainUnsentNotifications() {
+        if (typeof timeouts.maintainUnsentNotifications === "function") {
+          return clone(timeouts.maintainUnsentNotifications(...arguments));
+        }
+        return { ok: true };
+      },
       observeSessionHost(sessionKey) {
         state.timeoutHostObservations.push(sessionKey);
         if (typeof settings.sessionHost === "function") {
