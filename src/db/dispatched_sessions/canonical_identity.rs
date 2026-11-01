@@ -328,7 +328,7 @@ pub(crate) async fn resolve_session_key_with_identity_pg(
 }
 
 /// Converge exact locators and the canonical tuple through locked operational
-/// promotion, with disconnected foreign owners released only for legacy records.
+/// promotion; a disconnected owner on another terminal yields to a lone operational row.
 pub(crate) async fn resolve_session_row_pg(
     pool: &PgPool,
     session_key: Option<&str>,
@@ -545,16 +545,19 @@ async fn load_canonical_for_update(
         .fetch_one(&mut **tx)
         .await
         .map_err(database_error)?;
-        let hosts = [owner.session_key.as_str(), candidate.session_key.as_str()].map(|key| {
-            crate::services::discord::session_identity::SessionIdentity::parse(key)
-                .map(|parsed| parsed.host.to_ascii_lowercase())
+        // A different host or, on the same host, a renamed tmux session is a distinct
+        // terminal; two spellings of one host:tmux pair are not.
+        let terminals = [owner.session_key.as_str(), candidate.session_key.as_str()].map(|key| {
+            crate::services::discord::session_identity::SessionIdentity::parse(key).map(|parsed| {
+                let host = parsed.host.to_ascii_lowercase();
+                (host.trim_end_matches(".local").to_owned(), parsed.tmux_name)
+            })
         });
-        let foreign = matches!(&hosts, [Some(old), Some(live)]
-            if old.trim_end_matches(".local") != live.trim_end_matches(".local"));
-        if !disconnected || !foreign {
+        let moved = matches!(&terminals, [Some(old), Some(live)] if old != live);
+        if !disconnected || !moved {
             return Err(conflict(
                 SessionIdentityConflictKind::EvidenceDivergence,
-                "canonical and legacy rows lack a disconnected foreign-host handoff",
+                "canonical and legacy rows lack a disconnected handoff to another terminal",
             ));
         }
         // Release the old tuple before claiming it; both rows stay locked until commit.

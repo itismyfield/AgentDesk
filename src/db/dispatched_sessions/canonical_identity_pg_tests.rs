@@ -2662,17 +2662,19 @@ async fn canonical_identity_foreign_handoff_insufficient_evidence_stays_divergen
     let pool = test_db.migrate().await;
     let channel = "1490141485167808532";
     let live = "claude/discord_0123456789abcdef/mac-book:AgentDesk-claude-current";
-    for (status, old_host, live_status) in [
-        ("idle", "mac-mini", "idle"),
-        ("disconnected", "mac-book", "idle"),
-        ("disconnected", "MAC-BOOK.local", "idle"),
-        ("disconnected", "mac-mini", "disconnected"),
+    // Both rows live, one terminal spelled twice, or no live row stay refused.
+    for (status, old_host, old_tmux, live_status) in [
+        ("idle", "mac-mini", "old", "idle"),
+        ("idle", "mac-book", "old", "idle"),
+        ("disconnected", "MAC-BOOK", "current", "idle"),
+        ("disconnected", "MAC-BOOK.local", "current", "idle"),
+        ("disconnected", "mac-mini", "old", "disconnected"),
     ] {
         sqlx::query("DELETE FROM sessions")
             .execute(&pool)
             .await
             .unwrap();
-        let old = format!("claude/discord_0123456789abcdef/{old_host}:AgentDesk-claude-old");
+        let old = format!("claude/discord_0123456789abcdef/{old_host}:AgentDesk-claude-{old_tmux}");
         let mut old_params = params(&old, channel);
         old_params.status = status;
         upsert_hook_session_with_identity_pg(&pool, old_params, Some(identity(channel)))
@@ -2699,7 +2701,7 @@ async fn canonical_identity_foreign_handoff_insufficient_evidence_stays_divergen
         assert_eq!(
             read.conflict_kind(),
             Some(SessionIdentityConflictKind::EvidenceDivergence),
-            "{status}/{old_host}/{live_status}"
+            "{status}/{old_host}/{old_tmux}/{live_status}"
         );
         if live_status == "idle" {
             let nameless =
@@ -2829,6 +2831,72 @@ async fn canonical_identity_foreign_handoff_resolver_and_hook_converge_pg() {
                 .unwrap(),
             2
         );
+    }
+    test_db.drop().await;
+}
+
+#[tokio::test]
+async fn canonical_identity_same_host_rename_handoff_converges_and_refuses_revival_pg() {
+    let Some(test_db) = CanonicalIdentityPgDatabase::create().await else {
+        return;
+    };
+    let pool = test_db.migrate().await;
+    let channel = "1480531508820185241";
+    let old = "claude/discord_0123456789abcdef/MacBook-Pro-14:AgentDesk-claude-최고의셰프";
+    let live = "claude/discord_0123456789abcdef/MacBook-Pro-14:AgentDesk-claude-최고의셰프-cc";
+    for named_read in [false, true] {
+        sqlx::query("DELETE FROM sessions")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut old_params = params(old, channel);
+        old_params.status = "disconnected";
+        upsert_hook_session_with_identity_pg(&pool, old_params, Some(identity(channel)))
+            .await
+            .unwrap();
+        super::upsert_legacy_hook_session_pg(&pool, params(live, channel))
+            .await
+            .unwrap();
+        let before = actor_pin_session_snapshot(&pool, old).await;
+        if named_read {
+            let resolved = super::resolve_session_key_with_identity_pg(
+                &pool,
+                live,
+                Some("claude"),
+                Some(identity(channel)),
+            )
+            .await
+            .unwrap();
+            assert_eq!(resolved.as_deref(), Some(live));
+        } else {
+            let hook = upsert_hook_session_with_identity_pg(
+                &pool,
+                params(live, channel),
+                Some(identity(channel)),
+            )
+            .await
+            .unwrap();
+            assert_eq!((hook.inserted, hook.session_key.as_str()), (false, live));
+        }
+        let mut expected_old = before;
+        expected_old["identity_kind"] = Value::Null;
+        expected_old["discord_token_hash"] = Value::Null;
+        assert_eq!(actor_pin_session_snapshot(&pool, old).await, expected_old);
+        let converged = actor_pin_session_snapshot(&pool, live).await;
+        assert_eq!(converged["identity_kind"], "discord_channel");
+
+        // The old-name tmux coming back must not reclaim the identity from the live row.
+        let mut revived = params(old, channel);
+        revived.status = "working";
+        let error = upsert_hook_session_with_identity_pg(&pool, revived, Some(identity(channel)))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.conflict_kind(),
+            Some(SessionIdentityConflictKind::EvidenceDivergence)
+        );
+        assert_eq!(actor_pin_session_snapshot(&pool, old).await, expected_old);
+        assert_eq!(actor_pin_session_snapshot(&pool, live).await, converged);
     }
     test_db.drop().await;
 }
