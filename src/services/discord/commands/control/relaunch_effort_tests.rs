@@ -139,7 +139,7 @@ async fn clear_keeps_the_saved_effort_and_drops_its_relaunch_pg() {
 }
 
 // A Herdr channel and a channel off the local TUI refuse the save and keep the setting, its pending
-// relaunch and the session as they were; a stored level the CLI does not take launches nothing.
+// relaunch and the session as they were; without a level the CLI takes, the launch adds no effort.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn effort_off_the_local_tui_is_refused_with_the_setting_kept_pg() {
     let test = "services::discord::commands::control::relaunch_tests::effort_tests::effort_off_the_local_tui_is_refused_with_the_setting_kept_pg";
@@ -183,6 +183,14 @@ async fn effort_off_the_local_tui_is_refused_with_the_setting_kept_pg() {
         .insert(key, "ultracode".into());
     drop(settings);
     assert_eq!(fx.effort().await, None, "an unknown level is not launched");
+    let _tui = HostingConfig::tui();
+    fx.tmux.mark_missing();
+    let set = TestEnvVarGuard::set_value_after_shared_test_env_lock;
+    let _inherited = set("CLAUDE_CODE_EFFORT_LEVEL", std::ffi::OsStr::new("max"));
+    let effort = fx.effort().await;
+    let (args, _, env) = fx.launch_with(fx.channel, &fx.name, SESSION, None, effort.as_deref());
+    assert!(!args.iter().any(|arg| arg == "--effort"), "{args:?}");
+    assert_eq!(env, "max", "without a level the inherited variable stays");
     let said = effort_save_notice(
         &fx.shared,
         TOKEN,
