@@ -162,6 +162,8 @@ function createAgentdeskMock(options) {
     autoQueueCompletes: [],
     autoQueuePauses: [],
     autoQueueResumes: [],
+    phaseGateContextCalls: [],
+    phaseGateEvaluations: [],
     autoQueueSavedPhaseGates: [],
     autoQueueClearedPhaseGates: [],
     timeoutClearFreshCounterCalls: [],
@@ -528,6 +530,20 @@ function createAgentdeskMock(options) {
           return clone(settings.recordDispatchFailure(entryId, retryLimit, source, state));
         }
         return { retryCount: 1, retryLimit: 3, to: "pending", changed: true };
+      }
+    },
+    phaseGate: {
+      authoritativeContext(runId, phase, context) {
+        state.phaseGateContextCalls.push({ runId, phase, context: clone(context) });
+        return typeof settings.phaseGateContext === "function"
+          ? clone(settings.phaseGateContext(runId, phase, context)) : clone(context);
+      },
+      evaluate(context, result) {
+        state.phaseGateEvaluations.push({ context: clone(context), result: clone(result) });
+        if (typeof settings.phaseGateEvaluation !== "function") {
+          throw new Error("phaseGateEvaluation fixture is required; verdict logic belongs to Rust");
+        }
+        return clone(settings.phaseGateEvaluation(context, result));
       }
     },
     prTracking: {

@@ -21,6 +21,9 @@ pub(crate) use kanban_ops::reopen_done_auto_queue_entries_on_pg_tx;
 mod kv_ops;
 mod log_ops;
 pub(crate) mod message_ops;
+mod phase_gate_ops;
+#[cfg(test)]
+mod phase_gate_owner_tests;
 mod pipeline_ops;
 mod pr_tracking_ops;
 #[cfg(test)]
@@ -93,6 +96,7 @@ fn register_globals_pg_only(
     runtime_ops::register_runtime_ops(ctx, pg_pool.clone(), supervisor_bridge)?;
     message_ops::register_message_ops(ctx, pg_pool.clone())?;
     exec_ops::register_exec_ops(ctx)?;
+    phase_gate_ops::register_phase_gate_ops(ctx, pg_pool.clone())?;
     pipeline_ops::register_pipeline_ops(ctx, pg_pool.clone())?;
     dm_reply_ops::register_dm_reply_ops(ctx, pg_pool.clone())?;
     agent_ops::register_agent_ops(ctx, pg_pool.clone())?;

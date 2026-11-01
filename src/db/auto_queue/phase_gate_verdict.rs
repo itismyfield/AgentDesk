@@ -1,4 +1,4 @@
-//! Canonical phase-gate verdict reducer shared by finalize and durable reconciliation paths.
+//! Canonical phase-gate verdict reducer shared by policy hooks, finalize, and durable reconciliation.
 //!
 //! A pass is accepted only against an exact current registry snapshot. Explicit verdict strings
 //! remain available for diagnostics, but they do not bypass declaration or check validation.
@@ -50,9 +50,9 @@ fn check_entry_is_pass(entry: &Value) -> bool {
         Value::String(text) => Some(text.as_str()),
         Value::Object(map) => map
             .get("status")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .or_else(|| map.get("result").and_then(Value::as_str)),
+            .filter(|value| is_js_truthy(value))
+            .or_else(|| map.get("result"))
+            .and_then(Value::as_str),
         _ => None,
     };
     raw.map(|status| status.eq_ignore_ascii_case("pass") || status.eq_ignore_ascii_case("passed"))
@@ -103,6 +103,22 @@ pub fn resolve_verdict(context: Option<&Value>, result: &Value) -> VerdictResolu
         Some(verdict) => VerdictResolution::Inferred(verdict),
         None => VerdictResolution::Missing,
     }
+}
+
+/// Return the complete policy decision so callers only coordinate its effects.
+pub(crate) fn evaluate(context: Option<&Value>, result: &Value) -> Value {
+    let resolution = resolve_verdict(context, result);
+    let expected = context
+        .and_then(|context| context.get("phase_gate"))
+        .map(pass_verdict_of)
+        .unwrap_or_else(|| DEFAULT_PASS_VERDICT.to_string());
+    serde_json::json!({
+        "verdict": resolution.verdict(),
+        "inferred": matches!(resolution, VerdictResolution::Inferred(_)),
+        "pass_verdict": expected,
+        "matches": verdict_matches(resolution.verdict(), &expected, context, Some(result)),
+        "diagnostic": diagnostic_verdict(result, &resolution),
+    })
 }
 
 /// Preserve a closed diagnostic class without serializing arbitrary untrusted values.
@@ -312,5 +328,28 @@ mod tests {
             resolve_verdict(Some(&gate_context()), &result),
             VerdictResolution::Inferred(DEFAULT_PASS_VERDICT.to_string())
         );
+    }
+
+    #[test]
+    fn check_status_truthiness_preserves_result_fallback_boundary() {
+        for (status, expected) in [
+            (json!(true), false),
+            (json!(1), false),
+            (json!([]), false),
+            (json!(["pass"]), false),
+            (json!({}), false),
+            (json!(false), true),
+            (json!(0), true),
+            (Value::Null, true),
+            (json!(""), true),
+        ] {
+            let mut checks = passing_checks();
+            checks["merge_verified"] = json!({"status":status,"result":"pass"});
+            assert_eq!(
+                evaluate(Some(&gate_context()), &json!({"checks":checks}))["matches"],
+                expected,
+                "status={status}"
+            );
+        }
     }
 }
