@@ -45,6 +45,7 @@ struct HerdrOwner {
     channel: u64,
     logical: String,
     execution: String,
+    context: std::path::PathBuf,
     _dir: tempfile::TempDir,
 }
 
@@ -52,7 +53,8 @@ impl HerdrOwner {
     fn start(provider: &str, channel: u64) -> Self {
         let rig = HerdrRig::start();
         let execution = uuid::Uuid::new_v4().simple().to_string();
-        rig.run_provider(&rig.context(&execution), false);
+        let context = rig.context(&execution);
+        rig.run_provider(&context, false);
         let logical = format!("AgentDesk-{provider}-owned-{channel}");
         let marker = crate::services::tmux_common::session_temp_path(&logical, "host_kind");
         std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
@@ -98,6 +100,7 @@ impl HerdrOwner {
             channel,
             logical,
             execution,
+            context,
             _dir: tempfile::tempdir().unwrap(),
         }
     }
@@ -381,13 +384,19 @@ fn owned_herdr_pending_execution_is_refused_before_any_reservation() {
         "no input hold was taken"
     );
     let same = |a: &PendingQueueItem, b: &PendingQueueItem| a.message_id == b.message_id;
+    let mut offered = owner.original.clone();
+    offered.queued_generation += 100;
     let resumed = owner.runtime.block_on(owner.mailbox.v2_resume_ticket(
-        owner.original.clone(),
+        offered,
         owner.ticket.as_str().into(),
         same,
     ));
     let (_, stored) = resumed.expect("the refused original resumes under its ticket");
     let json = |item: &PendingQueueItem| serde_json::to_value(item).unwrap();
+    assert_eq!(
+        stored.queued_generation, owner.original.queued_generation,
+        "a resumed ticket keeps its stored generation"
+    );
     assert_eq!(json(&stored), json(&owner.original));
     let snapshot = owner.snapshot();
     assert_eq!(
@@ -590,14 +599,23 @@ fn owned_codex_absence_creates_only_with_the_reserved_prompt() {
             .success()
     };
     let root = crate::services::tmux_common::current_tmux_owner_marker();
-    for (case, channel, script_prompt, created) in [
+    for (case, channel, script_prompt, foreign_field, created) in [
         (
             "other",
             7_272_606,
             "a prompt the owner never reserved",
+            None,
             false,
         ),
-        ("same", 7_272_607, PROMPT, true),
+        ("same", 7_272_607, PROMPT, None, true),
+        (
+            "foreign-nonce",
+            7_272_616,
+            PROMPT,
+            Some("execution_nonce"),
+            false,
+        ),
+        ("foreign-root", 7_272_617, PROMPT, Some("root"), false),
     ] {
         let owner = HerdrOwner::start("codex", channel);
         let session = format!("owned-absence-{case}");
@@ -611,11 +629,15 @@ fn owned_codex_absence_creates_only_with_the_reserved_prompt() {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let inner = owner.hook("codex", "tmux", Lineage::Created);
         let record = seen.clone();
-        let _waiting =
-            scope::install_launch(Box::new(move |lineage, target, source, writer, submit| {
+        let _waiting = scope::install_launch(Box::new(
+            move |lineage, mut target, source, writer, submit| {
                 record.lock().unwrap().push(target.clone());
+                if let Some(field) = foreign_field {
+                    target[field] = json!("another-execution");
+                }
                 inner(lineage, target, source, writer, submit)
-            }));
+            },
+        ));
         let _entered = owner.runtime.enter();
         let result = crate::services::codex::herdr_turn::owned_spawn_for_tests(
             &context,
@@ -623,6 +645,14 @@ fn owned_codex_absence_creates_only_with_the_reserved_prompt() {
             script_prompt,
             "sleep 30".into(),
         );
+        if foreign_field.is_some() {
+            assert!(
+                result
+                    .as_ref()
+                    .is_err_and(|why| why.contains("foreign argv execution")),
+                "matching prompt with a foreign context is refused: {case}: {result:?}"
+            );
+        }
         assert_eq!(result.is_ok(), created, "{case}: {result:?}");
         assert_eq!(exists(&session), created, "{case}");
         assert_eq!(
@@ -641,11 +671,71 @@ fn owned_codex_absence_creates_only_with_the_reserved_prompt() {
     }
 }
 
+/// Keeps the scope alive through the rendezvous on either a write or a refusal.
+fn write_herdr_between(
+    logical: &str,
+    owner: &HerdrOwner,
+    pane: &crate::services::session_host::HerdrTarget,
+    between: &dyn Fn(),
+) -> Result<(), String> {
+    use crate::services::session_host::{HerdrMutation as Mutation, HostMutation};
+    admit_herdr_here();
+    let root = owner.rig.socket().display().to_string();
+    let physical = format!("{root}#{PANE}");
+    let target = json!({"host":"herdr","owner":logical,"root":root,"execution_nonce":"h"});
+    scope::with_scope(
+        "claude".into(),
+        target,
+        owner.channel,
+        Arc::new(|_| Ok(())),
+        Arc::new(|_, _| Ok(())),
+        Arc::new(|_| Ok(())),
+        || {
+            let wrote = (|| {
+                scope::bind_writer(&physical)?;
+                pane.pin(Mutation::Input)
+                    .map_err(|refusal| format!("{refusal:?}"))?;
+                match pane.send_paste(logical) {
+                    Ok(HostMutation::Confirmed) => Ok(()),
+                    other => Err(format!("{other:?}")),
+                }
+            })();
+            between();
+            wrote
+        },
+    )
+}
+
+/// A pin refusal still reaches the rendezvous; the parent can release and inspect the error.
+#[test]
+fn a_refused_first_herdr_pin_reaches_the_rendezvous() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let owner = HerdrOwner::start("claude", 7_272_618);
+    let _registry = owner.rig.registry_on_this_thread();
+    let pane =
+        crate::services::claude::herdr_turn::gate(&owner.record("claude", HostedState::Bound))
+            .unwrap();
+    owner.rig.run_provider(&owner.context, true);
+    let reached = std::sync::atomic::AtomicUsize::new(0);
+    let result = write_herdr_between("logical-refused", &owner, &pane, &|| {
+        reached.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    });
+    assert!(
+        result.is_err(),
+        "the replaced provider must fail its pin: {result:?}"
+    );
+    assert_eq!(
+        reached.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a refused first pin still completes the rendezvous"
+    );
+    assert!(owner.rig.sends().is_empty());
+}
+
 /// Through the real gate a second logical owner of a held pane gets no byte, another socket's pane
 /// writes meanwhile, and the pane takes the second owner once the first scope ends.
 #[test]
 fn two_herdr_rigs_serialize_one_physical_pane_through_the_gate() {
-    use crate::services::session_host::{HerdrMutation as Mutation, HerdrTarget, HostMutation};
     let _root = crate::config::TestRuntimeRootGuard::new();
     let (a, b) = (
         HerdrOwner::start("claude", 7_272_608),
@@ -657,47 +747,21 @@ fn two_herdr_rigs_serialize_one_physical_pane_through_the_gate() {
             .unwrap()
     };
     let (pane_a, pane_b) = (gate(&a), gate(&b));
-    // One logical owner's paste through `pane`, holding its scope across `between`.
-    let write = |logical: &str, owner: &HerdrOwner, pane: &HerdrTarget, between: &dyn Fn()| {
-        admit_herdr_here();
-        let root = owner.rig.socket().display().to_string();
-        let physical = format!("{root}#{PANE}");
-        let target = json!({"host":"herdr","owner":logical,"root":root,"execution_nonce":"h"});
-        scope::with_scope(
-            "claude".into(),
-            target,
-            owner.channel,
-            Arc::new(|_| Ok(())),
-            Arc::new(|_, _| Ok(())),
-            Arc::new(|_| Ok(())),
-            || {
-                scope::bind_writer(&physical)?;
-                pane.pin(Mutation::Input)
-                    .map_err(|refusal| format!("{refusal:?}"))?;
-                let wrote = pane.send_paste(logical);
-                between();
-                match wrote {
-                    Ok(HostMutation::Confirmed) => Ok(()),
-                    other => Err(format!("{other:?}")),
-                }
-            },
-        )
-    };
     let (held, release) = (std::sync::Barrier::new(2), std::sync::Barrier::new(2));
     // Results are asserted after the scope, so a failure never leaves the first writer parked.
     let (first, refused, other) = std::thread::scope(|threads| {
         let first = threads.spawn(|| {
-            write("logical-a", &a, &pane_a, &|| {
+            write_herdr_between("logical-a", &a, &pane_a, &|| {
                 held.wait();
                 release.wait();
             })
         });
         held.wait();
         let refused = threads
-            .spawn(|| write("logical-b", &a, &pane_a, &|| {}))
+            .spawn(|| write_herdr_between("logical-b", &a, &pane_a, &|| {}))
             .join();
         let other = threads
-            .spawn(|| write("logical-c", &b, &pane_b, &|| {}))
+            .spawn(|| write_herdr_between("logical-c", &b, &pane_b, &|| {}))
             .join();
         release.wait();
         (first.join().unwrap(), refused.unwrap(), other.unwrap())
@@ -710,7 +774,11 @@ fn two_herdr_rigs_serialize_one_physical_pane_through_the_gate() {
         "same pane, second owner: {refused:?}"
     );
     assert_eq!(other, Ok(()), "another socket's pane");
-    assert_eq!(write("logical-b", &a, &pane_a, &|| {}), Ok(()), "released");
+    assert_eq!(
+        write_herdr_between("logical-b", &a, &pane_a, &|| {}),
+        Ok(()),
+        "released"
+    );
     let pasted = |owner: &HerdrOwner| {
         let sends = owner.rig.sends();
         let texts = sends.iter().filter_map(|send| send["text"].as_str());
