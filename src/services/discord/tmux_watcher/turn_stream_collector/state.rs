@@ -120,6 +120,8 @@ pub(in crate::services::discord::tmux::tmux_watcher) struct ActiveReadState {
 pub(in crate::services::discord::tmux::tmux_watcher) struct RestoredResponseSeed {
     pub(in crate::services::discord::tmux::tmux_watcher) body: String,
     pub(in crate::services::discord::tmux::tmux_watcher) source: Option<SeedBodySource>,
+    /// Turn of the restored row that started this collection; kept even while `body` is empty.
+    pub(in crate::services::discord::tmux::tmux_watcher) producer_turn_nonce: Option<String>,
 }
 
 #[derive(Clone)]

@@ -538,7 +538,7 @@ async fn enqueue_headless_turn_row(
         runtime.provider,
         runtime.born_generation,
         delivery_cancel_token,
-        output_origin,
+        (output_origin, runtime.producer_turn_nonce),
     )
     .await
 }
