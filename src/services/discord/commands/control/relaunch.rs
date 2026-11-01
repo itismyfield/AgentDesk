@@ -33,9 +33,9 @@ pub(super) enum Outcome {
 
 /// Failed kills per channel with the fast value tried and the channel whose settings it shares; a
 /// new value or a new save restarts the count, and a spent one stops drift retries of that value.
-static KILL_FAILURES: LazyLock<
-    dashmap::DashMap<serenity::ChannelId, (u8, Option<bool>, serenity::ChannelId)>,
-> = LazyLock::new(dashmap::DashMap::new);
+static KILL_FAILURES: LazyLock<dashmap::DashMap<serenity::ChannelId, Failures>> =
+    LazyLock::new(dashmap::DashMap::new);
+type Failures = (u8, Option<bool>, serenity::ChannelId);
 static DEFER_NOTICED: LazyLock<dashmap::DashSet<serenity::ChannelId>> =
     LazyLock::new(dashmap::DashSet::new);
 
