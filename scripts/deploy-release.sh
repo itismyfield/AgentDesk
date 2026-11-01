@@ -3167,9 +3167,9 @@ config_path, port, output_dir, password_output = ARGV
 config = YAML.safe_load(File.read(config_path), aliases: true) || {}
 db = config.fetch("database", {})
 raise "database disabled" unless db["enabled"] == true
-host = db.fetch("host").to_s
-user = db.fetch("user").to_s
-name = db.fetch("dbname").to_s
+host = db.fetch("host", "127.0.0.1").to_s
+user = db.fetch("user", "agentdesk").to_s
+name = db.fetch("dbname", "agentdesk").to_s
 raise "database host, user, or name missing" if host.empty? || user.empty? || name.empty?
 fields = { "PGHOST" => host, "PGHOSTADDR" => "127.0.0.1",
            "PGPORT" => Integer(port, 10).to_s,

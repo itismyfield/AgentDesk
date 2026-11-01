@@ -711,19 +711,51 @@ fn resolve_guild_id(
     state: &AppState,
     override_guild_id: Option<&str>,
 ) -> Result<poise::serenity_prelude::GuildId, String> {
-    let raw = if let Some(value) = override_guild_id {
-        value.to_string()
-    } else {
-        state
-            .config
-            .discord
-            .guild_id
-            .clone()
-            .ok_or_else(|| "discord.guild_id not configured; pass --guild-id".to_string())?
-    };
+    let raw = override_guild_id
+        .or_else(|| {
+            state
+                .config
+                .onboarding
+                .effective_guild_id(&state.config.discord)
+        })
+        .ok_or_else(|| "guild id not configured; pass --guild-id".to_string())?;
     raw.parse::<u64>()
         .map(poise::serenity_prelude::GuildId::new)
         .map_err(|err| format!("invalid guild id {raw:?}: {err}"))
+}
+
+#[cfg(test)]
+mod guild_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn discord_create_guild_resolution_prefers_explicit_then_onboarding() {
+        for discord in [None, Some(""), Some("123"), Some("444")] {
+            let mut config = crate::config::Config::default();
+            config.discord.guild_id = discord.map(str::to_string);
+            config.onboarding.guild_id = Some("222".into());
+            let engine = crate::engine::PolicyEngine::new(&config).unwrap();
+            let broadcast_tx = crate::eventbus::new_broadcast();
+            let batch_buffer = crate::eventbus::spawn_batch_flusher(broadcast_tx.clone());
+            let mut state = AppState {
+                pg_pool: None,
+                engine,
+                config: Arc::new(config),
+                broadcast_tx,
+                batch_buffer,
+                health_registry: None,
+                cluster_instance_id: None,
+            };
+            assert_eq!(resolve_guild_id(&state, None).unwrap().get(), 222);
+            assert_eq!(resolve_guild_id(&state, Some("333")).unwrap().get(), 333);
+            let config = Arc::make_mut(&mut state.config);
+            config.onboarding.guild_id = None;
+            config.discord.guild_id = None;
+            assert!(resolve_guild_id(&state, None).is_err());
+            Arc::make_mut(&mut state.config).discord.guild_id = Some("444".into());
+            assert_eq!(resolve_guild_id(&state, None).unwrap().get(), 444);
+        }
+    }
 }
 
 pub(crate) async fn cmd_discord_category_create(
