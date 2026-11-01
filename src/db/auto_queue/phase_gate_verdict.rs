@@ -351,5 +351,18 @@ mod tests {
                 "status={status}"
             );
         }
+        for entry in [
+            json!({"result":["pass"]}),
+            json!({"status":"","result":["pass"]}),
+            json!({"result":{"toString":1}}),
+        ] {
+            let mut checks = passing_checks();
+            checks["merge_verified"] = entry.clone();
+            assert_eq!(
+                evaluate(Some(&gate_context()), &json!({"checks":checks}))["matches"],
+                false,
+                "non-string result: {entry}"
+            );
+        }
     }
 }

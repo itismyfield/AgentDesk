@@ -210,7 +210,48 @@ fn pr_tracking_mutation_re() -> &'static Result<Regex, regex::Error> {
     static RE: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r#"(?i)\b(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|MERGE\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?)\s+(?:["`]?\w+["`]?\s*\.\s*)?["`]?pr_tracking\b"#,
+            r#"(?i)\b(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|MERGE\s+INTO|UPDATE(?:\s+ONLY)?|DELETE\s+FROM(?:\s+ONLY)?|TRUNCATE(?:\s+TABLE)?)\s+(?:["`]?\w+["`]?\s*\.\s*)?["`]?pr_tracking\b"#,
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SqlGuardTarget, detect_core_table_write, pr_tracking_mutation_re};
+
+    #[test]
+    fn pr_tracking_guard_expression_compiles() {
+        assert!(pr_tracking_mutation_re().is_ok());
+    }
+
+    #[test]
+    fn pr_tracking_guard_rejects_mutations() {
+        for sql in [
+            "UPDATE public.pr_tracking SET state = 'merged'",
+            "UPDATE \"public\".\"pr_tracking\" SET state = 'merged'",
+            "UPDATE ONLY pr_tracking SET state = 'merged'",
+            "DELETE FROM ONLY public.pr_tracking WHERE card_id = 'card'",
+            "MERGE INTO public.pr_tracking USING incoming ON false WHEN NOT MATCHED THEN INSERT (card_id) VALUES ('card')",
+            "TRUNCATE pr_tracking",
+            "TRUNCATE TABLE \"public\".\"pr_tracking\"",
+            "WITH removed AS (DELETE FROM pr_tracking RETURNING *) SELECT * FROM removed",
+        ] {
+            assert_eq!(
+                detect_core_table_write(sql).map(|violation| violation.target),
+                Some(SqlGuardTarget::PrTracking),
+                "unblocked tracking mutation: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn pr_tracking_guard_allows_unrelated_writes_and_reads() {
+        for sql in [
+            "UPDATE pr_tracking_archive SET state = 'merged'",
+            "SELECT * FROM (SELECT card_id FROM public.pr_tracking) AS tracking",
+            "UPDATE kanban_cards SET title = 'renamed' WHERE id = 'card'",
+        ] {
+            assert_eq!(detect_core_table_write(sql), None, "blocked SQL: {sql}");
+        }
+    }
 }
