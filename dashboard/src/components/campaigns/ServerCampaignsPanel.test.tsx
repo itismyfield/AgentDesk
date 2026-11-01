@@ -5,7 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { getCampaigns, type Campaign } from "../../api/campaigns";
 import { ApiRequestError } from "../../api/httpClient";
 import {
-  createServerCampaign, editServerCampaignDefinition, getServerCampaign, getServerCampaignEvents, getServerCampaigns, sendServerCampaignCommand,
+  createServerCampaign, editServerCampaignDefinition, getServerCampaign, getServerCampaignEvents, getServerCampaignSummaries, sendServerCampaignCommand,
   type ServerCampaignCommandResult, type ServerCampaignDocument,
 } from "../../api/serverCampaigns";
 import { serverCampaignFixtures as fixtures } from "../../api/serverCampaignsFixtures";
@@ -14,7 +14,7 @@ import CampaignsPanel from "./CampaignsPanel";
 vi.mock("../../api/campaigns", () => ({ getCampaigns: vi.fn(), updateCampaignNode: vi.fn(), setCampaignAutoQueue: vi.fn() }));
 vi.mock("../../api/serverCampaigns", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../api/serverCampaigns")>()),
-  getServerCampaigns: vi.fn(), getServerCampaign: vi.fn(), getServerCampaignEvents: vi.fn(),
+  getServerCampaignSummaries: vi.fn(), getServerCampaign: vi.fn(), getServerCampaignEvents: vi.fn(),
   sendServerCampaignCommand: vi.fn(), createServerCampaign: vi.fn(), editServerCampaignDefinition: vi.fn(),
 }));
 vi.mock("@xyflow/react", () => ({
@@ -22,8 +22,18 @@ vi.mock("@xyflow/react", () => ({
   MarkerType: { ArrowClosed: "closed" }, Position: { Right: "right", Left: "left" },
 }));
 
-const list = vi.mocked(getServerCampaigns);
+const list = vi.mocked(getServerCampaignSummaries);
+const detail = vi.mocked(getServerCampaign);
 const command = vi.mocked(sendServerCampaignCommand);
+/** The server answers the summary list and each campaign's own read from the same documents. */
+function serve(...documents: ServerCampaignDocument[]) {
+  list.mockResolvedValue(documents);
+  detail.mockImplementation(async (id) => {
+    const found = documents.find((document) => document.view.campaign_id === id);
+    if (!found) throw notFound();
+    return found;
+  });
+}
 const legacy: Campaign = {
   id: "legacy-1", title: "Legacy campaign", description: "", status: "active", round: 1, revision: 1, auto_queue: false,
   created_at: "2026-09-20T00:00:00Z", updated_at: "2026-09-20T00:00:00Z", nodes: [],
@@ -44,8 +54,7 @@ beforeEach(() => {
   document.body.appendChild(container);
   root = createRoot(container);
   vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [legacy], live: {}, read: 1 });
-  list.mockResolvedValue([fixtures.prepared]);
-  vi.mocked(getServerCampaign).mockResolvedValue(fixtures.prepared);
+  serve(fixtures.prepared);
   vi.mocked(getServerCampaignEvents).mockResolvedValue([]);
 });
 afterEach(async () => {
@@ -68,6 +77,12 @@ async function click(element: Element | undefined | null) {
 async function openServer(title = "Release") {
   await click([...container.querySelectorAll(".campaign-server-list button")].find((button) => button.querySelector("strong")?.textContent === title));
 }
+/** The immediate stop sits in the stop menu, behind a confirmation. */
+async function stopNow() {
+  const menu = container.querySelector<HTMLButtonElement>('button[aria-label="More ways to stop"]');
+  if (menu?.getAttribute("aria-expanded") !== "true") await click(menu);
+  return [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((item) => item.textContent?.startsWith("Stop now"));
+}
 function controlText() {
   return container.querySelector(".campaign-server-controls")?.textContent ?? "";
 }
@@ -88,21 +103,21 @@ it("keeps the last server snapshot when a refresh fails and then allows only sto
   // Every command offered, so only the lost connection can disable one.
   const offered = structuredClone(fixtures.failedRunning);
   offered.view.commands = offered.view.commands.map((entry) => ({ ...entry, rejection: null }));
-  list.mockResolvedValue([offered]);
+  serve(offered);
   await render();
   await openServer();
   list.mockRejectedValue(new Error("Offline"));
   await click(buttonByText("Refresh"));
   expect(container.textContent).toContain("Could not refresh server campaigns.");
   expect(container.textContent).toContain("Running · 1 failed · 1 blocked");
-  expect(buttonByText("Stop now")?.disabled).toBe(false);
+  expect((await stopNow())?.disabled).toBe(false);
   expect(buttonByText("Stop after current stage")?.disabled).toBe(false);
   for (const label of ["Start", "Resume", "Edit definition"]) expect(buttonByText(label)?.disabled, label).toBe(true);
   expect(container.textContent).toContain("Disconnected: the latest state is unknown");
 });
 
 it("checks an unanswered stop, resends it under the same key and settles it from the server view", async () => {
-  list.mockResolvedValue([fixtures.failedRunning]);
+  serve(fixtures.failedRunning);
   command.mockRejectedValueOnce(new TypeError("Failed to fetch")).mockResolvedValueOnce(accepted);
   await render();
   await openServer();
@@ -112,22 +127,22 @@ it("checks an unanswered stop, resends it under the same key and settles it from
   const [first, second] = command.mock.calls;
   expect(second[2]).toBe(first[2]);
   expect(first[1]).toEqual({ command: "stop", expected_definition_revision: 7, expected_run: "run-1", mode: "finish_stage" });
-  list.mockResolvedValue([fixtures.stoppingUnknown]);
+  serve(fixtures.stoppingUnknown);
   await click(buttonByText("Refresh"));
   expect(container.textContent).not.toContain("Checking the request result");
   expect(container.textContent).toContain("Stop accepted · waiting for confirmation");
 });
 
-it("never lets an older server list answer replace a newer one", async () => {
-  let resolveOld: (value: ServerCampaignDocument[]) => void = () => {};
+it("never lets an older campaign read replace a newer one", async () => {
+  let resolveOld: (value: ServerCampaignDocument) => void = () => {};
   await render();
   await openServer();
-  list.mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; }));
+  detail.mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; }));
   await click(buttonByText("Refresh"));
-  list.mockResolvedValueOnce([fixtures.failedRunning]);
+  detail.mockResolvedValueOnce(fixtures.failedRunning);
   await click(buttonByText("Refresh"));
   expect(container.textContent).toContain("Running · 1 failed · 1 blocked");
-  await act(async () => resolveOld([fixtures.prepared]));
+  await act(async () => resolveOld(fixtures.prepared));
   expect(container.textContent).toContain("Running · 1 failed · 1 blocked");
 });
 
@@ -144,7 +159,7 @@ it("keeps an edit draft, its focus and its base revision across polls", async ()
   const newer = structuredClone(fixtures.prepared);
   newer.view.definition_revision = 8;
   newer.definition.title = "Renamed elsewhere";
-  list.mockResolvedValue([newer]);
+  serve(newer);
   await click(buttonByText("Refresh"));
   name.focus();
   const after = container.querySelector<HTMLInputElement>('input[aria-label="Name"]')!;
@@ -159,7 +174,7 @@ it("keeps an edit draft, its focus and its base revision across polls", async ()
 
 it("opens a deep link to a server task in a new browser and copies only the feedback fields", async () => {
   window.history.replaceState(null, "", "/campaigns?mode=server&campaign=release&node=B");
-  list.mockResolvedValue([fixtures.reviewWaiting]);
+  serve(fixtures.reviewWaiting);
   await render();
   expect(container.querySelector(".campaign-inspector h4")?.textContent).toBe("Dependent work");
   await click(container.querySelector('[data-node-id="C"]'));
@@ -200,7 +215,7 @@ it("marks a campaign past the first list page stale when only its own read fails
   expect(container.querySelector(".campaign-server-title h3")?.textContent).toBe("Linked campaign");
   expect(container.textContent).toContain("Running · 1 failed · 1 blocked");
   for (const label of ["Start", "Resume", "Edit definition", "Prepare retry"]) expect(buttonByText(label)?.disabled, label).toBe(true);
-  expect(buttonByText("Stop now")?.disabled).toBe(false);
+  expect((await stopNow())?.disabled).toBe(false);
 });
 
 it("never calls the screen empty while the server list is pending or failed", async () => {
@@ -222,7 +237,7 @@ it("continues edits typed while a create was in flight as an edit of the new cam
   let answer: (value: ServerCampaignCommandResult) => void = () => {};
   vi.mocked(createServerCampaign).mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
   await render();
-  await click(buttonByText("New server campaign"));
+  await click(buttonByText("New campaign"));
   const typeInto = async (label: string, value: string) => {
     const input = container.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!;
     await act(async () => {
@@ -263,14 +278,15 @@ it("marks the snapshot stale when a poll stays unanswered for a whole interval",
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
   await render();
   await openServer();
-  list.mockImplementation(() => new Promise(() => {}));
+  detail.mockImplementation(() => new Promise(() => {}));
   await act(async () => { vi.advanceTimersByTime(15_000); });
   expect(buttonByText("Edit definition")?.disabled).toBe(false);
   await act(async () => { vi.advanceTimersByTime(15_000); });
   expect(container.textContent).toContain("The server is not answering");
   expect(buttonByText("Edit definition")?.disabled).toBe(true);
-  // The unanswered poll is waited out, not stacked on.
-  expect(list).toHaveBeenCalledTimes(2);
+  // Polls read only the campaign on screen, and an unanswered one is waited out, not stacked on.
+  expect(detail).toHaveBeenCalledTimes(2);
+  expect(list).toHaveBeenCalledTimes(1);
 });
 
 it("marks a server that never answers silent one interval after the page opens", async () => {
@@ -279,7 +295,7 @@ it("marks a server that never answers silent one interval after the page opens",
   await render();
   await act(async () => { vi.advanceTimersByTime(15_000); });
   expect(container.textContent).toContain("The server is not answering");
-  expect(buttonByText("New server campaign")?.disabled).toBe(true);
+  expect(buttonByText("New campaign")?.disabled).toBe(true);
 });
 
 it("counts poll intervals that pass while the tab is hidden", async () => {
@@ -287,6 +303,7 @@ it("counts poll intervals that pass while the tab is hidden", async () => {
   await render();
   await openServer();
   list.mockImplementation(() => new Promise(() => {}));
+  detail.mockImplementation(() => new Promise(() => {}));
   await click(buttonByText("Refresh"));
   Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
   await act(async () => { vi.advanceTimersByTime(30_000); });
@@ -299,6 +316,7 @@ it("still marks a hung server silent when the user keeps pressing Refresh", asyn
   await render();
   await openServer();
   list.mockImplementation(() => new Promise(() => {}));
+  detail.mockImplementation(() => new Promise(() => {}));
   await act(async () => { vi.advanceTimersByTime(15_000); });
   await act(async () => { vi.advanceTimersByTime(12_000); });
   await click(buttonByText("Refresh"));
@@ -312,6 +330,7 @@ it("does not call a refresh the user just started an unanswered server", async (
   await openServer();
   await act(async () => { vi.advanceTimersByTime(14_990); });
   list.mockImplementation(() => new Promise(() => {}));
+  detail.mockImplementation(() => new Promise(() => {}));
   await click(buttonByText("Refresh"));
   await act(async () => { vi.advanceTimersByTime(10); });
   expect(container.textContent).not.toContain("The server is not answering");
@@ -321,7 +340,7 @@ it("does not call a refresh the user just started an unanswered server", async (
 });
 
 it("keeps a command's progress and refusal with the campaign it was sent for", async () => {
-  list.mockResolvedValue([fixtures.failedRunning, copyOf(fixtures.failedRunning, "other", "Other")]);
+  serve(fixtures.failedRunning, copyOf(fixtures.failedRunning, "other", "Other"));
   let refuse: (reason: unknown) => void = () => {};
   command.mockImplementationOnce(() => new Promise((_, reject) => { refuse = reject; }));
   await render();
@@ -336,7 +355,7 @@ it("keeps a command's progress and refusal with the campaign it was sent for", a
 });
 
 it("keeps each campaign's own refusal when commands on several campaigns are refused", async () => {
-  list.mockResolvedValue([fixtures.failedRunning, copyOf(fixtures.failedRunning, "other", "Other")]);
+  serve(fixtures.failedRunning, copyOf(fixtures.failedRunning, "other", "Other"));
   const refusal = (rejection: string) => new ApiRequestError("rejected", { status: 409, body: { error: "rejected", code: "x", context: { rejection, target: null } } });
   command.mockRejectedValueOnce(refusal("stale_run")).mockRejectedValueOnce(refusal("stale_definition"));
   await render();
@@ -349,7 +368,7 @@ it("keeps each campaign's own refusal when commands on several campaigns are ref
 });
 
 it("states the stopped phase without promising commands the server has not offered", async () => {
-  list.mockResolvedValue([fixtures.stoppedGone]);
+  serve(fixtures.stoppedGone);
   await render();
   await openServer(fixtures.stoppedGone.definition.title);
   expect(buttonByText("Resume")?.disabled).toBe(true);
@@ -378,9 +397,9 @@ it("shows an off-list campaign as stale when its read fails, and as missing only
 });
 
 it("keeps the create draft apart from the edit draft of a campaign named new", async () => {
-  list.mockResolvedValue([copyOf(fixtures.prepared, "new", "Named new")]);
+  serve(copyOf(fixtures.prepared, "new", "Named new"));
   await render();
-  await click(buttonByText("New server campaign"));
+  await click(buttonByText("New campaign"));
   await openServer("Named new");
   await click(buttonByText("Edit definition"));
   expect(container.querySelectorAll("form.campaign-server-form")).toHaveLength(2);
@@ -420,7 +439,7 @@ it("keeps the URL in step on the same page spelled with a trailing slash", async
 });
 
 it("keeps a save locked while its answer is outstanding, even after leaving and reopening the campaign", async () => {
-  list.mockResolvedValue([fixtures.prepared, copyOf(fixtures.prepared, "other", "Other")]);
+  serve(fixtures.prepared, copyOf(fixtures.prepared, "other", "Other"));
   let answer: (value: Awaited<ReturnType<typeof editServerCampaignDefinition>>) => void = () => {};
   vi.mocked(editServerCampaignDefinition).mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
   await render();
@@ -441,7 +460,6 @@ it("marks the event list when it could not be read, keeps its count unknown, and
   await openServer();
   const summary = () => container.querySelector(".campaign-connections summary")?.textContent;
   expect(summary()).toBe("Events · — · Could not refresh events");
-  list.mockImplementation(async () => [fixtures.prepared]);
   await click(buttonByText("Refresh"));
   expect(summary()).toBe("Events · 0");
   // A good read is not repeated while nothing moved.
@@ -451,7 +469,7 @@ it("marks the event list when it could not be read, keeps its count unknown, and
 
 it("shows each campaign's own events when reads for several campaigns overlap or fail", async () => {
   const events = vi.mocked(getServerCampaignEvents);
-  list.mockResolvedValue([fixtures.prepared, copyOf(fixtures.prepared, "other", "Other")]);
+  serve(fixtures.prepared, copyOf(fixtures.prepared, "other", "Other"));
   await render();
   await openServer("Release");
   const summary = () => container.querySelector(".campaign-connections summary")?.textContent;
@@ -470,9 +488,8 @@ it("shows each campaign's own events when reads for several campaigns overlap or
   expect(summary()).toBe("Events · 0");
 });
 
-it("retries a failing events read once per list read, not more", async () => {
+it("retries a failing events read once per campaign read, not more", async () => {
   vi.mocked(getServerCampaignEvents).mockRejectedValue(new TypeError("Failed to fetch"));
-  list.mockImplementation(async () => [fixtures.prepared]);
   await render();
   await openServer();
   expect(vi.mocked(getServerCampaignEvents)).toHaveBeenCalledTimes(1);
@@ -482,12 +499,11 @@ it("retries a failing events read once per list read, not more", async () => {
   expect(vi.mocked(getServerCampaignEvents)).toHaveBeenCalledTimes(4);
 });
 
-it("lets a slow events read or retry finish instead of restarting it on every list read", async () => {
+it("lets a slow events read or retry finish instead of restarting it on every campaign read", async () => {
   const events = vi.mocked(getServerCampaignEvents);
   let answer: (value: Awaited<ReturnType<typeof getServerCampaignEvents>>) => void = () => {};
   const slow = () => new Promise<Awaited<ReturnType<typeof getServerCampaignEvents>>>((resolve) => { answer = resolve; });
   events.mockImplementationOnce(slow);
-  list.mockImplementation(async () => [fixtures.prepared]);
   await render();
   await openServer();
   await click(buttonByText("Refresh"));
@@ -499,7 +515,7 @@ it("lets a slow events read or retry finish instead of restarting it on every li
   // The same holds for a retry after a failed read.
   const moved = structuredClone(fixtures.prepared);
   moved.view.last_event_sequence += 1;
-  list.mockImplementation(async () => [moved]);
+  serve(moved);
   events.mockRejectedValueOnce(new TypeError("Failed to fetch")).mockImplementationOnce(slow);
   await click(buttonByText("Refresh"));
   expect(summary()).toBe("Events · 0 · Could not refresh events");
@@ -511,7 +527,7 @@ it("lets a slow events read or retry finish instead of restarting it on every li
 });
 
 it("moves focus into a form only when it is opened, not each time its campaign is shown again", async () => {
-  list.mockResolvedValue([fixtures.prepared, copyOf(fixtures.prepared, "other", "Other")]);
+  serve(fixtures.prepared, copyOf(fixtures.prepared, "other", "Other"));
   await render();
   await openServer("Release");
   await click(buttonByText("Edit definition"));
@@ -526,10 +542,10 @@ it("copies a definition into an untouched create form but never over a draft bei
   const done = structuredClone(fixtures.prepared);
   done.view.control = "succeeded";
   const other = copyOf(done, "other", "Other");
-  list.mockResolvedValue([done, other]);
+  serve(done, other);
   await render();
   await openServer();
-  await click(buttonByText("New server campaign"));
+  await click(buttonByText("New campaign"));
   (document.activeElement as HTMLElement | null)?.blur();
   await click(buttonByText("Copy definition to a new campaign"));
   const createName = () => container.querySelector("form.campaign-server-form")!.querySelector<HTMLInputElement>('input[aria-label="Name"]')!;
@@ -553,7 +569,7 @@ it("brings a selected task's details into view on a narrow screen", async () => 
   const scroll = vi.fn();
   Object.defineProperty(window, "matchMedia", { configurable: true, value: (query: string) => ({ matches: query === "(max-width: 900px)" }) });
   Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: scroll });
-  list.mockResolvedValue([fixtures.reviewWaiting]);
+  serve(fixtures.reviewWaiting);
   await render();
   await openServer();
   await click(container.querySelector('[data-node-id="C"]'));
@@ -567,7 +583,7 @@ it("keeps both the create's later edits and an edit draft opened meanwhile for t
   let answer: (value: ServerCampaignCommandResult) => void = () => {};
   vi.mocked(createServerCampaign).mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
   await render();
-  await click(buttonByText("New server campaign"));
+  await click(buttonByText("New campaign"));
   const forms = () => [...container.querySelectorAll("form.campaign-server-form")];
   const name = (form: Element) => form.querySelector<HTMLInputElement>('input[aria-label="Name"]')!;
   const typeName = async (form: Element, value: string) => {
@@ -585,7 +601,7 @@ it("keeps both the create's later edits and an edit draft opened meanwhile for t
   await click(buttonByText("Create"));
   await typeName(forms()[0], "A typed after sending");
   // The server committed the create before its answer came: the list already shows it, and it is opened for editing.
-  list.mockResolvedValue([fixtures.prepared, copyOf(fixtures.prepared, "fresh", "Fresh")]);
+  serve(fixtures.prepared, copyOf(fixtures.prepared, "fresh", "Fresh"));
   await click(buttonByText("Refresh"));
   await openServer("Fresh");
   await click(buttonByText("Edit definition"));

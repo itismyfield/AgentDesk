@@ -38,8 +38,6 @@ pub(in crate::services::discord::turn_bridge::stream_loop) struct StreamToolArmC
     pub(in crate::services::discord::turn_bridge::stream_loop) adk_session_name: &'a Option<String>,
     pub(in crate::services::discord::turn_bridge::stream_loop) role_binding:
         &'a Option<RoleBinding>,
-    pub(in crate::services::discord::turn_bridge::stream_loop) voice_progress_playback_channel_id:
-        Option<ChannelId>,
     pub(in crate::services::discord::turn_bridge::stream_loop) single_message_panel_footer_mode:
         bool,
     pub(in crate::services::discord::turn_bridge::stream_loop) footer_owner:

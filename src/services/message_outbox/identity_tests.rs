@@ -48,7 +48,6 @@ fn operational_alert_registry_includes_notify_only_alerts() {
     for (source, reason) in [
         ("auto-queue-monitor", "auto_queue.monitor_review_long"),
         ("stall_watchdog", "stall_watchdog_suspected_stall"),
-        ("quality_regression_alerter", "agent_quality.regression"),
         ("queue_overflow_notice", "queue_overflow.evict"),
         (
             "stall_watchdog",

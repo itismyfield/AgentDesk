@@ -12,7 +12,7 @@ export default function AppShellOverlays({ ctx }: { ctx: any }) {
   const {
     accentPreset,
     agentInfoAgent,
-    allAgents,
+    agents,
     closeAgentInfo,
     departments,
     dismissNotification,
@@ -23,8 +23,6 @@ export default function AppShellOverlays({ ctx }: { ctx: any }) {
     openDefaultAgentInfo,
     popoverZIndex,
     refreshAgents,
-    refreshAllAgents,
-    refreshAuditLogs,
     setAccentPreset,
     setShowCommandPalette,
     setShowShortcutHelp,
@@ -33,7 +31,6 @@ export default function AppShellOverlays({ ctx }: { ctx: any }) {
     showCommandPalette,
     showShortcutHelp,
     showTweaksPanel,
-    spriteMap,
     themePreference,
     tr,
   } = ctx;
@@ -44,17 +41,12 @@ export default function AppShellOverlays({ ctx }: { ctx: any }) {
         {agentInfoAgent && (
           <AgentInfoCard
             agent={agentInfoAgent}
-            spriteMap={spriteMap}
             isKo={isKo}
             locale={locale}
             tr={tr}
             departments={departments}
             onClose={closeAgentInfo}
-            onAgentUpdated={() => {
-              refreshAgents();
-              refreshAllAgents();
-              refreshAuditLogs();
-            }}
+            onAgentUpdated={refreshAgents}
           />
         )}
       </Suspense>
@@ -62,7 +54,7 @@ export default function AppShellOverlays({ ctx }: { ctx: any }) {
       <Suspense fallback={null}>
         {showCommandPalette && (
           <CommandPalette
-            agents={allAgents}
+            agents={agents}
             departments={departments}
             isKo={isKo}
             onSelectAgent={openDefaultAgentInfo}
@@ -94,8 +86,6 @@ export default function AppShellOverlays({ ctx }: { ctx: any }) {
             onClose={() => setShowShortcutHelp(false)}
           />
       )}
-
-
     </>
   );
 }

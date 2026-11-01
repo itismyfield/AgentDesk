@@ -16,6 +16,8 @@ pub struct ReceiptData {
     pub period_label: String,
     pub period_start: String,
     pub period_end: String,
+    /// When the logs were scanned (RFC 3339, local offset).
+    pub generated_at: String,
     pub models: Vec<ModelLineItem>,
     pub subtotal: f64,
     pub cache_discount: f64,
@@ -1289,6 +1291,7 @@ fn build_receipt_data(
         period_label: period_label.into(),
         period_start: start_local.format("%Y-%m-%d").to_string(),
         period_end: end_local.format("%Y-%m-%d").to_string(),
+        generated_at: end_local.to_rfc3339(),
         models,
         subtotal: grand_sub,
         cache_discount: (grand_sub - grand_total).max(0.0),

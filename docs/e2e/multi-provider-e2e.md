@@ -342,16 +342,9 @@ boundary. See
 [`docs/runbooks/post-deploy-relay-continuity-smoke.md`](../runbooks/post-deploy-relay-continuity-smoke.md)
 for the full runbook and pass/fail evidence.
 
-Auto-queue and voice harnesses use the same lane vocabulary. The sandbox
+Auto-queue harnesses use the same lane vocabulary. The sandbox
 auto-queue preflight defaults to `agent_mode=none` or a controlled finalizer
 because it validates generate/dispatch/slot/entry/run truth, not LLM behavior.
-Deterministic PCM voice E2E should use `agent_mode=controlled`; the opt-in live
-Discord media smoke is the voice `agent_mode=real_live` lane and must say
-whether a real provider was contacted. The live media runner is
-`scripts/e2e/run_voice_live_media_smoke.py`; it fails closed unless explicit
-test guild/channel ids, an AgentDesk bot id, a separate speaker bot token, and
-live-safety confirmation env vars are set. Its report separates Discord media,
-STT/TTS, provider response, cleanup, and reporting failures.
 
 Destructive steps (`restart_dcserver`, `kill_pane`, `send_keys_no_enter`,
 `cancel_turn`) are gated by both `--allow-destructive` and

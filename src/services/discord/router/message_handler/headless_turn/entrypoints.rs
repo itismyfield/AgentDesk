@@ -94,34 +94,3 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
     )
     .await
 }
-
-#[allow(dead_code)] // #3034: exported voice entry point, wired-but-dormant (no live dispatch yet).
-#[allow(clippy::too_many_arguments)]
-pub(in crate::services::discord) async fn start_voice_headless_turn(
-    ctx: &serenity::Context,
-    channel_id: ChannelId,
-    prompt: &str,
-    request_owner_name: &str,
-    request_owner: UserId,
-    shared: &Arc<SharedData>,
-    token: &str,
-    metadata: Option<serde_json::Value>,
-    channel_name_hint: Option<String>,
-) -> Result<HeadlessTurnStartOutcome, HeadlessTurnStartError> {
-    start_reserved_headless_turn_with_owner(
-        ctx,
-        channel_id,
-        prompt,
-        request_owner_name,
-        request_owner,
-        shared,
-        token,
-        Some(crate::dispatch::Source::Voice.as_str()),
-        metadata,
-        channel_name_hint,
-        None,
-        Some(false),
-        reserve_headless_turn(),
-    )
-    .await
-}

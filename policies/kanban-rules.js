@@ -17,7 +17,6 @@
 // ── Submodule helpers ────────────────────────────────────────
 var _notifications = require("./lib/kanban-notifications");
 var sendDiscordNotification = _notifications.sendDiscordNotification;
-var emitQualityEvent = _notifications.emitQualityEvent;
 var _loadCardAlertContext = _notifications._loadCardAlertContext;
 var _formatCardAlertLabel = _notifications._formatCardAlertLabel;
 var notifyCardOwner = _notifications.notifyCardOwner;
@@ -274,7 +273,7 @@ var rules = {
     // the depth on the card metadata (T2 recorder, fail-safe to "full"). This is
     // a side-path (the card never advanced to in_progress on attach — see
     // transition.rs skip_kickoff), so completion must NOT flow into the
-    // review / XP lifecycle below. T3 then ACTIVATES the recorded depth to gate
+    // review lifecycle below. T3 then ACTIVATES the recorded depth to gate
     // the next stage instead of returning inert:
     //   direct    → create the implementation dispatch directly (skip plan).
     //   plan_only → create a "plan" dispatch (plan-completion arm creates impl).
@@ -458,23 +457,11 @@ var rules = {
       agentdesk.log.info("[kanban] " + card.id + " " + dispatch.dispatch_type + " noop completion recorded — routing through review flow");
     }
 
-    // Rework dispatches — no XP, go directly to review
+    // Rework dispatches go directly to review
     if (dispatch.dispatch_type === "rework") {
       agentdesk.kanban.setStatus(card.id, reviewState);
       agentdesk.log.info("[kanban] " + card.id + " rework done → " + reviewState);
       return;
-    }
-
-    // ── XP reward ──
-    var xpMap = { "low": 5, "medium": 10, "high": 18, "urgent": 30 };
-    var xp = xpMap[card.priority] || 10;
-    xp += Math.min(dispatch.chain_depth || 0, 3) * 2;
-
-    if (dispatch.to_agent_id) {
-      agentdesk.db.execute(
-        "UPDATE agents SET xp = xp + ? WHERE id = ?",
-        [xp, dispatch.to_agent_id]
-      );
     }
 
     // ── Completion → counter-model review ──
@@ -485,25 +472,6 @@ var rules = {
   // ── Card Transition — side effects ────────────────────────
   onCardTransition: function(payload) {
     agentdesk.log.info("[kanban] card " + payload.card_id + ": " + payload.from + " → " + payload.to);
-    if (agentdesk.quality && typeof agentdesk.quality.emit === "function") {
-      var qualityCardRows = agentdesk.db.query(
-        "SELECT assigned_agent_id, latest_dispatch_id FROM kanban_cards WHERE id = ?",
-        [payload.card_id]
-      );
-      var qualityCard = qualityCardRows.length > 0 ? qualityCardRows[0] : {};
-      emitQualityEvent({
-        event_type: "card_transitioned",
-        source_event_id: payload.card_id + ":" + payload.to,
-        correlation_id: qualityCard.latest_dispatch_id || payload.card_id,
-        agent_id: qualityCard.assigned_agent_id || null,
-        card_id: payload.card_id,
-        dispatch_id: qualityCard.latest_dispatch_id || null,
-        payload: {
-          from: payload.from || null,
-          to: payload.to || null
-        }
-      });
-    }
     var cfg = agentdesk.pipeline.resolveForCard(payload.card_id);
     var initialState = agentdesk.pipeline.kickoffState(cfg);
 

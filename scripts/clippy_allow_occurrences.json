@@ -203,11 +203,6 @@
       "count": 1
     },
     {
-      "path": "src/services/discord/commands/voice.rs",
-      "lint": "too_many_arguments",
-      "count": 1
-    },
-    {
       "path": "src/services/discord/footer_view_reconciler/mod.rs",
       "lint": "too_many_arguments",
       "count": 2
@@ -256,11 +251,6 @@
       "path": "src/services/discord/inflight/model.rs",
       "lint": "too_many_arguments",
       "count": 2
-    },
-    {
-      "path": "src/services/discord/meeting_orchestrator/rounds.rs",
-      "lint": "too_many_arguments",
-      "count": 1
     },
     {
       "path": "src/services/discord/mod.rs",
@@ -375,12 +365,7 @@
     {
       "path": "src/services/discord/router/message_handler/headless_turn/entrypoints.rs",
       "lint": "too_many_arguments",
-      "count": 3
-    },
-    {
-      "path": "src/services/discord/router/message_handler/intake_turn.rs",
-      "lint": "too_many_arguments",
-      "count": 1
+      "count": 2
     },
     {
       "path": "src/services/discord/router/message_handler/intake_turn/race_loss.rs",
@@ -388,19 +373,9 @@
       "count": 1
     },
     {
-      "path": "src/services/discord/router/message_handler/intake_turn/voice_intake.rs",
-      "lint": "too_many_arguments",
-      "count": 1
-    },
-    {
       "path": "src/services/discord/router/message_handler/tui_followup.rs",
       "lint": "too_many_arguments",
       "count": 2
-    },
-    {
-      "path": "src/services/discord/router/message_handler/voice_announcement_scope.rs",
-      "lint": "too_many_arguments",
-      "count": 1
     },
     {
       "path": "src/services/discord/router/message_handler/watchdog.rs",
@@ -793,11 +768,6 @@
       "count": 1
     },
     {
-      "path": "src/services/provider_exec.rs",
-      "lint": "too_many_arguments",
-      "count": 2
-    },
-    {
       "path": "src/services/qwen.rs",
       "lint": "too_many_arguments",
       "count": 3
@@ -851,11 +821,6 @@
       "path": "src/services/termination_audit.rs",
       "lint": "too_many_arguments",
       "count": 3
-    },
-    {
-      "path": "src/voice/prompt.rs",
-      "lint": "too_many_arguments",
-      "count": 2
     }
   ]
 }

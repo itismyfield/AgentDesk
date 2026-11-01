@@ -584,7 +584,6 @@ async fn refused_requeue_removes_the_placeholder() {
         has_reply_boundary: false,
         merge_consecutive: false,
         pending_uploads: Vec::new(),
-        voice_announcement: None,
     };
     let enqueued = crate::services::discord::mailbox_enqueue_intervention(
         &host.shared,

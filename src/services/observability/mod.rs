@@ -21,14 +21,12 @@ pub mod turn_lifecycle;
 pub mod watcher_latency;
 
 // #2049: mod.rs was a 3,946-line monolith. Splitting along responsibility
-// boundaries (helpers / emit / worker / retention / pg I/O / queries) without
-// changing the public API. Regression alerting is intentionally owned only by
-// `services::agent_quality::regression_alerts`. Global state (`OnceLock`
-// runtime) stays in this module to avoid relocating the singleton.
+// boundaries (helpers / emit / worker / retention / pg I/O) without
+// changing the public API. Global state (`OnceLock` runtime) stays in this
+// module to avoid relocating the singleton.
 mod emit;
 mod helpers;
 mod pg_io;
-mod queries;
 mod relay_signal_alert;
 pub(crate) mod retention;
 mod worker;
@@ -45,10 +43,6 @@ pub use emit::{
     emit_relay_delete_result, emit_relay_delivery, emit_turn_cancelled,
     emit_turn_finished_with_dispatch_kind, emit_turn_started, emit_watcher_replaced,
     record_invariant_check, record_invariant_check_with_severity,
-};
-#[allow(unused_imports)]
-pub use queries::{
-    query_agent_quality_ranking_with, query_agent_quality_summary, run_agent_quality_rollup_pg,
 };
 // #3561 — operator relay-loss signal monitor. Driven by the hourly
 // `RelaySignalAlerterJob` maintenance job (see `server::maintenance`). #5993:
@@ -70,13 +64,6 @@ pub(super) const DEFAULT_QUALITY_EVENT_RETENTION_DAYS: i64 = 90;
 pub(super) const DEFAULT_COUNTER_SNAPSHOT_RETENTION_DAYS: i64 = 7;
 pub(super) const DEFAULT_COUNTER_LIMIT: usize = 200;
 pub(super) const MAX_COUNTER_LIMIT: usize = 500;
-pub(super) const DEFAULT_QUALITY_DAYS: i64 = 7;
-pub(super) const MAX_QUALITY_DAYS: i64 = 365;
-pub(super) const DEFAULT_QUALITY_DAILY_LIMIT: usize = 60;
-pub(super) const MAX_QUALITY_DAILY_LIMIT: usize = 180;
-pub(super) const DEFAULT_QUALITY_RANKING_LIMIT: usize = 50;
-pub(super) const MAX_QUALITY_RANKING_LIMIT: usize = 200;
-pub(super) const QUALITY_SAMPLE_GUARD: i64 = 5;
 
 // #3561 — relay-loss operator monitor. The hourly job reports each signal at
 // most once per run; `RELAY_SIGNAL_REPEAT_WARN_SECS` bounds how often the
@@ -456,144 +443,6 @@ pub struct AgentQualityEvent {
     pub dispatch_id: Option<String>,
     pub event_type: String,
     pub payload: Value,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct AgentQualityFilters {
-    pub agent_id: Option<String>,
-    pub days: i64,
-    pub limit: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentQualityWindow {
-    pub days: i64,
-    pub sample_size: i64,
-    pub measurement_unavailable: bool,
-    pub measurement_label: Option<String>,
-    pub turn_sample_size: i64,
-    pub turn_success_rate: Option<f64>,
-    pub review_sample_size: i64,
-    pub review_pass_rate: Option<f64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentQualityDailyRecord {
-    pub agent_id: String,
-    pub day: String,
-    pub provider: Option<String>,
-    pub channel_id: Option<String>,
-    pub turn_success_count: i64,
-    pub turn_error_count: i64,
-    pub review_pass_count: i64,
-    pub review_fail_count: i64,
-    pub turn_sample_size: i64,
-    pub review_sample_size: i64,
-    pub sample_size: i64,
-    pub turn_success_rate: Option<f64>,
-    pub review_pass_rate: Option<f64>,
-    pub rolling_7d: AgentQualityWindow,
-    pub rolling_30d: AgentQualityWindow,
-    pub computed_at: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentQualitySummary {
-    pub generated_at: String,
-    pub agent_id: String,
-    pub latest: Option<AgentQualityDailyRecord>,
-    /// Alias for `latest` — DoD-mandated field name (#1102).
-    pub current: Option<AgentQualityDailyRecord>,
-    pub daily: Vec<AgentQualityDailyRecord>,
-    /// Last 7 days of daily rows (newest-first), DoD-mandated (#1102).
-    pub trend_7d: Vec<AgentQualityDailyRecord>,
-    /// Last 30 days of daily rows (newest-first), DoD-mandated (#1102).
-    pub trend_30d: Vec<AgentQualityDailyRecord>,
-    /// True when `daily` is synthesized from `agent_quality_event` because
-    /// the daily rollup table was empty — see #1102 fallback path.
-    pub fallback_from_events: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentQualityRankingEntry {
-    pub rank: i64,
-    pub agent_id: String,
-    pub agent_name: Option<String>,
-    pub provider: Option<String>,
-    pub channel_id: Option<String>,
-    pub latest_day: String,
-    pub rolling_7d: AgentQualityWindow,
-    pub rolling_30d: AgentQualityWindow,
-    /// The chosen metric value for the requested (metric, window) pair
-    /// — populated when the ranking endpoint is called with `metric`/`window`
-    /// query params. `None` when the agent has no available measurement.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metric_value: Option<f64>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QualityRankingMetric {
-    TurnSuccessRate,
-    ReviewPassRate,
-}
-
-impl QualityRankingMetric {
-    pub fn parse(raw: Option<&str>) -> Self {
-        match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-            Some("review_pass_rate") | Some("review") => Self::ReviewPassRate,
-            _ => Self::TurnSuccessRate,
-        }
-    }
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::TurnSuccessRate => "turn_success_rate",
-            Self::ReviewPassRate => "review_pass_rate",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QualityRankingWindow {
-    Seven,
-    Thirty,
-}
-
-impl QualityRankingWindow {
-    pub fn parse(raw: Option<&str>) -> Self {
-        match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-            Some("30d") | Some("30") => Self::Thirty,
-            _ => Self::Seven,
-        }
-    }
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Seven => "7d",
-            Self::Thirty => "30d",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentQualityRankingResponse {
-    pub generated_at: String,
-    pub metric: String,
-    pub window: String,
-    pub min_sample_size: i64,
-    pub agents: Vec<AgentQualityRankingEntry>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentQualityRollupReport {
-    pub upserted_rows: u64,
-    pub alert_count: u64,
 }
 
 static OBSERVABILITY_RUNTIME: OnceLock<Arc<ObservabilityRuntime>> = OnceLock::new();

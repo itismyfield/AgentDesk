@@ -123,7 +123,6 @@ fn queued_prompt(message: MessageId) -> crate::services::turn_orchestrator::Inte
         has_reply_boundary: false,
         merge_consecutive: false,
         pending_uploads: Vec::new(),
-        voice_announcement: None,
     }
 }
 

@@ -1813,11 +1813,6 @@ mod tests {
             id: "pg-agent".to_string(),
             name: "PG Agent".to_string(),
             name_ko: Some("피지 에이전트".to_string()),
-            aliases: Vec::new(),
-            wake_word: None,
-            voice_enabled: true,
-            sensitivity_mode: None,
-            voice: crate::config::AgentVoiceConfig::default(),
             provider: "codex".to_string(),
             channels: crate::config::AgentChannels::new()
                 .with("codex", crate::config::AgentChannel::from("pg-agent-cdx")),
@@ -2835,11 +2830,6 @@ mod tests {
             id: "maker".to_string(),
             name: "Maker".to_string(),
             name_ko: Some("뚝딱이".to_string()),
-            aliases: Vec::new(),
-            wake_word: None,
-            voice_enabled: true,
-            sensitivity_mode: None,
-            voice: crate::config::AgentVoiceConfig::default(),
             provider: "codex".to_string(),
             channels: crate::config::AgentChannels::new()
                 .with("codex", crate::config::AgentChannel::from("maker-cdx")),
@@ -2860,8 +2850,8 @@ mod tests {
 
         sqlx::query(
             "INSERT INTO agents (
-                id, name, provider, status, xp, sprite_number, description, system_prompt, pipeline_config
-             ) VALUES ($1, 'Legacy Maker', 'codex', 'working', 42, 7, 'legacy-desc', 'legacy-prompt', '{\"k\":1}')",
+                id, name, provider, status, sprite_number, description, system_prompt, pipeline_config
+             ) VALUES ($1, 'Legacy Maker', 'codex', 'working', 7, 'legacy-desc', 'legacy-prompt', '{\"k\":1}')",
         )
         .bind("openclaw-maker")
         .execute(&pool)
@@ -2897,14 +2887,13 @@ mod tests {
             .expect("list agent ids");
         assert_eq!(ids, vec!["maker".to_string()]);
 
-        let (status, xp, sprite_number, description, system_prompt): (
+        let (status, sprite_number, description, system_prompt): (
             String,
-            i64,
             Option<i64>,
             Option<String>,
             Option<String>,
         ) = sqlx::query_as(
-            "SELECT status, xp, sprite_number, description, system_prompt
+            "SELECT status, sprite_number, description, system_prompt
                FROM agents
               WHERE id = $1",
         )
@@ -2913,7 +2902,6 @@ mod tests {
         .await
         .expect("load canonical agent");
         assert_eq!(status, "working");
-        assert_eq!(xp, 42);
         assert_eq!(sprite_number, Some(7));
         assert_eq!(description.as_deref(), Some("legacy-desc"));
         assert_eq!(system_prompt.as_deref(), Some("legacy-prompt"));
@@ -2955,11 +2943,6 @@ mod tests {
                 id: "maker".to_string(),
                 name: "Maker".to_string(),
                 name_ko: None,
-                aliases: Vec::new(),
-                wake_word: None,
-                voice_enabled: true,
-                sensitivity_mode: None,
-                voice: crate::config::AgentVoiceConfig::default(),
                 provider: "codex".to_string(),
                 channels: crate::config::AgentChannels::new()
                     .with("codex", crate::config::AgentChannel::from("maker-cdx")),
@@ -2975,11 +2958,6 @@ mod tests {
                 id: "openclaw-maker".to_string(),
                 name: "Legacy Maker".to_string(),
                 name_ko: None,
-                aliases: Vec::new(),
-                wake_word: None,
-                voice_enabled: true,
-                sensitivity_mode: None,
-                voice: crate::config::AgentVoiceConfig::default(),
                 provider: "codex".to_string(),
                 channels: crate::config::AgentChannels::new()
                     .with("codex", crate::config::AgentChannel::from("legacy-cdx")),
@@ -3002,13 +2980,12 @@ mod tests {
         .expect("postgres pool");
 
         sqlx::query(
-            "INSERT INTO agents (id, name, provider, status, xp)
-             VALUES ($1, 'Configured Legacy Maker', 'codex', 'working', 42)
+            "INSERT INTO agents (id, name, provider, status)
+             VALUES ($1, 'Configured Legacy Maker', 'codex', 'working')
              ON CONFLICT (id) DO UPDATE SET
                  name = EXCLUDED.name,
                  provider = EXCLUDED.provider,
-                 status = EXCLUDED.status,
-                 xp = EXCLUDED.xp",
+                 status = EXCLUDED.status",
         )
         .bind("openclaw-maker")
         .execute(&pool)
@@ -3034,14 +3011,12 @@ mod tests {
             .expect("list agent ids");
         assert_eq!(ids, vec!["maker".to_string(), "openclaw-maker".to_string()]);
 
-        let (status, xp): (String, i64) =
-            sqlx::query_as("SELECT status, xp FROM agents WHERE id = $1")
-                .bind("openclaw-maker")
-                .fetch_one(&pool)
-                .await
-                .expect("load configured legacy agent");
+        let status: String = sqlx::query_scalar("SELECT status FROM agents WHERE id = $1")
+            .bind("openclaw-maker")
+            .fetch_one(&pool)
+            .await
+            .expect("load configured legacy agent");
         assert_eq!(status, "working");
-        assert_eq!(xp, 42);
 
         let github_default: Option<String> =
             sqlx::query_scalar("SELECT default_agent_id FROM github_repos WHERE id = $1")
@@ -3074,8 +3049,8 @@ mod tests {
 
         sqlx::query(
             "INSERT INTO agents (
-                id, name, provider, status, xp, sprite_number, description, system_prompt, pipeline_config
-             ) VALUES ($1, 'Stale E2E', 'codex', 'idle', 0, 1, '', '', '{}')",
+                id, name, provider, status, sprite_number, description, system_prompt, pipeline_config
+             ) VALUES ($1, 'Stale E2E', 'codex', 'idle', 1, '', '', '{}')",
         )
         .bind("adk-dashboard-e2e")
         .execute(&pool)
@@ -3125,8 +3100,8 @@ mod tests {
     async fn insert_stale_agent_for_sync(pool: &PgPool, id: &str) {
         sqlx::query(
             "INSERT INTO agents (
-                id, name, provider, status, xp, sprite_number, description, system_prompt, pipeline_config
-             ) VALUES ($1, $1, 'codex', 'idle', 0, 1, '', '', '{}')",
+                id, name, provider, status, sprite_number, description, system_prompt, pipeline_config
+             ) VALUES ($1, $1, 'codex', 'idle', 1, '', '', '{}')",
         )
         .bind(id)
         .execute(pool)

@@ -32,7 +32,6 @@ struct Rig {
     db: crate::db::auto_queue::test_support::TestPostgresDb,
     tmux: ScriptedTmux,
     gateway: tokio::task::JoinHandle<()>,
-    _voice: tempfile::TempDir,
     _root: crate::config::TestRuntimeRootGuard,
 }
 
@@ -55,16 +54,10 @@ impl Rig {
             discord_mock::start(discord_mock::DiscordMockState::new()).await;
         let rest = format!("http://127.0.0.1:{}", api.port);
         let ctx = discord_mock::serenity_context(rest, gateway_url).await;
-        let voice = tempfile::tempdir().unwrap();
-        let mut voice_config = crate::voice::VoiceConfig::default();
-        voice_config.audio.recordings_dir = voice.path().to_path_buf();
-        voice_config.keep_recordings = true;
         let data = Data {
             shared: shared.clone(),
             token: "text-clear-test".into(),
             provider: ProviderKind::Claude,
-            voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
-            voice_config,
         };
         Self {
             api,
@@ -75,7 +68,6 @@ impl Rig {
             db,
             tmux,
             gateway,
-            _voice: voice,
             _root: root,
         }
     }
@@ -175,7 +167,6 @@ fn input(id: MessageId) -> Intervention {
         has_reply_boundary: false,
         merge_consecutive: false,
         pending_uploads: Vec::new(),
-        voice_announcement: None,
     }
 }
 

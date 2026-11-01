@@ -847,12 +847,8 @@ pub fn handle_dcserver(token: Option<String>) {
         std::process::exit(1);
     }
 
-    // Raise the file-descriptor soft limit before anything opens fds. A
-    // tmux-launched dcserver otherwise inherits the tmux server's low default
-    // (256 on macOS), which voice STT exhausts during WAV convert / transcript
-    // sidecar reads / foreground process spawn -> "Too many open files (os error
-    // 24)". This makes the limit launch-model independent (works whether started
-    // via launchd, tmux, or directly).
+    // Raise the file-descriptor soft limit before anything opens fds: a tmux-launched
+    // dcserver otherwise inherits tmux's low default (256 on macOS) and hits "Too many open files".
     raise_fd_soft_limit(16_384);
 
     // The schema-ahead hold ends when this install path holds a new file, so

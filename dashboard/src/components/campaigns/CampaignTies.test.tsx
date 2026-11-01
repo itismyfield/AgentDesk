@@ -17,7 +17,7 @@ vi.mock("../../api/campaigns", async (importOriginal) => ({
 vi.mock("../../api/serverCampaigns", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../api/serverCampaigns")>()),
   createServerCampaign: vi.fn(), editServerCampaignDefinition: vi.fn(), sendServerCampaignCommand: vi.fn(),
-  getServerCampaigns: vi.fn().mockResolvedValue([]),
+  getServerCampaignSummaries: vi.fn().mockResolvedValue([]),
 }));
 
 type FlowProps = {

@@ -11,10 +11,7 @@ pub(super) async fn acquire_after_redirect_or_requeue(
     channels: (ChannelId, ChannelId),
     request: (TurnKind, UserId, MessageId, &str),
     reply: (&Option<String>, bool, bool),
-    uploads: (
-        &mut crate::services::cluster::attachment_transfer::uploads::PendingUploads,
-        &Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
-    ),
+    pending_uploads: &mut crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     requeue: (
         bool,
         &Option<String>,
@@ -26,9 +23,8 @@ pub(super) async fn acquire_after_redirect_or_requeue(
 ) -> Result<Option<IntakeRuntimeTransition>, Error> {
     let (http, shared, token, provider) = runtime;
     let (channel_id, original_channel_id) = channels;
-    let (turn_kind, original_request_owner, user_msg_id, user_text) = request;
+    let (turn_kind, request_owner, user_msg_id, user_text) = request;
     let (reply_context, has_reply_boundary, merge_consecutive) = reply;
-    let (pending_uploads, voice_announcement) = uploads;
     let (
         reply_to_user_message,
         dispatch_id_for_thread,
@@ -65,14 +61,13 @@ pub(super) async fn acquire_after_redirect_or_requeue(
                 channel_id,
                 original_channel_id,
                 turn_kind,
-                original_request_owner,
+                request_owner,
                 user_msg_id,
                 user_text,
                 reply_context,
                 has_reply_boundary,
                 merge_consecutive,
                 pending_uploads,
-                voice_announcement,
                 reply_to_user_message,
                 dispatch_id_for_thread,
                 turn_start_attempt,
@@ -164,7 +159,7 @@ mod tests {
             acquire_after_redirect_or_requeue(
                 (&http, &shared, "test-token", &ProviderKind::Codex), (channel, channel),
                 (TurnKind::Foreground, UserId::new(1), MessageId::new(566_003), "A"),
-                (&None, false, false), (&mut owned, &None),
+                (&None, false, false), &mut owned,
                 (false, &None, None, false, (false, route(channel))), (None, false, String::new()),
             )).await.expect("busy handoff must finish").expect("busy enqueue must succeed");
         assert!(transition.is_none(), "held transition must requeue, not acquire");
@@ -194,7 +189,7 @@ mod tests {
                 "A",
             ),
             (&None, false, false),
-            (&mut owned, &None),
+            &mut owned,
             (false, &None, None, false, (true, route(channel))),
             (None, false, String::new()),
         )

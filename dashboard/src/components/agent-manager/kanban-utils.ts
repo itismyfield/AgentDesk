@@ -206,6 +206,11 @@ export function hasManualInterventionReason(card: Pick<KanbanCard, "blocked_reas
   return Boolean(reason) && !isBenignBlockedReason(reason);
 }
 
+/** Done and cancelled cards are closed; every other status still needs work. */
+export function isOpenKanbanCard(card: Pick<KanbanCard, "status">): boolean {
+  return card.status !== "done" && card.status !== "cancelled";
+}
+
 export function isManualInterventionCard(
   card: Pick<KanbanCard, "review_status" | "blocked_reason">,
 ): boolean {
@@ -299,7 +304,6 @@ export function stringifyCardMetadata(metadata: KanbanCardMetadata): string | nu
   }
   if (metadata.redispatch_count) payload.redispatch_count = metadata.redispatch_count;
   if (metadata.redispatch_reason) payload.redispatch_reason = metadata.redispatch_reason;
-  if (metadata.reward) payload.reward = metadata.reward;
   return Object.keys(payload).length > 0 ? JSON.stringify(payload) : null;
 }
 
@@ -552,4 +556,9 @@ export function labelForStatus(
   if (col) return tr(col.labelKo, col.labelEn);
   const legacy = LEGACY_STATUS_LABELS[String(status)];
   return legacy ? tr(legacy.labelKo, legacy.labelEn) : status;
+}
+
+/** Imported titles can carry newlines or a literal "\n"; a title reads as one line. */
+export function cardTitle(title: string): string {
+  return title.replace(/\\[nrt]|[\r\n\t]+/g, " ").replace(/\s{2,}/g, " ").trim();
 }

@@ -55,10 +55,8 @@ enum StaticSendSource {
     ScheduledMessage,
     HeadlessTurn,
     SloAlerter,
-    QualityRegressionAlerter,
     AutoQueueMonitor,
     Inventory,
-    Voice,
     GithubSync,
     CatchUpTooOld,
     BootCustodyNotice,
@@ -112,14 +110,8 @@ const POLICIES: &[SourcePolicy] = &[
     policy!(ScheduledMessage, "scheduled_message", LOOPBACK),
     policy!(HeadlessTurn, "headless_turn", LOOPBACK),
     policy!(SloAlerter, "slo_alerter", LOOPBACK),
-    policy!(
-        QualityRegressionAlerter,
-        "quality_regression_alerter",
-        LOOPBACK
-    ),
     policy!(AutoQueueMonitor, "auto-queue-monitor", LOOPBACK),
     policy!(Inventory, "inventory", LOOPBACK),
-    policy!(Voice, "voice", LOOPBACK),
     policy!(GithubSync, "github_sync", LOOPBACK),
     policy!(CatchUpTooOld, "catch_up_too_old", LOOPBACK),
     policy!(BootCustodyNotice, "boot_custody_notice", LOOPBACK),
@@ -191,10 +183,8 @@ mod tests {
         "routine-runtime",
         "headless_turn",
         "slo_alerter",
-        "quality_regression_alerter",
         "auto-queue-monitor",
         "inventory",
-        "voice",
     ];
     const NEW_LOOPBACK_LABELS: &[&str] = &[
         "scheduled_message",

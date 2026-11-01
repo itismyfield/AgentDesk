@@ -150,15 +150,12 @@ mod tests {
         with_executor_dispatch_seam(|| {
             let token = CancelToken::new();
             token.store_child_pid(std::process::id());
-            token.publish_cancel("voice_barge_in_explicit_stop");
+            token.publish_cancel("explicit_stop");
 
             assert!(poll_cancel_watchdog(&token, "test-watchdog"));
             assert_eq!(pid_kill_dispatches_for_test(), 1);
-            assert_eq!(
-                token.cancel_source().as_deref(),
-                Some("voice_barge_in_explicit_stop")
-            );
-            assert_eq!(token.cancel_source_kind(), Some(CancelSource::UserBargeIn));
+            assert_eq!(token.cancel_source().as_deref(), Some("explicit_stop"));
+            assert_eq!(token.cancel_source_kind(), Some(CancelSource::ExplicitStop));
         });
     }
 
@@ -188,15 +185,12 @@ mod tests {
         with_executor_dispatch_seam(|| {
             let token = CancelToken::new();
             token.store_child_pid(std::process::id());
-            token.set_cancel_source("voice_barge_in_explicit_stop");
+            token.set_cancel_source("explicit_stop");
             token.cancelled.store(true, Ordering::Relaxed);
 
             assert!(poll_cancel_watchdog(&token, "test-watchdog"));
-            assert_eq!(
-                token.cancel_source().as_deref(),
-                Some("voice_barge_in_explicit_stop")
-            );
-            assert_eq!(token.cancel_source_kind(), Some(CancelSource::UserBargeIn));
+            assert_eq!(token.cancel_source().as_deref(), Some("explicit_stop"));
+            assert_eq!(token.cancel_source_kind(), Some(CancelSource::ExplicitStop));
         });
     }
 }

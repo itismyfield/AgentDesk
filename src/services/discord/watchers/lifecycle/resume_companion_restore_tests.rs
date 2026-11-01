@@ -831,7 +831,6 @@ impl LegacyQueued {
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         };
         let persistence = crate::services::discord::queue_persistence_context(
             &self.install.shared,
@@ -1100,8 +1099,6 @@ async fn gateway_intake(
         shared: data.shared.clone(),
         token: data.token.clone(),
         provider: data.provider.clone(),
-        voice_config: data.voice_config.clone(),
-        voice_receiver: data.voice_receiver.clone(),
     };
     tokio::spawn(async move {
         Box::pin(crate::services::discord::router::handle_event(
@@ -1142,13 +1139,10 @@ fn restart_gap_message_is_submitted_once(order: Ingress, channel: u64) {
             .restart
             .reconcile_done
             .store(false, std::sync::atomic::Ordering::Release);
-        let voice_config = crate::voice::VoiceConfig::default();
         let data = crate::services::discord::Data {
             shared: shared.clone(),
             token: "i7327-boot".to_owned(),
             provider: ProviderKind::Codex,
-            voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
-            voice_config,
         };
         let http = ctx.http.clone();
         let catch_up = || {

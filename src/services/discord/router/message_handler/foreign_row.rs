@@ -130,7 +130,7 @@ mod tests {
         state.turn_nonce = token.turn_nonce().map(str::to_owned);
         state.source_message_ids = sources.iter().map(|id| id.get()).collect();
         state.busy_followup_retry_user_msg_id = retry.get();
-        state.set_followup_requeue_context(None, false, false, Vec::new(), None, true);
+        state.set_followup_requeue_context(None, false, false, Vec::new(), true);
         let created = inflight::save_inflight_state_create_new(&state);
         let verdict = admit(shared, &provider, &state, &token, created).await;
         (token, verdict)
@@ -157,7 +157,6 @@ mod tests {
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         }
     }
 

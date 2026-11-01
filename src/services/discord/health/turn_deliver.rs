@@ -16,7 +16,7 @@ use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, UserId};
 
 use super::HealthRegistry;
-use super::runtime_resolve::resolve_direct_meeting_shared;
+use super::runtime_resolve::resolve_direct_channel_shared;
 use crate::services::discord::{SharedData, router};
 use crate::services::imsg_reply::{self, ReplyObligation, episode};
 use crate::services::provider::ProviderKind;
@@ -99,7 +99,7 @@ pub(crate) async fn preflight_human_input(
     provider: &ProviderKind,
     author_id: u64,
 ) -> Result<(), HumanInputError> {
-    let shared = resolve_direct_meeting_shared(registry, channel_id, provider)
+    let shared = resolve_direct_channel_shared(registry, channel_id, provider)
         .await
         .map_err(HumanInputError::RuntimeUnavailable)?;
     let settings = shared.settings.read().await;
@@ -202,7 +202,7 @@ pub async fn external_turn_hold_for_start(
         return None;
     }
     let channel = ChannelId::new(channel_id);
-    let shared = resolve_direct_meeting_shared(registry?, channel, provider)
+    let shared = resolve_direct_channel_shared(registry?, channel, provider)
         .await
         .ok()?;
     external_turn_hold(&shared, provider, channel).await
@@ -474,7 +474,6 @@ impl HumanInputRequest {
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
-            voice_announcement: None,
         };
         (intervention, reservation.turn_id(self.channel_id))
     }
@@ -547,7 +546,7 @@ async fn deliver_resolved(
     Result<HumanInputDelivery, HumanInputError>,
     InjectObservation,
 ) {
-    let shared = match resolve_direct_meeting_shared(
+    let shared = match resolve_direct_channel_shared(
         registry,
         request.channel_id,
         &request.provider,

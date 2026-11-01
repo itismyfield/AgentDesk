@@ -40,7 +40,7 @@ pub(super) fn canonical_category(category: &str) -> &'static str {
         "routines" => "routines",
         "analytics" | "auth" | "cluster" | "docs" | "health" | "monitoring" | "stats"
         | "provider-cli" | "claude-accounts" => "ops",
-        "discord" | "github" | "github-dashboard" | "meetings" | "kakao-calendar" => "integrations",
+        "discord" | "github" | "github-dashboard" | "kakao-calendar" => "integrations",
         "departments" | "memory" | "onboarding" | "policies" | "settings" | "skills" => "admin",
         _ => "ops",
     }
@@ -83,10 +83,10 @@ pub(super) fn category_to_group(category: &str) -> &'static str {
         "dispatches" | "dispatched-sessions" | "sessions" | "messages" => "runtime",
         // kanban — cards, pipeline, reviews, pm, repo config
         "kanban" | "kanban-repos" | "pipeline" | "pm" | "reviews" => "kanban",
-        // agents — agents, agent-setup, agent-quality, roles
+        // agents — agents, agent-setup, roles
         "agents" => "agents",
-        // integrations — discord, github, meetings, provider, mcp
-        "discord" | "github" | "github-dashboard" | "meetings" | "kakao-calendar" => "integrations",
+        // integrations — discord, github, provider, mcp
+        "discord" | "github" | "github-dashboard" | "kakao-calendar" => "integrations",
         // automation — auto-queue, policies, scheduler, cron, maintenance
         "auto-queue"
         | "automation-candidates"
@@ -114,12 +114,8 @@ pub(super) fn group_description(group: &str) -> &'static str {
         "kanban" => {
             "Kanban cards, pipeline state, reviews (kanban/reviews), PM decisions, and repo board config."
         }
-        "agents" => {
-            "Agent registry, turn control, setup wizard, quality telemetry, and role metadata."
-        }
-        "integrations" => {
-            "Discord, GitHub, round-table meetings, and provider/MCP integration entrypoints."
-        }
+        "agents" => "Agent registry, turn control, setup wizard, and role metadata.",
+        "integrations" => "Discord, GitHub, and provider/MCP integration entrypoints.",
         "automation" => {
             "Auto-queue generation and dispatch, policies, cron, and scheduled maintenance jobs."
         }
@@ -168,7 +164,7 @@ pub(super) fn category_description(category: &str) -> &'static str {
             "Auto-queue generation, activation, ordering, live queue views, and turn control."
         }
         "ops" => "Health, auth, docs, analytics, stats, and monitoring surfaces.",
-        "integrations" => "Discord, GitHub, and round-table meeting integration entrypoints.",
+        "integrations" => "Discord, GitHub, and calendar integration entrypoints.",
         "admin" => "Onboarding, settings, policies, skills, and departments.",
         "api-friction" => {
             "Structured API-friction events, repeated-pattern aggregation, and auto issue creation."
@@ -192,7 +188,6 @@ pub(super) fn category_description(category: &str) -> &'static str {
         "health" => "Health and liveness endpoints.",
         "internal" => "Internal-only thread reuse helpers used by the runtime.",
         "kanban-repos" => "Kanban repository settings and ownership metadata.",
-        "meetings" => "Round-table meeting lifecycle and issue generation.",
         "memory" => {
             "Memory fragment CRUD (recall/remember/forget) with auto-selected memento-or-local backend."
         }

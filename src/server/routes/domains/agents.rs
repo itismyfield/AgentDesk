@@ -18,10 +18,6 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 get(agents_crud::list_agents).post(agents_crud::create_agent),
             )
             .route("/agents/setup", post(agents_setup::setup_agent))
-            .route(
-                "/agents/quality/ranking",
-                get(agents::agents_quality_ranking),
-            )
             .route("/agents/diag/{identifier}", get(agents::agent_diag))
             .route(
                 "/agents/{id}",
@@ -29,7 +25,6 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                     .patch(agents_crud::update_agent)
                     .delete(agents_crud::delete_agent),
             )
-            .route("/agents/{id}/quality", get(agents::agent_quality))
             .route(
                 "/agents/{id}/session-evidence",
                 get(super::super::session_evidence::get),

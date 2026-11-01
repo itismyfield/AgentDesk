@@ -304,7 +304,6 @@ async fn requeue_inflight(
         has_reply_boundary: inflight_state.followup_has_reply_boundary,
         merge_consecutive: inflight_state.followup_merge_consecutive,
         pending_uploads: inflight_state.followup_pending_uploads.clone(),
-        voice_announcement: inflight_state.followup_voice_announcement.clone(),
     };
     mailbox_requeue_intervention_front(shared, provider, channel_id, intervention).await
 }

@@ -118,7 +118,6 @@ fn relay_recovery_cancel_finalize_context() -> super::turn_finalizer::FinalizeCo
     super::turn_finalizer::FinalizeContext {
         clear_inflight: true,
         allow_completion_cleanup: false,
-        drain_voice: false,
         kickoff_queue: true,
         expected_idempotent_guard_miss: false,
     }

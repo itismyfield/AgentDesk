@@ -1,14 +1,13 @@
 import type { SessionTranscript } from "../../api";
+import { parsePgTimestamp } from "../../lib/pgTimestamp";
 
 const UUID_LIKE_RE =
   /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
 const BRACKETED_PREFIX_RE = /^(\[[^\]]+\])\s+(.+)$/;
 
 export function parseTranscriptDate(value: string | null | undefined): Date | null {
-  if (!value) return null;
-  const normalized = value.includes("T") ? value : value.replace(" ", "T");
-  const parsed = new Date(normalized);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
+  const ms = parsePgTimestamp(value);
+  return ms === null ? null : new Date(ms);
 }
 
 export function formatTranscriptTimestamp(value: string, isKo: boolean): string {

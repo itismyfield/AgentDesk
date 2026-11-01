@@ -40,7 +40,6 @@ fn preserved_queue_item(message: u64) -> Intervention {
         has_reply_boundary: true,
         merge_consecutive: false,
         pending_uploads: Vec::new(),
-        voice_announcement: None,
     }
 }
 

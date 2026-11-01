@@ -7,7 +7,7 @@ use axum::{
 
 use super::super::{
     ApiRouter, AppState, campaigns, departments, escalation, home_metrics, protected_api_domain,
-    server_campaigns, settings, stats, voice_config,
+    server_campaigns, settings, stats,
 };
 
 // Category: admin
@@ -81,10 +81,6 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route(
                 "/settings/operator-connectors",
                 get(settings::get_operator_connectors),
-            )
-            .route(
-                "/voice/config",
-                get(voice_config::get_voice_config).put(voice_config::put_voice_config),
             )
             .route(
                 "/internal/escalation/emit",

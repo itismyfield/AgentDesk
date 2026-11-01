@@ -10,9 +10,8 @@ use sqlx::{PgPool, Row};
 mod storage_jobs;
 
 use self::storage_jobs::{
-    MemoryMementoConsolidationJob, ProgressTtsCacheSweepJob, StorageDbRetentionJob,
-    StorageHangDumpCleanupJob, StorageTargetSweepJob, StorageTmpPipelineSweepJob,
-    StorageWorktreeOrphanSweepJob,
+    MemoryMementoConsolidationJob, StorageDbRetentionJob, StorageHangDumpCleanupJob,
+    StorageTargetSweepJob, StorageTmpPipelineSweepJob, StorageWorktreeOrphanSweepJob,
 };
 
 type MaintenanceFuture<'a> = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
@@ -27,9 +26,8 @@ const EXTRA_STAGGER_PER_JOB: Duration = Duration::from_secs(15);
 // `MaintenanceSchedule::every`). On a cold start `startup_stagger_for_index`
 // adds `EXTRA_STAGGER_PER_JOB * <registry index>` on top of this base, so the
 // two mechanisms compose: the index-based auto-stagger fans the jobs out, and
-// the per-job bases below fine-tune the ordering *within* that fan-out (e.g.
-// keeping the quality rollup ahead of the alerters that read its aggregates on
-// the same tick). They are intentionally NOT folded into the auto-stagger —
+// the per-job bases below fine-tune the ordering *within* that fan-out. They
+// are intentionally NOT folded into the auto-stagger —
 // doing so would change the real boot timings. The values here are byte-for-byte
 // identical to the historical inline literals; naming them just makes the
 // existing schedule self-describing (cf. `REREVIEW_TRANSIENT_DIRTY_RETRY_DELAY`
@@ -39,38 +37,17 @@ const EXTRA_STAGGER_PER_JOB: Duration = Duration::from_secs(15);
 /// heartbeat is among the earliest maintenance signals without racing the pool.
 const NOOP_HEARTBEAT_STARTUP_STAGGER: Duration = Duration::from_secs(10);
 
-/// `agent_quality_rollup`: zero base so the hourly rollup runs *before* the
-/// regression + relay alerters below that read its aggregates on the same tick.
-const AGENT_QUALITY_ROLLUP_STARTUP_STAGGER: Duration = Duration::from_secs(0);
-
-/// `quality_regression_alerter`: sequenced after `agent_quality_rollup` (base 0)
-/// on the same hourly tick so alerts evaluate against the freshest aggregates.
-const QUALITY_REGRESSION_ALERTER_STARTUP_STAGGER: Duration = Duration::from_secs(15);
-
-/// `relay_signal_alerter`: sequenced after the quality alerter on the same
-/// hourly tick so the two jobs do not race for a connection at boot.
+/// `relay_signal_alerter`: offset from the other hourly jobs so they do not
+/// race for a connection at boot.
 const RELAY_SIGNAL_ALERTER_STARTUP_STAGGER: Duration = Duration::from_secs(30);
 
 /// `storage.cancel_tombstone_prune`: small boot offset so the tombstone prune
 /// does not pile on top of the other storage jobs at startup.
 const CANCEL_TOMBSTONE_PRUNE_STARTUP_STAGGER: Duration = Duration::from_secs(20);
 
-/// `voice.turn_link_gc`: staggered ~25s after boot so it does not pile on top
-/// of the other storage jobs (see the job's rationale comment).
-const VOICE_TURN_LINK_GC_STARTUP_STAGGER: Duration = Duration::from_secs(25);
-
 /// `storage.prompt_manifest_retention`: small startup stagger so the daily
 /// retention sweep does not pile on top of the other storage jobs at boot.
 const PROMPT_MANIFEST_RETENTION_STARTUP_STAGGER: Duration = Duration::from_secs(45);
-
-/// `storage.voice_transcript_announcement_meta_gc`: boot offset that keeps this
-/// voice-meta GC clear of the sibling voice GC jobs on the same tick.
-const VOICE_TRANSCRIPT_ANNOUNCEMENT_META_GC_STARTUP_STAGGER: Duration = Duration::from_secs(60);
-
-/// `storage.voice_background_handoff_meta_gc`: a touch longer than the
-/// announce-meta GC (60s) so the two voice storage GCs do not race for the same
-/// connection on the same tick.
-const VOICE_BACKGROUND_HANDOFF_META_GC_STARTUP_STAGGER: Duration = Duration::from_secs(75);
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MaintenanceSchedule {
@@ -115,30 +92,17 @@ impl MaintenanceJobRegistry {
 
     fn static_registry() -> Self {
         // Status/registry-only path (never executes the sweep) → default dirs.
-        Self::static_registry_with_config(
-            crate::config::PromptManifestRetentionConfig::default(),
-            crate::services::maintenance::jobs::voice_cache_sweep::Config::default_runtime(),
-        )
+        Self::static_registry_with_config(crate::config::PromptManifestRetentionConfig::default())
     }
 
     fn static_registry_with_config(
         prompt_manifest_retention: crate::config::PromptManifestRetentionConfig,
-        voice_cache_sweep: crate::services::maintenance::jobs::voice_cache_sweep::Config,
     ) -> Self {
         Self::new(vec![
             Arc::new(NoopHeartbeatJob),
-            Arc::new(AgentQualityRollupJob),
-            Arc::new(QualityRegressionAlerterJob),
             Arc::new(RelaySignalAlerterJob),
             Arc::new(CancelTombstonePruneJob),
             Arc::new(PromptManifestRetentionJob::new(prompt_manifest_retention)),
-            Arc::new(VoiceTurnLinkGcJob),
-            Arc::new(VoiceTranscriptAnnouncementMetaGcJob),
-            Arc::new(VoiceBackgroundHandoffMetaGcJob),
-            // #3909 — leader-only voice TTS cache/temp sweep.
-            Arc::new(ProgressTtsCacheSweepJob {
-                config: voice_cache_sweep,
-            }),
             // #3231 — disk-GC / memory maintenance jobs. Their implementations
             // live in `services::maintenance::jobs::*`; these wrappers register
             // them on the live leader-only scheduler.
@@ -176,78 +140,13 @@ impl MaintenanceJob for NoopHeartbeatJob {
     }
 }
 
-struct AgentQualityRollupJob;
-
-impl MaintenanceJob for AgentQualityRollupJob {
-    fn name(&self) -> &'static str {
-        "agent_quality_rollup"
-    }
-
-    fn schedule(&self) -> MaintenanceSchedule {
-        MaintenanceSchedule::every(
-            Duration::from_secs(60 * 60),
-            AGENT_QUALITY_ROLLUP_STARTUP_STAGGER,
-        )
-    }
-
-    fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
-        Box::pin(async move {
-            let report = crate::services::observability::run_agent_quality_rollup_pg(pool).await?;
-            tracing::info!(
-                job = self.name(),
-                upserted_rows = report.upserted_rows,
-                "agent quality aggregation rollup completed; alerts are owned by quality_regression_alerter"
-            );
-            Ok(())
-        })
-    }
-}
-
-/// #1104 (911-4) hourly regression rule engine.
-///
-/// Sole regression-alert authority. Runs the rule engine in
-/// `services::agent_quality::regression_alerts`
-/// against the `agent_quality_daily` rollup. The 15s startup stagger keeps
-/// it sequenced AFTER `agent_quality_rollup` (stagger=0) on the same tick
-/// so alerts always evaluate against the freshest aggregates.
-struct QualityRegressionAlerterJob;
-
-impl MaintenanceJob for QualityRegressionAlerterJob {
-    fn name(&self) -> &'static str {
-        "quality_regression_alerter"
-    }
-
-    fn schedule(&self) -> MaintenanceSchedule {
-        MaintenanceSchedule::every(
-            Duration::from_secs(60 * 60),
-            QUALITY_REGRESSION_ALERTER_STARTUP_STAGGER,
-        )
-    }
-
-    fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
-        Box::pin(async move {
-            let sent =
-                crate::services::agent_quality::regression_alerts::run_regression_alerter_pg(pool)
-                    .await?;
-            tracing::info!(
-                job = self.name(),
-                alerts_dispatched = sent,
-                "agent quality regression alerter completed"
-            );
-            Ok(())
-        })
-    }
-}
-
 /// #3561 — hourly relay-loss signal monitor.
 ///
 /// Aggregates the restart-safe `observability_events` stream (relay root-cause
 /// counters + offset invariant violations) over the trailing hour and reports
 /// every signal whose count crosses the (conservative, config-overridable)
 /// threshold as a WARN line plus a `relay_signal_threshold_crossed` event
-/// (#5993: no Discord channel, so no configuration can silence it). The 30s
-/// startup stagger sequences it after the quality alerter on the same hourly
-/// tick so the two jobs do not race for a connection at boot.
+/// (#5993: no Discord channel, so no configuration can silence it).
 struct RelaySignalAlerterJob;
 
 impl MaintenanceJob for RelaySignalAlerterJob {
@@ -312,50 +211,6 @@ impl MaintenanceJob for CancelTombstonePruneJob {
     }
 }
 
-/// #2362 / #2164 Voice A — hourly sweep of terminal `voice_turn_link`
-/// rows older than 24h. Active and cancelled rows are intentionally
-/// preserved because background turns can live 24h+ and the cancelled
-/// tombstones support reverse lookup during late reconciliation. The
-/// schedule mirrors the existing 30-minute cadence used by
-/// `CancelTombstonePruneJob`; staggered 25s after boot so it does not
-/// pile on top of other storage jobs.
-struct VoiceTurnLinkGcJob;
-
-/// Retention horizon for `voice_turn_link` terminal rows. 24h is long
-/// enough that any reasonable late-arriving barge-in / cancel /
-/// completion signal still finds the row.
-const VOICE_TURN_LINK_GC_RETENTION_SECS: i64 = 24 * 60 * 60;
-
-impl MaintenanceJob for VoiceTurnLinkGcJob {
-    fn name(&self) -> &'static str {
-        "voice.turn_link_gc"
-    }
-
-    fn schedule(&self) -> MaintenanceSchedule {
-        MaintenanceSchedule::every(
-            Duration::from_secs(60 * 60),
-            VOICE_TURN_LINK_GC_STARTUP_STAGGER,
-        )
-    }
-
-    fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
-        Box::pin(async move {
-            let cutoff = Utc::now() - chrono::Duration::seconds(VOICE_TURN_LINK_GC_RETENTION_SECS);
-            let deleted =
-                crate::voice::turn_link::gc_terminal_voice_turn_links_pg(pool, cutoff).await?;
-            if deleted > 0 {
-                tracing::info!(
-                    job = self.name(),
-                    deleted,
-                    retention_secs = VOICE_TURN_LINK_GC_RETENTION_SECS,
-                    "[maintenance] voice_turn_link GC swept terminal rows"
-                );
-            }
-            Ok(())
-        })
-    }
-}
-
 /// #1699 — daily sweep over `prompt_manifest_layers` to enforce the
 /// retention policy from `agentdesk.yaml::prompt_manifest_retention`.
 /// Trims `full_content` for rows older than `full_content_days`, preserves
@@ -405,93 +260,6 @@ impl MaintenanceJob for PromptManifestRetentionJob {
                     trimmed = report.trimmed_full_content,
                     horizon_at = ?report.horizon_at,
                     "[maintenance] prompt_manifest_retention trimmed full content"
-                );
-            }
-            Ok(())
-        })
-    }
-}
-
-/// #2209 — leader-only GC for durable voice transcript announcement metadata.
-/// Rows are short-lived during normal operation, but a send failure or process
-/// crash can leave pending rows behind.
-struct VoiceTranscriptAnnouncementMetaGcJob;
-
-impl MaintenanceJob for VoiceTranscriptAnnouncementMetaGcJob {
-    fn name(&self) -> &'static str {
-        "storage.voice_transcript_announcement_meta_gc"
-    }
-
-    fn schedule(&self) -> MaintenanceSchedule {
-        MaintenanceSchedule::every(
-            Duration::from_secs(15 * 60),
-            VOICE_TRANSCRIPT_ANNOUNCEMENT_META_GC_STARTUP_STAGGER,
-        )
-    }
-
-    fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
-        Box::pin(async move {
-            let ttl = Duration::from_secs(
-                crate::voice::announce_meta::DURABLE_ANNOUNCEMENT_META_TTL_SECS as u64,
-            );
-            let deleted =
-                crate::voice::announce_meta::gc_expired_voice_announcement_meta_pg(pool, ttl)
-                    .await
-                    .map_err(|error| {
-                        anyhow::anyhow!("voice_transcript_announcement_meta_gc failed: {error}")
-                    })?;
-            if deleted > 0 {
-                tracing::info!(
-                    job = self.name(),
-                    deleted,
-                    "[maintenance] voice_transcript_announcement_meta_gc removed expired rows"
-                );
-            }
-            Ok(())
-        })
-    }
-}
-
-/// #2274 — leader-only GC for `voice_background_handoff_meta`. Cleans
-/// rows whose `created_at` is older than the durable handoff TTL (~1
-/// hour). Consumed rows are also removed by the same age-based filter
-/// since terminal-delivery rows are consumed within minutes; anything
-/// older almost certainly represents a turn that crashed before terminal
-/// delivery and never claimed the row. Conservative 75-second stagger
-/// keeps it sequenced after the announce-meta GC at boot.
-struct VoiceBackgroundHandoffMetaGcJob;
-
-impl MaintenanceJob for VoiceBackgroundHandoffMetaGcJob {
-    fn name(&self) -> &'static str {
-        "storage.voice_background_handoff_meta_gc"
-    }
-
-    fn schedule(&self) -> MaintenanceSchedule {
-        // 15-minute cadence matches the announce-meta GC pattern; the
-        // stagger is a touch longer so the two storage GCs do not race
-        // for the same connection on the same tick.
-        MaintenanceSchedule::every(
-            Duration::from_secs(15 * 60),
-            VOICE_BACKGROUND_HANDOFF_META_GC_STARTUP_STAGGER,
-        )
-    }
-
-    fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
-        Box::pin(async move {
-            let ttl = Duration::from_secs(
-                crate::voice::announce_meta::DURABLE_HANDOFF_META_TTL_SECS as u64,
-            );
-            let deleted =
-                crate::voice::announce_meta::gc_expired_voice_background_handoff_meta_pg(pool, ttl)
-                    .await
-                    .map_err(|error| {
-                        anyhow::anyhow!("voice_background_handoff_meta_gc failed: {error}")
-                    })?;
-            if deleted > 0 {
-                tracing::info!(
-                    job = self.name(),
-                    deleted,
-                    "[maintenance] voice_background_handoff_meta_gc removed expired rows"
                 );
             }
             Ok(())
@@ -585,12 +353,8 @@ struct MaintenanceJobState {
 pub(crate) async fn scheduler_loop(
     pg_pool: Arc<PgPool>,
     prompt_manifest_retention: crate::config::PromptManifestRetentionConfig,
-    voice_cache_sweep: crate::services::maintenance::jobs::voice_cache_sweep::Config,
 ) {
-    let registry = MaintenanceJobRegistry::static_registry_with_config(
-        prompt_manifest_retention,
-        voice_cache_sweep,
-    );
+    let registry = MaintenanceJobRegistry::static_registry_with_config(prompt_manifest_retention);
     let store: Arc<dyn MaintenanceJobStore> =
         Arc::new(PgMaintenanceJobStore::new(pg_pool.as_ref().clone()));
 
@@ -911,36 +675,11 @@ fn kv_key(job_name: &str, field: &str) -> String {
     format!("maintenance_job:{job_name}:{field}")
 }
 
-/// Registry-membership assertion (#2362 / #2164 Voice A). Lives outside
-/// the removed SQLite-only gate so the production scheduler is checked in the
-/// normal test path.
+/// Registry-membership assertions. Lives outside the removed SQLite-only gate
+/// so the production scheduler is checked in the normal test path.
 #[cfg(test)]
 mod registry_membership_tests {
     use super::*;
-
-    #[test]
-    fn static_registry_includes_voice_turn_link_gc() {
-        let registry = MaintenanceJobRegistry::static_registry();
-        let names: Vec<&'static str> = registry.jobs().iter().map(|job| job.name()).collect();
-        assert!(
-            names.contains(&"voice.turn_link_gc"),
-            "voice.turn_link_gc must be registered on the production \
-             MaintenanceJobRegistry so the leader scheduler sweeps \
-             terminal voice_turn_link rows (#2362). present jobs: {names:?}"
-        );
-    }
-
-    #[test]
-    fn static_registry_includes_voice_transcript_announcement_meta_gc() {
-        let registry = MaintenanceJobRegistry::static_registry();
-        let names: Vec<&'static str> = registry.jobs().iter().map(|job| job.name()).collect();
-        assert!(
-            names.contains(&"storage.voice_transcript_announcement_meta_gc"),
-            "storage.voice_transcript_announcement_meta_gc must be registered so \
-             durable voice announcement metadata cannot accumulate indefinitely. \
-             present jobs: {names:?}"
-        );
-    }
 
     /// #3231 — the disk-GC / memory maintenance implementations live in
     /// `services::maintenance::jobs::*`; the wrapper structs below keep them
@@ -964,29 +703,6 @@ mod registry_membership_tests {
                  #3231 actually run on the leader scheduler. present jobs: {names:?}"
             );
         }
-    }
-
-    #[test]
-    fn static_registry_includes_progress_tts_cache_sweep() {
-        // #3909 — the leader-only voice cache/temp sweeper must be wired into
-        // the production registry so the unbounded-growth leaks are bounded.
-        let registry = MaintenanceJobRegistry::static_registry();
-        assert!(
-            registry
-                .jobs()
-                .iter()
-                .any(|job| job.name() == "voice.progress_tts_cache_sweep"),
-            "voice.progress_tts_cache_sweep must be registered on the production \
-             leader-only maintenance scheduler (#3909)"
-        );
-    }
-
-    #[test]
-    fn voice_turn_link_gc_schedule_is_hourly() {
-        let job = VoiceTurnLinkGcJob;
-        assert_eq!(job.name(), "voice.turn_link_gc");
-        let schedule = job.schedule();
-        assert_eq!(schedule.every_ms(), 60 * 60 * 1_000);
     }
 
     /// #3561 — the relay-loss operator monitor must be registered so the

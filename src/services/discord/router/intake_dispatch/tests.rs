@@ -193,7 +193,6 @@ fn queued_intervention(
         has_reply_boundary: false,
         merge_consecutive: false,
         pending_uploads,
-        voice_announcement: None,
     }
 }
 
@@ -206,7 +205,6 @@ fn submission_for_admission(channel_id: ChannelId, message_id: u64) -> IntakeSub
         has_nonportable_uploads: false,
         attachments: Vec::new(),
         preloaded_uploads: Vec::new(),
-        voice_announcement: None,
     }
 }
 
@@ -387,7 +385,6 @@ async fn intake_dispatch_invariant_enforce_without_postgres_blocks_owner_unknown
         has_nonportable_uploads: false,
         attachments: Vec::new(),
         preloaded_uploads: Vec::new(),
-        voice_announcement: None,
     };
 
     assert!(matches!(
@@ -491,7 +488,6 @@ async fn live_and_skill_producers_forward_to_foreign_owner_pg() {
             has_nonportable_uploads: false,
             attachments: Vec::new(),
             preloaded_uploads: Vec::new(),
-            voice_announcement: None,
         },
     )
     .await
@@ -561,7 +557,6 @@ async fn raw_attachment_foreign_owner_blocks_before_outbox_or_local_state_pg() {
             url: "https://example.invalid/report.txt".to_string(),
         }],
         preloaded_uploads: Vec::new(),
-        voice_announcement: None,
     };
 
     assert!(matches!(
@@ -737,7 +732,6 @@ async fn distinct_open_route_requeues_queued_successor_pg() {
             has_nonportable_uploads: false,
             attachments: Vec::new(),
             preloaded_uploads: Vec::new(),
-            voice_announcement: None,
         },
     )
     .await

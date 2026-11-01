@@ -89,7 +89,7 @@ pub(super) struct StatusPanelState {
     pub(super) completed_at: Option<std::time::Instant>,
     pub(super) background_agent_pending: bool,
     // #3811: intake-set original-request user_msg_id; drives the `요청:` deeplink
-    // (`None` for headless/synthetic/voice/id-0 — no real Discord message).
+    // (`None` for headless/synthetic/id-0 — no real Discord message).
     pub(super) request_user_msg_id: Option<u64>,
     pub(super) request_guild_id: Option<String>,
     // #3983/#4147/#4451: session one-shot + sticky winning-turn prefix ledger.

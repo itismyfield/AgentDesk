@@ -86,10 +86,11 @@ const CONFIG_KEYS: &[(&str, &str, &str, &str, Option<&str>)] = &[
         None,
     ),
     (
+        // Key name predates its current sole reader, the GitHub-sync terminal/OPEN alert.
         "agent_quality_monitoring_channel_id",
         "quality",
-        "에이전트 품질 알림 채널 ID",
-        "Agent Quality Alert Channel ID",
+        "GitHub 동기화 알림 채널 ID",
+        "GitHub Sync Alert Channel ID",
         None,
     ),
     (

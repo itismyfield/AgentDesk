@@ -36,12 +36,8 @@ fn env_runtime_fixtures_finish_in_parallel() {
                 "synthetic_terminal_ordering_tests::",
                 "witnessless_reclaim_records_the_i20_violation_and_a_witnessed_one_does_not",
                 "thread_follow_up_tmux_ready_claim_records_intended_classification_4984",
-                "voice_intake_chime_",
-                "voice_foreground_path_does_not_double_chime",
-                "voice_pcm_harness_unattended_e2e",
                 "--test-threads=8",
             ])
-            .env_remove("ADK_VOICE_PCM_HARNESS_REPORT")
             .stdout(Stdio::from(output.try_clone().unwrap()))
             .stderr(Stdio::from(output.try_clone().unwrap()))
             .spawn()
@@ -69,7 +65,7 @@ fn env_runtime_fixtures_finish_in_parallel() {
             "round {round}: fixtures failed or deadlocked\n{log}"
         );
         assert!(
-            log.contains("13 passed; 0 failed; 0 ignored"),
+            log.contains("7 passed; 0 failed; 0 ignored"),
             "round {round}: incomplete fixture coverage\n{log}"
         );
     }

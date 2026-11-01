@@ -1,28 +1,17 @@
-import type { CSSProperties, ReactNode } from "react";
+import type { ReactNode } from "react";
 
-import type { SettingRowMeta } from "./SettingsModel";
+import type { SettingRowMeta, SettingsPanel } from "./SettingsModel";
 
 export type SettingsTr = (ko: string, en: string) => string;
 
-export type RenderSettingRow = (
-  meta: SettingRowMeta,
-  options?: { controlOverlay?: ReactNode; trailingMeta?: ReactNode },
-) => ReactNode;
+export type SourceStatus = "loading" | "error" | "ready";
 
-export type RenderSettingGroupCard = (args: {
-  titleKo: string;
-  titleEn: string;
-  descriptionKo: string;
-  descriptionEn: string;
-  rows: ReactNode[];
-  totalCount: number;
-}) => ReactNode;
-
-export interface SettingsActionStyles {
-  primaryActionClass: string;
-  primaryActionStyle: CSSProperties;
-  secondaryActionClass: string;
-  secondaryActionStyle: CSSProperties;
-  subtleButtonClass: string;
-  subtleButtonStyle: CSSProperties;
+/** What every tab body needs from the page: copy, rows, row rendering and search. */
+export interface SettingsPanelContext {
+  tr: SettingsTr;
+  isKo: boolean;
+  queryActive: boolean;
+  matches: (...texts: string[]) => boolean;
+  rowsFor: (panel: SettingsPanel, section: string) => SettingRowMeta[];
+  renderRow: (meta: SettingRowMeta, options?: { extra?: ReactNode }) => ReactNode;
 }

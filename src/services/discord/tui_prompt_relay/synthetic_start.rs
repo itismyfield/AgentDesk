@@ -1845,10 +1845,8 @@ mod tests {
         // The exact `backstop_cleanup` predicate from `finalized_reaction_lifecycle`
         // (turn_finalizer/cleanup.rs:54-57) — the only shape that schedules a
         // reaction change on a Cancel.
-        let backstop_cleanup = ctx.clear_inflight
-            && ctx.kickoff_queue
-            && !ctx.allow_completion_cleanup
-            && !ctx.drain_voice;
+        let backstop_cleanup =
+            ctx.clear_inflight && ctx.kickoff_queue && !ctx.allow_completion_cleanup;
         assert!(
             !backstop_cleanup,
             "the reclaim finalize context must not be a backstop-cleanup shape — that is the only shape that strips ⏳ / withholds ✅ on a Cancel (#4370 F3b)"

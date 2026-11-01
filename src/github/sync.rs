@@ -1403,13 +1403,37 @@ pub(crate) fn format_terminal_open_alert(
     )
 }
 
+/// Env override first, then the shared `agent_quality_monitoring_channel_id` alert target.
 async fn resolve_terminal_open_alert_channel_pg(pool: &PgPool) -> Result<Option<String>, String> {
-    crate::services::agent_quality::regression_alerts::resolve_alert_channel_with_env_pg(
-        pool,
-        "ADK_GITHUB_SYNC_ALERT_CHANNEL",
+    fn channel_target(channel: &str) -> Option<String> {
+        let channel = channel.trim();
+        if channel.is_empty() {
+            None
+        } else if channel.starts_with("channel:") {
+            Some(channel.to_string())
+        } else {
+            Some(format!("channel:{channel}"))
+        }
+    }
+    if let Some(target) = std::env::var("ADK_GITHUB_SYNC_ALERT_CHANNEL")
+        .ok()
+        .as_deref()
+        .and_then(channel_target)
+    {
+        return Ok(Some(target));
+    }
+    let value = sqlx::query_scalar::<_, String>(
+        "SELECT value
+         FROM kv_meta
+         WHERE key = 'agent_quality_monitoring_channel_id'
+           AND value IS NOT NULL
+           AND btrim(value) <> ''
+         LIMIT 1",
     )
+    .fetch_optional(pool)
     .await
-    .map_err(|error| format!("resolve github-sync alert target: {error}"))
+    .map_err(|error| format!("resolve github-sync alert target: {error}"))?;
+    Ok(value.as_deref().and_then(channel_target))
 }
 
 async fn enqueue_terminal_open_alert_pg(

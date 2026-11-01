@@ -1,4 +1,4 @@
-import AgentAvatar from "../AgentAvatar";
+import AgentPersona from "../AgentPersona";
 import { SurfaceCard } from "../common/SurfacePrimitives";
 import {
   BUTTON_ACCENT_STYLE,
@@ -59,8 +59,8 @@ function FsmToolbar({ ctx, actions }: Props) {
             )}
             {ctx.pipelineDraft && (
               <Badge>
-                {ctx.pipelineDraft.states.length} {tr("states", "states")} ·{" "}
-                {ctx.pipelineDraft.transitions.length} {tr("edges", "edges")}
+                {ctx.pipelineDraft.states.length} {tr("단계", "states")} ·{" "}
+                {ctx.pipelineDraft.transitions.length} {tr("연결", "edges")}
               </Badge>
             )}
           </div>
@@ -147,7 +147,7 @@ function SelectedAgentLine({ ctx, size }: { ctx: any; size: number }) {
   return (
     <p className="flex flex-wrap items-center gap-1.5 text-xs leading-5" style={MUTED_TEXT_STYLE}>
       {ctx.tr("현재 선택된 에이전트", "Selected agent")}:{" "}
-      <AgentAvatar agent={ctx.selectedAgentDetail.agent} agents={ctx.agents} size={size} />
+      <AgentPersona agent={ctx.selectedAgentDetail.agent} size={size} />
       <span style={{ color: "var(--th-text-primary)" }}>{ctx.selectedAgentDetail.name}</span>
     </p>
   );

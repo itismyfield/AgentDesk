@@ -194,12 +194,11 @@ mod herdr {
             )
         };
         let flags = |i: &Intervention| (i.has_reply_boundary, i.merge_consecutive);
-        let extras = |i: &Intervention| (i.pending_uploads.clone(), i.voice_announcement.clone());
         (head(a), &a.source_message_ids, body(a), flags(a))
             == (head(b), &b.source_message_ids, body(b), flags(b))
             && sources(a) == sources(b)
             && segments(a) == segments(b)
-            && extras(a) == extras(b)
+            && a.pending_uploads == b.pending_uploads
     }
 
     /// An item as its queue file records it, clocks, channel name and override left out: the file

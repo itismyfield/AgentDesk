@@ -1,6 +1,6 @@
 import type { PipelineConfigFull } from "../../types";
+import { ActionMenu } from "../common/ActionMenu";
 import {
-  BUTTON_DANGER_STYLE,
   BUTTON_NEUTRAL_STYLE,
   BUTTON_WARN_STYLE,
   FSM_DETAIL_PANEL_STYLE,
@@ -99,15 +99,6 @@ function FsmTransitionPanel({ ctx, actions }: Props) {
         )}
       </div>
 
-      <div className="flex flex-wrap gap-2 pt-1">
-        <button
-          onClick={() => actions.removeTransition(ctx.selectedTransitionIndex)}
-          className="rounded-lg border px-3 py-1.5 text-[11px] font-medium"
-          style={BUTTON_DANGER_STYLE}
-        >
-          {tr("전환 삭제", "Delete edge")}
-        </button>
-      </div>
     </div>
   );
 }
@@ -167,14 +158,30 @@ function AdvancedTransitionPanel({ ctx, actions }: Props) {
         <GateDefinitionList ctx={ctx} actions={actions} />
       </div>
 
-      <button
-        onClick={() => actions.removeTransition(ctx.selectedTransitionIndex)}
-        className="rounded-xl border px-3 py-1.5 text-xs font-medium"
-        style={BUTTON_DANGER_STYLE}
-      >
-        {tr("이 전환 삭제", "Delete transition")}
-      </button>
     </>
+  );
+}
+
+/** Destructive transition actions live behind a menu with a confirmation step. */
+export function PipelineTransitionMenu({ ctx, actions }: Props) {
+  const tr = ctx.tr;
+  const { from, to } = ctx.selectedTransition;
+  return (
+    <ActionMenu
+      label={tr("전환 메뉴", "Transition menu")}
+      items={[{
+        key: "delete",
+        label: tr("이 전환 삭제", "Delete transition"),
+        danger: true,
+        onSelect: () => actions.removeTransition(ctx.selectedTransitionIndex),
+        confirm: {
+          title: tr(`${from} → ${to} 전환을 삭제할까요?`, `Delete the ${from} → ${to} transition?`),
+          description: tr("편집기에서 저장하기 전까지는 다시 불러와 되돌릴 수 있어요.", "Until you save the editor, reloading restores it."),
+          confirmLabel: tr("삭제", "Delete"),
+          cancelLabel: tr("취소", "Cancel"),
+        },
+      }]}
+    />
   );
 }
 

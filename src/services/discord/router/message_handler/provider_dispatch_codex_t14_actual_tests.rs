@@ -450,13 +450,10 @@ impl FullEventTask {
         text: &str,
     ) -> Self {
         let ctx = ctx.clone();
-        let config = crate::voice::VoiceConfig::default();
         let data = discord::Data {
             shared: shared.clone(),
             token: "test-token".into(),
             provider: ProviderKind::Codex,
-            voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&config),
-            voice_config: config,
         };
         let event = serenity::FullEvent::Message {
             new_message: discord_mock::user_message(id, text),

@@ -152,15 +152,6 @@ pub(crate) struct ManualOutboundDeliveryId<'a> {
     pub(crate) semantic_event_id: &'a str,
 }
 
-pub(super) fn is_reserved_voice_correlation_namespace(
-    delivery_id: ManualOutboundDeliveryId<'_>,
-) -> bool {
-    delivery_id
-        .correlation_id
-        .trim_start()
-        .starts_with("voice:")
-}
-
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum ManualDeliveryOutcome {
     Sent {
@@ -342,15 +333,8 @@ async fn deliver_manual_notification<C: ManualOutboundClient>(
         headless_nonce_enabled,
         attachment,
     } = notification;
-    // Issue #2363: the manual dedupe key must include the resolved target
-    // channel AND the sending `bot` identity. Voice announce delivery ids
-    // encode (guild, voice_channel, utterance, generation) in
-    // correlation+semantic, but the routed **target** channel and the
-    // producer bot can still differ (announce vs notify), and external
-    // `/api/discord/send` callers can set delivery ids freely — so without
-    // bot+target scoping a notify send could poison a later announce
-    // send and report "duplicate" while the announce bot never actually
-    // delivered the voice transcript trigger.
+    // The dedupe key includes the target channel and sending bot: callers set delivery ids
+    // freely, so one bot or channel must not suppress another's send as a duplicate.
     let dedup_key = delivery_id.map(|delivery_id| manual_dedup_key(bot, channel_id, delivery_id));
     let reservation = if let Some(key) = dedup_key.as_deref() {
         match reserve_manual_delivery(dedup, key).await {

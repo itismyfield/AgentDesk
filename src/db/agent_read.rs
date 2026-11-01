@@ -7,7 +7,7 @@ pub(crate) async fn list_agent_rows(
     let sql = "
         SELECT a.id, a.name, a.name_ko, a.provider, a.department, a.avatar_emoji,
                a.discord_channel_id, a.discord_channel_alt, a.discord_channel_cc, a.discord_channel_cdx,
-               a.status, a.xp, a.sprite_number, d.name AS department_name, d.name_ko AS department_name_ko,
+               a.status, a.sprite_number, d.name AS department_name, d.name_ko AS department_name_ko,
                d.color AS department_color, a.created_at::text AS created_at,
                (SELECT COUNT(DISTINCT kc.id)::BIGINT FROM kanban_cards kc WHERE kc.assigned_agent_id = a.id AND kc.status = 'done') AS tasks_done,
                (SELECT COALESCE(SUM(s.tokens), 0)::BIGINT FROM sessions s WHERE s.agent_id = a.id) AS total_tokens,
@@ -61,7 +61,7 @@ pub(crate) async fn load_agent_row(
         "
         SELECT a.id, a.name, a.name_ko, a.provider, a.department, a.avatar_emoji,
                a.discord_channel_id, a.discord_channel_alt, a.discord_channel_cc, a.discord_channel_cdx,
-               a.status, a.xp, a.sprite_number, d.name AS department_name, d.name_ko AS department_name_ko,
+               a.status, a.sprite_number, d.name AS department_name, d.name_ko AS department_name_ko,
                d.color AS department_color, a.created_at::text AS created_at,
                (SELECT COUNT(DISTINCT kc.id)::BIGINT FROM kanban_cards kc WHERE kc.assigned_agent_id = a.id AND kc.status = 'done') AS tasks_done,
                (SELECT COALESCE(SUM(s.tokens), 0)::BIGINT FROM sessions s WHERE s.agent_id = a.id) AS total_tokens,

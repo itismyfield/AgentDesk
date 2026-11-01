@@ -253,6 +253,60 @@ async fn read_envelope_matches_f8_fixture_and_definition_view_share_identity_pg(
 }
 
 #[tokio::test]
+async fn summary_list_counts_node_and_run_arrays_instead_of_returning_them_pg() {
+    let h = Harness::new().await;
+    h.seed_running().await;
+    let (_, full) = request(&h.app, "GET", "/server-campaigns", None).await;
+    let (status, summary) = request(&h.app, "GET", "/server-campaigns?view=summary", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let mut expected = full["campaigns"][0].clone();
+    expected["definition"]
+        .as_object_mut()
+        .unwrap()
+        .remove("nodes");
+    let view = expected["view"].as_object_mut().unwrap();
+    let nodes = view.remove("nodes").unwrap();
+    let mut node_counts = serde_json::Map::new();
+    for node in nodes.as_array().unwrap() {
+        let disposition = node["runtime"]["disposition"].as_str().unwrap().to_string();
+        let count = node_counts.entry(disposition).or_insert(json!(0));
+        *count = json!(count.as_u64().unwrap() + 1);
+    }
+    let sessions = view.remove("sessions").unwrap();
+    let actions = view.remove("unreconciled_actions").unwrap();
+    assert!(!nodes.as_array().unwrap().is_empty() && !actions.as_array().unwrap().is_empty());
+    view.insert("node_total".into(), json!(nodes.as_array().unwrap().len()));
+    view.insert("node_counts".into(), Value::Object(node_counts));
+    view.insert(
+        "session_count".into(),
+        json!(sessions.as_array().unwrap().len()),
+    );
+    view.insert(
+        "unreconciled_action_count".into(),
+        json!(actions.as_array().unwrap().len()),
+    );
+    let mut actual = summary["campaigns"][0].clone();
+    actual["view"]["as_of"] = expected["view"]["as_of"].clone();
+    assert_eq!(actual, expected);
+
+    let (status, detail) = request(&h.app, "GET", "/server-campaigns/campaign", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["campaign"]["view"]["nodes"], nodes);
+    for path in [
+        "/server-campaigns?view=nodes",
+        "/server-campaigns/campaign?view=summary",
+    ] {
+        assert_eq!(
+            request(&h.app, "GET", path, None).await.0,
+            StatusCode::BAD_REQUEST,
+            "{path}"
+        );
+    }
+    h.close().await;
+}
+
+#[tokio::test]
 async fn create_edit_command_receipts_replay_exact_status_body_after_new_pool_pg() {
     let mut h = Harness::new().await;
     let created = request(&h.app, "POST", "/server-campaigns", Some(create_body())).await;

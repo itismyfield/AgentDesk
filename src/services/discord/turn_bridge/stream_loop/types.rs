@@ -405,8 +405,6 @@ pub(in crate::services::discord::turn_bridge) struct StreamLoopContext {
     pub(in crate::services::discord::turn_bridge) dispatch_id: Option<String>,
     pub(in crate::services::discord::turn_bridge) role_binding: Option<RoleBinding>,
     pub(in crate::services::discord::turn_bridge) turn_id: String,
-    pub(in crate::services::discord::turn_bridge) voice_progress_playback_channel_id:
-        Option<ChannelId>,
     pub(in crate::services::discord::turn_bridge) single_message_panel_footer_mode: bool,
     pub(in crate::services::discord::turn_bridge) footer_owner:
         crate::services::discord::footer_view_reconciler::CompletionFooterOwner,

@@ -1,6 +1,7 @@
 # T5 → T6 철거 인벤토리 — #5464 (#5071 T5)
 
 <!-- doc-path-refs: removed src/services/discord/relay_recovery/cohort.rs src/services/discord/relay_recovery/authority_observation.rs src/services/discord/relay_recovery/authority_observation/delivery_boundary.rs src/services/discord/relay_recovery/authority_retention.rs scripts/relay_authority_rollout_report.py tests/test_relay_authority_rollout_report.py src/integration_tests.rs scripts/lib_test_inventory_manifest.txt -->
+<!-- doc-path-refs: removed src/server/routes/voice_config.rs -->
 
 > **이 리포 사본이 정본이다.** §12-2 기록은 이 파일에서만 갱신한다.
 > 워크플로 초안 `/private/tmp/adk-b0814/t6-removal-inventory.md` 는 S1 r1 시점에

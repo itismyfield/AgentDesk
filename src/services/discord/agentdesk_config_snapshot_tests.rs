@@ -26,36 +26,6 @@ fn shared_config_uses_snapshot_and_editor_keeps_fresh_disk() {
 }
 
 #[test]
-fn meeting_explicit_empty_stays_empty_until_validated_reload() {
-    isolated(|| {
-        let fixture = Fixture::new();
-        let missing = format!("{A}meeting: {{channel_name: fixture, summary_agent: self}}\n");
-        let empty = format!(
-            "{A}meeting: {{channel_name: fixture, summary_agent: self, available_agents: []}}\n"
-        );
-        fixture.install(&empty, &missing);
-        assert!(load_meeting_config().unwrap().available_agents.is_empty());
-        fixture.reload();
-        assert_eq!(load_meeting_config().unwrap().available_agents.len(), 2);
-    });
-}
-
-#[test]
-fn meeting_missing_candidates_stay_inherited_until_validated_reload() {
-    isolated(|| {
-        let fixture = Fixture::new();
-        let missing = format!("{A}meeting: {{channel_name: fixture, summary_agent: self}}\n");
-        let empty = format!(
-            "{A}meeting: {{channel_name: fixture, summary_agent: self, available_agents: []}}\n"
-        );
-        fixture.install(&missing, &empty);
-        assert_eq!(load_meeting_config().unwrap().available_agents.len(), 2);
-        fixture.reload();
-        assert!(load_meeting_config().unwrap().available_agents.is_empty());
-    });
-}
-
-#[test]
 fn shared_config_keeps_standalone_missing_and_invalid_file_contract() {
     isolated(|| {
         let fixture = Fixture::new();
