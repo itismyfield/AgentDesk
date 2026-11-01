@@ -35,8 +35,12 @@ async fn legacy_and_owned(start: Start) -> (String, String) {
     let (db, pool) = postgres().await;
     let (shared, registry) = runtime(&pool).await;
     use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
-    let (proxy, gateway, _server) =
-        discord_mock::start(discord_mock::DiscordMockState::new()).await;
+    let discord = discord_mock::DiscordMockState::new();
+    // Discord names the channels unlike their binding, so only a hint picks the binding's name.
+    for channel in [LEGACY, OWNED] {
+        discord.name_channel(channel.get(), "discord-named");
+    }
+    let (proxy, gateway, _server) = discord_mock::start(discord).await;
     let ctx = discord_mock::serenity_context(proxy, gateway).await;
     shared.http.cached_serenity_ctx.set(ctx).unwrap();
     shared
@@ -59,7 +63,7 @@ async fn legacy_and_owned(start: Start) -> (String, String) {
             &shared,
             channel,
             side,
-            start.dm_user.is_some(),
+            start.dm_user.is_some() || start.flat,
             workdir.path(),
         )
         .await;
@@ -89,12 +93,12 @@ async fn legacy_and_owned(start: Start) -> (String, String) {
 }
 
 /// A channel the runtime already knows, with its workspace and a provider session to continue;
-/// a DM channel has no name of its own, so its start's hint names it.
+/// a nameless one (a DM, or a restored channel) is named by its start's hint.
 async fn known_channel(
     shared: &SharedData,
     channel: ChannelId,
     side: &str,
-    dm: bool,
+    nameless: bool,
     dir: &std::path::Path,
 ) {
     map_channel(shared, channel, &format!("{side}-agent")).await;
@@ -102,7 +106,7 @@ async fn known_channel(
     let session = core.sessions.get_mut(&channel).unwrap();
     session.current_path = Some(dir.display().to_string());
     session.session_id = Some("sid".into());
-    if dm {
+    if nameless {
         session.channel_name = None;
     }
 }
@@ -372,6 +376,11 @@ async fn an_owned_flat_scheduled_start_kept_before_a_restart_resolves_as_its_leg
     .await;
     let scheduled = legacy.contains("snap-SIDE") && legacy.contains("scheduled_message");
     assert!(scheduled && legacy.ends_with("None"), "{legacy}");
+    let bound = legacy.contains("channel_name: Some(\"SIDE-agent\")");
+    assert!(
+        bound && !legacy.contains("discord-named"),
+        "the binding names it: {legacy}"
+    );
     assert_eq!(
         owned, legacy,
         "same session key, tmux session, channel, source and cold start"
