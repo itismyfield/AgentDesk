@@ -122,6 +122,15 @@ plist = "1.8"
 tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 
+# Keep local backtrace file:line while reducing dev/test artifact size.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+# Keep dependencies unstripped so macOS can load proc-macro dylibs.
+strip = false
+
 [profile.dev.build-override]
 # Keep proc-macros loadable on macOS when checks disable debug information.
 strip = false
