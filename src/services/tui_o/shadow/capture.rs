@@ -191,7 +191,7 @@ fn update_guard(guard: &mut Vec<u8>, chunk: &[u8]) {
 
 impl SourceCapture {
     /// Opens `source.path` read-only at `start_offset`; a torn first line is skipped. A renumbered
-    /// dev passes as every poll's `Fingerprint::path` check does; the capture keeps the stored source.
+    /// dev passes, as in each poll's `Fingerprint::path`; the capture keeps the stored source.
     pub fn open(source: SourceId, start_offset: u64) -> io::Result<Self> {
         let file = File::open(&source.path)?;
         let meta = file.metadata()?;
