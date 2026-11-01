@@ -19,6 +19,7 @@ import {
   type RLProvider,
   type RawRLProvider,
 } from "./MiniRateLimitBarModel";
+import { pollWhileVisible } from "../../lib/pollWhileVisible";
 
 const RL_ICONS: Record<string, string> = {
   Claude: "🤖",
@@ -264,11 +265,8 @@ export function MiniRateLimitBar({
       }
     };
     load();
-    // Hidden tabs skip the poll and refresh once they are visible again.
-    const timer = setInterval(() => { if (!document.hidden) load(); }, 30_000);
-    const onVisible = () => { if (!document.hidden) load(); };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => { mounted = false; clearInterval(timer); document.removeEventListener("visibilitychange", onVisible); };
+    const stopPolling = pollWhileVisible(() => void load(), 30_000);
+    return () => { mounted = false; stopPolling(); };
   }, []);
 
   if (layout === "homeSummary") {

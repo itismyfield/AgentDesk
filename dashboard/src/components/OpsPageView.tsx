@@ -31,6 +31,7 @@ import {
 } from "./OpsPageModel";
 import { StatusBadge } from "./common/StatusBadge";
 import { FreshnessIndicator } from "./common/FreshnessIndicator";
+import { pollWhileVisible } from "../lib/pollWhileVisible";
 
 
 interface OpsPageViewProps {
@@ -114,19 +115,7 @@ export default function OpsPageView({
       ? LIVE_POLL_INTERVAL_MS
       : Math.min(MAX_DISCONNECTED_POLL_MS, DISCONNECTED_POLL_BASE_MS * 2 ** Math.min(failureCount, 4));
 
-    // Background tabs skip polling; the visibility listener below catches up on return.
-    const timer = window.setInterval(() => {
-      if (!document.hidden) void refreshHealth();
-    }, intervalMs);
-    const onVisible = () => {
-      if (!document.hidden) void refreshHealth();
-    };
-    document.addEventListener("visibilitychange", onVisible);
-
-    return () => {
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", onVisible);
-    };
+    return pollWhileVisible(() => void refreshHealth(), intervalMs);
   }, [failureCount, refreshHealth, wsConnected]);
 
   useEffect(() => {

@@ -14,6 +14,7 @@ import { formatDiscordWebUrl, isDiscordSnowflake } from "../agent-manager/discor
 import type { TFunction } from "./model";
 import { cx } from "./ui";
 import { HomeRoutinesTimeline } from "./HomeRoutinesTimeline";
+import { pollWhileVisible } from "../../lib/pollWhileVisible";
 
 type RoutineFilter = "all" | RoutineStatus;
 
@@ -1077,16 +1078,10 @@ export function RoutinesTimelineWidget({
     };
 
     void load();
-    // Background tabs skip the poll and catch up as soon as they become visible, like the other home widgets.
-    const onVisible = () => {
-      if (!document.hidden) void load();
-    };
-    const timer = window.setInterval(onVisible, 60_000);
-    document.addEventListener("visibilitychange", onVisible);
+    const stopPolling = pollWhileVisible(() => void load(), 60_000);
     return () => {
       mounted = false;
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", onVisible);
+      stopPolling();
     };
   }, [filter, reloadKey]);
 

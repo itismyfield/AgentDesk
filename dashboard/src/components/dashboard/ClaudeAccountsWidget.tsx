@@ -10,6 +10,7 @@ import {
   rateLimitFillWidth,
 } from "../common/rateLimitGauge";
 import type { TFunction } from "./model";
+import { pollWhileVisible } from "../../lib/pollWhileVisible";
 
 interface ClaudeUsageWindow {
   pct?: number | null;
@@ -237,18 +238,10 @@ function ClaudeAccountsWidgetImpl({ t }: ClaudeAccountsWidgetProps) {
     };
 
     void load();
-    // Background tabs skip the 30s poll and catch up as soon as they become visible.
-    const timer = window.setInterval(() => {
-      if (!document.hidden) void load();
-    }, 30_000);
-    const onVisible = () => {
-      if (!document.hidden) void load();
-    };
-    document.addEventListener("visibilitychange", onVisible);
+    const stopPolling = pollWhileVisible(() => void load(), 30_000);
     return () => {
       activeController?.abort();
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", onVisible);
+      stopPolling();
     };
   }, [refreshNonce]);
 

@@ -10,6 +10,7 @@ import {
   SurfaceSection,
   SurfaceSegmentButton,
 } from "../common/SurfacePrimitives";
+import { pollWhileVisible } from "../../lib/pollWhileVisible";
 
 interface ModelLineItem {
   model: string;
@@ -196,12 +197,10 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
     };
 
     void load();
-    const timer = setInterval(() => {
-      if (!document.hidden) void load();
-    }, 60_000);
+    const stopPolling = pollWhileVisible(() => void load(), 60_000);
     return () => {
       mounted = false;
-      clearInterval(timer);
+      stopPolling();
     };
   }, [period]);
 
