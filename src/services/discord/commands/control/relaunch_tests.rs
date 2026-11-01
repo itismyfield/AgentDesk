@@ -414,9 +414,8 @@ fn launched_with(name: &str, session: &str, fast: Option<bool>) {
         .unwrap();
 }
 
-// A thread sharing its parent's fast setting is restarted on its own session even after the parent
-// consumed the shared pending change; a settings file naming another session is not trusted, and a
-// TUI already launched with the setting is left alone.
+// A thread sharing its parent's fast setting relaunches after the parent consumed the change; a
+// settings file naming another session is not trusted, and an applied setting relaunches nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shared_fast_pending_applies_to_each_live_tui_pg() {
     let test = "services::discord::commands::control::relaunch_tests::shared_fast_pending_applies_to_each_live_tui_pg";
