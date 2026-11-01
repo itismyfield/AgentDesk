@@ -275,6 +275,6 @@ fn a_backlog_behind_a_refused_head_has_each_reply_window_read_once() {
     );
     relay.sends_of(41, 1);
     let reads = crate::services::claude_tui::hook_relay::too_early::tests::window_reads(&queue);
-    assert!(reads.len() >= 40, "{reads:?}");
+    assert_eq!(reads.len(), 41, "{reads:?}");
     assert!(reads.iter().all(|count| *count == 1), "{reads:?}");
 }
