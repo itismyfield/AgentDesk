@@ -33,6 +33,8 @@ struct EvidenceFrame {
     seed: RestoredResponseSeed,
     body: Option<String>,
     fresh: bool,
+    /// The live (dev, ino) the watcher stats; the fixture's stored source when unset.
+    file: Option<(u64, u64)>,
     /// Inflight rows stored at each outer poll before this frame; `None` keeps the fixture's nonce.
     polls: Option<Vec<Option<InflightTurnState>>>,
 }
@@ -46,6 +48,7 @@ impl From<(u64, u64)> for EvidenceFrame {
             seed: RestoredResponseSeed::default(),
             body: None,
             fresh: true,
+            file: None,
             polls: None,
         }
     }
@@ -103,6 +106,7 @@ async fn plan(
         seed,
         body,
         fresh,
+        file,
         polls,
     } = frame.into();
     let watcher_nonce = match polls {
@@ -124,7 +128,7 @@ async fn plan(
         &output,
     );
     let context = TerminalRelayPlanContext {
-        evidence_source: Some((f.source.dev, f.source.ino)),
+        evidence_source: Some(file.unwrap_or((f.source.dev, f.source.ino))),
         http,
         shared,
         channel_id: ChannelId::new(f.row.channel_id),
@@ -1779,6 +1783,7 @@ async fn headless_restart_frame(
             body: Some(full_response),
             fresh: late || frame_body,
             polls: Some(polls),
+            file: None,
         },
     )
     .await;
@@ -1870,6 +1875,76 @@ async fn headless_outbox_row_covers_only_its_producer_turn_pg() {
         mismatches.extend(headless_restart_frame(&pool, 765_300 + index as u64, outbox).await);
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
+    pool.close().await;
+    db.drop().await;
+}
+
+/// After a reboot renumbers the transcript volume's dev, a soft terminal O already posted stays
+/// proven through the source O stored and records nothing; a body O never posted still records.
+#[tokio::test(flavor = "current_thread")]
+async fn renumbered_source_o_posted_terminal_records_nothing_but_unposted_body_records_pg() {
+    use crate::services::tui_o::shadow::capture::{file_identity, renumber};
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        "i7441_renumber",
+        "renumbered O terminal evidence",
+    )
+    .await;
+    let pool = db.connect_and_migrate().await;
+    for posted in [true, false] {
+        let f = Fixture::new(
+            744_810 + u64::from(posted),
+            ProviderKind::Claude,
+            &["renumbered answer"],
+        )
+        .await;
+        let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
+            f.row.channel_id,
+            crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+        )]);
+        let (http, _http) = f.http().await;
+        let shared =
+            crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+        if !posted {
+            f.port.messages.lock().unwrap().clear();
+        }
+        let _reboot = renumber::shift(&f.source.path, 1 << 40);
+        let file = file_identity(&std::fs::metadata(&f.source.path).unwrap());
+        assert_eq!(file, (f.source.dev ^ (1 << 40), f.source.ino));
+        let frame = EvidenceFrame {
+            file: Some(file),
+            ..EvidenceFrame::from((0, 0))
+        };
+        plan(&f, &shared, &http, None, None, &mut None, false, frame).await;
+        let rows: Vec<String> = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let rows =
+                    sqlx::query_scalar("SELECT content FROM relay_dead_letter WHERE channel_id=$1")
+                        .bind(f.row.channel_id.to_string())
+                        .fetch_all(&pool)
+                        .await
+                        .unwrap();
+                if posted || !rows.is_empty() {
+                    break rows;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("an unposted body must reach the dead letter table");
+        assert_eq!(
+            rows,
+            if posted {
+                Vec::new()
+            } else {
+                vec![f.body.clone()]
+            }
+        );
+        if posted {
+            assert!(f.get_calls.load(Ordering::SeqCst) > 0, "exact GET must run");
+        }
+    }
     pool.close().await;
     db.drop().await;
 }
