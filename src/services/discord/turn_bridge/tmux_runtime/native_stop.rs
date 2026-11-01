@@ -106,17 +106,26 @@ fn live_bridge_owner(
             || token.native_stop.has_live_bridge())
 }
 
+type StopRowIdentity = (
+    crate::services::discord::inflight::InflightTurnIdentity,
+    Option<String>,
+);
+
 fn row_identity(
     provider: &ProviderKind,
     channel: ChannelId,
-) -> Result<Option<crate::services::discord::inflight::InflightTurnIdentity>, String> {
+) -> Result<Option<StopRowIdentity>, String> {
     crate::services::discord::inflight::load_inflight_state_read_only_result(
         provider,
         channel.get(),
     )
     .map(|row| {
-        row.as_ref()
-            .map(crate::services::discord::inflight::InflightTurnIdentity::from_state)
+        row.as_ref().map(|state| {
+            (
+                crate::services::discord::inflight::InflightTurnIdentity::from_state(state),
+                state.turn_nonce.clone(),
+            )
+        })
     })
 }
 
@@ -384,17 +393,20 @@ impl NativeStop {
     }
 
     async fn current(&self) -> bool {
-        self.shared
+        let current = self
+            .mailbox
+            .cancel_token()
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|token| Arc::ptr_eq(&token, &self.token));
+        #[cfg(all(test, unix))]
+        after_token_probe().await;
+        let same_actor = self
+            .shared
             .mailbox_peek(self.channel)
-            .is_some_and(|handle| handle.same_actor(&self.mailbox))
-            && self
-                .mailbox
-                .cancel_token()
-                .await
-                .ok()
-                .flatten()
-                .is_some_and(|token| Arc::ptr_eq(&token, &self.token))
-            && !self.token.is_completion_cleanup()
+            .is_some_and(|handle| handle.same_actor(&self.mailbox));
+        current && same_actor && !self.token.is_completion_cleanup()
     }
 
     pub(in crate::services::discord) fn observed_text(sent: bool) -> &'static str {
@@ -508,11 +520,20 @@ type OwnerProbe = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>
 #[cfg(all(test, unix))]
 thread_local! {
     pub(super) static AFTER_BRIDGE_PROBE: std::cell::RefCell<Option<OwnerProbe>> = const { std::cell::RefCell::new(None) };
+    pub(super) static AFTER_TOKEN_PROBE: std::cell::RefCell<Option<OwnerProbe>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(all(test, unix))]
 async fn after_bridge_probe() {
     let step = AFTER_BRIDGE_PROBE.with_borrow_mut(Option::take);
+    if let Some(step) = step {
+        step.await;
+    }
+}
+
+#[cfg(all(test, unix))]
+async fn after_token_probe() {
+    let step = AFTER_TOKEN_PROBE.with_borrow_mut(Option::take);
     if let Some(step) = step {
         step.await;
     }

@@ -480,3 +480,68 @@ fn a2b_terminal_commit_between_native_and_publication_keeps_done() {
         crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(session);
     });
 }
+
+#[test]
+fn a2b_watcher_query_rechecks_row_episode_nonce() {
+    let fx = Fixture::new();
+    run(async {
+        let shared = discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(7_212_350);
+        let session = "ownership-row-nonce-race";
+        let (token, _) = generating_turn(&fx, session);
+        start(&shared, channel, &token).await;
+        native_inflight_row(channel, &token, session);
+        let (pause, _tx) = paused_bridge(&shared, channel, &token, false).await;
+        token.native_stop.completed();
+        assert!(pause.abort_and_wait(Duration::from_secs(8)).await);
+        super::super::super::native_stop::AFTER_BRIDGE_PROBE.with_borrow_mut(|step| {
+            *step = Some(Box::pin(async move {
+                let mut row =
+                    inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get())
+                        .unwrap();
+                row.turn_nonce = Some("successor-after-owner-probe".into());
+                inflight::save_inflight_state(&row).unwrap();
+            }));
+        });
+        native_finished(&shared, channel, &token).await;
+        assert!(
+            !fx.take_calls()
+                .iter()
+                .any(|call| call.starts_with("send-keys"))
+        );
+        crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+    });
+}
+
+#[test]
+fn a3b_actor_replaced_during_last_token_probe_never_receives_escape() {
+    let fx = Fixture::new();
+    fx.pane(&native_contract::running());
+    run(async {
+        let shared = discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(7_212_560);
+        let session = "ownership-actor-probe-race";
+        let (token, _) = generating_turn(&fx, session);
+        start(&shared, channel, &token).await;
+        native_inflight_row(channel, &token, session);
+        let (other_shared, other_token) = (shared.clone(), token.clone());
+        super::super::super::native_stop::AFTER_TOKEN_PROBE.with_borrow_mut(|step| {
+            *step = Some(Box::pin(async move {
+                super::super::super::native_stop::AFTER_TOKEN_PROBE.with_borrow_mut(|step| {
+                    *step = Some(Box::pin(async move {
+                        other_shared.mailboxes.remove_fixture_for_test(channel);
+                        start(&other_shared, channel, &other_token).await;
+                    }));
+                });
+            }));
+        });
+        native_finished(&shared, channel, &token).await;
+        assert!(
+            !fx.take_calls()
+                .iter()
+                .any(|call| call.starts_with("send-keys")),
+            "a replacement actor must not receive Escape after the token reply"
+        );
+        crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+    });
+}
