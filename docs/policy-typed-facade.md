@@ -30,15 +30,7 @@ Current typed facade entrypoints:
 | `agentdesk.queue` | `status()` | Returns typed queue and outbox counts without exposing raw queue tables to JS. |
 | `agentdesk.autoQueue` | `updateEntryStatus(entry_id, status, source, opts)` | Updates `auto_queue_entries` status cleanly, logging the transition. |
 | `agentdesk.timeouts` | `maintainStaleSessions()` | The policy entrypoint for stale busy-session maintenance. The Rust owner selects candidates, applies thresholds and liveness decisions, constructs repairs, and performs housekeeping. |
-| `agentdesk.timeouts` | `clearDeadlockCountersForFreshSessions(stale_scan_minutes)` | Owner I/O / compatibility. Deletes stale `deadlock_check:*` markers for active sessions with fresh heartbeats. |
-| `agentdesk.timeouts` | `listStaleWorkingSessions(grace_minutes)` | Owner I/O / compatibility. Returns stale `turn_active`/`working` sessions plus active dispatch status for safe stale-session recovery. |
-| `agentdesk.timeouts` | `listDeadlockCandidates(stale_scan_minutes, limit)` | Owner I/O / compatibility. Returns bounded stale session candidates ordered by heartbeat without exposing session SQL to JS. |
-| `agentdesk.timeouts` | `observeSessionHost(session_key)` | Owner I/O / compatibility. Resolves the full key to its sessions row and host; returns `live`/`dead` only for a legacy tmux row whose probe answered, otherwise `unknown` with the deferral `reason`. |
-| `agentdesk.timeouts` | `repairStaleSession(session_key, request)` | Owner I/O / compatibility. Re-resolves the row and host, then in one transaction fails the observed pending/dispatched dispatch (optional), re-checks the row, the listed `active_turn_nonce` and the dispatch are unchanged, and marks the session `idle`. Returns `repaired:false` with `deferred` otherwise. |
-| `agentdesk.timeouts` | `getDispatchType(dispatch_id)` | Owner I/O / compatibility. Returns a dispatch type or `null` for review-hang targeting. |
-| `agentdesk.timeouts` | `recordDeadlockTermination(payload)` | Owner I/O / compatibility. Inserts the deadlock-policy termination audit row with fixed component/reason fields. |
-| `agentdesk.timeouts` | `cleanupDeadlockCountersForInactiveSessions()` | Owner I/O / compatibility. Deletes `deadlock_check:*` markers whose sessions are no longer active. |
-| `agentdesk.timeouts` | `cleanupDeadlockHistoryBefore(cutoff_ms)` | Owner I/O / compatibility. Deletes old `deadlock_history:*` markers by timestamp suffix. |
+| `agentdesk.timeouts` | `observeSessionHost(session_key)` | Owner read I/O. Resolves the full key to its sessions row and host; returns `live`/`dead` only for a legacy tmux row whose probe answered, otherwise `unknown` with the deferral `reason`. |
 | `agentdesk.dispatch` | `create(...)` | Existing typed command, retained as-is. |
 | `agentdesk.kv` | `get/set/delete(...)` | Typed exact-key KV facade, preferred over `kv_meta` SQL. |
 | `agentdesk.kv` | `deleteMany(keys)` | Deletes exact keys with one PostgreSQL `TEXT[]` bind and returns `{ ok, deleted }`. |
@@ -64,7 +56,7 @@ Other scalar columns keep the same shape as `query`; the difference is limited t
 - Prefer `agentdesk.cards.list(...)` over ad hoc `SELECT ... FROM kanban_cards`.
 - Prefer `agentdesk.cards.assign(...)` and `agentdesk.cards.setPriority(...)` over direct `UPDATE kanban_cards`.
 - Prefer `agentdesk.review.entryContext(...)` and `agentdesk.review.recordEntry(...)` for review round planning over ad hoc `task_dispatches`/`kanban_cards.review_round` SQL.
-- For stale busy-session maintenance, call `agentdesk.timeouts.maintainStaleSessions()` only. Candidate selection, timing, host/inflight decisions, repair arguments, and cleanup belong to the Rust owner. The low-level timeout operations are owner-internal or compatibility surfaces, rather than policy decision entrypoints.
+- For stale busy-session maintenance, call `agentdesk.timeouts.maintainStaleSessions()` only. Candidate selection, timing, host/inflight decisions, repair arguments, and cleanup belong to the Rust owner. Candidate-scan, repair, deadlock-cleanup, and termination-audit operations are not exposed to policy JS.
 - Prefer `agentdesk.kv.*` over `kv_meta` SQL; use `deleteMany(keys)` for exact-key batches instead of scalar delete loops.
 - Keep `agentdesk.db.*` for gaps, debugging, or transitional policy code only.
 
@@ -90,9 +82,9 @@ The migrated slice covers `onReviewEnter` and its round-planning logic. A static
 
 `policies/timeouts/active-monitor.js` calls only `agentdesk.timeouts.maintainStaleSessions()` for Section I stale busy-session maintenance.
 
-The owner is Rust: `services::stale_turn_reconciler::policy_maintenance` owns the 10-minute then 30-minute policy scans, shared host cache, inflight/liveness decisions, repair requests, and counter/history cleanup. The same facade retains the separate automatic 5-minute sweep and keyed reconciliation contracts.
+The owner is Rust: `services::stale_turn_reconciler::policy_maintenance` owns the 10-minute then 30-minute policy scans, shared host cache, inflight/liveness decisions, repair requests, and counter/history cleanup. The same facade retains the separate automatic sweep (5-minute grace) and keyed reconciliation contracts.
 
-The lower-level `agentdesk.timeouts` operations in the table remain for owner I/O and compatibility. Policy authors must not use the scan, repair, or deadlock-cleanup operations to introduce another stale busy-session decision maker. A source-scan test enforces this across production `policies/**/*.js`; test harnesses and the legacy oracle remain test-only.
+Policy JS has no candidate-scan, repair, deadlock-cleanup, or termination-audit entrypoints. `observeSessionHost` remains read I/O for the Rust owner; `maintainStaleSessions` is the only policy maintenance command. A runtime test pins the exact timeout namespace immediately after registration, including its two raw bridge functions. A source-scan test also prevents production `policies/**/*.js` from calling the removed operations; the legacy oracle remains test-only.
 
 The active-monitor policy capability manifest sets `db.raw_sql.mode=forbidden`, so static capability checks fail if `agentdesk.db.*` is reintroduced in that file.
 

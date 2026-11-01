@@ -1,13 +1,12 @@
 use chrono::{DateTime, Utc};
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
-use serde::Deserialize;
 use serde_json::json;
 use sqlx::{PgPool, Row as SqlxRow};
 
 // ── Timeout policy typed facade (#3733) ─────────────────────────────
 //
-// Typed I/O for the stale-turn owner and compatibility operations. Candidate timing
-// and maintenance decisions belong to services::stale_turn_reconciler.
+// Typed I/O for the stale-turn owner. Candidate timing and maintenance decisions
+// belong to services::stale_turn_reconciler.
 
 pub(super) mod host_repair;
 
@@ -30,88 +29,11 @@ pub(super) fn register_timeouts_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>
         })?,
     )?;
 
-    let pg_clear_fresh = pg_pool.clone();
-    obj.set(
-        "__clearDeadlockCountersForFreshSessionsRaw",
-        Function::new(ctx.clone(), move |stale_scan_minutes: i32| -> String {
-            clear_deadlock_counters_for_fresh_sessions_raw(
-                pg_clear_fresh.as_ref(),
-                stale_scan_minutes,
-            )
-        })?,
-    )?;
-
-    let pg_stale_working = pg_pool.clone();
-    obj.set(
-        "__listStaleWorkingSessionsRaw",
-        Function::new(ctx.clone(), move |grace_minutes: i32| -> String {
-            list_stale_working_sessions_raw(pg_stale_working.as_ref(), grace_minutes)
-        })?,
-    )?;
-
-    let pg_candidates = pg_pool.clone();
-    obj.set(
-        "__listDeadlockCandidatesRaw",
-        Function::new(
-            ctx.clone(),
-            move |stale_scan_minutes: i32, limit: i32| -> String {
-                list_deadlock_candidates_raw(pg_candidates.as_ref(), stale_scan_minutes, limit)
-            },
-        )?,
-    )?;
-
     let pg_observe = pg_pool.clone();
     obj.set(
         "__observeSessionHostRaw",
         Function::new(ctx.clone(), move |session_key: String| -> String {
             host_repair::observe_session_host_raw(pg_observe.as_ref(), &session_key)
-        })?,
-    )?;
-
-    let pg_repair = pg_pool.clone();
-    obj.set(
-        "__repairStaleSessionRaw",
-        Function::new(
-            ctx.clone(),
-            move |session_key: String, request_json: String| -> String {
-                host_repair::repair_stale_session_raw(
-                    pg_repair.as_ref(),
-                    &session_key,
-                    &request_json,
-                )
-            },
-        )?,
-    )?;
-
-    let pg_dispatch_type = pg_pool.clone();
-    obj.set(
-        "__getDispatchTypeRaw",
-        Function::new(ctx.clone(), move |dispatch_id: String| -> String {
-            get_dispatch_type_raw(pg_dispatch_type.as_ref(), &dispatch_id)
-        })?,
-    )?;
-
-    let pg_record = pg_pool.clone();
-    obj.set(
-        "__recordDeadlockTerminationRaw",
-        Function::new(ctx.clone(), move |payload_json: String| -> String {
-            record_deadlock_termination_raw(pg_record.as_ref(), &payload_json)
-        })?,
-    )?;
-
-    let pg_cleanup_counters = pg_pool.clone();
-    obj.set(
-        "__cleanupDeadlockCountersForInactiveSessionsRaw",
-        Function::new(ctx.clone(), move || -> String {
-            cleanup_deadlock_counters_for_inactive_sessions_raw(pg_cleanup_counters.as_ref())
-        })?,
-    )?;
-
-    let pg_cleanup_history = pg_pool.clone();
-    obj.set(
-        "__cleanupDeadlockHistoryBeforeRaw",
-        Function::new(ctx.clone(), move |cutoff_ms: i64| -> String {
-            cleanup_deadlock_history_before_raw(pg_cleanup_history.as_ref(), cutoff_ms)
         })?,
     )?;
 
@@ -128,39 +50,8 @@ pub(super) fn register_timeouts_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>
             agentdesk.timeouts.maintainStaleSessions = function() {
                 return unwrap(JSON.parse(agentdesk.timeouts.__maintainStaleSessionsRaw()));
             };
-            agentdesk.timeouts.clearDeadlockCountersForFreshSessions = function(staleScanMinutes) {
-                return unwrap(JSON.parse(agentdesk.timeouts.__clearDeadlockCountersForFreshSessionsRaw(staleScanMinutes)));
-            };
-            agentdesk.timeouts.listStaleWorkingSessions = function(graceMinutes) {
-                var result = unwrap(JSON.parse(agentdesk.timeouts.__listStaleWorkingSessionsRaw(graceMinutes)));
-                return result.sessions || [];
-            };
-            agentdesk.timeouts.listDeadlockCandidates = function(staleScanMinutes, limit) {
-                var result = unwrap(JSON.parse(agentdesk.timeouts.__listDeadlockCandidatesRaw(staleScanMinutes, limit || 50)));
-                return result.sessions || [];
-            };
             agentdesk.timeouts.observeSessionHost = function(sessionKey) {
                 return unwrap(JSON.parse(agentdesk.timeouts.__observeSessionHostRaw(sessionKey || "")));
-            };
-            agentdesk.timeouts.repairStaleSession = function(sessionKey, request) {
-                return unwrap(JSON.parse(agentdesk.timeouts.__repairStaleSessionRaw(
-                    sessionKey || "",
-                    JSON.stringify(request || {})
-                )));
-            };
-            agentdesk.timeouts.getDispatchType = function(dispatchId) {
-                if (!dispatchId) return null;
-                var result = unwrap(JSON.parse(agentdesk.timeouts.__getDispatchTypeRaw(dispatchId || "")));
-                return result.dispatch_type || null;
-            };
-            agentdesk.timeouts.recordDeadlockTermination = function(payload) {
-                return unwrap(JSON.parse(agentdesk.timeouts.__recordDeadlockTerminationRaw(JSON.stringify(payload || {}))));
-            };
-            agentdesk.timeouts.cleanupDeadlockCountersForInactiveSessions = function() {
-                return unwrap(JSON.parse(agentdesk.timeouts.__cleanupDeadlockCountersForInactiveSessionsRaw()));
-            };
-            agentdesk.timeouts.cleanupDeadlockHistoryBefore = function(cutoffMs) {
-                return unwrap(JSON.parse(agentdesk.timeouts.__cleanupDeadlockHistoryBeforeRaw(cutoffMs || 0)));
             };
         })();
         "#,
@@ -259,12 +150,11 @@ impl crate::services::stale_turn_reconciler::PolicyMaintenanceIo for PolicyIo<'_
         key: &str,
         request: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        let raw: String = self.call(
-            "timeouts",
-            "__repairStaleSessionRaw",
-            (key, request.to_string()),
-        )?;
-        policy_result(&raw)
+        policy_result(&host_repair::repair_stale_session_raw(
+            self.pool,
+            key,
+            &request.to_string(),
+        ))
     }
     fn delete_counter(&mut self, key: &str) -> Result<(), String> {
         self.call("kv", "delete", (key,))
@@ -470,92 +360,6 @@ fn list_deadlock_candidates_raw(
     }
 }
 
-fn get_dispatch_type_raw(pg_pool: Option<&PgPool>, dispatch_id: &str) -> String {
-    let dispatch_id = dispatch_id.trim().to_string();
-    if dispatch_id.is_empty() {
-        return json!({ "dispatch_type": null }).to_string();
-    }
-    let Some(pool) = pg_pool else {
-        return unavailable();
-    };
-    match crate::utils::async_bridge::block_on_pg_result(
-        pool,
-        move |bridge_pool| async move {
-            let dispatch_type = sqlx::query_scalar::<_, Option<String>>(
-                "SELECT dispatch_type FROM task_dispatches WHERE id = $1",
-            )
-            .bind(&dispatch_id)
-            .fetch_optional(&bridge_pool)
-            .await
-            .map_err(|error| format!("load dispatch type {dispatch_id}: {error}"))?
-            .flatten();
-            Ok(json!({ "dispatch_type": dispatch_type }).to_string())
-        },
-        |error| json!({ "error": error }).to_string(),
-    ) {
-        Ok(result) => result,
-        Err(raw) => crate::engine::ops::ensure_js_error_json(raw),
-    }
-}
-
-#[derive(Deserialize)]
-struct DeadlockTerminationPayload {
-    session_key: String,
-    dispatch_id: Option<String>,
-    reason_text: Option<String>,
-    probe_snapshot: Option<String>,
-    tmux_alive: bool,
-}
-
-fn record_deadlock_termination_raw(pg_pool: Option<&PgPool>, payload_json: &str) -> String {
-    let payload: DeadlockTerminationPayload = match serde_json::from_str(payload_json) {
-        Ok(payload) => payload,
-        Err(error) => {
-            return json!({ "error": format!("invalid deadlock termination payload: {error}") })
-                .to_string();
-        }
-    };
-    let session_key = match valid_session_key(&payload.session_key) {
-        Ok(value) => value,
-        Err(error) => return json!({ "error": error }).to_string(),
-    };
-    let dispatch_id = payload.dispatch_id.and_then(|value| {
-        let trimmed = value.trim().to_string();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed)
-        }
-    });
-    let Some(pool) = pg_pool else {
-        return unavailable();
-    };
-    match crate::utils::async_bridge::block_on_pg_result(
-        pool,
-        move |bridge_pool| async move {
-            let rows_affected = sqlx::query(
-                "INSERT INTO session_termination_events
-                 (session_key, dispatch_id, killer_component, reason_code, reason_text, probe_snapshot, tmux_alive)
-                 VALUES ($1, $2, 'deadlock_policy', 'deadlock_timeout', $3, $4, $5)",
-            )
-            .bind(&session_key)
-            .bind(dispatch_id)
-            .bind(payload.reason_text)
-            .bind(payload.probe_snapshot)
-            .bind(if payload.tmux_alive { 1_i32 } else { 0_i32 })
-            .execute(&bridge_pool)
-            .await
-            .map_err(|error| format!("record deadlock termination {session_key}: {error}"))?
-            .rows_affected();
-            Ok(json!({ "ok": true, "rows_affected": rows_affected }).to_string())
-        },
-        |error| json!({ "error": error }).to_string(),
-    ) {
-        Ok(result) => result,
-        Err(raw) => crate::engine::ops::ensure_js_error_json(raw),
-    }
-}
-
 fn cleanup_deadlock_counters_for_inactive_sessions_raw(pg_pool: Option<&PgPool>) -> String {
     let Some(pool) = pg_pool else {
         return unavailable();
@@ -619,6 +423,29 @@ fn cleanup_deadlock_history_before_raw(pg_pool: Option<&PgPool>, cutoff_ms: i64)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn policy_timeout_surface_exposes_only_owner_and_host_observation() {
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+        context.with(|ctx| {
+            ctx.eval::<(), _>("var agentdesk = {session: {}};").unwrap();
+            register_timeouts_ops(&ctx, None).unwrap();
+            let keys: String = ctx
+                .eval("JSON.stringify(Object.keys(agentdesk.timeouts).sort())")
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&keys).unwrap(),
+                json!([
+                    "__maintainStaleSessionsRaw",
+                    "__observeSessionHostRaw",
+                    "maintainStaleSessions",
+                    "observeSessionHost"
+                ]),
+                "policies must only see the stale-session owner and host observation"
+            );
+        });
+    }
 
     #[test]
     fn owner_observation_keeps_the_existing_js_projection_and_error() {

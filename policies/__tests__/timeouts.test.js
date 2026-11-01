@@ -971,11 +971,8 @@ test("timeouts idle-kill module excludes thread idle rows from the main batch", 
 
 // Host, inflight and recovery decisions are exercised against the Rust owner and real PG.
 test("timeouts active monitor only invokes the Rust owner facade", () => {
-  const { policy, state } = loadPolicy("policies/timeouts.js", {
+  const { agentdesk, policy, state } = loadPolicy("policies/timeouts.js", {
     timeouts: {
-      listStaleWorkingSessions() { throw new Error("JS candidate selection"); },
-      listDeadlockCandidates() { throw new Error("JS candidate selection"); },
-      repairStaleSession() { throw new Error("JS repair construction"); },
       maintainStaleSessions() { return { ok: true }; }
     }
   });
@@ -985,9 +982,9 @@ test("timeouts active monitor only invokes the Rust owner facade", () => {
   assert.equal(state.queries.length, 0);
   assert.equal(state.executions.length, 0);
   assert.equal(state.timeoutHostObservations.length, 0);
-  assert.equal(state.timeoutStaleWorkingScans.length, 0);
-  assert.equal(state.timeoutDeadlockCandidateScans.length, 0);
-  assert.equal(state.timeoutRepairCalls.length, 0);
+  assert.deepEqual(Object.keys(agentdesk.timeouts).sort(), [
+    "maintainStaleSessions", "observeSessionHost"
+  ]);
 });
 
 test("timeouts active monitor leaves owner failure to the policy tick boundary", () => {
