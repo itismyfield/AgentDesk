@@ -1807,7 +1807,5 @@ async fn postgres_recorded_turn_outcome_settles_without_transcript_evidence() {
     pg_db.drop().await;
 }
 
-// The owner's retry leaf runs through the unix-only Claude owner input.
-#[cfg(unix)]
 #[path = "owner_input_tests.rs"]
 mod owner_input_tests;

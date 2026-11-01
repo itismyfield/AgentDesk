@@ -1,3 +1,6 @@
+// The owner's retry leaf runs through the unix-only Claude owner input.
+#![cfg(unix)]
+
 use super::*;
 use crate::config::TestRuntimeRootGuard;
 use crate::services::discord::runtime_store::discord_pending_queue_root;
