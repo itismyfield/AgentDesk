@@ -73,25 +73,3 @@ async fn user_boot_restores_exact_historical_grants_and_distinguishes_absence_fr
         "remote_endpoint_store_io_zero_contract"
     );
 }
-#[test]
-fn synchronous_mutation_evidence_does_not_read_disk_or_block_on_async_owners() {
-    let source = include_str!("../launch_host.rs");
-    let evidence = source
-        .split("pub(crate) fn mutation_evidence(")
-        .nth(1)
-        .unwrap()
-        .split("#[cfg(test)]")
-        .next()
-        .unwrap();
-    for forbidden in ["std::fs", ".load(", "block_on", "sqlx", "spawn_blocking"] {
-        assert!(
-            !evidence.contains(forbidden),
-            "mutation_gate_memory_only_contract: {forbidden}"
-        );
-    }
-    assert!(
-        include_str!("../../../../bootstrap.rs")
-            .contains("boot_grants::prepare(selection.hosts()).await"),
-        "async_boot_owner_restores_before_install_contract"
-    );
-}

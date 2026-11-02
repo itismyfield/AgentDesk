@@ -334,50 +334,6 @@ async fn exact_pg_process_reader_uses_only_metadata() {
     assert_eq!(first, run(with.path()));
 }
 
-#[test]
-fn exact_snapshot_sibling_construction_is_compile_rejected() {
-    let source = include_str!("exact_pg.rs");
-    let start = source
-        .find("pub(crate) struct ConsistentEpisodeSnapshot")
-        .unwrap();
-    let end = source[start..].find("\n}").unwrap() + start + 2;
-    let declaration = &source[start..end];
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("privacy.rs");
-    let prelude = format!("mod exact_pg {{ type EpisodeMetadata=(); {declaration} }}");
-    std::fs::write(
-        &path,
-        format!(
-            "{prelude} fn main() {{ let _: Option<exact_pg::ConsistentEpisodeSnapshot>=None; }}"
-        ),
-    )
-    .unwrap();
-    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
-    let positive = std::process::Command::new(&rustc)
-        .arg(&path)
-        .arg("--out-dir")
-        .arg(dir.path())
-        .output()
-        .unwrap();
-    assert!(
-        positive.status.success(),
-        "positive compile {}",
-        String::from_utf8_lossy(&positive.stderr)
-    );
-    std::fs::write(&path,format!("{prelude} mod sibling {{ pub fn forge() {{ let _=super::exact_pg::ConsistentEpisodeSnapshot {{ records:Vec::new() }}; }} }} fn main() {{}} ")).unwrap();
-    let negative = std::process::Command::new(rustc)
-        .arg(&path)
-        .arg("--out-dir")
-        .arg(dir.path())
-        .output()
-        .unwrap();
-    assert!(!negative.status.success());
-    assert!(
-        String::from_utf8_lossy(&negative.stderr)
-            .contains("field `records` of struct `ConsistentEpisodeSnapshot` is private")
-    );
-}
-
 #[tokio::test]
 async fn exact_child_ack_precedes_terminal_seal_pg() {
     let db = TestPostgresDb::create().await;

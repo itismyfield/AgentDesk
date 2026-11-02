@@ -8,7 +8,9 @@ use std::{
 };
 
 use crate::services::claude_command::ClaudeBinary;
-use crate::services::claude_tui::hook_bundle::{HookBundleConfig, write_claude_hook_settings};
+#[cfg(test)]
+use crate::services::claude_tui::hook_bundle::write_claude_hook_settings;
+use crate::services::claude_tui::hook_bundle::{HookBundleConfig, write_claude_launch_settings};
 use crate::services::process::shell_escape;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -268,6 +270,16 @@ fn persist_claude_continuation_session_files(
     Ok(true)
 }
 
+/// The launch inputs a Claude TUI process takes from its channel's settings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ClaudeTuiLaunchSettings<'a> {
+    pub(crate) model: Option<&'a str>,
+    /// `None` leaves fast mode to the CLI's own settings.
+    pub(crate) fast_mode: Option<bool>,
+    /// `None` leaves the effort to the environment and the CLI's own settings.
+    pub(crate) effort: Option<&'a str>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaudeTuiLaunchConfig {
     pub tmux_session_name: String,
@@ -299,6 +311,23 @@ impl ClaudeTuiLaunchConfig {
 pub fn prepare_claude_tui_launch(
     config: &ClaudeTuiLaunchConfig,
 ) -> Result<ClaudeTuiSessionFiles, String> {
+    prepare_claude_tui_launch_with_fast(config, None)
+}
+
+/// [`prepare_claude_tui_launch`] whose settings file also carries the channel's fast mode choice.
+pub fn prepare_claude_tui_launch_with_fast(
+    config: &ClaudeTuiLaunchConfig,
+    fast_mode: Option<bool>,
+) -> Result<ClaudeTuiSessionFiles, String> {
+    prepare_claude_tui_launch_with_settings(config, fast_mode, None)
+}
+
+/// [`prepare_claude_tui_launch_with_fast`] whose launch also takes the channel's effort level.
+pub(crate) fn prepare_claude_tui_launch_with_settings(
+    config: &ClaudeTuiLaunchConfig,
+    fast_mode: Option<bool>,
+    effort: Option<&str>,
+) -> Result<ClaudeTuiSessionFiles, String> {
     let files = config.session_files();
     let result = (|| {
         // A freshly prepared hosted pane must never inherit a disarmed or
@@ -311,7 +340,7 @@ pub fn prepare_claude_tui_launch(
             &config.session_id,
             &config.tmux_session_name,
         );
-        write_claude_hook_settings(
+        write_claude_launch_settings(
             &files.hook_settings_path,
             &HookBundleConfig {
                 endpoint: config.hook_endpoint.clone(),
@@ -319,8 +348,14 @@ pub fn prepare_claude_tui_launch(
                 session_id: config.session_id.clone(),
                 agentdesk_exe: config.agentdesk_exe.display().to_string(),
             },
+            fast_mode,
         )?;
-        write_launch_script(&files.launch_script_path, config, &files.hook_settings_path)
+        write_launch_script(
+            &files.launch_script_path,
+            config,
+            &files.hook_settings_path,
+            effort,
+        )
     })();
     if let Err(error) = result {
         files.cleanup_best_effort();
@@ -344,7 +379,9 @@ pub fn build_claude_tui_args(
     args.push("--settings".to_string());
     args.push(hook_settings_path.display().to_string());
 
-    if let Some(model) = config.model.as_deref().filter(|value| !value.is_empty()) {
+    // A resumed session keeps its last model unless one is named; `default` is the account default.
+    let model = config.model.as_deref().filter(|value| !value.is_empty());
+    if let Some(model) = model.or(config.resume.then_some("default")) {
         args.push("--model".to_string());
         args.push(model.to_string());
     }
@@ -363,6 +400,7 @@ fn write_launch_script(
     path: &Path,
     config: &ClaudeTuiLaunchConfig,
     hook_settings_path: &Path,
+    effort: Option<&str>,
 ) -> Result<(), String> {
     // This is the final pre-exec launch artifact. Registering here marks the
     // pane as AgentDesk-launched before it can receive its first prompt, and
@@ -373,7 +411,11 @@ fn write_launch_script(
             format!("create TUI launch script dir {}: {error}", parent.display())
         })?;
     }
-    let args = build_claude_tui_args(config, hook_settings_path)
+    let mut args = build_claude_tui_args(config, hook_settings_path);
+    if let Some(effort) = effort {
+        args.extend(["--effort".to_string(), effort.to_string()]);
+    }
+    let args = args
         .into_iter()
         .map(|arg| shell_escape(&arg))
         .collect::<Vec<_>>()
@@ -409,6 +451,10 @@ fn write_launch_script(
     // revisited. Track upstream PY6 changes and reflect them in this
     // comment + the unit tests.
     let mut env_exports = String::new();
+    // The effort variable outranks `--effort`, so an inherited one would hide the channel's level.
+    if effort.is_some() {
+        env_exports.push_str("unset CLAUDE_CODE_EFFORT_LEVEL\n");
+    }
     // #5172 R1: snapshot the YAML provider setting for each new launch. Its
     // absolute value is independent of the launch model and later model changes.
     // #5935: an unset provider setting exports nothing — the inherited window is
@@ -445,6 +491,9 @@ fn write_launch_script(
 #[cfg(test)]
 #[path = "session/auto_compact_launch_tests.rs"]
 mod auto_compact_launch_tests;
+#[cfg(test)]
+#[path = "session/fast_launch_tests.rs"]
+mod fast_launch_tests;
 
 #[cfg(test)]
 mod tests {
@@ -527,6 +576,19 @@ mod tests {
         assert!(!args.iter().any(|arg| arg == "--model"));
     }
 
+    // A resumed session would keep the model it last ran; without a model it is sent back to the
+    // account default, while a new session needs no selector.
+    #[test]
+    fn tui_args_name_the_default_model_when_resuming_without_one() {
+        let mut config = sample_config();
+        config.model = None;
+        config.resume = true;
+
+        let args = build_claude_tui_args(&config, Path::new("/tmp/settings.json"));
+
+        assert!(args.windows(2).any(|pair| pair == ["--model", "default"]));
+    }
+
     #[test]
     fn prepare_launch_writes_settings_and_script() {
         let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
@@ -547,7 +609,7 @@ mod tests {
             },
         )
         .unwrap();
-        write_launch_script(&launch_script_path, &config, &hook_settings_path).unwrap();
+        write_launch_script(&launch_script_path, &config, &hook_settings_path, None).unwrap();
 
         let settings = std::fs::read_to_string(&hook_settings_path).unwrap();
         let script = std::fs::read_to_string(&launch_script_path).unwrap();
@@ -603,6 +665,7 @@ mod tests {
             &launch_script_path,
             &config,
             Path::new("/tmp/settings.json"),
+            None,
         )
         .unwrap();
 
@@ -628,6 +691,7 @@ mod tests {
             &launch_script_path,
             &config,
             Path::new("/tmp/settings.json"),
+            None,
         )
         .unwrap();
         let sonnet_script = std::fs::read_to_string(&launch_script_path).unwrap();
@@ -640,6 +704,7 @@ mod tests {
             &launch_script_path,
             &config,
             Path::new("/tmp/settings.json"),
+            None,
         )
         .unwrap();
         let opus_script = std::fs::read_to_string(&launch_script_path).unwrap();
@@ -708,6 +773,7 @@ mod tests {
             &files.launch_script_path,
             &config,
             &files.hook_settings_path,
+            None,
         )
         .unwrap();
 

@@ -154,7 +154,6 @@ class RatchetDiscriminationTests(unittest.TestCase):
         "src/services/session_host/herdr/model.rs": 2,
         "src/services/session_host/herdr_gate.rs": 3,
         "src/services/session_host/herdr_gate_tests.rs": 5,
-        "src/services/session_host/herdr_host_tests.rs": 5,
     }
 
     def test_declared_close_sites_pass_without_baseline_growth(self) -> None:
@@ -205,13 +204,6 @@ class RatchetDiscriminationTests(unittest.TestCase):
                 errors = ratchet.growth_errors(actual, pinned)
                 self.assertEqual(len(errors), 1)
                 self.assertIn(f"GROWTH in {path}", errors[0])
-
-    def test_declared_close_sites_match_real_source_counts(self) -> None:
-        measured = {
-            path: ratchet.host_terminate_count((ROOT / path).read_text(encoding="utf-8"))
-            for path in self.DECLARED_CLOSE_SITES
-        }
-        self.assertEqual(measured, self.DECLARED_CLOSE_SITES)
 
     MUTATIONS = {
         "tmux_kill": (

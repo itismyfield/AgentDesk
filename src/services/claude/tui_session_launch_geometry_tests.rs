@@ -78,7 +78,7 @@ impl Lab {
             self.root.path(),
             id,
             None,
-            None,
+            Default::default(),
             "".into(),
             false,
             "",
