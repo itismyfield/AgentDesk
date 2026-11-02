@@ -164,7 +164,7 @@ pub(crate) use tmux_runtime::tmux_runtime_paths;
 
 // Items used by spawn_turn_bridge from submodules
 use super::watcher_lifecycle_decision::should_resume_watcher_after_turn;
-use crate::db::session_status::{AWAITING_BG, IDLE, TURN_ACTIVE};
+use crate::db::session_status::{AWAITING_BG, AWAITING_USER, IDLE, TURN_ACTIVE};
 use bridge_entry_persist::bridge_stream_relay_suppressed;
 use bridge_entry_persist::unwind_and_notify;
 use completion_guard::complete_work_dispatch_on_turn_end;
@@ -956,6 +956,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                 accumulated_output_tokens,
                 accumulated_memory_input_tokens,
                 accumulated_memory_output_tokens,
+                input_not_submitted: stream_loop_output.tui_error_classification.input_not_submitted(),
                 transport_error, provider_failure: terminal_outcome_delivery_output.provider_failure,
                 api_friction_reports,
                 cancelled,

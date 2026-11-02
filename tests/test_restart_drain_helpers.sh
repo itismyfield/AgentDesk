@@ -992,6 +992,135 @@ case "$COMPOSE_OUT" in
   *) fail "stopped job skip is the function verdict, not an override (got: $COMPOSE_OUT)" ;;
 esac
 
+echo "== Test 5p: a peer leg requests restart only after its runtime has booted =="
+# The production request region runs against a fake runtime on a real port that,
+# like dcserver, reports no provider and acknowledges nothing until it has booted.
+request_begin=$(grep -nx 'AGENTDESK_RESTART_ALLOW_FOREIGN_TURNS=1' "$DEPLOY_SH" | head -1 | cut -d: -f1 || true)
+[ -n "$request_begin" ] || fail "restart request region sentinel exists"
+sed -n "${request_begin},$((durability_begin - 1))p" "$DEPLOY_SH" >"$S1_TMP/request-region.sh"
+
+start_fake_runtime() {
+  local dir="$1" boot_after="$2" waited=0
+  mkdir -p "$dir/release"
+  python3 - "$dir" >"$dir/api.log" 2>&1 <<'PY' &
+import http.server, json, os, sys
+d = sys.argv[1]
+booting = {"status": "unhealthy", "ok": False, "db": True, "server_up": True,
+           "degraded_reasons": ["no_providers_registered"], "startup_status": "doctor_pending"}
+up = {"status": "degraded", "ok": False, "db": True, "server_up": True, "cluster_standby": True,
+      "degraded_reasons": ["provider:codex:gateway_standby"], "startup_status": "doctor_passed"}
+class Health(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        booted = os.path.exists(os.path.join(d, "booted"))
+        body = json.dumps(up if booted else booting).encode()
+        self.send_response(200 if booted else 503)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        pass
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Health)
+with open(os.path.join(d, "port.tmp"), "w") as handle:
+    handle.write(str(server.server_address[1]))
+os.rename(os.path.join(d, "port.tmp"), os.path.join(d, "port"))
+server.serve_forever()
+PY
+  FAKE_API_PID=$!
+  (
+    started=$SECONDS
+    while [ ! -e "$dir/stop" ]; do
+      if [ "$boot_after" -ge 0 ] && [ $((SECONDS - started)) -ge "$boot_after" ]; then
+        : >"$dir/booted"
+      fi
+      if [ -e "$dir/release/restart_pending" ]; then
+        if [ -e "$dir/booted" ]; then
+          nonce=$(sed -n 's/^nonce=//p' "$dir/release/restart_pending")
+          printf 'nonce=%s\n' "$nonce" >"$dir/release/restart_persisted.$nonce"
+          rm -f "$dir/release/restart_pending"
+        else
+          : >"$dir/requested-while-booting"
+        fi
+      fi
+      sleep 0.2
+    done
+  ) &
+  FAKE_POLLER_PID=$!
+  while [ ! -s "$dir/port" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+}
+
+has_restart_artifact() {
+  local artifact
+  for artifact in "$1"/$2; do
+    [ -e "$artifact" ] && return 0
+  done
+  return 1
+}
+
+stop_fake_runtime() {
+  : >"$1/stop"
+  kill "$FAKE_API_PID" 2>/dev/null || true
+  wait "$FAKE_API_PID" "$FAKE_POLLER_PID" 2>/dev/null || true
+}
+
+# Rows: name | peer leg | seconds until boot (-1 never) | boot wait cap |
+# drain ack wait | launchd state | expected rc | requested while booting.
+while IFS="|" read -r row peer boot_after cap ack_wait fake_job_state want_rc want_early; do
+  [ -n "$row" ] || continue
+  dir="$S1_TMP/boot-$row"
+  start_fake_runtime "$dir" "$boot_after"
+  port=$(<"$dir/port")
+  if [ "$row" = stopped ]; then
+    stop_fake_runtime "$dir"
+  fi
+  started=$SECONDS
+  set +e
+  (
+    # shellcheck source=/dev/null
+    . "$DEFAULTS_SH"
+    guard_no_foreign_active_turns_or_warn() { return 0; }
+    _launchd_job_state() { echo "$fake_job_state"; }
+    _capture_deploy_preexisting_reader_alarms() { :; }
+    export ADK_REL="$dir/release" PLIST_REL="fake.label" REL_PORT="$port"
+    export DEPLOY_PEER_INVOCATION="$peer" DEPLOY_PEER_BOOT_WAIT_SECS="$cap"
+    export AGENTDESK_RESTART_DRAIN_ACK_WAIT="$ack_wait"
+    eval "$(<"$S1_TMP/request-region.sh")"
+    eval "$(<"$S1_TMP/durability-region.sh")"
+  ) >"$dir/out" 2>&1
+  rc=$?
+  set -e
+  elapsed=$((SECONDS - started))
+  [ "$row" = stopped ] || stop_fake_runtime "$dir"
+  early=0
+  [ -e "$dir/requested-while-booting" ] && early=1
+  assert_eq "$row: deploy request region rc" "$want_rc" "$rc"
+  assert_eq "$row: restart requested while the runtime was booting" "$want_early" "$early"
+  case "$row" in
+    peer-boots-late)
+      has_restart_artifact "$dir/release" 'restart_persisted.*' \
+        && pass "$row: the booted runtime persisted this request" \
+        || fail "$row: the booted runtime persisted this request ($(<"$dir/out"))" ;;
+    peer-never-boots)
+      if ! has_restart_artifact "$dir/release" 'restart_*' && [ "$elapsed" -lt 15 ]; then
+        pass "$row: the bounded wait refuses before writing any restart marker"
+      else
+        fail "$row: the bounded wait refuses before writing any restart marker (elapsed=${elapsed}s $(<"$dir/out"))"
+      fi ;;
+    stopped)
+      [ "$elapsed" -lt 15 ] \
+        && pass "$row: a stopped peer runtime does not wait out the cap" \
+        || fail "$row: a stopped peer runtime does not wait out the cap (elapsed=${elapsed}s $(<"$dir/out"))" ;;
+  esac
+done <<'ROWS'
+peer-boots-late|1|4|30|2|running|0|0
+peer-never-boots|1|-1|2|2|running|1|0
+local-not-waiting|0|2|30|10|running|0|1
+stopped|1|-1|30|1|not running|0|0
+ROWS
+
 # The restart skill has no phase 2; its timeout keeps the permissive verdict.
 # shellcheck source=/dev/null
 . "$DEFAULTS_SH"

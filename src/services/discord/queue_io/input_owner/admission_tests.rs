@@ -1,3 +1,6 @@
+// Windows has no directory fsync, so the queued V2 owner these tests adopt refuses every commit.
+#![cfg(unix)]
+
 use super::*;
 use crate::config::TestRuntimeRootGuard;
 use crate::services::discord::runtime_store::{discord_pending_queue_root, durable_probe};

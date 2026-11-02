@@ -532,6 +532,7 @@ async fn run_postlude_for_owner(
         accumulated_output_tokens: 0,
         accumulated_memory_input_tokens: 0,
         accumulated_memory_output_tokens: 0,
+        input_not_submitted: false,
         transport_error: output.provider_failure,
         provider_failure: output.provider_failure,
         api_friction_reports: Vec::new(),
