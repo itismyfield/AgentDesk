@@ -17,7 +17,7 @@ fn launch(name: &str, cwd: &std::path::Path, session: &str) -> String {
         Some(&clearance),
         Some(CHANNEL),
         None,
-        None,
+        Default::default(),
         None,
         endpoint,
     )

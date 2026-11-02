@@ -606,6 +606,7 @@ pub fn execute_command_streaming(
     report_provider: Option<ProviderKind>,
     model_override: Option<&str>,
     fast_mode_enabled: Option<bool>,
+    effort: Option<&str>,
     compact_percent: Option<u64>,
     compact_lower_bound_tokens: u64,
     _cache_ttl_minutes: Option<u32>,
@@ -713,6 +714,11 @@ IMPORTANT: Format your responses using Markdown for better readability:
                 {
                     cleanup_process_backend_before_tmux(tmux_name);
                     debug_log(&format!("Claude TUI hosting session: {}", tmux_name));
+                    let launch = crate::services::claude_tui::session::ClaudeTuiLaunchSettings {
+                        model: model_override,
+                        fast_mode: fast_mode_enabled,
+                        effort,
+                    };
                     return execute_streaming_local_tui_tmux(
                         prompt,
                         session_id,
@@ -723,7 +729,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
                         teardown,
                         report_channel_id,
                         report_provider,
-                        model_override,
+                        launch,
                         effective_prompt,
                         hook_endpoint,
                     );
@@ -1631,7 +1637,7 @@ fn execute_streaming_local_tui_tmux(
     teardown: Option<&TeardownClearance>,
     report_channel_id: Option<u64>,
     _report_provider: Option<ProviderKind>,
-    model_override: Option<&str>,
+    launch: crate::services::claude_tui::session::ClaudeTuiLaunchSettings<'_>,
     system_prompt: Option<&str>,
     hook_endpoint: String,
 ) -> Result<(), String> {
@@ -1754,7 +1760,7 @@ fn execute_streaming_local_tui_tmux(
         working_dir_path,
         &resolved_session_id,
         system_prompt,
-        model_override,
+        launch,
         hook_endpoint,
         resume,
         &auth_env_lines,
@@ -1834,7 +1840,7 @@ pub(crate) fn tmux_tui_turn_for_tests(
         Some(teardown),
         channel,
         None,
-        None,
+        Default::default(),
         None,
         endpoint,
     )

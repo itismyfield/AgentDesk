@@ -207,6 +207,7 @@ fn run_adapter(host: &FakeHost, tokens: &[Arc<CancelToken>]) -> Vec<Vec<String>>
             None,
             None,
             None,
+            None,
             0,
             None,
             None,

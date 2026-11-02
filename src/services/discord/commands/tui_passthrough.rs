@@ -1,11 +1,10 @@
-use crate::services::claude_tui::input::SelectorNavigation;
 use crate::services::provider::ProviderKind;
 
 use super::super::{Context, Error, SharedData, check_auth};
 use super::config::{effective_provider_for_channel, fallback_channel_name_for_feature_toggle};
 
 #[derive(Debug, Clone, Copy, poise::ChoiceParameter)]
-enum EffortLevel {
+pub(super) enum EffortLevel {
     #[name = "low"]
     Low,
     #[name = "medium"]
@@ -18,9 +17,6 @@ enum EffortLevel {
     Max,
 }
 
-// Physical stops include an unsupported target so Left reaches home from every stop.
-const EFFORT_SLIDER_STOPS: [&str; 6] = ["low", "medium", "high", "xhigh", "max", "ultracode"];
-
 impl EffortLevel {
     const fn as_str(self) -> &'static str {
         match self {
@@ -31,54 +27,23 @@ impl EffortLevel {
             Self::Max => "max",
         }
     }
-
-    /// 0-based physical stop index of this level on the `/effort` slider.
-    fn selector_index(self) -> usize {
-        match self {
-            Self::Low => 0,
-            Self::Medium => 1,
-            Self::High => 2,
-            Self::Xhigh => 3,
-            Self::Max => 4,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
 enum ClaudeSlashPassthrough {
-    Effort(EffortLevel),
     Compact,
 }
 
 impl ClaudeSlashPassthrough {
     const fn slash_name(self) -> &'static str {
         match self {
-            Self::Effort(_) => "/effort",
             Self::Compact => "/compact",
         }
     }
 
     fn prompt(self) -> String {
         match self {
-            Self::Effort(level) => format!("/effort {}", level.as_str()),
             Self::Compact => "/compact".to_string(),
-        }
-    }
-
-    /// `/effort` is an interactive horizontal slider, not an inline-argument
-    /// command: it must be driven with left/right arrow navigation + Enter
-    /// rather than submitted as a single-line prompt. Returns the navigation
-    /// plan for the requested level, or `None` for commands that take the
-    /// plain-prompt path.
-    fn selector_navigation(self) -> Option<SelectorNavigation> {
-        match self {
-            // Include every physical stop when homing, even unsupported targets.
-            Self::Effort(level) => Some(SelectorNavigation {
-                slash_command: "/effort",
-                total_items: EFFORT_SLIDER_STOPS.len(),
-                target_index: level.selector_index(),
-            }),
-            Self::Compact => None,
         }
     }
 }
@@ -99,7 +64,7 @@ impl ClaudeSlashPassthrough {
 /// `/cost` and `/context` stay listed: no longer passed through, they still
 /// complete locally when typed in the TUI.
 #[cfg(test)]
-pub(in crate::services::discord) const LOCAL_ONLY_SLASH_COMMANDS: [&str; 4] =
+pub(in crate::services::discord) const LOCAL_ONLY_SLASH_COMMANDS: [&str; 3] =
     crate::services::tui_prompt_control::LOCAL_ONLY_SLASH_COMMANDS;
 
 /// #3500: local-completing slash commands that are NOT AgentDesk pass-throughs.
@@ -114,7 +79,7 @@ pub(in crate::services::discord) const LOCAL_ONLY_SLASH_COMMANDS: [&str; 4] =
 /// (which the `local_only_whitelist_matches_passthrough_command_set` anti-drift test
 /// pins to that variant set).
 #[cfg(test)]
-pub(in crate::services::discord) const OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS: [&str; 1] =
+pub(in crate::services::discord) const OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS: [&str; 2] =
     crate::services::tui_prompt_control::OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS;
 
 /// #3305/#3500: whether `kind` (a canonical `slash_command_control_kind`, e.g.
@@ -126,30 +91,46 @@ pub(in crate::services::discord) fn is_local_only_slash_command_kind(kind: &str)
     crate::services::tui_prompt_control::is_local_only_slash_command_kind(kind)
 }
 
-fn effort_sent_notice(level: EffortLevel, session: &str) -> String {
+fn unsupported_effort_notice(provider: &ProviderKind) -> String {
+    if matches!(provider, ProviderKind::Codex) {
+        return "`/effort`는 로컬 Claude TUI 채널의 기동 설정입니다. Codex의 reasoning effort는 \
+wrapper/env 시작 옵션 경로는 있지만 AgentDesk에 채널 단위 설정면이 아직 없어 여기서는 바꾸지 않습니다."
+            .to_string();
+    }
     format!(
-        "`/effort {}` 입력을 live Claude session `{session}`에 전달했습니다. selector는 닫혔지만 실제 레벨은 검증하지 못했습니다. TUI에서 설정을 확인하세요.",
-        level.as_str()
+        "/effort is only available for local Claude TUI channels. Current provider: {}.",
+        provider.display_name()
     )
 }
 
-fn codex_effort_notice() -> &'static str {
-    "`/effort`는 Claude live TUI passthrough로만 연결됩니다. Codex의 reasoning effort는 \
-wrapper/env 시작 옵션 경로는 있지만 AgentDesk에 채널 단위 설정면이 아직 없어 여기서는 \
-즉시 토글하지 않습니다."
-}
-
 fn unsupported_notice(provider: &ProviderKind, command: ClaudeSlashPassthrough) -> String {
-    if matches!(command, ClaudeSlashPassthrough::Effort(_))
-        && matches!(provider, ProviderKind::Codex)
-    {
-        return codex_effort_notice().to_string();
-    }
     format!(
         "{} is only available for live Claude TUI channels. Current provider: {}.",
         command.slash_name(),
         provider.display_name(),
     )
+}
+
+/// Saves the channel's effort level for its local Claude TUI and says what follows; nothing is
+/// typed into the TUI, and a refused save keeps the setting and session as they were.
+pub(super) async fn effort_save_notice(
+    shared: &std::sync::Arc<SharedData>,
+    token: &str,
+    channel_id: poise::serenity_prelude::ChannelId,
+    provider: &ProviderKind,
+    level: EffortLevel,
+) -> String {
+    if !matches!(provider, ProviderKind::Claude) {
+        return unsupported_effort_notice(provider);
+    }
+    let level = level.as_str();
+    match super::config::update_channel_effort(shared, token, channel_id, provider, level).await {
+        Ok(true) => format!(
+            "effort를 `{level}`로 저장했습니다. 다음 새 턴 시작 때 같은 세션으로 TUI를 재기동해 적용합니다(맥락 유지)."
+        ),
+        Ok(false) => format!("effort는 이미 `{level}`로 저장돼 있습니다. 바꾼 설정이 없습니다."),
+        Err(error) => format!("effort 설정을 저장하지 못했습니다: {error}"),
+    }
 }
 
 /// Why a passthrough may not reach the channel's session: a host the check keeps off its
@@ -258,44 +239,22 @@ async fn run_claude_passthrough(
     ctx.defer().await?;
 
     let tmux_name_for_send = tmux_name.clone();
-    let send_result = match command.selector_navigation() {
-        Some(nav) => tokio::task::spawn_blocking(move || {
-            crate::services::claude_tui::input::send_selector_followup(
-                &tmux_name_for_send,
-                nav,
-                None,
-            )
-        })
-        .await
-        .unwrap_or_else(|error| Err(format!("join error: {error}"))),
-        None => {
-            let prompt = command.prompt();
-            tokio::task::spawn_blocking(move || {
-                crate::services::claude_tui::input::send_followup_prompt(
-                    &tmux_name_for_send,
-                    &prompt,
-                    None,
-                )
-            })
-            .await
-            .unwrap_or_else(|error| Err(format!("join error: {error}")))
-        }
-    };
+    let prompt = command.prompt();
+    let send_result = tokio::task::spawn_blocking(move || {
+        crate::services::claude_tui::input::send_followup_prompt(&tmux_name_for_send, &prompt, None)
+    })
+    .await
+    .unwrap_or_else(|error| Err(format!("join error: {error}")));
 
     match send_result {
-        Ok(()) => match command {
-            ClaudeSlashPassthrough::Effort(level) => {
-                ctx.say(effort_sent_notice(level, &tmux_name)).await?;
-            }
-            _ => {
-                ctx.say(format!(
-                    "{}를 live Claude session `{}`에 전달했습니다. Claude 응답은 채널에 이어서 올라옵니다.",
-                    command.slash_name(),
-                    tmux_name,
-                ))
-                .await?;
-            }
-        },
+        Ok(()) => {
+            ctx.say(format!(
+                "{}를 live Claude session `{}`에 전달했습니다. Claude 응답은 채널에 이어서 올라옵니다.",
+                command.slash_name(),
+                tmux_name,
+            ))
+            .await?;
+        }
         Err(error) if crate::services::claude_tui::input::is_prompt_ready_timeout_error(&error) => {
             ctx.say(format!(
                 "{} 전달 대기 중 timeout이 났습니다. Claude turn이 아직 바쁘거나 prompt ready 상태가 아닙니다.",
@@ -326,13 +285,33 @@ async fn run_claude_passthrough(
     Ok(())
 }
 
-/// /effort <level> — pass through Claude native effort control to the live TUI.
+/// /effort <level> — save the local Claude TUI effort, applied by a same-session relaunch.
 #[poise::command(slash_command, rename = "effort")]
 pub(in crate::services::discord) async fn cmd_effort(
     ctx: Context<'_>,
     #[description = "Level: low / medium / high / xhigh / max"] level: EffortLevel,
 ) -> Result<(), Error> {
-    run_claude_passthrough(ctx, ClaudeSlashPassthrough::Effort(level)).await
+    let user_name = &ctx.author().name;
+    if !check_auth(
+        ctx.author().id,
+        user_name,
+        &ctx.data().shared,
+        &ctx.data().token,
+    )
+    .await
+    {
+        return Ok(());
+    }
+    log_command_received!(
+        ctx.channel_id().get(),
+        user_name,
+        format!("/effort {}", level.as_str())
+    );
+    let (provider, _) = resolve_effective_provider_and_tmux_name(ctx).await;
+    let (shared, token) = (&ctx.data().shared, &ctx.data().token);
+    let notice = effort_save_notice(shared, token, ctx.channel_id(), &provider, level).await;
+    ctx.say(notice).await?;
+    Ok(())
 }
 
 /// /compact — pass through Claude native /compact to the live TUI.
@@ -352,18 +331,7 @@ mod tests {
         let choices = EffortLevel::list();
         let names: Vec<&str> = choices.iter().map(|choice| choice.name.as_ref()).collect();
         assert_eq!(names, ["low", "medium", "high", "xhigh", "max"]);
-        let nav = ClaudeSlashPassthrough::Effort(EffortLevel::Max)
-            .selector_navigation()
-            .unwrap();
-        assert_eq!(EFFORT_SLIDER_STOPS[nav.target_index], "max");
-        assert_eq!(EFFORT_SLIDER_STOPS.last(), Some(&"ultracode"));
-    }
-
-    #[test]
-    fn truthful_effort_overlay_close_is_never_reported_as_verified_level() {
-        let notice = effort_sent_notice(EffortLevel::High, "fake-session");
-        assert!(notice.contains("실제 레벨은 검증하지 못했습니다"));
-        assert!(!notice.contains("적용했습니다"));
+        assert_eq!(names, super::super::config::EFFORT_LEVELS);
     }
 
     /// Every `ClaudeSlashPassthrough` variant in this file is a LOCAL-completing
@@ -376,12 +344,8 @@ mod tests {
     /// commands, #3305).
     #[test]
     fn local_only_whitelist_matches_passthrough_command_set() {
-        // The full ClaudeSlashPassthrough surface. `Effort` carries a level but its
-        // slash_name() is level-independent, so a single representative suffices.
-        let variants = [
-            ClaudeSlashPassthrough::Effort(EffortLevel::High),
-            ClaudeSlashPassthrough::Compact,
-        ];
+        // The full ClaudeSlashPassthrough surface.
+        let variants = [ClaudeSlashPassthrough::Compact];
         let mut variant_names: BTreeSet<&str> =
             variants.iter().map(|cmd| cmd.slash_name()).collect();
         // Retired pass-throughs that still complete locally when typed in the TUI.
@@ -403,6 +367,9 @@ mod tests {
         // LOCAL_ONLY_SLASH_COMMANDS (the variant-pinned set) — see the dedicated
         // test below for its local-only behavior.
         assert!(!LOCAL_ONLY_SLASH_COMMANDS.contains(&"/model"));
+        // `/effort` is no longer typed by AgentDesk; one a person types in the TUI stays local-only.
+        assert!(is_local_only_slash_command_kind("/effort"));
+        assert!(OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS.contains(&"/effort"));
     }
 
     /// #3500: `/model` (Claude-native model change, no model turn) must be treated

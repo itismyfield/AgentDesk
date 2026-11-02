@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 const WRAPPER: &str = r#"
-import hashlib, json, os, pathlib, subprocess, sys, tempfile
+import hashlib, json, os, pathlib, subprocess, sys, tempfile, time
 
 raw = sys.stdin.buffer.read()
 original = None
@@ -29,7 +29,9 @@ try:
         target = os.path.join(directory, hashlib.sha256(session.encode()).hexdigest() + '.json')
         descriptor, temporary = tempfile.mkstemp(prefix='.statusline-', suffix='.tmp', dir=directory)
         with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
-            json.dump({'session_id': session, 'rate_limits': value.get('rate_limits')}, stream)
+            json.dump({'session_id': session, 'rate_limits': value.get('rate_limits'),
+                       'model': value.get('model'), 'effort': value.get('effort'),
+                       'fast_mode': value.get('fast_mode'), 'written_at': time.time()}, stream)
         os.replace(temporary, target)
         temporary = None
 except Exception:

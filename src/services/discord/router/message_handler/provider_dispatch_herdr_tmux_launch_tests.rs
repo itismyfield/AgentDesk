@@ -353,6 +353,7 @@ fn dispatched_return(owned: bool) {
         channel_id: CHANNEL,
         model: None,
         native_fast_mode: None,
+        effort: Some("max"),
         codex_goals: None,
         compact_percent: None,
         compact_lower_bound_tokens: 0,
@@ -401,6 +402,12 @@ fn dispatched_return(owned: bool) {
     let script = fx.launch_script();
     assert!(script.contains(&format!("'--resume' '{s_b}'")), "{script}");
     assert!(script.contains(home.to_str().unwrap()), "{script}");
+    // The turn's effort reaches the relaunch, over any inherited effort variable.
+    assert!(script.contains("'--effort' 'max'"), "{script}");
+    assert!(
+        script.contains("unset CLAUDE_CODE_EFFORT_LEVEL"),
+        "{script}"
+    );
     assert_eq!(fx.session_auth(), Some(format!("{s_b}\nwork")));
     let calls = tmux.take_calls();
     let called = |command: &str| {

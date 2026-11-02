@@ -24,7 +24,8 @@ pub(super) async fn clear_session_memory(
     shared.dispatch.role_overrides.remove(&channel_id);
 }
 
-/// A process reset applies the pending fast-mode, goals and model resets, so their markers go.
+/// A process reset applies the pending fast-mode, goals and model resets and relaunches, so their
+/// markers go.
 pub(super) async fn clear_process_reset_pending(
     shared: &Arc<SharedData>,
     channel_id: serenity::ChannelId,
@@ -36,4 +37,6 @@ pub(super) async fn clear_process_reset_pending(
     overrides.session_reset_pending.remove(&channel_id);
     super::clear_all_fast_mode_reset_markers(shared, channel_id).await;
     super::persist_codex_goals_reset_marker(shared, channel_id, false).await;
+    super::release_relaunch_pending(shared, channel_id).await;
+    super::relaunch::forget(channel_id);
 }
