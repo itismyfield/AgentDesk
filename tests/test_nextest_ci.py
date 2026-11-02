@@ -1591,6 +1591,24 @@ mod tests {
         self.assertEqual(problems, [])
         self.assertIn("h::tests::via_child", pg)
 
+    def test_a_fixture_named_in_a_nested_use_group_makes_the_test_pg(self):
+        self.tree({"src/lib.rs": "mod db;\nmod support;\nmod out;\nmod relay;\n",
+                   "src/out.rs": "pub fn seal() {}\n#[cfg(test)]\npub mod tests {\n"
+                                 "    pub fn fixture() { TestPostgresDb::create(); }\n    pub fn revoke() {}\n}\n",
+                   "src/relay.rs": "#[cfg(test)]\nmod tests {\n    #[test]\n    fn nested() {\n"
+                                   "        use crate::out::{\n            self,\n            tests::{fixture, revoke},\n        };\n"
+                                   "        fixture();\n        revoke();\n        out::seal();\n    }\n"
+                                   "    #[test]\n    fn renamed() {\n        use crate::out::{tests::{fixture as open}};\n"
+                                   "        open();\n    }\n"
+                                   "    #[test]\n    fn module_self() {\n        use crate::out::{tests::{self as fx}};\n"
+                                   "        fx::fixture();\n    }\n"
+                                   "    #[test]\n    fn sibling_only() {\n        use crate::out::{self, tests::{revoke}};\n"
+                                   "        revoke();\n        out::seal();\n    }\n}\n"})
+        pg, problems = pgc.classify(self.root, exempt={})
+        self.assertEqual(problems, [])
+        self.assertLessEqual({"relay::tests::nested", "relay::tests::renamed", "relay::tests::module_self"}, set(pg))
+        self.assertNotIn("relay::tests::sibling_only", pg)
+
     def test_impl_helpers_follow_pg_references_and_preserve_local_item_boundaries(self):
         self.tree({"src/lib.rs": "#[cfg(test)]\nmod fixtures;\n",
                    "src/fixtures.rs": """fn open() { TestPostgresDb::new(); }
