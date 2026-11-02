@@ -293,6 +293,38 @@ async fn durable_exact_conflict_keeps_first_producer_turn_nonce_pg() {
     assert_eq!(stored.as_deref(), Some("turn-a"));
 }
 
+/// Turns sharing the bridge's session key still name their own turn on every headless row, so a
+/// row of one turn never reads as the other's.
+#[cfg(unix)]
+#[tokio::test]
+async fn turns_sharing_a_session_key_keep_their_own_producer_turn_pg() {
+    let Some((_pg_db, pool)) = durable_test_pool("agentdesk_headless_shared_session").await else {
+        return;
+    };
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let mut ids = Vec::new();
+    for nonce in ["turn-a", "turn-b"] {
+        let mut state = test_inflight_state();
+        state.turn_nonce = Some(nonce.to_string());
+        let outcome =
+            enqueue_headless_turn_row_for_test(&shared, &state, Some("shared-session"), "answer")
+                .await;
+        ids.push(enqueued_id(outcome));
+    }
+    let stored: Vec<Option<String>> = sqlx::query_scalar(
+        "SELECT producer_turn_nonce FROM message_outbox WHERE id = ANY($1) ORDER BY id",
+    )
+    .bind(&ids)
+    .fetch_all(&pool)
+    .await
+    .expect("read producer turns");
+    assert_eq!(
+        stored,
+        [Some("turn-a".to_string()), Some("turn-b".to_string())]
+    );
+}
+
 #[tokio::test]
 async fn durable_provider_channel_and_generation_axes_are_distinct_pg() {
     let Some((_pg_db, pool)) = durable_test_pool("agentdesk_headless_durable_tuple_axes").await

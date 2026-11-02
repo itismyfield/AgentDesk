@@ -1348,6 +1348,21 @@ enum HeadlessOutbox {
     DiscardedSeedOwnRow,
     /// Preflight stripped the seed; its turn's recent row no longer speaks for the late body.
     StaleSeedAfterDiscardRecentRow,
+    /// The next turn's frame while the watcher is still bound to this turn; the next turn's row
+    /// starts at the frame and only this turn's row was sent.
+    BoundOtherTurnFrame,
+    /// This turn's frame, bound to it, with the next turn's row starting after the frame.
+    BoundTurnFrameThenOtherInflight,
+    /// The bodiless handed-off seed is still held when the next turn starts at the frame.
+    SeedThenOtherTurnStart,
+    /// The bodiless seed is held; this turn leaves only non-body records before the next turn's
+    /// prompt and body inside the same frame.
+    SeedThenOwnNonBodyThenOtherTurn,
+    /// This turn's body is consumed; the next turn starts where consumption ended and its records
+    /// wait in the unprocessed tail.
+    BoundTurnFrameThenOtherInTail,
+    /// This turn's late body, then the next turn's request records in the same consumed frame.
+    BoundTurnFrameThenOtherInFrame,
 }
 
 /// The watcher's terminal order: preflight may strip the restored seed before the planner reads it.
@@ -1494,7 +1509,19 @@ async fn headless_restart_frame(
             | O::ClearedRowOtherTurnOnly
             | O::ClearedRowBothTurnsOtherNewest
     );
-    let frame_body = cleared || matches!(outbox, O::FrameBody | O::DiscardedSeedOwnRow);
+    // The next turn's prompt opens the frame and the body after it is that turn's.
+    let other_turn_frame = matches!(outbox, O::BoundOtherTurnFrame | O::SeedThenOtherTurnStart);
+    let frame_body = cleared
+        || other_turn_frame
+        || matches!(
+            outbox,
+            O::FrameBody
+                | O::DiscardedSeedOwnRow
+                | O::BoundTurnFrameThenOtherInflight
+                | O::SeedThenOwnNonBodyThenOtherTurn
+                | O::BoundTurnFrameThenOtherInTail
+                | O::BoundTurnFrameThenOtherInFrame
+        );
     let answer_age = if late { 60 } else { 1 };
     let (answer, seed_body) = match outbox {
         O::ToolTurn | O::ToolTurnLeadingNewline => {
@@ -1568,12 +1595,22 @@ async fn headless_restart_frame(
     .map(line)
     .concat();
     let body_record = assistant("answer", text(&body), Some(1));
+    let own_tail = line(
+        serde_json::json!({"type":"system","subtype":"informational","content":"A tail","timestamp":at(1)}),
+    );
     let frame = match outbox {
+        _ if other_turn_frame => requests.clone() + &body_record,
+        O::SeedThenOwnNonBodyThenOtherTurn => own_tail.clone() + &requests + &body_record,
+        O::BoundTurnFrameThenOtherInTail => body_record.clone(),
         _ if frame_body => body_record.clone() + &requests,
         _ if late => assistant("late", text(&body), Some(1)) + &requests,
-        _ => requests,
+        _ => requests.clone(),
     };
-    let next = user("E2");
+    let next = if outbox == O::BoundTurnFrameThenOtherInTail {
+        requests.clone() + &user("E2")
+    } else {
+        user("E2")
+    };
     let path = f.root.join(format!("restart-{channel}.jsonl"));
     std::fs::write(&path, format!("{previous}{turn}{frame}{next}")).unwrap();
     f.source =
@@ -1599,7 +1636,15 @@ async fn headless_restart_frame(
             file: crate::services::cluster::stream_relay::SourceFileIdentity::from_open_file(&file),
         }
     });
-    let mut restored = (outbox != O::FrameBody).then(|| {
+    let mut restored = (!matches!(
+        outbox,
+        O::FrameBody
+            | O::BoundOtherTurnFrame
+            | O::BoundTurnFrameThenOtherInflight
+            | O::BoundTurnFrameThenOtherInTail
+            | O::BoundTurnFrameThenOtherInFrame
+    ))
+    .then(|| {
         restored_watcher_turn_from_inflight(&f.row, &session, true)
             .unwrap()
             .read_by_producer(read, handoff_end, &session)
@@ -1649,7 +1694,14 @@ async fn headless_restart_frame(
     successor.turn_nonce = Some(format!("successor-{channel}"));
     successor.user_msg_id = f.row.user_msg_id + 1;
     successor.current_msg_id = 0;
-    successor.turn_start_offset = Some(handoff_end + body_record.len() as u64);
+    successor.turn_start_offset = Some(match outbox {
+        _ if other_turn_frame => handoff_end,
+        O::BoundTurnFrameThenOtherInflight => handoff_end + (frame.len() + next.len()) as u64,
+        O::SeedThenOwnNonBodyThenOtherTurn => handoff_end + own_tail.len() as u64,
+        // Where consumption ended: the frame is only this turn's body.
+        O::BoundTurnFrameThenOtherInTail => handoff_end + frame.len() as u64,
+        _ => handoff_end + body_record.len() as u64,
+    });
     let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
         channel,
         crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
@@ -1700,7 +1752,7 @@ async fn headless_restart_frame(
             Some(turn) => {
                 let crate::services::message_outbox::OutboxEnqueueOutcome::Enqueued { id } =
                     crate::services::discord::turn_bridge::enqueue_headless_turn_row_for_test(
-                        &shared, turn, content,
+                        &shared, turn, None, content,
                     )
                     .await
                 else {
@@ -1748,7 +1800,10 @@ async fn headless_restart_frame(
         | O::BlankThinking
         | O::BothTurnsOtherNewest
         | O::FrameBodyAfterBridgeClearedRow
-        | O::ClearedRowBothTurnsOtherNewest => Vec::new(),
+        | O::ClearedRowBothTurnsOtherNewest
+        | O::BoundTurnFrameThenOtherInflight
+        | O::BoundTurnFrameThenOtherInTail
+        | O::BoundTurnFrameThenOtherInFrame => Vec::new(),
         _ => vec![full_response.clone()],
     };
     let expected = if late && expected.len() == 1 {
@@ -1757,8 +1812,20 @@ async fn headless_restart_frame(
         expected
     };
     // The bridge's row was still stored at the watcher's last poll, unless it was cleared first.
-    let (polls, before) = if cleared {
+    let (polls, before) = if cleared
+        || matches!(
+            outbox,
+            O::SeedThenOtherTurnStart | O::SeedThenOwnNonBodyThenOtherTurn
+        ) {
         (vec![None, Some(successor.clone())], Some(successor))
+    } else if matches!(
+        outbox,
+        O::BoundOtherTurnFrame
+            | O::BoundTurnFrameThenOtherInflight
+            | O::BoundTurnFrameThenOtherInTail
+            | O::BoundTurnFrameThenOtherInFrame
+    ) {
+        (vec![Some(f.row.clone())], Some(successor))
     } else if matches!(
         outbox,
         O::DiscardedSeedOwnRow | O::StaleSeedAfterDiscardRecentRow
@@ -1873,6 +1940,38 @@ async fn headless_outbox_row_covers_only_its_producer_turn_pg() {
     .enumerate()
     {
         mismatches.extend(headless_restart_frame(&pool, 765_300 + index as u64, outbox).await);
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+    pool.close().await;
+    db.drop().await;
+}
+
+/// A held turn nonce, bound or seeded, speaks only for frames before the next turn's row starts.
+#[tokio::test(flavor = "current_thread")]
+async fn stale_turn_nonce_never_covers_the_next_turns_frame_pg() {
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        "i7666_stale_turn_nonce",
+        "stale headless turn nonce evidence",
+    )
+    .await;
+    let pool = db.connect_and_migrate().await;
+    use HeadlessOutbox as O;
+    let mut mismatches = Vec::new();
+    for (index, outbox) in [
+        O::BoundOtherTurnFrame,
+        O::BoundTurnFrameThenOtherInflight,
+        O::SeedThenOtherTurnStart,
+        O::FrameBodyAfterBridgeClearedRow,
+        O::SeedThenOwnNonBodyThenOtherTurn,
+        O::BoundTurnFrameThenOtherInTail,
+        O::BoundTurnFrameThenOtherInFrame,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        mismatches.extend(headless_restart_frame(&pool, 766_600 + index as u64, outbox).await);
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
     pool.close().await;

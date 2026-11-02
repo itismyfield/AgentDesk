@@ -172,7 +172,7 @@ pub(in crate::services::discord) enum BodyProducer {
 
 #[cfg(test)]
 thread_local! {
-    /// Runs after each record `body_written_ms` reads, so a test can change the file mid-read.
+    /// Runs after each record `body_written` reads, so a test can change the file mid-read.
     pub(super) static AFTER_BODY_RECORD: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
         const { std::cell::RefCell::new(None) };
 }
@@ -248,14 +248,21 @@ impl BodyComposer {
     }
 }
 
-/// When the range's last body record was written, only if the whole range, still that file at
-/// that path, composes `body` the way `producer` did.
-pub(super) fn body_written_ms(
+/// When a range's body was last written, and the file offset where its last body record ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct BodyWritten {
+    pub(super) at_ms: i64,
+    pub(super) records_end: u64,
+}
+
+/// When the range's last body record was written and where it ends, only if the whole range,
+/// still that file at that path, composes `body` the way `producer` did.
+pub(super) fn body_written(
     query: Query<'_>,
     body: &str,
     producer: BodyProducer,
     deadline: Instant,
-) -> Option<i64> {
+) -> Option<BodyWritten> {
     let (start, end) = query.range;
     let kind = provider(query.provider)?;
     if start >= end || Instant::now() >= deadline {
@@ -286,6 +293,7 @@ pub(super) fn body_written_ms(
     let mut reader = BufReader::new((&mut file).take(end - start));
     let mut line = Vec::new();
     let mut written = None;
+    let mut records_end = start;
     let mut consumed = 0;
     loop {
         if Instant::now() >= deadline {
@@ -308,6 +316,7 @@ pub(super) fn body_written_ms(
         if composer.record(&line, &value)? {
             let at = chrono::DateTime::parse_from_rfc3339(value["timestamp"].as_str()?).ok()?;
             written = written.max(Some(at.timestamp_millis()));
+            records_end = start + consumed;
         }
         #[cfg(test)]
         AFTER_BODY_RECORD.with(|hook| hook.borrow_mut().as_mut().map(|hook| hook()));
@@ -319,7 +328,9 @@ pub(super) fn body_written_ms(
     {
         return None;
     }
-    written.filter(|_| composer.composes(body))
+    written
+        .filter(|_| composer.composes(body))
+        .map(|at_ms| BodyWritten { at_ms, records_end })
 }
 
 fn build_with_prefix_limit(

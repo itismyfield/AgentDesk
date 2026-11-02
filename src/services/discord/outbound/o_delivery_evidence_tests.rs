@@ -1700,7 +1700,7 @@ fn body_reread_rejects_a_file_changed_mid_read() {
                     _ => {}
                 }));
             });
-            let read = manifest::body_written_ms(
+            let read = manifest::body_written(
                 manifest::Query {
                     provider: &ProviderKind::Claude,
                     channel: 1,
