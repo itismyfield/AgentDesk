@@ -2756,14 +2756,14 @@ mod role_map_retirement_tests {
 
     #[test]
     fn completion_persists_yaml_without_role_map_and_ignores_leftovers() {
-        let root = tempfile::tempdir().unwrap();
-        let _root = crate::config::set_agentdesk_root_for_test(root.path());
+        let root = crate::config::TestRuntimeRootGuard::with_isolated_config();
         let policy_dir = root.path().join("policies");
         std::fs::create_dir_all(&policy_dir).unwrap();
         std::fs::write(policy_dir.join("default-pipeline.yaml"), "name: fixture\nversion: 1\nstates: [{id: ready, label: Ready}]\ntransitions: [{from: ready, to: ready, type: free}]\n").unwrap();
         let mut config = crate::config::Config::default();
         config.policies.dir = policy_dir;
         let path = onboarding_config_path(root.path());
+        crate::config::test_env::assert_test_config_write_within_root(root.path(), &path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         crate::config::save_to_path(&path, &config).unwrap();
         let body: CompleteBody = serde_json::from_value(json!({
@@ -2833,6 +2833,35 @@ mod role_map_retirement_tests {
             "invalid JSON must stay untouched"
         );
     }
+    #[test]
+    fn completion_preserves_inherited_external_config_bytes() {
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let sentinel = outside.path().join("sentinel.yaml");
+        std::fs::write(&sentinel, b"server: {}\n").unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "services::onboarding::role_map_retirement_tests::completion_persists_yaml_without_role_map_and_ignores_leftovers",
+                "--exact",
+            ])
+            .env("AGENTDESK_ROOT_DIR", root.path())
+            .env("AGENTDESK_CONFIG", &sentinel)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "onboarding child failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("test result: ok. 1 passed; 0 failed; 0 ignored;")
+        );
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"server: {}\n");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn yaml_conflicts_remain_when_legacy_json_is_invalid_pg() {
         let root = tempfile::tempdir().unwrap();

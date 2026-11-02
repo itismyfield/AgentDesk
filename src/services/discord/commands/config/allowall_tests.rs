@@ -24,8 +24,7 @@ fn allowall_status_reports_without_changing_public_access() {
     let choices: Vec<&str> = action.choices.iter().map(|c| c.name.as_ref()).collect();
     assert_eq!(choices, ["on", "off", "status"]);
 
-    let root = tempfile::tempdir().expect("command runtime root");
-    let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+    let _root = crate::config::TestRuntimeRootGuard::with_isolated_config();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -60,4 +59,34 @@ fn allowall_status_reports_without_changing_public_access() {
             assert_eq!(now, after, "choice {choice} from {before}");
         }
     });
+}
+
+#[test]
+fn allowall_preserves_inherited_external_config_bytes() {
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let sentinel = outside.path().join("sentinel.yaml");
+    let before = b"server: {}\ndiscord:\n  bots:\n    main:\n      token: test-token\n      provider: claude\n";
+    std::fs::write(&sentinel, before).unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "services::discord::commands::config::allowall_tests::allowall_status_reports_without_changing_public_access",
+            "--exact",
+        ])
+        .env("AGENTDESK_ROOT_DIR", root.path())
+        .env("AGENTDESK_CONFIG", &sentinel)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "allowall child failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("test result: ok. 1 passed; 0 failed; 0 ignored;")
+    );
+    assert_eq!(std::fs::read(&sentinel).unwrap(), before);
 }

@@ -730,34 +730,9 @@ pub(crate) fn write_bindings_for_test(root: &Path, agents: serde_json::Value) {
     let mut config = Config::default();
     config.agents = serde_json::from_value(agents).expect("test agent bindings");
     let path = crate::config::config_path::config_path_in(root);
-    assert_test_config_write_within_root(root, &path);
+    crate::config::test_env::assert_test_config_write_within_root(root, &path);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, serde_yaml::to_string(&config).unwrap()).unwrap();
-}
-
-#[cfg(test)]
-fn assert_test_config_write_within_root(root: &Path, path: &Path) {
-    assert!(
-        !path
-            .components()
-            .any(|part| part == std::path::Component::ParentDir),
-        "test config write must not traverse parent directories"
-    );
-    // Check existing ancestors before creating directories, including dangling file symlinks.
-    let existing = path
-        .ancestors()
-        .find(|candidate| match std::fs::symlink_metadata(candidate) {
-            Ok(_) => true,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => panic!("cannot inspect test config write target: {error}"),
-        })
-        .expect("test config write has an existing ancestor");
-    let resolved = existing.canonicalize().expect("resolve test config target");
-    let root = root.canonicalize().expect("resolve test root");
-    assert!(
-        resolved.starts_with(root),
-        "test config write must stay inside its temporary root"
-    );
 }
 
 #[cfg(test)]

@@ -118,6 +118,30 @@ impl TestRuntimeRootGuard {
     }
 }
 
+pub(crate) fn assert_test_config_write_within_root(root: &std::path::Path, path: &std::path::Path) {
+    assert!(
+        !path
+            .components()
+            .any(|part| part == std::path::Component::ParentDir),
+        "test config write must not traverse parent directories"
+    );
+    // Check existing ancestors before creating directories, including dangling file symlinks.
+    let existing = path
+        .ancestors()
+        .find(|candidate| match std::fs::symlink_metadata(candidate) {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => panic!("cannot inspect test config write target: {error}"),
+        })
+        .expect("test config write has an existing ancestor");
+    let resolved = existing.canonicalize().expect("resolve test config target");
+    let root = root.canonicalize().expect("resolve test root");
+    assert!(
+        resolved.starts_with(root),
+        "test config write must stay inside its temporary root"
+    );
+}
+
 fn probe_root_config_isolation(prior_present: bool, owning: bool) {
     crate::test_env_panic_probe::assert_restores_on_return_and_panic(
         &["AGENTDESK_ROOT_DIR", "AGENTDESK_CONFIG"],
