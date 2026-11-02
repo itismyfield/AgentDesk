@@ -221,16 +221,43 @@ pub(in crate::services::discord) fn process_watcher_lines_for_turn(
     buffer_start_offset: Option<u64>,
     turn_start_offset: Option<u64>,
 ) -> WatcherLineOutcome {
+    let (outcome, consumed) = scan_watcher_lines_for_turn(
+        buffer,
+        state,
+        full_response,
+        tool_state,
+        buffer_start_offset,
+        turn_start_offset,
+    );
+    // One front cut per call; per-line cuts made a long pinned turn quadratic.
+    buffer.drain(..consumed);
+    outcome
+}
+
+/// Parses complete lines without mutating `buffer` and returns how many leading
+/// bytes were consumed. A prompt boundary line is left unconsumed.
+fn scan_watcher_lines_for_turn(
+    buffer: &str,
+    state: &mut StreamLineState,
+    full_response: &mut String,
+    tool_state: &mut WatcherToolState,
+    buffer_start_offset: Option<u64>,
+    turn_start_offset: Option<u64>,
+) -> (WatcherLineOutcome, usize) {
     let mut outcome = WatcherLineOutcome::default();
     let mut next_line_offset = buffer_start_offset;
+    // Always 0 or just past an ASCII '\n', so it is a char boundary.
+    let mut consumed = 0usize;
 
-    while let Some(pos) = buffer.find('\n') {
+    while let Some(pos) = buffer[consumed..].find('\n') {
         let line_start_offset = next_line_offset;
+        let line_start = consumed;
         let line_len = pos + 1;
         if let Some(offset) = next_line_offset.as_mut() {
             *offset = offset.saturating_add(line_len as u64);
         }
-        let line: String = buffer.drain(..=pos).collect();
+        let line = &buffer[line_start..line_start + line_len];
+        consumed += line_len;
         let trimmed = line.trim();
         let pre_turn_line = should_skip_pre_turn_line(turn_start_offset, line_start_offset);
         if trimmed.is_empty() {
@@ -286,7 +313,7 @@ pub(in crate::services::discord) fn process_watcher_lines_for_turn(
                         outcome.terminal_kind = Some(WatcherTerminalKind::SoftUserBoundary);
                         outcome.terminal_evidence_offset = line_start_offset;
                     }
-                    buffer.insert_str(0, &line);
+                    consumed = line_start;
                     break;
                 }
             }
@@ -635,7 +662,7 @@ pub(in crate::services::discord) fn process_watcher_lines_for_turn(
         }
     }
 
-    outcome
+    (outcome, consumed)
 }
 
 #[derive(Debug, Clone, Copy)]
