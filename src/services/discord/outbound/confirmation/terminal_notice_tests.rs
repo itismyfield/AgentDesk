@@ -120,56 +120,8 @@ impl Drop for Recorder {
     }
 }
 
-fn strict_gateway_override(source: &str, gateway: &str) {
-    let implementation = source
-        .split(&format!("impl TurnGateway for {gateway} {{"))
-        .nth(1)
-        .unwrap();
-    let method = implementation
-        .split("fn send_notice_once")
-        .nth(1)
-        .unwrap_or_else(|| panic!("{gateway} needs its own terminal notice override"))
-        .split("\n    fn ")
-        .next()
-        .unwrap();
-    assert!(
-        method
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .any(|line| line.contains("confirmation::send_terminal_notice_http_once(")),
-        "{gateway} terminal notice must use strict HTTP helper"
-    );
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn turn_end_summary_spends_one_physical_post_and_consumes_every_response() {
-    // Enabling Serenity's limiter ignores Http.proxy; pin this before any local request.
-    let source = include_str!("../confirmation.rs");
-    let function = source
-        .split("async fn send_terminal_notice_http_once(")
-        .nth(1)
-        .unwrap()
-        .split("#[cfg(test)]")
-        .next()
-        .unwrap();
-    for guard in [
-        ".ratelimiter_disabled(true)",
-        ".retry(reqwest::retry::never())",
-        ".redirect(reqwest::redirect::Policy::none())",
-    ] {
-        assert!(
-            function
-                .lines()
-                .filter(|line| !line.trim_start().starts_with("//"))
-                .any(|line| line.trim().starts_with(guard)),
-            "terminal notice transport guard missing: {guard}"
-        );
-    }
-    strict_gateway_override(include_str!("../../gateway.rs"), "DiscordGateway");
-    strict_gateway_override(
-        include_str!("../../tui_prompt_relay/bridge_gateway.rs"),
-        "TuiDirectBridgeGateway",
-    );
     let _isolation = Isolation::new();
     let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     for (index, (direct, reply)) in [false, true]

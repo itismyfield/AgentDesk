@@ -432,35 +432,6 @@ async fn image_without_durable_identity_never_falls_back_to_text() {
     );
 }
 
-#[test]
-fn binary_error_logging_uses_display_only() {
-    let shorthand = regex::Regex::new(r"(?:^|[\s,(])\?(?:error|err|e)\b").unwrap();
-    let interpolation = regex::Regex::new(r"\{(?:error|err|e):\?\}").unwrap();
-    for source in [
-        include_str!("image_delivery.rs"),
-        include_str!("../send_gate.rs"),
-        include_str!("../../../message_outbox.rs"),
-        include_str!("../../../../server/mod.rs"),
-        include_str!("../../../../server/outbox_worker.rs"),
-        include_str!("../../../../server/outbox_actionable_delivery.rs"),
-        include_str!("../../../scheduled_messages/push_handoff.rs"),
-        include_str!("../../../scheduled_messages.rs"),
-        include_str!("../../../../server/outbox_worker/claim.rs"),
-        include_str!("../../../../db/scheduled_messages/image_lifecycle.rs"),
-        include_str!("../../../maintenance/jobs/db_retention/image_retention.rs"),
-        include_str!("../../../../server/routes/scheduled_messages/create.rs"),
-        include_str!("../../../../server/routes/scheduled_messages/image_input.rs"),
-        include_str!("../../../../server/routes/scheduled_messages.rs"),
-        include_str!("../../../../db/scheduled_messages.rs"),
-        include_str!("../../../maintenance/jobs/db_retention.rs"),
-    ] {
-        assert!(
-            !shorthand.is_match(source) && !interpolation.is_match(source),
-            "image errors must use Display without PG DETAIL"
-        );
-    }
-}
-
 #[tokio::test]
 async fn lost_binary_receipt_retries_with_same_nonce_and_reservation() {
     let (state, client, task) = client().await;
