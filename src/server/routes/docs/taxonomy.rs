@@ -180,7 +180,9 @@ pub(super) fn category_description(category: &str) -> &'static str {
         "cron" => "Registered cron jobs per agent.",
         "cluster" => "Multinode worker-node registry, heartbeat, and role diagnostics.",
         "departments" => "Department CRUD and ordering.",
-        "discord" => "Discord delivery helpers, bindings, message reads, and DM reply hooks. Channel creation has no HTTP endpoint; use the CLI `agentdesk discord channel-create` (idempotent by name and parent category).",
+        "discord" => {
+            "Discord delivery helpers, bindings, message reads, and DM reply hooks. Channel creation has no HTTP endpoint; use the CLI `agentdesk discord channel-create` (idempotent by name and parent category)."
+        }
         "dispatched-sessions" => "Persisted dispatched-session lifecycle and cleanup helpers.",
         "docs" => "API documentation discovery and category drill-down.",
         "github" => "GitHub repository integration, issue creation, and sync entrypoints.",
