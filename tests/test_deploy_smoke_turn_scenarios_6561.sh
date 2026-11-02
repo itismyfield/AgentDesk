@@ -11,19 +11,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DEPLOY_SH="${DEPLOY_SH_OVERRIDE:-$REPO_ROOT/scripts/deploy-release.sh}"
 SCRIPT_DIR="$REPO_ROOT/scripts"
-# Bash 3.2 aborts on an empty [@] expansion under nounset, even inside an OR guard.
-# Check the optional expansions before exercising empty E-51 arguments and draft sections.
-python3 - "$DEPLOY_SH" <<'PY_COMPAT'
-import re, sys
-from pathlib import Path
-source = Path(sys.argv[1]).read_text(encoding="utf-8")
-for name in ("classification_args", "POST_DEPLOY_SMOKE_KNOWN_GAPS", "POST_DEPLOY_SMOKE_UNEXPECTED_PASSES"):
-    guarded = '${' + name + '[@]+"${' + name + '[@]}"}'
-    remaining = source.replace(guarded, "")
-    if re.search(r"\$\{" + re.escape(name) + r"\[@\]\}", remaining):
-        raise SystemExit("FAIL: Bash 3.2 optional array expansion is unguarded: " + name)
-PY_COMPAT
-
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-smoke-turns-test.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
@@ -36,7 +23,7 @@ extract_function() {
 }
 for fn in _release_config_path _post_deploy_smoke_note _post_deploy_smoke_fail \
     _post_deploy_smoke_log_identity_and_size _post_deploy_smoke_log_head_fingerprint \
-    _post_deploy_smoke_classified_note _post_deploy_smoke_check_relay_round_trip \
+    _post_deploy_smoke_check_relay_round_trip _post_deploy_smoke_check_durable_record \
     _post_deploy_smoke_run_turn_scenario \
     _post_deploy_smoke_check_turn_scenarios _report_post_deploy_smoke_failure; do
     body=$(extract_function "$fn")
@@ -78,6 +65,8 @@ if mode == "withheld":
     counts = {m: (0 if m.endswith(":AFTER_CLEAR]") else 1) for m in counts}
     status, reason = "fail", "assertion: timeout waiting for Discord text"
 row = {"cell": args.cell, "channel_id": args.channel_id, "run_id": run_id, "id": args.filter, "status": status, "reason": reason, "marker_counts": counts}
+if args.filter == "E-35":
+    row["durable_record_probe"] = {"status": "evaluated"}
 if mode == "rotation":
     content = "세션을 초기화하지 못했어요: herdr clear refused: rotation_unsettled(59)"
     row.update(status="fail", reason="assertion: text !clear refused by the server: " + content,
@@ -134,11 +123,18 @@ run_case() {
         POST_DEPLOY_SMOKE_TURN_COVERAGE='not run'
         POST_DEPLOY_SMOKE_CREATE_ISSUE=off
         POST_DEPLOY_SMOKE_WEDGE_COVERAGE=clean; POST_DEPLOY_SMOKE_DURABLE_COVERAGE=evaluated
+        POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE=clean; POST_DEPLOY_SMOKE_DURABLE_CLEAN_COVERAGE=evaluated
+        POST_DEPLOY_SMOKE_E35_DEADLINE_S=900; POST_DEPLOY_SMOKE_GATEWAY_READY_S=120; POST_DEPLOY_SMOKE_RELAY_PATH=''
         : > "$POST_DEPLOY_SMOKE_EVIDENCE"
         python3() {
             case "${1:-}" in
                 scripts/e2e/post_deploy_turn_smoke.py|*/scripts/e2e/post_deploy_turn_smoke.py)
-                    if [ "${2:-}" = cell-reset ]; then return 0; fi
+                    if [ "${2:-}" = cell-reset ]; then echo cell-reset >> "$root/calls"; return 0; fi
+                    if [ "${2:-}" = reset-status ]; then return 0; fi
+                    if [ "${2:-}" = gateway-ready ]; then
+                        echo gateway-ready >> "$root/calls"
+                        echo "gateway-ready fixture rc=${FAKE_GATEWAY_RC:-0}"; return "${FAKE_GATEWAY_RC:-0}"
+                    fi
                     if [ "${2:-}" = preflight ]; then
                         [ "$preflight_rc" -eq 0 ] && { echo idle; return 0; }
                         echo "busy: mailbox fixture active_turn"; return 1
@@ -154,7 +150,7 @@ run_case() {
         _notify_channel() { printf '%s\n' "$1" > "$root/alert"; }
         hostname() { echo fixture-node; }
         rc=0
-        if [[ "$name" == e1_* || "$name" = both_classifications ]]; then
+        if [[ "$name" == e1_* || "$name" == full_* ]]; then
             POST_DEPLOY_SMOKE_READY=true
             POST_DEPLOY_SMOKE_HEALTH_BODY="$root/health"
             POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY="$root/detail"
@@ -167,7 +163,8 @@ run_case() {
         else
             _post_deploy_smoke_check_turn_scenarios || rc=$?
         fi
-        if [ "$name" = both_classifications ]; then
+        if [[ "$name" == full_* ]]; then
+            _post_deploy_smoke_check_durable_record || rc=$?
             _post_deploy_smoke_check_turn_scenarios || rc=$?
             _run_post_deploy_functional_smoke() { return "$rc"; }
             eval "$DISPOSITION"
@@ -199,7 +196,7 @@ export FIXTURES
 root=$(run_case clean 1509350490461180105 "$two_cells" 0)
 grep -q '^RC=0$' "$root/out" || fail_test "clean: rc $(cat "$root/out")"
 grep -q '^COVERAGE=E-50=pass E-51=pass$' "$root/out" || fail_test "clean: coverage $(cat "$root/out")"
-grep -q '^relay E-50 cell=claude-tui result=pass deliveries T1=1 T2=1 AFTER_CLEAR=1 composer_not_detected=0 warm_followup_kill=0 cold_resume=0$' "$root/evidence" \
+grep -q '^relay E-50 cell=claude-tui result=pass path=tui deliveries T1=1 T2=1 AFTER_CLEAR=1 composer_not_detected=0 warm_followup_kill=0 cold_resume=0 steps: unrecorded$' "$root/evidence" \
     || fail_test "clean: E-50 pass line missing"
 grep -q '^relay E-51 cell=codex-tui result=pass ' "$root/evidence" || fail_test "clean: E-51 pass line missing"
 grep -q -- '--cell claude-tui --channel-id 1509350490461180105 .*--filter E-50 --run-id fixture-E-50-claude-tui --no-reset-before-each --phase-deadline-s 120 ' "$root/argv" \
@@ -212,7 +209,7 @@ grep -q -- '--cell codex-tui --channel-id 1509350778043895902 .*--filter E-51 --
 root=$(run_case warm_kill 1509350490461180105 "$two_cells" 0 FAKE_MODE_E_51=warm_kill)
 grep -q '^RC=1$' "$root/out" || fail_test "warm_kill: rc"
 grep -q '^COVERAGE=E-50=pass E-51=FAIL$' "$root/out" || fail_test "warm_kill: coverage $(cat "$root/out")"
-grep -q '^FAIL: relay E-51 cell=codex-tui result=FAIL deliveries T1=1 T2=1 AFTER_CLEAR=1 composer_not_detected=2 warm_followup_kill=2 cold_resume=2;' "$root/evidence" \
+grep -q '^FAIL: relay E-51 cell=codex-tui result=FAIL path=tui deliveries T1=1 T2=1 AFTER_CLEAR=1 composer_not_detected=2 warm_followup_kill=2 cold_resume=2;' "$root/evidence" \
     || fail_test "warm_kill: FAIL line missing $(cat "$root/evidence")"
 grep -q 'relay E-51 cell=codex-tui result=FAIL' "$root/alert" || fail_test "warm_kill: alert lacks the scenario line"
 grep -q 'turn scenarios: E-50=pass E-51=FAIL' "$root/alert" || fail_test "warm_kill: alert lacks turn coverage"
@@ -222,7 +219,7 @@ grep -q 'Turn scenarios: `E-50=pass E-51=FAIL`' "$root/release/logs/post-deploy-
 # 3. Claude body withheld after !clear.
 root=$(run_case withheld 1509350490461180105 "$two_cells" 0 FAKE_MODE_E_50=withheld)
 grep -q '^COVERAGE=E-50=FAIL E-51=pass$' "$root/out" || fail_test "withheld: coverage"
-grep -q '^FAIL: relay E-50 cell=claude-tui result=FAIL deliveries T1=1 T2=1 AFTER_CLEAR=0 .*AFTER_CLEAR body withheld after !clear (0 deliveries)' "$root/evidence" \
+grep -q '^FAIL: relay E-50 cell=claude-tui result=FAIL path=tui deliveries T1=1 T2=1 AFTER_CLEAR=0 .*AFTER_CLEAR body withheld after !clear (0 deliveries)' "$root/evidence" \
     || fail_test "withheld: FAIL line missing"
 
 # 4. A log replaced mid-run leaves no excerpt: FAIL, never PASS. A recreated file
@@ -251,30 +248,28 @@ herdr_cells="$two_cells
 session_hosts:
   herdr:
     channels: {1509350490461180105: local}"
+# A visible !clear refusal on a Herdr channel is what the user saw: FAIL, quoting the reply.
 root=$(run_case rotation 1509350490461180105 "$herdr_cells" 0 FAKE_MODE_E_50=rotation)
-grep -q '^RC=0$' "$root/out" || fail_test "rotation: rc"
-grep -q '^COVERAGE=E-50=KNOWN_GAP E-51=pass$' "$root/out" || fail_test "rotation: coverage"
-grep -q '^KNOWN_GAP: relay E-50 .*rotation_unsettled(59)$' "$root/evidence" || fail_test "rotation: evidence"
-[ ! -f "$root/alert" ] || fail_test "rotation: false alarm"
-root=$(run_case unexpected 1509350490461180105 "$herdr_cells" 0)
-grep -q '^COVERAGE=E-50=UNEXPECTED_PASS E-51=pass$' "$root/out" || fail_test "unexpected: coverage"
-root=$(run_case mixed 1509350490461180105 "$herdr_cells" 0 FAKE_MODE_E_50=rotation FAKE_MODE_E_51=warm_kill)
-grep -q '^RC=1$' "$root/out" || fail_test "mixed: rc"
-draft="$root/release/logs/post-deploy-smoke-issue-draft-fixture.md"
-grep -A2 '^## Known gaps' "$draft" | grep -q 'KNOWN_GAP: relay E-50' || fail_test "mixed: gap section"
-! sed -n '/## Findings/,/## Known gaps/p' "$draft" | grep -q 'KNOWN_GAP:' || fail_test "mixed: gap in findings"
-root=$(run_case mixed_pass 1509350490461180105 "$herdr_cells" 0 FAKE_MODE_E_51=warm_kill)
-grep -A2 '^## Unexpected passes' "$root/release/logs/post-deploy-smoke-issue-draft-fixture.md" | grep -q 'UNEXPECTED_PASS:' || fail_test "mixed_pass: section"
-for mode in e1_gap e1_other; do
-    root=$(run_case "$mode" 1509350490461180105 "$herdr_cells" 0 "FAKE_MODE_E_1=$mode")
-    if [ "$mode" = e1_gap ]; then
-        grep -q '^RC=0$' "$root/out" || fail_test "e1_gap: rc $(cat "$root/out")"
-        grep -q '^KNOWN_GAP: relay E-1 .*executor_not_wired$' "$root/evidence" || fail_test "e1_gap: evidence"
-    else
-        grep -q '^RC=1$' "$root/out" || fail_test "e1_other: rc"
-        grep -q '^FAIL: relay E-1 round-trip failed' "$root/evidence" || fail_test "e1_other: FAIL"
-    fi
-done
+grep -q '^RC=1$' "$root/out" || fail_test "rotation: rc"
+grep -q '^COVERAGE=E-50=FAIL E-51=pass$' "$root/out" || fail_test "rotation: coverage"
+grep -q '^FAIL: relay E-50 cell=claude-tui result=FAIL path=herdr .*세션을 초기화하지 못했어요: herdr clear refused: rotation_unsettled(59)' "$root/evidence" \
+    || fail_test "rotation: refusal not reported as FAIL $(cat "$root/evidence")"
+grep -q 'relay E-50 cell=claude-tui result=FAIL' "$root/alert" || fail_test "rotation: no alert"
+# Every body delivered on a Herdr channel is a plain pass.
+root=$(run_case herdr_pass 1509350490461180105 "$herdr_cells" 0)
+grep -q '^COVERAGE=E-50=pass E-51=pass$' "$root/out" || fail_test "herdr_pass: coverage $(cat "$root/out")"
+grep -q '^relay E-50 cell=claude-tui result=pass path=herdr deliveries T1=1 T2=1 AFTER_CLEAR=1 ' "$root/evidence" \
+    || fail_test "herdr_pass: pass line"
+# Headless turn/start never runs a Herdr channel: E-1 is not sent there; a 422 elsewhere is a FAIL.
+root=$(run_case e1_herdr 1509350490461180105 "$herdr_cells" 0 FAKE_MODE_E_1=e1_gap)
+grep -q '^RC=0$' "$root/out" || fail_test "e1_herdr: rc $(cat "$root/out")"
+grep -q '^relay cell=claude-tui channel=1509350490461180105 path=herdr$' "$root/evidence" || fail_test "e1_herdr: path line"
+grep -q '^relay E-1=not applicable path=herdr: ' "$root/evidence" || fail_test "e1_herdr: note"
+! grep -q -- '--filter E-1 ' "$root/argv" 2>/dev/null || fail_test "e1_herdr: E-1 sent to a Herdr channel"
+root=$(run_case e1_tmux_422 1509350490461180105 "$two_cells" 0 FAKE_MODE_E_1=e1_gap)
+grep -q '^RC=1$' "$root/out" || fail_test "e1_tmux_422: rc"
+grep -q '^FAIL: relay E-1 round-trip failed' "$root/evidence" || fail_test "e1_tmux_422: FAIL"
+! grep -q 'KNOWN_GAP' "$root/evidence" || fail_test "e1_tmux_422: classified as a known gap"
 
 # The live layout maps only the Herdr worker's channel: claude-tui is a plain tmux PASS whose
 # channel, tmux session and workspace tag all come from adk-claude-tui-2-e2e.
@@ -307,13 +302,32 @@ grep -q '^FAIL: relay E-1: could not resolve claude-tui channel' "$root/evidence
 grep -q "'adk-claude-tui-2-e2e' not found" "$root/evidence" || fail_test "old agent only: missing agent unnamed"
 [ ! -s "$root/argv" ] || fail_test "old agent only: driver ran $(cat "$root/argv")"
 
-root=$(run_case both_classifications 1509350490461180105 "$herdr_cells" 0 FAKE_MODE_E_1=e1_gap)
-grep -q '^RC=0$' "$root/out" || fail_test "both classifications: rc"
-grep -q '^△ Post-deploy functional smoke completed with known gaps ' "$root/out" || fail_test "both classifications: known gaps summary"
-grep -q '^△ Post-deploy functional smoke completed with unexpected passes ' "$root/out" || fail_test "both classifications: unexpected passes summary"
-grep -q '^  KNOWN_GAP: relay E-1 ' "$root/out" || fail_test "both classifications: E-1 summary"
-grep -q '^  UNEXPECTED_PASS: relay E-50 ' "$root/out" || fail_test "both classifications: E-50 summary"
-[ ! -f "$root/alert" ] || fail_test "both classifications: false alarm"
+# Full smoke on the live layout (relay channel owned by Herdr): E-1 and E-35 are each reported once
+# as not applicable, E-50/E-51 are judged, and nothing is a known gap or unexpected pass.
+root=$(run_case full_herdr "" "$herdr_cells" 0 FAKE_MODE_E_1=e1_gap)
+grep -q '^RC=0$' "$root/out" || fail_test "full_herdr: rc $(cat "$root/out")"
+[ "$(grep -c 'not applicable' "$root/evidence")" -eq 2 ] || fail_test "full_herdr: not-applicable notes $(cat "$root/evidence")"
+grep -q '^durable_record_probe=not applicable: claude-tui channel is Herdr-configured' "$root/evidence" || fail_test "full_herdr: E-35 note"
+! grep -q -- '--filter E-35 ' "$root/argv" || fail_test "full_herdr: E-35 ran on a Herdr channel"
+grep -q '^relay E-50 cell=claude-tui result=pass path=herdr ' "$root/evidence" || fail_test "full_herdr: E-50"
+grep -q '^△ Post-deploy functional smoke completed with coverage gap (relay wedge coverage: clean; durable record coverage: not applicable: ' "$root/out" \
+    || fail_test "full_herdr: summary $(cat "$root/out")"
+! grep -q 'KNOWN_GAP\|UNEXPECTED_PASS\|^FAIL:' "$root/evidence" || fail_test "full_herdr: classified or failed"
+[ ! -f "$root/alert" ] || fail_test "full_herdr: false alarm"
+# On a tmux relay channel E-35 still runs and its evaluated probe keeps the clean summary.
+root=$(run_case full_tmux "" "$split_cells" 0)
+grep -q '^RC=0$' "$root/out" || fail_test "full_tmux: rc $(cat "$root/out")"
+grep -q -- '--filter E-35 ' "$root/argv" || fail_test "full_tmux: E-35 did not run"
+grep -q '^durable_record_probe=evaluated' "$root/evidence" || fail_test "full_tmux: E-35 not evaluated"
+grep -q '^✓ Post-deploy functional smoke passed ' "$root/out" || fail_test "full_tmux: summary $(cat "$root/out")"
+# A gateway that never becomes ready is one FAIL, and no Discord message or reset is sent.
+root=$(run_case full_gateway "" "$herdr_cells" 0 FAKE_GATEWAY_RC=1)
+grep -q '^RC=1$' "$root/out" || fail_test "full_gateway: rc"
+[ "$(grep -c '^FAIL:' "$root/evidence")" -eq 1 ] || fail_test "full_gateway: FAIL lines $(cat "$root/evidence")"
+grep -q '^FAIL: relay gateway not ready within 120s; E-1/E-35/E-50/E-51 not run' "$root/evidence" || fail_test "full_gateway: FAIL"
+[ "$(cat "$root/calls")" = gateway-ready ] || fail_test "full_gateway: calls after the wait $(cat "$root/calls")"
+[ ! -s "$root/argv" ] || fail_test "full_gateway: driver ran"
+grep -q 'relay gateway not ready' "$root/alert" || fail_test "full_gateway: no alert"
 
 if [ "$failures" -ne 0 ]; then
     printf 'test_deploy_smoke_turn_scenarios_6561: %s assertion(s) failed\n' "$failures" >&2

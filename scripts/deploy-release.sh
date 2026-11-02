@@ -3919,6 +3919,9 @@ POST_DEPLOY_SMOKE_ADMIN_API_ENDPOINTS=(
 POST_DEPLOY_SMOKE_LOG_LINES="${AGENTDESK_POST_DEPLOY_SMOKE_LOG_LINES:-500}"
 POST_DEPLOY_SMOKE_WARN_LIMIT="${AGENTDESK_POST_DEPLOY_SMOKE_WARN_LIMIT:-5}"
 POST_DEPLOY_SMOKE_RECOVERY_GATE_S="${AGENTDESK_POST_DEPLOY_SMOKE_RECOVERY_GATE_S:-120}"
+# Upper bound on waiting for a connected gateway and a timely Discord read before the first
+# scenario message; the wait ends as soon as both hold.
+POST_DEPLOY_SMOKE_GATEWAY_READY_S="${AGENTDESK_POST_DEPLOY_SMOKE_GATEWAY_READY_S:-120}"
 # The E-35 phase from lease acquisition through scenario execution is capped,
 # including its live safety gate, setup/send/fetch HTTP, response wait, record
 # poll, refetch, idle check, and teardown. The component timeouts total 1,422
@@ -3937,9 +3940,8 @@ POST_DEPLOY_SMOKE_HEALTH_BODY=""
 POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY=""
 POST_DEPLOY_SMOKE_SESSIONS_BODY=""
 POST_DEPLOY_SMOKE_FAILURES=()
-POST_DEPLOY_SMOKE_KNOWN_GAPS=()
-POST_DEPLOY_SMOKE_UNEXPECTED_PASSES=()
 POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID=""
+POST_DEPLOY_SMOKE_RELAY_PATH=""
 POST_DEPLOY_SMOKE_DURABLE_COVERAGE="unevaluable: E-35 did not run"
 POST_DEPLOY_SMOKE_DURABLE_CLEAN_COVERAGE="evaluated"
 POST_DEPLOY_SMOKE_TURN_COVERAGE="not run: turn scenarios did not execute"
@@ -4379,19 +4381,9 @@ _post_deploy_smoke_wait_for_startup_recovery() {
     return 1
 }
 
-_post_deploy_smoke_classified_note() {
-    local verdict="$1"
-    case "$verdict" in
-        "KNOWN_GAP: "*) POST_DEPLOY_SMOKE_KNOWN_GAPS+=("$verdict") ;;
-        "UNEXPECTED_PASS: "*) POST_DEPLOY_SMOKE_UNEXPECTED_PASSES+=("$verdict") ;;
-        *) return 1 ;;
-    esac
-    _post_deploy_smoke_note "$verdict"
-}
-
 _post_deploy_smoke_check_relay_round_trip() {
     local cluster_standby gateway channel_id relay_output relay_log
-    local resolve_rc cell_busy cell_guard_rc rc=0 verdict
+    local resolve_rc cell_busy cell_guard_rc rc=0
     local run_id
     local config_path
     if [ -z "$POST_DEPLOY_SMOKE_HEALTH_BODY" ] || [ ! -s "$POST_DEPLOY_SMOKE_HEALTH_BODY" ]; then
@@ -4461,6 +4453,19 @@ PY
         return 1
     fi
 
+    if ! POST_DEPLOY_SMOKE_RELAY_PATH=$(python3 "$REPO/scripts/e2e/post_deploy_turn_smoke.py" cell-path --config "$config_path" --cell "$POST_DEPLOY_SMOKE_RELAY_CELL" --channel-id "$channel_id" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"); then
+        POST_DEPLOY_SMOKE_RELAY_PATH=""
+        _post_deploy_smoke_fail "relay E-1: could not read the session host of ${POST_DEPLOY_SMOKE_RELAY_CELL} channel ${channel_id} from ${config_path}" || true
+        return 1
+    fi
+    _post_deploy_smoke_note "relay cell=${POST_DEPLOY_SMOKE_RELAY_CELL} channel=${channel_id} path=${POST_DEPLOY_SMOKE_RELAY_PATH}" || return 1
+    # Right after a restart Discord reads can hang although recovery reports done. Start the
+    # scenario clocks only once the gateway is connected and a channel read answers in time.
+    if ! python3 "$REPO/scripts/e2e/post_deploy_turn_smoke.py" gateway-ready --base-url "http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}" --cell "$POST_DEPLOY_SMOKE_RELAY_CELL" --channel-id "$channel_id" --deadline-s "$POST_DEPLOY_SMOKE_GATEWAY_READY_S" >> "$POST_DEPLOY_SMOKE_EVIDENCE" 2>&1; then
+        _post_deploy_smoke_fail "relay gateway not ready within ${POST_DEPLOY_SMOKE_GATEWAY_READY_S}s; E-1/E-35/E-50/E-51 not run (see gateway-ready lines)" || true
+        return 1
+    fi
+
     POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID="$channel_id"
     python3 "$REPO/scripts/e2e/post_deploy_turn_smoke.py" cell-reset --base-url "http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}" --config "$config_path" --cell "$POST_DEPLOY_SMOKE_RELAY_CELL" --cell "$POST_DEPLOY_SMOKE_CODEX_TURNS_CELL" --queue-runtime-root "$ADK_REL/runtime" --state-output "$POST_DEPLOY_SMOKE_TMP_DIR/cell-reset.json" --health-detail-output "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY" --sessions-output "$POST_DEPLOY_SMOKE_SESSIONS_BODY" >> "$POST_DEPLOY_SMOKE_EVIDENCE" 2>&1 || { rc=$?; if [ "$rc" -eq 3 ]; then _post_deploy_smoke_note "relay E-1=skipped: foreign active turn on cell" || return 1; return 0; fi; _post_deploy_smoke_fail "relay E-1: cell-reset refused (see smoke evidence)" || true; return 1; }
 
@@ -4476,6 +4481,10 @@ PY
             _post_deploy_smoke_note "relay E-1=skipped: could not verify E2E cell is idle" || return 1
             return 0
         fi
+    fi
+    if [ "$POST_DEPLOY_SMOKE_RELAY_PATH" = herdr ]; then
+        _post_deploy_smoke_note "relay E-1=not applicable path=herdr: headless turn/start never runs a Herdr-configured channel (executor_not_wired); the cell is idle and its Discord intake is judged by the turn scenarios" || return 1
+        return 0
     fi
 
     run_id="${POST_DEPLOY_SMOKE_STAMP}-E-1-${POST_DEPLOY_SMOKE_RELAY_CELL}"
@@ -4498,15 +4507,6 @@ PY
             --required-coverage-class live
     ) > "$relay_log" 2>&1 || rc=$?
     if [ "$rc" -ne 0 ]; then
-        verdict=$(cd "$REPO" && python3 scripts/e2e/post_deploy_turn_smoke.py judge \
-            --config "$config_path" --run-id "$run_id" --report "$relay_output/report.${POST_DEPLOY_SMOKE_RELAY_CELL}.json" \
-            --scenarios "$REPO/tests/e2e/tui_relay/scenarios" --scenario E-1 \
-            --cell "$POST_DEPLOY_SMOKE_RELAY_CELL" --channel-id "$channel_id" --driver-rc "$rc" \
-            2>> "$POST_DEPLOY_SMOKE_EVIDENCE") || verdict=""
-        if [[ "$verdict" == "KNOWN_GAP: "* ]]; then
-            _post_deploy_smoke_classified_note "$verdict" || return 1
-            return 0
-        fi
         tail -n 40 "$relay_log" >> "$POST_DEPLOY_SMOKE_EVIDENCE" 2>/dev/null || true
         _post_deploy_smoke_fail "relay E-1 round-trip failed (evidence: ${relay_output})" || true
         return 1
@@ -4521,6 +4521,13 @@ _post_deploy_smoke_check_durable_record() {
     # claude-pipe is partial coverage and is not S8 TUI-surface evidence.
     if [ -z "$POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID" ]; then
         _post_deploy_smoke_note "durable_record_probe=unevaluable: E-35 channel unavailable; probe did not run" || return 1
+        return 0
+    fi
+    # E-35 declares its durable receipt/frontier proof not applicable on Herdr, and the probe's
+    # legacy mailbox gate never finds a Herdr channel ("target mailbox unavailable").
+    if [ "$POST_DEPLOY_SMOKE_RELAY_PATH" = herdr ]; then
+        POST_DEPLOY_SMOKE_DURABLE_COVERAGE="not applicable: ${POST_DEPLOY_SMOKE_RELAY_CELL} channel is Herdr-configured; Herdr has no durable receipt/frontier proof"
+        _post_deploy_smoke_note "durable_record_probe=${POST_DEPLOY_SMOKE_DURABLE_COVERAGE}" || return 1
         return 0
     fi
     python3 "$REPO/scripts/e2e/post_deploy_turn_smoke.py" reset-status --reset-state "$POST_DEPLOY_SMOKE_TMP_DIR/cell-reset.json" --cell "$POST_DEPLOY_SMOKE_RELAY_CELL" --channel-id "$POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID" >> "$POST_DEPLOY_SMOKE_EVIDENCE" 2>&1 || { POST_DEPLOY_SMOKE_DURABLE_COVERAGE="unevaluable: cell-reset blocked E-35"; _post_deploy_smoke_note "durable_record_probe=skipped: cell-reset blocked E-35" || return 1; return 0; }
@@ -4612,25 +4619,14 @@ _post_deploy_smoke_run_turn_scenario() {
         || ! tail -c "+$((start_size + 1))" "$POST_DEPLOY_SMOKE_LOG_PATH" > "$excerpt"; then
         excerpt=""
     fi
-    local classification_args=()
-    if [ "$scenario" = E-50 ]; then
-        local config_path
-        config_path="$(_release_config_path)" || return 1
-        classification_args=(--config "$config_path" --run-id "$run_id")
-    fi
-    verdict=$(cd "$REPO" && python3 scripts/e2e/post_deploy_turn_smoke.py judge ${classification_args[@]+"${classification_args[@]}"} \
+    local config_path
+    config_path="$(_release_config_path)" || return 1
+    verdict=$(cd "$REPO" && python3 scripts/e2e/post_deploy_turn_smoke.py judge --config "$config_path" --run-id "$run_id" \
         --report "$output/report.${cell}.json" \
         --scenarios "$REPO/tests/e2e/tui_relay/scenarios" \
         --scenario "$scenario" --cell "$cell" --channel-id "$channel_id" \
         --log-excerpt "$excerpt" --driver-rc "$rc" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE") || judge_rc=$?
     if [ "$judge_rc" -eq 0 ] && [ -n "$verdict" ]; then
-        case "$verdict" in
-            "KNOWN_GAP: "*|"UNEXPECTED_PASS: "*)
-                _post_deploy_smoke_classified_note "$verdict" || return 1
-                POST_DEPLOY_SMOKE_TURN_COVERAGE+=" ${scenario}=${verdict%%:*}"
-                return 0
-                ;;
-        esac
         _post_deploy_smoke_note "$verdict" || return 1
         POST_DEPLOY_SMOKE_TURN_COVERAGE+=" ${scenario}=pass"
         return 0
@@ -4704,9 +4700,8 @@ _run_post_deploy_functional_smoke() {
     _post_deploy_smoke_wedge_reset
     POST_DEPLOY_SMOKE_READY=false
     POST_DEPLOY_SMOKE_FAILURES=()
-    POST_DEPLOY_SMOKE_KNOWN_GAPS=()
-    POST_DEPLOY_SMOKE_UNEXPECTED_PASSES=()
     POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID=""
+    POST_DEPLOY_SMOKE_RELAY_PATH=""
     POST_DEPLOY_SMOKE_DURABLE_COVERAGE="unevaluable: E-35 did not run"
     POST_DEPLOY_SMOKE_TURN_COVERAGE="not run: turn scenarios did not execute"
     mkdir -p "$ADK_REL/logs" || return 1
@@ -4771,14 +4766,6 @@ _report_post_deploy_smoke_failure() {
         printf -- "- Turn scenarios: \`%s\`\n\n" "${POST_DEPLOY_SMOKE_TURN_COVERAGE:-not run: turn scenarios did not execute}"
         printf '## Findings\n\n'
         for finding in "${POST_DEPLOY_SMOKE_FAILURES[@]}"; do
-            printf -- '- %s\n' "$finding"
-        done
-        printf '\n## Known gaps\n\n'
-        for finding in ${POST_DEPLOY_SMOKE_KNOWN_GAPS[@]+"${POST_DEPLOY_SMOKE_KNOWN_GAPS[@]}"}; do
-            printf -- '- %s\n' "$finding"
-        done
-        printf '\n## Unexpected passes\n\n'
-        for finding in ${POST_DEPLOY_SMOKE_UNEXPECTED_PASSES[@]+"${POST_DEPLOY_SMOKE_UNEXPECTED_PASSES[@]}"}; do
             printf -- '- %s\n' "$finding"
         done
         printf '\n## Deploy disposition\n\n'
@@ -4863,34 +4850,24 @@ echo "▸ Running post-deploy functional smoke (#4262)..."
 # The smoke function runs from an `if` guard, suspending `set -e` within it;
 # each fallible step is nevertheless explicitly guarded or carries `|| return`.
 if _run_post_deploy_functional_smoke; then
-    if [ -n "${POST_DEPLOY_SMOKE_KNOWN_GAPS[*]:-}" ]; then
-        echo "△ Post-deploy functional smoke completed with known gaps (evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
-        printf '  %s\n' ${POST_DEPLOY_SMOKE_KNOWN_GAPS[@]+"${POST_DEPLOY_SMOKE_KNOWN_GAPS[@]}"}
-    fi
-    if [ -n "${POST_DEPLOY_SMOKE_UNEXPECTED_PASSES[*]:-}" ]; then
-        echo "△ Post-deploy functional smoke completed with unexpected passes (evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
-        printf '  %s\n' ${POST_DEPLOY_SMOKE_UNEXPECTED_PASSES[@]+"${POST_DEPLOY_SMOKE_UNEXPECTED_PASSES[@]}"}
-    fi
-    if [ -z "${POST_DEPLOY_SMOKE_KNOWN_GAPS[*]:-}${POST_DEPLOY_SMOKE_UNEXPECTED_PASSES[*]:-}" ]; then
-        if case "$POST_DEPLOY_SMOKE_WEDGE_COVERAGE:$POST_DEPLOY_SMOKE_DURABLE_COVERAGE" in
-            "$POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE:$POST_DEPLOY_SMOKE_DURABLE_CLEAN_COVERAGE") true ;;
-            *) false ;;
-        esac
-        then
-        case "$POST_DEPLOY_SMOKE_WEDGE_COVERAGE" in
-            "$POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE")
-                echo "✓ Post-deploy functional smoke passed (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
-                ;;
-            *)
-                echo "△ Post-deploy functional smoke completed with coverage gap (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
-                ;;
-        esac
-                echo "  durable record coverage: ${POST_DEPLOY_SMOKE_DURABLE_COVERAGE}"
-                echo "  turn scenarios: ${POST_DEPLOY_SMOKE_TURN_COVERAGE:-not run: turn scenarios did not execute}"
-        else
-                echo "△ Post-deploy functional smoke completed with coverage gap (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; durable record coverage: ${POST_DEPLOY_SMOKE_DURABLE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
-                echo "  turn scenarios: ${POST_DEPLOY_SMOKE_TURN_COVERAGE:-not run: turn scenarios did not execute}"
-        fi
+    if case "$POST_DEPLOY_SMOKE_WEDGE_COVERAGE:$POST_DEPLOY_SMOKE_DURABLE_COVERAGE" in
+        "$POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE:$POST_DEPLOY_SMOKE_DURABLE_CLEAN_COVERAGE") true ;;
+        *) false ;;
+    esac
+    then
+    case "$POST_DEPLOY_SMOKE_WEDGE_COVERAGE" in
+        "$POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE")
+            echo "✓ Post-deploy functional smoke passed (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
+            ;;
+        *)
+            echo "△ Post-deploy functional smoke completed with coverage gap (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
+            ;;
+    esac
+            echo "  durable record coverage: ${POST_DEPLOY_SMOKE_DURABLE_COVERAGE}"
+            echo "  turn scenarios: ${POST_DEPLOY_SMOKE_TURN_COVERAGE:-not run: turn scenarios did not execute}"
+    else
+            echo "△ Post-deploy functional smoke completed with coverage gap (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; durable record coverage: ${POST_DEPLOY_SMOKE_DURABLE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
+            echo "  turn scenarios: ${POST_DEPLOY_SMOKE_TURN_COVERAGE:-not run: turn scenarios did not execute}"
     fi
 else
     echo "⚠ POST-DEPLOY FUNCTIONAL SMOKE FAILED — deploy remains healthy (fail-open)"

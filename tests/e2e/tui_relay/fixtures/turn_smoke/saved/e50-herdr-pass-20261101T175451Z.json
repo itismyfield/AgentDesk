@@ -1,0 +1,47 @@
+{
+ "schema_version": 2,
+ "run_id": "20261101T175451Z-64462-E-50-claude-tui",
+ "cell": "claude-tui",
+ "provider": "claude",
+ "runtime": "tui",
+ "channel_id": "1559670200419352696",
+ "coverage_class_violations": [],
+ "scenarios": [
+  {
+   "id": "E-50",
+   "run_id": "20261101T175451Z-64462-E-50-claude-tui",
+   "cell": "claude-tui",
+   "channel_id": "1559670200419352696",
+   "status": "pass",
+   "marker_counts": {
+    "[E2E:E50:20261101T175451Z-64462-E-50-claude-tui:T1]": 1,
+    "[E2E:E50:20261101T175451Z-64462-E-50-claude-tui:T2]": 1,
+    "[E2E:E50:20261101T175451Z-64462-E-50-claude-tui:AFTER_CLEAR]": 1
+   },
+   "prompt_sends": [
+    {
+     "step": "send_discord_prompt",
+     "send_state": "acknowledged",
+     "message_id": "1566511087384273030"
+    },
+    {
+     "step": "send_discord_prompt",
+     "send_state": "acknowledged",
+     "message_id": "1566511156963840021"
+    },
+    {
+     "step": "send_discord_prompt",
+     "send_state": "acknowledged",
+     "message_id": "1566511217810472961"
+    },
+    {
+     "step": "send_discord_prompt",
+     "send_state": "acknowledged",
+     "message_id": "1566511233559961651"
+    }
+   ],
+   "started_at": "2026-11-02T02:55:38",
+   "completed_at": "2026-11-02T02:56:39"
+  }
+ ]
+}
