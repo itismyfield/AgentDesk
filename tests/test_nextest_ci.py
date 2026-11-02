@@ -928,13 +928,29 @@ class ScriptRepo(Fixture):
     """A git checkout holding the CI scripts, with gh and cargo stubbed by the subclass texts."""
 
     LIB = "#[test]\nfn a() {}\n#[cfg(windows)]\n#[test]\nfn w() {}\n"
-    GH = """#!/bin/sh
-case "$1 $2" in
-  "run list") [ -n "$GH_RUN_ID" ] && echo "$GH_RUN_ID"; exit 0 ;;
-  "run download") shift 2; while [ "$1" != "--dir" ]; do shift; done
-    [ -n "$GH_BASELINE" ] && mkdir -p "$2" && cp "$GH_BASELINE" "$2/plan.json" ;;
-  *) exit 9 ;;
-esac
+    # Like gh: `run list` filters by workflow, commit, status or conclusion and limit before --jq runs on
+    # the --json fields; `run download` fails without the artifact and never overwrites a file.
+    GH = """#!/usr/bin/env python3
+import json, os, shutil, subprocess, sys
+args = sys.argv[1:]
+opt = lambda name: args[args.index(name) + 1] if name in args else None
+if args[:2] == ["run", "list"] and opt("--workflow") == "ci-main.yml":
+    runs = [r for r in json.loads(os.environ["GH_RUNS"]) if r["headSha"] == opt("--commit")]
+    runs = [r for r in runs if opt("--status") in (None, r["status"], r["conclusion"])][:int(opt("--limit") or 20)]
+    doc = json.dumps([{f: r[f] for f in opt("--json").split(",")} for r in runs])
+    sys.stdout.write(subprocess.run(["jq", "-r", opt("--jq")], input=doc, capture_output=True, text=True,
+                                    check=True).stdout if opt("--jq") else doc)
+elif args[:2] == ["run", "download"] and opt("--name") == "nextest-baseline":
+    src, dest = os.path.join(os.environ["GH_ARTIFACTS"], args[2]), opt("--dir")
+    if not os.path.isfile(os.path.join(src, "plan.json")):
+        sys.exit("no valid artifacts found to download")
+    os.makedirs(dest, exist_ok=True)
+    if os.path.exists(os.path.join(dest, "plan.json")):
+        sys.exit("plan.json: file exists")
+    shutil.copy(os.path.join(src, "plan.json"), dest)
+    sys.exit(1 if os.path.exists(os.path.join(src, "partial")) else 0)
+else:
+    sys.exit(9)
 """
     CARGO = """#!/bin/sh
 echo "$*" >> "$CARGO_LOG"
@@ -985,9 +1001,27 @@ if [ "$2" = archive ]; then while [ "$1" != --archive-file ]; do shift; done; ec
         self.plan_ok(names, workers=1, out="nextest/plan", sha=head)
         return head
 
-    def baseline(self, names, **kw):
-        self.plan_ok(names, workers=1, out="main", sha=kw.pop("sha", self.base_sha), **kw)
-        return self.dir / "main/plan.json"
+    def baseline(self, names, out="main", **kw):
+        self.plan_ok(names, workers=1, out=out, sha=kw.pop("sha", self.base_sha), **kw)
+        return self.dir / out / "plan.json"
+
+    def main_runs(self, *runs):
+        """gh env for CI Main runs of the base SHA, newest first: (id, event, status, conclusion, baseline plan
+        or None, download fails after writing the plan)."""
+        import shutil
+        rows = []
+        for run_id, event, status, conclusion, plan, partial in runs:
+            rows.append({"databaseId": int(run_id), "headSha": self.base_sha, "event": event, "status": status,
+                         "conclusion": conclusion})
+            if plan:
+                (self.dir / "artifacts" / run_id).mkdir(parents=True, exist_ok=True)
+                shutil.copy(plan, self.dir / "artifacts" / run_id / "plan.json")
+                if partial:
+                    (self.dir / "artifacts" / run_id / "partial").write_text("")
+        return {"GH_RUNS": json.dumps(rows)}
+
+    def main_success(self, plan):
+        return self.main_runs(("5", "push", "completed", "success", plan, False))
 
     def run_script(self, head, **env):
         summary = self.dir / "summary.md"
@@ -995,7 +1029,7 @@ if [ "$2" = archive ]; then while [ "$1" != --archive-file ]; do shift; done; ec
         full = {**os.environ, "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}", "PR_HEAD_SHA": head,
                 "GITHUB_REPOSITORY": "o/r", "GITHUB_WORKSPACE": str(self.repo), "GITHUB_STEP_SUMMARY": str(summary),
                 "CARGO_LOG": str(self.dir / "cargo.log"), "BASE_LIST": str(self.dir / "base-list.json"),
-                "GH_RUN_ID": "", "GH_BASELINE": "", "CARGO_FAIL": "", **env}
+                "GH_RUNS": "[]", "GH_ARTIFACTS": str(self.dir / "artifacts"), "CARGO_FAIL": "", **env}
         full.pop("GITHUB_OUTPUT", None)
         done = self.sp.run(["bash", "scripts/ci/nextest-base-diff.sh", str(self.dir / "nextest")], cwd=self.repo,
                            env=full, capture_output=True, text=True)
@@ -1011,17 +1045,47 @@ class BaseDiffScript(ScriptRepo):
         head = self.head_plan(["m::a", "m::b"])
         row = f"{BIN} m::landed | removed | removed by the preceding PR"
         (self.repo / "scripts/ci/test-removal-justifications.txt").write_text(row + "\n")
-        rc, out, summary, cargo = self.run_script(head, GH_RUN_ID="5", GH_BASELINE=str(self.baseline(["m::a"])))
+        rc, out, summary, cargo = self.run_script(head, **self.main_success(self.baseline(["m::a"])))
         self.assertEqual(rc, 0, out)
         self.assertIn("WARN ", out)
         self.assertIn(row, out)
         self.assertIn("against CI Main's baseline", summary)
         self.assertNotIn("archive", cargo)
 
+    def test_baseline_of_an_unfinished_or_later_failed_main_run_is_used(self):
+        head = self.head_plan(["m::a", "m::b"])
+        plan = self.baseline(["m::a"])
+        for status, conclusion in (("in_progress", ""), ("completed", "cancelled"), ("completed", "failure")):
+            with self.subTest(status=status, conclusion=conclusion):
+                (self.dir / "cargo.log").unlink(missing_ok=True)
+                self.sp.run(["rm", "-rf", str(self.dir / "nextest/base"), str(self.dir / "artifacts")], check=True)
+                self.git("worktree", "prune")
+                rc, out, summary, cargo = self.run_script(
+                    head, **self.main_runs(("7", "push", status, conclusion, plan, False)))
+                self.assertEqual(rc, 0, out)
+                self.assertIn(f"from run 7 ({status}/{conclusion})", summary)
+                self.assertIn("against CI Main's baseline", summary)
+                self.assertNotIn("archive", cargo)
+
+    def test_newer_runs_without_the_artifact_and_pull_request_runs_are_skipped(self):
+        head = self.head_plan(["m::b"])
+        stale = self.baseline(["m::b"], out="stale")
+        lost = self.baseline(["m::a"])
+        # A pull_request run's artifact would hide the loss; the cancelled run's partial file must not block run 8.
+        rc, out, summary, cargo = self.run_script(head, **self.main_runs(
+            ("10", "pull_request", "completed", "success", stale, False),
+            ("9", "push", "completed", "cancelled", None, False),
+            ("8", "workflow_dispatch", "completed", "failure", stale, True),
+            ("7", "push", "in_progress", "", lost, False)))
+        self.assertEqual(rc, 1, out)
+        self.assertIn("from run 7 (in_progress/)", summary)
+        self.assertIn(f"lost without a justification row: {BIN} m::a | removed", out)
+        self.assertNotIn("archive", cargo)
+
     def test_missing_or_mismatched_baseline_rebuilds_the_base_plan(self):
         head = self.head_plan(["m::a", "m::b"])
-        cases = ({}, {"GH_RUN_ID": "5", "GH_BASELINE": str(self.baseline(["m::a"], sha="c" * 40))},
-                 {"GH_RUN_ID": "5", "GH_BASELINE": str(self.baseline(["m::a"], build={**BUILD, "--features": "x"}))})
+        cases = ({}, self.main_success(self.baseline(["m::a"], sha="c" * 40)),
+                 self.main_success(self.baseline(["m::a"], build={**BUILD, "--features": "x"})))
         for env in cases:
             with self.subTest(env=env):
                 (self.dir / "cargo.log").unlink(missing_ok=True)
@@ -1036,7 +1100,7 @@ class BaseDiffScript(ScriptRepo):
 
     def test_loss_fails_on_either_path_and_a_failed_rebuild_never_passes(self):
         head = self.head_plan(["m::b"])
-        rc, out, _, _ = self.run_script(head, GH_RUN_ID="5", GH_BASELINE=str(self.baseline(["m::a"])))
+        rc, out, _, _ = self.run_script(head, **self.main_success(self.baseline(["m::a"])))
         self.assertEqual(rc, 1)
         self.assertIn(f"lost without a justification row: {BIN} m::a | removed", out)
         self.sp.run(["rm", "-rf", str(self.dir / "nextest/base")], check=True)
@@ -1047,21 +1111,21 @@ class BaseDiffScript(ScriptRepo):
 
     def test_windows_only_source_removal_needs_a_row(self):
         head = self.head_plan(["m::a"], lib="#[test]\nfn a() {}\n")
-        rc, out, _, _ = self.run_script(head, GH_RUN_ID="5", GH_BASELINE=str(self.baseline(["m::a"])))
+        rc, out, _, _ = self.run_script(head, **self.main_success(self.baseline(["m::a"])))
         self.assertEqual(rc, 1)
         self.assertIn(f"lost without a justification row: {BIN} w | removed", out)
 
     def test_windows_only_test_gaining_ignore_needs_its_exact_row(self):
         head = self.head_plan(["m::a"], lib=self.LIB.replace("fn w()", "#[ignore = \"temporarily disabled\"]\nfn w()"))
-        baseline = str(self.baseline(["m::a"]))
-        rc, out, _, _ = self.run_script(head, GH_RUN_ID="5", GH_BASELINE=baseline)
+        baseline = self.baseline(["m::a"])
+        rc, out, _, _ = self.run_script(head, **self.main_success(baseline))
         self.assertEqual(rc, 1)
         self.assertIn(f"lost without a justification row: {BIN} w | runnable->ignored", out)
         rows = self.repo / "scripts/ci/test-removal-justifications.txt"
         rows.write_text(f"{BIN} w | runnable->ignored | Win32 lock flaky on hosted runners\n")
         self.sp.run(["rm", "-rf", str(self.dir / "nextest/base")], check=True)
         self.git("worktree", "prune")
-        rc, out, _, _ = self.run_script(head, GH_RUN_ID="5", GH_BASELINE=baseline)
+        rc, out, _, _ = self.run_script(head, **self.main_success(baseline))
         self.assertEqual(rc, 0, out)
 
 
