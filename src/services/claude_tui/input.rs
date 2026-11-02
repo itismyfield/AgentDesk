@@ -123,9 +123,8 @@ fn followup_prompt_ready_timeout() -> Duration {
 /// #tui-hook-ttl-buffer (REQ-006): claim the Claude hook registry key for this
 /// tmux session and report whether a fresh Stop / SubagentStop was already
 /// buffered. `claim_once` drains and drops the key so the consumed Stop cannot
-/// replay into a later turn (single-consumption). Returns `false` when the
-/// registry has no matching key/event, or
-/// when the buffered events are not Stop kinds — in which case the caller falls
+/// replay into a later turn (single-consumption). Returns `false` when no
+/// key/event matches or when the buffered events are not Stop kinds — in which case the caller falls
 /// through to the existing Notify fast path and polling fallback unchanged.
 ///
 /// Key-match (REQ-001): for a hosted Claude launch the hook relay buffers under
