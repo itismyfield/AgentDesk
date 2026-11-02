@@ -123,7 +123,7 @@ pub(in crate::services::discord) fn request<T>(
         let mut observation = context
             .census
             .clone()
-            .filter(|_| op != Operation::Delete)
+            .filter(|tag| op != Operation::Delete && tag["output_class"] != "NonBody")
             .map(|tag| Observation {
                 tag,
                 channel,
@@ -176,4 +176,4 @@ pub(in crate::services::discord) fn request<T>(
 
 #[cfg(test)]
 #[path = "transport_observation_tests.rs"]
-mod tests;
+pub(in crate::services::discord) mod tests;

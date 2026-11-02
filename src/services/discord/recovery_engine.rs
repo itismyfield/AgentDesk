@@ -218,7 +218,7 @@ use self::completion_delivery::{
     should_advance_recovery_dispatch_after_relay,
 };
 pub(in crate::services::discord) use self::completion_delivery::{
-    relay_recovered_body_to_placeholder, relay_recovered_terminal_text_to_placeholder,
+    carries_body, relay_recovered_body_to_placeholder, relay_recovered_terminal_text_to_placeholder,
 };
 // `detect_live_tmux_output_path` exists only under `#[cfg(unix)]` in the child;
 // a by-name import of a cfg'd-out item is a hard E0432 on non-unix targets.

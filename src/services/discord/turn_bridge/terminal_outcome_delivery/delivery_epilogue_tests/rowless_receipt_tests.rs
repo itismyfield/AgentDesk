@@ -1356,6 +1356,12 @@ async fn o_delegated_foreign_custody_follows_destination_membership() {
             "{name}: a held identity keeps the custody for retry"
         );
         assert_eq!(driver.completed_publications(), posts, "{name}");
+        let observed = driver.published_census.lock().unwrap();
+        assert_eq!(observed.len(), posts);
+        for tag in observed.iter() {
+            assert_eq!(tag["site"], "W13", "{name}");
+            assert_eq!(tag["output_class"], "RecoveredLegacyBody", "{name}");
+        }
         if posts == 0 {
             assert!(driver.observations().is_empty(), "{name}: no Discord write");
         }

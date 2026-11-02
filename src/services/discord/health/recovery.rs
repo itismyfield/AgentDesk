@@ -599,36 +599,51 @@ async fn maybe_recover_completed_stale_leak(
     }
     // Claimed only here, before the first edit or post; a confirm-only pass reads the adoption.
     // The claimed send stays counted until this pass returns, past its last chunk.
-    let _legacy_send = if confirmed_chunks < chunks.len() {
+    let (_legacy_send, census_reason) = if confirmed_chunks < chunks.len() {
         let claimed = crate::services::tui_o::cutover::o_owns_tui_output_for_channel_reserving(
             channel_id.get(),
             kind,
         );
-        let (owned, send) = match claimed {
-            Ok(claimed) => (Ok(claimed.owned), claimed.send),
-            Err(error) => (Err(error), None),
+        let (owned, send, reason) = match claimed {
+            Ok(claimed) => (Ok(claimed.owned), claimed.send, claimed.reason),
+            Err(error) => (
+                Err(error),
+                None,
+                crate::services::tui_o::channel_policy::ClaimReason::IdentityHeld,
+            ),
         };
         if o_holds(owned) {
             return false;
         }
-        send
+        (send, reason)
     } else {
-        None
+        (
+            None,
+            crate::services::tui_o::channel_policy::ClaimReason::NoClaim,
+        )
     };
+    let census =
+        discord::outbound::body_census::BodySource::from_state(&state).reason(census_reason);
     let mut wrote_any_chunk = false;
     if confirmed_chunks == 0 {
         // Edit the original placeholder to chunk 0. If Discord commits the edit
         // but the client observes an error/crash, the next pass derives
         // `confirmed_chunks == 1` from the live message and continues with chunk
         // 1. No fallback send is used for the first chunk.
-        if discord::http::edit_channel_message(
-            http.as_ref(),
-            channel_id,
-            current_msg_id,
-            &chunks[0],
-        )
-        .await
-        .is_err()
+        if census
+            .clone()
+            .observe(
+                crate::services::tui_o::cutover::BodySite::HealthRecovery,
+                discord::outbound::body_census::BodyOffer::Recovered,
+                discord::http::edit_channel_message(
+                    http.as_ref(),
+                    channel_id,
+                    current_msg_id,
+                    &chunks[0],
+                ),
+            )
+            .await
+            .is_err()
         {
             return false;
         }
@@ -647,7 +662,15 @@ async fn maybe_recover_completed_stale_leak(
     }
 
     for (chunk_index, chunk) in chunks.iter().enumerate().skip(confirmed_chunks) {
-        match discord::http::send_channel_message(http.as_ref(), channel_id, chunk).await {
+        match census
+            .clone()
+            .observe(
+                crate::services::tui_o::cutover::BodySite::HealthRecovery,
+                discord::outbound::body_census::BodyOffer::Recovered,
+                discord::http::send_channel_message(http.as_ref(), channel_id, chunk),
+            )
+            .await
+        {
             Ok(message) => {
                 if let Err(error) = leak_recovery_record_confirmed_chunk(
                     &ledger_identity,

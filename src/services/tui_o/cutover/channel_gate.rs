@@ -206,6 +206,44 @@ pub(crate) async fn claim_then_send_held<T, F: std::future::Future<Output = T>>(
 pub(crate) enum BodySite {
     #[serde(rename = "W06")]
     StandbyRelay,
+    #[serde(rename = "W10")]
+    BridgeTerminal,
+    #[serde(rename = "W10b")]
+    BridgeShortController,
+    #[serde(rename = "W10c")]
+    BridgeLongController,
+    #[serde(rename = "W10d")]
+    BridgeLongChunks,
+    #[serde(rename = "W10e")]
+    BridgePinnedTerminal,
+    #[serde(rename = "W11")]
+    BridgeCancelled,
+    #[serde(rename = "W13")]
+    BridgeForeignTerminal,
+    #[serde(rename = "W14")]
+    BridgeStreaming,
+    #[serde(rename = "W14a")]
+    BridgeRollover,
+    #[serde(rename = "W14b")]
+    BridgeRolloverRestore,
+    #[serde(rename = "W14c")]
+    BridgeBlockedRollover,
+    #[serde(rename = "W19")]
+    OutputController,
+    #[serde(rename = "W30")]
+    RecoveryNotice,
+    #[serde(rename = "W30a")]
+    RecoveryController,
+    #[serde(rename = "W31")]
+    RecoveredTerminal,
+    #[serde(rename = "W32")]
+    RecoveryChunks,
+    #[serde(rename = "W33")]
+    HealthRecovery,
+    #[serde(rename = "W34")]
+    RestartHandoff,
+    #[serde(rename = "W35")]
+    RestartAnchor,
 }
 
 /// Observation remains separate from a Legacy send guard, including unclaimed transports.
@@ -217,11 +255,13 @@ pub(crate) struct BodyTransport {
 impl BodyTransport {
     fn inherited(site: BodySite, send: Option<LegacySend>, reason: ClaimReason) -> Self {
         let mut tag = current_census();
-        if let Some(object) = tag.as_mut().and_then(Value::as_object_mut)
-            && !object.contains_key("site")
-        {
-            object.insert("site".into(), json!(site));
-            object.insert("reason".into(), json!(reason));
+        if let Some(object) = tag.as_mut().and_then(Value::as_object_mut) {
+            if !object.contains_key("site") {
+                object.insert("site".into(), json!(site));
+            }
+            if !object.contains_key("reason") {
+                object.insert("reason".into(), json!(reason));
+            }
         }
         Self { _send: send, tag }
     }

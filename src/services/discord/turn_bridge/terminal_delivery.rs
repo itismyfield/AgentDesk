@@ -160,8 +160,13 @@ async fn send_ordered_long_terminal_chunks(
     placeholder_msg_id: MessageId,
     response: &str,
 ) -> Result<(MessageId, Option<MessageId>, Result<(), String>), String> {
-    let message_ids = gateway
-        .send_long_message_with_rollback(channel_id, placeholder_msg_id, response)
+    let message_ids = crate::services::discord::outbound::body_census::BodySource::inherited()
+        .reason(crate::services::tui_o::channel_policy::ClaimReason::NoClaim)
+        .observe(
+            crate::services::tui_o::cutover::BodySite::BridgeLongChunks,
+            crate::services::discord::outbound::body_census::BodyOffer::Body,
+            gateway.send_long_message_with_rollback(channel_id, placeholder_msg_id, response),
+        )
         .await?;
     let first_msg_id = message_ids
         .first()
@@ -897,6 +902,79 @@ impl Drop for BridgeDeliveryLease {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test(flavor = "current_thread")]
+    async fn terminal_body_delivery_keeps_its_site_without_waiting_for_journal() {
+        use crate::services::discord::outbound::raw_output::tests as observation;
+        use crate::services::tui_o::repost::io::tests::{CHANNEL, Mock, reply};
+        if observation::isolated(
+            concat!(
+                module_path!(),
+                "::terminal_body_delivery_keeps_its_site_without_waiting_for_journal"
+            )
+            .trim_start_matches("agentdesk::"),
+        ) {
+            return;
+        }
+        let log = observation::journal().await;
+        let mock = Mock::start(vec![
+            observation::message(9901),
+            reply("204 No Content", &[], ""),
+        ])
+        .await;
+        let shared = make_shared_data_for_tests();
+        let gateway = crate::services::discord::tui_prompt_relay::bridge_gateway::terminal_notice_test_gateway(
+            Arc::new(observation::client(&mock)), shared.clone(),
+        );
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(log.parent().unwrap().join("writer.lock"))
+            .unwrap();
+        lock.lock().unwrap();
+        let delivery = super::send_ordered_long_terminal_response(
+            &shared,
+            gateway.as_ref(),
+            &ProviderKind::Claude,
+            ChannelId::new(CHANNEL),
+            MessageId::new(9900),
+            None,
+            "provider answer",
+            None,
+            None,
+            None,
+        );
+        tokio::pin!(delivery);
+        let before =
+            tokio::time::timeout(std::time::Duration::from_millis(1500), &mut delivery).await;
+        let completed = before.is_ok();
+        let wire = mock.requests().len();
+        drop(lock);
+        let result = match before {
+            Ok(result) => result,
+            Err(_) => delivery.await,
+        };
+        assert!(result.is_ok());
+        assert!(
+            completed && wire == 2,
+            "observation delayed delivery: completed={completed}, wire={wire}"
+        );
+        observation::flushed().await;
+        let rows: Vec<serde_json::Value> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .filter(|row: &serde_json::Value| row["kind"] == "target")
+            .collect();
+        assert_eq!(
+            rows.len(),
+            2,
+            "one POST begin/result; cleanup DELETE is excluded"
+        );
+        for row in rows {
+            assert_eq!(row["census"]["site"], "W10d");
+        }
+    }
+
     use super::{
         bridge_epilogue_clears_inflight, bridge_epilogue_marks_watcher_delivered,
         bridge_epilogue_skip_save_is_identity_guarded, empty_sink_commits_fully_consumed_response,

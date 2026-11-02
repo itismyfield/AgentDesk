@@ -12,6 +12,8 @@ use super::stream_tick::{
 };
 use super::streaming_edit_text::bridge_claude_tui_followup_busy_readiness_timeout;
 use super::{streaming_edit_text::TuiErrorClassification, *};
+use crate::services::discord::outbound::body_census::{BodyOffer, BodySource};
+use crate::services::tui_o::cutover::BodySite;
 use busy_followup_retry::{apply_busy_requeue_if_pending, handle_empty_response_and_busy_requeue};
 use cancel_prompt_replace::{
     CancelPromptReplaceContext, CancelPromptReplaceMessage, CancelPromptReplaceOutcome,
@@ -147,6 +149,7 @@ pub(super) async fn run_terminal_outcome_delivery(
         state.pending_long_running_retarget_after_state_save;
     let mut long_running_placeholder_active = state.long_running_placeholder_active;
     let mut inflight_state = state.inflight_state;
+    let census_source = BodySource::from_state(&inflight_state);
     let admitted = ctx.codex_tui_terminal_range.as_ref();
     let mut api_friction_reports = state.api_friction_reports;
     let review_dispatch_warning = state.review_dispatch_warning;
@@ -456,14 +459,19 @@ pub(super) async fn run_terminal_outcome_delivery(
                             .await
                             .is_some()
                     } else {
-                        TurnGateway::edit_message(
-                            gateway.as_ref(),
-                            channel_id,
-                            current_msg_id,
-                            notice,
-                        )
-                        .await
-                        .is_ok()
+                        BodySource::inherited()
+                            .observe(
+                                BodySite::BridgeTerminal,
+                                BodyOffer::NonBody,
+                                TurnGateway::edit_message(
+                                    gateway.as_ref(),
+                                    channel_id,
+                                    current_msg_id,
+                                    notice,
+                                ),
+                            )
+                            .await
+                            .is_ok()
                     };
                 if shown {
                     terminal_delivery_committed = true;
@@ -549,43 +557,48 @@ pub(super) async fn run_terminal_outcome_delivery(
                             &inflight_state,
                         );
                         let cell = shared_owned.delivery_lease(watcher_owner_channel_id);
-                        terminal_controller_cutover::apply_bridge_long_chunks_controller(
-                            gateway.as_ref(),
-                            shared_owned.as_ref(),
-                            &provider,
-                            channel_id,
-                            watcher_owner_channel_id,
-                            inflight_state.tmux_session_name.as_deref(),
-                            &cell,
-                            &shared_owned.ui.placeholder_controller,
-                            current_msg_id,
-                            &delivery_response,
-                            &spoken_delivery_response,
-                            full_response.len(),
-                            bridge_turn,
-                            bridge_start,
-                            bridge_end,
-                            single_message_panel_footer_mode,
-                            dispatch_id.as_deref(),
-                            adk_session_key.as_deref(),
-                            Some(turn_id.as_str()),
-                            Some(bridge_lease_key.clone()),
-                            body_claim,
-                            terminal_controller_cutover::BridgeLongChunksLocals {
-                                terminal_delivery_committed: &mut terminal_delivery_committed,
-                                terminal_body_visible: &mut terminal_body_visible,
-                                completion_footer_terminal_text:
-                                    &mut completion_footer_terminal_text,
-                                preserve_inflight_for_cleanup_retry:
-                                    &mut preserve_inflight_for_cleanup_retry,
-                                bridge_skip_holder_owns_inflight:
-                                    &mut bridge_skip_holder_owns_inflight,
-                                response_sent_offset: &mut response_sent_offset,
-                                inflight_response_sent_offset: &mut inflight_state
-                                    .response_sent_offset,
-                            },
-                        )
-                        .await;
+                        census_source
+                            .clone()
+                            .scope(
+                                terminal_controller_cutover::apply_bridge_long_chunks_controller(
+                                    gateway.as_ref(),
+                                    shared_owned.as_ref(),
+                                    &provider,
+                                    channel_id,
+                                    watcher_owner_channel_id,
+                                    inflight_state.tmux_session_name.as_deref(),
+                                    &cell,
+                                    &shared_owned.ui.placeholder_controller,
+                                    current_msg_id,
+                                    &delivery_response,
+                                    &spoken_delivery_response,
+                                    full_response.len(),
+                                    bridge_turn,
+                                    bridge_start,
+                                    bridge_end,
+                                    single_message_panel_footer_mode,
+                                    dispatch_id.as_deref(),
+                                    adk_session_key.as_deref(),
+                                    Some(turn_id.as_str()),
+                                    Some(bridge_lease_key.clone()),
+                                    body_claim,
+                                    terminal_controller_cutover::BridgeLongChunksLocals {
+                                        terminal_delivery_committed:
+                                            &mut terminal_delivery_committed,
+                                        terminal_body_visible: &mut terminal_body_visible,
+                                        completion_footer_terminal_text:
+                                            &mut completion_footer_terminal_text,
+                                        preserve_inflight_for_cleanup_retry:
+                                            &mut preserve_inflight_for_cleanup_retry,
+                                        bridge_skip_holder_owns_inflight:
+                                            &mut bridge_skip_holder_owns_inflight,
+                                        response_sent_offset: &mut response_sent_offset,
+                                        inflight_response_sent_offset: &mut inflight_state
+                                            .response_sent_offset,
+                                    },
+                                ),
+                            )
+                            .await;
                     } else {
                         let lease_acquire = bridge_delivery_lease_for_inflight(
                             shared_owned.as_ref(),
@@ -594,39 +607,44 @@ pub(super) async fn run_terminal_outcome_delivery(
                             &inflight_state,
                             tmux_last_offset,
                         );
-                        terminal_controller_cutover::apply_bridge_long_chunks_legacy(
-                            lease_acquire,
-                            gateway.as_ref(),
-                            shared_owned.as_ref(),
-                            &provider,
-                            channel_id,
-                            watcher_owner_channel_id,
-                            inflight_state.tmux_session_name.as_deref(),
-                            current_msg_id,
-                            &delivery_response,
-                            &spoken_delivery_response,
-                            full_response.len(),
-                            single_message_panel_footer_mode,
-                            dispatch_id.as_deref(),
-                            adk_session_key.as_deref(),
-                            Some(turn_id.as_str()),
-                            inflight_state.user_msg_id,
-                            body_claim,
-                            terminal_controller_cutover::BridgeLongChunksLocals {
-                                terminal_delivery_committed: &mut terminal_delivery_committed,
-                                terminal_body_visible: &mut terminal_body_visible,
-                                completion_footer_terminal_text:
-                                    &mut completion_footer_terminal_text,
-                                preserve_inflight_for_cleanup_retry:
-                                    &mut preserve_inflight_for_cleanup_retry,
-                                bridge_skip_holder_owns_inflight:
-                                    &mut bridge_skip_holder_owns_inflight,
-                                response_sent_offset: &mut response_sent_offset,
-                                inflight_response_sent_offset: &mut inflight_state
-                                    .response_sent_offset,
-                            },
-                        )
-                        .await;
+                        census_source
+                            .clone()
+                            .scope(
+                                terminal_controller_cutover::apply_bridge_long_chunks_legacy(
+                                    lease_acquire,
+                                    gateway.as_ref(),
+                                    shared_owned.as_ref(),
+                                    &provider,
+                                    channel_id,
+                                    watcher_owner_channel_id,
+                                    inflight_state.tmux_session_name.as_deref(),
+                                    current_msg_id,
+                                    &delivery_response,
+                                    &spoken_delivery_response,
+                                    full_response.len(),
+                                    single_message_panel_footer_mode,
+                                    dispatch_id.as_deref(),
+                                    adk_session_key.as_deref(),
+                                    Some(turn_id.as_str()),
+                                    inflight_state.user_msg_id,
+                                    body_claim,
+                                    terminal_controller_cutover::BridgeLongChunksLocals {
+                                        terminal_delivery_committed:
+                                            &mut terminal_delivery_committed,
+                                        terminal_body_visible: &mut terminal_body_visible,
+                                        completion_footer_terminal_text:
+                                            &mut completion_footer_terminal_text,
+                                        preserve_inflight_for_cleanup_retry:
+                                            &mut preserve_inflight_for_cleanup_retry,
+                                        bridge_skip_holder_owns_inflight:
+                                            &mut bridge_skip_holder_owns_inflight,
+                                        response_sent_offset: &mut response_sent_offset,
+                                        inflight_response_sent_offset: &mut inflight_state
+                                            .response_sent_offset,
+                                    },
+                                ),
+                            )
+                            .await;
                     }
                 } else if !pinned_handled {
                     // #3089 A5/#3998 S1-f2: route structurally eligible
@@ -653,42 +671,47 @@ pub(super) async fn run_terminal_outcome_delivery(
                             &inflight_state,
                         );
                         let cell = shared_owned.delivery_lease(watcher_owner_channel_id);
-                        terminal_controller_cutover::apply_bridge_short_replace_controller(
-                            gateway.as_ref(),
-                            shared_owned.as_ref(),
-                            &provider,
-                            channel_id,
-                            watcher_owner_channel_id,
-                            inflight_state.tmux_session_name.as_deref(),
-                            &cell,
-                            &shared_owned.ui.placeholder_controller,
-                            current_msg_id,
-                            &delivery_response,
-                            &spoken_delivery_response,
-                            full_response.len(),
-                            bridge_turn,
-                            bridge_start,
-                            tmux_last_offset.unwrap_or(0),
-                            single_message_panel_footer_mode,
-                            dispatch_id.as_deref(),
-                            adk_session_key.as_deref(),
-                            Some(turn_id.as_str()),
-                            Some(bridge_lease_key.clone()),
-                            body_claim,
-                            terminal_controller_cutover::BridgeShortReplaceLocals {
-                                terminal_delivery_committed: &mut terminal_delivery_committed,
-                                terminal_body_visible: &mut terminal_body_visible,
-                                completion_footer_terminal_text:
-                                    &mut completion_footer_terminal_text,
-                                preserve_inflight_for_cleanup_retry:
-                                    &mut preserve_inflight_for_cleanup_retry,
-                                bridge_skip_holder_owns_inflight:
-                                    &mut bridge_skip_holder_owns_inflight,
-                                inflight_response_sent_offset: &mut inflight_state
-                                    .response_sent_offset,
-                            },
-                        )
-                        .await;
+                        census_source
+                            .clone()
+                            .scope(
+                                terminal_controller_cutover::apply_bridge_short_replace_controller(
+                                    gateway.as_ref(),
+                                    shared_owned.as_ref(),
+                                    &provider,
+                                    channel_id,
+                                    watcher_owner_channel_id,
+                                    inflight_state.tmux_session_name.as_deref(),
+                                    &cell,
+                                    &shared_owned.ui.placeholder_controller,
+                                    current_msg_id,
+                                    &delivery_response,
+                                    &spoken_delivery_response,
+                                    full_response.len(),
+                                    bridge_turn,
+                                    bridge_start,
+                                    tmux_last_offset.unwrap_or(0),
+                                    single_message_panel_footer_mode,
+                                    dispatch_id.as_deref(),
+                                    adk_session_key.as_deref(),
+                                    Some(turn_id.as_str()),
+                                    Some(bridge_lease_key.clone()),
+                                    body_claim,
+                                    terminal_controller_cutover::BridgeShortReplaceLocals {
+                                        terminal_delivery_committed:
+                                            &mut terminal_delivery_committed,
+                                        terminal_body_visible: &mut terminal_body_visible,
+                                        completion_footer_terminal_text:
+                                            &mut completion_footer_terminal_text,
+                                        preserve_inflight_for_cleanup_retry:
+                                            &mut preserve_inflight_for_cleanup_retry,
+                                        bridge_skip_holder_owns_inflight:
+                                            &mut bridge_skip_holder_owns_inflight,
+                                        inflight_response_sent_offset: &mut inflight_state
+                                            .response_sent_offset,
+                                    },
+                                ),
+                            )
+                            .await;
                     } else {
                         // The shared delivery lease serializes the watcher and bridge; on
                         // Skip another holder owns this range, so nothing is delivered.
@@ -725,17 +748,24 @@ pub(super) async fn run_terminal_outcome_delivery(
                             };
                             {
                                 let replace = || {
-                                    gateway.replace_message_with_outcome(
-                                        channel_id,
-                                        current_msg_id,
-                                        &delivery_response,
+                                    BodySource::inherited().observe(
+                                        BodySite::BridgeTerminal,
+                                        BodyOffer::Body,
+                                        gateway.replace_message_with_outcome(
+                                            channel_id,
+                                            current_msg_id,
+                                            &delivery_response,
+                                        ),
                                     )
                                 };
                                 // `None` sent nothing (O owns the channel or its identity is
                                 // held) and stays uncommitted like a failed replace.
-                                let replace_outcome =
-                                    terminal_controller_cutover::sent_under(body_claim, replace)
-                                        .await;
+                                let replace_outcome = census_source
+                                    .clone()
+                                    .scope(terminal_controller_cutover::sent_under(
+                                        body_claim, replace,
+                                    ))
+                                    .await;
                                 // A fallback that posted the whole response as a fresh message
                                 // still delivered it, so recovery must not re-deliver this turn.
                                 let fallback_delivered = matches!(

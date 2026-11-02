@@ -817,6 +817,91 @@ def _transport_guard_problems(root: Path, texts: dict[str, str], ack_sites: dict
     return problems
 
 
+def _future_scope_args(text: str, opening: int):
+    """Argument spans in classifier-stripped text; ambiguous syntax never certifies a scope."""
+    stack, start, args = [")"], opening + 1, []
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    for at in range(opening + 1, len(text)):
+        char = text[at]
+        if char in pairs:
+            stack.append(pairs[char])
+        elif char in ")]}":
+            if not stack or stack.pop() != char:
+                return []
+            if not stack:
+                if text[start:at].strip():
+                    args.append((start, at))
+                return args
+        elif char == "," and len(stack) == 1:
+            args.append((start, at))
+            start = at + 1
+    return []
+
+
+def _body_future_guard(row: dict, text: str) -> tuple[bool, int]:
+    spans = [(start, end) for name, start, end in _fn_bodies(text) if name == row["function"]]
+    if len(spans) != 1:
+        return False, 0
+    start, end = spans[0]
+    primitive = re.compile(PRIMITIVES[row["primitive"]])
+    calls = list(primitive.finditer(text, start + 1, end))
+    occurrence = int(row["id"].rsplit(":", 1)[1])
+    if not 0 < occurrence <= len(calls):
+        return False, 0
+    call = calls[occurrence - 1]
+    for scope in re.finditer(r"\.\s*observe\s*\(|\bforward\s*\(", text[start + 1:end]):
+        opening = start + 1 + scope.end() - 1
+        args = _future_scope_args(text, opening)
+        inherited = scope.group().lstrip().startswith("forward")
+        if len(args) != (1 if inherited else 3):
+            continue
+        future_start, future_end = args[-1]
+        if not future_start <= call.start() < call.end() <= future_end:
+            continue
+        # A future is polled inside the scope. An awaited argument ran before it.
+        future = text[future_start:future_end]
+        awaited = re.search(r"\.\s*await\b", future)
+        async_block = re.match(r"\s*async(?:\s+move)?\s*\{", future)
+        if bool(awaited) != bool(async_block):
+            continue
+        if inherited:
+            if row.get("guard") == "INHERITED_FUTURE" and row.get("site") == "INHERITED":
+                return True, text.count("\n", 0, call.start()) + 1
+            continue
+        site = re.sub(r"\s+", "", text[args[0][0]:args[0][1]])
+        offer = re.sub(r",(?=\))", "", re.sub(r"\s+", "", text[args[1][0]:args[1][1]]))
+        if (row.get("guard") == "BODY_FUTURE_SCOPE"
+                and site.endswith("BodySite::" + row.get("site_variant", "<missing>"))
+                and offer.endswith("BodyOffer::" + row.get("offer", "<missing>"))):
+            return True, text.count("\n", 0, call.start()) + 1
+    return False, text.count("\n", 0, call.start()) + 1
+
+
+def _body_guard_problems(root: Path) -> list[str]:
+    try:
+        rows = json.loads((root / "scripts/tui_o_body_probes.json").read_bytes())["probes"]
+    except (OSError, KeyError, TypeError, ValueError):
+        return []
+    classifier, texts, problems = _load_classifier(), {}, []
+    for row in rows:
+        if row["status"] != "VERIFIED" and "guard" not in row:
+            continue
+        path = row["path"]
+        if path not in texts:
+            texts[path] = classifier._production_text(root / path) if (root / path).is_file() else ""
+        if not _body_future_guard(row, texts[path])[0]:
+            problems.append(f"body guard: {row['id']} primitive is not inside its declared transport future")
+    if texts:
+        helper = classifier._production_text(root / "src/services/discord/outbound/body_census.rs")
+        compact = re.sub(r"\s+", "", helper)
+        if ("census_scope(Some(tag),next).await" not in compact
+                or "census_scope(current_census(),next).await" not in compact
+                or ".extend(outer)" not in compact
+                or re.search(r"\b(?:try_record|record|append|try_append|spawn|spawn_blocking)\s*\(", helper)):
+            problems.append("body guard: metadata scopes must preserve the outer tag without I/O or counters")
+    return problems
+
+
 def measure(root: Path, pinned_test_only_files=None):
     classifier = _load_classifier()
     if pinned_test_only_files is None:
@@ -869,6 +954,7 @@ def measure(root: Path, pinned_test_only_files=None):
             admission_problems.append(f"transport request: missing {slot}")
         admission_problems.extend(_transport_guard_problems(root, transport_texts, ack_sites))
         admission_problems.extend(_claim_guard_problems(root))
+        admission_problems.extend(_body_guard_problems(root))
     return primitives, gates, flags, raw, marks, admission_problems
 
 

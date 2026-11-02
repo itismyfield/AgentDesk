@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::services::tui_o::cutover::{BodySend, claim_then_send};
+use crate::services::tui_o::cutover::BodySend;
 
 #[path = "stream_tick/guarded_persist.rs"]
 pub(super) mod guarded_persist;

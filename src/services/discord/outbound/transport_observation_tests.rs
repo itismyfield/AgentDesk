@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::{sync::Arc, time::Duration};
 
-fn isolated(test: &str) -> bool {
+pub(in crate::services::discord) fn isolated(test: &str) -> bool {
     if std::env::var("ADK_TRANSPORT_OBSERVATION_TEST").is_ok() {
         return false;
     }
@@ -33,7 +33,7 @@ fn isolated(test: &str) -> bool {
     true
 }
 
-async fn journal() -> PathBuf {
+pub(in crate::services::discord) async fn journal() -> PathBuf {
     let root = PathBuf::from(std::env::var("AGENTDESK_ROOT_DIR").unwrap());
     std::fs::create_dir_all(root.join("runtime")).unwrap();
     std::fs::write(
@@ -70,7 +70,7 @@ fn phases(path: &Path, case: &str) -> Vec<(String, Option<String>)> {
         .collect()
 }
 
-async fn flushed() {
+pub(in crate::services::discord) async fn flushed() {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let health = census::health_json();
@@ -85,7 +85,7 @@ async fn flushed() {
     .expect("queued observations must reach their durable cut");
 }
 
-fn message(id: u64) -> Reply {
+pub(in crate::services::discord) fn message(id: u64) -> Reply {
     reply(
         "200 OK",
         &[],
@@ -100,7 +100,7 @@ fn message(id: u64) -> Reply {
     )
 }
 
-fn client(mock: &Mock) -> serenity::Http {
+pub(in crate::services::discord) fn client(mock: &Mock) -> serenity::Http {
     serenity::HttpBuilder::new("test-token")
         .proxy(mock.base.clone())
         .ratelimiter_disabled(true)
@@ -125,6 +125,7 @@ async fn raw_requests_observe_body_operations_and_retry_once() {
         ("edit", vec![message(9001)], Some("confirmed"), 1),
         ("delete", vec![reply("204 No Content", &[], "")], None, 1),
         ("untagged", vec![message(9001)], None, 1),
+        ("nonbody", vec![message(9001)], None, 1),
         (
             "rejected",
             vec![reply(
@@ -156,7 +157,13 @@ async fn raw_requests_observe_body_operations_and_retry_once() {
     ] {
         let mock = Mock::start(replies).await;
         let http = client(&mock);
-        let tagged = (case != "untagged").then(|| json!({"case":case}));
+        let tagged = (case != "untagged").then(|| {
+            if case == "nonbody" {
+                json!({"case":case,"output_class":"NonBody"})
+            } else {
+                json!({"case":case})
+            }
+        });
         let result = raw_output::census_scope(tagged, async {
             match case {
                 "edit" => crate::services::discord::http::edit_channel_message(&http, channel, MessageId::new(9001), "body").await.map(|_| ()),
@@ -611,6 +618,108 @@ async fn tagged_http_send_does_not_wait_for_a_blocked_journal() {
             ("result".into(), Some("confirmed".into()))
         ]
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn recovered_body_delivery_preserves_source_without_waiting_for_journal() {
+    if isolated(
+        concat!(
+            module_path!(),
+            "::recovered_body_delivery_preserves_source_without_waiting_for_journal"
+        )
+        .trim_start_matches("agentdesk::"),
+    ) {
+        return;
+    }
+    use crate::services::discord::{
+        inflight::InflightTurnState, make_shared_data_for_tests, recovery_engine,
+    };
+    use crate::services::{agent_protocol::RuntimeHandoffKind, provider::ProviderKind};
+    let log = journal().await;
+    let mock = Mock::start(vec![message(9902)]).await;
+    let http = Arc::new(client(&mock));
+    let shared = make_shared_data_for_tests();
+    let mut row = InflightTurnState::new(
+        ProviderKind::Claude,
+        CHANNEL,
+        None,
+        7,
+        8,
+        9900,
+        "input".into(),
+        None,
+        None,
+        None,
+        None,
+        0,
+    );
+    row.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+    row.host_locator = Some(
+        serde_json::from_value(json!({"host_kind":"tmux",
+        "host_session_id":"fixture-runtime", "execution_node":"old-producer"}))
+        .unwrap(),
+    );
+    row.tui_terminal_source_file_identity = Some((12, 34));
+    row.tui_terminal_generation_mtime_ns = Some(123);
+    let context = recovery_engine::RecoveryDeliveryContext::from_state(
+        &shared,
+        &ProviderKind::Claude,
+        &row,
+        None,
+        7,
+    )
+    .unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(log.parent().unwrap().join("writer.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let delivery = recovery_engine::relay_recovered_terminal_text_to_placeholder(
+        &http,
+        &shared,
+        ChannelId::new(CHANNEL),
+        Some(MessageId::new(9900)),
+        "saved provider answer",
+        Some(&context),
+    );
+    tokio::pin!(delivery);
+    let before = tokio::time::timeout(Duration::from_secs(1), &mut delivery).await;
+    let completed = before.is_ok();
+    let wire = mock.requests().len();
+    drop(lock);
+    let result = match before {
+        Ok(result) => result,
+        Err(_) => delivery.await,
+    };
+    assert_eq!(
+        result,
+        crate::services::discord::recovery_paths::shared::RecoveryRelayOutcome::Delivered
+    );
+    assert!(
+        completed && wire == 1,
+        "observation delayed recovery: completed={completed}, wire={wire}"
+    );
+    flushed().await;
+    let rows: Vec<Value> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|row: &Value| row["kind"] == "target")
+        .collect();
+    assert_eq!(rows.len(), 2, "one recovered EDIT begin/result");
+    for row in rows {
+        let tag = &row["census"];
+        assert_eq!(tag["site"], "W31");
+        assert_eq!(tag["output_class"], "RecoveredLegacyBody");
+        assert_eq!(tag["binding_mode"], "TUI");
+        assert_eq!(tag["actual_runtime"], "tmux");
+        assert_eq!(tag["producer_host"], "old-producer");
+        assert_eq!(
+            tag["source_incarnation"],
+            json!({"file":[12,34],"generation":123})
+        );
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
