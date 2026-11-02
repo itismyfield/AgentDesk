@@ -2018,6 +2018,8 @@ fn herdr_items_have_no_production_caller() {
             &[
                 LOCATOR,
                 INFLIGHT_MODEL,
+                "src/services/discord/inflight.rs",
+                "src/services/discord/outbound/body_census.rs",
                 GUARD_ADAPTER,
                 BINDING_CAS,
                 "src/services/discord/inflight/managed_submission/evidence.rs",
@@ -2094,6 +2096,7 @@ fn herdr_items_have_no_production_caller() {
             ".host_locator",
             &[
                 GUARD_ADAPTER,
+                "src/services/discord/outbound/body_census.rs",
                 BINDING_CAS,
                 LIVENESS,
                 "src/services/discord/inflight/managed_submission/evidence.rs",
@@ -2104,6 +2107,7 @@ fn herdr_items_have_no_production_caller() {
             "host_locator:",
             &[
                 INFLIGHT_MODEL,
+                "src/services/discord/inflight.rs",
                 GUARD_ADAPTER,
                 IDENTITY_GATE,
                 BINDING_CAS,
