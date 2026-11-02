@@ -38,7 +38,9 @@
 디스패치·카드·에이전트·채널 ID를 직접 받는 등록된 슬래시 명령은 없다.
 HTTP API·버튼 custom_id·텍스트 명령을 슬래시 인자로 오인해 새 명령을 만들지 않는다.
 기존 고정 choices와 picker는 위 main의 같은 좌표에 이미 충족된 범위이므로 재구현하지 않는다.
-세션·skill 자동완성 등록도 main의 `commands/session.rs:17`과 `commands/skill.rs:353`에 이미 있다.
+세션·skill 자동완성 등록도 main에 이미 있다:
+[session.rs L17](https://github.com/itismyfield/AgentDesk/blob/832254536a342caf0d94bf91abf281a93f43e2ce/src/services/discord/commands/session.rs#L17),
+[skill.rs L353](https://github.com/itismyfield/AgentDesk/blob/832254536a342caf0d94bf91abf281a93f43e2ce/src/services/discord/commands/skill.rs#L353).
 이번 조각은 등록을 유지하면서 공통 한도·권한 검사와 cwd 후보를 보완한다.
 
 ## 조각 2 설계 메모
