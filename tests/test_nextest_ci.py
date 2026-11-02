@@ -668,7 +668,7 @@ class BaseDiff(Fixture):
         self.write("justify.txt", rows)
         self.write("source-removed.json", source or source_losses())
         return self.run_cli("base-diff", "--plan", self.dir / "plan/plan.json", "--baseline", self.dir / baseline,
-                            "--comparison-base-sha", base_sha, "--justifications", self.dir / "justify.txt",
+                            "--head-sha", SHA, "--head-run-id", "7", "--comparison-base-sha", base_sha, "--justifications", self.dir / "justify.txt",
                             "--source-removed", self.dir / "source-removed.json", "--json-out", self.dir / "diff.json")
 
     def test_baseline_from_another_sha_or_missing_is_refused(self):
@@ -993,7 +993,7 @@ if [ "$2" = archive ]; then while [ "$1" != --archive-file ]; do shift; done; ec
         summary = self.dir / "summary.md"
         summary.write_text("")
         full = {**os.environ, "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}", "PR_HEAD_SHA": head,
-                "GITHUB_REPOSITORY": "o/r", "GITHUB_WORKSPACE": str(self.repo), "GITHUB_STEP_SUMMARY": str(summary),
+                "GITHUB_SHA": head, "GITHUB_RUN_ID": "7", "GITHUB_REPOSITORY": "o/r", "GITHUB_WORKSPACE": str(self.repo), "GITHUB_STEP_SUMMARY": str(summary),
                 "CARGO_LOG": str(self.dir / "cargo.log"), "BASE_LIST": str(self.dir / "base-list.json"),
                 "GH_RUN_ID": "", "GH_BASELINE": "", "CARGO_FAIL": "", **env}
         full.pop("GITHUB_OUTPUT", None)
@@ -1044,6 +1044,20 @@ class BaseDiffScript(ScriptRepo):
         rc, out, summary, _ = self.run_script(head, CARGO_FAIL="1")
         self.assertNotEqual(rc, 0)
         self.assertNotIn("against the fallback base plan", summary)
+
+    def test_head_plan_of_another_sha_or_run_is_refused_without_a_rebuild(self):
+        head = self.head_plan(["m::a", "m::b"])
+        baseline = str(self.baseline(["m::a"]))
+        for env, needle in (({"GITHUB_SHA": "c" * 40}, f"expected {'c' * 40} run 7"),
+                            ({"GITHUB_RUN_ID": "8"}, f"expected {head} run 8")):
+            with self.subTest(env=env):
+                (self.dir / "cargo.log").unlink(missing_ok=True)
+                self.sp.run(["rm", "-rf", str(self.dir / "nextest/base")], check=True)
+                self.git("worktree", "prune")
+                rc, out, summary, cargo = self.run_script(head, GH_RUN_ID="5", GH_BASELINE=baseline, **env)
+                self.assertEqual(rc, 1, out)
+                self.assertIn(f"ERROR head plan is {head} run 7, {needle}", out)
+                self.assertNotIn("archive", cargo)
 
     def test_windows_only_source_removal_needs_a_row(self):
         head = self.head_plan(["m::a"], lib="#[test]\nfn a() {}\n")

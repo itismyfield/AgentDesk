@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Compare the head nextest plan with the comparison base: CI Main's nextest-baseline artifact for
 # that exact SHA, or a base plan built here when the artifact is missing or not comparable.
-# Usage: nextest-base-diff.sh <nextest dir holding plan/plan.json>   (env: PR_HEAD_SHA, GH_TOKEN)
+# Usage: nextest-base-diff.sh <nextest dir holding plan/plan.json>
+#   (env: PR_HEAD_SHA, GH_TOKEN; GITHUB_SHA and GITHUB_RUN_ID name the run that must have written the plan)
 set -euo pipefail
 
 NEXTEST_DIR="$1"
@@ -18,8 +19,9 @@ base_sha="$(sed -n 's/^base_sha=//p' "$work/base.env")"
 # Linux removals come from the plans; macOS and Windows only from the base and head sources.
 git worktree add --detach "$work/src" "$base_sha" >/dev/null
 python3 scripts/ci/rust_test_sources.py removed --base-root "$work/src" --json-out "$work/source-removed.json"
-diff_args=(--plan "$plan" --comparison-base-sha "$base_sha" --justifications scripts/ci/test-removal-justifications.txt
-  --source-removed "$work/source-removed.json" --json-out "$work/diff.json")
+diff_args=(--plan "$plan" --head-sha "$GITHUB_SHA" --head-run-id "$GITHUB_RUN_ID" --comparison-base-sha "$base_sha"
+  --justifications scripts/ci/test-removal-justifications.txt --source-removed "$work/source-removed.json"
+  --json-out "$work/diff.json")
 
 fetch_main_baseline() {
   local run_id
