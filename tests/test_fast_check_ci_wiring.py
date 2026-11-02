@@ -1858,6 +1858,13 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     self.assert_hosted_sccache_reset(disable["run"].replace(line, "", 1))
 
+    def test_ci_sccache_server_outlives_the_uncached_lib_test_rustc(self) -> None:
+        # The lib-test rustc runs 20+ minutes after the last cached request; hardening pins only the PR env.
+        for path in (PR_WORKFLOW, MAIN_WORKFLOW, NIGHTLY_WORKFLOW):
+            with self.subTest(workflow=path.name):
+                env = yaml.safe_load(path.read_text(encoding="utf-8"))["env"]
+                self.assertEqual(env.get("SCCACHE_IDLE_TIMEOUT"), "0")
+
     def test_test_lane_baseline_uses_candidate_snapshot_refs(self) -> None:
         pr_workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         main_workflow = MAIN_WORKFLOW.read_text(encoding="utf-8")

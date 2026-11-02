@@ -469,6 +469,7 @@ expected_workflow_env = {
   "RUSTC_WRAPPER" => "sccache",
   "SCCACHE_CACHE_SIZE" => "10G",
   "SCCACHE_GHA_ENABLED" => "true",
+  "SCCACHE_IDLE_TIMEOUT" => "0",
   "SCCACHE_GHA_RW_MODE" => "${{ github.event_name == 'pull_request' && 'READ_ONLY' || 'READ_WRITE' }}",
   "POSTGRES_SERVICE_IMAGE" => "${{ vars.AGENTDESK_POSTGRES_SERVICE_IMAGE }}",
 }
