@@ -68,6 +68,8 @@ pub(in crate::services::discord::turn_bridge) struct CompletionPostludeState {
     pub(in crate::services::discord::turn_bridge) accumulated_output_tokens: u64,
     pub(in crate::services::discord::turn_bridge) accumulated_memory_input_tokens: u64,
     pub(in crate::services::discord::turn_bridge) accumulated_memory_output_tokens: u64,
+    /// A proved pre-submit refusal ends this attempt without ending the input execution.
+    pub(in crate::services::discord::turn_bridge) input_not_submitted: bool,
     pub(in crate::services::discord::turn_bridge) transport_error: bool,
     pub(in crate::services::discord::turn_bridge) provider_failure: bool,
     pub(in crate::services::discord::turn_bridge) api_friction_reports:

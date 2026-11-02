@@ -49,6 +49,7 @@ struct IntakeRig {
     _api: discord::admin_host_guard::tests::Recorder,
     trace: Trace,
     renderer: std::path::PathBuf,
+    transcript: std::path::PathBuf,
 }
 
 impl Drop for IntakeRig {
@@ -63,6 +64,15 @@ impl IntakeRig {
     }
 
     async fn with_bot(id: u64, busy: bool, bot: ProviderKind) -> Self {
+        Self::with_storage(id, busy, bot, None).await
+    }
+
+    async fn with_storage(
+        id: u64,
+        busy: bool,
+        bot: ProviderKind,
+        pool: Option<sqlx::PgPool>,
+    ) -> Self {
         let trace = Trace::default();
         tracing_subscriber::fmt()
             .with_ansi(false)
@@ -103,7 +113,7 @@ impl IntakeRig {
         );
         let api = discord::admin_host_guard::tests::Recorder::start().await;
         discord::internal_api::init(api.port, None);
-        let mut shared = discord::make_shared_data_for_tests();
+        let mut shared = discord::make_shared_data_for_tests_with_storage(pool);
         Arc::get_mut(&mut shared).unwrap().api_port = api.port;
         Arc::get_mut(&mut shared).unwrap().provider = bot.clone();
         shared.settings.write().await.provider = bot.clone();
@@ -189,6 +199,7 @@ impl IntakeRig {
             _api: api,
             trace,
             renderer,
+            transcript,
         }
     }
 
@@ -476,6 +487,11 @@ async fn a1_not_sent_intake_posts_no_provider_failure() {
     }
     let _root = crate::config::TestRuntimeRootGuard::new();
     let rig = IntakeRig::new(7_676_102, false).await;
+    let (_, status) = not_sent_turn(rig).await;
+    assert_eq!(status.as_deref(), Some("awaiting_user"));
+}
+
+async fn not_sent_turn(rig: IntakeRig) -> (IntakeRig, Option<String>) {
     let session_before = rig.shared.core.lock().await.sessions[&rig.channel]
         .session_id
         .clone();
@@ -568,4 +584,206 @@ async fn a1_not_sent_intake_posts_no_provider_failure() {
             "{error}"
         );
     }
+    let calls = rig._api.take();
+    let status = calls
+        .iter()
+        .filter_map(|call| {
+            let body: Value = serde_json::from_str(call.splitn(3, ' ').nth(2)?).ok()?;
+            (body["channel_id"] == rig.channel.to_string())
+                .then(|| body["status"].as_str().map(str::to_owned))
+                .flatten()
+        })
+        .last();
+    eprintln!("NOT_SENT_LAST_STATUS {status:?}");
+    (rig, status)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn not_sent_intake_records_only_the_later_success_pg() {
+    if !creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::",
+        "not_sent_intake_records_only_the_later_success_pg"
+    )) {
+        return;
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let rig =
+        IntakeRig::with_storage(7_676_105, false, ProviderKind::Claude, Some(pool.clone())).await;
+    let (rig, status) = not_sent_turn(rig).await;
+    let turn = format!(
+        "discord:{}:{}",
+        rig.channel,
+        1_479_671_302_387_076_000u64 + rig.channel.get()
+    );
+    let receipts = sqlx::query_scalar::<_, String>(
+        "SELECT terminal_outcome FROM turns WHERE turn_id=$1 AND terminal_outcome IS NOT NULL",
+    )
+    .bind(&turn)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    eprintln!("NOT_SENT_TERMINAL_RECEIPTS {receipts:?}; status={status:?}");
+    assert_eq!(
+        (receipts, status),
+        (Vec::<String>::new(), Some("awaiting_user".into()))
+    );
+
+    // The next real idle admission uses the same source message; the pane supplies its native rows.
+    fs::create_dir_all(rig.transcript.parent().unwrap()).unwrap();
+    fs::write(rig.renderer.join("transcript"), IDLE).unwrap();
+    fs::hard_link(rig.renderer.join("transcript"), &rig.transcript).unwrap();
+    let (completed, bridge) = tokio::sync::oneshot::channel();
+    *discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
+        .lock()
+        .unwrap() = Some((rig.channel, completed));
+    let (drive, mut settled) = rig.drive();
+    crate::services::discord::queue_io::input_owner::drive::wake(drive);
+    let result = tokio::time::timeout(Duration::from_secs(30), settled.recv())
+        .await
+        .unwrap_or_else(|_| panic!("{}", rig.trace.text()))
+        .unwrap();
+    assert_eq!(result, Ok(()), "{}", rig.trace.text());
+    wait("the submitted native user row", || {
+        fs::read_to_string(&rig.transcript)
+            .unwrap()
+            .lines()
+            .any(|line| {
+                serde_json::from_str::<Value>(line).is_ok_and(|row| {
+                    row["type"] == "user"
+                        && row["message"]["content"]
+                            .as_str()
+                            .is_some_and(|s| s.contains(PROMPT))
+                })
+            })
+    });
+    use std::io::Write;
+    let mut native = fs::OpenOptions::new()
+        .append(true)
+        .open(&rig.transcript)
+        .unwrap();
+    writeln!(native, "{}", json!({"type":"assistant","uuid":"delivered-answer","apiBlockIndex":0,
+        "message":{"id":"delivered-answer","role":"assistant","content":[{"type":"text","text":"delivered exactly once"}],"stop_reason":"end_turn"}})).unwrap();
+    writeln!(
+        native,
+        "{}",
+        json!({"type":"system","subtype":"turn_duration"})
+    )
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(30), bridge)
+        .await
+        .unwrap_or_else(|_| panic!("{}", rig.trace.text()))
+        .unwrap();
+    let receipts = sqlx::query_scalar::<_, String>(
+        "SELECT terminal_outcome FROM turns WHERE turn_id=$1 AND terminal_outcome IS NOT NULL",
+    )
+    .bind(&turn)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        receipts,
+        ["completed"],
+        "{}\nDiscord: {:?}\nNative: {}",
+        rig.trace.text(),
+        rig.mock.written_texts(),
+        fs::read_to_string(&rig.transcript).unwrap()
+    );
+    assert_eq!(
+        events(&rig.renderer)
+            .iter()
+            .filter(|e| *e == "Enter")
+            .count(),
+        1
+    );
+    assert!(
+        rig.mock
+            .written_texts()
+            .iter()
+            .any(|s| s.contains("delivered exactly once"))
+    );
+    drop(rig);
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_waiting_status_keeps_a_successor_active_pg() {
+    if !creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::",
+        "terminal_waiting_status_keeps_a_successor_active_pg"
+    )) {
+        return;
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let config = crate::config::Config::default();
+    let broadcast_tx = crate::eventbus::new_broadcast();
+    let state = crate::app_state::AppState {
+        pg_pool: Some(pool.clone()),
+        engine: crate::engine::PolicyEngine::new(&config).unwrap(),
+        config: Arc::new(config),
+        batch_buffer: crate::eventbus::spawn_batch_flusher(broadcast_tx.clone()),
+        broadcast_tx,
+        health_registry: None,
+        cluster_instance_id: Some("isolated-status-test".into()),
+    };
+    let router = axum::Router::new()
+        .route(
+            "/api/dispatched-sessions/webhook",
+            axum::routing::post(crate::services::dispatched_sessions::hook_session_with_query),
+        )
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    discord::internal_api::init(listener.local_addr().unwrap().port(), Some(pool.clone()));
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    sqlx::query(
+        "INSERT INTO sessions(session_key, provider, status, active_turn_nonce)
+        VALUES ('not-sent-status', 'claude', 'turn_active', 'actor-a')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    for (current, caller, expected) in [
+        ("actor-a", "actor-a", "awaiting_user"),
+        ("actor-b", "actor-a", "turn_active"),
+        ("actor-b", "actor-b", "awaiting_user"),
+    ] {
+        sqlx::query("UPDATE sessions SET status='turn_active', active_turn_nonce=$1 WHERE session_key='not-sent-status'")
+            .bind(current).execute(&pool).await.unwrap();
+        discord::adk_session::post_adk_turn_terminal_status(
+            discord::adk_session::TurnTerminalStatus {
+                session_key: Some("not-sent-status"),
+                name: None,
+                model: None,
+                status: "awaiting_user",
+                provider: &ProviderKind::Claude,
+                session_info: None,
+                tokens: None,
+                cwd: None,
+                dispatch_id: None,
+                thread_channel_id: None,
+                channel_id: None,
+                agent_id: None,
+                turn_nonce: Some(caller),
+            },
+        )
+        .await;
+        let row: (String, String) = sqlx::query_as(
+            "SELECT status, active_turn_nonce FROM sessions WHERE session_key='not-sent-status'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            row,
+            (expected.into(), current.into()),
+            "current={current}, caller={caller}"
+        );
+    }
+    server.abort();
+    pool.close().await;
+    db.drop().await;
 }
