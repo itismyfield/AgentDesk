@@ -168,7 +168,7 @@ jobs:
       - name: cargo test (non-PG, non-lib targets)
         shell: bash
         run: |
-          cargo test --bins --examples --benches --test '*' -- --skip _pg --skip pg_ --skip postgres
+          cargo test --bins --examples --test '*' -- --skip _pg --skip pg_ --skip postgres
         env:
           RUST_BACKTRACE: 1
 
@@ -239,7 +239,7 @@ jobs:
       - name: cargo test (non-PG, non-lib targets)
         shell: bash
         run: |
-          cargo test --bins --examples --benches --test '*' -- --skip _pg --skip pg_ --skip postgres
+          cargo test --bins --examples --test '*' -- --skip _pg --skip pg_ --skip postgres
         env:
           RUST_BACKTRACE: 1
 

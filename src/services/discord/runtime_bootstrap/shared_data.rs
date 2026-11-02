@@ -185,9 +185,7 @@ pub(super) fn run_bot_build_shared_data(
         overrides: SessionOverrideState {
             model_overrides: {
                 let map = dashmap::DashMap::new();
-                for (channel_id, model) in restored_model_overrides {
-                    map.insert(*channel_id, model.clone());
-                }
+                restore_model_overrides(&map, restored_model_overrides);
                 map
             },
             fast_mode_channels: {
