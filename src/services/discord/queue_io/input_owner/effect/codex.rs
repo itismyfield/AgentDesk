@@ -88,10 +88,7 @@ impl codex_inject::Ledger for OwnedLedger<'_> {
         self.ledger.admitted();
     }
     fn draft_delivered(&self) {
-        crate::services::codex_tui::input::notify_owned_draft(
-            self.input.channel,
-            &self.input.nonce,
-        );
+        crate::services::codex_tui::input::notify_owned_draft(self.input.channel);
     }
 }
 
@@ -207,10 +204,7 @@ pub(crate) fn idle_codex(pane: busy_inject::Pane, session: String) -> Leaf {
                             crate::services::claude_tui::submission_fence::idle_stash_scope()
                         && context.target == session
                     {
-                        crate::services::codex_tui::input::notify_owned_draft(
-                            context.channel,
-                            &uuid::Uuid::new_v4().to_string(),
-                        );
+                        crate::services::codex_tui::input::notify_owned_draft(context.channel);
                     }
                     Completion::Submitted
                 }

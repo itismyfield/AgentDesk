@@ -127,7 +127,7 @@ fn write(
         return Ok(None);
     }
     if draft {
-        crate::services::codex_tui::input::notify_owned_draft(channel, nonce);
+        crate::services::codex_tui::input::notify_owned_draft(channel);
     }
     Ok(Some(Submitted { target, logged }))
 }

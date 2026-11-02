@@ -584,10 +584,7 @@ fn followup(
                 match followup_write(&logical, &nonce, cancel.as_deref(), at, &target, &plan)? {
                     true => {
                         if draft {
-                            crate::services::codex_tui::input::notify_owned_draft(
-                                channel,
-                                &uuid::Uuid::new_v4().to_string(),
-                            );
+                            crate::services::codex_tui::input::notify_owned_draft(channel);
                         }
                         Ok(())
                     }

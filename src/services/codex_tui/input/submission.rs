@@ -21,12 +21,26 @@ pub(crate) fn owned_prompt_plan(prompt: &str) -> Result<Vec<TuiInputAction>, Str
     ])
 }
 
-/// Called once after a successful owned submit; no draft text leaves the input path.
-pub(crate) fn notify_owned_draft(channel: u64, event: &str) {
+const DRAFT_NOTICE_KIND: &str = "codex.draft_preservation_unconfirmed";
+
+fn draft_notice_event(channel: u64, original: Option<(u64, u64)>) -> Option<String> {
+    let (primary, generation) = original?;
+    Some(format!(
+        "{DRAFT_NOTICE_KIND}:{channel}:{primary}:{generation}"
+    ))
+}
+
+/// Without an owner identity there is no stable notice key; no draft text leaves this path.
+pub(crate) fn notify_owned_draft(channel: u64) {
+    let Some(event) = draft_notice_event(
+        channel,
+        crate::services::claude_tui::owner_input::original_identity(),
+    ) else {
+        return;
+    };
     let Some(pool) = crate::db::cancel_tombstones::global_pool() else {
         return;
     };
-    let event = event.to_owned();
     let result = crate::utils::async_bridge::block_on_pg_result(
         pool,
         move |pool| async move { enqueue_draft_notice(&pool, channel, &event).await },
@@ -57,7 +71,7 @@ async fn enqueue_draft_notice(
             content: &text,
             bot: "codex",
             source: "lifecycle_notifier",
-            reason_code: Some("codex.draft_preservation_unconfirmed"),
+            reason_code: Some(DRAFT_NOTICE_KIND),
             session_key: Some(&key),
         },
     )
@@ -249,15 +263,82 @@ mod tests {
             assert_ne!(std::env::var("AGENTDESK_REQUIRE_PG").as_deref(), Ok("1"));
             return;
         }
+        const CHANNEL: u64 = 7_676_150;
+        const RESTART_DB: &str = "ADK_CODEX_DRAFT_NOTICE_TEST_DB";
+        let event = |primary: u64, nonce: &str| {
+            #[cfg(unix)]
+            {
+                use crate::services::claude_tui::owner_input;
+                use std::sync::Arc;
+                let target = serde_json::json!({"host":"herdr","execution_nonce":nonce,
+                    "_attempt":{"identity":{"primary":primary,"queued_generation":7,
+                        "sources":[{"message_id":primary,"queued_generation":7}]},
+                        "attempt":{"nonce":nonce}}});
+                owner_input::with_scope(
+                    "codex".into(),
+                    target,
+                    CHANNEL,
+                    Arc::new(|_| Ok(())),
+                    Arc::new(|_, _| Ok(())),
+                    Arc::new(|_| Ok(())),
+                    || draft_notice_event(CHANNEL, owner_input::original_identity()).unwrap(),
+                )
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = nonce;
+                draft_notice_event(CHANNEL, Some((primary, 7))).unwrap()
+            }
+        };
+        assert!(crate::services::claude_tui::owner_input::original_identity().is_none());
+        assert!(draft_notice_event(CHANNEL, None).is_none());
+        if let Ok(url) = std::env::var(RESTART_DB) {
+            let pool = sqlx::PgPool::connect(&url).await.unwrap();
+            for original in [1001, 1002] {
+                enqueue_draft_notice(&pool, CHANNEL, &event(original, "after-restart"))
+                    .await
+                    .unwrap();
+            }
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM message_outbox")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                count, 2,
+                "a fresh process must reuse both original notice keys"
+            );
+            pool.close().await;
+            return;
+        }
         let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
-        let first = enqueue_draft_notice(&pool, 7_676_150, "a-submitted-original")
+        let first = enqueue_draft_notice(&pool, CHANNEL, &event(1001, "first-attempt"))
             .await
             .unwrap();
-        let again = enqueue_draft_notice(&pool, 7_676_150, "a-submitted-original")
+        let again = enqueue_draft_notice(&pool, CHANNEL, &event(1001, "next-attempt"))
             .await
             .unwrap();
-        assert_eq!(first, again);
+        assert_eq!(
+            first, again,
+            "one original across changed attempts owes one notice"
+        );
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM message_outbox")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        let second = enqueue_draft_notice(&pool, CHANNEL, &event(1002, "next-attempt"))
+            .await
+            .unwrap();
+        assert_ne!(
+            first, second,
+            "identical notice text for different originals stays distinct"
+        );
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM message_outbox")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
         let text: String = sqlx::query_scalar("SELECT content FROM message_outbox WHERE id = $1")
             .bind(first)
             .fetch_one(&pool)
@@ -268,7 +349,29 @@ mod tests {
         assert!(
             crate::services::turn_orchestrator::ChannelMailboxHandle::v2_notice_is_non_turn(&text)
         );
-        assert!(!text.contains("a-submitted-original"));
+        pool.close().await;
+        let test = format!(
+            "{}::codex_draft_notice_is_one_non_turn_outbox_event_pg",
+            module_path!().split_once("::").unwrap().1
+        );
+        let restarted = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &test, "--nocapture"])
+            .env(RESTART_DB, &db.database_url)
+            .output()
+            .unwrap();
+        assert!(
+            restarted.status.success()
+                && String::from_utf8_lossy(&restarted.stdout).contains("1 passed"),
+            "{}\n{}",
+            String::from_utf8_lossy(&restarted.stdout),
+            String::from_utf8_lossy(&restarted.stderr)
+        );
+        let pool = db.connect_and_migrate().await;
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM message_outbox")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
         pool.close().await;
         db.drop().await;
     }
