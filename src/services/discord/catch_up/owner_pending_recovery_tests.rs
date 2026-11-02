@@ -192,6 +192,7 @@ fn existing_v2_boots_twice_and_commits_live_and_catch_up_inputs() {
     std::fs::create_dir_all(generation.parent().unwrap()).unwrap();
     std::fs::write(generation, "7").unwrap();
     let cases = ["empty", "queued", "retained", "unknown", "terminal"];
+    let mut fixtures = Vec::new();
     let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
     for (index, case) in cases.iter().enumerate() {
         let channel = ChannelId::new(7_676_510 + index as u64);
@@ -203,6 +204,7 @@ fn existing_v2_boots_twice_and_commits_live_and_catch_up_inputs() {
             "sources":[{"message_id":original["message_id"],"queued_generation":7}]});
         let input = serde_json::json!({"identity":identity,"original":original,"phase":"unknown",
             "attempt":null,"payload":null,"confirmation_deadline_ms":null});
+        let notice = serde_json::json!({"kind":"unconfirmed","enqueued":true});
         let mut state = serde_json::json!({"version":2,"items":[],"head_injection":null,
             "retained_inputs":[],"terminal_identities":[],
             "namespace":format!("claude/{}", fx.shared.token_hash)});
@@ -211,7 +213,7 @@ fn existing_v2_boots_twice_and_commits_live_and_catch_up_inputs() {
             "retained" => {
                 state["retained_inputs"] = serde_json::json!([{
                 "input":input,"reason":{"kind":"unconfirmed"},
-                "notice":{"kind":"unconfirmed","enqueued":true}}])
+                "notice":notice}])
             }
             "unknown" => {
                 state["items"] = serde_json::json!([original]);
@@ -223,6 +225,7 @@ fn existing_v2_boots_twice_and_commits_live_and_catch_up_inputs() {
             }
             _ => {}
         }
+        fixtures.push((original, identity, notice));
         if *case == "empty" {
             let path = crate::services::discord::runtime_store::discord_pending_queue_root()
                 .unwrap()
@@ -253,6 +256,47 @@ fn existing_v2_boots_twice_and_commits_live_and_catch_up_inputs() {
             let channel = ChannelId::new(7_676_510 + index as u64);
             let handle = fx.shared.mailbox(channel);
             let before = snapshot(&fx, channel).await;
+            let (original, identity, notice) = &fixtures[index];
+            let assert_restored = |state: &serde_json::Value| {
+                let items = state["items"].as_array().unwrap();
+                let kept_original = match *case {
+                    "queued" => {
+                        let copies: Vec<_> = items.iter()
+                            .filter(|item| item["message_id"] == original["message_id"]).collect();
+                        assert_eq!(copies.len(), 1, "boot {boot} lost the queued fixture");
+                        Some(copies[0])
+                    }
+                    "retained" | "unknown" => {
+                        let copies: Vec<_> = state["retained_inputs"].as_array().unwrap().iter()
+                            .filter(|entry| entry["input"]["identity"] == *identity).collect();
+                        assert_eq!(copies.len(), 1, "boot {boot} lost the {case} fixture identity");
+                        if *case == "retained" {
+                            assert_eq!(copies[0]["notice"], *notice,
+                                "boot {boot} changed the retained fixture notice");
+                        } else {
+                            assert!(state["head_injection"].is_null(),
+                                "boot {boot} rearmed the unknown fixture");
+                            assert!(items.iter().all(|item| item["message_id"] != original["message_id"]),
+                                "boot {boot} requeued the unknown fixture");
+                        }
+                        Some(&copies[0]["input"]["original"])
+                    }
+                    "terminal" => {
+                        assert_eq!(state["terminal_identities"].as_array().unwrap().iter()
+                            .filter(|entry| entry["identity"] == *identity).count(), 1,
+                            "boot {boot} lost the terminal fixture identity");
+                        None
+                    }
+                    _ => None,
+                };
+                if let Some(kept) = kept_original {
+                    for (field, value) in original.as_object().unwrap() {
+                        assert_eq!(&kept[field], value,
+                            "boot {boot} changed the {case} fixture's {field}");
+                    }
+                }
+            };
+            assert_restored(&before);
             let path = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap()
                 .join("claude").join(&fx.shared.token_hash).join(format!("{channel}.json"));
             let expected = std::fs::read(&path).unwrap();
@@ -260,6 +304,7 @@ fn existing_v2_boots_twice_and_commits_live_and_catch_up_inputs() {
             crate::services::discord::runtime_bootstrap::restore_queued_and_inflight_for_tests(
                 &http, &fx.shared, &fx.provider,
             ).await;
+            assert_restored(&snapshot(&fx, channel).await);
             assert!(handle.same_actor(&fx.shared.mailbox(channel)));
             let actual = std::fs::read(&path).unwrap();
             assert_eq!(actual, expected);
@@ -274,6 +319,7 @@ fn existing_v2_boots_twice_and_commits_live_and_catch_up_inputs() {
             fx.sweep(&api).await;
             assert_eq!(api.enqueue_log(), vec![(q.get(), true, None)]);
             let state = snapshot(&fx, channel).await;
+            assert_restored(&state);
             assert_eq!(state["admission_sequence"], boot * 2);
             for message in [live.user_msg_id, q] {
                 assert_eq!(state["items"].as_array().unwrap().iter()
