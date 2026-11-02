@@ -107,6 +107,8 @@ impl Rig {
         let address = listener.local_addr().unwrap();
         let frontend = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let ctx = discord_mock::serenity_context(format!("http://{address}"), gateway).await;
+        ctx.http
+            .set_application_id(serenity::ApplicationId::new(discord_mock::BOT_ID));
         let payload = if network.payload {
             json!({"id": discord_mock::CHANNEL_ID.to_string(), "name": name,
                 "type": if network.thread {11} else {0},
@@ -794,6 +796,11 @@ fn transient_channel_lookup_failure_asks_to_retry_instead_of_switching_bots() {
 fn rig_records_non_callback_http_writes() {
     isolated(async {
         let rig = Rig::new().await;
+        assert_eq!(
+            rig.ctx.http.application_id(),
+            Some(serenity::ApplicationId::new(discord_mock::BOT_ID)),
+            "follow-up writes must reach HTTP with a configured application ID"
+        );
         reqwest::Client::builder()
             .no_proxy()
             .build()
