@@ -788,3 +788,9 @@ changing runtime behavior.
 > `=0`/`=1` changes nothing. `delivery_record_rollout` keeps its health shape with the authority
 > fields fixed (`authority_enabled: true`, `flag_source.authority: compiled_default`). On-disk
 > delivery-record and inflight formats are unchanged.)
+
+> Last refreshed: 2026-11-02 (#7650 B8 — `AGENTDESK_DELIVERY_RECORD_SHADOW` is retired with its
+> divergence telemetry (the `delivered_frontier END diverged` error log). Confirmed frontier and
+> receipt persistence never read it. `delivery_record_rollout` is now a fixed block:
+> `shadow_enabled: false`, `mode: authority_only`, both `flag_source` axes `compiled_default`,
+> `warning_count: 0`. A leftover env value changes nothing.)

@@ -548,17 +548,14 @@ fn tmux_relay_adoption_json(
 /// observed (the provider session id when the hook reported one, else the tmux
 /// session name passed via the query string), so we probe both candidate keys —
 /// provider session id first, then tmux name — and return the first retained
-/// unclaimed Stop. Platform-independent (no tmux capture). `None` when the
-/// registry is disabled, no key can be formed, or no Stop is retained.
+/// unclaimed Stop. Platform-independent (no tmux capture). `None` when no key
+/// can be formed or no Stop is retained.
 fn hook_unclaimed_stop_json(
     provider: Option<&str>,
     tmux_name: Option<&str>,
     provider_session_id: Option<&str>,
 ) -> Option<Value> {
     use crate::services::claude_tui::hook_registry;
-    if !hook_registry::registry_enabled() {
-        return None;
-    }
     let provider = provider.map(str::trim).filter(|value| !value.is_empty())?;
     let registry = hook_registry::global();
     // Probe provider session id first, then the tmux fallback — whichever key

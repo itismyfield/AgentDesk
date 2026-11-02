@@ -53,7 +53,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 
 use poise::serenity_prelude::ChannelId;
@@ -108,12 +107,7 @@ use owner_context::{
     watcher_owner_channel_from_context_at, write_watcher_owner_context_at,
 };
 pub(super) use rollout::delivery_record_rollout_health_json;
-#[cfg(test)]
-use rollout::delivery_record_rollout_health_json_for_flags;
-pub(in crate::services::discord) use rollout::{
-    FlagResolution, FlagSource, delivery_record_shadow_enabled, outcome_is_shadow_delivered,
-};
-use rollout::{delivered_frontier_end_diverged, should_shadow_mirror};
+pub(in crate::services::discord) use rollout::outcome_is_shadow_delivered;
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use store::write_proven_gone_equal_range_frontier;
 #[cfg(all(test, unix))]
@@ -267,43 +261,8 @@ fn delete_record_at(path: &Path) -> bool {
     fs::remove_file(path).is_ok()
 }
 
-/// #4130 test seam: a per-thread override of
-/// `delivery_record_shadow_enabled()` so default-OFF tests stay deterministic
-/// even when the developer shell exports `AGENTDESK_DELIVERY_RECORD_SHADOW=1`.
-#[cfg(test)]
-pub(in crate::services::discord) mod shadow_test_seam {
-    use std::cell::Cell;
-
-    thread_local! {
-        static OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
-    }
-
-    pub(in crate::services::discord) fn current_override() -> Option<bool> {
-        OVERRIDE.with(Cell::get)
-    }
-
-    #[must_use]
-    pub(in crate::services::discord) fn force(value: bool) -> Guard {
-        Guard {
-            previous: OVERRIDE.with(|cell| cell.replace(Some(value))),
-        }
-    }
-
-    pub(in crate::services::discord) struct Guard {
-        previous: Option<bool>,
-    }
-
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            OVERRIDE.with(|cell| cell.set(self.previous));
-        }
-    }
-}
-
-/// Path-based core (testable): write the frontier and report whether its END
-/// diverged from the in-memory authority. `Err` only when the durable write
-/// itself failed. Caller invokes this ONLY for a confirmed `Delivered` (I2).
-#[allow(clippy::too_many_arguments)]
+/// Path-based core (testable): write the frontier. `Err` only when the durable
+/// write itself failed. Caller invokes this ONLY for a confirmed `Delivered` (I2).
 #[cfg(test)]
 fn record_delivered_frontier_shadow_at(
     path: &Path,
@@ -312,8 +271,7 @@ fn record_delivered_frontier_shadow_at(
     attempts: u32,
     panel_msg_id: Option<u64>,
     panel_channel_id: Option<u64>,
-    in_memory_confirmed_end: u64,
-) -> Result<bool, String> {
+) -> Result<(), String> {
     write_delivered_frontier_at(
         path,
         DeliveredCommit {
@@ -323,11 +281,7 @@ fn record_delivered_frontier_shadow_at(
             panel_msg_id,
             panel_channel_id,
         },
-    )?;
-    Ok(delivered_frontier_end_diverged(
-        range.1,
-        in_memory_confirmed_end,
-    ))
+    )
 }
 
 fn exact_receipt_from_inflight(
@@ -566,7 +520,6 @@ fn shadow_mirror_delivered_frontier_inner(
         );
         return false;
     }
-    let in_memory_confirmed_end = coord.confirmed_end_offset.load(Ordering::Acquire);
     let delivery_channel_id = terminal_anchor_channel_id.unwrap_or(channel_id);
     let delivery_channel = ChannelId::new(delivery_channel_id);
     // Capture the delivered turn's nonce/session from its DELIVERY-channel row,
@@ -678,21 +631,6 @@ fn shadow_mirror_delivered_frontier_inner(
     }
     if let Some(user_msg_id) = safe_ledger_user_msg_id {
         append_completed_episode(provider, delivery_channel_id, user_msg_id, nonce.as_deref());
-    }
-
-    // The flag controls only divergence telemetry. The confirmed frontier and
-    // exact receipt above are delivery authority and are always persisted.
-    if should_shadow_mirror(true, delivery_record_shadow_enabled())
-        && delivered_frontier_end_diverged(range.1, in_memory_confirmed_end)
-    {
-        tracing::error!(
-            provider = provider.as_str(),
-            channel_id,
-            durable_end = range.1,
-            in_memory_confirmed_end,
-            generation_mtime_ns,
-            "#3089 B1: delivered_frontier END diverged from in-memory confirmed_end_offset (observe-only)"
-        );
     }
     true
 }
@@ -1470,16 +1408,6 @@ mod tests {
     }
 
     #[test]
-    fn should_shadow_mirror_requires_delivered_and_enabled() {
-        // The legacy flag gates only divergence telemetry. Confirmed authority
-        // persistence is pinned independently by the Phase A test below.
-        assert!(should_shadow_mirror(true, true));
-        assert!(!should_shadow_mirror(false, true));
-        assert!(!should_shadow_mirror(true, false));
-        assert!(!should_shadow_mirror(false, false));
-    }
-
-    #[test]
     fn authority_blocks_backward_inflight_write_truth_table() {
         // Blocks only a same-turn backward move; the reset flag (3rd arg) only relaxes.
         // Both monotonic OK → permit the write.
@@ -1504,107 +1432,41 @@ mod tests {
     }
 
     #[test]
-    fn delivery_record_rollout_unpinned_defaults_report_shadow_warning() {
-        let json = delivery_record_rollout_health_json_for_flags(resolve_shadow_flag(None));
-
-        assert_eq!(json["shadow_enabled"], false);
-        assert_eq!(json["authority_enabled"], true);
-        assert_eq!(json["mode"], "authority_only");
-        assert_eq!(json["dedup_authority"], "durable_delivery_record_frontier");
-        assert_eq!(json["same_turn_backward_write_enforcement"], "enforcing");
-        assert_eq!(json["flag_source"]["shadow"], "compiled_default");
-        assert_eq!(json["flag_source"]["authority"], "compiled_default");
-        assert_eq!(json["warning_count"], 1);
-
-        let warnings = json["configuration_warnings"].as_array().unwrap();
-        assert_eq!(warnings.len(), 1);
-        let only_warning = warnings[0].as_str().unwrap();
-        assert!(only_warning.starts_with("delivery_record_shadow_disabled"));
-        assert!(!only_warning.starts_with("delivery_record_authority_disabled"));
-    }
-
-    #[test]
-    fn delivery_record_rollout_health_reports_enforcing_modes() {
-        let authority_only =
-            delivery_record_rollout_health_json_for_flags(FlagResolution::compiled_default(false));
-        assert_eq!(authority_only["mode"], "authority_only");
-        assert_eq!(
-            authority_only["same_turn_backward_write_enforcement"],
-            "enforcing"
-        );
-        assert_eq!(authority_only["warning_count"], 1);
-
-        let enforcing =
-            delivery_record_rollout_health_json_for_flags(FlagResolution::compiled_default(true));
-        assert_eq!(enforcing["mode"], "shadow_and_authority");
-        assert_eq!(
-            enforcing["dedup_authority"],
-            "durable_delivery_record_frontier"
-        );
-        assert_eq!(
-            enforcing["same_turn_backward_write_enforcement"],
-            "enforcing"
-        );
-        assert_eq!(enforcing["warning_count"], 0);
-    }
-
-    #[test]
-    fn rollout_health_uses_production_names_defaults_and_first_read_cache() {
+    fn rollout_health_ignores_retired_delivery_record_env() {
         const CHILD: &str = "ADK_TEST_DELIVERY_RECORD_ROLLOUT_CHILD";
         const SHADOW: &str = "AGENTDESK_DELIVERY_RECORD_SHADOW";
         const AUTHORITY: &str = "AGENTDESK_DELIVERY_RECORD_AUTHORITY";
-        if let Ok(case) = std::env::var(CHILD) {
-            let (shadow, source) = match case.as_str() {
-                "defaults" => (false, "compiled_default"),
-                "shadow" => (true, "env_override"),
-                "authority" => (false, "env_override"),
-                _ => panic!("unknown rollout child case"),
-            };
-            // A retired authority env value left in a deployment never turns the
-            // durable frontier authority off.
-            let health = delivery_record_rollout_health_json();
-            assert_eq!(health["shadow_enabled"], shadow);
-            assert_eq!(health["authority_enabled"], true);
-            assert_eq!(
-                health["dedup_authority"],
-                "durable_delivery_record_frontier"
-            );
-            assert_eq!(health["same_turn_backward_write_enforcement"], "enforcing");
-            assert_eq!(health["flag_source"]["shadow"], source);
-            assert_eq!(health["flag_source"]["authority"], "compiled_default");
-            // This exact test owns the isolated child's environment.
-            unsafe {
-                std::env::set_var(SHADOW, if shadow { "0" } else { "1" });
-                std::env::set_var(AUTHORITY, "0");
-            }
-            assert_eq!(delivery_record_rollout_health_json(), health);
+        let expected = serde_json::json!({
+            "shadow_enabled": false,
+            "authority_enabled": true,
+            "mode": "authority_only",
+            "dedup_authority": "durable_delivery_record_frontier",
+            "same_turn_backward_write_enforcement": "enforcing",
+            "flag_source": {"shadow": "compiled_default", "authority": "compiled_default"},
+            "warning_count": 0,
+            "configuration_warnings": [],
+        });
+        if std::env::var_os(CHILD).is_some() {
+            assert_eq!(delivery_record_rollout_health_json(), expected);
             return;
         }
         let qualified = format!(
-            "{}::rollout_health_uses_production_names_defaults_and_first_read_cache",
+            "{}::rollout_health_ignores_retired_delivery_record_env",
             module_path!().split_once("::").unwrap().1
         );
-        for (case, flags) in [
-            ("defaults", None),
-            ("shadow", Some(("1", "0"))),
-            ("authority", Some(("0", "1"))),
-        ] {
+        for env in [None, Some(("1", "0")), Some(("0", "1"))] {
             let mut child = std::process::Command::new(std::env::current_exe().unwrap());
             child
                 .args(["--exact", &qualified, "--nocapture"])
-                .env(CHILD, case)
+                .env(CHILD, "1")
                 .env_remove(SHADOW)
                 .env_remove(AUTHORITY);
-            if let Some((shadow, authority)) = flags {
+            if let Some((shadow, authority)) = env {
                 child.env(SHADOW, shadow).env(AUTHORITY, authority);
             }
             let output = child.output().unwrap();
             let stdout = String::from_utf8_lossy(&output.stdout);
-            assert!(
-                output.status.success(),
-                "{case}: {stdout}\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            assert!(output.status.success(), "{env:?}: {stdout}");
             assert!(
                 stdout.contains("1 passed; 0 failed; 0 ignored;"),
                 "{stdout}"
@@ -1612,115 +1474,12 @@ mod tests {
         }
     }
 
-    fn resolve_test_flag(name: &'static str, raw: Option<&str>, default: bool) -> FlagResolution {
-        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-        let _restore = crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock(name);
-        match raw {
-            Some(raw) => unsafe { std::env::set_var(name, raw) },
-            None => unsafe { std::env::remove_var(name) },
-        }
-        rollout::resolve_env_flag(name, default)
-    }
-
-    fn resolve_shadow_flag(raw: Option<&str>) -> FlagResolution {
-        resolve_test_flag("AGENTDESK_DELIVERY_RECORD_SHADOW", raw, false)
-    }
-
-    #[test]
-    fn rollout_flag_resolvers_separate_provenance_from_value() {
-        // #5071 T1 S8-1r2 gate (a): absence and an explicit off are the SAME
-        // value and DIFFERENT provenance.
-        assert_eq!(
-            resolve_shadow_flag(None),
-            FlagResolution::compiled_default(false)
-        );
-        assert_eq!(
-            resolve_shadow_flag(Some("1")),
-            FlagResolution::env_override(true)
-        );
-        assert_eq!(
-            resolve_shadow_flag(Some("0")),
-            FlagResolution::env_override(false)
-        );
-
-        assert_eq!(
-            resolve_shadow_flag(Some(" TRUE ")),
-            FlagResolution::env_override(true)
-        );
-        assert_eq!(
-            resolve_shadow_flag(Some(" 1 ")),
-            FlagResolution::env_override(true)
-        );
-        for (raw, expected) in [
-            ("", false),
-            ("  ", false),
-            ("yes", true),
-            ("on", true),
-            ("2", false),
-            ("false", false),
-            (" NO ", false),
-            ("off", false),
-        ] {
-            assert_eq!(
-                resolve_shadow_flag(Some(raw)),
-                FlagResolution::env_override(expected),
-                "presence is independent of fallback: {raw:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn delivery_record_rollout_health_reports_flag_source_across_truth_table() {
-        // #5071 T1 S8-1r2 gate (b): provenance is emitted per axis, independently
-        // of the mode the values combine into.
-        for shadow_enabled in [false, true] {
-            let compiled = delivery_record_rollout_health_json_for_flags(
-                FlagResolution::compiled_default(shadow_enabled),
-            );
-            assert_eq!(
-                compiled["flag_source"],
-                serde_json::json!({"shadow": "compiled_default", "authority": "compiled_default"}),
-                "compiled-branch row ({shadow_enabled})"
-            );
-
-            let pinned = delivery_record_rollout_health_json_for_flags(
-                FlagResolution::env_override(shadow_enabled),
-            );
-            assert_eq!(
-                pinned["flag_source"],
-                serde_json::json!({"shadow": "env_override", "authority": "compiled_default"}),
-                "pinned row ({shadow_enabled})"
-            );
-
-            // Provenance never perturbs the rollout facts it accompanies.
-            assert_eq!(compiled["mode"], pinned["mode"]);
-            assert_eq!(compiled["dedup_authority"], pinned["dedup_authority"]);
-            assert_eq!(
-                compiled["same_turn_backward_write_enforcement"],
-                pinned["same_turn_backward_write_enforcement"]
-            );
-            assert_eq!(compiled["warning_count"], pinned["warning_count"]);
-        }
-    }
-
-    #[test]
-    fn delivered_frontier_end_divergence_predicate() {
-        // M4: END must equal the in-memory authority.
-        assert!(!delivered_frontier_end_diverged(42, 42));
-        assert!(delivered_frontier_end_diverged(42, 41));
-        assert!(delivered_frontier_end_diverged(0, 7));
-    }
-
     #[test]
     fn shadow_writes_frontier_and_reports_match() {
-        // flag-ON Delivered path: writes the exact frontier and reports no
-        // divergence when the durable END equals the in-memory authority.
+        // A confirmed Delivered write records the exact frontier.
         let dir = tempfile::tempdir().unwrap();
         let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 11);
-        let diverged =
-            record_delivered_frontier_shadow_at(&path, (3, 10), 111, 2, Some(9), Some(8), 10)
-                .unwrap();
-        assert!(!diverged);
+        record_delivered_frontier_shadow_at(&path, (3, 10), 111, 2, Some(9), Some(8)).unwrap();
         let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
         assert_eq!(
             written,
@@ -1752,7 +1511,6 @@ mod tests {
                 0,
                 Some(555),
                 Some(999),
-                77,
             )
             .unwrap();
         }
@@ -1777,30 +1535,10 @@ mod tests {
                 0,
                 Some(555),
                 Some(999),
-                0,
             )
             .unwrap();
         }
         assert!(read_record_at(&not_delivered_path).is_none());
-    }
-
-    #[test]
-    fn shadow_reports_divergence_but_still_writes_and_never_panics() {
-        // A durable-vs-memory END mismatch is observe-only: it reports `true`
-        // (logged upstream) and STILL writes the frontier — no panic.
-        let dir = tempfile::tempdir().unwrap();
-        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 12);
-        let diverged =
-            record_delivered_frontier_shadow_at(&path, (3, 10), 222, 0, None, None, 9).unwrap();
-        assert!(diverged); // 10 (durable end) != 9 (in-memory)
-        assert_eq!(
-            read_record_at(&path)
-                .unwrap()
-                .delivered_frontier
-                .unwrap()
-                .range,
-            (3, 10)
-        );
     }
 
     #[test]
@@ -1809,7 +1547,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 13);
         upsert_lease_at(&path, sample_lease()).unwrap();
-        record_delivered_frontier_shadow_at(&path, (0, 5), 5, 0, None, None, 5).unwrap();
+        record_delivered_frontier_shadow_at(&path, (0, 5), 5, 0, None, None).unwrap();
         let after = read_record_at(&path).unwrap();
         assert_eq!(after.delivery_lease, Some(sample_lease()));
         assert_eq!(after.delivered_frontier.unwrap().range, (0, 5));
@@ -2331,7 +2069,6 @@ mod tests {
             0,
             Some(terminal_anchor),
             Some(anchor_channel),
-            100,
         )
         .unwrap();
         let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
@@ -2360,7 +2097,6 @@ mod tests {
             0,
             Some(edit_msg),
             Some(edit_channel),
-            100,
         )
         .unwrap();
         let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
@@ -2376,7 +2112,7 @@ mod tests {
         // frontier still advances normally.
         let dir = tempfile::tempdir().unwrap();
         let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36101);
-        record_delivered_frontier_shadow_at(&path, (0, 100), 700, 0, None, None, 100).unwrap();
+        record_delivered_frontier_shadow_at(&path, (0, 100), 700, 0, None, None).unwrap();
         let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
         assert_eq!(written.panel_msg_id, None);
         assert_eq!(written.panel_channel_id, None);
@@ -2469,20 +2205,10 @@ mod tests {
         assert!(!range_already_committed(443_200, fused_with)); // new answer relayed
     }
 
-    #[test]
-    fn shadow_off_is_anchor_noop_3610() {
-        // Phase A: the old gate now controls divergence telemetry only. It must
-        // remain false under OFF, but confirmed delivery authority is written by
-        // the flag-independent funnel tested below.
-        assert!(!should_shadow_mirror(true, false)); // no divergence telemetry
-        assert!(!should_shadow_mirror(false, true)); // not delivered → no anchor write (I2)
-    }
-
     #[cfg(unix)]
     #[test]
     fn shadow_off_confirmed_delivery_writes_exact_split_channel_authority_4911() {
         let root = IsolatedRoot::new();
-        let _shadow_off = shadow_test_seam::force(false);
         let provider = ProviderKind::Claude;
         let owner = ChannelId::new(4_911_001);
         let delivery = ChannelId::new(4_911_002);
@@ -3229,7 +2955,6 @@ mod tests {
             0,
             Some(last_chunk_anchor),
             Some(delivery_channel),
-            4096,
         )
         .unwrap();
         let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
@@ -3260,7 +2985,6 @@ mod tests {
             0,
             Some(777_111_222),
             Some(delivery_channel),
-            8192,
         )
         .unwrap();
         let written = read_record_at(&owner_path)
@@ -3283,22 +3007,10 @@ mod tests {
         // advances (END = range.1) so the dedup floor is correct.
         let dir = tempfile::tempdir().unwrap();
         let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36111);
-        record_delivered_frontier_shadow_at(&path, (0, 2048), 700, 0, None, Some(444), 2048)
-            .unwrap();
+        record_delivered_frontier_shadow_at(&path, (0, 2048), 700, 0, None, Some(444)).unwrap();
         let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
         assert_eq!(written.panel_msg_id, None);
         assert_eq!(written.range, (0, 2048));
-    }
-
-    #[test]
-    fn long_chunk_partial_or_err_never_records_anchor_3610c() {
-        // Gate (A): the helper hardcodes `is_delivered = true` because the mod.rs
-        // call site lives ONLY inside the full-commit `Ok` arm — the long-chunk send
-        // (`send_long_message_with_rollback`) rolls back and returns `Err` on ANY
-        // chunk failure, so a partial delivery NEVER reaches the helper. The shadow
-        // outcome (modelled here as `is_delivered = false`) can never reach either
-        // persistence or divergence telemetry.
-        assert!(!should_shadow_mirror(false, true));
     }
 
     #[test]
@@ -3310,7 +3022,6 @@ mod tests {
         // the assertions stay inside one throw-away tree and can never inspect the
         // operator's runtime.
         let root = IsolatedRoot::new();
-        let _shadow_off = shadow_test_seam::force(false);
         let shared = crate::services::discord::make_shared_data_for_tests();
         // Does not panic; missing generation → writes nothing.
         super::record_long_chunk_terminal_delivery(
@@ -3349,7 +3060,6 @@ mod tests {
         // row and false-Settle B (which would make catch-up skip B's recovery on the
         // next restart = silent loss, the #4600 class re-introduced by a new vector).
         let _root = IsolatedRoot::new();
-        let _shadow_off = shadow_test_seam::force(false);
         let shared = crate::services::discord::make_shared_data_for_tests();
         let provider = ProviderKind::Codex;
         let watcher_owner_x = ChannelId::new(4_564_100); // offset-authority / session owner
@@ -3605,8 +3315,7 @@ mod tests {
             700,
             0,
             Some(last_chunk_anchor),
-            Some(watcher_channel), // == the record path channel (same-channel)
-            16384,
+            Some(watcher_channel),
         )
         .unwrap();
         let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
@@ -3614,17 +3323,6 @@ mod tests {
         // The recorded anchor channel IS the frontier-key channel (same-channel).
         assert_eq!(written.panel_channel_id, Some(watcher_channel));
         assert_eq!(written.range, (10, 16384));
-    }
-
-    #[test]
-    fn watcher_long_chunk_partial_or_unadvanced_never_records_3610d() {
-        // Gates (A)+(M4) for the watcher arm: the helper is invoked ONLY inside the
-        // `if committed && Delivered { advance(); … }` block in tmux_watcher.rs, AND
-        // only when the anchor is `Some` (the full-commit `Ok` arm of
-        // `send_long_message_raw_with_rollback`, which is all-or-nothing — a partial
-        // chunk failure rolls back and returns `Err`). So a non-advanced commit
-        // (modelled as `is_delivered = false`) NEVER reaches the durable write.
-        assert!(!should_shadow_mirror(false, true));
     }
 
     // ---- read-authority end-to-end wiring through the env-resolved public gates ----

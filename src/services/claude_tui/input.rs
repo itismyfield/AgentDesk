@@ -147,9 +147,6 @@ fn followup_prompt_ready_timeout() -> Duration {
 fn claude_registry_stop_already_buffered(session_name: &str) -> bool {
     use crate::services::claude_tui::hook_registry;
     use crate::services::claude_tui::hook_server::HookEventKind;
-    if !hook_registry::registry_enabled() {
-        return false;
-    }
     // Prefer the provider session UUID the relay actually buffers under; fall
     // back to the tmux session name when no launch mapping is recorded.
     let provider_session_id =

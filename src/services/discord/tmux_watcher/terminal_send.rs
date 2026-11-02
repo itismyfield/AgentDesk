@@ -671,14 +671,12 @@ mod tests {
     use super::*;
     use poise::serenity_prelude::ChannelId;
 
-    /// Legacy test name retained: an invalid/missing captured generation must
-    /// remain a complete no-op even when the shadow flag is OFF. The flag controls
-    /// telemetry only; durable authority still fails closed on identity.
+    /// Legacy test name retained: an invalid/missing captured generation is a
+    /// complete no-op; durable authority fails closed on identity.
     #[test]
     fn watcher_long_chunk_delivery_off_is_noop_3610d() {
         let temp = tempfile::TempDir::new().expect("temp runtime root");
         let _root_guard = crate::config::set_agentdesk_root_for_test(temp.path());
-        let _shadow = dr::shadow_test_seam::force(false);
         let shared = crate::services::discord::make_shared_data_for_tests();
         let channel = ChannelId::new(556_677_889);
         // Does not panic; missing generation → writes nothing.
@@ -710,7 +708,6 @@ mod tests {
     fn watcher_long_chunk_delivery_none_anchor_is_noop_3610d() {
         let temp = tempfile::TempDir::new().expect("temp runtime root");
         let _root_guard = crate::config::set_agentdesk_root_for_test(temp.path());
-        let _shadow = dr::shadow_test_seam::force(false);
         let shared = crate::services::discord::make_shared_data_for_tests();
         let channel = ChannelId::new(112_233_445);
         super::super::terminal_long_chunks::record_watcher_terminal_delivery(

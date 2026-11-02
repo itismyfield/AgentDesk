@@ -500,9 +500,6 @@ fn try_claim_registry_match(
     not_before: Option<DateTime<Utc>>,
 ) -> Option<HookEvent> {
     use crate::services::claude_tui::hook_registry;
-    if !hook_registry::registry_enabled() {
-        return None;
-    }
     // Registry replay must be tied to a concrete turn lower-bound. Without it,
     // a previous turn's still-in-TTL Stop/token payload for the same provider
     // session can satisfy the next wait before the live broadcast path sees any

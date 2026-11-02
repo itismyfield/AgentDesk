@@ -1444,13 +1444,6 @@ mod runtime_hook_registry_config_tests {
             ..RuntimeSettingsConfig::default()
         };
         assert!(!delay_only.is_empty());
-
-        // The rollback flag also keeps the section alive when set to either bool.
-        let disabled = RuntimeSettingsConfig {
-            tui_hook_registry_enabled: Some(false),
-            ..RuntimeSettingsConfig::default()
-        };
-        assert!(!disabled.is_empty());
     }
 
     // The keys survive a YAML round-trip with their types intact, and an absent
@@ -1458,12 +1451,10 @@ mod runtime_hook_registry_config_tests {
     #[test]
     fn hook_registry_keys_round_trip_through_yaml() {
         let yaml = "tui_hook_buffer_ttl_secs: 60\n\
-                    tui_unclaimed_stop_delay_ms: 1500\n\
-                    tui_hook_registry_enabled: false\n";
+                    tui_unclaimed_stop_delay_ms: 1500\n";
         let parsed: RuntimeSettingsConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(parsed.tui_hook_buffer_ttl_secs, Some(60));
         assert_eq!(parsed.tui_unclaimed_stop_delay_ms, Some(1500));
-        assert_eq!(parsed.tui_hook_registry_enabled, Some(false));
 
         let reserialized = serde_yaml::to_string(&parsed).unwrap();
         let reparsed: RuntimeSettingsConfig = serde_yaml::from_str(&reserialized).unwrap();
@@ -1474,7 +1465,6 @@ mod runtime_hook_registry_config_tests {
         let empty: RuntimeSettingsConfig = serde_yaml::from_str("{}").unwrap();
         assert_eq!(empty.tui_hook_buffer_ttl_secs, None);
         assert_eq!(empty.tui_unclaimed_stop_delay_ms, None);
-        assert_eq!(empty.tui_hook_registry_enabled, None);
     }
 
     // #5071 T3-A0: an operator who never writes the key must land on `Legacy`,

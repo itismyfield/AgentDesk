@@ -15,7 +15,6 @@ const RUNTIME_CONFIG_ROW: &str = "runtime-config";
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SettingSource {
-    EnvOverride,
     KvOverride,
     Yaml,
     Default,
@@ -26,19 +25,6 @@ pub enum SettingSource {
 pub struct Resolved<T> {
     pub value: T,
     pub source: SettingSource,
-}
-
-/// An env flag retains presence provenance even when its value falls back to the default.
-pub(crate) fn resolve_env_flag(name: &str, default: bool) -> Resolved<bool> {
-    let (value, present) = crate::utils::read_env_flag(name, default);
-    Resolved {
-        value,
-        source: if present {
-            SettingSource::EnvOverride
-        } else {
-            SettingSource::Default
-        },
-    }
 }
 
 /// Which persisted values outrank YAML.

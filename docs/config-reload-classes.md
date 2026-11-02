@@ -145,8 +145,6 @@ seconds with content comparison, independently of native filesystem notification
 | `runtime.followup_prompt_ready_timeout_secs` | live | `src/services/claude_tui/input.rs` followup_prompt_ready_timeout (current()) |
 | `runtime.tui_hook_buffer_ttl_secs` | restart | `src/services/claude_tui/hook_registry.rs` GLOBAL (LazyLock; current_registry_durations on first access) |
 | `runtime.tui_unclaimed_stop_delay_ms` | restart | `src/services/claude_tui/hook_registry.rs` GLOBAL (LazyLock; current_registry_durations on first access) |
-| `runtime.tui_hook_registry_enabled` | live | `src/services/claude_tui/hook_registry.rs` registry_enabled (current()) |
-| `runtime.codex_rollout_index_cache_enabled` | live | `src/services/codex_tui/rollout_index.rs` cache_enabled (current()) |
 | `runtime.dispatch_rate_limit_gate_enabled` | seeded-at-boot | `src/services/settings.rs` seed_runtime_config_defaults_pg (kv runtime-config blob; via startup_reseed) -> dispatchRateLimitGateEnabled |
 | `runtime.dispatch_rate_limit_gate_danger_pct` | seeded-at-boot | `src/services/settings.rs` seed_runtime_config_defaults_pg (kv runtime-config blob; via startup_reseed) -> dispatchRateLimitGateDangerPct |
 | `runtime.herdr_turn_enabled` | live | `src/services/turn_host.rs` herdr_turn_switched_on (current()) |

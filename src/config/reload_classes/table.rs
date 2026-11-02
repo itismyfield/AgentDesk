@@ -130,8 +130,6 @@ pub const FIELDS: &[FieldReload] = &[
     row("runtime.followup_prompt_ready_timeout_secs", Live, "`src/services/claude_tui/input.rs` followup_prompt_ready_timeout (current())"),
     row("runtime.tui_hook_buffer_ttl_secs", Restart, "`src/services/claude_tui/hook_registry.rs` GLOBAL (LazyLock; current_registry_durations on first access)"),
     row("runtime.tui_unclaimed_stop_delay_ms", Restart, "`src/services/claude_tui/hook_registry.rs` GLOBAL (LazyLock; current_registry_durations on first access)"),
-    row("runtime.tui_hook_registry_enabled", Live, "`src/services/claude_tui/hook_registry.rs` registry_enabled (current())"),
-    row("runtime.codex_rollout_index_cache_enabled", Live, "`src/services/codex_tui/rollout_index.rs` cache_enabled (current())"),
     row("runtime.dispatch_rate_limit_gate_enabled", SeededAtBoot, "`src/services/settings.rs` seed_runtime_config_defaults_pg (kv runtime-config blob; via startup_reseed) -> dispatchRateLimitGateEnabled"),
     row("runtime.dispatch_rate_limit_gate_danger_pct", SeededAtBoot, "`src/services/settings.rs` seed_runtime_config_defaults_pg (kv runtime-config blob; via startup_reseed) -> dispatchRateLimitGateDangerPct"),
     row("runtime.herdr_turn_enabled", Live, "`src/services/turn_host.rs` herdr_turn_switched_on (current())"),

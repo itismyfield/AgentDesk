@@ -681,7 +681,7 @@ static GLOBAL: LazyLock<HookRegistry> = LazyLock::new(|| {
 /// when `GLOBAL` is first initialised — so the resulting durations are frozen on
 /// the immutable `HookRegistry` for the life of the process. Editing
 /// `tui_hook_buffer_ttl_secs` / `tui_unclaimed_stop_delay_ms` therefore requires
-/// a restart; only `registry_enabled()` is re-read per hook.
+/// a restart.
 pub fn current_registry_durations() -> (Duration, Duration) {
     let cfg = crate::config_live_reload::current();
     let ttl = cfg
@@ -697,17 +697,6 @@ pub fn current_registry_durations() -> (Duration, Duration) {
         .map(|ms| Duration::from_millis(ms.min(600_000)))
         .unwrap_or(DEFAULT_UNCLAIMED_STOP_DELAY);
     (ttl, delay)
-}
-
-/// Whether the registry buffering layer is enabled. Reads the hot-reloadable
-/// `tui_hook_registry_enabled` runtime flag; defaults to ON. This is the
-/// documented rollback switch (REQ rollback contract): set it to `false` in
-/// `agentdesk.yaml` and the hook receiver stops feeding the registry, leaving
-/// the legacy broadcast + polling path exactly as before — no restart needed.
-pub fn registry_enabled() -> bool {
-    crate::config_live_reload::current()
-        .and_then(|cfg| cfg.runtime.tui_hook_registry_enabled)
-        .unwrap_or(true)
 }
 
 /// The process-global registry instance.
@@ -1344,13 +1333,5 @@ mod tests {
         let (ttl, delay) = current_registry_durations();
         assert_eq!(ttl, DEFAULT_HOOK_BUFFER_TTL);
         assert_eq!(delay, DEFAULT_UNCLAIMED_STOP_DELAY);
-    }
-
-    /// The rollback flag defaults to ON when the config is not installed (the
-    /// unit-test case). This pins the "feature defaults ON" contract — operators
-    /// must explicitly set `tui_hook_registry_enabled: false` to disable it.
-    #[test]
-    fn registry_enabled_defaults_on() {
-        assert!(registry_enabled());
     }
 }
