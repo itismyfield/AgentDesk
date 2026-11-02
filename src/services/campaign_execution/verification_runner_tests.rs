@@ -48,6 +48,7 @@ fn ctx<'a>(log_dir: &'a Path, handoff: Option<TestHandoff>) -> LaunchContext<'a>
         host: "host",
         now: at(),
         handoff,
+        nonce: uuid::Uuid::new_v4().to_string(),
     }
 }
 

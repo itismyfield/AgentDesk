@@ -110,6 +110,28 @@ pub(super) fn parse_legacy_bot_entry(entry_key: &str, entry_value: &Value) -> Le
                     .collect::<BTreeSet<_>>()
             })
             .unwrap_or_default(),
+        channel_relaunch_pending: entry_value
+            .get("channel_relaunch_pending")
+            .and_then(Value::as_array)
+            .map(|values| {
+                let ids = values.iter().filter_map(Value::as_str).map(str::trim);
+                ids.filter(|id| !id.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        channel_effort_levels: entry_value
+            .get("channel_effort_levels")
+            .and_then(Value::as_object)
+            .map(|obj| {
+                let levels = obj
+                    .iter()
+                    .filter_map(|(id, level)| Some((id, level.as_str()?)));
+                levels
+                    .map(|(id, level)| (id.clone(), level.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 

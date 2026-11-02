@@ -46,6 +46,41 @@ pub(crate) fn write_claude_session_auth(
     .map_err(|error| format!("write claude session auth marker: {error}"))
 }
 
+/// The account markers of a session as written, so a cleanup that must not end its account record
+/// can put them back unchanged.
+#[derive(Debug, Default)]
+pub(crate) struct AuthMarkers {
+    profile: Option<String>,
+    session: Option<String>,
+}
+
+impl AuthMarkers {
+    pub(crate) fn read(session_name: &str) -> Self {
+        let raw = |ext| {
+            resolve_session_temp_path(session_name, ext)
+                .and_then(|path| std::fs::read_to_string(path).ok())
+        };
+        Self {
+            profile: raw(TMUX_AUTH_PROFILE_TEMP_EXT),
+            session: raw(CLAUDE_SESSION_AUTH_TEMP_EXT),
+        }
+    }
+
+    /// Writes back each marker read; one that was absent stays absent.
+    pub(crate) fn restore(&self, session_name: &str) -> Result<(), String> {
+        for (ext, body) in [
+            (TMUX_AUTH_PROFILE_TEMP_EXT, &self.profile),
+            (CLAUDE_SESSION_AUTH_TEMP_EXT, &self.session),
+        ] {
+            if let Some(body) = body {
+                std::fs::write(session_temp_path(session_name, ext), body)
+                    .map_err(|error| format!("restore {ext} marker: {error}"))?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Whether `session_id` ran under `profile_id`: by its own record, or by the profile marker while
 /// no launch recorded one. A record of another session vouches for nothing.
 pub(crate) fn claude_session_auth_matches(

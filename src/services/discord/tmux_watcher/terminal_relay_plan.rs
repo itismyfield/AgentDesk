@@ -694,18 +694,24 @@ pub(super) async fn run_terminal_relay_plan<'a>(
         // this frame; a restored seed was composed by the bridge from its producer's read range.
         // Either way only the frame's own turn's row counts: the handed-off seed's turn, else the
         // turn the watcher bound, never the pre-relay row (a later turn can share the body).
+        // A held nonce, seed then bound, also carries where the pre-relay row's other turn starts;
+        // the lookup drops it unless the body's records all end by then.
         let consumed_end = terminal_event_consumed_offset(current_offset, all_data);
         let seed_turn_nonce = restored_response_seed.producer_turn_nonce.as_deref();
         let body_source = if restored_response_seed.body.is_empty() {
-            seed_turn_nonce
-                .or_else(|| startup_soft_terminal_authority.bound_turn_nonce())
-                .map(|nonce| {
-                    (
-                        (turn_data_start_offset, consumed_end),
-                        o_delivery_evidence::BodyProducer::Watcher,
-                        nonce,
-                    )
-                })
+            let inflight = inflight_before_relay.as_ref();
+            let turns: Vec<_> = seed_turn_nonce
+                .into_iter()
+                .chain(startup_soft_terminal_authority.bound_turn_nonce())
+                .map(|nonce| (nonce, other_turn_start(inflight, tmux_session_name, nonce)))
+                .collect();
+            (!turns.is_empty()).then(|| {
+                (
+                    (turn_data_start_offset, consumed_end),
+                    o_delivery_evidence::BodyProducer::Watcher,
+                    turns,
+                )
+            })
         } else {
             restored_response_seed
                 .source
@@ -719,12 +725,12 @@ pub(super) async fn run_terminal_relay_plan<'a>(
                     (
                         source.range,
                         o_delivery_evidence::BodyProducer::Bridge,
-                        nonce,
+                        vec![(nonce, None)],
                     )
                 })
         };
         let o_tail_covered = match (o_tail_covered, context.evidence_source, body_source) {
-            (None, Some(file), Some((range, producer, producer_turn_nonce)))
+            (None, Some(file), Some((range, producer, turns)))
                 if orphan_facts.existing_record_required() =>
             {
                 o_delivery_evidence::headless_outbox(
@@ -739,7 +745,7 @@ pub(super) async fn run_terminal_relay_plan<'a>(
                         sent: response_sent_offset,
                     },
                     producer,
-                    producer_turn_nonce,
+                    &turns,
                     evidence_deadline.max(tokio::time::Instant::now() + HEADLESS_OUTBOX_BUDGET),
                 )
                 .await

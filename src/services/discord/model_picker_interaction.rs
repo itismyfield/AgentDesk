@@ -74,9 +74,19 @@ async fn persist_model_picker_notice(
         Some(_) => false,
         None => false,
     };
-    Ok(if changed {
+    let saved = next.as_ref().and_then(|model| model.as_deref());
+    let key = channel.get().to_string();
+    let relaunch = shared
+        .settings
+        .read()
+        .await
+        .channel_relaunch_pending
+        .contains(&key);
+    Ok(if changed && relaunch {
+        model_picker_relaunch_notice(saved)
+    } else if changed {
         model_picker_submit_notice(
-            next.as_ref().and_then(|model| model.as_deref()),
+            saved,
             shared.overrides.session_reset_pending.contains(&channel),
         )
     } else {
@@ -94,6 +104,13 @@ fn model_picker_submit_notice(saved_model: Option<&str>, reset_pending: bool) ->
         Some(model) => format!("모델 설정을 `{model}`로 저장했습니다. {session_note}"),
         None => format!("모델 설정을 기본값으로 저장했습니다. {session_note}"),
     }
+}
+
+fn model_picker_relaunch_notice(saved_model: Option<&str>) -> String {
+    let saved = saved_model.map_or("기본값".to_string(), |model| format!("`{model}`"));
+    format!(
+        "모델 설정을 {saved}(으)로 저장했습니다. 다음 새 턴 시작 때 같은 세션으로 TUI를 재기동해 적용합니다(맥락 유지, 수 초). 진행 중인 턴에 합류하는 메시지는 기존 모델로 처리됩니다."
+    )
 }
 
 fn model_picker_no_change_notice() -> String {
