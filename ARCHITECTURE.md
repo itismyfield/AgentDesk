@@ -820,6 +820,7 @@ src/
 │   │   ├── control_tests.rs
 │   │   ├── definition.rs
 │   │   ├── definition_tests.rs
+│   │   ├── effect_envelope.rs
 │   │   ├── evidence.rs
 │   │   ├── evidence_gate.rs
 │   │   ├── evidence_gate_tests.rs
@@ -828,6 +829,9 @@ src/
 │   │   ├── execution_pin_tests.rs
 │   │   ├── failure_budget.rs
 │   │   ├── failure_budget_tests.rs
+│   │   ├── host_gate.rs
+│   │   ├── host_gate_tests.rs
+│   │   ├── host_journal.rs
 │   │   ├── main_integration.rs
 │   │   ├── main_integration_tests.rs
 │   │   ├── mod.rs
@@ -951,7 +955,8 @@ src/
 │   │   │   ├── timeout_draft_tests.rs
 │   │   │   └── user_receipt.rs
 │   │   ├── session/
-│   │   │   └── auto_compact_launch_tests.rs
+│   │   │   ├── auto_compact_launch_tests.rs
+│   │   │   └── fast_launch_tests.rs
 │   │   ├── source_verify/
 │   │   │   └── renumber.rs
 │   │   ├── busy_inject.rs
@@ -1293,7 +1298,12 @@ src/
 │   │   │   │   ├── herdr_report_tests.rs
 │   │   │   │   ├── managed_reset.rs
 │   │   │   │   ├── native.rs
-│   │   │   │   └── provider_reset.rs
+│   │   │   │   ├── provider_reset.rs
+│   │   │   │   ├── relaunch.rs
+│   │   │   │   ├── relaunch_confirm.rs
+│   │   │   │   ├── relaunch_effort_tests.rs
+│   │   │   │   ├── relaunch_model_tests.rs
+│   │   │   │   └── relaunch_tests.rs
 │   │   │   ├── diagnostics/
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── recovery_command_tests.rs

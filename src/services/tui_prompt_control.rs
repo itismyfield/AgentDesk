@@ -9,11 +9,10 @@
 //! injection or execution, and the first marker is always retained.
 
 /// Claude TUI commands that complete locally: AgentDesk pass-throughs plus `/cost` and `/context`.
-pub(crate) const LOCAL_ONLY_SLASH_COMMANDS: [&str; 4] =
-    ["/effort", "/compact", "/cost", "/context"];
+pub(crate) const LOCAL_ONLY_SLASH_COMMANDS: [&str; 3] = ["/compact", "/cost", "/context"];
 
 /// Claude-native controls observed from a TUI that also complete locally.
-pub(crate) const OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS: [&str; 1] = ["/model"];
+pub(crate) const OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS: [&str; 2] = ["/model", "/effort"];
 
 /// #5188: slash controls that RESET the provider session — Claude Code opens a
 /// brand-new transcript JSONL and stops writing to the current one.
