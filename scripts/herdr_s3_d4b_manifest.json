@@ -14,10 +14,9 @@
       "status": "implemented",
       "tests": [
         "services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::ordinary_gateway_writer_starts_detached_and_backend_exit_does_not_join_it",
-        "services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::every_slot_holding_runtime_registers_one_sigterm_handler",
         "services::discord::runtime_bootstrap::gateway_lease_recovery_tests::promotion_cancel_keeps_the_writer_incarnation_pg"
       ],
-      "what": "Ordinary writers retain their detached lifetime; a cancelled promotion leaves the writer running, and each slot-holding runtime keeps its SIGTERM handler.",
+      "what": "Ordinary writers retain their detached lifetime, and a cancelled promotion leaves the writer running.",
       "evidence_scope": "The gateway spawn and backend exit run in process with an isolated runtime root. The writer is hosted while awaiting gateway readiness. Existing managed writer tests independently cover actor and POST settlement. No delegated registry join is claimed."
     }
   ],
