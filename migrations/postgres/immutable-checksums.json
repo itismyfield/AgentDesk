@@ -835,6 +835,11 @@
       "path": "migrations/postgres/0171_headless_outbox_producer_turn_nonce.sql",
       "sha256": "c13dde76452e9b0d4d186cd27968ae7f4450816e51910777ffe1e44bd93994c7",
       "version": 171
+    },
+    {
+      "path": "migrations/postgres/0172_drop_agents_xp.sql",
+      "sha256": "847aab3d0d9d56d8a4e7ae99bfed99c6283daf06d02d81da7e65e5cefdc3f36d",
+      "version": 172
     }
   ],
   "version": 1
