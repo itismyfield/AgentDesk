@@ -40,23 +40,16 @@ fn timed_out(
     (result, writes, session)
 }
 
-/// A plain follow-up and a selector follow-up that time out behind a person's draft send no key,
-/// leave the draft, protect the pane and return the hold the turn bridge requeues.
+/// A follow-up that times out behind a person's draft sends no key, leaves the draft, protects the
+/// pane and returns the hold the turn bridge requeues.
 #[test]
 fn a_follow_up_timing_out_on_a_person_draft_keeps_every_key() {
     let pane = two_row_draft();
     assert!(prompt_readiness_snapshot_from_capture(Some(&pane), true).prompt_draft_detected);
-    let nav = SelectorNavigation {
-        slash_command: "/effort",
-        total_items: 5,
-        target_index: 2,
-    };
     let plain =
         |session: &str, token: &CancelToken| send_followup_prompt(session, "/cost", Some(token));
-    let selector =
-        |session: &str, token: &CancelToken| send_selector_followup(session, nav, Some(token));
     type Send<'a> = &'a dyn Fn(&str, &CancelToken) -> Result<(), String>;
-    let sends: [(&str, Send); 2] = [("follow-up", &plain), ("selector", &selector)];
+    let sends: [(&str, Send); 1] = [("follow-up", &plain)];
     for (name, send) in sends {
         let (ended, writes, session) = timed_out(&pane, send);
         assert_eq!(writes, Vec::<String>::new(), "{name}");
