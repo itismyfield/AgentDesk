@@ -1363,6 +1363,14 @@ enum HeadlessOutbox {
     BoundTurnFrameThenOtherInTail,
     /// This turn's late body, then the next turn's request records in the same consumed frame.
     BoundTurnFrameThenOtherInFrame,
+    /// This turn's body records straddle the next turn's start; its sent row has the whole body.
+    BoundBodySplitAcrossOtherTurnStart,
+    /// The bodiless seed's turn ends where the next turn starts; the watcher bound that next turn,
+    /// whose body follows its start and whose row alone was sent.
+    SeedRefusedBoundOtherTurnSent,
+    /// A later batch: the seed's body ends before the next turn starts, the watcher bound that
+    /// next turn, and only the next turn's row was sent; the seed's turn is chosen first.
+    SeedAndBoundValidOtherTurnSentOnly,
 }
 
 /// The watcher's terminal order: preflight may strip the restored seed before the planner reads it.
@@ -1510,7 +1518,10 @@ async fn headless_restart_frame(
             | O::ClearedRowBothTurnsOtherNewest
     );
     // The next turn's prompt opens the frame and the body after it is that turn's.
-    let other_turn_frame = matches!(outbox, O::BoundOtherTurnFrame | O::SeedThenOtherTurnStart);
+    let other_turn_frame = matches!(
+        outbox,
+        O::BoundOtherTurnFrame | O::SeedThenOtherTurnStart | O::SeedRefusedBoundOtherTurnSent
+    );
     let frame_body = cleared
         || other_turn_frame
         || matches!(
@@ -1521,6 +1532,8 @@ async fn headless_restart_frame(
                 | O::SeedThenOwnNonBodyThenOtherTurn
                 | O::BoundTurnFrameThenOtherInTail
                 | O::BoundTurnFrameThenOtherInFrame
+                | O::BoundBodySplitAcrossOtherTurnStart
+                | O::SeedAndBoundValidOtherTurnSentOnly
         );
     let answer_age = if late { 60 } else { 1 };
     let (answer, seed_body) = match outbox {
@@ -1595,6 +1608,13 @@ async fn headless_restart_frame(
     .map(line)
     .concat();
     let body_record = assistant("answer", text(&body), Some(1));
+    // The body texts the frame's records write, in order.
+    let split_tail = "[E2E:E1:MORE]";
+    let frame_texts = if outbox == O::BoundBodySplitAcrossOtherTurnStart {
+        vec![body.as_str(), split_tail]
+    } else {
+        vec![body.as_str()]
+    };
     let own_tail = line(
         serde_json::json!({"type":"system","subtype":"informational","content":"A tail","timestamp":at(1)}),
     );
@@ -1602,6 +1622,9 @@ async fn headless_restart_frame(
         _ if other_turn_frame => requests.clone() + &body_record,
         O::SeedThenOwnNonBodyThenOtherTurn => own_tail.clone() + &requests + &body_record,
         O::BoundTurnFrameThenOtherInTail => body_record.clone(),
+        O::BoundBodySplitAcrossOtherTurnStart => {
+            body_record.clone() + &requests + &assistant("answer-more", text(split_tail), Some(1))
+        }
         _ if frame_body => body_record.clone() + &requests,
         _ if late => assistant("late", text(&body), Some(1)) + &requests,
         _ => requests.clone(),
@@ -1643,6 +1666,7 @@ async fn headless_restart_frame(
             | O::BoundTurnFrameThenOtherInflight
             | O::BoundTurnFrameThenOtherInTail
             | O::BoundTurnFrameThenOtherInFrame
+            | O::BoundBodySplitAcrossOtherTurnStart
     ))
     .then(|| {
         restored_watcher_turn_from_inflight(&f.row, &session, true)
@@ -1675,16 +1699,21 @@ async fn headless_restart_frame(
         "claude", &session, channel,
     );
     let mut full_response = stream_seed.full_response;
-    if late || frame_body {
+    let frame_texts = if late || frame_body {
+        frame_texts
+    } else {
+        Vec::new()
+    };
+    for text in frame_texts {
         if !full_response.is_empty()
             && crate::services::discord::semantic_boundaries::semantic_chunk_separator_needed(
                 &full_response,
-                &body,
+                text,
             )
         {
             full_response.push_str("\n\n");
         }
-        full_response.push_str(&body);
+        full_response.push_str(text);
     }
     f.row.last_offset = handoff_end + frame.len() as u64;
     let banner = format!("⚙ session restored\n\n{body}");
@@ -1733,7 +1762,13 @@ async fn headless_restart_frame(
         | O::ToolThenTextOneRecord
         | O::BlankThinking => vec![(seed_body.as_str(), own, "headless_turn", "sent", 0)],
         O::StaleSeedAfterDiscard => vec![(body.as_str(), own, "headless_turn", "sent", 59)],
-        O::OtherTurnOnly | O::ClearedRowOtherTurnOnly => {
+        O::BoundBodySplitAcrossOtherTurnStart => {
+            vec![(full_response.as_str(), own, "headless_turn", "sent", 0)]
+        }
+        O::OtherTurnOnly
+        | O::ClearedRowOtherTurnOnly
+        | O::SeedRefusedBoundOtherTurnSent
+        | O::SeedAndBoundValidOtherTurnSentOnly => {
             vec![(body.as_str(), other, "headless_turn", "sent", 0)]
         }
         O::BothTurnsOtherNewest | O::ClearedRowBothTurnsOtherNewest => vec![
@@ -1803,7 +1838,8 @@ async fn headless_restart_frame(
         | O::ClearedRowBothTurnsOtherNewest
         | O::BoundTurnFrameThenOtherInflight
         | O::BoundTurnFrameThenOtherInTail
-        | O::BoundTurnFrameThenOtherInFrame => Vec::new(),
+        | O::BoundTurnFrameThenOtherInFrame
+        | O::SeedRefusedBoundOtherTurnSent => Vec::new(),
         _ => vec![full_response.clone()],
     };
     let expected = if late && expected.len() == 1 {
@@ -1815,7 +1851,10 @@ async fn headless_restart_frame(
     let (polls, before) = if cleared
         || matches!(
             outbox,
-            O::SeedThenOtherTurnStart | O::SeedThenOwnNonBodyThenOtherTurn
+            O::SeedThenOtherTurnStart
+                | O::SeedThenOwnNonBodyThenOtherTurn
+                | O::SeedRefusedBoundOtherTurnSent
+                | O::SeedAndBoundValidOtherTurnSentOnly
         ) {
         (vec![None, Some(successor.clone())], Some(successor))
     } else if matches!(
@@ -1824,6 +1863,7 @@ async fn headless_restart_frame(
             | O::BoundTurnFrameThenOtherInflight
             | O::BoundTurnFrameThenOtherInTail
             | O::BoundTurnFrameThenOtherInFrame
+            | O::BoundBodySplitAcrossOtherTurnStart
     ) {
         (vec![Some(f.row.clone())], Some(successor))
     } else if matches!(
@@ -1844,7 +1884,12 @@ async fn headless_restart_frame(
         before,
         EvidenceFrame {
             turn_start: handoff_end,
-            batch_start: handoff_end,
+            // A later batch starts after the frame, so the watcher bound the turn started inside it.
+            batch_start: if outbox == O::SeedAndBoundValidOtherTurnSentOnly {
+                handoff_end + frame.len() as u64
+            } else {
+                handoff_end
+            },
             tail: next,
             seed,
             body: Some(full_response),
@@ -1967,6 +2012,9 @@ async fn stale_turn_nonce_never_covers_the_next_turns_frame_pg() {
         O::SeedThenOwnNonBodyThenOtherTurn,
         O::BoundTurnFrameThenOtherInTail,
         O::BoundTurnFrameThenOtherInFrame,
+        O::BoundBodySplitAcrossOtherTurnStart,
+        O::SeedRefusedBoundOtherTurnSent,
+        O::SeedAndBoundValidOtherTurnSentOnly,
     ]
     .into_iter()
     .enumerate()
