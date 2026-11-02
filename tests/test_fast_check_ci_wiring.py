@@ -844,7 +844,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 job = job_block(nightly, job_name)
                 # Lib tests run through the audited native path; the other targets run whole.
                 self.assertIn("pg-classifier", job)
-                self.assertIn("cargo test --bins --examples --benches --test '*' -- --skip _pg --skip pg_ --skip postgres", job)
+                self.assertIn("cargo test --bins --examples --test '*' -- --skip _pg --skip pg_ --skip postgres", job)
         self.assertIn("cargo test --test e2e -- --test-threads=1", job_block(nightly, "postgres_full"))
 
     def test_native_nightly_runs_both_phases_with_separate_time_budgets(self) -> None:

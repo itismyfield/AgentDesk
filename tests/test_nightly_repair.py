@@ -15,7 +15,7 @@ DEBUG_JOBS = ("full_macos", "full_windows", "rust_build", "postgres_full",
 DEBUG_KEYS = ("CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG")
 PG_STEP = "cargo test (e2e smoke against PostgreSQL)"
 PG_CARGO = "cargo test --test e2e -- --test-threads=1"
-NON_PG_CARGO = "cargo test --bins --examples --benches --test '*' -- --skip _pg --skip pg_ --skip postgres"
+NON_PG_CARGO = "cargo test --bins --examples --test '*' -- --skip _pg --skip pg_ --skip postgres"
 NATIVE_LIB_STEPS = (("Build and plan non-PG lib tests", "prepare"),
                     ("Run and audit non-PG lib tests", "run"))
 
