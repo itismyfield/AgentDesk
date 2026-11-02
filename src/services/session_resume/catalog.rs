@@ -12,7 +12,6 @@ use crate::services::claude_tui::transcript_tail::{
 
 const WINDOW: usize = 64 * 1024;
 const CACHE_TTL: Duration = Duration::from_secs(10);
-const DISCOVERY_BUDGET: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Default)]
 struct Preview {
@@ -40,6 +39,34 @@ pub(crate) async fn scope_claude_home_for_tests<F: std::future::Future>(
     TEST_HOME.scope(home, future).await
 }
 
+#[cfg(test)]
+static PREVIEW_DELAYS: OnceLock<Mutex<HashMap<PathBuf, Duration>>> = OnceLock::new();
+
+#[cfg(test)]
+pub(crate) struct PreviewDelay(PathBuf);
+
+#[cfg(test)]
+impl Drop for PreviewDelay {
+    fn drop(&mut self) {
+        PREVIEW_DELAYS
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .remove(&self.0);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn delay_previews_for_tests(root: PathBuf, delay: Duration) -> PreviewDelay {
+    PREVIEW_DELAYS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap()
+        .insert(root.clone(), delay);
+    PreviewDelay(root)
+}
+
 pub(crate) fn claude_home() -> Option<PathBuf> {
     #[cfg(test)]
     if let Ok(home) = TEST_HOME.try_with(Clone::clone) {
@@ -49,28 +76,43 @@ pub(crate) fn claude_home() -> Option<PathBuf> {
 }
 
 pub(super) fn scoped_worktrees(current_cwd: &str) -> Vec<PathBuf> {
+    scoped_worktree_iter(current_cwd, None).collect()
+}
+
+fn scoped_worktree_iter(
+    current_cwd: &str,
+    deadline: Option<Instant>,
+) -> impl Iterator<Item = PathBuf> + '_ {
     let current = Path::new(current_cwd);
-    let mut worktrees = vec![current.to_path_buf()];
-    if let (Some(parent), Some(name)) = (
-        current.parent(),
-        current.file_name().and_then(|n| n.to_str()),
-    ) && let Ok(entries) = fs::read_dir(parent)
-    {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path != current
-                && path.is_dir()
-                && path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(worktree_lineage_stem)
-                    == Some(worktree_lineage_stem(name))
-            {
-                worktrees.push(path);
-            }
-        }
-    }
-    worktrees
+    let entries = std::iter::once(current.parent())
+        .filter_map(|parent| fs::read_dir(parent?).ok())
+        .flatten();
+    std::iter::once(current.to_path_buf())
+        .chain(scoped_worktree_entries(current, entries, deadline))
+}
+
+// Check raw entries before filtering can consume them without yielding a candidate.
+fn before_deadline<T>(
+    entries: impl Iterator<Item = T>,
+    deadline: Option<Instant>,
+) -> impl Iterator<Item = T> {
+    entries.take_while(move |_| deadline.is_none_or(|end| Instant::now() < end))
+}
+
+fn scoped_worktree_entries<'a>(
+    current: &'a Path,
+    entries: impl Iterator<Item = std::io::Result<fs::DirEntry>> + 'a,
+    deadline: Option<Instant>,
+) -> impl Iterator<Item = PathBuf> + 'a {
+    before_deadline(entries, deadline).filter_map(move |entry| {
+        let path = entry.ok()?.path();
+        let current_name = current.file_name()?.to_str()?;
+        let name = path.file_name()?.to_str()?;
+        (path != current
+            && worktree_lineage_stem(name) == worktree_lineage_stem(current_name)
+            && path.is_dir())
+        .then_some(path)
+    })
 }
 
 pub(super) fn resolve_cwd(
@@ -169,10 +211,16 @@ pub(crate) fn choices(
     live_bound: &HashSet<String>,
     home: Option<&Path>,
     partial: &str,
+    deadline: Instant,
 ) -> Vec<ResumeChoice> {
-    let deadline = Instant::now() + DISCOVERY_BUDGET;
+    // Reserve preview time even when directory discovery consumes its share of the budget.
+    let discovery_deadline =
+        Instant::now() + deadline.saturating_duration_since(Instant::now()) / 3;
     let mut files = Vec::new();
-    for worktree in scoped_worktrees(cwd) {
+    'worktrees: for worktree in scoped_worktree_iter(cwd, Some(discovery_deadline)) {
+        if Instant::now() >= discovery_deadline {
+            break;
+        }
         let Ok(projects) = claude_project_dir_candidates_for_cwd(&worktree, home) else {
             continue;
         };
@@ -180,9 +228,9 @@ pub(crate) fn choices(
             let Ok(entries) = fs::read_dir(project) else {
                 continue;
             };
-            for entry in entries.flatten() {
-                if Instant::now() >= deadline {
-                    break;
+            for entry in before_deadline(entries, Some(discovery_deadline)).flatten() {
+                if Instant::now() >= discovery_deadline {
+                    break 'worktrees;
                 }
                 let path = entry.path();
                 let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
@@ -219,7 +267,7 @@ pub(crate) fn choices(
     let partial = partial.to_lowercase();
     let mut result = Vec::new();
     for (modified, path, len, candidate) in files {
-        if result.len() == 25 || Instant::now() >= deadline {
+        if Instant::now() >= deadline {
             break;
         }
         if !seen.insert(candidate.session_id.clone()) {
@@ -267,6 +315,17 @@ pub(crate) fn choices(
 }
 
 fn preview(path: &Path, modified: SystemTime, len: u64) -> Preview {
+    #[cfg(test)]
+    if let Some(delays) = PREVIEW_DELAYS.get() {
+        let delay = delays
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|(root, delay)| path.starts_with(root).then_some(*delay));
+        if let Some(delay) = delay {
+            std::thread::sleep(delay);
+        }
+    }
     let cache = PREVIEWS.get_or_init(Mutex::default);
     if let Ok(guard) = cache.lock()
         && let Some(cached) = guard.get(path)

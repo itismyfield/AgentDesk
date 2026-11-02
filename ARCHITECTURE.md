@@ -820,6 +820,7 @@ src/
 │   │   ├── control_tests.rs
 │   │   ├── definition.rs
 │   │   ├── definition_tests.rs
+│   │   ├── effect_envelope.rs
 │   │   ├── evidence.rs
 │   │   ├── evidence_gate.rs
 │   │   ├── evidence_gate_tests.rs
@@ -828,6 +829,9 @@ src/
 │   │   ├── execution_pin_tests.rs
 │   │   ├── failure_budget.rs
 │   │   ├── failure_budget_tests.rs
+│   │   ├── host_gate.rs
+│   │   ├── host_gate_tests.rs
+│   │   ├── host_journal.rs
 │   │   ├── main_integration.rs
 │   │   ├── main_integration_tests.rs
 │   │   ├── mod.rs
@@ -951,7 +955,8 @@ src/
 │   │   │   ├── timeout_draft_tests.rs
 │   │   │   └── user_receipt.rs
 │   │   ├── session/
-│   │   │   └── auto_compact_launch_tests.rs
+│   │   │   ├── auto_compact_launch_tests.rs
+│   │   │   └── fast_launch_tests.rs
 │   │   ├── source_verify/
 │   │   │   └── renumber.rs
 │   │   ├── busy_inject.rs
@@ -1293,7 +1298,12 @@ src/
 │   │   │   │   ├── herdr_report_tests.rs
 │   │   │   │   ├── managed_reset.rs
 │   │   │   │   ├── native.rs
-│   │   │   │   └── provider_reset.rs
+│   │   │   │   ├── provider_reset.rs
+│   │   │   │   ├── relaunch.rs
+│   │   │   │   ├── relaunch_confirm.rs
+│   │   │   │   ├── relaunch_effort_tests.rs
+│   │   │   │   ├── relaunch_model_tests.rs
+│   │   │   │   └── relaunch_tests.rs
 │   │   │   ├── diagnostics/
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── recovery_command_tests.rs
@@ -1326,6 +1336,7 @@ src/
 │   │   │   │   ├── clear_http_overlap_tests.rs
 │   │   │   │   ├── clear_refusal_reply_tests.rs
 │   │   │   │   └── native_stop.rs
+│   │   │   ├── autocomplete.rs
 │   │   │   ├── cancel_backstop_tests.rs
 │   │   │   ├── command_policy.rs
 │   │   │   ├── config.rs
@@ -2125,6 +2136,7 @@ src/
 │   │   │   │   │   ├── owner_input_codex_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_tests.rs
 │   │   │   │   │   ├── owner_input_not_sent_tests.rs
+│   │   │   │   │   ├── owner_input_rollback_tests.rs
 │   │   │   │   │   ├── owner_input_tests.rs
 │   │   │   │   │   ├── owner_provenance_tests.rs
 │   │   │   │   │   ├── producer_error_test_support.rs
@@ -2202,6 +2214,9 @@ src/
 │   │   │   ├── thread_binding.rs
 │   │   │   └── turn_start.rs
 │   │   ├── runtime_bootstrap/
+│   │   │   ├── gateway_runtime/
+│   │   │   │   ├── command_guard.rs
+│   │   │   │   └── slash_command_tests.rs
 │   │   │   ├── intake_delivery_sweep/
 │   │   │   │   └── tests.rs
 │   │   │   ├── o_writer_host/
@@ -3624,8 +3639,6 @@ src/
 │   │   │   ├── policy_tests.rs
 │   │   │   ├── root_replaced.rs
 │   │   │   └── root_replaced_tests.rs
-│   │   ├── herdr_host_tests/
-│   │   │   └── teardown_census_tests.rs
 │   │   ├── consumer_guard.rs
 │   │   ├── herdr_gate.rs
 │   │   ├── herdr_gate_tests.rs

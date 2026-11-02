@@ -1682,6 +1682,74 @@ _release_runtime_is_serving() {
     [ "$rc" != "7" ]
 }
 
+# Prints absent, booting or up. A booting runtime has bound its port but has not
+# registered a provider yet, so its restart-marker poller cannot acknowledge.
+_release_runtime_boot_state() {
+    local port="$1" body="" rc=0 reasons
+    body=$(curl -s --max-time 3 \
+        "http://${ADK_DEFAULT_LOOPBACK}:${port}/api/health" 2>/dev/null) || rc=$?
+    if [ "$rc" = "7" ]; then
+        printf 'absent\n'
+        return 0
+    fi
+    if [ -z "$body" ] || [ -z "$(_health_json_status "$body" || true)" ]; then
+        printf 'booting\n'
+        return 0
+    fi
+    reasons=$(_health_json_reasons "$body" || true)
+    case ",${reasons}," in
+        *,no_providers_registered,*)
+            # A leader-only node stays provider-less once its startup doctor skips.
+            if ! _health_json_unhealthy_only_no_provider_runtimes "$body"; then
+                printf 'booting\n'
+                return 0
+            fi
+            ;;
+    esac
+    printf 'up\n'
+}
+
+# Waits at most max_wait seconds for the runtime to finish booting. Returns 0
+# when up, 2 when no runtime is running, 1 when it is still booting at the deadline.
+wait_for_release_runtime_boot() {
+    local scope="$1" port="$2" label="$3" max_wait="$4"
+    local started="$SECONDS" state="" announced=0
+    case "$max_wait" in
+        ''|*[!0-9]*)
+            echo "✗ [gate] ${scope} invalid runtime boot wait: ${max_wait}" >&2
+            return 1
+            ;;
+    esac
+    if [ -z "$port" ]; then
+        echo "✗ [gate] ${scope} runtime boot wait needs the release port" >&2
+        return 1
+    fi
+    while :; do
+        state=$(_release_runtime_boot_state "$port")
+        if [ "$state" = "up" ]; then
+            [ "$announced" = 0 ] \
+                || echo "▸ [gate] ${scope} runtime on :${port} finished booting after $((SECONDS - started))s"
+            return 0
+        fi
+        if [ "$state" = "absent" ] && [ "$(_launchd_job_state "$label")" = "not running" ]; then
+            echo "▸ [gate] ${scope} runtime is not running on :${port}; nothing is booting"
+            return 2
+        fi
+        [ $((SECONDS - started)) -lt "$max_wait" ] || break
+        if [ "$announced" = 0 ]; then
+            echo "▸ [gate] ${scope} runtime on :${port} is ${state}; waiting up to ${max_wait}s before requesting a restart"
+            announced=1
+        fi
+        sleep 1
+    done
+    if [ "$state" = "absent" ]; then
+        echo "⚠ [gate] ${scope} runtime never bound :${port} within ${max_wait}s; proceeding as a stopped runtime" >&2
+        return 2
+    fi
+    echo "✗ [gate] ${scope} runtime on :${port} was still booting after ${max_wait}s; no restart was requested" >&2
+    return 1
+}
+
 wait_for_restart_persistence_or_fail() {
   local scope="$1"
   local runtime_root="$2"

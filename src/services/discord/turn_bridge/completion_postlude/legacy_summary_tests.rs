@@ -141,6 +141,7 @@ async fn bridge(
         accumulated_output_tokens: 10,
         accumulated_memory_input_tokens: 0,
         accumulated_memory_output_tokens: 0,
+        input_not_submitted: false,
         transport_error: false,
         provider_failure: case.outcome == Outcome::Failed,
         api_friction_reports: Vec::new(),

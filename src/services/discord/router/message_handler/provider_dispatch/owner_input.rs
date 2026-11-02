@@ -232,6 +232,7 @@ pub(in crate::services::discord) async fn hand_busy(
             channel_id: channel,
             model: None,
             native_fast_mode: None,
+            effort: None,
             codex_goals: None,
             compact_percent: None,
             compact_lower_bound_tokens: 0,
@@ -260,6 +261,11 @@ pub(in crate::services::discord) struct OwnerTurn {
 impl OwnerTurn {
     pub(in crate::services::discord) fn front(&self) -> &Front {
         self.claim.front()
+    }
+
+    /// No effect began: leave the original at the owner's front until another real wake.
+    pub(in crate::services::discord) fn defer_before_submit(self, reason: &str) {
+        let _ = self.settled.send(Err(effect::unsent(reason.into())));
     }
 }
 
