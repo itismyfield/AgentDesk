@@ -539,7 +539,7 @@ fn p2_cap_rejects_partial_nonuser_over_sixteen_mib_through_reader() {
     let session = "p2-cap";
     binding(session, &path);
     let token = Arc::new(CancelToken::new());
-    let tmux = ScriptedTmux::new(&view("", false));
+    let _tmux = ScriptedTmux::new(&view("", false));
     let _spy = ready();
     fresh(session, &path, "own", &token).unwrap();
     // The observation entry is the real reader, not a direct receipt helper.
