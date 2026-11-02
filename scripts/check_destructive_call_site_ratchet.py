@@ -164,8 +164,9 @@ REGISTRY_REMOVE_COMMENT = (
     "is classified as direct channel remove, not remove_tmux_session_locked."
 )
 HOST_TERMINATE_COMMENT = (
-    "Herdr close RPC spellings (pane.close, server.stop, their method names and "
-    "aliases). Only src/services/termination_audit/host_terminate.rs uses this "
+    "Herdr close RPC spellings (pane.close, server.stop, workspace.close, tab.close, "
+    "group.close, worktree_group.close, their method names and aliases). Only "
+    "src/services/termination_audit/host_terminate.rs uses this "
     "baseline map; its growth needs a reviewed diff here. Fixed declaration "
     "sites use checker constants, and every other site fails regardless of this map."
 )
