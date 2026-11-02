@@ -360,7 +360,8 @@ fn c2_c3_c4_actual_restart_rechecks_only_persisted_proof_pg() {
         rewrite_raw(&state, &encoded);
         cases.push((state, *change));
     }
-    runtime().block_on(Box::pin(async {
+    let rt = runtime();
+    let recovered_app = rt.block_on(Box::pin(async {
         let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         let mut shared = shared_on(&pool).await;
@@ -414,12 +415,13 @@ fn c2_c3_c4_actual_restart_rechecks_only_persisted_proof_pg() {
                 );
             }
         }
-        for handle in shared.tmux_watchers.iter() {
-            handle
-                .cancel
-                .store(true, std::sync::atomic::Ordering::Release);
-        }
         pool.close().await;
         db.drop().await;
+        Arc::downgrade(&shared)
     }));
+    drop(rt);
+    assert!(
+        recovered_app.upgrade().is_none(),
+        "the test runtime owns and releases its recovered watcher tasks"
+    );
 }
