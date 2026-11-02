@@ -592,6 +592,24 @@ pub(super) fn refresh_watcher_turn_identity(
     }
 }
 
+/// Where the stored row's turn starts when it is another turn than `nonce` on this session: from
+/// that offset the transcript is the other turn's, so `nonce` cannot speak for it.
+pub(super) fn other_turn_start(
+    inflight: Option<&crate::services::discord::inflight::InflightTurnState>,
+    tmux_session_name: &str,
+    nonce: &str,
+) -> Option<u64> {
+    inflight
+        .filter(|state| {
+            state.tmux_session_name.as_deref().map(str::trim) == Some(tmux_session_name.trim())
+                && state
+                    .turn_nonce
+                    .as_deref()
+                    .is_some_and(|row| !row.is_empty() && row != nonce)
+        })
+        .map(|state| state.turn_start_offset.unwrap_or(state.last_offset))
+}
+
 #[cfg(test)]
 #[path = "turn_identity_tests.rs"]
 mod pane_dead_identity_tests;

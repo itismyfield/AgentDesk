@@ -548,8 +548,7 @@ fn tmux_relay_adoption_json(
 /// observed (the provider session id when the hook reported one, else the tmux
 /// session name passed via the query string), so we probe both candidate keys —
 /// provider session id first, then tmux name — and return the first retained
-/// unclaimed Stop. Platform-independent (no tmux capture). `None` when no key
-/// can be formed or no Stop is retained.
+/// unclaimed Stop. Platform-independent (no tmux capture). `None` when none is retained.
 fn hook_unclaimed_stop_json(
     provider: Option<&str>,
     tmux_name: Option<&str>,

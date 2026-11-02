@@ -1,5 +1,3 @@
-//! Resolve KV/YAML/default settings and preserve provenance for env-only boolean flags.
-
 use std::collections::HashMap;
 
 use serde::Serialize;

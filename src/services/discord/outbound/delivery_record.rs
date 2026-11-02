@@ -261,8 +261,8 @@ fn delete_record_at(path: &Path) -> bool {
     fs::remove_file(path).is_ok()
 }
 
-/// Path-based core (testable): write the frontier. `Err` only when the durable
-/// write itself failed. Caller invokes this ONLY for a confirmed `Delivered` (I2).
+/// Path-based core (testable): write the frontier. `Err` only when the durable write
+/// itself failed. Caller invokes this ONLY for a confirmed `Delivered` (I2).
 #[cfg(test)]
 fn record_delivered_frontier_shadow_at(
     path: &Path,
@@ -376,8 +376,7 @@ fn persist_confirmed_frontier_and_receipt(
 
 /// Integration wrapper for owner `Delivered` arms. A confirmed outcome always
 /// persists the frontier, and atomically appends an exact receipt when the
-/// delivery-channel inflight still exposes a complete turn identity. The
-/// rollout flag controls only post-write divergence telemetry. Non-`Delivered`
+/// delivery-channel inflight still exposes a complete turn identity. Non-`Delivered`
 /// outcomes never write delivery authority (I2).
 ///
 /// #3610 (Phase B PR-1): `terminal_anchor_msg_id` is the durable TERMINAL ANCHOR

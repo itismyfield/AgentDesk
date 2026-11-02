@@ -123,8 +123,8 @@ conditionally selects these live specifications:
 
 | Scenario | Operational check and selection | Source function |
 | --- | --- | --- |
-| `E-1` | Headless relay round-trip on the configured relay cell (default `claude-tui`). | `_post_deploy_smoke_check_relay_round_trip`, `--filter E-1` |
-| `E-35` | Normal Discord short turn with exact durable receipt and covering frontier on the resolved relay cell. | `_post_deploy_smoke_check_durable_record`, `--filter E-35` |
+| `E-1` | Headless relay round-trip on the configured relay cell (default `claude-tui`); not applicable when Herdr owns that channel. | `_post_deploy_smoke_check_relay_round_trip`, `--filter E-1` |
+| `E-35` | Normal Discord short turn with exact durable receipt and covering frontier on the resolved relay cell; not applicable when Herdr owns that channel. | `_post_deploy_smoke_check_durable_record`, `--filter E-35` |
 | `E-50` | Consecutive Claude turns, `!clear`, then a new-session turn; selected only for a `claude-*` relay cell. | `_post_deploy_smoke_check_turn_scenarios`, `_post_deploy_smoke_run_turn_scenario E-50` |
 | `E-51` | Consecutive Codex turns, `!clear`, then a new-session turn; configured Codex cell defaults to `codex-tui`. | `_post_deploy_smoke_check_turn_scenarios`, `_post_deploy_smoke_run_turn_scenario E-51` |
 
@@ -138,6 +138,15 @@ disabled gateway, missing channels and unproven/busy target state.
 `_post_deploy_smoke_check_turn_scenarios`'s `E-1 resolved no relay channel` check
 make `E-35/E-50/E-51` depend on the relay channel resolved during `E-1`.
 `_post_deploy_smoke_run_turn_scenario` performs a fresh `post_deploy_turn_smoke.py preflight`.
+Before the first scenario message the smoke records the relay cell's session host
+(`relay cell=… path=herdr|tui`, from `session_hosts.herdr.channels`) and waits, at most
+`AGENTDESK_POST_DEPLOY_SMOKE_GATEWAY_READY_S` seconds, until `/api/health/detail` shows a
+recovered, connected gateway and a Discord read of the channel answers; not ready by then is
+one FAIL and no scenario runs. On a Herdr-owned relay channel `E-1` (headless `turn/start`
+is refused there by design) and `E-35` (Herdr has no durable receipt/frontier proof) are each
+reported once as not applicable. `E-50`/`E-51` pass only when every marker body arrived
+exactly once; a visible `!clear` refusal is a FAIL that quotes the reply. Each verdict line
+carries `path=` and the per-step durations.
 These conditions mean a successful deployment does not imply that any particular live scenario ran.
 Before E-1, `cell-reset` acquires each configured legacy TUI E2E cell's existing driver lease and always inspects the turn lease; only for residue performs CAS release and `!clear`, preserving idle cells without residue (inflight without a lease needs only `!clear`).
 A foreign driver lease skips that cell; reset failure blocks only that cell's scenarios and is reported without stopping the other cells.
@@ -145,7 +154,7 @@ A foreign driver lease skips that cell; reset failure blocks only that cell's sc
 The `smoke-disposition region` is fail-open after a healthy deploy;
 `_run_post_deploy_functional_smoke` results need their own evidence.
 [`post_deploy_turn_smoke.py`](../../../../scripts/e2e/post_deploy_turn_smoke.py)'s
-`main` registers `cell-guard`, `cell-reset`, `reset-status`, `preflight` and `judge`,
+`main` registers `cell-guard`, `cell-reset`, `cell-path`, `gateway-ready`, `reset-status`, `preflight` and `judge`,
 while the deploy script invokes the scenario runner. The judge evaluates its report
 and run-scoped dcserver log excerpt; it is not an additional live execution lane.
 

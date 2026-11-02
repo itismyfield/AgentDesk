@@ -2,8 +2,7 @@
 
 use super::*;
 
-/// The durable frontier is the only dedup authority and there is no rollout
-/// switch left; the block keeps its shape for existing dashboards and scripts.
+/// No rollout switch remains; the block keeps its shape for existing dashboards and scripts.
 pub(in crate::services::discord::outbound) fn delivery_record_rollout_health_json()
 -> serde_json::Value {
     serde_json::json!({

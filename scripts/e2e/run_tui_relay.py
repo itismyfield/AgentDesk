@@ -148,6 +148,7 @@ REPORT_RECORD_KEYS: tuple[str, ...] = (
     "direct_input_prompts",
     "concurrent_prompt_batches",
     "wait_timeouts",
+    "step_timings",
     "provider_hold_prompts",
     "provider_hold_states",
     "cancel_turns",
@@ -2611,7 +2612,33 @@ def _mailbox_idle_evidence(mailbox: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# SnapshotV2 in src/services/turn_orchestrator/queued_head/v2_types.rs. Items, head_injection,
+# retained_inputs and any admission bind not yet settled wait for delivery; the rest is settled history.
+QUEUE_V2_KEYS = frozenset({
+    "version", "items", "head_injection", "retained_inputs", "terminal_identities", "namespace",
+    "admission_receipts", "admission_sequence", "admission_binds",
+})
+
+
+def _queue_v2_waiting(payload: Any) -> bool | None:
+    """Whether a V2 queue snapshot holds a waiting input; None when the payload is not one."""
+    if (not isinstance(payload, dict) or type(payload.get("version")) is not int or payload["version"] != 2
+            or not set(payload) <= QUEUE_V2_KEYS
+            or not isinstance(payload.get("items"), list) or not isinstance(payload.get("retained_inputs"), list)
+            or not isinstance(payload.get("terminal_identities"), list)
+            or "head_injection" not in payload or not isinstance(payload["head_injection"], (dict, type(None)))):
+        return None
+    binds = payload.get("admission_binds", [])
+    if not isinstance(binds, list) or not all(isinstance(b, dict) and isinstance(b.get("at"), dict) for b in binds):
+        return None
+    return bool(payload["items"] or payload["retained_inputs"] or payload["head_injection"] is not None
+                or any(b["at"].get("kind") != "settled" for b in binds))
+
+
 def _runtime_payload_has_entries(payload: Any) -> bool:
+    waiting = _queue_v2_waiting(payload)
+    if waiting is not None:
+        return waiting
     if payload in (None, False, "", [], {}):
         return False
     if isinstance(payload, list):
@@ -3500,9 +3527,38 @@ def run_scenario(
             result["reason"] = str(phase_error) + (f"; prior: {prior_reason}" if prior_reason else "")
             result["failure_attribution"] = _failure_attribution("harness", result["reason"], record=partial)
             result["completed_at"] = dt.datetime.now().isoformat(timespec="seconds")
+            _finish_step_timings(result)
 
     result["completed_at"] = dt.datetime.now().isoformat(timespec="seconds")
+    _finish_step_timings(result)
     return feature_accounting.annotate(result)
+
+
+def _note_step_start(record: dict[str, Any], step: str) -> None:
+    record.setdefault("step_timings", []).append({"step": str(step), "at": time.monotonic()})
+
+
+def _finish_step_timings(result: dict[str, Any]) -> None:
+    """Turn step start times into offsets and durations; the last step runs until the scenario ends."""
+    rows = result.get("step_timings")
+    if not isinstance(rows, list) or not rows or "at" not in rows[0]:
+        return
+    ends = [row["at"] for row in rows[1:]] + [time.monotonic()]
+    result["step_timings"] = [
+        {"step": row["step"], "started_s": round(row["at"] - rows[0]["at"], 1),
+         "duration_s": round(end - row["at"], 1)}
+        for row, end in zip(rows, ends)
+    ]
+
+
+def format_step_timings(rows: Any) -> str:
+    """One line of `step duration` pairs; the last pair is the step the scenario ended in."""
+    if not isinstance(rows, list) or not rows:
+        return "unrecorded"
+    try:
+        return ", ".join(f"{row['step']} {float(row['duration_s']):.1f}s" for row in rows)
+    except (KeyError, TypeError, ValueError):
+        return "unreadable"
 
 
 def post_send_sleep(step):
@@ -3748,6 +3804,7 @@ def run_one_cell(
     for step in ([] if e36 is not None else scenario.get("steps") or []):
         if not isinstance(step, dict):
             continue
+        _note_step_start(record, next(iter(step), "?"))
         controlled_evidence = _controlled_harness_step_evidence(step)
         if controlled_evidence:
             record.setdefault("controlled_harness_evidence", []).append(
@@ -4276,6 +4333,8 @@ def run_one_cell(
                                   record=record, window=window, refresh=_ingest_snapshot)
         else:
             raise assertions.AssertionError(f"unknown step shape: {step!r}")
+    if record.get("step_timings"):
+        _note_step_start(record, "final_checks")
 
     final_refetches = int(getattr(args, "final_refetches", 2))
     final_refetch_interval_s = float(getattr(args, "final_refetch_interval_s", 1.0))
@@ -5203,6 +5262,8 @@ def main() -> int:
                     deferred_failure = result
                     break
                 print(f"[e2e]   → {result['status']} {result.get('reason') or ''}")
+                if result.get("step_timings"):
+                    print(f"[e2e]   steps: {format_step_timings(result['step_timings'])}")
                 active_scenario, partial_result_sink = None, {}
     except PhaseDeadlineExpired as error:
         partial = partial_result_sink.get("result")
