@@ -233,7 +233,6 @@ HOST_TERMINATE_DECLARED_SITES = {
     "src/services/session_host/herdr/model.rs": 2,
     "src/services/session_host/herdr_gate.rs": 3,
     "src/services/session_host/herdr_gate_tests.rs": 5,
-    "src/services/session_host/herdr_host_tests.rs": 5,
 }
 HOST_TERMINATE_LITERAL_PATTERN = re.compile(
     r"(?i)\bpane\s*\.\s*close\b|\bserver\s*\.\s*stop\b"

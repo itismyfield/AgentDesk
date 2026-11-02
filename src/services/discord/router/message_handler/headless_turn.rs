@@ -977,6 +977,8 @@ async fn start_reserved_headless_turn_admitted(
         super::super::super::commands::channel_codex_goals_setting(shared, fast_mode_channel_id)
             .await,
     );
+    let effort_for_turn =
+        super::super::super::commands::channel_effort_level(shared, &provider, channel_id).await;
     let ctx_thresholds =
         super::super::super::adk_session::fetch_context_thresholds(shared.pg_pool.as_ref()).await;
     let compact_percent = ctx_thresholds.compact_pct_for(&provider);
@@ -1055,6 +1057,7 @@ async fn start_reserved_headless_turn_admitted(
                                 channel_id: channel_id.get(),
                                 model: model_for_turn.as_deref(),
                                 native_fast_mode: native_fast_mode_override,
+                                effort: effort_for_turn.as_deref(),
                                 codex_goals: codex_goals_override,
                                 compact_percent: compact_percent_for_claude,
                                 compact_lower_bound_tokens,

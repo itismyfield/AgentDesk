@@ -2612,7 +2612,33 @@ def _mailbox_idle_evidence(mailbox: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# SnapshotV2 in src/services/turn_orchestrator/queued_head/v2_types.rs. Items, head_injection,
+# retained_inputs and any admission bind not yet settled wait for delivery; the rest is settled history.
+QUEUE_V2_KEYS = frozenset({
+    "version", "items", "head_injection", "retained_inputs", "terminal_identities", "namespace",
+    "admission_receipts", "admission_sequence", "admission_binds",
+})
+
+
+def _queue_v2_waiting(payload: Any) -> bool | None:
+    """Whether a V2 queue snapshot holds a waiting input; None when the payload is not one."""
+    if (not isinstance(payload, dict) or type(payload.get("version")) is not int or payload["version"] != 2
+            or not set(payload) <= QUEUE_V2_KEYS
+            or not isinstance(payload.get("items"), list) or not isinstance(payload.get("retained_inputs"), list)
+            or not isinstance(payload.get("terminal_identities"), list)
+            or "head_injection" not in payload or not isinstance(payload["head_injection"], (dict, type(None)))):
+        return None
+    binds = payload.get("admission_binds", [])
+    if not isinstance(binds, list) or not all(isinstance(b, dict) and isinstance(b.get("at"), dict) for b in binds):
+        return None
+    return bool(payload["items"] or payload["retained_inputs"] or payload["head_injection"] is not None
+                or any(b["at"].get("kind") != "settled" for b in binds))
+
+
 def _runtime_payload_has_entries(payload: Any) -> bool:
+    waiting = _queue_v2_waiting(payload)
+    if waiting is not None:
+        return waiting
     if payload in (None, False, "", [], {}):
         return False
     if isinstance(payload, list):
