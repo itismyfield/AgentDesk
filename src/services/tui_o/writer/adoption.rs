@@ -46,7 +46,7 @@ pub trait LegacyView: Send + Sync + 'static {
     fn late_cursor(&self, _tmux: &str) -> Result<LegacyCursor, String> {
         Err("host has no nonblocking late source lookup".into())
     }
-    /// Legacy's delivered frontier within `eof`; `None` while its delivery record is not authority.
+    /// Legacy's delivered frontier within `eof`; `None` from a host that keeps no delivery record.
     fn frontier(&self, channel: u64, tmux: &str, eof: u64) -> Option<u64>;
     fn tail_running(&self, tmux: &str) -> bool;
     /// What restarts Legacy's own redrive cycle for the channel; unchanged when nothing can say.

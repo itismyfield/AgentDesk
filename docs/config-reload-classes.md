@@ -112,7 +112,6 @@ seconds with content comparison, independently of native filesystem notification
 | `cluster.intake_routing.input_fallback_pair_instance_ids` | live | `src/services/cluster/input_fallback_config.rs` current (config::snapshot per input) |
 | `cluster.semaphores.*.capacity` | live | `src/server/task_dispatch_claims/config_read.rs` claim_task_dispatches (config::snapshot per claim) |
 | `cluster.semaphores.*.scope` | live | `src/server/task_dispatch_claims/config_read.rs` claim_task_dispatches (config::snapshot per claim) |
-| `cluster.session_bound_relay_enabled` | restart | `src/server/worker_registry/registry.rs` start_worker (WatcherSupervisor spawn gate) |
 | `kanban.manager_channel_id` | restart | `src/services/kanban_cards.rs` require_explicit_bearer_token, `src/server/routes/kanban.rs` log_kanban_identity_consumption, `src/services/auto_queue/order_routes.rs` submit_order_with_pg (live runtime_config()); `src/services/auto_queue/control_routes.rs` repair_phase_gates (boot AppState.config authorization) |
 | `kanban.deadlock_manager_channel_id` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (applied by db/postgres/shared_config.rs:startup_reseed) -> kv deadlock_manager_channel_id |
 | `kanban.relay_alert_threshold` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (applied by db/postgres/shared_config.rs:startup_reseed) -> kv kanban_relay_alert_threshold |
@@ -146,8 +145,6 @@ seconds with content comparison, independently of native filesystem notification
 | `runtime.followup_prompt_ready_timeout_secs` | live | `src/services/claude_tui/input.rs` followup_prompt_ready_timeout (current()) |
 | `runtime.tui_hook_buffer_ttl_secs` | restart | `src/services/claude_tui/hook_registry.rs` GLOBAL (LazyLock; current_registry_durations on first access) |
 | `runtime.tui_unclaimed_stop_delay_ms` | restart | `src/services/claude_tui/hook_registry.rs` GLOBAL (LazyLock; current_registry_durations on first access) |
-| `runtime.tui_hook_registry_enabled` | live | `src/services/claude_tui/hook_registry.rs` registry_enabled (current()) |
-| `runtime.codex_rollout_index_cache_enabled` | live | `src/services/codex_tui/rollout_index.rs` cache_enabled (current()) |
 | `runtime.dispatch_rate_limit_gate_enabled` | seeded-at-boot | `src/services/settings.rs` seed_runtime_config_defaults_pg (kv runtime-config blob; via startup_reseed) -> dispatchRateLimitGateEnabled |
 | `runtime.dispatch_rate_limit_gate_danger_pct` | seeded-at-boot | `src/services/settings.rs` seed_runtime_config_defaults_pg (kv runtime-config blob; via startup_reseed) -> dispatchRateLimitGateDangerPct |
 | `runtime.herdr_turn_enabled` | live | `src/services/turn_host.rs` herdr_turn_switched_on (current()) |

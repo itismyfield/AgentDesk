@@ -71,8 +71,13 @@ impl LegacyView for LegacyRelay {
     fn frontier(&self, channel: u64, tmux: &str, eof: u64) -> Option<u64> {
         let channel = ChannelId::new(channel);
         let claude = &ProviderKind::Claude;
-        dr::delivery_record_authority_enabled()
-            .then(|| dr::effective_committed_offset(&self.shared, claude, channel, tmux, Some(eof)))
+        Some(dr::effective_committed_offset(
+            &self.shared,
+            claude,
+            channel,
+            tmux,
+            Some(eof),
+        ))
     }
 
     fn tail_running(&self, tmux: &str) -> bool {
