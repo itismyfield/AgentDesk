@@ -1586,6 +1586,90 @@ mod tests {
             "continuation must stay glued, got: {full:?}"
         );
     }
+
+    /// A long turn pinned at a prompt boundary keeps line offsets, pre-turn skip
+    /// bytes and the unterminated tail, and rescans while pinned consume nothing.
+    #[test]
+    fn process_watcher_lines_for_turn_large_pinned_turn_keeps_offsets_and_tail() {
+        let delta = |text: &str| {
+            serde_json::json!({"type": "content_block_delta", "delta": {"text": text}}).to_string()
+                + "\n"
+        };
+        let prompt = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"다음 질문\"}]}}\n";
+        let mut pre_turn = String::new();
+        for i in 0..10_000 {
+            pre_turn.push_str(&assistant_text_line(&format!("이전 답변 {i}")));
+            pre_turn.push_str(match i % 1_000 {
+                0 => prompt,
+                7 => "\n",
+                9 => "plain prose\n",
+                _ => "",
+            });
+        }
+        let (mut turn, mut expected_response) = (String::new(), String::new());
+        for i in 0..20_000 {
+            let text = format!("줄{i} ");
+            turn.push_str(&delta(&text));
+            expected_response.push_str(&text);
+        }
+        let rest = format!(
+            "{prompt}{}{{\"type\":\"content_block_delta\",\"delta\":{{\"text\":\"부분",
+            delta("다음 답변")
+        );
+        let start = 7_000u64;
+        let turn_start = start + pre_turn.len() as u64;
+        let boundary = turn_start + turn.len() as u64;
+        let mut buffer = format!("{pre_turn}{turn}{rest}");
+        let (mut state, mut tools) = (StreamLineState::new(), WatcherToolState::new());
+        let mut response = String::new();
+
+        let outcome = process_watcher_lines_for_turn(
+            &mut buffer,
+            &mut state,
+            &mut response,
+            &mut tools,
+            Some(start),
+            Some(turn_start),
+        );
+        assert_eq!(outcome.pre_turn_bytes_skipped, pre_turn.len());
+        assert_eq!(
+            outcome.terminal_kind,
+            Some(WatcherTerminalKind::SoftUserBoundary)
+        );
+        assert_eq!(outcome.terminal_evidence_offset, Some(boundary));
+        assert_eq!(response, expected_response);
+        assert_eq!(buffer, rest);
+
+        buffer.push_str("\"}}\n");
+        for _ in 0..3 {
+            let (outcome, consumed) = scan_watcher_lines_for_turn(
+                &buffer,
+                &mut state,
+                &mut response,
+                &mut tools,
+                Some(boundary),
+                Some(turn_start),
+            );
+            assert_eq!(consumed, 0, "a pinned rescan must not cut the buffer front");
+            assert_eq!(outcome.terminal_evidence_offset, Some(boundary));
+        }
+        assert_eq!(response, expected_response);
+
+        // Once the pinned turn commits, the next turn parses from the boundary line.
+        let mut next_response = String::new();
+        let outcome = process_watcher_lines_for_turn(
+            &mut buffer,
+            &mut state,
+            &mut next_response,
+            &mut tools,
+            Some(boundary),
+            Some(boundary),
+        );
+        assert!(!outcome.soft_terminal_candidate);
+        assert_eq!(outcome.pre_turn_bytes_skipped, 0);
+        assert_eq!(next_response, "다음 답변부분");
+        assert!(buffer.is_empty());
+    }
 }
 
 #[cfg(test)]
