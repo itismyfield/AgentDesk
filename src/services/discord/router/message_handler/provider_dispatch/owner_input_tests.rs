@@ -318,6 +318,7 @@ impl Rig {
             channel_id: self.channel,
             model: None,
             native_fast_mode: None,
+            effort: None,
             codex_goals: None,
             compact_percent: None,
             compact_lower_bound_tokens: 0,
