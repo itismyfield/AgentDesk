@@ -511,6 +511,37 @@ def _external_test_files(repo_root: Path, counter: list[int] | None = None, find
     return targets
 
 
+def _use_tree_entries(raw: str) -> list[str]:
+    """Flatten a `use` tree into `path` / `path as alias` entries; nested groups and `self` included."""
+    text = raw.strip()
+    opening = text.find("{")
+    if opening < 0 or not text.endswith("}"):
+        return [text]
+    prefix = text[:opening].strip()
+    if prefix and not prefix.endswith("::"):
+        return [text]
+    prefix = prefix[:-2].strip()
+    items, depth, start = [], 0, opening + 1
+    for index in range(opening + 1, len(text) - 1):
+        depth += {"{": 1, "}": -1}.get(text[index], 0)
+        if depth < 0:
+            return [text]
+        if text[index] == "," and depth == 0:
+            items.append(text[start:index])
+            start = index + 1
+    if depth:
+        return [text]
+    items.append(text[start:len(text) - 1])
+    entries = []
+    for item in filter(None, (item.strip() for item in items)):
+        for entry in _use_tree_entries(item):
+            path, separator, alias = entry.partition(" as ")
+            path = path.strip()
+            full = prefix if path == "self" else f"{prefix}::{path}" if prefix else path
+            entries.append(f"{full} as {alias.strip()}" if separator else full)
+    return entries
+
+
 def discover_pg_inventory(
     repo_root: Path, findings: list[Finding] | None = None
 ) -> PgInventory:
@@ -575,9 +606,7 @@ def discover_pg_inventory(
         return parts
 
     def import_bindings(module: tuple[str, ...], raw: str):
-        brace = re.fullmatch(r"(?P<base>.+)::\{(?P<items>[^{}]+)\}", raw.strip())
-        expanded = [f"{brace.group('base')}::{item.strip()}" for item in brace.group("items").split(",") if item.strip()] if brace else [raw.strip()]
-        for entry in expanded:
+        for entry in _use_tree_entries(raw):
             target_text, separator, alias = entry.partition(" as ")
             target = absolute_path(module, target_text)
             if target:

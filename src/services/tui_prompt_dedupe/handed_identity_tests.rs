@@ -681,6 +681,7 @@ fn migrated_append_world(v2: bool, state: &str, separator: bool) -> (Vec<String>
 
 /// A V1 append migrated into V2 binds, settles, replays and is observed as in V1 for every stored
 /// state, with or without a draft before the frame, and is handed off at most once.
+#[cfg(unix)]
 #[test]
 fn a_migrated_v1_append_binds_settles_and_replays_as_in_v1() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
@@ -707,6 +708,7 @@ fn a_migrated_v1_append_binds_settles_and_replays_as_in_v1() {
 
 /// A bound append whose row landed in a new turn, migrated before any decision, is handed off
 /// exactly once by the first observer; a cold re-observation publishes nothing more.
+#[cfg(unix)]
 #[test]
 fn a_migrated_undecided_append_in_a_new_turn_hands_off_exactly_once() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
