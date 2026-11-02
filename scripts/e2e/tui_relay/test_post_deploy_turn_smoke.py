@@ -612,6 +612,56 @@ class GatewayReadyTest(unittest.TestCase):
         self.assertIn("startup recovery not finished", lines[-1])
 
 
+# Copied from the 11-02 09:52 deploy smoke's claude E2E pending-queue file: drained, settled metadata only.
+QUEUE_V2_SETTLED = FIXTURES / "saved/pending-queue-v2-settled-20261102T0952.json"
+
+
+class RuntimeQueueWaitingInputs(unittest.TestCase):
+    """A V2 queue file is busy only while it holds a queued, head or retained input."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.target = self.root / "discord_pending_queue/claude/discord_c2adc5461e12b989/1559670200419352696.json"
+        self.target.parent.mkdir(parents=True)
+        self.snapshot = json.loads(QUEUE_V2_SETTLED.read_text(encoding="utf-8"))
+
+    def violations(self, payload):
+        self.target.write_text(json.dumps(payload), encoding="utf-8")
+        return driver._runtime_queue_violations(  # noqa: SLF001
+            runtime_root=self.root, provider="claude", channel_id="1559670200419352696")
+
+    def test_drained_v2_file_with_settled_metadata_is_not_waiting(self):
+        self.assertEqual(self.violations(self.snapshot), [])
+
+    def test_each_waiting_input_kind_is_still_nonempty(self):
+        attempt = {"identity": {"primary": 1}, "original": {"message_id": 1}, "phase": {"kind": "prepared"}}
+        for key, value in (("items", [{"message_id": 1}]), ("head_injection", attempt),
+                           ("retained_inputs", [{"input": attempt, "reason": "composer_refused"}])):
+            with self.subTest(key=key):
+                self.assertEqual(len(self.violations({**self.snapshot, key: value})), 1)
+        unsettled = [{**self.snapshot["admission_binds"][0], "at": {"kind": "queued", "index": 0, "item": "d"}}]
+        self.assertEqual(len(self.violations({**self.snapshot, "admission_binds": unsettled})), 1)
+
+    def test_unknown_shapes_stay_nonempty(self):
+        unknown = {
+            "newer version": {**self.snapshot, "version": 3},
+            "unknown field": {**self.snapshot, "pending_handoff": []},
+            "missing items": {k: v for k, v in self.snapshot.items() if k != "items"},
+            "items not a list": {**self.snapshot, "items": {}},
+            "head not an object": {**self.snapshot, "head_injection": "x"},
+            "boolean version": {**self.snapshot, "version": True},
+            "binds not a list": {**self.snapshot, "admission_binds": {}},
+            "bind without at": {**self.snapshot, "admission_binds": [{"receipt": "r"}]},
+        }
+        for name, payload in unknown.items():
+            with self.subTest(shape=name):
+                self.assertEqual(len(self.violations(payload)), 1)
+        self.assertEqual(len(self.violations([{"message_id": 1}])), 1)
+        self.assertEqual(self.violations([]), [])
+
+
 class CellResetTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -754,6 +804,16 @@ class CellResetTest(unittest.TestCase):
         self.assertEqual(self.cleared, {"222", "333"})
         for action in ("allowlist", "inspect", "identity", "release", "!clear", "ack"):
             self.assertIn(action, self.output.getvalue())
+
+    def test_settled_v2_queue_metadata_leaves_preflight_idle_but_a_waiting_input_does_not(self):
+        self.reset("claude-tui", "222")
+        target = self.root / "discord_pending_queue/claude/discord_fixture/222.json"
+        target.parent.mkdir(parents=True)
+        snapshot = json.loads(QUEUE_V2_SETTLED.read_text(encoding="utf-8"))
+        target.write_text(json.dumps(snapshot), encoding="utf-8")
+        self.assertEqual(self.preflight("claude-tui", "222"), 0, self.output.getvalue())
+        target.write_text(json.dumps({**snapshot, "items": [{"message_id": 1}]}), encoding="utf-8")
+        self.assertEqual(self.preflight("claude-tui", "222"), 1)
 
     def test_outside_allowlist_refused_without_any_http(self):
         self.identities["claude"]["channel_id"] = 999
