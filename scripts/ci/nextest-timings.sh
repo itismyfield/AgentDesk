@@ -46,16 +46,19 @@ for ((i = 0; i < workers; i++)); do
   [ "${#found[@]}" -gt 0 ] || fallback "CI Main run $run has no JUnit report for worker $i"
   reports+=("${found[@]}")
 done
-# The plan rejects an unreadable report, so each one is read here with the plan's own parser first.
+# The plan rejects an unreadable report and skips bad times silently, so each report is read here with the
+# plan's own parser first and any bad time drops the whole set.
 bad="$(python3 -I - "$here" "${reports[@]}" 2>&1 <<'PY'
 import sys
 sys.path.insert(0, sys.argv[1])
 import nextest_ci
 for path in sys.argv[2:]:
     try:
-        timings, _ = nextest_ci.load_timings([path])
+        timings, invalid = nextest_ci.load_timings([path])
     except nextest_ci.PlanError as exc:
         sys.exit(str(exc))
+    if invalid:
+        sys.exit(f"JUnit {path} has {invalid} testcases without a valid time")
     if not timings:
         sys.exit(f"JUnit {path} has no timed testcase")
 PY

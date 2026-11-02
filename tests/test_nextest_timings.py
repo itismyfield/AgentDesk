@@ -159,7 +159,8 @@ class TimingsScript(unittest.TestCase):
             "CI Main run 7 has no JUnit report for worker 5": run7(w5={"exit-code": "101\n"}),
             "cannot parse JUnit": run7(w4={"junit.xml": junit({"m::t4": 1})[:-20]}),
             "root is <testsuite>": run7(w2={"junit.xml": f'<testsuite name="{BIN}"/>'}),
-            "has no timed testcase": run7(w3={"junit.xml": junit({"m::t3": "nan"})}),
+            "has no timed testcase": run7(w3={"junit.xml": junit({})}),
+            "has 2 testcases without a valid time": run7(w1={"junit.xml": junit({"m::t1": 5.0, "m::a": "nan", "m::b": -3})}),
         }
         for reason, state in cases.items():
             with self.subTest(reason):
