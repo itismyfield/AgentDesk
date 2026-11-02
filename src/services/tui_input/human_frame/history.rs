@@ -195,6 +195,32 @@ fn file_id(_meta: &std::fs::Metadata) -> [u64; 2] {
     [0, 0]
 }
 
+/// Attempts whose caller set up its own reader before the paste, kept for this process: who
+/// answers a row is read from the attempt that took it, never from matching text.
+static READERS: std::sync::Mutex<std::collections::VecDeque<[String; 3]>> =
+    std::sync::Mutex::new(std::collections::VecDeque::new());
+const READERS_KEPT: usize = 1024;
+
+/// Records (`reads`) or drops whether attempt `id` has a reader of its own.
+pub(crate) fn declare_reader(provider: &str, session: &str, id: &str, reads: bool) {
+    let key = [provider.to_string(), session.to_string(), id.to_string()];
+    let mut readers = READERS.lock().unwrap_or_else(|error| error.into_inner());
+    readers.retain(|kept| *kept != key);
+    if reads {
+        if readers.len() >= READERS_KEPT {
+            readers.pop_front();
+        }
+        readers.push_back(key);
+    }
+}
+
+pub(crate) fn has_reader(provider: &str, session: &str, id: &str) -> bool {
+    let readers = READERS.lock().unwrap_or_else(|error| error.into_inner());
+    readers
+        .iter()
+        .any(|[p, s, i]| p == provider && s == session && i == id)
+}
+
 pub(crate) fn register(
     (provider, session, id, author): (&str, &str, &str, &str),
     transcript: &Path,

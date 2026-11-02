@@ -327,6 +327,7 @@ fn human_input_text(record: &serde_json::Value, prompt_only: bool) -> Option<(St
 }
 
 /// Bounded tmux calls against one session; the program is injectable for tests.
+#[derive(Clone)]
 pub(crate) struct Pane {
     program: PathBuf,
     target: String,
@@ -400,6 +401,17 @@ pub(in crate::services::claude_tui) fn before_paste(
     stash_allowed: bool,
 ) -> Result<bool, Veto> {
     before_paste_by(pane, listed(stash_allowed), false).map(|seen| seen.park)
+}
+
+/// Whether Enter would submit on the pane now, by the owned entry's own screen read; `None` once
+/// the pane is gone.
+#[cfg(unix)]
+pub(crate) fn screen_submits(pane: &Pane) -> Option<bool> {
+    match before_paste_by(pane, None, true) {
+        Ok(_) => Some(true),
+        Err(Veto::PaneUnavailable) => None,
+        Err(_) => Some(false),
+    }
 }
 
 /// Which draft one capture lets C-s park; `None` parks nothing.

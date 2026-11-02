@@ -40,6 +40,8 @@ pub(super) enum Claim {
     Handed { verified_row: bool },
     /// Already handed: a later sighting is a duplicate.
     HandedBefore,
+    /// Opened a turn for an attempt whose caller reads that turn itself.
+    Declared,
 }
 
 fn marker(nonce: &str) -> String {
@@ -257,12 +259,11 @@ fn claude_claim(session: &str, prompts: &[String], row: Option<&str>) -> Option<
             return Some(Claim::Joined { first: false });
         }
     };
+    // The reader is the attempt's own, so a twin's text or an aged pending entry never decides it.
+    let declared = history::has_reader("claude", session, &id);
     let key = PromptKey::new("claude", session);
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
-    let declared = (state.pending_by_tmux.get(&key)).is_some_and(|queue| {
-        (queue.iter()).any(|pending| prompts.iter().any(|p| prompts_match(&pending.value, p)))
-    });
     let ledger = state.injected_steer_by_tmux.entry(key).or_default();
     if let Some(entry) = ledger.iter().find(|entry| entry.value.nonce == id) {
         return Some(match entry.value.settled {
@@ -284,8 +285,10 @@ fn claude_claim(session: &str, prompts: &[String], row: Option<&str>) -> Option<
         },
         recorded_at: Instant::now(),
     });
-    // A declared prompt takes the ordinary path, where its pending entry hands the turn to its reader.
-    (!declared).then_some(Claim::Handed { verified_row: true })
+    Some(match declared {
+        true => Claim::Declared,
+        false => Claim::Handed { verified_row: true },
+    })
 }
 
 impl TuiPromptDedupeState {

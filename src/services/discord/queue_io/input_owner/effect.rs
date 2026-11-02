@@ -171,6 +171,11 @@ impl BusyClaude {
                 Ok(Outcome::NotSent(veto)) => {
                     let reason = format!("{veto:?}");
                     owner_input::vetoed(&reason);
+                    if HELD.contains(&reason.as_str()) {
+                        let pane = self.pane.clone();
+                        let probe = Box::new(move || busy_inject::screen_submits(&pane));
+                        super::held_watch::arm(self.channel, probe);
+                    }
                     Completion::NotSent(reason)
                 }
                 Ok(Outcome::Injected) => Completion::Submitted,

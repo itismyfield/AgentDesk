@@ -153,11 +153,17 @@ fn inject_gated_with(
                 use crate::services::tui_prompt_dedupe as dedupe;
                 let own = matches!(policy.answer, Answer::Declared);
                 // The hook may observe the frame before its submission receipt returns.
+                let reader = |reads| {
+                    let declare = crate::services::tui_input::human_frame::history::declare_reader;
+                    declare("claude", request.session, request.nonce, reads);
+                };
                 if own {
+                    reader(true);
                     dedupe::record_discord_originated_prompt("claude", request.session, &text);
                 }
                 let report = inject_locked(pane, request, &text, timing, park, policy);
                 if own && matches!(&report.outcome, Outcome::NotSent(_)) {
+                    reader(false);
                     dedupe::remove_discord_originated_prompt("claude", request.session, &text);
                 }
                 report

@@ -98,13 +98,15 @@ async fn run(lane: Arc<Lane>, drive: Arc<Drive>) {
         lane.again.store(false, Ordering::SeqCst);
         let mut stalled = false;
         while let Some(front) = grant(&drive, stalled).await {
+            let message = front.1.message_id;
             let result = (drive.handoff)(front).await;
             // A front held on a screen where Enter may not submit waits for a real wake: a turn
-            // boundary, an idle pane or new input. Nothing polls it.
+            // boundary, new input, or its pane's screen recovering. It is never re-handed by time.
             if result
                 .as_ref()
                 .is_err_and(|error| super::effect::held(error))
             {
+                super::held_watch::watch(drive.clone(), message);
                 break;
             }
             stalled = result.is_err();
