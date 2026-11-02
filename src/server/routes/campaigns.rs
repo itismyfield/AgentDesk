@@ -52,6 +52,42 @@ pub struct ReplaceCampaign {
 pub struct ListQuery {
     pub limit: Option<u32>,
     pub offset: Option<u32>,
+    #[serde(default)]
+    pub view: ListView,
+}
+
+#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ListView {
+    #[default]
+    Full,
+    /// Drops the node fields only the task details show; the detail GET stays full.
+    Summary,
+}
+
+/// Most of a ledger's bytes; a summary campaign carries `nodes_partial: true` instead.
+const SUMMARY_OMITTED_NODE_FIELDS: [&str; 4] =
+    ["details", "evidence", "evidence_records", "findings"];
+
+fn campaign_list_json(campaigns: &[Campaign], view: ListView) -> Value {
+    let mut listed = json!(campaigns);
+    if view == ListView::Summary {
+        for campaign in listed
+            .as_array_mut()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_object_mut)
+        {
+            let nodes = campaign.get_mut("nodes").and_then(Value::as_array_mut);
+            for node in nodes.into_iter().flatten().filter_map(Value::as_object_mut) {
+                for field in SUMMARY_OMITTED_NODE_FIELDS {
+                    node.remove(field);
+                }
+            }
+            campaign.insert("nodes_partial".into(), Value::Bool(true));
+        }
+    }
+    listed
 }
 
 fn pool(state: &AppState) -> AppResult<&sqlx::PgPool> {
@@ -81,8 +117,9 @@ fn error(error: CampaignError) -> AppError {
 
 pub async fn list(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<ListQuery>,
-) -> AppResult<Json<Value>> {
+) -> AppResult<Response> {
     let limit = i64::from(query.limit.unwrap_or(100).clamp(1, 500));
     let offset = i64::from(query.offset.unwrap_or(0));
     let pool = pool(&state)?;
@@ -97,9 +134,14 @@ pub async fn list(
             (!entries.is_empty()).then(|| (campaign.id.clone(), json!(entries)))
         })
         .collect();
-    Ok(Json(
-        json!({ "campaigns": campaigns, "live": live, "issue_drift": issue_drift, "limit": limit, "offset": offset }),
-    ))
+    let body = json!({
+        "campaigns": campaign_list_json(&campaigns, query.view),
+        "live": live,
+        "issue_drift": issue_drift,
+        "limit": limit,
+        "offset": offset,
+    });
+    Ok(revalidated_json(&headers, &body))
 }
 
 pub async fn get(
@@ -573,6 +615,68 @@ mod tests {
             .expect("stored oversize campaign");
         assert_eq!(stored.revision, 2);
         assert_eq!(stored.nodes[0].input.details, bulk);
+        pool.close().await;
+        fixture.drop().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_campaign_list_summary_drops_node_details_and_revalidates_pg() {
+        let fixture = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = fixture.connect_and_migrate().await;
+        let app = app(pool.clone());
+        let node = json!({"id": "n1", "title": "Task", "status": "pending", "stage": "implement", "round": 1,
+            "summary": "gist", "details": "long notes", "evidence": ["cargo test"], "findings": ["P2"],
+            "acceptance": ["done"], "evidence_records": [{"summary": "CI", "result": "Passed"}]});
+        let body = json!({"id": "summary", "title": "Summary", "status": "active", "round": 1, "nodes": [node]});
+        assert_eq!(
+            request(&app, Method::POST, "/campaigns", Some(body), true)
+                .await
+                .0,
+            StatusCode::CREATED
+        );
+
+        let (status, summary) =
+            request(&app, Method::GET, "/campaigns?view=summary", None, true).await;
+        assert_eq!(status, StatusCode::OK);
+        let listed = &summary["campaigns"][0];
+        assert_eq!(listed["nodes_partial"], true);
+        let node = listed["nodes"][0].as_object().unwrap();
+        for field in SUMMARY_OMITTED_NODE_FIELDS {
+            assert!(!node.contains_key(field), "summary keeps {field}");
+        }
+        assert_eq!(node["summary"], "gist");
+        assert_eq!(node["acceptance"], json!(["done"]));
+
+        let (_, full) = request(&app, Method::GET, "/campaigns", None, true).await;
+        assert!(full["campaigns"][0].get("nodes_partial").is_none());
+        assert_eq!(full["campaigns"][0]["nodes"][0]["details"], "long notes");
+
+        let list_get = |view: &'static str, tag: Option<String>| {
+            let app = app.clone();
+            async move {
+                let mut request = Request::builder()
+                    .uri(format!("/campaigns?view={view}"))
+                    .header(header::AUTHORIZATION, "Bearer campaign-test-token");
+                if let Some(tag) = tag {
+                    request = request.header(header::IF_NONE_MATCH, tag);
+                }
+                let response = app
+                    .oneshot(request.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                (
+                    response.status(),
+                    response.headers().get(header::ETAG).cloned(),
+                )
+            }
+        };
+        assert_eq!(list_get("bogus", None).await.0, StatusCode::BAD_REQUEST);
+        let (_, etag) = list_get("summary", None).await;
+        let etag = etag.expect("list etag").to_str().unwrap().to_string();
+        assert_eq!(
+            list_get("summary", Some(etag)).await.0,
+            StatusCode::NOT_MODIFIED
+        );
         pool.close().await;
         fixture.drop().await;
     }

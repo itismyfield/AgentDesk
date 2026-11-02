@@ -64,6 +64,10 @@ export default function CampaignsPanel({ language }: { language: string }) {
   useEffect(() => { writeLocalStorageValue(STORAGE_KEYS.dashboardActiveCampaign, selectedId); }, [selectedId]);
 
   const [mode, setMode] = useState<CampaignLocation["mode"]>(linked?.mode ?? "legacy");
+  // The list carries node summaries; the campaign on screen is read in full as soon as it shows.
+  const selectedPartial = tab === "campaigns" && mode === "legacy" && campaigns.some((value) => value.id === selectedId && value.nodes_partial);
+  const { refreshCampaign } = legacy;
+  useEffect(() => { if (selectedPartial && selectedId) void refreshCampaign(selectedId); }, [selectedPartial, selectedId, refreshCampaign]);
   const [serverSelected, setServerSelected] = useState<string | null>(linked?.mode === "server" ? linked.campaign : null);
   const [node, setNode] = useState<string | null>(linked?.node ?? null);
   const server = useServerCampaignReads(mode === "server" ? serverSelected : null);

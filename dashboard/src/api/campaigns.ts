@@ -74,6 +74,8 @@ export const campaignSchema = z.looseObject({
   revision: z.number().int().positive(),
   auto_queue: z.boolean().default(false),
   nodes: z.array(campaignNodeSchema).max(1000).default([]),
+  /** Set by the list's summary view: node details, evidence, evidence_records and findings were left out. */
+  nodes_partial: z.boolean().optional(),
   created_at: timestampSchema,
   updated_at: timestampSchema,
 });
@@ -140,7 +142,7 @@ export async function getCampaigns(): Promise<{
   const live: CampaignLive = {};
   const limit = 100;
   for (let offset = 0; ; offset += limit) {
-    const result = await request(`/api/campaigns?limit=${limit}&offset=${offset}`, { suppressErrorToast: true, shareInflight: false }, campaignListResponseSchema);
+    const result = await request(`/api/campaigns?limit=${limit}&offset=${offset}&view=summary`, { suppressErrorToast: true, shareInflight: false }, campaignListResponseSchema);
     for (const campaign of result.campaigns) campaigns.set(campaign.id, campaign);
     Object.assign(live, result.live);
     if (result.campaigns.length < limit) return { campaigns: Array.from(campaigns.values()), live, read };
@@ -163,8 +165,20 @@ export function isRejectedSave(error: unknown): boolean {
   return error instanceof ApiRequestError && error.status < 500;
 }
 
+// A save replaces every node, so fields a summary copy left out come back from a full read first.
+// A newer stored revision still fails the save on expected_revision.
+async function withStoredNodeDetails(campaign: Campaign, nodes: CampaignNode[]): Promise<CampaignNode[]> {
+  if (!campaign.nodes_partial) return nodes;
+  const stored = new Map((await getCampaign(campaign.id)).nodes.map((node) => [node.id, node]));
+  return nodes.map((node) => {
+    const full = stored.get(node.id);
+    return full ? { ...node, details: full.details, evidence: full.evidence, evidence_records: full.evidence_records, findings: full.findings } : node;
+  });
+}
+
 // Omitting auto_queue keeps the stored value, so node edits never switch it.
-function saveCampaign(campaign: Campaign, patch: Partial<Pick<Campaign, "nodes" | "auto_queue">>, timeoutMs?: number) {
+async function saveCampaign(campaign: Campaign, patch: Partial<Pick<Campaign, "nodes" | "auto_queue">>, timeoutMs?: number) {
+  const nodes = await withStoredNodeDetails(campaign, patch.nodes ?? campaign.nodes);
   return request(
     `/api/campaigns/${encodeURIComponent(campaign.id)}`,
     {
@@ -177,8 +191,8 @@ function saveCampaign(campaign: Campaign, patch: Partial<Pick<Campaign, "nodes" 
         description: campaign.description,
         status: campaign.status,
         round: campaign.round,
-        nodes: campaign.nodes,
         ...patch,
+        nodes,
       }),
     },
     campaignSaveResponseSchema,

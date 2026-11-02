@@ -13,6 +13,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         .with_params([
             ("limit", query_param("integer", false, "Page size 1..500; default 100.")),
             ("offset", query_param("integer", false, "Zero-based offset; default 0.")),
+            ("view", query_param("string", false, "full (default) or summary. summary drops each node's details, evidence, evidence_records and findings and marks the campaign nodes_partial: true; read them from GET /api/campaigns/{id}. Answers carry an ETag and return 304 on If-None-Match.")),
         ])
         .with_example(json!({}), json!({"campaigns": [], "live": {}, "issue_drift": {}, "limit": 100, "offset": 0}))
         .with_curl("curl -H \"Authorization: Bearer $ADK_AUTH_TOKEN\" \"$ADK_URL/api/campaigns\""),
