@@ -684,6 +684,7 @@ jobs:
         shell: bash
         env:
           BASH_ENV: /dev/null
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           NEXTEST_DIR="$RUNNER_TEMP/nextest"
@@ -694,11 +695,12 @@ jobs:
           python3 scripts/check_relay_authority_contract.py --nextest-list "$NEXTEST_DIR/universe.json"
           python3 scripts/ci/rust_test_sources.py compare --platform linux --list "$NEXTEST_DIR/universe.json" \
             --json-out "$NEXTEST_DIR/compare.json"
+          mapfile -t timings < <(bash scripts/ci/nextest-timings.sh "$RUNNER_TEMP/nextest-timings" 6)
           python3 scripts/ci/nextest_ci.py plan --universe "$NEXTEST_DIR/universe.json" \
             --archive "$NEXTEST_DIR/lib-tests.tar.zst" --workers 6 --sha "$GITHUB_SHA" --scope linux-lib \
             --rust-version 1.94.1 --nextest-version "$(cargo nextest --version | awk 'NR==1 {print $2}')" \
             --target x86_64-unknown-linux-gnu --build-option CARGO_PROFILE_DEV_DEBUG=0 \
-            --build-option CARGO_PROFILE_TEST_DEBUG=0 --retry-mode all-once --output "$NEXTEST_DIR/plan"
+            --build-option CARGO_PROFILE_TEST_DEBUG=0 --retry-mode all-once --output "$NEXTEST_DIR/plan" "${timings[@]}"
           python3 scripts/ci/nextest_ci.py selector-audit --plan "$NEXTEST_DIR/plan/plan.json"
       - name: Upload nextest plan
         uses: actions/upload-artifact@v4
@@ -925,7 +927,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py e053f5c127c059178cc8a47aa573b9c18997641d545a0d5718e47e2415468d70
-          pin scripts/check-ci-runner-hardening.sh c28bd4c107dfa540f14f6571413691d766745ee8353740c76201b01249cb5497
+          pin scripts/check-ci-runner-hardening.sh 3bf89b89c982a35aacc5325fb154677c6dedae332e0e492cfbfd31b9d7ea0330
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks

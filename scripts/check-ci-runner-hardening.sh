@@ -697,7 +697,7 @@ targets = {
   "rust_build" => {
     "label" => "nextest build and plan job", "name" => "Rust tests build and plan",
     "needs" => "changes", "if" => rust_tests_gate, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 100, "job_sha256" => "9e1644775275aac1c367b09f26011526006262ac832d776cf8600c181d4aea37",
+    "job_timeout_minutes" => 100, "job_sha256" => "403e326748fb24cb4783148d231a1f1bc68ac425d55f254c7a9c1e9ccf7dcd48",
     "cargo_steps" => {
       "Check Rust test source wiring" => {"commands" => ["python3 scripts/ci/rust_test_sources.py check"], "timeout_minutes" => nil, "env" => {"BASH_ENV" => "/dev/null"}},
       "Archive, list, compare and plan" => {
@@ -709,14 +709,15 @@ targets = {
           'python3 scripts/check_relay_authority_contract.py --nextest-list "$NEXTEST_DIR/universe.json"',
           'python3 scripts/ci/rust_test_sources.py compare --platform linux --list "$NEXTEST_DIR/universe.json" \\',
           '--json-out "$NEXTEST_DIR/compare.json"',
+          'mapfile -t timings < <(bash scripts/ci/nextest-timings.sh "$RUNNER_TEMP/nextest-timings" 6)',
           'python3 scripts/ci/nextest_ci.py plan --universe "$NEXTEST_DIR/universe.json" \\',
           '--archive "$NEXTEST_DIR/lib-tests.tar.zst" --workers 6 --sha "$GITHUB_SHA" --scope linux-lib \\',
           "--rust-version 1.94.1 --nextest-version \"$(cargo nextest --version | awk 'NR==1 {print $2}')\" \\",
           "--target x86_64-unknown-linux-gnu --build-option CARGO_PROFILE_DEV_DEBUG=0 \\",
-          '--build-option CARGO_PROFILE_TEST_DEBUG=0 --retry-mode all-once --output "$NEXTEST_DIR/plan"',
+          '--build-option CARGO_PROFILE_TEST_DEBUG=0 --retry-mode all-once --output "$NEXTEST_DIR/plan" "${timings[@]}"',
           'python3 scripts/ci/nextest_ci.py selector-audit --plan "$NEXTEST_DIR/plan/plan.json"',
         ],
-        "timeout_minutes" => 45, "env" => {"BASH_ENV" => "/dev/null"},
+        "timeout_minutes" => 45, "env" => {"BASH_ENV" => "/dev/null", "GH_TOKEN" => "${{ github.token }}"},
       },
     },
   },
