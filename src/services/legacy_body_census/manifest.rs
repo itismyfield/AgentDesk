@@ -88,6 +88,19 @@ pub(super) fn inspect(raw: &str) -> Value {
             ),
         ] {
             let row = claims.iter().find(|row| row["id"] == id)?;
+            let mut fields = BTreeSet::from(["id", "path", "entrypoint", "guard", "status"]);
+            if id == "CLAIM_SITE_NONE_HELD" {
+                fields.extend(["consumer_path", "consumer_function", "site"]);
+            }
+            if row
+                .as_object()?
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>()
+                != fields
+            {
+                return None;
+            }
             if !ids.insert(id)
                 || row["path"] != path
                 || row["entrypoint"] != entrypoint

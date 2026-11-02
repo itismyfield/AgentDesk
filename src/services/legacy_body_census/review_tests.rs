@@ -593,6 +593,9 @@ fn claim_manifest_requires_complete_verified_rows() {
         "incomplete",
         "duplicate",
         "unknown",
+        "extra_gate_field",
+        "extra_adoption_field",
+        "extra_site_field",
     ] {
         let mut current = data.clone();
         for row in current["claim_probes"].as_array_mut().unwrap() {
@@ -615,6 +618,14 @@ fn claim_manifest_requires_complete_verified_rows() {
             "unknown" => {
                 current["claim_probes"][0]["status"] = json!("UNRECOGNIZED");
             }
+            "extra_gate_field" | "extra_adoption_field" | "extra_site_field" => {
+                let index = match case {
+                    "extra_gate_field" => 0,
+                    "extra_adoption_field" => 1,
+                    _ => 2,
+                };
+                current["claim_probes"][index]["unexpected"] = json!("unreviewed");
+            }
             _ => {}
         }
         let result = manifest::inspect(&current.to_string());
@@ -626,6 +637,9 @@ fn claim_manifest_requires_complete_verified_rows() {
         );
         if case == "pending" {
             assert_eq!(result["pending"], 3);
+        }
+        if case.starts_with("extra_") {
+            assert_eq!(result["error"], "manifest_invalid", "{case}");
         }
     }
 }

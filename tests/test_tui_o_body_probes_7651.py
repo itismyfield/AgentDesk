@@ -50,6 +50,13 @@ class BodyProbeManifestTests(unittest.TestCase):
             self.assertFalse(state["coverage"])
             self.assertTrue(state["error"])
 
+        for index in range(3):
+            invalid = copy.deepcopy(data)
+            invalid["claim_probes"][index]["unexpected"] = "unreviewed"
+            state = self.snapshot(invalid)
+            self.assertFalse(state["coverage"], index)
+            self.assertTrue(state["error"], index)
+
     def test_rust_expected_probe_rows_matches_the_census_total(self):
         import re
         source = (ROOT / "src/services/legacy_body_census/manifest.rs").read_text()
