@@ -2,7 +2,7 @@
 use super::*;
 use crate::services::discord::queue_io::input_owner::admission::Admission;
 use crate::services::discord::router::message_handler::provider_dispatch::submission_tests::{
-    d1_execution_proof, d1_fixture_config,
+    creator_child, d1_execution_proof, d1_fixture_config,
 };
 use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
 use crate::services::discord::{self as discord, SharedData, turn_completion_events};
@@ -232,7 +232,7 @@ impl IntakeRig {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a1_owned_busy_rollback_keeps_the_bot_queue_namespace() {
-    if !discord::admin_host_guard::tests::api_child(concat!(
+    if !creator_child(concat!(
         "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::",
         "a1_owned_busy_rollback_keeps_the_bot_queue_namespace"
     )) {
@@ -305,7 +305,7 @@ async fn a1_owned_busy_rollback_keeps_the_bot_queue_namespace() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a1_owned_busy_rollback_keeps_front_without_completing_or_requeueing() {
-    if !discord::admin_host_guard::tests::api_child(concat!(
+    if !creator_child(concat!(
         "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::",
         "a1_owned_busy_rollback_keeps_front_without_completing_or_requeueing"
     )) {
@@ -386,7 +386,7 @@ async fn a1_owned_busy_rollback_keeps_front_without_completing_or_requeueing() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a1_owned_busy_front_never_calls_legacy_requeue() {
-    if !discord::admin_host_guard::tests::api_child(concat!(
+    if !creator_child(concat!(
         "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::",
         "a1_owned_busy_front_never_calls_legacy_requeue"
     )) {
@@ -415,7 +415,7 @@ async fn a1_owned_busy_front_never_calls_legacy_requeue() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a1_not_sent_intake_posts_no_provider_failure() {
-    if !discord::admin_host_guard::tests::api_child(concat!(
+    if !creator_child(concat!(
         "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::",
         "a1_not_sent_intake_posts_no_provider_failure"
     )) {

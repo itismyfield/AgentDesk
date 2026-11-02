@@ -811,7 +811,7 @@ async fn actual_creator(creator: Creator) {
 }
 
 /// The child inherits this process's environment, so no env fixture may change it meanwhile.
-fn creator_child(test: &str) -> bool {
+pub(super) fn creator_child(test: &str) -> bool {
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     crate::services::discord::admin_host_guard::tests::api_child(test)
 }
