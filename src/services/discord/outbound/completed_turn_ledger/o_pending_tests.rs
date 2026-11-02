@@ -258,3 +258,82 @@ async fn i7441b_pending_byte_eviction_and_corrupt_quarantine() {
         b"corrupt pending"
     );
 }
+
+/// A reboot renumbers the transcript volume after capture left no manifest: the entry still names
+/// that file by path and inode, so projection settles it; a new inode at the path stays pending.
+#[cfg(unix)]
+#[tokio::test]
+async fn renumbered_source_projects_but_a_replaced_one_stays_pending() {
+    use crate::services::tui_o::shadow::capture::renumber;
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let f = super::super::super::o_delivery_evidence::tests::Fixture::new(
+        744771,
+        ProviderKind::Claude,
+        &["body"],
+    )
+    .await;
+    let (_http, _http_guard) = f.http().await;
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
+        f.row.channel_id,
+        crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+    )]);
+    capture(&ProviderKind::Claude, &f.row).await;
+    let pending_path = path(&ProviderKind::Claude, f.row.channel_id).unwrap();
+    let mut captured = read(&pending_path).unwrap();
+    assert!(captured[0].manifest.take().is_some());
+    save(&pending_path, &captured).unwrap();
+    let before = std::fs::read(&pending_path).unwrap();
+    let aside = f.source.path.with_extension("aside");
+
+    std::fs::rename(&f.source.path, &aside).unwrap();
+    std::fs::copy(&aside, &f.source.path).unwrap();
+    project(&shared, &ProviderKind::Claude, f.row.channel_id).await;
+    assert_eq!(std::fs::read(&pending_path).unwrap(), before, "a new inode");
+    assert!(read_ledger(&ProviderKind::Claude, f.row.channel_id).is_none());
+    std::fs::rename(&aside, &f.source.path).unwrap();
+
+    let _reboot = renumber::shift(&f.source.path, 1 << 40);
+    project(&shared, &ProviderKind::Claude, f.row.channel_id).await;
+    let ledger = read_ledger(&ProviderKind::Claude, f.row.channel_id).unwrap();
+    assert!(ledger.settled_ids().contains(&f.row.user_msg_id));
+    assert!(read(&pending_path).unwrap().is_empty());
+}
+
+/// A turn captured after a reboot records the renumbered dev while the O store keeps the old one;
+/// projection still finds that stored source by path and inode and settles the entry.
+#[cfg(unix)]
+#[tokio::test]
+async fn capture_after_a_reboot_projects_against_the_older_stored_source() {
+    use crate::services::tui_o::shadow::capture::{file_identity, renumber};
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let mut f = super::super::super::o_delivery_evidence::tests::Fixture::new(
+        744772,
+        ProviderKind::Claude,
+        &["body"],
+    )
+    .await;
+    let (_http, _http_guard) = f.http().await;
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
+        f.row.channel_id,
+        crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+    )]);
+    let _reboot = renumber::shift(&f.source.path, 1 << 40);
+    let live = file_identity(&std::fs::metadata(&f.source.path).unwrap());
+    assert_ne!(live.0, f.source.dev);
+    f.row.tui_terminal_source_file_identity = Some(live);
+    capture(&ProviderKind::Claude, &f.row).await;
+    let pending_path = path(&ProviderKind::Claude, f.row.channel_id).unwrap();
+    let mut captured = read(&pending_path).unwrap();
+    assert_eq!(captured[0].file, Some(live));
+    captured[0].manifest = None;
+    save(&pending_path, &captured).unwrap();
+
+    project(&shared, &ProviderKind::Claude, f.row.channel_id).await;
+    let ledger = read_ledger(&ProviderKind::Claude, f.row.channel_id).unwrap();
+    assert!(ledger.settled_ids().contains(&f.row.user_msg_id));
+    assert!(read(&pending_path).unwrap().is_empty());
+}
