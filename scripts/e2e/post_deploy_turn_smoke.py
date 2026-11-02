@@ -2,22 +2,25 @@
 """Post-deploy smoke verdicts for the ``!clear`` transition + continuous-turn scenarios.
 
 ``cell-reset`` clears configured TUI cells once, before the smoke's first preflight.
+``cell-path`` names the session host the configured cell channel really runs on.
+``gateway-ready`` waits, up to a deadline, until the gateway can take Discord input.
 ``preflight`` proves the E2E cell idle before the deploy smoke posts prompts.
 ``judge`` folds one ``run_tui_relay.py`` report and the dcserver log bytes
 written during that run into one smoke line. Only a fully evidenced clean run
 passes; missing or unreadable evidence is a FAIL, never a PASS.
 
-Exit codes: 0 pass/idle, 1 fail/busy, 2 unreadable input, 3 foreign reset lease, 4 failed reset state.
+Exit codes: 0 pass/idle/ready, 1 fail/busy/not ready, 2 unreadable input, 3 foreign reset lease,
+4 failed reset state.
 """
 
 from __future__ import annotations
 
 import argparse
-import copy
 import json
 import os
 import re
 import sys
+import time
 import urllib.request
 from contextlib import ExitStack
 from pathlib import Path
@@ -194,97 +197,96 @@ def judge(
         findings.append(f"driver rc={driver_rc}")
 
     detail = f"deliveries {' '.join(marker_parts) or 'none'} {log_part}"
+    steps = f"steps: {cell_driver.format_step_timings((result or {}).get('step_timings'))}"
     if findings:
-        return False, f"{detail}; " + "; ".join(findings)
-    return True, detail
+        return False, f"{detail}; " + "; ".join(findings) + f"; {steps}"
+    return True, f"{detail} {steps}"
 
 
 def classify(
     *, report: dict[str, Any] | None, scenario_id: str, cell: str, channel_id: str,
-    run_id: str, config_path: Path, driver_rc: int, markers: list[str] | tuple[str, ...] = (),
+    run_id: str, driver_rc: int, markers: list[str] | tuple[str, ...] = (),
     log_counts: dict[str, int] | None = None, launch_options: Iterable[str] = (),
 ) -> dict[str, Any]:
-    """Classify only current, configured Herdr refusals; preserve the driver report."""
-    outcome = {"classification": "FAIL", "observed_reason": "evidence incomplete", "known_gaps": []}
-    try:
-        designated = channel_is_herdr(config_path, cell, channel_id)
-        rows = report.get("scenarios") if isinstance(report, dict) else None
-        if (not run_id or not isinstance(rows, list) or len(rows) != 1
-                or report.get("run_id") != run_id or report.get("cell") != cell
-                or str(report.get("channel_id")) != str(channel_id)):
-            return outcome
-        row = rows[0]
-        if (not isinstance(row, dict) or row.get("id") != scenario_id
-                or row.get("run_id") != run_id or row.get("cell") != cell
-                or str(row.get("channel_id")) != str(channel_id)):
-            return outcome
-        violations = report.get("coverage_class_violations")
-        if (not isinstance(violations, list) or violations or row.get("teardown_error")
-                or row.get("dirty_active_residue")):
-            return outcome
-        passed, detail = (judge(report=report, scenario_id=scenario_id, markers=markers,
-                               log_counts=log_counts, driver_rc=driver_rc, cell=cell,
-                               channel_id=channel_id, launch_options=launch_options)
-                          if scenario_id != "E-1" else (row.get("status") == "pass" and driver_rc == 0,
-                                                       "round-trip"))
-        outcome.update(classification="PASS" if passed else "FAIL", observed_reason=detail)
-        classification = None
-        if designated and scenario_id == "E-50" and passed:
-            classification, detail = "UNEXPECTED_PASS", "full judge passed on Herdr-configured channel"
-        elif designated and row.get("status") == "fail" and driver_rc == 1:
-            assertion_rows = row.get("assertions")
-            if not isinstance(assertion_rows, list):
-                return outcome
-            if (row.get("teardown_error") or row.get("wait_timeouts") or row.get("dirty_active_residue")
-                    or any(a.get("status") in {"fail", "unevaluable"} or a.get("passed") is False for a in assertion_rows)):
-                return outcome
-            reason = row.get("reason", "")
-            attribution = row.get("failure_attribution")
-            raw_reason = reason.removeprefix("assertion: ") if scenario_id == "E-50" else reason
-            expected_source = {"E-1": "exception", "E-50": "assertion"}.get(scenario_id)
-            if (not isinstance(attribution, dict) or attribution.get("raw_reason") != raw_reason
-                    or attribution.get("source") != expected_source):
-                return outcome
-            if scenario_id == "E-1":
-                match = re.fullmatch(r"RuntimeError: turn/start HTTP 422: (.+)", reason, re.DOTALL)
-                body = json.loads(match[1]) if match else None
-                if (isinstance(body, dict) and body.get("status") == "invalid_target"
-                        and body.get("error") == "herdr turn refused: executor_not_wired"):
-                    classification, detail = "KNOWN_GAP", "HTTP 422 invalid_target/executor_not_wired"
-            elif scenario_id == "E-50":
-                refusal = row.get("clear_refusal") or {}
-                reply = refusal.get("reply") or {}
-                after = str(refusal.get("after_id") or "")
-                content = reply.get("content", "")
-                match = re.fullmatch(r"세션을 초기화하지 못했어요: herdr clear refused: rotation_unsettled\(([1-9][0-9]*)\)", content)
-                if (refusal.get("stage") != "clear_ack" or not after.isdigit() or int(after) <= 0 or not match
-                        or not reply.get("channel_id") or str(reply["channel_id"]) != str(channel_id)
-                        or cell_driver.assertions.is_our_send(reply)
-                        or not cell_driver.herdr.clear_refusal([reply], after=int(after), channel=channel_id)
-                        or reason != "assertion: text !clear refused by the server: " + content):
-                    return outcome
-                counts = row.get("marker_counts") or {}
-                if (sorted(_label(m) for m in markers) != ["AFTER_CLEAR", "T1", "T2"]
-                        or any(type(counts.get(m)) is not int or counts[m] !=
-                               (0 if _label(m) == AFTER_CLEAR_LABEL else 1) for m in markers)):
-                    return outcome
-                # Run the unchanged judge after replacing only the interrupted clear transition.
-                complete = copy.deepcopy(report)
-                complete["scenarios"][0].update(status="pass", reason=None, marker_counts=dict.fromkeys(markers, 1))
-                clean, _ = judge(report=complete, scenario_id=scenario_id, markers=markers,
-                                 log_counts=log_counts, driver_rc=0, cell=cell,
-                                 channel_id=channel_id, launch_options=launch_options)
-                if clean:
-                    classification, detail = "KNOWN_GAP", f"herdr clear refused: rotation_unsettled({match[1]})"
-        if classification:
-            observed = {"reason": detail}
-            cell_driver.known_gap.apply_herdr_result(
-                observed, {"profile": "post_deploy_configured_herdr", "issue": detail},
-                passed=classification == "UNEXPECTED_PASS")
-            outcome.update(classification=classification, observed_reason=detail, known_gaps=observed["known_gaps"])
+    """Bind the report to this run, cell and channel, then judge what the user saw; unbound fails."""
+    outcome = {"classification": "FAIL", "observed_reason": "evidence incomplete"}
+    rows = report.get("scenarios") if isinstance(report, dict) else None
+    if (not run_id or not isinstance(rows, list) or len(rows) != 1
+            or report.get("run_id") != run_id or report.get("cell") != cell
+            or str(report.get("channel_id")) != str(channel_id)):
         return outcome
-    except (OSError, ValueError, TypeError, AttributeError, KeyError, yaml.YAMLError):
-        return {"classification": "FAIL", "observed_reason": "configuration or evidence unreadable", "known_gaps": []}
+    row = rows[0]
+    if (not isinstance(row, dict) or row.get("id") != scenario_id
+            or row.get("run_id") != run_id or row.get("cell") != cell
+            or str(row.get("channel_id")) != str(channel_id)):
+        return outcome
+    violations = report.get("coverage_class_violations")
+    if (not isinstance(violations, list) or violations or row.get("teardown_error")
+            or row.get("dirty_active_residue")):
+        return outcome
+    passed, detail = judge(report=report, scenario_id=scenario_id, markers=markers,
+                           log_counts=log_counts, driver_rc=driver_rc, cell=cell,
+                           channel_id=channel_id, launch_options=launch_options)
+    outcome.update(classification="PASS" if passed else "FAIL", observed_reason=detail)
+    return outcome
+
+
+def cell_path(config_path: Path, cell: str, channel_id: str) -> str:
+    """The session host the configured cell channel runs on: ``herdr`` when Herdr owns it."""
+    return "herdr" if channel_is_herdr(config_path, cell, channel_id) else cell_driver.cell_runtime(cell)
+
+
+def gateway_observation(detail: Any, *, provider: str) -> str | None:
+    """Why /api/health/detail does not yet show a recovered, connected gateway; None when it does."""
+    if not isinstance(detail, dict):
+        return "health detail is not an object"
+    if detail.get("fully_recovered") is not True:
+        return "startup recovery not finished"
+    providers = detail.get("providers")
+    if not isinstance(providers, list):
+        return "providers missing"
+    gateways = [p for p in providers if isinstance(p, dict) and p.get("runtime_role") == "gateway"]
+    if not any(p.get("name") == provider for p in gateways):
+        return f"no {provider} gateway provider"
+    waiting = sorted(str(p.get("name")) for p in gateways if p.get("connected") is not True)
+    return f"gateway not connected: {', '.join(waiting)}" if waiting else None
+
+
+def wait_gateway_ready(
+    *, base_url: str, cell: str, channel_id: str, deadline_s: float, interval_s: float = 2.0,
+    clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
+) -> tuple[bool, str]:
+    """Poll until the gateway is connected and a Discord read of the cell channel answers in time.
+
+    The read is the one every scenario wait polls, so a server that cannot answer it yet is not ready.
+    """
+    started = clock()
+    observation = "not observed"
+    while True:
+        remaining = deadline_s - (clock() - started)
+        if remaining <= 0:
+            return False, f"not ready after {clock() - started:.1f}s: {observation}"
+        request_s = max(0.1, min(10.0, remaining))
+        try:
+            _, detail = cell_driver._read_api_json(base_url, "/api/health/detail", timeout=request_s)  # noqa: SLF001
+            observation = gateway_observation(detail, provider=cell_driver.cell_provider(cell))
+            remaining = deadline_s - (clock() - started)
+            if observation is None and remaining > 0:
+                read_started = clock()
+                client = cell_driver.discord.DiscordClient(base_url=base_url, timeout_s=max(0.1, min(10.0, remaining)))
+                client.fetch_messages(channel_id, limit=1)
+                # A read that answers only after the deadline does not make the gateway ready in time.
+                if clock() - started <= deadline_s:
+                    return True, (f"ready after {clock() - started:.1f}s "
+                                  f"(gateway connected; Discord read {clock() - read_started:.1f}s)")
+                observation = "Discord read answered after the deadline"
+        except Exception as error:  # noqa: BLE001 - an unanswered probe is "not ready yet"
+            observation = f"{type(error).__name__}: {error}"[:300]
+        print(f"gateway-ready waiting {clock() - started:.1f}s: {observation}", flush=True)
+        remaining = deadline_s - (clock() - started)
+        if remaining <= 0:
+            continue
+        sleep(min(interval_s, remaining))
 
 
 def cell_session_busy_reasons(*, cell: str, channel_id: str, sessions_payload: Any) -> list[str]:
@@ -550,6 +552,15 @@ def main(argv: list[str] | None = None) -> int:
     status.add_argument("--reset-state", required=True)
     status.add_argument("--cell", required=True, choices=cell_driver.SUPPORTED_CELLS)
     status.add_argument("--channel-id", required=True)
+    path = sub.add_parser("cell-path")
+    path.add_argument("--config", required=True)
+    path.add_argument("--cell", required=True, choices=cell_driver.SUPPORTED_CELLS)
+    path.add_argument("--channel-id", required=True)
+    ready = sub.add_parser("gateway-ready")
+    ready.add_argument("--base-url", required=True)
+    ready.add_argument("--cell", required=True, choices=cell_driver.SUPPORTED_CELLS)
+    ready.add_argument("--channel-id", required=True)
+    ready.add_argument("--deadline-s", type=float, required=True)
     pre = sub.add_parser("preflight")
     pre.add_argument("--base-url", required=True)
     pre.add_argument("--cell", required=True, choices=cell_driver.SUPPORTED_CELLS)
@@ -575,6 +586,20 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "cell-reset":
         return _reset_smoke_cells(args)
+
+    if args.command == "cell-path":
+        try:
+            print(cell_path(Path(args.config), args.cell, args.channel_id))
+        except (OSError, ValueError, yaml.YAMLError) as error:
+            print(f"{type(error).__name__}: {error}", file=sys.stderr)
+            return 2
+        return 0
+
+    if args.command == "gateway-ready":
+        ready_now, detail = wait_gateway_ready(base_url=args.base_url, cell=args.cell,
+                                               channel_id=args.channel_id, deadline_s=args.deadline_s)
+        print(f"gateway-ready {'ok' if ready_now else 'FAIL'}: {detail}", flush=True)
+        return 0 if ready_now else 1
 
     if args.command == "reset-status" or (args.command == "preflight" and args.reset_state):
         rc, detail = reset_status(Path(args.reset_state), args.cell, args.channel_id)
@@ -625,21 +650,20 @@ def main(argv: list[str] | None = None) -> int:
         launch_options=launch_options,
         cell=args.cell, channel_id=args.channel_id,
     )
+    path_part = ""
     if args.config:
         outcome = classify(report=report, scenario_id=args.scenario, cell=args.cell,
                            channel_id=args.channel_id, run_id=args.run_id or "",
-                           config_path=Path(args.config), driver_rc=args.driver_rc, markers=markers,
+                           driver_rc=args.driver_rc, markers=markers,
                            log_counts=log_counts, launch_options=launch_options)
-        classification = outcome["classification"]
-        if classification in {"KNOWN_GAP", "UNEXPECTED_PASS"}:
-            print(f"{classification}: relay {args.scenario} cell={args.cell} reason={outcome['observed_reason']}")
-            return 0
-        if classification == "FAIL":
-            passed = False
-        if args.scenario == "E-1":
-            detail = outcome["observed_reason"]
-            passed = classification == "PASS"
-    print(f"relay {args.scenario} cell={args.cell} result={'pass' if passed else 'FAIL'} {detail}")
+        passed, detail = outcome["classification"] == "PASS", outcome["observed_reason"]
+        try:
+            path_part = f" path={cell_path(Path(args.config), args.cell, args.channel_id)}"
+        except (OSError, ValueError, yaml.YAMLError) as error:
+            # A verdict the current configuration cannot be bound to is not a pass.
+            path_part, passed = " path=unreadable", False
+            detail += f"; configured session host unreadable: {type(error).__name__}: {error}"
+    print(f"relay {args.scenario} cell={args.cell} result={'pass' if passed else 'FAIL'}{path_part} {detail}")
     return 0 if passed else 1
 
 

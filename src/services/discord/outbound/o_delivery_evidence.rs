@@ -343,14 +343,16 @@ fn headless_content_matches(content: &str, bodies: &[&str]) -> bool {
 
 /// A headless bridge body leaves a sent `message_outbox` row, not an O receipt; only a row the
 /// frame's own turn queued with this body after its records covers it, never another turn's.
+/// `turns` are the held turn nonces in preference order, each with where another stored turn
+/// starts: a turn speaks for the body only if every body record ends by that start.
 pub(in crate::services::discord) async fn headless_outbox(
     shared: &SharedData,
     frame: Frame<'_>,
     producer: manifest::BodyProducer,
-    producer_turn_nonce: &str,
+    turns: &[(&str, Option<u64>)],
     deadline: Instant,
 ) -> Option<TailCovered> {
-    if producer_turn_nonce.is_empty() {
+    if turns.iter().all(|(nonce, _)| nonce.is_empty()) {
         return None;
     }
     let pool = shared.pg_pool.as_ref()?;
@@ -360,7 +362,7 @@ pub(in crate::services::discord) async fn headless_outbox(
     let written = tokio::time::timeout_at(
         deadline,
         tokio::task::spawn_blocking(move || {
-            manifest::body_written_ms(
+            manifest::body_written(
                 manifest::Query {
                     provider: &provider,
                     channel,
@@ -377,7 +379,13 @@ pub(in crate::services::discord) async fn headless_outbox(
     .await
     .ok()?
     .ok()??;
-    let floor = chrono::DateTime::from_timestamp_millis(written - HEADLESS_OUTBOX_SKEW_MS)?;
+    let producer_turn_nonce = turns
+        .iter()
+        .find(|(nonce, next_turn_start)| {
+            !nonce.is_empty() && next_turn_start.is_none_or(|start| written.records_end <= start)
+        })
+        .map(|(nonce, _)| *nonce)?;
+    let floor = chrono::DateTime::from_timestamp_millis(written.at_ms - HEADLESS_OUTBOX_SKEW_MS)?;
     let rows: Vec<String> = tokio::time::timeout_at(
         deadline,
         sqlx::query_scalar(
