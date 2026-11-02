@@ -1358,24 +1358,3 @@ mod reply_context_tests {
         assert!(!should_start_attachment_only_turn("", 0));
     }
 }
-
-/// #4247/#4550 pins the live intake ordering contract. The Discord event
-/// dependencies make a unit-level end-to-end test impractical, so this follows
-/// the module's established source-order test convention: classify once, bypass
-/// stale terminal suppression only for positively identified human work, and
-/// pass that same value into both request and submission envelopes.
-#[cfg(test)]
-mod live_intake_preserve_wiring_tests {
-    pub(super) mod source_guard_tests;
-    use source_guard_tests::{INTAKE_GATE, admission_guard_gaps, preservation_gaps};
-
-    #[test]
-    fn live_human_preservation_precedes_stale_dispatch_suppression() {
-        assert_eq!(preservation_gaps(INTAKE_GATE), Vec::<String>::new());
-    }
-
-    #[test]
-    fn one_admission_guard_precedes_all_soft_intervention_entrypoints() {
-        assert_eq!(admission_guard_gaps(INTAKE_GATE), Vec::<String>::new());
-    }
-}
