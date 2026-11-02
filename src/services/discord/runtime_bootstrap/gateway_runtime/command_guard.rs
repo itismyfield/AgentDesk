@@ -48,7 +48,7 @@ pub(super) async fn check(ctx: Context<'_>) -> Result<bool, Error> {
         mark_routed(ctx).await;
         return Ok(true);
     }
-    tracing::info!(channel = %ctx.channel_id(), provider = ctx.data().provider.as_str(), command = %ctx.command().name, "CMD-GUARD: rejecting slash command");
+    tracing::info!(channel_id = %ctx.channel_id(), provider = ctx.data().provider.as_str(), command = %ctx.command().name, "CMD-GUARD: rejecting slash command");
     match app.interaction_type {
         poise::CommandInteractionType::Autocomplete => {
             app.interaction
