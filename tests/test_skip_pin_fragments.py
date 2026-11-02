@@ -258,6 +258,16 @@ class WriterGateVerdictTests(TempRoot):
                 self.assertIn(needle, message)
                 self.assertIn("scripts/test_only_module_skip_pin.d/", message)
 
+    def test_removing_a_pinned_helpers_test_cfg_fails_both_writer_gates(self) -> None:
+        pinned = ["src/helper.rs"]
+        before = self.verdicts(pinned)
+        self.assertTrue(all(ok for ok, _ in before), before)
+        write(self.root, "src/main.rs", "mod prod;\nmod helper;\nfn main() {}\n")
+        after = self.verdicts(pinned)
+        for ok, message in after:
+            self.assertFalse(ok, "a formerly test-only helper must enter the writer scan")
+            self.assertIn("pin-only (no longer skipped): src/helper.rs", message)
+
 
 class SyncWriterTests(TempRoot):
     def setUp(self) -> None:
