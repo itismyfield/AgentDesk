@@ -548,6 +548,7 @@ async fn enqueue_headless_turn_row(
 pub(in crate::services::discord) async fn enqueue_headless_turn_row_for_test(
     shared: &Arc<SharedData>,
     state: &InflightTurnState,
+    session_key: Option<&str>,
     content: &str,
 ) -> crate::services::message_outbox::OutboxEnqueueOutcome {
     let provider = state.provider_kind().expect("turn provider");
@@ -557,7 +558,7 @@ pub(in crate::services::discord) async fn enqueue_headless_turn_row_for_test(
             shared,
             channel_id: ChannelId::new(state.channel_id),
             owning_user_msg_id: (state.user_msg_id != 0).then(|| MessageId::new(state.user_msg_id)),
-            session_key: None,
+            session_key,
             provider: &provider,
             content,
             cancel_token: None,

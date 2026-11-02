@@ -385,8 +385,6 @@ fn release_closed_hold(logical: &str, nonce: &str) {
     }
 }
 
-/// The first prompt of execution `nonce`: one gated write on a ready composer, then its own hook
-/// Source, the attach, the hold's end and the new rollout from its start.
 /// A test's recorded Codex execution handed to the owner hook on this thread, unobserved.
 #[cfg(all(test, unix))]
 pub(crate) fn owned_first_prompt_for_tests(
@@ -411,6 +409,8 @@ pub(crate) fn owned_spawn_for_tests(
     super::tui_session_launch::first_input::spawn_owned(hook, context, at, prompt, command)
 }
 
+/// The first prompt of execution `nonce`: one gated write on a ready composer, then its own hook
+/// Source, the attach, the hold's end and the new rollout from its start.
 fn first_prompt(
     turn: &CodexHerdrTurn<'_>,
     runtime: &Handle,

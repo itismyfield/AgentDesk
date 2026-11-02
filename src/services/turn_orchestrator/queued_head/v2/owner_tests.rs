@@ -293,6 +293,18 @@ fn v2_restart_adopts_reserved_and_unknown_without_reset_or_resend() {
             assert!(restored.snapshot.head_injection.is_none());
             assert_eq!(restored.snapshot.items.len(), 1);
         } else {
+            let head = restored
+                .snapshot
+                .head_injection
+                .as_ref()
+                .expect("restart must keep the uncertain head, never make it eligible again");
+            assert_eq!(head.phase, phase, "restart preserves the uncertain phase");
+            assert_eq!(
+                head.attempt.as_ref(),
+                Some(&key.attempt),
+                "restart preserves the exact attempt"
+            );
+            assert_eq!(head.original.message_id, 100, "restart keeps the original");
             assert_eq!(
                 restored
                     .snapshot

@@ -15,7 +15,7 @@ pub(super) fn prepare_and_create_claude_tui_session(
     working_dir_path: &std::path::Path,
     resolved_session_id: &str,
     system_prompt: Option<&str>,
-    model_override: Option<&str>,
+    launch: crate::services::claude_tui::session::ClaudeTuiLaunchSettings<'_>,
     hook_endpoint: String,
     resume: bool,
     auth_env_lines: &str,
@@ -28,7 +28,11 @@ pub(super) fn prepare_and_create_claude_tui_session(
     if herdr_configured_for_tui_launch(channel_id) {
         return Err(HERDR_NOT_ADMITTED.to_string());
     }
+    // A launch that fails after its cleanup puts back the account markers, so the next launch still
+    // resumes the session under the account it ran on.
+    let auth = crate::services::tmux_common::AuthMarkers::read(tmux_session_name);
     crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
+    let mut restore = RestoreAuthOnFailure(Some((tmux_session_name, auth)));
     write_tmux_owner_marker(tmux_session_name)?;
     crate::services::tmux_common::write_tmux_runtime_kind_marker(
         tmux_session_name,
@@ -43,7 +47,7 @@ pub(super) fn prepare_and_create_claude_tui_session(
                 working_dir_path,
                 resolved_session_id,
                 system_prompt,
-                model_override,
+                launch,
                 hook_endpoint,
                 resume,
                 auth_env_lines,
@@ -83,7 +87,21 @@ pub(super) fn prepare_and_create_claude_tui_session(
         let _ = std::fs::remove_file(&owner_path);
         return Err(format!("tmux error: {}", stderr));
     }
+    restore.0 = None;
     Ok((owner_path, incarnation))
+}
+
+/// Restores the account markers read before a launch's cleanup unless the launch disarms it.
+struct RestoreAuthOnFailure<'a>(Option<(&'a str, crate::services::tmux_common::AuthMarkers)>);
+
+impl Drop for RestoreAuthOnFailure<'_> {
+    fn drop(&mut self) {
+        if let Some((name, auth)) = self.0.take()
+            && let Err(error) = auth.restore(name)
+        {
+            tracing::warn!(tmux_session_name = name, %error, "launch failure kept no account marker");
+        }
+    }
 }
 
 /// A session returning from Herdr launches on tmux next: its marker names tmux first, read back.
@@ -220,7 +238,7 @@ mod tests {
                     cwd,
                     id,
                     None,
-                    None,
+                    Default::default(),
                     "".into(),
                     false,
                     "",
@@ -280,7 +298,7 @@ mod host_marker_tests {
             root.path(),
             id,
             None,
-            None,
+            Default::default(),
             "".into(),
             false,
             "",
@@ -305,7 +323,7 @@ mod host_marker_tests {
             root.path(),
             id,
             None,
-            None,
+            Default::default(),
             "".into(),
             false,
             "",
@@ -364,7 +382,7 @@ mod herdr_off_tests {
             root.path(),
             id,
             None,
-            None,
+            Default::default(),
             "".into(),
             false,
             "",
@@ -437,7 +455,7 @@ mod herdr_off_tests {
                 root.path(),
                 id,
                 None,
-                None,
+                Default::default(),
                 "".into(),
                 false,
                 "",
@@ -605,7 +623,7 @@ mod herdr_env_tests {
             root.path(),
             id,
             None,
-            None,
+            Default::default(),
             "http://127.0.0.1:1".into(),
             false,
             &auth,
