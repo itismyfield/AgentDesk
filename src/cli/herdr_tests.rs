@@ -426,7 +426,7 @@ const RACE_CHANNEL: u64 = 1_479_671_301_387_059_401;
 #[test]
 fn m2t_u9_manual_retire_inside_the_terminate_cas_window_pg() {
     use crate::services::discord::herdr_terminate::{
-        OperatorTerminate, TerminationResult, terminate_explicit_herdr, test_turn,
+        OperatorTerminate, TerminationResult, terminate_explicit_herdr_for_test, test_turn,
     };
     use crate::services::discord::turn_lease;
     use crate::services::session_host::herdr_termination_rig as herdr;
@@ -472,7 +472,7 @@ fn m2t_u9_manual_retire_inside_the_terminate_cas_window_pg() {
             session_key: session_key.clone(),
             execution_nonce: herdr::EXECUTION.into(),
         };
-        let service = terminate_explicit_herdr(request, shared.clone(), &pool);
+        let service = terminate_explicit_herdr_for_test(request, shared.clone(), &pool);
         let (result, manual) = tokio::join!(service, manual);
         let won = Retired {
             nonce: herdr::EXECUTION.into(),

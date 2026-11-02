@@ -1689,7 +1689,16 @@ fn guarded_item_violations(
                 ));
             }
         }
-        for (relative, (used, values)) in item_uses_by_file(&files, needle, &aliases) {
+        let uses = item_uses_by_file(&files, needle, &aliases);
+        for (owner, budget) in *owners {
+            if *budget > 0 && *budget != usize::MAX {
+                assert!(
+                    sources.contains_key(*owner) && uses.get(*owner).is_some_and(|(n, _)| *n > 0),
+                    "source scan missed {needle} caller {owner}"
+                );
+            }
+        }
+        for (relative, (used, values)) in uses {
             let budget = owners.iter().find(|(owner, _)| *owner == relative);
             let Some((_, budget)) = budget else {
                 violations.push(format!("{relative}: {needle}"));

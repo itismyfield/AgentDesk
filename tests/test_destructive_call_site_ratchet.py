@@ -150,10 +150,11 @@ class SourceContractTests(unittest.TestCase):
 class RatchetDiscriminationTests(unittest.TestCase):
     DECLARED_CLOSE_SITES = {
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_e2e_tests.rs": 1,
-        "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs": 1,
+        "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs": 2,
         "src/services/session_host/herdr/model.rs": 2,
         "src/services/session_host/herdr_gate.rs": 3,
         "src/services/session_host/herdr_gate_tests.rs": 5,
+        "src/services/session_host/herdr_terminate_real_tests.rs": 1,
     }
 
     def test_declared_close_sites_pass_without_baseline_growth(self) -> None:
@@ -355,6 +356,18 @@ class RatchetDiscriminationTests(unittest.TestCase):
     HOST_TERMINATE_SPELLINGS = {
         "pane_close_literal": ('send("pane.close");\n', 1),
         "server_stop_literal": ('send("server.stop");\n', 1),
+        "workspace_close_literal": ('send("workspace.close");\n', 1),
+        "tab_close_literal": ('send("tab.close");\n', 1),
+        "group_close_literal": ('send("group.close");\n', 1),
+        "worktree_group_close_literal": ('send("worktree_group.close");\n', 1),
+        "workspace_raw_frame": ('let f = r#"{"method":"workspace.close"}"#;\n', 1),
+        "tab_concat": ('const M: &str = concat!("tab", ".close");\n', 1),
+        "group_format": ('let m = format!("{}.close", "group");\n', 1),
+        "worktree_group_variant": ('#[serde(rename = "worktree_group.close")]\nWorktreeGroupClose {},\n', 2),
+        "workspace_wrapper": ("fn close_workspace() {}\n", 1),
+        "close_group_alias": ("use api::CloseGroup as Close;\n", 1),
+        "worktree_group_acronym": ("RPCWorktreeGroupClose::new();\n", 1),
+        "worktree_group_screaming": ("const CLOSE_WORKTREE_GROUP: u8 = 1;\n", 1),
         "raw_json_frame": ('let frame = r#"{"method":"server.stop"}"#;\n', 1),
         "concat_split": ('const M: &str = concat!("pane", ".close");\n', 1),
         "hex_escape": ('send("pane\\x2eclose");\n', 1),
@@ -391,6 +404,8 @@ class RatchetDiscriminationTests(unittest.TestCase):
         "call_with_pieces": 'send("pane.cl", "ose");\n',
         "pane_closed_constant": "const PANE_CLOSED: u8 = 1;\n",
         "server_stopped_constant": "const SERVER_STOPPED: u8 = 1;\n",
+        "workspace_closed_constant": "const WORKSPACE_CLOSED: u8 = 1;\n",
+        "worktree_group_closed": "on_worktree_group_closed();\n",
     }
 
     def test_host_terminate_catches_close_rpc_spellings_and_aliases(self) -> None:
@@ -411,6 +426,8 @@ class RatchetDiscriminationTests(unittest.TestCase):
             "// pane.close is refused here\n"
             "/// server.stop\n"
             "/* PaneClose */\n"
+            "// workspace.close and TabClose\n"
+            "/* group.close and WorktreeGroupClose */\n"
             'server.stop(); pane.close_all(); let s = "stop"; let c = "close";\n'
             'f("pane"); g(".close");\n'
             "on_pane_closed(); server_stopped = true;\n"
