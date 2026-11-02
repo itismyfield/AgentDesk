@@ -3634,8 +3634,6 @@ src/
 │   │   │   ├── policy_tests.rs
 │   │   │   ├── root_replaced.rs
 │   │   │   └── root_replaced_tests.rs
-│   │   ├── herdr_host_tests/
-│   │   │   └── teardown_census_tests.rs
 │   │   ├── consumer_guard.rs
 │   │   ├── herdr_gate.rs
 │   │   ├── herdr_gate_tests.rs
