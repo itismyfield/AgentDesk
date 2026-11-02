@@ -422,7 +422,8 @@ pub async fn update_entry_status_on_pg(
     // defensive rather than load-bearing — the 0-row drift branch below only
     // `continue`s while the row still carries the identity this attempt
     // observed, so recomputing `options.or(current.*)` per iteration would
-    // yield the same value.
+    // yield the same value. Its declaration site is locked structurally by
+    // `pinned_dispatch_identity_is_declared_before_the_stale_retry_loop`.
     let pinned_dispatch_id = options
         .dispatch_id
         .clone()
