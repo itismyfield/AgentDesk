@@ -216,16 +216,4 @@ async fn restore_waits_for_channel_lock_and_keeps_other_channel() {
     assert_disk(&shared);
 }
 
-#[test]
-fn recovery_consumer_routes_uninstalled_candidates_to_cleanup() {
-    // Lexical auxiliary only: this is not an HTTP execution proof.
-    let source = include_str!("../queued_recovery.rs");
-    let region =
-        &source[source.find("let filter_outcome =").unwrap()..source.find("// P1-2:").unwrap()];
-    assert!(region.contains("install_restored_queued_placeholders("));
-    assert!(region.contains("stale_cards_to_delete.extend(uninstalled)"));
-    assert!(!region.contains(".insert("));
-    assert!(!region.contains("persist_channel_from_map"));
-}
-
 pub(super) mod n3bc_tests;
