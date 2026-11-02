@@ -9,9 +9,7 @@ pub(in crate::services::discord) fn record_placeholder_live_event(
     channel_id: ChannelId,
     event: Option<super::super::placeholder_live_events::RecentPlaceholderEvent>,
 ) {
-    if (shared.ui.placeholder_live_events_enabled || shared.ui.status_panel_v2_enabled)
-        && let Some(event) = event
-    {
+    if let Some(event) = event {
         shared
             .ui
             .placeholder_live_events
@@ -216,11 +214,10 @@ pub(super) async fn ensure_active_placeholder_card<G: TurnGateway + ?Sized>(
     key: super::super::placeholder_controller::PlaceholderKey,
     input: super::super::placeholder_controller::PlaceholderActiveInput,
 ) -> super::super::placeholder_controller::PlaceholderControllerOutcome {
-    if shared.ui.placeholder_live_events_enabled
-        && let Some(block) = shared
-            .ui
-            .placeholder_live_events
-            .render_block(key.channel_id)
+    if let Some(block) = shared
+        .ui
+        .placeholder_live_events
+        .render_block(key.channel_id)
     {
         return shared
             .ui

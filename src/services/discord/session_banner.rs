@@ -77,11 +77,7 @@ impl<'a> DiscordTurnSessionBanner<'a> {
     }
 
     pub(in crate::services::discord) fn format_discord_body(&self, body: &str) -> String {
-        if self.shared.ui.status_panel_v2_enabled {
-            super::formatting::format_for_discord_with_status_panel(body, self.provider)
-        } else {
-            super::formatting::format_for_discord_with_provider(body, self.provider)
-        }
+        super::formatting::format_for_discord_with_status_panel(body, self.provider)
     }
 
     pub(in crate::services::discord) fn format_and_prefix(
@@ -93,18 +89,21 @@ impl<'a> DiscordTurnSessionBanner<'a> {
     }
 }
 
-/// Whether `text` is `body` as relayed, with or without the one-line banner prefixed below.
+/// Whether `text` is `body` as relayed, with or without the session banner prefixed below.
 #[cfg(test)]
 pub(in crate::services::discord) fn relays_body(text: &str, body: &str) -> bool {
     text == body
-        || text
-            .split_once("\n\n")
-            .is_some_and(|(line, rest)| rest == body && !line.contains('\n'))
+        || text.split_once("\n\n").is_some_and(|(banner, rest)| {
+            rest == body
+                && crate::services::discord::placeholder_live_events::is_session_panel_banner(
+                    banner,
+                )
+        })
 }
 
 /// Decorate the first logical answer chunk for `turn_id` with the current
-/// session line. `first_turn_chunk=false`, an empty body, disabled status-panel
-/// v2, or a non-winning turn returns `body` unchanged.
+/// session line. `first_turn_chunk=false`, an empty body, or a non-winning turn
+/// returns `body` unchanged.
 pub(in crate::services::discord) fn with_session_banner_prefix(
     shared: &SharedData,
     channel_id: ChannelId,
@@ -113,7 +112,7 @@ pub(in crate::services::discord) fn with_session_banner_prefix(
     first_turn_chunk: bool,
     body: String,
 ) -> String {
-    if !shared.ui.status_panel_v2_enabled || !first_turn_chunk || body.trim().is_empty() {
+    if !first_turn_chunk || body.trim().is_empty() {
         return body;
     }
     let Some(line) = shared
@@ -389,24 +388,6 @@ mod tests {
             .starts_with(BANNER)
         );
 
-        let disabled = shared_with_v2(false);
-        arm_session(
-            &disabled,
-            ChannelId::new(4151),
-            "AgentDesk-claude#nonce-a",
-            "session-a",
-        );
-        assert_eq!(
-            with_session_banner_prefix(
-                &disabled,
-                ChannelId::new(4151),
-                &ProviderKind::Claude,
-                "discord:4151:1",
-                true,
-                "body".to_string(),
-            ),
-            "body"
-        );
         assert_eq!(
             with_session_banner_prefix(
                 &shared,
@@ -418,6 +399,22 @@ mod tests {
             ),
             "body"
         );
+    }
+
+    #[test]
+    fn relayed_body_accepts_only_a_rendered_session_banner() {
+        for (text, relays) in [
+            ("ok", true),
+            ("🆕 새 세션 시작\n\nok", true),
+            (
+                "기존 세션 복원 · provider session claude#abc\n(최근 대화 3개를 읽어들였습니다)\n\nok",
+                true,
+            ),
+            ("ERROR\n\nok", false),
+            ("\n\nok", false),
+        ] {
+            assert_eq!(relays_body(text, "ok"), relays, "{text:?}");
+        }
     }
 
     #[test]

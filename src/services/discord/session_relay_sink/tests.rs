@@ -2241,10 +2241,6 @@ fn session_sink_short_replace_raw_body_fingerprint_refuses_watcher_rerelay_4081(
         "session sink must preserve raw response bytes before Discord formatting"
     );
     assert!(
-        relay_format_src.contains("format_for_discord_with_provider(&raw_response_text"),
-        "session sink must format from the preserved raw body, not derive raw from formatted text"
-    );
-    assert!(
         relay_format_src.contains("format_for_discord_with_status_panel(&raw_response_text"),
         "session sink status-panel formatting must also use the preserved raw body"
     );

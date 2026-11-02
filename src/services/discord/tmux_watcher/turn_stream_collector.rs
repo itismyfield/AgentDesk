@@ -229,10 +229,7 @@ async fn collect_turn_stream_body(
     let watcher_fresh_turn_frame = placeholder_msg_id.is_none()
         && status_panel_msg_id.is_none()
         && !restored_assistant_text_seen;
-    if continuation.is_none()
-        && watcher_fresh_turn_frame
-        && (shared.ui.placeholder_live_events_enabled || shared.ui.status_panel_v2_enabled)
-    {
+    if continuation.is_none() && watcher_fresh_turn_frame {
         if single_message_panel_footer_mode {
             supersede_watcher_footer(&http, &shared, channel_id, footer_owner).await;
             shared

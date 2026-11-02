@@ -609,9 +609,6 @@ where
         }
     }
 
-    if !shared.ui.status_panel_v2_enabled {
-        return RecoveryCompletionOutcome::Emitted;
-    }
     // #2427 D wire: explicit completion signal — most recovery paths
     // already call `clear_inflight_state` unconditionally; this is a
     // safety net for any branch that emits TurnCompleted without doing
@@ -625,12 +622,8 @@ where
     );
     let started_at_unix = super::inflight::parse_started_at_unix(&state.started_at)
         .unwrap_or_else(|| chrono::Utc::now().timestamp());
-    let Some(status_msg_id) = recovery_status_panel::completion_target(
-        shared.ui.status_panel_v2_enabled,
-        state,
-        provider,
-        channel_id,
-    ) else {
+    let Some(status_msg_id) = recovery_status_panel::completion_target(state, provider, channel_id)
+    else {
         return RecoveryCompletionOutcome::Emitted;
     };
 

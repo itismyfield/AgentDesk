@@ -249,7 +249,6 @@ async fn t08_fallback_death_respawn_preserves_row_one_reader_and_body_before_nex
         let mut shared = discord::make_shared_data_for_tests();
         let data = Arc::get_mut(&mut shared).unwrap();
         data.ui.status_panel_v2_enabled = false;
-        data.ui.placeholder_live_events_enabled = false;
         data.provider = provider.clone();
         let token = Arc::new(CancelToken::new());
         let mut row = row(channel.get(), &token);

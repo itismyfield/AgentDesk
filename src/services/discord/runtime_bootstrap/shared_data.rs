@@ -110,8 +110,7 @@ pub(super) fn run_bot_build_shared_data(
             placeholder_live_events: Arc::new(
                 crate::services::discord::placeholder_live_events::PlaceholderLiveEvents::with_tool_activity_display(crate::config::runtime_config().placeholder.tool_activity_display),
             ),
-            // Config switches retired: live events and the v2 panel are the production layout.
-            placeholder_live_events_enabled: true,
+            // Config switch retired: the v2 panel is the production layout.
             status_panel_v2_enabled: true,
             two_message_panel_enabled,
         },

@@ -5,11 +5,8 @@ use crate::services::agent_protocol::StatusEvent;
 use super::common::{EVENT_LINE_MAX_CHARS, normalize_summary, normalize_tool_key, truncate_chars};
 
 pub(super) fn slots_enabled_by_footer_flag() -> bool {
-    // #3089: background Bash task slots are deliberately footer-mode gated so the
-    // legacy separate status-panel / completion-card render path is unchanged only
-    // when AGENTDESK_SINGLE_MESSAGE_PANEL=0/false (opt-out). As of #3560 the gate is
-    // default-ON, so unset/other values render in footer mode. `status_panel_v2_enabled`
-    // is already checked by the callers before status events are pushed/rendered.
+    // Background Bash task slots render only in footer mode, which
+    // AGENTDESK_SINGLE_MESSAGE_PANEL turns on by default.
     super::super::single_message_panel::enabled()
 }
 

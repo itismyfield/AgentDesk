@@ -435,7 +435,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
             bridge.reuse_status_panel_message,
         );
         let mut last_status_panel_text = String::new();
-        let mut status_panel_dirty = shared_owned.ui.status_panel_v2_enabled;
+        let mut status_panel_dirty = true;
         let mut last_status_panel_edit = tokio::time::Instant::now() - status_interval;
         let turn_start = std::time::Instant::now();
         // #5707: observe after own clear; the unbounded prior window can overlap provider work.
@@ -513,16 +513,14 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
             )
             .await;
         }
-        if shared_owned.ui.placeholder_live_events_enabled || shared_owned.ui.status_panel_v2_enabled {
-            if single_message_panel_footer_mode {
-                supersede_bridge_footer(shared_owned.as_ref(), channel_id, footer_owner).await;
-                shared_owned
-                    .ui
-                    .placeholder_live_events
-                    .clear_channel_preserving_footer_residuals(channel_id);
-            } else {
-                shared_owned.ui.placeholder_live_events.clear_channel(channel_id);
-            }
+        if single_message_panel_footer_mode {
+            supersede_bridge_footer(shared_owned.as_ref(), channel_id, footer_owner).await;
+            shared_owned
+                .ui
+                .placeholder_live_events
+                .clear_channel_preserving_footer_residuals(channel_id);
+        } else {
+            shared_owned.ui.placeholder_live_events.clear_channel(channel_id);
         }
         if single_message_panel_footer_mode {
             // #3560: authority is proven before touching the old Discord panel.
@@ -555,9 +553,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         )
         .await;
 
-        if shared_owned.ui.status_panel_v2_enabled
-            && let Some(dispatch_id) = dispatch_id.as_deref()
-        {
+        if let Some(dispatch_id) = dispatch_id.as_deref() {
             status_panel_dirty |= refresh_task_panel_line_from_dispatch(
                 shared_owned.as_ref(),
                 channel_id,
