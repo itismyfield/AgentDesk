@@ -343,7 +343,6 @@ impl OwnerInput {
     }
 }
 
-// Windows has no directory fsync, so the queued V2 owner these tests adopt refuses every commit.
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
