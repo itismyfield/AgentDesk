@@ -357,22 +357,75 @@ async fn a1_owned_busy_rollback_keeps_front_without_completing_or_requeueing() {
             .any(|s| s.contains("provider가 응답을 완료하지 못했어요"))
     );
 
+    let calls = rig._api.take();
+    let last_status = calls
+        .iter()
+        .filter_map(|call| {
+            let body = call.splitn(3, ' ').nth(2)?;
+            let body: Value = serde_json::from_str(body).ok()?;
+            (body["channel_id"] == rig.channel.to_string())
+                .then(|| body["status"].as_str().map(str::to_owned))
+                .flatten()
+        })
+        .last();
+    assert_eq!(last_status.as_deref(), Some("awaiting_user"), "{calls:?}");
+
     // A real turn still publishes its completion, which grants the same front another opportunity.
     let token = Arc::new(CancelToken::new());
     rig.mailbox
         .restore_active_turn(token, UserId::new(7), MessageId::new(9))
         .await;
+    discord::queue_io::spawn_turn_completion_idle_queue_listener(
+        rig.shared.clone(),
+        ProviderKind::Claude,
+    );
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while discord::queue_io::cancel_backstop_test_support::listener_completed_reconciles(
+            rig.channel,
+        ) == 0
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let attempts = rig
+        .trace
+        .text()
+        .matches("prior turn genuinely busy per JSONL")
+        .count();
+    assert_eq!(
+        attempts, 1,
+        "listener startup must not manufacture a completion"
+    );
     discord::mailbox_finish_turn(&rig.shared, &ProviderKind::Claude, rig.channel).await;
     assert!(completions.recv().await.unwrap().queue_is_eligible());
-    crate::services::discord::queue_io::input_owner::drive::wake(drive);
-    let retry = tokio::time::timeout(Duration::from_secs(20), settled.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(
-        retry.is_err(),
-        "a genuine completion wakes the front through real intake again"
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if rig
+                .trace
+                .text()
+                .matches("prior turn genuinely busy per JSONL")
+                .count()
+                > attempts
+                && !rig.mailbox.has_active_turn().await.unwrap()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{}", rig.trace.text()));
+    assert_eq!(
+        rig.trace
+            .text()
+            .matches("prior turn genuinely busy per JSONL")
+            .count(),
+        2,
+        "real completion listener re-enters actual intake once, without a manual drive wake"
     );
+    drop(drive);
     assert!(
         completions.try_recv().is_err(),
         "the second busy refusal also has no self completion"
@@ -423,6 +476,10 @@ async fn a1_not_sent_intake_posts_no_provider_failure() {
     }
     let _root = crate::config::TestRuntimeRootGuard::new();
     let rig = IntakeRig::new(7_676_102, false).await;
+    let session_before = rig.shared.core.lock().await.sessions[&rig.channel]
+        .session_id
+        .clone();
+    let mut completions = turn_completion_events::subscribe_turn_completion_events(&rig.shared);
     let (completed, bridge) = tokio::sync::oneshot::channel();
     *discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
         .lock()
@@ -443,12 +500,44 @@ async fn a1_not_sent_intake_posts_no_provider_failure() {
         .await
         .unwrap()
         .unwrap();
+    // Process the bridge's earlier settlement messages before inspecting the event bus.
+    let _ = rig
+        .shared
+        .turn_finalizer
+        .has_live_watcher_pending(rig.channel, rig.shared.restart.current_generation)
+        .await;
     let writes = rig.mock.written_texts();
+    let trace = rig.trace.text();
+    let mut queue_eligible = 0;
+    while let Ok(event) = completions.try_recv() {
+        if event.channel_id == rig.channel && event.queue_is_eligible() {
+            queue_eligible += 1;
+        }
+    }
+    let session_after = rig.shared.core.lock().await.sessions[&rig.channel]
+        .session_id
+        .clone();
+    let observation = (
+        !writes.iter().any(|s| s.contains("⚠️")),
+        !trace.contains("Empty response"),
+        !trace.contains("auto-retrying with fresh session"),
+        queue_eligible,
+        session_after,
+    );
+    eprintln!("A1B_NOT_SENT_OBSERVATION {observation:?}");
+    assert_eq!(
+        observation,
+        (true, true, true, 0, session_before),
+        "{writes:?}\n{trace}"
+    );
+    let deleted = rig.mock.deleted();
     assert!(
-        !writes
-            .iter()
-            .any(|s| s.contains("provider가 응답을 완료하지 못했어요")),
-        "{writes:?}"
+        !deleted.is_empty(),
+        "NotSent removes its intake placeholder"
+    );
+    assert!(
+        !deleted.contains(&(1_479_671_302_387_076_000 + rig.channel.get())),
+        "the user message is never a placeholder"
     );
     assert_eq!(
         rig.state().await["items"].as_array().unwrap().len(),

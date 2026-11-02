@@ -1730,6 +1730,24 @@ pub(super) async fn handle_text_message(
                     &cancel_token,
                     &super::super::super::resolve_discord_bot_provider(token),
                 ).await;
+                post_adk_session_status(
+                    adk_session_key.as_deref(),
+                    adk_session_name.as_deref(),
+                    Some(provider.as_str()),
+                    "awaiting_user",
+                    &provider,
+                    Some(&adk_session_info),
+                    None,
+                    Some(&current_path),
+                    dispatch_id.as_deref(),
+                    adk_thread_channel_id,
+                    Some(channel_id),
+                    role_binding
+                        .as_ref()
+                        .map(|binding| binding.role_id.as_str()),
+                    shared.api_port,
+                )
+                .await;
                 owner.defer_before_submit("hosted_tui_busy_pre_submit");
                 intake_latency.log(channel_id.get(), provider_label, "deferred_busy");
                 return Ok(IntakeExecution::deferred(channel_id));

@@ -415,6 +415,25 @@ pub(super) async fn handle_stream_content_message(
                                 );
                             }
                         }
+        StreamContentArmMessage::Error { message, .. } if message.starts_with("NotSent(") => {
+                            // A held input never started a provider turn or a queue-completion edge.
+                            transport_error = true;
+                            recovery_retry = false;
+                            resume_failure_detected = false;
+                            full_response.clear();
+                            current_tool_line = None;
+                            tui_error_classification = TuiErrorClassification::not_submitted();
+                            let key = crate::services::discord::turn_finalizer::TurnKey::new(
+                                channel_id,
+                                inflight_state.effective_finalizer_turn_id(),
+                                shared_owned.restart.current_generation,
+                            ).with_episode_nonce(inflight_state.turn_nonce.as_deref());
+                            shared_owned.turn_finalizer.note_terminal_disposition_settled(key, false, shared_owned.clone());
+                            tracing::info!(%channel_id, %message, "owner input held without provider recovery or completion");
+                            state_dirty = true;
+                            done = true;
+                            terminal_control_drain_until = None;
+                        }
         StreamContentArmMessage::Error { message, stderr } => {
                             let is_stale_resume =
                                 stream_error_has_stale_resume_error(&message, &stderr);
