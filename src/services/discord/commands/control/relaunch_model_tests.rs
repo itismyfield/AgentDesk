@@ -55,7 +55,7 @@ impl Fixture {
     }
 
     /// A restart: memory starts empty, the boot audit rewrites the settings file, and the settings
-    /// are read back from disk.
+    /// and model overrides are read back from disk as boot restores them.
     pub(super) async fn restart(&self) {
         self.shared
             .settings
@@ -63,11 +63,16 @@ impl Fixture {
             .await
             .channel_relaunch_pending
             .clear();
+        let models = &self.shared.overrides.model_overrides;
+        models.clear();
         let root = crate::config::runtime_root().unwrap();
         let audit = crate::services::discord_config_audit::audit_and_reconcile_config_only;
         let loaded = crate::services::discord_config_audit::load_runtime_config(&root).unwrap();
         audit(&root, loaded.config, loaded.path, loaded.existed, false).unwrap();
         let stored = crate::services::discord::settings::load_bot_settings(TOKEN);
+        let boot = crate::services::discord::runtime_bootstrap::restored_model_overrides;
+        let restore = crate::services::discord::runtime_bootstrap::restore_model_overrides;
+        restore(models, &boot(&stored));
         *self.shared.settings.write().await = stored;
     }
 
