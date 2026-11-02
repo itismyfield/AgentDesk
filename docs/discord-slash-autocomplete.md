@@ -35,6 +35,15 @@
 | `/system-prompt` | 없음 | 대상 인자 없음 | `commands/system_prompt.rs:97` | #7678-1 |
 | `/restart` | 없음 | 대상 인자 없음 | `commands/restart.rs:353` | #7678-1 |
 
+등록 계약 시험은 `run_bot_build_slash_commands`가 만든 Discord 등록 JSON의 모든 명령·하위 명령·인자를 이 표와 대조한다.
+문자열 인자는 autocomplete나 choices가 필요하며, 명시적 예외는 임의 프롬프트인 `skill.args`와 조각 2의 `cancel-queued.message_id`다.
+
+자동완성 가드·권한·PG·후보 조회는 interaction 생성 시각 기준 2.3초의 단일 deadline을 공유한다.
+Discord 3초 한도까지 응답 전송 여유를 남기고, catalog는 같은 deadline보다 200ms 먼저 부분 결과를 반환한다.
+후보는 값 접두어, 값 포함, 표시 포함 순서로 안정 정렬한 뒤 25개로 제한한다.
+채널 정보는 interaction payload, 같은 guild cache, REST 순서로 한 번 조회해 안내 후보에도 재사용한다.
+채널 확인 오류나 durable recovery의 불확정 `Skip`은 확인된 fallback이 없는 한 다른 봇 선택 대신 재시도를 안내한다.
+
 디스패치·카드·에이전트·채널 ID를 직접 받는 등록된 슬래시 명령은 없다.
 HTTP API·버튼 custom_id·텍스트 명령을 슬래시 인자로 오인해 새 명령을 만들지 않는다.
 기존 고정 choices와 picker는 위 main의 같은 좌표에 이미 충족된 범위이므로 재구현하지 않는다.

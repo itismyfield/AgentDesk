@@ -1,7 +1,7 @@
 use poise::serenity_prelude::CreateAutocompleteResponse;
 
 use super::super::super::Context;
-use super::super::autocomplete::{authorized, complete};
+use super::super::autocomplete::{authorized, complete, query_deadline};
 use crate::db::dispatched_sessions::{
     load_live_bound_session_ids_pg, load_session_rebind_context_pg,
 };
@@ -11,7 +11,8 @@ pub(super) async fn autocomplete_session(
     ctx: Context<'_>,
     partial: &str,
 ) -> CreateAutocompleteResponse {
-    complete(partial, async {
+    let deadline = query_deadline(ctx).await;
+    complete(ctx, partial, async {
         if !matches!(ctx.data().provider, ProviderKind::Claude) || !authorized(ctx).await {
             return Vec::new();
         }
@@ -47,6 +48,7 @@ pub(super) async fn autocomplete_session(
                 &live,
                 home.as_deref(),
                 &partial,
+                deadline - std::time::Duration::from_millis(200),
             )
         })
         .await
@@ -62,7 +64,7 @@ pub(super) async fn autocomplete_cwd(
     ctx: Context<'_>,
     partial: &str,
 ) -> CreateAutocompleteResponse {
-    complete(partial, async {
+    complete(ctx, partial, async {
         if !authorized(ctx).await {
             return Vec::new();
         }

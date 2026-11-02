@@ -2204,6 +2204,7 @@ src/
 │   │   │   └── turn_start.rs
 │   │   ├── runtime_bootstrap/
 │   │   │   ├── gateway_runtime/
+│   │   │   │   ├── command_guard.rs
 │   │   │   │   └── slash_command_tests.rs
 │   │   │   ├── intake_delivery_sweep/
 │   │   │   │   └── tests.rs

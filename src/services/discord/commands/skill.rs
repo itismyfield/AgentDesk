@@ -110,7 +110,7 @@ async fn autocomplete_skill<'a>(
     ctx: Context<'a>,
     partial: &'a str,
 ) -> serenity::CreateAutocompleteResponse {
-    super::autocomplete::complete(partial, async {
+    super::autocomplete::complete(ctx, partial, async {
         if !super::autocomplete::authorized(ctx).await {
             return Vec::new();
         }
