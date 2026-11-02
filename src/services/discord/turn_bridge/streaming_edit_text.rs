@@ -64,10 +64,25 @@ pub(in crate::services::discord) fn bridge_streaming_edit_gate_open(
 /// requeue and quiescence behavior do not depend on the rendered text shape.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(in crate::services::discord) struct TuiErrorClassification {
+    input_not_submitted: bool,
     pre_submission_prompt_error: bool,
     claude_followup_requeue_prompt_error: bool,
     claude_followup_busy_readiness_timeout: bool,
     transport_error_should_skip_quiescence: bool,
+}
+
+impl TuiErrorClassification {
+    pub(in crate::services::discord) fn not_submitted() -> Self {
+        Self {
+            input_not_submitted: true,
+            transport_error_should_skip_quiescence: true,
+            ..Self::default()
+        }
+    }
+
+    pub(in crate::services::discord) fn input_not_submitted(self) -> bool {
+        self.input_not_submitted
+    }
 }
 
 pub(in crate::services::discord) fn classify_raw_tui_error(
@@ -123,6 +138,7 @@ pub(in crate::services::discord) fn classify_raw_tui_error(
     };
 
     TuiErrorClassification {
+        input_not_submitted: false,
         pre_submission_prompt_error,
         claude_followup_requeue_prompt_error,
         claude_followup_busy_readiness_timeout,

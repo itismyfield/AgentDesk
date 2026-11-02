@@ -16,6 +16,7 @@ pub(super) fn terminal_receipt_outcome(label: &str) -> Option<TerminalOutcome> {
         "empty_response" => Some(TerminalOutcome::Empty),
         "cancelled" => Some(TerminalOutcome::Cancelled),
         "prompt_too_long" | "transport_error" => Some(TerminalOutcome::Failed),
+        "input_not_submitted" => None,
         _ => None,
     }
 }
