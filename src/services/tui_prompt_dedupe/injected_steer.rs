@@ -246,9 +246,16 @@ fn claude_claim(session: &str, prompts: &[String], row: Option<&str>) -> Option<
     if channel.is_some_and(crate::services::tui_o::turn_mode::transcript_turns) {
         return Some(Claim::Joined { first: false });
     }
-    let Some(id) = row.and_then(|row| history::user_row_attempt("claude", session, prompts, row))
-    else {
-        return Some(Claim::Joined { first: false });
+    let owner = row.map_or(history::RowOwner::None, |row| {
+        history::row_owner("claude", session, prompts, row)
+    });
+    let id = match owner {
+        history::RowOwner::User(id) => id,
+        // A row not yet readable is decided on a later reading, never joined now.
+        history::RowOwner::Unread => return Some(Claim::Deferred),
+        history::RowOwner::Command(_) | history::RowOwner::None => {
+            return Some(Claim::Joined { first: false });
+        }
     };
     let key = PromptKey::new("claude", session);
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());

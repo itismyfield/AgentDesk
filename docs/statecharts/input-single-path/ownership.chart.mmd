@@ -1,5 +1,5 @@
 ---
-title: "Who answers a Discord input pasted into a Claude pane, issue 7676 A2+D"
+title: "Who answers an input pasted into a Claude pane, issue 7676 A2+D"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -7,9 +7,9 @@ stateDiagram-v2
     lg1: Lost
     lg2: Done
     lg3: Delivered
-    lg4: Breaks AnswerOnce or NoRetryRequired
-    lg5: Breaks NoSilentLoss in some cases
-    lg6: Path to the AnswerOnce or NoRetryRequired or NoSilentLoss bug
+    lg4: Breaks AnswerOnce or NoRetryRequired or StartNotDropped
+    lg5: Breaks DraftToldOnce or NoSilentLoss or NoTimedRetry in some cases
+    lg6: Path to the AnswerOnce or DraftToldOnce or NoRetryRequired or NoSilentLoss or NoTimedRetry or StartNotDropped bug
   }
   class lg0 blue
   class lg1 pink
@@ -20,25 +20,29 @@ stateDiagram-v2
   class lg6 bugPath
   s0: Input waits for the owner (Claude busy)
   s1: Input waits for the owner (Claude idle)
-  s2: Input held for a later wake (Claude idle)
-  s3: Pasted, no row yet
+  s2: Input held for a later wake (Claude busy)
+  s3: Input held for a later wake (Claude idle)
   s4: Input kept, person asked to send again
-  s5: Input held for a later wake (Claude busy)
-  s6: Claude queued it behind the running turn
-  s7: Opened its own turn
-  s8: Opened its own turn, nobody answers it
-  s9: Answer posted
+  s5: Pasted, no row yet
+  s6: Turn ended with a failure, input never pasted
+  s7: Claude queued it behind the running turn
+  s8: Opened its own turn
+  s9: Opened its own turn, nobody answers it
+  s10: Answer posted
   [*] --> s0
   [*] --> s1
-  s0 --> s3: the owner pastes into the AgentDesk turn [refused when the transcript is idle, main]
-  s1 --> s2: the owner submits to an idle pane
+  s0 --> s5: the owner pastes into the AgentDesk turn [refused when the transcript is idle, main]
+  s0 --> s2: the owner pastes into the AgentDesk turn [refused when the transcript is idle, main]
   s1 --> s4: the owner pastes into the AgentDesk turn [refused when the transcript is idle, main]
-  s2 --> s5: a person starts a turn at the terminal
-  s3 --> s6: Claude writes an enqueue row
-  s5 --> s2: the turn ends
-  s6 --> s7: the turn ends
-  s7 --> s8: the relay reads the input's row
-  s8 --> s9: the turn ends
+  s1 --> s3: the owner submits to an idle pane
+  s0 --> s6: a turn/start's turn meets a busy pane [read as idle in main and a2d1]
+  s2 --> s2: the drive's fixed recheck fires [main, a2d1] or the owner pastes into the AgentDesk turn [refused when the transcript is idle, main]
+  s3 --> s2: a person starts a turn at the terminal
+  s5 --> s7: Claude writes an enqueue row
+  s2 --> s3: the turn ends
+  s7 --> s8: the turn ends
+  s8 --> s9: the relay reads the input's row
+  s9 --> s10: the turn ends
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
   class s0 blue
@@ -48,19 +52,24 @@ stateDiagram-v2
   class s2 blue
   class s2 mayBreak
   class s2 bugPath
-  class s3 orange
+  class s3 blue
+  class s3 mayBreak
   class s3 bugPath
   class s4 pink
   class s4 breaks
   class s4 bugPath
-  class s5 blue
+  class s5 orange
+  class s5 mayBreak
   class s5 bugPath
-  class s6 orange
+  class s6 pink
+  class s6 breaks
   class s6 bugPath
   class s7 orange
   class s7 bugPath
   class s8 orange
   class s8 bugPath
-  class s9 teal
-  class s9 breaks
+  class s9 orange
   class s9 bugPath
+  class s10 teal
+  class s10 breaks
+  class s10 bugPath

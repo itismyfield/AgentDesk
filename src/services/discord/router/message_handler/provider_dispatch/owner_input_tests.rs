@@ -1396,6 +1396,7 @@ fn an_owner_idle_turn_binds_its_cancel_token_to_its_pane() {
             mailbox,
             claim,
             settled,
+            origin: InputOrigin::Discord,
         };
         let mut bound = None;
         let _ = rig.with_turn(&provider, Some(&rig.name), |turn, sender| {
@@ -1512,6 +1513,7 @@ pub(in crate::services::discord) async fn claimed_owner_turn(
         mailbox,
         claim,
         settled,
+        origin: InputOrigin::Discord,
     };
     (owner, answer)
 }

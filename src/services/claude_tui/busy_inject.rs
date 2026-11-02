@@ -116,6 +116,8 @@ pub(crate) struct Report {
     pub outcome: Outcome,
     /// What `confirm` checks once the paste and Enter were sent.
     sent: Option<Sent>,
+    /// The owned entry pasted over a composer whose text it could not prove parked.
+    pub draft_unproven: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -131,6 +133,7 @@ impl Report {
         Self {
             outcome: Outcome::NotSent(veto),
             sent: None,
+            draft_unproven: false,
         }
     }
 }
@@ -396,7 +399,7 @@ pub(in crate::services::claude_tui) fn before_paste(
     pane: &Pane,
     stash_allowed: bool,
 ) -> Result<bool, Veto> {
-    before_paste_by(pane, listed(stash_allowed), false)
+    before_paste_by(pane, listed(stash_allowed), false).map(|seen| seen.park)
 }
 
 /// Which draft one capture lets C-s park; `None` parks nothing.
@@ -408,7 +411,14 @@ fn listed(stash_allowed: bool) -> Park {
     stash_allowed.then_some(screen::parkable)
 }
 
-fn before_paste_by(pane: &Pane, park: Park, screen_proven: bool) -> Result<bool, Veto> {
+/// What the screen allows before a paste: whether C-s parks a draft, and whether the owned entry
+/// saw composer text it can neither park nor prove empty.
+struct Seen {
+    park: bool,
+    unproven: bool,
+}
+
+fn before_paste_by(pane: &Pane, park: Park, screen_proven: bool) -> Result<Seen, Veto> {
     #[cfg(unix)]
     if epoch::observe(pane.target().trim_start_matches('=').trim_end_matches(':')).is_err() {
         return Err(Veto::PaneUnavailable);
@@ -420,16 +430,18 @@ fn before_paste_by(pane: &Pane, park: Park, screen_proven: bool) -> Result<bool,
         return Err(Veto::PaneUnavailable);
     }
     let Some(capture) = pane.capture() else {
-        return if screen_proven {
-            Err(Veto::ScreenUnread)
-        } else {
-            Ok(false)
+        return match screen_proven {
+            true => Err(Veto::ScreenUnread),
+            false => Ok(Seen {
+                park: false,
+                unproven: false,
+            }),
         };
     };
     if modal(&capture) {
         return Err(Veto::Modal);
     }
-    let in_mode = || {
+    if screen_proven {
         let at = [
             "display-message",
             "-p",
@@ -437,12 +449,16 @@ fn before_paste_by(pane: &Pane, park: Park, screen_proven: bool) -> Result<bool,
             pane.target(),
             "#{pane_in_mode}",
         ];
-        pane.ok(&at).is_some_and(|mode| mode.trim() == "1")
-    };
-    if screen_proven && in_mode() {
-        return Err(Veto::CopyMode);
+        // Only a read `0` proves Enter submits; an unread mode is held like an unread screen.
+        match pane.ok(&at).map(|mode| mode.trim().to_string()).as_deref() {
+            Some("0") => {}
+            Some("1") => return Err(Veto::CopyMode),
+            _ => return Err(Veto::ScreenUnread),
+        }
     }
-    Ok(park.is_some_and(|park| park(&capture)))
+    let park = park.is_some_and(|park| park(&capture));
+    let unproven = screen_proven && !park && ownership::draft_unproven(&capture);
+    Ok(Seen { park, unproven })
 }
 
 /// Channel ids whose panes may take the stash path, comma-separated and read once; unset is none.
@@ -497,8 +513,8 @@ fn inject_locked(
     park: Park,
     policy: Policy,
 ) -> Report {
-    let park = match before_paste_by(pane, park, policy.screen_proven) {
-        Ok(park) => park,
+    let Seen { park, unproven } = match before_paste_by(pane, park, policy.screen_proven) {
+        Ok(seen) => seen,
         Err(veto) => return Report::not_sent(veto),
     };
     if matches!(policy.gate, TurnGate::BusyOnly)
@@ -527,6 +543,7 @@ fn inject_locked(
             text: text.to_string(),
             parked: park,
         }),
+        draft_unproven: unproven && !matches!(outcome, Outcome::NotSent(_)),
     };
     if matches!(report.outcome, Outcome::NotSent(_)) {
         crate::services::tui_input::human_frame::history::withdraw(

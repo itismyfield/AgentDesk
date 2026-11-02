@@ -154,7 +154,6 @@ pub(in crate::services::discord) fn owner_drive(
             }
         })
     });
-    let recheck = std::time::Duration::from_secs(5);
     let settled: Option<Owed> = drains.map(|pool| {
         let settled: Owed = std::sync::Arc::new(move || {
             let (pool, (mailbox, provider)) = (pool.clone(), owed.clone());
@@ -172,7 +171,6 @@ pub(in crate::services::discord) fn owner_drive(
         mailbox,
         channel,
         handoff,
-        recheck,
         settled,
     })
 }
@@ -285,6 +283,8 @@ pub(in crate::services::discord) struct OwnerTurn {
     mailbox: ChannelMailboxHandle,
     claim: FrontClaim,
     settled: Settled,
+    /// Where the front came from, read from the provenance its admission kept.
+    origin: InputOrigin,
 }
 
 impl OwnerTurn {
@@ -309,11 +309,12 @@ impl OwnerTurn {
             mailbox,
             claim,
             settled,
+            origin,
         } = self;
         let for_turn = crate::services::turn_host::for_turn;
         let host = for_turn(pool.as_ref(), &provider, channel, key.as_deref()).await;
         let live = Some((transcript.as_str(), session_id.as_deref()));
-        let kind = (provider.as_str(), InputOrigin::Discord, true);
+        let kind = (provider.as_str(), origin, true);
         let at = (&host, session.as_str(), live);
         let owner = match Registration::observed(mailbox, kind, at, &claim.front().1, None) {
             Ok(owner) if owner.phase == target::Phase::Busy => owner,
@@ -424,10 +425,16 @@ async fn start_idle(
     let claim = claim_turn(&mailbox, front.1.message_id, &front).await?;
     let claim = claim.ok_or("NotSent(\"front_not_granted\")")?;
     let (settled, answer) = tokio::sync::oneshot::channel();
+    let origin = match kept.as_ref().map(|context| context["origin"].as_str()) {
+        None => InputOrigin::Discord,
+        Some(Some("headless")) => InputOrigin::HttpStart,
+        Some(_) => InputOrigin::Routine,
+    };
     let owner = OwnerTurn {
         mailbox,
         claim,
         settled,
+        origin,
     };
     let now = (std::time::SystemTime::now(), std::time::Instant::now());
     let restore = crate::services::turn_orchestrator::pending_queue_item_to_intervention;
@@ -467,8 +474,8 @@ async fn start_idle(
     }
 }
 
-/// An owner front's turn: its registration is read from this turn's own host and pane, and an
-/// idle pane's AI turn is read on this turn's sender until it ends.
+/// An owner front's turn, registered from this turn's own host and pane: a running Claude pane
+/// takes it through the busy entry, an idle pane's AI turn is read on this turn's sender.
 pub(super) fn execute_owned(
     turn: StreamingTurn<'_>,
     sender: std::sync::mpsc::Sender<crate::services::agent_protocol::StreamMessage>,
@@ -479,19 +486,67 @@ pub(super) fn execute_owned(
         mailbox,
         claim,
         settled,
+        origin,
     } = owner;
     let session = turn.tmux_session_name.unwrap_or_default();
     let live = matches!(turn.host, TurnHost::Tmux) && pane_liveness(session) == PaneLiveness::Live;
-    let observer = live.then(|| observer(&turn, &sender)).flatten();
-    let kind = (turn.provider.as_str(), InputOrigin::Discord, false);
-    let at = (turn.host, session, None);
-    match Registration::observed(mailbox, kind, at, &claim.front().1, observer) {
+    let running = live.then(|| running_transcript(&turn, session)).flatten();
+    let registered = match &running {
+        Some(transcript) => {
+            let kind = (turn.provider.as_str(), origin, true);
+            let at = (
+                turn.host,
+                session,
+                Some((transcript.as_str(), turn.session_id)),
+            );
+            Registration::observed(mailbox, kind, at, &claim.front().1, None).map(|mut owner| {
+                owner.until_done = busy_observer(&turn, &sender, &owner);
+                owner
+            })
+        }
+        None => {
+            let observer = live.then(|| observer(&turn, &sender)).flatten();
+            let kind = (turn.provider.as_str(), origin, false);
+            let at = (turn.host, session, None);
+            Registration::observed(mailbox, kind, at, &claim.front().1, observer)
+        }
+    };
+    match registered {
         Ok(owner) => execute_front(turn, sender, claim, owner, settled),
         Err(error) => {
             let _ = settled.send(Err(error.clone()));
             Err(error)
         }
     }
+}
+
+/// The transcript of a Claude tmux pane whose turn is running now, resolved by the pane's identity.
+fn running_transcript(turn: &StreamingTurn<'_>, session: &str) -> Option<String> {
+    (*turn.provider == ProviderKind::Claude).then_some(())?;
+    let dir = Some(turn.working_dir).filter(|dir| !dir.is_empty());
+    let resolve = super::super::tui_followup::claude_followup_transcript;
+    let path = resolve(dir, turn.session_id, Some(session))?;
+    let state = crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&path);
+    state.is_busy().then(|| path.display().to_string())
+}
+
+/// The reader of a busy paste's answer, from the row its attempt takes to that turn's end.
+fn busy_observer(
+    turn: &StreamingTurn<'_>,
+    sender: &std::sync::mpsc::Sender<crate::services::agent_protocol::StreamMessage>,
+    owner: &Registration,
+) -> Option<UntilDone> {
+    let nonce = owner.attempt["nonce"].as_str()?;
+    let frame = busy_inject::frame("discord", &owner.author, &owner.name, nonce, turn.prompt);
+    let at = (
+        turn.tmux_session_name?,
+        nonce,
+        frame.as_str(),
+        turn.channel_id,
+    );
+    let cancel = std::sync::Arc::clone(&turn.cancel);
+    let observe = crate::services::claude_tui::hosting::busy_owner_observer;
+    observe(at, &owner.transcript, sender.clone(), cancel)
 }
 
 /// The provider's own observer of the AI turn an idle submit starts, set up before that submit.
@@ -634,7 +689,8 @@ fn take_owned(
         }
         _ => None,
     };
-    let result = run(turn, route, registration, front);
+    let declared = until_done.is_some();
+    let result = run(turn, (route, declared), registration, front);
     reply(&result);
     let result = match (result, until_done) {
         (Ok(()), Some(until_done)) => until_done(),
@@ -706,9 +762,10 @@ fn codex_herdr_frame(prompt: &str) -> Result<String, String> {
     Ok(typed.collect())
 }
 
+/// Writes the prepared input on `route`; `declared` says a reader set up before the write answers it.
 fn run(
     turn: &StreamingTurn<'_>,
-    route: target::Route,
+    (route, declared): (target::Route, bool),
     r: Registration,
     front: Option<FrontClaim>,
 ) -> Result<(), String> {
@@ -732,6 +789,8 @@ fn run(
                 nonce,
                 text: turn.prompt.into(),
                 timing: r.timing,
+                declared,
+                draft_notice: draft_notice(turn, &r.sources),
             }
             .leaf(),
         ),
@@ -813,6 +872,23 @@ fn run(
         attempt: r.attempt,
     };
     submit((&r.mailbox, r.clock), front, prepared, leaf)
+}
+
+/// Posts the original's one notice that a draft beside its paste may not be kept; the outbox key
+/// is the original's, so a later attempt of it posts nothing.
+fn draft_notice(turn: &StreamingTurn<'_>, sources: &[String]) -> Option<effect::DraftNotice> {
+    let pool = turn.pool?.clone();
+    let runtime = tokio::runtime::Handle::try_current().ok()?;
+    let (provider, channel) = (turn.provider.as_str().to_string(), turn.channel_id);
+    let sources = sources.to_vec();
+    Some(Box::new(move || {
+        runtime.spawn(async move {
+            let post = crate::services::discord::queue_io::retained_notice::draft_unproven;
+            if let Err(error) = post(&pool, &provider, channel, &sources).await {
+                tracing::warn!(channel_id = channel, %error, "draft notice not enqueued");
+            }
+        });
+    }))
 }
 
 #[cfg(test)]

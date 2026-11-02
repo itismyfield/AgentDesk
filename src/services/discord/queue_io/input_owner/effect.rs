@@ -121,10 +121,18 @@ pub(crate) struct BusyClaude {
     /// The original body; the prepared frame must be exactly main's framing of it.
     pub(crate) text: String,
     pub(crate) timing: &'static busy_inject::Timing,
+    /// A reader set up before the paste answers it, so the relay leaves its turn alone.
+    pub(crate) declared: bool,
+    /// Tells the original once that a draft beside the pasted input may not be kept.
+    pub(crate) draft_notice: Option<DraftNotice>,
 }
 
+/// Raises the one notice an original owes when its paste met a draft C-s could not park.
+pub(crate) type DraftNotice = Box<dyn FnOnce() + Send>;
+
 impl BusyClaude {
-    pub(crate) fn leaf(self) -> Leaf {
+    pub(crate) fn leaf(mut self) -> Leaf {
+        let notice = self.draft_notice.take();
         Box::new(move |frame| {
             let (source, author, name) = (&self.source, &self.author, &self.name);
             if busy_inject::frame(source, author, name, &self.nonce, &self.text) != frame {
@@ -142,11 +150,19 @@ impl BusyClaude {
             };
             // Enter ends the transaction: the receipt is only recorded off this thread.
             let inject = || {
-                let report = busy_inject::inject_owned(&self.pane, &request, self.timing);
+                let declared = self.declared;
+                let report = busy_inject::inject_owned(&self.pane, &request, self.timing, declared);
                 busy_inject::collect_receipt(&request, &report, self.timing);
-                report.outcome
+                (report.outcome, report.draft_unproven)
             };
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(inject));
+            let outcome = outcome.map(|(outcome, unproven)| {
+                if unproven && let Some(notice) = notice {
+                    tracing::info!(channel_id = self.channel, nonce = %self.nonce, "owned paste met an unparked draft");
+                    notice();
+                }
+                outcome
+            });
             let alert = |detail: &str| {
                 self.unconfirmed(detail);
                 detail.to_string()

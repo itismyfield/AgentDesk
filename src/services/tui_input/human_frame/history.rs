@@ -501,27 +501,45 @@ fn observed_at_checked(
     })
 }
 
-/// The one attempt whose frame `row` carries as a non-meta user row after that attempt's offset,
-/// read from its transcript now; `None` for any other row or when several attempts could own it.
-pub(crate) fn user_row_attempt(
-    provider: &str,
-    session: &str,
-    prompts: &[String],
-    row: &str,
-) -> Option<String> {
+/// Who took a native row that carries a registered frame.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RowOwner {
+    /// A non-meta user row: the attempt opened its own turn.
+    User(String),
+    /// A queued command the running turn took for the attempt.
+    Command(String),
+    /// No attempt registered before the row carries it.
+    None,
+    /// The transcript cannot be read now, so nothing is decided.
+    Unread,
+}
+
+/// One row that took a frame: its byte offset, uuid, class hashes and whether it is a user row.
+struct Taken {
+    offset: u64,
+    uuid: String,
+    hashes: Vec<String>,
+    user: bool,
+}
+
+/// The rows after `from` that take a human frame: non-meta user rows and queued prompt commands.
+fn taken_rows(path: &Path, file: [u64; 2], from: u64) -> Option<Vec<Taken>> {
     use std::io::{BufRead, Seek, SeekFrom};
-    let store = path().and_then(|path| readable(&path)).ok()?;
-    let hashes: Vec<_> = prompts.iter().flat_map(|p| class_hashes(p)).collect();
-    let carries = |entry: &Entry| -> Option<bool> {
-        let mut file = std::fs::File::open(&entry.path).ok()?;
-        (file_id(&file.metadata().ok()?) == entry.file).then_some(())?;
-        file.seek(SeekFrom::Start(entry.offset)).ok()?;
-        for line in std::io::BufReader::new(file).lines() {
-            let record: serde_json::Value = serde_json::from_str(&line.ok()?).unwrap_or_default();
-            if record["uuid"].as_str() != Some(row) {
-                continue;
-            }
-            let text = match &record["message"]["content"] {
+    let mut handle = std::fs::File::open(path).ok()?;
+    (file_id(&handle.metadata().ok()?) == file).then_some(())?;
+    handle.seek(SeekFrom::Start(from)).ok()?;
+    let mut reader = std::io::BufReader::new(handle);
+    let (mut rows, mut line, mut at) = (Vec::new(), Vec::new(), from);
+    while reader.read_until(b'\n', &mut line).ok()? > 0 {
+        let offset = at;
+        at += line.len() as u64;
+        let record: serde_json::Value = match line.ends_with(b"\n") {
+            true => serde_json::from_slice(&line).unwrap_or_default(),
+            false => serde_json::Value::Null,
+        };
+        line.clear();
+        let text = match record["type"].as_str() {
+            Some("user") if record["isMeta"] != true => match &record["message"]["content"] {
                 serde_json::Value::String(text) => Some(text.clone()),
                 serde_json::Value::Array(blocks) => blocks
                     .iter()
@@ -530,25 +548,123 @@ pub(crate) fn user_row_attempt(
                     .flatten()
                     .map(|texts| texts.join("\n")),
                 _ => None,
-            };
-            let user = record["type"] == "user" && record["isMeta"] != true;
-            return Some(
-                user && text.is_some_and(|t| class_hashes(&t).contains(&entry.class_hash)),
-            );
+            },
+            Some("attachment") if record["attachment"]["type"] == "queued_command" => {
+                record["attachment"]["prompt"].as_str().map(str::to_string)
+            }
+            _ => None,
+        };
+        if let (Some(text), Some(uuid)) = (text, record["uuid"].as_str()) {
+            rows.push(Taken {
+                offset,
+                uuid: uuid.into(),
+                hashes: class_hashes(&text),
+                user: record["type"] == "user",
+            });
         }
-        Some(false)
+    }
+    Some(rows)
+}
+
+/// The attempt `row` took: a receipt's own row, else same-frame rows paired with attempts in
+/// registration order, read afresh each time so rescans and later identical inputs agree.
+pub(crate) fn row_owner(provider: &str, session: &str, prompts: &[String], row: &str) -> RowOwner {
+    let Ok(store) = path().and_then(|path| readable(&path)) else {
+        return RowOwner::Unread;
     };
-    let mut owners = store.entries.iter().filter(|entry| {
+    let hashes: Vec<_> = prompts.iter().flat_map(|p| class_hashes(p)).collect();
+    owner_in(&store, (provider, session), &hashes, row)
+}
+
+fn owner_in(
+    store: &Store,
+    (provider, session): (&str, &str),
+    hashes: &[String],
+    row: &str,
+) -> RowOwner {
+    let same = |entry: &&Entry| {
         entry.append.is_none()
             && entry.provider == provider
             && entry.session == session
             && hashes.contains(&entry.class_hash)
-            && carries(entry) == Some(true)
-    });
-    match (owners.next(), owners.next()) {
-        (Some(entry), None) => Some(entry.id.clone()),
-        _ => None,
+    };
+    let mut files: Vec<(&Path, [u64; 2])> = Vec::new();
+    for entry in store.entries.iter().filter(same) {
+        if !files.contains(&(entry.path.as_path(), entry.file)) {
+            files.push((entry.path.as_path(), entry.file));
+        }
     }
+    for (path, file) in files {
+        let mut entries: Vec<&Entry> = (store.entries.iter().filter(same))
+            .filter(|entry| entry.path == path && entry.file == file)
+            .collect();
+        entries.sort_by_key(|entry| entry.offset);
+        let from = entries.first().map_or(0, |entry| entry.offset);
+        let Some(rows) = taken_rows(path, file, from) else {
+            return RowOwner::Unread;
+        };
+        let Some(this) = rows.iter().find(|taken| taken.uuid == row) else {
+            continue;
+        };
+        return match pair(&entries, &rows, row) {
+            Some(entry) if this.user => RowOwner::User(entry.id.clone()),
+            Some(entry) => RowOwner::Command(entry.id.clone()),
+            None => RowOwner::None,
+        };
+    }
+    RowOwner::None
+}
+
+/// The entry that took `row`: the one whose receipt names it, else the earliest free entry each
+/// earlier unreceipted row did not take.
+fn pair<'a>(entries: &[&'a Entry], rows: &[Taken], row: &str) -> Option<&'a Entry> {
+    let receipt = |entry: &Entry, uuid: &str| {
+        (entry.events.iter()).any(|event| {
+            matches!(event.kind.as_str(), "user" | "command") && event.row.as_deref() == Some(uuid)
+        })
+    };
+    if let Some(entry) = entries.iter().find(|entry| receipt(entry, row)) {
+        return Some(entry);
+    }
+    // An entry a receipt paired with another row takes no other row.
+    let mut free: Vec<&Entry> = (entries.iter().copied())
+        .filter(|entry| !rows.iter().any(|taken| receipt(entry, &taken.uuid)))
+        .collect();
+    for taken in rows
+        .iter()
+        .filter(|taken| !entries.iter().any(|e| receipt(e, &taken.uuid)))
+    {
+        let at = free.iter().position(|entry| {
+            entry.offset <= taken.offset && taken.hashes.contains(&entry.class_hash)
+        });
+        let Some(at) = at else {
+            continue;
+        };
+        let entry = free.remove(at);
+        if taken.uuid == row {
+            return Some(entry);
+        }
+    }
+    None
+}
+
+/// The row attempt `id` took in its transcript as [`row_owner`] pairs them, and whether that row
+/// is a user row.
+pub(crate) fn attempt_row(provider: &str, session: &str, id: &str) -> Option<(u64, bool)> {
+    let store = path().and_then(|path| readable(&path)).ok()?;
+    let entry = store.entries.iter().find(|entry| entry.id == id)?;
+    let hashes = [entry.class_hash.clone()];
+    let rows = taken_rows(&entry.path, entry.file, entry.offset)?;
+    rows.into_iter()
+        .filter(|taken| taken.hashes.contains(&entry.class_hash))
+        .find_map(
+            |taken| match owner_in(&store, (provider, session), &hashes, &taken.uuid) {
+                RowOwner::User(owner) | RowOwner::Command(owner) if owner == id => {
+                    Some((taken.offset, taken.user))
+                }
+                _ => None,
+            },
+        )
 }
 
 pub(crate) fn receipt_row(id: &str, transcript: &Path) -> Option<String> {

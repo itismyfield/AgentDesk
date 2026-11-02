@@ -108,7 +108,7 @@ fn run_cell(turn_mode: bool, row: Row, route: Route, at: u64) -> Cell {
     let offset = std::fs::metadata(&transcript).unwrap().len();
     let pane = Pane::with_program(&session, path("tmux"));
     let report = match route {
-        Route::Busy => busy_inject::inject_owned(&pane, &request, &TIMING),
+        Route::Busy => busy_inject::inject_owned(&pane, &request, &TIMING, false),
         Route::Declared => busy_inject::inject_report_any_turn(&pane, &request, None, &TIMING),
     };
     assert_eq!(
@@ -237,8 +237,8 @@ fn claude_input_answerer_is_read_from_its_row() {
     assert_eq!(cells, 16);
 }
 
-/// The owner's entry sends no key on a screen it cannot prove submits: an unread capture or copy
-/// mode is a typed refusal the owner holds, while the same pane read normally takes the input.
+/// The owner's entry sends no key on a screen it cannot prove submits (unread capture, copy mode,
+/// unread mode) and returns a typed refusal; the same pane read normally takes the input.
 #[test]
 fn owned_entry_sends_no_key_on_a_screen_it_cannot_prove_submits() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
@@ -252,6 +252,11 @@ fn owned_entry_sends_no_key_on_a_screen_it_cannot_prove_submits() {
             2,
             "in_mode",
             busy_inject::Outcome::NotSent(busy_inject::Veto::CopyMode),
+        ),
+        (
+            4,
+            "fail.mode",
+            busy_inject::Outcome::NotSent(busy_inject::Veto::ScreenUnread),
         ),
         (3, "", busy_inject::Outcome::Injected),
     ] {
@@ -271,10 +276,193 @@ fn owned_entry_sends_no_key_on_a_screen_it_cannot_prove_submits() {
             text: "held until the screen submits",
         };
         let pane = Pane::with_program(&session, dir.path().join("tmux"));
-        let report = busy_inject::inject_owned(&pane, &request, &TIMING);
+        let report = busy_inject::inject_owned(&pane, &request, &TIMING, false);
         assert_eq!(report.outcome, expected, "{screen}");
         let keys = std::fs::read_to_string(dir.path().join("applied")).unwrap_or_default();
         let sent = usize::from(screen.is_empty()) * 2;
         assert_eq!(keys.lines().count(), sent, "{screen}: {keys}");
     }
+}
+
+/// One step of a same-author, same-body sequence on one session.
+enum Step {
+    /// The input is pasted through the owner's busy entry.
+    Paste,
+    /// Claude writes a row carrying the frame: a user row or a queued command.
+    Row(&'static str, bool),
+    /// Claude ends the running turn.
+    TurnEnds,
+    /// The relay reads a row the transcript already holds.
+    Observe(&'static str),
+}
+
+/// Identical inputs each answer for their own row: on a legacy channel each user turn is relayed
+/// once and an absorbed one not at all, whatever the rescans or a later identical input.
+#[test]
+fn identical_inputs_each_answer_for_their_own_row() {
+    use Step::{Observe, Paste, Row, TurnEnds};
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let cases: [(&str, &[Step], usize); 5] = [
+        (
+            "handed then next",
+            &[
+                Paste,
+                TurnEnds,
+                Row("u1", true),
+                Observe("u1"),
+                Paste,
+                TurnEnds,
+                Row("u2", true),
+                Observe("u2"),
+            ],
+            2,
+        ),
+        (
+            "both after the window",
+            &[
+                Paste,
+                Paste,
+                TurnEnds,
+                Row("u1", true),
+                TurnEnds,
+                Row("u2", true),
+                Observe("u1"),
+                Observe("u2"),
+            ],
+            2,
+        ),
+        (
+            "first absorbed",
+            &[
+                Paste,
+                Paste,
+                Row("a1", false),
+                TurnEnds,
+                Row("u2", true),
+                Observe("a1"),
+                Observe("u2"),
+            ],
+            1,
+        ),
+        (
+            "rescanned",
+            &[
+                Paste,
+                Paste,
+                TurnEnds,
+                Row("u1", true),
+                TurnEnds,
+                Row("u2", true),
+                Observe("u1"),
+                Observe("u2"),
+                Observe("u2"),
+                Observe("u1"),
+            ],
+            2,
+        ),
+        (
+            "a later identical input",
+            &[
+                Paste,
+                Paste,
+                TurnEnds,
+                Row("u1", true),
+                TurnEnds,
+                Row("u2", true),
+                Observe("u1"),
+                Observe("u2"),
+                Paste,
+                Observe("u2"),
+                Observe("u1"),
+            ],
+            2,
+        ),
+    ];
+    let mut ran = 0;
+    for (at, (case, steps, relayed)) in cases.into_iter().enumerate() {
+        let dir = fake_pane();
+        let path = |name: &str| dir.path().join(name);
+        let transcript = path("transcript.jsonl");
+        let session = format!("row-repeat-{at}");
+        register_tmux_channel(&session, 7_676_300 + at as u64);
+        let pane = Pane::with_program(&session, path("tmux"));
+        let append = |record: serde_json::Value| {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&transcript)
+                .unwrap();
+            writeln!(file, "{record}").unwrap();
+        };
+        let mut events = subscribe_observed_prompts();
+        let (mut frame, mut owners) = (String::new(), Vec::new());
+        for step in steps {
+            match step {
+                Paste => {
+                    let nonce = busy_inject::fresh_nonce();
+                    let request = Request {
+                        session: &session,
+                        transcript: &transcript,
+                        source: "discord",
+                        author: "200",
+                        name: "ann",
+                        nonce: &nonce,
+                        text: "same body again",
+                    };
+                    let offset = std::fs::metadata(&transcript).unwrap().len();
+                    let report = busy_inject::inject_owned(&pane, &request, &TIMING, false);
+                    assert_eq!(report.outcome, busy_inject::Outcome::Injected, "{case}");
+                    let next = busy_inject::frame("discord", "200", "ann", &nonce, request.text);
+                    assert!(frame.is_empty() || frame == next, "{case}: frames differ");
+                    frame = next;
+                    // The receipt thread records the enqueue row inside its window.
+                    let receipt = (transcript.as_path(), offset, nonce.as_str(), frame.as_str());
+                    let deadline = std::time::Instant::now() + TIMING.confirm_window;
+                    let seen = busy_inject::await_receipt(receipt, deadline, TIMING.confirm_poll);
+                    assert_eq!(seen, Ok(()), "{case}");
+                }
+                Row(uuid, user) => append(match user {
+                    true => serde_json::json!({"type":"user","uuid":uuid,
+                        "message":{"role":"user","content":frame}}),
+                    false => serde_json::json!({"type":"attachment","uuid":uuid,
+                        "attachment":{"type":"queued_command","prompt":frame,"commandMode":"prompt"}}),
+                }),
+                TurnEnds => append(serde_json::json!({"type":"system","subtype":"turn_duration"})),
+                Observe(uuid) => {
+                    let now = Utc::now();
+                    let row = Some(*uuid);
+                    observe_prompt_by_tmux_with_row_ids_at(
+                        "claude", &session, &frame, row, None, now,
+                    );
+                    let prompts = [frame.clone()];
+                    let owner = crate::services::tui_input::human_frame::history::row_owner(
+                        "claude", &session, &prompts, uuid,
+                    );
+                    owners.push((*uuid, owner));
+                }
+            }
+        }
+        let mut published = 0;
+        while let Ok(event) = events.try_recv() {
+            published += usize::from(event.tmux_session_name == session && event.prompt == frame);
+        }
+        assert_eq!(published, relayed, "{case}: {owners:?}");
+        // Each row keeps one owner across readings, and two rows never share one.
+        use crate::services::tui_input::human_frame::history::RowOwner;
+        let id = |owner: &RowOwner| match owner {
+            RowOwner::User(id) | RowOwner::Command(id) => Some(id.clone()),
+            RowOwner::None | RowOwner::Unread => None,
+        };
+        for (uuid, owner) in &owners {
+            assert!(id(owner).is_some(), "{case}: {uuid} unowned: {owners:?}");
+            let same = owners.iter().filter(|(other, _)| other == uuid);
+            assert!(same.clone().all(|(_, o)| o == owner), "{case}: {owners:?}");
+            let shared = owners
+                .iter()
+                .filter(|(other, o)| other != uuid && id(o) == id(owner));
+            assert_eq!(shared.count(), 0, "{case}: {owners:?}");
+        }
+        ran += 1;
+    }
+    assert_eq!(ran, 5);
 }

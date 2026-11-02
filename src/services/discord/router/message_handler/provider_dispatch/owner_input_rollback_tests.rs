@@ -49,6 +49,7 @@ struct IntakeRig {
     _api: discord::admin_host_guard::tests::Recorder,
     trace: Trace,
     renderer: std::path::PathBuf,
+    transcript: std::path::PathBuf,
 }
 
 impl Drop for IntakeRig {
@@ -63,6 +64,15 @@ impl IntakeRig {
     }
 
     async fn with_bot(id: u64, busy: bool, bot: ProviderKind) -> Self {
+        Self::build(id, busy, bot, false).await
+    }
+
+    /// A busy pane whose front a `turn/start` admitted with its headless provenance.
+    async fn turn_start(id: u64) -> Self {
+        Self::build(id, true, ProviderKind::Claude, true).await
+    }
+
+    async fn build(id: u64, busy: bool, bot: ProviderKind, start: bool) -> Self {
         let trace = Trace::default();
         tracing_subscriber::fmt()
             .with_ansi(false)
@@ -129,12 +139,20 @@ impl IntakeRig {
         let sid = proof.context.expected_native_session_id.as_deref().unwrap();
         let workspace = f.root.path().join("workspace");
         fs::create_dir(&workspace).unwrap();
-        let transcript = crate::services::claude_tui::transcript_tail::claude_transcript_path(
-            &workspace,
-            sid,
-            Some(f.root.path()),
-        )
-        .unwrap();
+        let transcript = match start {
+            // Known only through the pane's binding, as when no idle observer can be built.
+            true => f
+                .root
+                .path()
+                .join("bound-only")
+                .join(format!("{sid}.jsonl")),
+            false => crate::services::claude_tui::transcript_tail::claude_transcript_path(
+                &workspace,
+                sid,
+                Some(f.root.path()),
+            )
+            .unwrap(),
+        };
         if busy {
             fs::create_dir_all(transcript.parent().unwrap()).unwrap();
             fs::write(&transcript, BUSY).unwrap();
@@ -175,7 +193,28 @@ impl IntakeRig {
                 "route": {"target": channel, "parent": null, "role": channel}
             })).unwrap());
         }
-        let admitted = admit(&mailbox, &original, AdmissionTicket::new()).await;
+        let admitted = match start {
+            false => admit(&mailbox, &original, AdmissionTicket::new()).await,
+            true => {
+                use crate::services::discord::queue_io::input_owner::{admission, routine, start};
+                let generation =
+                    crate::services::discord::runtime_store::generation_path().unwrap();
+                fs::create_dir_all(generation.parent().unwrap()).unwrap();
+                fs::write(generation, "5").unwrap();
+                let turn = format!("discord:{id}:9100095826424066539");
+                let (original, ticket) = routine::synthetic_original(&turn, id, PROMPT, 1).unwrap();
+                let provenance = start::HeadlessProvenance {
+                    owner: (7, "imessage"),
+                    source: Some("imessage"),
+                    metadata: None,
+                    channel_hint: None,
+                    label: None,
+                    dm: None,
+                };
+                let context = provenance.json(&turn);
+                admission::admit_with_context(&mailbox, &original, ticket, context).await
+            }
+        };
         assert!(matches!(admitted, Admission::Accepted(_)), "{admitted:?}");
         Self {
             shared,
@@ -189,6 +228,7 @@ impl IntakeRig {
             _api: api,
             trace,
             renderer,
+            transcript,
         }
     }
 
@@ -345,6 +385,66 @@ async fn owned_front_on_a_busy_pane_is_pasted_once_without_completion() {
             .iter()
             .any(|s| s.contains("provider가 응답을 완료하지 못했어요"))
     );
+    drop(drive);
+}
+
+/// A `turn/start` (an iMessage reply) into a busy pane with no idle observer: the real drive's
+/// headless turn pastes it once and reads the turn its row opens, so the caller is answered once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_turn_start_into_a_busy_pane_is_pasted_once_and_answered_once() {
+    if !creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::",
+        "a_turn_start_into_a_busy_pane_is_pasted_once_and_answered_once"
+    )) {
+        return;
+    }
+    const ANSWER: &str = "turn start answer 7676";
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = IntakeRig::turn_start(7_676_105).await;
+    let (drive, mut settled) = rig.drive();
+    crate::services::discord::queue_io::input_owner::drive::wake(drive.clone());
+    let result = tokio::time::timeout(Duration::from_secs(30), settled.recv())
+        .await
+        .unwrap_or_else(|_| panic!("{}", rig.trace.text()))
+        .unwrap();
+    assert_eq!(result, Ok(()), "{}", rig.trace.text());
+    assert_eq!(events(&rig.renderer), ["paste", "Enter"]);
+    let frame = fs::read_to_string(rig.renderer.join("body")).unwrap();
+    assert!(frame.ends_with(PROMPT), "{frame:?}");
+    // Claude ends the running turn, then opens one for the queued input and answers it.
+    let rows = [
+        json!({"type":"system","subtype":"turn_duration"}),
+        json!({"type":"user","uuid":"turn-start-row","message":{"role":"user","content":frame}}),
+        json!({"type":"assistant","uuid":"turn-start-answer","message":{"id":"turn-start-answer",
+            "role":"assistant","content":[{"type":"text","text":ANSWER}],"stop_reason":"end_turn"}}),
+        json!({"type":"system","subtype":"turn_duration"}),
+    ];
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(&rig.transcript)
+        .unwrap();
+    for row in rows {
+        std::io::Write::write_all(&mut file, format!("{row}\n").as_bytes()).unwrap();
+    }
+    let answered = || {
+        let texts = rig.mock.written_texts();
+        texts.iter().filter(|text| text.contains(ANSWER)).count()
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while answered() == 0 {
+        assert!(std::time::Instant::now() < deadline, "{}", rig.trace.text());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // The mock lists a POST both as posted and as the message it minted: one answer, listed twice.
+    assert_eq!(answered(), 2, "{:?}", rig.mock.written_texts());
+    assert_eq!(events(&rig.renderer), ["paste", "Enter"]);
+    assert!(
+        !rig.trace.text().contains("idle_unobserved"),
+        "{}",
+        rig.trace.text()
+    );
+    assert_eq!(rig.state().await["items"], json!([]));
     drop(drive);
 }
 

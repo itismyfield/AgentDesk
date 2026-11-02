@@ -30,13 +30,21 @@ pub(crate) fn inject_report_any_turn(
     report(pane, request, channel, timing, policy)
 }
 
-/// The input owner's entry for a running pane: pasted whatever turn the transcript reads, a
-/// person's draft parked, and no answer declared; a screen it cannot prove submits is held.
+/// The input owner's entry for a running pane: pasted whatever turn the transcript reads and a
+/// person's draft parked; the answer is declared only for a caller that reads it itself.
 #[cfg(unix)]
-pub(crate) fn inject_owned(pane: &Pane, request: &Request<'_>, timing: &Timing) -> Report {
+pub(crate) fn inject_owned(
+    pane: &Pane,
+    request: &Request<'_>,
+    timing: &Timing,
+    declared: bool,
+) -> Report {
     let policy = Policy {
         gate: TurnGate::AnyTurn,
-        answer: Answer::FromRow,
+        answer: match declared {
+            true => Answer::Declared,
+            false => Answer::FromRow,
+        },
         screen_proven: true,
     };
     inject_gated_with(pane, request, timing, Some(person_draft), policy)

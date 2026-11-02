@@ -58,8 +58,6 @@ pub(crate) struct Drive {
     pub(crate) mailbox: ChannelMailboxHandle,
     pub(crate) channel: u64,
     pub(crate) handoff: Handoff,
-    /// How long a front held under a modal waits before the drive looks at it again.
-    pub(crate) recheck: Duration,
     pub(crate) settled: Option<Settled>,
 }
 
@@ -101,15 +99,12 @@ async fn run(lane: Arc<Lane>, drive: Arc<Drive>) {
         let mut stalled = false;
         while let Some(front) = grant(&drive, stalled).await {
             let result = (drive.handoff)(front).await;
+            // A front held on a screen where Enter may not submit waits for a real wake: a turn
+            // boundary, an idle pane or new input. Nothing polls it.
             if result
                 .as_ref()
                 .is_err_and(|error| super::effect::held(error))
             {
-                let again = Arc::clone(&drive);
-                tokio::spawn(async move {
-                    tokio::time::sleep(again.recheck).await;
-                    wake(again);
-                });
                 break;
             }
             stalled = result.is_err();
