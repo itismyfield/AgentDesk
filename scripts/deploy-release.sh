@@ -227,6 +227,9 @@ DEPLOY_SSH_CONNECT_TIMEOUT="${AGENTDESK_DEPLOY_SSH_CONNECT_TIMEOUT:-10}"
 # SSH/API pressure without making a completed peer wait long for recognition.
 DEPLOY_PEER_VERDICT_TIMEOUT_SECS="${AGENTDESK_DEPLOY_PEER_VERDICT_TIMEOUT_SECS:-1800}"
 DEPLOY_PEER_VERDICT_POLL_INTERVAL_SECS="${AGENTDESK_DEPLOY_PEER_VERDICT_POLL_INTERVAL_SECS:-5}"
+# Peer legs wait this long for the runtime to boot before requesting a restart;
+# a standby can sit out the 90s gateway yield grace first, so allow twice that.
+DEPLOY_PEER_BOOT_WAIT_SECS="${AGENTDESK_DEPLOY_PEER_BOOT_WAIT_SECS:-180}"
 
 # Parse flags non-destructively into shell vars + env so that the lock-acquire
 # re-exec (lockf/flock pass-through) and the detached-helper tmux script both
@@ -1625,6 +1628,7 @@ _deploy_peer_env_prelude() {
         AGENTDESK_DEPLOY_HEALTH_RETRIES \
         AGENTDESK_DEPLOY_PEERS \
         AGENTDESK_DEPLOY_PEERS_FILE \
+        AGENTDESK_DEPLOY_PEER_BOOT_WAIT_SECS \
         AGENTDESK_DEPLOY_SKIP_BUILD_CACHE_CLEANUP \
         AGENTDESK_DEPLOY_SKIP_FRESHNESS \
         AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS \
@@ -2659,6 +2663,14 @@ fi
 # unstamped after the new code rolls out. If the release API is unreachable
 # the gate skips itself (recovery deploys must not be false-blocked).
 REL_PORT="$(_resolve_release_server_port)"
+# A peer leg can land while its runtime is still booting; a booting API is not
+# an unreachable one, so wait for boot instead of skipping the gate.
+if [ "$DEPLOY_PEER_INVOCATION" = "1" ]; then
+    _peer_boot_rc=0
+    wait_for_release_runtime_boot "release" "$REL_PORT" "$PLIST_REL" \
+        "$DEPLOY_PEER_BOOT_WAIT_SECS" || _peer_boot_rc=$?
+    [ "$_peer_boot_rc" != "1" ] || exit 1
+fi
 if ! curl -sf --max-time 3 "http://127.0.0.1:${REL_PORT}/api/health" > /dev/null 2>&1; then
     echo "▸ [gate] Release API not reachable on :${REL_PORT} — skipping zero-inflight check"
 else
@@ -3419,6 +3431,14 @@ fi
 _capture_deploy_preexisting_reader_alarms
 AGENTDESK_RESTART_ALLOW_FOREIGN_TURNS=1
 export AGENTDESK_RESTART_ALLOW_FOREIGN_TURNS
+# A peer runtime restarted while this leg built (another node's restart can hand
+# it the gateway) acknowledges restart_pending only after it boots.
+if [ "$DEPLOY_PEER_INVOCATION" = "1" ]; then
+    _peer_boot_rc=0
+    wait_for_release_runtime_boot "release" "$REL_PORT" "$PLIST_REL" \
+        "$DEPLOY_PEER_BOOT_WAIT_SECS" || _peer_boot_rc=$?
+    [ "$_peer_boot_rc" != "1" ] || exit 1
+fi
 # `$ADK_REL` is the sole canonical restart-marker root; `$ADK_REL/runtime` is not one.
 if ! request_restart_drain_mode_or_fail \
     "release" "$PLIST_REL" "$REL_PORT" "$ADK_REL" "deploy-release"; then
