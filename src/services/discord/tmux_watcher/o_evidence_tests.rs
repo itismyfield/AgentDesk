@@ -1368,6 +1368,9 @@ enum HeadlessOutbox {
     /// The bodiless seed's turn ends where the next turn starts; the watcher bound that next turn,
     /// whose body follows its start and whose row alone was sent.
     SeedRefusedBoundOtherTurnSent,
+    /// A later batch: the seed's body ends before the next turn starts, the watcher bound that
+    /// next turn, and only the next turn's row was sent; the seed's turn is chosen first.
+    SeedAndBoundValidOtherTurnSentOnly,
 }
 
 /// The watcher's terminal order: preflight may strip the restored seed before the planner reads it.
@@ -1530,6 +1533,7 @@ async fn headless_restart_frame(
                 | O::BoundTurnFrameThenOtherInTail
                 | O::BoundTurnFrameThenOtherInFrame
                 | O::BoundBodySplitAcrossOtherTurnStart
+                | O::SeedAndBoundValidOtherTurnSentOnly
         );
     let answer_age = if late { 60 } else { 1 };
     let (answer, seed_body) = match outbox {
@@ -1761,7 +1765,10 @@ async fn headless_restart_frame(
         O::BoundBodySplitAcrossOtherTurnStart => {
             vec![(full_response.as_str(), own, "headless_turn", "sent", 0)]
         }
-        O::OtherTurnOnly | O::ClearedRowOtherTurnOnly | O::SeedRefusedBoundOtherTurnSent => {
+        O::OtherTurnOnly
+        | O::ClearedRowOtherTurnOnly
+        | O::SeedRefusedBoundOtherTurnSent
+        | O::SeedAndBoundValidOtherTurnSentOnly => {
             vec![(body.as_str(), other, "headless_turn", "sent", 0)]
         }
         O::BothTurnsOtherNewest | O::ClearedRowBothTurnsOtherNewest => vec![
@@ -1847,6 +1854,7 @@ async fn headless_restart_frame(
             O::SeedThenOtherTurnStart
                 | O::SeedThenOwnNonBodyThenOtherTurn
                 | O::SeedRefusedBoundOtherTurnSent
+                | O::SeedAndBoundValidOtherTurnSentOnly
         ) {
         (vec![None, Some(successor.clone())], Some(successor))
     } else if matches!(
@@ -1876,7 +1884,12 @@ async fn headless_restart_frame(
         before,
         EvidenceFrame {
             turn_start: handoff_end,
-            batch_start: handoff_end,
+            // A later batch starts after the frame, so the watcher bound the turn started inside it.
+            batch_start: if outbox == O::SeedAndBoundValidOtherTurnSentOnly {
+                handoff_end + frame.len() as u64
+            } else {
+                handoff_end
+            },
             tail: next,
             seed,
             body: Some(full_response),
@@ -2001,6 +2014,7 @@ async fn stale_turn_nonce_never_covers_the_next_turns_frame_pg() {
         O::BoundTurnFrameThenOtherInFrame,
         O::BoundBodySplitAcrossOtherTurnStart,
         O::SeedRefusedBoundOtherTurnSent,
+        O::SeedAndBoundValidOtherTurnSentOnly,
     ]
     .into_iter()
     .enumerate()
