@@ -26,6 +26,12 @@ impl TestEnvVarGuard {
         Self::set_value_after_shared_test_env_lock(key, value.as_os_str())
     }
 
+    pub(crate) fn remove_after_shared_test_env_lock(key: &'static str) -> Self {
+        let guard = Self::capture_after_shared_test_env_lock(key);
+        unsafe { std::env::remove_var(key) };
+        guard
+    }
+
     /// Set a non-path value while the caller owns the shared environment lock.
     pub(crate) fn set_value_after_shared_test_env_lock(
         key: &'static str,
@@ -81,18 +87,82 @@ pub(crate) fn kept_test_tmpdir(label: &str) -> std::path::PathBuf {
 }
 
 pub(crate) struct TestRuntimeRootGuard {
+    _config: Option<TestEnvVarGuard>,
     _env: TestEnvVarGuard,
     _root: tempfile::TempDir,
 }
 
 impl TestRuntimeRootGuard {
+    pub(crate) fn path(&self) -> &std::path::Path {
+        self._root.path()
+    }
+
+    pub(crate) fn with_isolated_config() -> Self {
+        let mut guard = Self::new();
+        // Restore the config override before the root guard releases the environment lock.
+        guard._config = Some(TestEnvVarGuard::remove_after_shared_test_env_lock(
+            "AGENTDESK_CONFIG",
+        ));
+        guard
+    }
+
     #[track_caller]
     pub(crate) fn new() -> Self {
         let root = tempfile::tempdir().expect("runtime root");
         let env = set_agentdesk_root_for_test(root.path());
         Self {
+            _config: None,
             _env: env,
             _root: root,
         }
     }
+}
+
+fn probe_root_config_isolation(prior_present: bool, owning: bool) {
+    crate::test_env_panic_probe::assert_restores_on_return_and_panic(
+        &["AGENTDESK_ROOT_DIR", "AGENTDESK_CONFIG"],
+        prior_present,
+        || {
+            let checkpoint = |path: &std::path::Path| {
+                crate::test_env_panic_probe::checkpoint_values(&[
+                    ("AGENTDESK_ROOT_DIR", Some(path.as_os_str())),
+                    ("AGENTDESK_CONFIG", None),
+                ]);
+            };
+            if owning {
+                let root = TestRuntimeRootGuard::with_isolated_config();
+                checkpoint(root.path());
+            } else {
+                let _lock = super::test_env_lock::acquire_shared_test_env_lock();
+                let root = tempfile::tempdir().unwrap();
+                let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
+                    "AGENTDESK_ROOT_DIR",
+                    root.path(),
+                );
+                let _config =
+                    TestEnvVarGuard::remove_after_shared_test_env_lock("AGENTDESK_CONFIG");
+                checkpoint(root.path());
+            }
+        },
+    );
+}
+
+#[test]
+fn root_guard_restores_present_config_on_return_and_panic() {
+    probe_root_config_isolation(true, true);
+}
+
+#[test]
+fn root_guard_restores_absent_config_on_return_and_panic() {
+    probe_root_config_isolation(false, true);
+}
+
+#[test]
+fn borrowed_root_guard_restores_present_config_on_return_and_panic() {
+    probe_root_config_isolation(true, false);
+}
+
+#[test]
+fn borrowed_root_guard_restores_absent_config_on_return_and_panic() {
+    probe_root_config_isolation(false, false);
 }

@@ -661,41 +661,10 @@ mod catch_up_recovery_tests {
     /// stay authorized through `allow_all_users`.
     const OTHER_OWNER_ID: u64 = 343_742_347_365_974_030;
 
-    struct ScopedRuntimeRoot {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        temp: tempfile::TempDir,
-        previous: Option<std::ffi::OsString>,
-    }
-
-    impl ScopedRuntimeRoot {
-        fn path(&self) -> &std::path::Path {
-            self.temp.path()
-        }
-    }
-
-    impl Drop for ScopedRuntimeRoot {
-        fn drop(&mut self) {
-            unsafe {
-                match self.previous.take() {
-                    Some(value) => std::env::set_var("AGENTDESK_ROOT_DIR", value),
-                    None => std::env::remove_var("AGENTDESK_ROOT_DIR"),
-                }
-            }
-        }
-    }
+    type ScopedRuntimeRoot = crate::config::TestRuntimeRootGuard;
 
     fn scoped_runtime_root() -> ScopedRuntimeRoot {
-        let lock = crate::services::turn_orchestrator::test_support::lock_test_env();
-        let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
-        let temp = tempfile::tempdir().expect("create catch-up test runtime root");
-        unsafe {
-            std::env::set_var("AGENTDESK_ROOT_DIR", temp.path());
-        }
-        ScopedRuntimeRoot {
-            _lock: lock,
-            temp,
-            previous,
-        }
+        ScopedRuntimeRoot::with_isolated_config()
     }
 
     fn write_last_message_checkpoint(

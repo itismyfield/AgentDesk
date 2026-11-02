@@ -730,8 +730,34 @@ pub(crate) fn write_bindings_for_test(root: &Path, agents: serde_json::Value) {
     let mut config = Config::default();
     config.agents = serde_json::from_value(agents).expect("test agent bindings");
     let path = crate::config::config_path::config_path_in(root);
+    assert_test_config_write_within_root(root, &path);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, serde_yaml::to_string(&config).unwrap()).unwrap();
+}
+
+#[cfg(test)]
+fn assert_test_config_write_within_root(root: &Path, path: &Path) {
+    assert!(
+        !path
+            .components()
+            .any(|part| part == std::path::Component::ParentDir),
+        "test config write must not traverse parent directories"
+    );
+    // Check existing ancestors before creating directories, including dangling file symlinks.
+    let existing = path
+        .ancestors()
+        .find(|candidate| match std::fs::symlink_metadata(candidate) {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => panic!("cannot inspect test config write target: {error}"),
+        })
+        .expect("test config write has an existing ancestor");
+    let resolved = existing.canonicalize().expect("resolve test config target");
+    let root = root.canonicalize().expect("resolve test root");
+    assert!(
+        resolved.starts_with(root),
+        "test config write must stay inside its temporary root"
+    );
 }
 
 #[cfg(test)]
@@ -742,6 +768,149 @@ mod worktree_isolation_policy_tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn bindings_fixture_preserves_inherited_external_config_bytes() {
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let root = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let sentinel = outside.path().join("sentinel.yaml");
+        fs::write(&sentinel, b"server: {}\n").unwrap();
+        let _config = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_CONFIG",
+            &sentinel,
+        );
+        let env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        let isolated =
+            crate::config::TestEnvVarGuard::remove_after_shared_test_env_lock("AGENTDESK_CONFIG");
+        write_bindings_for_test(root.path(), serde_json::json!([]));
+        let path = crate::runtime_layout::config_file_path(root.path());
+        assert!(
+            crate::config::config_path::load_config_file(&path)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(fs::read(&sentinel).unwrap(), b"server: {}\n");
+        drop(isolated);
+        drop(env);
+        assert_eq!(
+            std::env::var_os("AGENTDESK_CONFIG").as_deref(),
+            Some(sentinel.as_os_str())
+        );
+    }
+
+    #[test]
+    fn bindings_fixture_writes_canonical_legacy_and_explicit_paths_inside_root() {
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let _isolated =
+            crate::config::TestEnvVarGuard::remove_after_shared_test_env_lock("AGENTDESK_CONFIG");
+        for layout in ["canonical", "legacy", "explicit"] {
+            let root = TempDir::new().unwrap();
+            let path = match layout {
+                "legacy" => crate::runtime_layout::legacy_config_file_path(root.path()),
+                "explicit" => root.path().join("nested/fixture.yaml"),
+                _ => crate::runtime_layout::config_file_path(root.path()),
+            };
+            if layout == "legacy" {
+                fs::write(&path, b"server: {}\n").unwrap();
+            }
+            let _config = (layout == "explicit").then(|| {
+                crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+                    "AGENTDESK_CONFIG",
+                    &path,
+                )
+            });
+            let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+                "AGENTDESK_ROOT_DIR",
+                root.path(),
+            );
+            write_bindings_for_test(
+                root.path(),
+                serde_json::json!([{"id": "fixture", "name": "Fixture", "provider": "codex"}]),
+            );
+            assert_eq!(
+                crate::config::config_path::config_path_in(root.path()),
+                path
+            );
+            let config = crate::config::config_path::load_config_file(&path)
+                .unwrap()
+                .unwrap();
+            assert_eq!(config.agents[0].id, "fixture");
+        }
+    }
+
+    #[test]
+    fn bindings_fixture_rejects_external_targets_before_any_write() {
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let base = TempDir::new().unwrap();
+        let root = base.path().join("root");
+        let outside = base.path().join("root-sibling");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let sentinel = outside.join("sentinel.yaml");
+        fs::write(&sentinel, b"server: {}\n").unwrap();
+        let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            &root,
+        );
+        for target in [
+            sentinel.clone(),
+            outside.join("missing/nested/fixture.yaml"),
+            root.join("../root-sibling/sentinel.yaml"),
+        ] {
+            let _config = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+                "AGENTDESK_CONFIG",
+                &target,
+            );
+            let result = std::panic::catch_unwind(|| {
+                write_bindings_for_test(&root, serde_json::json!([]));
+            });
+            assert!(result.is_err(), "external test config write must fail");
+            assert_eq!(fs::read(&sentinel).unwrap(), b"server: {}\n");
+            assert!(!outside.join("missing").exists());
+            assert!(!root.join("config").exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bindings_fixture_rejects_symlink_escapes_before_any_write() {
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let _isolated =
+            crate::config::TestEnvVarGuard::remove_after_shared_test_env_lock("AGENTDESK_CONFIG");
+        for kind in ["directory", "file", "dangling"] {
+            let root = TempDir::new().unwrap();
+            let outside = TempDir::new().unwrap();
+            let sentinel = outside.path().join("sentinel.yaml");
+            fs::write(&sentinel, b"server: {}\n").unwrap();
+            let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+                "AGENTDESK_ROOT_DIR",
+                root.path(),
+            );
+            let path = crate::runtime_layout::config_file_path(root.path());
+            if kind == "directory" {
+                std::os::unix::fs::symlink(outside.path(), path.parent().unwrap()).unwrap();
+            } else {
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                let target = if kind == "file" {
+                    sentinel.clone()
+                } else {
+                    outside.path().join("absent.yaml")
+                };
+                std::os::unix::fs::symlink(target, &path).unwrap();
+            }
+            let result = std::panic::catch_unwind(|| {
+                write_bindings_for_test(root.path(), serde_json::json!([]));
+            });
+            assert!(result.is_err(), "test config symlink escape must fail");
+            assert_eq!(fs::read(&sentinel).unwrap(), b"server: {}\n");
+            assert!(!outside.path().join("absent.yaml").exists());
+            assert!(!outside.path().join("agentdesk.yaml").exists());
+        }
+    }
 
     fn with_temp_root<F>(f: F)
     where
@@ -755,6 +924,8 @@ mod worktree_isolation_policy_tests {
             "AGENTDESK_ROOT_DIR",
             &root,
         );
+        let _config =
+            crate::config::TestEnvVarGuard::remove_after_shared_test_env_lock("AGENTDESK_CONFIG");
         f(&temp);
     }
 
