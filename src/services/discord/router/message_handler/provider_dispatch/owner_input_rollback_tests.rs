@@ -59,6 +59,10 @@ impl Drop for IntakeRig {
 
 impl IntakeRig {
     async fn new(id: u64, busy: bool) -> Self {
+        Self::with_bot(id, busy, ProviderKind::Claude).await
+    }
+
+    async fn with_bot(id: u64, busy: bool, bot: ProviderKind) -> Self {
         let trace = Trace::default();
         tracing_subscriber::fmt()
             .with_ansi(false)
@@ -67,7 +71,25 @@ impl IntakeRig {
             .try_init()
             .unwrap();
         let f = Fixture::after_shared_test_env_lock();
-        let (mut env, config) = d1_fixture_config(&f, &[id]);
+        let (mut env, mut config) = d1_fixture_config(&f, &[id]);
+        if bot == ProviderKind::Codex {
+            let path = f.root.path().join("cg-d1-fixture.yaml");
+            let mut yaml: serde_yaml::Value =
+                serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            yaml["providers"]["codex"] = serde_yaml::from_str("{runtime: tui}").unwrap();
+            yaml["discord"] =
+                serde_yaml::from_str("bots: {codex: {token: test-token, provider: codex}}")
+                    .unwrap();
+            yaml["agents"][0]["channels"]["claude"]["provider"] = "claude".into();
+            fs::write(path, serde_yaml::to_string(&yaml).unwrap()).unwrap();
+            config = serde_yaml::from_value(yaml).unwrap();
+        }
+        env.push(
+            crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+                "AGENTDESK_CODEX_PATH",
+                &f.root.path().join("claude-fixture"),
+            ),
+        );
         env.push(
             crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
                 "ADK_INTAKE_ROUTING_MODE",
@@ -83,7 +105,9 @@ impl IntakeRig {
         discord::internal_api::init(api.port, None);
         let mut shared = discord::make_shared_data_for_tests();
         Arc::get_mut(&mut shared).unwrap().api_port = api.port;
-        Arc::get_mut(&mut shared).unwrap().provider = ProviderKind::Claude;
+        Arc::get_mut(&mut shared).unwrap().provider = bot.clone();
+        shared.settings.write().await.provider = bot.clone();
+        assert_eq!(discord::resolve_discord_bot_provider("test-token"), bot);
         let mock = discord_mock::DiscordMockState::new();
         mock.park_first_placeholder
             .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -135,16 +159,22 @@ impl IntakeRig {
             session.session_id = Some(sid.into());
         }
         let mailbox = shared.mailbox(channel);
-        let persistence =
-            discord::queue_persistence_context(&shared, &ProviderKind::Claude, channel);
+        let persistence = discord::queue_persistence_context(&shared, &bot, channel);
         mailbox
             .v2_ensure_channel(&persistence, channel)
             .await
             .unwrap();
-        let original: PendingQueueItem = serde_json::from_value(json!({"author_id":7,
+        let mut original: PendingQueueItem = serde_json::from_value(json!({"author_id":7,
             "message_id":1_479_671_302_387_076_000u64+id,"channel_id":id,
             "queued_generation":1,"text":PROMPT}))
         .unwrap();
+        if bot == ProviderKind::Codex {
+            original.source_message_ids.push(original.message_id);
+            original.source_message_queued_generations.push(serde_json::from_value(json!({
+                "message_id": original.message_id, "queued_generation": original.queued_generation,
+                "route": {"target": channel, "parent": null, "role": channel}
+            })).unwrap());
+        }
         let admitted = admit(&mailbox, &original, AdmissionTicket::new()).await;
         assert!(matches!(admitted, Admission::Accepted(_)), "{admitted:?}");
         Self {
@@ -198,6 +228,79 @@ impl IntakeRig {
             .await
             .unwrap()
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a1_owned_busy_rollback_keeps_the_bot_queue_namespace() {
+    if !discord::admin_host_guard::tests::api_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::",
+        "a1_owned_busy_rollback_keeps_the_bot_queue_namespace"
+    )) {
+        return;
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = IntakeRig::with_bot(7_676_104, true, ProviderKind::Codex).await;
+    let original = rig
+        .mailbox
+        .v2_request(|slot| Ok(slot.as_ref().unwrap().front().unwrap().1))
+        .await
+        .unwrap();
+    let item = crate::services::turn_orchestrator::pending_queue_item_to_intervention(
+        original,
+        std::time::SystemTime::now(),
+        std::time::Instant::now(),
+    );
+    use crate::services::turn_orchestrator::{
+        load_channel_pending_dispatch_marker_checked, save_channel_pending_dispatch_marker,
+    };
+    save_channel_pending_dispatch_marker(
+        &ProviderKind::Codex,
+        &rig.shared.token_hash,
+        rig.channel,
+        &item,
+        None,
+    )
+    .unwrap();
+    assert!(
+        load_channel_pending_dispatch_marker_checked(
+            &ProviderKind::Codex,
+            &rig.shared.token_hash,
+            rig.channel
+        )
+        .unwrap()
+        .is_some()
+    );
+    let (drive, mut settled) = rig.drive();
+    crate::services::discord::queue_io::input_owner::drive::wake(drive);
+    let result = tokio::time::timeout(Duration::from_secs(30), settled.recv())
+        .await
+        .unwrap_or_else(|_| panic!("{}", rig.trace.text()))
+        .unwrap();
+    assert_eq!(
+        result,
+        Err("NotSent(\"hosted_tui_busy_pre_submit\")".into()),
+        "{}",
+        rig.trace.text()
+    );
+    assert!(
+        rig.trace
+            .text()
+            .contains("prior turn genuinely busy per JSONL"),
+        "{}",
+        rig.trace.text()
+    );
+    assert!(
+        load_channel_pending_dispatch_marker_checked(
+            &ProviderKind::Codex,
+            &rig.shared.token_hash,
+            rig.channel
+        )
+        .unwrap()
+        .is_none(),
+        "rollback must consume its marker in the bot queue namespace"
+    );
+    assert!(events(&rig.renderer).is_empty());
+    assert_eq!(rig.state().await["items"].as_array().unwrap().len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

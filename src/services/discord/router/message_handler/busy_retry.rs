@@ -32,6 +32,7 @@ pub(super) struct FinalizeEnqueueContext<'a> {
 pub(super) async fn defer_owned_front(
     context: FinalizeEnqueueContext<'_>,
     cancel: &Arc<CancelToken>,
+    queue_provider: &crate::services::provider::ProviderKind,
 ) {
     let FinalizeEnqueueContext {
         shared,
@@ -47,7 +48,7 @@ pub(super) async fn defer_owned_front(
     } = context;
     let started = shared.turn_start_times.get(&channel_id).map(|at| *at);
     let finish = crate::services::discord::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
-        shared, provider, channel_id, user_msg_id, cancel.turn_nonce().map(str::to_owned),
+        shared, queue_provider, channel_id, user_msg_id, cancel.turn_nonce().map(str::to_owned),
         std::time::Instant::now(), Some(cancel.clone()),
     ).await;
     let released = finish.removed_token.is_some();

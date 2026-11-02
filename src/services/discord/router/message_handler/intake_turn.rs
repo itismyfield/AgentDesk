@@ -1728,6 +1728,7 @@ pub(super) async fn handle_text_message(
                         wip_warning: wip_warning.as_deref(),
                     },
                     &cancel_token,
+                    &super::super::super::resolve_discord_bot_provider(token),
                 ).await;
                 owner.defer_before_submit("hosted_tui_busy_pre_submit");
                 intake_latency.log(channel_id.get(), provider_label, "deferred_busy");
