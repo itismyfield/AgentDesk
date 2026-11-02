@@ -694,6 +694,9 @@ mod catch_up_recovery_tests {
         .expect("seed scanner checkpoint");
     }
 
+    type CleanupHook =
+        Arc<dyn Fn(&Arc<super::super::SharedData>, ChannelId, MessageId) + Send + Sync>;
+
     struct TestCatchUpDiscordApi {
         current_user_id: Option<u64>,
         binding_status: RuntimeChannelBindingStatus,
@@ -701,8 +704,7 @@ mod catch_up_recovery_tests {
         messages: Vec<serenity::Message>,
         fetch_attempts: Option<Arc<AtomicUsize>>,
         empty_after_first_fetch: bool,
-        cleanup_hook:
-            Option<Arc<dyn Fn(&Arc<super::super::SharedData>, ChannelId, MessageId) + Send + Sync>>,
+        cleanup_hook: Option<CleanupHook>,
     }
 
     impl TestCatchUpDiscordApi {
