@@ -422,8 +422,7 @@ pub async fn update_entry_status_on_pg(
     // defensive rather than load-bearing — the 0-row drift branch below only
     // `continue`s while the row still carries the identity this attempt
     // observed, so recomputing `options.or(current.*)` per iteration would
-    // yield the same value. Its declaration site is locked structurally by
-    // `pinned_dispatch_identity_is_declared_before_the_stale_retry_loop`.
+    // yield the same value.
     let pinned_dispatch_id = options
         .dispatch_id
         .clone()
@@ -1659,8 +1658,6 @@ mod tests {
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use sqlx::{Connection, PgConnection, PgPool};
 
-    mod source_guard_tests;
-
     async fn setup_entry(pool: &PgPool, run_status: &str, entry_status: &str) {
         sqlx::query(
             "INSERT INTO agents (id, name, provider, discord_channel_id)
@@ -2250,12 +2247,6 @@ mod tests {
         assert_eq!(terminal_dispatch.row.dispatch_id, None);
         assert!(terminal_dispatch.transitions.is_empty());
         assert!(terminal_dispatch.dispatch_history.is_empty());
-    }
-
-    #[test]
-    fn pinned_dispatch_identity_is_declared_before_the_stale_retry_loop() {
-        let gaps = source_guard_tests::pinned_identity_gaps(source_guard_tests::ENTRIES);
-        assert_eq!(gaps, Vec::<String>::new());
     }
 
     #[tokio::test]

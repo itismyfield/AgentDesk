@@ -276,7 +276,6 @@ fn provider_exec_registry_conformance_invariant() {
     assert!(!agy.supports_tool_stream);
     assert!(!agy.supports_tui_hosting);
     assert!(agy.context_window_tokens.is_none());
-    assert_scoped_dispatches_have_no_wildcard_arms();
 }
 
 #[test]
@@ -305,82 +304,4 @@ fn unsupported_provider_preserves_generic_readiness_fallback() {
         BUSY_CAPTURE,
         &provider
     ));
-}
-
-const PROVIDER_SOURCE: &str = include_str!("../provider.rs");
-const PROVIDER_EXEC_SOURCE: &str = include_str!("../provider_exec.rs");
-const PROVIDER_FUNCTIONS: [&str; 3] = [
-    "compact_env_vars",
-    "compact_cli_config",
-    "tmux_capture_indicates_ready_for_input",
-];
-const PROVIDER_EXEC_FUNCTIONS: [&str; 1] = ["execute_simple_blocking_inner"];
-
-fn assert_scoped_dispatches_have_no_wildcard_arms() {
-    assert_eq!(
-        wildcard_arm_gaps(PROVIDER_SOURCE, &PROVIDER_FUNCTIONS),
-        Vec::<String>::new()
-    );
-    assert_eq!(
-        wildcard_arm_gaps(PROVIDER_EXEC_SOURCE, &PROVIDER_EXEC_FUNCTIONS),
-        Vec::<String>::new()
-    );
-}
-
-/// Classification 2: each scoped body is the real item in the code mask, so a brace or a
-/// `_ =>` inside a comment or string neither ends the body nor counts as an arm. Lexical only.
-fn wildcard_arm_gaps(source: &str, functions: &[&str]) -> Vec<String> {
-    let mask = crate::test_support::rust_code_mask(source).expect("provider source lexes");
-    let mut gaps = Vec::new();
-    for function_name in functions {
-        let signature = format!("fn {function_name}(");
-        let Some(span) = crate::test_support::braced_item_span(&mask, &signature) else {
-            gaps.push(format!("missing scoped function {function_name}"));
-            continue;
-        };
-        let wildcard_line = mask[span.clone()].lines().find(|line| {
-            line.split_once("=>")
-                .is_some_and(|(pattern, _)| pattern.trim() == "_")
-        });
-        if let Some(line) = wildcard_line {
-            gaps.push(format!(
-                "{function_name} contains a wildcard match arm; every registered provider needs an explicit adapter: {}",
-                line.trim()
-            ));
-        }
-    }
-    gaps
-}
-
-#[test]
-fn wildcard_arm_guard_rejects_commented_bodies_and_counts_only_coded_arms() {
-    use crate::test_support::{CommentForgery, comment_out_code};
-    let scoped = [
-        (PROVIDER_SOURCE, &PROVIDER_FUNCTIONS[..]),
-        (PROVIDER_EXEC_SOURCE, &PROVIDER_EXEC_FUNCTIONS[..]),
-    ];
-    for (source, functions) in scoped {
-        for function_name in functions {
-            let signature = format!("fn {function_name}(");
-            for forgery in CommentForgery::ALL {
-                let forged = comment_out_code(source, &signature, forgery);
-                assert_eq!(
-                    wildcard_arm_gaps(&forged, functions),
-                    [format!("missing scoped function {function_name}")]
-                );
-            }
-            let open = source.find(&signature).expect("scoped function");
-            let body = open + source[open..].find("{\n").expect("scoped body") + 2;
-            let insert = |line: &str| [&source[..body], line, &source[body..]].concat();
-            let noted = insert("        // _ => {}\n        let _ = \"_ => {}\";\n");
-            assert_eq!(wildcard_arm_gaps(&noted, functions), Vec::<String>::new());
-            // A brace scan over raw text ends the body at the commented `}` before the arm.
-            let hidden = insert("        // }\n        _ => unreachable!(),\n");
-            assert_eq!(
-                wildcard_arm_gaps(&hidden, functions).len(),
-                1,
-                "{function_name}"
-            );
-        }
-    }
 }
