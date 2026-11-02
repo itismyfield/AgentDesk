@@ -22,11 +22,7 @@ pub(super) struct ProcessLifecycleCounters {
 
 /// #3479 Item 3: UI feature gates for the live-placeholder / status-panel surface.
 pub(super) struct UiFeatureFlags {
-    pub(super) placeholder_live_events_enabled: bool,
-    pub(super) status_panel_v2_enabled: bool,
-    /// #3805 P2: two-message panel rollout gate (default OFF). Scaffolding —
-    /// copied into shared UI state alongside `status_panel_v2_enabled` but not
-    /// read by any path in PR-A.
+    /// Two-message panel rollout gate (default OFF).
     pub(super) two_message_panel_enabled: bool,
 }
 
@@ -75,8 +71,6 @@ pub(super) fn run_bot_build_shared_data(
         shutdown_remaining,
     } = counters;
     let UiFeatureFlags {
-        placeholder_live_events_enabled,
-        status_panel_v2_enabled,
         two_message_panel_enabled,
     } = flags;
     let RestoredSessionState {
@@ -116,8 +110,9 @@ pub(super) fn run_bot_build_shared_data(
             placeholder_live_events: Arc::new(
                 crate::services::discord::placeholder_live_events::PlaceholderLiveEvents::with_tool_activity_display(crate::config::runtime_config().placeholder.tool_activity_display),
             ),
-            placeholder_live_events_enabled,
-            status_panel_v2_enabled,
+            // Config switches retired: live events and the v2 panel are the production layout.
+            placeholder_live_events_enabled: true,
+            status_panel_v2_enabled: true,
             two_message_panel_enabled,
         },
         // #3038 S1: wrapped verbatim at the first-member position (evaluation-order preserved).

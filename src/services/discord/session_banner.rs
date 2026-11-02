@@ -93,6 +93,15 @@ impl<'a> DiscordTurnSessionBanner<'a> {
     }
 }
 
+/// Whether `text` is `body` as relayed, with or without the one-line banner prefixed below.
+#[cfg(test)]
+pub(in crate::services::discord) fn relays_body(text: &str, body: &str) -> bool {
+    text == body
+        || text
+            .split_once("\n\n")
+            .is_some_and(|(line, rest)| rest == body && !line.contains('\n'))
+}
+
 /// Decorate the first logical answer chunk for `turn_id` with the current
 /// session line. `first_turn_chunk=false`, an empty body, disabled status-panel
 /// v2, or a non-winning turn returns `body` unchanged.

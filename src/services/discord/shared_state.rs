@@ -31,8 +31,7 @@ pub(in crate::services::discord) struct PlaceholderState {
     /// both the async-dispatch and live-turn call paths.
     pub(in crate::services::discord) placeholder_controller:
         Arc<placeholder_controller::PlaceholderController>,
-    /// Per-channel recent tool/system events rendered in Active placeholder
-    /// cards when `placeholder.live_events_enabled` is enabled.
+    /// Per-channel recent tool/system events rendered in Active placeholder cards.
     pub(in crate::services::discord) placeholder_live_events:
         Arc<placeholder_live_events::PlaceholderLiveEvents>,
     pub(in crate::services::discord) placeholder_live_events_enabled: bool,

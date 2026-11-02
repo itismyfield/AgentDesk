@@ -813,7 +813,15 @@ mod tests {
         );
 
         let mut placeholder = base.clone();
-        placeholder.placeholder.live_events_enabled = !base.placeholder.live_events_enabled;
+        placeholder.placeholder.tool_activity_display = match base.placeholder.tool_activity_display
+        {
+            crate::config::ToolActivityDisplay::Class => {
+                crate::config::ToolActivityDisplay::Summary
+            }
+            crate::config::ToolActivityDisplay::Summary => {
+                crate::config::ToolActivityDisplay::Class
+            }
+        };
         assert_eq!(
             restart_required_changes(&base, &placeholder),
             vec!["placeholder"]
