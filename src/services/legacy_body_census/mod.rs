@@ -13,6 +13,7 @@ mod manifest;
 #[path = "entry_tests.rs"]
 mod tests;
 pub(crate) mod transport;
+mod window;
 mod writer;
 
 type Shared = Arc<Mutex<State>>;
@@ -23,6 +24,8 @@ struct State {
     invalid: bool,
     own_reasons: Vec<String>,
     history_problems: Vec<Value>,
+    window: window::Window,
+    predecessor_window: Value,
 }
 
 impl State {
@@ -36,6 +39,8 @@ impl State {
             invalid: false,
             own_reasons: Vec::new(),
             history_problems: Vec::new(),
+            window: window::Window::new(boot.id.clone()),
+            predecessor_window: json!({"status":"INCONCLUSIVE","reason":"PREDECESSOR_UNKNOWN"}),
         };
         if state.header["host"]
             .as_str()
@@ -51,6 +56,7 @@ impl State {
 
     fn mark(&mut self, reason: &str) {
         self.invalid = true;
+        self.window.invalid = true;
         if !self.own_reasons.iter().any(|old| old == reason) {
             self.own_reasons.push(reason.into());
         }
@@ -101,7 +107,7 @@ impl Journal {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut value = state.header.clone();
         let reasons = state.reasons();
-        value["status"] = json!(if state.ready
+        let candidate = if state.ready
             && !state.invalid
             && reasons.is_empty()
             && value["probe_coverage"] == true
@@ -109,7 +115,10 @@ impl Journal {
             "READY"
         } else {
             "INCONCLUSIVE"
-        });
+        };
+        value["status"] = json!(state.window.verdict(Some(&state.window.boot_id), candidate));
+        value["window"] = state.window.report(Some(&state.window.boot_id));
+        value["predecessor_window"] = state.predecessor_window.clone();
         value["journal_ready"] = json!(state.ready);
         value["journal_invalid"] = json!(state.invalid);
         value["reasons"] = json!(reasons);

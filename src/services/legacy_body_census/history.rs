@@ -62,6 +62,7 @@ fn predecessor(dir: &Path, boot: &Boot, host: &Value, state: &Shared) -> Option<
         {
             return Err("HISTORY_HOST_OR_ROLE_MISMATCH");
         }
+        let mut window = super::window::Window::new(id.to_owned());
         let mut line = Vec::new();
         loop {
             line.clear();
@@ -69,15 +70,23 @@ fn predecessor(dir: &Path, boot: &Boot, host: &Value, state: &Shared) -> Option<
                 Ok(0) => break,
                 Ok(_) if !line.ends_with(b"\n") => {
                     inherited(state, Some(id), "HISTORY_TRUNCATED");
+                    window.invalid = true;
                     break;
                 }
                 Err(_) => {
                     inherited(state, Some(id), "HISTORY_READ_FAILED");
+                    window.invalid = true;
                     break;
                 }
                 Ok(_) => {}
             }
-            match serde_json::from_slice::<Value>(&line) {
+            let record = serde_json::from_slice::<Value>(&line);
+            if let Ok(record) = &record {
+                window.observe(record);
+            } else {
+                window.invalid = true;
+            }
+            match record {
                 Ok(record) if record["kind"] == "observation_invalid" => {
                     inherited(state, Some(id), "HISTORY_INVALIDATED")
                 }
@@ -85,6 +94,10 @@ fn predecessor(dir: &Path, boot: &Boot, host: &Value, state: &Shared) -> Option<
                 _ => inherited(state, Some(id), "HISTORY_INVALID_JSON"),
             }
         }
+        state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .predecessor_window = window.report(None);
         Ok(header)
     })();
     match result {

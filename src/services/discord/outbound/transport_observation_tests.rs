@@ -70,6 +70,21 @@ fn phases(path: &Path, case: &str) -> Vec<(String, Option<String>)> {
         .collect()
 }
 
+async fn flushed() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let health = census::health_json();
+            let window = &health["window"];
+            if window["cut"].is_u64() && window["drained"] == window["cut"] {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("queued observations must reach their durable cut");
+}
+
 fn message(id: u64) -> Reply {
     reply(
         "200 OK",
@@ -160,6 +175,7 @@ async fn raw_requests_observe_body_operations_and_retry_once() {
             "{case}"
         );
         assert_eq!(mock.requests().len(), wire, "{case}");
+        flushed().await;
         let expected = outcome.map_or_else(Vec::new, |result| {
             vec![
                 ("begin".into(), None),
@@ -245,10 +261,11 @@ async fn nested_observation_preserves_owner_fences_and_uncertain_results_pg() {
                 }) => {}
             }
             assert_eq!(mock.requests().len(), 1);
+            flushed().await;
             assert_eq!(
                 phases(&log, case),
                 [("begin".into(), None)],
-                "begin must be stable before the raw request"
+                "begin must be stable after its drain"
             );
             if case == "timeout" {
                 tokio::time::pause();
@@ -262,16 +279,7 @@ async fn nested_observation_preserves_owner_fences_and_uncertain_results_pg() {
             } else {
                 drop(call);
             }
-            tokio::time::timeout(Duration::from_secs(5), async {
-                loop {
-                    if phases(&log, case).len() == 2 {
-                        break;
-                    }
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .unwrap();
+            flushed().await;
             assert_eq!(
                 phases(&log, case),
                 [
@@ -282,6 +290,7 @@ async fn nested_observation_preserves_owner_fences_and_uncertain_results_pg() {
         } else {
             assert_eq!(call.await.is_ok(), !blocked, "{case}");
             assert_eq!(mock.requests().len(), usize::from(!blocked), "{case}");
+            flushed().await;
             let expected = if blocked {
                 vec![("not_sent".into(), None)]
             } else {
@@ -412,6 +421,7 @@ async fn claim_api_scopes_no_claim_transport_without_creating_a_tag() {
         Ok(crate::services::tui_o::cutover::BodySend::Sent(Ok(_)))
     ));
     assert_eq!(mock.requests().len(), 1);
+    flushed().await;
     let recorded = events(&log, "claim-none");
     assert_eq!(recorded.len(), 2);
     assert_eq!(recorded[0]["census"]["site"], "W06");
@@ -504,6 +514,7 @@ async fn claim_held_context_preserves_lifetime_none_guard_and_outer_site() {
         drop(context);
         assert_eq!(candidate.sends(), (u64::from(claimed), u64::from(claimed)));
         assert_eq!(mock.requests().len(), 2);
+        flushed().await;
         let recorded = events(&log, case);
         assert_eq!(
             recorded.len(),
@@ -536,10 +547,181 @@ async fn claim_held_context_preserves_lifetime_none_guard_and_outer_site() {
     .await
     .unwrap();
     assert_eq!(mock.requests().len(), 1);
+    flushed().await;
     let recorded = events(&log, "outer-claim");
     assert_eq!(recorded.len(), 2);
     for event in recorded {
         assert_eq!(event["census"]["site"], "W30");
         assert_eq!(event["census"]["reason"], "RELEASED");
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn tagged_http_send_does_not_wait_for_a_blocked_journal() {
+    if isolated(
+        concat!(
+            module_path!(),
+            "::tagged_http_send_does_not_wait_for_a_blocked_journal"
+        )
+        .trim_start_matches("agentdesk::"),
+    ) {
+        return;
+    }
+    let log = journal().await;
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(log.parent().unwrap().join("writer.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let mock = Mock::start(vec![message(9021), message(9022)]).await;
+    let http = client(&mock);
+    let channel = ChannelId::new(CHANNEL);
+    let control = tokio::time::timeout(
+        Duration::from_secs(1),
+        crate::services::discord::http::send_channel_message(&http, channel, "control"),
+    )
+    .await;
+    assert!(matches!(control, Ok(Ok(_))));
+    let tagged = raw_output::census_scope(
+        Some(json!({"case":"blocked-journal","site":"W30"})),
+        crate::services::discord::http::send_channel_message(&http, channel, "body"),
+    );
+    tokio::pin!(tagged);
+    let before = tokio::time::timeout(Duration::from_secs(1), &mut tagged).await;
+    let completed = before.is_ok();
+    let wire = mock.requests().len() - 1;
+    drop(lock);
+    let result = match before {
+        Ok(result) => result,
+        Err(_) => tokio::time::timeout(Duration::from_secs(5), &mut tagged)
+            .await
+            .unwrap(),
+    };
+    assert!(result.is_ok());
+    assert!(
+        completed && wire == 1,
+        "journal ACK delayed HTTP: completed={completed}, wire={wire}"
+    );
+    flushed().await;
+    assert_eq!(
+        phases(&log, "blocked-journal"),
+        vec![
+            ("begin".into(), None),
+            ("result".into(), Some("confirmed".into()))
+        ]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_full_observation_queue_keeps_the_send_and_invalidates_the_window() {
+    if isolated(
+        concat!(
+            module_path!(),
+            "::a_full_observation_queue_keeps_the_send_and_invalidates_the_window"
+        )
+        .trim_start_matches("agentdesk::"),
+    ) {
+        return;
+    }
+    crate::config_live_reload::install(
+        serde_json::from_value(json!({"server":{},"cluster":{"instance_id":"test-node"}})).unwrap(),
+    );
+    let log = journal().await;
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(log.parent().unwrap().join("writer.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    for _ in 0..128 {
+        census::transport::try_record(json!({"kind":"checkpoint"}));
+    }
+    let mock = Mock::start(vec![message(9023)]).await;
+    let http = client(&mock);
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        raw_output::census_scope(
+            Some(json!({"case":"full-queue"})),
+            crate::services::discord::http::send_channel_message(
+                &http,
+                ChannelId::new(CHANNEL),
+                "body",
+            ),
+        ),
+    )
+    .await;
+    let health = census::health_json();
+    drop(lock);
+    assert!(matches!(result, Ok(Ok(_))));
+    assert_eq!(mock.requests().len(), 1);
+    assert_eq!(health["journal_invalid"], true);
+    assert_eq!(health["window"]["status"], "INCONCLUSIVE");
+    flushed().await;
+    assert_eq!(census::health_json()["journal_invalid"], true);
+    assert_eq!(census::health_json()["window"]["status"], "INCONCLUSIVE");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_crash_before_body_drain_cannot_certify_the_next_window() {
+    if isolated(
+        concat!(
+            module_path!(),
+            "::a_crash_before_body_drain_cannot_certify_the_next_window"
+        )
+        .trim_start_matches("agentdesk::"),
+    ) {
+        return;
+    }
+    crate::config_live_reload::install(
+        serde_json::from_value(json!({"server":{},"cluster":{"instance_id":"test-node"}})).unwrap(),
+    );
+    if std::env::var_os("ADK_CENSUS_CRASH_CHILD").is_some() {
+        let log = journal().await;
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(log.parent().unwrap().join("writer.lock"))
+            .unwrap();
+        lock.lock().unwrap();
+        let mock = Mock::start(vec![message(9024)]).await;
+        let http = client(&mock);
+        raw_output::census_scope(
+            Some(json!({"case":"crash-before-drain"})),
+            crate::services::discord::http::send_channel_message(
+                &http,
+                ChannelId::new(CHANNEL),
+                "body",
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(mock.requests().len(), 1);
+        std::process::exit(0);
+    }
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            concat!(
+                module_path!(),
+                "::a_crash_before_body_drain_cannot_certify_the_next_window"
+            )
+            .trim_start_matches("agentdesk::"),
+            "--nocapture",
+        ])
+        .env("ADK_CENSUS_CRASH_CHILD", "1")
+        .output()
+        .unwrap();
+    assert!(
+        child.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&child.stdout),
+        String::from_utf8_lossy(&child.stderr)
+    );
+    assert!(String::from_utf8_lossy(&child.stdout).contains("running 1 test"));
+    journal().await;
+    let health = census::health_json();
+    assert_eq!(health["predecessor_window"]["status"], "INCONCLUSIVE");
+    assert_ne!(health["predecessor_window"]["boot_id"], health["boot_id"]);
+    assert_eq!(health["window"]["status"], "COMPLETE");
 }

@@ -643,3 +643,93 @@ fn claim_manifest_requires_complete_verified_rows() {
         }
     }
 }
+
+#[tokio::test]
+async fn a_durable_cut_requires_its_boot_and_a_live_owner_or_final_drain() {
+    let root = tempfile::tempdir().unwrap();
+    let id = boot();
+    let current = open(root.path(), &id).await;
+    assert!(current.append(json!({"kind":"checkpoint"})).await);
+    let shared = current.0.state.clone();
+    {
+        let state = shared.lock().unwrap();
+        for candidate in ["PASS", "FAIL"] {
+            assert_eq!(state.window.verdict(Some(&id.id), candidate), candidate);
+            assert_eq!(state.window.verdict(None, candidate), "INCONCLUSIVE");
+            assert_eq!(
+                state.window.verdict(Some("other-boot"), candidate),
+                "INCONCLUSIVE"
+            );
+        }
+    }
+    drop(current);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !shared.lock().unwrap().window.closed {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let rows = records(root.path(), &id);
+    for case in [
+        "valid",
+        "foreign_boot",
+        "wrong_cut",
+        "later_record",
+        "missing_drain",
+    ] {
+        let mut altered = rows.clone();
+        match case {
+            "foreign_boot" => {
+                for row in altered.iter_mut().filter(|r| r["kind"] == "drain") {
+                    row["boot_id"] = json!(uuid::Uuid::new_v4().to_string());
+                }
+            }
+            "wrong_cut" => altered.last_mut().unwrap()["cut"] = json!(900),
+            "later_record" => altered.push(json!({"kind":"checkpoint"})),
+            "missing_drain" => altered.retain(|r| r["kind"] != "drain"),
+            _ => {}
+        }
+        let mut window = crate::services::legacy_body_census::window::Window::new(id.id.clone());
+        for row in altered.iter().skip(1) {
+            window.observe(row);
+        }
+        for candidate in ["PASS", "FAIL"] {
+            assert_eq!(
+                window.verdict(None, candidate),
+                if case == "valid" {
+                    candidate
+                } else {
+                    "INCONCLUSIVE"
+                },
+                "{case}"
+            );
+        }
+    }
+    let next = open(root.path(), &boot()).await;
+    assert_eq!(next.snapshot()["predecessor_window"]["status"], "COMPLETE");
+    assert_eq!(next.snapshot()["predecessor_window"]["boot_id"], id.id);
+}
+
+#[tokio::test]
+async fn a_new_enqueue_cannot_reuse_the_previous_drain() {
+    let root = tempfile::tempdir().unwrap();
+    let id = boot();
+    let current = open(root.path(), &id).await;
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.path().join("legacy_body_census/writer.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    current.0.try_append(json!({"kind":"checkpoint"}));
+    {
+        let state = current.0.state.lock().unwrap();
+        assert_eq!(state.window.verdict(Some(&id.id), "PASS"), "INCONCLUSIVE");
+        assert_ne!(Some(state.window.cut), state.window.drained);
+    }
+    drop(lock);
+    assert!(current.append(json!({"kind":"checkpoint"})).await);
+    let state = current.0.state.lock().unwrap();
+    assert_eq!(state.window.verdict(Some(&id.id), "PASS"), "PASS");
+}

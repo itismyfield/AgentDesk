@@ -143,37 +143,32 @@ pub(in crate::services::discord) fn request<T>(
             Ok(guard) => guard,
             Err(error) => {
                 if let Some(observation) = observation.as_mut() {
-                    let receipt = transport::record(observation.event("not_sent", None));
+                    transport::record(observation.event("not_sent", None));
                     observation.finished = true;
-                    receipt.await;
                 }
                 return Err(serenity::Error::Io(std::io::Error::other(error)));
             }
         };
         if let Some(observation) = observation.as_mut() {
             observation.begun = true;
-            transport::record(observation.event("begin", None)).await;
+            transport::record(observation.event("begin", None));
         }
-        let mut receipt = None;
         let result = guard
             .run(async {
                 let result = raw.await;
                 if let Some(observation) = observation.as_mut() {
-                    // Enqueue the known raw outcome before rollback; wait outside the raw deadline.
-                    receipt = Some(transport::record(
-                        observation.event("result", Some(outcome(&result))),
-                    ));
+                    // Keep the known raw outcome before rollback, without waiting for observation I/O.
+                    transport::record(observation.event("result", Some(outcome(&result))));
                     observation.finished = true;
                 }
                 result
             })
             .await;
-        if let Some(receipt) = receipt {
-            receipt.await;
-        } else if let Some(observation) = observation.as_mut() {
-            let receipt = transport::record(observation.event("result", Some("uncertain")));
+        if let Some(observation) = observation.as_mut()
+            && !observation.finished
+        {
+            transport::record(observation.event("result", Some("uncertain")));
             observation.finished = true;
-            receipt.await;
         }
         result.map_err(|error| serenity::Error::Io(std::io::Error::other(error)))?
     })

@@ -37,6 +37,7 @@ impl Default for Options {
 struct Message {
     record: Value,
     ack: Option<oneshot::Sender<bool>>,
+    cut: u64,
 }
 
 pub(super) struct Writer {
@@ -60,6 +61,27 @@ fn persist_invalid(file: &mut std::fs::File, state: &Shared, persisted: &mut Vec
     {
         persisted.extend(fresh);
     }
+}
+
+fn write_drain(file: &mut Option<std::fs::File>, state: &Shared, cut: u64, closed: bool) -> bool {
+    let marker = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .window
+        .marker(cut, closed);
+    let synced = file
+        .as_mut()
+        .is_some_and(|file| history::append_synced(file, &marker).is_ok());
+    if synced {
+        let mut status = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        status.window.drained = Some(cut);
+        status.window.closed = closed;
+    } else {
+        invalidate(state, "DRAIN_WRITE_FAILED");
+    }
+    synced
 }
 
 impl Writer {
@@ -92,6 +114,7 @@ impl Writer {
                 if let Some(file) = file.as_mut() {
                     persist_invalid(file, &shared, &mut persisted);
                 }
+                let mut last_cut = 0;
                 while let Ok(message) = receiver.recv() {
                     (options.before_write)();
                     let gate = root
@@ -99,7 +122,7 @@ impl Writer {
                         .and_then(|root| history::lock_writer(root).ok());
                     let written = gate.is_some()
                         && file.as_mut().is_some_and(|file| {
-                            history::append_synced(file, &message.record).is_ok()
+                            history::append_line(file, &message.record).is_ok()
                         });
                     if !written {
                         invalidate(&shared, "WRITE_FAILED");
@@ -107,14 +130,28 @@ impl Writer {
                     if let Some(file) = file.as_mut() {
                         persist_invalid(file, &shared, &mut persisted);
                     }
+                    let drained =
+                        gate.is_some() && write_drain(&mut file, &shared, message.cut, false);
+                    last_cut = message.cut;
                     if let Some(ack) = message.ack
-                        && ack.send(written).is_err()
+                        && ack.send(written && drained).is_err()
                     {
                         invalidate(&shared, "ACK_RECEIVER_DROPPED");
                         if let Some(file) = file.as_mut() {
                             persist_invalid(file, &shared, &mut persisted);
                         }
                     }
+                }
+                let gate = root
+                    .as_deref()
+                    .and_then(|root| history::lock_writer(root).ok());
+                if gate.is_some() {
+                    if let Some(file) = file.as_mut() {
+                        persist_invalid(file, &shared, &mut persisted);
+                    }
+                    write_drain(&mut file, &shared, last_cut, true);
+                } else {
+                    invalidate(&shared, "DRAIN_WRITE_FAILED");
                 }
             });
         if thread.is_err() {
@@ -129,23 +166,28 @@ impl Writer {
 
     pub(super) fn enqueue(&self, record: Value) -> Option<oneshot::Receiver<bool>> {
         let (ack, received) = oneshot::channel();
-        if self
-            .sender
-            .try_send(Message {
-                record,
-                ack: Some(ack),
-            })
-            .is_err()
-        {
-            invalidate(&self.state, "WRITE_QUEUE_UNAVAILABLE");
-            return None;
-        }
-        Some(received)
+        self.queue(record, Some(ack)).then_some(received)
     }
 
     pub(super) fn try_append(&self, record: Value) {
-        if self.sender.try_send(Message { record, ack: None }).is_err() {
-            invalidate(&self.state, "WRITE_QUEUE_UNAVAILABLE");
+        self.queue(record, None);
+    }
+
+    fn queue(&self, record: Value, ack: Option<oneshot::Sender<bool>>) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(cut) = state.window.cut.checked_add(1) else {
+            state.mark("CUT_OVERFLOW");
+            return false;
+        };
+        if self.sender.try_send(Message { record, ack, cut }).is_err() {
+            state.mark("WRITE_QUEUE_UNAVAILABLE");
+            false
+        } else {
+            state.window.cut = cut;
+            true
         }
     }
 

@@ -3,23 +3,12 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
-    future::Future,
     sync::{LazyLock, Mutex},
 };
 
-/// Queue now, then acknowledge durability wherever the caller can await safely.
-pub(crate) fn record(record: Value) -> impl Future<Output = ()> + Send + 'static {
-    let queued = JOURNAL.get().and_then(|journal| {
-        journal
-            .0
-            .enqueue(record)
-            .map(|received| (&journal.0, received))
-    });
-    async move {
-        if let Some((writer, received)) = queued {
-            writer.wait_for_ack(received).await;
-        }
-    }
+/// Observation cannot add a disk or writer-ACK dependency to a send.
+pub(crate) fn record(record: Value) {
+    try_record(record);
 }
 
 pub(crate) fn try_record(record: Value) {
