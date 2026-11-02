@@ -59,6 +59,9 @@ pub(in crate::services::discord) use self::queued_placeholders::{
     delete_stale_queued_placeholder_cards, delete_stale_queued_placeholder_cards_with,
     filter_restored_queued_placeholders,
 };
+pub(in crate::services::discord) use self::restored_state::{
+    restore_model_overrides, restored_model_overrides,
+};
 use self::shared_data::{
     ProcessLifecycleCounters, RestoredSessionState, RuntimeServices, UiFeatureFlags,
     run_bot_build_shared_data,
@@ -228,16 +231,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     let startup_doctor_started_for_client_start = startup_doctor_started.clone();
     let health_registry_for_client_start = health_registry.clone();
 
-    let restored_model_overrides: Vec<(ChannelId, String)> = bot_settings
-        .channel_model_overrides
-        .iter()
-        .filter_map(|(channel_id, model)| {
-            channel_id
-                .parse::<u64>()
-                .ok()
-                .map(|id| (ChannelId::new(id), model.clone()))
-        })
-        .collect();
+    let restored_model_overrides = restored_model_overrides(&bot_settings);
     let restored_node_overrides: Vec<(ChannelId, String)> = bot_settings
         .channel_node_overrides
         .iter()
