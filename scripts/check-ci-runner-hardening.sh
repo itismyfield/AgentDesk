@@ -327,7 +327,8 @@ built_gate = "${{ !github.event.pull_request.draft && !cancelled() && needs.rust
 relay_gate = "${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}"
 cross_os_gate = "${{ !github.event.pull_request.draft && needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true' }}"
 expected_closure_if = {
-  "changes" => "${{ !github.event.pull_request.draft }}", "rust_build" => rust_tests_gate, "rust_tests" => built_gate, "test_evidence" => built_gate,
+  "changes" => "${{ !github.event.pull_request.draft }}", "rust_build" => rust_tests_gate, "base_compare" => built_gate,
+  "rust_tests" => built_gate, "test_evidence" => built_gate,
   "lint" => "${{ !github.event.pull_request.draft && (needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true') }}",
   "scripts" => "${{ !github.event.pull_request.draft && !cancelled() }}", "scripts_guards" => "${{ !github.event.pull_request.draft && !cancelled() }}", "scripts_contracts" => "${{ !github.event.pull_request.draft && !cancelled() }}",
   "dashboard" => "${{ !github.event.pull_request.draft && needs.changes.outputs.dashboard == 'true' }}", "pg15_owner_proof" => rust_tests_gate,
@@ -397,7 +398,7 @@ end
 required_key_node = jobs_node.children.each_slice(2).find { |key_node, _| key_node.is_a?(Psych::Nodes::Scalar) && key_node.value == "required_contexts" }&.first
 required_source = required_key_node && raw_job_source(path, required_key_node).gsub(/\b[0-9a-f]{64}\b/, "<sha256>")
 required_source_sha256 = required_source && Digest::SHA256.hexdigest(required_source)
-unless required_source_sha256 == "916b1fddd0fc5f85a8a125b927e6167c1560e32e42f65bab69c4df863c70499c"
+unless required_source_sha256 == "ef88557e3be990d67db05ca382b57e118ba7a7a9d74151301db9459c08d7d2b7"
   warn "#{path}: required_contexts source bytes changed (scalar tags/styles and exact step surface are pinned); found #{required_source_sha256 || '<missing>'}"
   exit 1
 end
@@ -696,7 +697,7 @@ targets = {
   "rust_build" => {
     "label" => "nextest build and plan job", "name" => "Rust tests build and plan",
     "needs" => "changes", "if" => rust_tests_gate, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 100, "job_sha256" => "ca0b5f75c9e2aad794a5cef33a393de0cc29a017017e484f5dc579e8142f8025",
+    "job_timeout_minutes" => 100, "job_sha256" => "9e1644775275aac1c367b09f26011526006262ac832d776cf8600c181d4aea37",
     "cargo_steps" => {
       "Check Rust test source wiring" => {"commands" => ["python3 scripts/ci/rust_test_sources.py check"], "timeout_minutes" => nil, "env" => {"BASH_ENV" => "/dev/null"}},
       "Archive, list, compare and plan" => {
@@ -717,6 +718,14 @@ targets = {
         ],
         "timeout_minutes" => 45, "env" => {"BASH_ENV" => "/dev/null"},
       },
+    },
+  },
+  # The workers do not wait for it; the judge still requires it through N.
+  "base_compare" => {
+    "label" => "nextest base comparison job", "name" => "Rust tests base comparison",
+    "needs" => %w[changes rust_build], "if" => built_gate, "runs_on" => "ubuntu-latest",
+    "job_timeout_minutes" => 60, "job_sha256" => "6af0ae6c8cadc08ceb89f33b133f1ec369f70dd09da05e474d4ee92a5c22662e",
+    "cargo_steps" => {
       # Dropping this step or changing its argv (a report-only diff) is rejected here.
       "Compare tests with the comparison base" => {
         "commands" => ['bash scripts/ci/nextest-base-diff.sh "$RUNNER_TEMP/nextest"'], "timeout_minutes" => 40,
@@ -1108,10 +1117,10 @@ if lint.is_a?(Hash)
     errors << "job lint #{lint_tests_name} must keep #{key}=0" unless tests && (tests["env"] || {})[key] == "0"
   end
 end
-# PR N == main N == nightly N: the jobs differ only in needs, the PR base comparison and the main baseline upload.
+# PR N == main N == nightly N: the jobs differ only in needs and the main baseline upload; base_compare is PR-only.
 built_gate = "${{ !cancelled() && needs.rust_build.result == 'success' }}"
 baseline_upload = {"name" => "Upload nextest baseline", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "nextest-baseline", "path" => "${{ runner.temp }}/nextest/plan/plan.json", "if-no-files-found" => "error", "retention-days" => 14}}
-role_free = ->(job, role_step) { job.reject { |key, _| %w[needs if].include?(key) }.merge("steps" => Array(job["steps"]).reject { |step| step.is_a?(Hash) && step["name"] == role_step }) }
+role_free = ->(job, role_step) { job.reject { |key, _| %w[needs if].include?(key) }.merge("steps" => Array(job["steps"]).reject { |step| role_step && step.is_a?(Hash) && step["name"] == role_step }) }
 {"rust_build" => [nil, nil], "rust_tests" => ["rust_build", built_gate], "test_evidence" => [%w[rust_build rust_tests], built_gate]}.each do |job_id, (needs, gate)|
   main_job, pr_job = main_jobs[job_id], pr_jobs[job_id]
   unless main_job.is_a?(Hash) && pr_job.is_a?(Hash)
@@ -1119,7 +1128,7 @@ role_free = ->(job, role_step) { job.reject { |key, _| %w[needs if].include?(key
     next
   end
   errors << "main #{job_id} must keep needs #{needs.inspect} and if #{gate.inspect}" unless main_job["needs"] == needs && main_job["if"] == gate
-  errors << "main #{job_id} must equal the PR job apart from needs, if and the role step" unless role_free.(main_job, "Upload nextest baseline") == role_free.(pr_job, "Compare tests with the comparison base")
+  errors << "main #{job_id} must equal the PR job apart from needs, if and the role step" unless role_free.(main_job, "Upload nextest baseline") == role_free.(pr_job, nil)
   nightly_job = nightly_jobs[job_id]
   expected_nightly = role_free.(main_job, "Upload nextest baseline").merge(main_job.slice("needs", "if"))
   # Nightly keeps the strict retry policy: its plan differs from main only in that argument.

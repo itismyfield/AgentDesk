@@ -611,7 +611,11 @@ pub(crate) fn busy_owner_observer(
                 break offset;
             }
             // Three misses in a row, so one failed probe does not end a live turn's read.
-            dead_reads = if legacy_pane_alive(&tmux) { 0 } else { dead_reads + 1 };
+            dead_reads = if legacy_pane_alive(&tmux) {
+                0
+            } else {
+                dead_reads + 1
+            };
             if dead_reads >= 3 {
                 return Err("claude tui session died before taking the input".into());
             }
