@@ -103,7 +103,8 @@ fn stdout_artifact(kind: PhaseKind) -> Option<&'static str> {
 }
 
 // Resources and preflight digests are checked before any spawn; a wait leaves the phase unstarted.
-// Only the final host gate calls this, after it journaled the start intent.
+// Only the final host gate calls this, after it journaled the start intent. An Err means nothing
+// was spawned.
 pub(super) fn launch(
     kind: PhaseKind,
     phase_id: &str,

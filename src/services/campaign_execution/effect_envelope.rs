@@ -1,10 +1,12 @@
 use super::control::validate_new_start;
-use super::host_gate::{EffectAuthority, EffectEnvelope, HostNodeFence, HostStop, RunFence};
+use super::host_gate::{
+    EffectAuthority, EffectEnvelope, HostNodeFence, HostStop, PhaseBinding, RunFence,
+};
 use super::model::{
     ActionKind, ActionState, AttemptBinding, CampaignState, Rejection, RejectionCode, Run,
 };
 use super::stage_fsm::validate_verification_start;
-use super::verification_run::{CurrentFence, Digest, PhaseAdmission, digest_of};
+use super::verification_run::{BoundInput, CurrentFence, Digest, PhaseAdmission, digest_of};
 
 fn reject<T>(code: RejectionCode) -> Result<T, Rejection> {
     Err(Rejection::new(code))
@@ -28,14 +30,36 @@ pub fn execution_nonce(action_id: &str, payload_digest: &str) -> String {
     format!("n-{}", blake3::hash(key.as_bytes()).to_hex())
 }
 
-// A StartPending phase's effect: identity and payload from the V's origin and bound input, the
-// authority from whichever of Work, Review prerequisite or FinishPlan holds it now.
+// An approved phase effect and the exact input it was approved for, built once from server state
+// so a gate never pairs the envelope with other launch arguments.
+pub struct VerifiedPhaseLaunch {
+    pub(super) envelope: EffectEnvelope,
+    pub(super) input: BoundInput,
+}
+
+impl VerifiedPhaseLaunch {
+    pub fn envelope(&self) -> &EffectEnvelope {
+        &self.envelope
+    }
+}
+
 pub fn phase_envelope(
     state: &CampaignState,
     execution_id: &str,
     phase_id: &str,
     consumer: &AttemptBinding,
 ) -> Result<EffectEnvelope, Rejection> {
+    phase_launch(state, execution_id, phase_id, consumer).map(|launch| launch.envelope)
+}
+
+// A StartPending phase's effect: identity and payload from the V's origin and bound input, the
+// authority from whichever of Work, Review prerequisite or FinishPlan holds it now.
+pub fn phase_launch(
+    state: &CampaignState,
+    execution_id: &str,
+    phase_id: &str,
+    consumer: &AttemptBinding,
+) -> Result<VerifiedPhaseLaunch, Rejection> {
     let run = current_run(state)?;
     let v = run
         .verifications
@@ -61,7 +85,12 @@ pub fn phase_envelope(
         }
         _ => return reject(RejectionCode::InvalidState),
     };
-    Ok(EffectEnvelope {
+    let input = phase
+        .input
+        .bound()
+        .cloned()
+        .ok_or_else(|| Rejection::new(RejectionCode::InvalidState))?;
+    let envelope = EffectEnvelope {
         execution_nonce: execution_nonce(&action.id, &payload_digest),
         action_id: action.id.clone(),
         run_id: run.id.clone(),
@@ -71,8 +100,16 @@ pub fn phase_envelope(
         target_host_gate: action.target.clone(),
         payload_digest,
         kind: ActionKind::VerificationPhase,
+        phase: Some(PhaseBinding {
+            execution_id: v.origin.execution_id.clone(),
+            phase_id: phase.id.clone(),
+            kind: phase.kind,
+            check_id: v.origin.check_id.clone(),
+            input_digest: input.digest.clone(),
+        }),
         authority: EffectAuthority::Verification(authority),
-    })
+    };
+    Ok(VerifiedPhaseLaunch { envelope, input })
 }
 
 // A general action's effect under the current attempt; the payload digest is the caller's
@@ -105,6 +142,7 @@ pub fn action_envelope(
         target_host_gate: action.target.clone(),
         payload_digest,
         kind: action.kind,
+        phase: None,
         authority: EffectAuthority::CurrentAttempt {
             attempt_id: binding.attempt_id.clone(),
             binding_digest,

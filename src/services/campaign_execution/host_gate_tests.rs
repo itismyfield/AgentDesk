@@ -9,7 +9,7 @@ use super::*;
 use crate::services::campaign_execution::candidate_seal::CandidateSeal;
 use crate::services::campaign_execution::control::{decide, tests as domain};
 use crate::services::campaign_execution::effect_envelope::{
-    action_envelope, host_fences, phase_envelope,
+    action_envelope, host_fences, phase_envelope, phase_launch,
 };
 use crate::services::campaign_execution::model::{
     ActionObservation, ActionState, AttemptBinding, CampaignState, Command, RejectionCode,
@@ -459,41 +459,204 @@ fn a_start_lost_in_a_crash_stays_indeterminate_until_directly_resolved() {
     };
     assert_eq!(calls.get(), 0);
     assert_eq!(
-        gate.restart_observations(|_| TreeState::Gone, now()),
-        vec![RestartObservation::Indeterminate {
+        gate.recovery_snapshot(|_| TreeState::Gone, now()),
+        vec![Recovered::Indeterminate {
             action_id: request.action_id.clone(),
             initiation_id: initiation_id.clone(),
             evidence: "host restarted before the initiation receipt was recorded".into(),
         }]
     );
-    let unstarted = || Resolution::Unstarted {
+    // A missing process proves nothing for a local phase; a found start must carry its nonce.
+    let nonce = request.execution_nonce.clone();
+    let no_record = |nonce: &str| Resolution::TargetHasNoRecord {
+        nonce: nonce.into(),
         evidence: "no process carries the nonce".into(),
     };
+    let found = |nonce: &str| Resolution::Started {
+        receipt: format!("receipt-{nonce}"),
+        process: Some(process(nonce)),
+    };
+    for (id, resolution) in [
+        (initiation_id.as_str(), no_record(&nonce)),
+        (initiation_id.as_str(), found("another-start")),
+        ("older#0", found(&nonce)),
+    ] {
+        assert!(
+            gate.resolve_indeterminate(&request.action_id, id, resolution, now())
+                .is_err()
+        );
+    }
+    gate.resolve_indeterminate(&request.action_id, initiation_id, found(&nonce), now())
+        .unwrap();
+    assert_eq!(
+        receipt_of(&admit(&mut gate, &request, &calls)),
+        format!("receipt-{nonce}")
+    );
+    assert_eq!(calls.get(), 0);
+
+    // A remote effect whose target holds no record of this nonce is proven unstarted and runs once.
+    let (dir, calls) = (tempdir().unwrap(), Cell::new(0));
+    let state = pending_action(&state, "launch-work-a", &work);
+    let launch = action_envelope(&state, "launch-work-a", &work, "launch".into()).unwrap();
+    let mut gate = open(&dir, &launch.target_host_gate);
+    sync(&mut gate, &state);
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        gate.admit_and_initiate(&launch, now(), |_| -> io::Result<Initiated<()>> {
+            panic!("host died after sending the launch")
+        })
+    }));
+    drop(gate);
+    let mut gate = open(&dir, &launch.target_host_gate);
+    let Initiation::Indeterminate { initiation_id, .. } = admit(&mut gate, &launch, &calls) else {
+        panic!("expected an indeterminate launch");
+    };
+    let id = &launch.action_id;
     assert!(
-        gate.resolve_indeterminate(&request.action_id, "older#0", unstarted(), now())
+        gate.resolve_indeterminate(id, &initiation_id, no_record("other"), now())
             .is_err()
     );
-    gate.resolve_indeterminate(&request.action_id, initiation_id, unstarted(), now())
+    let proof = no_record(&launch.execution_nonce);
+    gate.resolve_indeterminate(id, &initiation_id, proof, now())
         .unwrap();
-    let receipt = receipt_of(&admit(&mut gate, &request, &calls));
+    receipt_of(&admit(&mut gate, &launch, &calls));
     assert_eq!(calls.get(), 1);
+}
 
-    // A recorded result answers later requests and is no longer a running process after restart.
-    gate.record_finished(
-        &request.action_id,
-        &receipt,
-        serde_json::json!({"exit": 0}),
-        now(),
-    )
-    .unwrap();
-    drop(gate);
+#[test]
+fn an_initiator_error_without_proof_leaves_the_start_indeterminate() {
+    let (state, work, _) = work_pending();
+    let request = phase_envelope(&state, &finish_v(&state), PHASE, &work).unwrap();
+    let (dir, effects) = (tempdir().unwrap(), Cell::new(0));
     let mut gate = open(&dir, &request.target_host_gate);
+    sync(&mut gate, &state);
+    let failed = gate.admit_and_initiate(&request, now(), |_| -> io::Result<Initiated<()>> {
+        effects.set(effects.get() + 1);
+        Err(io::Error::other("response lost after the request was sent"))
+    });
+    assert!(matches!(
+        failed.unwrap().initiation,
+        Initiation::Indeterminate { .. }
+    ));
+    assert!(matches!(
+        admit(&mut gate, &request, &effects),
+        Initiation::Indeterminate { .. }
+    ));
+    assert_eq!(effects.get(), 1);
+}
+
+#[test]
+fn recovery_offers_only_recovered_effects_and_kept_results_until_delivered() {
+    let (state, work, _) = work_pending();
+    let request = phase_envelope(&state, &finish_v(&state), PHASE, &work).unwrap();
+    let (dir, calls) = (tempdir().unwrap(), Cell::new(0));
+    let mut gate = open(&dir, &request.target_host_gate);
+    sync(&mut gate, &state);
+    let receipt = receipt_of(&admit(&mut gate, &request, &calls));
+    // This instance holds the handle for what it started: there is nothing to recover.
     assert!(
-        gate.restart_observations(|_| TreeState::Alive, now())
+        gate.recovery_snapshot(|_| TreeState::Gone, now())
             .is_empty()
     );
+    let result = serde_json::json!({"exit": 0});
+    gate.record_finished(&request.action_id, &receipt, result.clone(), now())
+        .unwrap();
+    drop(gate);
+
+    // The host died before the server took the result: recovery offers it until delivered.
+    let mut gate = open(&dir, &request.target_host_gate);
+    let kept = Recovered::Finished {
+        action_id: request.action_id.clone(),
+        receipt: receipt.clone(),
+        result,
+    };
+    assert_eq!(
+        gate.recovery_snapshot(|_| TreeState::Alive, now()),
+        vec![kept]
+    );
     assert_eq!(receipt_of(&admit(&mut gate, &request, &calls)), receipt);
+    gate.mark_delivered(&request.action_id, now()).unwrap();
+    assert!(
+        gate.recovery_snapshot(|_| TreeState::Alive, now())
+            .is_empty()
+    );
+    drop(gate);
+    let gate = open(&dir, &request.target_host_gate);
+    assert!(
+        gate.recovery_snapshot(|_| TreeState::Alive, now())
+            .is_empty()
+    );
     assert_eq!(calls.get(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_phase_runs_only_the_input_and_host_its_payload_was_approved_for() {
+    use super::super::verification_run::CommandSpec;
+
+    let dir = tempdir().unwrap();
+    let marker = dir.path().join("spawned");
+    let command = |program: &str, argv: Vec<String>| PhaseInput {
+        checkout_path: dir.path().to_string_lossy().into_owned(),
+        command: CommandSpec {
+            program: program.into(),
+            argv,
+            cwd: dir.path().to_string_lossy().into_owned(),
+            env_identity: Default::default(),
+        },
+        ..a1::input(&[])
+    };
+    let (mut state, work) = assigned();
+    let seal = seal_of(&state, &work);
+    let finish = finish_v(&state);
+    materialize(&mut state, &finish, &seal, command("true", vec![]));
+    let state = pending(&state, &finish, &work);
+    let approved = phase_launch(&state, &finish, PHASE, &work).unwrap();
+    let mut gate = reopen(
+        &dir.path().join("gate"),
+        &approved.envelope().target_host_gate,
+    )
+    .unwrap();
+    sync(&mut gate, &state);
+    let ctx = |host| LaunchContext {
+        check_id: "another-check",
+        log_dir: dir.path(),
+        host,
+        now: now(),
+        handoff: None,
+        nonce: String::new(),
+    };
+    let other = command(
+        "sh",
+        vec!["-c".into(), format!("touch '{}'", marker.display())],
+    );
+    let swapped = [
+        BoundInput::new(other.clone()).unwrap(),
+        BoundInput {
+            input: other,
+            digest: approved.input.digest.clone(),
+        },
+    ];
+    for input in swapped {
+        let forged = VerifiedPhaseLaunch {
+            envelope: approved.envelope().clone(),
+            input,
+        };
+        let refused = start_phase(&mut gate, &forged, &[], ctx("remote"));
+        assert!(matches!(refused, Err(GateError::Conflict(_))));
+    }
+    let elsewhere = start_phase(&mut gate, &approved, &[], ctx("elsewhere"));
+    assert!(matches!(elsewhere, Err(GateError::Conflict(_))));
+    assert!(gate.entry(&approved.envelope().action_id).is_none());
+    let started = start_phase(&mut gate, &approved, &[], ctx("remote")).unwrap();
+    assert!(matches!(
+        started.initiation,
+        PhaseInitiation::Started { .. }
+    ));
+    let _ = started
+        .running
+        .unwrap()
+        .wait(std::time::Duration::from_secs(20), now());
+    assert!(!marker.exists());
 }
 
 #[cfg(unix)]
@@ -526,7 +689,8 @@ fn restart_observes_a_phase_child_without_turning_it_into_a_result() {
     };
     materialize(&mut state, &finish, &seal, input.clone());
     let state = pending(&state, &finish, &work);
-    let request = phase_envelope(&state, &finish, PHASE, &work).unwrap();
+    let approved = phase_launch(&state, &finish, PHASE, &work).unwrap();
+    let request = approved.envelope().clone();
     let gate_dir = dir.path().join("gate");
     let open_gate = || reopen(&gate_dir, &request.target_host_gate).unwrap();
     let launch_ctx = || LaunchContext {
@@ -537,19 +701,9 @@ fn restart_observes_a_phase_child_without_turning_it_into_a_result() {
         handoff: None,
         nonce: String::new(),
     };
-    let bound = BoundInput::new(input).unwrap();
     let mut gate = open_gate();
     sync(&mut gate, &state);
-    let started = start_phase(
-        &mut gate,
-        &request,
-        PhaseKind::Archive,
-        PHASE,
-        &bound,
-        &[],
-        launch_ctx(),
-    )
-    .unwrap();
+    let started = start_phase(&mut gate, &approved, &[], launch_ctx()).unwrap();
     let PhaseInitiation::Started { receipt, process } = started.initiation.clone() else {
         panic!("expected a start, got {:?}", started.initiation);
     };
@@ -564,16 +718,7 @@ fn restart_observes_a_phase_child_without_turning_it_into_a_result() {
     drop(gate);
 
     let mut gate = open_gate();
-    let replay = start_phase(
-        &mut gate,
-        &request,
-        PhaseKind::Archive,
-        PHASE,
-        &bound,
-        &[],
-        launch_ctx(),
-    )
-    .unwrap();
+    let replay = start_phase(&mut gate, &approved, &[], launch_ctx()).unwrap();
     assert_eq!(replay.initiation, started.initiation);
     assert!(replay.running.is_none());
     let spawns = std::fs::read_to_string(&marker).unwrap();
@@ -591,11 +736,11 @@ fn restart_observes_a_phase_child_without_turning_it_into_a_result() {
     let action = started_state.run.as_ref().unwrap().actions[&request.action_id].clone();
     v.record_initiation(PHASE, started.initiation).unwrap();
     // A probe that cannot tell keeps the phase open; only a tree seen Gone closes it, as interrupted.
-    let unknown = gate.restart_observations(|_| TreeState::Unknown, now());
+    let unknown = gate.recovery_snapshot(|_| TreeState::Unknown, now());
     let unclear = termination_observation(&v, &unknown[0]).unwrap();
     assert_eq!(unclear.tree, TreeState::Unknown);
     assert!(v.clone().reconcile_termination(&action, unclear).is_err());
-    let seen = gate.restart_observations(process_tree_state, now());
+    let seen = gate.recovery_snapshot(process_tree_state, now());
     let gone = termination_observation(&v, &seen[0]).unwrap();
     assert_eq!(
         (gone.tree, &gone.process, &gone.receipt),
@@ -628,6 +773,17 @@ fn only_the_exact_incarnation_and_a_single_writer_start_effects() {
     let (dir, calls) = (tempdir().unwrap(), Cell::new(0));
     let mut gate = open(&dir, &home);
     sync(&mut gate, &state);
+    // Another V's authority, or another phase of the same V, never stands for this action.
+    let mut borrowed = first.clone();
+    borrowed.authority = second.authority.clone();
+    let mut other_phase = first.clone();
+    other_phase.phase.as_mut().unwrap().phase_id = "list".into();
+    for forged in [borrowed, other_phase] {
+        let refused = gate.admit_and_initiate(&forged, now(), |_| -> io::Result<Initiated<()>> {
+            unreachable!("an authority for another effect starts nothing")
+        });
+        assert!(matches!(refused, Err(GateError::Conflict(_))));
+    }
     let receipt = receipt_of(&admit(&mut gate, &first, &calls));
     assert_eq!(
         EffectGate::recover_journal(dir.path(), home.clone(), now()).err(),

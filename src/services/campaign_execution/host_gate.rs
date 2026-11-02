@@ -6,12 +6,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::adk_resources::ResourceObservation;
+pub use super::effect_envelope::VerifiedPhaseLaunch;
 use super::host_journal::{JournalDir, OpenError};
 use super::model::{ActionKind, FenceAcknowledgement, HostGate, StopMode};
 use super::verification_run::{
     AuthoritySource, BoundInput, Digest, NotSentReason, PhaseInitiation, PhaseKind, PhaseResult,
     ProcessIdentity, TerminationObservation, TreeState, VerificationRun,
-    VerificationStartAuthority,
+    VerificationStartAuthority, phase_action_id,
 };
 use super::verification_runner::{self, Launch, LaunchContext, RunningPhase};
 
@@ -53,13 +54,17 @@ impl EffectAuthority {
                 ..
             } => {
                 effect.kind != ActionKind::VerificationPhase
+                    && effect.phase.is_none()
                     && (attempt_id, binding_digest)
                         == (&effect.origin_attempt_id, &effect.origin_binding_digest)
             }
-            Self::Verification(a) => {
+            Self::Verification(a) => effect.phase.as_ref().is_some_and(|p| {
                 effect.kind == ActionKind::VerificationPhase
                     && a.original_binding_digest == effect.origin_binding_digest
-            }
+                    && a.execution_id == p.execution_id
+                    && effect.action_id
+                        == phase_action_id(&effect.run_id, &p.execution_id, &p.phase_id)
+            }),
         }
     }
 
@@ -81,7 +86,18 @@ pub struct EffectEnvelope {
     pub payload_digest: Digest,
     pub execution_nonce: String,
     pub kind: ActionKind,
+    pub phase: Option<PhaseBinding>,
     pub authority: EffectAuthority,
+}
+
+// What a verification effect runs: the V, phase and exact bound input the payload was built from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhaseBinding {
+    pub execution_id: String,
+    pub phase_id: String,
+    pub kind: PhaseKind,
+    pub check_id: String,
+    pub input_digest: Digest,
 }
 
 // What a journal entry must match exactly; a different value under the same action ID conflicts.
@@ -95,6 +111,7 @@ pub struct EffectIdentity {
     pub target: HostGate,
     pub payload_digest: Digest,
     pub kind: ActionKind,
+    pub phase: Option<PhaseBinding>,
 }
 
 impl EffectEnvelope {
@@ -108,6 +125,7 @@ impl EffectEnvelope {
             target: self.target_host_gate.clone(),
             payload_digest: self.payload_digest.clone(),
             kind: self.kind,
+            phase: self.phase.clone(),
         }
     }
 }
@@ -150,8 +168,6 @@ pub enum GateError {
     Conflict(String),
     #[error("the host has not applied the fence this authority names")]
     FenceBehind,
-    #[error("the initiator failed before starting: {0}")]
-    Initiator(String),
     #[error("journal: {0}")]
     Journal(String),
 }
@@ -221,6 +237,9 @@ pub struct JournalEntry {
     pub attempts: u32,
     pub authority: Option<EffectAuthority>,
     pub state: JournalState,
+    // The server accepted this Finished result, so recovery no longer offers it.
+    #[serde(default)]
+    pub delivered: bool,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -236,6 +255,8 @@ pub struct Admitted<T> {
     pub handle: Option<T>,
 }
 
+// NotSent claims proof that nothing crossed the start boundary; an Err from the initiator is
+// no such proof and leaves the start Indeterminate.
 pub enum Initiated<T> {
     NotSent {
         evidence: String,
@@ -255,13 +276,19 @@ pub struct FenceReport {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RestartObservation {
+pub enum Recovered {
     Running {
         action_id: String,
         receipt: String,
         process: ProcessIdentity,
         tree: TreeState,
         observed_at: DateTime<Utc>,
+    },
+    // A result the host kept but the server has not accepted yet; deliver it, then mark_delivered.
+    Finished {
+        action_id: String,
+        receipt: String,
+        result: serde_json::Value,
     },
     Indeterminate {
         action_id: String,
@@ -272,11 +299,15 @@ pub enum RestartObservation {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Resolution {
+    // The start found by direct observation; its process must carry this effect's nonce and host.
     Started {
         receipt: String,
         process: Option<ProcessIdentity>,
     },
-    Unstarted {
+    // The target answered a lookup by this effect's nonce with no record of it. A missing process
+    // is not such an answer, so a local verification phase never resolves this way.
+    TargetHasNoRecord {
+        nonce: String,
         evidence: String,
     },
 }
@@ -301,6 +332,8 @@ pub struct EffectGate {
     journal: JournalDir,
     fences: FenceBook,
     entries: BTreeMap<String, JournalEntry>,
+    // Effects found unfinished or undelivered at recovery; nothing this instance starts joins it.
+    recovery: BTreeSet<String>,
 }
 
 impl EffectGate {
@@ -331,6 +364,7 @@ impl EffectGate {
             identity,
             fences: fences.unwrap_or_default(),
             entries: BTreeMap::new(),
+            recovery: BTreeSet::new(),
             journal,
         };
         for entry in gate
@@ -350,6 +384,16 @@ impl EffectGate {
             let evidence = "host restarted before the initiation receipt was recorded".into();
             gate.transition(&id, JournalState::Indeterminate { evidence }, now)?;
         }
+        gate.recovery = gate
+            .entries
+            .values()
+            .filter(|e| match e.state {
+                JournalState::Started { .. } | JournalState::Indeterminate { .. } => true,
+                JournalState::Finished { .. } => !e.delivered,
+                _ => false,
+            })
+            .map(|e| e.identity.action_id.clone())
+            .collect();
         Ok(gate)
     }
 
@@ -562,6 +606,7 @@ impl EffectGate {
             attempts,
             authority: Some(envelope.authority.clone()),
             state,
+            delivered: false,
             updated_at: now,
         };
         match self.check(envelope) {
@@ -614,12 +659,16 @@ impl EffectGate {
                 })
             }
             Err(error) => {
-                let evidence = error.to_string();
-                let state = JournalState::NotSent {
+                let evidence =
+                    format!("initiator failed without proof that nothing started: {error}");
+                let state = JournalState::Indeterminate {
                     evidence: evidence.clone(),
                 };
                 self.transition(&id, state, now)?;
-                Err(GateError::Initiator(evidence))
+                recorded(Initiation::Indeterminate {
+                    initiation_id: self.entries[&id].initiation_id(),
+                    evidence,
+                })
             }
         }
     }
@@ -669,36 +718,74 @@ impl EffectGate {
         {
             return Err(conflict());
         }
+        let local = entry.identity.kind == ActionKind::VerificationPhase;
         let state = match resolution {
-            Resolution::Started { receipt, process } => JournalState::Started { receipt, process },
-            Resolution::Unstarted { evidence } => JournalState::NotSent { evidence },
+            Resolution::Started { receipt, process } => {
+                let ours = match &process {
+                    Some(p) => (&p.nonce, &p.host) == (&entry.nonce, &entry.identity.target.host),
+                    None => !local,
+                };
+                if receipt.trim().is_empty() || !ours {
+                    return Err(conflict());
+                }
+                JournalState::Started { receipt, process }
+            }
+            Resolution::TargetHasNoRecord { nonce, evidence } => {
+                if local || nonce != entry.nonce {
+                    return Err(conflict());
+                }
+                JournalState::NotSent { evidence }
+            }
         };
         self.transition(action_id, state, now)
     }
 
-    // What survived a restart without a runner handle: each started process as its tree is seen
-    // now, and each start that may or may not have happened. Neither is ever a finished result.
-    pub fn restart_observations(
+    // The server accepted this Finished result fill-once; recovery stops offering it, also after
+    // a later restart.
+    pub fn mark_delivered(&mut self, action_id: &str, now: DateTime<Utc>) -> Result<(), GateError> {
+        let mut entry = self
+            .entries
+            .get(action_id)
+            .filter(|e| matches!(e.state, JournalState::Finished { .. }))
+            .cloned()
+            .ok_or_else(|| GateError::Conflict(action_id.into()))?;
+        entry.delivered = true;
+        entry.updated_at = now;
+        self.store(entry)?;
+        self.recovery.remove(action_id);
+        Ok(())
+    }
+
+    // Only the effects recovered from the journal, never one this instance holds a handle for: a
+    // started process as its tree is seen now (never a result), a kept result, a lost start.
+    pub fn recovery_snapshot(
         &self,
         probe: impl Fn(&ProcessIdentity) -> TreeState,
         now: DateTime<Utc>,
-    ) -> Vec<RestartObservation> {
+    ) -> Vec<Recovered> {
         let mut observations = Vec::new();
-        for entry in self.entries.values() {
+        for entry in self.recovery.iter().filter_map(|id| self.entries.get(id)) {
             let action_id = entry.identity.action_id.clone();
             match &entry.state {
                 JournalState::Started {
                     receipt,
                     process: Some(process),
-                } => observations.push(RestartObservation::Running {
+                } => observations.push(Recovered::Running {
                     action_id,
                     receipt: receipt.clone(),
                     process: process.clone(),
                     tree: probe(process),
                     observed_at: now,
                 }),
+                JournalState::Finished {
+                    receipt, result, ..
+                } if !entry.delivered => observations.push(Recovered::Finished {
+                    action_id,
+                    receipt: receipt.clone(),
+                    result: result.clone(),
+                }),
                 JournalState::Indeterminate { evidence } => {
-                    observations.push(RestartObservation::Indeterminate {
+                    observations.push(Recovered::Indeterminate {
                         action_id,
                         initiation_id: entry.initiation_id(),
                         evidence: evidence.clone(),
@@ -717,40 +804,61 @@ pub struct PhaseStart {
 }
 
 // The only path that spawns a verification phase: the runner starts inside the gate, with the
-// effect's nonce, after the journal holds the intent and the final check passed.
+// effect's nonce, and runs only the phase, check and input the approved payload was built from.
 pub fn start_phase(
     gate: &mut EffectGate,
-    envelope: &EffectEnvelope,
-    kind: PhaseKind,
-    phase_id: &str,
-    bound: &BoundInput,
+    launch: &VerifiedPhaseLaunch,
     resources: &[ResourceObservation],
     ctx: LaunchContext<'_>,
 ) -> Result<PhaseStart, GateError> {
+    let (envelope, bound) = (&launch.envelope, &launch.input);
+    let conflict = || GateError::Conflict(envelope.action_id.clone());
+    let phase = envelope.phase.as_ref().ok_or_else(conflict)?;
+    let recomputed = BoundInput::new(bound.input.clone()).map_err(|_| conflict())?;
+    if (&recomputed.digest, &bound.digest) != (&phase.input_digest, &phase.input_digest)
+        || ctx.host != gate.identity().host
+    {
+        return Err(conflict());
+    }
     let now = ctx.now;
     let mut declined = None;
     let admitted = gate.admit_and_initiate(envelope, now, |nonce| {
         let ctx = LaunchContext {
+            check_id: &phase.check_id,
             nonce: nonce.to_owned(),
             ..ctx
         };
-        Ok(
-            match verification_runner::launch(kind, phase_id, bound, resources, ctx)? {
-                Launch::Started(running) => {
-                    let process = running.process().clone();
-                    Initiated::Started {
-                        receipt: running.receipt().to_owned(),
-                        process: Some(process),
-                        handle: *running,
-                    }
+        // launch fails only before anything is spawned, which proves this start never happened.
+        let launched =
+            match verification_runner::launch(phase.kind, &phase.phase_id, bound, resources, ctx) {
+                Ok(launched) => launched,
+                Err(error) => {
+                    let evidence = format!("launch failed before spawning: {error}");
+                    declined = Some(PhaseInitiation::NotSent {
+                        reason: NotSentReason::PreflightMismatch {
+                            artifact: "spawn".into(),
+                        },
+                        evidence: evidence.clone(),
+                        observed_at: now,
+                    });
+                    return Ok(Initiated::NotSent { evidence });
                 }
-                Launch::NotSent(initiation) => {
-                    let evidence = format!("{initiation:?}");
-                    declined = Some(initiation);
-                    Initiated::NotSent { evidence }
+            };
+        Ok(match launched {
+            Launch::Started(running) => {
+                let process = running.process().clone();
+                Initiated::Started {
+                    receipt: running.receipt().to_owned(),
+                    process: Some(process),
+                    handle: *running,
                 }
-            },
-        )
+            }
+            Launch::NotSent(initiation) => {
+                let evidence = format!("{initiation:?}");
+                declined = Some(initiation);
+                Initiated::NotSent { evidence }
+            }
+        })
     })?;
     let not_sent = |reason, evidence| PhaseInitiation::NotSent {
         reason,
@@ -762,9 +870,7 @@ pub fn start_phase(
             receipt,
             process: Some(process),
         } => PhaseInitiation::Started { receipt, process },
-        Initiation::Started { process: None, .. } => {
-            return Err(GateError::Conflict(envelope.action_id.clone()));
-        }
+        Initiation::Started { process: None, .. } => return Err(conflict()),
         Initiation::Indeterminate {
             initiation_id,
             evidence,
@@ -783,11 +889,8 @@ pub fn start_phase(
         } => not_sent(NotSentReason::AuthorityRevoked, evidence),
         Initiation::NotSent {
             reason: GateRefusal::Initiator,
-            evidence,
-        } => match declined {
-            Some(initiation) => initiation,
-            None => return Err(GateError::Initiator(evidence)),
-        },
+            ..
+        } => declined.ok_or_else(conflict)?,
     };
     Ok(PhaseStart {
         initiation,
@@ -808,9 +911,9 @@ pub fn finish_phase(
 // A restart observation of a running phase, named by the V and phase that own its action.
 pub fn termination_observation(
     v: &VerificationRun,
-    observation: &RestartObservation,
+    observation: &Recovered,
 ) -> Option<TerminationObservation> {
-    let RestartObservation::Running {
+    let Recovered::Running {
         action_id,
         receipt,
         process,
