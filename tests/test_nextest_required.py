@@ -16,7 +16,7 @@ from test_nextest_ci import SHA, Fixture, junit, nci  # noqa: E402
 
 nreq = sys.modules["nextest_required"]
 
-N = ("rust_build", "rust_tests", "test_evidence")
+N = ("rust_build", "base_compare", "rust_tests", "test_evidence")
 # Written from the old *_required_context mirrors and design section 1.5, not from the implementation:
 # context -> (N gate, {own job: gate}). A gate lists changes outputs that make the job expected; "!x" means x false.
 EXPECTED = {
