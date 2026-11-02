@@ -69,8 +69,7 @@ pub(in crate::services::discord) fn delivered_frontier_current_generation(
     current_generation_durable_frontier_at(&path, current_gen, current_transcript_eof)
 }
 
-/// The current-generation durable frontier END, or `0` (the safe `max` floor) when
-/// the record is absent, malformed, from an older generation, or beyond EOF.
+/// The current-generation durable frontier END, or `0` (the safe `max` floor) when unusable.
 pub(in crate::services::discord) fn delivered_frontier_end_current_generation(
     provider: &ProviderKind,
     channel: ChannelId,

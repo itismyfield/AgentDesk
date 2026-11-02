@@ -664,8 +664,7 @@ fn buffered_event_bytes(event: &HookEvent) -> usize {
 /// overrides at first access. Subsequent calls reuse the same instance — the
 /// TTL is captured at construction; a hot-reload of the TTL takes effect for
 /// the next process (a restart) OR can be observed by reading the live config
-/// in the caller before invoking diagnostic helpers. Capturing at first access
-/// keeps the lock-free hot path simple.
+/// in the caller before invoking diagnostic helpers.
 static GLOBAL: LazyLock<HookRegistry> = LazyLock::new(|| {
     let (ttl, delay) = current_registry_durations();
     HookRegistry::new(ttl, delay)

@@ -2,8 +2,7 @@
 
 use super::*;
 
-/// Blocks a same-turn backward inflight write unless it is a legitimate full reset
-/// (the Gemini/Qwen `RetryBoundary` rewind with an empty body, see retry_state.rs).
+/// Blocks a same-turn backward inflight write unless it is an empty-body `RetryBoundary` reset.
 pub(in crate::services::discord) fn authority_blocks_backward_inflight_write(
     response_sent_offset_monotonic: bool,
     last_offset_monotonic: bool,
@@ -208,8 +207,7 @@ pub(in crate::services::discord) fn reanchor_current_generation_frontier(
     )
 }
 
-/// The dedup floor: `max(in-memory committed offset, durable frontier END)`, trusting
-/// the durable END only for the current wrapper generation and within `current_transcript_eof`.
+/// The dedup floor: `max(in-memory offset, current-generation durable END within EOF)`.
 pub(in crate::services::discord) fn effective_committed_offset(
     shared: &crate::services::discord::SharedData,
     provider: &ProviderKind,
@@ -228,8 +226,7 @@ pub(in crate::services::discord) fn effective_committed_offset(
     fuse_committed_offset(durable_end, in_memory)
 }
 
-/// The synthetic-resume re-send floor: [`effective_committed_offset`] raised by a second
-/// current-generation durable read, so a new answer above both is never suppressed.
+/// The re-send floor: [`effective_committed_offset`] raised by a current-generation durable read.
 pub(in crate::services::discord) fn committed_floor_for_resend_dedup(
     shared: &crate::services::discord::SharedData,
     provider: &ProviderKind,
