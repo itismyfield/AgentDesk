@@ -60,6 +60,8 @@ pub struct LaunchContext<'a> {
     pub host: &'a str,
     pub now: DateTime<Utc>,
     pub handoff: Option<TestHandoff>,
+    // The effect's execution nonce from the final gate, also set on the child for later matching.
+    pub nonce: String,
 }
 
 // A phase child in its own process group, tracked from spawn to confirmed exit.
@@ -101,7 +103,9 @@ fn stdout_artifact(kind: PhaseKind) -> Option<&'static str> {
 }
 
 // Resources and preflight digests are checked before any spawn; a wait leaves the phase unstarted.
-pub fn launch(
+// Only the final host gate calls this, after it journaled the start intent. An Err means nothing
+// was spawned.
+pub(super) fn launch(
     kind: PhaseKind,
     phase_id: &str,
     bound: &BoundInput,
@@ -149,7 +153,7 @@ pub fn launch(
     }
     let stdout_path = ctx.log_dir.join(format!("{phase_id}.stdout"));
     let stderr_path = ctx.log_dir.join(format!("{phase_id}.stderr"));
-    let nonce = uuid::Uuid::new_v4().to_string();
+    let nonce = ctx.nonce;
     let mut command = Command::new(&input.command.program);
     command
         .args(&input.command.argv)
@@ -289,6 +293,10 @@ impl RunningPhase {
 
     pub fn process(&self) -> &ProcessIdentity {
         &self.process
+    }
+
+    pub fn receipt(&self) -> &str {
+        &self.receipt
     }
 
     pub fn poll(&mut self) -> io::Result<Option<ExitStatus>> {
