@@ -404,6 +404,9 @@ class FastCheckCiWiringTests(unittest.TestCase):
             # The workers start at the plan upload; waiting for the base comparison again is red.
             ("rust_tests", "    needs: [changes, rust_build]\n", "    needs: [changes, rust_build, base_compare]\n", "exact needs"),
             ("rust_build", "--retry-mode all-once", "--retry-mode policy", "exact cargo/test command list"),
+            # Without CI Main's JUnit times the plan silently splits by test count again.
+            ("rust_build", ' "${timings[@]}"\n', "\n", "exact cargo/test command list"),
+            ("rust_build", '          mapfile -t timings < <(bash scripts/ci/nextest-timings.sh "$RUNNER_TEMP/nextest-timings" 6)\n', "", "exact cargo/test command list"),
         )
         for job_id, old, new, reason in mutants:
             with self.subTest(job=job_id, mutation=old):
