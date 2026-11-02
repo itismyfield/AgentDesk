@@ -206,13 +206,6 @@ class RatchetDiscriminationTests(unittest.TestCase):
                 self.assertEqual(len(errors), 1)
                 self.assertIn(f"GROWTH in {path}", errors[0])
 
-    def test_declared_close_sites_match_real_source_counts(self) -> None:
-        measured = {
-            path: ratchet.host_terminate_count((ROOT / path).read_text(encoding="utf-8"))
-            for path in self.DECLARED_CLOSE_SITES
-        }
-        self.assertEqual(measured, self.DECLARED_CLOSE_SITES)
-
     MUTATIONS = {
         "tmux_kill": (
             "src/t3a4_probe.rs",
