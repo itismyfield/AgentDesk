@@ -1,9 +1,10 @@
 use crate::services::cluster::intake_router_hook::owner_record::output;
 use crate::services::discord::outbound::raw_output::{self, Operation};
 use crate::services::legacy_body_census as census;
-use crate::services::tui_o::repost::io::tests::{
-    CHANNEL, Mock, Reply, always, dispatch, reply, route_429,
+pub(in crate::services::discord) use crate::services::tui_o::repost::io::tests::{
+    CHANNEL, Mock, reply,
 };
+use crate::services::tui_o::repost::io::tests::{Reply, always, dispatch, route_429};
 use crate::services::tui_o::repost::send::WireOutcome;
 use crate::services::tui_o::writer::{DiscordPort, PostOutcome};
 use poise::serenity_prelude::{self as serenity, ChannelId, MessageId};

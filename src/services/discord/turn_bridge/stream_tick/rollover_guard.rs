@@ -93,7 +93,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn blocked_rollover_records_only_the_safe_replacement() {
         use crate::services::discord::outbound::raw_output::tests as observation;
-        use crate::services::tui_o::repost::io::tests::{CHANNEL, Mock};
+        use observation::{CHANNEL, Mock};
         if observation::isolated(
             concat!(
                 module_path!(),
