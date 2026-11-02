@@ -376,9 +376,8 @@ fn persist_confirmed_frontier_and_receipt(
 
 /// Integration wrapper for owner `Delivered` arms. A confirmed outcome always
 /// persists the frontier, and atomically appends an exact receipt when the
-/// delivery-channel inflight still exposes a complete turn identity. The
-/// rollout flag controls only post-write divergence telemetry. Non-`Delivered`
-/// outcomes never write delivery authority (I2).
+/// delivery-channel inflight still exposes a complete turn identity.
+/// Non-`Delivered` outcomes never write delivery authority (I2).
 ///
 /// #3610 (Phase B PR-1): `terminal_anchor_msg_id` is the durable TERMINAL ANCHOR
 /// the caller resolved — the Discord message id terminal-replace edits in place

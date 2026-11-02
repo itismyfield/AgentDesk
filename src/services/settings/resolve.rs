@@ -1,4 +1,4 @@
-//! Resolve KV/YAML/default settings and preserve provenance for env-only boolean flags.
+//! Resolve KV/YAML/default settings and report which layer supplied each value.
 
 use std::collections::HashMap;
 

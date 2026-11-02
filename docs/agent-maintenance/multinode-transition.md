@@ -647,20 +647,12 @@
 delivery-record rollout across mac-book and mac-mini. Two blocks matter:
 `delivery_record_rollout` and `release_source`.
 
-**Reading `flag_source`.** `shadow_enabled` / `authority_enabled` say what a flag's
-value is; `flag_source` says which resolver branch supplied it. `compiled_default`
-means `std::env::var` did not yield a Unicode value (the variable was absent or its
-value was non-Unicode), so the compiled value was used. `env_override` means a
-Unicode value was present — whatever it said — so the node's untracked
-`~/.adk/release/config/launchd.env` normally owns it. A present Unicode value alone
-decides that provenance, so an explicit `=0` still reports `env_override`.
-
-| observed | reading |
-| --- | --- |
-| `authority_enabled: false`, `compiled_default` | the binary predates the #5071 T1 S8-2 flip — the promoted commit is not deployed on this node |
-| `authority_enabled: true`, `env_override` | on by node-local pin only — the #5262 pathology |
-| `authority_enabled: true`, `compiled_default` | compiled branch, the target state (verify no non-Unicode env ambiguity) |
-| `authority_enabled: false`, `env_override` | someone pinned an explicit rollback |
+**Reading `delivery_record_rollout`.** The rollout switches are gone (#7650). The
+durable delivery-record frontier is the only dedup authority, and the block keeps a
+fixed shape for existing dashboards and scripts: `flag_source` always reports
+`compiled_default`, and `AGENTDESK_DELIVERY_RECORD_SHADOW` /
+`AGENTDESK_DELIVERY_RECORD_AUTHORITY` are no longer read. A node that reports a
+non-zero `warning_count` or any `configuration_warnings` is running an older binary.
 
 **Reading `release_source`.** `deployed_repo_head` is the 40-hex the deploy script
 recorded; `deployed_repo_dirty` is its checkout-cleanliness verdict, passed through
@@ -675,10 +667,10 @@ recognized-field type error that rejects the whole manifest as
 the deploy gate reads its existing top-level readiness predicates, including
 `fully_recovered`, and never reads `release_source.observation_status`.
 
-**Acceptance.** T1 S8 closes when both nodes return this object from public
-`/api/health`, report the same 40-hex `deployed_repo_head` with
-`deployed_repo_dirty` of `"false"`, and retain the existing `fully_recovered` and
-canonical deploy/drain evidence requirements:
+**Expected state.** Both nodes return this object from public `/api/health`, report
+the same 40-hex `deployed_repo_head` with `deployed_repo_dirty` of `"false"`, and
+keep the existing `fully_recovered` and canonical deploy/drain evidence
+requirements:
 
 ```jsonc
 "delivery_record_rollout": {
@@ -688,31 +680,20 @@ canonical deploy/drain evidence requirements:
   "dedup_authority": "durable_delivery_record_frontier",
   "same_turn_backward_write_enforcement": "enforcing",
   "flag_source": { "shadow": "compiled_default", "authority": "compiled_default" },
-  "warning_count": 1,
-  "configuration_warnings": [
-    "delivery_record_shadow_disabled: authority is enabled without shadow mirror telemetry"
-  ]
+  "warning_count": 0,
+  "configuration_warnings": []
 }
 ```
 
-This is the accepted configuration. #5071 T1 S8-2 made the AUTHORITY compiled
-default ON, so an unpinned node uses the durable delivery-record frontier as its
-dedup authority. The SHADOW compiled default remains intentionally OFF because it
-is an independent telemetry axis. Its sole
-`delivery_record_shadow_disabled: authority is enabled without shadow mirror telemetry`
-warning is therefore an expected accepted-configuration warning; a
-`delivery_record_authority_disabled` warning is not accepted. Promoting the
-SHADOW compiled default ON is a separate rollout decision and is not a T1 S8
-acceptance requirement.
+History: #5071 T1 S8-2 made the authority the compiled default and left the shadow
+mirror as a separate telemetry axis, so binaries before #7650 report one accepted
+`delivery_record_shadow_disabled` warning. #7650 removed both switches and the
+shadow comparison.
 
-Removing the two host-local `AGENTDESK_DELIVERY_RECORD_*` pins from mac-book's
-`launchd.env` is an operational action separate from this code PR. Actual removal
-is blocked until #5504 receives P0 dual-review CLEAN, lands on `main`, and a safe
-canonical deploy can run. Never delete the pins while the old binary is running:
-that regresses mac-book to in-memory authority, the opposite of the rollout. Pin
-removal alone is also insufficient: the canonical redeploy must regenerate the
-plist from the updated `launchd.env`; a `launchctl kickstart` without that
-redeploy leaves the old values live in the plist.
+Once a node runs a #7650 build, its `AGENTDESK_DELIVERY_RECORD_*` lines in
+`launchd.env` are dead and can be removed as cleanup; remove them only after the
+new binary runs there. The canonical redeploy regenerates the plist from
+`launchd.env`; a `launchctl kickstart` alone leaves the old values in the plist.
 
 ## Updating This Page
 
