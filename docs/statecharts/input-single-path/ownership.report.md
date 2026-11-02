@@ -1,70 +1,100 @@
 # InputOwnership — who answers an input pasted into a Claude pane (#7676 A2+D)
 
-Code: a1c `0b0fbcbfbe` (`Fix = "main"`, `InputOwnershipMain.cfg`), the first A2+D change
-`524adb6190` (`Fix = "a2d1"`, `InputOwnershipA2d1.cfg`) and its repair (`Fix = "a2d2"`,
-`InputOwnership.cfg`). One input from Discord or from `turn/start` (an iMessage reply), one
-Claude tmux channel in turn mode or legacy mode, mailbox idle/active and transcript idle/busy in
-every combination, a screen that may refuse keys (modal, unread capture, copy mode) and clear with
-no event, a person's draft C-s cannot be proven to keep, an earlier input with the same author and
-body, the receipt thread's 3 s window, and the relay reading the input's row once.
+Code versions modelled:
 
-Run (exit 1 means a rule breaks):
+| `Fix` | Commit | Config |
+|---|---|---|
+| `main` | a1c `0b0fbcbfbe` | `InputOwnershipMain.cfg` |
+| `a2d1` | first A2+D change `524adb6190` | `InputOwnershipA2d1.cfg` |
+| `a2d2` | its repair `e6d97a192f` | `InputOwnershipA2d2.cfg` |
+| `a2d3` | the second repair | `InputOwnership.cfg` |
+
+What the model covers:
+
+- One input, from Discord or from `turn/start` (an iMessage reply).
+- One Claude tmux channel, in turn mode or legacy mode.
+- Every combination of mailbox idle/active and transcript idle/busy.
+- A screen that may refuse keys (modal, unread capture, copy mode) and later clear with no event of its own.
+- A person's draft that C-s cannot be proven to keep.
+- An earlier input with the same author and body; its own caller may have declared a reader, and it may have been absorbed.
+- A long running turn that outlives the 10 s pending text.
+- The receipt thread's 3 s window.
+- The relay reading the input's row once.
+
+Run it like this (exit 1 means a rule breaks):
 
 ```sh
 export TLA2TOOLS=~/.local/share/tla2tools/tla2tools-1.7.4.jar JAVA=/opt/homebrew/opt/openjdk/bin/java
-~/.claude/skills/statechart/scripts/statechart InputOwnership.tla --config InputOwnershipMain.cfg --view ownership.view.mjs --out /tmp/sc-own-main
-~/.claude/skills/statechart/scripts/statechart InputOwnership.tla --config InputOwnershipA2d1.cfg --view ownership.view.mjs --out /tmp/sc-own-a2d1
-~/.claude/skills/statechart/scripts/statechart InputOwnership.tla --config InputOwnership.cfg --view ownership.view.mjs --out /tmp/sc-own-a2d2
+for c in Main A2d1 A2d2 ""; do
+  ~/.claude/skills/statechart/scripts/statechart InputOwnership.tla --config InputOwnership$c.cfg \
+    --view ownership.view.mjs --out /tmp/sc-own-${c:-A2d3}
+done
 ```
 
 ## Rules
 
-| Rule | Reader's sentence | main | a2d1 | a2d2 |
-|---|---|---|---|---|
-| NoDuplicate | The input is pasted at most once. | holds | holds | holds |
-| NoRetryRequired | No input ends asking the person to send it again. | breaks (1) | holds | holds |
-| AnswerOnce | An answered input was posted once: O writer only on turn mode, the relay or the reader the input's turn set up on legacy. | breaks (5) | breaks (4) | holds |
-| HandedHasRow | Time alone never makes the input Handed. | holds | holds | holds |
-| StartNotDropped | A turn/start into a busy pane is never dropped for want of an idle observer. | breaks (1) | breaks (1) | holds |
-| NoTimedRetry | A held input is handed again only by an event, never by a fixed timer alone. | breaks (3) | breaks (3) | holds |
-| DraftToldOnce | An owned paste beside a draft C-s could not park tells its original once. | breaks (1) | breaks (1) | holds |
-| NoSilentLoss | Once nothing else happens, the input was answered. | breaks (3) | breaks (3) | breaks (3, same path) |
+| Rule | Reader's sentence | main | a2d1 | a2d2 | a2d3 |
+|---|---|---|---|---|---|
+| NoDuplicate | The input is pasted at most once. | holds | holds | holds | holds |
+| NoRetryRequired | No input ends asking the person to send it again. | breaks (1) | holds | holds | holds |
+| AnswerOnce | An answered input was posted once. In turn mode only the O writer posts it; in legacy, the relay or the reader the input's turn set up posts it. | breaks (5) | breaks (4) | breaks (4) | holds |
+| HandedHasRow | Time alone never makes the input Handed. | holds | holds | holds | holds |
+| StartNotDropped | A turn/start into a busy pane is never dropped for want of an idle observer. | breaks (1) | breaks (1) | holds | holds |
+| NoTimedRetry | A held input is handed again only by an event, never by a fixed timer alone. | breaks (3) | breaks (3) | holds | holds |
+| DraftToldOnce | An owned paste beside a draft C-s could not park tells its original once. | breaks (1) | breaks (1) | holds | holds |
+| HeldResumes | An input held by its screen is not left waiting once that screen would submit. | holds (timer) | holds (timer) | breaks (4) | holds |
+| NoSilentLoss | Once nothing else happens, the input was answered. | breaks (3) | breaks (3) | breaks (3) | breaks (3, same path) |
 
-`ownership.chart.mmd` is the main chart (bug paths only; 12,416 states). a2d1 reached 15,472
-states, a2d2 7,456.
+Each break shows the step count of its shortest path.
+
+States reached: main 30,272; a2d1 39,328; a2d2 22,832; a2d3 31,872. `ownership.chart.mmd` is the main chart, drawing the bug paths only.
 
 ## Counterexamples, replayed against the code
 
-1. **NoRetryRequired, main** — mailbox active, transcript idle: `hand_busy` → `inject_owned` was
-   `BusyOnly`, `NotBusy` is not a held reason, so `effect::run` retains the original and asks for a
-   resend. Fixed in a2d1 (the owned entry is `AnyTurn`).
-2. **StartNotDropped, main and a2d1** — a `turn/start` on a pane busy with a turn AgentDesk did not
-   start: `start_idle` → `start_owner_headless` → `execute_owned` registered `busy=false` and
-   `InputOrigin::Discord`, so with no idle observer `take_owned` returned
-   `NotSent("idle_unobserved")` and the turn ended with a failure (the 11-02 11:57 iMessage case).
-   a2d2 re-reads the pane (`running_transcript`) and keeps the front's origin: a busy pane takes the
-   owned busy entry, with a reader of the row the input takes (`busy_owner_observer`).
-3. **NoTimedRetry, main and a2d1** — a held refusal (`Modal`, and in a2d1 also `ScreenUnread`,
-   `CopyMode`) spawned `sleep(recheck)` → `wake` in `drive.rs`, so an unchanged screen rebuilt the
-   prompt every 5 s. a2d2 removes the timer; the next turn boundary, idle kickoff or new input wakes
-   the drive.
-4. **DraftToldOnce, main and a2d1** — a draft beside an image chip reads `Composer::Unknown`, so
-   C-s is not sent and the frame is pasted behind it with no word to the person. a2d2 pastes and
-   posts one outbox notice keyed by the original's sources.
-5. **AnswerOnce, main** — every recorded Claude frame was `Joined { first: false }`, so a queued
-   input that opened its own turn had no relay. Fixed in a2d1 by the row-based claim.
-6. **AnswerOnce, a2d1** — with an earlier input of the same author and body, both attempts carry
-   the second user row, `user_row_attempt` sees two owners and the row is Joined: no answer. a2d2
-   pairs same-frame rows with attempts in registration order (`history::row_owner`).
-7. **NoSilentLoss, every version** — an idle pane whose observer cannot be built holds the front,
-   and a native turn AgentDesk did not start may end without waking the drive. The Claude observer
-   is absent only when the transcript cannot be resolved, so nothing proves where a paste would
-   land. The remaining event-wake gap of the A1 review (P2-1), owned by slice C.
+1. **NoRetryRequired breaks on main.**
+   - Path: mailbox active, transcript idle. `hand_busy` → `inject_owned` was `BusyOnly`.
+   - `NotBusy` is not a held reason, so `effect::run` retains the original and asks the person to resend.
+   - Fixed in a2d1: the owned entry is `AnyTurn`.
+2. **StartNotDropped breaks on main and a2d1.**
+   - Path: a `turn/start` on a pane busy with a turn AgentDesk did not start. `execute_owned` registered `busy=false` and `Discord`, so with no idle observer the turn ended with a failure.
+   - Fixed in a2d2. It re-reads the pane and keeps the front's origin. A busy pane takes the owned busy entry, with a reader of the row the input takes.
+3. **NoTimedRetry breaks on main and a2d1.**
+   - Path: a held refusal spawned `sleep(recheck)` → `wake`, so an unchanged screen rebuilt the prompt every 5 s.
+   - Fixed in a2d2: the timer is gone.
+4. **HeldResumes breaks on a2d2.**
+   - Path: the front is held by copy mode (or an unread capture) while a person's long turn runs, and that turn ends without a wake. The copy mode then closes, and nothing hands the front again.
+   - Fixed in a2d3:
+     - A held refusal leaves a probe of that pane (`held_watch::arm`).
+     - The drive watches it, every 2 s with no handoff.
+     - The first read that would submit wakes the drive once.
+     - The watch ends when that front no longer leads or the pane is gone.
+5. **DraftToldOnce breaks on main and a2d1.**
+   - Path: a draft beside an image chip reads `Composer::Unknown`.
+   - Fixed in a2d2: the frame is pasted, and the original gets one outbox notice.
+6. **AnswerOnce breaks on main.** Every recorded Claude frame was `Joined { first: false }`, so a queued input that opened its own turn had no relay.
+7. **AnswerOnce breaks on a2d1.** An earlier input with the same body made two candidate attempts for the row, so the row was Joined and nobody answered.
+8. **AnswerOnce breaks on a2d2, in three ways.**
+   - **Same-body twin:** an absorbed twin's caller declared a reader. Its pending text, matched by body, still marked this input's later user row as declared, so nobody answered it.
+   - **Aged declaration:** the input's own declaration was pending text kept 10 s. After a long turn the row was read as undeclared, so the relay and the caller's reader both answered.
+   - **Absorbed input:** an input taken into a person's running turn as a queued command still had its caller's reader post that turn's tail, a second body beside the relay's.
+   - Fixed in a2d3:
+     - The relay reads the declaration of the attempt that took the row (`history::has_reader`) and opens no turn for it (`Claim::Declared`).
+     - A busy reader whose input became a queued command posts no body (`busy_owner_observer`).
+9. **NoSilentLoss breaks in every version.**
+   - Path: an idle pane whose observer cannot be built holds the front, and a native turn AgentDesk did not start may end without waking the drive.
+   - This is the remaining event-wake gap of the A1 review (P2-1), owned by slice C.
 
-## Mutants of the a2d2 model (each breaks a rule besides the known NoSilentLoss gap)
+## Mutants of the a2d3 model
 
-| Mut | What it removes | Breaks |
+Each mutant breaks a rule besides the known NoSilentLoss gap.
+
+| Mutant | What it removes | Breaks |
 |---|---|---|
+| noWatch | the held pane's watch | HeldResumes |
+| watchBlind | the watch wakes on an unchanged screen | NoTimedRetry |
+| ttlDecl | the declaration read from 10 s pending text | AnswerOnce |
+| bodyDecl | the declaration matched by body to any attempt | AnswerOnce |
+| commandReads | a reader posts a queued command's turn | AnswerOnce |
 | pendOnBusy | the owned busy entry declares an Answer nobody reads | AnswerOnce |
 | blanketJoin | Claude frames joined whatever the row | AnswerOnce |
 | receiptKind | ownership read from the 3 s receipt kind | AnswerOnce |
@@ -75,5 +105,9 @@ states, a2d2 7,456.
 | noNotice | the draft notice skipped | DraftToldOnce |
 | twoCandidates | a row with two possible owners joined | AnswerOnce |
 
-Left out: Codex and Herdr panes (A2 keeps their hold), restart replay of the relay's claim ledger,
-two inputs racing one paste, a screen that never clears.
+Left out of the model:
+
+- Codex and Herdr panes: A2 keeps their hold, and they arm no watch.
+- Restart replay of the relay's claim ledger.
+- Two inputs racing one paste.
+- A screen that never clears.

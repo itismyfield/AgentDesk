@@ -584,8 +584,8 @@ pub(crate) fn owner_observer(
     }))
 }
 
-/// A paste into a running turn read as its caller's answer, from the row the attempt took to that
-/// turn's end; a dead pane or a turn ending with no such row ends the read in error, unresent.
+/// A paste into a running turn read as its caller's answer, from the user row the attempt took to
+/// that turn's end; a dead pane or a turn ending with no such row ends the read in error, unresent.
 #[cfg(unix)]
 pub(crate) fn busy_owner_observer(
     (tmux, nonce, frame, channel): (&str, &str, &str, u64),
@@ -607,8 +607,11 @@ pub(crate) fn busy_owner_observer(
                 return Ok(());
             }
             let taken = crate::services::tui_input::human_frame::history::attempt_row;
-            if let Some((offset, _)) = taken("claude", &tmux, &nonce) {
-                break offset;
+            match taken("claude", &tmux, &nonce) {
+                Some((offset, true)) => break offset,
+                // A queued command joins the running turn, whose owner posts its answer.
+                Some((_, false)) => return Ok(()),
+                None => {}
             }
             // Three misses in a row, so one failed probe does not end a live turn's read.
             dead_reads = if legacy_pane_alive(&tmux) {

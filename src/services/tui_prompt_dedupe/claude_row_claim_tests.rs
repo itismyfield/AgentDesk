@@ -288,6 +288,8 @@ fn owned_entry_sends_no_key_on_a_screen_it_cannot_prove_submits() {
 enum Step {
     /// The input is pasted through the owner's busy entry.
     Paste,
+    /// The input is pasted by a caller that reads its turn itself.
+    Declare,
     /// Claude writes a row carrying the frame: a user row or a queued command.
     Row(&'static str, bool),
     /// Claude ends the running turn.
@@ -297,12 +299,13 @@ enum Step {
 }
 
 /// Identical inputs each answer for their own row: on a legacy channel each user turn is relayed
-/// once and an absorbed one not at all, whatever the rescans or a later identical input.
+/// once and an absorbed one not at all, whatever the rescans, a later identical input, or an
+/// earlier identical input whose own caller declared a reader.
 #[test]
 fn identical_inputs_each_answer_for_their_own_row() {
-    use Step::{Observe, Paste, Row, TurnEnds};
+    use Step::{Declare, Observe, Paste, Row, TurnEnds};
     let _runtime = crate::config::TestRuntimeRootGuard::new();
-    let cases: [(&str, &[Step], usize); 5] = [
+    let cases: [(&str, &[Step], usize); 6] = [
         (
             "handed then next",
             &[
@@ -377,6 +380,20 @@ fn identical_inputs_each_answer_for_their_own_row() {
             ],
             2,
         ),
+        (
+            "an absorbed declared twin",
+            &[
+                Declare,
+                Paste,
+                Row("a1", false),
+                TurnEnds,
+                Row("u2", true),
+                Observe("a1"),
+                Observe("u2"),
+                Observe("u2"),
+            ],
+            1,
+        ),
     ];
     let mut ran = 0;
     for (at, (case, steps, relayed)) in cases.into_iter().enumerate() {
@@ -398,7 +415,7 @@ fn identical_inputs_each_answer_for_their_own_row() {
         let (mut frame, mut owners) = (String::new(), Vec::new());
         for step in steps {
             match step {
-                Paste => {
+                Paste | Declare => {
                     let nonce = busy_inject::fresh_nonce();
                     let request = Request {
                         session: &session,
@@ -410,7 +427,12 @@ fn identical_inputs_each_answer_for_their_own_row() {
                         text: "same body again",
                     };
                     let offset = std::fs::metadata(&transcript).unwrap().len();
-                    let report = busy_inject::inject_owned(&pane, &request, &TIMING, false);
+                    let report = match step {
+                        Declare => {
+                            busy_inject::inject_report_any_turn(&pane, &request, None, &TIMING)
+                        }
+                        _ => busy_inject::inject_owned(&pane, &request, &TIMING, false),
+                    };
                     assert_eq!(report.outcome, busy_inject::Outcome::Injected, "{case}");
                     let next = busy_inject::frame("discord", "200", "ann", &nonce, request.text);
                     assert!(frame.is_empty() || frame == next, "{case}: frames differ");
@@ -464,5 +486,5 @@ fn identical_inputs_each_answer_for_their_own_row() {
         }
         ran += 1;
     }
-    assert_eq!(ran, 5);
+    assert_eq!(ran, 6);
 }

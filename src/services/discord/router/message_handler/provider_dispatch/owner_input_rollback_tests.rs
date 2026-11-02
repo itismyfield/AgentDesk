@@ -404,7 +404,8 @@ async fn owned_front_on_a_busy_pane_is_pasted_once_without_completion() {
 }
 
 /// A `turn/start` (an iMessage reply) into a busy pane with no idle observer: the real drive's
-/// headless turn pastes it once and reads the turn its row opens, so the caller is answered once.
+/// headless turn pastes it once and reads the turn its row opens. The row comes after a long turn,
+/// past the pending text's 10 s, and the legacy relay still leaves that turn to the caller's reader.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_turn_start_into_a_busy_pane_is_pasted_once_and_answered_once() {
     if !creator_child(concat!(
@@ -426,6 +427,7 @@ async fn a_turn_start_into_a_busy_pane_is_pasted_once_and_answered_once() {
     assert_eq!(events(&rig.renderer), ["paste", "Enter"]);
     let frame = fs::read_to_string(rig.renderer.join("body")).unwrap();
     assert!(frame.ends_with(PROMPT), "{frame:?}");
+    crate::services::tui_prompt_dedupe::Instant::advance(Duration::from_secs(11));
     // Claude ends the running turn, then opens one for the queued input and answers it.
     let rows = [
         json!({"type":"system","subtype":"turn_duration"}),
@@ -450,9 +452,29 @@ async fn a_turn_start_into_a_busy_pane_is_pasted_once_and_answered_once() {
         assert!(std::time::Instant::now() < deadline, "{}", rig.trace.text());
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    // The legacy relay reads the input's row, then again on a rescan.
+    let mut relayed = crate::services::tui_prompt_dedupe::subscribe_observed_prompts();
+    let session =
+        ProviderKind::Claude.build_tmux_session_name(&format!("a1-rollback-{}", 7_676_106));
+    for _ in 0..2 {
+        let observe = crate::services::tui_prompt_dedupe::observe_prompt_by_tmux_with_row_ids_at;
+        observe(
+            "claude",
+            &session,
+            &frame,
+            Some("turn-start-row"),
+            None,
+            chrono::Utc::now(),
+        );
+    }
+    let mut legacy = 0;
+    while let Ok(event) = relayed.try_recv() {
+        legacy += usize::from(event.prompt == frame);
+    }
     tokio::time::sleep(Duration::from_secs(1)).await;
     // The mock lists a POST both as posted and as the message it minted: one answer, listed twice.
     assert_eq!(answered(), 2, "{:?}", rig.mock.written_texts());
+    assert_eq!(legacy, 0, "the relay also answered the caller's turn");
     assert_eq!(events(&rig.renderer), ["paste", "Enter"]);
     assert!(
         !rig.trace.text().contains("idle_unobserved"),
@@ -460,6 +482,52 @@ async fn a_turn_start_into_a_busy_pane_is_pasted_once_and_answered_once() {
         rig.trace.text()
     );
     assert_eq!(rig.state().await["items"], json!([]));
+    drop(drive);
+}
+
+/// A `turn/start` the running native turn takes as a queued command: that turn's owner (the
+/// legacy relay, for a person's turn) posts its answer, so the caller's reader posts no body.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_turn_start_absorbed_into_a_running_turn_posts_no_second_body() {
+    if !creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::",
+        "a_turn_start_absorbed_into_a_running_turn_posts_no_second_body"
+    )) {
+        return;
+    }
+    const ANSWER: &str = "running turn answer 7676";
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = IntakeRig::turn_start(7_676_107).await;
+    let (drive, mut settled) = rig.drive();
+    crate::services::discord::queue_io::input_owner::drive::wake(drive.clone());
+    let result = tokio::time::timeout(Duration::from_secs(30), settled.recv())
+        .await
+        .unwrap_or_else(|_| panic!("{}", rig.trace.text()))
+        .unwrap();
+    assert_eq!(result, Ok(()), "{}", rig.trace.text());
+    assert_eq!(events(&rig.renderer), ["paste", "Enter"]);
+    let frame = fs::read_to_string(rig.renderer.join("body")).unwrap();
+    // The running turn takes the input as a queued command and answers within itself.
+    let rows = [
+        json!({"type":"attachment","uuid":"absorbed-row","attachment":{"type":"queued_command",
+            "prompt":frame,"commandMode":"prompt"}}),
+        json!({"type":"assistant","uuid":"absorbed-answer","message":{"id":"absorbed-answer",
+            "role":"assistant","content":[{"type":"text","text":ANSWER}],"stop_reason":"end_turn"}}),
+        json!({"type":"system","subtype":"turn_duration"}),
+    ];
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(&rig.transcript)
+        .unwrap();
+    for row in rows {
+        std::io::Write::write_all(&mut file, format!("{row}\n").as_bytes()).unwrap();
+    }
+    // The reader's own turn settles; a body it took would be posted well within this wait.
+    tokio::time::sleep(Duration::from_secs(40)).await;
+    let posted = rig.mock.written_texts();
+    // No second body, and no failure notice for a turn that ended as its input joined another.
+    assert_eq!(posted, Vec::<String>::new(), "{}", rig.trace.text());
+    assert_eq!(events(&rig.renderer), ["paste", "Enter"]);
     drop(drive);
 }
 
