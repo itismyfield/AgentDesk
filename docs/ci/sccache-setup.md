@@ -134,6 +134,16 @@ If sccache is not installed, both release scripts continue with
 Cache storage is backed by GitHub Actions cache (automatic when using the
 action) — no manual GCS/S3 wiring needed.
 
+The same workflow `env:` sets `SCCACHE_IDLE_TIMEOUT: "0"`. The `agentdesk`
+lib-test rustc is not cacheable and runs for 20+ minutes after the last
+dependency request, so with the 600s default the server exits mid-build and the
+action's post-step `--show-stats` reads a fresh, empty server. With `0` the
+server lives until the runner's orphan-process cleanup at job end. The value is
+not part of any cache key: rust-cache hashes only `CARGO`/`CC`/`CFLAGS`/`CXX`/
+`CMAKE`/`RUST` env, and sccache's Rust key takes `CARGO_*` env.
+`scripts/check-ci-runner-hardening.sh` pins the PR workflow env, and
+`tests/test_fast_check_ci_wiring.py` checks the value in all three workflows.
+
 All macOS CI jobs use GitHub-hosted runners and explicitly clear both
 `RUSTC_WRAPPER` and `SCCACHE_GHA_ENABLED` before build steps so a Homebrew
 `sccache` binary does not use the GitHub Actions backend without the action token.
@@ -198,11 +208,11 @@ harness assignment/clearing sites:
 | `scripts/deploy-release.sh:2128-2138` | Same size default and empty wrapper pair on helper failure. |
 | `scripts/build_token.py:622-631` | Eligible POSIX child only: writes `PATH`, `SCCACHE_DIR`, `SCCACHE_CACHE_SIZE`, `SCCACHE_IDLE_TIMEOUT`, and `RUSTC_WRAPPER` (§2.4). |
 | `scripts/ci/run-writer-namespace-windows-targets.sh:8` | Defaults `SCCACHE_IDLE_TIMEOUT` to `0`, preserving nonempty overrides. |
-| `.github/workflows/ci-main.yml:22-25` | Workflow env: `RUSTC_WRAPPER=sccache`, size `10G`, GHA enabled, GHA mode `READ_WRITE`. |
-| `.github/workflows/ci-nightly.yml:20-23` | Same workflow env defaults as `ci-main.yml`. |
-| `.github/workflows/ci-pr.yml:23-28` | Same wrapper, size, and GHA enablement; GHA mode is `READ_ONLY` for PRs and `READ_WRITE` otherwise. |
-| `.github/workflows/ci-pr.yml:504-505`, `.github/workflows/ci-pr.yml:579-580` | Hosted macOS jobs write empty `RUSTC_WRAPPER` and `SCCACHE_GHA_ENABLED` to `$GITHUB_ENV`. |
-| `.github/workflows/ci-nightly.yml:108-109` | Hosted macOS job writes the same empty pair to `$GITHUB_ENV`. |
+| `.github/workflows/ci-main.yml:16-20` | Workflow env: `RUSTC_WRAPPER=sccache`, size `10G`, GHA enabled, idle timeout `0`, GHA mode `READ_WRITE`. |
+| `.github/workflows/ci-nightly.yml:20-24` | Same workflow env defaults as `ci-main.yml`. |
+| `.github/workflows/ci-pr.yml:21-27` | Same wrapper, size, GHA enablement, and idle timeout `0`; GHA mode is `READ_ONLY` for PRs and `READ_WRITE` otherwise. |
+| `.github/workflows/ci-pr.yml:511-512`, `.github/workflows/ci-pr.yml:580-581` | Hosted macOS jobs write empty `RUSTC_WRAPPER` and `SCCACHE_GHA_ENABLED` to `$GITHUB_ENV`. |
+| `.github/workflows/ci-nightly.yml:120-121` | Hosted macOS job writes the same empty pair to `$GITHUB_ENV`. |
 | `scripts/run_relay_authority_mutations.sh:204` | Mutation build command unsets `RUSTC_WRAPPER` with `env -u`. |
 
 Search hits in `tests/` and the dry observer's fixture environment
@@ -225,8 +235,8 @@ cache environment (§2.3) are outside this census of checked-in assignments.
 | `scripts/build-release.sh` | resolved `sccache` path | disabled | `$HOME/.cache/sccache` | `15G` | `0` | `.cargo/config.toml` + `setup_sccache_env` |
 | `scripts/deploy-release.sh` | resolved `sccache` path | disabled | `$HOME/.cache/sccache` | `15G` | `0` | `.cargo/config.toml` + `setup_sccache_env` |
 | Installer source build (helper available) | resolved `sccache` path | disabled | `$HOME/.cache/sccache` | `15G` | `0` | `scripts/install.sh` + `setup_sccache_env` |
-| CI Linux/Windows (`ci-*.yml`) | `sccache` | disabled | provided by `sccache-action` | workflow `10G` | inherited/upstream | workflow env + action |
-| CI Windows exact targets (`ci-pr.yml` `check_fast_cross_os_targets`) | `sccache` | disabled | provided by `sccache-action` | workflow `10G` | `0` unless set | `scripts/ci/run-writer-namespace-windows-targets.sh` |
+| CI Linux/Windows (`ci-pr.yml`, `ci-main.yml`, `ci-nightly.yml`) | `sccache` | disabled | provided by `sccache-action` | workflow `10G` | workflow `0` | workflow env + action |
+| CI Windows exact targets (`ci-pr.yml` `check_fast_cross_os_targets`) | `sccache` | disabled | provided by `sccache-action` | workflow `10G` | workflow `0`; script default `0` if unset | workflow env + `scripts/ci/run-writer-namespace-windows-targets.sh` |
 | CI macOS hosted | none | disabled | n/a | n/a | n/a | workflow clears `RUSTC_WRAPPER` + `SCCACHE_GHA_ENABLED` |
 
 Helper rows show defaults when sccache is available and size/idle values are unset
@@ -259,8 +269,9 @@ Key rows:
   exited or whether the build used that server. Capture stats in the same job
   immediately after the build, and check that the build's wrapper and server
   configuration point to that server.
-  The Windows exact-targets runner defaults `SCCACHE_IDLE_TIMEOUT=0` because
-  its lib-test compile and test runs outlast the usual 600s idle timeout.
+  The CI workflows and the Windows exact-targets runner set
+  `SCCACHE_IDLE_TIMEOUT=0` because their lib-test compiles and test runs
+  outlast the usual 600s idle timeout (§2.3).
 
 Reset stats between measurements:
 
