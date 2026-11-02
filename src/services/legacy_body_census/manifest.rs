@@ -5,6 +5,7 @@ use std::{collections::BTreeSet, sync::LazyLock};
 const EMBEDDED: &str = include_str!("../../../scripts/tui_o_body_probes.json");
 
 pub(super) const EXPECTED_PROBE_ROWS: usize = 68;
+const EXPECTED_TRANSPORT_ROWS: usize = 14;
 
 pub(super) fn snapshot() -> Value {
     static SNAPSHOT: LazyLock<Value> = LazyLock::new(|| inspect(EMBEDDED));
@@ -38,6 +39,28 @@ pub(super) fn inspect(raw: &str) -> Value {
                 "PENDING_0a3" | "PENDING_0b1" | "PENDING_0b2" | "PENDING_0c1" | "PENDING_0c2" => {
                     pending += 1
                 }
+                _ => return None,
+            }
+        }
+        let transport = data["transport_probes"]
+            .as_array()
+            .filter(|rows| rows.len() == EXPECTED_TRANSPORT_ROWS)?;
+        for row in transport {
+            for key in ["id", "path", "entrypoint"] {
+                row[key].as_str().filter(|s| !s.is_empty())?;
+            }
+            if !ids.insert(row["id"].as_str()?)
+                || !matches!(row["op"].as_str()?, "POST" | "EDIT" | "DELETE")
+                || !matches!(
+                    row["guard"].as_str()?,
+                    "RAW_OPERATION_OBSERVED_ONCE" | "O_CREATED_ACK_ONCE"
+                )
+            {
+                return None;
+            }
+            match row["status"].as_str()? {
+                "VERIFIED" => {}
+                "PENDING_0a3" => pending += 1,
                 _ => return None,
             }
         }

@@ -643,6 +643,107 @@ def _admission_order_problems(rel: str, text: str) -> list[str]:
     return problems
 
 
+
+# The transport inventory is independent of the unchanged body census.
+TRANSPORT_PROBES = {
+    'RAW:http.rs:dispatch_channel_message:1': {'id': 'RAW:http.rs:dispatch_channel_message:1', 'path': 'src/services/discord/http.rs', 'entrypoint': 'dispatch_channel_message', 'occurrence': 1, 'op': 'POST', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'RAW:http.rs:send_channel_message_with_nonce:1': {'id': 'RAW:http.rs:send_channel_message_with_nonce:1', 'path': 'src/services/discord/http.rs', 'entrypoint': 'send_channel_message_with_nonce', 'occurrence': 1, 'op': 'POST', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'RAW:http.rs:send_channel_message_with_reference:1': {'id': 'RAW:http.rs:send_channel_message_with_reference:1', 'path': 'src/services/discord/http.rs', 'entrypoint': 'send_channel_message_with_reference', 'occurrence': 1, 'op': 'POST', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'RAW:http.rs:send_channel_message_with_reference_and_nonce:1': {'id': 'RAW:http.rs:send_channel_message_with_reference_and_nonce:1', 'path': 'src/services/discord/http.rs', 'entrypoint': 'send_channel_message_with_reference_and_nonce', 'occurrence': 1, 'op': 'POST', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'RAW:http.rs:dispatch_channel_edit:1': {'id': 'RAW:http.rs:dispatch_channel_edit:1', 'path': 'src/services/discord/http.rs', 'entrypoint': 'dispatch_channel_edit', 'occurrence': 1, 'op': 'EDIT', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'RAW:http.rs:delete_channel_message:1': {'id': 'RAW:http.rs:delete_channel_message:1', 'path': 'src/services/discord/http.rs', 'entrypoint': 'delete_channel_message', 'occurrence': 1, 'op': 'DELETE', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'RAW:gateway.rs:post_message:1': {'id': 'RAW:gateway.rs:post_message:1', 'path': 'src/services/discord/gateway.rs', 'entrypoint': 'post_message', 'occurrence': 1, 'op': 'POST', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'RAW:gateway.rs:post_message_with_reference:1': {'id': 'RAW:gateway.rs:post_message_with_reference:1', 'path': 'src/services/discord/gateway.rs', 'entrypoint': 'post_message_with_reference', 'occurrence': 1, 'op': 'POST', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'RAW:gateway.rs:edit_message:1': {'id': 'RAW:gateway.rs:edit_message:1', 'path': 'src/services/discord/gateway.rs', 'entrypoint': 'edit_message', 'occurrence': 1, 'op': 'EDIT', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'RAW:gateway.rs:delete_message:1': {'id': 'RAW:gateway.rs:delete_message:1', 'path': 'src/services/discord/gateway.rs', 'entrypoint': 'delete_message', 'occurrence': 1, 'op': 'DELETE', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'RAW:tui_prompt_relay/bridge_gateway.rs:delete_message:1': {'id': 'RAW:tui_prompt_relay/bridge_gateway.rs:delete_message:1', 'path': 'src/services/discord/tui_prompt_relay/bridge_gateway.rs', 'entrypoint': 'delete_message', 'occurrence': 1, 'op': 'DELETE', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'RAW:outbound/transport.rs:post_serenity_message_with_nonce:1': {'id': 'RAW:outbound/transport.rs:post_serenity_message_with_nonce:1', 'path': 'src/services/discord/outbound/transport.rs', 'entrypoint': 'post_serenity_message_with_nonce', 'occurrence': 1, 'op': 'POST', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'O_GATEWAY_CREATED_ACK': {'id': 'O_GATEWAY_CREATED_ACK', 'path': 'src/services/discord/outbound/o_writer_io.rs', 'entrypoint': 'post/post_origin', 'op': 'POST', 'guard': 'O_CREATED_ACK_ONCE'},
+    'O_REPOST_CREATED_ACK': {'id': 'O_REPOST_CREATED_ACK', 'path': 'src/services/discord/outbound/o_writer_repost_io.rs', 'entrypoint': 'create', 'op': 'POST', 'guard': 'O_CREATED_ACK_ONCE'},
+}
+TRANSPORT_REQUESTS = {(row["path"], row["entrypoint"], row["occurrence"]): row["op"] for row in TRANSPORT_PROBES.values() if "occurrence" in row}
+
+RAW_REQUEST_RE = re.compile(r"\braw_output\s*::\s*request\s*\(")
+RAW_OPERATION_RE = re.compile(
+    r"\s*\w+\s*,\s*(?:\w+\s*::\s*)*Operation\s*::\s*(Post|Edit|Delete)\s*,"
+)
+
+
+def _transport_requests(rel: str, text: str) -> tuple[dict, list[str]]:
+    if "raw_output" not in text:
+        return {}, []
+    matches = list(RAW_REQUEST_RE.finditer(text))
+    if not matches:
+        return {}, []
+    bodies = _fn_bodies(text)
+    measured, occurrences, problems = {}, Counter(), []
+    for match in matches:
+        owners = [span for span in bodies if span[1] < match.start() < span[2]]
+        owner = max(owners, key=lambda span: span[1])[0] if owners else "<module>"
+        occurrences[owner] += 1
+        slot = (rel, owner, occurrences[owner])
+        op = RAW_OPERATION_RE.match(text, match.end())
+        measured[slot] = op[1].upper() if op else "UNKNOWN"
+        if TRANSPORT_REQUESTS.get(slot) != measured[slot]:
+            problems.append(f"transport request: {slot} op={measured[slot]}, expected {TRANSPORT_REQUESTS.get(slot)}")
+    return measured, problems
+
+
+def _transport_guard_problems(root: Path, texts: dict[str, str], ack_sites: dict) -> list[str]:
+    try:
+        rows = json.loads((root / "scripts/tui_o_body_probes.json").read_bytes())["transport_probes"]
+        active = {row["id"] for row in rows if row["status"] == "VERIFIED"}
+    except (OSError, KeyError, TypeError, ValueError):
+        return []  # The manifest parser reports malformed or missing inventories.
+    problems = []
+    if active & {"O_GATEWAY_CREATED_ACK", "O_REPOST_CREATED_ACK"} and ack_sites != {
+        "src/services/discord/outbound/o_writer_io.rs": ["post:ack"],
+        "src/services/discord/outbound/o_writer_repost_io.rs": ["create:ack"],
+    }:
+        problems.append("transport guard: O ACK callers moved outside the two Created ports")
+
+    def body(path, name):
+        text = texts.get(path, "")
+        spans = [(start, end) for fn, start, end in _fn_bodies(text) if fn == name]
+        return text[spans[0][0] + 1:spans[0][1]] if len(spans) == 1 else ""
+
+    raw_path = "src/services/discord/outbound/raw_output.rs"
+    request = body(raw_path, "request")
+    owner = body(raw_path, "scope")
+    census = body(raw_path, "census_scope")
+    compact = lambda value: re.sub(r"\s+", "", value)
+    raw_ok = all(token in compact(request) for token in (
+        "op!=Operation::Delete", "context.scope.as_ref()", "context.artifact.as_ref()",
+        "guard.run(async{letresult=raw.await;", "Some(outcome(&result))",
+    )) and request.count("raw.await") == 2 and len(re.findall(r"transport\s*::\s*record\s*\(", request)) == 4
+    raw_ok = raw_ok and all("CONTEXT.try_with(Clone::clone).unwrap_or_default()" in compact(value) for value in (owner, census))
+    raw_ok = raw_ok and not re.search(r"context\s*\.\s*census\s*=", owner)
+    raw_ok = raw_ok and "context.census=tag;" in compact(census)
+    raw_ok = raw_ok and not re.search(r"context\s*\.\s*(?:scope|artifact|body)\s*=", census)
+    if any(key.startswith("RAW:") for key in active) and not raw_ok:
+        problems.append("transport guard: raw outcome/operation/owner-census composition drifted")
+    ack_path = "src/services/legacy_body_census/transport.rs"
+    ack = compact(body(ack_path, "record_o_created"))
+    ack_ok = all(token in ack for token in ("ifstarted_at_ms.is_some_and(|started|created_at_ms<=started){return;}", "ifid>bucket.latest_id{", "saturating_add(1)"))
+    if "O_GATEWAY_CREATED_ACK" in active:
+        path = "src/services/discord/outbound/o_writer_io.rs"
+        post, origin = compact(body(path, "post")), compact(body(path, "post_origin"))
+        ok = True
+        ok = ok and re.search(r"Ok\(message\)=>\{crate::services::legacy_body_census::transport::record_o_created\(channel,message.id.get\(\),None,?\);PostOutcome::Created\(seen\(message\)\)\}", post)
+        ok = ok and post.count("record_o_created(") == 1 and "self.post(channel,content.clone())" in origin and "record_o_created(" not in origin
+        ok = ok and "super::census_scope(None,ChannelId::new(channel).send_message" in post
+        if not (ok and ack_ok):
+            problems.append("transport guard: O gateway ACK must follow its sole Created response")
+    if "O_REPOST_CREATED_ACK" in active:
+        create = compact(body("src/services/discord/outbound/o_writer_repost_io.rs", "create"))
+        ok = "letstarted_at=chrono::Utc::now().timestamp_millis();" in create
+        ok = ok and re.search(r"letoutcome=settle\(response\).await;ifletWireOutcome::Created\(created\)=&outcome\{crate::services::legacy_body_census::transport::record_o_created\(channel_id.get\(\),created.id,Some\(started_at\),?\);\}returnoutcome;", create)
+        ok = ok and create.count("record_o_created(") == 1 and "outbound::census_scope(None,hold.run(asyncmove{" in create
+        if not (ok and ack_ok):
+            problems.append("transport guard: O repost ACK must follow its sole Created response")
+    return problems
+
+
 def measure(root: Path, pinned_test_only_files=None):
     classifier = _load_classifier()
     if pinned_test_only_files is None:
@@ -656,12 +757,24 @@ def measure(root: Path, pinned_test_only_files=None):
     marks: dict[str, list[str]] = {}
     admission_problems: list[str] = []
     seen: set[str] = set()
+    transport_enabled = (root / "scripts/tui_o_body_probes.json").is_file()
+    transport_sites, transport_texts, ack_sites = {}, {}, {}
     for path in files:
         if path in skips:
             continue
         rel = path.relative_to(root).as_posix()
         text = classifier._production_text(path)
         seen.add(rel)
+        if transport_enabled:
+            sites, errors = _transport_requests(rel, text)
+            transport_sites.update(sites)
+            admission_problems.extend(errors)
+            if "record_o_created" in text and (sites := _gate_sites(text, {"ack": re.compile(r"\brecord_o_created\s*\(")})):
+                ack_sites[rel] = sites
+            if rel in {row["path"] for row in TRANSPORT_PROBES.values()} or rel in {
+                "src/services/discord/outbound/raw_output.rs", "src/services/legacy_body_census/transport.rs",
+            }:
+                transport_texts[rel] = text
         admission_problems.extend(_admission_order_problems(rel, text))
         if sites := _gate_sites(text, TURN_MARK_RES):
             marks[rel] = sites
@@ -678,6 +791,10 @@ def measure(root: Path, pinned_test_only_files=None):
             flags[rel] = n
     for rel in sorted(set(TURN_ADMISSION_ORDER) - seen):
         admission_problems.append(f"turn admission: missing production file {rel}")
+    if transport_enabled:
+        for slot in sorted(set(TRANSPORT_REQUESTS) - set(transport_sites)):
+            admission_problems.append(f"transport request: missing {slot}")
+        admission_problems.extend(_transport_guard_problems(root, transport_texts, ack_sites))
     return primitives, gates, flags, raw, marks, admission_problems
 
 
@@ -820,6 +937,18 @@ def body_probe_snapshot(root: Path) -> dict:
             for primitive, count in EXPECTED_PRIMITIVES[path].items()
         })
         require(measured == expected)
+        transport = data["transport_probes"]
+        require(isinstance(transport, list) and len(transport) == len(TRANSPORT_PROBES))
+        transport_ids = set()
+        for row in transport:
+            expected = TRANSPORT_PROBES.get(row["id"])
+            require(expected is not None and set(row) == set(expected) | {"status"})
+            require({key: row[key] for key in expected} == expected)
+            require("occurrence" not in row or type(row["occurrence"]) is int)
+            require(row["id"] not in transport_ids)
+            transport_ids.add(row["id"])
+            require(row["status"] in {"PENDING_0a3", "VERIFIED"})
+            pending += row["status"] != "VERIFIED"
         return dict(coverage=pending == 0, census_hash=digest, pending=pending, error=None)
     except (AssertionError, KeyError, TypeError, ValueError):
         return dict(coverage=False, census_hash=digest, pending=0, error="manifest_invalid")

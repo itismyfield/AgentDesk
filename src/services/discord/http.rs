@@ -158,6 +158,7 @@ pub(in crate::services::discord) async fn dispatch_channel_message(
 ) -> serenity::Result<Message> {
     super::outbound::raw_output::request(
         channel_id,
+        super::outbound::raw_output::Operation::Post,
         channel_id.send_message(http, message.allowed_mentions(relay_allowed_mentions())),
     )
     .await
@@ -174,7 +175,12 @@ pub(in crate::services::discord) async fn send_channel_message_with_nonce(
 ) -> serenity::Result<Message> {
     let message =
         channel_message_builder(content, None, Some(nonce)).map_err(serenity::Error::Other)?;
-    super::outbound::raw_output::request(channel_id, channel_id.send_message(http, message)).await
+    super::outbound::raw_output::request(
+        channel_id,
+        super::outbound::raw_output::Operation::Post,
+        channel_id.send_message(http, message),
+    )
+    .await
 }
 
 pub(in crate::services::discord) async fn send_channel_message_with_reference(
@@ -190,7 +196,12 @@ pub(in crate::services::discord) async fn send_channel_message_with_reference(
         None,
     )
     .map_err(serenity::Error::Other)?;
-    super::outbound::raw_output::request(channel_id, channel_id.send_message(http, message)).await
+    super::outbound::raw_output::request(
+        channel_id,
+        super::outbound::raw_output::Operation::Post,
+        channel_id.send_message(http, message),
+    )
+    .await
 }
 
 pub(in crate::services::discord) async fn send_channel_message_with_reference_and_nonce(
@@ -207,7 +218,12 @@ pub(in crate::services::discord) async fn send_channel_message_with_reference_an
         Some(nonce),
     )
     .map_err(serenity::Error::Other)?;
-    super::outbound::raw_output::request(channel_id, channel_id.send_message(http, message)).await
+    super::outbound::raw_output::request(
+        channel_id,
+        super::outbound::raw_output::Operation::Post,
+        channel_id.send_message(http, message),
+    )
+    .await
 }
 
 pub(in crate::services::discord) async fn send_channel_message_with_required_reference(
@@ -306,6 +322,7 @@ async fn dispatch_channel_edit(
 ) -> serenity::Result<Message> {
     super::outbound::raw_output::request(
         channel_id,
+        super::outbound::raw_output::Operation::Edit,
         channel_id.edit_message(http, message_id, edit),
     )
     .await
@@ -319,8 +336,12 @@ pub(in crate::services::discord) async fn delete_channel_message(
     channel_id: ChannelId,
     message_id: MessageId,
 ) -> serenity::Result<()> {
-    super::outbound::raw_output::request(channel_id, channel_id.delete_message(http, message_id))
-        .await
+    super::outbound::raw_output::request(
+        channel_id,
+        super::outbound::raw_output::Operation::Delete,
+        channel_id.delete_message(http, message_id),
+    )
+    .await
 }
 
 #[cfg(test)]

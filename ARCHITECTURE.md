@@ -1729,6 +1729,7 @@ src/
 │   │   │   ├── source_registry.rs
 │   │   │   ├── source_registry_scan_tests.rs
 │   │   │   ├── transport.rs
+│   │   │   ├── transport_observation_tests.rs
 │   │   │   └── turn_output_controller.rs
 │   │   ├── placeholder_controller/
 │   │   │   ├── queued_card_gate/
@@ -3296,6 +3297,7 @@ src/
 │   │   ├── manifest.rs
 │   │   ├── mod.rs
 │   │   ├── review_tests.rs
+│   │   ├── transport.rs
 │   │   ├── window_tests.rs
 │   │   └── writer.rs
 │   ├── maintenance/

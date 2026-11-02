@@ -76,6 +76,41 @@ fn a_missing_verified_manifest_row_cannot_certify_coverage() {
     assert_eq!(inspected["error"], "manifest_invalid");
 }
 
+#[test]
+fn transport_manifest_requires_complete_verified_rows() {
+    let mut data: Value =
+        serde_json::from_str(include_str!("../../../scripts/tui_o_body_probes.json")).unwrap();
+    for row in data["probes"].as_array_mut().unwrap() {
+        row["status"] = json!("VERIFIED");
+    }
+    for case in ["pending", "verified", "missing", "incomplete"] {
+        let mut current = data.clone();
+        for row in current["transport_probes"].as_array_mut().unwrap() {
+            row["status"] = json!(if case == "pending" {
+                "PENDING_0a3"
+            } else {
+                "VERIFIED"
+            });
+        }
+        if case == "missing" {
+            current.as_object_mut().unwrap().remove("transport_probes");
+        }
+        if case == "incomplete" {
+            current["transport_probes"].as_array_mut().unwrap().pop();
+        }
+        let observed = manifest::inspect(&current.to_string());
+        assert_eq!(observed["coverage"], case == "verified", "{case}");
+        assert_eq!(
+            observed["error"].is_string(),
+            matches!(case, "missing" | "incomplete"),
+            "{case}"
+        );
+        if case == "pending" {
+            assert_eq!(observed["pending"], 14);
+        }
+    }
+}
+
 #[tokio::test]
 async fn head_is_the_only_predecessor_authority_even_when_wall_time_moves_backwards() {
     let root = tempfile::tempdir().unwrap();

@@ -12,6 +12,7 @@ mod manifest;
 #[cfg(test)]
 #[path = "entry_tests.rs"]
 mod tests;
+pub(crate) mod transport;
 mod writer;
 
 type Shared = Arc<Mutex<State>>;
@@ -190,6 +191,7 @@ pub(crate) fn health_json() -> Value {
         },
         Journal::snapshot,
     );
+    value["o_created"] = transport::snapshot();
     value["uptime_ms"] = json!(
         crate::services::process_boot::initialize()
             .monotonic

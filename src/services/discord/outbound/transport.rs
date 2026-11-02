@@ -39,9 +39,13 @@ pub(crate) async fn post_serenity_message_with_nonce(
         );
     }
     crate::services::discord::rate_limit_wait(shared, channel_id).await;
-    super::raw_output::request(channel_id, channel_id.send_message(http, message))
-        .await
-        .map(|message| message.id.get().to_string())
+    super::raw_output::request(
+        channel_id,
+        super::raw_output::Operation::Post,
+        channel_id.send_message(http, message),
+    )
+    .await
+    .map(|message| message.id.get().to_string())
 }
 
 /// Short stable fingerprint for outbound idempotency keys. Parts are separated

@@ -106,6 +106,7 @@ impl TurnGateway for TuiDirectBridgeGateway {
             super::super::rate_limit_wait(&self.shared, channel_id).await;
             super::super::outbound::raw_output::request(
                 channel_id,
+                super::super::outbound::raw_output::Operation::Delete,
                 channel_id.delete_message(&self.http, message_id),
             )
             .await

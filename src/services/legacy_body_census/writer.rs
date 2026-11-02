@@ -36,7 +36,7 @@ impl Default for Options {
 
 struct Message {
     record: Value,
-    ack: oneshot::Sender<bool>,
+    ack: Option<oneshot::Sender<bool>>,
 }
 
 pub(super) struct Writer {
@@ -107,7 +107,9 @@ impl Writer {
                     if let Some(file) = file.as_mut() {
                         persist_invalid(file, &shared, &mut persisted);
                     }
-                    if message.ack.send(written).is_err() {
+                    if let Some(ack) = message.ack
+                        && ack.send(written).is_err()
+                    {
                         invalidate(&shared, "ACK_RECEIVER_DROPPED");
                         if let Some(file) = file.as_mut() {
                             persist_invalid(file, &shared, &mut persisted);
@@ -125,12 +127,36 @@ impl Writer {
         }
     }
 
-    pub(super) async fn append(&self, record: Value) -> bool {
+    pub(super) fn enqueue(&self, record: Value) -> Option<oneshot::Receiver<bool>> {
         let (ack, received) = oneshot::channel();
-        if self.sender.try_send(Message { record, ack }).is_err() {
+        if self
+            .sender
+            .try_send(Message {
+                record,
+                ack: Some(ack),
+            })
+            .is_err()
+        {
             invalidate(&self.state, "WRITE_QUEUE_UNAVAILABLE");
-            return false;
+            return None;
         }
+        Some(received)
+    }
+
+    pub(super) fn try_append(&self, record: Value) {
+        if self.sender.try_send(Message { record, ack: None }).is_err() {
+            invalidate(&self.state, "WRITE_QUEUE_UNAVAILABLE");
+        }
+    }
+
+    pub(super) async fn append(&self, record: Value) -> bool {
+        match self.enqueue(record) {
+            Some(received) => self.wait_for_ack(received).await,
+            None => false,
+        }
+    }
+
+    pub(super) async fn wait_for_ack(&self, received: oneshot::Receiver<bool>) -> bool {
         match tokio::time::timeout(self.timeout, received).await {
             Ok(Ok(true)) => true,
             Ok(_) => {
