@@ -1111,14 +1111,14 @@ class BaseDiffScript(ScriptRepo):
 
     def test_head_plan_of_another_sha_or_run_is_refused_without_a_rebuild(self):
         head = self.head_plan(["m::a", "m::b"])
-        baseline = str(self.baseline(["m::a"]))
+        baseline = self.baseline(["m::a"])
         for env, needle in (({"GITHUB_SHA": "c" * 40}, f"expected {'c' * 40} run 7"),
                             ({"GITHUB_RUN_ID": "8"}, f"expected {head} run 8")):
             with self.subTest(env=env):
                 (self.dir / "cargo.log").unlink(missing_ok=True)
                 self.sp.run(["rm", "-rf", str(self.dir / "nextest/base")], check=True)
                 self.git("worktree", "prune")
-                rc, out, summary, cargo = self.run_script(head, GH_RUN_ID="5", GH_BASELINE=baseline, **env)
+                rc, out, summary, cargo = self.run_script(head, **self.main_success(baseline), **env)
                 self.assertEqual(rc, 1, out)
                 self.assertIn(f"ERROR head plan is {head} run 7, {needle}", out)
                 self.assertNotIn("archive", cargo)
