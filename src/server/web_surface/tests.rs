@@ -54,7 +54,7 @@ fn request(method: Method, path: &str, peer: &str) -> Request<Body> {
 async fn runner_browser_entry_explains_profile_without_token_or_dashboard_assets() {
     let root = tempfile::tempdir().unwrap();
     let app = app(false, root.path());
-    for peer in ["127.0.0.1:50000", "[::1]:50000", "192.0.2.2:50000"] {
+    for peer in ["127.0.0.1:50000", "[::1]:50000", "100.101.102.103:50000"] {
         for path in ["/", "/settings?settingsPanel=providers"] {
             let response = app
                 .clone()
@@ -113,7 +113,7 @@ async fn runner_entry_keeps_execution_routes_protected_and_absent_routes_not_fou
     ] {
         let response = app
             .clone()
-            .oneshot(request(method.clone(), path, "192.0.2.2:50000"))
+            .oneshot(request(method.clone(), path, "100.101.102.103:50000"))
             .await
             .unwrap();
         assert_eq!(response.status(), status, "{method} {path}");
@@ -147,7 +147,7 @@ async fn full_profile_keeps_public_spa_entry_and_protected_api() {
         .oneshot(request(
             Method::GET,
             "/api/health/detail",
-            "192.0.2.2:50000",
+            "100.101.102.103:50000",
         ))
         .await
         .unwrap();
@@ -210,67 +210,23 @@ fn peer_filter_warnings(buffer: &LogBuffer) -> Vec<String> {
         .collect()
 }
 
-#[tokio::test]
-async fn enforce_rejects_only_peers_outside_loopback_tailscale_and_private_lan() {
-    let root = tempfile::tempdir().unwrap();
-    let app = app_with_peer_filter(false, root.path(), PeerFilterMode::Enforce);
-    let (buffer, _guard) = capture_warnings();
-    for peer in [
-        "127.0.0.1",
-        "127.255.0.9",
-        "[::1]",
-        "100.64.0.0",
-        "100.127.255.255",
-        "[fd7a:115c:a1e0::1]",
-        "10.0.0.5",
-        "172.16.0.1",
-        "172.31.255.255",
-        "192.168.1.10",
-        "169.254.1.1",
-        "[fc00::1]",
-        "[fdff::1]",
-        "[fe80::1]",
-        "[::ffff:127.0.0.1]",
-        "[::ffff:100.71.1.1]",
-        "[::ffff:192.168.1.10]",
-    ] {
-        let (status, body) = peer_probe(&app, &format!("{peer}:50000")).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED, "{peer} must reach auth");
-        assert!(!body.contains("peer_not_allowed"), "{peer}: {body}");
-    }
-    for peer in [
-        "192.0.2.2",
-        "8.8.8.8",
-        "11.0.0.1",
-        "100.63.255.255",
-        "100.128.0.0",
-        "172.15.255.255",
-        "172.32.0.1",
-        "[2001:db8::1]",
-        "[2606:4700::1111]",
-        "[fec0::1]",
-        "[::ffff:8.8.8.8]",
-    ] {
-        let (status, body) = peer_probe(&app, &format!("{peer}:50000")).await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{peer} must be rejected");
-        assert!(body.contains("peer_not_allowed"), "{peer}: {body}");
-    }
-    let warnings = peer_filter_warnings(&buffer);
-    let classed = |class: &str| {
-        warnings
-            .iter()
-            .filter(|line| line.contains(&format!("peer_class={class}")))
-            .count()
-    };
-    // The nine private-LAN peers above are served but logged; the eleven outside peers are refused.
-    assert_eq!(
-        (classed("private_lan"), classed("outside"), warnings.len()),
-        (9, 11, 20),
-        "{warnings:#?}"
-    );
-}
+const TRUSTED_PEERS: [&str; 12] = [
+    "127.0.0.1",
+    "127.255.0.9",
+    "[::1]",
+    "[::ffff:127.0.0.1]",
+    "100.64.0.0",
+    "100.127.255.255",
+    "100.71.169.10",
+    "[::ffff:100.64.0.1]",
+    "[::ffff:100.71.1.1]",
+    "[fd7a:115c:a1e0::]",
+    "[fd7a:115c:a1e0::1]",
+    "[fd7a:115c:a1e0:ffff:ffff:ffff:ffff:ffff]",
+];
 
-const PRIVATE_LAN_PEERS: [&str; 12] = [
+const PRIVATE_LAN_PEERS: [&str; 15] = [
+    "10.0.0.5",
     "10.1.0.4",
     "172.16.0.1",
     "172.31.255.255",
@@ -278,54 +234,63 @@ const PRIVATE_LAN_PEERS: [&str; 12] = [
     "169.254.1.1",
     "[fc00::1]",
     "[fd00::1]",
+    "[fdff::1]",
     "[fd7a:115c:a1e1::1]",
     "[fd7a:115c:a1df:ffff::1]",
     "[fe80::1]",
     "[::ffff:192.168.1.10]",
     "[::ffff:10.0.0.5]",
+    "[::ffff:169.254.1.1]",
+];
+
+const PUBLIC_PEERS: [&str; 11] = [
+    "192.0.2.2",
+    "8.8.8.8",
+    "11.0.0.1",
+    "100.63.255.255",
+    "100.128.0.0",
+    "172.15.255.255",
+    "172.32.0.1",
+    "[2001:db8::1]",
+    "[2606:4700::1111]",
+    "[fec0::1]",
+    "[::ffff:8.8.8.8]",
 ];
 
 #[tokio::test]
-async fn private_lan_peers_are_served_unchanged_and_warned_in_every_filtering_mode() {
+async fn tailnet_only_rejects_private_lan_and_public_peers() {
     let root = tempfile::tempdir().unwrap();
-    let off = app_with_peer_filter(false, root.path(), PeerFilterMode::Off);
-    for mode in [PeerFilterMode::Log, PeerFilterMode::Enforce] {
-        let app = app_with_peer_filter(false, root.path(), mode);
-        let (buffer, _guard) = capture_warnings();
-        for peer in PRIVATE_LAN_PEERS {
-            let addr = format!("{peer}:50000");
-            let served = peer_probe(&app, &addr).await;
-            assert_eq!(served.0, StatusCode::UNAUTHORIZED, "{mode:?} {peer}");
-            assert_eq!(served, peer_probe(&off, &addr).await, "{mode:?} {peer}");
-        }
-        let warnings = peer_filter_warnings(&buffer);
-        assert_eq!(warnings.len(), PRIVATE_LAN_PEERS.len(), "{warnings:#?}");
-        for (line, peer) in warnings.iter().zip(PRIVATE_LAN_PEERS) {
-            let ip = peer.trim_start_matches('[').trim_end_matches(']');
-            assert!(line.contains(&format!("peer_ip={ip} ")), "{line}");
-            assert!(line.contains("peer_class=private_lan"), "{line}");
-        }
+    // The default is what an install gets without configuring the filter.
+    let app = app_with_peer_filter(false, root.path(), PeerFilterMode::default());
+    let (buffer, _guard) = capture_warnings();
+    for peer in TRUSTED_PEERS {
+        let (status, body) = peer_probe(&app, &format!("{peer}:50000")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{peer} must reach auth");
+        assert!(!body.contains("peer_not_allowed"), "{peer}: {body}");
+    }
+    let refused: Vec<&str> = PRIVATE_LAN_PEERS.into_iter().chain(PUBLIC_PEERS).collect();
+    for peer in &refused {
+        let (status, body) = peer_probe(&app, &format!("{peer}:50000")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{peer} must be rejected");
+        assert!(body.contains("peer_not_allowed"), "{peer}: {body}");
+    }
+    let warnings = peer_filter_warnings(&buffer);
+    assert_eq!(warnings.len(), refused.len(), "{warnings:#?}");
+    for (line, peer) in warnings.iter().zip(&refused) {
+        let ip = peer.trim_start_matches('[').trim_end_matches(']');
+        assert!(line.contains(&format!("peer_ip={ip} ")), "{line}");
+        assert!(line.contains("peer_class=outside"), "{line}");
+        assert!(line.contains("tailnet_only"), "{line}");
     }
 }
 
 #[tokio::test]
 async fn loopback_and_tailscale_peers_are_never_warned() {
     let root = tempfile::tempdir().unwrap();
-    for mode in [PeerFilterMode::Log, PeerFilterMode::Enforce] {
+    for mode in [PeerFilterMode::Log, PeerFilterMode::TailnetOnly] {
         let app = app_with_peer_filter(false, root.path(), mode);
         let (buffer, _guard) = capture_warnings();
-        for peer in [
-            "127.0.0.1",
-            "127.255.0.9",
-            "[::1]",
-            "[::ffff:127.0.0.1]",
-            "100.64.0.0",
-            "100.127.255.255",
-            "100.71.169.10",
-            "[::ffff:100.64.0.1]",
-            "[fd7a:115c:a1e0::]",
-            "[fd7a:115c:a1e0:ffff:ffff:ffff:ffff:ffff]",
-        ] {
+        for peer in TRUSTED_PEERS {
             let (status, _) = peer_probe(&app, &format!("{peer}:50000")).await;
             assert_eq!(status, StatusCode::UNAUTHORIZED, "{mode:?} {peer}");
         }
@@ -343,25 +308,25 @@ async fn log_mode_serves_outside_peers_unchanged_and_warns_once_per_peer() {
     assert_eq!(unfiltered.0, StatusCode::UNAUTHORIZED);
 
     let (buffer, _guard) = capture_warnings();
-    for peer in [
-        "8.8.8.8:50000",
-        "8.8.8.8:50001",
-        "[2606:4700::1111]:50000",
-        "192.168.1.10:50000",
-    ] {
+    let peers: Vec<String> = ["8.8.8.8:50000", "8.8.8.8:50001", "[2606:4700::1111]:50000"]
+        .into_iter()
+        .map(str::to_string)
+        .chain(PRIVATE_LAN_PEERS.map(|peer| format!("{peer}:50000")))
+        .collect();
+    for peer in &peers {
         assert_eq!(peer_probe(&log, peer).await, unfiltered, "{peer}");
     }
     let warnings = peer_filter_warnings(&buffer);
-    assert_eq!(warnings.len(), 3, "{warnings:#?}");
-    for (line, (ip, class)) in warnings.iter().zip([
-        ("8.8.8.8", "outside"),
-        ("2606:4700::1111", "outside"),
-        ("192.168.1.10", "private_lan"),
-    ]) {
+    let warned_ips: Vec<&str> = ["8.8.8.8", "2606:4700::1111"]
+        .into_iter()
+        .chain(PRIVATE_LAN_PEERS.map(|peer| peer.trim_start_matches('[').trim_end_matches(']')))
+        .collect();
+    assert_eq!(warnings.len(), warned_ips.len(), "{warnings:#?}");
+    for (line, ip) in warnings.iter().zip(warned_ips) {
         assert!(line.contains(&format!("peer_ip={ip} ")), "{line}");
-        assert!(line.contains(&format!("peer_class={class}")), "{line}");
+        assert!(line.contains("peer_class=outside"), "{line}");
+        assert!(line.contains("WARN"), "{line}");
     }
-    assert!(warnings.iter().all(|line| line.contains("WARN")));
 }
 
 #[tokio::test]
@@ -376,22 +341,24 @@ async fn off_mode_keeps_unfiltered_behavior_without_warnings() {
 }
 
 #[tokio::test]
-async fn enforce_covers_dashboard_static_entry_and_websocket_route() {
+async fn tailnet_only_covers_dashboard_static_entry_and_websocket_route() {
     let root = tempfile::tempdir().unwrap();
     let dashboard = root.path().join("dashboard");
     std::fs::create_dir(&dashboard).unwrap();
     std::fs::write(dashboard.join("index.html"), "<html>dashboard</html>").unwrap();
-    let app = app_with_peer_filter(true, root.path(), PeerFilterMode::Enforce);
-    for path in ["/", "/ws", "/missing"] {
-        let response = app
-            .clone()
-            .oneshot(request(Method::GET, path, "8.8.8.8:50000"))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+    let app = app_with_peer_filter(true, root.path(), PeerFilterMode::TailnetOnly);
+    for peer in ["8.8.8.8:50000", "192.168.1.10:50000"] {
+        for path in ["/", "/ws", "/missing"] {
+            let response = app
+                .clone()
+                .oneshot(request(Method::GET, path, peer))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{peer} {path}");
+        }
     }
     let response = app
-        .oneshot(request(Method::GET, "/", "192.168.1.10:50000"))
+        .oneshot(request(Method::GET, "/", "100.101.102.103:50000"))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);

@@ -1,10 +1,10 @@
 server:
   port: 8791
   host: "0.0.0.0"
-  # Peers outside loopback and Tailscale (100.64.0.0/10, fd7a:115c:a1e0::/48):
-  # off = no filter, log = warn only (default), enforce = 403 for public peers.
-  # Private LAN peers are still served but logged with peer_class=private_lan.
-  # peer_filter: log
+  # Peers outside loopback and Tailscale (100.64.0.0/10, fd7a:115c:a1e0::/48),
+  # private LAN included: tailnet_only = 403 (default; `enforce` is its old name),
+  # log = warn only, off = no filter.
+  # peer_filter: tailnet_only
 
 cluster:
   # Roles: hub = Hub, runner = Runner, auto = Automatic.
