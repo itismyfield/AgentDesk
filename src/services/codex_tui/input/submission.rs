@@ -6,6 +6,65 @@ const MAX_UNFOLDED_SUBMISSION_CHARS: usize = 1000;
 const SUBMISSION_RESERVED_ROWS: usize = 10;
 const MAX_SUBMISSION_ROWS: usize = 40;
 
+/// One bracketed paste avoids digit actions and preserves the plan's normalized payload bytes.
+pub(crate) fn owned_prompt_plan(prompt: &str) -> Result<Vec<TuiInputAction>, String> {
+    let text = plan_prompt_submit(prompt)?
+        .into_iter()
+        .filter_map(|action| match action {
+            TuiInputAction::Literal(text) | TuiInputAction::PasteBuffer(text) => Some(text),
+            _ => None,
+        })
+        .collect::<String>();
+    Ok(vec![
+        TuiInputAction::PasteBuffer(text),
+        TuiInputAction::Enter,
+    ])
+}
+
+/// Called once after a successful owned submit; no draft text leaves the input path.
+pub(crate) fn notify_owned_draft(channel: u64, event: &str) {
+    let Some(pool) = crate::db::cancel_tombstones::global_pool() else {
+        return;
+    };
+    let event = event.to_owned();
+    let result = crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |pool| async move { enqueue_draft_notice(&pool, channel, &event).await },
+        |error| error,
+    );
+    if let Err(error) = result {
+        tracing::warn!(channel, %error, "Codex draft notice enqueue failed after submission");
+    }
+}
+
+async fn enqueue_draft_notice(
+    pool: &sqlx::PgPool,
+    channel: u64,
+    event: &str,
+) -> Result<i64, String> {
+    use crate::services::message_outbox::{
+        OutboxMessage, enqueue_outbox_pg_returning_id_with_persistent_dedupe,
+    };
+    use sha2::{Digest, Sha256};
+    let key = format!("codex-draft:{:x}", Sha256::digest(event.as_bytes()));
+    let text = crate::services::discord::dispatch_policy::prepend_operational_alert_origin(
+        "Codex에 입력을 전달했습니다. 기존 초안의 보존 여부는 확인하지 못했습니다.",
+    );
+    enqueue_outbox_pg_returning_id_with_persistent_dedupe(
+        pool,
+        OutboxMessage {
+            target: &format!("channel:{channel}"),
+            content: &text,
+            bot: "codex",
+            source: "lifecycle_notifier",
+            reason_code: Some("codex.draft_preservation_unconfirmed"),
+            session_key: Some(&key),
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
 /// A conservative screen budget; the core checks frame bytes before this payload callback.
 pub(crate) fn prompt_submission_fits_pane(
     frame: &str,
@@ -183,6 +242,36 @@ pub(crate) fn submission_busy_in_pane(pane: &str) -> bool {
 mod tests {
     use super::*;
     use crate::services::codex_tui::host_input::spy::{SpyGuard, SpyState};
+
+    #[tokio::test]
+    async fn codex_draft_notice_is_one_non_turn_outbox_event_pg() {
+        if crate::db::postgres::postgres_test_database_url_base().is_none() {
+            assert_ne!(std::env::var("AGENTDESK_REQUIRE_PG").as_deref(), Ok("1"));
+            return;
+        }
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let first = enqueue_draft_notice(&pool, 7_676_150, "a-submitted-original")
+            .await
+            .unwrap();
+        let again = enqueue_draft_notice(&pool, 7_676_150, "a-submitted-original")
+            .await
+            .unwrap();
+        assert_eq!(first, again);
+        let text: String = sqlx::query_scalar("SELECT content FROM message_outbox WHERE id = $1")
+            .bind(first)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(text.contains("초안의 보존 여부는 확인하지 못했습니다"));
+        assert!(crate::services::discord::dispatch_policy::has_non_turn_provenance(&text));
+        assert!(
+            crate::services::turn_orchestrator::ChannelMailboxHandle::v2_notice_is_non_turn(&text)
+        );
+        assert!(!text.contains("a-submitted-original"));
+        pool.close().await;
+        db.drop().await;
+    }
 
     #[test]
     fn idle_submission_preserves_box_rows_and_modal_choices() {

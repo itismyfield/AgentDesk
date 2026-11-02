@@ -107,11 +107,11 @@ const DEFAULT_LITERAL_CHUNK_CHARS: usize = 1800;
 mod composer_content;
 mod composer_lock;
 mod submission;
-use submission::{prompt_readiness_snapshot_with_pane, submission_snapshot_with_pane};
 pub(crate) use submission::{
-    prompt_submission_fits_pane, submission_busy_in_pane, submission_draft_in_pane,
-    submission_modal_in_pane, submission_readiness_from_ansi_pane,
+    notify_owned_draft, owned_prompt_plan, prompt_submission_fits_pane, submission_busy_in_pane,
+    submission_draft_in_pane, submission_modal_in_pane, submission_readiness_from_ansi_pane,
 };
+use submission::{prompt_readiness_snapshot_with_pane, submission_snapshot_with_pane};
 mod composer_status;
 mod herdr_cancel;
 pub(crate) use herdr_cancel::herdr_turn_in_progress;
@@ -122,6 +122,7 @@ pub(crate) use composer_content::{ComposerContent, active_composer_content_in_pa
 pub(crate) use composer_lock::try_with_composer_mutation_lock;
 use composer_lock::with_composer_mutation_lock;
 use composer_status::line_is_codex_fast_context_status;
+pub(crate) use inline_banner::pane_has_blocking_action_menu;
 
 const PROMPT_SUBMIT_INITIAL_SETTLE: Duration = Duration::from_millis(150);
 const PROMPT_SUBMIT_DRAFT_RECHECK_SETTLE: Duration = Duration::from_millis(250);
@@ -1154,6 +1155,15 @@ pub(crate) fn admit_codex_prompt_under_lock(
     dismiss: bool,
 ) -> Result<(Vec<TuiInputAction>, Option<String>), String> {
     let actions = plan_prompt_submit(prompt)?;
+    if crate::services::claude_tui::owner_input::active() {
+        let command = crate::services::platform::binary_resolver::runtime_command("tmux")
+            .map_err(|_| "PaneUnavailable".to_string())?;
+        let pane =
+            super::busy_inject::Pane::with_program(session_name, command.get_program().into());
+        let capture = super::busy_inject::owned_composer_capture(&pane)
+            .map_err(|veto| format!("{veto:?}"))?;
+        return Ok((owned_prompt_plan(prompt)?, Some(capture)));
+    }
     // The warm-flow post-wait probe cannot make the send atomic with tmux.
     // Take one final canonical snapshot immediately before mutating the
     // composer so a just-arrived user draft or active turn is never appended
