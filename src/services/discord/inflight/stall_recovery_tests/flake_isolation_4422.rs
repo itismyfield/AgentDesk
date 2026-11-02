@@ -1,7 +1,6 @@
 //! #4422 deterministic regression for the flaky text-log severity witness.
 
 use super::*;
-use crate::services::discord::outbound::delivery_record as dr;
 use crate::services::observability::InvariantSeverity;
 
 #[test]
@@ -10,12 +9,11 @@ fn legit_reset_records_monotonic_violation_at_typed_warn_4422() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
 
-    // A same-turn RetryBoundary reset is permitted under both authority modes.
-    // Observe the typed decision synchronously; formatted tracing output is
-    // deliberately not part of this test's correctness witness.
-    for authority_on in [false, true] {
+    // A same-turn RetryBoundary reset is permitted; observe the typed decision,
+    // not formatted tracing output.
+    {
         let temp = TempDir::new().unwrap();
-        let channel_id = 44_220_100 + authority_on as u64;
+        let channel_id = 44_220_101;
         let mut reset = seed_watcher_stream_state(
             temp.path(),
             channel_id,
@@ -28,7 +26,6 @@ fn legit_reset_records_monotonic_violation_at_typed_warn_4422() {
         let path = inflight_state_path(temp.path(), &ProviderKind::Claude, channel_id);
 
         let (tripwire, events) = super::super::invariant_test_capture::capture(|| {
-            let _authority = dr::authority_test_seam::force(authority_on);
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 validate_inflight_state_for_save(
                     temp.path(),
@@ -51,12 +48,12 @@ fn legit_reset_records_monotonic_violation_at_typed_warn_4422() {
         assert_eq!(
             severities,
             [InvariantSeverity::Warn],
-            "legitimate reset must expose exactly one typed WARN invariant (authority_on={authority_on}): {events:?}"
+            "legitimate reset must expose exactly one typed WARN invariant: {events:?}"
         );
     }
 
-    // Non-reset backward progress with authority disabled persists bad state and
-    // therefore remains ERROR. This control keeps the WARN assertion non-vacuous.
+    // Non-reset backward progress is enforce-skipped, so it never persists and
+    // the tripwire stays quiet; the violation is still recorded at WARN.
     let temp = TempDir::new().unwrap();
     let channel_id = 44_220_199;
     let mut regression = seed_watcher_stream_state(
@@ -71,7 +68,6 @@ fn legit_reset_records_monotonic_violation_at_typed_warn_4422() {
     let path = inflight_state_path(temp.path(), &ProviderKind::Claude, channel_id);
 
     let (tripwire, events) = super::super::invariant_test_capture::capture(|| {
-        let _authority = dr::authority_test_seam::force(false);
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             validate_inflight_state_for_save(
                 temp.path(),
@@ -82,8 +78,8 @@ fn legit_reset_records_monotonic_violation_at_typed_warn_4422() {
         }))
     });
     assert!(
-        tripwire.is_err() || cfg!(not(debug_assertions)),
-        "the production monotonic tripwire must fire when debug assertions are enabled"
+        tripwire.is_ok(),
+        "an enforce-skipped backward write must not trip the monotonic tripwire"
     );
     let severities: Vec<_> = events
         .iter()
@@ -92,7 +88,7 @@ fn legit_reset_records_monotonic_violation_at_typed_warn_4422() {
         .collect();
     assert_eq!(
         severities,
-        [InvariantSeverity::Error],
-        "genuine non-reset backward progress must expose exactly one typed ERROR invariant: {events:?}"
+        [InvariantSeverity::Warn],
+        "enforce-skipped backward progress must expose exactly one typed WARN invariant: {events:?}"
     );
 }

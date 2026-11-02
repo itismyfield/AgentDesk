@@ -72,7 +72,7 @@
 | `POST` | `/api/cluster/resource-locks/reclaim-expired` | `cluster::reclaim_expired_resource_locks` | `src/server/routes/cluster.rs:318` | `src/server/routes/domains/ops.rs:60` |
 | `POST` | `/api/cluster/resource-locks/release` | `cluster::release_resource_lock` | `src/server/routes/cluster.rs:300` | `src/server/routes/domains/ops.rs:56` |
 | `GET` | `/api/cluster/routing-diagnostics` | `cluster::routing_diagnostics` | `src/server/routes/cluster.rs:186` | `src/server/routes/domains/runtime.rs:36` |
-| `GET` | `/api/cluster/sessions` | `cluster::list_sessions` | `src/server/routes/cluster.rs:445` | `src/server/routes/domains/runtime.rs:35` |
+| `GET` | `/api/cluster/sessions` | `cluster::list_sessions` | `src/server/routes/cluster.rs:444` | `src/server/routes/domains/runtime.rs:35` |
 | `POST` | `/api/cluster/task-dispatches/claim` | `cluster::claim_task_dispatches` | `src/server/routes/cluster.rs:400` | `src/server/routes/domains/ops.rs:84` |
 | `GET` | `/api/cluster/test-phase-runs` | `cluster::list_test_phase_runs` | `src/server/routes/cluster.rs:328` | `src/server/routes/domains/ops.rs:64` |
 | `POST` | `/api/cluster/test-phase-runs/complete` | `cluster::complete_test_phase_run` | `src/server/routes/cluster.rs:368` | `src/server/routes/domains/ops.rs:76` |

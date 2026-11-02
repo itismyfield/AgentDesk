@@ -468,14 +468,11 @@ mod tests {
 
     #[test]
     fn retry_state_authority_on_reclaim_rewind_persists() {
-        use crate::services::discord::outbound::delivery_record as dr;
-
         let _env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let temp = tempfile::TempDir::new().expect("temp root");
         let _root = set_runtime_root(temp.path());
-        let _authority = dr::authority_test_seam::force(true);
 
         let full_response = "visible prefix\nhidden tail";
         let channel = ChannelId::new(41_100_001);
@@ -623,14 +620,11 @@ mod tests {
 
     #[test]
     fn retry_state_terminal_error_reset_persists_without_debug_panic() {
-        use crate::services::discord::outbound::delivery_record as dr;
-
         let _env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let temp = tempfile::TempDir::new().expect("temp root");
         let _root = set_runtime_root(temp.path());
-        let _authority = dr::authority_test_seam::force(false);
 
         let channel = ChannelId::new(41_100_002);
         let mut state = inflight("streamed answer body", "streamed answer body".len());
@@ -719,14 +713,11 @@ mod tests {
 
     #[test]
     fn watcher_relay_error_frame_reclaims_bridge_delivery_frontier() {
-        use crate::services::discord::outbound::delivery_record as dr;
-
         let _env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let temp = tempfile::TempDir::new().expect("temp root");
         let _root = set_runtime_root(temp.path());
-        let _authority = dr::authority_test_seam::force(true);
 
         let full_response = "w".repeat(500);
         let mut response_sent_offset = full_response.len();

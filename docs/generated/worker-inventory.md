@@ -26,10 +26,8 @@
                 polls every 10s. External request_discovery_tick() nudges fire an immediate tick \
                 for E3 event hooks. Unexpected return/panic is restarted with a bounded local \
                 budget and capped exponential backoff. |
-| watcher_supervisor_loop | `tokio::spawn` | `services::discord::run_session_bound_discord_relay_supervisor` | `src/server/worker_registry.rs:374` | stage=after_boot_reconcile; order=67; restart=loop_owned; shutdown=runtime_shutdown; owner=server::worker_registry; health=watcher-supervisor tracing + per-relay metrics; responsibility=Spawn/teardown session-bound StreamRelay tasks in response to SessionRegistry events; Epic #2285 / E3 (#2345), wired through E4 (#2411) and E5 (#2412). Gated by \
-                cluster.session_bound_relay_enabled (default true since E5); flipping the flag \
-                off restores the legacy watcher as the sole terminal delivery path. \
-                Worker-local because tmux is host-scoped — relays live next to the sessions \
+| watcher_supervisor_loop | `tokio::spawn` | `services::discord::run_session_bound_discord_relay_supervisor` | `src/server/worker_registry.rs:374` | stage=after_boot_reconcile; order=67; restart=loop_owned; shutdown=runtime_shutdown; owner=server::worker_registry; health=watcher-supervisor tracing + per-relay metrics; responsibility=Spawn/teardown session-bound StreamRelay tasks in response to SessionRegistry events; Epic #2285 / E3 (#2345), wired through E4 (#2411) and E5 (#2412). Always \
+                started on Unix hosts. Worker-local because tmux is host-scoped — relays live next to the sessions \
                 they observe. Production wires a Discord RelaySink that parses provider JSONL \
                 frames and owns Discord terminal delivery for eligible session-bound inflight \
                 shapes (rebind-origin/adopted sessions and watcher-owned relays). The legacy \
@@ -37,4 +35,4 @@
                 runtimes without a HealthRegistry. LoopOwned terminal semantics: unexpected \
                 return/panic is recorded as a worker-local terminal supervision signal; registry \
                 does not auto-restart. |
-| spawn_batch_flusher | `spawn helper` | `ws::spawn_batch_flusher` | `src/server/worker_registry.rs:399` | stage=after_websocket_broadcast; order=70; restart=loop_owned; shutdown=runtime_shutdown; owner=server::worker_registry; health=websocket broadcast throughput and tracing logs; responsibility=Flush deduplicated websocket events into the shared broadcast channel; Starts after the broadcast sender exists because it owns the shared batch buffer |
+| spawn_batch_flusher | `spawn helper` | `ws::spawn_batch_flusher` | `src/server/worker_registry.rs:397` | stage=after_websocket_broadcast; order=70; restart=loop_owned; shutdown=runtime_shutdown; owner=server::worker_registry; health=websocket broadcast throughput and tracing logs; responsibility=Flush deduplicated websocket events into the shared broadcast channel; Starts after the broadcast sender exists because it owns the shared batch buffer |

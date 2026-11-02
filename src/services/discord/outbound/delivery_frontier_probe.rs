@@ -69,17 +69,8 @@ pub(in crate::services::discord) fn delivered_frontier_current_generation(
     current_generation_durable_frontier_at(&path, current_gen, current_transcript_eof)
 }
 
-/// #3593 (flag-INDEPENDENT): the CURRENT-generation durable `delivered_frontier`
-/// END, or `0` when there is none to trust (absent/malformed record, a stale
-/// prior-generation frontier per the #1270 guard, missing transcript EOF, or a
-/// frontier END beyond the current EOF). UNLIKE
-/// [`super::delivery_record::effective_committed_offset`], this NEVER consults
-/// `AGENTDESK_DELIVERY_RECORD_AUTHORITY` — it is the durable frontier the legacy
-/// #3520 new-message floor read, surfaced so the synthetic-resume dedup gate can
-/// fuse it (`max`) with the in-memory committed offset and remain a TRUE superset
-/// of #3520 under BOTH authority states. Returning `0` (not `None`) keeps the
-/// caller's `committed.max(this)` fusion a plain `u64` op; `0` is the safe floor
-/// (`range_already_committed` suppresses NOTHING at `committed == 0`).
+/// The current-generation durable frontier END, or `0` (the safe `max` floor) when
+/// the record is absent, malformed, from an older generation, or beyond EOF.
 pub(in crate::services::discord) fn delivered_frontier_end_current_generation(
     provider: &ProviderKind,
     channel: ChannelId,

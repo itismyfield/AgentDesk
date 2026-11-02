@@ -97,7 +97,6 @@ pub const FIELDS: &[FieldReload] = &[
     row("cluster.intake_routing.input_fallback_pair_instance_ids", Live, "`src/services/cluster/input_fallback_config.rs` current (config::snapshot per input)"),
     row("cluster.semaphores.*.capacity", Live, "`src/server/task_dispatch_claims/config_read.rs` claim_task_dispatches (config::snapshot per claim)"),
     row("cluster.semaphores.*.scope", Live, "`src/server/task_dispatch_claims/config_read.rs` claim_task_dispatches (config::snapshot per claim)"),
-    row("cluster.session_bound_relay_enabled", Restart, "`src/server/worker_registry/registry.rs` start_worker (WatcherSupervisor spawn gate)"),
     row("kanban.manager_channel_id", Restart, "`src/services/kanban_cards.rs` require_explicit_bearer_token, `src/server/routes/kanban.rs` log_kanban_identity_consumption, `src/services/auto_queue/order_routes.rs` submit_order_with_pg (live runtime_config()); `src/services/auto_queue/control_routes.rs` repair_phase_gates (boot AppState.config authorization)"),
     row("kanban.deadlock_manager_channel_id", SeededAtBoot, "`src/services/settings.rs` config_default_seed_actions (applied by db/postgres/shared_config.rs:startup_reseed) -> kv deadlock_manager_channel_id"),
     row("kanban.relay_alert_threshold", SeededAtBoot, "`src/services/settings.rs` config_default_seed_actions (applied by db/postgres/shared_config.rs:startup_reseed) -> kv kanban_relay_alert_threshold"),

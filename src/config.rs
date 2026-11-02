@@ -2007,15 +2007,6 @@ fn default_cluster_lease_ttl_secs() -> u64 {
 fn default_gateway_yield_grace_secs() -> u64 {
     90
 }
-fn default_session_bound_relay_enabled() -> bool {
-    // Epic #2285 / E5 (#2412): flipped to `true` once the production tmux
-    // frame producer (`services::discord::tmux::tmux_watcher`) pushed frames into
-    // the supervisor-owned StreamRelay via `RelayProducerRegistry`. E4
-    // (#2346) now wires that relay to a Discord sink for session-bound
-    // terminal delivery on eligible inflight shapes, while preserving the
-    // legacy watcher as fallback for bridge-owned/no-inflight envelopes.
-    true
-}
 fn default_memory_backend() -> String {
     "auto".into()
 }
