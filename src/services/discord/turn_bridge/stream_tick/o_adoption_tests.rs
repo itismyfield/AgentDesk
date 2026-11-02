@@ -218,7 +218,7 @@ async fn o_channel_panel_shows_the_last_tool_in_place_even_below_o_posts() {
             ..Default::default()
         });
         let shared = panel_with_last_tool(channel);
-        let footer = crate::services::discord::turn_bridge::single_message_footer::bridge_single_message_panel_footer_enabled(shared.ui.status_panel_v2_enabled);
+        let footer = crate::services::discord::turn_bridge::single_message_footer::bridge_single_message_panel_footer_enabled();
         let state = tick_with(shared, channel, BODY, gateway.clone(), false, footer).await;
         let edits = gateway.edits.lock().unwrap().clone();
         assert!(
@@ -248,7 +248,7 @@ async fn a_last_tick_tool_is_edited_into_the_panel_below_o_posts() {
         ..Default::default()
     });
     let shared = panel_with_last_tool(channel);
-    let footer = crate::services::discord::turn_bridge::single_message_footer::bridge_single_message_panel_footer_enabled(shared.ui.status_panel_v2_enabled);
+    let footer = crate::services::discord::turn_bridge::single_message_footer::bridge_single_message_panel_footer_enabled();
     let state = tick_with(shared, channel, BODY, gateway.clone(), true, footer).await;
     let edits = gateway.edits.lock().unwrap().clone();
     assert!(

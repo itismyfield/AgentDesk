@@ -158,8 +158,7 @@ async fn collect_turn_stream_body(
     let mut placeholder_msg_id: Option<serenity::MessageId> = stream_seed.placeholder_msg_id;
     let mut placeholder_from_restored_inflight = placeholder_msg_id.is_some();
     let mut status_panel_msg_id: Option<serenity::MessageId> = stream_seed.status_panel_msg_id;
-    let single_message_panel_footer_mode =
-        watcher_single_message_panel_footer_enabled(shared.ui.status_panel_v2_enabled);
+    let single_message_panel_footer_mode = watcher_single_message_panel_footer_enabled();
     if single_message_panel_footer_mode {
         status_panel_msg_id = None;
     }

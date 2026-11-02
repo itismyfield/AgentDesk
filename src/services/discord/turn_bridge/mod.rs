@@ -368,7 +368,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         let mut active_background_child_session_ids: Vec<i64> = Vec::new();
         let (status_panel_started_at, footer_owner) = make_owner_now(user_msg_id);
         let single_message_panel_footer_mode =
-            bridge_single_message_panel_footer_enabled(shared_owned.ui.status_panel_v2_enabled);
+            bridge_single_message_panel_footer_enabled();
         let mut transport_error = false;
         let api_friction_reports = Vec::new();
         let mut transcript_events = Vec::<SessionTranscriptEvent>::new();

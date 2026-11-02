@@ -52,7 +52,6 @@ pub(in crate::services::discord) fn watcher_short_replace_cutover(
 /// [`watcher_short_replace_cutover`].
 #[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) fn watcher_short_replace_cutover_decision(
-    status_panel_v2_enabled: bool,
     should_tag_monitor_origin: bool,
     provider: &ProviderKind,
     direct_terminal_response: &str,
@@ -62,17 +61,10 @@ pub(in crate::services::discord) fn watcher_short_replace_cutover_decision(
     session_bound_fallback_uses_full_body: bool,
     tui_completion_gate_required: bool,
 ) -> bool {
-    let formatted = if status_panel_v2_enabled {
-        crate::services::discord::formatting::format_for_discord_with_status_panel(
-            direct_terminal_response,
-            provider,
-        )
-    } else {
-        crate::services::discord::formatting::format_for_discord_with_provider(
-            direct_terminal_response,
-            provider,
-        )
-    };
+    let formatted = crate::services::discord::formatting::format_for_discord_with_status_panel(
+        direct_terminal_response,
+        provider,
+    );
     let formatted = if should_tag_monitor_origin {
         crate::services::discord::prepend_monitor_auto_turn_origin(&formatted)
     } else {

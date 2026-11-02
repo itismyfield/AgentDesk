@@ -60,12 +60,7 @@ pub(in crate::services::discord::tmux::tmux_watcher) fn build_watcher_streaming_
             response_sent_offset == 0,
             raw_current_portion.to_string(),
         );
-    build_watcher_streaming_edit_text(
-        shared.ui.status_panel_v2_enabled,
-        &rendered,
-        status_block,
-        provider,
-    )
+    build_watcher_streaming_edit_text(&rendered, status_block, provider)
 }
 
 pub(in crate::services::discord::tmux::tmux_watcher) fn prefix_watcher_terminal_session_banner(

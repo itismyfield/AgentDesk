@@ -16,14 +16,13 @@ pub(super) fn make_owner_now(
     let started_at_unix = chrono::Utc::now().timestamp();
     (started_at_unix, make_owner(user_msg_id, started_at_unix))
 }
-pub(super) fn bridge_single_message_panel_footer_enabled(status_panel_v2_enabled: bool) -> bool {
+pub(super) fn bridge_single_message_panel_footer_enabled() -> bool {
     #[cfg(test)]
     if SEPARATE_PANEL_FOR_TESTS.get() {
         return false;
     }
     super::single_message_panel::footer_mode_enabled(
         crate::services::discord::single_message_panel_enabled(),
-        status_panel_v2_enabled,
     )
 }
 #[cfg(test)]
@@ -189,9 +188,8 @@ pub(super) fn build_bridge_single_message_panel_status_block(
     full_response: &str,
 ) -> String {
     // Retired snapshots omit this block, but keep its budget to preserve rollover offsets.
-    if bridge_single_message_panel_footer_enabled(shared.ui.status_panel_v2_enabled)
-        || (crate::services::discord::single_message_panel_enabled()
-            && shared.ui.status_panel_v2_enabled)
+    if bridge_single_message_panel_footer_enabled()
+        || crate::services::discord::single_message_panel_enabled()
     {
         let content = (full_response, indicator);
         return shared

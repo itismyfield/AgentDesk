@@ -471,7 +471,7 @@ async fn real_watcher_producer_posts_body_then_one_summary_for_retired_flags_and
                     "⠸ 계속 처리 중",
                 );
                 gateway.send_message(channel_id, &body).await.unwrap();
-                let mode = super::super::single_message_panel::footer_mode_enabled(single, v2);
+                let mode = super::super::single_message_panel::footer_mode_enabled(single);
                 assert!(!mode);
                 let mut spin = 0;
                 let mut last = String::new();

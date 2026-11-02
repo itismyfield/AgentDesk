@@ -481,6 +481,31 @@ mod tests {
         assert_eq!(current().unwrap().server.port, 8799);
     }
 
+    // Retired placeholder panel switches left in an edited file still reload, warn-free.
+    #[test]
+    fn reload_ignores_retired_placeholder_panel_switches() {
+        let _guard = global_test_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agentdesk.yaml");
+        write(
+            &path,
+            "server:\n  port: 8791\nplaceholder:\n  tool_activity_display: class\n",
+        );
+        install(crate::config::load_from_path(&path).unwrap());
+
+        write(
+            &path,
+            "server:\n  port: 8791\nplaceholder:\n  live_events_enabled: false\n  status_panel_v2_enabled: false\n  tool_activity_display: class\n",
+        );
+        let ReloadOutcome::Applied { restart_required } = reload_from_path(&path) else {
+            panic!("retired placeholder switches must not reject the reload");
+        };
+        assert!(restart_required.is_empty(), "{restart_required:?}");
+        let saved = serde_yaml::to_string(&*current().unwrap()).unwrap();
+        assert!(!saved.contains("live_events_enabled"), "{saved}");
+        assert!(!saved.contains("status_panel_v2_enabled"), "{saved}");
+    }
+
     #[derive(Clone, Default)]
     struct LogBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
 

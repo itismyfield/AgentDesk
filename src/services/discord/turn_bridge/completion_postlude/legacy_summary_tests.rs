@@ -89,10 +89,7 @@ async fn bridge(
         defer_watcher_resume: true,
         can_chain_locally: false,
         single_message_panel_footer_mode:
-            crate::services::discord::single_message_panel::footer_mode_enabled(
-                case.single,
-                shared.ui.status_panel_v2_enabled,
-            ),
+            crate::services::discord::single_message_panel::footer_mode_enabled(case.single),
         is_external_input_tui_direct: false,
         context_window_tokens: 1000,
         context_compact_percent: 80,

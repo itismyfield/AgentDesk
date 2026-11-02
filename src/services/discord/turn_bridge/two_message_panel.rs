@@ -378,7 +378,6 @@ pub(super) async fn reanchor_bridge_two_message_status_panel_below_answer<
                 // outcome-equivalent to the watcher path: the orphan drain
                 // classifies 403/404/410 and drops the record on its next pass.
                 crate::services::discord::status_panel_orphan_store::enqueue_separate_status_panel_orphan(
-                    shared.ui.status_panel_v2_enabled,
                     provider,
                     &shared.token_hash,
                     channel_id.get(),
