@@ -138,8 +138,8 @@ fn child() {}
         self.assertEqual(N.check(ROOT), [])
         self.assertEqual(N.inherited_pairs(ROOT), ((PARENT, CHILD),))
         rows = N.declarations(ROOT)
-        self.assertEqual(len(rows), 9)
-        self.assertEqual(sum(call["ignored_args"] for row in rows for call in row["calls"]), 14)
+        self.assertEqual(len(rows), 10)
+        self.assertEqual(sum(call["ignored_args"] for row in rows for call in row["calls"]), 15)
 
 
 class RealTranscriptTests(unittest.TestCase):

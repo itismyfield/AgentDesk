@@ -104,13 +104,43 @@ pub(in crate::services::discord) fn snowflake(age_secs: i64) -> u64 {
 /// unbounded await parks every test waiting on them; a bound fails by name and unwinds both locks.
 const SEAM_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
 
+thread_local! {
+    static FORCED_STALL: std::cell::Cell<Option<(&'static str, std::time::Duration)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Makes `seam` never finish on this thread under `limit`, to drive the real timeout unwind.
+pub(in crate::services::discord) fn force_seam_stall(
+    seam: &'static str,
+    limit: std::time::Duration,
+) {
+    FORCED_STALL.set(Some((seam, limit)));
+}
+
 pub(in crate::services::discord) async fn bounded<T>(
     seam: &str,
     future: impl std::future::Future<Output = T>,
 ) -> T {
-    tokio::time::timeout(SEAM_LIMIT, future)
+    match FORCED_STALL.get() {
+        Some((stalled, limit)) if stalled == seam => {
+            let stall = async {
+                std::future::pending::<()>().await;
+                future.await
+            };
+            bounded_with(limit, seam, stall).await
+        }
+        _ => bounded_with(SEAM_LIMIT, seam, future).await,
+    }
+}
+
+pub(in crate::services::discord) async fn bounded_with<T>(
+    limit: std::time::Duration,
+    seam: &str,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    tokio::time::timeout(limit, future)
         .await
-        .unwrap_or_else(|_| panic!("{seam} did not finish within {SEAM_LIMIT:?}"))
+        .unwrap_or_else(|_| panic!("{seam} did not finish within {limit:?}"))
 }
 
 impl Fixture {
@@ -1684,6 +1714,104 @@ fn body_reread_rejects_a_file_changed_mid_read() {
             );
             manifest::AFTER_BODY_RECORD.with(|hook| hook.borrow_mut().take());
             assert_eq!(read.is_some(), change == "none", "{change} {producer:?}");
+        }
+    }
+}
+
+/// A reboot renumbers the transcript volume's dev while the writer keeps the source it stored, so
+/// the terminal manifest finds that source by path and inode; a file replaced at the path is not it.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn renumbered_source_keeps_its_terminal_manifest_but_a_replacement_does_not() {
+    use crate::services::tui_o::shadow::capture::{file_identity, renumber};
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let f = Fixture::new(744_800, ProviderKind::Claude, &["renumbered answer"]).await;
+    let live = || file_identity(&std::fs::metadata(&f.source.path).unwrap());
+    let query = |file| manifest::Query {
+        provider: &ProviderKind::Claude,
+        channel: f.row.channel_id,
+        path: &f.source.path,
+        file,
+        range: (f.row.turn_start_offset.unwrap(), f.row.last_offset),
+    };
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    let _reboot = renumber::shift(&f.source.path, 1 << 40);
+    let renumbered = live();
+    assert_eq!(renumbered, (f.source.dev ^ (1 << 40), f.source.ino));
+    let cursor =
+        delivery_evidence::source(&f.root, f.row.channel_id, &f.source.path, renumbered).unwrap();
+    assert_eq!(cursor.source, f.source);
+    let plan = manifest::build_terminal(&f.root, query(renumbered), deadline).unwrap();
+    assert_eq!((plan.source, plan.body), (f.source.clone(), f.body.clone()));
+
+    let _old_inode = std::fs::File::open(&f.source.path).unwrap();
+    let staged = f.source.path.with_extension("replacement");
+    std::fs::copy(&f.source.path, &staged).unwrap();
+    std::fs::rename(&staged, &f.source.path).unwrap();
+    let replaced = live();
+    assert_ne!(replaced.1, f.source.ino);
+    assert!(
+        delivery_evidence::source(&f.root, f.row.channel_id, &f.source.path, replaced).is_none()
+    );
+    assert!(manifest::build_terminal(&f.root, query(replaced), deadline).is_none());
+}
+
+/// Like the writer, the observer never guesses between two stored variants of one file, even when
+/// the live stat matches one of them exactly; the same stored source listed twice is still found.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn stored_variants_of_one_file_find_no_source_but_a_repeated_source_does() {
+    use crate::services::tui_o::shadow::capture::{file_identity, renumber};
+    use crate::services::tui_o::store::rotation::{Boundary, Rotation, SourceLink};
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    for (channel, linked_dev) in [(744_801, Some(1 << 41)), (744_802, None)] {
+        let f = Fixture::new(channel, ProviderKind::Claude, &["linked answer"]).await;
+        let linked = SourceId {
+            dev: linked_dev.map_or(f.source.dev, |shift| f.source.dev ^ shift),
+            ..f.source.clone()
+        };
+        let boundary = f
+            .root
+            .join("o_store")
+            .join(channel.to_string())
+            .join("boundary");
+        assert!(!boundary.exists());
+        let link = SourceLink {
+            source: linked.clone(),
+            seq: 1,
+            parent: None,
+            committed_at: chrono::Utc::now(),
+            boundary: Boundary::Owed { from: 0 },
+            hot_candidate: None,
+        };
+        let rotation = Rotation {
+            links: [(
+                crate::services::tui_o::store::spool::source_key(&linked),
+                link,
+            )]
+            .into(),
+            successors: Default::default(),
+        };
+        std::fs::write(&boundary, serde_json::to_vec(&rotation).unwrap()).unwrap();
+        let source = |file| delivery_evidence::source(&f.root, channel, &f.source.path, file);
+        let exact = file_identity(&std::fs::metadata(&f.source.path).unwrap());
+        assert_eq!(exact, (f.source.dev, f.source.ino));
+        let _reboot = renumber::shift(&f.source.path, 1 << 40);
+        let renumbered = file_identity(&std::fs::metadata(&f.source.path).unwrap());
+        assert_eq!(renumbered, (f.source.dev ^ (1 << 40), f.source.ino));
+        for live in [exact, renumbered] {
+            let found = source(live).map(|cursor| cursor.source);
+            if linked_dev.is_some() {
+                assert_eq!(found, None, "two stored variants, live {live:?}");
+            } else {
+                assert_eq!(
+                    found,
+                    Some(f.source.clone()),
+                    "repeated source, live {live:?}"
+                );
+            }
         }
     }
 }

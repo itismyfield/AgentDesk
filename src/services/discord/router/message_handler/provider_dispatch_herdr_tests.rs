@@ -1519,6 +1519,8 @@ fn coldstop_execute_fresh_pending_bound_closed_arm_releases_hold_pg() {
 #[path = "provider_dispatch_live_end_tests.rs"]
 pub(super) mod live_end;
 
+#[path = "provider_dispatch_herdr_fresh_notice_tests.rs"]
+mod fresh_notice_tests;
 #[path = "provider_dispatch_herdr_start_offset_tests.rs"]
 mod start_offset_tests;
 #[path = "provider_dispatch_herdr_tmux_launch_tests.rs"]
@@ -1654,6 +1656,7 @@ fn f1_a_tmux_session_resumes_on_herdr_under_its_own_id_after_its_claude_exits_pg
     assert_eq!(logged[0].cause, BindingCause::Resume);
     assert!(matches!(&logged[0].new, BindingTarget::Source(source) if source.path == path));
     assert!(std::fs::read(&path).unwrap().starts_with(&before));
+    assert_eq!(fresh_notice_tests::notices(&fx, &session), 0);
     let account = crate::services::provider_auth_profile::DEFAULT_PROFILE_ID;
     assert_eq!(fx.session_auth(), Some(format!("{session}\n{account}")));
 }

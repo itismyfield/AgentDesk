@@ -11,10 +11,13 @@ pub(super) fn run(
     home: Option<OsString>,
     out: &mut dyn Write,
 ) -> Result<(), String> {
+    let home = home.map(PathBuf::from);
     let socket = match socket {
         Some(socket) => socket,
         // The socket a local user_default endpoint resolves when its socket_path is omitted.
-        None => PathBuf::from(home.ok_or("HOME is unset; pass --socket")?)
+        None => home
+            .clone()
+            .ok_or("HOME is unset; pass --socket")?
             .join(".config/herdr/herdr.sock"),
     };
     if !socket.is_absolute() {
@@ -24,7 +27,9 @@ pub(super) fn run(
         ));
     }
     super::super::direct::run_async(async move {
-        let report = crate::services::session_host::policy::diagnostics::probe(&socket).await?;
+        let env = crate::services::session_host::autostart::Environment::for_home(home);
+        let report =
+            crate::services::session_host::policy::diagnostics::probe(&socket, env).await?;
         let text = serde_json::to_string_pretty(&report).unwrap_or_else(|_| report.to_string());
         writeln!(out, "{text}").map_err(|error| format!("herdr probe output: {error}"))
     })

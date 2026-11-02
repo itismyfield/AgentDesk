@@ -21,6 +21,7 @@ use super::herdr::observe::{self, RestoreResume, RestoreUnverified};
 use super::herdr::pane_probe::{self, EvidenceGap, HostOs, PaneProcesses, ProbeRequest, ProcessOs};
 use super::herdr::policy::Unverified;
 use super::herdr::policy::permit::{ExistingMutationEvidence, ExistingMutationPermit};
+use super::herdr::provenance;
 use super::model::{HostError, HostKey, HostKind, HostMutation, HostPresence, HostRefusal};
 use crate::db::dispatched_sessions::hosted_execution::{
     ExpectedExecution, HostedExecution, HostedLocation, HostedState, ProcessStamp,
@@ -814,19 +815,31 @@ impl HerdrPaneView {
     }
 }
 
-/// `record`'s execution is over: its pane is gone, or a lone shell is left that is its recorded
-/// root or another shell outliving both recorded processes; only the latter reads the OS.
 fn confirmed_ended(os: &dyn ProcessOs, record: &HostedExecution, reading: &PaneReading) -> bool {
-    let absent = |stamp: &ProcessStamp| {
-        pane_probe::recorded_process(os, stamp) == pane_probe::RecordedProcess::ProvenAbsent
-    };
+    ended_across(os, record, reading, &|| None)
+}
+
+/// `record`'s execution is over: its pane is gone, or a lone shell is left that is its recorded
+/// root or outlives both recorded processes; only that last check reads the OS and `rebooted`.
+fn ended_across(
+    os: &dyn ProcessOs,
+    record: &HostedExecution,
+    reading: &PaneReading,
+    rebooted: &dyn Fn() -> Option<provenance::StartIdentity>,
+) -> bool {
     match reading {
         PaneReading::Missing => true,
         PaneReading::Present {
             root,
             provider: PaneProvider::Exited,
         } => record.expected.as_ref().is_some_and(|expected| {
-            expected.root == *root || (absent(&expected.root) && absent(&expected.provider_process))
+            if expected.root == *root {
+                return true;
+            }
+            let rebooted = rebooted();
+            let absent =
+                |stamp: &ProcessStamp| pane_probe::original_gone(os, stamp, rebooted).is_ok();
+            absent(&expected.root) && absent(&expected.provider_process)
         }),
         PaneReading::Present { .. } | PaneReading::Unreadable(_) => false,
     }

@@ -3051,6 +3051,7 @@ fn cross_turn_watcher_reuse_discards_restored_seed_through_watcher_wiring_4105()
         same_turn_rewind: false,
         delivery_source: None,
         body_source: None,
+        producer_turn_nonce: None,
     };
 
     let disposition = watcher_stream_seed_after_restored_seed_discard(

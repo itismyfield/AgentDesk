@@ -1139,11 +1139,7 @@ function recordPrCreateFailureForSweep(cardId, errorMsg, stampGen) {
 // forever and the 21st never lands. The next recordPrCreateFailure overwrites
 // last_error and re-arms the row for that generation.
 function markPrCreateHandedOff(cardId, errorMsg) {
-  agentdesk.db.execute(
-    "UPDATE pr_tracking SET last_error = ?, updated_at = datetime('now') " +
-    "WHERE card_id = ? AND state IN ('create-pr', 'escalated')",
-    ["handed-off:" + errorMsg, cardId]
-  );
+  prTracking.markHandedOff(cardId, errorMsg);
 }
 
 // #5716: escalate()/flushEscalations drops pending entries for terminal cards (loadManualInterventionState
@@ -1161,7 +1157,7 @@ function handOffPrCreateFailure(cardId, errorMsg, retryCount, generation) {
   if (agentdesk.kv.get(dedupKey)) {
     // Still a sweep candidate (no marker ⇒ it self-heals once the kv TTL lapses), but bumped so it stops
     // pinning the head of ORDER BY updated_at LIMIT 20 — 20 such rows starved every newer stranded card.
-    agentdesk.db.execute("UPDATE pr_tracking SET updated_at = datetime('now') WHERE card_id = ? AND dispatch_generation = ?", [cardId, generation || ""]);
+    prTracking.touchGeneration(cardId, generation || "");
     return "deduped";
   }
   var card = agentdesk.cards.get(cardId);
@@ -1197,14 +1193,7 @@ function handOffPrCreateFailure(cardId, errorMsg, retryCount, generation) {
 // deadlock-channel enqueue kept failing 30 days after its last write. Without a deadlock channel the
 // handoff settles on its human-alert WARN log line (#5993) unless recording the handoff fails.
 function sweepStrandedPrCreateFailures() {
-  var rows = agentdesk.db.query(
-    "SELECT card_id, last_error, retry_count, dispatch_generation FROM pr_tracking " +
-    "WHERE state IN ('create-pr', 'escalated') AND retry_count > 0 " +
-    "AND COALESCE(last_error, '') NOT LIKE 'handed-off:%' " +
-    "AND updated_at > datetime('now', '-30 days') " +
-    "ORDER BY updated_at LIMIT 20",
-    []
-  );
+  var rows = prTracking.listStrandedCreatePr(20);
   var handed = 0;
   var deduped = 0;
   for (var i = 0; i < rows.length; i++) {

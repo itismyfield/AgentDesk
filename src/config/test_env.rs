@@ -7,6 +7,7 @@ pub(crate) struct TestEnvVarGuard {
 }
 
 impl TestEnvVarGuard {
+    #[track_caller]
     pub(crate) fn set_path(key: &'static str, value: &std::path::Path) -> Self {
         let lock = super::test_env_lock::acquire_shared_test_env_lock();
         let previous = std::env::var_os(key);
@@ -64,6 +65,7 @@ impl Drop for TestEnvVarGuard {
     }
 }
 
+#[track_caller]
 pub(crate) fn set_agentdesk_root_for_test(path: &std::path::Path) -> TestEnvVarGuard {
     TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", path)
 }
@@ -84,6 +86,7 @@ pub(crate) struct TestRuntimeRootGuard {
 }
 
 impl TestRuntimeRootGuard {
+    #[track_caller]
     pub(crate) fn new() -> Self {
         let root = tempfile::tempdir().expect("runtime root");
         let env = set_agentdesk_root_for_test(root.path());

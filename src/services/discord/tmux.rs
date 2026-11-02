@@ -313,6 +313,7 @@ mod restored_seed_discard_tests {
             same_turn_rewind: false,
             delivery_source: None,
             body_source: None,
+            producer_turn_nonce: None,
         };
 
         let seed_reassigned_to_different_turn = restored_seed_reassigned_to_different_turn(

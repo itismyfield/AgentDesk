@@ -135,7 +135,7 @@ async fn durable_exact_path_observes_cancellation_before_database_work() {
         &ProviderKind::Claude,
         7,
         Some(&cancel_token),
-        true,
+        (true, None),
     )
     .await
     .expect("pre-cancelled durable enqueue must not touch postgres");
@@ -181,7 +181,7 @@ async fn durable_enqueue_with(
         provider,
         generation,
         None,
-        enabled,
+        (enabled, None),
     )
     .await
     .unwrap()
@@ -253,6 +253,44 @@ async fn durable_exact_identity_is_content_free_and_owner_sensitive_pg() {
         finite_expiry,
         "durable sent rows must remain retention-eligible"
     );
+}
+
+/// A durable retry that lands on the exact identity keeps the turn that first queued the row.
+#[tokio::test]
+async fn durable_exact_conflict_keeps_first_producer_turn_nonce_pg() {
+    let Some((_pg_db, pool)) = durable_test_pool("agentdesk_headless_producer_turn").await else {
+        return;
+    };
+    let enqueue = |nonce| {
+        durable_outbox::enqueue_headless_outbox_with_rollout(
+            &pool,
+            OutboxMessage {
+                target: "channel:5191",
+                content: "answer",
+                bot: "claude",
+                source: "headless_turn",
+                reason_code: Some("headless.delivery"),
+                session_key: Some("session"),
+            },
+            Some(MessageId::new(8)),
+            &ProviderKind::Claude,
+            7,
+            None,
+            (true, nonce),
+        )
+    };
+    let id = enqueued_id(enqueue(Some("turn-a")).await.unwrap());
+    assert_eq!(
+        enqueue(Some("turn-b")).await.unwrap(),
+        OutboxEnqueueOutcome::Enqueued { id }
+    );
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT producer_turn_nonce FROM message_outbox WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("read producer turn");
+    assert_eq!(stored.as_deref(), Some("turn-a"));
 }
 
 #[tokio::test]
