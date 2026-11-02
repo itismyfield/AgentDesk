@@ -6,6 +6,7 @@ import type {
 import {
   formatNumber,
   opsToneToHealth,
+  publicOnlyHealthNote,
 } from "./OpsPageModel";
 import { StatusBadge } from "./common/StatusBadge";
 import { FreshnessIndicator } from "./common/FreshnessIndicator";
@@ -57,8 +58,8 @@ export default function OpsConnectionPanel({
           <div className="min-w-0"><h3 className="text-xs text-th-text-muted">{tr("실시간 이벤트", "Live events")}</h3><p className="mt-2 text-sm font-medium text-th-text-primary">{wsConnected ? tr("받는 중", "Receiving") : tr("끊김", "Disconnected")}</p><p className="mt-1 text-xs leading-5 text-th-text-secondary">{wsConnected ? tr("이벤트가 오면 상태를 바로 새로 확인해요.", "Health refreshes when an event arrives.") : tr("연결을 되살리는 동안 주기적으로 확인해요.", "Health is polled while the connection recovers.")}</p></div>
         </div>
         <div className="grid grid-cols-2 divide-x divide-th-border-subtle">
-          <div data-testid="ops-dispatch-outbox-card" className="min-w-0 py-4 pr-4"><h3 className="text-xs text-th-text-muted">{tr("전달 대기", "Outbox")}</h3><p className="mt-2 text-xl font-semibold tabular-nums text-th-text-primary">{health ? formatNumber(health.dispatch_outbox?.pending ?? 0) : "—"}</p><p className="mt-1 text-xs leading-5 text-th-text-muted">{tr(`재시도 ${formatNumber(health?.dispatch_outbox?.retrying ?? 0)} · 실패 ${formatNumber(health?.dispatch_outbox?.permanent_failures ?? 0)}`, `retry ${formatNumber(health?.dispatch_outbox?.retrying ?? 0)} · fail ${formatNumber(health?.dispatch_outbox?.permanent_failures ?? 0)}`)}</p></div>
-          <div data-testid="ops-providers-card" className="min-w-0 py-4 pl-4"><h3 className="text-xs text-th-text-muted">{tr("프로바이더", "Providers")}</h3><p className="mt-2 text-xl font-semibold tabular-nums text-th-text-primary">{health ? `${connectedProviders}/${providerCount}` : "—"}</p><p className="mt-1 text-xs leading-5 text-th-text-muted">{tr(`연결 끊김 ${formatNumber(disconnectedProviders)} · 재시작 ${formatNumber(restartPendingProviders)}`, `disconnect ${formatNumber(disconnectedProviders)} · restart ${formatNumber(restartPendingProviders)}`)}</p></div>
+          <div data-testid="ops-dispatch-outbox-card" className="min-w-0 py-4 pr-4"><h3 className="text-xs text-th-text-muted">{tr("전달 대기", "Outbox")}</h3><p className="mt-2 text-xl font-semibold tabular-nums text-th-text-primary">{health && !health.publicOnly ? formatNumber(health.dispatch_outbox?.pending ?? 0) : "—"}</p><p className="mt-1 text-xs leading-5 text-th-text-muted">{publicOnlyHealthNote(health, tr) ?? tr(`재시도 ${formatNumber(health?.dispatch_outbox?.retrying ?? 0)} · 실패 ${formatNumber(health?.dispatch_outbox?.permanent_failures ?? 0)}`, `retry ${formatNumber(health?.dispatch_outbox?.retrying ?? 0)} · fail ${formatNumber(health?.dispatch_outbox?.permanent_failures ?? 0)}`)}</p></div>
+          <div data-testid="ops-providers-card" className="min-w-0 py-4 pl-4"><h3 className="text-xs text-th-text-muted">{tr("프로바이더", "Providers")}</h3><p className="mt-2 text-xl font-semibold tabular-nums text-th-text-primary">{health && !health.publicOnly ? `${connectedProviders}/${providerCount}` : "—"}</p><p className="mt-1 text-xs leading-5 text-th-text-muted">{publicOnlyHealthNote(health, tr) ?? tr(`연결 끊김 ${formatNumber(disconnectedProviders)} · 재시작 ${formatNumber(restartPendingProviders)}`, `disconnect ${formatNumber(disconnectedProviders)} · restart ${formatNumber(restartPendingProviders)}`)}</p></div>
         </div>
         <div data-testid="ops-prompt-retention-card" className="min-w-0 py-4">
           <div className="flex flex-wrap items-start justify-between gap-3">

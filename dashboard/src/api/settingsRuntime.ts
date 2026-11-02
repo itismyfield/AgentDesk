@@ -1,6 +1,6 @@
 import type { CompanySettings } from "../types";
 import type { ConfigEditValue, ConfigEntry } from "../components/settings/SettingsModel";
-import { readCachedGet, request, type CachedGetEntry } from "./httpClient";
+import { ApiRequestError, readCachedGet, request, type CachedGetEntry } from "./httpClient";
 
 export async function getSettings(): Promise<Partial<CompanySettings>> {
   return request("/api/settings");
@@ -151,6 +151,8 @@ export interface HealthResponse {
   dashboard?: boolean;
   outbox_age?: number;
   dispatch_outbox?: HealthDispatchOutboxStats;
+  /** Set when only the public summary came back, so detail-only fields are absent, not zero. */
+  publicOnly?: "forbidden" | "failed";
 }
 
 // #2050 P3 finding 18 — normalize optional fields so consumers don't have
@@ -185,10 +187,21 @@ function normalizeHealth(raw: unknown): HealthResponse {
   };
 }
 
-/** Protected variant with provider, uptime and queue metrics; the public `/api/health` omits them. */
+// Without a server auth token, detail answers loopback peers only, so tailnet devices get 403 every time.
+let healthDetailForbidden = false;
+
+/** Detail health (providers, uptime, queues) where the server allows it, otherwise the public summary marked `publicOnly`. */
 export async function getHealthDetail(): Promise<HealthResponse> {
-  const raw = await request<unknown>("/api/health/detail");
-  return normalizeHealth(raw);
+  let publicOnly: HealthResponse["publicOnly"] = "forbidden";
+  if (!healthDetailForbidden) {
+    try {
+      return normalizeHealth(await request<unknown>("/api/health/detail", { suppressErrorToast: true }));
+    } catch (error) {
+      healthDetailForbidden = error instanceof ApiRequestError && error.status === 403;
+      if (!healthDetailForbidden) publicOnly = "failed";
+    }
+  }
+  return { ...normalizeHealth(await request<unknown>("/api/health")), publicOnly };
 }
 
 export interface PromptManifestRetentionStatus {
