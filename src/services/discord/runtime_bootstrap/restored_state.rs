@@ -1,5 +1,31 @@
 use super::super::*;
 
+/// The channel model overrides saved in `bot_settings`, as boot restores them.
+pub(in crate::services::discord) fn restored_model_overrides(
+    bot_settings: &DiscordBotSettings,
+) -> Vec<(ChannelId, String)> {
+    bot_settings
+        .channel_model_overrides
+        .iter()
+        .filter_map(|(channel_id, model)| {
+            channel_id
+                .parse::<u64>()
+                .ok()
+                .map(|id| (ChannelId::new(id), model.clone()))
+        })
+        .collect()
+}
+
+/// Puts restored model overrides into the map a turn reads its model from.
+pub(in crate::services::discord) fn restore_model_overrides(
+    into: &dashmap::DashMap<ChannelId, String>,
+    restored: &[(ChannelId, String)],
+) {
+    for (channel_id, model) in restored {
+        into.insert(*channel_id, model.clone());
+    }
+}
+
 pub(super) fn restored_fast_mode_enabled_channels_for_provider(
     bot_settings: &DiscordBotSettings,
     _provider: &ProviderKind,
