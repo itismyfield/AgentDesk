@@ -190,11 +190,13 @@ fn update_guard(guard: &mut Vec<u8>, chunk: &[u8]) {
 }
 
 impl SourceCapture {
-    /// Opens `source.path` read-only at `start_offset`; a torn first line is skipped.
+    /// Opens `source.path` read-only at `start_offset`; a torn first line is skipped. A renumbered
+    /// dev passes, as in each poll's `Fingerprint::path`; the capture keeps the stored source.
     pub fn open(source: SourceId, start_offset: u64) -> io::Result<Self> {
         let file = File::open(&source.path)?;
         let meta = file.metadata()?;
-        if file_identity(&meta) != (source.dev, source.ino) || start_offset > meta.len() {
+        let replaced = file_match(&source, file_identity(&meta)) == FileMatch::Other;
+        if replaced || start_offset > meta.len() {
             return Err(io::ErrorKind::InvalidInput.into());
         }
         Self::opened(source, file, &meta, start_offset)
@@ -538,6 +540,28 @@ mod tests {
         file.write_all(b"a").unwrap();
         assert_eq!(poll(&mut capture, budget), Err(Kind::Oversized));
     }
+    /// Open names the stored source by path and inode: a new inode at the path is refused at once,
+    /// while a dev a reboot renumbered opens and polls.
+    #[cfg(unix)]
+    #[test]
+    fn open_refuses_a_new_inode_at_the_path_but_takes_a_renumbered_dev() {
+        let (dir, path, _held) = open_fixture(0);
+        let source = source_id_for("s", &path).unwrap();
+        let aside = dir.path().join("aside.jsonl");
+        std::fs::rename(&path, &aside).unwrap();
+        std::fs::copy(&aside, &path).unwrap();
+        let refused = SourceCapture::open(source.clone(), 0)
+            .err()
+            .map(|e| e.kind());
+        assert_eq!(refused, Some(io::ErrorKind::InvalidInput), "a new inode");
+        std::fs::rename(&aside, &path).unwrap();
+
+        let _reboot = renumber::shift(&path, 1 << 40);
+        let mut capture = SourceCapture::open(source, 0).unwrap();
+        let polled = poll(&mut capture, MAX).map(|records| records.len());
+        assert_eq!(polled, Ok(line_ends().len()), "a renumbered dev");
+    }
+
     #[cfg(unix)]
     #[test]
     fn readers_s1a_access_error_is_unreadable_not_replaced() {
