@@ -600,8 +600,8 @@ pub(crate) fn busy_owner_observer(
     let (tmux, nonce, frame) = (tmux.to_string(), nonce.to_string(), frame.to_string());
     let transcript = transcript.to_path_buf();
     Some(Box::new(move || {
-        use crate::services::platform::tmux::{PaneLiveness, pane_liveness};
-        let mut idle_since = None;
+        use crate::services::claude_tui::host_input::legacy_pane_alive;
+        let (mut idle_since, mut dead_reads) = (None, 0);
         let at = loop {
             if cancel.cancelled.load(Ordering::Relaxed) {
                 return Ok(());
@@ -610,7 +610,9 @@ pub(crate) fn busy_owner_observer(
             if let Some((offset, _)) = taken("claude", &tmux, &nonce) {
                 break offset;
             }
-            if pane_liveness(&tmux) == PaneLiveness::DeadOrAbsent {
+            // Three misses in a row, so one failed probe does not end a live turn's read.
+            dead_reads = if legacy_pane_alive(&tmux) { 0 } else { dead_reads + 1 };
+            if dead_reads >= 3 {
                 return Err("claude tui session died before taking the input".into());
             }
             let busy =
