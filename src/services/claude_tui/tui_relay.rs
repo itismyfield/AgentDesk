@@ -394,9 +394,7 @@ async fn handle_wait(Json(req): Json<WaitRequest>) -> Json<Value> {
     // Now claim the registry key for events that landed in the early window
     // (after the previous turn drained the channel but before this subscriber
     // existed). `claim_matching_once` consumes ONLY the matching event and leaves
-    // any non-matching buffered events for a later waiter. When the registry is
-    // disabled via the rollback flag, this is a no-op and the behaviour reverts
-    // to the pure broadcast wait.
+    // any non-matching buffered events for a later waiter.
     if let Some(early) = try_claim_registry_match(
         req.provider.as_deref(),
         req.session_id.as_deref(),
@@ -491,7 +489,7 @@ async fn handle_wait(Json(req): Json<WaitRequest>) -> Json<Value> {
 /// tmux fallback), and `/tui/wait` callers that omit `session_id` intentionally
 /// accept "any session", which the registry (per-key) cannot represent. Those
 /// callers fall through to the broadcast wait unchanged. Returns `None` when
-/// the registry is disabled, no key can be formed, or no buffered event matches.
+/// no key can be formed or no buffered event matches.
 fn try_claim_registry_match(
     want_provider: Option<&str>,
     want_session_id: Option<&str>,
@@ -500,9 +498,6 @@ fn try_claim_registry_match(
     not_before: Option<DateTime<Utc>>,
 ) -> Option<HookEvent> {
     use crate::services::claude_tui::hook_registry;
-    if !hook_registry::registry_enabled() {
-        return None;
-    }
     // Registry replay must be tied to a concrete turn lower-bound. Without it,
     // a previous turn's still-in-TTL Stop/token payload for the same provider
     // session can satisfy the next wait before the live broadcast path sees any

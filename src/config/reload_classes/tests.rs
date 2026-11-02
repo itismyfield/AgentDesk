@@ -307,7 +307,7 @@ fn audited_fields_have_their_traced_class() {
         // Captured by the hook registry's LazyLock on first access.
         ("runtime.tui_hook_buffer_ttl_secs", Restart),
         ("runtime.tui_unclaimed_stop_delay_ms", Restart),
-        ("runtime.tui_hook_registry_enabled", Live),
+        ("runtime.herdr_turn_enabled", Live),
         ("kanban.manager_channel_id", Restart),
         ("policies/default-pipeline.yaml", Restart),
         // Copied into kv_meta / the runtime-config blob or the DB at boot.
@@ -337,7 +337,7 @@ fn changes_are_reported_per_field_and_skip_live_fields() {
             .collect::<Vec<_>>()
     };
     assert!(changed(|c| c.cluster.intake_routing.capacity_aware ^= true).is_empty());
-    assert!(changed(|c| c.runtime.tui_hook_registry_enabled = Some(false)).is_empty());
+    assert!(changed(|c| c.runtime.herdr_turn_enabled = Some(true)).is_empty());
     assert_eq!(
         changed(|c| c.cluster.execution_slots = Some(3)),
         ["cluster.execution_slots"]

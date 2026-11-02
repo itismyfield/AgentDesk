@@ -626,8 +626,6 @@ mod tests {
     fn idle_jsonl_shared_dedup_sends_range_once_then_skips_committed_retry() {
         use std::sync::atomic::Ordering;
 
-        let _authority =
-            crate::services::discord::outbound::delivery_record::authority_test_seam::force(false);
         let shared = crate::services::discord::make_shared_data_for_tests();
         let provider = ProviderKind::Claude;
         let channel = ChannelId::new(4_164);

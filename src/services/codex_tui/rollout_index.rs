@@ -33,14 +33,7 @@
 //! Invalidation deliberately prefers a **false miss** (an extra rescan) over a
 //! **stale hit** (resuming the wrong rollout) — see PRD risk table.
 //!
-//! # Rollback
-//!
-//! The cache is gated by `RuntimeSettingsConfig::codex_rollout_index_cache_enabled`
-//! (default ON, hot-reloadable). When disabled, [`cached_indexed_rollouts`]
-//! falls through to the direct [`rollout_files_under`] scan plus
-//! [`read_rollout_session_meta`] header reads, exactly reproducing the legacy
-//! behaviour with zero cache state. Tests can also force the cold path with
-//! [`reset_cache_for_tests`].
+//! Tests can force the cold path with [`reset_cache_for_tests`].
 
 use serde_json::Value;
 use std::collections::HashMap;
@@ -134,23 +127,6 @@ struct IndexState {
 fn cache() -> &'static Mutex<IndexState> {
     static CACHE: OnceLock<Mutex<IndexState>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(IndexState::default()))
-}
-
-/// Pure enablement decision from a config field value. `None` (field unset)
-/// means "enabled" — the feature defaults ON. Split out so the gate is unit
-/// testable without touching the process-global live-config snapshot.
-fn enabled_from_field(field: Option<bool>) -> bool {
-    field.unwrap_or(true)
-}
-
-/// Live config gate. A `None` config snapshot (pre-boot / unit tests) and a
-/// `None` field both mean "enabled". Read via `config_live_reload::current()`
-/// so an `agentdesk.yaml` edit applies on the next lookup without a restart.
-fn cache_enabled() -> bool {
-    let field = crate::config_live_reload::current()
-        .map(|cfg| cfg.runtime.codex_rollout_index_cache_enabled)
-        .unwrap_or(None);
-    enabled_from_field(field)
 }
 
 /// Recursively collect `rollout-*.jsonl` files under `root`. This is the shared
@@ -439,20 +415,7 @@ fn rollout_membership_in_dir(dir: &Path) -> Option<DirMembership> {
 /// per-file map is still consulted, so only headers whose `(modified, len)`
 /// changed (or never-seen files) are re-read — a single new rollout does NOT
 /// re-read every surviving file's header.
-///
-/// When the cache is disabled (config flag off) this still returns the full
-/// candidate set, but performs a fresh scan + header read each time — i.e. it is
-/// behaviourally identical to the legacy path, just routed through one helper.
 pub fn cached_indexed_rollouts(root: &Path) -> Vec<IndexedRollout> {
-    cached_indexed_rollouts_inner(root, cache_enabled())
-}
-
-/// Internal seam taking the enablement decision explicitly so the disabled
-/// (rollback) path is testable without mutating the process-global live config.
-fn cached_indexed_rollouts_inner(root: &Path, enabled: bool) -> Vec<IndexedRollout> {
-    if !enabled {
-        return scan_indexed_rollouts(root, None);
-    }
     let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
 
     // Snapshot the previous per-root state so headers (and, on a signature hit,
@@ -665,7 +628,7 @@ fn strict_header_reader(file: std::fs::File, path: &Path) -> Box<dyn std::io::Re
 /// Test seam: fills the discovery cache for `root` as an enabled lookup would.
 #[cfg(test)]
 pub(crate) fn warm_cache_for_tests(root: &Path) -> Vec<IndexedRollout> {
-    cached_indexed_rollouts_inner(root, true)
+    cached_indexed_rollouts(root)
 }
 
 /// Test seam: the cached header for `path` under `root`; `Some(None)` is a cached negative.
@@ -723,8 +686,7 @@ fn store_root(
 
 /// Clear the entire cache. Test-only hook (REQ-004): lets tests force the cold
 /// path and prevents cross-test contamination from a shared process-lifetime
-/// cache. Compiled only under `cfg(test)`; the production rollback path is the
-/// `codex_rollout_index_cache_enabled` config flag, not this function.
+/// cache. Compiled only under `cfg(test)`.
 #[cfg(test)]
 pub fn reset_cache_for_tests() {
     let mut state = lock_cache();
@@ -1061,45 +1023,6 @@ mod tests {
             warm[0].meta.as_ref().unwrap().id.as_deref(),
             Some("new-longer-id"),
             "a content/length rewrite must re-parse the header"
-        );
-    }
-
-    // Gate logic: unset field defaults ON; explicit false disables.
-    #[test]
-    fn enabled_from_field_defaults_on() {
-        assert!(enabled_from_field(None));
-        assert!(enabled_from_field(Some(true)));
-        assert!(!enabled_from_field(Some(false)));
-    }
-
-    // Rollback contract: with the cache disabled, lookups still return the exact
-    // same candidate set (correctness preserved) but populate NO cache state, so
-    // there is no stale-hit surface. This is the behavioural rollback proven
-    // without mutating the process-global live config.
-    #[test]
-    fn disabled_cache_returns_results_but_caches_nothing() {
-        let _guard = lock_test();
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = tempfile::tempdir().unwrap();
-        write_rollout(dir.path(), "2026/05/rollout-a.jsonl", "s1", cwd.path());
-
-        let disabled = cached_indexed_rollouts_inner(dir.path(), false);
-        assert_eq!(disabled.len(), 1);
-        assert_eq!(disabled[0].meta.as_ref().unwrap().id.as_deref(), Some("s1"));
-        {
-            let state = lock_cache();
-            assert!(
-                state.roots.is_empty(),
-                "disabled cache must not populate any root state"
-            );
-        }
-
-        // And the enabled path produces the identical candidate set.
-        let enabled = cached_indexed_rollouts_inner(dir.path(), true);
-        assert_eq!(enabled.len(), disabled.len());
-        assert_eq!(
-            enabled[0].meta.as_ref().unwrap().id.as_deref(),
-            disabled[0].meta.as_ref().unwrap().id.as_deref()
         );
     }
 

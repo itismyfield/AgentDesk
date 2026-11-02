@@ -502,9 +502,7 @@ pub(super) fn validate_inflight_state_for_save_with_delivery_rewind_reason(
     let is_legitimate_delivery_rewind =
         is_legitimate_full_reset || is_legitimate_reasoned_delivery_rewind;
     use crate::services::discord::outbound::delivery_record as dr;
-    let authority = dr::delivery_record_authority_enabled();
     let enforce_skips_backward_write = dr::authority_blocks_backward_inflight_write(
-        authority,
         monotonic_offset,
         last_offset_monotonic,
         is_legitimate_delivery_rewind,
@@ -590,9 +588,8 @@ pub(super) fn validate_inflight_state_for_save_with_delivery_rewind_reason(
         }),
     );
 
-    // #3416/#3089 B3: observe→ENFORCE under the durable-authority flag (no-op
-    // when OFF); see dr::authority_blocks_backward_inflight_write. The
-    // violation was already recorded above (WARN, per #3552).
+    // Enforce the same-turn backward-write guard; the violation was already
+    // recorded above at WARN.
     if enforce_skips_backward_write {
         tracing::warn!(
             "#3416 enforce: skipped backward inflight write at {}",

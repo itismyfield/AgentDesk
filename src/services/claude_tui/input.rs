@@ -116,9 +116,8 @@ fn followup_prompt_ready_timeout() -> Duration {
 /// #tui-hook-ttl-buffer (REQ-006): claim the Claude hook registry key for this
 /// tmux session and report whether a fresh Stop / SubagentStop was already
 /// buffered. `claim_once` drains and drops the key so the consumed Stop cannot
-/// replay into a later turn (single-consumption). Returns `false` when the
-/// registry is disabled by the rollback flag, when no key/event matches, or
-/// when the buffered events are not Stop kinds — in which case the caller falls
+/// replay into a later turn (single-consumption). Returns `false` when no
+/// key/event matches or when the buffered events are not Stop kinds — in which case the caller falls
 /// through to the existing Notify fast path and polling fallback unchanged.
 ///
 /// Key-match (REQ-001): for a hosted Claude launch the hook relay buffers under
@@ -140,9 +139,6 @@ fn followup_prompt_ready_timeout() -> Duration {
 fn claude_registry_stop_already_buffered(session_name: &str) -> bool {
     use crate::services::claude_tui::hook_registry;
     use crate::services::claude_tui::hook_server::HookEventKind;
-    if !hook_registry::registry_enabled() {
-        return false;
-    }
     // Prefer the provider session UUID the relay actually buffers under; fall
     // back to the tmux session name when no launch mapping is recorded.
     let provider_session_id =
@@ -698,7 +694,7 @@ fn wait_for_prompt_ready_inner(
     // the prompt marker (the same gate the Notify fast path applies via its
     // post-event snapshot) before returning ready. A stale Stop whose pane is
     // still mid-turn therefore does NOT short-circuit; it falls through to the
-    // normal Notify + polling path. The rollback flag turns the whole block off.
+    // normal Notify + polling path.
     if claude_registry_stop_already_buffered(session_name) {
         check_prompt_cancel(cancel_token)?;
         let snapshot = prompt_readiness_snapshot(session_name);
