@@ -198,19 +198,22 @@ mod tests {
         )
         .await;
 
-        let replacements = capturing_gateway
-            .replacements
-            .lock()
-            .expect("replacements lock");
-        assert_eq!(replacements.len(), 1);
-        let delivered = &replacements[0];
-        assert!(delivered.contains("<@4215> ⚠️ 현재 대화가 provider의 컨텍스트 한도를 넘었어요."));
-        assert!(delivered.contains("`/compact`"));
-        assert!(delivered.contains("요청을 짧게"));
-        assert!(delivered.contains("||**상세**\n```text\n__prompt too long__"));
-        assert!(delivered.contains(provider_detail));
-        assert!(!delivered.contains("다음 메시지를 보내면 자동으로 새 턴이 시작됩니다."));
-        drop(replacements);
+        {
+            let replacements = capturing_gateway
+                .replacements
+                .lock()
+                .expect("replacements lock");
+            assert_eq!(replacements.len(), 1);
+            let delivered = &replacements[0];
+            assert!(
+                delivered.contains("<@4215> ⚠️ 현재 대화가 provider의 컨텍스트 한도를 넘었어요.")
+            );
+            assert!(delivered.contains("`/compact`"));
+            assert!(delivered.contains("요청을 짧게"));
+            assert!(delivered.contains("||**상세**\n```text\n__prompt too long__"));
+            assert!(delivered.contains(provider_detail));
+            assert!(!delivered.contains("다음 메시지를 보내면 자동으로 새 턴이 시작됩니다."));
+        }
         full_response = "partial assistant body".into();
         handle_cancel_prompt_replace(
             CancelPromptReplaceMessage::Cancelled,
