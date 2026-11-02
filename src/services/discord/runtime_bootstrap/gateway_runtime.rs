@@ -1,5 +1,10 @@
 use super::*;
 
+mod command_guard;
+
+#[cfg(all(test, unix))]
+mod slash_command_tests;
+
 /// Start the leader gateway runtime after health registration, restart-marker
 /// fencing, and optional intake-worker startup. This final `run_bot` tail owns
 /// framework/client construction, gateway-lease keepalive and the gateway
@@ -114,28 +119,7 @@ pub(in crate::services::discord) fn run_bot_framework_options(
 ) -> poise::FrameworkOptions<Data, Error> {
     poise::FrameworkOptions {
         commands,
-        command_check: Some(|ctx| {
-            Box::pin(async move {
-                let settings_snapshot = { ctx.data().shared.settings.read().await.clone() };
-                let allowed = provider_handles_channel(
-                    ctx.serenity_context(),
-                    &ctx.data().provider,
-                    &settings_snapshot,
-                    ctx.channel_id(),
-                )
-                .await;
-                if !allowed {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::info!(
-                        "  [{ts}] ⏭ CMD-GUARD: skipping /{} in channel {} for provider {}",
-                        ctx.command().name,
-                        ctx.channel_id(),
-                        ctx.data().provider.as_str()
-                    );
-                }
-                Ok(allowed)
-            })
-        }),
+        command_check: Some(|ctx| Box::pin(command_guard::check(ctx))),
         event_handler: |framework, event| {
             Box::pin(handle_event(
                 framework.serenity_context,

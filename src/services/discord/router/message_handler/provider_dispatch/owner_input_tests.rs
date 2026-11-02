@@ -1566,3 +1566,6 @@ fn a_failed_injection_hook_has_an_explicit_diagnostic() {
     assert!(message.contains("after-Enter rc=1"), "{message}");
     assert_eq!(rig.events(), ["paste", "Enter"]);
 }
+
+#[path = "owner_input_rollback_tests.rs"]
+mod rollback;

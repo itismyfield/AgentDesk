@@ -241,6 +241,15 @@ pub(super) async fn run_terminal_outcome_delivery(
         epilogue_response = Some(full_response.clone());
     } else if !may_publish {
         bridge_should_emit_completion = false;
+    } else if tui_error_classification.input_not_submitted() {
+        // Settle this attempt's chrome without claiming an answer or invoking empty recovery.
+        bridge_should_emit_completion = false;
+        if let Some(placeholder) =
+            super::super::inflight::opt_message_id(inflight_state.current_msg_id)
+                .filter(|id| id.get() != inflight_state.user_msg_id)
+        {
+            let _ = gateway.delete_message(channel_id, placeholder).await;
+        }
     } else if cancelled || is_prompt_too_long {
         let message = if cancelled {
             CancelPromptReplaceMessage::Cancelled
