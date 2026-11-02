@@ -29,6 +29,14 @@ pub(crate) enum Completion {
 
 /// The refusal of a pane showing a modal: the original is held at the front, not retained.
 pub(crate) const MODAL: &str = "Modal";
+/// Refusals of a screen where Enter may not submit; each holds the original at the front too.
+const HELD: [&str; 3] = [MODAL, "ScreenUnread", "CopyMode"];
+
+/// Whether a drive handoff failed on such a screen, so the front waits for its next opportunity.
+pub(crate) fn held(error: &str) -> bool {
+    HELD.iter()
+        .any(|reason| error == format!("{:?}", Completion::NotSent((*reason).into())))
+}
 
 /// A refusal before any key, marked so a caller never takes it for a write that may have landed.
 pub(crate) fn unsent(error: String) -> String {
@@ -64,7 +72,7 @@ pub(crate) async fn run(
         })?;
     let completion = outcome.result.unwrap_or_else(Completion::WriteUncertain);
     if let Some(proof) = outcome.not_sent {
-        let held = completion == Completion::NotSent(MODAL.into());
+        let held = matches!(&completion, Completion::NotSent(r) if HELD.contains(&r.as_str()));
         mailbox
             .v2_request(move |slot| {
                 let owner = slot.as_mut().ok_or("V2 not adopted")?;

@@ -58,7 +58,7 @@ impl ScriptedTmux {
 d='@D@'
 echo "$*" >> "$d/argv"
 case "$2" in
-display-message) for last do :; done; case "$last" in '#{pane_dead}') echo 0 ;; *) echo 1 ;; esac ;;
+display-message) for last do :; done; case "$last" in '#{pane_dead}'|'#{pane_in_mode}') echo 0 ;; *) echo 1 ;; esac ;;
 capture-pane) cat "$d/screen" ;;
 load-buffer|paste-buffer|send-keys)
   n=$(cat "$d/sent" 2>/dev/null || echo 0); echo $((n + 1)) > "$d/sent"

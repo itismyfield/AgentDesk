@@ -141,7 +141,7 @@ render() {
   cat "$d/border" "$d/footer"
 }
 case "$2" in
-display-message) for last do :; done; case "$last" in '#{pane_dead}') printf ' 0 \n' ;; *) echo "$(cat "$d/attached"),$(cat "$d/last"),$(cat "$d/width"),$(cat "$d/height")" ;; esac ;;
+display-message) for last do :; done; case "$last" in '#{pane_dead}') printf ' 0 \n' ;; '#{pane_in_mode}') cat "$d/in_mode" 2>/dev/null || echo 0 ;; *) echo "$(cat "$d/attached"),$(cat "$d/last"),$(cat "$d/width"),$(cat "$d/height")" ;; esac ;;
 capture-pane)
   n=$(($(cat "$d/cap.n" 2>/dev/null || echo 0) + 1)); echo $n > "$d/cap.n"
   [ ! -f "$d/late.rec" ] || { cat "$d/late.rec" >> '@T@'; rm "$d/late.rec"; }

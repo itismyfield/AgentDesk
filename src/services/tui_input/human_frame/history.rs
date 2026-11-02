@@ -501,6 +501,56 @@ fn observed_at_checked(
     })
 }
 
+/// The one attempt whose frame `row` carries as a non-meta user row after that attempt's offset,
+/// read from its transcript now; `None` for any other row or when several attempts could own it.
+pub(crate) fn user_row_attempt(
+    provider: &str,
+    session: &str,
+    prompts: &[String],
+    row: &str,
+) -> Option<String> {
+    use std::io::{BufRead, Seek, SeekFrom};
+    let store = path().and_then(|path| readable(&path)).ok()?;
+    let hashes: Vec<_> = prompts.iter().flat_map(|p| class_hashes(p)).collect();
+    let carries = |entry: &Entry| -> Option<bool> {
+        let mut file = std::fs::File::open(&entry.path).ok()?;
+        (file_id(&file.metadata().ok()?) == entry.file).then_some(())?;
+        file.seek(SeekFrom::Start(entry.offset)).ok()?;
+        for line in std::io::BufReader::new(file).lines() {
+            let record: serde_json::Value = serde_json::from_str(&line.ok()?).unwrap_or_default();
+            if record["uuid"].as_str() != Some(row) {
+                continue;
+            }
+            let text = match &record["message"]["content"] {
+                serde_json::Value::String(text) => Some(text.clone()),
+                serde_json::Value::Array(blocks) => blocks
+                    .iter()
+                    .map(|block| (block["type"] == "text").then(|| block["text"].as_str()))
+                    .collect::<Option<Option<Vec<_>>>>()
+                    .flatten()
+                    .map(|texts| texts.join("\n")),
+                _ => None,
+            };
+            let user = record["type"] == "user" && record["isMeta"] != true;
+            return Some(
+                user && text.is_some_and(|t| class_hashes(&t).contains(&entry.class_hash)),
+            );
+        }
+        Some(false)
+    };
+    let mut owners = store.entries.iter().filter(|entry| {
+        entry.append.is_none()
+            && entry.provider == provider
+            && entry.session == session
+            && hashes.contains(&entry.class_hash)
+            && carries(entry) == Some(true)
+    });
+    match (owners.next(), owners.next()) {
+        (Some(entry), None) => Some(entry.id.clone()),
+        _ => None,
+    }
+}
+
 pub(crate) fn receipt_row(id: &str, transcript: &Path) -> Option<String> {
     if let Some(row) = v2::scoped_receipt_row(id, transcript) {
         return row;

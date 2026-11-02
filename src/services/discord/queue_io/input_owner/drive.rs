@@ -8,7 +8,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
-use super::effect::{Completion, MODAL};
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};
 
 /// The owner's granted front: its slot's ticket and the original.
@@ -102,7 +101,10 @@ async fn run(lane: Arc<Lane>, drive: Arc<Drive>) {
         let mut stalled = false;
         while let Some(front) = grant(&drive, stalled).await {
             let result = (drive.handoff)(front).await;
-            if result == Err(format!("{:?}", Completion::NotSent(MODAL.into()))) {
+            if result
+                .as_ref()
+                .is_err_and(|error| super::effect::held(error))
+            {
                 let again = Arc::clone(&drive);
                 tokio::spawn(async move {
                     tokio::time::sleep(again.recheck).await;

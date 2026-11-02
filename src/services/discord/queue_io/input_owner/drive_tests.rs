@@ -4,7 +4,9 @@ use super::*;
 use crate::config::TestRuntimeRootGuard;
 use crate::services::claude_tui::owner_input;
 use crate::services::discord::queue_io::input_owner::admission::{AdmissionTicket, admit};
-use crate::services::discord::queue_io::input_owner::effect::{Leaf, PreparedPayload};
+use crate::services::discord::queue_io::input_owner::effect::{
+    Completion, Leaf, MODAL, PreparedPayload,
+};
 use crate::services::discord::queue_io::input_owner::pump;
 use crate::services::turn_orchestrator::ChannelMailboxRegistry;
 use serde_json::json;
@@ -211,52 +213,56 @@ async fn a_front_that_moved_after_its_grant_is_never_reserved() {
     }
 }
 
-/// A modal refusal holds the front in place, unretained and owing no notice, and the drive's own
-/// recheck delivers it once the modal is gone, with no new input or wake.
+/// A refusal on a screen where Enter may not submit (modal, unread capture, copy mode) holds the
+/// front in place, unretained and owing no notice; the drive's own recheck then delivers it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_modal_front_is_held_and_delivered_after_release_without_new_input() {
     let _root = TestRuntimeRootGuard::new();
     let registry = ChannelMailboxRegistry::default();
-    let channel = 7_272_704;
-    let mailbox = owner(&registry, channel, 1).await;
-    let calls = Arc::new(AtomicUsize::new(0));
-    let held = Arc::new(Mutex::new(None));
-    let (c, h, m) = (calls.clone(), held.clone(), mailbox.clone());
-    let answer = move |_: &str| match c.fetch_add(1, Ordering::SeqCst) {
-        0 => Completion::NotSent(MODAL.into()),
-        _ => {
-            let state = tokio::runtime::Handle::current().block_on(snapshot(&m));
-            *h.lock().unwrap() = Some(state);
-            Completion::Submitted
-        }
-    };
-    let none = |_: &Front| Box::pin(async {}) as Pin<Box<dyn Future<Output = ()> + Send>>;
-    let drive = Arc::new(Drive {
-        mailbox: mailbox.clone(),
-        channel,
-        handoff: handoff(mailbox.clone(), channel, none, answer),
-        recheck: Duration::from_millis(50),
-        settled: None,
-    });
-    wake(drive);
-    let after = settled(&mailbox).await;
-    assert_eq!(calls.load(Ordering::SeqCst), 2, "{after}");
-    assert!(
-        after["items"].as_array().unwrap().is_empty(),
-        "delivered: {after}"
-    );
-    assert_eq!(
-        after["retained_inputs"],
-        json!([]),
-        "never retained: {after}"
-    );
-    let between = held.lock().unwrap().clone().unwrap();
-    assert_eq!(
-        between["retained_inputs"],
-        json!([]),
-        "held, not retained: {between}"
-    );
-    assert_eq!(between["items"][0]["text"], "input 0", "{between}");
+    for (channel, reason) in [
+        (7_272_704, MODAL),
+        (7_272_714, "ScreenUnread"),
+        (7_272_724, "CopyMode"),
+    ] {
+        let mailbox = owner(&registry, channel, 1).await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let held = Arc::new(Mutex::new(None));
+        let (c, h, m) = (calls.clone(), held.clone(), mailbox.clone());
+        let answer = move |_: &str| match c.fetch_add(1, Ordering::SeqCst) {
+            0 => Completion::NotSent(reason.into()),
+            _ => {
+                let state = tokio::runtime::Handle::current().block_on(snapshot(&m));
+                *h.lock().unwrap() = Some(state);
+                Completion::Submitted
+            }
+        };
+        let none = |_: &Front| Box::pin(async {}) as Pin<Box<dyn Future<Output = ()> + Send>>;
+        let drive = Arc::new(Drive {
+            mailbox: mailbox.clone(),
+            channel,
+            handoff: handoff(mailbox.clone(), channel, none, answer),
+            recheck: Duration::from_millis(50),
+            settled: None,
+        });
+        wake(drive);
+        let after = settled(&mailbox).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "{reason}: {after}");
+        assert!(
+            after["items"].as_array().unwrap().is_empty(),
+            "{reason} delivered: {after}"
+        );
+        assert_eq!(after["retained_inputs"], json!([]), "{reason}: {after}");
+        let between = held.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            between["retained_inputs"],
+            json!([]),
+            "{reason} held, not retained: {between}"
+        );
+        assert_eq!(
+            between["items"][0]["text"], "input 0",
+            "{reason}: {between}"
+        );
+    }
 }
 
 /// A turn's claim gives one reserve: a spent grant gives no second claim, and a claimed front a

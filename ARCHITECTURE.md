@@ -4133,6 +4133,7 @@ src/
 │   │   ├── binding_context.rs
 │   │   ├── binding_context_snapshot_tests.rs
 │   │   ├── binding_events.rs
+│   │   ├── claude_row_claim_tests.rs
 │   │   ├── extract.rs
 │   │   ├── handed_identity_tests.rs
 │   │   ├── handoff.rs

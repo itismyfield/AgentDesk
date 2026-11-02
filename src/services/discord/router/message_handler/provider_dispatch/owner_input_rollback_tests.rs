@@ -6,7 +6,7 @@ use crate::services::discord::router::message_handler::provider_dispatch::submis
 };
 use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
 use crate::services::discord::{self as discord, SharedData, turn_completion_events};
-use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+use poise::serenity_prelude::ChannelId;
 
 #[derive(Clone, Default)]
 struct Trace(Arc<std::sync::Mutex<Vec<u8>>>);
@@ -276,12 +276,7 @@ async fn a1_owned_busy_rollback_keeps_the_bot_queue_namespace() {
         .await
         .unwrap_or_else(|_| panic!("{}", rig.trace.text()))
         .unwrap();
-    assert_eq!(
-        result,
-        Err("NotSent(\"hosted_tui_busy_pre_submit\")".into()),
-        "{}",
-        rig.trace.text()
-    );
+    assert_eq!(result, Ok(()), "{}", rig.trace.text());
     assert!(
         rig.trace
             .text()
@@ -299,21 +294,22 @@ async fn a1_owned_busy_rollback_keeps_the_bot_queue_namespace() {
         .is_none(),
         "rollback must consume its marker in the bot queue namespace"
     );
-    assert!(events(&rig.renderer).is_empty());
-    assert_eq!(rig.state().await["items"].as_array().unwrap().len(), 1);
+    assert_eq!(events(&rig.renderer), ["paste", "Enter"]);
+    assert_eq!(rig.state().await["items"], json!([]));
 }
 
+/// Real drive and intake: a pane busy with a turn AgentDesk did not start takes the owned front
+/// once, settled delivered, with no completion, requeue or provider failure from the intake turn.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a1_owned_busy_rollback_keeps_front_without_completing_or_requeueing() {
+async fn owned_front_on_a_busy_pane_is_pasted_once_without_completion() {
     if !creator_child(concat!(
         "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::",
-        "a1_owned_busy_rollback_keeps_front_without_completing_or_requeueing"
+        "owned_front_on_a_busy_pane_is_pasted_once_without_completion"
     )) {
         return;
     }
     let _root = crate::config::TestRuntimeRootGuard::new();
     let rig = IntakeRig::new(7_676_101, true).await;
-    let original = rig.state().await["items"].clone();
     let mut completions = turn_completion_events::subscribe_turn_completion_events(&rig.shared);
     let (drive, mut settled) = rig.drive();
     crate::services::discord::queue_io::input_owner::drive::wake(drive.clone());
@@ -321,11 +317,7 @@ async fn a1_owned_busy_rollback_keeps_front_without_completing_or_requeueing() {
         .await
         .unwrap_or_else(|_| panic!("{}", rig.trace.text()))
         .unwrap();
-    assert!(
-        result.as_ref().is_err_and(|e| e.starts_with("NotSent(")),
-        "{result:?}\n{}",
-        rig.trace.text()
-    );
+    assert_eq!(result, Ok(()), "{}", rig.trace.text());
     assert!(
         rig.trace
             .text()
@@ -333,108 +325,27 @@ async fn a1_owned_busy_rollback_keeps_front_without_completing_or_requeueing() {
         "{}",
         rig.trace.text()
     );
-    assert!(
-        completions.try_recv().is_err(),
-        "a rejected input is not a native completion"
-    );
-    assert!(
-        rig.shared.restart.deferred_hook_channels.is_empty(),
-        "no rollback timer is armed"
-    );
+    assert_eq!(events(&rig.renderer), ["paste", "Enter"]);
+    let pasted = fs::read_to_string(rig.renderer.join("body")).unwrap();
+    assert!(pasted.ends_with(PROMPT), "{pasted:?}");
     let state = rig.state().await;
-    assert_eq!(state["items"], original);
-    assert!(state["head_injection"].is_null());
-    assert_eq!(state["retained_inputs"], json!([]));
+    assert_eq!(state["items"], json!([]), "{state}");
+    assert!(state["head_injection"].is_null(), "{state}");
+    assert_eq!(state["retained_inputs"], json!([]), "{state}");
     assert!(!rig.mailbox.has_active_turn().await.unwrap());
     assert!(
-        rig.mailbox.snapshot().await.intervention_queue.is_empty(),
-        "V1 never receives the V2 front"
+        completions.try_recv().is_err(),
+        "the released intake turn is not a native completion"
     );
+    assert!(rig.shared.restart.deferred_hook_channels.is_empty());
+    assert!(rig.mailbox.snapshot().await.intervention_queue.is_empty());
     assert!(
         !rig.mock
             .written_texts()
             .iter()
             .any(|s| s.contains("provider가 응답을 완료하지 못했어요"))
     );
-
-    let calls = rig._api.take();
-    let last_status = calls
-        .iter()
-        .filter_map(|call| {
-            let body = call.splitn(3, ' ').nth(2)?;
-            let body: Value = serde_json::from_str(body).ok()?;
-            (body["channel_id"] == rig.channel.to_string())
-                .then(|| body["status"].as_str().map(str::to_owned))
-                .flatten()
-        })
-        .last();
-    assert_eq!(last_status.as_deref(), Some("awaiting_user"), "{calls:?}");
-
-    // A real turn still publishes its completion, which grants the same front another opportunity.
-    let token = Arc::new(CancelToken::new());
-    rig.mailbox
-        .restore_active_turn(token, UserId::new(7), MessageId::new(9))
-        .await;
-    discord::queue_io::spawn_turn_completion_idle_queue_listener(
-        rig.shared.clone(),
-        ProviderKind::Claude,
-    );
-    tokio::time::timeout(Duration::from_secs(20), async {
-        while discord::queue_io::cancel_backstop_test_support::listener_completed_reconciles(
-            rig.channel,
-        ) == 0
-        {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-    let attempts = rig
-        .trace
-        .text()
-        .matches("prior turn genuinely busy per JSONL")
-        .count();
-    assert_eq!(
-        attempts, 1,
-        "listener startup must not manufacture a completion"
-    );
-    discord::mailbox_finish_turn(&rig.shared, &ProviderKind::Claude, rig.channel).await;
-    assert!(completions.recv().await.unwrap().queue_is_eligible());
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            if rig
-                .trace
-                .text()
-                .matches("prior turn genuinely busy per JSONL")
-                .count()
-                > attempts
-                && !rig.mailbox.has_active_turn().await.unwrap()
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("{}", rig.trace.text()));
-    assert_eq!(
-        rig.trace
-            .text()
-            .matches("prior turn genuinely busy per JSONL")
-            .count(),
-        2,
-        "real completion listener re-enters actual intake once, without a manual drive wake"
-    );
     drop(drive);
-    assert!(
-        completions.try_recv().is_err(),
-        "the second busy refusal also has no self completion"
-    );
-    assert_eq!(rig.state().await["items"], original);
-    assert!(
-        events(&rig.renderer).is_empty(),
-        "busy refusal sends no keys"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -449,11 +360,11 @@ async fn a1_owned_busy_front_never_calls_legacy_requeue() {
     let rig = IntakeRig::new(7_676_103, true).await;
     let (drive, mut settled) = rig.drive();
     crate::services::discord::queue_io::input_owner::drive::wake(drive);
-    let result = tokio::time::timeout(Duration::from_secs(30), settled.recv())
+    let settlement = tokio::time::timeout(Duration::from_secs(30), settled.recv())
         .await
         .unwrap_or_else(|_| panic!("{}", rig.trace.text()))
         .unwrap();
-    assert!(result.is_err());
+    assert_eq!(settlement, Ok(()), "{}", rig.trace.text());
     let trace = rig.trace.text();
     assert!(
         trace.contains("prior turn genuinely busy per JSONL"),

@@ -1,0 +1,66 @@
+---
+title: "Who answers a Discord input pasted into a Claude pane, issue 7676 A2+D"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Waiting
+    lg1: Lost
+    lg2: Done
+    lg3: Delivered
+    lg4: Breaks AnswerOnce or NoRetryRequired
+    lg5: Breaks NoSilentLoss in some cases
+    lg6: Path to the AnswerOnce or NoRetryRequired or NoSilentLoss bug
+  }
+  class lg0 blue
+  class lg1 pink
+  class lg2 teal
+  class lg3 orange
+  class lg4 breaks
+  class lg5 mayBreak
+  class lg6 bugPath
+  s0: Input waits for the owner (Claude busy)
+  s1: Input waits for the owner (Claude idle)
+  s2: Input held for a later wake (Claude idle)
+  s3: Pasted, no row yet
+  s4: Input kept, person asked to send again
+  s5: Input held for a later wake (Claude busy)
+  s6: Claude queued it behind the running turn
+  s7: Opened its own turn
+  s8: Opened its own turn, nobody answers it
+  s9: Answer posted
+  [*] --> s0
+  [*] --> s1
+  s0 --> s3: the owner pastes into the AgentDesk turn [refused when the transcript is idle, main]
+  s1 --> s2: the owner submits to an idle pane
+  s1 --> s4: the owner pastes into the AgentDesk turn [refused when the transcript is idle, main]
+  s2 --> s5: a person starts a turn at the terminal
+  s3 --> s6: Claude writes an enqueue row
+  s5 --> s2: the turn ends
+  s6 --> s7: the turn ends
+  s7 --> s8: the relay reads the input's row
+  s8 --> s9: the turn ends
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 blue
+  class s2 mayBreak
+  class s2 bugPath
+  class s3 orange
+  class s3 bugPath
+  class s4 pink
+  class s4 breaks
+  class s4 bugPath
+  class s5 blue
+  class s5 bugPath
+  class s6 orange
+  class s6 bugPath
+  class s7 orange
+  class s7 bugPath
+  class s8 orange
+  class s8 bugPath
+  class s9 teal
+  class s9 breaks
+  class s9 bugPath

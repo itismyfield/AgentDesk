@@ -193,7 +193,6 @@ pub(in crate::services::discord) async fn hand_busy(
     provider: ProviderKind,
     (channel, front): (u64, Front),
 ) -> Result<(), String> {
-    let unobserved = || "NotSent(\"busy_turn_unobserved\")".to_string();
     let row = crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel)
         .ok_or_else(unobserved)?;
     let session = row.tmux_session_name.clone().ok_or_else(unobserved)?;
@@ -208,13 +207,47 @@ pub(in crate::services::discord) async fn hand_busy(
     }
     let claim = claim_turn(&mailbox, front.1.message_id, &front).await?;
     let claim = claim.ok_or("NotSent(\"front_not_granted\")")?;
+    let (settled, answer) = tokio::sync::oneshot::channel();
+    let thread = paste_busy(
+        (pool, provider),
+        (channel, session, host),
+        claim,
+        owner,
+        settled,
+    )
+    .await;
+    match (answer.await, thread) {
+        (Ok(settlement), _) => settlement,
+        (Err(_), Some(thread)) => thread.await.map_err(|error| error.to_string())?,
+        (Err(_), None) => Err(unobserved()),
+    }
+}
+
+fn unobserved() -> String {
+    "NotSent(\"busy_turn_unobserved\")".to_string()
+}
+
+/// Runs the busy effect for a claimed front on a blocking thread that answers `settled` once the
+/// input settled; a body that cannot be built answers there too and starts no thread.
+async fn paste_busy(
+    (pool, provider): (Option<sqlx::PgPool>, ProviderKind),
+    (channel, session, host): (u64, String, TurnHost),
+    claim: FrontClaim,
+    owner: Registration,
+    settled: Settled,
+) -> Option<tokio::task::JoinHandle<Result<(), String>>> {
     let mut bodies = Vec::new();
-    for item in std::iter::once(&front.1).chain(claim.followers()) {
-        bodies.push(super::super::input_payload::busy_body(channel, item, pool.as_ref()).await?);
+    for item in std::iter::once(&claim.front().1).chain(claim.followers()) {
+        match super::super::input_payload::busy_body(channel, item, pool.as_ref()).await {
+            Ok(body) => bodies.push(body),
+            Err(error) => {
+                let _ = settled.send(Err(error));
+                return None;
+            }
+        }
     }
     let payload = bodies.join("\n\n");
-    let (settled, answer) = tokio::sync::oneshot::channel();
-    let thread = tokio::task::spawn_blocking(move || {
+    Some(tokio::task::spawn_blocking(move || {
         let turn = StreamingTurn {
             pool: pool.as_ref(),
             shared: None,
@@ -242,11 +275,7 @@ pub(in crate::services::discord) async fn hand_busy(
             submission: None,
         };
         execute_front(turn, std::sync::mpsc::channel().0, claim, owner, settled)
-    });
-    match answer.await {
-        Ok(settlement) => settlement,
-        Err(_) => thread.await.map_err(|error| error.to_string())?,
-    }
+    }))
 }
 
 /// A front the drive granted and the owner claimed, carried by value to the turn that starts it,
@@ -265,6 +294,33 @@ impl OwnerTurn {
     /// No effect began: leave the original at the owner's front until another real wake.
     pub(in crate::services::discord) fn defer_before_submit(self, reason: &str) {
         let _ = self.settled.send(Err(effect::unsent(reason.into())));
+    }
+
+    /// A pane running a turn AgentDesk did not start takes the claimed front now, through the busy
+    /// entry; the row the input produces decides who answers, and the drive hears its settlement.
+    pub(in crate::services::discord) async fn into_busy_pane(
+        self,
+        (pool, provider): (Option<sqlx::PgPool>, ProviderKind),
+        (channel, session, key): (u64, String, Option<String>),
+        (transcript, session_id): (String, Option<String>),
+    ) {
+        let OwnerTurn {
+            mailbox,
+            claim,
+            settled,
+        } = self;
+        let for_turn = crate::services::turn_host::for_turn;
+        let host = for_turn(pool.as_ref(), &provider, channel, key.as_deref()).await;
+        let live = Some((transcript.as_str(), session_id.as_deref()));
+        let kind = (provider.as_str(), InputOrigin::Discord, true);
+        let at = (&host, session.as_str(), live);
+        let owner = match Registration::observed(mailbox, kind, at, &claim.front().1, None) {
+            Ok(owner) if owner.phase == target::Phase::Busy => owner,
+            Ok(_) => return drop(settled.send(Err(unobserved()))),
+            Err(error) => return drop(settled.send(Err(error))),
+        };
+        let at = (channel, session, host);
+        let _ = paste_busy((pool, provider), at, claim, owner, settled).await;
     }
 }
 

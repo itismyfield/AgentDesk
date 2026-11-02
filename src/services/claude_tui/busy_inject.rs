@@ -24,6 +24,32 @@ enum TurnGate {
     BusyOnly,
     AnyTurn,
 }
+
+/// Who answers the turn the input reaches, set apart from whether it may be pasted at all.
+#[derive(Clone, Copy)]
+enum Answer {
+    /// A pending Discord prompt is recorded, so the caller's own reader answers it.
+    Declared,
+    /// Nothing is declared: the transcript row the input produces decides the answerer.
+    FromRow,
+}
+
+/// How one entry pastes: its turn gate, its answer declaration and whether a screen that cannot
+/// be read, or one in copy mode, holds the input instead of pasting blind.
+#[derive(Clone, Copy)]
+struct Policy {
+    gate: TurnGate,
+    answer: Answer,
+    screen_proven: bool,
+}
+
+impl Policy {
+    const BUSY_ONLY: Self = Self {
+        gate: TurnGate::BusyOnly,
+        answer: Answer::FromRow,
+        screen_proven: false,
+    };
+}
 pub(crate) use receipt::exact as exact_receipt;
 pub(crate) use receipt::pasted_inner;
 #[cfg(test)]
@@ -63,6 +89,10 @@ pub(crate) enum Veto {
     NotBusy,
     TranscriptUnavailable,
     LoadFailed,
+    /// The owned entry could not read the screen, so it cannot tell whether Enter submits.
+    ScreenUnread,
+    /// The pane is in copy mode, where Enter copies instead of submitting.
+    CopyMode,
 }
 
 /// An actual tmux write failed; no observation failure can produce this result.
@@ -366,7 +396,7 @@ pub(in crate::services::claude_tui) fn before_paste(
     pane: &Pane,
     stash_allowed: bool,
 ) -> Result<bool, Veto> {
-    before_paste_by(pane, listed(stash_allowed))
+    before_paste_by(pane, listed(stash_allowed), false)
 }
 
 /// Which draft one capture lets C-s park; `None` parks nothing.
@@ -378,7 +408,7 @@ fn listed(stash_allowed: bool) -> Park {
     stash_allowed.then_some(screen::parkable)
 }
 
-fn before_paste_by(pane: &Pane, park: Park) -> Result<bool, Veto> {
+fn before_paste_by(pane: &Pane, park: Park, screen_proven: bool) -> Result<bool, Veto> {
     #[cfg(unix)]
     if epoch::observe(pane.target().trim_start_matches('=').trim_end_matches(':')).is_err() {
         return Err(Veto::PaneUnavailable);
@@ -390,10 +420,27 @@ fn before_paste_by(pane: &Pane, park: Park) -> Result<bool, Veto> {
         return Err(Veto::PaneUnavailable);
     }
     let Some(capture) = pane.capture() else {
-        return Ok(false);
+        return if screen_proven {
+            Err(Veto::ScreenUnread)
+        } else {
+            Ok(false)
+        };
     };
     if modal(&capture) {
         return Err(Veto::Modal);
+    }
+    let in_mode = || {
+        let at = [
+            "display-message",
+            "-p",
+            "-t",
+            pane.target(),
+            "#{pane_in_mode}",
+        ];
+        pane.ok(&at).is_some_and(|mode| mode.trim() == "1")
+    };
+    if screen_proven && in_mode() {
+        return Err(Veto::CopyMode);
     }
     Ok(park.is_some_and(|park| park(&capture)))
 }
@@ -448,13 +495,13 @@ fn inject_locked(
     text: &str,
     timing: &Timing,
     park: Park,
-    turn_gate: TurnGate,
+    policy: Policy,
 ) -> Report {
-    let park = match before_paste_by(pane, park) {
+    let park = match before_paste_by(pane, park, policy.screen_proven) {
         Ok(park) => park,
         Err(veto) => return Report::not_sent(veto),
     };
-    if matches!(turn_gate, TurnGate::BusyOnly)
+    if matches!(policy.gate, TurnGate::BusyOnly)
         && !crate::services::tui_turn_state::observe_claude_jsonl_turn_state(request.transcript)
             .is_busy()
     {

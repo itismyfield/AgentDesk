@@ -1,0 +1,52 @@
+// Reader's words for InputOwnership.tla: one Discord input on a Claude tmux channel, pasted once,
+// and the relay that answers it chosen from the transcript row it produced.
+export const title = "Who answers a Discord input pasted into a Claude pane, issue 7676 A2+D";
+
+const pane = (v) => (v.nat === "busy" ? "Claude busy" : "Claude idle");
+
+export const state = (v) => {
+  switch (v.inp) {
+    case "queued": return `Input waits for the owner (${pane(v)})`;
+    case "held": return `Input held for a later wake (${pane(v)})`;
+    case "retained": return "Input kept, person asked to send again";
+    case "sent": return "Pasted, no row yet";
+    case "enq": return "Claude queued it behind the running turn";
+    case "absorbed":
+      return v.claim === "none" ? "Taken into the running turn" : "Taken into the running turn, answerer known";
+    case "newturn":
+      if (v.claim === "none") return "Opened its own turn";
+      return v.natOwner === "none" || v.natOwner === "adNoObs"
+        ? "Opened its own turn, nobody answers it"
+        : "Opened its own turn, answerer known";
+    case "answered": return "Answer posted";
+  }
+  return v.inp;
+};
+
+export const group = (v) => {
+  if (v.inp === "queued" || v.inp === "held") return "Waiting";
+  if (v.inp === "retained") return "Lost";
+  if (v.inp === "answered") return "Done";
+  return "Delivered";
+};
+
+export const colors = { Waiting: "blue", Lost: "pink", Done: "teal", Delivered: "orange" };
+
+const labels = {
+  DriveBusy: "the owner pastes into the AgentDesk turn [refused when the transcript is idle, main]",
+  DriveIdleBusyPane: "the owner meets a busy pane with no AgentDesk turn",
+  DriveIdle: "the owner submits to an idle pane",
+  RowOpensTurn: "a user row opens a new turn",
+  RowEnqueued: "Claude writes an enqueue row",
+  Absorb: "Claude takes it into the running turn",
+  WindowPasses: null,
+  DriveFindsNothing: null,
+  Observe: "the relay reads the input's row",
+  TimeHands: "the 3 s window passes with only an enqueue",
+  TurnEnds: "the turn ends",
+  HumanStartsTurn: "a person starts a turn at the terminal",
+  MailboxReleases: "the AgentDesk turn is released",
+  Done: null,
+};
+
+export const step = (action, from, to) => (action in labels ? labels[action] : action);
