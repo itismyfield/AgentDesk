@@ -820,6 +820,7 @@ src/
 │   │   ├── control_tests.rs
 │   │   ├── definition.rs
 │   │   ├── definition_tests.rs
+│   │   ├── effect_envelope.rs
 │   │   ├── evidence.rs
 │   │   ├── evidence_gate.rs
 │   │   ├── evidence_gate_tests.rs
@@ -828,6 +829,9 @@ src/
 │   │   ├── execution_pin_tests.rs
 │   │   ├── failure_budget.rs
 │   │   ├── failure_budget_tests.rs
+│   │   ├── host_gate.rs
+│   │   ├── host_gate_tests.rs
+│   │   ├── host_journal.rs
 │   │   ├── main_integration.rs
 │   │   ├── main_integration_tests.rs
 │   │   ├── mod.rs
