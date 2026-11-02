@@ -398,8 +398,11 @@ class FastCheckCiWiringTests(unittest.TestCase):
             ("test_evidence", "python3 scripts/ci/nextest_ci.py collect-results", "python3 scripts/ci/nextest_ci.py --help", "exact cargo/test command list"),
             ("test_evidence", "    needs: [changes, rust_build, rust_tests]\n", "    needs: [changes, rust_build]\n", "exact needs"),
             ("rust_build", "          python3 scripts/check_relay_authority_contract.py --nextest-list \"$NEXTEST_DIR/universe.json\"\n", "", "exact cargo/test command list"),
-            ("rust_build", 'nextest-base-diff.sh "$RUNNER_TEMP/nextest"', 'nextest-base-diff.sh "$RUNNER_TEMP/nextest" --report-only', "exact cargo/test command list"),
-            ("rust_build", step_block(job_block(workflow, "rust_build"), "Compare tests with the comparison base"), "", 'exactly one "Compare tests with the comparison base"'),
+            ("base_compare", 'nextest-base-diff.sh "$RUNNER_TEMP/nextest"', 'nextest-base-diff.sh "$RUNNER_TEMP/nextest" --report-only', "exact cargo/test command list"),
+            ("base_compare", step_block(job_block(workflow, "base_compare"), "Compare tests with the comparison base"), "", 'exactly one "Compare tests with the comparison base"'),
+            ("base_compare", "if: ${{ !github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success' }}", "if: ${{ !github.event.pull_request.draft && needs.rust_build.result == 'success' }}", "required needs closure"),
+            # The workers start at the plan upload; waiting for the base comparison again is red.
+            ("rust_tests", "    needs: [changes, rust_build]\n", "    needs: [changes, rust_build, base_compare]\n", "exact needs"),
             ("rust_build", "--retry-mode all-once", "--retry-mode policy", "exact cargo/test command list"),
         )
         for job_id, old, new, reason in mutants:
@@ -486,7 +489,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         }
         for (rust_tests, outcome), expected_red in red.items():
             n_result = "success" if rust_tests == "true" else "skipped"
-            needs = {job: {"result": n_result} for job in ("rust_build", "rust_tests", "test_evidence")}
+            needs = {job: {"result": n_result} for job in ("rust_build", "base_compare", "rust_tests", "test_evidence")}
             needs.update(changes={"result": "success", "outputs": {"rust_tests": rust_tests}}, pg15_owner_proof={"result": outcome})
             with self.subTest(rust_tests=rust_tests, outcome=outcome):
                 ok, lines = nextest_required.context_verdict("Fast targeted tests (ubuntu-latest)", needs)
@@ -1277,7 +1280,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
     def test_required_needs_closure_rejects_fail_open_mutations(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         mutations = []
-        for job_id in ("rust_build", "rust_tests", "test_evidence", "pg15_owner_proof",
+        for job_id in ("rust_build", "base_compare", "rust_tests", "test_evidence", "pg15_owner_proof",
                        "relay_authority_mutations", "lint", "dashboard", "check_fast_cross_os_targets"):
             runner = job_block(workflow, job_id)
             mutations.append((job_id, runner, re.sub(r"(?m)^    if: .*\n", "    if: always()\n", runner, count=1)))
@@ -1297,7 +1300,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         for cross_os_rust in ("true", "false"):
             for check in outcomes:
                 for targets in outcomes:
-                    needs = {job: {"result": "success"} for job in ("rust_build", "rust_tests", "test_evidence")}
+                    needs = {job: {"result": "success"} for job in ("rust_build", "base_compare", "rust_tests", "test_evidence")}
                     needs.update(changes={"result": "success", "outputs": {"rust_tests": "true", "cross_os_rust": cross_os_rust}},
                                  check_fast_cross_os={"result": check}, check_fast_cross_os_targets={"result": targets})
                     with self.subTest(cross_os_rust=cross_os_rust, check=check, targets=targets):
@@ -1330,7 +1333,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         cross_os = "${{ !github.event.pull_request.draft && needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true' }}"
         expected_if = {
             "changes": "${{ !github.event.pull_request.draft }}", "required_contexts": JUDGE_IF, "scripts": MIRROR_IF, "scripts_guards": MIRROR_IF, "scripts_contracts": MIRROR_IF,
-            "rust_build": rust_gate, "pg15_owner_proof": rust_gate, "rust_tests": n_gate, "test_evidence": n_gate,
+            "rust_build": rust_gate, "pg15_owner_proof": rust_gate, "base_compare": n_gate, "rust_tests": n_gate, "test_evidence": n_gate,
             "relay_authority_mutations": RUST_REQUIRED_IF,
             "lint": _LINT_FILTER, "dashboard": "${{ !github.event.pull_request.draft && needs.changes.outputs.dashboard == 'true' }}",
             "check_fast_cross_os": cross_os, "check_fast_cross_os_targets": cross_os,
