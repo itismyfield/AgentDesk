@@ -154,7 +154,6 @@ class RatchetDiscriminationTests(unittest.TestCase):
         "src/services/session_host/herdr/model.rs": 2,
         "src/services/session_host/herdr_gate.rs": 3,
         "src/services/session_host/herdr_gate_tests.rs": 5,
-        "src/services/session_host/herdr_host_tests.rs": 5,
     }
 
     def test_declared_close_sites_pass_without_baseline_growth(self) -> None:

@@ -798,7 +798,6 @@ impl DiscordPort for Legacy {
     }
 }
 
-/// The probe's own definition files; everything else is checked line by line.
 #[tokio::test(start_paused = true)]
 async fn legacy_confirmation_without_a_known_post_remains_unresolved() {
     let gateway = GatewayPort::new(Arc::new(serenity::Http::new("test-token")), BOT);
