@@ -243,7 +243,7 @@ const PRIVATE_LAN_PEERS: [&str; 15] = [
     "[::ffff:169.254.1.1]",
 ];
 
-const PUBLIC_PEERS: [&str; 11] = [
+const PUBLIC_PEERS: [&str; 13] = [
     "192.0.2.2",
     "8.8.8.8",
     "11.0.0.1",
@@ -255,6 +255,9 @@ const PUBLIC_PEERS: [&str; 11] = [
     "[2606:4700::1111]",
     "[fec0::1]",
     "[::ffff:8.8.8.8]",
+    // IPv4-compatible, not mapped: stays IPv6, so it must not pass as loopback or Tailscale.
+    "[::127.0.0.1]",
+    "[::100.71.1.1]",
 ];
 
 #[tokio::test]
@@ -277,7 +280,8 @@ async fn tailnet_only_rejects_private_lan_and_public_peers() {
     let warnings = peer_filter_warnings(&buffer);
     assert_eq!(warnings.len(), refused.len(), "{warnings:#?}");
     for (line, peer) in warnings.iter().zip(&refused) {
-        let ip = peer.trim_start_matches('[').trim_end_matches(']');
+        // Compare in display form: `::127.0.0.1` is logged as `::7f00:1`.
+        let ip: std::net::IpAddr = peer.trim_matches(['[', ']']).parse().unwrap();
         assert!(line.contains(&format!("peer_ip={ip} ")), "{line}");
         assert!(line.contains("peer_class=outside"), "{line}");
         assert!(line.contains("tailnet_only"), "{line}");
