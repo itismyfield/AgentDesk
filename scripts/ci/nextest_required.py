@@ -17,8 +17,8 @@ from pathlib import Path
 import shutil
 import subprocess
 
-# Jobs whose success is N: one archive build, every planned worker, and the result audit.
-N_JOBS = ("rust_build", "rust_tests", "test_evidence")
+# Jobs whose success is N: one archive build, the comparison-base diff, every planned worker, and the result audit.
+N_JOBS = ("rust_build", "base_compare", "rust_tests", "test_evidence")
 # A gate is the changes outputs that make a job expected to run; "!x" reads x == "false", () always runs.
 CONTEXTS = {
     "Lint": ((N_JOBS, ("rust_tests",)), (("lint",), ("rust_or_policy", "relay_contract"))),

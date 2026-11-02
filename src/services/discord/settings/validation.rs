@@ -260,9 +260,7 @@ mod voice_channel_guard_tests {
     {
         // Serialize on the process-wide `AGENTDESK_ROOT_DIR` lock so this
         // root-mutating helper cannot race a concurrent test in another module.
-        let _guard = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let temp = TempDir::new().expect("temp home");
         let root = temp.path().join(".adk");
         let settings_dir = root.join("config");
@@ -287,6 +285,8 @@ agents:
             "AGENTDESK_ROOT_DIR",
             &root,
         );
+        let _config =
+            crate::config::TestEnvVarGuard::remove_after_shared_test_env_lock("AGENTDESK_CONFIG");
         f(&root);
     }
 

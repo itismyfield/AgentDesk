@@ -82,6 +82,7 @@ pub(super) async fn run_completion_postlude(
     let accumulated_output_tokens = state.accumulated_output_tokens;
     let mut accumulated_memory_input_tokens = state.accumulated_memory_input_tokens;
     let mut accumulated_memory_output_tokens = state.accumulated_memory_output_tokens;
+    let input_not_submitted = state.input_not_submitted;
     let transport_error = state.transport_error;
     let provider_failure = state.provider_failure;
     let api_friction_reports = state.api_friction_reports;
@@ -201,9 +202,15 @@ pub(super) async fn run_completion_postlude(
         .await;
 
     let completion_r1 = ownership.read("completion_r1").await;
+    let not_submitted_status = input_not_submitted
+        && !cancelled
+        && inflight_state
+            .turn_nonce
+            .as_deref()
+            .is_some_and(|nonce| !nonce.is_empty());
     if completion_r1.permits_channel_effects()
-        && status_panel_terminal_committed
-        && status_panel_completion_committed
+        && (not_submitted_status
+            || (status_panel_terminal_committed && status_panel_completion_committed))
         && !preserve_inflight_for_cleanup_retry
     {
         crate::services::discord::adk_session::post_adk_turn_terminal_status(
@@ -211,7 +218,11 @@ pub(super) async fn run_completion_postlude(
                 session_key: adk_session_key.as_deref(),
                 name: adk_session_name.as_deref(),
                 model: Some(provider.as_str()),
-                status: final_session_status,
+                status: if not_submitted_status {
+                    AWAITING_USER
+                } else {
+                    final_session_status
+                },
                 provider: &provider,
                 session_info: adk_session_info.as_deref(),
                 tokens: persisted_context_tokens(
@@ -446,6 +457,8 @@ pub(super) async fn run_completion_postlude(
     };
     let primary_turn_outcome = if cancelled {
         "cancelled"
+    } else if input_not_submitted {
+        "input_not_submitted"
     } else if recovery_retry {
         "recovery_retry"
     } else if is_prompt_too_long {

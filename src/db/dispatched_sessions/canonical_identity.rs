@@ -190,7 +190,8 @@ pub(crate) async fn upsert_hook_session_terminal_pg(
     if expected_turn_nonce.trim().is_empty()
         || params.turn_start_nonce.is_some()
         || !(params.status.eq_ignore_ascii_case("idle")
-            || params.status.eq_ignore_ascii_case("awaiting_bg"))
+            || params.status.eq_ignore_ascii_case("awaiting_bg")
+            || params.status.eq_ignore_ascii_case("awaiting_user"))
     {
         return Err(conflict(
             SessionIdentityConflictKind::OwnershipMismatch,

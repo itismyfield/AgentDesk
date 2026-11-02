@@ -444,6 +444,63 @@ fn save_runtime_bot_settings_checked(
     write_bytes_atomically(&path, &rendered)
 }
 
+/// Writes the local Claude TUI launch settings, the pending relaunches and effort levels, into the
+/// bot's entry the runtime save just wrote, adding the entry when the save left none.
+fn save_tui_launch_settings(token: &str, settings: &DiscordBotSettings) -> std::io::Result<()> {
+    let Some(path) = bot_settings_path() else {
+        return Ok(());
+    };
+    let mut json: serde_json::Value = match fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str(&content).map_err(|err| config_io_error(&path, err))?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(err) => return Err(err),
+    };
+    let Some(obj) = json.as_object_mut() else {
+        return Err(config_io_error(&path, "settings JSON must be an object"));
+    };
+    let mut pending: Vec<_> = settings.channel_relaunch_pending.iter().collect();
+    pending.sort();
+    let levels: std::collections::BTreeMap<_, _> = settings.channel_effort_levels.iter().collect();
+    let fields = [
+        (
+            "channel_relaunch_pending",
+            (!pending.is_empty()).then(|| serde_json::json!(pending)),
+        ),
+        (
+            "channel_effort_levels",
+            (!levels.is_empty()).then(|| serde_json::json!(levels)),
+        ),
+    ];
+    let key = super::discord_token_hash(token);
+    let present = obj.get(&key).and_then(|entry| entry.as_object());
+    let unchanged = fields.iter().all(|(field, value)| {
+        value.is_none() && present.is_none_or(|entry| !entry.contains_key(*field))
+    });
+    if unchanged {
+        return Ok(());
+    }
+    let entry = obj
+        .entry(key.clone())
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(entry) = entry.as_object_mut() else {
+        return Err(config_io_error(
+            &path,
+            "bot settings entry must be an object",
+        ));
+    };
+    for (field, value) in fields {
+        match value {
+            Some(value) => entry.insert(field.to_string(), value),
+            None => entry.remove(field),
+        };
+    }
+    if entry.is_empty() {
+        obj.remove(&key);
+    }
+    let rendered = serde_json::to_vec_pretty(&json).map_err(|err| config_io_error(&path, err))?;
+    write_bytes_atomically(&path, &rendered)
+}
+
 fn try_save_bot_settings(token: &str, settings: &DiscordBotSettings) -> std::io::Result<()> {
     let yaml_path = super::config_path_for_write();
     let yaml_snapshot = yaml_path
@@ -461,7 +518,8 @@ fn try_save_bot_settings(token: &str, settings: &DiscordBotSettings) -> std::io:
 
     persist_bot_auth_to_yaml_checked(token, settings)?;
 
-    if let Err(err) = save_runtime_bot_settings_checked(token, settings) {
+    let runtime = save_runtime_bot_settings_checked(token, settings);
+    if let Err(err) = runtime.and_then(|()| save_tui_launch_settings(token, settings)) {
         let mut rollback_failed = false;
 
         if let (Some(path), Some(snapshot)) = (yaml_path.as_ref(), yaml_snapshot.as_ref()) {

@@ -1718,6 +1718,40 @@ pub(super) async fn handle_text_message(
         };
         #[cfg(unix)]
         if let Some(diagnostic) = tui_busy_diagnostic {
+            if let Some(owner) = owner {
+                busy_retry::defer_owned_front(
+                    busy_retry::FinalizeEnqueueContext {
+                        shared, http, provider: &provider, channel_id, user_msg_id,
+                        placeholder_msg_id, turn_start_attempt: _turn_start_attempt,
+                        session_retry_context: None,
+                        feedback_reminder: feedback_reminder.as_deref(),
+                        wip_warning: wip_warning.as_deref(),
+                    },
+                    &cancel_token,
+                    &super::super::super::resolve_discord_bot_provider(token),
+                ).await;
+                post_adk_session_status(
+                    adk_session_key.as_deref(),
+                    adk_session_name.as_deref(),
+                    Some(provider.as_str()),
+                    "awaiting_user",
+                    &provider,
+                    Some(&adk_session_info),
+                    None,
+                    Some(&current_path),
+                    dispatch_id.as_deref(),
+                    adk_thread_channel_id,
+                    Some(channel_id),
+                    role_binding
+                        .as_ref()
+                        .map(|binding| binding.role_id.as_str()),
+                    shared.api_port,
+                )
+                .await;
+                owner.defer_before_submit("hosted_tui_busy_pre_submit");
+                intake_latency.log(channel_id.get(), provider_label, "deferred_busy");
+                return Ok(IntakeExecution::deferred(channel_id));
+            }
             let bot_owner_provider = super::super::super::resolve_discord_bot_provider(token);
             let queue_kickoff_scheduled_by_release = release_mailbox_after_hosted_tui_busy_pre_submit(
                 shared,
@@ -2064,6 +2098,8 @@ pub(super) async fn handle_text_message(
 
         let (native_fast_mode_override, codex_goals_override) =
             feature_settings::overrides_for_turn(shared, &provider, fast_mode_channel_id).await;
+        let effort_for_turn =
+            super::super::super::commands::channel_effort_level(shared, &provider, channel_id).await;
 
         // Fetch context compact percent from ADK settings (provider-specific)
         let ctx_thresholds =
@@ -2142,6 +2178,7 @@ pub(super) async fn handle_text_message(
                                 channel_id: channel_id.get(),
                                 model: model_for_turn.as_deref(),
                                 native_fast_mode: native_fast_mode_override,
+                                effort: effort_for_turn.as_deref(),
                                 codex_goals: codex_goals_override,
                                 compact_percent: compact_percent_for_claude,
                                 compact_lower_bound_tokens,
