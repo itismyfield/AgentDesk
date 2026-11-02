@@ -64,6 +64,50 @@ pub(super) fn inspect(raw: &str) -> Value {
                 _ => return None,
             }
         }
+        let claims = data["claim_probes"]
+            .as_array()
+            .filter(|rows| rows.len() == 3)?;
+        for (id, path, entrypoint, guard) in [
+            (
+                "CLAIM_GATE_REASON",
+                "src/services/tui_o/cutover/channel_gate.rs",
+                "decide_with_snapshot",
+                "CLAIM_REASON_AT_DECISION",
+            ),
+            (
+                "CLAIM_ADOPTION_REASON",
+                "src/services/tui_o/channel_policy/adoption.rs",
+                "claim_body_from",
+                "CLAIM_REASON_UNDER_STATE_LOCK",
+            ),
+            (
+                "CLAIM_SITE_NONE_HELD",
+                "src/services/tui_o/cutover/channel_gate.rs",
+                "claim_then_send_at/claim_then_send_held_at",
+                "SITE_NONE_HELD_INHERITED_ONLY",
+            ),
+        ] {
+            let row = claims.iter().find(|row| row["id"] == id)?;
+            if !ids.insert(id)
+                || row["path"] != path
+                || row["entrypoint"] != entrypoint
+                || row["guard"] != guard
+            {
+                return None;
+            }
+            if id == "CLAIM_SITE_NONE_HELD"
+                && (row["consumer_path"] != "src/services/discord/standby_relay.rs"
+                    || row["consumer_function"] != "run_standby_relay"
+                    || row["site"] != "W06")
+            {
+                return None;
+            }
+            match row["status"].as_str()? {
+                "VERIFIED" => {}
+                "PENDING_0a2" => pending += 1,
+                _ => return None,
+            }
+        }
         Some(pending)
     })();
     let coverage = pending == Some(0);

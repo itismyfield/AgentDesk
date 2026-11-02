@@ -26,7 +26,7 @@ pub(in crate::services::discord) mod reaction_control;
 // Read-only projection over `delivery_record`'s evidence, without verdict authority.
 // Unix-gated because its reader, `health::reachability::composite`, is unix-only.
 pub(in crate::services::discord) mod raw_output;
-pub(crate) use raw_output::census_scope;
+pub(crate) use raw_output::{census_scope, current_census};
 #[cfg(unix)]
 pub(in crate::services::discord) mod receipt_index;
 pub(crate) mod result;

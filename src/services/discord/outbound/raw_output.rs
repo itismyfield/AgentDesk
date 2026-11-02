@@ -26,6 +26,13 @@ tokio::task_local! {
     static CONTEXT: Context;
 }
 
+pub(crate) fn current_census() -> Option<Value> {
+    CONTEXT
+        .try_with(|context| context.census.clone())
+        .ok()
+        .flatten()
+}
+
 /// Observation metadata cannot install or replace PG authority.
 pub(crate) fn census_scope<T>(
     tag: Option<Value>,

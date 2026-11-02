@@ -37,7 +37,7 @@ use super::inflight::{
 use super::outbound::turn_output_controller as toc;
 use super::placeholder_controller::{PlaceholderKey, PlaceholderLifecycle};
 use crate::services::provider::ProviderKind;
-use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send};
+use crate::services::tui_o::cutover::{BodyClaim, BodySend, BodySite, claim_then_send_at};
 
 fn standby_short_replace_should_cutover(formatted: &str) -> bool {
     !formatted.is_empty()
@@ -244,7 +244,9 @@ pub(super) async fn run_standby_relay(
             // The relay claims the channel as it posts; O taking it meanwhile ends the relay.
             let claim = (!result_text.trim().is_empty())
                 .then(|| BodyClaim::new(channel_id.get(), turn_binding.runtime_kind));
-            let Ok(BodySend::Sent(delivered)) = claim_then_send(claim, send).await else {
+            let Ok(BodySend::Sent(delivered)) =
+                claim_then_send_at(BodySite::StandbyRelay, claim, send).await
+            else {
                 return;
             };
             if delivered {

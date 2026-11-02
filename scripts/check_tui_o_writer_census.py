@@ -92,7 +92,7 @@ RAW_CLAIM_RE = re.compile(_RAW_CLAIM)
 TUI_O_ROOT = "src/services/tui_o/"
 TUI_O_RAW_CLAIM_RE = re.compile(rf"{_RAW_CLAIM}|\.\s*{_CLAIM_METHOD}\s*\(|::\s*{_CLAIM_METHOD}\b")
 GATE_RES = {
-    "claim": re.compile(rf"{_RAW_CLAIM}|\bclaim_then_(?:direct_)?send(?:_held)?\b|\bclaim_at_post\b"),
+    "claim": re.compile(rf"{_RAW_CLAIM}|\bclaim_then_(?:direct_)?send(?:_held)?(?:_at)?\b|\bclaim_at_post\b"),
     "peek": re.compile(rf"\b(?:peek_{_OWNS}(?:_quiet)?|bridge_o_body_peek_decision)\b"),
 }
 FLAG_RE = re.compile(r"\bO_TUI_WRITER\b")
@@ -498,6 +498,7 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
     ),
     "src/services/tui_o/cutover/channel_gate.rs": (
         "claim_then_send:claim",
+        "claim_then_send_at:claim",
         "decide_with_snapshot:claim",
         "decide_with_snapshot:claim",
     ),
@@ -505,7 +506,7 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
 # Functions where a raw claim may stand outside `claim_then_send`, keyed by file.
 RAW_CLAIM_SITES: dict[str, tuple[str, ...]] = {
     # The helper's own claim, and the adoption transition it reaches.
-    "src/services/tui_o/cutover/channel_gate.rs": ("claim_then_send_held", "decide_with_snapshot"),
+    "src/services/tui_o/cutover/channel_gate.rs": ("reserve_body", "decide_with_snapshot"),
     # The caller-location wrapper forwards to the same locked body claim and origin log.
     "src/services/tui_o/channel_policy/adoption.rs": ("claim_body",),
     # Re-exports; a placement releases a pending adoption by design, with no body.
@@ -661,6 +662,78 @@ TRANSPORT_PROBES = {
     'O_GATEWAY_CREATED_ACK': {'id': 'O_GATEWAY_CREATED_ACK', 'path': 'src/services/discord/outbound/o_writer_io.rs', 'entrypoint': 'post/post_origin', 'op': 'POST', 'guard': 'O_CREATED_ACK_ONCE'},
     'O_REPOST_CREATED_ACK': {'id': 'O_REPOST_CREATED_ACK', 'path': 'src/services/discord/outbound/o_writer_repost_io.rs', 'entrypoint': 'create', 'op': 'POST', 'guard': 'O_CREATED_ACK_ONCE'},
 }
+
+CLAIM_PROBES = {'CLAIM_GATE_REASON': {'id': 'CLAIM_GATE_REASON', 'path': 'src/services/tui_o/cutover/channel_gate.rs', 'entrypoint': 'decide_with_snapshot', 'guard': 'CLAIM_REASON_AT_DECISION'}, 'CLAIM_ADOPTION_REASON': {'id': 'CLAIM_ADOPTION_REASON', 'path': 'src/services/tui_o/channel_policy/adoption.rs', 'entrypoint': 'claim_body_from', 'guard': 'CLAIM_REASON_UNDER_STATE_LOCK'}, 'CLAIM_SITE_NONE_HELD': {'id': 'CLAIM_SITE_NONE_HELD', 'path': 'src/services/tui_o/cutover/channel_gate.rs', 'entrypoint': 'claim_then_send_at/claim_then_send_held_at', 'consumer_path': 'src/services/discord/standby_relay.rs', 'consumer_function': 'run_standby_relay', 'site': 'W06', 'guard': 'SITE_NONE_HELD_INHERITED_ONLY'}}
+
+
+def _claim_guard_problems(root: Path) -> list[str]:
+    try:
+        rows = json.loads((root / "scripts/tui_o_body_probes.json").read_bytes())["claim_probes"]
+        active = {row["id"] for row in rows if row["status"] == "VERIFIED"}
+    except (OSError, KeyError, TypeError, ValueError):
+        return []  # Manifest parsing reports missing or malformed data.
+    if not active:
+        return []
+    classifier = _load_classifier()
+    gate_path = "src/services/tui_o/cutover/channel_gate.rs"
+    adoption_path = "src/services/tui_o/channel_policy/adoption.rs"
+    paths = {gate_path, adoption_path, "src/services/discord/standby_relay.rs"}
+    texts = {path: classifier._production_text(root / path) if (root / path).is_file() else "" for path in paths}
+
+    def body(path, name):
+        text = texts[path]
+        spans = [(start, end) for fn, start, end in _fn_bodies(text) if fn == name]
+        return re.sub(r"\s+", "", text[spans[0][0] + 1:spans[0][1]]) if len(spans) == 1 else ""
+
+    problems = []
+    decide = body(gate_path, "decide_with_snapshot")
+    if "CLAIM_GATE_REASON" in active and not all(token in decide for token in (
+        "ifsnapshot.channels().is_empty(){returnOk(legacy(ClaimReason::EmptySelection));}",
+        "if!snapshot.channels().contains(&channel_id){returnOk(legacy(ClaimReason::NonMember));}",
+        "ifselected{ClaimReason::NoCandidate}else{ClaimReason::Unselected}",
+        "execution.permit.is_err(){ClaimReason::OwnedHeld}",
+        "Some(origin)=>candidate.claim_body_from(channel_id,origin)",
+    )):
+        problems.append("claim guard: gate reasons no longer follow the actual decision branches")
+    take = body(adoption_path, "take")
+    claim = body(adoption_path, "claim_body_from")
+    reason = body(adoption_path, "claim_reason")
+    locked = all(token in take for token in (
+        "letmutstate=self.lock();letreason=state.claim_reason();",
+        "if*state==Adoption::Pending{*state=Adoption::Released;", "(state,reason)",
+    )) and all(token in claim for token in (
+        "let(state,reason)=self.take(channel);letowned=state.owned();",
+        "self.sends.started.fetch_add(1,Ordering::SeqCst)",
+        "drop(state);BodyClaimed{owned,send,reason,}",
+    )) and all(f"Self::{state}=>ClaimReason::{value}" in reason for state, value in (
+        ("Pending", "PendingReleased"), ("Released", "Released"), ("Deferred", "Deferred"),
+        ("Committed", "OwnedByO"), ("Held", "OwnedHeld"),
+    ))
+    if "CLAIM_ADOPTION_REASON" in active and not locked:
+        problems.append("claim guard: reason/send must be decided under the same adoption lock")
+    inherited = body(gate_path, "inherited")
+    reserved = body(gate_path, "reserve_body")
+    held = body(gate_path, "claim_then_send_held_at")
+    scoped = "letmuttag=current_census();" in inherited and "tag.as_mut().and_then(Value::as_object_mut)" in inherited
+    scoped = scoped and "!object.contains_key(" in inherited and "json!(site)" in inherited and "json!(reason)" in inherited
+    scoped = scoped and "Self{_send:send,tag}" in inherited and not any(token in inherited for token in ("tag=None", "send.is_some()", "send.is_none()", "Some(json!"))
+    scoped = scoped and all(token in reserved for token in (
+        "letSome(claim)=claimelse{returnOk(legacy(ClaimReason::NoClaim));};", "letclaimed=claim.claim()?;",
+    ))
+    scoped = scoped and all(token in held for token in (
+        "letclaimed=reserve_body(claim)?;", "BodyTransport::inherited(site,claimed.send,claimed.reason)",
+        "context.run(async{send().await}).await",
+    ))
+    scoped = scoped and "ifself.tag.is_some(){census_scope(self.tag.clone(),next).await}else{next.await}" in body(gate_path, "run")
+    scoped = scoped and "claim_then_send_held_at(site,claim,send).await?" in body(gate_path, "claim_then_send_at")
+    legacy = body(gate_path, "claim_then_send_held")
+    scoped = scoped and "reserve_body(claim)?" in legacy and "BodySend::Sent(send().await)" in legacy and "census_scope" not in legacy
+    scoped = scoped and "claim_then_send_at(BodySite::StandbyRelay,claim,send).await" in body("src/services/discord/standby_relay.rs", "run_standby_relay")
+    scoped = scoped and not re.search(r"\b(?:tokio|task_supervisor|thread)\s*::\s*spawn|\bspawn_blocking\s*\(", texts[gate_path])
+    if "CLAIM_SITE_NONE_HELD" in active and not scoped:
+        problems.append("claim guard: site/None/held must preserve inherited metadata across the full transport")
+    return problems
+
 TRANSPORT_REQUESTS = {(row["path"], row["entrypoint"], row["occurrence"]): row["op"] for row in TRANSPORT_PROBES.values() if "occurrence" in row}
 
 RAW_REQUEST_RE = re.compile(r"\braw_output\s*::\s*request\s*\(")
@@ -795,6 +868,7 @@ def measure(root: Path, pinned_test_only_files=None):
         for slot in sorted(set(TRANSPORT_REQUESTS) - set(transport_sites)):
             admission_problems.append(f"transport request: missing {slot}")
         admission_problems.extend(_transport_guard_problems(root, transport_texts, ack_sites))
+        admission_problems.extend(_claim_guard_problems(root))
     return primitives, gates, flags, raw, marks, admission_problems
 
 
@@ -948,6 +1022,17 @@ def body_probe_snapshot(root: Path) -> dict:
             require(row["id"] not in transport_ids)
             transport_ids.add(row["id"])
             require(row["status"] in {"PENDING_0a3", "VERIFIED"})
+            pending += row["status"] != "VERIFIED"
+        claims = data["claim_probes"]
+        require(isinstance(claims, list) and len(claims) == len(CLAIM_PROBES))
+        claim_ids = set()
+        for row in claims:
+            expected = CLAIM_PROBES.get(row["id"])
+            require(expected is not None and set(row) == set(expected) | {"status"})
+            require({key: row[key] for key in expected} == expected)
+            require(row["id"] not in claim_ids and row["id"] not in seen and row["id"] not in transport_ids)
+            claim_ids.add(row["id"])
+            require(row["status"] in {"PENDING_0a2", "VERIFIED"})
             pending += row["status"] != "VERIFIED"
         return dict(coverage=pending == 0, census_hash=digest, pending=pending, error=None)
     except (AssertionError, KeyError, TypeError, ValueError):

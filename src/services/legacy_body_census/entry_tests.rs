@@ -207,6 +207,9 @@ fn manifest_coverage_and_hash_follow_the_same_embedded_bytes() {
     for row in data["probes"].as_array_mut().unwrap() {
         row["status"] = json!("VERIFIED");
     }
+    for row in data["claim_probes"].as_array_mut().unwrap() {
+        row["status"] = json!("VERIFIED");
+    }
     let complete = manifest::inspect(&serde_json::to_string(&data).unwrap());
     assert_eq!(complete["coverage"], true);
     assert_ne!(actual["census_hash"], complete["census_hash"]);

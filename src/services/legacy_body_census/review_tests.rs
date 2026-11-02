@@ -69,6 +69,9 @@ fn a_missing_verified_manifest_row_cannot_certify_coverage() {
     for row in data["probes"].as_array_mut().unwrap() {
         row["status"] = json!("VERIFIED");
     }
+    for row in data["claim_probes"].as_array_mut().unwrap() {
+        row["status"] = json!("VERIFIED");
+    }
     assert_eq!(manifest::inspect(&data.to_string())["coverage"], true);
     data["probes"].as_array_mut().unwrap().pop();
     let inspected = manifest::inspect(&data.to_string());
@@ -81,6 +84,9 @@ fn transport_manifest_requires_complete_verified_rows() {
     let mut data: Value =
         serde_json::from_str(include_str!("../../../scripts/tui_o_body_probes.json")).unwrap();
     for row in data["probes"].as_array_mut().unwrap() {
+        row["status"] = json!("VERIFIED");
+    }
+    for row in data["claim_probes"].as_array_mut().unwrap() {
         row["status"] = json!("VERIFIED");
     }
     for case in ["pending", "verified", "missing", "incomplete"] {
@@ -569,4 +575,57 @@ async fn head_publication_holds_the_boot_lock() {
         "HEAD publication ran without its cross-process boot lock"
     );
     assert_eq!(current.snapshot()["journal_ready"], true);
+}
+
+#[test]
+fn claim_manifest_requires_complete_verified_rows() {
+    let mut data: Value =
+        serde_json::from_str(include_str!("../../../scripts/tui_o_body_probes.json")).unwrap();
+    for family in ["probes", "transport_probes"] {
+        for row in data[family].as_array_mut().unwrap() {
+            row["status"] = json!("VERIFIED");
+        }
+    }
+    for case in [
+        "pending",
+        "verified",
+        "missing",
+        "incomplete",
+        "duplicate",
+        "unknown",
+    ] {
+        let mut current = data.clone();
+        for row in current["claim_probes"].as_array_mut().unwrap() {
+            row["status"] = json!(if case == "pending" {
+                "PENDING_0a2"
+            } else {
+                "VERIFIED"
+            });
+        }
+        match case {
+            "missing" => {
+                current.as_object_mut().unwrap().remove("claim_probes");
+            }
+            "incomplete" => {
+                current["claim_probes"].as_array_mut().unwrap().pop();
+            }
+            "duplicate" => {
+                current["claim_probes"][1] = current["claim_probes"][0].clone();
+            }
+            "unknown" => {
+                current["claim_probes"][0]["status"] = json!("UNRECOGNIZED");
+            }
+            _ => {}
+        }
+        let result = manifest::inspect(&current.to_string());
+        assert_eq!(result["coverage"], case == "verified", "{case}");
+        assert_eq!(
+            result["error"].is_string(),
+            !matches!(case, "pending" | "verified"),
+            "{case}"
+        );
+        if case == "pending" {
+            assert_eq!(result["pending"], 3);
+        }
+    }
 }

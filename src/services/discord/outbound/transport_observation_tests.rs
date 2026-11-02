@@ -376,3 +376,170 @@ async fn o_ack_counts_only_fresh_created_responses() {
         assert!(events(&log, case).is_empty(), "O is never a Legacy request");
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn claim_api_scopes_no_claim_transport_without_creating_a_tag() {
+    if isolated(
+        concat!(
+            module_path!(),
+            "::claim_api_scopes_no_claim_transport_without_creating_a_tag"
+        )
+        .trim_start_matches("agentdesk::"),
+    ) {
+        return;
+    }
+    let log = journal().await;
+    let mock = Mock::start(vec![message(9010)]).await;
+    let http = client(&mock);
+    let result = raw_output::census_scope(Some(json!({"case":"claim-none"})), async {
+        crate::services::tui_o::cutover::claim_then_send_at(
+            crate::services::tui_o::cutover::BodySite::StandbyRelay,
+            None,
+            || async {
+                crate::services::discord::http::send_channel_message(
+                    &http,
+                    ChannelId::new(CHANNEL),
+                    "body",
+                )
+                .await
+            },
+        )
+        .await
+    })
+    .await;
+    assert!(matches!(
+        result,
+        Ok(crate::services::tui_o::cutover::BodySend::Sent(Ok(_)))
+    ));
+    assert_eq!(mock.requests().len(), 1);
+    let recorded = events(&log, "claim-none");
+    assert_eq!(recorded.len(), 2);
+    assert_eq!(recorded[0]["census"]["site"], "W06");
+    assert_eq!(recorded[0]["census"]["reason"], "NO_CLAIM");
+    let mock = Mock::start(vec![message(9013)]).await;
+    let http = client(&mock);
+    crate::services::tui_o::cutover::claim_then_send_at(
+        crate::services::tui_o::cutover::BodySite::StandbyRelay,
+        None,
+        || async {
+            assert!(raw_output::CONTEXT.try_with(|_| ()).is_err());
+            crate::services::discord::http::send_channel_message(
+                &http,
+                ChannelId::new(CHANNEL),
+                "body",
+            )
+            .await
+            .unwrap();
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(mock.requests().len(), 1);
+    assert_eq!(events(&log, "claim-none").len(), 2);
+    assert_eq!(
+        std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .filter(|line| serde_json::from_str::<Value>(line).unwrap()["kind"] == "target")
+            .count(),
+        2,
+        "a site argument cannot turn None into an operational body tag"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn claim_held_context_preserves_lifetime_none_guard_and_outer_site() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    use crate::services::tui_o::cutover::{self, BodyClaim, BodySite};
+    if isolated(
+        concat!(
+            module_path!(),
+            "::claim_held_context_preserves_lifetime_none_guard_and_outer_site"
+        )
+        .trim_start_matches("agentdesk::"),
+    ) {
+        return;
+    }
+    let log = journal().await;
+    for (case, claimed, reason) in [
+        ("held-pending", true, "PENDING_RELEASED"),
+        ("held-none", false, "NO_CLAIM"),
+    ] {
+        let _boot = cutover::test_override::force_candidates(&[(CHANNEL, ClaudeTui)]);
+        let candidate = cutover::test_override::with_channels(|boot| {
+            boot.unwrap().candidate(CHANNEL).unwrap().clone()
+        });
+        let mock = Mock::start(vec![message(9011), message(9011)]).await;
+        let http = client(&mock);
+        let claim = claimed.then(|| BodyClaim::new(CHANNEL, Some(ClaudeTui)));
+        let (sent, context) = raw_output::census_scope(
+            Some(json!({"case":case})),
+            cutover::claim_then_send_held_at(BodySite::StandbyRelay, claim, || async {
+                crate::services::discord::http::send_channel_message(
+                    &http,
+                    ChannelId::new(CHANNEL),
+                    "body",
+                )
+                .await
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(sent, cutover::BodySend::Sent(Ok(_))));
+        assert_eq!(candidate.sends(), (u64::from(claimed), 0));
+        context
+            .run(async {
+                tokio::task::yield_now().await;
+                crate::services::discord::http::edit_channel_message(
+                    &http,
+                    ChannelId::new(CHANNEL),
+                    MessageId::new(9011),
+                    "body",
+                )
+                .await
+                .unwrap();
+            })
+            .await;
+        assert_eq!(candidate.sends(), (u64::from(claimed), 0));
+        drop(context);
+        assert_eq!(candidate.sends(), (u64::from(claimed), u64::from(claimed)));
+        assert_eq!(mock.requests().len(), 2);
+        let recorded = events(&log, case);
+        assert_eq!(
+            recorded.len(),
+            4,
+            "each real transport has one begin/result"
+        );
+        for event in recorded {
+            assert_eq!(event["census"]["site"], "W06");
+            assert_eq!(event["census"]["reason"], reason);
+        }
+    }
+    let mock = Mock::start(vec![message(9012)]).await;
+    let http = client(&mock);
+    raw_output::census_scope(
+        Some(json!({"case":"outer-claim", "site":"W30", "reason":"RELEASED"})),
+        cutover::claim_then_send_at(BodySite::StandbyRelay, None, || async {
+            cutover::claim_then_send_at(BodySite::StandbyRelay, None, || async {
+                crate::services::discord::http::send_channel_message(
+                    &http,
+                    ChannelId::new(CHANNEL),
+                    "body",
+                )
+                .await
+                .unwrap();
+            })
+            .await
+            .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(mock.requests().len(), 1);
+    let recorded = events(&log, "outer-claim");
+    assert_eq!(recorded.len(), 2);
+    for event in recorded {
+        assert_eq!(event["census"]["site"], "W30");
+        assert_eq!(event["census"]["reason"], "RELEASED");
+    }
+}

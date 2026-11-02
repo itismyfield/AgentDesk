@@ -11,13 +11,14 @@ pub(crate) mod intake_route;
 #[cfg(unix)]
 pub(crate) use channel_gate::peek_o_owns_tui_output_for_channel_quiet;
 pub(crate) use channel_gate::{
-    BodyClaim, BodySend, IdentityError, claim_then_send, claim_then_send_held, o_keeps_body,
-    o_owns_tui_output_for_channel_reserving, peek_o_owns_tui_output_for_channel,
-    peek_o_owns_tui_output_for_channel_tmux,
+    BodyClaim, BodySend, BodySite, IdentityError, claim_then_send, claim_then_send_at,
+    claim_then_send_held, o_keeps_body, o_owns_tui_output_for_channel_reserving,
+    peek_o_owns_tui_output_for_channel, peek_o_owns_tui_output_for_channel_tmux,
 };
 #[cfg(test)]
 pub(crate) use channel_gate::{
-    claims_judged, o_owns_tui_output_for_channel, o_owns_tui_output_for_channel_tmux,
+    claim_then_send_held_at, claims_judged, o_owns_tui_output_for_channel,
+    o_owns_tui_output_for_channel_tmux,
 };
 
 pub(crate) fn boot_snapshot() -> Option<BootChannels> {
