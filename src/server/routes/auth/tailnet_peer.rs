@@ -3,21 +3,24 @@ use axum::http::Method;
 use std::net::{IpAddr, SocketAddr};
 
 // These ranges assume direct tailnet transport; request headers cannot establish membership.
-pub(super) fn allows(req: &Request, peer: Option<SocketAddr>) -> bool {
+pub(in crate::server::routes) fn is_tailnet_peer(peer: Option<SocketAddr>) -> bool {
     let Some(peer) = peer else {
         return false;
     };
     if matches!(peer, SocketAddr::V6(address) if address.scope_id() != 0) {
         return false;
     }
-    let trusted_ip = match peer.ip().to_canonical() {
+    match peer.ip().to_canonical() {
         IpAddr::V4(ip) => {
             let [a, b, ..] = ip.octets();
             a == 100 && (64..=127).contains(&b)
         }
         IpAddr::V6(ip) => ip.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0],
-    };
-    if !trusted_ip {
+    }
+}
+
+pub(super) fn allows(req: &Request, peer: Option<SocketAddr>) -> bool {
+    if !is_tailnet_peer(peer) {
         return false;
     }
     let Some(original) = req.extensions().get::<OriginalUri>() else {

@@ -245,7 +245,7 @@ async fn make_binding_only(fixture: &CanaryFixture, assert_absent: bool) {
                 }
         })
         .expect("the actual N2 hook must retain its exact durable Source binding");
-    assert!(!dedupe::codex_verified_event_allowed(prior));
+    assert_eq!(dedupe::codex_verified_events_allowed(&[prior]), [false]);
     use crate::services::tui_o::writer::binding::{
         BindingEvents, BindingRecord, ChannelBindingLog,
     };

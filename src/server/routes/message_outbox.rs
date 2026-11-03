@@ -204,7 +204,7 @@ pub async fn list_failed(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Query(query): Query<FailedQuery>,
 ) -> Response {
-    if let Err(response) = control_allowed(&state, peer) {
+    if let Some(response) = super::health_api::read_rejection(&state.config, peer) {
         return response;
     }
     let ids = match query_ids(&query.ids) {

@@ -535,3 +535,77 @@ fn rank_rise_and_late_bind_are_compacted_and_still_recognized() {
         Some(true)
     );
 }
+
+/// Unchanged production-size history bytes are parsed once; bytes from the writer, a replacement
+/// or an in-place rewrite keeping length and mtime are read again.
+#[test]
+fn unchanged_history_bytes_are_parsed_once_and_new_bytes_are_read_again() {
+    let _root = TestRuntimeRootGuard::new();
+    let dir = tempfile::tempdir().unwrap();
+    let history = Registry::runtime().unwrap();
+    std::fs::create_dir_all(history.path.parent().unwrap()).unwrap();
+    let compact = encode_compacted(fixture(Scenario::AllReceived, 2000, dir.path()));
+    assert!(compact.len() > 657 * 1024, "{} bytes", compact.len());
+    std::fs::write(&history.path, &compact).unwrap();
+    let seeded = frame("a measured prompt of ordinary length for one Discord message");
+    let ask = |row: &str| {
+        observed(super::super::observed_attempt_checked(
+            "codex",
+            "history-pane",
+            std::slice::from_ref(&seeded),
+            Some(row),
+        ))
+    };
+    compat::COST.with(|cost| cost.set((0, 0, 0)));
+    for _ in 0..5 {
+        assert!(super::super::known(&seeded));
+        assert_eq!(ask("row-7"), "known:nonce10007");
+    }
+    assert_eq!(
+        compat::COST.with(|cost| cost.get().0),
+        2,
+        "one parse per reader"
+    );
+
+    let transcript = dir.path().join("fresh.jsonl");
+    std::fs::write(&transcript, "").unwrap();
+    let fresh = key(99_999, &transcript, false);
+    let fresh_frame = frame("registered after the first reads");
+    assert!(!super::super::known(&fresh_frame));
+    history.prepare(NS, &input(&fresh, &fresh_frame)).unwrap();
+    assert!(
+        super::super::known(&fresh_frame),
+        "the writer's publication"
+    );
+
+    let mut rewritten = std::fs::read(&history.path).unwrap();
+    let modified = std::fs::metadata(&history.path)
+        .unwrap()
+        .modified()
+        .unwrap();
+    let (from, to) = (b"\"row-7\"", b"\"row-Z\"");
+    let at = rewritten
+        .windows(from.len())
+        .position(|w| w == from)
+        .unwrap();
+    rewritten[at..at + to.len()].copy_from_slice(to);
+    std::fs::write(&history.path, &rewritten).unwrap();
+    let file = std::fs::File::options()
+        .write(true)
+        .open(&history.path)
+        .unwrap();
+    file.set_modified(modified).unwrap();
+    drop(file);
+    assert_eq!(
+        ask("row-7"),
+        "pending",
+        "an in-place rewrite of equal size and mtime"
+    );
+    assert_eq!(ask("row-Z"), "known:nonce10007");
+
+    let replacement = history.path.with_extension("replacement");
+    std::fs::write(&replacement, &compact).unwrap();
+    std::fs::rename(&replacement, &history.path).unwrap();
+    assert_eq!(ask("row-7"), "known:nonce10007", "a replaced file");
+    assert!(!super::super::known(&fresh_frame));
+}
