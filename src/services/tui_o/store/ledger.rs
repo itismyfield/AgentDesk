@@ -1,7 +1,7 @@
 //! Delivery ledger: every piece O prepares and what became of it, appended and fsynced per entry.
 //! Replay rebuilds the anchor and outcomes; an ownership-invariant break is kept as a violation.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::ops::Range;
@@ -157,6 +157,12 @@ pub enum PieceDisposition {
     Settled,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// `piece` lookups on this thread, for the retry-selection cost test.
+    pub(crate) static PIECE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Replayed ledger. `anchor` moves only on Posted; the first invariant break pauses the channel.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LedgerState {
@@ -167,6 +173,8 @@ pub struct LedgerState {
     next_serial: u64,
     open_serial: Option<u64>,
     pieces: BTreeMap<u64, PieceRecord>,
+    /// Serials whose piece carries a local-retry budget, the only possible retry roots.
+    budget_roots: BTreeSet<u64>,
     output_origins:
         BTreeMap<u64, crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
     latest: HashMap<(UnitKey, u32), u64>,
@@ -214,7 +222,14 @@ impl LedgerState {
     }
 
     pub fn piece(&self, serial: u64) -> Option<&PieceRecord> {
+        #[cfg(test)]
+        PIECE_READS.with(|reads| reads.set(reads.get() + 1));
         self.pieces.get(&serial)
+    }
+
+    /// Serials from `from` whose piece carries a local-retry budget, in serial order.
+    pub(crate) fn budget_roots(&self, from: u64) -> impl Iterator<Item = u64> + '_ {
+        self.budget_roots.range(from..).copied()
     }
 
     /// Latest attempt for one piece of a unit.
@@ -521,6 +536,11 @@ impl LedgerState {
                     notice_origin,
                     outcome_at: None,
                 };
+                if piece.local_retry == Some(LocalRetryMark::Budget) {
+                    self.budget_roots.insert(serial);
+                } else {
+                    self.budget_roots.remove(&serial);
+                }
                 self.pieces.insert(serial, piece);
             }
             LedgerEntry::Posted { serial, msg_id } => {
