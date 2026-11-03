@@ -227,7 +227,6 @@ fn owner_drive_codex_delivers_draft_busy_and_unknown_turn_once() {
             mailbox: rig.mailbox.clone(),
             channel: rig.channel,
             handoff,
-            recheck: Duration::from_secs(60),
             settled: Some(Arc::new(move || {
                 settle_send.send(()).unwrap();
                 Box::pin(async {})
