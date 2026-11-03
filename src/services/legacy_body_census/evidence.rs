@@ -18,12 +18,14 @@ pub(super) fn linked_ids(manifest: &Value) -> Option<BTreeSet<&str>> {
                 }
                 linked.insert(id);
             }
-            if let Some(recording) = row["recording_test"].as_str()
-                && !unique
+            if let Some(recording) = row.get("recording_test") {
+                let recording = recording.as_str()?;
+                if !unique
                     .iter()
                     .any(|id| id.rsplit("::").next() == Some(recording))
-            {
-                return None;
+                {
+                    return None;
+                }
             }
         }
     }

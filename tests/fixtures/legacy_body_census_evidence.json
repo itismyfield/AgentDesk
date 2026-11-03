@@ -202,6 +202,58 @@
       ],
       "coverage": false,
       "linked": true
+    },
+    {
+      "name": "recording_null",
+      "edits": [],
+      "missing": false,
+      "manifest_edits": [
+        [
+          "/probes/0/recording_test",
+          null
+        ]
+      ],
+      "coverage": false,
+      "linked": false
+    },
+    {
+      "name": "recording_boolean",
+      "edits": [],
+      "missing": false,
+      "manifest_edits": [
+        [
+          "/probes/0/recording_test",
+          true
+        ]
+      ],
+      "coverage": false,
+      "linked": false
+    },
+    {
+      "name": "recording_number",
+      "edits": [],
+      "missing": false,
+      "manifest_edits": [
+        [
+          "/probes/0/recording_test",
+          1
+        ]
+      ],
+      "coverage": false,
+      "linked": false
+    },
+    {
+      "name": "recording_object",
+      "edits": [],
+      "missing": false,
+      "manifest_edits": [
+        [
+          "/probes/0/recording_test",
+          {}
+        ]
+      ],
+      "coverage": false,
+      "linked": false
     }
   ]
 }

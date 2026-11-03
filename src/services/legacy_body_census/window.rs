@@ -93,6 +93,7 @@ pub(super) fn valid_chain(
         return false;
     }
     let mut complete = BTreeSet::new();
+    let mut successors = BTreeSet::new();
     for start in headers.keys() {
         let mut path = BTreeSet::new();
         let mut cursor = Some(start.as_str());
@@ -121,6 +122,9 @@ pub(super) fn valid_chain(
             cursor = match header.get("predecessor_boot_id") {
                 Some(Value::Null) if id == epoch => None,
                 Some(Value::String(parent)) if uuid::Uuid::parse_str(parent).is_ok() => {
+                    if !successors.insert(parent) {
+                        return false;
+                    }
                     if let Some(previous) = headers.get(parent) {
                         if previous["started_at_ms"]
                             .as_i64()

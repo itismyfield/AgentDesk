@@ -547,6 +547,8 @@ fn dangling_or_cyclic_predecessors_are_inconclusive() {
     for (case, expected) in [
         ("valid", true),
         ("same_time", true),
+        ("fork_skips_middle", false),
+        ("same_time_fork", false),
         ("outside_boundary", true),
         ("empty", false),
         ("middle_missing", false),
@@ -576,11 +578,17 @@ fn dangling_or_cyclic_predecessors_are_inconclusive() {
                 }
                 headers.get_mut(&ids[0]).unwrap()["predecessor_boot_id"] = json!(ids[2]);
             }
-            "same_time" => {
+            "fork_skips_middle" => {
+                headers.get_mut(&ids[2]).unwrap()["predecessor_boot_id"] = json!(ids[0])
+            }
+            "same_time" | "same_time_fork" => {
                 for row in headers.values_mut() {
                     row["started_at_ms"] = json!(1000);
                 }
                 end = 1000;
+                if case == "same_time_fork" {
+                    headers.get_mut(&ids[2]).unwrap()["predecessor_boot_id"] = json!(ids[0]);
+                }
             }
             "before_start" => headers.get_mut(&ids[1]).unwrap()["started_at_ms"] = json!(999),
             "after_end" => headers.get_mut(&ids[2]).unwrap()["started_at_ms"] = json!(1003),
