@@ -346,20 +346,58 @@ async fn recovered_notices_record_bodies_without_counting_neutral_markers() {
     let journal = observation::journal().await;
     let mut row = state_for_recovery(9904);
     row.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
-    for text in ["saved provider answer", super::RECOVERED_WITHOUT_TEXT] {
+    let neutral = super::RECOVERY_NEUTRAL_NOTICE;
+    let partial = format!("saved answer\n\n{neutral}");
+    for (entry, text) in [
+        ("notice", "saved provider answer"),
+        ("notice", super::RECOVERED_WITHOUT_TEXT),
+        ("notice", neutral),
+        ("notice", partial.as_str()),
+        ("terminal", neutral),
+        ("worktree", "fixture worktree is unavailable"),
+    ] {
         let mock = Mock::start(vec![observation::message(9904)]).await;
         let http = Arc::new(observation::client(&mock));
         let shared = crate::services::discord::make_shared_data_for_tests();
-        let outcome = super::relay_recovery_terminal_notice(
-            &http,
-            &shared,
-            &ProviderKind::Claude,
-            &row,
-            text,
-        )
-        .await;
-        assert_eq!(outcome, super::RecoveryRelayOutcome::Delivered);
-        assert_eq!(mock.requests().len(), 1);
+        let outcome = match entry {
+            "worktree" => {
+                super::completion_delivery::relay_worktree_recovery_refusal(
+                    &http,
+                    &shared,
+                    &row,
+                    (
+                        ChannelId::new(row.channel_id),
+                        Some(MessageId::new(row.current_msg_id)),
+                    ),
+                    text,
+                    None,
+                )
+                .await
+            }
+            "terminal" => {
+                super::relay_recovered_terminal_text_to_placeholder(
+                    &http,
+                    &shared,
+                    ChannelId::new(row.channel_id),
+                    Some(MessageId::new(row.current_msg_id)),
+                    text,
+                    None,
+                )
+                .await
+            }
+            _ => {
+                super::relay_recovery_terminal_notice(
+                    &http,
+                    &shared,
+                    &ProviderKind::Claude,
+                    &row,
+                    text,
+                )
+                .await
+            }
+        };
+        assert_eq!(outcome, super::RecoveryRelayOutcome::Delivered, "{entry}");
+        assert_eq!(mock.requests().len(), 1, "{entry}");
     }
     observation::flushed().await;
     let recorded: Vec<serde_json::Value> = std::fs::read_to_string(journal)
@@ -370,8 +408,8 @@ async fn recovered_notices_record_bodies_without_counting_neutral_markers() {
         .collect();
     assert_eq!(
         recorded.len(),
-        2,
-        "one body EDIT; the neutral marker is excluded"
+        4,
+        "two real bodies, including a partial before a notice; registered notices are excluded"
     );
     for event in recorded {
         assert_eq!(event["census"]["site"], "W30");

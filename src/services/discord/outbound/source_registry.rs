@@ -142,19 +142,20 @@ pub struct SendSourcePolicyError {
     pub caller: SendCallerClass,
 }
 
-/// Only static notice policies establish N; an authorized agent label may carry a body.
+/// Capture static notice identity at production time, before agent configuration changes.
 pub(crate) fn is_registered_nonbody_source(source: &str) -> bool {
+    crate::config::snapshot()
+        .is_some_and(|config| !config.agents.iter().any(|agent| agent.id == source))
+        && is_static_notice_kind(source)
+}
+
+pub(crate) fn is_static_notice_kind(source: &str) -> bool {
     let Some(policy) = POLICIES
         .iter()
         .find(|policy| policy.label == source && policy.caller_mask & LOOPBACK != 0)
     else {
         return false;
     };
-    if crate::config::snapshot()
-        .is_none_or(|config| config.agents.iter().any(|agent| agent.id == source))
-    {
-        return false;
-    }
     use StaticSendSource::*;
     matches!(
         policy.source,

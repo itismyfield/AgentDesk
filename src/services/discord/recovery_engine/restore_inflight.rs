@@ -1840,12 +1840,12 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                             None,
                             shared.restart.current_generation,
                         );
-                        let relay_ok = relay_recovered_terminal_text_to_placeholder(
+                        let relay_ok = super::completion_delivery::relay_worktree_recovery_refusal(
                             http,
                             shared,
-                            channel_id,
-                            current_msg_id,
-                            &format!("❌ {error}\nmain workspace fallback blocked."),
+                            &state,
+                            (channel_id, current_msg_id),
+                            &error,
                             recovery_context.as_ref(),
                         )
                         .await
@@ -2101,12 +2101,12 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                     None,
                     shared.restart.current_generation,
                 );
-                let relay_ok = relay_recovered_terminal_text_to_placeholder(
+                let relay_ok = super::completion_delivery::relay_worktree_recovery_refusal(
                     http,
                     shared,
-                    channel_id,
-                    current_msg_id,
-                    &format!("❌ {error}\nmain workspace fallback blocked."),
+                    &state,
+                    (channel_id, current_msg_id),
+                    &error,
                     recovery_context.as_ref(),
                 )
                 .await

@@ -55,8 +55,8 @@ fn tag(mode: &str, host: &str) -> Value {
         "input_origin":"unknown","provider":null,"body_owner":"Legacy","reason":"NO_CLAIM"})
 }
 
-#[test]
-fn registered_agent_labels_do_not_certify_absent_body_metadata() {
+#[tokio::test]
+async fn registered_agent_labels_do_not_certify_absent_body_metadata() {
     if recording::isolated(
         concat!(
             module_path!(),
@@ -66,10 +66,12 @@ fn registered_agent_labels_do_not_certify_absent_body_metadata() {
     ) {
         return;
     }
-    let _live = crate::config_live_reload::test_live_guard(
-        crate::config::test_env_lock::acquire_shared_test_env_lock(),
-    );
-    let mut config = crate::config::Config::default();
+    let (_db, pool, _origin) = output::tests::fixture("72280700").await;
+    let log = recording::journal().await;
+    let mock = Discord::new().await;
+    let registry = mock.registry().await;
+    let without_agents = (*crate::config::snapshot().expect("fixture live config")).clone();
+    let mut config = without_agents.clone();
     for id in ["census-agent", "system"] {
         let input = crate::services::discord::agentdesk_config::AgentSetupConfigInput {
             agent_id: id.into(),
@@ -87,6 +89,87 @@ fn registered_agent_labels_do_not_certify_absent_body_metadata() {
         assert_eq!(tag["output_class"], "UnknownBody", "{id}");
         assert_eq!(tag["binding_mode"], "UNKNOWN", "{id}");
     }
+    let id = message_outbox::enqueue_outbox_pg_returning_id_with_ttl(
+        &pool,
+        OutboxMessage {
+            target: "channel:72280700",
+            content: "agent answer before removal",
+            bot: "notify",
+            source: "system",
+            reason_code: None,
+            session_key: None,
+        },
+        0,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let stored: Option<Value> =
+        sqlx::query_scalar("SELECT body_census FROM message_outbox WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        stored.is_none(),
+        "an ambiguous agent producer is not a static notice"
+    );
+    crate::config_live_reload::install(without_agents);
+    assert_eq!(
+        drain_message_outbox_once(&Arc::new(pool.clone()), &registry, "agent-removed-worker").await,
+        1
+    );
+    assert_eq!(mock.posts().len(), 1);
+    recording::flushed().await;
+    let rows = records(&log);
+    assert_eq!(
+        rows.len(),
+        2,
+        "removing an agent must not turn its old NULL row into N"
+    );
+    assert_eq!(rows[0]["census"]["output_class"], "UnknownBody");
+    assert_eq!(rows[0]["census"]["binding_mode"], "UNKNOWN");
+    assert_eq!(rows[1]["outcome"], "confirmed");
+    let notice_id = message_outbox::enqueue_outbox_pg_returning_id_with_ttl(
+        &pool,
+        OutboxMessage {
+            target: "channel:72280700",
+            content: "operational notice",
+            bot: "notify",
+            source: "system",
+            reason_code: Some("census.nonbody"),
+            session_key: None,
+        },
+        0,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let stored: Option<Value> =
+        sqlx::query_scalar("SELECT body_census FROM message_outbox WHERE id=$1")
+            .bind(notice_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        stored.is_some(),
+        "new static notices must store producer-kind evidence"
+    );
+    assert_eq!(
+        message_outbox::body_census::delivery_tag("system", stored)["output_class"],
+        "NonBody"
+    );
+    assert_eq!(
+        drain_message_outbox_once(&Arc::new(pool), &registry, "static-notice-worker").await,
+        1
+    );
+    recording::flushed().await;
+    assert_eq!(mock.posts().len(), 2);
+    assert_eq!(
+        records(&log).len(),
+        2,
+        "only persisted static-notice evidence establishes N"
+    );
 }
 
 #[tokio::test]

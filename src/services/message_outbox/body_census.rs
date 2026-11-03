@@ -5,7 +5,13 @@ use sqlx::{Acquire, Postgres, Transaction};
 /// Capture provenance only; enqueue success is never a transport observation.
 pub(super) fn capture(source: &str) -> Option<Value> {
     if source != "headless_turn" {
-        return None;
+        return crate::services::discord::outbound::source_registry::is_registered_nonbody_source(
+            source,
+        )
+        .then(|| {
+            json!({"schema_version":1,"notice_kind":source,
+                "producer":crate::services::legacy_body_census::producer_identity()})
+        });
     }
     crate::services::discord::outbound::current_census().map(|tag| {
         json!({"schema_version":1,"tag":tag,
@@ -13,16 +19,10 @@ pub(super) fn capture(source: &str) -> Option<Value> {
     })
 }
 
-/// Old body rows remain unknown; only registered nonbody sources may omit metadata.
+/// Only persisted producer evidence can establish a nonbody exclusion.
 pub(crate) fn delivery_tag(source: &str, stored: Option<Value>) -> Value {
-    let missing = stored.as_ref().is_none_or(Value::is_null);
     if let Some(tag) = stored.as_ref().and_then(restore) {
         return tag;
-    }
-    if missing
-        && crate::services::discord::outbound::source_registry::is_registered_nonbody_source(source)
-    {
-        return json!({"output_class":"NonBody"});
     }
     json!({"site":if source=="headless_turn" { json!(crate::services::tui_o::cutover::BodySite::BridgeHeadless) } else { Value::Null },
         "output_class":"UnknownBody","binding_mode":"UNKNOWN","actual_runtime":"unknown",
@@ -35,12 +35,6 @@ pub(crate) fn delivery_tag(source: &str, stored: Option<Value>) -> Value {
 fn restore(stored: &Value) -> Option<Value> {
     let envelope = stored.as_object()?;
     let producer = stored["producer"].as_object()?;
-    let mut tag = stored["tag"].as_object()?.clone();
-    let present_string = |key: &str| {
-        tag.get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|s| !s.is_empty())
-    };
     let nullable_string =
         |value: Option<&Value>| value.is_some_and(|v| v.is_null() || v.is_string());
     if envelope.len() != 3
@@ -51,9 +45,22 @@ fn restore(stored: &Value) -> Option<Value> {
             .and_then(Value::as_str)
             .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
         || !nullable_string(producer.get("host"))
-        || !["site", "actual_runtime", "input_origin", "reason"]
-            .into_iter()
-            .all(present_string)
+    {
+        return None;
+    }
+    if let Some(kind) = stored.get("notice_kind").and_then(Value::as_str) {
+        return crate::services::discord::outbound::source_registry::is_static_notice_kind(kind)
+            .then(|| json!({"output_class":"NonBody"}));
+    }
+    let mut tag = stored["tag"].as_object()?.clone();
+    let present_string = |key: &str| {
+        tag.get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+    };
+    if !["site", "actual_runtime", "input_origin", "reason"]
+        .into_iter()
+        .all(present_string)
         || !["producer_host", "provider"]
             .into_iter()
             .all(|key| nullable_string(tag.get(key)))

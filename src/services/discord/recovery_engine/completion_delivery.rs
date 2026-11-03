@@ -12,6 +12,22 @@ use crate::services::tui_o::cutover::{
     BodyClaim, BodySend, BodySite, IdentityError, claim_then_send_at,
 };
 
+pub(super) const RECOVERY_NEUTRAL_NOTICE: &str = "ℹ️ 이전 실행은 종료됐거나 입력 가능한 상태지만, 이전 요청의 완료 여부는 확인하지 못했습니다. 요청을 자동으로 다시 실행하지는 않았습니다.";
+
+// Only the exact registered notice masks a body; a saved partial before it still counts.
+async fn registered_notice<T>(
+    source: BodySource,
+    site: BodySite,
+    text: &str,
+    next: impl std::future::Future<Output = T>,
+) -> T {
+    if text == RECOVERY_NEUTRAL_NOTICE {
+        source.observe(site, BodyOffer::NonBody, next).await
+    } else {
+        next.await
+    }
+}
+
 pub(super) fn should_advance_recovery_dispatch_after_relay(relay_ok: bool) -> bool {
     relay_ok
 }
@@ -200,21 +216,26 @@ async fn relay_recovery_terminal_notice_with_capture(
             context
         }
     });
-    let outcome = BodySource::from_state(state)
-        .observe(
-            BodySite::RecoveryNotice,
-            BodyOffer::recovered(carries_body(state, text)),
-            relay_recovered_body_to_placeholder(
-                http,
-                shared,
-                channel_id,
-                super::inflight::opt_message_id(state.current_msg_id),
-                text,
-                recovery_context.as_ref(),
-                claim,
-            ),
-        )
-        .await?;
+    let relay = BodySource::from_state(state).observe(
+        BodySite::RecoveryNotice,
+        BodyOffer::recovered(carries_body(state, text)),
+        relay_recovered_body_to_placeholder(
+            http,
+            shared,
+            channel_id,
+            super::inflight::opt_message_id(state.current_msg_id),
+            text,
+            recovery_context.as_ref(),
+            claim,
+        ),
+    );
+    let outcome = registered_notice(
+        BodySource::from_state(state),
+        BodySite::RecoveryNotice,
+        text,
+        relay,
+    )
+    .await?;
     let BodySend::Sent(outcome) = outcome else {
         return Ok(BodySend::OwnedByO);
     };
@@ -311,7 +332,14 @@ pub(super) async fn relay_recovery_body_to_placeholder(
             claim,
         ),
     );
-    match relay.await {
+    match registered_notice(
+        BodySource::from_state(state),
+        BodySite::RecoveryNotice,
+        text,
+        relay,
+    )
+    .await
+    {
         Ok(BodySend::Sent(outcome)) => outcome,
         // O took the channel since the peek; the retry shows its marker instead.
         Ok(BodySend::OwnedByO) | Err(_) => RecoveryRelayOutcome::TransientFailure,
@@ -351,6 +379,32 @@ pub(super) async fn relay_recovery_body_notice(
         .await
 }
 
+/// The registered worktree-refusal notice keeps its existing delivery and authority path.
+pub(super) async fn relay_worktree_recovery_refusal(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    state: &super::inflight::InflightTurnState,
+    target: (ChannelId, Option<MessageId>),
+    error: &str,
+    recovery_context: Option<&RecoveryDeliveryContext>,
+) -> RecoveryRelayOutcome {
+    let text = format!("❌ {error}\nmain workspace fallback blocked.");
+    BodySource::from_state(state)
+        .observe(
+            BodySite::RecoveredTerminal,
+            BodyOffer::NonBody,
+            relay_recovered_terminal_text_to_placeholder(
+                http,
+                shared,
+                target.0,
+                target.1,
+                &text,
+                recovery_context,
+            ),
+        )
+        .await
+}
+
 /// Deliver the recovered terminal text to Discord: edit the placeholder in
 /// place when one was anchored, else (`placeholder == None`, e.g. TUI-direct —
 /// `MessageId::new(0)` would panic) send a NEW message. Only `Delivered` lets
@@ -368,23 +422,23 @@ pub(in crate::services::discord) async fn relay_recovered_terminal_text_to_place
     text: &str,
     recovery_context: Option<&RecoveryDeliveryContext>,
 ) -> RecoveryRelayOutcome {
-    let relay = recovery_context
+    let source = recovery_context
         .map(|context| context.census.clone())
-        .unwrap_or_else(BodySource::inherited)
-        .observe(
-            BodySite::RecoveredTerminal,
-            BodyOffer::recovered(!text.trim().is_empty() && text != RECOVERED_WITHOUT_TEXT),
-            relay_recovered_body_to_placeholder(
-                http,
-                shared,
-                channel_id,
-                placeholder,
-                text,
-                recovery_context,
-                None,
-            ),
-        );
-    match relay.await {
+        .unwrap_or_else(BodySource::inherited);
+    let relay = source.clone().observe(
+        BodySite::RecoveredTerminal,
+        BodyOffer::recovered(!text.trim().is_empty() && text != RECOVERED_WITHOUT_TEXT),
+        relay_recovered_body_to_placeholder(
+            http,
+            shared,
+            channel_id,
+            placeholder,
+            text,
+            recovery_context,
+            None,
+        ),
+    );
+    match registered_notice(source, BodySite::RecoveredTerminal, text, relay).await {
         Ok(BodySend::Sent(outcome)) => outcome,
         Ok(BodySend::OwnedByO) | Err(_) => RecoveryRelayOutcome::TransientFailure,
     }

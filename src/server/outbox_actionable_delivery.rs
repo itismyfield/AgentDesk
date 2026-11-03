@@ -102,6 +102,17 @@ async fn deliver_with_bot(
             Ok(None) => None,
             Err(error) => return ("503 Service Unavailable", error.to_string()),
         };
+    } else {
+        options.body_census = sqlx::query_scalar::<_, Option<serde_json::Value>>(
+            "SELECT to_jsonb(m)->'body_census' FROM message_outbox m WHERE id=$1 AND target=$2 AND content=$3",
+        )
+        .bind(row.id)
+        .bind(&row.target)
+        .bind(&row.content)
+        .fetch_one(pg_pool)
+        .await
+        .ok()
+        .flatten();
     }
     let (correlation_id, semantic_event_id) = row.delivery_ids();
     let content = delivery_content(&row.content, &row.source, row.reason_code.as_deref());
