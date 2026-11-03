@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from scripts.check_release_token_wiring import REPO, observe, prepare
+from scripts.check_release_token_wiring import HELPERS, REPO, observe, prepare
 from scripts import build_token as bt
 
 VARIANTS = {
@@ -30,8 +30,7 @@ class ReleaseTokenWiringTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.repo = Path(temp.name)
         (self.repo / "scripts/lib").mkdir(parents=True)
-        for name in ("build-release.sh", "deploy-release.sh", "_deploy_policy_generation.sh",
-                     "build_token.py", "lib/deploy_allow_degraded.sh"):
+        for name in ("build-release.sh", "deploy-release.sh", "build_token.py", *HELPERS):
             shutil.copy2(REPO / "scripts" / name, self.repo / "scripts" / name)
 
     def inject(self, script, command):
