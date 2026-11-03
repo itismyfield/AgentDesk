@@ -345,27 +345,38 @@ pub(super) fn observe_claude_tui_transcript_state_for_session(
     session_id: Option<&str>,
     tmux_session_name: Option<&str>,
 ) -> crate::services::tui_turn_state::TuiTurnState {
-    let pane_cwd = tmux_session_name
-        .and_then(crate::services::tmux_diagnostics::tmux_session_pane_cwd)
-        .map(std::path::PathBuf::from);
-    let runtime_binding = tmux_session_name
-        .and_then(crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session);
-    let launch_mtime_cutoff = claude_session_launch_mtime_cutoff(tmux_session_name);
-    let Some(transcript_path) = resolve_claude_followup_transcript_path_with_identity(
-        current_path,
-        session_id,
-        pane_cwd.as_deref(),
-        None,
-        runtime_binding.as_ref(),
-        launch_mtime_cutoff,
-        &std::collections::HashSet::new(),
-    ) else {
+    let Some(transcript_path) =
+        claude_followup_transcript(current_path, session_id, tmux_session_name)
+    else {
         return crate::services::tui_turn_state::TuiTurnState::Unknown;
     };
     let provider = ProviderKind::Claude;
     let probe =
         crate::services::tui_turn_state::JsonlTurnStateProbe::new(&provider, &transcript_path);
     crate::services::tui_turn_state::TuiTurnStateProbe::observe(&probe)
+}
+
+/// The transcript a follow-up's Claude pane writes, resolved by the pane's own identity.
+#[cfg(unix)]
+pub(super) fn claude_followup_transcript(
+    current_path: Option<&str>,
+    session_id: Option<&str>,
+    tmux_session_name: Option<&str>,
+) -> Option<std::path::PathBuf> {
+    let pane_cwd = tmux_session_name
+        .and_then(crate::services::tmux_diagnostics::tmux_session_pane_cwd)
+        .map(std::path::PathBuf::from);
+    let runtime_binding = tmux_session_name
+        .and_then(crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session);
+    resolve_claude_followup_transcript_path_with_identity(
+        current_path,
+        session_id,
+        pane_cwd.as_deref(),
+        None,
+        runtime_binding.as_ref(),
+        claude_session_launch_mtime_cutoff(tmux_session_name),
+        &std::collections::HashSet::new(),
+    )
 }
 
 #[cfg(unix)]

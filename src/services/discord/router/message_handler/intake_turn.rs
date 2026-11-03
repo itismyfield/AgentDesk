@@ -1748,7 +1748,25 @@ pub(super) async fn handle_text_message(
                     shared.api_port,
                 )
                 .await;
-                owner.defer_before_submit("hosted_tui_busy_pre_submit");
+                // A Claude tmux pane running a turn AgentDesk did not start takes the input now;
+                // the row it produces decides who answers. Any other pane keeps the front.
+                let live = (provider == ProviderKind::Claude
+                    && crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_none())
+                .then(|| {
+                    let session = (session_id.as_deref(), tmux_session_name.as_deref());
+                    claude_followup_transcript(Some(&current_path), session.0, session.1)
+                })
+                .flatten()
+                .zip(tmux_session_name.clone());
+                match live {
+                    Some((transcript, session)) => {
+                        let at = (channel_id.get(), session, adk_session_key.clone());
+                        let live = (transcript.display().to_string(), session_id.clone());
+                        let by = (shared.pg_pool.clone(), provider.clone());
+                        owner.into_busy_pane(by, at, live).await;
+                    }
+                    None => owner.defer_before_submit("hosted_tui_busy_pre_submit"),
+                }
                 intake_latency.log(channel_id.get(), provider_label, "deferred_busy");
                 return Ok(IntakeExecution::deferred(channel_id));
             }

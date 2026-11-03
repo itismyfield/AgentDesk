@@ -24,7 +24,6 @@ fn drive(mailbox: &ChannelMailboxHandle, channel: u64, woken: Arc<AtomicUsize>) 
         mailbox: mailbox.clone(),
         channel,
         handoff,
-        recheck: Duration::from_secs(60),
         settled: None,
     })
 }

@@ -57,8 +57,8 @@ fn rig(name: &str, channel: u64, mode: &str, before: String, transcript: &str) -
     owned(f, name, channel, renderer, "claude")
 }
 
-/// An owner with one admitted original over the `provider` pane in session `name`. Its tmux fails a
-/// load on `fail-load`, respawns after the step in `swap-after`, and runs `after-<step>` once.
+/// An owner with one admitted original over the `provider` pane in session `name`. Its tmux fails
+/// `fail-load`'s load and `fail-dead`'s pane read, respawns on `swap-after`, runs `after-<step>`.
 pub(super) fn owned(
     f: Fixture,
     name: &str,
@@ -80,6 +80,7 @@ pub(super) fn owned(
     let script = format!(
         "#!/bin/sh\nd='{dir}'\nprintf '%s\\n' \"$*\" >> \"$d/trace\"\n\
          case \"$*\" in *load-buffer*) [ ! -f \"$d/fail-load\" ] || exit 1 ;; esac\n\
+         case \"$*\" in *pane_dead*) [ ! -f \"$d/fail-dead\" ] || {{ rm \"$d/fail-dead\"; exit 1; }} ;; esac\n\
          case \"$*\" in *paste-buffer*) [ ! -f \"$d/before-paste\" ] || {{ sh \"$d/before-paste\" || printf 'before-paste rc=%s\\n' \"$?\" >> \"$d/hook-timeout\"; rm \"$d/before-paste\"; }} ;; esac\n\
          case \"$*\" in *send-keys*Enter*) [ ! -f \"$d/before-Enter\" ] || {{ sh \"$d/before-Enter\" || printf 'before-Enter rc=%s\\n' \"$?\" >> \"$d/hook-timeout\"; rm \"$d/before-Enter\"; }} ;; esac\n\
          '{shim}' \"$@\"; rc=$?\ncase \"$*\" in *load-buffer*) step=load ;; *paste-buffer*) step=paste ;; *C-s*) step=C-s ;; *send-keys*Enter*) step=Enter ;; *) step= ;; esac\n\
@@ -1372,6 +1373,126 @@ fn an_idle_channel_hands_its_front_to_the_turn_start() {
     assert!(rig.events().is_empty(), "no key: {:?}", rig.events());
 }
 
+/// Copy mode holds a busy pane's front through 25 virtual seconds, a failed pane read and repeated
+/// reads of that screen; once only the pane leaves copy mode, the front is pasted once.
+#[test]
+fn a_front_held_by_copy_mode_is_pasted_once_when_the_pane_leaves_it() {
+    use std::sync::mpsc;
+    use tokio::sync::oneshot;
+    type Ask = (Front, oneshot::Sender<Result<(), String>>);
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig("hold-watch", 7_272_523, "normal", view("", false), BUSY);
+    let target = format!("={}:", rig.name);
+    rig.f.tmux(&["copy-mode", "-t", &target]);
+    let trace = rig.f.root.path().join(format!("{}-owner/trace", rig.name));
+    let mode_reads = || {
+        let trace = fs::read_to_string(&trace).unwrap_or_default();
+        trace
+            .lines()
+            .filter(|line| line.contains("#{pane_in_mode}"))
+            .count()
+    };
+    // The drive runs on virtual time in its own thread; this thread runs each handoff on the rig.
+    let (asks, asked) = mpsc::channel::<Ask>();
+    let idle: crate::services::discord::queue_io::input_owner::drive::Handoff =
+        Arc::new(move |front: Front| {
+            let asks = asks.clone();
+            Box::pin(async move {
+                let (answer, answered) = oneshot::channel();
+                asks.send((front, answer)).map_err(|e| e.to_string())?;
+                answered.await.map_err(|e| e.to_string())?
+            })
+        });
+    let drive = owner_drive(
+        (rig.mailbox.clone(), None),
+        (ProviderKind::Claude, rig.channel),
+        idle,
+    );
+    let (mailbox, (said, heard)) = (rig.mailbox.clone(), mpsc::channel());
+    let ((held, on_hold), (left, on_left)) = (oneshot::channel(), oneshot::channel::<()>());
+    let driver = std::thread::spawn(move || {
+        let paused = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap();
+        paused.block_on(async move {
+            let items = || async {
+                let json = mailbox.v2_request(|s| s.as_ref().unwrap().json()).await;
+                json.unwrap()["items"].clone()
+            };
+            crate::services::discord::queue_io::input_owner::drive::wake(drive);
+            on_hold.await.unwrap();
+            tokio::time::sleep(Duration::from_secs(25)).await;
+            said.send(items().await).unwrap();
+            if on_left.await.is_err() {
+                return;
+            }
+            // Real time too: the paste runs on the rig's own thread.
+            for _ in 0..3_000 {
+                if items().await == json!([]) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            said.send(items().await).unwrap();
+        });
+    });
+    let (mut handed, mut seen, mut since) = (0, Vec::new(), None);
+    let (mut held, mut left) = (Some(held), Some(left));
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    while seen.len() < 2 && std::time::Instant::now() < deadline {
+        if let Ok((front, answer)) = asked.recv_timeout(Duration::from_millis(10)) {
+            handed += 1;
+            let transcript = rig.transcript();
+            let result = rig.handoff(
+                front,
+                ProviderKind::Claude,
+                target::Phase::Busy,
+                &transcript,
+            );
+            if held.is_some() {
+                rig.mark("fail-dead", "");
+            }
+            let _ = answer.send(result);
+            if let Some(held) = held.take() {
+                since = Some(mode_reads());
+                held.send(()).unwrap();
+            }
+        }
+        if let Ok(items) = heard.try_recv() {
+            seen.push(items);
+        }
+        // The watch met the failed read, then read the unchanged screen three times.
+        let failed = !rig
+            .f
+            .root
+            .path()
+            .join(format!("{}-owner/fail-dead", rig.name))
+            .exists();
+        let read = failed && since.is_some_and(|since| mode_reads() >= since + 3);
+        if seen.len() == 1
+            && read
+            && let Some(left) = left.take()
+        {
+            assert_eq!(handed, 1, "the same screen hands nothing");
+            assert!(rig.events().is_empty(), "{:?}", rig.events());
+            assert_eq!(seen[0][0]["text"], PROMPT);
+            rig.f.tmux(&["send-keys", "-t", &target, "-X", "cancel"]);
+            left.send(()).unwrap();
+        }
+    }
+    assert!(
+        left.take().is_none(),
+        "the watch never read the held screen"
+    );
+    driver.join().unwrap();
+    assert_eq!(seen.get(1), Some(&json!([])), "{}", rig.snapshot());
+    assert_eq!(handed, 2);
+    assert_eq!(rig.events(), ["paste", "Enter"]);
+}
+
 /// An owner idle turn binds its fresh cancel token to the pane it submits into, as the warm
 /// follow-up does: a non-force stop reads only that binding to reach the native AI.
 #[test]
@@ -1396,6 +1517,7 @@ fn an_owner_idle_turn_binds_its_cancel_token_to_its_pane() {
             mailbox,
             claim,
             settled,
+            origin: InputOrigin::Discord,
         };
         let mut bound = None;
         let _ = rig.with_turn(&provider, Some(&rig.name), |turn, sender| {
@@ -1512,6 +1634,7 @@ pub(in crate::services::discord) async fn claimed_owner_turn(
         mailbox,
         claim,
         settled,
+        origin: InputOrigin::Discord,
     };
     (owner, answer)
 }

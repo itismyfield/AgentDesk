@@ -12,6 +12,8 @@ pub(super) fn veto_name(veto: Veto) -> &'static str {
         Veto::NotBusy => "not_busy",
         Veto::TranscriptUnavailable => "transcript_unavailable",
         Veto::LoadFailed => "load_failed",
+        Veto::ScreenUnread => "screen_unread",
+        Veto::CopyMode => "copy_mode",
     }
 }
 
