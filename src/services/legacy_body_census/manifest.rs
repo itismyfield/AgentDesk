@@ -123,8 +123,10 @@ pub(super) fn inspect(raw: &str) -> Value {
         }
         Some(pending)
     })();
-    let coverage = pending == Some(0);
-    json!({"coverage":coverage,"census_hash":hex::encode(Sha256::digest(raw.as_bytes())),
+    let instrumentation_complete = pending == Some(0);
+    // Execution evidence needs its own verifier before instrumentation can certify coverage.
+    let coverage = false;
+    json!({"coverage":coverage,"instrumentation_complete":instrumentation_complete,"census_hash":hex::encode(Sha256::digest(raw.as_bytes())),
         "pending":pending.unwrap_or(0),
         "error":if pending.is_some() { Value::Null } else { json!("manifest_invalid") }})
 }

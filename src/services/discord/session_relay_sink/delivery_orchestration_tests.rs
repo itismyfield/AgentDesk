@@ -173,6 +173,162 @@ async fn relay_deliver_preserves_tail_anchor_and_observes_persisted_proof() {
     crate::services::discord::inflight::clear_inflight_state(&ProviderKind::Claude, channel_id);
     drop(_root);
     native_codex_restart_sink_fixture().await;
+
+    use crate::services::discord::outbound::raw_output::tests as recording;
+    use crate::services::discord::shared_state::test_rest;
+    use serde_json::{Value, json};
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let log = recording::journal().await;
+    for (index, (case, site)) in [
+        ("sink_legacy", "W20"),
+        ("sink_controller", "W20a"),
+        ("sink_chunks", "W20b"),
+        ("sink_new", "W20d"),
+        ("sink_task", "W20d"),
+        ("standby_chunks", "W06"),
+        ("standby_new", "W06"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let channel = 44_100 + index as u64;
+        let binding = matched(&channel.to_string());
+        let session = &binding.expected_session_name;
+        let generation = crate::services::tmux_common::session_temp_path(session, "generation");
+        std::fs::create_dir_all(std::path::Path::new(&generation).parent().unwrap()).unwrap();
+        std::fs::write(generation, "census-entry").unwrap();
+        let text = if matches!(case, "sink_chunks" | "standby_chunks") {
+            "ordered response line\n".repeat(200)
+        } else {
+            "actual terminal answer".into()
+        };
+        let mut payload = String::new();
+        if case == "sink_task" {
+            payload.push_str(
+                &json!({"type":"system", "subtype":"task_notification",
+                "task_id":"census-task", "status":"completed", "summary":"notice-card",
+                "task_notification_kind":"background"})
+                .to_string(),
+            );
+            payload.push('\n');
+        }
+        payload.push_str(
+            &json!({"type":"assistant", "message":{"content":[{"type":"text", "text":text}]}})
+                .to_string(),
+        );
+        payload.push('\n');
+        payload.push_str(&json!({"type":"result", "subtype":"success", "result":text}).to_string());
+        payload.push('\n');
+        std::fs::write(&binding.expected_rollout_path, &payload).unwrap();
+        let started = "2026-11-04T00:00:00Z";
+        let mut row =
+            inflight_with_identity_offset(channel, session, channel + 1, started, Some(0));
+        row.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
+        row.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+        row.output_path = Some(binding.expected_rollout_path.clone());
+        row.current_msg_id = if case.ends_with("new") || case == "sink_task" {
+            0
+        } else {
+            channel + 2
+        };
+        crate::services::discord::inflight::save_inflight_state(&row).unwrap();
+        let replies = (0..32).map(|n| recording::reply("200 OK", &[], &json!({
+            "id":(920000+n).to_string(), "username":"bot", "discriminator":"0001", "avatar":null,"bot":true,
+            "channel_id":channel.to_string(), "content":"answer",
+            "author":{"id":"42","username":"bot","discriminator":"0001","avatar":null},
+            "timestamp":"2026-11-04T00:00:00+00:00", "edited_timestamp":null,
+            "tts":false,"mention_everyone":false,"mentions":[],"mention_roles":[],
+            "attachments":[],"embeds":[],"pinned":false,"type":0
+        }).to_string())).collect();
+        let mock = recording::Mock::start(replies).await;
+        let http = Arc::new(recording::client(&mock));
+        let _http = test_rest::install(http.clone());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let registry = Arc::new(HealthRegistry::new());
+        registry
+            .register(ProviderKind::Claude.as_str().into(), shared.clone())
+            .await;
+        let blocker = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log.with_file_name("writer.lock"))
+            .unwrap();
+        blocker.lock().unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            Box::pin(async {
+                if case.starts_with("standby") {
+                    super::super::standby_relay::run_standby_relay(
+                        http,
+                        ChannelId::new(channel),
+                        (row.current_msg_id != 0).then(|| MessageId::new(row.current_msg_id)),
+                        binding.expected_rollout_path.clone(),
+                        super::super::standby_relay::StandbyRelayTurnBinding::from_state(&row),
+                        0,
+                        Arc::new(AtomicBool::new(false)),
+                        shared.clone(),
+                        ProviderKind::Claude,
+                        Duration::from_secs(2),
+                    )
+                    .await;
+                } else {
+                    let mut sink = SessionBoundDiscordRelaySink::new(registry);
+                    sink.test_force_legacy_replace = case == "sink_legacy";
+                    let frame = terminal_frame_offset(
+                        &binding,
+                        &payload,
+                        1,
+                        payload.len() as u64,
+                        channel + 1,
+                        started,
+                        Some(0),
+                    );
+                    assert_eq!(
+                        sink.deliver(&frame).await.unwrap(),
+                        RelaySinkOutcome::TerminalDelivered,
+                        "{case}"
+                    );
+                }
+            }),
+        )
+        .await
+        .expect("actual entry transport must not await the journal writer");
+        blocker.unlock().unwrap();
+        recording::flushed().await;
+        let wire: Vec<_> = mock
+            .requests()
+            .into_iter()
+            .filter(|(_, body)| !body.is_empty())
+            .collect();
+        assert!(
+            !wire.is_empty(),
+            "actual body wire: {case}: {:?}",
+            mock.requests()
+        );
+        let rows: Vec<Value> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|r| r["kind"] == "target" && r["channel"] == channel)
+            .collect();
+        let body_wire = wire.len() - usize::from(case == "sink_task");
+        assert_eq!(
+            rows.len(),
+            2 * body_wire,
+            "every body wire, excluding the notice card: {case}: {rows:?}"
+        );
+        if case.ends_with("chunks") {
+            assert!(body_wire > 1, "first and later chunks: {case}");
+        }
+        assert!(
+            rows.iter().all(|r| r["census"]["site"] == site
+                && r["census"]["binding_mode"] == "TUI"
+                && r["census"]["output_class"] == "LegacyBody"),
+            "{case}: {rows:?}"
+        );
+        crate::services::discord::inflight::clear_inflight_state(&ProviderKind::Claude, channel);
+    }
 }
 
 async fn native_codex_restart_sink_fixture() {

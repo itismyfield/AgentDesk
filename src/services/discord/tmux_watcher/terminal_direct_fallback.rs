@@ -168,6 +168,10 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                 &relay_text,
                 external_input_lease_before_relay,
                 super::task_response_authority::WatcherTaskResponseLocals {
+                    census_source: watcher_body_source(
+                        inflight_before_relay.as_ref(),
+                        source_authority,
+                    ),
                     placeholder_msg_id: &mut *placeholder_msg_id,
                     placeholder_from_restored_inflight: &mut *placeholder_from_restored_inflight,
                     last_edit_text: &mut *last_edit_text,

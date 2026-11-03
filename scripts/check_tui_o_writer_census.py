@@ -854,10 +854,14 @@ def _future_scope_args(text: str, opening: int):
 
 def _body_future_guard(row: dict, text: str) -> tuple[bool, int]:
     spans = [(start, end) for name, start, end in _fn_bodies(text) if name == row["function"]]
+    primitive = re.compile(PRIMITIVES[row["primitive"]])
+    if (row["path"] == "src/services/discord/task_notification_delivery/response_chunks.rs"
+            and row["function"] == "post_chunk"):
+        spans = [(start, end) for start, end in spans
+                 if primitive.search(text, start + 1, end)]
     if len(spans) != 1:
         return False, 0
     start, end = spans[0]
-    primitive = re.compile(PRIMITIVES[row["primitive"]])
     calls = list(primitive.finditer(text, start + 1, end))
     occurrence = int(row["id"].rsplit(":", 1)[1])
     if not 0 < occurrence <= len(calls):
@@ -1075,7 +1079,7 @@ def body_probe_snapshot(root: Path) -> dict:
     try:
         raw = (root / "scripts/tui_o_body_probes.json").read_bytes()
     except OSError:
-        return dict(coverage=False, census_hash=None, pending=0, error="manifest_unreadable")
+        return dict(coverage=False, instrumentation_complete=False, census_hash=None, pending=0, error="manifest_unreadable")
     digest = hashlib.sha256(raw).hexdigest()
 
     def require(condition):
@@ -1134,9 +1138,11 @@ def body_probe_snapshot(root: Path) -> dict:
             claim_ids.add(row["id"])
             require(row["status"] in {"PENDING_0a2", "VERIFIED"})
             pending += row["status"] != "VERIFIED"
-        return dict(coverage=pending == 0, census_hash=digest, pending=pending, error=None)
+        # Execution evidence is not linked until its verifier is installed.
+        return dict(coverage=False, instrumentation_complete=pending == 0,
+                    census_hash=digest, pending=pending, error=None)
     except (AssertionError, KeyError, TypeError, ValueError):
-        return dict(coverage=False, census_hash=digest, pending=0, error="manifest_invalid")
+        return dict(coverage=False, instrumentation_complete=False, census_hash=digest, pending=0, error="manifest_invalid")
 
 
 def check(root: Path, pinned_test_only_files=None) -> tuple[bool, str]:

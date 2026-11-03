@@ -72,7 +72,11 @@ fn a_missing_verified_manifest_row_cannot_certify_coverage() {
     for row in data["claim_probes"].as_array_mut().unwrap() {
         row["status"] = json!("VERIFIED");
     }
-    assert_eq!(manifest::inspect(&data.to_string())["coverage"], true);
+    assert_eq!(manifest::inspect(&data.to_string())["coverage"], false);
+    assert_eq!(
+        manifest::inspect(&data.to_string())["instrumentation_complete"],
+        true
+    );
     data["probes"].as_array_mut().unwrap().pop();
     let inspected = manifest::inspect(&data.to_string());
     assert_eq!(inspected["coverage"], false);
@@ -105,7 +109,12 @@ fn transport_manifest_requires_complete_verified_rows() {
             current["transport_probes"].as_array_mut().unwrap().pop();
         }
         let observed = manifest::inspect(&current.to_string());
-        assert_eq!(observed["coverage"], case == "verified", "{case}");
+        assert_eq!(observed["coverage"], false, "{case}");
+        assert_eq!(
+            observed["instrumentation_complete"],
+            case == "verified",
+            "{case}"
+        );
         assert_eq!(
             observed["error"].is_string(),
             matches!(case, "missing" | "incomplete"),
@@ -632,7 +641,12 @@ fn claim_manifest_requires_complete_verified_rows() {
             _ => {}
         }
         let result = manifest::inspect(&current.to_string());
-        assert_eq!(result["coverage"], case == "verified", "{case}");
+        assert_eq!(result["coverage"], false, "{case}");
+        assert_eq!(
+            result["instrumentation_complete"],
+            case == "verified",
+            "{case}"
+        );
         assert_eq!(
             result["error"].is_string(),
             !matches!(case, "pending" | "verified"),

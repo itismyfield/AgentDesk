@@ -270,6 +270,18 @@ pub(crate) enum BodySite {
     RestartHandoff,
     #[serde(rename = "W35")]
     RestartAnchor,
+    #[serde(rename = "W20")]
+    SessionSink,
+    #[serde(rename = "W20a")]
+    SessionShortController,
+    #[serde(rename = "W20b")]
+    SessionChunks,
+    #[serde(rename = "W20d")]
+    SessionTaskResponse,
+    #[serde(rename = "W21")]
+    TaskResponse,
+    #[serde(rename = "W01g")]
+    WatcherTaskResponse,
 }
 
 /// Observation remains separate from a Legacy send guard, including unclaimed transports.

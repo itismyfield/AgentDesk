@@ -20,8 +20,9 @@ use super::super::task_notification_delivery::{
 };
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::cluster::stream_relay::RelaySinkError;
+use crate::services::discord::outbound::body_census::{BodyOffer, BodySource};
 use crate::services::provider::ProviderKind;
-use crate::services::tui_o::cutover::{BodyClaim, claim_then_send};
+use crate::services::tui_o::cutover::{BodyClaim, BodySite, claim_then_send_at};
 use serenity::model::id::{ChannelId, MessageId};
 
 fn defer_task_response_to_watcher(
@@ -88,25 +89,30 @@ pub(super) async fn ensure_task_context_card(
             ),
     );
     let transport = DiscordTaskCardTransport::new(shared.clone());
-    let outcome = confirm_task_context_card(
-        Some(shared),
-        &clients,
-        &transport,
-        &shared.ui.placeholder_live_events,
-        channel_id,
-        provider.as_str(),
-        session_name,
-        Some(context),
-    )
-    .await
-    .map_err(|error| match error {
-        CardEnsureError::Permanent(error) => RelaySinkError::Permanent(format!(
-            "task-notification card permanently rejected before response delivery: {error}"
-        )),
-        error => RelaySinkError::Transient(format!(
-            "task-notification card must be confirmed before response delivery: {error}"
-        )),
-    })?;
+    let outcome = BodySource::inherited()
+        .observe(
+            BodySite::SessionTaskResponse,
+            BodyOffer::NonBody,
+            Box::pin(confirm_task_context_card(
+                Some(shared),
+                &clients,
+                &transport,
+                &shared.ui.placeholder_live_events,
+                channel_id,
+                provider.as_str(),
+                session_name,
+                Some(context),
+            )),
+        )
+        .await
+        .map_err(|error| match error {
+            CardEnsureError::Permanent(error) => RelaySinkError::Permanent(format!(
+                "task-notification card permanently rejected before response delivery: {error}"
+            )),
+            error => RelaySinkError::Transient(format!(
+                "task-notification card must be confirmed before response delivery: {error}"
+            )),
+        })?;
 
     let Some(outcome) = outcome else {
         return Ok(None);
@@ -338,20 +344,27 @@ impl super::SessionBoundDiscordRelaySink {
         RelaySinkError,
     > {
         if super::super::formatting::split_message(relay_text).len() == 1 {
-            let receipt = super::super::formatting::send_single_message_returning_receipt(
-                http, channel, relay_text, shared, reference,
-            )
-            .await
-            .map_err(|error| RelaySinkError::Transient(error.to_string()))?;
+            let receipt = BodySource::inherited()
+                .observe(
+                    BodySite::SessionTaskResponse,
+                    BodyOffer::Body,
+                    Box::pin(
+                        super::super::formatting::send_single_message_returning_receipt(
+                            http, channel, relay_text, shared, reference,
+                        ),
+                    ),
+                )
+                .await
+                .map_err(|error| RelaySinkError::Transient(error.to_string()))?;
             let message_id = MessageId::new(receipt.message_id.parse().map_err(|error| {
                 RelaySinkError::Transient(format!("invalid Discord receipt message id: {error}"))
             })?);
             Ok((vec![message_id], Some(receipt)))
         } else {
-            super::super::formatting::send_long_message_raw_with_reference_returning_message_ids(
+            BodySource::inherited().observe(BodySite::SessionTaskResponse, BodyOffer::Body, Box::pin(super::super::formatting::send_long_message_raw_with_reference_returning_message_ids(
                 http, channel, relay_text, shared, reference,
-            )
-            .await
+            )))
+.await
             .map(|ids| (ids, None))
             .map_err(|error| RelaySinkError::Transient(error.to_string()))
         }
@@ -371,6 +384,7 @@ impl super::SessionBoundDiscordRelaySink {
         sink_lease_guard: Option<&super::SinkDeliveryLeaseGuard>,
         sink_delivery_ctx: super::delivery_frontier::SinkDeliveryCtx<'_>,
         body_claim: BodyClaim<'_>,
+        census_source: BodySource,
     ) -> Result<super::SessionRelayDeliveryOutcome, RelaySinkError> {
         let channel = ChannelId::new(channel_id);
         // #4911 R10 (P1-5): a NewMessage route reached WITHOUT a task card is a
@@ -461,9 +475,10 @@ impl super::SessionBoundDiscordRelaySink {
             let claimed = super::super::task_notification_delivery::claim_at_post(
                 &response_transport,
                 body_claim,
-            );
+            )
+            .observing(census_source.clone(), BodySite::SessionTaskResponse);
             let sent =
-                super::super::task_notification_delivery::send_task_response_chunks_with_card_repair(
+                census_source.clone().observe(BodySite::SessionTaskResponse, BodyOffer::Body, Box::pin(super::super::task_notification_delivery::send_task_response_chunks_with_card_repair(
                     shared.pg_pool.as_ref(),
                     &clients,
                     &card_transport,
@@ -471,8 +486,8 @@ impl super::SessionBoundDiscordRelaySink {
                     &event,
                     response_claim,
                     relay_text,
-                )
-                .await;
+                )))
+.await;
             let (_messages, rebound) =
                 super::claimed_body_send(claimed.settle(sent))?.map_err(|error| {
                     match error {
@@ -529,8 +544,22 @@ impl super::SessionBoundDiscordRelaySink {
                     .await?;
                 Ok(message_ids)
             };
-            let message_ids =
-                super::claimed_body_send(claim_then_send(Some(body_claim), send).await)??;
+            let message_ids = super::claimed_body_send(
+                census_source
+                    .observe(
+                        BodySite::SessionTaskResponse,
+                        BodyOffer::body(!relay_text.trim().is_empty()),
+                        Box::pin(async {
+                            claim_then_send_at(
+                                BodySite::SessionTaskResponse,
+                                Some(body_claim),
+                                send,
+                            )
+                            .await
+                        }),
+                    )
+                    .await,
+            )??;
             plain_body_anchor_msg_id = message_ids.last().map(|message_id| message_id.get());
             plain_body_posted = true;
         }

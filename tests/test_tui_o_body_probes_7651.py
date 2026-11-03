@@ -26,12 +26,16 @@ class BodyProbeManifestTests(unittest.TestCase):
     def test_pending_is_computed_and_uses_the_authoritative_file(self):
         data = json.loads((ROOT / "scripts/tui_o_body_probes.json").read_text())
         self.assertFalse(self.snapshot(data)["coverage"])
+        self.assertEqual(self.snapshot(data)["pending"], 0)
+        self.assertTrue(self.snapshot(data)["instrumentation_complete"])
         complete = copy.deepcopy(data)
         for row in complete["probes"]:
             row["status"] = "VERIFIED"
-        self.assertTrue(self.snapshot(complete)["coverage"])
+        self.assertFalse(self.snapshot(complete)["coverage"])
+        self.assertTrue(self.snapshot(complete)["instrumentation_complete"])
         complete["probes"][0]["status"] = "PENDING_0b1"
         self.assertFalse(self.snapshot(complete)["coverage"])
+        self.assertFalse(self.snapshot(complete)["instrumentation_complete"])
 
     def test_empty_missing_duplicate_and_unknown_states_fail_closed(self):
         self.assertFalse(self.snapshot({"schema_version": 1, "probes": []})["coverage"])

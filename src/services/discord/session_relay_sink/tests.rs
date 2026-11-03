@@ -1818,6 +1818,8 @@ fn cutover_short_replace_production_path_advance_is_fresh_identity_gated() {
         .block_on(short_controller::deliver_short_replace_via_controller(
             &gateway,
             short_controller::SinkShortReplaceCtx {
+                census_source:
+                    crate::services::discord::outbound::body_census::BodySource::inherited(),
                 shared: &shared,
                 provider: &provider,
                 channel,
@@ -1887,6 +1889,8 @@ fn cutover_short_replace_production_path_advance_is_fresh_identity_gated() {
         .block_on(short_controller::deliver_short_replace_via_controller(
             &gateway2,
             short_controller::SinkShortReplaceCtx {
+                census_source:
+                    crate::services::discord::outbound::body_census::BodySource::inherited(),
                 shared: &shared2,
                 provider: &provider,
                 channel,
@@ -2024,6 +2028,8 @@ fn sink_short_controller_post_reset_is_landed_stale_without_replacement_poison_4
         .block_on(short_controller::deliver_short_replace_via_controller(
             &gateway,
             short_controller::SinkShortReplaceCtx {
+                census_source:
+                    crate::services::discord::outbound::body_census::BodySource::inherited(),
                 shared: &shared,
                 provider: &provider,
                 channel,
@@ -2305,6 +2311,8 @@ fn session_sink_short_replace_raw_body_fingerprint_refuses_watcher_rerelay_4081(
         .block_on(short_controller::deliver_short_replace_via_controller(
             &gateway,
             short_controller::SinkShortReplaceCtx {
+                census_source:
+                    crate::services::discord::outbound::body_census::BodySource::inherited(),
                 shared: &shared,
                 provider: &provider,
                 channel,

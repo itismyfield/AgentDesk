@@ -203,6 +203,8 @@ fn manifest_coverage_and_hash_follow_the_same_embedded_bytes() {
     let raw = include_str!("../../../scripts/tui_o_body_probes.json");
     let actual = manifest::inspect(raw);
     assert_eq!(actual["coverage"], false);
+    assert_eq!(actual["pending"], 0);
+    assert_eq!(actual["instrumentation_complete"], true);
     let mut data: Value = serde_json::from_str(raw).unwrap();
     for row in data["probes"].as_array_mut().unwrap() {
         row["status"] = json!("VERIFIED");
@@ -211,10 +213,15 @@ fn manifest_coverage_and_hash_follow_the_same_embedded_bytes() {
         row["status"] = json!("VERIFIED");
     }
     let complete = manifest::inspect(&serde_json::to_string(&data).unwrap());
-    assert_eq!(complete["coverage"], true);
+    assert_eq!(complete["coverage"], false);
+    assert_eq!(complete["instrumentation_complete"], true);
     assert_ne!(actual["census_hash"], complete["census_hash"]);
     data["probes"][0]["status"] = json!("PENDING_0b1");
     assert_eq!(manifest::inspect(&data.to_string())["coverage"], false);
+    assert_eq!(
+        manifest::inspect(&data.to_string())["instrumentation_complete"],
+        false
+    );
     assert_eq!(manifest::inspect("{}")["coverage"], false);
     assert_eq!(manifest::inspect("not json")["coverage"], false);
 }

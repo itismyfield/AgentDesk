@@ -11,8 +11,8 @@ pub(crate) mod intake_route;
 #[cfg(unix)]
 pub(crate) use channel_gate::peek_o_owns_tui_output_for_channel_quiet;
 pub(crate) use channel_gate::{
-    BodyClaim, BodySend, BodySite, IdentityError, claim_then_send, claim_then_send_at,
-    claim_then_send_held, claim_then_send_held_at, o_keeps_body,
+    BodyClaim, BodySend, BodySite, BodyTransport, IdentityError, claim_then_send,
+    claim_then_send_at, claim_then_send_held_at, o_keeps_body,
     o_owns_tui_output_for_channel_reserving, peek_o_owns_tui_output_for_channel,
     peek_o_owns_tui_output_for_channel_tmux,
 };

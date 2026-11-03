@@ -34,6 +34,7 @@ use super::formatting::{self, ReplaceLongMessageOutcome};
 use super::inflight::{
     GuardedClearOutcome, InflightSignal, InflightTurnIdentity, InflightTurnState, RelayOwnerKind,
 };
+use super::outbound::body_census::{BodyOffer, BodySource};
 use super::outbound::turn_output_controller as toc;
 use super::placeholder_controller::{PlaceholderKey, PlaceholderLifecycle};
 use crate::services::provider::ProviderKind;
@@ -48,13 +49,26 @@ const MAX_FILE_BYTES_PER_TICK: u64 = 1_048_576; // 1 MiB safety cap
 const INFLIGHT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const COMPLETED_SIGNAL_DRAIN_GRACE: Duration = Duration::from_secs(5);
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(in crate::services::discord) struct StandbyRelayTurnBinding {
     identity: InflightTurnIdentity,
     dispatch_id: Option<String>,
     session_key: Option<String>,
     turn_start_offset: Option<u64>,
     runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
+    census_source: BodySource,
+}
+
+impl std::fmt::Debug for StandbyRelayTurnBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StandbyRelayTurnBinding")
+            .field("identity", &self.identity)
+            .field("dispatch_id", &self.dispatch_id)
+            .field("session_key", &self.session_key)
+            .field("turn_start_offset", &self.turn_start_offset)
+            .field("runtime_kind", &self.runtime_kind)
+            .finish()
+    }
 }
 
 impl StandbyRelayTurnBinding {
@@ -65,6 +79,7 @@ impl StandbyRelayTurnBinding {
             session_key: state.session_key.clone(),
             turn_start_offset: state.turn_start_offset,
             runtime_kind: state.runtime_kind,
+            census_source: BodySource::from_state(state),
         }
     }
 
@@ -244,8 +259,17 @@ pub(super) async fn run_standby_relay(
             // The relay claims the channel as it posts; O taking it meanwhile ends the relay.
             let claim = (!result_text.trim().is_empty())
                 .then(|| BodyClaim::new(channel_id.get(), turn_binding.runtime_kind));
-            let Ok(BodySend::Sent(delivered)) =
-                claim_then_send_at(BodySite::StandbyRelay, claim, send).await
+            let Ok(BodySend::Sent(delivered)) = turn_binding
+                .census_source
+                .clone()
+                .observe(
+                    BodySite::StandbyRelay,
+                    BodyOffer::body(!result_text.trim().is_empty()),
+                    Box::pin(async {
+                        claim_then_send_at(BodySite::StandbyRelay, claim, send).await
+                    }),
+                )
+                .await
             else {
                 return;
             };
@@ -777,50 +801,55 @@ async fn deliver_short_replace_via_controller<G: super::gateway::TurnGateway + ?
     let turn =
         super::turn_finalizer::TurnKey::new(channel_id, 0, shared.restart.current_generation);
     let no_lease = toc::NoLease;
-    let outcome = toc::deliver_turn_output(
-        gateway,
-        toc::TurnOutputCtx {
-            turn,
-            lease_key: None,
-            owner: RelayOwnerKind::StandbyRelay,
-            // Reuse `LeaseHolder::Sink` (its doc reads "The standby / output sink
-            // relay") — cosmetic on the markerless path; no `Standby` variant
-            // exists and `mod.rs` is a frozen baseline, so adding one is avoided.
-            holder: super::LeaseHolder::Sink,
-            lease: &no_lease,
-            channel_id,
-            placeholder_controller: &shared.ui.placeholder_controller,
-            placeholder: toc::PlaceholderSlot::Active {
-                message_id: msg_id,
-                key: PlaceholderKey {
-                    provider: provider.clone(),
+    let outcome = BodySource::inherited()
+        .observe(
+            BodySite::StandbyRelay,
+            BodyOffer::Body,
+            Box::pin(toc::deliver_turn_output(
+                gateway,
+                toc::TurnOutputCtx {
+                    turn,
+                    lease_key: None,
+                    owner: RelayOwnerKind::StandbyRelay,
+                    // Reuse `LeaseHolder::Sink` (its doc reads "The standby / output sink
+                    // relay") — cosmetic on the markerless path; no `Standby` variant
+                    // exists and `mod.rs` is a frozen baseline, so adding one is avoided.
+                    holder: super::LeaseHolder::Sink,
+                    lease: &no_lease,
                     channel_id,
-                    message_id: msg_id,
+                    placeholder_controller: &shared.ui.placeholder_controller,
+                    placeholder: toc::PlaceholderSlot::Active {
+                        message_id: msg_id,
+                        key: PlaceholderKey {
+                            provider: provider.clone(),
+                            channel_id,
+                            message_id: msg_id,
+                        },
+                    },
+                    body: formatted,
+                    // Standby has no offsets and never commits (NoLease) — the range is
+                    // inert. A degenerate `(0, 0)` is defensible: nothing reads it.
+                    send_range: (0, 0),
+                    // `Replace { Active }` → non-terminal → `post_send_finalize` no-ops,
+                    // matching the legacy edit-in-place.
+                    plan: toc::OutputPlan::Replace {
+                        lifecycle: PlaceholderLifecycle::Active,
+                    },
+                    // #2757: never delete the original on edit-fail fallback.
+                    edit_fail_policy: toc::EditFailPlaceholderPolicy::PreserveAlways,
+                    // Standby returns true on fallback (`standby_relay.rs` legacy).
+                    fallback_commit_policy: toc::FallbackCommitPolicy::CommitOnFallback,
+                    // Transport-only: a (failed) acquire still POSTs, markerless.
+                    acquire_failure_mode: toc::AcquireFailureMode::ProceedMarkerless,
+                    // No offset authority → unconditional advance (A1 semantics).
+                    advance: None,
+                    // No heartbeat (no lease to renew).
+                    heartbeat: None,
+                    body_claim: None,
                 },
-            },
-            body: formatted,
-            // Standby has no offsets and never commits (NoLease) — the range is
-            // inert. A degenerate `(0, 0)` is defensible: nothing reads it.
-            send_range: (0, 0),
-            // `Replace { Active }` → non-terminal → `post_send_finalize` no-ops,
-            // matching the legacy edit-in-place.
-            plan: toc::OutputPlan::Replace {
-                lifecycle: PlaceholderLifecycle::Active,
-            },
-            // #2757: never delete the original on edit-fail fallback.
-            edit_fail_policy: toc::EditFailPlaceholderPolicy::PreserveAlways,
-            // Standby returns true on fallback (`standby_relay.rs` legacy).
-            fallback_commit_policy: toc::FallbackCommitPolicy::CommitOnFallback,
-            // Transport-only: a (failed) acquire still POSTs, markerless.
-            acquire_failure_mode: toc::AcquireFailureMode::ProceedMarkerless,
-            // No offset authority → unconditional advance (A1 semantics).
-            advance: None,
-            // No heartbeat (no lease to renew).
-            heartbeat: None,
-            body_claim: None,
-        },
-    )
-    .await;
+            )),
+        )
+        .await;
 
     let ts = chrono::Local::now().format("%H:%M:%S");
     match outcome {
@@ -876,10 +905,15 @@ async fn deliver_response(
     match placeholder_msg_id {
         Some(msg_id) => {
             if standby_should_send_new_chunks_for_placeholder(&formatted) {
-                if let Err(error) = formatting::send_long_message_raw_with_rollback(
-                    http, channel_id, msg_id, &formatted, shared,
-                )
-                .await
+                if let Err(error) = BodySource::inherited()
+                    .observe(
+                        BodySite::StandbyRelay,
+                        BodyOffer::Body,
+                        Box::pin(formatting::send_long_message_raw_with_rollback(
+                            http, channel_id, msg_id, &formatted, shared,
+                        )),
+                    )
+                    .await
                 {
                     let error = error.to_string();
                     let display_error =
@@ -921,12 +955,17 @@ async fn deliver_response(
                 )
                 .await;
             }
-            let outcome = formatting::replace_long_message_raw_with_outcome(
-                // #3805 P1: standby relay does not append a completion footer, so
-                // the last-chunk anchor is unused here.
-                http, channel_id, msg_id, &formatted, shared, &mut None,
-            )
-            .await;
+            let outcome = BodySource::inherited()
+                .observe(
+                    BodySite::StandbyRelay,
+                    BodyOffer::Body,
+                    Box::pin(formatting::replace_long_message_raw_with_outcome(
+                        // #3805 P1: standby relay does not append a completion footer, so
+                        // the last-chunk anchor is unused here.
+                        http, channel_id, msg_id, &formatted, shared, &mut None,
+                    )),
+                )
+                .await;
             // #3089 A0: the "delivered?" return is sourced from the shared
             // disposition policy (committed = EditedOriginal | preserved
             // fallback) instead of per-arm literals.
@@ -1010,8 +1049,15 @@ async fn deliver_response(
             }
         }
         None => {
-            let result =
-                formatting::send_long_message_raw(http, channel_id, &formatted, shared).await;
+            let result = BodySource::inherited()
+                .observe(
+                    BodySite::StandbyRelay,
+                    BodyOffer::Body,
+                    Box::pin(formatting::send_long_message_raw(
+                        http, channel_id, &formatted, shared,
+                    )),
+                )
+                .await;
             let ts = chrono::Local::now().format("%H:%M:%S");
             match result {
                 Ok(()) => {
