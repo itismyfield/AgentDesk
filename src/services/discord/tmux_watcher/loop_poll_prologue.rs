@@ -334,7 +334,6 @@ pub(super) async fn poll_watcher_output_or_continue(
                 http,
                 shared,
                 channel_id,
-                shared.ui.status_panel_v2_enabled,
                 &mut *loop_poll_state.completion_footer_idle,
             )
             .await;

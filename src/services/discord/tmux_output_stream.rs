@@ -123,16 +123,14 @@ pub(in crate::services::discord) fn flush_placeholder_live_events(
     let events = tool_state.take_placeholder_events();
     let status_events = tool_state.take_status_events();
     let mut dirty = false;
-    if (shared.ui.placeholder_live_events_enabled || shared.ui.status_panel_v2_enabled)
-        && !events.is_empty()
-    {
+    if !events.is_empty() {
         shared
             .ui
             .placeholder_live_events
             .push_many(channel_id, events);
         dirty = true;
     }
-    if shared.ui.status_panel_v2_enabled && !status_events.is_empty() {
+    if !status_events.is_empty() {
         shared
             .ui
             .placeholder_live_events
@@ -158,10 +156,7 @@ pub(in crate::services::discord) fn build_watcher_placeholder_status_block(
     full_response: &str,
     status_panel_msg_id: Option<serenity::MessageId>,
 ) -> String {
-    if watcher_placeholder_uses_status_panel_only(
-        shared.ui.status_panel_v2_enabled,
-        status_panel_msg_id,
-    ) {
+    if status_panel_msg_id.is_some() {
         return crate::services::discord::formatting::build_processing_status_block(indicator);
     }
     let status_block = crate::services::discord::formatting::build_placeholder_status_block(
@@ -170,30 +165,10 @@ pub(in crate::services::discord) fn build_watcher_placeholder_status_block(
         current_tool_line,
         full_response,
     );
-    if watcher_placeholder_inlines_live_events(
-        shared.ui.placeholder_live_events_enabled,
-        shared.ui.status_panel_v2_enabled,
-        status_panel_msg_id,
-    ) && let Some(block) = shared.ui.placeholder_live_events.render_block(channel_id)
-    {
+    if let Some(block) = shared.ui.placeholder_live_events.render_block(channel_id) {
         return format!("{status_block}\n{block}");
     }
     status_block
-}
-
-fn watcher_placeholder_uses_status_panel_only(
-    status_panel_v2_enabled: bool,
-    status_panel_msg_id: Option<serenity::MessageId>,
-) -> bool {
-    status_panel_v2_enabled && status_panel_msg_id.is_some()
-}
-
-fn watcher_placeholder_inlines_live_events(
-    placeholder_live_events_enabled: bool,
-    status_panel_v2_enabled: bool,
-    status_panel_msg_id: Option<serenity::MessageId>,
-) -> bool {
-    placeholder_live_events_enabled || (status_panel_v2_enabled && status_panel_msg_id.is_none())
 }
 
 #[path = "tmux_output_stream/native_codex.rs"]
@@ -906,22 +881,32 @@ mod tests {
     }
 
     #[test]
-    fn watcher_status_panel_fallback_inlines_events_without_status_message() {
-        assert!(
-            watcher_placeholder_inlines_live_events(false, true, /*status_panel_msg_id*/ None),
-            "status-panel-v2 watcher fallback must keep recent tool/subagent monitoring visible"
+    fn watcher_placeholder_inlines_recent_events_only_without_a_status_panel() {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(7_650_301);
+        shared.ui.placeholder_live_events.push_event(
+            channel_id,
+            crate::services::discord::placeholder_live_events::RecentPlaceholderEvent::tool_use(
+                "Bash",
+                r#"{"command":"echo watcher"}"#,
+            )
+            .unwrap(),
         );
-    }
-
-    #[test]
-    fn watcher_status_panel_bound_placeholder_keeps_events_on_status_panel() {
-        assert!(
-            watcher_placeholder_uses_status_panel_only(true, Some(MessageId::new(99))),
-            "bound status-panel-v2 watcher should avoid duplicating recent events in placeholder"
+        let inline =
+            build_watcher_placeholder_status_block(&shared, channel_id, "⠋", None, None, "", None);
+        assert!(inline.contains("[Bash]"), "{inline}");
+        let bound = build_watcher_placeholder_status_block(
+            &shared,
+            channel_id,
+            "⠋",
+            None,
+            None,
+            "",
+            Some(MessageId::new(99)),
         );
-        assert!(
-            !watcher_placeholder_inlines_live_events(false, true, Some(MessageId::new(99))),
-            "recent events stay on the dedicated status panel when that message is available"
+        assert_eq!(
+            bound,
+            crate::services::discord::formatting::build_processing_status_block("⠋")
         );
     }
 

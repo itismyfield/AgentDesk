@@ -37,14 +37,13 @@ pub(super) fn leak_recovery_unrelayed_range(
 }
 
 /// #2860 - pure render: format the unrelayed tail exactly as the bridge's
-/// terminal-replace path would (strip TUI chrome, then status-panel or provider
-/// formatting selected by the same flag). Returns `None` when the tail strips or
+/// terminal-replace path would (strip TUI chrome, then status-panel formatting).
+/// Returns `None` when the tail strips or
 /// formats to empty - recovery must never post a placeholder or an empty notice,
 /// only real leaked content.
 pub(super) fn render_leak_recovery_delivery(
     full_response: &str,
     start: usize,
-    status_panel_v2_enabled: bool,
     provider: &ProviderKind,
 ) -> Option<String> {
     let raw_tail = full_response.get(start..)?;
@@ -54,11 +53,7 @@ pub(super) fn render_leak_recovery_delivery(
     if !raw_tail.trim().is_empty() && stripped.trim().is_empty() {
         return None;
     }
-    let rendered = if status_panel_v2_enabled {
-        discord::formatting::format_for_discord_with_status_panel(&stripped, provider)
-    } else {
-        discord::formatting::format_for_discord_with_provider(&stripped, provider)
-    };
+    let rendered = discord::formatting::format_for_discord_with_status_panel(&stripped, provider);
     if rendered.trim().is_empty() {
         None
     } else {

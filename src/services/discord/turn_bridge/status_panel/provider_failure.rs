@@ -45,9 +45,6 @@ pub(super) async fn end_status_panel<G: TurnGateway + ?Sized>(
     let Some(panel_id) = normalize_status_panel_message_id(status_panel_msg_id) else {
         return true;
     };
-    if !shared.ui.status_panel_v2_enabled {
-        return true;
-    }
     let text = failed_panel_text(started_at_unix);
     if *last_status_panel_text != text {
         let surface = StatusPanelSurface::Gateway(shared, gateway);

@@ -11,11 +11,7 @@ async fn actual_recovery_completion_never_posts_a_summary_for_empty_suppressed_r
         .enumerate()
     {
         let channel = 586_301 + index as u64;
-        let mut shared = crate::services::discord::make_shared_data_for_tests();
-        Arc::get_mut(&mut shared)
-            .unwrap()
-            .ui
-            .status_panel_v2_enabled = true;
+        let shared = crate::services::discord::make_shared_data_for_tests();
         let recorder = super::super::o_cut_recorder::start(channel).await;
         let mut state = row(channel, 0, "recovery-episode");
         state.started_at = "2026-10-19 00:00:00".into();
@@ -56,11 +52,7 @@ async fn actual_recovery_old_panel_edit_is_exercised_without_posting_a_terminal_
     let _isolation = Isolation::new();
     let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let channel = 586_505;
-    let mut shared = crate::services::discord::make_shared_data_for_tests();
-    Arc::get_mut(&mut shared)
-        .unwrap()
-        .ui
-        .status_panel_v2_enabled = true;
+    let shared = crate::services::discord::make_shared_data_for_tests();
     let recorder = super::super::o_cut_recorder::start(channel).await;
     let mut state = row(channel, 0, "recovery-positive-panel");
     state.status_message_id = Some(101);

@@ -164,6 +164,27 @@ pub(super) fn render_session_panel_line(
     }
 }
 
+/// Whether `banner` has the shape `render_session_panel_line` produces.
+#[cfg(test)]
+pub(in crate::services::discord) fn is_session_panel_banner(banner: &str) -> bool {
+    let (head, recovery) = banner
+        .split_once('\n')
+        .map_or((banner, None), |(head, rest)| (head, Some(rest)));
+    let labeled = [
+        SessionPanelKind::Fresh,
+        SessionPanelKind::Resumed,
+        SessionPanelKind::Fallback,
+    ]
+    .iter()
+    .any(|kind| head == kind.label() || head.starts_with(&format!("{} · ", kind.label())));
+    labeled
+        && recovery.is_none_or(|line| {
+            line.strip_prefix("(최근 대화 ")
+                .and_then(|rest| rest.strip_suffix("개를 읽어들였습니다)"))
+                .is_some_and(|count| count.parse::<usize>().is_ok_and(|count| count > 0))
+        })
+}
+
 fn render_provider_session_label(provider: &ProviderKind, session_id: &str) -> String {
     let abbreviated = abbreviate_provider_session_id(session_id);
     if abbreviated.contains('#') {

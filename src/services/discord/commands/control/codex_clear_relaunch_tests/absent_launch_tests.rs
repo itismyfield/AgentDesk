@@ -565,8 +565,14 @@ async fn restored_head_reaches_provider(marker: HistoricalMarker, warm: bool, st
                 let body = parts.next().unwrap_or_default();
                 matches!(method, "POST" | "PATCH")
                     && path.contains(&format!("/channels/{CANARY_CHANNEL}/messages"))
-                    && serde_json::from_str::<serde_json::Value>(body)
-                        .is_ok_and(|value| value["content"] == "clear relaunch completed")
+                    && serde_json::from_str::<serde_json::Value>(body).is_ok_and(|value| {
+                        value["content"].as_str().is_some_and(|content| {
+                            crate::services::discord::session_banner::relays_body(
+                                content,
+                                "clear relaunch completed",
+                            )
+                        })
+                    })
             });
             let summary = sent.iter().any(|call| {
                 let mut parts = call.splitn(3, ' ');

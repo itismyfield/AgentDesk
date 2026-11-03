@@ -140,7 +140,6 @@ pub(super) async fn handle_known_owner(
                 && optional_durable_current_msg_id_from_detached(ctx.current_msg_id).is_some();
             if o_panel
                 || should_delete_bridge_created_watcher_orphan_response(
-                    shared_owned.ui.status_panel_v2_enabled,
                     ctx.watcher_handoff_claim_outcome,
                     ctx.bridge_created_response_placeholder_msg_id,
                     ctx.current_msg_id,

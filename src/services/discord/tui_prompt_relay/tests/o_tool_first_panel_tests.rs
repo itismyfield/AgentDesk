@@ -35,11 +35,7 @@ fn tool_first_turn(o_owned: bool, then_done: bool, channel: u64) -> Option<Vec<S
         .build()
         .unwrap();
     rt.block_on(async {
-        let mut shared = crate::services::discord::make_shared_data_for_tests();
-        Arc::get_mut(&mut shared)
-            .unwrap()
-            .ui
-            .status_panel_v2_enabled = true;
+        let shared = crate::services::discord::make_shared_data_for_tests();
         let (provider, channel) = (ProviderKind::Claude, ChannelId::new(channel));
         let tmux = format!("o-tool-first-{}", channel.get());
         let generation = crate::services::tmux_common::session_temp_path(&tmux, "generation");

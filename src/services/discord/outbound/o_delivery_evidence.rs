@@ -402,17 +402,10 @@ pub(in crate::services::discord) async fn headless_outbox(
     .await
     .ok()?
     .ok()?;
-    let formatted = if shared.ui.status_panel_v2_enabled {
-        crate::services::discord::formatting::format_for_discord_with_status_panel(
-            frame.body,
-            frame.provider,
-        )
-    } else {
-        crate::services::discord::formatting::format_for_discord_with_provider(
-            frame.body,
-            frame.provider,
-        )
-    };
+    let formatted = crate::services::discord::formatting::format_for_discord_with_status_panel(
+        frame.body,
+        frame.provider,
+    );
     let bodies = [frame.body, formatted.as_str()];
     if !rows
         .iter()

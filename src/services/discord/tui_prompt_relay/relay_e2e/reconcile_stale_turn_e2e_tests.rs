@@ -299,11 +299,9 @@ async fn reconcile_stale_turn_held_release_arms_backstop_and_runs_preserved_q_pg
                     && std::fs::read_to_string(&inputs)
                         .unwrap()
                         .contains(QUEUED_TEXT);
-                let answered = messages
-                    .lock()
-                    .unwrap()
-                    .values()
-                    .any(|(_, text)| text == "ok");
+                let answered = messages.lock().unwrap().values().any(|(_, text)| {
+                    crate::services::discord::session_banner::relays_body(text, "ok")
+                });
                 submitted
                     && answered
                     && actual.cancel_token.is_none()
@@ -330,7 +328,7 @@ async fn reconcile_stale_turn_held_release_arms_backstop_and_runs_preserved_q_pg
         harness
             .messages()
             .iter()
-            .filter(|(_, text)| text == "ok")
+            .filter(|(_, text)| crate::services::discord::session_banner::relays_body(text, "ok"))
             .count(),
         1
     );

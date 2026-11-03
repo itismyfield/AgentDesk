@@ -157,7 +157,9 @@ async fn lookup_failure_keeps_custody_until_recovery(requested: bool) {
                     .lock()
                     .expect("mock messages")
                     .values()
-                    .any(|(_, body)| body == "ok")
+                    .any(|(_, body)| {
+                        crate::services::discord::session_banner::relays_body(body, "ok")
+                    })
             })
         }
     })
@@ -177,7 +179,7 @@ async fn lookup_failure_keeps_custody_until_recovery(requested: bool) {
         harness
             .messages()
             .iter()
-            .filter(|(_, body)| body == "ok")
+            .filter(|(_, body)| crate::services::discord::session_banner::relays_body(body, "ok"))
             .count(),
         1,
         "one successful response after recovery"

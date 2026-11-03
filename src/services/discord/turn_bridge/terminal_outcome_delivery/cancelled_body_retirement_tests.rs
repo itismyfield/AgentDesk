@@ -5,34 +5,28 @@ use crate::services::discord::{make_shared_data_for_tests, restart_mode::Infligh
 
 #[test]
 fn a_cancelled_partial_body_has_no_new_stopped_suffix_in_either_formatter_mode() {
-    for v2 in [false, true] {
-        let mut shared = make_shared_data_for_tests();
-        Arc::get_mut(&mut shared)
-            .unwrap()
-            .ui
-            .status_panel_v2_enabled = v2;
-        let provider = ProviderKind::Claude;
-        let banner = DiscordTurnSessionBanner::new_with_turn_key(
-            &shared,
-            ChannelId::new(4091),
-            &provider,
-            0,
-            None,
-            None,
+    let shared = make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let banner = DiscordTurnSessionBanner::new_with_turn_key(
+        &shared,
+        ChannelId::new(4091),
+        &provider,
+        0,
+        None,
+        None,
+    );
+    for body in [
+        "남은 본문",
+        "```rust\nlet x = 1;\n```",
+        "literal [Stopped] inside provider text",
+    ] {
+        let saved = format!("already delivered\n{body}");
+        let offset = "already delivered\n".len();
+        assert_eq!(
+            cancelled_terminal_response(&saved, offset, None, &banner),
+            banner.format_discord_body(body),
+            "body must remain the only payload"
         );
-        for body in [
-            "남은 본문",
-            "```rust\nlet x = 1;\n```",
-            "literal [Stopped] inside provider text",
-        ] {
-            let saved = format!("already delivered\n{body}");
-            let offset = "already delivered\n".len();
-            assert_eq!(
-                cancelled_terminal_response(&saved, offset, None, &banner),
-                banner.format_discord_body(body),
-                "v2={v2}: body must remain the only payload"
-            );
-        }
     }
 }
 

@@ -15,11 +15,8 @@ const S2: &str = "ADK-P8-3 S2 streamed when the row lapses";
 const PANEL: &str = "ADK-P8-3 status panel";
 const PLACEHOLDER: &str = "⠋ ADK-P8-4 placeholder";
 const BASE: u64 = 90;
-/// The separate status-panel-v2 path, whose orphan cleanup deletes the panel message.
-const PANEL_V2: [(&str, &str); 2] = [
-    (STATUS_PANEL_V2, "1"),
-    ("AGENTDESK_SINGLE_MESSAGE_PANEL", "0"),
-];
+/// The separate status-panel path, whose orphan cleanup deletes the panel message.
+const SEPARATE_PANEL: [(&str, &str); 1] = [("AGENTDESK_SINGLE_MESSAGE_PANEL", "0")];
 
 fn turn(prompt: &str, body: &str) -> String {
     format!("{}{}{}", user(prompt), said(body), stop())
@@ -88,7 +85,7 @@ fn panel_kept(h: &Harness, panel: serenity::MessageId) -> bool {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_status_tick_parked_at_cleanup_rereads_the_host_before_dropping_the_panel() {
     let test = "a_status_tick_parked_at_cleanup_rereads_the_host_before_dropping_the_panel";
-    if !isolated_in("herdr_entry_host_tests", test, &PANEL_V2) {
+    if !isolated_in("herdr_entry_host_tests", test, &SEPARATE_PANEL) {
         return;
     }
     let (mut h, panel) = panel_turn(BASE, &format!("{}{}", user("T1"), said(S1))).await;
@@ -129,7 +126,7 @@ fn tool_only() -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_status_tick_on_a_restored_placeholder_keeps_it_when_the_session_moves_to_herdr() {
     let test = "a_status_tick_on_a_restored_placeholder_keeps_it_when_the_session_moves_to_herdr";
-    if !isolated_in("herdr_entry_host_tests", test, &PANEL_V2) {
+    if !isolated_in("herdr_entry_host_tests", test, &SEPARATE_PANEL) {
         return;
     }
     let seed_text = turn("T0", T0);
@@ -181,8 +178,7 @@ async fn a_terminal_preflight_parked_at_cleanup_rereads_the_host_before_dropping
     let test = "a_terminal_preflight_parked_at_cleanup_rereads_the_host_before_dropping_the_panel";
     // No status tick runs in this turn, so the preflight is the first check to read the host.
     let slow_ticks = [
-        PANEL_V2[0],
-        PANEL_V2[1],
+        SEPARATE_PANEL[0],
         ("AGENTDESK_STATUS_INTERVAL_SECS", "3600"),
     ];
     if !isolated_in("herdr_entry_host_tests", test, &slow_ticks) {

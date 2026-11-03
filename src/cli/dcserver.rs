@@ -1184,8 +1184,6 @@ pub fn handle_dcserver(token: Option<String>) {
         }
         // HTTP API port for self-referencing requests (dcserver → own HTTP server)
         let api_port = ad_config.server.port;
-        let placeholder_live_events_enabled = ad_config.placeholder.live_events_enabled;
-        let status_panel_v2_enabled = ad_config.placeholder.status_panel_v2_enabled;
         // #3805 P2: two-message panel rollout gate (default OFF). Scaffolding —
         // copied into shared UI state at boot; no path reads it yet.
         let two_message_panel_enabled = ad_config.placeholder.two_message_panel_enabled;
@@ -1239,8 +1237,6 @@ pub fn handle_dcserver(token: Option<String>) {
                         api_port,
                         pg_pool: Some(discord_pg_pool),
                         engine: discord_engine,
-                        placeholder_live_events_enabled,
-                        status_panel_v2_enabled,
                         two_message_panel_enabled,
                         replay_restart: replay_restart.clone(),
                     },
@@ -1318,8 +1314,6 @@ pub fn handle_dcserver(token: Option<String>) {
                     let port = api_port;
                     let pg_pool_clone = Some(discord_pg_pool.clone());
                     let engine_clone = discord_engine.clone();
-                    let live_events_enabled = placeholder_live_events_enabled;
-                    let status_panel_v2 = status_panel_v2_enabled;
                     let two_message_panel = two_message_panel_enabled;
                     let replay_restart = replay_restart.clone();
                     tasks.push(tokio::spawn(async move {
@@ -1336,8 +1330,6 @@ pub fn handle_dcserver(token: Option<String>) {
                                 api_port: port,
                                 pg_pool: pg_pool_clone,
                                 engine: engine_clone,
-                                placeholder_live_events_enabled: live_events_enabled,
-                                status_panel_v2_enabled: status_panel_v2,
                                 two_message_panel_enabled: two_message_panel,
                                 replay_restart,
                             },
