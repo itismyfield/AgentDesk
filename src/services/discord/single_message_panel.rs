@@ -45,7 +45,6 @@ fn configured_enabled() -> bool {
 // Footer writes are retired; callers keep the flag arguments until the legacy panel path goes.
 pub(in crate::services::discord) fn footer_mode_enabled(
     _single_message_panel_enabled: bool,
-    _status_panel_v2_enabled: bool,
 ) -> bool {
     false
 }
@@ -53,7 +52,6 @@ pub(in crate::services::discord) fn footer_mode_enabled(
 // Separate-panel writes are retired as well; the same legacy removal drops this gate.
 pub(in crate::services::discord) fn separate_status_panel_enabled_for_flags(
     _single_message_panel_enabled: bool,
-    _status_panel_v2_enabled: bool,
 ) -> bool {
     false
 }

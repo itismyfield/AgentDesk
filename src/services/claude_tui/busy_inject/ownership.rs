@@ -41,6 +41,16 @@ fn draft_sighting_for(capture: &str, session: Option<&str>) -> DraftSighting {
     }
 }
 
+/// Whether the composer may hold a person's text that C-s did not park: an unread box, or text
+/// that is not an injected frame.
+pub(crate) fn draft_unproven(capture: &str) -> bool {
+    match screen::read(capture).composer {
+        screen::Composer::Empty => false,
+        screen::Composer::Text(rows) => !injected_rows(&rows, None),
+        screen::Composer::Unknown => true,
+    }
+}
+
 /// Whose text the composer holds before an automatic key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ComposerOwner {

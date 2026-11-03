@@ -378,7 +378,7 @@ fn the_tmux_owner_parks_only_what_the_herdr_owner_parks() {
             nonce: &nonce,
             text: PROMPT,
         };
-        let report = busy_inject::inject_owned(&pane, &request, &busy_inject::TIMING);
+        let report = busy_inject::inject_owned(&pane, &request, &busy_inject::TIMING, false);
         assert_eq!(
             report.outcome,
             busy_inject::Outcome::Injected,

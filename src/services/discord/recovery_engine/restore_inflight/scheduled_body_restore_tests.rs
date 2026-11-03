@@ -31,11 +31,7 @@ async fn each_direct_body_restore_records_before_its_visible_completion_pg() {
     let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    let mut shared = shared_on(&pool).await;
-    Arc::get_mut(&mut shared)
-        .expect("fresh runtime")
-        .ui
-        .status_panel_v2_enabled = true;
+    let shared = shared_on(&pool).await;
     let provider = ProviderKind::Claude;
     let transcripts = tempfile::tempdir().unwrap();
     let mut probes = Vec::new();

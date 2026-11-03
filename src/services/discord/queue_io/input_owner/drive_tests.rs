@@ -1,10 +1,12 @@
 //! The drive from its wake: one run per channel, each granted front handed on once in queue order,
-//! a front that moved after its grant never reserved, and a modal front delivered after release.
+//! a front that moved after its grant never reserved, and a held front delivered on its next wake.
 use super::*;
 use crate::config::TestRuntimeRootGuard;
 use crate::services::claude_tui::owner_input;
 use crate::services::discord::queue_io::input_owner::admission::{AdmissionTicket, admit};
-use crate::services::discord::queue_io::input_owner::effect::{Leaf, PreparedPayload};
+use crate::services::discord::queue_io::input_owner::effect::{
+    Completion, Leaf, MODAL, PreparedPayload,
+};
 use crate::services::discord::queue_io::input_owner::pump;
 use crate::services::turn_orchestrator::ChannelMailboxRegistry;
 use serde_json::json;
@@ -126,7 +128,6 @@ async fn one_drive_per_channel_hands_each_front_on_once_in_order() {
         mailbox: mailbox.clone(),
         channel,
         handoff: handoff(mailbox.clone(), channel, before, |_| Completion::Submitted),
-        recheck: Duration::from_millis(20),
         settled: None,
     });
     for _ in 0..3 {
@@ -189,7 +190,6 @@ async fn a_front_that_moved_after_its_grant_is_never_reserved() {
             mailbox: mailbox.clone(),
             channel,
             handoff: handoff(mailbox.clone(), channel, before, answer),
-            recheck: Duration::from_millis(20),
             settled: None,
         });
         wake(drive);
@@ -211,52 +211,161 @@ async fn a_front_that_moved_after_its_grant_is_never_reserved() {
     }
 }
 
-/// A modal refusal holds the front in place, unretained and owing no notice, and the drive's own
-/// recheck delivers it once the modal is gone, with no new input or wake.
+/// A hold armed while the cancelled front's watch is mid-read outlives that watch's end: the pane's
+/// recovery alone hands the new front again, and it is submitted once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_modal_front_is_held_and_delivered_after_release_without_new_input() {
+async fn a_new_hold_outlives_the_watch_of_the_front_it_replaced() {
+    use crate::services::claude_tui::busy_inject::Screen;
+    use std::sync::{atomic::AtomicBool, mpsc};
     let _root = TestRuntimeRootGuard::new();
     let registry = ChannelMailboxRegistry::default();
-    let channel = 7_272_704;
-    let mailbox = owner(&registry, channel, 1).await;
-    let calls = Arc::new(AtomicUsize::new(0));
-    let held = Arc::new(Mutex::new(None));
-    let (c, h, m) = (calls.clone(), held.clone(), mailbox.clone());
-    let answer = move |_: &str| match c.fetch_add(1, Ordering::SeqCst) {
-        0 => Completion::NotSent(MODAL.into()),
-        _ => {
-            let state = tokio::runtime::Handle::current().block_on(snapshot(&m));
-            *h.lock().unwrap() = Some(state);
-            Completion::Submitted
+    let channel = 7_272_709;
+    let mailbox = owner(&registry, channel, 2).await;
+    let (ready, handed) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(Mutex::new(Vec::new())),
+    );
+    let ((entered, on_entered), (release, on_release)) = (mpsc::channel(), mpsc::channel::<()>());
+    // Only the first front's probe stops in its first read until this test releases it.
+    let gate = Arc::new(Mutex::new(Some((entered, on_release))));
+    let (r, h) = (ready.clone(), handed.clone());
+    let answer = move |frame: &str| {
+        h.lock().unwrap().push(frame.to_string());
+        if r.load(Ordering::SeqCst) {
+            return Completion::Submitted;
         }
+        let (r, mut gate) = (r.clone(), gate.lock().unwrap().take());
+        super::super::held_watch::arm(
+            channel,
+            Box::new(move || {
+                if let Some((entered, release)) = gate.take() {
+                    entered.send(()).unwrap();
+                    release.recv().unwrap();
+                }
+                match r.load(Ordering::SeqCst) {
+                    true => Screen::Ready,
+                    false => Screen::Blocked,
+                }
+            }),
+        );
+        Completion::NotSent("CopyMode".into())
     };
-    let none = |_: &Front| Box::pin(async {}) as Pin<Box<dyn Future<Output = ()> + Send>>;
+    let before = |_: &Front| Box::pin(async {}) as Pin<Box<dyn Future<Output = ()> + Send>>;
+    // A pass ends after the drive handed its held front to the watch.
+    let passes = Arc::new(AtomicUsize::new(0));
+    let passes_seen = passes.clone();
     let drive = Arc::new(Drive {
         mailbox: mailbox.clone(),
         channel,
-        handoff: handoff(mailbox.clone(), channel, none, answer),
-        recheck: Duration::from_millis(50),
-        settled: None,
+        handoff: handoff(mailbox.clone(), channel, before, answer),
+        settled: Some(Arc::new(move || {
+            passes.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {}) as Pin<Box<dyn Future<Output = ()> + Send>>
+        })),
     });
+    wake(drive.clone());
+    let wait = Duration::from_secs(20);
+    tokio::task::spawn_blocking(move || on_entered.recv_timeout(wait))
+        .await
+        .unwrap()
+        .expect("the first front's watch reads its pane");
+    let ctx = crate::services::turn_orchestrator::QueuePersistenceContext::new(
+        &crate::services::provider::ProviderKind::Claude,
+        "drive",
+        None,
+    );
+    let first = poise::serenity_prelude::MessageId::new(original(channel, 0).message_id);
+    drop(mailbox.cancel_queued_primary_message(first, ctx).await);
     wake(drive);
-    let after = settled(&mailbox).await;
-    assert_eq!(calls.load(Ordering::SeqCst), 2, "{after}");
-    assert!(
-        after["items"].as_array().unwrap().is_empty(),
-        "delivered: {after}"
-    );
+    for _ in 0..2_000 {
+        if passes_seen.load(Ordering::SeqCst) == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert_eq!(
-        after["retained_inputs"],
-        json!([]),
-        "never retained: {after}"
+        *handed.lock().unwrap(),
+        ["input 0", "input 1"],
+        "the new front is held"
     );
-    let between = held.lock().unwrap().clone().unwrap();
-    assert_eq!(
-        between["retained_inputs"],
-        json!([]),
-        "held, not retained: {between}"
-    );
-    assert_eq!(between["items"][0]["text"], "input 0", "{between}");
+    release.send(()).unwrap();
+    ready.store(true, Ordering::SeqCst);
+    for _ in 0..2_000 {
+        if snapshot(&mailbox).await["items"] == json!([]) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let after = snapshot(&mailbox).await;
+    assert_eq!(after["items"], json!([]), "the new hold was woken: {after}");
+    assert_eq!(*handed.lock().unwrap(), ["input 0", "input 1", "input 1"]);
+}
+
+/// A front held on a screen where Enter may not submit stays unretained, owes no notice and is
+/// never handed again by time alone; the next wake (boundary, idle, new input) delivers it once.
+#[tokio::test(start_paused = true)]
+async fn a_held_front_waits_for_its_next_wake_and_is_then_delivered_once() {
+    let _root = TestRuntimeRootGuard::new();
+    let registry = ChannelMailboxRegistry::default();
+    for (channel, reason) in [
+        (7_272_704, MODAL),
+        (7_272_714, "ScreenUnread"),
+        (7_272_724, "CopyMode"),
+    ] {
+        let mailbox = owner(&registry, channel, 1).await;
+        let (calls, handed) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let held = Arc::new(Mutex::new(None));
+        let c = calls.clone();
+        let answer = move |_: &str| match c.fetch_add(1, Ordering::SeqCst) {
+            0 => Completion::NotSent(reason.into()),
+            _ => Completion::Submitted,
+        };
+        let (n, h, m) = (handed.clone(), held.clone(), mailbox.clone());
+        let before = move |_: &Front| {
+            let (n, h, m) = (n.clone(), h.clone(), m.clone());
+            Box::pin(async move {
+                if n.fetch_add(1, Ordering::SeqCst) == 1 {
+                    *h.lock().unwrap() = Some(snapshot(&m).await);
+                }
+            }) as Pin<Box<dyn Future<Output = ()> + Send>>
+        };
+        let drive = Arc::new(Drive {
+            mailbox: mailbox.clone(),
+            channel,
+            handoff: handoff(mailbox.clone(), channel, before, answer),
+            settled: None,
+        });
+        wake(drive.clone());
+        while calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        tokio::time::sleep(Duration::from_secs(25)).await;
+        assert_eq!(handed.load(Ordering::SeqCst), 1, "{reason}: time alone");
+        wake(drive);
+        for _ in 0..2_000 {
+            if snapshot(&mailbox).await["items"] == json!([]) {
+                break;
+            }
+            tokio::task::yield_now().await;
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let after = snapshot(&mailbox).await;
+        assert_eq!(handed.load(Ordering::SeqCst), 2, "{reason}: {after}");
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "{reason}: {after}");
+        assert_eq!(after["items"], json!([]), "{reason} delivered: {after}");
+        assert_eq!(after["retained_inputs"], json!([]), "{reason}: {after}");
+        let between = held.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            between["retained_inputs"],
+            json!([]),
+            "{reason} held, not retained: {between}"
+        );
+        assert_eq!(
+            between["items"][0]["text"], "input 0",
+            "{reason}: {between}"
+        );
+    }
 }
 
 /// A turn's claim gives one reserve: a spent grant gives no second claim, and a claimed front a
@@ -354,7 +463,6 @@ async fn identical_migrated_inputs_are_each_handed_on_once() {
         mailbox: mailbox.clone(),
         channel,
         handoff: handoff(mailbox.clone(), channel, none, answer),
-        recheck: Duration::from_millis(20),
         settled: None,
     });
     wake(drive);
@@ -391,7 +499,6 @@ async fn a_reserve_that_did_not_commit_stops_the_drive_until_the_next_wake() {
         mailbox: mailbox.clone(),
         channel,
         handoff: handoff(mailbox.clone(), channel, before, answer),
-        recheck: Duration::from_millis(20),
         settled: None,
     });
     wake(drive.clone());

@@ -13,6 +13,7 @@ use crate::services::claude_tui::hook_server::observation_ingress::{
 };
 use crate::services::codex::{CodexSourceMode, SOURCE_MODE_TEST};
 use crate::services::codex_tui::canary::{CANARY_CHANNEL, CANARY_TMUX};
+use crate::services::discord::session_banner::relays_body;
 use crate::services::discord::turn_presence::activity::{self, Activity};
 use crate::services::provider_teardown::tests::test_support::FakeTmux;
 use crate::services::tui_o::turn_mode::TestConfirmation;
@@ -542,7 +543,8 @@ PY
                             return false;
                         };
                         serde_json::from_str::<serde_json::Value>(body).unwrap()["content"]
-                            == "clear relaunch completed"
+                            .as_str()
+                            .is_some_and(|content| relays_body(content, "clear relaunch completed"))
                     });
                     if seen {
                         break;
@@ -1119,17 +1121,20 @@ pub(in crate::services::discord) fn assert_one_completed_response(sent: &[String
     );
     assert!(posts <= 1, "a repeated POST is another response: {sent:?}");
     let last = body_calls.last().expect("completed body call");
-    assert_eq!(
-        last.3, RESPONSE,
+    assert!(
+        relays_body(&last.3, RESPONSE),
         "last body call settles the response: {sent:?}"
     );
-    let finals = body_calls.iter().filter(|call| call.3 == RESPONSE).count();
+    let finals = body_calls
+        .iter()
+        .filter(|call| relays_body(&call.3, RESPONSE))
+        .count();
     assert!(
         (1..=2).contains(&finals),
         "one settle and at most one identical streaming edit: {sent:?}"
     );
     for call in &body_calls[..body_calls.len() - 1] {
-        if call.3 == RESPONSE {
+        if relays_body(&call.3, RESPONSE) {
             assert!(
                 call.1 == "PATCH" && call.2 == last.2,
                 "earlier exact body only edits the same target: {sent:?}"

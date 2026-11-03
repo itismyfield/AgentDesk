@@ -31,23 +31,14 @@ pub(super) fn make_owner_now(
     (started_at_unix, make_owner(identity, started_at_unix))
 }
 
-pub(super) fn watcher_single_message_panel_footer_enabled(status_panel_v2_enabled: bool) -> bool {
-    footer_mode_enabled(
-        crate::services::discord::single_message_panel_enabled(),
-        status_panel_v2_enabled,
-    )
+pub(super) fn watcher_single_message_panel_footer_enabled() -> bool {
+    footer_mode_enabled(crate::services::discord::single_message_panel_enabled())
 }
 
-fn footer_mode_enabled(single_message_panel_enabled: bool, status_panel_v2_enabled: bool) -> bool {
+fn footer_mode_enabled(single_message_panel_enabled: bool) -> bool {
     crate::services::discord::single_message_panel::footer_mode_enabled(
         single_message_panel_enabled,
-        status_panel_v2_enabled,
     )
-}
-
-pub(super) fn watcher_separate_status_panel_enabled(status_panel_v2_enabled: bool) -> bool {
-    // Existing ids still need adoption, edits and reclaim; creation has its own retirement gate.
-    status_panel_v2_enabled
 }
 
 pub(super) fn watcher_live_events_dirty_should_force_status_update(
@@ -63,15 +54,10 @@ pub(super) fn watcher_live_events_dirty_should_force_status_update(
 // Separate-panel creation is retired; the legacy panel path removal drops this gate.
 pub(super) fn watcher_should_create_separate_status_panel(
     _single_message_panel_footer_mode: bool,
-    _status_panel_v2_enabled: bool,
     _status_panel_present: bool,
     _panel_eligible_turn: bool,
 ) -> bool {
     false
-}
-
-pub(super) fn watcher_should_complete_separate_status_panel(status_panel_v2_enabled: bool) -> bool {
-    watcher_separate_status_panel_enabled(status_panel_v2_enabled)
 }
 
 #[cfg(test)]
@@ -94,9 +80,8 @@ pub(super) fn build_watcher_single_message_panel_status_block(
     status_panel_msg_id: Option<serenity::MessageId>,
 ) -> String {
     // Retired snapshots omit this block, but keep its budget to preserve rollover offsets.
-    if watcher_single_message_panel_footer_enabled(shared.ui.status_panel_v2_enabled)
-        || (crate::services::discord::single_message_panel_enabled()
-            && shared.ui.status_panel_v2_enabled)
+    if watcher_single_message_panel_footer_enabled()
+        || crate::services::discord::single_message_panel_enabled()
     {
         let content = (full_response, indicator);
         return shared
@@ -178,14 +163,13 @@ pub(super) async fn refresh_watcher_completion_footer_if_due(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
-    status_panel_v2_enabled: bool,
     state: &mut WatcherCompletionFooterIdleState,
 ) {
     let has_target =
         crate::services::discord::footer_view_reconciler::completion_footer_has_registered_target(
             channel_id,
         );
-    if !watcher_single_message_panel_footer_enabled(status_panel_v2_enabled)
+    if !watcher_single_message_panel_footer_enabled()
         || !watcher_completion_footer_should_tick(
             has_target,
             state.tick_at.elapsed(),

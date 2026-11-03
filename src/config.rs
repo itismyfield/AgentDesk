@@ -1145,10 +1145,6 @@ impl ReviewConfig {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct PlaceholderConfig {
-    #[serde(default = "default_true")]
-    pub live_events_enabled: bool,
-    #[serde(default = "default_true")]
-    pub status_panel_v2_enabled: bool,
     pub tool_activity_display: ToolActivityDisplay,
     /// Restart-required rollout gate for the two-message panel model (default OFF).
     #[serde(default)]
@@ -1158,8 +1154,6 @@ pub struct PlaceholderConfig {
 impl Default for PlaceholderConfig {
     fn default() -> Self {
         Self {
-            live_events_enabled: true,
-            status_panel_v2_enabled: true,
             tool_activity_display: ToolActivityDisplay::default(),
             two_message_panel_enabled: false,
         }

@@ -535,27 +535,21 @@ pub(in crate::services::discord) fn enqueue_pending_bind(
 
 fn should_record_separate_status_panel_orphan_for_flags(
     single_message_panel_enabled: bool,
-    status_panel_v2_enabled: bool,
 ) -> bool {
     super::single_message_panel::separate_status_panel_enabled_for_flags(
         single_message_panel_enabled,
-        status_panel_v2_enabled,
     )
 }
 
 fn enqueue_separate_status_panel_orphan_in_root_for_flags(
     root: &Path,
     single_message_panel_enabled: bool,
-    status_panel_v2_enabled: bool,
     provider: &ProviderKind,
     token_hash: &str,
     channel_id: u64,
     panel_msg_id: u64,
 ) {
-    if !should_record_separate_status_panel_orphan_for_flags(
-        single_message_panel_enabled,
-        status_panel_v2_enabled,
-    ) {
+    if !should_record_separate_status_panel_orphan_for_flags(single_message_panel_enabled) {
         return;
     }
     enqueue_in_root(root, provider, token_hash, channel_id, panel_msg_id);
@@ -566,7 +560,6 @@ fn enqueue_separate_status_panel_orphan_in_root_for_flags(
 /// for stale flag-off panels uses the raw [`enqueue`] after an attempted sweeper
 /// delete, because those are real legacy panel messages that still need retry.
 pub(in crate::services::discord) fn enqueue_separate_status_panel_orphan(
-    status_panel_v2_enabled: bool,
     provider: &ProviderKind,
     token_hash: &str,
     channel_id: u64,
@@ -578,7 +571,6 @@ pub(in crate::services::discord) fn enqueue_separate_status_panel_orphan(
     enqueue_separate_status_panel_orphan_in_root_for_flags(
         &root,
         super::single_message_panel_enabled(),
-        status_panel_v2_enabled,
         provider,
         token_hash,
         channel_id,

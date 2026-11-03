@@ -16,6 +16,7 @@ use super::super::{
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::herdr_terminate::probe_before_postlude;
 use crate::services::discord::rebind_channel_session;
+use crate::services::discord::session_banner::relays_body;
 use crate::services::discord::tui_prompt_relay::relay_e2e::{
     CHANNEL_ID, SESSION_UUID, discord_mock,
 };
@@ -88,7 +89,10 @@ fn cancel(run: &Terminating) -> impl std::future::Future<Output = (StatusCode, V
 /// How many messages the Discord mock holds with `content`, in any channel.
 fn legacy_posts(run: &Terminating, content: &str) -> usize {
     let messages = run.harness.messages();
-    messages.iter().filter(|(_, text)| text == content).count()
+    messages
+        .iter()
+        .filter(|(_, text)| relays_body(text, content))
+        .count()
 }
 
 /// What both owners had delivered when the cancel was still held.

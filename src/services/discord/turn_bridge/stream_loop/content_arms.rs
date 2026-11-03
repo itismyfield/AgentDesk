@@ -561,7 +561,7 @@ pub(super) async fn handle_stream_content_message(
                             if let Some(ot) = output_tokens {
                                 accumulated_output_tokens = accumulated_output_tokens.max(ot);
                             }
-                            if shared_owned.ui.status_panel_v2_enabled && has_context_token_data {
+                            if has_context_token_data {
                                 let context_provider_session_id = new_raw_provider_session_id
                                     .as_deref()
                                     .or(new_session_id.as_deref())

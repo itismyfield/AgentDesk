@@ -21,11 +21,9 @@ pub(super) fn status_frame(
         provider,
         started_at_unix,
         indicator,
-        None,
-        None,
         "",
     );
-    build_turn_bridge_streaming_edit_text(shared.ui.status_panel_v2_enabled, "", &block, provider)
+    build_turn_bridge_streaming_edit_text("", &block, provider)
 }
 
 /// The frame's last-tool label without its spinner; None before the turn's first tool.

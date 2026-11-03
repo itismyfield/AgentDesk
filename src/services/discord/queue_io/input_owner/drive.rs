@@ -8,7 +8,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
-use super::effect::{Completion, MODAL};
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};
 
 /// The owner's granted front: its slot's ticket and the original.
@@ -59,8 +58,6 @@ pub(crate) struct Drive {
     pub(crate) mailbox: ChannelMailboxHandle,
     pub(crate) channel: u64,
     pub(crate) handoff: Handoff,
-    /// How long a front held under a modal waits before the drive looks at it again.
-    pub(crate) recheck: Duration,
     pub(crate) settled: Option<Settled>,
 }
 
@@ -101,13 +98,15 @@ async fn run(lane: Arc<Lane>, drive: Arc<Drive>) {
         lane.again.store(false, Ordering::SeqCst);
         let mut stalled = false;
         while let Some(front) = grant(&drive, stalled).await {
+            let message = front.1.message_id;
             let result = (drive.handoff)(front).await;
-            if result == Err(format!("{:?}", Completion::NotSent(MODAL.into()))) {
-                let again = Arc::clone(&drive);
-                tokio::spawn(async move {
-                    tokio::time::sleep(again.recheck).await;
-                    wake(again);
-                });
+            // A front held on a screen where Enter may not submit waits for a real wake: a turn
+            // boundary, new input, or its pane's screen recovering. It is never re-handed by time.
+            if result
+                .as_ref()
+                .is_err_and(|error| super::effect::held(error))
+            {
+                super::held_watch::watch(drive.clone(), message);
                 break;
             }
             stalled = result.is_err();

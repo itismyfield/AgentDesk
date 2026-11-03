@@ -385,9 +385,10 @@ fn codex_adapter_panic_emits_one_owned_alert() {
     assert!(pane.rig.sends().is_empty());
 }
 
-/// A real Codex Modal veto holds the same admission; the drive's timer retries the actual adapter.
+/// A real Codex Modal veto holds the same admission with no timer; the next wake retries the
+/// actual adapter.
 #[test]
-fn a_codex_modal_is_retried_by_the_drive_without_another_wake() {
+fn a_codex_modal_is_retried_by_the_drive_on_its_next_wake() {
     use crate::services::discord::queue_io::input_owner::drive::{self, Drive, Handoff};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
@@ -450,11 +451,10 @@ fn a_codex_modal_is_retried_by_the_drive_without_another_wake() {
             mailbox: mailbox.clone(),
             channel: pane.channel,
             handoff,
-            recheck: Duration::from_millis(50),
             settled: None,
         });
         runtime.block_on(async {
-            drive::wake(drive);
+            drive::wake(drive.clone());
             let deadline = Instant::now() + Duration::from_secs(20);
             while !refused.load(Ordering::SeqCst) {
                 assert!(
@@ -475,6 +475,7 @@ fn a_codex_modal_is_retried_by_the_drive_without_another_wake() {
             assert!(pane.rig.sends().is_empty());
             assert!(pane.ledger_free());
             pane.rig.answer("pane.read", screen(""));
+            drive::wake(drive);
             loop {
                 let done = mailbox
                     .v2_request(|s| s.as_ref().unwrap().json())

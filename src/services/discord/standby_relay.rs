@@ -854,11 +854,7 @@ async fn deliver_response(
     turn_binding: &StandbyRelayTurnBinding,
     response_text: &str,
 ) -> bool {
-    let formatted = if shared.ui.status_panel_v2_enabled {
-        formatting::format_for_discord_with_status_panel(response_text, provider)
-    } else {
-        formatting::format_for_discord_with_provider(response_text, provider)
-    };
+    let formatted = formatting::format_for_discord_with_status_panel(response_text, provider);
     let formatted = super::session_banner::with_discord_turn_session_banner_identity_prefix(
         shared,
         channel_id,

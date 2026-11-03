@@ -52,6 +52,34 @@ pub(crate) async fn enqueue(
     .map_err(|e| e.to_string())
 }
 
+/// The one notice an original owes when its input was pasted beside a draft C-s could not park;
+/// keyed by the original's sources, so a retry of the same original posts nothing more.
+pub(crate) async fn draft_unproven(
+    pool: &sqlx::PgPool,
+    provider: &str,
+    channel: u64,
+    sources: &[String],
+) -> Result<i64, String> {
+    let stable = serde_json::to_vec(&(provider, channel, sources)).map_err(|e| e.to_string())?;
+    let key = format!("draft-unproven:{:x}", Sha256::digest(stable));
+    let body = "⚠️ 입력을 전달했지만 작성 중이던 초안은 보존 여부를 확인하지 못했습니다.";
+    let text = super::super::dispatch_policy::prepend_operational_alert_origin(body);
+    enqueue_outbox_pg_returning_id_with_persistent_dedupe(
+        pool,
+        OutboxMessage {
+            target: &format!("channel:{channel}"),
+            content: &text,
+            bot: provider,
+            // The owner's input-notice source; the reason code tells this notice apart.
+            source: "retained_input_notice",
+            reason_code: Some("draft.unproven"),
+            session_key: Some(&key),
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
 impl crate::services::turn_orchestrator::ChannelMailboxHandle {
     #[cfg(test)]
     pub(crate) fn v2_notice_is_non_turn(text: &str) -> bool {

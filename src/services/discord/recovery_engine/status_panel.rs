@@ -5,27 +5,19 @@ use super::super::{inflight, turn_bridge};
 use crate::services::provider::ProviderKind;
 
 pub(super) fn completion_target(
-    status_panel_v2_enabled: bool,
     state: &inflight::InflightTurnState,
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> Option<Option<MessageId>> {
-    if !status_panel_v2_enabled {
-        return None;
-    }
     let persisted = inflight::load_inflight_state(provider, channel_id.get());
     retired_completion_target(message_id_for_completion(state, persisted.as_ref()))
 }
 
 #[cfg(test)]
-pub(super) fn completion_target_for_flags(
-    status_panel_v2_enabled: bool,
+pub(super) fn completion_target_with_persisted(
     state: &inflight::InflightTurnState,
     persisted: Option<&inflight::InflightTurnState>,
 ) -> Option<Option<MessageId>> {
-    if !status_panel_v2_enabled {
-        return None;
-    }
     retired_completion_target(message_id_for_completion(state, persisted))
 }
 

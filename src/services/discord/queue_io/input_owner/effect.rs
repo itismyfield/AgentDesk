@@ -29,6 +29,14 @@ pub(crate) enum Completion {
 
 /// The refusal of a pane showing a modal: the original is held at the front, not retained.
 pub(crate) const MODAL: &str = "Modal";
+/// Refusals of a screen where Enter may not submit; each holds the original at the front too.
+const HELD: [&str; 3] = [MODAL, "ScreenUnread", "CopyMode"];
+
+/// Whether a drive handoff failed on such a screen, so the front waits for its next opportunity.
+pub(crate) fn held(error: &str) -> bool {
+    HELD.iter()
+        .any(|reason| error == format!("{:?}", Completion::NotSent((*reason).into())))
+}
 
 /// A refusal before any key, marked so a caller never takes it for a write that may have landed.
 pub(crate) fn unsent(error: String) -> String {
@@ -64,7 +72,7 @@ pub(crate) async fn run(
         })?;
     let completion = outcome.result.unwrap_or_else(Completion::WriteUncertain);
     if let Some(proof) = outcome.not_sent {
-        let held = completion == Completion::NotSent(MODAL.into());
+        let held = matches!(&completion, Completion::NotSent(r) if HELD.contains(&r.as_str()));
         mailbox
             .v2_request(move |slot| {
                 let owner = slot.as_mut().ok_or("V2 not adopted")?;
@@ -113,10 +121,18 @@ pub(crate) struct BusyClaude {
     /// The original body; the prepared frame must be exactly main's framing of it.
     pub(crate) text: String,
     pub(crate) timing: &'static busy_inject::Timing,
+    /// A reader set up before the paste answers it, so the relay leaves its turn alone.
+    pub(crate) declared: bool,
+    /// Tells the original once that a draft beside the pasted input may not be kept.
+    pub(crate) draft_notice: Option<DraftNotice>,
 }
 
+/// Raises the one notice an original owes when its paste met a draft C-s could not park.
+pub(crate) type DraftNotice = Box<dyn FnOnce() + Send>;
+
 impl BusyClaude {
-    pub(crate) fn leaf(self) -> Leaf {
+    pub(crate) fn leaf(mut self) -> Leaf {
+        let notice = self.draft_notice.take();
         Box::new(move |frame| {
             let (source, author, name) = (&self.source, &self.author, &self.name);
             if busy_inject::frame(source, author, name, &self.nonce, &self.text) != frame {
@@ -134,11 +150,19 @@ impl BusyClaude {
             };
             // Enter ends the transaction: the receipt is only recorded off this thread.
             let inject = || {
-                let report = busy_inject::inject_owned(&self.pane, &request, self.timing);
+                let declared = self.declared;
+                let report = busy_inject::inject_owned(&self.pane, &request, self.timing, declared);
                 busy_inject::collect_receipt(&request, &report, self.timing);
-                report.outcome
+                (report.outcome, report.draft_unproven)
             };
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(inject));
+            let outcome = outcome.map(|(outcome, unproven)| {
+                if unproven && let Some(notice) = notice {
+                    tracing::info!(channel_id = self.channel, nonce = %self.nonce, "owned paste met an unparked draft");
+                    notice();
+                }
+                outcome
+            });
             let alert = |detail: &str| {
                 self.unconfirmed(detail);
                 detail.to_string()
@@ -147,6 +171,11 @@ impl BusyClaude {
                 Ok(Outcome::NotSent(veto)) => {
                     let reason = format!("{veto:?}");
                     owner_input::vetoed(&reason);
+                    if HELD.contains(&reason.as_str()) {
+                        let pane = self.pane.clone();
+                        let probe = Box::new(move || busy_inject::screen_submits(&pane));
+                        super::held_watch::arm(self.channel, probe);
+                    }
                     Completion::NotSent(reason)
                 }
                 Ok(Outcome::Injected) => Completion::Submitted,

@@ -11,7 +11,6 @@ fn o_status_only_frame_uses_the_same_summary_and_class_renderer() {
         let ui = &mut std::sync::Arc::get_mut(&mut shared)
             .expect("unshared fixture")
             .ui;
-        ui.status_panel_v2_enabled = true;
         ui.placeholder_live_events = std::sync::Arc::new(crate::services::discord::placeholder_live_events::PlaceholderLiveEvents::with_tool_activity_display(mode));
         let channel = ChannelId::new(807151);
         ui.placeholder_live_events.push_status_events(

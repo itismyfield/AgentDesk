@@ -1822,6 +1822,7 @@ src/
 │   │   │   │   ├── drive_tests.rs
 │   │   │   │   ├── effect.rs
 │   │   │   │   ├── effect_tests.rs
+│   │   │   │   ├── held_watch.rs
 │   │   │   │   ├── ingress.rs
 │   │   │   │   ├── ingress_tests.rs
 │   │   │   │   ├── mod.rs
@@ -4121,6 +4122,7 @@ src/
 │   │   ├── binding_context.rs
 │   │   ├── binding_context_snapshot_tests.rs
 │   │   ├── binding_events.rs
+│   │   ├── claude_row_claim_tests.rs
 │   │   ├── extract.rs
 │   │   ├── handed_identity_tests.rs
 │   │   ├── handoff.rs
