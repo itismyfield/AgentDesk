@@ -4,7 +4,7 @@
 use super::*;
 
 #[cfg(unix)]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ClaudeTuiLaunchInfo {
     pub(super) working_dir: PathBuf,
     pub(super) session_id: String,
@@ -13,9 +13,16 @@ pub(super) struct ClaudeTuiLaunchInfo {
 
 #[cfg(unix)]
 pub(super) fn parse_claude_tui_launch_script(path: &Path) -> Result<ClaudeTuiLaunchInfo, String> {
-    let script = std::fs::read_to_string(path)
+    let script = std::fs::read(path)
         .map_err(|error| format!("read Claude TUI launch script {}: {error}", path.display()))?;
-    parse_claude_tui_launch_script_content(&script)
+    // Unchanged script bytes keep their parse; any other bytes are parsed again.
+    let parsed = crate::utils::parsed_bytes::reuse(path, script, |script| {
+        let script = std::str::from_utf8(script).map_err(|error| error.to_string())?;
+        Ok(parse_claude_tui_launch_script_content(script))
+    })
+    .map_err(|error| format!("read Claude TUI launch script {}: {error}", path.display()))?;
+    (*parsed)
+        .clone()
         .ok_or_else(|| format!("parse Claude TUI launch script {}", path.display()))
 }
 
@@ -240,6 +247,56 @@ mod tests {
                 binding_context_path: None,
             })
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_script_is_parsed_again_only_when_its_bytes_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("launch.sh");
+        let script = |id: &str| format!("cd '/tmp/project'\nexec 'claude' '--session-id' '{id}'\n");
+        let session = |path: &Path| parse_claude_tui_launch_script(path).map(|l| l.session_id);
+        let builds = || crate::utils::parsed_bytes::BUILDS.with(std::cell::Cell::get);
+        std::fs::write(&path, script("launch-1")).unwrap();
+        let start = builds();
+        for _ in 0..5 {
+            assert_eq!(session(&path).as_deref(), Ok("launch-1"));
+        }
+        assert_eq!(builds() - start, 1, "an unchanged script is parsed once");
+
+        let before = std::fs::metadata(&path).unwrap();
+        std::fs::write(&path, script("launch-2")).unwrap();
+        let mtime = filetime::FileTime::from_last_modification_time(&before);
+        filetime::set_file_mtime(&path, mtime).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), before.len());
+        assert_eq!(
+            session(&path).as_deref(),
+            Ok("launch-2"),
+            "in-place rewrite"
+        );
+
+        let replacement = path.with_extension("next");
+        std::fs::write(&replacement, script("replaced")).unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        assert_eq!(
+            session(&path).as_deref(),
+            Ok("replaced"),
+            "a replaced script"
+        );
+
+        std::fs::write(&path, "cd '/tmp/project'\n").unwrap();
+        assert!(session(&path).is_err(), "a script without a session");
+        std::fs::write(&path, script("relaunched")).unwrap();
+        assert_eq!(
+            session(&path).as_deref(),
+            Ok("relaunched"),
+            "a relaunch's script"
+        );
+
+        crate::utils::parsed_bytes::forget(&path);
+        let start = builds();
+        assert_eq!(session(&path).as_deref(), Ok("relaunched"));
+        assert_eq!(builds() - start, 1, "a restart parses the script again");
     }
 
     #[cfg(unix)]
