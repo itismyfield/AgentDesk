@@ -37,6 +37,9 @@ describe("connection status rows", () => {
       { data: undefined, isError: false, isPending: true },
       tr,
     );
+    const limited = connectionStatusRows(ready<OnboardingConnectionStatus>({ guild_id: "1", owner_id: "2", bot_providers: {} }), ready<HealthResponse>({ status: "healthy", publicOnly: "forbidden" }), tr);
+    expect([limited[0].value, limited[0].tone]).toEqual(["이 기기에서는 확인할 수 없어요", "unknown"]);
+
     expect(unknown.map((row) => [row.value, row.tone])).toEqual([
       ["확인 중…", "unknown"],
       ["확인하지 못했어요", "unknown"],

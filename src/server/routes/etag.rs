@@ -3,14 +3,14 @@
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
-/// Strong ETag over a serialized JSON body. serde_json runs without `preserve_order`,
-/// so object keys serialize sorted and equal values hash equal.
+/// Weak ETag shared across content encodings. Sorted serde_json object keys
+/// keep equal values hashing equally.
 pub(crate) fn json_etag(serialized: &str) -> String {
-    format!("\"{}\"", blake3::hash(serialized.as_bytes()).to_hex())
+    format!("W/\"{}\"", blake3::hash(serialized.as_bytes()).to_hex())
 }
 
 /// 304 when `If-None-Match` already names `etag` (weak or strong) or `*`, otherwise `full()`.
-/// Both carry the ETag header.
+/// Both carry the ETag and content-encoding variation headers.
 pub(crate) fn revalidate(
     headers: &HeaderMap,
     etag: &str,
@@ -25,9 +25,13 @@ pub(crate) fn revalidate(
         response.headers_mut().insert(header::ETAG, value);
     }
     response
+        .headers_mut()
+        .append(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+    response
 }
 
 fn if_none_match_hits(headers: &HeaderMap, etag: &str) -> bool {
+    let etag = etag.trim_start_matches("W/");
     headers
         .get(header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())

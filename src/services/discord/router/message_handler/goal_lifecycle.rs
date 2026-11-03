@@ -380,3 +380,66 @@ mod host_guard_tests {
         db.drop().await;
     }
 }
+
+#[cfg(test)]
+mod fresh_session_boundary_pg_tests {
+    use super::*;
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+
+    async fn boundary_generation(pool: &sqlx::PgPool, channel: ChannelId) -> Option<i64> {
+        sqlx::query_scalar(
+            "SELECT clear_generation::BIGINT FROM channel_session_clear_boundaries WHERE channel_id = $1",
+        )
+        .bind(channel.get().to_string())
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+    }
+
+    /// `/goal fresh` clears the provider session only after this boundary is durable, so a write
+    /// that does not land must come back as an error the caller stops on.
+    #[tokio::test]
+    async fn fresh_session_boundary_reports_a_write_that_did_not_land_pg() {
+        let channel = ChannelId::new(5_100_000_001);
+        let storeless = crate::services::discord::make_shared_data_for_tests();
+        assert!(
+            record_fresh_session_context_boundary(&storeless, channel)
+                .await
+                .is_err(),
+            "without PostgreSQL there is no durable boundary"
+        );
+
+        let db = TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let shared =
+            crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+        for statement in [
+            "CREATE FUNCTION reject_fresh_boundary() RETURNS trigger AS $$
+             BEGIN RAISE EXCEPTION 'injected fresh boundary failure'; END; $$ LANGUAGE plpgsql",
+            "CREATE TRIGGER reject_fresh_boundary BEFORE INSERT OR UPDATE
+             ON channel_session_clear_boundaries
+             FOR EACH ROW EXECUTE FUNCTION reject_fresh_boundary()",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+        let error = record_fresh_session_context_boundary(&shared, channel)
+            .await
+            .expect_err("a rejected boundary write cannot report success");
+        assert!(
+            format!("{error:#}").contains("injected fresh boundary failure"),
+            "{error:#}"
+        );
+        assert_eq!(boundary_generation(&pool, channel).await, None);
+
+        sqlx::query("DROP TRIGGER reject_fresh_boundary ON channel_session_clear_boundaries")
+            .execute(&pool)
+            .await
+            .unwrap();
+        record_fresh_session_context_boundary(&shared, channel)
+            .await
+            .expect("the boundary lands once the store accepts it");
+        assert_eq!(boundary_generation(&pool, channel).await, Some(1));
+        pool.close().await;
+        db.drop().await;
+    }
+}

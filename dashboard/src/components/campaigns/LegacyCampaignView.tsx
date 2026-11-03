@@ -14,7 +14,7 @@ export default function LegacyCampaignView({ campaign, live, selector, refreshed
   node: string | null; onNode: (id: string | null) => void; onSaved: (updated: Campaign) => void; tr: Tr;
 }) {
   const progress = campaignProgress(campaign.nodes);
-  return <div className="campaign-main gap-4 rounded-lg p-3 sm:p-5">
+  return <div className="campaign-main gap-3 rounded-lg p-3 max-sm:border-0 max-sm:bg-transparent max-sm:p-0 sm:gap-4 sm:p-5">
     <div className="campaign-summary-header flex flex-wrap items-center gap-x-3 gap-y-2">
       {selector}
       <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-th-text-muted">

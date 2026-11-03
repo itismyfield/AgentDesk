@@ -36,7 +36,7 @@ type_complexity = "deny"
 [dependencies]
 # HTTP server
 axum = { version = "0.8", features = ["ws", "macros"] }
-tower-http = { version = "0.6", features = ["fs", "cors"] }
+tower-http = { version = "0.6", features = ["fs", "cors", "compression-gzip"] }
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 
@@ -117,6 +117,7 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Secur
 plist = "1.8"
 
 [dev-dependencies]
+flate2 = "1"
 filetime = "0.2"
 plist = "1.8"
 tokio = { version = "1", features = ["test-util"] }

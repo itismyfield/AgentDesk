@@ -137,3 +137,8 @@ export function useWorkspace(): WorkspaceContextValue {
   if (!ctx) throw new Error("useWorkspace must be used within WorkspaceProvider");
   return ctx;
 }
+
+/** The agent roster inside WorkspaceProvider, or null for components rendered outside it. */
+export function useWorkspaceAgents(): Agent[] | null {
+  return useContext(WorkspaceContext)?.agents ?? null;
+}

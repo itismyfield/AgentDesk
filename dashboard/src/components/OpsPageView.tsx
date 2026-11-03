@@ -28,6 +28,7 @@ import {
   surfaceStyleForSeverity,
   toneForSeverity,
   translateStatus,
+  publicOnlyHealthNote,
 } from "./OpsPageModel";
 import { StatusBadge } from "./common/StatusBadge";
 import { FreshnessIndicator } from "./common/FreshnessIndicator";
@@ -247,8 +248,12 @@ export default function OpsPageView({
                 <p className="mt-2 text-xs leading-5 text-th-text-muted">{signal.note}</p>
               </div>;
             }) : <SurfaceEmptyState className="col-span-2 rounded-none border-0 px-4 py-5 text-sm sm:col-span-4">
-              <p className="font-medium text-th-text-primary">{tr("아직 상태 정보가 없어요.", "No health signals available yet.")}</p>
-              <p className="mt-1 text-xs leading-5 text-th-text-muted">{tr("첫 응답이 오면 요약을 보여드릴게요.", "The health summary appears after the first response arrives.")}</p>
+              {publicOnlyHealthNote(health, tr)
+                ? <p data-testid="ops-public-only-note" className="text-sm leading-6 break-keep text-th-text-secondary">{publicOnlyHealthNote(health, tr)}</p>
+                : <>
+                  <p className="font-medium text-th-text-primary">{tr("아직 상태 정보가 없어요.", "No health signals available yet.")}</p>
+                  <p className="mt-1 text-xs leading-5 text-th-text-muted">{tr("첫 응답이 오면 요약을 보여드릴게요.", "The health summary appears after the first response arrives.")}</p>
+                </>}
             </SurfaceEmptyState>}
           </div>
         </section>

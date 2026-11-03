@@ -97,6 +97,26 @@ pub(super) fn local_or_configured_control_endpoint_allowed(
     matches!(config.server.host.trim(), "127.0.0.1" | "localhost" | "::1")
 }
 
+/// Read handlers also accept direct tailnet socket peers, independently of request headers.
+pub(super) fn read_rejection(
+    config: &crate::config::Config,
+    peer_addr: SocketAddr,
+) -> Option<Response> {
+    if local_or_configured_control_endpoint_allowed(config, Some(peer_addr))
+        || super::auth::is_tailnet_peer(Some(peer_addr))
+    {
+        return None;
+    }
+    Some(
+        legacy_health_error(AppError::new(
+            StatusCode::FORBIDDEN,
+            ErrorCode::Policy,
+            "auth_token required for non-loopback host",
+        ))
+        .into_response(),
+    )
+}
+
 /// `fully_recovered` tracks startup/recovery completion only; live degradation is
 /// reported by `status` and `degraded_reasons`, so operators can tell the two apart.
 fn compute_fully_recovered(
@@ -369,18 +389,13 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
     response::health_response(&state, false).await
 }
 
-/// GET /api/health/detail — authenticated or local detailed health.
+/// GET /api/health/detail — authenticated, local or direct-tailnet detailed health.
 pub async fn health_detail_handler(
     State(state): State<AppState>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
 ) -> Response {
-    if !local_or_configured_control_endpoint_allowed(&state.config, Some(peer_addr)) {
-        return legacy_health_error(AppError::new(
-            StatusCode::FORBIDDEN,
-            ErrorCode::Policy,
-            "auth_token required for non-loopback host",
-        ))
-        .into_response();
+    if let Some(response) = read_rejection(&state.config, peer_addr) {
+        return response;
     }
     response::health_response(&state, true).await
 }
@@ -478,18 +493,13 @@ pub async fn ack_dispatch_outbox_failures_handler(
     }
 }
 
-/// GET /api/doctor/startup/latest — protected/local latest startup doctor artifact.
+/// GET /api/doctor/startup/latest — authenticated, local or direct-tailnet doctor artifact.
 pub async fn startup_doctor_latest_handler(
     State(state): State<AppState>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
 ) -> Response {
-    if !local_or_configured_control_endpoint_allowed(&state.config, Some(peer_addr)) {
-        return legacy_health_error(AppError::new(
-            StatusCode::FORBIDDEN,
-            ErrorCode::Policy,
-            "auth_token required for non-loopback host",
-        ))
-        .into_response();
+    if let Some(response) = read_rejection(&state.config, peer_addr) {
+        return response;
     }
 
     Json(crate::cli::doctor::startup::doctor_json(&state.config)).into_response()

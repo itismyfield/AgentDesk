@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildBottlenecks, describeDegradedReason } from "./OpsPageModel";
+import { buildBottlenecks, buildSignalCards, describeDegradedReason, publicOnlyHealthNote } from "./OpsPageModel";
 
 describe("describeDegradedReason", () => {
   it("names provider and outbox reasons in Korean", () => {
@@ -29,5 +29,15 @@ describe("buildBottlenecks", () => {
     expect(rows).toEqual([
       expect.objectContaining({ kind: "tui_o:unresolved:1479671298497183835", label: "TUI 출력 확인 필요" }),
     ]);
+  });
+});
+
+describe("public-only health", () => {
+  it("shows no zero-valued signal cards and explains why detail is missing", () => {
+    const tr = (ko: string) => ko;
+    expect(buildSignalCards({ status: "healthy", publicOnly: "forbidden" }, true)).toEqual([]);
+    expect(publicOnlyHealthNote({ status: "healthy", publicOnly: "forbidden" }, tr)).toContain("서버가 도는 맥");
+    expect(publicOnlyHealthNote({ status: "healthy", publicOnly: "failed" }, tr)).toContain("요약만");
+    expect(publicOnlyHealthNote({ status: "healthy" }, tr)).toBeNull();
   });
 });

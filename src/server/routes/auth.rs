@@ -6,6 +6,7 @@ use super::AppState;
 use crate::api_caller_observability::{AuthStrength, RequestPrincipal};
 
 mod tailnet_peer;
+pub(super) use tailnet_peer::is_tailnet_peer;
 
 /// GET /api/auth/session
 /// Public authentication probe; never treats reaching this handler as proof.

@@ -29,6 +29,10 @@ cd docs/statecharts/session-lifecycle
 
 The command exits 1 when any rule breaks, which is the expected result for a model that documents a known gap.
 
+CI (`.github/workflows/statecharts-tlc.yml`, PRs touching this folder and nightly, alert only) runs every `.cfg` with plain TLC through `scripts/ci/statecharts_tlc.py` and fails when the broken rules differ from that config's row in `expected.tsv`; run it locally with `TLA2TOOLS` and `JAVA` set as above.
+A change that adds a config, breaks a rule or closes a known gap updates `expected.tsv` and the report in the same PR.
+Add a new model only with small constants that finish within the CI limits (5 minutes per config, 15 minutes per job).
+
 ## Index
 
 | Area | Code SHA | Rules that break | Disposition |
@@ -38,3 +42,4 @@ The command exits 1 when any rule breaks, which is the expected result for a mod
 | `host-migration` (tmux ↔ Herdr, #7503) | `db99888121` (branch `feat/i7503-claude-resume-both`) | old tmux Claude left running after a fresh forward launch (C1), which then blocks every Return turn (C2); id-only channel's queued input never starts Return (C3) | C1 already in main; C2 new, not raised by #7503 reviews; C3 is review B2 P1-1 (repair B-2) |
 | `input-single-path` (#7272, landed + 4f design) | `0a9b3f99cf` + design-4f-r1 | unreadable composer pastes over a human draft (C1), MayHaveSent head after a restart never ticked (C2), Held input dropped or never re-woken (C4, unconfirmed), busy input lost by /stop (C5, unconfirmed) | C3 is carry P1-7; C1, C2, C4, C5 are 4f-b acceptance test candidates |
 | `input-single-path` ownership (#7676 A2+D) | `0b0fbcbfbe`, `524adb6190`, `e6d97a192f`, `4def1c6289` + repair | main: busy input retained (retry required), queued busy input answered by nobody; main and first A2+D: turn/start on a busy pane dropped, held input re-woken by a timer, unparked draft untold, repeated body answered by nobody; first repair: a reader's declaration lost after 10 s or taken from a same-body twin, an absorbed input's reader posting a second body, a held input never woken once its screen recovers; second repair: one failed read of the held pane, or an old watch's end, leaves that input unwatched; all: idle pane without observer waits for a wake | the third repair fixes all but the wake, which is slice C |
+| `execution-authority` (#7731) | `b66f40ba19` | main: one transient PG read failure (or an owner change) on a channel hosted under the gateway lease holds live input forever, because the refresh waits for a host that never retires | fixed by #7731 (`fix1`); the `nowait` mutant breaks the permit-host fence |
