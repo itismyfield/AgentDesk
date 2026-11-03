@@ -860,13 +860,8 @@ pub(super) fn unscoped_store(path: &Path) -> Result<Option<Store>, String> {
     if !is_v2(path)? {
         return Ok(None);
     }
-    let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let migration::Decoded::V2(state) = migration::decode(&raw)? else {
-        return Err("frame history envelope changed while reading".into());
-    };
-    Ok(Some(Store {
-        entries: owned(&state).into_iter().map(|(entry, _)| entry).collect(),
-    }))
+    let raw = std::fs::read(path).map_err(|e| e.to_string())?;
+    Ok(Some(owned_store(path, raw)?))
 }
 
 /// The V1 append readers' store in a V2 file (`None` if not V2); they match only append entries,
@@ -875,16 +870,28 @@ pub(super) fn append_store(path: &Path) -> Result<Option<Store>, String> {
     if !is_v2(path)? {
         return Ok(None);
     }
-    let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    if !raw.contains("\"append\":") {
+    let raw = std::fs::read(path).map_err(|e| e.to_string())?;
+    if !raw.windows(9).any(|window| window == b"\"append\":") {
         return Ok(Some(Store::default()));
     }
-    let migration::Decoded::V2(state) = migration::decode(&raw)? else {
-        return Err("frame history envelope changed while reading".into());
-    };
-    Ok(Some(Store {
-        entries: owned(&state).into_iter().map(|(entry, _)| entry).collect(),
-    }))
+    Ok(Some(owned_store(path, raw)?))
+}
+
+/// The owned entries of the V2 file whose bytes are `raw`, parsed once per distinct content.
+fn owned_store(path: &Path, raw: Vec<u8>) -> Result<Store, String> {
+    let entries = compat::reuse(path, raw, |raw| {
+        let raw = std::str::from_utf8(raw).map_err(|e| e.to_string())?;
+        let migration::Decoded::V2(state) = migration::decode(raw)? else {
+            return Err("frame history envelope changed while reading".into());
+        };
+        Ok(owned(&state)
+            .into_iter()
+            .map(|(entry, _)| entry)
+            .collect::<Vec<Entry>>())
+    })?;
+    Ok(Store {
+        entries: entries.as_ref().clone(),
+    })
 }
 
 /// A V1 append mutation under the V2 lock: only migrated append entries change; any other change,

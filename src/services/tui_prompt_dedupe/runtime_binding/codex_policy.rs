@@ -24,7 +24,15 @@ pub(super) enum SourcePolicyState {
     VerifiedUnavailable,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Source policy dispositions judged on this thread, for the batch cost test.
+    pub(crate) static DISPOSITIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(super) fn disposition(authority: &TmuxSourceAuthority<'_>) -> SourcePolicyState {
+    #[cfg(test)]
+    DISPOSITIONS.with(|count| count.set(count.get() + 1));
     match codex_verified::current_context(authority) {
         Ok(Some(context)) => {
             return SourcePolicyState::VerifiedCurrent(PinnedIncarnation(context));
@@ -189,33 +197,47 @@ pub(crate) fn codex_verified_channel_delivery_allowed(channel: u64) -> bool {
         .all(|tmux| !codex_verified_input_blocked(&tmux))
 }
 
-pub(crate) fn codex_verified_event_allowed(event: &binding_events::BindingEvent) -> bool {
-    if event.provider != "codex" {
-        return true;
+/// Whether each of `events` may bind its source; a pane's policy is judged once for all its events,
+/// under one hold of its source authority.
+pub(crate) fn codex_verified_events_allowed(events: &[&binding_events::BindingEvent]) -> Vec<bool> {
+    let mut allowed = vec![true; events.len()];
+    let mut panes: Vec<&str> = (events.iter())
+        .filter(|event| event.provider == "codex")
+        .map(|event| event.tmux_session.as_str())
+        .collect();
+    panes.sort_unstable();
+    panes.dedup();
+    for pane in panes {
+        tc::with_tmux_source_authority(pane, |authority| {
+            let policy = disposition(authority);
+            for (verdict, event) in allowed.iter_mut().zip(events) {
+                if event.provider == "codex" && event.tmux_session == pane {
+                    *verdict = event_allowed(&policy, event);
+                }
+            }
+        });
     }
-    tc::with_tmux_source_authority(&event.tmux_session, |authority| {
-        let context = match disposition(authority) {
-            SourcePolicyState::Legacy => return true,
-            SourcePolicyState::VerifiedUnavailable => return false,
-            SourcePolicyState::VerifiedCurrent(pin) => pin.into_context(),
-        };
-        if event.execution_nonce.as_deref() != Some(&context.execution_nonce)
-            || event.channel_id != context.channel_id.unwrap_or(0)
-        {
-            return false;
-        }
-        let source = match &event.new {
-            binding_events::BindingTarget::Source(source)
-            | binding_events::BindingTarget::Resolved { source, .. } => source,
-            _ => return true,
-        };
-        if !binding_events::codex::proof_at_seq(&context, event.seq)
-            .is_ok_and(|proof| proof.is_some_and(|proof| &proof.source == source))
-        {
-            return false;
-        }
-        true
-    })
+    allowed
+}
+
+fn event_allowed(policy: &SourcePolicyState, event: &binding_events::BindingEvent) -> bool {
+    let context = match policy {
+        SourcePolicyState::Legacy => return true,
+        SourcePolicyState::VerifiedUnavailable => return false,
+        SourcePolicyState::VerifiedCurrent(pin) => &pin.0,
+    };
+    if event.execution_nonce.as_deref() != Some(&context.execution_nonce)
+        || event.channel_id != context.channel_id.unwrap_or(0)
+    {
+        return false;
+    }
+    let source = match &event.new {
+        binding_events::BindingTarget::Source(source)
+        | binding_events::BindingTarget::Resolved { source, .. } => source,
+        _ => return true,
+    };
+    binding_events::codex::proof_at_seq(context, event.seq)
+        .is_ok_and(|proof| proof.is_some_and(|proof| &proof.source == source))
 }
 
 #[cfg(test)]
