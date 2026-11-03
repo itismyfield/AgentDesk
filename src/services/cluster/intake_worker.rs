@@ -167,6 +167,8 @@ impl IntakeWorkerLifecycle {
     pub(crate) async fn wait_until_drained(&self) {
         loop {
             let notified = self.drained.notified();
+            #[cfg(test)]
+            drain_tests::between_waiter_steps();
             if self.active_ticks.load(Ordering::SeqCst) == 0 {
                 return;
             }
