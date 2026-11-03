@@ -144,7 +144,9 @@ fn crossed_rebind_relay_reaches_discord_once_below_the_old_watermark() {
             .env(CHILD, "1")
             .env("AGENTDESK_ROOT_DIR", root.path())
             .env("CODEX_HOME", root.path())
-            .env("AGENTDESK_STATUS_INTERVAL_SECS", "0")
+            // No progress tick: which message a crossed rebind draws into is a placeholder policy
+            // outside this test, which checks the read-source switch and the single delivery.
+            .env("AGENTDESK_STATUS_INTERVAL_SECS", "3600")
             .env(
                 crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
                 "[]",
