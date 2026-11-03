@@ -232,32 +232,107 @@ async fn old_outbox_rows_and_bad_metadata_keep_wire_and_unknown_source_pg() {
         assert_eq!(rows.last().unwrap()["census"]["binding_mode"], "UNKNOWN");
         assert_eq!(rows.last().unwrap()["outcome"], "confirmed");
     }
-    let mut tx = pool.begin().await.unwrap();
-    message_outbox::enqueue_outbox_pg_on_tx(
-        &mut tx,
-        OutboxMessage {
+    for (index, kind) in ["plain", "ttl", "persistent", "exact", "staged", "lifecycle"]
+        .iter()
+        .enumerate()
+    {
+        let content = format!("operational notice {kind}");
+        let session = format!("census-static-{kind}");
+        let source = if *kind == "lifecycle" {
+            message_outbox::LIFECYCLE_NOTIFIER_SOURCE
+        } else {
+            "system"
+        };
+        let message = OutboxMessage {
             target: "channel:72280700",
-            content: "operational notice",
+            content: &content,
             bot: "notify",
-            source: "system",
+            source,
             reason_code: Some("census.nonbody"),
-            session_key: None,
-        },
-    )
-    .await
-    .unwrap();
-    tx.commit().await.unwrap();
-    assert_eq!(
-        drain_message_outbox_once(&Arc::new(pool), &registry, "nonbody-worker").await,
-        1
-    );
-    recording::flushed().await;
-    assert_eq!(mock.posts().len(), 5);
-    assert_eq!(
-        records(&log).len(),
-        8,
-        "registered nonbody does not become a body sample"
-    );
+            session_key: Some(&session),
+        };
+        let id = match *kind {
+            "plain" => {
+                let mut tx = pool.begin().await.unwrap();
+                let id = message_outbox::enqueue_outbox_pg_on_tx(&mut tx, message)
+                    .await
+                    .unwrap();
+                tx.commit().await.unwrap();
+                id
+            }
+            "ttl" => message_outbox::enqueue_outbox_pg_returning_id_with_ttl(&pool, message, 0)
+                .await
+                .unwrap()
+                .unwrap(),
+            "persistent" => message_outbox::enqueue_outbox_pg_returning_id_with_persistent_dedupe(
+                &pool, message,
+            )
+            .await
+            .unwrap(),
+            "exact" => match message_outbox::enqueue_outbox_pg_with_exact_dedupe_and_attachment(
+                &pool, message, kind, None, None,
+            )
+            .await
+            .unwrap()
+            {
+                OutboxEnqueueOutcome::Enqueued { id } => id,
+                other => panic!("{other:?}"),
+            },
+            "staged" => {
+                let id = message_outbox::stage_outbox_pg_with_ttl(&pool, message, 300)
+                    .await
+                    .unwrap();
+                assert!(
+                    message_outbox::activate_staged_outbox_pg(&pool, id)
+                        .await
+                        .unwrap()
+                );
+                id
+            }
+            "lifecycle" => {
+                assert!(
+                    message_outbox::enqueue_lifecycle_notification_pg(
+                        &pool,
+                        message.target,
+                        message.session_key,
+                        "census.nonbody",
+                        &content
+                    )
+                    .await
+                    .unwrap()
+                );
+                sqlx::query_scalar("SELECT id FROM message_outbox WHERE content=$1 AND source=$2 ORDER BY id DESC LIMIT 1")
+                    .bind(&content).bind(source).fetch_one(&pool).await.unwrap()
+            }
+            _ => unreachable!(),
+        };
+        let stored: Option<Value> =
+            sqlx::query_scalar("SELECT body_census FROM message_outbox WHERE id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            stored.as_ref().unwrap()["notice_kind"],
+            source,
+            "producer {kind} must store its kind at insertion"
+        );
+        assert_eq!(
+            message_outbox::body_census::delivery_tag(source, stored)["output_class"],
+            "NonBody"
+        );
+        assert_eq!(
+            drain_message_outbox_once(&Arc::new(pool.clone()), &registry, kind).await,
+            1
+        );
+        recording::flushed().await;
+        assert_eq!(mock.posts().len(), 5 + index);
+        assert_eq!(
+            records(&log).len(),
+            8,
+            "registered nonbody does not become a body sample: {kind}"
+        );
+    }
 }
 
 #[tokio::test]

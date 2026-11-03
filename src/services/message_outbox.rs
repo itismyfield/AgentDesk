@@ -667,6 +667,10 @@ pub(crate) async fn stage_outbox_pg_with_ttl_and_attachment(
     .bind(notice)
     .fetch_optional(&mut *tx)
     .await?;
+    if let Some(id) = inserted {
+        let census = body_census::capture(message.source);
+        body_census::store(&mut tx, id, census.as_ref()).await;
+    }
     let id = match inserted {
         Some(id) => id,
         None => {
@@ -844,7 +848,7 @@ async fn enqueue_plain_on_tx(
         explicit_completion,
     )
     .await?;
-    Ok(sqlx::query_scalar::<_, i64>(
+    let id = sqlx::query_scalar::<_, i64>(
         "INSERT INTO message_outbox
          (target, content, bot, source, reason_code, session_key, attachment_filename, attachment_content_type, attachment_data, session_notice)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -861,7 +865,10 @@ async fn enqueue_plain_on_tx(
     .bind(data)
     .bind(notice)
     .fetch_one(&mut **tx)
-    .await?)
+    .await?;
+    let census = body_census::capture(message.source);
+    body_census::store(tx, id, census.as_ref()).await;
+    Ok(id)
 }
 
 pub(crate) async fn enqueue_lifecycle_notification_pg(
@@ -932,6 +939,10 @@ pub(crate) async fn enqueue_lifecycle_notification_pg(
     .bind(notice)
     .fetch_optional(&mut *tx)
     .await?;
+    if let Some(id) = inserted {
+        let census = body_census::capture(LIFECYCLE_NOTIFIER_SOURCE);
+        body_census::store(&mut tx, id, census.as_ref()).await;
+    }
     tx.commit().await?;
 
     if inserted.is_none() {

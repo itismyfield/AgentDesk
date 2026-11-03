@@ -367,6 +367,14 @@ impl DiscordOutboundClient for HttpOutboundClient {
             ),
         )
         .await
+        .inspect(|id| {
+            if let (Ok(channel), Ok(message)) = (
+                target_channel.parse::<std::num::NonZeroU64>(),
+                id.parse::<std::num::NonZeroU64>(),
+            ) {
+                super::body_census::note_legacy_created(channel.get(), message.get());
+            }
+        })
     }
 
     async fn edit_message(

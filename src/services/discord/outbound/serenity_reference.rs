@@ -108,6 +108,9 @@ impl DiscordOutboundClient for SerenityReferenceOutboundClient {
             ),
         )
         .await
+        .inspect(|message| {
+            super::body_census::note_legacy_created(channel_id.get(), message.id.get())
+        })
         .map(|message| message.id.get().to_string())
         .map_err(dispatch_post_error)
     }
@@ -143,6 +146,9 @@ impl DiscordOutboundClient for SerenityReferenceOutboundClient {
             ),
         )
         .await
+        .inspect(|message| {
+            super::body_census::note_legacy_created(channel_id.get(), message.id.get())
+        })
         .map(|message| message.id.get().to_string())
         .map_err(dispatch_post_error)
     }

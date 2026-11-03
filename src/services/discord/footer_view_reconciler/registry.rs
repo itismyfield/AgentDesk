@@ -495,12 +495,16 @@ pub(in crate::services::discord) fn completion_footer_record_committed_text_resu
             && target.owner == owner
         {
             // Only a confirmed initial Legacy edit establishes historical body provenance.
-            target.legacy_body_confirmed = target.census.as_ref().is_some_and(|tag| {
-                tag["body_owner"] == "Legacy"
-                    && matches!(tag["binding_mode"].as_str(), Some("TUI" | "NON_TUI"))
-            }) && !target.base_body.trim().is_empty()
-                && smp::completion_footer_base_body(committed_text, &target.provider)
-                    == target.base_body;
+            target.legacy_body_confirmed =
+                crate::services::discord::outbound::body_census::created_by_legacy(
+                    channel_id.get(),
+                    message_id.get(),
+                ) && target.census.as_ref().is_some_and(|tag| {
+                    tag["body_owner"] == "Legacy"
+                        && matches!(tag["binding_mode"].as_str(), Some("TUI" | "NON_TUI"))
+                }) && !target.base_body.trim().is_empty()
+                    && smp::completion_footer_base_body(committed_text, &target.provider)
+                        == target.base_body;
         }
     }
     recorded

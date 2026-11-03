@@ -816,15 +816,16 @@ mod tests {
         completion_footer_forget_registered_target(channel_id);
         let log = recording::journal().await;
         let mock =
-            recording::Mock::start((0..24).map(|id| recording::message(4049600 + id)).collect())
-                .await;
+            recording::Mock::start((0..48).map(|_| recording::message(4_049_999)).collect()).await;
         let http = Arc::new(recording::client(&mock));
-        for (case, body, known, registered_only, original_o) in [
-            (4_049_451, "Final answer", true, false, false),
-            (4_049_452, "", true, false, false),
-            (4_049_453, "Final answer", false, false, false),
-            (4_049_454, "Old answer", false, true, false),
-            (4_049_455, "O answer", false, false, true),
+        for (case, body, known, registered_only, original_o, legacy_created) in [
+            (4_049_451, "Final answer", true, false, false, true),
+            (4_049_452, "", true, false, false, true),
+            (4_049_453, "Final answer", false, false, false, false),
+            (4_049_454, "Old answer", false, true, false, false),
+            (4_049_455, "O answer", false, false, true, false),
+            (4_049_456, "Unproven author", true, false, false, false),
+            (4_049_457, "Nonce echo", true, false, false, false),
         ] {
             let channel = ChannelId::new(case);
             let shared = push_unfinished_subagent(channel);
@@ -854,6 +855,37 @@ mod tests {
                 BodySource::from_state(&state)
             } else {
                 BodySource::captured(None)
+            };
+            let message = if registered_only {
+                message
+            } else if case == 4_049_457 {
+                source
+                    .clone()
+                    .observe(
+                        BodySite::WatcherStreaming,
+                        BodyOffer::NonBody,
+                        super::super::http::send_channel_message_with_nonce(
+                            &http,
+                            channel,
+                            "placeholder",
+                            "existing-nonce",
+                        ),
+                    )
+                    .await
+                    .unwrap()
+                    .id
+            } else {
+                let create =
+                    super::super::http::send_channel_message(&http, channel, "placeholder");
+                let created = if legacy_created {
+                    source
+                        .clone()
+                        .observe(BodySite::WatcherStreaming, BodyOffer::NonBody, create)
+                        .await
+                } else {
+                    crate::services::discord::outbound::census_scope(None, create).await
+                };
+                created.unwrap().id
             };
             let writer = FooterViewWriter::watcher(&shared, &http);
             if registered_only {
@@ -945,7 +977,7 @@ mod tests {
                 .collect();
             assert_eq!(refresh.len(), 6);
             assert!(refresh.iter().all(|row| row["census"]["output_class"]
-                == if known {
+                == if known && legacy_created {
                     "LegacyBodyRefresh"
                 } else {
                     "UnknownBody"

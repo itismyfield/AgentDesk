@@ -130,7 +130,11 @@ pub(in crate::services::discord) async fn send_channel_message(
     content: &str,
 ) -> serenity::Result<Message> {
     let message = channel_message_builder(content, None, None).map_err(serenity::Error::Other)?;
-    dispatch_channel_message(http, channel_id, message).await
+    dispatch_channel_message(http, channel_id, message)
+        .await
+        .inspect(|message| {
+            super::outbound::body_census::note_legacy_created(channel_id.get(), message.id.get())
+        })
 }
 
 /// Preserve the SDK reply's author-ping behavior while applying the relay policy.
@@ -202,6 +206,9 @@ pub(in crate::services::discord) async fn send_channel_message_with_reference(
         channel_id.send_message(http, message),
     )
     .await
+    .inspect(|message| {
+        super::outbound::body_census::note_legacy_created(channel_id.get(), message.id.get())
+    })
 }
 
 pub(in crate::services::discord) async fn send_channel_message_with_reference_and_nonce(
@@ -274,7 +281,11 @@ pub(in crate::services::discord) async fn send_channel_message_with_components(
     let message = channel_message_builder(content, None, None)
         .map_err(serenity::Error::Other)?
         .components(components);
-    dispatch_channel_message(http, channel_id, message).await
+    dispatch_channel_message(http, channel_id, message)
+        .await
+        .inspect(|message| {
+            super::outbound::body_census::note_legacy_created(channel_id.get(), message.id.get())
+        })
 }
 
 fn channel_edit_builder(

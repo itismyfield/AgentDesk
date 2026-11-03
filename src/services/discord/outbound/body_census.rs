@@ -5,10 +5,38 @@ use crate::services::discord::inflight::{InflightTurnState, PersistedHostLocator
 use crate::services::tui_o::{channel_policy::ClaimReason, cutover::BodySite};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::future::Future;
+use std::{
+    collections::VecDeque,
+    future::Future,
+    sync::{LazyLock, Mutex},
+};
 
 #[derive(Clone)]
 pub(in crate::services::discord) struct BodySource(Value, bool);
+
+// Only non-nonce POST ACKs establish an original Legacy creator; the bounded proof is process-local.
+static LEGACY_CREATES: LazyLock<Mutex<VecDeque<(u64, u64)>>> = LazyLock::new(Mutex::default);
+
+pub(in crate::services::discord) fn note_legacy_created(channel: u64, message: u64) {
+    if !current_census().is_some_and(|tag| tag["body_owner"] == "Legacy") {
+        return;
+    }
+    let Ok(mut created) = LEGACY_CREATES.try_lock() else {
+        return;
+    };
+    if !created.contains(&(channel, message)) {
+        created.push_back((channel, message));
+        if created.len() > 512 {
+            created.pop_front();
+        }
+    }
+}
+
+pub(in crate::services::discord) fn created_by_legacy(channel: u64, message: u64) -> bool {
+    LEGACY_CREATES
+        .try_lock()
+        .is_ok_and(|created| created.contains(&(channel, message)))
+}
 
 #[derive(Clone, Copy)]
 pub(in crate::services::discord) enum BodyOffer {
@@ -89,6 +117,18 @@ impl BodySource {
     ) -> Self {
         self.0["read_source"] =
             json!({"file":file,"generation":generation,"reset_incarnation":reset});
+        if file.is_some() && generation > 0 {
+            let mut incarnation = self.0["source_incarnation"]
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
+            incarnation.insert("file".into(), json!(file));
+            incarnation.insert("generation".into(), json!(generation));
+            incarnation.insert("reset_incarnation".into(), json!(reset));
+            self.0["source_incarnation"] = Value::Object(incarnation);
+        } else if self.0["source_incarnation"]["hosted_record"].is_null() {
+            self.0["source_incarnation"] = Value::Null;
+        }
         self
     }
 

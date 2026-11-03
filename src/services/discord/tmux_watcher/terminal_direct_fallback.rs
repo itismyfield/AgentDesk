@@ -230,36 +230,37 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                     } else {
                         let delivered_long_chunk_body = direct_terminal_response.to_string();
                         let mut long_chunk_anchor_msg_id = None;
-                        terminal_long_chunks::apply_watcher_long_chunks_legacy(
-                            &http,
-                            &shared,
-                            &watcher_provider,
-                            channel_id,
-                            &tmux_session_name,
-                            msg_id,
-                            &relay_text,
-                            session_bound_fallback_uses_full_body,
-                            &mut *watcher_streaming_rollover_frozen_msg_ids,
-                            inflight_before_relay.as_ref(),
-                            &mut long_chunk_anchor_msg_id,
-                            body_claim,
-                            terminal_long_chunks::WatcherLongChunksLocals {
-                                relay_ok: &mut relay_ok,
-                                direct_send_delivered: &mut direct_send_delivered,
-                                tui_direct_anchor_terminal_body_visible:
-                                    &mut *tui_direct_anchor_terminal_body_visible,
-                                external_input_lease_consumed_by_relay:
-                                    &mut external_input_lease_consumed_by_relay,
-                                placeholder_msg_id: &mut *placeholder_msg_id,
-                                placeholder_from_restored_inflight:
-                                    &mut *placeholder_from_restored_inflight,
-                                last_edit_text: &mut *last_edit_text,
-                                single_message_panel_footer_mode,
-                                completion_footer_terminal_target:
-                                    &mut *completion_footer_terminal_target,
-                            },
-                        )
-                        .await;
+                        watcher_body_source(inflight_before_relay.as_ref(), source_authority)
+                            .scope(terminal_long_chunks::apply_watcher_long_chunks_legacy(
+                                &http,
+                                &shared,
+                                &watcher_provider,
+                                channel_id,
+                                &tmux_session_name,
+                                msg_id,
+                                &relay_text,
+                                session_bound_fallback_uses_full_body,
+                                &mut *watcher_streaming_rollover_frozen_msg_ids,
+                                inflight_before_relay.as_ref(),
+                                &mut long_chunk_anchor_msg_id,
+                                body_claim,
+                                terminal_long_chunks::WatcherLongChunksLocals {
+                                    relay_ok: &mut relay_ok,
+                                    direct_send_delivered: &mut direct_send_delivered,
+                                    tui_direct_anchor_terminal_body_visible:
+                                        &mut *tui_direct_anchor_terminal_body_visible,
+                                    external_input_lease_consumed_by_relay:
+                                        &mut external_input_lease_consumed_by_relay,
+                                    placeholder_msg_id: &mut *placeholder_msg_id,
+                                    placeholder_from_restored_inflight:
+                                        &mut *placeholder_from_restored_inflight,
+                                    last_edit_text: &mut *last_edit_text,
+                                    single_message_panel_footer_mode,
+                                    completion_footer_terminal_target:
+                                        &mut *completion_footer_terminal_target,
+                                },
+                            ))
+                            .await;
                         if long_chunk_anchor_msg_id.is_some() {
                             *watcher_terminal_delivery_proof =
                                 Some(terminal_long_chunks::WatcherTerminalDeliveryProof {

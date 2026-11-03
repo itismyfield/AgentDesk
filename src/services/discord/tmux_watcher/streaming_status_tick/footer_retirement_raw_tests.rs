@@ -238,6 +238,15 @@ fn retired_watcher_rollover_raw_history_keeps_rich_budget_and_visible_progress()
                 rows.iter()
                     .all(|row| !row["census"]["read_source"]["file"].is_null())
             );
+            assert!(
+                rows.iter()
+                    .all(|row| row["census"]["source_incarnation"]["file"]
+                        == row["census"]["read_source"]["file"]
+                        && row["census"]["source_incarnation"]["generation"] == 1
+                        && row["census"]["source_incarnation"]["reset_incarnation"] == 0)
+            );
+            assert!(rows.iter().all(|row| row["census"]["site"] == "W02"
+                || (!marker.is_empty() && row["census"]["site"] == "W02b")));
             if !marker.is_empty() && expect_wire {
                 assert!(rows.iter().any(|row| row["census"]["site"] == "W02b"));
                 assert!(
