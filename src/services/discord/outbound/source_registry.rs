@@ -76,6 +76,7 @@ enum StaticSendSource {
 
 #[derive(Copy, Clone, Debug)]
 struct SourcePolicy {
+    #[allow(dead_code)]
     source: StaticSendSource,
     label: &'static str,
     caller_mask: u8,
