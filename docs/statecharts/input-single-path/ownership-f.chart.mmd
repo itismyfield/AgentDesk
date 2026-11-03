@@ -1,0 +1,24 @@
+---
+title: "Who answers an input pasted into a Claude pane, issue 7676 A2+D"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Waiting
+    lg1: Breaks CarriedRowEnds or NoSilentLoss or NoSilentLossObserved in some cases
+    lg2: Path to the CarriedRowEnds or NoSilentLoss or NoSilentLossObserved bug
+  }
+  class lg0 blue
+  class lg1 mayBreak
+  class lg2 bugPath
+  s0: Input waits for the owner (Claude idle)
+  s1: Input waits for the owner (Claude busy)
+  [*] --> s0
+  s0 --> s1: a person starts a turn at the terminal
+  s1 --> s0: the turn ends
+  s0 --> s0: the owner's turn start meets an earlier turn's carried row and is refused
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
+  class s0 blue
+  class s0 mayBreak
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
