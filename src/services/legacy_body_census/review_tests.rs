@@ -112,7 +112,10 @@ fn transport_manifest_requires_complete_verified_rows() {
             "{case}"
         );
         if case == "pending" {
-            assert_eq!(observed["pending"], 14);
+            assert_eq!(
+                observed["pending"],
+                data["transport_probes"].as_array().unwrap().len()
+            );
         }
     }
 }
