@@ -865,3 +865,120 @@ pub(super) async fn finish_failed_codex_idle_reader(
 #[cfg(test)]
 pub(super) static RELAY_TICKS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(all(test, unix))]
+mod tail_delivery_failure_tests {
+    use super::*;
+    use crate::services::tui_prompt_dedupe as dedupe;
+
+    fn record(value: serde_json::Value) -> String {
+        format!("{value}\n")
+    }
+
+    /// A tail whose Discord delivery fails leaves the binding cursor at its start, so a retry
+    /// reads the unsent answer again instead of finding it consumed.
+    #[test]
+    fn failed_tail_delivery_keeps_the_cursor_for_the_retry() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::tempdir().unwrap();
+        let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        // The reader's pane probe must never reach the host tmux server.
+        let bin = root.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("tmux"), "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(bin.join("tmux"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _path = crate::config::TestEnvVarGuard::prepend_path_after_shared_test_env_lock(&bin);
+        crate::services::platform::tmux::invalidate_availability_cache();
+        let _dedupe = dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+        dedupe::reset_state_for_tests();
+
+        let tmux = "codex-tail-delivery-failure";
+        let channel = ChannelId::new(5_100_100_001);
+        let rollout = root.path().join("rollout.jsonl");
+        let head = record(
+            serde_json::json!({"type": "session_meta", "payload": {"id": "s-tail-failure"}}),
+        ) + &record(
+            serde_json::json!({"type": "response_item", "payload": {"type": "message",
+                "role": "user", "content": [{"type": "input_text", "text": "unsent answer prompt"}]}}),
+        );
+        let answer = record(serde_json::json!({"type": "response_item", "payload": {
+                "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "UNSENT_ANSWER"}]}}))
+            + &record(serde_json::json!({"type": "event_msg", "payload": {
+                "type": "task_complete", "last_agent_message": "UNSENT_ANSWER"}}));
+        std::fs::write(&rollout, format!("{head}{answer}")).unwrap();
+        let start = head.len() as u64;
+        dedupe::register_tmux_runtime_binding(
+            tmux,
+            dedupe::TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::CodexTui,
+                output_path: rollout.to_str().unwrap().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some("s-tail-failure".to_string()),
+                last_offset: start,
+                relay_last_offset: None,
+            },
+        );
+        crate::services::tmux_diagnostics::set_pane_liveness_override_for_tests(
+            tmux,
+            Some(crate::services::platform::tmux::PaneLiveness::Live),
+        );
+        // No serenity context, bot token or REST override: delivery fails before any request.
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let cursor = || {
+            dedupe::runtime_binding_for_tmux_session(tmux)
+                .expect("binding")
+                .last_offset
+        };
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                for attempt in ["first delivery", "retry"] {
+                    let (entered, resume) = (
+                        Arc::new(tokio::sync::Notify::new()),
+                        Arc::new(tokio::sync::Notify::new()),
+                    );
+                    resume.notify_one();
+                    *CAPTURE_PAUSE.lock().unwrap() = Some((channel.get(), entered, resume));
+                    tokio::time::timeout(
+                        Duration::from_secs(10),
+                        run_codex_idle_response_tail(
+                            shared.clone(),
+                            tmux.to_string(),
+                            channel,
+                            rollout.clone(),
+                            cursor(),
+                            ("unsent answer prompt".to_string(), None),
+                            ExternalInputRelayLease::unassigned(Some(channel.get())),
+                        ),
+                    )
+                    .await
+                    .expect("the failed tail settles");
+                    assert!(
+                        CAPTURE_PAUSE.lock().unwrap().is_none(),
+                        "{attempt}: the tail read the answer and reached its delivery"
+                    );
+                    assert_eq!(
+                        cursor(),
+                        start,
+                        "{attempt}: a failed delivery must not consume the answer range"
+                    );
+                }
+            });
+        crate::services::tmux_diagnostics::set_pane_liveness_override_for_tests(tmux, None);
+        dedupe::reset_state_for_tests();
+    }
+}

@@ -120,10 +120,84 @@ impl Drop for Recorder {
     }
 }
 
+/// The proxy every environment variable names while the test runs: a request that leaves the
+/// loopback recorder is caught here and closed instead of reaching the network.
+struct EgressTrap {
+    seen: Arc<Mutex<Vec<String>>>,
+    server: tokio::task::AbortHandle,
+    _env: Vec<crate::config::TestEnvVarGuard>,
+}
+
+impl EgressTrap {
+    /// The caller holds the shared environment lock.
+    async fn start() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::<Mutex<Vec<String>>>::default();
+        let recorded = seen.clone();
+        let server = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut head = [0u8; 512];
+                let read = tokio::io::AsyncReadExt::read(&mut stream, &mut head).await;
+                let line = String::from_utf8_lossy(&head[..read.unwrap_or(0)]);
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(line.lines().next().unwrap_or_default().to_string());
+            }
+        });
+        let set = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock;
+        let proxies = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"];
+        let mut env: Vec<_> = (proxies.into_iter())
+            .chain(["ALL_PROXY", "all_proxy"])
+            .map(|key| set(key, url.as_ref()))
+            .collect();
+        for key in ["NO_PROXY", "no_proxy"] {
+            env.push(set(key, "127.0.0.1,localhost,::1".as_ref()));
+        }
+        Self {
+            seen,
+            server: server.abort_handle(),
+            _env: env,
+        }
+    }
+
+    fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.seen.lock().unwrap())
+    }
+}
+
+impl Drop for EgressTrap {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn turn_end_summary_spends_one_physical_post_and_consumes_every_response() {
     let _isolation = Isolation::new();
     let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let trap = EgressTrap::start().await;
+    // Premise: the notice client routes a non-loopback host through the trap. `.invalid` never
+    // resolves, so even a client that ignored the trap could not reach a server.
+    let unroutable = HttpBuilder::new("terminal-notice-test-token")
+        .proxy("http://egress-probe.invalid")
+        .ratelimiter_disabled(true)
+        .build();
+    let probe_shared = crate::services::discord::make_shared_data_for_tests();
+    let probe = crate::services::discord::outbound::confirmation::send_terminal_notice_http_once(
+        &unroutable,
+        &probe_shared,
+        ChannelId::new(586_799),
+        "-# egress probe",
+    );
+    let probe = tokio::time::timeout(std::time::Duration::from_secs(3), probe).await;
+    assert!(probe.unwrap().is_err());
+    let seen = trap.take();
+    assert!(
+        seen.len() == 1 && seen[0].contains("egress-probe.invalid"),
+        "the trap must stand in for the network: {seen:?}"
+    );
     for (index, (direct, reply)) in [false, true]
         .into_iter()
         .flat_map(|direct| {
@@ -166,6 +240,11 @@ async fn turn_end_summary_spends_one_physical_post_and_consumes_every_response()
         )
         .await
         .unwrap();
+        assert_eq!(
+            trap.take(),
+            Vec::<String>::new(),
+            "the terminal POST must stay on the loopback recorder for {reply:?} direct={direct}"
+        );
         let calls = recorder.calls.lock().unwrap().clone();
         assert_eq!(
             calls.len(),
@@ -186,6 +265,11 @@ async fn turn_end_summary_spends_one_physical_post_and_consumes_every_response()
             recorder.calls.lock().unwrap().len(),
             1,
             "duplicate producer cannot re-post terminal summary after {reply:?} direct={direct}"
+        );
+        assert_eq!(
+            trap.take(),
+            Vec::<String>::new(),
+            "no request may leave the loopback recorder for {reply:?} direct={direct}"
         );
     }
 }
