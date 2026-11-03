@@ -40,6 +40,7 @@ export default function AgentFormModal({
   form,
   departments,
   isEdit,
+  agentId,
   saving,
   onSave,
   onClose,
@@ -50,6 +51,8 @@ export default function AgentFormModal({
   form: FormData;
   departments: Department[];
   isEdit: boolean;
+  /** The edited agent's id, so the preview draws the same avatar as the lists. */
+  agentId?: string;
   saving: boolean;
   onSave: (values: FormData) => void | Promise<void>;
   onClose: () => void;
@@ -150,13 +153,12 @@ export default function AgentFormModal({
             <div className="flex min-h-11 items-start gap-3">
               <AgentPersona
                 agent={{
-                  id: formValues.name || "new-agent",
+                  id: agentId ?? (formValues.name || "new-agent"),
                   name: formValues.name || "Agent",
-                  avatar_emoji: formValues.avatar_emoji,
-                  department_color: departments.find((d) => d.id === formValues.department_id)?.color ?? null,
                 }}
                 state="idle"
                 size={48}
+                animated
               />
               <div className="flex-1 min-w-0">
                 <div>
