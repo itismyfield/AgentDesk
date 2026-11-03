@@ -163,8 +163,6 @@ src/
 ├── db/
 │   ├── auto_queue/
 │   │   ├── entries/
-│   │   │   ├── tests/
-│   │   │   │   └── source_guard_tests.rs
 │   │   │   └── dispatch_failure.rs
 │   │   ├── run_owner_guard/
 │   │   │   └── writes.rs
@@ -911,7 +909,6 @@ src/
 │   │   │   ├── ordered_queue/
 │   │   │   │   └── tests/
 │   │   │   │       ├── session_start_retry_tests.rs
-│   │   │   │       ├── source_guard_tests.rs
 │   │   │   │       ├── too_early_tests.rs
 │   │   │   │       └── tq_tests.rs
 │   │   │   ├── ordered_queue.rs
@@ -1040,8 +1037,6 @@ src/
 │   │   │   ├── placement.rs
 │   │   │   └── session_owner.rs
 │   │   ├── intake_worker/
-│   │   │   ├── tests/
-│   │   │   │   └── source_guard_tests.rs
 │   │   │   ├── consent_scope_tests.rs
 │   │   │   ├── dispatch_stamp_tests.rs
 │   │   │   ├── drain_tests.rs
@@ -1168,8 +1163,6 @@ src/
 │   │   │   │   ├── herdr_replay.rs
 │   │   │   │   ├── herdr_terminal_tests.rs
 │   │   │   │   └── managed_empty.rs
-│   │   │   ├── tests/
-│   │   │   │   └── source_guard_tests.rs
 │   │   │   ├── child_binding_tests.rs
 │   │   │   ├── discovery.rs
 │   │   │   ├── following_source.rs

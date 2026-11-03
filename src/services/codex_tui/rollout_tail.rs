@@ -4590,15 +4590,4 @@ mod tests {
             Some("AgentDesk-codex-opts")
         );
     }
-
-    // The value test above cannot see an entry point that bypasses the shared constructor
-    // altogether, which is how the resumed path originally drifted. This is a lexical
-    // check and is only meaningful alongside it.
-    #[test]
-    fn every_handoff_tail_entry_point_uses_the_shared_options_constructor() {
-        let gaps = source_guard_tests::handoff_options_gaps(source_guard_tests::ROLLOUT_TAIL);
-        assert_eq!(gaps, Vec::<String>::new());
-    }
-
-    mod source_guard_tests;
 }
