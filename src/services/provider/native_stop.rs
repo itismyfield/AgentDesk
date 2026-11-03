@@ -37,6 +37,8 @@ pub(crate) struct ReceiptSink {
     rejected: AtomicBool,
     observer: OnceLock<PinObserver>,
     persisted: AtomicBool,
+    /// A durable pin restored unchecked; only a stop accepts it after rechecking the live pane.
+    restored: Mutex<Option<NativeUserPin>>,
 }
 #[derive(Default)]
 struct WriterReceipt {
@@ -120,6 +122,33 @@ impl ReceiptSink {
             }
         }
         self.notify();
+    }
+    pub(crate) fn restore_candidate(&self, pin: NativeUserPin) {
+        if self.cached().is_none() {
+            *self.restored.lock().unwrap_or_else(|e| e.into_inner()) = Some(pin);
+        }
+    }
+    /// The pin a stop may target, rechecked against the live pane now; a failed check targets none.
+    pub(crate) fn stop_pin(&self) -> Option<NativeUserPin> {
+        let live = crate::services::claude_tui::input::revalidate_native_pin;
+        match self.observe() {
+            Some(Ok(pin)) => return live(&pin).then_some(pin),
+            Some(Err(())) => return None,
+            None => {}
+        }
+        let candidate = self
+            .restored
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()?;
+        if !live(&candidate) {
+            return None;
+        }
+        self.adopt(candidate.clone());
+        self.accepted
+            .get()
+            .filter(|pin| **pin == candidate)
+            .cloned()
     }
     pub(crate) fn on_pin(&self, observer: PinObserver) {
         let _ = self.observer.set(observer);

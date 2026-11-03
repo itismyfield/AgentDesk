@@ -290,7 +290,7 @@ fn c2_c3_c4_actual_restart_rechecks_only_persisted_proof_pg() {
     use crate::services::session_host::{HostLiveness, HostPresence, HostSessionRef};
     let _root = crate::config::TestRuntimeRootGuard::new();
     let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
-    let mut cases = Vec::new();
+    let (mut cases, mut stored) = (Vec::new(), Vec::new());
     for (index, change) in [
         "valid",
         "sid",
@@ -358,6 +358,7 @@ fn c2_c3_c4_actual_restart_rechecks_only_persisted_proof_pg() {
             _ => {}
         }
         rewrite_raw(&state, &encoded);
+        stored.push(encoded["native_stop_user_pin"].clone());
         cases.push((state, *change));
     }
     let rt = runtime();
@@ -387,6 +388,12 @@ fn c2_c3_c4_actual_restart_rechecks_only_persisted_proof_pg() {
         }
         let tmux = ScriptedTmux::new(&view("", false));
         tmux.set_dead(false);
+        // A new process has no runtime binding until rehydration registers it.
+        for (state, _) in &cases {
+            tui_prompt_dedupe::clear_tmux_runtime_binding(
+                state.tmux_session_name.as_deref().unwrap(),
+            );
+        }
         let discord = discord::recovery_engine::o_cut_recorder::start(cases[0].0.channel_id).await;
         discord::recovery_engine::restore_inflight_turns(
             &discord.http,
@@ -394,26 +401,67 @@ fn c2_c3_c4_actual_restart_rechecks_only_persisted_proof_pg() {
             &ProviderKind::Claude,
         )
         .await;
-        for (state, change) in &cases {
+        let durable = |state: &InflightTurnState| {
+            let row = load_inflight_state(&ProviderKind::Claude, state.channel_id).unwrap();
+            serde_json::to_value(row).unwrap()["native_stop_user_pin"].clone()
+        };
+        let mut tokens = Vec::new();
+        for (index, (state, change)) in cases.iter().enumerate() {
             let snapshot =
                 discord::mailbox_snapshot(&shared, ChannelId::new(state.channel_id)).await;
             let token = snapshot
                 .cancel_token
                 .expect("actual live-pane restore admitted the episode");
             assert_eq!(token.turn_nonce(), state.turn_nonce.as_deref());
-            let pin = token.native_stop.receipt_sink().observed();
+            let sink = token.native_stop.receipt_sink();
+            assert_eq!(
+                sink.observed(),
+                None,
+                "{change}: restore accepts no pin itself"
+            );
+            assert_eq!(
+                sink.stop_pin(),
+                None,
+                "{change}: no binding yet, nothing to target"
+            );
+            assert_eq!(
+                durable(state),
+                stored[index],
+                "C3 {change}: restore writes no durable pin"
+            );
+            assert!(!token.cancelled.load(std::sync::atomic::Ordering::Acquire));
+            tokens.push(token);
+        }
+        for ((state, change), token) in cases.iter().zip(&tokens) {
+            let path = state.output_path.clone().unwrap();
+            tui_prompt_dedupe::register_tmux_runtime_binding(
+                state.tmux_session_name.as_deref().unwrap(),
+                TuiRuntimeBinding {
+                    runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                    output_path: path,
+                    relay_output_path: None,
+                    input_fifo_path: None,
+                    session_id: Some("persisted-sid".into()),
+                    last_offset: 0,
+                    relay_last_offset: None,
+                },
+            );
+            let pin = token.native_stop.receipt_sink().stop_pin();
             if *change == "valid" {
                 assert!(
-                    matches!(pin, Some(Ok(_))),
-                    "C2: a new allocation re-adopts the saved pin after app restart"
+                    pin.is_some(),
+                    "C2: a stop after rehydration accepts the saved pin despite the boot order"
                 );
-                assert!(!token.cancelled.load(std::sync::atomic::Ordering::Acquire));
             } else {
-                assert!(
-                    pin.is_none(),
-                    "C3/C4 {change}: no invalid or retroactive pin: {pin:?}"
-                );
+                assert_eq!(pin, None, "C3/C4 {change}: no invalid or retroactive pin");
             }
+        }
+        for (index, (state, change)) in cases.iter().enumerate() {
+            assert_eq!(
+                durable(state),
+                stored[index],
+                "C3 {change}: a failed or passed recheck leaves the durable pin as stored"
+            );
         }
         pool.close().await;
         db.drop().await;

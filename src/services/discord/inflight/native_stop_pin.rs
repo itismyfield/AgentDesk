@@ -1,6 +1,5 @@
 //! Verified native input attached to its durable birth episode, without cancellation effects.
 use super::*;
-use crate::services::claude_tui::input::revalidate_native_pin;
 use crate::services::provider::{CancelToken, native_stop::NativeUserPin};
 use std::sync::Arc;
 
@@ -90,9 +89,11 @@ pub(in crate::services::discord) fn bind_native_stop_pin(
         .native_stop_user_pin
         .as_ref()
         .filter(|pin| pin.matches_source(row))
-        && revalidate_native_pin(&pin.input)
     {
-        token.native_stop.receipt_sink().adopt(pin.input.clone());
+        token
+            .native_stop
+            .receipt_sink()
+            .restore_candidate(pin.input.clone());
     }
     let episode = InflightEpisodePin::from_state(row);
     let channel = row.channel_id;
@@ -123,20 +124,16 @@ pub(in crate::services::discord) fn bind_native_stop_pin(
         }));
 }
 
-/// Recovery may retain the proof across an app generation, but must recheck the pane and row.
+/// Recovery keeps the proof across an app generation as a candidate the stop rechecks.
 pub(in crate::services::discord) fn restore_native_stop_pin(
     row: &InflightTurnState,
     token: &Arc<CancelToken>,
 ) {
-    let Some(pin) = row
+    let restored = row
         .native_stop_user_pin
         .as_ref()
-        .filter(|pin| pin.matches_source(row))
-    else {
-        return;
-    };
-    if token.turn_nonce() == Some(pin.turn_nonce.as_str()) && revalidate_native_pin(&pin.input) {
-        token.native_stop.receipt_sink().adopt(pin.input.clone());
+        .filter(|pin| pin.matches_source(row));
+    if restored.is_some_and(|pin| token.turn_nonce() == Some(pin.turn_nonce.as_str())) {
         bind_native_stop_pin(row, token);
     }
 }
