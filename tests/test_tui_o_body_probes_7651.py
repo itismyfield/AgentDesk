@@ -69,12 +69,13 @@ class BodyProbeManifestTests(unittest.TestCase):
 
     def test_w02_fallback_post_is_body_and_only_two_seeds_are_nonbody(self):
         data = json.loads((ROOT / "scripts/tui_o_body_probes.json").read_text())
-        rows = {row["line"]: row for row in data["probes"]
-                if row["path"].endswith("/tmux_watcher/streaming_status_tick.rs")}
-        self.assertEqual(rows[925]["classification"], "BODY_CAPABLE")
-        self.assertEqual(rows[922]["classification"], "BODY_CAPABLE")
-        for line in (457, 775):
-            self.assertEqual(rows[line]["classification"], "NONBODY")
+        prefix = "tmux_watcher/streaming_status_tick.rs:update_streaming_status_tick:"
+        rows = {row["id"].removeprefix(prefix): row for row in data["probes"]
+                if row["id"].startswith(prefix)}
+        self.assertEqual(rows["send_channel_message*:3"]["classification"], "BODY_CAPABLE")
+        self.assertEqual(rows["edit_channel_message*:3"]["classification"], "BODY_CAPABLE")
+        for probe in ("send_channel_message*:1", "send_channel_message*:2"):
+            self.assertEqual(rows[probe]["classification"], "NONBODY")
 
 
 if __name__ == "__main__":
