@@ -572,7 +572,11 @@ pub(crate) fn owner_observer(
     let overlay = overlay.ok()?;
     let matches =
         crate::services::tmux_common::tmux_session_auth_profile_matches(tmux, &overlay.profile_id);
-    let at = (working_dir, matches.then_some(session_id).flatten(), overlay.home.as_deref());
+    let at = (
+        working_dir,
+        matches.then_some(session_id).flatten(),
+        overlay.home.as_deref(),
+    );
     let resolve = crate::services::claude::resolve_live_claude_tui_session;
     let resolved = resolve(tmux, at, (true, || Ok(matches))).ok()?.resolution;
     let fallback = std::fs::metadata(&resolved.transcript_path).ok()?.len();
