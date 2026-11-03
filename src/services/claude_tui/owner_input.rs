@@ -37,6 +37,16 @@ fn current() -> Option<Arc<Scope>> {
 pub(crate) fn active() -> bool {
     current().is_some()
 }
+/// The original queue identity stays the same across execution and attempt changes.
+pub(crate) fn original_identity() -> Option<(u64, u64)> {
+    let scope = current()?;
+    let identity = &scope.target["_attempt"]["identity"];
+    Some((
+        identity["primary"].as_u64()?,
+        identity["queued_generation"].as_u64()?,
+    ))
+}
+
 pub(crate) fn epoch() -> Option<PaneEpoch> {
     #[cfg(unix)]
     return current().and_then(|s| {

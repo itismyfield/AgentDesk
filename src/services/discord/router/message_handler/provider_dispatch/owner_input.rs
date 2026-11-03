@@ -825,11 +825,12 @@ fn run(
             )
         }
         target::Route::CodexBusy | target::Route::CodexHerdrBusy => {
-            // Main's busy preparation: the open model turn the paste is aimed at, read up front.
+            // A readable rollout supplies a diagnostic turn, not permission to deliver.
             use crate::services::codex_tui::busy_inject::{TIMING, TurnVerdict, read_turn};
             let target_turn = match read_turn(&r.transcript) {
                 Some(TurnVerdict::KnownModelTurn(turn)) => turn,
-                other => return Err(format!("NotSent(\"busy_turn: {other:?}\")")),
+                Some(_) => String::new(),
+                None => return Err("NotSent(\"busy_turn: transcript unavailable\")".into()),
             };
             let frame = busy_inject::frame("discord", &r.author, &r.name, &nonce, turn.prompt);
             let input = CodexInput {

@@ -6,6 +6,20 @@ const DISMISSIBLE_ACTION_BANNER_HINT: &str =
     "Press a number to choose · esc to dismiss · type to continue";
 
 pub(super) fn pane_has_dismissible_action_banner(pane: &str) -> bool {
+    pane_has_action_hint(pane, &[DISMISSIBLE_ACTION_BANNER_HINT])
+}
+
+pub(crate) fn pane_has_blocking_action_menu(pane: &str) -> bool {
+    pane_has_action_hint(
+        pane,
+        &[
+            "Press a number to choose",
+            "Press enter to confirm or esc to cancel",
+        ],
+    )
+}
+
+fn pane_has_action_hint(pane: &str, hints: &[&str]) -> bool {
     let recent: Vec<&str> = pane
         .lines()
         .rev()
@@ -20,8 +34,9 @@ pub(super) fn pane_has_dismissible_action_banner(pane: &str) -> bool {
     let wrapped = recent.get(3).map(|first| format!("{first} {hint}"));
     (line_is_codex_compact_status_line(status) || line_is_codex_fast_context_status(status))
         && line_is_codex_compact_prompt_marker(composer)
-        && (hint == DISMISSIBLE_ACTION_BANNER_HINT
-            || wrapped.as_deref() == Some(DISMISSIBLE_ACTION_BANNER_HINT))
+        && hints
+            .iter()
+            .any(|expected| hint == *expected || wrapped.as_deref() == Some(*expected))
 }
 
 /// Sends a single Esc, which the banner consumes (Codex disables Esc-Esc backtrack

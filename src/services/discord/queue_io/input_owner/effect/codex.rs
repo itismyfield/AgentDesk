@@ -1,5 +1,4 @@
-//! A busy Codex pane: main's Codex busy transaction under the owner scope, mapped as main's
-//! `run_codex` maps it, with the owner's ready and start refusals as not-sent vetoes.
+//! Owned Codex delivery on either host, with physical refusals kept apart from uncertain writes.
 use std::path::PathBuf;
 
 use super::{Completion, Leaf};
@@ -13,7 +12,7 @@ pub(crate) struct CodexInput {
     /// The logical session the history and the legacy ledger name.
     pub(crate) session: String,
     pub(crate) rollout: PathBuf,
-    /// The open model turn the owner read before reserving; the paste is refused once it moves.
+    /// An observed model turn for diagnostics; empty when the readable rollout has none.
     pub(crate) target_turn: String,
     pub(crate) channel: u64,
     pub(crate) message: Option<u64>,
@@ -38,7 +37,10 @@ impl CodexInput {
     /// `inject` on main's request and ledger, its outcome or panic mapped as `run_codex` maps it.
     fn run(
         &self,
-        inject: impl FnOnce(&codex_inject::Request<'_>, &CodexLedger<'_>) -> codex_inject::Outcome,
+        inject: impl FnOnce(
+            &codex_inject::Request<'_>,
+            &dyn codex_inject::Ledger,
+        ) -> codex_inject::Outcome,
     ) -> Completion {
         let request = codex_inject::Request {
             session: &self.session,
@@ -56,11 +58,37 @@ impl CodexInput {
             target_turn: &self.target_turn,
             message: self.message.map(poise::serenity_prelude::MessageId::new),
         };
+        let ledger = OwnedLedger {
+            ledger,
+            input: self,
+        };
         let inject = || inject(&request, &ledger);
         map(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(inject)),
             |detail| unconfirmed(self.channel, &self.session, &self.nonce, detail),
         )
+    }
+}
+
+struct OwnedLedger<'a> {
+    ledger: CodexLedger<'a>,
+    input: &'a CodexInput,
+}
+impl codex_inject::Ledger for OwnedLedger<'_> {
+    fn register(&self) -> bool {
+        self.ledger.register()
+    }
+    fn withdraw(&self) {
+        self.ledger.withdraw();
+    }
+    fn message_id(&self) -> Option<u64> {
+        self.ledger.message_id()
+    }
+    fn admitted(&self) {
+        self.ledger.admitted();
+    }
+    fn draft_delivered(&self) {
+        crate::services::codex_tui::input::notify_owned_draft(self.input.channel);
     }
 }
 
@@ -115,7 +143,7 @@ impl BusyCodexHerdr {
 /// An idle Codex tmux pane: one pre-key read of the composer, then the owner's pinned paste, settle
 /// and Enter; nothing is read after a key, and a paste of unknown effect is never resent.
 pub(crate) fn idle_codex(pane: busy_inject::Pane, session: String) -> Leaf {
-    use crate::services::claude_tui::busy_inject::stash::{Key, key};
+    use crate::services::claude_tui::busy_inject::stash::Key;
     use crate::services::codex_tui::input::{
         admit_codex_prompt_under_lock, try_with_composer_mutation_lock,
     };
@@ -125,9 +153,10 @@ pub(crate) fn idle_codex(pane: busy_inject::Pane, session: String) -> Leaf {
     };
     Box::new(move |frame| {
         let send = || {
-            if let Err(error) = admit_codex_prompt_under_lock(&session, &frame, false) {
-                return refused(format!("composer_refused: {error}"));
-            }
+            let before = match admit_codex_prompt_under_lock(&session, &frame, false) {
+                Ok((_, before)) => before,
+                Err(error) => return refused(error),
+            };
             let buffer = format!("agentdesk-owner-idle-{session}");
             let loaded = tempfile::NamedTempFile::new().ok().filter(|file| {
                 let path = file.path().to_string_lossy().into_owned();
@@ -155,7 +184,7 @@ pub(crate) fn idle_codex(pane: busy_inject::Pane, session: String) -> Leaf {
                 ]
                 .map(String::from)
             };
-            match key(&pane, paste) {
+            match codex_inject::key(&pane, paste) {
                 Key::Applied => {}
                 Key::Held => {
                     owner_input::first_key_held("pane_moved");
@@ -164,10 +193,21 @@ pub(crate) fn idle_codex(pane: busy_inject::Pane, session: String) -> Leaf {
                 Key::Failed => return Completion::WriteUncertain("paste_failed".into()),
             }
             std::thread::sleep(codex_inject::TIMING.settle);
-            match key(&pane, |target: &str| {
+            match codex_inject::key(&pane, |target: &str| {
                 ["send-keys", "-t", target, "Enter"].map(String::from)
             }) {
-                Key::Applied => Completion::Submitted,
+                Key::Applied => {
+                    if before
+                        .as_deref()
+                        .is_some_and(codex_inject::screen::draft_may_be_present)
+                        && let Some((_, context)) =
+                            crate::services::claude_tui::submission_fence::idle_stash_scope()
+                        && context.target == session
+                    {
+                        crate::services::codex_tui::input::notify_owned_draft(context.channel);
+                    }
+                    Completion::Submitted
+                }
                 _ => Completion::WriteUncertain("enter_failed".into()),
             }
         };

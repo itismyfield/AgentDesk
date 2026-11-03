@@ -4,7 +4,7 @@ use crate::services::claude_tui::busy_inject::{MAX_INPUT_BYTES, at_offsets, fram
 use crate::services::claude_tui::owner_input::{self, ReadyRefusal};
 use crate::services::codex_tui::busy_inject::screen::{self, Composer};
 use crate::services::codex_tui::busy_inject::{
-    Ledger, Outcome, Request, TIMING, TurnVerdict, Unconfirmed, Veto, read_turn,
+    Ledger, Outcome, Request, TIMING, Unconfirmed, Veto, turn,
 };
 use crate::services::codex_tui::host_input::InputRun;
 use crate::services::codex_tui::input::{TuiInputAction, try_with_composer_mutation_lock};
@@ -24,7 +24,7 @@ pub(crate) fn inject(target: &HerdrTarget, request: &Request<'_>, ledger: &dyn L
     if request.text.trim().is_empty()
         || text.len() > MAX_INPUT_BYTES
         || request.nonce.is_empty()
-        || request.target_turn.trim().is_empty()
+        || (!owner_input::active() && request.target_turn.trim().is_empty())
     {
         return Outcome::NotSent(Veto::InvalidInput);
     }
@@ -42,10 +42,18 @@ pub(crate) fn inject(target: &HerdrTarget, request: &Request<'_>, ledger: &dyn L
     locked.unwrap_or(Outcome::NotSent(Veto::LockContended))
 }
 
-/// One read of the pane with its colors, through the tmux path's own reader: no modal, a bottom
-/// composer holding only its dimmed placeholder, and nothing the append rules leave unproven.
-fn composer(target: &HerdrTarget) -> Result<(), Veto> {
+/// Both hosts share the owned screen policy; legacy steering still needs an empty editor.
+fn composer(target: &HerdrTarget) -> Result<bool, Veto> {
     let capture = target.capture_ansi(-80).ok_or(Veto::PaneUnavailable)?;
+    if owner_input::active() {
+        if capture.trim().is_empty() {
+            return Err(Veto::PaneUnavailable);
+        }
+        if let Some(veto) = screen::delivery_veto(&capture) {
+            return Err(veto);
+        }
+        return Ok(screen::draft_may_be_present(&capture));
+    }
     let shown = screen::read(&capture);
     if shown.modal {
         return Err(Veto::Modal);
@@ -53,26 +61,15 @@ fn composer(target: &HerdrTarget) -> Result<(), Veto> {
     if shown.composer != Composer::Empty || shown.attachments {
         return Err(Veto::ComposerUnread);
     }
-    screen::append_veto(&capture, &shown).map_or(Ok(()), Err)
-}
-
-/// The rollout's open turn is still the one the caller aimed at.
-fn turn(request: &Request<'_>) -> Result<(), Veto> {
-    match read_turn(request.rollout) {
-        Some(TurnVerdict::KnownModelTurn(turn)) if turn == request.target_turn => Ok(()),
-        Some(TurnVerdict::KnownModelTurn(_)) => Err(Veto::TurnChanged),
-        Some(TurnVerdict::NonSteerable(_)) => Err(Veto::NotSteerable),
-        Some(TurnVerdict::NotBusy) => Err(Veto::NotBusy),
-        Some(TurnVerdict::Unknown) => Err(Veto::TurnUnknown),
-        None => Err(Veto::TranscriptUnavailable),
-    }
+    screen::append_veto(&capture, &shown).map_or(Ok(false), Err)
 }
 
 fn locked(target: &HerdrTarget, request: &Request<'_>, text: &str, ledger: &dyn Ledger) -> Outcome {
     let not_sent = Outcome::NotSent;
-    if let Err(veto) = composer(target) {
-        return not_sent(veto);
-    }
+    let mut draft = match composer(target) {
+        Ok(draft) => draft,
+        Err(veto) => return not_sent(veto),
+    };
     let Ok(offset) = std::fs::metadata(request.rollout).map(|meta| meta.len()) else {
         return not_sent(Veto::TranscriptUnavailable);
     };
@@ -106,8 +103,9 @@ fn locked(target: &HerdrTarget, request: &Request<'_>, text: &str, ledger: &dyn 
     };
     // The turn and the composer are read again just before the owner's ready, as the tmux path
     // does; a failed read withdraws before the owner is asked at all.
-    if let Err(veto) = turn(request).and_then(|()| composer(target)) {
-        return withdraw(veto);
+    match turn(request).and_then(|()| composer(target)) {
+        Ok(current) => draft |= current,
+        Err(veto) => return withdraw(veto),
     }
     let ready = owner_input::ready_payload().map_err(|refusal| match refusal {
         ReadyRefusal::Target(_) => Veto::PaneUnavailable,
@@ -136,7 +134,10 @@ fn locked(target: &HerdrTarget, request: &Request<'_>, text: &str, ledger: &dyn 
     match run.run {
         InputRun::Applied => {}
         // The gate refused before its first write: nothing reached the pane.
-        InputRun::Refused(_) => return withdraw(Veto::PaneUnavailable),
+        InputRun::Refused(_) => {
+            owner_input::first_key_held("herdr_gate_refused");
+            return withdraw(Veto::PaneUnavailable);
+        }
         InputRun::Indeterminate { confirmed: 0, .. } | InputRun::Cancelled { confirmed: 0 } => {
             return unconfirmed(Unconfirmed::PasteFailed);
         }
@@ -144,6 +145,9 @@ fn locked(target: &HerdrTarget, request: &Request<'_>, text: &str, ledger: &dyn 
     }
     if append::mark(request.nonce, request.rollout, Admission::Admitted).is_ok() {
         ledger.admitted();
+    }
+    if owner_input::active() && draft {
+        ledger.draft_delivered();
     }
     Outcome::Injected
 }
