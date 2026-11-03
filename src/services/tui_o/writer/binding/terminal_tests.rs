@@ -351,3 +351,27 @@ fn typed_terminal_audit_and_corrupt_history_remain_distinct() {
         BindingRecord::Rejected { closes: None, .. }
     ));
 }
+
+/// A log read judges the pane's source policy once and still gives every event the record that
+/// judging it alone gives, across two incarnations whose events the policy splits.
+#[test]
+fn log_read_judges_the_pane_once_with_each_events_own_record() {
+    let h = Fixture::new();
+    h.settle();
+    h.next_incarnation();
+    let alone: Vec<_> = (p5::binding_events_judged_since(CHANNEL, 0).unwrap())
+        .into_iter()
+        .map(|(event, reclaims)| from_p5(event, reclaims).unwrap())
+        .collect();
+    let bound = |e: &BindingEvent| matches!(&e.record, BindingRecord::Bound { new: BindingTarget::Source(s), .. } if s != &h.source);
+    let held = |e: &BindingEvent| matches!(&e.record, BindingRecord::Rejected { detail, .. } if detail.starts_with("Codex source proof"));
+    assert!(
+        alone.iter().any(bound) && alone.iter().any(held),
+        "{alone:#?}"
+    );
+    dedupe::DISPOSITIONS.with(|count| count.set(0));
+    let read = BindingLog.binding_events_since(CHANNEL, 0).unwrap();
+    assert_eq!(read, alone);
+    let judged = dedupe::DISPOSITIONS.with(std::cell::Cell::get);
+    assert_eq!(judged, 1, "{} events of one pane", read.len());
+}

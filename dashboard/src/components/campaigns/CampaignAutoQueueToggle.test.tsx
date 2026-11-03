@@ -2,7 +2,7 @@
 import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { getCampaign, setCampaignAutoQueue, type Campaign } from "../../api/campaigns";
+import { CampaignSaveNotSentError, getCampaign, setCampaignAutoQueue, type Campaign } from "../../api/campaigns";
 import { ApiRequestError } from "../../api/httpClient";
 import CampaignAutoQueueToggle from "./CampaignAutoQueueToggle";
 import CampaignsPanel from "./CampaignsPanel";
@@ -54,18 +54,19 @@ it("turns auto-run on and says what was sent and why the rest is held back", asy
   );
 });
 
-it("shows a rejected save, such as a stale revision, instead of pretending it switched", async () => {
+it.each([
+  ["a stale revision", new ApiRequestError("campaign revision conflict; reload before retrying", { status: 409 }), "revision conflict"],
+  ["a save never sent", new CampaignSaveNotSentError(new TypeError("Failed to fetch")), "could not read the campaign first"],
+])("shows %s as not saved instead of pretending it switched", async (_, failure, shown) => {
   const campaign = { ...makeLargeCampaign(), auto_queue: true };
   const onSaved = vi.fn();
-  vi.mocked(setCampaignAutoQueue).mockRejectedValue(
-    new ApiRequestError("campaign revision conflict; reload before retrying", { status: 409 }),
-  );
+  vi.mocked(setCampaignAutoQueue).mockRejectedValue(failure);
   await act(async () => root.render(<CampaignAutoQueueToggle campaign={campaign} tr={(_, en) => en} onSaved={onSaved} />));
   await act(async () => container.querySelector("button")!.click());
   expect(setCampaignAutoQueue).toHaveBeenCalledWith(campaign, false);
   expect(onSaved).not.toHaveBeenCalled();
   expect(container.querySelector("button")?.getAttribute("aria-checked")).toBe("true");
-  expect(statusText()).toContain("revision conflict");
+  expect(statusText()).toContain(shown);
   expect(getCampaign).not.toHaveBeenCalled();
 });
 

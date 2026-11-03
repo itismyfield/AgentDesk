@@ -1,5 +1,9 @@
 //! The rollback reader recognizes V2 without flattening it into a writable V1 store.
 use super::*;
+use std::sync::Arc;
+
+mod parsed;
+pub(super) use parsed::reuse;
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct HistoryV2 {
@@ -109,9 +113,14 @@ pub(super) fn read_legacy(path: &Path) -> Result<Store, String> {
     }
 }
 
-fn v2_value(path: &Path) -> Option<serde_json::Value> {
-    let value = parse(&std::fs::read(path).ok()?).ok()?;
-    (value.get("version")?.as_u64() == Some(2) && value.get("entries").is_none()).then_some(value)
+fn v2_value(path: &Path) -> Option<Arc<serde_json::Value>> {
+    let read = reuse(path, std::fs::read(path).ok()?, |raw| {
+        let value = parse(raw)?;
+        let v2 = value.get("version").and_then(serde_json::Value::as_u64) == Some(2)
+            && value.get("entries").is_none();
+        Ok(v2.then(|| Arc::new(value)))
+    });
+    read.ok()?.as_ref().clone()
 }
 
 pub(super) fn known_v2(path: &Path, hashes: &[String]) -> Option<bool> {

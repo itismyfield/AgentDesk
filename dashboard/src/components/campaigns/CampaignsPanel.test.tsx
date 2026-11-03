@@ -534,3 +534,19 @@ it("shows a task number once, and the stage as one line under the title", async 
   expect(row.querySelector("strong")?.textContent).toBe("Review current head");
   expect(row.querySelector(".campaign-task-title .campaign-task-stage")?.textContent).toBe("Absorbed into #7272 acceptance");
 });
+
+it("reads the shown campaign in full right after the summary list and notes the details still loading", async () => {
+  const summary = { ...campaign, nodes_partial: true, nodes: campaign.nodes.map((node) => ({ ...node, details: "" })) };
+  const full = { ...campaign, nodes: campaign.nodes.map((node) => ({ ...node, details: "Stored notes" })) };
+  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [summary], live: {}, read: 1 });
+  let finish: (value: Awaited<ReturnType<typeof getCampaignDetail>>) => void = () => {};
+  vi.mocked(getCampaignDetail).mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+  await render();
+  expect(getCampaignDetail).toHaveBeenCalledWith("ongoing");
+  await selectTask();
+  expect(container.textContent).toContain("Loading details and verification records");
+  await act(async () => finish({ campaign: full, live: {}, read: 2 }));
+  expect(container.textContent).toContain("Stored notes");
+  expect(container.textContent).not.toContain("Loading details and verification records");
+  expect(getCampaignDetail).toHaveBeenCalledOnce();
+});

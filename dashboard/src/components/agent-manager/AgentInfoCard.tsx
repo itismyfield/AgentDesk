@@ -439,7 +439,7 @@ export default function AgentInfoCard({
             )}
           >
             <div className="mt-4 flex flex-col gap-4 md:flex-row md:items-start">
-              <AgentPersona agent={agent} size={56} />
+              <AgentPersona agent={agent} size={56} animated />
               <div className="min-w-0 flex-1 space-y-3">
                 <div className="flex flex-wrap items-center gap-2">
                   {editingAlias ? (

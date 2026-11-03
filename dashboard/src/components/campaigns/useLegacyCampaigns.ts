@@ -3,11 +3,13 @@ import { getCampaignDetail, getCampaigns, type Campaign, type CampaignLive } fro
 import { campaignRawEdges } from "./campaignGraphRouting";
 import { groupViewScope, pruneStoredView, storedGroupViewCampaigns } from "./campaignViewStorage";
 
-/** Never let an older read replace a revision this screen already holds. */
-function newest(current: Campaign[], values: Campaign[]): Campaign[] {
+/** Never let an older read replace a revision this screen already holds, nor a summary replace the same revision in full. */
+export function newest(current: Campaign[], values: Campaign[]): Campaign[] {
   return values.map((value) => {
     const previous = current.find((candidate) => candidate.id === value.id);
-    return previous && previous.revision > value.revision ? previous : value;
+    if (!previous) return value;
+    const keep = previous.revision > value.revision || (previous.revision === value.revision && !!value.nodes_partial && !previous.nodes_partial);
+    return keep ? previous : value;
   });
 }
 
