@@ -211,6 +211,96 @@ async fn a_front_that_moved_after_its_grant_is_never_reserved() {
     }
 }
 
+/// A hold armed while the cancelled front's watch is mid-read outlives that watch's end: the pane's
+/// recovery alone hands the new front again, and it is submitted once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_hold_outlives_the_watch_of_the_front_it_replaced() {
+    use crate::services::claude_tui::busy_inject::Screen;
+    use std::sync::{atomic::AtomicBool, mpsc};
+    let _root = TestRuntimeRootGuard::new();
+    let registry = ChannelMailboxRegistry::default();
+    let channel = 7_272_709;
+    let mailbox = owner(&registry, channel, 2).await;
+    let (ready, handed) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(Mutex::new(Vec::new())),
+    );
+    let ((entered, on_entered), (release, on_release)) = (mpsc::channel(), mpsc::channel::<()>());
+    // Only the first front's probe stops in its first read until this test releases it.
+    let gate = Arc::new(Mutex::new(Some((entered, on_release))));
+    let (r, h) = (ready.clone(), handed.clone());
+    let answer = move |frame: &str| {
+        h.lock().unwrap().push(frame.to_string());
+        if r.load(Ordering::SeqCst) {
+            return Completion::Submitted;
+        }
+        let (r, mut gate) = (r.clone(), gate.lock().unwrap().take());
+        super::super::held_watch::arm(
+            channel,
+            Box::new(move || {
+                if let Some((entered, release)) = gate.take() {
+                    entered.send(()).unwrap();
+                    release.recv().unwrap();
+                }
+                match r.load(Ordering::SeqCst) {
+                    true => Screen::Ready,
+                    false => Screen::Blocked,
+                }
+            }),
+        );
+        Completion::NotSent("CopyMode".into())
+    };
+    let before = |_: &Front| Box::pin(async {}) as Pin<Box<dyn Future<Output = ()> + Send>>;
+    // A pass ends after the drive handed its held front to the watch.
+    let passes = Arc::new(AtomicUsize::new(0));
+    let passes_seen = passes.clone();
+    let drive = Arc::new(Drive {
+        mailbox: mailbox.clone(),
+        channel,
+        handoff: handoff(mailbox.clone(), channel, before, answer),
+        settled: Some(Arc::new(move || {
+            passes.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {}) as Pin<Box<dyn Future<Output = ()> + Send>>
+        })),
+    });
+    wake(drive.clone());
+    let wait = Duration::from_secs(20);
+    tokio::task::spawn_blocking(move || on_entered.recv_timeout(wait))
+        .await
+        .unwrap()
+        .expect("the first front's watch reads its pane");
+    let ctx = crate::services::turn_orchestrator::QueuePersistenceContext::new(
+        &crate::services::provider::ProviderKind::Claude,
+        "drive",
+        None,
+    );
+    let first = poise::serenity_prelude::MessageId::new(original(channel, 0).message_id);
+    drop(mailbox.cancel_queued_primary_message(first, ctx).await);
+    wake(drive);
+    for _ in 0..2_000 {
+        if passes_seen.load(Ordering::SeqCst) == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        *handed.lock().unwrap(),
+        ["input 0", "input 1"],
+        "the new front is held"
+    );
+    release.send(()).unwrap();
+    ready.store(true, Ordering::SeqCst);
+    for _ in 0..2_000 {
+        if snapshot(&mailbox).await["items"] == json!([]) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let after = snapshot(&mailbox).await;
+    assert_eq!(after["items"], json!([]), "the new hold was woken: {after}");
+    assert_eq!(*handed.lock().unwrap(), ["input 0", "input 1", "input 1"]);
+}
+
 /// A front held on a screen where Enter may not submit stays unretained, owes no notice and is
 /// never handed again by time alone; the next wake (boundary, idle, new input) delivers it once.
 #[tokio::test(start_paused = true)]

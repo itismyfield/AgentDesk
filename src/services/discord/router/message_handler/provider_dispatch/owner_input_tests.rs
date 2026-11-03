@@ -57,8 +57,8 @@ fn rig(name: &str, channel: u64, mode: &str, before: String, transcript: &str) -
     owned(f, name, channel, renderer, "claude")
 }
 
-/// An owner with one admitted original over the `provider` pane in session `name`. Its tmux fails a
-/// load on `fail-load`, respawns after the step in `swap-after`, and runs `after-<step>` once.
+/// An owner with one admitted original over the `provider` pane in session `name`. Its tmux fails
+/// `fail-load`'s load and `fail-dead`'s pane read, respawns on `swap-after`, runs `after-<step>`.
 pub(super) fn owned(
     f: Fixture,
     name: &str,
@@ -80,6 +80,7 @@ pub(super) fn owned(
     let script = format!(
         "#!/bin/sh\nd='{dir}'\nprintf '%s\\n' \"$*\" >> \"$d/trace\"\n\
          case \"$*\" in *load-buffer*) [ ! -f \"$d/fail-load\" ] || exit 1 ;; esac\n\
+         case \"$*\" in *pane_dead*) [ ! -f \"$d/fail-dead\" ] || {{ rm \"$d/fail-dead\"; exit 1; }} ;; esac\n\
          case \"$*\" in *paste-buffer*) [ ! -f \"$d/before-paste\" ] || {{ sh \"$d/before-paste\" || printf 'before-paste rc=%s\\n' \"$?\" >> \"$d/hook-timeout\"; rm \"$d/before-paste\"; }} ;; esac\n\
          case \"$*\" in *send-keys*Enter*) [ ! -f \"$d/before-Enter\" ] || {{ sh \"$d/before-Enter\" || printf 'before-Enter rc=%s\\n' \"$?\" >> \"$d/hook-timeout\"; rm \"$d/before-Enter\"; }} ;; esac\n\
          '{shim}' \"$@\"; rc=$?\ncase \"$*\" in *load-buffer*) step=load ;; *paste-buffer*) step=paste ;; *C-s*) step=C-s ;; *send-keys*Enter*) step=Enter ;; *) step= ;; esac\n\
@@ -1372,8 +1373,8 @@ fn an_idle_channel_hands_its_front_to_the_turn_start() {
     assert!(rig.events().is_empty(), "no key: {:?}", rig.events());
 }
 
-/// Copy mode holds a busy pane's front through 25 virtual seconds and repeated reads of that screen;
-/// once only the pane leaves copy mode, its watch wakes the drive and the front is pasted once.
+/// Copy mode holds a busy pane's front through 25 virtual seconds, a failed pane read and repeated
+/// reads of that screen; once only the pane leaves copy mode, the front is pasted once.
 #[test]
 fn a_front_held_by_copy_mode_is_pasted_once_when_the_pane_leaves_it() {
     use std::sync::mpsc;
@@ -1451,6 +1452,9 @@ fn a_front_held_by_copy_mode_is_pasted_once_when_the_pane_leaves_it() {
                 target::Phase::Busy,
                 &transcript,
             );
+            if held.is_some() {
+                rig.mark("fail-dead", "");
+            }
             let _ = answer.send(result);
             if let Some(held) = held.take() {
                 since = Some(mode_reads());
@@ -1460,8 +1464,14 @@ fn a_front_held_by_copy_mode_is_pasted_once_when_the_pane_leaves_it() {
         if let Ok(items) = heard.try_recv() {
             seen.push(items);
         }
-        // The watch has read the unchanged screen three times since the hold.
-        let read = since.is_some_and(|since| mode_reads() >= since + 3);
+        // The watch met the failed read, then read the unchanged screen three times.
+        let failed = !rig
+            .f
+            .root
+            .path()
+            .join(format!("{}-owner/fail-dead", rig.name))
+            .exists();
+        let read = failed && since.is_some_and(|since| mode_reads() >= since + 3);
         if seen.len() == 1
             && read
             && let Some(left) = left.take()

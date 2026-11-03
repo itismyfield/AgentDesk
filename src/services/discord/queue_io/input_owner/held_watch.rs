@@ -6,19 +6,30 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 use std::time::Duration;
 
 use super::drive::{Drive, wake};
+use crate::services::claude_tui::busy_inject::Screen;
 
-/// One read of the refusing pane: `Some(true)` once Enter would submit, `None` once it is gone.
-pub(crate) type ScreenProbe = Box<dyn FnMut() -> Option<bool> + Send>;
+/// One read of the refusing pane.
+pub(crate) type ScreenProbe = Box<dyn FnMut() -> Screen + Send>;
 
 /// A held pane is read this often; each read is a few bounded tmux queries and no handoff.
 const LOOK: Duration = Duration::from_secs(2);
 
 #[derive(Default)]
 struct Watch {
-    probe: Option<ScreenProbe>,
-    /// The held front's message; the watch ends once another one leads the queue.
+    /// The probe the last refusal left, until the drive names the front it held.
+    armed: Option<ScreenProbe>,
+    /// The watched hold: its generation, front message and probe (out while a read runs).
+    generation: u64,
     message: u64,
+    probe: Option<ScreenProbe>,
     running: bool,
+}
+
+/// What one look decided for the hold it read.
+enum Look {
+    Wake,
+    Keep(ScreenProbe),
+    End,
 }
 
 fn watches() -> MutexGuard<'static, HashMap<u64, Watch>> {
@@ -28,56 +39,76 @@ fn watches() -> MutexGuard<'static, HashMap<u64, Watch>> {
 
 /// Leaves the probe of the pane that just refused `channel`'s front, for the drive to watch.
 pub(crate) fn arm(channel: u64, probe: ScreenProbe) {
-    watches().entry(channel).or_default().probe = Some(probe);
+    watches().entry(channel).or_default().armed = Some(probe);
 }
 
 /// Watches the pane that held `message` until its screen would submit, then wakes the drive once.
-/// One watch runs per channel; it ends quietly when that front no longer leads or the pane is gone.
+/// One task runs per channel; a newer hold replaces the one it watches, never ending with it.
 pub(crate) fn watch(drive: Arc<Drive>, message: u64) {
     {
         let mut all = watches();
-        let Some(watch) = all.get_mut(&drive.channel).filter(|w| w.probe.is_some()) else {
+        let Some(watch) = all.get_mut(&drive.channel) else {
             return;
         };
-        watch.message = message;
+        let Some(probe) = watch.armed.take() else {
+            return;
+        };
+        watch.generation += 1;
+        (watch.message, watch.probe) = (message, Some(probe));
         if std::mem::replace(&mut watch.running, true) {
             return;
         }
     }
     tokio::spawn(async move {
         let channel = drive.channel;
-        let recovered = loop {
+        loop {
             tokio::time::sleep(LOOK).await;
-            let (message, probe) = match watches().get_mut(&channel) {
-                Some(watch) => (watch.message, watch.probe.take()),
-                None => break false,
-            };
-            let (Some(mut probe), true) = (probe, leads(&drive, message).await) else {
-                break false;
+            let taken = watches()
+                .get_mut(&channel)
+                .map(|w| (w.generation, w.message, w.probe.take()));
+            let Some((generation, message, Some(mut probe))) = taken else {
+                break;
             };
             let read = tokio::task::spawn_blocking(move || (probe(), probe)).await;
-            match read {
-                Ok((Some(true), _)) => break true,
-                Ok((Some(false), probe)) => {
-                    if let Some(watch) = watches().get_mut(&channel) {
-                        watch.probe.get_or_insert(probe);
-                    }
-                }
-                _ => break false,
+            let look = match (read, leads(&drive, message).await) {
+                (Err(_), _) | (_, Ok(false)) | (Ok((Screen::Gone, _)), _) => Look::End,
+                (Ok((Screen::Ready, _)), Ok(true)) => Look::Wake,
+                // A failed read of the pane or of the queue keeps the watch for the next look.
+                (Ok((_, probe)), _) => Look::Keep(probe),
+            };
+            let mut all = watches();
+            let Some(watch) = all.get_mut(&channel) else {
+                break;
+            };
+            if watch.generation != generation {
+                continue;
             }
-        };
-        watches().remove(&channel);
-        if recovered {
-            wake(drive);
+            match look {
+                Look::Keep(probe) => watch.probe = Some(probe),
+                Look::End | Look::Wake => {
+                    watch.running = false;
+                    if watch.armed.is_none() {
+                        all.remove(&channel);
+                    }
+                    drop(all);
+                    if matches!(look, Look::Wake) {
+                        wake(drive);
+                    }
+                    return;
+                }
+            }
+        }
+        if let Some(watch) = watches().get_mut(&channel) {
+            watch.running = false;
         }
     });
 }
 
-/// Whether `message` is still the owner's unattempted front.
-async fn leads(drive: &Drive, message: u64) -> bool {
+/// Whether `message` is still the owner's unattempted front; `Err` when the queue was not read.
+async fn leads(drive: &Drive, message: u64) -> Result<bool, String> {
     let front = drive.mailbox.v2_request(|slot| {
-        let owner = slot.as_ref().ok_or("V2 not adopted")?;
-        Ok(owner.front().map(|front| front.1.message_id))
+        let front = slot.as_ref().and_then(|owner| owner.front());
+        Ok(front.map(|front| front.1.message_id))
     });
-    matches!(front.await, Ok(Some(id)) if id == message)
+    Ok(front.await? == Some(message))
 }

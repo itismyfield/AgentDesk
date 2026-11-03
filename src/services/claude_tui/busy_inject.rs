@@ -376,6 +376,22 @@ impl Pane {
             .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
+    /// `Gone` only on tmux's own word that the pane died or its session is missing.
+    #[cfg(unix)]
+    fn lost(&self) -> Screen {
+        use crate::services::platform::tmux::{SessionPresence, classify_has_session_output};
+        let dead = self.ok(&["display-message", "-p", "-t", &self.target, "#{pane_dead}"]);
+        if dead.as_deref().map(str::trim) == Some("1") {
+            return Screen::Gone;
+        }
+        match self.run(&["has-session", "-t", &self.target]) {
+            Ok(out) if classify_has_session_output(&out) == SessionPresence::Missing => {
+                Screen::Gone
+            }
+            _ => Screen::Unknown,
+        }
+    }
+
     pub(crate) fn capture(&self) -> Option<String> {
         self.ok(&[
             "capture-pane",
@@ -403,14 +419,26 @@ pub(in crate::services::claude_tui) fn before_paste(
     before_paste_by(pane, listed(stash_allowed), false).map(|seen| seen.park)
 }
 
-/// Whether Enter would submit on the pane now, by the owned entry's own screen read; `None` once
-/// the pane is gone.
+/// One read of a held pane by the owned entry's own screen check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Screen {
+    /// Enter would submit now.
+    Ready,
+    /// The screen still refuses keys.
+    Blocked,
+    /// tmux reports the pane dead or its session missing.
+    Gone,
+    /// A read failed; it proves neither a submit nor the pane's end.
+    Unknown,
+}
+
+/// Whether Enter would submit on the pane now, by the owned entry's own screen read.
 #[cfg(unix)]
-pub(crate) fn screen_submits(pane: &Pane) -> Option<bool> {
+pub(crate) fn screen_submits(pane: &Pane) -> Screen {
     match before_paste_by(pane, None, true) {
-        Ok(_) => Some(true),
-        Err(Veto::PaneUnavailable) => None,
-        Err(_) => Some(false),
+        Ok(_) => Screen::Ready,
+        Err(Veto::PaneUnavailable) => pane.lost(),
+        Err(_) => Screen::Blocked,
     }
 }
 
