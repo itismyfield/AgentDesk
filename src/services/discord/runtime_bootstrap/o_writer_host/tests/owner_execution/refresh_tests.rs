@@ -183,7 +183,33 @@ async fn owner_refresh_readmits_live_input_after_one_transient_pg_failure_pg() {
         for_input_placement("claude", channel).await,
         crate::services::tui_o::cutover::intake_route::IntakeRoute::Gateway
     );
-    // One read fails transiently: a competing custody holder outlasts the 2s lock timeout.
+    #[derive(Clone, Default)]
+    struct Warnings(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Warnings {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let warnings = Warnings::default();
+    let sink = warnings.clone();
+    crate::logging::test_capture::pin_callsite_interest();
+    let _capture = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_writer(move || sink.clone())
+            .finish(),
+    );
+    let logged = |message: &str| {
+        String::from_utf8_lossy(&warnings.0.lock().unwrap())
+            .matches(message)
+            .count()
+    };
+    // Reads fail transiently for two ticks: a competing custody holder outlasts the 2s lock timeout.
     use crate::services::cluster::intake_router_hook::owner_record::{OwnerIdentity, custody};
     let mut competing = pool.begin().await.unwrap();
     custody::lock(
@@ -192,6 +218,7 @@ async fn owner_refresh_readmits_live_input_after_one_transient_pg_failure_pg() {
     )
     .await
     .unwrap();
+    refresh().await;
     refresh().await;
     let paused = snapshot.execution(channel).map(|view| view.permit.err());
     assert!(
@@ -202,6 +229,9 @@ async fn owner_refresh_readmits_live_input_after_one_transient_pg_failure_pg() {
     for _ in 0..4 {
         refresh().await;
     }
+    // The 2s loop warns once per change, not once per tick.
+    assert_eq!(logged("execution owner refresh read failed"), 1);
+    assert_eq!(logged("execution identity changed; admission suspended"), 1);
     assert_eq!(
         for_input_placement("claude", channel).await,
         crate::services::tui_o::cutover::intake_route::IntakeRoute::Gateway,
