@@ -197,9 +197,8 @@ async fn a_schedule_coalesced_during_the_slow_cycles_kick_wakes_the_new_owner() 
     );
 }
 
-/// Between the slow cycle's owner check answering "not owned" and the cycle acting on it, V1
-/// drains, the owner takes the channel and a new event's schedule coalesces: that schedule still
-/// wakes the owner exactly once.
+/// A schedule coalesced after the slow cycle's owner check answered "not owned", as the owner
+/// took the channel, wakes that owner exactly once.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn a_schedule_coalesced_while_the_owner_check_answers_wakes_the_owner_once() {
     let _root = crate::services::discord::relay_recovery::tests::isolated_agentdesk_root();
