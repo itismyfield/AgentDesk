@@ -34,7 +34,8 @@ VARIABLES
     claim,     \* the live relay's decision for the input row: none, joined, handed, deferred
     pastes,    \* paste+Enter count
     lp, op,    \* legacy-side / O writer answer posts for the input
-    screen,    \* the pane's screen: ok, or held (modal, unread capture, copy mode)
+    screen,    \* what refuses a paste before any key: ok; held, the pane's screen (modal, unread
+               \* capture, copy mode); cause, a lock, a buffer load or a missing transcript
     draft,     \* a person's composer text the owned paste meets: none, or unproven (C-s can't park)
     notices,   \* draft notices sent to the input's original
     wake,      \* an owner drive wake is pending
@@ -63,11 +64,14 @@ Init ==
                  <<"active", "busy", "ad">>, <<"active", "idle", "none">>} :
          mbx = s[1] /\ nat = s[2] /\ natOwner = s[3]
     /\ old \in IF Fix = "c" THEN {"none", "told", "untold"} ELSE {"none"}
-    /\ inp = (IF old = "none" THEN "queued" ELSE "retained") /\ pend = FALSE /\ reader = FALSE /\ obsOk \in BOOLEAN
+    /\ inp = (IF old = "none" THEN "queued" ELSE "retained") /\ pend = FALSE /\ reader = FALSE
+    \* In c the drive's observer finds the transcript as the live path does (account home, live
+    \* binding), assumed present for an idle live pane; noObserver keeps the default-home lookup.
+    /\ obsOk \in IF Fix = "c" /\ Mut # "noObserver" THEN {TRUE} ELSE BOOLEAN
     /\ route = "none" /\ plain = FALSE /\ sentInto = "idle"
     /\ win = "open" /\ rcv = "none" /\ userRow = FALSE /\ twin \in BOOLEAN /\ claim = "none"
     /\ pastes = 0 /\ lp = 0 /\ op = 0
-    /\ screen \in {"ok", "held"} /\ draft \in {"none", "unproven"} /\ notices = 0
+    /\ screen \in {"ok", "held", "cause"} /\ draft \in {"none", "unproven"} /\ notices = 0
     /\ wake = (old = "none") /\ timer = FALSE /\ byTimer = FALSE /\ timed = FALSE /\ envLeft = 1
     /\ heldBy = "none" /\ watch = FALSE /\ aged = FALSE /\ twinPend \in BOOLEAN
     /\ stale \in IF Fix \in {"a2d3", "a2d4", "c"} THEN BOOLEAN ELSE {FALSE}
@@ -89,12 +93,14 @@ Paste(r, pl, pd) ==
     /\ sentInto' = nat /\ pastes' = pastes + 1 /\ win' = "open"
 
 \* The owned busy entry: a held screen sends no key and, from a2d3, leaves a watch of that pane;
+\* in c a refusing cause leaves a read of that cause too (noCauseWatch removes it);
 \* otherwise one paste, and an unparked draft owes its original one notice (a2d2; the outbox key
 \* is the original's).
 OwnedPaste(r, pd, rd) ==
-    IF screen = "held"
+    IF screen # "ok"
     THEN /\ inp' = "held" /\ timer' = (~R2 \/ Mut = "timer") /\ heldBy' = "screen"
-         /\ watch' = (R3 /\ Mut # "noWatch")
+         /\ watch' = (R3 /\ Mut # "noWatch"
+                      /\ (screen = "held" \/ (Fix = "c" /\ Mut # "noCauseWatch")))
          /\ UNCHANGED <<route, plain, pend, sentInto, pastes, win, notices, reader>>
     ELSE /\ Paste(r, FALSE, pd) /\ reader' = rd /\ UNCHANGED <<timer, watch>>
          /\ heldBy' = "none"
@@ -291,9 +297,9 @@ MailboxReleases ==
                    userRow, claim, pastes, lp, op, envLeft, stale>>
     /\ UNCHANGED drv
 
-\* The held screen clears with no event of its own (a modal or copy mode closed).
+\* The refusal clears with no event of its own (a modal closed, a lock freed, a load recovered).
 ScreenClears ==
-    /\ screen = "held"
+    /\ screen # "ok"
     /\ screen' = "ok"
     /\ UNCHANGED <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain,
                    sentInto, win, rcv, userRow, twin, claim, pastes, lp, op, draft, notices, wake,
@@ -303,7 +309,7 @@ ScreenClears ==
 \* Mutant watchBlind wakes on a read of the unchanged screen.
 WatchSees ==
     /\ watch /\ inp = "held" /\ (screen = "ok" \/ Mut = "watchBlind")
-    /\ watch' = FALSE /\ wake' = TRUE /\ byTimer' = (~wake /\ screen = "held")
+    /\ watch' = FALSE /\ wake' = TRUE /\ byTimer' = (~wake /\ screen # "ok")
     /\ UNCHANGED <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain,
                    sentInto, win, rcv, userRow, twin, claim, pastes, lp, op, screen, draft,
                    notices, timer, timed, heldBy, aged, twinPend, envLeft, stale, old>>
@@ -369,7 +375,9 @@ BootRequeues ==
                    win, rcv, userRow, twin, claim, pastes, lp, op, screen, draft, notices, timer,
                    byTimer, timed, heldBy, watch, aged, twinPend, envLeft, stale, old>>
 
-Quiet == nat = "idle" /\ ~wake /\ ~timer
+\* Loss is judged once the pane's refusal cleared and no watch is left to read it: a screen that
+\* never clears holds by design.
+Quiet == nat = "idle" /\ ~wake /\ ~timer /\ screen = "ok" /\ ~watch
          /\ inp \in {"queued", "held", "retained", "failed", "answered"}
          /\ envLeft = 0 /\ mbx = "idle" /\ ~ENABLED BootRequeues
 
@@ -408,7 +416,7 @@ NoTimedRetry == ~timed
 DraftToldOnce ==
     /\ notices <= 1
     /\ (pastes = 1 /\ route \in {"busyOwned", "busyStart"} /\ draft = "unproven") => notices = 1
-\* 9. An input held by its screen is not left waiting once that screen would submit: something
+\* 9. An input held by its screen or a cause is not left waiting once that clears: something
 \*    still pending (a wake or the pane's watch) hands it again.
 HeldResumes == ~(Quiet /\ inp = "held" /\ heldBy = "screen" /\ screen = "ok" /\ ~watch)
 \* 10. On a turn-mode channel with an idle observer, nothing is left waiting once all is quiet: a
