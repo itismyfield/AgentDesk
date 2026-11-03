@@ -23,8 +23,7 @@ use crate::services::tmux_diagnostics::{
 };
 
 use super::formatting::{
-    ReplaceLongMessageOutcome, build_streaming_placeholder_text, format_tool_input,
-    plan_streaming_rollover, truncate_str,
+    ReplaceLongMessageOutcome, format_tool_input, plan_streaming_rollover, truncate_str,
 };
 use super::placeholder_cleanup::{PlaceholderCleanupOperation, PlaceholderCleanupOutcome};
 use super::placeholder_live_events::{

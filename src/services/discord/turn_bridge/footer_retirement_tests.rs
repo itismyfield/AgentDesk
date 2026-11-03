@@ -75,11 +75,7 @@ impl TurnGateway for Gateway {
 }
 
 fn shared() -> Arc<SharedData> {
-    let mut shared = crate::services::discord::make_shared_data_for_tests();
-    Arc::get_mut(&mut shared)
-        .unwrap()
-        .ui
-        .status_panel_v2_enabled = true;
+    let shared = crate::services::discord::make_shared_data_for_tests();
     shared
 }
 
@@ -120,7 +116,7 @@ async fn retired_bridge_creates_no_panel_in_either_layout() {
             let mut generation = 0;
             let mut dirty = true;
             super::super::single_message_footer::maybe_create_bridge_separate_status_panel_response(
-                two_message, footer, true, &gateway, ChannelId::new(state.channel_id), "⠸", &mut current, &mut panel,
+                two_message, footer, &gateway, ChannelId::new(state.channel_id), "⠸", &mut current, &mut panel,
                 &mut placeholder, &mut last_edit, &mut state, &mut generation, 0, "body", &mut dirty, &shared, &ProviderKind::Claude,
             ).await;
             assert_eq!(current, MessageId::new(42));
@@ -183,9 +179,6 @@ async fn retired_upgrade_panels_complete_by_edit_for_success_and_failure() {
     let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_ROOT_DIR",
         root.path(),
-    );
-    assert!(
-        super::super::single_message_footer::bridge_should_complete_separate_status_panel(true)
     );
     for failure in [false, true] {
         let gateway = Gateway::default();
@@ -262,8 +255,6 @@ fn retired_bridge_builder_preserves_actual_footer_budget_input() {
                     &ProviderKind::Claude,
                     START,
                     "⠸",
-                    None,
-                    None,
                     &body,
                 )
             };

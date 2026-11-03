@@ -56,7 +56,8 @@ direct_discord_sends = [
   # placeholder call; context hash shifted only by deleting the dead
   # `shadow_register_bridge_panel` helper above it + renaming the now-unused
   # `shared`/`provider` params to `_shared`/`_provider` — no new direct send).
-  "src/services/discord/turn_bridge/single_message_footer.rs#direct_discord_sends:d2d9f46d97bfa069",
+  # Re-fingerprinted again when the retired status-panel-v2 argument left the nearby gate call.
+  "src/services/discord/turn_bridge/single_message_footer.rs#direct_discord_sends:36e51bf47d6725a5",
   # #3805 P2 PR-B: the two-message SINK create — same `gateway.send_message`
   # status-panel placeholder send as the OFF separate-panel path above, but
   # gated on `two_message_panel_enabled` and ordered answer-first (the panel is

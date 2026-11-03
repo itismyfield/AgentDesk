@@ -163,7 +163,7 @@ async fn retired_bridge_rollover_raw_history_uses_minimal_anchor_with_legacy_bud
             let body = unit.repeat(1990 / unit.encode_utf16().count());
             let old_plan = {
                 let budget = build_bridge_single_message_panel_status_block(
-                    &shared, channel, &provider, START, "⠋", None, None, &body,
+                    &shared, channel, &provider, START, "⠋", &body,
                 );
                 assert!(
                     budget.len()
@@ -226,21 +226,9 @@ async fn retired_bridge_empty_and_tool_only_raw_edits_use_minimal_anchor() {
         .into_iter()
         .enumerate()
     {
-        for (variant, (v2, tool)) in [
-            (false, None),
-            (true, None),
-            (false, Some("⚙ Bash …")),
-            (true, Some("⚙ Bash …")),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        for (variant, tool) in [None, Some("⚙ Bash …")].into_iter().enumerate() {
             let channel = ChannelId::new(8_071_880 + index as u64 * 10 + variant as u64);
-            let mut shared = six_tool_fixture(crate::config::ToolActivityDisplay::Summary, channel);
-            Arc::get_mut(&mut shared)
-                .unwrap()
-                .ui
-                .status_panel_v2_enabled = v2;
+            let shared = six_tool_fixture(crate::config::ToolActivityDisplay::Summary, channel);
             let history = drive(
                 shared,
                 &provider,

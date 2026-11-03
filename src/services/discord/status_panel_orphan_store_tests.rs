@@ -362,9 +362,7 @@ fn footer_mode_status_panel_orphan_enqueue_is_noop_at_store_api() {
     let root = root.path();
     let provider = ProviderKind::Claude;
 
-    enqueue_separate_status_panel_orphan_in_root_for_flags(
-        root, true, true, &provider, "tok", 100, 5001,
-    );
+    enqueue_separate_status_panel_orphan_in_root_for_flags(root, true, &provider, "tok", 100, 5001);
 
     assert!(
         load_pending_in_root(root, &provider, "tok").is_empty(),
@@ -379,14 +377,14 @@ fn flag_off_status_panel_orphan_enqueue_preserves_original_store_behavior() {
     let provider = ProviderKind::Claude;
 
     enqueue_separate_status_panel_orphan_in_root_for_flags(
-        root, false, true, &provider, "tok", 100, 5001,
+        root, false, &provider, "tok", 100, 5001,
     );
 
     assert!(load_pending_in_root(root, &provider, "tok").is_empty());
 
     enqueue_in_root(root, &provider, "tok", 100, 5001);
     enqueue_separate_status_panel_orphan_in_root_for_flags(
-        root, false, true, &provider, "tok", 100, 5002,
+        root, false, &provider, "tok", 100, 5002,
     );
     assert_eq!(
         load_pending_in_root(root, &provider, "tok"),

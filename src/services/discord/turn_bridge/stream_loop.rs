@@ -43,8 +43,7 @@ pub(super) async fn run_stream_loop(
     let context_compact_lower_bound_tokens = ctx.compact_lower_bound_tokens().await;
     let (shared_owned, gateway) = (ctx.shared_owned, ctx.gateway);
     let (channel_id, provider) = (ctx.channel_id, ctx.provider);
-    let (cancel_token, user_text_owned) = (ctx.cancel_token, ctx.user_text_owned);
-    let (request_owner_name, adk_session_key) = (ctx.request_owner_name, ctx.adk_session_key);
+    let (cancel_token, adk_session_key) = (ctx.cancel_token, ctx.adk_session_key);
     let (adk_session_name, adk_session_info) = (ctx.adk_session_name, ctx.adk_session_info);
     let (adk_cwd, dispatch_id) = (ctx.adk_cwd, ctx.dispatch_id);
     shared_owned
@@ -421,8 +420,6 @@ pub(super) async fn run_stream_loop(
                                     gateway: &gateway,
                                     channel_id,
                                     provider: &provider,
-                                    user_text_owned: &user_text_owned,
-                                    request_owner_name: &request_owner_name,
                                     adk_session_key: &adk_session_key,
                                     adk_session_name: &adk_session_name,
                                     role_binding: &role_binding,
@@ -489,8 +486,6 @@ pub(super) async fn run_stream_loop(
                                     gateway: &gateway,
                                     channel_id,
                                     provider: &provider,
-                                    user_text_owned: &user_text_owned,
-                                    request_owner_name: &request_owner_name,
                                     adk_session_key: &adk_session_key,
                                     adk_session_name: &adk_session_name,
                                     role_binding: &role_binding,
@@ -564,8 +559,6 @@ pub(super) async fn run_stream_loop(
                                     gateway: &gateway,
                                     channel_id,
                                     provider: &provider,
-                                    user_text_owned: &user_text_owned,
-                                    request_owner_name: &request_owner_name,
                                     adk_session_key: &adk_session_key,
                                     adk_session_name: &adk_session_name,
                                     role_binding: &role_binding,

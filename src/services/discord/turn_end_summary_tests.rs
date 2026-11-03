@@ -414,36 +414,31 @@ async fn real_watcher_producer_posts_body_then_one_summary_for_retired_flags_and
     let _isolation = Isolation::new();
     let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let mut channel = 586_201;
-    for v2 in [false, true] {
-        for single in [false, true] {
-            for (native, expected) in [
-                (
-                    "{\"type\":\"result\",\"is_error\":false}\n",
-                    "-# ✅ · 📦 45%",
-                ),
-                (
-                    "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"[Request interrupted by user]\"}]}}\n",
-                    "-# ⏹ 중단 · 📦 45%",
-                ),
-                (
-                    "{\"type\":\"result\",\"is_error\":true}\n",
-                    "-# ⚠️ 오류 · 📦 45%",
-                ),
-            ] {
-                let mut shared = super::super::make_shared_data_for_tests();
-                Arc::get_mut(&mut shared)
-                    .unwrap()
-                    .ui
-                    .status_panel_v2_enabled = v2;
-                let channel_id = ChannelId::new(channel);
-                let _mailbox = shared.mailbox(channel_id);
-                shared
-                    .ui
-                    .placeholder_live_events
-                    .set_context_panel_usage(channel_id, None, 100, 200, 150, 1000, 80);
-                let mut state = row(channel, 0, "watcher");
-                state.tmux_session_name = Some("fixture-summary".into());
-                let key = crate::services::discord::tmux::tmux_watcher::completion_producer::watcher_completion_key(
+    for single in [false, true] {
+        for (native, expected) in [
+            (
+                "{\"type\":\"result\",\"is_error\":false}\n",
+                "-# ✅ · 📦 45%",
+            ),
+            (
+                "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"[Request interrupted by user]\"}]}}\n",
+                "-# ⏹ 중단 · 📦 45%",
+            ),
+            (
+                "{\"type\":\"result\",\"is_error\":true}\n",
+                "-# ⚠️ 오류 · 📦 45%",
+            ),
+        ] {
+            let shared = super::super::make_shared_data_for_tests();
+            let channel_id = ChannelId::new(channel);
+            let _mailbox = shared.mailbox(channel_id);
+            shared
+                .ui
+                .placeholder_live_events
+                .set_context_panel_usage(channel_id, None, 100, 200, 150, 1000, 80);
+            let mut state = row(channel, 0, "watcher");
+            state.tmux_session_name = Some("fixture-summary".into());
+            let key = crate::services::discord::tmux::tmux_watcher::completion_producer::watcher_completion_key(
                     &shared,
                     channel_id,
                     Some(&state),
@@ -451,42 +446,37 @@ async fn real_watcher_producer_posts_body_then_one_summary_for_retired_flags_and
                     30,
                 )
                 .unwrap();
-                let summary = LiveSummary::watcher(
-                    &shared,
-                    Some(key),
-                    Some(&state),
-                    false,
-                    parsed_watcher_outcome(native).0.outcome(),
-                )
-                .unwrap();
-                let recorder = super::super::recovery_engine::o_cut_recorder::start(channel).await;
-                let gateway = DiscordGateway::new(
-                    recorder.http.clone(),
-                    shared.clone(),
-                    ProviderKind::Claude,
-                    None,
-                );
-                let body = super::super::formatting::build_streaming_placeholder_text(
-                    "answer",
-                    "⠸ 계속 처리 중",
-                );
-                gateway.send_message(channel_id, &body).await.unwrap();
-                let mode = super::super::single_message_panel::footer_mode_enabled(single, v2);
-                assert!(!mode);
-                let mut spin = 0;
-                let mut last = String::new();
-                for _ in 0..2 {
-                    crate::services::discord::tmux::tmux_watcher::completion_producer::complete_watcher_terminal_footer_or_status_panel_with_sniffer(
+            let summary = LiveSummary::watcher(
+                &shared,
+                Some(key),
+                Some(&state),
+                false,
+                parsed_watcher_outcome(native).0.outcome(),
+            )
+            .unwrap();
+            let recorder = super::super::recovery_engine::o_cut_recorder::start(channel).await;
+            let gateway = DiscordGateway::new(
+                recorder.http.clone(),
+                shared.clone(),
+                ProviderKind::Claude,
+                None,
+            );
+            let body = super::super::formatting::build_streaming_placeholder_text(
+                "answer",
+                "⠸ 계속 처리 중",
+            );
+            gateway.send_message(channel_id, &body).await.unwrap();
+            let mode = super::super::single_message_panel::footer_mode_enabled(single);
+            assert!(!mode);
+            let mut spin = 0;
+            let mut last = String::new();
+            for _ in 0..2 {
+                crate::services::discord::tmux::tmux_watcher::completion_producer::complete_watcher_terminal_footer_or_status_panel_with_sniffer(
                 &recorder.http,&shared,channel_id,&ProviderKind::Claude,0,mode,&mut spin,None,None,"answer",None,&mut last,None,None,|_|async{false},None,false,false,false,Some(summary.clone()),None,
             ).await;
-                }
-                assert_eq!(
-                    recorder.contents(),
-                    ["answer", expected],
-                    "v2={v2} single={single}"
-                );
-                channel += 1;
             }
+            assert_eq!(recorder.contents(), ["answer", expected], "single={single}");
+            channel += 1;
         }
     }
 }

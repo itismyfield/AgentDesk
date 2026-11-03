@@ -82,8 +82,6 @@ fn shared_with_configured_placeholder() -> Arc<SharedData> {
             shutdown_remaining: Arc::new(std::sync::atomic::AtomicUsize::new(1)),
         },
         UiFeatureFlags {
-            placeholder_live_events_enabled: false,
-            status_panel_v2_enabled: true,
             two_message_panel_enabled: false,
         },
         RestoredSessionState {

@@ -181,11 +181,7 @@ fn reanchor_bind_bumps_epoch_atomically_and_guard_stale_skips_old_epoch() {
 #[test]
 fn watcher_orphan_preregistration_is_flag_gated_and_removed_after_persist() {
     let _env = isolate_agentdesk_runtime_root_for_two_message_tests();
-    let mut shared = crate::services::discord::make_shared_data_for_tests();
-    Arc::get_mut(&mut shared)
-        .expect("fresh shared data should be uniquely owned")
-        .ui
-        .status_panel_v2_enabled = true;
+    let shared = crate::services::discord::make_shared_data_for_tests();
     let provider = ProviderKind::Claude;
     let channel_id = ChannelId::new(777);
     let panel = serenity::MessageId::new(44);
@@ -273,7 +269,6 @@ async fn exercise_status_panel_ledger_failure_4891(watcher_tail: bool) {
     let _env = isolate_agentdesk_runtime_root_for_two_message_tests();
     let mut shared = crate::services::discord::make_shared_data_for_tests();
     let ui = &mut Arc::get_mut(&mut shared).unwrap().ui;
-    ui.status_panel_v2_enabled = true;
     ui.two_message_panel_enabled = true;
     let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
     let recorded = calls.clone();

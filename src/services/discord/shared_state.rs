@@ -31,12 +31,9 @@ pub(in crate::services::discord) struct PlaceholderState {
     /// both the async-dispatch and live-turn call paths.
     pub(in crate::services::discord) placeholder_controller:
         Arc<placeholder_controller::PlaceholderController>,
-    /// Per-channel recent tool/system events rendered in Active placeholder
-    /// cards when `placeholder.live_events_enabled` is enabled.
+    /// Per-channel recent tool/system events rendered in Active placeholder cards.
     pub(in crate::services::discord) placeholder_live_events:
         Arc<placeholder_live_events::PlaceholderLiveEvents>,
-    pub(in crate::services::discord) placeholder_live_events_enabled: bool,
-    pub(in crate::services::discord) status_panel_v2_enabled: bool,
     /// Two-message panel rollout gate (default OFF, #3805). When ON, the
     /// status panel renders as a separate message below the answer instead
     /// of the single-message layout.

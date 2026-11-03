@@ -554,11 +554,7 @@ async fn run_postlude_for_owner(
 #[tokio::test]
 async fn exact_receipt_rowless_terminal_runs_postlude_without_footer_or_status_mutation_5521() {
     for footer in [false, true] {
-        let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
-        Arc::get_mut(&mut driver.shared)
-            .unwrap()
-            .ui
-            .status_panel_v2_enabled = true;
+        let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
         let _mailbox = driver.shared.mailbox(ChannelId::new(DRIVER_CHANNEL_ID));
         let (mut ctx, state, source) = receipt_parts(&driver, ProviderKind::Codex);
         ctx.entry_was_rowless = true;
@@ -1448,7 +1444,7 @@ async fn complete_then_late_o_body(o_channel: bool) -> (Option<u64>, Vec<DriverC
     let _separate = SeparatePanel;
     let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
     let ui = &mut Arc::get_mut(&mut driver.shared).expect("fresh driver").ui;
-    (ui.status_panel_v2_enabled, ui.two_message_panel_enabled) = (true, true);
+    ui.two_message_panel_enabled = true;
     (
         driver.inflight.runtime_kind,
         driver.inflight.status_message_id,

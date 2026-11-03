@@ -98,17 +98,10 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
         watcher_lease_end,
         direct_terminal_response,
     );
-    let formatted = if shared.ui.status_panel_v2_enabled {
-        crate::services::discord::formatting::format_for_discord_with_status_panel(
-            direct_terminal_response,
-            &watcher_provider,
-        )
-    } else {
-        crate::services::discord::formatting::format_for_discord_with_provider(
-            direct_terminal_response,
-            &watcher_provider,
-        )
-    };
+    let formatted = crate::services::discord::formatting::format_for_discord_with_status_panel(
+        direct_terminal_response,
+        &watcher_provider,
+    );
     let relay_text = if should_tag_monitor_origin {
         crate::services::discord::prepend_monitor_auto_turn_origin(&formatted)
     } else {

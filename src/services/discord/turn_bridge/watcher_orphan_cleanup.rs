@@ -13,13 +13,11 @@
 use super::*;
 
 pub(in crate::services::discord) fn should_delete_bridge_created_watcher_orphan_response(
-    status_panel_v2_enabled: bool,
     watcher_handoff_claim_outcome: WatcherHandoffClaimOutcome,
     bridge_created_response_placeholder_msg_id: Option<MessageId>,
     current_msg_id: MessageId,
 ) -> bool {
-    status_panel_v2_enabled
-        && watcher_handoff_claim_outcome == WatcherHandoffClaimOutcome::ReusedExisting
+    watcher_handoff_claim_outcome == WatcherHandoffClaimOutcome::ReusedExisting
         && bridge_created_response_placeholder_msg_id == Some(current_msg_id)
 }
 
@@ -240,31 +238,21 @@ mod watcher_orphan_cleanup_tests {
         let bridge_placeholder = MessageId::new(20);
 
         assert!(should_delete_bridge_created_watcher_orphan_response(
-            true,
             WatcherHandoffClaimOutcome::ReusedExisting,
             Some(bridge_placeholder),
             bridge_placeholder,
         ));
         assert!(!should_delete_bridge_created_watcher_orphan_response(
-            true,
             WatcherHandoffClaimOutcome::Spawned,
             Some(bridge_placeholder),
             bridge_placeholder,
         ));
         assert!(!should_delete_bridge_created_watcher_orphan_response(
-            true,
             WatcherHandoffClaimOutcome::ReusedExisting,
             Some(bridge_placeholder),
             MessageId::new(10),
         ));
         assert!(!should_delete_bridge_created_watcher_orphan_response(
-            false,
-            WatcherHandoffClaimOutcome::ReusedExisting,
-            Some(bridge_placeholder),
-            bridge_placeholder,
-        ));
-        assert!(!should_delete_bridge_created_watcher_orphan_response(
-            true,
             WatcherHandoffClaimOutcome::None,
             Some(bridge_placeholder),
             bridge_placeholder,

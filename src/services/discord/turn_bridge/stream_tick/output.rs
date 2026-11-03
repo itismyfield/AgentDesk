@@ -112,8 +112,6 @@ pub(super) async fn run_rollover_loop(
             &provider,
             status_panel_started_at,
             indicator,
-            tick.prev_tool_status.as_deref(),
-            tick.current_tool_line.as_deref(),
             tick.full_response,
         );
         if bridge_streaming_rollover_should_skip(raw_current_portion) {
@@ -388,8 +386,6 @@ pub(super) async fn refresh_streaming_response(
         &provider,
         status_panel_started_at,
         indicator,
-        tick.prev_tool_status.as_deref(),
-        tick.current_tool_line.as_deref(),
         tick.full_response,
     );
     let rendered_current_portion =
@@ -403,12 +399,8 @@ pub(super) async fn refresh_streaming_response(
             *tick.response_sent_offset == 0,
             raw_current_portion.to_string(),
         );
-    let stable_display_text = build_turn_bridge_streaming_edit_text(
-        shared_owned.ui.status_panel_v2_enabled,
-        &rendered_current_portion,
-        &status_block,
-        &provider,
-    );
+    let stable_display_text =
+        build_turn_bridge_streaming_edit_text(&rendered_current_portion, &status_block, &provider);
 
     if streaming_edit_authorized
         && super::super::super::single_message_panel::streaming_footer_text_changed(
