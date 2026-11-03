@@ -618,6 +618,17 @@ mod tests {
     use clap::{CommandFactory, Parser, error::ErrorKind};
 
     #[test]
+    fn cli_parse_fits_in_the_windows_default_main_thread_stack() {
+        // Windows gives the main thread 1 MiB, and `run_from_args` parses there before any command runs.
+        let parsed = std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(|| Cli::try_parse_from(["agentdesk", "config", "audit", "--dry-run"]).is_ok())
+            .expect("spawn the 1 MiB parser thread")
+            .join();
+        assert!(matches!(parsed, Ok(true)));
+    }
+
+    #[test]
     fn turn_lease_cli_parses_read_and_exact_release() {
         let read = Cli::try_parse_from([
             "agentdesk",
