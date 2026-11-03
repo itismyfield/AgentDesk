@@ -196,3 +196,75 @@ async fn a_schedule_coalesced_during_the_slow_cycles_kick_wakes_the_new_owner() 
         "the coalesced schedule woke the owner"
     );
 }
+
+/// Between the slow cycle's owner check answering "not owned" and the cycle acting on it, V1
+/// drains, the owner takes the channel and a new event's schedule coalesces: that schedule still
+/// wakes the owner exactly once.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_schedule_coalesced_while_the_owner_check_answers_wakes_the_owner_once() {
+    let _root = crate::services::discord::relay_recovery::tests::isolated_agentdesk_root();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let channel = ChannelId::new(7_676_205);
+    let provider = ProviderKind::Claude;
+    let persistence = crate::services::discord::queue_dispatch::persistence_context;
+    let queued =
+        crate::services::turn_orchestrator::ChannelMailboxRegistry::queued_for_test(76_762_050);
+    let context = persistence(&shared, &provider, channel);
+    shared
+        .mailbox(channel)
+        .replace_queue(vec![queued], context)
+        .await;
+    let fired = Arc::new(AtomicUsize::new(0));
+    let (seen, at) = (fired.clone(), shared.clone());
+    let hook: OwnerAnsweredHook = Arc::new(move |owned| {
+        let (seen, shared, provider) = (seen.clone(), at.clone(), ProviderKind::Claude);
+        Box::pin(async move {
+            if owned || seen.fetch_add(1, Ordering::SeqCst) > 0 {
+                return;
+            }
+            let mailbox = shared.mailbox(channel);
+            let context = persistence(&shared, &provider, channel);
+            mailbox.replace_queue(Vec::new(), context).await;
+            let dir = crate::services::discord::runtime_store::discord_pending_queue_root();
+            let file = dir.unwrap().join("claude/owned-backstop/7676205.json");
+            mailbox
+                .v2_ensure(file, "owned-backstop".into())
+                .await
+                .unwrap();
+            let original: crate::services::turn_orchestrator::PendingQueueItem =
+                serde_json::from_value(serde_json::json!({"author_id":7,"message_id":76_762_051,
+                    "channel_id":channel.get(),"source_message_ids":[76_762_051],
+                    "queued_generation":1,"text":"owned front"}))
+                .unwrap();
+            let _ = admit(&mailbox, &original, AdmissionTicket::new()).await;
+            schedule_deferred_idle_queue_kickoff(shared.clone(), provider, channel, "after_owner");
+        })
+    });
+    OWNER_ANSWERED_HOOKS.insert(channel, hook);
+    let outcome = IdleQueueKickoffChannelOutcome::default();
+    let armed = arm_event_backstop_after_no_start_if_queue_nonempty(
+        &shared, &provider, channel, outcome, "slow",
+    );
+    assert!(armed.await, "the unowned backlog arms the slow cycle");
+    let cycle = DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY + std::time::Duration::from_secs(1);
+    tokio::time::sleep(cycle).await;
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+    }
+    OWNER_ANSWERED_HOOKS.remove(&channel);
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        1,
+        "the owner check answered once unowned"
+    );
+    assert!(
+        granted(&shared.mailbox(channel)).await,
+        "the coalesced schedule woke the owner"
+    );
+    let wakes = OWNER_WAKES_FOR_TESTS.get(&channel).map(|n| *n);
+    assert_eq!(wakes, Some(1), "one schedule is one owner wake");
+    assert!(
+        !shared.restart.deferred_hook_channels.contains_key(&channel),
+        "the slot was released with nothing left"
+    );
+}

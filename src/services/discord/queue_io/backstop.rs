@@ -381,23 +381,51 @@ async fn idle_queue_backstop_backlog_units_all(
         .sum()
 }
 
-/// Hands a schedule coalesced into `slot` to the channel's owner as its wake.
-fn wake_coalesced(shared: &Arc<SharedData>, channel_id: ChannelId, slot: &BackstopSlot) {
-    if slot.consume_requests() {
+/// Hands schedules taken from a slot (`coalesced`) to the channel's owner as its wake.
+fn wake_coalesced(shared: &Arc<SharedData>, channel_id: ChannelId, coalesced: bool) {
+    if coalesced {
+        #[cfg(test)]
+        {
+            *OWNER_WAKES_FOR_TESTS.entry(channel_id).or_default() += 1;
+        }
         #[cfg(unix)]
         crate::services::discord::router::message_handler::owner_wake(shared, channel_id);
     }
 }
 
-/// Consumes the slot's requests; once the owner holds the channel a coalesced one is its wake, and
-/// a timer alone never wakes it. Returns whether the owner holds the channel.
+/// Takes the requests received before the owner check; once the owner holds the channel they are
+/// its wake. Requests arriving during the check stay for the slot's release to evaluate.
 async fn owner_took(shared: &Arc<SharedData>, channel_id: ChannelId, slot: &BackstopSlot) -> bool {
-    if owned(shared, channel_id).await {
-        wake_coalesced(shared, channel_id, slot);
-        return true;
+    let coalesced = slot.consume_requests();
+    let owned = owned(shared, channel_id).await;
+    #[cfg(test)]
+    owner_answered_for_tests(channel_id, owned).await;
+    if owned {
+        wake_coalesced(shared, channel_id, coalesced);
     }
-    slot.consume_requests();
-    false
+    owned
+}
+
+/// Runs in a slow cycle between the owner check's answer and the cycle acting on it.
+#[cfg(test)]
+type OwnerAnsweredHook = Arc<
+    dyn Fn(bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
+>;
+#[cfg(test)]
+static OWNER_ANSWERED_HOOKS: std::sync::LazyLock<dashmap::DashMap<ChannelId, OwnerAnsweredHook>> =
+    std::sync::LazyLock::new(Default::default);
+#[cfg(test)]
+static OWNER_WAKES_FOR_TESTS: std::sync::LazyLock<dashmap::DashMap<ChannelId, usize>> =
+    std::sync::LazyLock::new(Default::default);
+
+#[cfg(test)]
+async fn owner_answered_for_tests(channel_id: ChannelId, owned: bool) {
+    let hook = OWNER_ANSWERED_HOOKS
+        .get(&channel_id)
+        .map(|hook| hook.clone());
+    if let Some(hook) = hook {
+        hook(owned).await;
+    }
 }
 
 async fn run_single_slow_idle_queue_backstop(
@@ -771,7 +799,7 @@ fn schedule_deferred_idle_queue_kickoff_inner(
             // A schedule coalesced here after the owner took the channel is a new event: it wakes
             // the owner, until the slot is released with none left.
             loop {
-                wake_coalesced(&shared, channel_id, &slot);
+                wake_coalesced(&shared, channel_id, slot.consume_requests());
                 if backlog_guard.release() {
                     return;
                 }
