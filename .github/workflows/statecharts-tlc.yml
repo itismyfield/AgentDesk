@@ -1,0 +1,114 @@
+name: Statecharts TLC
+
+# Checks every docs/statecharts TLA+ config with plain TLC against
+# docs/statecharts/expected.tsv. Alert only: not a required check.
+on:
+  pull_request:
+    paths:
+      - "docs/statecharts/**"
+      - "scripts/ci/statecharts_tlc.py"
+      - "tests/test_statecharts_tlc.py"
+      - ".github/workflows/statecharts-tlc.yml"
+  schedule:
+    # 19:17 UTC (04:17 KST), clear of CI Nightly at 18:00 UTC.
+    - cron: "17 19 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: statecharts-tlc-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  TLA2TOOLS_VERSION: "1.7.4"
+  TLA2TOOLS_SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
+
+jobs:
+  tlc:
+    name: Statecharts TLC
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Restore tla2tools.jar
+        id: jar-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/tla2tools
+          key: tla2tools-${{ env.TLA2TOOLS_VERSION }}-${{ env.TLA2TOOLS_SHA256 }}
+
+      # A cached jar is hashed again, so a bad cache entry fails here instead of being used.
+      - name: Fetch and verify tla2tools.jar
+        shell: bash
+        run: |
+          set -euo pipefail
+          jar="$HOME/.cache/tla2tools/tla2tools.jar"
+          if [ ! -f "$jar" ]; then
+            mkdir -p "$(dirname "$jar")"
+            curl -fsSL --retry 3 -o "$jar.part" \
+              "https://github.com/tlaplus/tlaplus/releases/download/v${TLA2TOOLS_VERSION}/tla2tools.jar"
+            mv "$jar.part" "$jar"
+          fi
+          actual="$(sha256sum "$jar" | cut -d ' ' -f 1)"
+          if [ "$actual" != "$TLA2TOOLS_SHA256" ]; then
+            echo "::error::tla2tools.jar sha256 $actual, want $TLA2TOOLS_SHA256"
+            exit 1
+          fi
+          echo "TLA2TOOLS=$jar" >> "$GITHUB_ENV"
+
+      - name: Save tla2tools.jar
+        if: steps.jar-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/tla2tools
+          key: tla2tools-${{ env.TLA2TOOLS_VERSION }}-${{ env.TLA2TOOLS_SHA256 }}
+
+      - name: Checker self-tests
+        run: python3 -m unittest tests.test_statecharts_tlc
+
+      - name: Check models against expected.tsv
+        run: python3 scripts/ci/statecharts_tlc.py --java java --timeout 300
+
+  report:
+    name: Statecharts TLC nightly report
+    needs: tlc
+    if: >-
+      always() && github.event_name == 'schedule' &&
+      (needs.tlc.result == 'failure' || needs.tlc.result == 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      # One open issue per failure stream: comment on it if open, otherwise open it.
+      - name: Open or update the nightly failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RESULT: ${{ needs.tlc.result }}
+          SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          title="Statecharts TLC nightly check failed"
+          body="Nightly \`statecharts-tlc\` ended \`${RESULT}\` on \`${SHA}\`: ${RUN_URL}"
+          number="$(gh issue list --state open --limit 1000 \
+            --json number,title --jq "map(select(.title == \"$title\")) | first | .number // empty")"
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body
+
+          The model check found a rule set different from \`docs/statecharts/expected.tsv\`, or TLC could not finish. Later nightly failures comment here until this issue is closed."
+          fi

@@ -29,6 +29,10 @@ cd docs/statecharts/session-lifecycle
 
 The command exits 1 when any rule breaks, which is the expected result for a model that documents a known gap.
 
+CI (`.github/workflows/statecharts-tlc.yml`, PRs touching this folder and nightly, alert only) runs every `.cfg` with plain TLC through `scripts/ci/statecharts_tlc.py` and fails when the broken rules differ from that config's row in `expected.tsv`; run it locally with `TLA2TOOLS` and `JAVA` set as above.
+A change that adds a config, breaks a rule or closes a known gap updates `expected.tsv` and the report in the same PR.
+Add a new model only with small constants that finish within the CI limits (5 minutes per config, 15 minutes per job).
+
 ## Index
 
 | Area | Code SHA | Rules that break | Disposition |
