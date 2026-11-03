@@ -149,7 +149,15 @@ impl Owner {
         let attempt = &key.attempt;
         (next.admission_binds)
             .retain(|b| !matches!(&b.at, BindAt::Attempt { attempt: a, .. } if a == attempt));
-        self.commit(next)
+        self.commit(next)?;
+        // A proven-unsent paste can never be observed, so its ledger entry is forgotten.
+        let (provider, owner) = (&attempt.provider, &attempt.target.owner);
+        crate::services::tui_prompt_dedupe::withdraw_injected_steer(
+            provider,
+            owner,
+            &attempt.nonce,
+        );
+        Ok(())
     }
 
     pub(crate) fn retain_not_sent(

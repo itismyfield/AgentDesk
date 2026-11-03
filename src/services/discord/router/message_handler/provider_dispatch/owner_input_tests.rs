@@ -405,6 +405,15 @@ impl Rig {
         assert!(self.events().is_empty(), "no key: {:?}", self.events());
     }
 
+    /// The original kept at the queue front for the next wake with no attempt bound, and no key sent.
+    pub(super) fn waits_not_sent(&self) {
+        let snapshot = self.snapshot();
+        assert!(snapshot["head_injection"].is_null(), "{snapshot}");
+        assert_eq!(snapshot["retained_inputs"], json!([]), "{snapshot}");
+        assert_eq!(snapshot["items"][0]["text"], PROMPT, "{snapshot}");
+        assert!(self.events().is_empty(), "no key: {:?}", self.events());
+    }
+
     /// Content may have gone: the head stays, Unknown, and nothing is queued or sent again.
     pub(super) fn uncertain(&self) {
         let snapshot = self.snapshot();
@@ -727,7 +736,7 @@ fn pane_pid_swap_stages_map_to_not_sent_or_write_uncertain() {
         &rig_ready.transcript(),
     );
     assert_eq!(result, Err("NotSent(\"PaneUnavailable\")".into()));
-    rig_ready.held_not_sent("owner_refused");
+    rig_ready.waits_not_sent();
     for (name, channel, step, reached, outcome) in [
         (
             "ps-cs",

@@ -376,7 +376,7 @@ fn owner_codex_changed_source_and_late_copy_mode_never_receive_payload() {
 }
 
 /// An owner refusal after the buffer is loaded and before the paste proves the same attempt was
-/// not sent: the original goes back to custody unarmed, with no key, no buffer and no ledger row.
+/// not sent: the original stays at the queue front unarmed, with no key, buffer or ledger row.
 #[test]
 fn owner_ready_refusal_before_the_codex_paste_is_known_not_sent() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -386,13 +386,7 @@ fn owner_ready_refusal_before_the_codex_paste_is_known_not_sent() {
     rig.mark("after-load", &format!("printf other > '{marker}'"));
     let result = rig.codex();
     assert_eq!(result, Err("NotSent(\"PaneUnavailable\")".into()));
-    rig.held_not_sent("owner_refused");
-    let snapshot = rig.snapshot();
-    assert_eq!(
-        snapshot["retained_inputs"][0]["input"]["attempt"]["nonce"],
-        rig.nonce.as_str(),
-        "{snapshot}"
-    );
+    rig.waits_not_sent();
     assert_eq!(rig.bind(), TurnBind::NotArmed);
     assert!(!rig.buffered(), "the loaded buffer is dropped");
     let register = crate::services::tui_prompt_dedupe::register_injected_steer;
@@ -744,15 +738,14 @@ fn an_idle_codex_paste_held_before_it_ran_settles_not_sent() {
     after.uncertain();
 }
 
-/// The real Codex leaf passes ready, fails only its start commit, releases both temporary stores,
-/// and leaves A in the owner's custody while the same pane accepts a newly admitted successor B.
+/// The real Codex leaf passes ready, fails only its start commit, releases both temporary stores
+/// and keeps A at the queue front, which the next attempt delivers once under a fresh nonce.
 #[test]
 fn a_codex_start_only_refusal_keeps_custody_and_releases_buffer_and_ledger() {
     use crate::services::discord::queue_io::input_owner::{
         effect::{BusyCodex, CodexInput, PreparedPayload},
         pump,
     };
-    use crate::services::turn_orchestrator::PendingQueueItem;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -849,13 +842,9 @@ fn a_codex_start_only_refusal_keeps_custody_and_releases_buffer_and_ledger() {
     );
     let held = rig.snapshot();
     assert!(held["head_injection"].is_null(), "{held}");
-    assert_eq!(held["retained_inputs"].as_array().unwrap().len(), 1);
+    assert_eq!(held["retained_inputs"], json!([]), "{held}");
     assert_eq!(
-        held["retained_inputs"][0]["input"]["attempt"]["nonce"],
-        rig.nonce
-    );
-    assert_eq!(
-        held["retained_inputs"][0]["input"]["original"],
+        held["items"][0],
         serde_json::to_value(&rig.original).unwrap()
     );
     assert!(
@@ -872,45 +861,20 @@ fn a_codex_start_only_refusal_keeps_custody_and_releases_buffer_and_ledger() {
     );
     crate::services::tui_prompt_dedupe::withdraw_injected_steer("codex", &rig.name, &rig.nonce);
     assert!(free, "start refusal must withdraw the legacy ledger row");
-    let next_id = rig.original.message_id + 1;
-    let mut next: PendingQueueItem = rig.original.clone();
-    next.message_id = next_id;
-    next.source_message_ids = vec![next_id];
-    next.text = "successor B".into();
-    let ticket = crate::services::discord::queue_io::input_owner::admission::AdmissionTicket::new();
-    rig.runtime.block_on(async {
-        assert!(matches!(
-            crate::services::discord::queue_io::input_owner::admission::admit(
-                &rig.mailbox,
-                &next,
-                ticket
-            )
-            .await,
-            crate::services::discord::queue_io::input_owner::admission::Admission::Accepted(_)
-        ));
-        let result = pump::submit(
-            &rig.mailbox,
-            payload("successor0b", &next.text, next_id),
-            Arc::new(|| 10_000),
-            leaf(input("successor0b", &next.text)),
-        )
-        .await;
-        assert_eq!(result, Ok(effect::Completion::Submitted));
-    });
+    // The next attempt takes A from the front under a fresh nonce and delivers it once.
+    let result = rig.runtime.block_on(pump::submit(
+        &rig.mailbox,
+        payload("retry0a", PROMPT, rig.original.message_id),
+        Arc::new(|| 10_000),
+        leaf(input("retry0a", PROMPT)),
+    ));
+    assert_eq!(result, Ok(effect::Completion::Submitted));
     assert_eq!(rig.events(), ["paste", "Enter"]);
     assert_eq!(
         fs::read_to_string(rig.renderer.join("body")).unwrap(),
-        crate::services::claude_tui::busy_inject::frame(
-            "discord",
-            AUTHOR,
-            NAME,
-            "successor0b",
-            "successor B"
-        )
+        crate::services::claude_tui::busy_inject::frame("discord", AUTHOR, NAME, "retry0a", PROMPT)
     );
-    assert_eq!(
-        rig.snapshot()["retained_inputs"],
-        held["retained_inputs"],
-        "B cannot consume A's custody"
-    );
+    let after = rig.snapshot();
+    assert_eq!(after["retained_inputs"], json!([]), "{after}");
+    assert_eq!(after["items"], json!([]), "{after}");
 }
