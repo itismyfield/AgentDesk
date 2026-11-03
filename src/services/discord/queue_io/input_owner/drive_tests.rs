@@ -301,8 +301,8 @@ async fn a_new_hold_outlives_the_watch_of_the_front_it_replaced() {
     assert_eq!(*handed.lock().unwrap(), ["input 0", "input 1", "input 1"]);
 }
 
-/// A front held on a screen where Enter may not submit stays unretained, owes no notice and is
-/// never handed again by time alone; the next wake (boundary, idle, new input) delivers it once.
+/// A front refused before any key for a reason a later look may clear (a screen where Enter may not
+/// submit, a missing pane, a held lock) stays unretained and waits for its next wake, never time.
 #[tokio::test(start_paused = true)]
 async fn a_held_front_waits_for_its_next_wake_and_is_then_delivered_once() {
     let _root = TestRuntimeRootGuard::new();
@@ -311,6 +311,8 @@ async fn a_held_front_waits_for_its_next_wake_and_is_then_delivered_once() {
         (7_272_704, MODAL),
         (7_272_714, "ScreenUnread"),
         (7_272_724, "CopyMode"),
+        (7_272_734, "PaneUnavailable"),
+        (7_272_744, "LockContended"),
     ] {
         let mailbox = owner(&registry, channel, 1).await;
         let (calls, handed) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));

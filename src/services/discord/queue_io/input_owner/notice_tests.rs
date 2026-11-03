@@ -170,6 +170,79 @@ async fn a_restart_retains_an_expired_unsettled_head_and_posts_its_notice_pg() {
     db.drop().await;
 }
 
+/// A restart requeues an input an older binary retained as proven unsent and asked to resend: it
+/// is queued once, its ask is corrected once, and a second restart posts and moves nothing more.
+#[tokio::test(flavor = "current_thread")]
+async fn a_restart_requeues_a_proven_unsent_input_and_corrects_its_resend_ask_once_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap();
+    let file = root
+        .join("claude")
+        .join("requeue")
+        .join(format!("{CHANNEL}.json"));
+    let before = ChannelMailboxRegistry::default();
+    let handle = before.handle(ChannelId::new(CHANNEL));
+    handle
+        .v2_adopt(file.clone(), "requeue".into())
+        .await
+        .unwrap();
+    admit(&handle, item(1, &[1], None), "requeue-1").await;
+    let attempt = json!({"nonce":"older","provider":"claude",
+        "target":{"host":"tmux","owner":"notice-older","root":"/test","execution_nonce":"e"},
+        "source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}});
+    let reserved = handle.v2_request(move |slot| {
+        let owner = slot.as_mut().ok_or("no owner")?;
+        let attempt = serde_json::from_value(attempt).map_err(|e| e.to_string())?;
+        owner.reserve_unit(attempt, |item| Some((String::new(), item.text.clone())))?;
+        owner.json()
+    });
+    let mut state = reserved.await.unwrap();
+    drop((handle, before));
+    // What an older binary left: the refused head retained as proven unsent, its resend ask posted.
+    let head = state["head_injection"].take();
+    state["items"].as_array_mut().unwrap().remove(0);
+    state["retained_inputs"] = json!([{"input":head,"disposition":"known_not_sent",
+        "reason":{"kind":"rejected","reason":"known_not_sent: vetoed: NotBusy"},
+        "notice":{"kind":"retained_retry_required","enqueued":true}}]);
+    std::fs::write(&file, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+    for boot in 0..2 {
+        let restarted = ChannelMailboxRegistry::default();
+        let handle = restarted.handle(ChannelId::new(CHANNEL));
+        let history = Registry::at(dir.path().join("history.json"));
+        let at = ("claude", CHANNEL, 10_000);
+        let queue = (file.clone(), "requeue".into());
+        let recovered = super::super::recovery::recover(&handle, queue, history, Some(&pool), at);
+        assert_eq!(recovered.await, Ok(0), "boot {boot}: no resend ask is owed");
+        let snapshot = handle.v2_request(|slot| slot.as_ref().ok_or("no owner")?.json());
+        let snapshot = snapshot.await.unwrap();
+        assert_eq!(
+            snapshot["retained_inputs"],
+            json!([]),
+            "boot {boot}: {snapshot}"
+        );
+        let queued: Vec<_> = snapshot["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| &i["message_id"])
+            .collect();
+        assert_eq!(queued, [&json!(BASE + 1)], "boot {boot}: queued once");
+        drop((handle, restarted));
+    }
+    let posted = posts(&pool).await;
+    assert_eq!(posted.len(), 1, "{posted:?}");
+    assert!(
+        posted[0].0.contains("다시 보내지 않아도 됩니다"),
+        "{posted:?}"
+    );
+    assert_eq!(posted[0].1, "retained.requeued");
+    pool.close().await;
+    db.drop().await;
+}
+
 /// The backstop's one wakeup is the moment `tick` first retains the head: nothing is due for an
 /// absent or reserved head, the armed head is due at its deadline and not a millisecond before.
 #[tokio::test(flavor = "current_thread")]

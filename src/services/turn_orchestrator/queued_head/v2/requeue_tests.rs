@@ -150,9 +150,8 @@ fn queue(owner: &Owner) -> (Vec<u64>, Vec<(usize, String, Option<serde_json::Val
     (ids, binds)
 }
 
-/// Only a retained input proven unsent before any key, for a refusal a later look may clear, goes
-/// back to the queue: original then followers behind any attempted head, each with its ticket and
-/// caller context, once. Unconfirmed, opaque, legacy, permanent and settled inputs stay retained.
+/// Only a clearable proven-unsent input requeues, once, behind any head with each ticket and caller
+/// context; unconfirmed, opaque, legacy, permanent and settled inputs stay retained.
 #[test]
 fn only_a_proven_unsent_retained_input_is_requeued_once_with_its_tickets() {
     let _root = TestRuntimeRootGuard::new();
@@ -210,14 +209,17 @@ fn only_a_proven_unsent_retained_input_is_requeued_once_with_its_tickets() {
     }
     // A proven-unsent input with a follower, behind an attempted head with its own binds.
     let channel = 767_610;
-    let mut seeded = snapshot(
+    let seeded = snapshot(
         channel,
         vec![1, 20],
         vec![retained(input(10, &[11], "k", reserved), ask, known)],
     );
-    seeded.head_injection = Some(input(1, &[], "head", reserved));
-    seeded.admission_binds.push(attempt_bind(1, "head"));
     let mut owner = owner(channel, seeded);
+    // The head unit is the first original alone; the tail stays queued behind it.
+    let unit = |item: &PendingQueueItem| {
+        (item.message_id == 1).then(|| (String::new(), item.text.clone()))
+    };
+    owner.reserve_unit(attempt("head"), unit).unwrap();
     let moved = owner.requeue_known_not_sent().unwrap();
     assert_eq!(moved.len(), 1);
     assert!(owner.snapshot.retained_inputs.is_empty());
