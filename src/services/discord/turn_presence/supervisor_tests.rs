@@ -111,6 +111,7 @@ struct Fake {
     typed: Mutex<Vec<(u64, Duration)>>,
     succeeded: Mutex<Vec<(u64, Duration)>>,
     kicks: Mutex<Vec<(u64, Duration)>>,
+    owner_wakes: Mutex<Vec<(u64, Duration)>>,
     notices: Mutex<Vec<(u64, Duration, String)>>,
     notice_delay: Mutex<Option<Duration>>,
     notice_error: AtomicBool,
@@ -138,6 +139,7 @@ impl Fake {
             typed: Mutex::new(Vec::new()),
             succeeded: Mutex::new(Vec::new()),
             kicks: Mutex::new(Vec::new()),
+            owner_wakes: Mutex::new(Vec::new()),
             notices: Mutex::new(Vec::new()),
             notice_delay: Mutex::new(None),
             notice_error: AtomicBool::new(false),
@@ -212,7 +214,7 @@ impl Effects for Fake {
         Reading::unwatched_for_tests(observed, Some("pane"), Some("/t.jsonl"))
     }
 
-    async fn mailbox(&self, channel: u64) -> (bool, Option<u64>) {
+    async fn mailbox(&self, channel: u64) -> (bool, Option<u64>, bool) {
         let delay = lock(&self.mailbox_delay).remove(&channel);
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
@@ -221,7 +223,7 @@ impl Effects for Fake {
         if let Some(shared) = live {
             return waiting_input(&shared, &ProviderKind::Claude, ChannelId::new(channel)).await;
         }
-        (self.token.load(Ordering::SeqCst), *lock(&self.head))
+        (self.token.load(Ordering::SeqCst), *lock(&self.head), false)
     }
 
     async fn typing(&self, channel: u64) -> Result<(), String> {
@@ -239,6 +241,10 @@ impl Effects for Fake {
 
     fn kickoff(&self, channel: u64) {
         lock(&self.kicks).push((channel, self.since()));
+    }
+
+    fn wake_owner(&self, channel: u64) {
+        lock(&self.owner_wakes).push((channel, self.since()));
     }
 
     fn idle(&self, channel: u64) {
@@ -390,7 +396,7 @@ async fn a_send_overtaken_by_idle_counts_nothing_and_schedules_nothing() {
             channel,
             now,
             &read(observed),
-            (false, None),
+            (false, None, false),
             None,
         );
         first = first.or(actions.into_iter().find_map(|action| match action {

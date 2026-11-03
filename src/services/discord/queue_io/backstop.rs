@@ -273,6 +273,17 @@ async fn queued_lane_backlog_units(
     }
 }
 
+/// An input owner's queue is woken by its own events, never by a backstop timer.
+async fn owned(shared: &SharedData, channel_id: ChannelId) -> bool {
+    #[cfg(unix)]
+    return super::input_ingress::installed(&shared.mailbox(channel_id)).await == Ok(true);
+    #[cfg(not(unix))]
+    {
+        let _ = (shared, channel_id);
+        false
+    }
+}
+
 pub(in crate::services::discord) async fn arm_event_backstop_after_no_start_if_queue_nonempty(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -280,7 +291,7 @@ pub(in crate::services::discord) async fn arm_event_backstop_after_no_start_if_q
     outcome: IdleQueueKickoffChannelOutcome,
     reason: &'static str,
 ) -> bool {
-    if outcome.started {
+    if outcome.started || owned(shared, channel_id).await {
         return false;
     }
     let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
@@ -392,6 +403,9 @@ async fn run_single_slow_idle_queue_backstop(
     };
     // This snapshot evaluates all requests received before it; newer requests remain pending.
     slot.consume_requests();
+    if owned(shared, channel_id).await {
+        return None;
+    }
     let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
     let backlog_units =
         idle_queue_backstop_backlog_units(shared.as_ref(), provider, channel_id, &snapshot);
@@ -714,6 +728,11 @@ fn schedule_deferred_idle_queue_kickoff_inner(
         active: true,
     };
     super::task_supervisor::spawn_observed("deferred_idle_queue_kickoff", async move {
+        if owned(&shared, channel_id).await {
+            slot.consume_requests();
+            let _ = backlog_guard.release();
+            return;
+        }
         let initial_presleep = profile.initial_presleep();
         if !initial_presleep.is_zero() {
             tokio::select! {

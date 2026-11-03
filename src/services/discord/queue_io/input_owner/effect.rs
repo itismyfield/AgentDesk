@@ -19,6 +19,9 @@ pub(crate) struct PreparedPayload {
 pub(crate) enum Completion {
     /// Content and Enter went, whether or not the transcript receipt was observed.
     Submitted,
+    /// No key reached the pane for a reason a later look may clear; the original waits at the
+    /// front. Only the leaf answers this: `run` reports it as a NotSent once the owner holds it.
+    Held(String),
     /// No key reached the pane and the owner holds the proof; the original stays in custody.
     NotSent(String),
     /// C-s went but no content: a person's draft may be parked.
@@ -29,22 +32,58 @@ pub(crate) enum Completion {
 
 /// The refusal of a pane showing a modal: the original is held at the front, not retained.
 pub(crate) const MODAL: &str = "Modal";
-/// Refusals of a screen where Enter may not submit; each holds the original at the front too.
-const HELD: [&str; 3] = [MODAL, "ScreenUnread", "CopyMode"];
-/// Refusals before any key that the next turn boundary may clear; they hold the front as well.
-const WAITS: [&str; 5] = [
-    MODAL,
-    "ScreenUnread",
-    "CopyMode",
-    "PaneUnavailable",
-    "LockContended",
-];
 
-/// Whether a drive handoff was refused so that the front waits for its next opportunity.
-pub(crate) fn held(error: &str) -> bool {
-    WAITS
-        .iter()
-        .any(|reason| error == format!("{:?}", Completion::NotSent((*reason).into())))
+/// A refusal before any key, held at the front when a later look may clear it and retained when
+/// none can.
+pub(crate) fn refused(reason: String, waits: bool) -> Completion {
+    owner_input::vetoed(&reason);
+    match waits {
+        true => Completion::Held(reason),
+        false => Completion::NotSent(reason),
+    }
+}
+
+/// Whether a later look may clear a Claude veto; an input the entry refuses never submits.
+pub(crate) fn claude_waits(veto: busy_inject::Veto) -> bool {
+    use busy_inject::Veto::*;
+    match veto {
+        InvalidInput => false,
+        LockContended
+        | PaneUnavailable
+        | Modal
+        | NotBusy
+        | TranscriptUnavailable
+        | LoadFailed
+        | ScreenUnread
+        | CopyMode => true,
+    }
+}
+
+/// Whether a later look may clear a Codex veto; an input the entry refuses never submits.
+pub(crate) fn codex_waits(veto: crate::services::codex_tui::busy_inject::Veto) -> bool {
+    use crate::services::codex_tui::busy_inject::Veto::*;
+    match veto {
+        InvalidInput => false,
+        LockContended
+        | PaneUnavailable
+        | Modal
+        | ComposerUnread
+        | DraftNavigationUnproven
+        | DraftSelectionUnproven
+        | DraftCommandUnproven
+        | DraftPasteTransformUnproven
+        | DraftPlaceholderUnproven
+        | DraftNotFullyVisible
+        | DraftImagePositionUnproven
+        | NotSteerable
+        | NotBusy
+        | TurnUnknown
+        | TurnChanged
+        | TranscriptUnavailable
+        | LoadFailed
+        | LedgerFull
+        | AmbiguousIdenticalPending => true,
+    }
 }
 
 /// A refusal before any key, marked so a caller never takes it for a write that may have landed.
@@ -81,7 +120,7 @@ pub(crate) async fn run(
         })?;
     let completion = outcome.result.unwrap_or_else(Completion::WriteUncertain);
     if let Some(proof) = outcome.not_sent {
-        let held = matches!(&completion, Completion::NotSent(r) if WAITS.contains(&r.as_str()));
+        let held = matches!(&completion, Completion::Held(_));
         mailbox
             .v2_request(move |slot| {
                 let owner = slot.as_mut().ok_or("V2 not adopted")?;
@@ -93,7 +132,7 @@ pub(crate) async fn run(
             .await
             .map_err(unsent)?;
         return Ok(match completion {
-            Completion::NotSent(reason) => Completion::NotSent(reason),
+            Completion::Held(reason) | Completion::NotSent(reason) => Completion::NotSent(reason),
             other => Completion::NotSent(format!("{other:?}")),
         });
     }
@@ -106,7 +145,9 @@ pub(crate) async fn run(
         })
         .await?;
     Ok(match completion {
-        Completion::NotSent(reason) => Completion::WriteUncertain(format!("unproven: {reason}")),
+        Completion::Held(reason) | Completion::NotSent(reason) => {
+            Completion::WriteUncertain(format!("unproven: {reason}"))
+        }
         other => other,
     })
 }
@@ -178,14 +219,11 @@ impl BusyClaude {
             };
             Ok(match outcome {
                 Ok(Outcome::NotSent(veto)) => {
-                    let reason = format!("{veto:?}");
-                    owner_input::vetoed(&reason);
-                    if HELD.contains(&reason.as_str()) {
-                        let pane = self.pane.clone();
-                        let probe = Box::new(move || busy_inject::screen_submits(&pane));
-                        super::held_watch::arm(self.channel, probe);
+                    use busy_inject::Veto::{CopyMode, Modal, ScreenUnread};
+                    if matches!(veto, Modal | ScreenUnread | CopyMode) {
+                        arm_screen(self.channel, self.pane.clone());
                     }
-                    Completion::NotSent(reason)
+                    refused(format!("{veto:?}"), claude_waits(veto))
                 }
                 Ok(Outcome::Injected) => Completion::Submitted,
                 Ok(Outcome::Failed(WriteFailure::Stash)) => {
@@ -220,14 +258,26 @@ impl BusyClaude {
     }
 }
 
+/// Leaves a read of the Claude pane that refused under a screen Enter may not submit on, so its
+/// recovery wakes the drive.
+fn arm_screen(channel: u64, pane: busy_inject::Pane) {
+    super::held_watch::arm(
+        channel,
+        Box::new(move || busy_inject::screen_submits(&pane)),
+    );
+}
+
 /// An idle Claude tmux pane: main's warm submission, whose stash the owner scope admits.
-pub(crate) fn idle_claude(session: String) -> Leaf {
+pub(crate) fn idle_claude(pane: busy_inject::Pane, session: String, channel: u64) -> Leaf {
     use crate::services::claude_tui::guarded_outcome::SubmissionError;
     Box::new(move |frame| {
         match crate::services::claude_tui::input::send_warm_followup_owned(&session, &frame, None) {
             Ok(()) => Ok(Completion::Submitted),
-            Err(SubmissionError::Held(hold)) if hold.modal => Ok(Completion::NotSent(MODAL.into())),
-            Err(SubmissionError::Held(hold)) => Ok(Completion::NotSent(format!("held: {hold:?}"))),
+            Err(SubmissionError::Held(hold)) if hold.modal => {
+                arm_screen(channel, pane.clone());
+                Ok(Completion::Held(MODAL.into()))
+            }
+            Err(SubmissionError::Held(hold)) => Ok(Completion::Held(format!("held: {hold:?}"))),
             Err(error) => Ok(Completion::WriteUncertain(format!("{error:?}"))),
         }
     })
@@ -244,7 +294,7 @@ pub(crate) fn created(submit: owner_input::CreatedSubmit, writer: Option<String>
         }
         Ok(match submit(frame) {
             Ok(()) => Completion::Submitted,
-            Err(SubmissionError::Held(hold)) => Completion::NotSent(format!("held: {hold:?}")),
+            Err(SubmissionError::Held(hold)) => Completion::Held(format!("held: {hold:?}")),
             Err(error) => Completion::WriteUncertain(format!("{error:?}")),
         })
     })

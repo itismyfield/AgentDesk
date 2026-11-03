@@ -1,7 +1,8 @@
 //! Owned Codex delivery on either host, with physical refusals kept apart from uncertain writes.
 use std::path::PathBuf;
 
-use super::{Completion, Leaf};
+use super::{Completion, Leaf, codex_waits, refused};
+use crate::services::claude_tui::busy_inject::Screen;
 use crate::services::claude_tui::{busy_inject, owner_input};
 use crate::services::codex_tui::busy_inject as codex_inject;
 use crate::services::discord::health::CodexLedger;
@@ -34,13 +35,15 @@ impl CodexInput {
         Some(Completion::NotSent("frame_mismatch".into()))
     }
 
-    /// `inject` on main's request and ledger, its outcome or panic mapped as `run_codex` maps it.
+    /// `inject` on main's request and ledger, its outcome or panic mapped as `run_codex` maps it;
+    /// `probe` reads the pane once a modal refused it.
     fn run(
         &self,
         inject: impl FnOnce(
             &codex_inject::Request<'_>,
             &dyn codex_inject::Ledger,
         ) -> codex_inject::Outcome,
+        probe: impl FnMut() -> Screen + Send + 'static,
     ) -> Completion {
         let request = codex_inject::Request {
             session: &self.session,
@@ -63,10 +66,13 @@ impl CodexInput {
             input: self,
         };
         let inject = || inject(&request, &ledger);
-        map(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(inject)),
-            |detail| unconfirmed(self.channel, &self.session, &self.nonce, detail),
-        )
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(inject));
+        if let Ok(codex_inject::Outcome::NotSent(codex_inject::Veto::Modal)) = outcome {
+            super::super::held_watch::arm(self.channel, Box::new(probe));
+        }
+        map(outcome, |detail| {
+            unconfirmed(self.channel, &self.session, &self.nonce, detail)
+        })
     }
 }
 
@@ -105,9 +111,11 @@ impl BusyCodex {
                 return Ok(refused);
             }
             let (pane, timing) = (&self.pane, self.timing);
-            Ok(self
-                .input
-                .run(|request, ledger| codex_inject::inject(pane, request, ledger, timing)))
+            let probe = composer(self.pane.clone());
+            Ok(self.input.run(
+                |request, ledger| codex_inject::inject(pane, request, ledger, timing),
+                probe,
+            ))
         })
     }
 }
@@ -133,29 +141,49 @@ impl BusyCodexHerdr {
                 return Ok(Completion::NotSent(refused));
             }
             let busy = crate::services::codex::herdr_turn::busy::inject;
+            let target = self.target.clone();
+            let probe = move || match target.capture_ansi(-80) {
+                Some(capture) if codex_inject::screen::delivery_veto(&capture).is_none() => {
+                    Screen::Ready
+                }
+                Some(_) => Screen::Blocked,
+                None => Screen::Unknown,
+            };
             Ok(self
                 .input
-                .run(|request, ledger| busy(&self.target, request, ledger)))
+                .run(|request, ledger| busy(&self.target, request, ledger), probe))
         })
+    }
+}
+
+/// The owner's own read of a Codex composer: ready once a capture admits a paste.
+fn composer(pane: busy_inject::Pane) -> impl FnMut() -> Screen + Send + 'static {
+    move || match codex_inject::owned_composer_capture(&pane) {
+        Ok(_) => Screen::Ready,
+        Err(codex_inject::Veto::PaneUnavailable) => pane.lost(),
+        Err(_) => Screen::Blocked,
     }
 }
 
 /// An idle Codex tmux pane: one pre-key read of the composer, then the owner's pinned paste, settle
 /// and Enter; nothing is read after a key, and a paste of unknown effect is never resent.
-pub(crate) fn idle_codex(pane: busy_inject::Pane, session: String) -> Leaf {
+pub(crate) fn idle_codex(pane: busy_inject::Pane, session: String, channel: u64) -> Leaf {
     use crate::services::claude_tui::busy_inject::stash::Key;
     use crate::services::codex_tui::input::{
-        admit_codex_prompt_under_lock, try_with_composer_mutation_lock,
+        admit_owned_codex_prompt, try_with_composer_mutation_lock,
     };
-    let refused = |reason: String| {
-        owner_input::vetoed(&reason);
-        Completion::NotSent(reason)
-    };
+    use codex_inject::Veto;
+    let vetoed = |veto: Veto| refused(format!("{veto:?}"), codex_waits(veto));
     Box::new(move |frame| {
         let send = || {
-            let before = match admit_codex_prompt_under_lock(&session, &frame, false) {
-                Ok((_, before)) => before,
-                Err(error) => return refused(error),
+            let before = match admit_owned_codex_prompt(&session, &frame) {
+                Ok((_, before)) => Some(before),
+                Err(Ok(Veto::Modal)) => {
+                    super::super::held_watch::arm(channel, Box::new(composer(pane.clone())));
+                    return vetoed(Veto::Modal);
+                }
+                Err(Ok(veto)) => return vetoed(veto),
+                Err(Err(prompt)) => return refused(prompt, false),
             };
             let buffer = format!("agentdesk-owner-idle-{session}");
             let loaded = tempfile::NamedTempFile::new().ok().filter(|file| {
@@ -164,11 +192,11 @@ pub(crate) fn idle_codex(pane: busy_inject::Pane, session: String) -> Leaf {
                     && pane.ok(&["load-buffer", "-b", &buffer, &path]).is_some()
             });
             if loaded.is_none() {
-                return refused("load_failed".into());
+                return vetoed(Veto::LoadFailed);
             }
             if owner_input::ready_payload().is_err() || owner_input::start_payload().is_err() {
                 let _ = pane.ok(&["delete-buffer", "-b", &buffer]);
-                return refused("owner_refused".into());
+                return refused("owner_refused".into(), false);
             }
             owner_input::keyed();
             let paste = |target: &str| {
@@ -212,7 +240,7 @@ pub(crate) fn idle_codex(pane: busy_inject::Pane, session: String) -> Leaf {
             }
         };
         Ok(try_with_composer_mutation_lock(&session, send)
-            .unwrap_or_else(|| refused("lock_contended".into())))
+            .unwrap_or_else(|| vetoed(Veto::LockContended)))
     })
 }
 
@@ -224,11 +252,7 @@ fn map(
 ) -> Completion {
     use codex_inject::{Outcome, Unconfirmed};
     match outcome {
-        Ok(Outcome::NotSent(veto)) => {
-            let reason = format!("{veto:?}");
-            owner_input::vetoed(&reason);
-            Completion::NotSent(reason)
-        }
+        Ok(Outcome::NotSent(veto)) => refused(format!("{veto:?}"), codex_waits(veto)),
         Ok(Outcome::Injected) => Completion::Submitted,
         Ok(Outcome::Unconfirmed(Unconfirmed::PasteFailed)) => {
             Completion::WriteUncertain(alert("paste_failed"))

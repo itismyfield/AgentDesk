@@ -369,8 +369,10 @@ fn codex_adapter_panic_emits_one_owned_alert() {
     let pane = Pane::start(7_272_546);
     let (completion, events) =
         crate::services::observability::events::test_capture::capture_sync(|| {
-            pane.input(T)
-                .run(|_, _| panic!("injected busy adapter panic"))
+            pane.input(T).run(
+                |_, _| panic!("injected busy adapter panic"),
+                || Screen::Unknown,
+            )
         });
     assert_eq!(
         completion,

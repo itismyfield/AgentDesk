@@ -16,16 +16,11 @@ pub(crate) async fn recover(
     handle
         .v2_request(move |slot| slot.as_mut().ok_or("no input owner")?.tick(now))
         .await?;
-    // Requeued before the notice drain, so an input delivered next never gets a late resend ask.
-    let told = handle
+    // Requeued before the notice drain, so an input requeued here never gets a resend ask.
+    handle
         .v2_request(|slot| {
-            let moved = slot
-                .as_mut()
-                .ok_or("no input owner")?
-                .requeue_known_not_sent()?;
-            let told = moved.iter().filter(|entry| entry.notice.enqueued);
-            told.map(|entry| serde_json::to_value(&entry.input.identity).map_err(|e| e.to_string()))
-                .collect::<Result<Vec<_>, String>>()
+            let owner = slot.as_mut().ok_or("no input owner")?;
+            owner.requeue_known_not_sent().map(drop)
         })
         .await?;
     let synced = handle
@@ -38,16 +33,10 @@ pub(crate) async fn recover(
     if let Err(error) = synced {
         tracing::warn!(%error, channel, "input owner history projection failed after restart");
     }
-    let Some(pool) = pool else {
-        return Ok(0);
-    };
-    for identity in &told {
-        crate::services::discord::queue_io::retained_notice::requeued(
-            pool, provider, channel, identity,
-        )
-        .await?;
+    match pool {
+        Some(pool) => super::notice::drain(pool, handle, provider, channel).await,
+        None => Ok(0),
     }
-    super::notice::drain(pool, handle, provider, channel).await
 }
 
 /// When the owner's head is next due to be retained, for a backstop that wakes once at that time

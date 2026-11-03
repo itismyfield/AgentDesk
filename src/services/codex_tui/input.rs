@@ -1156,13 +1156,10 @@ pub(crate) fn admit_codex_prompt_under_lock(
 ) -> Result<(Vec<TuiInputAction>, Option<String>), String> {
     let actions = plan_prompt_submit(prompt)?;
     if crate::services::claude_tui::owner_input::active() {
-        let command = crate::services::platform::binary_resolver::runtime_command("tmux")
-            .map_err(|_| "PaneUnavailable".to_string())?;
-        let pane =
-            super::busy_inject::Pane::with_program(session_name, command.get_program().into());
-        let capture = super::busy_inject::owned_composer_capture(&pane)
-            .map_err(|veto| format!("{veto:?}"))?;
-        return Ok((owned_prompt_plan(prompt)?, Some(capture)));
+        let admitted = admit_owned_codex_prompt(session_name, prompt);
+        return admitted
+            .map(|(plan, capture)| (plan, Some(capture)))
+            .map_err(|refused| refused.map_or_else(|prompt| prompt, |veto| format!("{veto:?}")));
     }
     // The warm-flow post-wait probe cannot make the send atomic with tmux.
     // Take one final canonical snapshot immediately before mutating the
@@ -1182,6 +1179,21 @@ pub(crate) fn admit_codex_prompt_under_lock(
         return Err("Codex TUI warm follow-up final pane snapshot rejected submit".to_string());
     }
     Ok((actions, before))
+}
+
+/// The owner's admission of `prompt`: its plan and one composer capture, refused before any key
+/// by a typed pane veto, or by the prompt itself as `Err(Err(_))`.
+pub(crate) fn admit_owned_codex_prompt(
+    session_name: &str,
+    prompt: &str,
+) -> Result<(Vec<TuiInputAction>, String), Result<super::busy_inject::Veto, String>> {
+    use super::busy_inject::Veto;
+    plan_prompt_submit(prompt).map_err(Err)?;
+    let command = crate::services::platform::binary_resolver::runtime_command("tmux")
+        .map_err(|_| Ok(Veto::PaneUnavailable))?;
+    let pane = super::busy_inject::Pane::with_program(session_name, command.get_program().into());
+    let capture = super::busy_inject::owned_composer_capture(&pane).map_err(Ok)?;
+    Ok((owned_prompt_plan(prompt).map_err(Err)?, capture))
 }
 
 pub(super) fn submit_codex_followup_prompt_under_lock(

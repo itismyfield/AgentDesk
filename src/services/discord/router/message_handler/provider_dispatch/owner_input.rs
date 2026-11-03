@@ -794,13 +794,21 @@ fn run(
             }
             .leaf(),
         ),
-        target::Route::ClaudeIdle => (turn.prompt.into(), effect::idle_claude(session()?.into())),
+        target::Route::ClaudeIdle => (
+            turn.prompt.into(),
+            effect::idle_claude(
+                busy_inject::Pane::with_program(session()?, r.program),
+                session()?.into(),
+                turn.channel_id,
+            ),
+        ),
         target::Route::CodexIdle => (
             codex_herdr_frame(turn.prompt)
                 .map_err(|error| format!("NotSent(\"invalid_prompt: {error}\")"))?,
             effect::idle_codex(
                 busy_inject::Pane::with_program(session()?, r.program),
                 session()?.into(),
+                turn.channel_id,
             ),
         ),
         target::Route::ClaudeHerdrBusy => {

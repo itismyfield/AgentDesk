@@ -504,10 +504,11 @@ impl SnapshotV2 {
 }
 
 impl SnapshotV2 {
-    /// After an ungrouping moved queue items, every ticket receipt whose original is queued binds
-    /// to its new slot again, once each; the released unit's attempt binds go.
+    /// After queue items moved, every ticket receipt whose original is queued binds to the first
+    /// slot holding it again; the released unit's attempt binds go and a live head keeps its own.
     pub(super) fn rebind_queued(&mut self, released: &InputAttempt) {
         let attempt = released.attempt.as_ref();
+        let live = self.head_injection.as_ref().and_then(|h| h.attempt.clone());
         let contexts: Vec<(String, AdmissionContext)> = (self.admission_binds.iter())
             .filter_map(|b| Some((b.receipt.clone(), b.context.clone()?)))
             .collect();
@@ -516,7 +517,10 @@ impl SnapshotV2 {
             BindAt::Attempt { attempt: bound, .. } => Some(bound) != attempt,
             _ => true,
         });
-        let bound: Vec<&String> = self.admission_binds.iter().map(|b| &b.receipt).collect();
+        let bound: Vec<&String> = (self.admission_binds.iter())
+            .filter(|b| !matches!(&b.at, BindAt::Attempt { attempt: a, .. } if Some(a) == live.as_ref()))
+            .map(|b| &b.receipt)
+            .collect();
         let mut free: Vec<String> = (self.admission_receipts.iter())
             .filter(|r| r.starts_with("tk:") && !bound.contains(r))
             .cloned()
@@ -526,12 +530,15 @@ impl SnapshotV2 {
                 continue;
             };
             let suffix = format!(":{item}");
-            if let Some(at) = free.iter().position(|r| r.ends_with(&suffix)) {
+            while let Some(at) = free.iter().position(|r| r.ends_with(&suffix)) {
                 let receipt = free.remove(at);
                 let context = (contexts.iter())
                     .find(|(r, _)| *r == receipt)
                     .map(|(_, c)| c.clone());
-                let at = BindAt::Queued { index, item };
+                let at = BindAt::Queued {
+                    index,
+                    item: item.clone(),
+                };
                 self.admission_binds.push(AdmissionBind {
                     receipt,
                     at,
