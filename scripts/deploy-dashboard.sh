@@ -6,11 +6,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
 DASHBOARD_SRC="$REPO/dashboard"
+. "$SCRIPT_DIR/lib/dashboard_build_commit.sh"
 
 # Build
 echo "▸ Building dashboard..."
 cd "$DASHBOARD_SRC"
 npm run build --silent
+_dashboard_build_commit write "$REPO" "$DASHBOARD_SRC/dist"
 echo "  ✓ Built → $DASHBOARD_SRC/dist/"
 
 ADK_REL="${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"
@@ -21,7 +23,7 @@ DEST_OLD="$ADK_REL/dashboard/dist.old"
 # Atomic swap: copy to temp dir, then rename
 rm -rf "$DEST_TMP" "$DEST_OLD"
 mkdir -p "$DEST_TMP"
-cp -r "$DASHBOARD_SRC/dist/"* "$DEST_TMP/"
+cp -r "$DASHBOARD_SRC/dist/." "$DEST_TMP/"
 
 # Verify before swap
 if [[ ! -f "$DEST_TMP/index.html" ]]; then

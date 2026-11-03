@@ -199,7 +199,7 @@ raise SystemExit(bt.run(sys.argv[3:], path={str(self.root / 'token')!r}))
             source = (REPO / "scripts" / script).read_text()
             start = 'export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-15G}"'
             end = ('echo "[2/3] Dashboard' if script == "build-release.sh" else
-                   '# Rebuild dashboard so deploy never ships a stale dist.')
+                   '# Rebuild dashboard unless a newer deployed build is known.')
             self.assertEqual(source.count(start), 1)
             self.assertEqual(source.count(end), 1)
             fragment = source.split(start)[1].split(end)[0]
