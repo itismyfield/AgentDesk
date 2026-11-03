@@ -91,9 +91,8 @@ fn idle_turn(
     (result, receiver.try_iter().collect())
 }
 
-/// A person's own turn ends with two inputs queued for an idle Claude pane whose transcript only its
-/// runtime binding names: one boundary wake hands each on in order, pasted, entered and answered
-/// once, and the drive hands nothing more.
+/// After a person's turn ends, one wake hands two queued inputs to an idle pane whose transcript only
+/// its binding names: in order, each pasted, entered and answered once, then nothing more.
 #[test]
 fn an_idle_pane_takes_each_queued_front_once_through_its_own_observer() {
     let _root = crate::config::TestRuntimeRootGuard::new();
