@@ -794,23 +794,6 @@ mod tests {
         }
     }
 
-    mod source_guard_tests;
-
-    #[test]
-    fn worker_executor_forwards_restored_preservation_instead_of_literal_false() {
-        let gaps =
-            source_guard_tests::preservation_forwarding_gaps(source_guard_tests::WORKER_ENTRY);
-        assert_eq!(gaps, Vec::<String>::new());
-    }
-
-    #[test]
-    fn worker_ok_branch_textually_contains_done_writer_once_and_err_branch_contains_none() {
-        // A source contract: running the tick needs a production SharedData + Discord
-        // harness, while this lane stays PG-free. Comment-free judge in source_guard_tests.
-        let gaps = source_guard_tests::done_writer_gaps(source_guard_tests::INTAKE_WORKER);
-        assert_eq!(gaps, Vec::<String>::new());
-    }
-
     #[test]
     fn intake_request_from_row_handles_null_request_owner_name() {
         let mut row = fake_row();

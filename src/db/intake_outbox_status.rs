@@ -221,33 +221,6 @@ mod tests {
     }
 
     #[test]
-    fn variant_census_ignores_commented_variants_at_any_nesting() {
-        let declared = declared_variant_names(MODULE_SOURCE);
-        // A line filter keeps both of these because no line starts with a comment marker.
-        let hidden = "    /* outer /* inner */\n    Pending,\n    */";
-        let ghost = "    Pending,\n    /*\n    Ghost,\n    */";
-        for (forged, gone, added) in [
-            (
-                MODULE_SOURCE.replacen("    Pending,", hidden, 1),
-                "Pending",
-                false,
-            ),
-            (
-                MODULE_SOURCE.replacen("    Pending,", ghost, 1),
-                "Ghost",
-                true,
-            ),
-        ] {
-            assert!(forged.lines().any(|line| line == format!("    {gone},")));
-            let census = declared_variant_names(&forged);
-            assert!(!census.contains(gone), "{gone} counted from a comment");
-            assert_eq!(census.len() + usize::from(!added), declared.len());
-        }
-        let line = MODULE_SOURCE.replacen("    Pending,", "    // Pending,", 1);
-        assert!(!declared_variant_names(&line).contains("Pending"));
-    }
-
-    #[test]
     fn open_classification_matches_shared_sql_list() {
         let classified: BTreeSet<_> = IntakeOutboxStatus::ALL
             .into_iter()

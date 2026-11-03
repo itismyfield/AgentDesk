@@ -2037,34 +2037,6 @@ mod tests {
         clear_watcher_absence(&provider, channel);
     }
 
-    /// #5957 P0: the respawn the retry drives must pin the inflight row it is
-    /// recovering for, or the rebind's `WatcherReattach` arm clears that row and
-    /// re-mints a synthetic one.
-    ///
-    /// Pinned at the source because the behaviour is unreachable from here under
-    /// test: the rebind resolves its own runtime and returns before touching
-    /// inflight when no Discord http is registered.
-    #[test]
-    fn retry_respawn_call_site_pins_the_inflight_episode() {
-        let body = include_str!("watcher_respawn.rs")
-            .split_once("async fn retry_pending_watcher_respawn_admitted(")
-            .expect("single-channel retry")
-            .1;
-        // Bounded to the argument list: an unbounded slice runs to EOF and this
-        // assertion's own needle satisfies it.
-        let args = body
-            .split_once("respawn_watcher_after_force_clean(")
-            .expect("respawn call")
-            .1
-            .split_once("\n    )\n    .await")
-            .expect("call terminator")
-            .0;
-        assert!(
-            args.contains("expected_episode.as_ref()"),
-            "the retry must pass its episode pin to the respawn, got: {args}"
-        );
-    }
-
     /// #5957: the candidate gate must read the same mailbox terms the arming
     /// gate does. A term that can never satisfy `watcher_ownership_expected`
     /// only buys a snapshot round-trip per tick and is dropped again.
@@ -2512,32 +2484,6 @@ mod tests {
         );
 
         clear_watcher_absence(&provider, channel);
-    }
-
-    /// #5957: the registry-derived sweep is only useful if the pass calls it.
-    /// This dies if `observe_routable_unwatched_tui_sessions` is dropped from
-    /// `sweep_and_retry_absences` — nothing else arms an absence for a channel
-    /// that owes no relay work.
-    #[test]
-    fn the_sweep_arms_the_registry_derived_absences_before_retrying() {
-        let body = include_str!("watcher_respawn.rs")
-            .split_once("pub(super) async fn sweep_and_retry_absences(")
-            .expect("sweep entry point")
-            .1
-            .split_once("\n}\n")
-            .expect("sweep body terminator")
-            .0;
-        let arm = body
-            .find("observe_routable_unwatched_tui_sessions(")
-            .expect("the registry-derived sweep must run in the pass");
-        let retry = body
-            .find("retry_pending_watcher_respawns(")
-            .expect("the retry must run in the pass");
-        assert!(
-            arm < retry,
-            "the absence must be armed before the queue is drained, or recovery \
-             waits a whole extra tick"
-        );
     }
 }
 

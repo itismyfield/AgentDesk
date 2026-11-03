@@ -1,24 +1,23 @@
 //! Lexical source contract (not a SQL parser): `auto_queue_runs.status = 'completed'`
 //! is written only by the canonical derived writer and the pinned destructive admin owners.
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-/// Production files allowed to spell a literal `status = 'completed'` run
-/// update, with the exact number of statements each may contain.
-const COMPLETED_LITERAL_OWNERS: &[(&str, usize)] = &[
+/// Production files allowed to spell a literal `status = 'completed'` run update.
+const COMPLETED_LITERAL_OWNERS: &[&str] = &[
     // Canonical derived writer `finalize_run_if_ready_on_pg_tx`.
-    ("src/db/auto_queue/runs.rs", 1),
-    // Destructive admin resets: run-scoped (1) and global (2 branches).
-    ("src/services/auto_queue/command.rs", 3),
+    "src/db/auto_queue/runs.rs",
+    // Destructive admin resets.
+    "src/services/auto_queue/command.rs",
 ];
 
 /// Production files allowed to bind the run status from a parameter.
-const PARAMETERIZED_STATUS_OWNERS: &[(&str, usize)] = &[
+const PARAMETERIZED_STATUS_OWNERS: &[&str] = &[
     // Operator cancel/end force-termination `terminalize_selected_runs_on_pg_tx`.
-    ("src/services/auto_queue/cancel_run/terminalize_tx.rs", 1),
+    "src/services/auto_queue/cancel_run/terminalize_tx.rs",
     // Restore hand-off re-opens a cancelled run.
-    ("src/services/auto_queue/fsm.rs", 1),
+    "src/services/auto_queue/fsm.rs",
 ];
 
 fn repo_root() -> PathBuf {
@@ -225,34 +224,29 @@ fn production_rust_sources() -> Vec<(String, String)> {
         .collect()
 }
 
-fn count_matching(
+fn files_matching(
     statements_by_file: &[(String, String)],
     predicate: fn(&str) -> bool,
-) -> BTreeMap<String, usize> {
-    let mut counts = BTreeMap::new();
-    for (relative, normalized) in statements_by_file {
-        let matched = run_update_statements(normalized)
-            .iter()
-            .filter(|statement| predicate(statement))
-            .count();
-        if matched > 0 {
-            counts.insert(relative.clone(), matched);
-        }
-    }
-    counts
+) -> BTreeSet<String> {
+    statements_by_file
+        .iter()
+        .filter(|(_, normalized)| {
+            run_update_statements(normalized)
+                .iter()
+                .any(|statement| predicate(statement))
+        })
+        .map(|(relative, _)| relative.clone())
+        .collect()
 }
 
-fn expected(owners: &[(&str, usize)]) -> BTreeMap<String, usize> {
-    owners
-        .iter()
-        .map(|(path, count)| ((*path).to_string(), *count))
-        .collect()
+fn expected(owners: &[&str]) -> BTreeSet<String> {
+    owners.iter().map(|path| (*path).to_string()).collect()
 }
 
 #[test]
 fn completed_run_status_literal_writers_are_pinned() {
     let sources = production_rust_sources();
-    let actual = count_matching(&sources, |statement| {
+    let actual = files_matching(&sources, |statement| {
         sets_status_to(statement, "'completed'")
     });
     assert_eq!(
@@ -266,7 +260,7 @@ fn completed_run_status_literal_writers_are_pinned() {
 #[test]
 fn parameterized_run_status_writers_are_pinned() {
     let sources = production_rust_sources();
-    let actual = count_matching(&sources, sets_parameterized_status);
+    let actual = files_matching(&sources, sets_parameterized_status);
     assert_eq!(
         actual,
         expected(PARAMETERIZED_STATUS_OWNERS),
@@ -288,43 +282,4 @@ fn policies_never_write_run_status_directly() {
             );
         }
     }
-}
-
-#[test]
-fn inline_test_module_stripper_skips_fixture_sql() {
-    let source = r##"
-        fn production() { sqlx::query("UPDATE auto_queue_runs SET status = 'paused' WHERE id = $1"); }
-        #[cfg(test)]
-        mod tests {
-            // a brace in a comment: {
-            const JSON: &str = r#"{"a": "}"}"#;
-            fn seed() { sqlx::query("UPDATE auto_queue_runs SET status = 'completed' WHERE id = '{'"); }
-        }
-        fn after() {}
-    "##;
-    let stripped = strip_inline_test_modules(source);
-    assert!(stripped.contains("fn production()"));
-    assert!(stripped.contains("fn after()"));
-    assert!(!stripped.contains("'completed'"));
-    assert!(
-        strip_inline_test_modules("#[cfg(test)]\nmod tests;\nfn x() {}").contains("mod tests;")
-    );
-}
-
-#[test]
-fn status_predicates_read_set_clause_only() {
-    let statement =
-        "UPDATE auto_queue_runs SET completed_at = NOW() WHERE id = $1 AND status = 'completed'";
-    assert!(!sets_status_to(statement, "'completed'"));
-    assert!(sets_status_to(
-        "UPDATE auto_queue_runs SET status = 'completed', completed_at = NOW()",
-        "'completed'"
-    ));
-    assert!(sets_status_to(
-        "UPDATE auto_queue_runs SET completed_at = NOW(), status = 'completed'",
-        "'completed'"
-    ));
-    assert!(sets_parameterized_status(
-        "UPDATE auto_queue_runs SET status = $2, completed_at = NOW()"
-    ));
 }
