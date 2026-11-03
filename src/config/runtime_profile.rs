@@ -233,20 +233,6 @@ pub struct ClusterConfig {
     pub intake_routing: ClusterIntakeRoutingConfig,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub semaphores: BTreeMap<String, ClusterSemaphoreConfig>,
-    /// Epic #2285 / E3 + E4 + E5 gate. When `true` (default since E5 / #2412),
-    /// the session-bound `WatcherSupervisor` + `StreamRelay` infrastructure runs
-    /// in production with a Discord `RelaySink`, and the production tmux frame
-    /// producer (`services::discord::tmux::tmux_watcher`) pushes every chunk it reads
-    /// into the supervisor-owned relay via `RelayProducerRegistry`. The
-    /// session-bound sink owns Discord terminal delivery for eligible inflight
-    /// shapes (rebind-origin/adopted sessions and watcher-owned relays); the
-    /// legacy watcher remains a fallback for bridge-owned/no-inflight envelopes
-    /// and runtimes that have no Discord health registry. Setting the flag to
-    /// `false` skips the supervisor entirely and the producer-side lookups
-    /// become silent no-ops (the registry stays empty), restoring pre-E5
-    /// behavior.
-    #[serde(default = "default_session_bound_relay_enabled")]
-    pub session_bound_relay_enabled: bool,
 }
 
 fn default_gateway_lease_idle_expiry_secs() -> u64 {
@@ -275,7 +261,6 @@ impl Default for ClusterConfig {
             dispatch_routing: ClusterDispatchRoutingConfig::default(),
             intake_routing: ClusterIntakeRoutingConfig::default(),
             semaphores: BTreeMap::new(),
-            session_bound_relay_enabled: default_session_bound_relay_enabled(),
         }
     }
 }

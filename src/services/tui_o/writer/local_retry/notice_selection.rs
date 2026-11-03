@@ -39,9 +39,11 @@ pub(super) fn candidates(ledger: &LedgerState) -> impl Iterator<Item = Pending> 
     let from = first.as_ref().map_or(ledger.next_serial(), |root| {
         root.root_serial.saturating_add(1)
     });
-    first
-        .into_iter()
-        .chain((from..ledger.next_serial()).filter_map(move |serial| at(ledger, serial)))
+    first.into_iter().chain(
+        ledger
+            .budget_roots(from)
+            .filter_map(move |serial| at(ledger, serial)),
+    )
 }
 
 pub(super) fn for_piece(

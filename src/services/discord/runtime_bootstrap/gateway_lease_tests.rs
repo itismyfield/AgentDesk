@@ -219,43 +219,6 @@ fn never_yields_to_an_offline_or_malformed_preferred_node() {
     ));
 }
 
-/// Static check: every gateway lease unlock goes through `release_gateway` (Lost first), and the
-/// keepalive-failure drop closes admission first. The runtime paths need a live PG lock.
-#[test]
-fn every_gateway_lease_release_path_closes_o_admission_first() {
-    let source = include_str!("gateway_lease.rs");
-    let lines: Vec<&str> = source.lines().map(str::trim).collect();
-    let unlocks: Vec<&&str> = lines
-        .iter()
-        .filter(|line| line.contains(".unlock()"))
-        .collect();
-    assert_eq!(unlocks.len(), 2, "unexpected unlock sites: {unlocks:?}");
-    assert!(
-        unlocks
-            .iter()
-            .all(|line| line.contains("release_gateway(&gate, lease.unlock())"))
-    );
-    let dropped: Vec<usize> = (0..lines.len())
-        .filter(|&at| lines[at] == "current_lease = None;")
-        .collect();
-    assert_eq!(dropped.len(), 1);
-    assert!(
-        dropped
-            .iter()
-            .all(|&at| lines[at - 1] == "gate.uncertain();")
-    );
-    let handoff = lines
-        .iter()
-        .position(|line| line.contains("singleton lease taken by another instance"));
-    let fence = handoff.and_then(|at| {
-        lines[at..]
-            .iter()
-            .position(|line| line.starts_with("self_fence_gateway"))
-            .map(|off| at + off)
-    });
-    assert!(fence.is_some_and(|at| lines[at - 1] == "gate.lost();"));
-}
-
 fn snapshot_root() -> (
     tempfile::TempDir,
     crate::config_live_reload::TestLiveGuard,
@@ -385,4 +348,108 @@ async fn gateway_snapshot_preferred_waiter_uses_live_lease_ttl_pg() {
     pool.close().await;
     fixture.drop().await;
     assert!(waiting, "snapshot TTL keeps the known waiter online");
+}
+
+async fn execution_owner_rows(pool: &sqlx::PgPool, channel: u64) -> Vec<serde_json::Value> {
+    sqlx::query_scalar(
+        "SELECT to_jsonb(o) FROM intake_session_owners o
+          WHERE provider = 'claude' AND raw_channel_id = $1 ORDER BY generation",
+    )
+    .bind(channel.to_string())
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// Losing the gateway transport stops Discord intake, not native execution: the PG execution
+/// owner, the permit it grants and the channel's provider session all survive the self-fence.
+#[tokio::test]
+async fn gateway_self_fence_keeps_the_execution_owner_and_native_session_pg() {
+    use crate::services::tui_o::ownership::execution;
+    let root = crate::config::TestRuntimeRootGuard::new();
+    let fixture = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate().await;
+    let channel = 5_100_800_001;
+    execution::tests::admission(&pool, "claude", channel, "fenced-node").await;
+    let owners = execution_owner_rows(&pool, channel).await;
+    let read = || execution::read(&pool, "claude", channel, "fenced-node", || Ok(false));
+    let permit = read()
+        .await
+        .unwrap()
+        .expect("the admitted owner grants execution");
+
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let channel_id = serenity::ChannelId::new(channel);
+    let session = crate::services::discord::DiscordSession {
+        session_id: Some("native-session".into()),
+        memento_context_loaded: false,
+        memento_reflected: false,
+        current_path: None,
+        history: Vec::new(),
+        pending_uploads: Default::default(),
+        cleared: false,
+        channel_id: Some(channel),
+        channel_name: Some("fenced".into()),
+        category_name: None,
+        last_active: tokio::time::Instant::now(),
+        worktree: None,
+        born_generation: shared.restart.current_generation,
+    };
+    shared
+        .core
+        .lock()
+        .await
+        .sessions
+        .insert(channel_id, session);
+    shared
+        .bot_connected
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let http = Arc::new(serenity::Http::new("unused-token"));
+    let (shard_manager, _) =
+        serenity::gateway::ShardManager::new(serenity::gateway::ShardManagerOptions {
+            data: Arc::new(serenity::prelude::RwLock::new(
+                serenity::prelude::TypeMap::new(),
+            )),
+            event_handlers: vec![],
+            raw_event_handlers: vec![],
+            framework: Arc::new(std::sync::OnceLock::new()),
+            shard_index: 0,
+            shard_init: 0,
+            shard_total: 1,
+            ws_url: Arc::new(tokio::sync::Mutex::new("ws://127.0.0.1:1".into())),
+            cache: Arc::new(serenity::Cache::new()),
+            http,
+            intents: serenity::GatewayIntents::empty(),
+            presence: None,
+        });
+
+    self_fence_gateway(&shared, &ProviderKind::Claude, &shard_manager).await;
+
+    assert!(
+        !shared
+            .bot_connected
+            .load(std::sync::atomic::Ordering::SeqCst)
+            && root.path().join("restart_pending").exists(),
+        "premise: the self-fence ran"
+    );
+    assert_eq!(
+        execution_owner_rows(&pool, channel).await,
+        owners,
+        "transport loss must not end or transfer the execution owner"
+    );
+    let after = read()
+        .await
+        .unwrap()
+        .expect("the owner still grants execution");
+    assert!(after.same_execution(&permit), "{after:?} != {permit:?}");
+    assert_eq!(
+        shared.core.lock().await.sessions[&channel_id]
+            .session_id
+            .as_deref(),
+        Some("native-session"),
+        "transport loss must not clear the native provider session"
+    );
+    pool.close().await;
+    fixture.drop().await;
 }

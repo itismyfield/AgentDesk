@@ -177,24 +177,15 @@ pub(super) fn should_probe_tmux_liveness(
 }
 
 pub(super) fn build_watcher_streaming_edit_text(
-    status_panel_v2_enabled: bool,
     current_portion: &str,
     status_block: &str,
     provider: &ProviderKind,
 ) -> String {
-    if status_panel_v2_enabled {
-        crate::services::discord::formatting::build_status_panel_streaming_edit_text(
-            current_portion,
-            status_block,
-            provider,
-        )
-    } else {
-        let formatted = crate::services::discord::formatting::format_for_discord_with_status_panel(
-            current_portion,
-            provider,
-        );
-        build_streaming_placeholder_text(&formatted, status_block)
-    }
+    crate::services::discord::formatting::build_status_panel_streaming_edit_text(
+        current_portion,
+        status_block,
+        provider,
+    )
 }
 
 pub(super) fn watcher_streaming_rollover_should_skip(current_portion: &str) -> bool {
@@ -259,12 +250,8 @@ mod tests {
         assert!(raw_plan.frozen_chunk.contains("<subagent_notification>"));
         assert!(watcher_streaming_rollover_should_skip(&current_portion));
 
-        let rendered = build_watcher_streaming_edit_text(
-            false,
-            &current_portion,
-            status_block,
-            &ProviderKind::Codex,
-        );
+        let rendered =
+            build_watcher_streaming_edit_text(&current_portion, status_block, &ProviderKind::Codex);
         assert!(rendered.contains("Subagent completed"));
         assert!(!rendered.contains("<subagent_notification>"));
         assert!(!rendered.contains("</subagent_notification>"));
@@ -282,7 +269,6 @@ mod tests {
         assert!(watcher_streaming_rollover_should_skip(&current_portion));
 
         let rendered = build_watcher_streaming_edit_text(
-            false,
             &current_portion,
             "⠙ 계속 처리 중",
             &ProviderKind::Codex,
@@ -302,7 +288,6 @@ mod tests {
 </subagent_notification>"#;
 
         let rendered = build_watcher_streaming_edit_text(
-            false,
             current_portion,
             "⠙ 계속 처리 중",
             &ProviderKind::Codex,

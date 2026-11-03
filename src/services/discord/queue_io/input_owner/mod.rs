@@ -3,6 +3,7 @@
 pub(crate) mod admission;
 pub(crate) mod drive;
 pub(crate) mod effect;
+pub(crate) mod held_watch;
 pub(crate) mod ingress;
 pub(crate) mod notice;
 pub(crate) mod origin;

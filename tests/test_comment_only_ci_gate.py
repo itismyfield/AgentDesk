@@ -35,6 +35,7 @@ import rust_include_reads as includes  # noqa: E402
 
 SKIPPED_WHEN_COMMENT_ONLY = (
     "rust_build",
+    "base_compare",
     "rust_tests",
     "test_evidence",
     "lint",
@@ -44,7 +45,7 @@ SKIPPED_WHEN_COMMENT_ONLY = (
     "check_fast_cross_os_targets",
 )
 KEPT_WHEN_COMMENT_ONLY = ("scripts", "scripts_guards", "scripts_contracts")
-KEPT_FOR_INCLUDED_RUST = {"rust_build", "rust_tests", "test_evidence", "lint",
+KEPT_FOR_INCLUDED_RUST = {"rust_build", "base_compare", "rust_tests", "test_evidence", "lint",
                           "relay_authority_mutations", "pg15_owner_proof"}
 REQUIRED_CONTEXTS = (
     "Lint",
@@ -758,7 +759,7 @@ HEAVY_RAW = outputs(
     relay_contract=[], cross_os_rust=[RS], win32_build_token=[], script_check_files=[RS],
 )
 OVERRIDDEN = {"high_risk_recovery": "high_risk_recovery", "cross_os_rust": "cross_os_rust", "rust_tests": "rust_or_policy"}
-N_JOBS = ("rust_build", "rust_tests", "test_evidence")
+N_JOBS = ("rust_build", "base_compare", "rust_tests", "test_evidence")
 # The contexts each upstream job decides, written here independently of the judge's table.
 CONTEXTS_OF = {
     **{job: set(REQUIRED_CONTEXTS) for job in N_JOBS},

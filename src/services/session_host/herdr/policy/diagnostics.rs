@@ -90,8 +90,8 @@ pub(crate) fn record(
                 _ => format!("next_restart_policy_unverified:{reason:?}"),
             },
             match reason {
-                Unverified::Peer => {
-                    "On the execution node, start bare herdr if absent and recheck the configured socket; AgentDesk never starts or restarts it."
+                Unverified::Peer | Unverified::Changed => {
+                    "The herdr peer on this socket could not be verified. See `autostart` for server presence and start eligibility; AgentDesk never stops or restarts a live server."
                 }
                 Unverified::Unsupported => {
                     "Use a stable herdr release of protocol 22, version 0.9.3 or newer, on the execution node, then retry; `server` shows what the socket reported."
@@ -143,15 +143,20 @@ pub(crate) fn record(
     value
 }
 
-/// One next-restart check of `socket` with a fresh cache; it writes no config or file and starts no server.
+/// One next-restart check of `socket` with a fresh cache, and whether a server answers there and
+/// could be started, as a dry run; it writes no config or file and starts no server.
 #[cfg(unix)]
-pub(crate) async fn probe(socket: &Path) -> Result<Value, String> {
+pub(crate) async fn probe(
+    socket: &Path,
+    env: super::super::autostart::Environment,
+) -> Result<Value, String> {
     let source = super::super::launch_host::probe_source(socket)?;
     let cache = ProofCache::default();
     let result = cache.next_restart(source, &super::LocalChecker).await;
     let mut value = record(socket, &cache, &result);
     value["socket"] = socket.display().to_string().into();
     value["observation"] = "probe_once; nothing outlives this process".into();
+    value["autostart"] = super::super::autostart::assess(socket, env).await;
     Ok(value)
 }
 
@@ -165,6 +170,10 @@ pub(crate) fn snapshot(socket: &Path) -> Value {
     }));
     if let Some(checker) = observed.checker.get(socket) {
         value["checker"] = checker_excerpt(checker).into();
+    }
+    #[cfg(unix)]
+    if let Some(autostart) = super::super::autostart::last(socket) {
+        value["autostart"] = autostart;
     }
     value
 }

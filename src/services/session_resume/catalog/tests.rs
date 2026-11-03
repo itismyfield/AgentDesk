@@ -51,6 +51,7 @@ impl Fixture {
             live,
             Some(&self.home),
             partial,
+            Instant::now() + Duration::from_secs(2),
         )
     }
 }
@@ -272,5 +273,51 @@ fn prompt_fallback_supports_text_blocks_and_unicode_choice_limits() {
             i as i64,
         );
     }
-    assert_eq!(f.choices(None, &HashSet::new(), "").len(), 25);
+    assert_eq!(f.choices(None, &HashSet::new(), "").len(), 31);
+}
+
+#[test]
+fn short_discovery_deadline_preserves_partial_results() {
+    let f = Fixture::new();
+    for n in 1..31 {
+        f.transcript(
+            &f.current,
+            &uuid::Uuid::from_u128(n).to_string(),
+            "{}\n",
+            n as i64,
+        );
+    }
+    let _delay = delay_previews_for_tests(f.home.clone(), Duration::from_millis(30));
+    let start = Instant::now();
+    let result = choices(
+        f.current.to_str().unwrap(),
+        None,
+        &HashSet::new(),
+        Some(&f.home),
+        "",
+        start + Duration::from_millis(120),
+    );
+    assert!(
+        !result.is_empty() && result.len() < 25,
+        "partial result count={}",
+        result.len()
+    );
+    assert!(start.elapsed() < Duration::from_millis(500));
+}
+
+#[test]
+fn sibling_deadline_is_checked_before_filtering_unreadable_entries() {
+    let visited = std::cell::Cell::new(0);
+    let entries = (0..1000).map(|_| {
+        visited.set(visited.get() + 1);
+        Err(std::io::Error::other("unreadable sibling"))
+    });
+    let found =
+        scoped_worktree_entries(Path::new("/work/current"), entries, Some(Instant::now())).count();
+    assert_eq!(found, 0);
+    assert!(
+        visited.get() <= 1,
+        "expired discovery scanned {} entries before checking its deadline",
+        visited.get()
+    );
 }

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { readCachedGet } from "./httpClient";
-import { campaignNodeLiveSchema, campaignSchema, getCampaigns, setCampaignAutoQueue, updateCampaignNode } from "./campaigns";
+import { campaignNodeLiveSchema, campaignSchema, getCampaigns, isRejectedSave, setCampaignAutoQueue, updateCampaignNode } from "./campaigns";
 
 const timestamp = "2026-09-20T00:00:00Z";
 const campaignPayload = {
@@ -91,7 +91,44 @@ it("includes older campaigns beyond the first page with validated pagination met
   expect(result.campaigns).toHaveLength(101);
   expect(result.campaigns.at(-1)?.id).toBe("older-campaign");
   expect(result.live).toEqual({ "0": { review: live } });
-  expect(fetchMock.mock.calls[1][0]).toBe("/api/campaigns?limit=100&offset=100");
+  expect(fetchMock.mock.calls[1][0]).toBe("/api/campaigns?limit=100&offset=100&view=summary");
+});
+
+it("restores the fields a summary copy left out before any save, so the ledger keeps its evidence", async () => {
+  const summary = campaignSchema.parse({
+    ...campaignPayload,
+    nodes_partial: true,
+    nodes: campaignPayload.nodes.map(({ evidence_records: _omitted, ...node }) => node),
+  });
+  const stored = campaignSchema.parse({
+    ...campaignPayload,
+    nodes: campaignPayload.nodes.map((node) => ({ ...node, details: `${node.id} notes`, evidence: ["cargo test"], findings: ["P2"] })),
+  });
+  fetchMock.mockImplementation(async () => response({ campaign: stored }));
+
+  await updateCampaignNode(summary, { ...summary.nodes[0], next_action: "Inspect CI" });
+  expect(fetchMock.mock.calls.map(([url, options]) => `${options?.method ?? "GET"} ${url}`))
+    .toEqual(["GET /api/campaigns/release-one", "PUT /api/campaigns/release-one"]);
+  const body = JSON.parse(fetchMock.mock.calls[1][1]?.body as string);
+  expect(body.expected_revision).toBe(7);
+  expect(body.nodes[0]).toMatchObject({ next_action: "Inspect CI", details: "review notes", evidence: ["cargo test"], findings: ["P2"] });
+  expect(body.nodes[0].evidence_records).toEqual(stored.nodes[0].evidence_records);
+  expect(body.nodes[1].details).toBe("deploy notes");
+  expect(body).not.toHaveProperty("nodes_partial");
+
+  fetchMock.mockClear();
+  await setCampaignAutoQueue(summary, true);
+  const autoBody = JSON.parse(fetchMock.mock.calls[1][1]?.body as string);
+  expect(autoBody.nodes.map((node: { details: string }) => node.details)).toEqual(["review notes", "deploy notes"]);
+});
+
+it("reports a summary save whose pre-read failed as never sent", async () => {
+  const summary = campaignSchema.parse({ ...campaignPayload, nodes_partial: true });
+  fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
+  const failure = await setCampaignAutoQueue(summary, true).catch((error: unknown) => error);
+  expect(isRejectedSave(failure)).toBe(true);
+  expect((failure as Error).message).toContain("Failed to fetch");
+  expect(fetchMock.mock.calls.every(([, options]) => (options?.method ?? "GET") === "GET")).toBe(true);
 });
 
 it("saves against the edited revision while preserving sibling tasks and nullable evidence fields", async () => {

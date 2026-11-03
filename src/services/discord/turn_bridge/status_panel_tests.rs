@@ -2,8 +2,8 @@ use super::super::complete_bridge_terminal_footer_or_status_panel_with_sniffer;
 use super::{
     ChannelId, InflightTurnState, MessageId, ProviderKind, StatusPanelCompletionAction,
     bridge_epilogue_identity_guards_inflight_clear, complete_status_panel_v2,
-    migrate_separate_status_panel_to_footer, should_open_long_running_placeholder_controller,
-    status_panel_completion_action, status_panel_completion_edit_aliases_newer_turn,
+    migrate_separate_status_panel_to_footer, status_panel_completion_action,
+    status_panel_completion_edit_aliases_newer_turn,
     status_panel_completion_ready_after_terminal_body, status_panel_message_id_for_turn,
     status_panel_message_missing_error, status_panel_wip_inflight_for_completion,
 };
@@ -269,45 +269,8 @@ fn a_synthetic_id_edit_error_reads_as_a_missing_message() {
     ));
 }
 
-#[test]
-fn status_panel_v2_disables_long_running_placeholder_controller() {
-    let anchored = (ChannelId::new(7_507_501), MessageId::new(42));
-    assert!(!should_open_long_running_placeholder_controller(
-        true, anchored
-    ));
-    assert!(should_open_long_running_placeholder_controller(
-        false, anchored
-    ));
-}
-
-/// A turn-mode turn without an anchor opens no long-running card; any other turn still may.
-#[test]
-fn a_turn_mode_turn_without_an_anchor_opens_no_long_running_card() {
-    let channel = ChannelId::new(7_507_502);
-    let sentinel =
-        crate::services::discord::turn_bridge::current_message_anchor::detached_current_msg_id_from_durable(0);
-    assert!(should_open_long_running_placeholder_controller(
-        false,
-        (channel, sentinel)
-    ));
-    let _turn = crate::services::tui_o::turn_mode::TestConfirmation::new(channel.get());
-    assert!(!should_open_long_running_placeholder_controller(
-        false,
-        (channel, sentinel)
-    ));
-    assert!(should_open_long_running_placeholder_controller(
-        false,
-        (channel, MessageId::new(42))
-    ));
-}
-
 fn make_status_panel_v2_shared_for_tests() -> Arc<crate::services::discord::SharedData> {
-    let mut shared = super::super::make_shared_data_for_tests();
-    let ui = &mut Arc::get_mut(&mut shared)
-        .expect("fresh test shared data should be uniquely owned")
-        .ui;
-    ui.status_panel_v2_enabled = true;
-    shared
+    super::super::make_shared_data_for_tests()
 }
 
 fn make_two_message_status_panel_shared_for_tests() -> Arc<crate::services::discord::SharedData> {
@@ -1566,7 +1529,6 @@ async fn single_message_mode_completion_leaves_singleton_store_untouched() {
         let ui = &mut Arc::get_mut(&mut shared)
             .expect("fresh test shared data should be uniquely owned")
             .ui;
-        ui.status_panel_v2_enabled = true;
         ui.two_message_panel_enabled = false;
     }
     let gateway = StatusPanelFallbackGateway::default();

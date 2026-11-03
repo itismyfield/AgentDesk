@@ -1,8 +1,5 @@
 use super::*;
 
-#[path = "guard_tests/source_guard_tests.rs"]
-mod source_guard_tests;
-
 #[tokio::test]
 async fn same_slot_originals_overlap_and_both_exclude_recovery() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -248,8 +245,6 @@ async fn t08_fallback_death_respawn_preserves_row_one_reader_and_body_before_nex
         let provider = ProviderKind::Codex;
         let mut shared = discord::make_shared_data_for_tests();
         let data = Arc::get_mut(&mut shared).unwrap();
-        data.ui.status_panel_v2_enabled = false;
-        data.ui.placeholder_live_events_enabled = false;
         data.provider = provider.clone();
         let token = Arc::new(CancelToken::new());
         let mut row = row(channel.get(), &token);
@@ -792,18 +787,6 @@ async fn row_loss_keeps_original_registration_and_blocks_self_heal_until_both_ow
         "old drop must not unregister successor"
     );
     drop(successor);
-}
-
-#[test]
-fn original_and_restore_source_coverage_preserves_admission_order() {
-    use source_guard_tests::{ENTRIES, RESTORE, admission_order_gaps, restore_reader_gaps};
-    for (source, entry, call, create) in ENTRIES {
-        assert_eq!(
-            admission_order_gaps(source, entry, call, create),
-            Vec::<String>::new()
-        );
-    }
-    assert_eq!(restore_reader_gaps(RESTORE), Vec::<String>::new());
 }
 
 #[tokio::test]

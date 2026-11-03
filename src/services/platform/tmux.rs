@@ -106,7 +106,7 @@ pub(crate) enum SessionPresence {
 /// Transport, socket, permission, timeout, and unexpected tmux errors remain
 /// distinguishable from a confirmed missing session so destructive callers can
 /// fail closed.
-fn classify_has_session_output(output: &Output) -> SessionPresence {
+pub(crate) fn classify_has_session_output(output: &Output) -> SessionPresence {
     if output.status.success() {
         return SessionPresence::Present;
     }

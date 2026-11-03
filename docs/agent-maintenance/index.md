@@ -26,6 +26,9 @@
   list. Use this before adding logic to any new file.
 - [`comment-language-policy.md`](comment-language-policy.md) — authoring policy
   for the language and review scope of code comments and doc-comments.
+- [`test-policy.md`](test-policy.md) — authoring policy for tests: assert
+  behavior at public boundaries, no source-text assertions, no committed mutant
+  switches (#7344).
 - [`dispatch-mod-extraction-plan.md`](dispatch-mod-extraction-plan.md) —
   subdomain map and ordered extraction issues for shrinking
   `src/dispatch/mod.rs` into a facade (#1785).
@@ -37,6 +40,8 @@
 - [`idle-kill-owner-recovery.md`](idle-kill-owner-recovery.md) — how idle-kill
   skips and later recovers remote session owners whose origin or heartbeat is
   missing.
+- [`input-owner-entry-notes.md`](input-owner-entry-notes.md) — input owner readiness,
+  launch outcomes and adjacent entries (#7539).
 - [`kanban-extraction-plan.md`](kanban-extraction-plan.md) — subdomain map and
   ordered extraction issues for shrinking the former `src/kanban.rs` (removed)
   into the `src/kanban/` facade (#1787).

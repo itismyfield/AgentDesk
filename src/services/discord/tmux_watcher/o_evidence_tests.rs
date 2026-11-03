@@ -33,6 +33,8 @@ struct EvidenceFrame {
     seed: RestoredResponseSeed,
     body: Option<String>,
     fresh: bool,
+    /// The live (dev, ino) the watcher stats; the fixture's stored source when unset.
+    file: Option<(u64, u64)>,
     /// Inflight rows stored at each outer poll before this frame; `None` keeps the fixture's nonce.
     polls: Option<Vec<Option<InflightTurnState>>>,
 }
@@ -46,6 +48,7 @@ impl From<(u64, u64)> for EvidenceFrame {
             seed: RestoredResponseSeed::default(),
             body: None,
             fresh: true,
+            file: None,
             polls: None,
         }
     }
@@ -103,6 +106,7 @@ async fn plan(
         seed,
         body,
         fresh,
+        file,
         polls,
     } = frame.into();
     let watcher_nonce = match polls {
@@ -124,7 +128,7 @@ async fn plan(
         &output,
     );
     let context = TerminalRelayPlanContext {
-        evidence_source: Some((f.source.dev, f.source.ino)),
+        evidence_source: Some(file.unwrap_or((f.source.dev, f.source.ino))),
         http,
         shared,
         channel_id: ChannelId::new(f.row.channel_id),
@@ -1344,6 +1348,29 @@ enum HeadlessOutbox {
     DiscardedSeedOwnRow,
     /// Preflight stripped the seed; its turn's recent row no longer speaks for the late body.
     StaleSeedAfterDiscardRecentRow,
+    /// The next turn's frame while the watcher is still bound to this turn; the next turn's row
+    /// starts at the frame and only this turn's row was sent.
+    BoundOtherTurnFrame,
+    /// This turn's frame, bound to it, with the next turn's row starting after the frame.
+    BoundTurnFrameThenOtherInflight,
+    /// The bodiless handed-off seed is still held when the next turn starts at the frame.
+    SeedThenOtherTurnStart,
+    /// The bodiless seed is held; this turn leaves only non-body records before the next turn's
+    /// prompt and body inside the same frame.
+    SeedThenOwnNonBodyThenOtherTurn,
+    /// This turn's body is consumed; the next turn starts where consumption ended and its records
+    /// wait in the unprocessed tail.
+    BoundTurnFrameThenOtherInTail,
+    /// This turn's late body, then the next turn's request records in the same consumed frame.
+    BoundTurnFrameThenOtherInFrame,
+    /// This turn's body records straddle the next turn's start; its sent row has the whole body.
+    BoundBodySplitAcrossOtherTurnStart,
+    /// The bodiless seed's turn ends where the next turn starts; the watcher bound that next turn,
+    /// whose body follows its start and whose row alone was sent.
+    SeedRefusedBoundOtherTurnSent,
+    /// A later batch: the seed's body ends before the next turn starts, the watcher bound that
+    /// next turn, and only the next turn's row was sent; the seed's turn is chosen first.
+    SeedAndBoundValidOtherTurnSentOnly,
 }
 
 /// The watcher's terminal order: preflight may strip the restored seed before the planner reads it.
@@ -1490,7 +1517,24 @@ async fn headless_restart_frame(
             | O::ClearedRowOtherTurnOnly
             | O::ClearedRowBothTurnsOtherNewest
     );
-    let frame_body = cleared || matches!(outbox, O::FrameBody | O::DiscardedSeedOwnRow);
+    // The next turn's prompt opens the frame and the body after it is that turn's.
+    let other_turn_frame = matches!(
+        outbox,
+        O::BoundOtherTurnFrame | O::SeedThenOtherTurnStart | O::SeedRefusedBoundOtherTurnSent
+    );
+    let frame_body = cleared
+        || other_turn_frame
+        || matches!(
+            outbox,
+            O::FrameBody
+                | O::DiscardedSeedOwnRow
+                | O::BoundTurnFrameThenOtherInflight
+                | O::SeedThenOwnNonBodyThenOtherTurn
+                | O::BoundTurnFrameThenOtherInTail
+                | O::BoundTurnFrameThenOtherInFrame
+                | O::BoundBodySplitAcrossOtherTurnStart
+                | O::SeedAndBoundValidOtherTurnSentOnly
+        );
     let answer_age = if late { 60 } else { 1 };
     let (answer, seed_body) = match outbox {
         O::ToolTurn | O::ToolTurnLeadingNewline => {
@@ -1564,12 +1608,32 @@ async fn headless_restart_frame(
     .map(line)
     .concat();
     let body_record = assistant("answer", text(&body), Some(1));
+    // The body texts the frame's records write, in order.
+    let split_tail = "[E2E:E1:MORE]";
+    let frame_texts = if outbox == O::BoundBodySplitAcrossOtherTurnStart {
+        vec![body.as_str(), split_tail]
+    } else {
+        vec![body.as_str()]
+    };
+    let own_tail = line(
+        serde_json::json!({"type":"system","subtype":"informational","content":"A tail","timestamp":at(1)}),
+    );
     let frame = match outbox {
+        _ if other_turn_frame => requests.clone() + &body_record,
+        O::SeedThenOwnNonBodyThenOtherTurn => own_tail.clone() + &requests + &body_record,
+        O::BoundTurnFrameThenOtherInTail => body_record.clone(),
+        O::BoundBodySplitAcrossOtherTurnStart => {
+            body_record.clone() + &requests + &assistant("answer-more", text(split_tail), Some(1))
+        }
         _ if frame_body => body_record.clone() + &requests,
         _ if late => assistant("late", text(&body), Some(1)) + &requests,
-        _ => requests,
+        _ => requests.clone(),
     };
-    let next = user("E2");
+    let next = if outbox == O::BoundTurnFrameThenOtherInTail {
+        requests.clone() + &user("E2")
+    } else {
+        user("E2")
+    };
     let path = f.root.join(format!("restart-{channel}.jsonl"));
     std::fs::write(&path, format!("{previous}{turn}{frame}{next}")).unwrap();
     f.source =
@@ -1595,7 +1659,16 @@ async fn headless_restart_frame(
             file: crate::services::cluster::stream_relay::SourceFileIdentity::from_open_file(&file),
         }
     });
-    let mut restored = (outbox != O::FrameBody).then(|| {
+    let mut restored = (!matches!(
+        outbox,
+        O::FrameBody
+            | O::BoundOtherTurnFrame
+            | O::BoundTurnFrameThenOtherInflight
+            | O::BoundTurnFrameThenOtherInTail
+            | O::BoundTurnFrameThenOtherInFrame
+            | O::BoundBodySplitAcrossOtherTurnStart
+    ))
+    .then(|| {
         restored_watcher_turn_from_inflight(&f.row, &session, true)
             .unwrap()
             .read_by_producer(read, handoff_end, &session)
@@ -1626,16 +1699,21 @@ async fn headless_restart_frame(
         "claude", &session, channel,
     );
     let mut full_response = stream_seed.full_response;
-    if late || frame_body {
+    let frame_texts = if late || frame_body {
+        frame_texts
+    } else {
+        Vec::new()
+    };
+    for text in frame_texts {
         if !full_response.is_empty()
             && crate::services::discord::semantic_boundaries::semantic_chunk_separator_needed(
                 &full_response,
-                &body,
+                text,
             )
         {
             full_response.push_str("\n\n");
         }
-        full_response.push_str(&body);
+        full_response.push_str(text);
     }
     f.row.last_offset = handoff_end + frame.len() as u64;
     let banner = format!("⚙ session restored\n\n{body}");
@@ -1645,7 +1723,14 @@ async fn headless_restart_frame(
     successor.turn_nonce = Some(format!("successor-{channel}"));
     successor.user_msg_id = f.row.user_msg_id + 1;
     successor.current_msg_id = 0;
-    successor.turn_start_offset = Some(handoff_end + body_record.len() as u64);
+    successor.turn_start_offset = Some(match outbox {
+        _ if other_turn_frame => handoff_end,
+        O::BoundTurnFrameThenOtherInflight => handoff_end + (frame.len() + next.len()) as u64,
+        O::SeedThenOwnNonBodyThenOtherTurn => handoff_end + own_tail.len() as u64,
+        // Where consumption ended: the frame is only this turn's body.
+        O::BoundTurnFrameThenOtherInTail => handoff_end + frame.len() as u64,
+        _ => handoff_end + body_record.len() as u64,
+    });
     let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
         channel,
         crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
@@ -1677,7 +1762,13 @@ async fn headless_restart_frame(
         | O::ToolThenTextOneRecord
         | O::BlankThinking => vec![(seed_body.as_str(), own, "headless_turn", "sent", 0)],
         O::StaleSeedAfterDiscard => vec![(body.as_str(), own, "headless_turn", "sent", 59)],
-        O::OtherTurnOnly | O::ClearedRowOtherTurnOnly => {
+        O::BoundBodySplitAcrossOtherTurnStart => {
+            vec![(full_response.as_str(), own, "headless_turn", "sent", 0)]
+        }
+        O::OtherTurnOnly
+        | O::ClearedRowOtherTurnOnly
+        | O::SeedRefusedBoundOtherTurnSent
+        | O::SeedAndBoundValidOtherTurnSentOnly => {
             vec![(body.as_str(), other, "headless_turn", "sent", 0)]
         }
         O::BothTurnsOtherNewest | O::ClearedRowBothTurnsOtherNewest => vec![
@@ -1696,7 +1787,7 @@ async fn headless_restart_frame(
             Some(turn) => {
                 let crate::services::message_outbox::OutboxEnqueueOutcome::Enqueued { id } =
                     crate::services::discord::turn_bridge::enqueue_headless_turn_row_for_test(
-                        &shared, turn, content,
+                        &shared, turn, None, content,
                     )
                     .await
                 else {
@@ -1744,7 +1835,11 @@ async fn headless_restart_frame(
         | O::BlankThinking
         | O::BothTurnsOtherNewest
         | O::FrameBodyAfterBridgeClearedRow
-        | O::ClearedRowBothTurnsOtherNewest => Vec::new(),
+        | O::ClearedRowBothTurnsOtherNewest
+        | O::BoundTurnFrameThenOtherInflight
+        | O::BoundTurnFrameThenOtherInTail
+        | O::BoundTurnFrameThenOtherInFrame
+        | O::SeedRefusedBoundOtherTurnSent => Vec::new(),
         _ => vec![full_response.clone()],
     };
     let expected = if late && expected.len() == 1 {
@@ -1753,8 +1848,24 @@ async fn headless_restart_frame(
         expected
     };
     // The bridge's row was still stored at the watcher's last poll, unless it was cleared first.
-    let (polls, before) = if cleared {
+    let (polls, before) = if cleared
+        || matches!(
+            outbox,
+            O::SeedThenOtherTurnStart
+                | O::SeedThenOwnNonBodyThenOtherTurn
+                | O::SeedRefusedBoundOtherTurnSent
+                | O::SeedAndBoundValidOtherTurnSentOnly
+        ) {
         (vec![None, Some(successor.clone())], Some(successor))
+    } else if matches!(
+        outbox,
+        O::BoundOtherTurnFrame
+            | O::BoundTurnFrameThenOtherInflight
+            | O::BoundTurnFrameThenOtherInTail
+            | O::BoundTurnFrameThenOtherInFrame
+            | O::BoundBodySplitAcrossOtherTurnStart
+    ) {
+        (vec![Some(f.row.clone())], Some(successor))
     } else if matches!(
         outbox,
         O::DiscardedSeedOwnRow | O::StaleSeedAfterDiscardRecentRow
@@ -1773,12 +1884,18 @@ async fn headless_restart_frame(
         before,
         EvidenceFrame {
             turn_start: handoff_end,
-            batch_start: handoff_end,
+            // A later batch starts after the frame, so the watcher bound the turn started inside it.
+            batch_start: if outbox == O::SeedAndBoundValidOtherTurnSentOnly {
+                handoff_end + frame.len() as u64
+            } else {
+                handoff_end
+            },
             tail: next,
             seed,
             body: Some(full_response),
             fresh: late || frame_body,
             polls: Some(polls),
+            file: None,
         },
     )
     .await;
@@ -1870,6 +1987,111 @@ async fn headless_outbox_row_covers_only_its_producer_turn_pg() {
         mismatches.extend(headless_restart_frame(&pool, 765_300 + index as u64, outbox).await);
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
+    pool.close().await;
+    db.drop().await;
+}
+
+/// A held turn nonce, bound or seeded, speaks only for frames before the next turn's row starts.
+#[tokio::test(flavor = "current_thread")]
+async fn stale_turn_nonce_never_covers_the_next_turns_frame_pg() {
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        "i7666_stale_turn_nonce",
+        "stale headless turn nonce evidence",
+    )
+    .await;
+    let pool = db.connect_and_migrate().await;
+    use HeadlessOutbox as O;
+    let mut mismatches = Vec::new();
+    for (index, outbox) in [
+        O::BoundOtherTurnFrame,
+        O::BoundTurnFrameThenOtherInflight,
+        O::SeedThenOtherTurnStart,
+        O::FrameBodyAfterBridgeClearedRow,
+        O::SeedThenOwnNonBodyThenOtherTurn,
+        O::BoundTurnFrameThenOtherInTail,
+        O::BoundTurnFrameThenOtherInFrame,
+        O::BoundBodySplitAcrossOtherTurnStart,
+        O::SeedRefusedBoundOtherTurnSent,
+        O::SeedAndBoundValidOtherTurnSentOnly,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        mismatches.extend(headless_restart_frame(&pool, 766_600 + index as u64, outbox).await);
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+    pool.close().await;
+    db.drop().await;
+}
+
+/// After a reboot renumbers the transcript volume's dev, a soft terminal O already posted stays
+/// proven through the source O stored and records nothing; a body O never posted still records.
+#[tokio::test(flavor = "current_thread")]
+async fn renumbered_source_o_posted_terminal_records_nothing_but_unposted_body_records_pg() {
+    use crate::services::tui_o::shadow::capture::{file_identity, renumber};
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        "i7441_renumber",
+        "renumbered O terminal evidence",
+    )
+    .await;
+    let pool = db.connect_and_migrate().await;
+    for posted in [true, false] {
+        let f = Fixture::new(
+            744_810 + u64::from(posted),
+            ProviderKind::Claude,
+            &["renumbered answer"],
+        )
+        .await;
+        let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
+            f.row.channel_id,
+            crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+        )]);
+        let (http, _http) = f.http().await;
+        let shared =
+            crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+        if !posted {
+            f.port.messages.lock().unwrap().clear();
+        }
+        let _reboot = renumber::shift(&f.source.path, 1 << 40);
+        let file = file_identity(&std::fs::metadata(&f.source.path).unwrap());
+        assert_eq!(file, (f.source.dev ^ (1 << 40), f.source.ino));
+        let frame = EvidenceFrame {
+            file: Some(file),
+            ..EvidenceFrame::from((0, 0))
+        };
+        plan(&f, &shared, &http, None, None, &mut None, false, frame).await;
+        let rows: Vec<String> = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let rows =
+                    sqlx::query_scalar("SELECT content FROM relay_dead_letter WHERE channel_id=$1")
+                        .bind(f.row.channel_id.to_string())
+                        .fetch_all(&pool)
+                        .await
+                        .unwrap();
+                if posted || !rows.is_empty() {
+                    break rows;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("an unposted body must reach the dead letter table");
+        assert_eq!(
+            rows,
+            if posted {
+                Vec::new()
+            } else {
+                vec![f.body.clone()]
+            }
+        );
+        if posted {
+            assert!(f.get_calls.load(Ordering::SeqCst) > 0, "exact GET must run");
+        }
+    }
     pool.close().await;
     db.drop().await;
 }

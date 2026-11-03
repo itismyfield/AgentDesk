@@ -1237,8 +1237,8 @@ mod service {
     use super::*;
     use crate::db::auto_queue::test_support::TestPostgresDb;
     pub(super) use crate::services::discord::herdr_terminate::{
-        OperatorTerminate, TerminationResult, probe_settlement_window, terminate_explicit_herdr,
-        test_queue, test_turn,
+        OperatorTerminate, TerminationResult, probe_settlement_window,
+        terminate_explicit_herdr_for_test, test_queue, test_turn,
     };
 
     pub(super) const KEY: &str = "claude/hash/mac-mini:AgentDesk-claude-service";
@@ -1433,7 +1433,7 @@ mod service {
                 session_key: KEY.into(),
                 execution_nonce: nonce.into(),
             };
-            terminate_explicit_herdr(request, self.shared.clone(), &self.pool).await
+            terminate_explicit_herdr_for_test(request, self.shared.clone(), &self.pool).await
         }
 
         /// The row's state and nonce.

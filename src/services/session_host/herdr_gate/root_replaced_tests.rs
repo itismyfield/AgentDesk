@@ -18,6 +18,7 @@ struct ProofOs {
     inner: FakeOs,
     original: [OriginalProcess; 2],
     existence_reads: Mutex<Vec<u32>>,
+    boot: Option<StartIdentity>,
 }
 
 impl ProofOs {
@@ -31,7 +32,15 @@ impl ProofOs {
             inner,
             original,
             existence_reads: Mutex::default(),
+            boot: None,
         })
+    }
+
+    /// As `new` on a host that booted at `boot` seconds (`None`: boot time unread).
+    fn booted(rig: &Rig, original: [OriginalProcess; 2], boot: Option<u64>) -> Arc<Self> {
+        let mut os = Arc::into_inner(Self::new(rig, original)).unwrap();
+        os.boot = boot.map(|seconds| StartIdentity::Darwin { seconds, micros: 0 });
+        Arc::new(os)
     }
 
     fn original(&self, pid: u32) -> Option<OriginalProcess> {
@@ -78,6 +87,10 @@ impl ProcessOs for ProofOs {
 
     fn exec_path(&self, pid: u32) -> Option<String> {
         self.inner.exec_path(pid)
+    }
+
+    fn boot_time(&self) -> Option<StartIdentity> {
+        self.boot
     }
 }
 
@@ -410,6 +423,129 @@ fn replaced_root_end_second_proof_requires_the_first_execution_and_server() {
             "{error}"
         );
         assert_eq!(os.reads(), [SHELL, PROVIDER]);
+    }
+    assert!(rig.server.mutations().is_empty());
+}
+
+/// A user_default target whose nonce's grant admitted server `granted`; the server answering now
+/// is `SERVER`, with startup proof.
+fn granted_target(rig: &Rig, os: Arc<ProofOs>, granted: u32, missing: bool) -> HerdrTarget {
+    use crate::services::session_host::herdr::policy::permit::{
+        ExistingMutationEvidence, grant_for_test, startup_for_test,
+    };
+    let transport = transport(&rig.server, vec![SERVER]);
+    let transport = if missing {
+        Arc::new(MissingPane(transport)) as Arc<dyn HerdrTransport>
+    } else {
+        transport
+    };
+    let configured =
+        endpoint(&rig.server).with_mode(crate::config::session_hosts::EndpointMode::UserDefault);
+    let launch = crate::services::herdr_launch::HerdrLaunchEndpoint {
+        execution_node: configured.execution_node().into(),
+        config_key: configured.config_key().into(),
+        socket_addr: rig.server.path.to_string_lossy().into_owned(),
+        herdr_session: configured.herdr_session().into(),
+    };
+    let server = |pid| ServerWitness {
+        socket: rig.server.path.clone(),
+        pid,
+        start: start(1_000).identity,
+    };
+    let evidence = ExistingMutationEvidence {
+        startup: Some(startup_for_test(server(SERVER))),
+        grant: Some(grant_for_test(&launch, NONCE, server(granted))),
+    };
+    let stored = stored(&rig.server, HostedState::Bound);
+    HerdrTarget::new_with_evidence(configured, transport, &stored, evidence)
+        .unwrap()
+        .with_reads(off_where_dialled, os)
+}
+
+/// The lone shell a restored pane shows in place of the recorded root.
+fn restored_shell() -> PaneReading {
+    PaneReading::Present {
+        root: ProcessStamp {
+            pid: RESTORED_SHELL,
+            start: "darwin:2000.000000".into(),
+        },
+        provider: PaneProvider::Exited,
+    }
+}
+
+const OLD_SERVER: u32 = 99;
+/// A boot after both recorded starts (1_001 and 1_002).
+const BOOTED_AFTER: u64 = 5_000;
+
+#[test]
+fn a_replaced_server_takes_an_original_pid_reused_since_the_boot_as_gone() {
+    use OriginalProcess::{Absent, Replaced};
+    let rig = rig();
+    pane(&rig, RESTORED_SHELL);
+    let row = stored(&rig.server, HostedState::Bound);
+    for original in [[Replaced, Absent], [Absent, Replaced], [Replaced, Replaced]] {
+        for missing in [false, true] {
+            let os = ProofOs::booted(&rig, original, Some(BOOTED_AFTER));
+            let target = granted_target(&rig, os, OLD_SERVER, missing);
+            let first = target.replaced_root_end(&row, None);
+            let first = first.unwrap_or_else(|e| panic!("{original:?} missing={missing}: {e}"));
+            assert!(target.replaced_root_end(&row, Some(&first)).is_ok());
+            // The row-end read of the same execution reaches the same answer.
+            assert!(
+                target.ended_reading(&row, &restored_shell()),
+                "{original:?}"
+            );
+            assert!(target.ended_reading(&row, &PaneReading::Missing));
+        }
+    }
+    assert!(rig.server.mutations().is_empty());
+}
+
+#[test]
+fn a_reused_original_pid_is_alive_unless_the_server_was_replaced_and_it_predates_the_boot() {
+    use OriginalProcess::{Absent, ExactAlive, ExistsUnreadable, Replaced, StartUnreadable};
+    let rig = rig();
+    pane(&rig, RESTORED_SHELL);
+    let row = stored(&rig.server, HostedState::Bound);
+    let cases = [
+        ("the granted server", SERVER, Replaced, Some(BOOTED_AFTER)),
+        (
+            "a boot at the recorded start",
+            OLD_SERVER,
+            Replaced,
+            Some(1_001),
+        ),
+        ("an unread boot", OLD_SERVER, Replaced, None),
+        (
+            "a live original",
+            OLD_SERVER,
+            ExactAlive,
+            Some(BOOTED_AFTER),
+        ),
+        (
+            "an unread pid",
+            OLD_SERVER,
+            ExistsUnreadable,
+            Some(BOOTED_AFTER),
+        ),
+        (
+            "an unread start",
+            OLD_SERVER,
+            StartUnreadable,
+            Some(BOOTED_AFTER),
+        ),
+    ];
+    for (case, granted, root, boot) in cases {
+        let os = ProofOs::booted(&rig, [root, Absent], boot);
+        let target = granted_target(&rig, os, granted, false);
+        let error = target.replaced_root_end(&row, None).unwrap_err();
+        assert!(
+            error.contains("original root is not proven absent"),
+            "{case}: {error}"
+        );
+        assert!(!target.ended_reading(&row, &restored_shell()), "{case}");
+        // A pane that is gone needs no process read, on any server.
+        assert!(target.ended_reading(&row, &PaneReading::Missing), "{case}");
     }
     assert!(rig.server.mutations().is_empty());
 }

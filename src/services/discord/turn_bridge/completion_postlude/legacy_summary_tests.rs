@@ -89,10 +89,7 @@ async fn bridge(
         defer_watcher_resume: true,
         can_chain_locally: false,
         single_message_panel_footer_mode:
-            crate::services::discord::single_message_panel::footer_mode_enabled(
-                case.single,
-                shared.ui.status_panel_v2_enabled,
-            ),
+            crate::services::discord::single_message_panel::footer_mode_enabled(case.single),
         is_external_input_tui_direct: false,
         context_window_tokens: 1000,
         context_compact_percent: 80,
@@ -141,6 +138,7 @@ async fn bridge(
         accumulated_output_tokens: 10,
         accumulated_memory_input_tokens: 0,
         accumulated_memory_output_tokens: 0,
+        input_not_submitted: false,
         transport_error: false,
         provider_failure: case.outcome == Outcome::Failed,
         api_friction_reports: Vec::new(),
@@ -155,13 +153,8 @@ async fn bridge(
     super::super::run_completion_postlude(ctx, state).await;
 }
 
-fn shared(v2: bool) -> Arc<SharedData> {
-    let mut shared = crate::services::discord::make_shared_data_for_tests();
-    Arc::get_mut(&mut shared)
-        .unwrap()
-        .ui
-        .status_panel_v2_enabled = v2;
-    shared
+fn shared() -> Arc<SharedData> {
+    crate::services::discord::make_shared_data_for_tests()
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -169,48 +162,46 @@ async fn real_bridge_postlude_posts_one_terminal_summary_for_all_retired_mode_fl
     let _isolation = Isolation::new();
     let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let mut channel = 586_101;
-    for v2 in [false, true] {
-        for single in [false, true] {
-            for outcome in [Outcome::Completed, Outcome::Cancelled, Outcome::Failed] {
-                let shared = shared(v2);
-                assert!(
-                    shared
-                        .ui
-                        .placeholder_live_events
-                        .context_panel_snapshot(ChannelId::new(channel))
-                        .is_none()
-                );
-                let gateway = Arc::new(Gateway::default());
-                bridge(
-                    shared.clone(),
-                    gateway.clone(),
-                    row(channel, 11, "bridge"),
-                    Case {
-                        outcome,
-                        single,
-                        ..Default::default()
-                    },
-                )
-                .await;
-                let posts = gateway.posts();
-                assert_eq!(
-                    posts.len(),
-                    2,
-                    "v2={v2} single={single} outcome={outcome:?}: {posts:?}"
-                );
-                assert_eq!(posts[0], "answer");
-                assert!(posts[1].starts_with(match outcome {
-                    Outcome::Completed => "-# ⏱️ ",
-                    Outcome::Cancelled => "-# ⏹ 중단 · ",
-                    Outcome::Failed => "-# ⚠️ 오류 · ",
-                }));
-                assert!(
-                    posts[1].ends_with(" · 📦 45%"),
-                    "exact usage backfill: {posts:?}"
-                );
-                assert!(gateway.edited.lock().unwrap().is_empty());
-                channel += 1;
-            }
+    for single in [false, true] {
+        for outcome in [Outcome::Completed, Outcome::Cancelled, Outcome::Failed] {
+            let shared = shared();
+            assert!(
+                shared
+                    .ui
+                    .placeholder_live_events
+                    .context_panel_snapshot(ChannelId::new(channel))
+                    .is_none()
+            );
+            let gateway = Arc::new(Gateway::default());
+            bridge(
+                shared.clone(),
+                gateway.clone(),
+                row(channel, 11, "bridge"),
+                Case {
+                    outcome,
+                    single,
+                    ..Default::default()
+                },
+            )
+            .await;
+            let posts = gateway.posts();
+            assert_eq!(
+                posts.len(),
+                2,
+                "single={single} outcome={outcome:?}: {posts:?}"
+            );
+            assert_eq!(posts[0], "answer");
+            assert!(posts[1].starts_with(match outcome {
+                Outcome::Completed => "-# ⏱️ ",
+                Outcome::Cancelled => "-# ⏹ 중단 · ",
+                Outcome::Failed => "-# ⚠️ 오류 · ",
+            }));
+            assert!(
+                posts[1].ends_with(" · 📦 45%"),
+                "exact usage backfill: {posts:?}"
+            );
+            assert!(gateway.edited.lock().unwrap().is_empty());
+            channel += 1;
         }
     }
 }
@@ -238,7 +229,7 @@ async fn bridge_summary_keeps_terminal_emit_and_episode_authority_guards_after_f
     {
         let gateway = Arc::new(Gateway::default());
         bridge(
-            shared(true),
+            shared(),
             gateway.clone(),
             row(586_121 + index as u64, 11, "guard"),
             case,
@@ -255,7 +246,7 @@ async fn real_bridge_and_watcher_producers_share_the_pinned_episode_latch_in_eit
     let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     for watcher_first in [false, true] {
         let channel = 586_131 + u64::from(watcher_first);
-        let shared = shared(false);
+        let shared = shared();
         let mut state = row(channel, 0, "same-episode");
         state.tmux_session_name = Some("fixture-summary".into());
         let key =
@@ -335,7 +326,7 @@ async fn actual_producers_keep_equal_offset_turns_with_distinct_sources_and_nonc
     let _isolation = Isolation::new();
     let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let channel = 586_141;
-    let shared = shared(false);
+    let shared = shared();
     let gateway = Arc::new(Gateway::default());
     let recorder = crate::services::discord::recovery_engine::o_cut_recorder::start(channel).await;
     for (source, nonce) in [("a", "first"), ("b", "first"), ("a", "next")] {
@@ -391,7 +382,7 @@ async fn real_bridge_postlude_suppresses_o_owned_and_unresolved_identity_summari
             state.runtime_kind = None;
         }
         let gateway = Arc::new(Gateway::default());
-        bridge(shared(false), gateway.clone(), state, Default::default()).await;
+        bridge(shared(), gateway.clone(), state, Default::default()).await;
         assert_eq!(
             gateway.posts(),
             ["answer"],
@@ -480,7 +471,7 @@ impl TurnGateway for SuspendedPanelGateway {
 async fn suspended_panel_projection_rechecks_summary_authority_without_consuming_the_latch() {
     let _isolation = Isolation::new();
     let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
-    let shared = shared(true);
+    let shared = shared();
     let channel = ChannelId::new(586_161);
     let state = row(channel.get(), 11, "suspended-projection");
     let inner = Arc::new(Gateway::default());

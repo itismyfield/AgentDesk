@@ -26,6 +26,10 @@ pub(in crate::services::discord) use managed_reset::{
     verified_codex_reset_refusal, verified_codex_reset_refusal_for_target,
 };
 pub(in crate::services::discord) mod native;
+mod relaunch;
+mod relaunch_confirm;
+#[cfg(all(test, unix))]
+mod relaunch_tests;
 
 use super::config::{
     clear_codex_goals_reset_pending_for_channel, clear_fast_mode_reset_pending_for_provider,
@@ -48,6 +52,18 @@ enum ManagedSessionResetBehavior {
 struct PendingSessionResetPlan {
     reset_source: &'static str,
     recreate_tmux: bool,
+    action: PendingAction,
+}
+
+/// How a pending launch-setting change reaches the channel's provider.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PendingAction {
+    /// End the provider session; the next launch starts a new one.
+    Reset,
+    /// Restart the live Claude TUI on its own session; the next launch resumes it.
+    Relaunch,
+    /// No process runs, so the next launch already takes the setting.
+    ConsumeOnly,
 }
 
 fn managed_session_clear_behavior(provider: &ProviderKind) -> ManagedSessionClearBehavior {
@@ -84,23 +100,47 @@ fn pending_session_reset_plan(
     fast_mode_reset_pending: bool,
     codex_goals_reset_pending: bool,
     model_reset_pending: bool,
+    relaunch_pending: bool,
+    claude_tui_pane: Option<relaunch::PaneState>,
 ) -> Option<PendingSessionResetPlan> {
+    use relaunch::PaneState;
+    // A reset another pending flag asks for covers a relaunch as well.
+    let reset_asked = codex_goals_reset_pending || model_reset_pending;
+    let action = match claude_tui_pane.filter(|_| !reset_asked) {
+        Some(PaneState::ClaudeTuiLive) => PendingAction::Relaunch,
+        Some(PaneState::None) => PendingAction::ConsumeOnly,
+        Some(PaneState::Unknown) => return None,
+        Some(PaneState::OtherLive) | None => PendingAction::Reset,
+    };
     if fast_mode_reset_pending {
         return Some(PendingSessionResetPlan {
-            reset_source: "fast mode reset pending",
+            reset_source: match action {
+                PendingAction::Relaunch => "fast mode relaunch",
+                _ => "fast mode reset pending",
+            },
             recreate_tmux: matches!(provider, ProviderKind::Claude | ProviderKind::Codex),
+            action,
         });
     }
     if codex_goals_reset_pending {
         return Some(PendingSessionResetPlan {
             reset_source: "codex goals reset pending",
             recreate_tmux: matches!(provider, ProviderKind::Codex),
+            action: PendingAction::Reset,
         });
     }
-    if model_reset_pending {
+    if model_reset_pending || relaunch_pending {
         return Some(PendingSessionResetPlan {
-            reset_source: "model session reset pending",
+            reset_source: match action {
+                PendingAction::Relaunch => "model relaunch",
+                _ => "model session reset pending",
+            },
             recreate_tmux: false,
+            action: if model_reset_pending {
+                PendingAction::Reset
+            } else {
+                action
+            },
         });
     }
     None
@@ -198,33 +238,123 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
         .overrides
         .model_session_reset_pending
         .contains(&channel_id);
+    let mut relaunch_pending =
+        matches!(provider, ProviderKind::Claude) && relaunch_pending_for(shared, channel_id).await;
+    let applies = super::config::claude_local_tui_relaunch_applies(provider, channel_id);
+    if relaunch_pending && !applies && herdr_channel(channel_id) {
+        // A channel moved to Herdr is not restarted; its next launch takes the saved setting.
+        release_relaunch_pending(shared, channel_id).await;
+        relaunch::say(http, channel_id, relaunch::HERDR_NOTICE.to_string()).await;
+        relaunch_pending = false;
+    }
 
+    // Only a change on a local Claude TUI is applied by restarting the process in place.
+    let claude_tui_pane = if (fast_mode_reset_pending || relaunch_pending) && applies {
+        Some(relaunch::pane_state(shared, provider, channel_id).await)
+    } else {
+        None
+    };
     let Some(plan) = pending_session_reset_plan(
         provider,
         fast_mode_reset_pending,
         codex_goals_reset_pending,
         model_reset_pending,
+        relaunch_pending,
+        claude_tui_pane,
     ) else {
         sync_session_reset_pending(shared, channel_id);
         if fast_mode_channel_id != channel_id {
             sync_session_reset_pending(shared, fast_mode_channel_id);
         }
-        return None;
+        return relaunch_on_fast_drift(http, shared, provider, channel_id, fast_mode_channel_id)
+            .await;
+    };
+    let mut fallback = false;
+    match plan.action {
+        PendingAction::Reset => {}
+        PendingAction::ConsumeOnly => {
+            relaunch::forget_attempts(channel_id);
+            release_relaunched(shared, provider, channel_id, fast_mode_channel_id).await;
+            return None;
+        }
+        PendingAction::Relaunch => {
+            let fast = super::config::channel_fast_mode_setting(shared, fast_mode_channel_id).await;
+            let model = match relaunch_pending {
+                true => {
+                    Some(super::config::resolve_model_for_turn(shared, channel_id, provider).await)
+                }
+                false => None,
+            };
+            let effort = match relaunch_pending {
+                true => super::config::channel_effort_level(shared, provider, channel_id).await,
+                false => None,
+            };
+            let requested = relaunch::Requested {
+                feature: fast_mode_channel_id,
+                fast,
+                model,
+                effort,
+            };
+            let source = plan.reset_source;
+            let outcome =
+                relaunch::run(http, shared, provider, channel_id, source, requested).await;
+            match outcome {
+                relaunch::Outcome::Applied(name) => {
+                    release_relaunched(shared, provider, channel_id, fast_mode_channel_id).await;
+                    return Some(ManagedReset::Applied(Some(name)));
+                }
+                relaunch::Outcome::Kept => return None,
+                relaunch::Outcome::Undetermined => {
+                    tracing::info!(
+                        channel_id = channel_id.get(),
+                        "relaunch waits: launch account unconfirmed"
+                    );
+                    return None;
+                }
+                relaunch::Outcome::Released => {
+                    release_relaunched(shared, provider, channel_id, fast_mode_channel_id).await;
+                    return None;
+                }
+                relaunch::Outcome::Refused(reason) => {
+                    let reset = ManagedReset::Refused(reason);
+                    reset.report(http, channel_id, plan.reset_source).await;
+                    return Some(reset);
+                }
+                relaunch::Outcome::Fallback => fallback = true,
+            }
+        }
+    }
+    let reset_source = match (fallback, fast_mode_reset_pending) {
+        (true, true) => "fast mode reset pending",
+        (true, false) => "model session reset pending",
+        (false, _) => plan.reset_source,
     };
     let reset = reset_channel_provider_state(
         http,
         shared,
         provider,
         channel_id,
-        plan.reset_source,
+        reset_source,
         true,
         false,
         plan.recreate_tmux,
     )
     .await;
     // A refused reset keeps its pending flags; the channel is told why it did not apply.
-    if reset.report(http, channel_id, plan.reset_source).await {
+    if reset.report(http, channel_id, reset_source).await {
         return Some(reset);
+    }
+    // A relaunch was promised to keep the context; a reset in its place says it did not.
+    let promised = claude_tui_pane == Some(relaunch::PaneState::OtherLive) || relaunch_pending;
+    let context_lost = if fallback {
+        Some(relaunch::FALLBACK_NOTICE)
+    } else if promised {
+        Some(relaunch::OTHER_LIVE_NOTICE)
+    } else {
+        None
+    };
+    if let Some(notice) = context_lost {
+        relaunch::say(http, channel_id, notice.to_string()).await;
     }
 
     if fast_mode_reset_pending {
@@ -241,11 +371,103 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
             .model_session_reset_pending
             .remove(&channel_id);
     }
+    if relaunch_pending {
+        release_relaunch_pending(shared, channel_id).await;
+    }
     sync_session_reset_pending(shared, channel_id);
     if fast_mode_channel_id != channel_id {
         sync_session_reset_pending(shared, fast_mode_channel_id);
     }
     Some(reset)
+}
+
+/// Restarts a live local Claude TUI launched with a fast setting other than the channel's, on its
+/// own session, though another session sharing the setting consumed the pending change.
+async fn relaunch_on_fast_drift(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    fast_mode_channel_id: serenity::ChannelId,
+) -> Option<ManagedReset> {
+    if !super::config::claude_local_tui_relaunch_applies(provider, channel_id) {
+        return None;
+    }
+    let desired = super::config::channel_fast_mode_setting(shared, fast_mode_channel_id).await;
+    if !relaunch::fast_drifted(shared, provider, channel_id, desired).await
+        || relaunch::pane_state(shared, provider, channel_id).await
+            != relaunch::PaneState::ClaudeTuiLive
+    {
+        return None;
+    }
+    let requested = relaunch::Requested {
+        feature: fast_mode_channel_id,
+        fast: desired,
+        model: None,
+        effort: None,
+    };
+    match relaunch::run(
+        http,
+        shared,
+        provider,
+        channel_id,
+        "fast mode relaunch",
+        requested,
+    )
+    .await
+    {
+        relaunch::Outcome::Applied(name) => Some(ManagedReset::Applied(Some(name))),
+        _ => None,
+    }
+}
+
+/// Drops the fast and model changes a relaunch, or a launch still to come, now carries.
+async fn release_relaunched(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    fast_mode_channel_id: serenity::ChannelId,
+) {
+    if fast_mode_reset_pending_for_provider(shared, fast_mode_channel_id, provider) {
+        clear_fast_mode_reset_pending_for_provider(shared, fast_mode_channel_id, provider);
+        persist_fast_mode_reset_marker(shared, fast_mode_channel_id, provider, false).await;
+        sync_session_reset_pending(shared, channel_id);
+        if fast_mode_channel_id != channel_id {
+            sync_session_reset_pending(shared, fast_mode_channel_id);
+        }
+    }
+    release_relaunch_pending(shared, channel_id).await;
+}
+
+async fn relaunch_pending_for(shared: &SharedData, channel_id: serenity::ChannelId) -> bool {
+    let settings = shared.settings.read().await;
+    settings
+        .channel_relaunch_pending
+        .contains(&channel_id.get().to_string())
+}
+
+/// Drops the channel's pending relaunch, in memory and on disk.
+pub(super) async fn release_relaunch_pending(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+) {
+    let mut settings = shared.settings.write().await;
+    let removed = settings
+        .channel_relaunch_pending
+        .remove(&channel_id.get().to_string());
+    if let Some(token) = shared.http.cached_bot_token.get().filter(|_| removed) {
+        save_bot_settings(token, &settings);
+    }
+}
+
+fn herdr_channel(channel_id: serenity::ChannelId) -> bool {
+    crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_some()
+}
+
+/// Lets a newly saved setting of `channel`, or of a channel sharing it, retry a relaunch whose
+/// kills failed.
+pub(in crate::services::discord) fn forget_relaunch_failures(channel: serenity::ChannelId) {
+    relaunch::forget_failures(channel);
 }
 
 fn choose_clear_session_key(

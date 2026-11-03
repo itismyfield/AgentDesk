@@ -107,7 +107,6 @@ fn strip_headless_placeholder_artifacts(text: &str, provider: &ProviderKind) -> 
 fn headless_streaming_placeholder_cleanup_action(
     last_edit_text: &str,
     provider: &ProviderKind,
-    status_panel_v2_enabled: bool,
     single_message_panel_footer_mode: bool,
 ) -> HeadlessPlaceholderCleanupAction {
     if single_message_panel_footer_mode {
@@ -135,14 +134,10 @@ fn headless_streaming_placeholder_cleanup_action(
             };
         }
     }
-    let mut cleaned = if status_panel_v2_enabled {
-        super::formatting::format_for_discord_with_status_panel(last_edit_text, provider)
-    } else {
-        super::formatting::format_for_discord_with_provider(last_edit_text, provider)
-    };
-    if status_panel_v2_enabled {
-        cleaned = strip_headless_placeholder_artifacts(&cleaned, provider);
-    }
+    let cleaned = strip_headless_placeholder_artifacts(
+        &super::formatting::format_for_discord_with_status_panel(last_edit_text, provider),
+        provider,
+    );
     if cleaned.trim().is_empty() {
         HeadlessPlaceholderCleanupAction::Delete
     } else if cleaned == last_edit_text {
@@ -172,8 +167,7 @@ pub(super) async fn cleanup_headless_streaming_placeholder_after_delivery(
     match headless_streaming_placeholder_cleanup_action(
         last_edit_text,
         provider,
-        shared.ui.status_panel_v2_enabled,
-        super::bridge_single_message_panel_footer_enabled(shared.ui.status_panel_v2_enabled),
+        super::bridge_single_message_panel_footer_enabled(),
     ) {
         HeadlessPlaceholderCleanupAction::Delete => {
             if let Err(error) =
@@ -548,6 +542,7 @@ async fn enqueue_headless_turn_row(
 pub(in crate::services::discord) async fn enqueue_headless_turn_row_for_test(
     shared: &Arc<SharedData>,
     state: &InflightTurnState,
+    session_key: Option<&str>,
     content: &str,
 ) -> crate::services::message_outbox::OutboxEnqueueOutcome {
     let provider = state.provider_kind().expect("turn provider");
@@ -557,7 +552,7 @@ pub(in crate::services::discord) async fn enqueue_headless_turn_row_for_test(
             shared,
             channel_id: ChannelId::new(state.channel_id),
             owning_user_msg_id: (state.user_msg_id != 0).then(|| MessageId::new(state.user_msg_id)),
-            session_key: None,
+            session_key,
             provider: &provider,
             content,
             cancel_token: None,
@@ -676,7 +671,6 @@ mod headless_delivery_tests {
         let action = headless_streaming_placeholder_cleanup_action(
             "[Bash] /bin/zsh -lc 'cargo test'\n⠙ Processing...",
             &ProviderKind::Codex,
-            true,
             false,
         );
 
@@ -688,7 +682,6 @@ mod headless_delivery_tests {
         let action = headless_streaming_placeholder_cleanup_action(
             "⠂ Processing...\n\n```\n[Bash] /bin/zsh -lc 'grep -n foo src/lib.rs'\n[Bash] /bin/zsh -lc \"sed -n '1,40p' src/lib.rs\"\n```",
             &ProviderKind::Codex,
-            true,
             false,
         );
 
@@ -700,7 +693,6 @@ mod headless_delivery_tests {
         let action = headless_streaming_placeholder_cleanup_action(
             "partial answer\n\n⠙ Processing...",
             &ProviderKind::Codex,
-            true,
             false,
         );
 
@@ -715,7 +707,6 @@ mod headless_delivery_tests {
         let action = headless_streaming_placeholder_cleanup_action(
             "partial answer\n\n⠙ 계속 처리 중",
             &ProviderKind::Codex,
-            true,
             false,
         );
 
@@ -733,7 +724,6 @@ mod headless_delivery_tests {
         let action = headless_streaming_placeholder_cleanup_action(
             &format!("partial answer\n\n{footer}"),
             &ProviderKind::Claude,
-            true,
             true,
         );
 

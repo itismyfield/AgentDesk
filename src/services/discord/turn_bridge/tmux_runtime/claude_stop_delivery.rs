@@ -63,7 +63,7 @@ where
 /// registry guard *inside* the closure passed here. The acquisition order is
 /// therefore composer-lock → interrupt-registry-lock. This is the deliberate
 /// reversal of the earlier registry-first order: parking on the per-pane composer
-/// lock (up to `SELECTOR_OPEN_TIMEOUT` + confirm, ~seconds) while holding the
+/// lock (held through a composer mutation and its confirmation, ~seconds) while holding the
 /// GLOBAL registry lock froze every pane's turn-start bind and every other stop
 /// delivery. Composer-first keeps the global registry lock held only for the
 /// brief generation check + tmux send.

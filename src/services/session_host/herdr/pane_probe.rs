@@ -65,6 +65,10 @@ pub(crate) trait ProcessOs: Send + Sync {
     fn environ(&self, pid: u32) -> Result<Vec<String>, RestoreUnverified>;
     /// Only for the provenance text; never compared.
     fn exec_path(&self, pid: u32) -> Option<String>;
+    /// When this host booted; no process that started before it can still run.
+    fn boot_time(&self) -> Option<StartIdentity> {
+        provenance::boot_time()
+    }
 }
 
 /// Absence is separate evidence from failure to read a process start.
@@ -85,6 +89,36 @@ pub(crate) fn recorded_process(os: &dyn ProcessOs, stamp: &ProcessStamp) -> Reco
             Err(_) => RecordedProcess::Unreadable,
         },
         Err(_) => RecordedProcess::Unreadable,
+    }
+}
+
+/// `stamp`'s process is gone: proven absent, or its pid runs another process and it started
+/// before `rebooted`. Else the reading that kept it.
+pub(crate) fn original_gone(
+    os: &dyn ProcessOs,
+    stamp: &ProcessStamp,
+    rebooted: Option<StartIdentity>,
+) -> Result<(), RecordedProcess> {
+    let read = recorded_process(os, stamp);
+    let gone = match read {
+        RecordedProcess::ProvenAbsent => true,
+        RecordedProcess::Replaced => rebooted.is_some_and(|boot| started_before(stamp, boot)),
+        RecordedProcess::ExactAlive | RecordedProcess::Unreadable => false,
+    };
+    if gone { Ok(()) } else { Err(read) }
+}
+
+fn started_before(stamp: &ProcessStamp, boot: StartIdentity) -> bool {
+    let StartIdentity::Darwin { seconds, micros } = boot else {
+        return false;
+    };
+    let recorded = stamp
+        .start
+        .strip_prefix("darwin:")
+        .and_then(|t| t.split_once('.'));
+    match recorded.map(|(s, us)| (s.parse::<u64>(), us.parse::<u64>())) {
+        Some((Ok(s), Ok(us))) => (s, us) < (seconds, micros),
+        _ => false,
     }
 }
 

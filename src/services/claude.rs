@@ -56,6 +56,8 @@ mod backend_routing;
 #[cfg(test)]
 mod c1_teardown_tests;
 #[cfg(unix)]
+pub(crate) mod fresh_notice;
+#[cfg(unix)]
 pub(crate) mod herdr_return;
 #[cfg(unix)]
 pub(crate) mod herdr_turn;
@@ -604,6 +606,7 @@ pub fn execute_command_streaming(
     report_provider: Option<ProviderKind>,
     model_override: Option<&str>,
     fast_mode_enabled: Option<bool>,
+    effort: Option<&str>,
     compact_percent: Option<u64>,
     compact_lower_bound_tokens: u64,
     _cache_ttl_minutes: Option<u32>,
@@ -711,6 +714,11 @@ IMPORTANT: Format your responses using Markdown for better readability:
                 {
                     cleanup_process_backend_before_tmux(tmux_name);
                     debug_log(&format!("Claude TUI hosting session: {}", tmux_name));
+                    let launch = crate::services::claude_tui::session::ClaudeTuiLaunchSettings {
+                        model: model_override,
+                        fast_mode: fast_mode_enabled,
+                        effort,
+                    };
                     return execute_streaming_local_tui_tmux(
                         prompt,
                         session_id,
@@ -721,7 +729,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
                         teardown,
                         report_channel_id,
                         report_provider,
-                        model_override,
+                        launch,
                         effective_prompt,
                         hook_endpoint,
                     );
@@ -1565,6 +1573,60 @@ fn recover_claude_tui_session_resolution_from_runtime_binding(
     })
 }
 
+/// A live pane's Claude session as its warm follow-up finds it.
+#[cfg(unix)]
+pub(crate) struct LiveClaudeTuiSession {
+    pub(crate) resolution: ClaudeTuiSessionResolution,
+    /// The requested session whose transcript was missing and no live binding recovered.
+    substitution: Option<tui_session_launch::prepared::FreshSubstitution>,
+    /// Whether the pane runs a live process under the turn's account.
+    pub(crate) live: bool,
+}
+
+/// The turn's session in the account's own home; when that transcript is missing on a live pane,
+/// the session its runtime binding names.
+#[cfg(unix)]
+pub(crate) fn resolve_live_claude_tui_session(
+    tmux_session_name: &str,
+    (working_dir, session_id, claude_home): (
+        &std::path::Path,
+        Option<&str>,
+        Option<&std::path::Path>,
+    ),
+    (session_exists, live): (bool, impl FnOnce() -> Result<bool, String>),
+) -> Result<LiveClaudeTuiSession, String> {
+    let (mut resolution, substitution) =
+        tui_session_launch::prepared::resolve(working_dir, session_id, claude_home)?;
+    let live = live()?;
+    if session_exists
+        && live
+        && !resolution.resume
+        && let Some(recovered) = recover_claude_tui_session_resolution_from_runtime_binding(
+            tmux_session_name,
+            session_id,
+        )
+    {
+        tracing::warn!(
+            tmux_session_name,
+            requested_session_id = session_id.unwrap_or("(none)"),
+            recovered_session_id = %recovered.session_id,
+            transcript_path = %recovered.transcript_path.display(),
+            "recovered live Claude TUI session from runtime binding after selector/transcript lookup missed"
+        );
+        debug_log(&format!(
+            "Claude TUI recovered live runtime binding for warm follow-up (session={}, transcript={})",
+            tmux_session_name,
+            recovered.transcript_path.display()
+        ));
+        resolution = recovered;
+    }
+    Ok(LiveClaudeTuiSession {
+        resolution,
+        substitution,
+        live,
+    })
+}
+
 /// Check if tmux is available on the system
 #[cfg(unix)]
 pub fn is_tmux_available() -> bool {
@@ -1629,7 +1691,7 @@ fn execute_streaming_local_tui_tmux(
     teardown: Option<&TeardownClearance>,
     report_channel_id: Option<u64>,
     _report_provider: Option<ProviderKind>,
-    model_override: Option<&str>,
+    launch: crate::services::claude_tui::session::ClaudeTuiLaunchSettings<'_>,
     system_prompt: Option<&str>,
     hook_endpoint: String,
 ) -> Result<(), String> {
@@ -1666,38 +1728,20 @@ fn execute_streaming_local_tui_tmux(
 
     let session_id = profile_matches.then_some(session_id).flatten();
     let working_dir_path = std::path::Path::new(working_dir);
-    let session_resolution =
-        resolve_claude_tui_session_for_launch(working_dir_path, session_id, claude_home)?;
+    let live = || Ok(host_gate::live_pane(tmux_session_name, session_exists)? && profile_matches);
+    let at = (working_dir_path, session_id, claude_home);
+    let found = resolve_live_claude_tui_session(tmux_session_name, at, (session_exists, live))?;
+    let (session_resolution, substitution, has_live_pane) =
+        (found.resolution, found.substitution, found.live);
     let mut resolved_session_id = session_resolution.session_id;
     let mut transcript_path = session_resolution.transcript_path;
     let mut transcript_path_string = transcript_path.display().to_string();
     let mut resume = session_resolution.resume;
-
-    let has_live_pane = host_gate::live_pane(tmux_session_name, session_exists)? && profile_matches;
-    if session_exists
-        && has_live_pane
-        && !resume
-        && let Some(recovered) = recover_claude_tui_session_resolution_from_runtime_binding(
-            tmux_session_name,
-            session_id,
-        )
-    {
-        tracing::warn!(
-            tmux_session_name,
-            requested_session_id = session_id.unwrap_or("(none)"),
-            recovered_session_id = %recovered.session_id,
-            transcript_path = %recovered.transcript_path.display(),
-            "recovered live Claude TUI session from runtime binding after selector/transcript lookup missed"
-        );
-        debug_log(&format!(
-            "Claude TUI recovered live runtime binding for warm follow-up (session={}, transcript={})",
-            tmux_session_name,
-            recovered.transcript_path.display()
-        ));
-        resolved_session_id = recovered.session_id;
-        transcript_path = recovered.transcript_path;
-        transcript_path_string = transcript_path.display().to_string();
-        resume = recovered.resume;
+    // Told only when no live binding recovered the session, so the launch really starts fresh.
+    if let Some(lost) = substitution.filter(|_| !resume) {
+        let pool = crate::db::cancel_tombstones::global_pool();
+        let missing = lost.missing_transcript.as_path();
+        fresh_notice::announce(pool, report_channel_id, &lost.requested, missing);
     }
 
     if session_exists && has_live_pane && resume {
@@ -1746,7 +1790,7 @@ fn execute_streaming_local_tui_tmux(
         working_dir_path,
         &resolved_session_id,
         system_prompt,
-        model_override,
+        launch,
         hook_endpoint,
         resume,
         &auth_env_lines,
@@ -1826,7 +1870,7 @@ pub(crate) fn tmux_tui_turn_for_tests(
         Some(teardown),
         channel,
         None,
-        None,
+        Default::default(),
         None,
         endpoint,
     )

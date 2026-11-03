@@ -1,4 +1,5 @@
 import type { HealthResponse, OnboardingConnectionStatus, OperatorConnectorsResponse } from "../../api/settingsRuntime";
+import { publicOnlyHealthNote } from "../OpsPageModel";
 import { providerDisplayName } from "./SettingsCopy";
 
 type Tr = (ko: string, en: string) => string;
@@ -33,6 +34,8 @@ export function connectionStatusRows(
   const aiLabel = tr("AI 서비스", "AI services");
 
   const bot = unknownRow("bot", botLabel, health, tr) ?? (() => {
+    const limited = publicOnlyHealthNote(health.data, tr);
+    if (limited) return { key: "bot" as const, label: botLabel, value: tr("이 기기에서는 확인할 수 없어요", "Not visible from this device"), detail: limited, tone: "unknown" as const };
     const bots = health.data?.providers ?? [];
     const names = bots.map((item) => providerDisplayName(item.name)).join(", ");
     const offline = bots.filter((item) => !item.connected).map((item) => providerDisplayName(item.name));

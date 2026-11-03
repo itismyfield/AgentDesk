@@ -89,8 +89,10 @@ impl BindingEvents for BindingLog {
     fn binding_events_since(&self, channel: u64, after: u64) -> Result<Vec<BindingEvent>, String> {
         let events = p5::binding_events_judged_since(channel, after);
         let events = events.map_err(|e| e.to_string())?;
-        (events.into_iter())
-            .map(|(event, reclaims)| from_p5(event, reclaims))
+        let judged: Vec<_> = events.iter().map(|(event, _)| event).collect();
+        let allowed = crate::services::tui_prompt_dedupe::codex_verified_events_allowed(&judged);
+        (events.into_iter().zip(allowed))
+            .map(|((event, reclaims), allowed)| judged_from_p5(event, reclaims, allowed))
             .collect()
     }
 
@@ -139,7 +141,18 @@ impl BindingEvents for ChannelBindingLog {
     }
 }
 
+#[cfg(test)]
 fn from_p5(event: p5::BindingEvent, reclaims: bool) -> Result<BindingEvent, String> {
+    let allowed = crate::services::tui_prompt_dedupe::codex_verified_events_allowed(&[&event]);
+    judged_from_p5(event, reclaims, allowed[0])
+}
+
+/// `event` as O reads it, where `source_allowed` is its Codex source policy verdict.
+fn judged_from_p5(
+    event: p5::BindingEvent,
+    reclaims: bool,
+    source_allowed: bool,
+) -> Result<BindingEvent, String> {
     let provider = match event.provider.as_str() {
         "claude" => ShadowProvider::Claude,
         "codex" => ShadowProvider::Codex,
@@ -150,7 +163,6 @@ fn from_p5(event: p5::BindingEvent, reclaims: bool) -> Result<BindingEvent, Stri
             ));
         }
     };
-    let source_allowed = crate::services::tui_prompt_dedupe::codex_verified_event_allowed(&event);
     #[cfg(test)]
     let source_allowed = source_allowed
         || std::env::var("AGENTDESK_N2B_TEST_MUTATION")

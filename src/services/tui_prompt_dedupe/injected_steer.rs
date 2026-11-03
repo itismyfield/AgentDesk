@@ -40,6 +40,8 @@ pub(super) enum Claim {
     Handed { verified_row: bool },
     /// Already handed: a later sighting is a duplicate.
     HandedBefore,
+    /// Opened a turn for an attempt whose caller reads that turn itself.
+    Declared,
 }
 
 fn marker(nonce: &str) -> String {
@@ -129,7 +131,7 @@ pub(super) fn claim_injected_steer(
         .as_ref()
         .is_some_and(|entry| entry.bound && entry.row.as_deref() == entry_id && entry_id.is_some());
     if provider == "claude" && !matches!(&observed, ObservedAttempt::None) {
-        return Some(Claim::Joined { first: false });
+        return claude_claim(tmux_session_name, prompts, entry_id);
     }
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
@@ -238,6 +240,57 @@ pub(super) fn claim_injected_steer(
     Some(claim)
 }
 
+/// A Claude frame's answerer, settled once from its row: turn mode's O writer, a caller that
+/// declared it, or for a user row past its offset the direct-input path; nothing else owns it.
+fn claude_claim(session: &str, prompts: &[String], row: Option<&str>) -> Option<Claim> {
+    use crate::services::tui_input::human_frame::history;
+    let channel = super::owner_channel_for_tmux_session(session);
+    if channel.is_some_and(crate::services::tui_o::turn_mode::transcript_turns) {
+        return Some(Claim::Joined { first: false });
+    }
+    let owner = row.map_or(history::RowOwner::None, |row| {
+        history::row_owner("claude", session, prompts, row)
+    });
+    let id = match owner {
+        history::RowOwner::User(id) => id,
+        // A row not yet readable is decided on a later reading, never joined now.
+        history::RowOwner::Unread => return Some(Claim::Deferred),
+        history::RowOwner::Command(_) | history::RowOwner::None => {
+            return Some(Claim::Joined { first: false });
+        }
+    };
+    // The reader is the attempt's own, so a twin's text or an aged pending entry never decides it.
+    let declared = history::has_reader("claude", session, &id);
+    let key = PromptKey::new("claude", session);
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.purge_expired();
+    let ledger = state.injected_steer_by_tmux.entry(key).or_default();
+    if let Some(entry) = ledger.iter().find(|entry| entry.value.nonce == id) {
+        return Some(match entry.value.settled {
+            Some(Settled::Handed) => Claim::HandedBefore,
+            _ => Claim::Joined { first: false },
+        });
+    }
+    ledger.push_back(TimedValue {
+        value: InjectedSteer {
+            nonce: id,
+            target_turn: String::new(),
+            message_id: None,
+            settled: Some(if declared {
+                Settled::Joined
+            } else {
+                Settled::Handed
+            }),
+            retained: false,
+        },
+        recorded_at: Instant::now(),
+    });
+    Some(match declared {
+        true => Claim::Declared,
+        false => Claim::Handed { verified_row: true },
+    })
+}
+
 impl TuiPromptDedupeState {
     pub(super) fn purge_expired_injected_steers(&mut self, now: Instant) {
         self.injected_steer_by_tmux.retain(|_, ledger| {
@@ -295,6 +348,9 @@ mod retained_tests {
     }
 }
 
+#[cfg(all(test, unix))]
+#[path = "claude_row_claim_tests.rs"]
+mod claude_row_claim_tests;
 #[cfg(test)]
 #[path = "handed_identity_tests.rs"]
 mod handed_identity_tests;

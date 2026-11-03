@@ -319,7 +319,7 @@ stale  = baseline - current              # 사라진 모듈        → FAIL
 
 ### 6.3 contract-symbol 게이트 — 경로 결합 참조 2개 보존 필수
 
-`tmux_watcher/liveness.rs:666-691`의 `relay_state_contract_refs` 모듈은 **컴파일돼야 하는 모듈 경로 표현식**을 앵커로 갖는다:
+`tmux_watcher/liveness.rs:662-688`의 `relay_state_contract_refs` 모듈은 **컴파일돼야 하는 모듈 경로 표현식**을 앵커로 갖는다:
 
 ```rust
 use super::super::loop_poll_prologue::poll_watcher_output_or_continue as _;
@@ -376,4 +376,4 @@ use crate::services::discord::tmux::advance_watcher_confirmed_end as _;
 - `scripts/hotfile_ratchet.toml` (raw cap `3571`)
 - `scripts/audit_maintainability_giant_baseline.toml:143` (prod cap `3571`)
 - `scripts/test_lane_coverage_baseline.txt` + `scripts/check_test_lane_coverage.py` (§6.1 하드 게이트)
-- `src/services/discord/tmux_watcher/liveness.rs:666-691` (W8을 제약하는 경로 결합 계약 앵커)
+- `src/services/discord/tmux_watcher/liveness.rs:662-688` (W8을 제약하는 경로 결합 계약 앵커)

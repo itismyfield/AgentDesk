@@ -109,49 +109,75 @@ async fn run_config_with_limits(
     tokio::task::spawn_blocking(move || image.fast_unchanged().map_err(|_| Unverified::Identity))
         .await
         .map_err(|_| Unverified::Cache)??;
-    let mut child = Command::new(&peer.checker)
-        .args(["config", "check"])
-        .current_dir(&peer.home)
-        .env_clear()
-        .env("HOME", &peer.home)
-        .env("HERDR_CONFIG_PATH", config)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|_| Unverified::Checker)?;
-    let stdout = child.stdout.take().ok_or(Unverified::Checker)?;
-    let stderr = child.stderr.take().ok_or(Unverified::Checker)?;
-    let checked = tokio::time::timeout(timeout, async {
-        let (stdout, stderr, status) = tokio::try_join!(
-            read_capped(stdout, limit),
-            read_capped(stderr, limit),
-            async { child.wait().await.map_err(|_| Unverified::Checker) },
-        )?;
-        super::diagnostics::checker(&peer.witness.socket, &stdout, &stderr);
-        if !status.success() {
-            return Err(Unverified::Checker);
-        }
-        if stdout != HEALTHY_OUTPUT || !stderr.is_empty() {
-            return Err(Unverified::Diagnostics);
-        }
-        Ok(())
-    })
-    .await
-    .unwrap_or(Err(Unverified::Timeout));
-    if let Err(reason) = checked {
-        // A capped stream may finish while the child is still writing. Reap it before
-        // returning so failures cannot accumulate checker processes.
-        let _ = child.kill().await;
-        let _ = child.wait().await;
-        return Err(reason);
-    }
+    let checker = Checker {
+        binary: &peer.checker,
+        home: &peer.home,
+        config,
+        socket: &peer.witness.socket,
+    };
+    checker.run(timeout, limit).await?;
     let image = peer.image.clone();
     tokio::task::spawn_blocking(move || image.fast_unchanged())
         .await
         .map_err(|_| Unverified::Cache)??;
     Ok(())
+}
+
+/// One `config check` of `config` by `binary` under `home`; its output is recorded for `socket`.
+pub(crate) struct Checker<'a> {
+    pub binary: &'a std::path::Path,
+    pub home: &'a std::path::Path,
+    pub config: &'a std::path::Path,
+    pub socket: &'a std::path::Path,
+}
+
+impl Checker<'_> {
+    /// The binary a start would run, checking the config that server would read.
+    pub(crate) async fn candidate(&self) -> Result<(), Unverified> {
+        self.run(CHECK_TIMEOUT, OUTPUT_LIMIT).await
+    }
+
+    async fn run(&self, timeout: Duration, limit: usize) -> Result<(), Unverified> {
+        let mut child = Command::new(self.binary)
+            .args(["config", "check"])
+            .current_dir(self.home)
+            .env_clear()
+            .env("HOME", self.home)
+            .env("HERDR_CONFIG_PATH", self.config)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|_| Unverified::Checker)?;
+        let stdout = child.stdout.take().ok_or(Unverified::Checker)?;
+        let stderr = child.stderr.take().ok_or(Unverified::Checker)?;
+        let checked = tokio::time::timeout(timeout, async {
+            let (stdout, stderr, status) = tokio::try_join!(
+                read_capped(stdout, limit),
+                read_capped(stderr, limit),
+                async { child.wait().await.map_err(|_| Unverified::Checker) },
+            )?;
+            super::diagnostics::checker(self.socket, &stdout, &stderr);
+            if !status.success() {
+                return Err(Unverified::Checker);
+            }
+            if stdout != HEALTHY_OUTPUT || !stderr.is_empty() {
+                return Err(Unverified::Diagnostics);
+            }
+            Ok(())
+        })
+        .await
+        .unwrap_or(Err(Unverified::Timeout));
+        if let Err(reason) = checked {
+            // A capped stream may finish while the child is still writing. Reap it before
+            // returning so failures cannot accumulate checker processes.
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(reason);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(all(test, unix))]

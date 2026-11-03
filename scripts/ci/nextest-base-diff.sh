@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Compare the head nextest plan with the comparison base: CI Main's nextest-baseline artifact for
 # that exact SHA, or a base plan built here when the artifact is missing or not comparable.
-# Usage: nextest-base-diff.sh <nextest dir holding plan/plan.json>   (env: PR_HEAD_SHA, GH_TOKEN)
+# Usage: nextest-base-diff.sh <nextest dir holding plan/plan.json>
+#   (env: PR_HEAD_SHA, GH_TOKEN; GITHUB_SHA and GITHUB_RUN_ID name the run that must have written the plan)
 set -euo pipefail
 
 NEXTEST_DIR="$1"
@@ -18,18 +19,31 @@ base_sha="$(sed -n 's/^base_sha=//p' "$work/base.env")"
 # Linux removals come from the plans; macOS and Windows only from the base and head sources.
 git worktree add --detach "$work/src" "$base_sha" >/dev/null
 python3 scripts/ci/rust_test_sources.py removed --base-root "$work/src" --json-out "$work/source-removed.json"
-diff_args=(--plan "$plan" --comparison-base-sha "$base_sha" --justifications scripts/ci/test-removal-justifications.txt
-  --source-removed "$work/source-removed.json" --json-out "$work/diff.json")
+diff_args=(--plan "$plan" --head-sha "$GITHUB_SHA" --head-run-id "$GITHUB_RUN_ID" --comparison-base-sha "$base_sha"
+  --justifications scripts/ci/test-removal-justifications.txt --source-removed "$work/source-removed.json"
+  --json-out "$work/diff.json")
 
+# CI Main uploads the baseline as soon as its build job has planned, so a run that is still testing, or
+# failed or was cancelled later, carries the same IDs; base-diff still checks the SHA, scope and build.
 fetch_main_baseline() {
-  local run_id
-  run_id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci-main.yml --commit "$base_sha" --status success \
-    --limit 1 --json databaseId --jq '.[0].databaseId // empty')" || return 1
-  [ -n "$run_id" ] || return 1
-  gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name nextest-baseline --dir "$work/main" || return 1
+  local runs run_id state
+  runs="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci-main.yml --commit "$base_sha" --limit 20 \
+    --json databaseId,event,status,conclusion \
+    --jq '.[] | select(.event == "push" or .event == "workflow_dispatch") | "\(.databaseId) \(.status)/\(.conclusion)"')" \
+    || return 1
+  while read -r run_id state; do
+    [ -n "$run_id" ] || continue
+    # gh refuses to overwrite files, so an earlier candidate's partial download must not remain.
+    rm -rf "$work/main"
+    if gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name nextest-baseline --dir "$work/main"; then
+      echo "CI Main nextest-baseline for $base_sha from run $run_id ($state)" | tee -a "$summary"
+      return 0
+    fi
+  done <<<"$runs"
+  return 1
 }
 
-reason="no successful CI Main nextest-baseline artifact for $base_sha"
+reason="no CI Main run of $base_sha has uploaded its nextest-baseline artifact"
 if fetch_main_baseline; then
   status=0
   ci base-diff --baseline "$work/main/plan.json" "${diff_args[@]}" || status=$?

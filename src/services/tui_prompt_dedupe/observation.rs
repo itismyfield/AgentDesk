@@ -420,6 +420,21 @@ pub(super) fn observe_inner(
             return PromptObservation::InjectedSteer;
         }
         Some(Claim::HandedBefore) => return PromptObservation::SuppressedRecentDuplicate,
+        Some(Claim::Declared) => {
+            // The attempt's reader owns the turn its row opened; its pending text is spent here.
+            let _ = take_matching_pending_prompt(&provider, tmux_session_name, &candidates[0]);
+            if let Some(turn) = native_turn {
+                let owner = (
+                    SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+                    NativeTurnOwner::Answer,
+                );
+                open_native_turn(&provider, tmux_session_name, turn, owner);
+            }
+            if let Some(entry_id) = entry_id {
+                record_relayed_entry_id(&provider, tmux_session_name, entry_id);
+            }
+            return PromptObservation::SuppressedDiscordDuplicate;
+        }
         Some(Claim::Handed { .. }) | None => {}
     }
     // #4567: structured task lifecycle records are status events, not positive

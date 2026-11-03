@@ -418,7 +418,9 @@ async fn a_pong_of_another_protocol_is_unsupported_at_both_gates_and_named_in_th
             RestoreResume::Unverified(RestoreUnverified::VersionNotVerified),
             "{protocol}"
         );
-        let probe = diagnostics::probe(&server.path).await.unwrap();
+        let probe = diagnostics::probe(&server.path, Default::default())
+            .await
+            .unwrap();
         assert_eq!(
             probe["reason"],
             "next_restart_policy_unverified:Unsupported"

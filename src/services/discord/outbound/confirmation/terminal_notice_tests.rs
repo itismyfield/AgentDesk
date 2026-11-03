@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::services::discord::gateway::{DiscordGateway, TurnGateway};
 use crate::services::discord::tui_prompt_relay::bridge_gateway::terminal_notice_test_gateway;
-use crate::services::discord::turn_end_summary::tests::{Isolation, row};
+use crate::services::discord::turn_end_summary::tests::row;
 use crate::services::discord::turn_end_summary::{LiveSummary, post_live};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_summary_line::Outcome;
@@ -120,58 +120,31 @@ impl Drop for Recorder {
     }
 }
 
-fn strict_gateway_override(source: &str, gateway: &str) {
-    let implementation = source
-        .split(&format!("impl TurnGateway for {gateway} {{"))
-        .nth(1)
-        .unwrap();
-    let method = implementation
-        .split("fn send_notice_once")
-        .nth(1)
-        .unwrap_or_else(|| panic!("{gateway} needs its own terminal notice override"))
-        .split("\n    fn ")
-        .next()
-        .unwrap();
-    assert!(
-        method
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .any(|line| line.contains("confirmation::send_terminal_notice_http_once(")),
-        "{gateway} terminal notice must use strict HTTP helper"
-    );
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn turn_end_summary_spends_one_physical_post_and_consumes_every_response() {
-    // Enabling Serenity's limiter ignores Http.proxy; pin this before any local request.
-    let source = include_str!("../confirmation.rs");
-    let function = source
-        .split("async fn send_terminal_notice_http_once(")
-        .nth(1)
-        .unwrap()
-        .split("#[cfg(test)]")
-        .next()
-        .unwrap();
-    for guard in [
-        ".ratelimiter_disabled(true)",
-        ".retry(reqwest::retry::never())",
-        ".redirect(reqwest::redirect::Policy::none())",
-    ] {
-        assert!(
-            function
-                .lines()
-                .filter(|line| !line.trim_start().starts_with("//"))
-                .any(|line| line.trim().starts_with(guard)),
-            "terminal notice transport guard missing: {guard}"
-        );
-    }
-    strict_gateway_override(include_str!("../../gateway.rs"), "DiscordGateway");
-    strict_gateway_override(
-        include_str!("../../tui_prompt_relay/bridge_gateway.rs"),
-        "TuiDirectBridgeGateway",
-    );
     let _isolation = Isolation::new();
     let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let trap = EgressTrap::start().await;
+    // Premise: the notice client routes a non-loopback host through the trap. `.invalid` never
+    // resolves, so even a client that ignored the trap could not reach a server.
+    let unroutable = HttpBuilder::new("terminal-notice-test-token")
+        .proxy("http://egress-probe.invalid")
+        .ratelimiter_disabled(true)
+        .build();
+    let probe_shared = crate::services::discord::make_shared_data_for_tests();
+    let probe = crate::services::discord::outbound::confirmation::send_terminal_notice_http_once(
+        &unroutable,
+        &probe_shared,
+        ChannelId::new(586_799),
+        "-# egress probe",
+    );
+    let probe = tokio::time::timeout(std::time::Duration::from_secs(3), probe).await;
+    assert!(probe.unwrap().is_err());
+    let seen = trap.take();
+    assert!(
+        seen.len() == 1 && seen[0].contains("egress-probe.invalid"),
+        "the trap must stand in for the network: {seen:?}"
+    );
     for (index, (direct, reply)) in [false, true]
         .into_iter()
         .flat_map(|direct| {
@@ -214,6 +187,11 @@ async fn turn_end_summary_spends_one_physical_post_and_consumes_every_response()
         )
         .await
         .unwrap();
+        assert_eq!(
+            trap.take(),
+            Vec::<String>::new(),
+            "the terminal POST must stay on the loopback recorder for {reply:?} direct={direct}"
+        );
         let calls = recorder.calls.lock().unwrap().clone();
         assert_eq!(
             calls.len(),
@@ -235,5 +213,93 @@ async fn turn_end_summary_spends_one_physical_post_and_consumes_every_response()
             1,
             "duplicate producer cannot re-post terminal summary after {reply:?} direct={direct}"
         );
+        assert_eq!(
+            trap.take(),
+            Vec::<String>::new(),
+            "no request may leave the loopback recorder for {reply:?} direct={direct}"
+        );
+    }
+}
+
+/// `turn_end_summary::tests::Isolation`, taken here so this file owns the environment lock
+/// that its egress trap writes the proxy variables under.
+struct Isolation {
+    _guards: [crate::config::TestEnvVarGuard; 2],
+    _live: crate::config_live_reload::TestLiveGuard,
+    _root: tempfile::TempDir,
+}
+
+impl Isolation {
+    fn new() -> Self {
+        let live = crate::config_live_reload::test_live_guard(
+            crate::config::test_env_lock::acquire_shared_test_env_lock(),
+        );
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config.yaml");
+        std::fs::write(&config, "server: {}\n").unwrap();
+        let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
+        let guards = [
+            set("AGENTDESK_ROOT_DIR", root.path()),
+            set("AGENTDESK_CONFIG", &config),
+        ];
+        crate::config_live_reload::install(crate::config::Config::default());
+        Self {
+            _guards: guards,
+            _live: live,
+            _root: root,
+        }
+    }
+}
+
+/// The proxy every environment variable names while the test runs: a request that leaves the
+/// loopback recorder is caught here and closed instead of reaching the network.
+struct EgressTrap {
+    seen: Arc<Mutex<Vec<String>>>,
+    server: tokio::task::AbortHandle,
+    _env: Vec<crate::config::TestEnvVarGuard>,
+}
+
+impl EgressTrap {
+    /// The caller holds the shared environment lock.
+    async fn start() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::<Mutex<Vec<String>>>::default();
+        let recorded = seen.clone();
+        let server = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut head = [0u8; 512];
+                let read = tokio::io::AsyncReadExt::read(&mut stream, &mut head).await;
+                let line = String::from_utf8_lossy(&head[..read.unwrap_or(0)]);
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(line.lines().next().unwrap_or_default().to_string());
+            }
+        });
+        let set = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock;
+        let proxies = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"];
+        let mut env: Vec<_> = (proxies.into_iter())
+            .chain(["ALL_PROXY", "all_proxy"])
+            .map(|key| set(key, url.as_ref()))
+            .collect();
+        for key in ["NO_PROXY", "no_proxy"] {
+            env.push(set(key, "127.0.0.1,localhost,::1".as_ref()));
+        }
+        Self {
+            seen,
+            server: server.abort_handle(),
+            _env: env,
+        }
+    }
+
+    fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.seen.lock().unwrap())
+    }
+}
+
+impl Drop for EgressTrap {
+    fn drop(&mut self) {
+        self.server.abort();
     }
 }

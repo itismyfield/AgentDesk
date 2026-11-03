@@ -137,6 +137,13 @@ impl UnitDeriver {
         derived
     }
 
+    /// Names the transcript the next records come from; turn summaries stay per transcript.
+    pub(crate) fn enter_source(&mut self, source: &crate::services::tui_o::shadow::SourceId) {
+        if let Some(summary) = &mut self.summary {
+            summary.enter(&source.path);
+        }
+    }
+
     /// Units in record order; a repeated key with the same plan (a fork copy) yields nothing.
     pub fn derive(&mut self, record: &CapturedRecord) -> Vec<Derived> {
         self.derive_with_version(record, crate::services::tui_o::shadow::IDENTITY_VERSION)

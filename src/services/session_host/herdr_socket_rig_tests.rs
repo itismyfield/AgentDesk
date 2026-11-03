@@ -705,3 +705,11 @@ impl HerdrRig {
 
 #[path = "herdr_t14_client_tests.rs"]
 pub(crate) mod t14_client;
+
+/// Installs on this thread the registry `boot` builds for its node, production launch host included.
+#[cfg(unix)]
+pub(crate) fn boot_registry_on_this_thread(
+    boot: &crate::config::session_hosts::BootSessionHosts,
+) -> impl Drop + use<> {
+    herdr_registry::force_for_test(HerdrRegistry::build(boot))
+}

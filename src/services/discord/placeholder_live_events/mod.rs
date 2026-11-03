@@ -49,6 +49,8 @@ use recent_events::render_compact_events;
 use recent_events::render_events;
 use session_panel::SessionPanelSnapshot;
 #[cfg(test)]
+pub(in crate::services::discord) use session_panel::is_session_panel_banner;
+#[cfg(test)]
 use status_panel::{CompletedKind, DerivedStatus};
 use status_panel::{StatusPanelState, panel_now, render_status_panel};
 

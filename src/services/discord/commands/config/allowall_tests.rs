@@ -6,6 +6,8 @@ use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
 use crate::services::provider::ProviderKind;
 use poise::serenity_prelude as serenity;
 
+const MANAGED_CONFIG: &[u8] = b"server: {}\ndiscord:\n  bots:\n    main:\n      token: test-token\n      provider: claude\n      auth: {allow_all_users: true}\n";
+
 /// The registered `/allowall` takes a required on/off/status choice, and an
 /// owner's `status` answers without changing public access while `off` does.
 #[test]
@@ -24,8 +26,11 @@ fn allowall_status_reports_without_changing_public_access() {
     let choices: Vec<&str> = action.choices.iter().map(|c| c.name.as_ref()).collect();
     assert_eq!(choices, ["on", "off", "status"]);
 
-    let root = tempfile::tempdir().expect("command runtime root");
-    let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+    let root = crate::config::TestRuntimeRootGuard::with_isolated_config();
+    let yaml_path = crate::runtime_layout::config_file_path(root.path());
+    crate::config::test_env::assert_test_config_write_within_root(root.path(), &yaml_path);
+    std::fs::create_dir_all(yaml_path.parent().unwrap()).unwrap();
+    std::fs::write(&yaml_path, MANAGED_CONFIG).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -60,4 +65,56 @@ fn allowall_status_reports_without_changing_public_access() {
             assert_eq!(now, after, "choice {choice} from {before}");
         }
     });
+    assert_eq!(
+        crate::config::resolved_config_path()
+            .canonicalize()
+            .unwrap(),
+        yaml_path.canonicalize().unwrap()
+    );
+    let saved = crate::config::load_from_path(&yaml_path).unwrap();
+    assert_eq!(saved.discord.bots["main"].auth.allow_all_users, Some(false));
+}
+
+#[test]
+fn allowall_preserves_inherited_external_config_bytes() {
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let sentinel = outside.path().join("sentinel.yaml");
+    let before = MANAGED_CONFIG;
+    let cwd = tempfile::tempdir().unwrap();
+    let cwd_config = crate::runtime_layout::config_file_path(cwd.path());
+    std::fs::create_dir_all(cwd_config.parent().unwrap()).unwrap();
+    std::fs::write(&cwd_config, before).unwrap();
+    std::fs::write(&sentinel, before).unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "services::discord::commands::config::allowall_tests::allowall_status_reports_without_changing_public_access",
+            "--exact",
+        ])
+        .current_dir(cwd.path())
+        .env("AGENTDESK_ROOT_DIR", root.path())
+        .env("AGENTDESK_CONFIG", &sentinel)
+        .output()
+        .unwrap();
+    assert_eq!(
+        std::fs::read(&sentinel).unwrap(),
+        before,
+        "inherited CONFIG sentinel changed"
+    );
+    assert_eq!(
+        std::fs::read(&cwd_config).unwrap(),
+        before,
+        "CWD sentinel changed"
+    );
+    assert!(
+        output.status.success(),
+        "allowall child failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("test result: ok. 1 passed; 0 failed; 0 ignored;")
+    );
 }

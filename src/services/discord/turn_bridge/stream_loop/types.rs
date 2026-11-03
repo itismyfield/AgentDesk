@@ -396,8 +396,6 @@ pub(in crate::services::discord::turn_bridge) struct StreamLoopContext {
     pub(in crate::services::discord::turn_bridge) provider: ProviderKind,
     pub(in crate::services::discord::turn_bridge) cancel_token:
         Arc<crate::services::provider::CancelToken>,
-    pub(in crate::services::discord::turn_bridge) user_text_owned: String,
-    pub(in crate::services::discord::turn_bridge) request_owner_name: String,
     pub(in crate::services::discord::turn_bridge) adk_session_key: Option<String>,
     pub(in crate::services::discord::turn_bridge) adk_session_name: Option<String>,
     pub(in crate::services::discord::turn_bridge) adk_session_info: Option<String>,

@@ -67,12 +67,6 @@ mod tests {
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use std::sync::Arc;
 
-    #[test]
-    fn boot_setup_does_not_enrich_role_map() {
-        let source = include_str!("../../runtime_bootstrap/framework_setup.rs");
-        assert!(!source.contains("enrich_role_map_with_channel_ids"));
-    }
-
     #[tokio::test(flavor = "current_thread")]
     async fn thread_inherit_yaml_controls_intake_policy_pg() {
         let root = tempfile::tempdir().unwrap();

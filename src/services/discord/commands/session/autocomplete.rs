@@ -1,6 +1,7 @@
-use poise::serenity_prelude::{AutocompleteChoice, CreateAutocompleteResponse};
+use poise::serenity_prelude::CreateAutocompleteResponse;
 
-use super::super::super::{Context, check_auth};
+use super::super::super::Context;
+use super::super::autocomplete::{authorized, complete, query_deadline};
 use crate::db::dispatched_sessions::{
     load_live_bound_session_ids_pg, load_session_rebind_context_pg,
 };
@@ -10,16 +11,9 @@ pub(super) async fn autocomplete_session(
     ctx: Context<'_>,
     partial: &str,
 ) -> CreateAutocompleteResponse {
-    let choices = tokio::time::timeout(std::time::Duration::from_millis(2500), async {
-        if !matches!(ctx.data().provider, ProviderKind::Claude)
-            || !check_auth(
-                ctx.author().id,
-                &ctx.author().name,
-                &ctx.data().shared,
-                &ctx.data().token,
-            )
-            .await
-        {
+    let deadline = query_deadline(ctx).await;
+    complete(ctx, partial, async {
+        if !matches!(ctx.data().provider, ProviderKind::Claude) || !authorized(ctx).await {
             return Vec::new();
         }
         let shared = &ctx.data().shared;
@@ -54,19 +48,35 @@ pub(super) async fn autocomplete_session(
                 &live,
                 home.as_deref(),
                 &partial,
+                deadline - std::time::Duration::from_millis(200),
             )
         })
         .await
         .unwrap_or_default()
+        .into_iter()
+        .map(|choice| (choice.label, choice.session_id))
+        .collect()
     })
     .await
-    .unwrap_or_default();
-    CreateAutocompleteResponse::new().set_choices(
-        choices
+}
+
+pub(super) async fn autocomplete_cwd(
+    ctx: Context<'_>,
+    partial: &str,
+) -> CreateAutocompleteResponse {
+    complete(ctx, partial, async {
+        if !authorized(ctx).await {
+            return Vec::new();
+        }
+        let core = ctx.data().shared.core.lock().await;
+        core.sessions
+            .get(&ctx.channel_id())
+            .and_then(|session| session.current_path.as_ref())
+            .map(|path| (format!("현재 작업 · {path}"), path.clone()))
             .into_iter()
-            .map(|choice| AutocompleteChoice::new(choice.label, choice.session_id))
-            .collect(),
-    )
+            .collect()
+    })
+    .await
 }
 
 #[cfg(test)]

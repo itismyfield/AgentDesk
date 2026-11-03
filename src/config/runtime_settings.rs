@@ -76,14 +76,6 @@ pub struct RuntimeSettingsConfig {
     /// Does not sync/finalize. Captured on first GLOBAL access; restart required.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tui_unclaimed_stop_delay_ms: Option<u64>,
-    /// Live per-hook buffering switch; defaults on. False preserves the
-    /// legacy broadcast/polling path. Unlike TTL/delay, no restart is needed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tui_hook_registry_enabled: Option<bool>,
-    /// Live Codex rollout-index cache switch; defaults on. False restores
-    /// recursive scanning and header reads on every resume/follow-up lookup.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub codex_rollout_index_cache_enabled: Option<bool>,
     /// Live dispatch pressure gate; defaults on. Entries remain pending
     /// until provider utilization clears the threshold. False bypasses the gate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -139,8 +131,6 @@ impl RuntimeSettingsConfig {
             && self.followup_prompt_ready_timeout_secs.is_none()
             && self.tui_hook_buffer_ttl_secs.is_none()
             && self.tui_unclaimed_stop_delay_ms.is_none()
-            && self.tui_hook_registry_enabled.is_none()
-            && self.codex_rollout_index_cache_enabled.is_none()
             && self.dispatch_rate_limit_gate_enabled.is_none()
             && self.dispatch_rate_limit_gate_danger_pct.is_none()
             && self.herdr_turn_enabled.is_none()

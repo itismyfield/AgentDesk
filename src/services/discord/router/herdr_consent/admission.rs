@@ -5,7 +5,10 @@ use super::*;
 use crate::db::dispatched_sessions::hosted_execution::{
     self as hosted, HostedLookup, HostedRecord, HostedState,
 };
-use crate::services::session_host::policy::{LocalChecker, ProofCache};
+use crate::services::session_host::{
+    herdr_endpoints,
+    policy::{LocalChecker, ProofCache, Unverified},
+};
 use consent::{ConsentKey, IntentRef, Preview, Question, workflow::Request};
 use refusal::Code;
 pub(in crate::services::discord) use refusal::Refusal;
@@ -33,12 +36,39 @@ pub(in crate::services::discord::router) async fn check(
     if session_hosts::local_node().as_deref() != Some(configured.execution_node.as_str()) {
         return None;
     }
+    // An input of this local user_default channel is demand for its server; rows decide later.
+    Box::pin(crate::services::session_host::autostart::spawn::ensure(
+        &configured,
+    ))
+    .await;
     match Box::pin(assess(deps, provider, request, configured)).await {
         Ok(None) => None,
         other => Some(other.and_then(|hold| {
             hold.ok_or_else(|| Code::Missing.of()("consent assessment missing".into()))
         })),
     }
+}
+
+/// The launch host's policy cache, so a passing check also stands for the host's later permits
+/// and mutations; a registry without a launch host keeps a cache of its own.
+async fn observe(
+    configured: &HerdrLaunchEndpoint,
+    source: Arc<dyn PeerSource>,
+) -> (
+    Result<crate::services::session_host::policy::NextRestartProof, Unverified>,
+    serde_json::Value,
+) {
+    let registry = herdr_endpoints();
+    if let Some(host) = registry.launch_host() {
+        return host.observe_policy_from(configured, source).await;
+    }
+    static PROOFS: std::sync::OnceLock<ProofCache> = std::sync::OnceLock::new();
+    let proofs = PROOFS.get_or_init(ProofCache::default);
+    let checked = proofs.next_restart(source, &LocalChecker).await;
+    let socket = std::path::Path::new(&configured.socket_addr);
+    let observation =
+        crate::services::session_host::policy::diagnostics::record(socket, proofs, &checked);
+    (checked, observation)
 }
 
 async fn assess(
@@ -128,14 +158,7 @@ async fn assess(
         return Ok(Some(held));
     }
     let source = peer(&configured).map_err(Code::PeerSource.of())?;
-    static PROOFS: std::sync::OnceLock<ProofCache> = std::sync::OnceLock::new();
-    let proofs = PROOFS.get_or_init(ProofCache::default);
-    let checked = proofs.next_restart(source.clone(), &LocalChecker).await;
-    let observation = crate::services::session_host::policy::diagnostics::record(
-        std::path::Path::new(&configured.socket_addr),
-        proofs,
-        &checked,
-    );
+    let (checked, observation) = observe(&configured, source.clone()).await;
     if checked.is_ok() {
         return Ok(None);
     }

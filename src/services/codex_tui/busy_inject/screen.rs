@@ -71,6 +71,48 @@ pub(crate) fn read(capture: &str) -> Screen {
     }
 }
 
+/// Owned delivery ignores editor contents, but Enter must still mean prompt submission.
+pub(crate) fn delivery_veto(capture: &str) -> Option<super::Veto> {
+    let plain = strip_ansi_escape_sequences(capture);
+    let footer = plain.lines().rev().find(|row| !row.trim().is_empty());
+    (crate::services::codex_tui::input::submission_modal_in_pane(&plain)
+        || crate::services::codex_tui::input::pane_has_blocking_action_menu(&plain)
+        || completion_popup(&plain)
+        || footer.is_some_and(|row| MODAL_FOOTERS.iter().any(|hint| row.contains(hint))))
+    .then_some(super::Veto::Modal)
+}
+
+/// Completion choices occupy their own block above the current composer, outside its draft.
+fn completion_popup(plain: &str) -> bool {
+    let rows: Vec<_> = plain.lines().collect();
+    let Some(composer) = rows.iter().rposition(|row| row.starts_with('›')) else {
+        return false;
+    };
+    rows[..composer]
+        .iter()
+        .rev()
+        .skip_while(|row| row.trim().is_empty())
+        .take_while(|row| !row.trim().is_empty())
+        .any(|row| {
+            row.starts_with("› /") || row.trim_start().starts_with("enter/tab insert · esc close")
+        })
+}
+
+pub(crate) fn draft_may_be_present(capture: &str) -> bool {
+    use crate::services::codex_tui::input::{
+        ComposerContent, active_composer_content_in_pane, submission_draft_in_pane,
+        submission_readiness_from_ansi_pane,
+    };
+    let shown = read(capture);
+    let plain = strip_ansi_escape_sequences(capture);
+    let (_, draft, _) = submission_readiness_from_ansi_pane(capture);
+    draft
+        || shown.attachments
+        || (shown.composer != Composer::Empty
+            && active_composer_content_in_pane(&plain) != ComposerContent::Empty
+            && submission_draft_in_pane(&plain).is_none_or(|body| !body.is_empty()))
+}
+
 /// The composer's text and whether image rows sit above it.
 fn composer(raw: &[&str], plain: &[String]) -> (Composer, bool) {
     let blank = |at: usize| plain[at].trim().is_empty();

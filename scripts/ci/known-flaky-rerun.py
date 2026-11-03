@@ -30,7 +30,8 @@ OTHER_FAILURE = re.compile(
 # against their source, never against log prose; nextest worker logs never parse as known flaky.
 JUDGE_STEP = "Judge required checks"
 JOB_NAMES = {
-    "rust_build": r"Rust tests build and plan", "rust_tests": r"Rust tests \(worker \d+\)",
+    "rust_build": r"Rust tests build and plan", "base_compare": r"Rust tests base comparison",
+    "rust_tests": r"Rust tests \(worker \d+\)",
     "test_evidence": r"Rust tests evidence", "lint": r"Lint runner",
     "dashboard": r"Dashboard \(Node 22\) runner", "pg15_owner_proof": r"PostgreSQL 15 owner proof",
     "scripts": r"Script checks runner", "scripts_guards": r"Script checks runner \(guards\)",

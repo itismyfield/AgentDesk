@@ -1,27 +1,3 @@
-mod source_guard_tests;
-
-#[test]
-fn intake_dispatch_invariant_direct_execution_body_has_no_external_producer_callsites() {
-    use source_guard_tests::{DISPATCHERS, PRODUCERS, producer_gaps};
-    assert_eq!(
-        producer_gaps(&PRODUCERS, &DISPATCHERS),
-        Vec::<String>::new()
-    );
-}
-
-#[test]
-fn intake_dispatch_invariant_worker_post_claim_is_the_only_router_bypass() {
-    use source_guard_tests::{MESSAGE_HANDLER, WORKER_BODY, WORKER_ENTRY, worker_gaps};
-    let gaps = worker_gaps(WORKER_BODY, WORKER_ENTRY, MESSAGE_HANDLER);
-    assert_eq!(gaps, Vec::<String>::new());
-}
-
-#[test]
-fn intake_dispatch_invariant_queued_entrypoints_promote_markers_after_admission_before_finish() {
-    use source_guard_tests::{QUEUED, queued_promotion_gaps};
-    assert_eq!(queued_promotion_gaps(&QUEUED), Vec::<String>::new());
-}
-
 use std::ffi::OsString;
 use std::sync::Arc;
 

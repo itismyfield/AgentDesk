@@ -176,3 +176,22 @@ fn diagnosis_names_each_loaded_image_refusal_and_never_calls_ambiguity_a_change(
     let distinct: std::collections::BTreeSet<_> = actions.iter().collect();
     assert_eq!(distinct.len(), 4, "each refusal has its own action");
 }
+
+#[test]
+fn an_unverified_peer_is_not_called_an_absent_server() {
+    let socket = Path::new("/no-server-peer-diagnostics-test/herdr.sock");
+    for reason in [Unverified::Peer, Unverified::Changed] {
+        let view = record(socket, &ProofCache::default(), &Err(reason));
+        let action = view["action"].as_str().unwrap_or_default();
+        assert!(
+            action.contains("could not be verified") && action.contains("autostart"),
+            "{action}"
+        );
+        for claim in ["listening", "absent", "not running", "start bare herdr"] {
+            assert!(
+                !action.contains(claim),
+                "{reason:?} asserts absence: {action}"
+            );
+        }
+    }
+}

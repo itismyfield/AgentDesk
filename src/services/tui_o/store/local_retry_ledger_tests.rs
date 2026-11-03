@@ -131,3 +131,47 @@ fn local_retry_reducer_rejects_duplicate_mismatched_or_ineligible_children() {
         assert!(state.violation().is_some(), "mismatch {mismatch}");
     }
 }
+
+#[test]
+fn local_retry_selection_reads_only_budget_roots_of_a_long_ledger() {
+    let at = Utc::now();
+    let mut state = LedgerState::default();
+    let mut add = |serial: u64, mark: Option<LocalRetryMark>, end: LedgerEntry| {
+        let mut entry = prepared(serial, mark);
+        if let LedgerEntry::Prepared {
+            anchor_id,
+            unit_key,
+            ..
+        } = &mut entry
+        {
+            *anchor_id = 0;
+            unit_key.native_key = format!("unit-{serial}");
+        }
+        state.apply(at, entry);
+        state.apply(at, end);
+    };
+    for serial in 0..2_000 {
+        add(serial, None, LedgerEntry::NotFound { serial });
+    }
+    let reason = "unresolved".to_string();
+    let unresolved = LedgerEntry::Unresolved {
+        serial: 2_000,
+        reason,
+    };
+    add(2_000, Some(LocalRetryMark::Budget), unresolved);
+    add(
+        2_001,
+        Some(LocalRetryMark::Budget),
+        LedgerEntry::NotFound { serial: 2_001 },
+    );
+    assert!(state.violation().is_none(), "{:?}", state.violation());
+
+    super::PIECE_READS.with(|reads| reads.set(0));
+    let root = local_retry::pending(&state).expect("the one retryable root");
+    assert_eq!(root.root_serial, 2_001);
+    let reads = super::PIECE_READS.with(std::cell::Cell::get);
+    assert!(
+        reads <= 4,
+        "only budget roots are read, not every serial: {reads}"
+    );
+}

@@ -120,7 +120,12 @@ fn b2_idle_leaf_collects_for_turn_without_enabling_cancel_gate() {
         .cancelled
         .store(true, std::sync::atomic::Ordering::Relaxed);
     assert_eq!(
-        idle_claude(session.into(), token.clone())("own".into()),
+        idle_claude(
+            crate::services::claude_tui::busy_inject::Pane::with_program(session, "tmux".into()),
+            session.into(),
+            7_212_901,
+            token.clone(),
+        )("own".into()),
         Ok(Completion::Submitted)
     );
     assert_eq!(

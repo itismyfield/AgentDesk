@@ -1,7 +1,19 @@
-use super::IntakeWorkerLifecycle;
+use super::{IntakeWorkerLifecycle, IntakeWorkerTickGuard};
+use std::cell::RefCell;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
+
+thread_local! {
+    static ENDS_BETWEEN_WAITER_STEPS: RefCell<Option<IntakeWorkerTickGuard<'static>>> =
+        const { RefCell::new(None) };
+}
+
+/// Ends the armed tick between the waiter's registration and its count check.
+pub(super) fn between_waiter_steps() {
+    let tick = ENDS_BETWEEN_WAITER_STEPS.with(|slot| slot.borrow_mut().take());
+    drop(tick);
+}
 
 fn poll_drain(future: Pin<&mut impl Future<Output = ()>>) -> Poll<()> {
     future.poll(&mut Context::from_waker(Waker::noop()))
@@ -59,55 +71,20 @@ fn nonfinal_tick_does_not_complete_drain() {
     assert!(poll_drain(waiter.as_mut()).is_ready());
 }
 
-const INTAKE_WORKER: &str = include_str!("../intake_worker.rs");
-const WAIT: &str = "pub(crate) async fn wait_until_drained(";
-const REGISTER: &str = "let notified = self.drained.notified();";
-const CHECK: &str = "self.active_ticks.load(Ordering::SeqCst)";
-
-/// Lexical order tripwire, not a runtime interleaving proof or Rust parser: in the code
-/// mask of the real `wait_until_drained`, registration precedes the active-tick check.
-fn drain_order_gaps(source: &str) -> Vec<String> {
-    let mask = crate::test_support::rust_code_mask(source).expect("intake worker lexes");
-    let Some(span) = crate::test_support::braced_item_span(&mask, WAIT) else {
-        return vec![format!("missing {WAIT}")];
-    };
-    let body = &mask[span];
-    match (body.find(REGISTER), body.find(CHECK)) {
-        (Some(register), Some(check)) if register < check => Vec::new(),
-        found => vec![format!(
-            "register before checking: broadcast has no permit {found:?}"
-        )],
-    }
-}
-
 #[test]
-fn drain_registers_before_checking_active_ticks() {
-    assert_eq!(drain_order_gaps(INTAKE_WORKER), Vec::<String>::new());
-}
-
-#[test]
-fn drain_order_guard_rejects_commented_and_reordered_steps() {
-    for needle in [WAIT, REGISTER, CHECK] {
-        for forgery in crate::test_support::CommentForgery::ALL {
-            let forged = crate::test_support::comment_out_code(INTAKE_WORKER, needle, forgery);
-            assert!(
-                !drain_order_gaps(&forged).is_empty(),
-                "{forgery:?} commented `{needle}` still passes"
-            );
-        }
-    }
-    let register = INTAKE_WORKER.find(REGISTER).expect("registration");
-    let check = register + INTAKE_WORKER[register..].find(CHECK).expect("tick check");
-    let swapped = [
-        &INTAKE_WORKER[..register],
-        CHECK,
-        &INTAKE_WORKER[register + REGISTER.len()..check],
-        REGISTER,
-        &INTAKE_WORKER[check + CHECK.len()..],
-    ]
-    .concat();
+fn last_tick_ending_inside_the_waiter_steps_completes_the_drain() {
+    let lifecycle: &'static IntakeWorkerLifecycle = Box::leak(Box::default());
+    let tick = lifecycle.try_begin_tick().unwrap();
+    lifecycle.fence_admission();
+    ENDS_BETWEEN_WAITER_STEPS.with(|slot| *slot.borrow_mut() = Some(tick));
+    let mut waiter = Box::pin(lifecycle.wait_until_drained());
+    let first = poll_drain(waiter.as_mut());
     assert!(
-        !drain_order_gaps(&swapped).is_empty(),
-        "reordered drain passes"
+        ENDS_BETWEEN_WAITER_STEPS.with(|slot| slot.borrow().is_none()),
+        "the waiter must reach the step boundary that ends the last tick"
+    );
+    assert!(
+        first.is_ready() || poll_drain(waiter.as_mut()).is_ready(),
+        "a last tick ending between the waiter steps must not strand the drain"
     );
 }

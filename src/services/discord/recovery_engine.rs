@@ -132,6 +132,9 @@ mod turn_mode_restart_tests;
 #[path = "recovery_engine/herdr_reader.rs"]
 pub(in crate::services::discord) mod herdr_reader;
 #[cfg(unix)]
+#[path = "recovery_engine/herdr_server_replaced.rs"]
+pub(in crate::services::discord) mod herdr_server_replaced;
+#[cfg(unix)]
 #[path = "recovery_engine/host_reconcile.rs"]
 pub(in crate::services::discord) mod host_reconcile;
 // #4111: behavior-preserving extraction of guarded Codex rollout persist-outcome

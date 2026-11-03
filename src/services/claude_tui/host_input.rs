@@ -423,8 +423,6 @@ impl Plan<'_> {
             TuiInputAction::Enter => self.mutate(action, key(HostKey::Enter))?,
             TuiInputAction::Escape => self.mutate(action, key(HostKey::Escape))?,
             TuiInputAction::CtrlU => self.mutate(action, key(HostKey::CtrlU))?,
-            TuiInputAction::ArrowLeft => self.mutate(action, key(HostKey::Left))?,
-            TuiInputAction::ArrowRight => self.mutate(action, key(HostKey::Right))?,
             TuiInputAction::Backspace(count) => {
                 let mut remaining = *count;
                 while remaining > 0 {

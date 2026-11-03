@@ -22,7 +22,7 @@ mod witness_codec;
 #[cfg(unix)]
 pub(crate) mod writer_compat;
 
-pub(crate) use cache::ProofCache;
+pub(crate) use cache::{ProofCache, explicit_false};
 pub(crate) use types::{NextRestartProof, StartupProof};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

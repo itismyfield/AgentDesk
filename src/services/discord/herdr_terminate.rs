@@ -178,7 +178,7 @@ async fn read_end(target: HerdrTarget, record: HostedExecution) -> Result<(), Te
     })?;
     tokio::task::spawn_blocking(move || {
         let pane = view.read_execution();
-        if !view.ended(&record, &pane) {
+        if !target.ended_reading(&record, &pane) {
             return Err(TerminationResult::Indeterminate(format!("pane: {pane:?}")));
         }
         match target.provider_absent() {
@@ -386,7 +386,7 @@ async fn confirm_captured_released(
     }
 }
 /// Production callers: [`terminate_registered_herdr`] and a user clear of a Herdr channel.
-pub(crate) async fn terminate_explicit_herdr(
+pub(in crate::services::discord) async fn terminate_explicit_herdr(
     request: impl Into<ExplicitTerminate> + Send,
     shared: Arc<SharedData>,
     pool: &PgPool,
@@ -408,6 +408,17 @@ pub(crate) async fn terminate_explicit_herdr(
         }
         Err(result) => result,
     }
+}
+
+/// Lets Unix integration tests drive the Discord-scoped service.
+#[cfg(test)]
+#[cfg(unix)]
+pub(crate) async fn terminate_explicit_herdr_for_test(
+    request: impl Into<ExplicitTerminate> + Send,
+    shared: Arc<SharedData>,
+    pool: &PgPool,
+) -> TerminationResult {
+    terminate_explicit_herdr(request, shared, pool).await
 }
 
 /// The service up to its settlement. An HTTP `expected` binds the run to what the caller selected:

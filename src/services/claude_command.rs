@@ -231,9 +231,7 @@ mod chokepoint_guard_tests {
         files
     }
 
-    /// Read the crate's actual source set into the same path/content entry form
-    /// consumed by the scanner. Keeping collection separate lets synthetic tests
-    /// exercise the production scan loop without filesystem setup.
+    /// Read the crate's actual source set into the path/content entries the scanners consume.
     fn crate_source_entries() -> Vec<(String, String)> {
         crate_sources()
             .into_iter()
@@ -283,28 +281,6 @@ mod chokepoint_guard_tests {
             "Claude binary raw-spawned outside the chokepoint \
              (build it with claude_command::ClaudeCommandBuilder instead):\n{}",
             violations.join("\n")
-        );
-    }
-
-    /// Mutation coverage for the raw-spawn scanner: a foreign file that spells a
-    /// forbidden `Command::new(claude_bin…)` idiom is flagged, while the
-    /// chokepoint definition site itself stays exempt. Inverting the exemption
-    /// check or emptying `FORBIDDEN_RAW_SPAWN` is caught here.
-    #[test]
-    fn raw_spawn_guard_flags_foreign_spawns_and_exempts_the_chokepoint() {
-        let spawn_source = "let command = std::process::Command::new(claude_bin);";
-        let foreign = scan_raw_spawn_sources([("src/services/other.rs", spawn_source)]);
-        assert!(
-            foreign
-                .iter()
-                .any(|violation| violation.starts_with("src/services/other.rs")),
-            "a foreign raw spawn must be flagged"
-        );
-
-        let sanctioned = scan_raw_spawn_sources([(DEFINITION_SITES[0], spawn_source)]);
-        assert!(
-            sanctioned.is_empty(),
-            "the chokepoint definition site must stay exempt"
         );
     }
 
@@ -364,38 +340,6 @@ mod chokepoint_guard_tests {
              (obtain Claude paths through platform::resolve_provider_binary, which \
              scrubs them):\n{}",
             violations.join("\n")
-        );
-    }
-
-    /// Mutation coverage for the sealed-seam guard: a foreign reference is flagged
-    /// while the sanctioned sites stay exempt. Inverting the exemption check or
-    /// broadening the site list is caught here.
-    #[test]
-    fn sealed_claude_seam_guard_flags_foreign_reference_only() {
-        let foreign = scan_sealed_claude_seam_sources([(
-            "src/services/other.rs",
-            "let r = resolve_claude_binary_sealed();",
-        )]);
-        assert!(
-            foreign
-                .iter()
-                .any(|violation| violation.contains(SEALED_CLAUDE_SEAM_NEEDLE)),
-            "a foreign reference to the sealed seam must be flagged"
-        );
-
-        let sanctioned = scan_sealed_claude_seam_sources([
-            (
-                "src/services/claude_command.rs",
-                "resolve_claude_binary_sealed();",
-            ),
-            (
-                "src/services/platform/binary_resolver.rs",
-                "pub(crate) fn resolve_claude_binary_sealed()",
-            ),
-        ]);
-        assert!(
-            sanctioned.is_empty(),
-            "the definition site and sanctioned chokepoint caller must stay exempt"
         );
     }
 }

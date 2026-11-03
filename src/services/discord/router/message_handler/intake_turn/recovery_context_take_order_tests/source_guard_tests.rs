@@ -415,8 +415,10 @@ fn intake_guards_reject_reordered_steps_and_count_coded_bans() {
     let coded = insert(" = { let provider = x; };\n");
     assert_eq!(transition_provider_gaps(&coded).len(), 1);
 
-    let at = Lexed::new(BUSY_RETRY)
-        .find(PENDING_REACTION)
+    let src = Lexed::new(BUSY_RETRY);
+    let finalize = src.find(FINALIZE_FN).expect("enqueue finalizer");
+    let at = src
+        .find_after(finalize, PENDING_REACTION)
         .expect("accepted reaction");
     let insert = |text: &str| format!("{}{text}{}", &BUSY_RETRY[..at], &BUSY_RETRY[at..]);
     let prose = insert(&format!("/* {CLEARED_VIEW} */ // {CLEARED_VIEW}\n"));

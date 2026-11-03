@@ -4,6 +4,9 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 pub(crate) use super::migrate::MigrateAction;
 
+mod command_args;
+pub(crate) use command_args::*;
+
 #[derive(Parser)]
 #[command(name = "agentdesk", version = env!("CARGO_PKG_VERSION"), about = "AI agent orchestration platform")]
 struct Cli {
@@ -19,10 +22,7 @@ struct Cli {
 #[derive(Subcommand)]
 pub(crate) enum Commands {
     /// Start Discord bot server(s)
-    Dcserver {
-        /// Bot token (defaults to configured Discord bots or AGENTDESK_TOKEN env)
-        token: Option<String>,
-    },
+    Dcserver(DcserverArgs),
     /// Run the initial setup wizard
     Init,
     /// Re-run the configuration wizard
@@ -30,167 +30,34 @@ pub(crate) enum Commands {
     /// Emit a launchd plist using the canonical Rust renderer
     EmitLaunchdPlist(EmitLaunchdPlistArgs),
     /// Restart Discord bot server(s)
-    RestartDcserver {
-        /// Discord channel ID for restart completion report
-        #[arg(long)]
-        report_channel_id: Option<u64>,
-        /// Provider for restart report (claude, codex, gemini, opencode, or qwen)
-        #[arg(long, value_enum)]
-        report_provider: Option<ReportProvider>,
-        /// Existing message ID to edit for restart report
-        #[arg(long)]
-        report_message_id: Option<u64>,
-    },
+    RestartDcserver(RestartDcserverArgs),
     /// Deprecated: send a file to a Discord channel
     #[command(
         after_help = "Deprecated compatibility command. The routed `send` command does not currently accept file attachments, so keep using this command until an attachment-capable replacement is available."
     )]
-    DiscordSendfile {
-        /// File path to send
-        path: String,
-        /// Discord channel ID
-        #[arg(long)]
-        channel: u64,
-        /// Authentication key hash
-        #[arg(long)]
-        key: String,
-    },
+    DiscordSendfile(DiscordSendfileArgs),
     /// Deprecated: send a message to a Discord channel
     #[command(
         after_help = "Deprecated compatibility command. With `--key`, this command selects that one configured bot token; without `--key`, it tries configured bot tokens sequentially until one succeeds. For a role-mapped channel with a configured bot runtime, migrate to `agentdesk send --target channel:<id> --content <TEXT>`. Routed `send` instead requires role-map authorization and selects one `--bot` runtime (default: announce), so it does not preserve this command's token selection or sequential fallback. Keep using this compatibility command when those routing requirements do not match the current delivery."
     )]
-    DiscordSendmessage {
-        /// Discord channel ID
-        #[arg(long)]
-        channel: u64,
-        /// Message text
-        #[arg(long)]
-        message: String,
-        /// Authentication key hash (optional; without it, configured bot tokens are tried sequentially until one succeeds)
-        #[arg(long)]
-        key: Option<String>,
-    },
+    DiscordSendmessage(DiscordSendmessageArgs),
     /// Deprecated: send a direct message to a Discord user
     #[command(
         after_help = "Deprecated compatibility command. With `--key`, this command selects that one configured bot token; without `--key`, it tries configured bot tokens sequentially until one succeeds. Routed `send` instead requires a role-map-authorized channel or agent target and selects one configured `--bot` runtime (default: announce); it does not preserve this token fallback, target a Discord user, or create a DM. Keep using this command until a supported replacement is available."
     )]
-    DiscordSenddm {
-        /// Discord user ID
-        #[arg(long)]
-        user: u64,
-        /// Message text
-        #[arg(long)]
-        message: String,
-        /// Authentication key hash (optional; without it, configured bot tokens are tried sequentially until one succeeds)
-        #[arg(long)]
-        key: Option<String>,
-    },
+    DiscordSenddm(DiscordSenddmArgs),
     /// Send a routed Discord message without HTTP server dependency
-    Send {
-        #[arg(
-            long,
-            help = crate::services::discord::outbound::send_target::SEND_TARGET_CONTRACT
-        )]
-        target: String,
-        /// Source label recorded in the send envelope
-        #[arg(long)]
-        source: Option<String>,
-        /// Preferred Discord bot name
-        #[arg(long)]
-        bot: Option<String>,
-        /// Message body
-        #[arg(long)]
-        content: String,
-    },
+    Send(SendArgs),
     /// Send a trigger-capable agent handoff through the announce bot
-    SendToAgent {
-        /// Source agent id recorded in the message envelope
-        #[arg(long = "from")]
-        from_agent_id: String,
-        /// Target agent id whose Discord channel binding is used
-        #[arg(long = "to")]
-        to_agent_id: String,
-        /// Message body
-        #[arg(long)]
-        message: String,
-        /// Target channel binding kind
-        #[arg(long = "channel-kind", value_enum, default_value = "cc")]
-        channel_kind: AgentHandoffChannelKindArg,
-        /// Send the body without the automatic handoff prefix
-        #[arg(long = "no-prefix")]
-        no_prefix: bool,
-        /// Required: `true` → 회신 필수, `false` → 회신 불필요.
-        #[arg(long = "expect-reply", action = clap::ArgAction::Set, required = true)]
-        expect_reply: bool,
-        /// #3556 — reserve a headless turn on the target mailbox instead of
-        /// posting an announce message. Authoritative wake-up: exits non-zero
-        /// on 409 (mailbox busy). Mutually exclusive with the default
-        /// announce-post behavior.
-        #[arg(long = "start-turn")]
-        start_turn: bool,
-    },
+    SendToAgent(SendToAgentArgs),
     /// Submit a review verdict without HTTP server dependency
-    ReviewVerdict {
-        /// Review dispatch ID
-        #[arg(long = "dispatch")]
-        dispatch_id: String,
-        /// Verdict: pass, improve, rework, reject, approved
-        #[arg(long = "verdict")]
-        verdict: String,
-        /// Optional verdict notes
-        #[arg(long)]
-        notes: Option<String>,
-        /// Optional detailed feedback
-        #[arg(long)]
-        feedback: Option<String>,
-        /// Reviewer provider id for counter-model reviews
-        #[arg(long)]
-        provider: Option<String>,
-        /// Reviewed commit SHA
-        #[arg(long)]
-        commit: Option<String>,
-    },
+    ReviewVerdict(ReviewVerdictArgs),
     /// Submit a review decision without HTTP server dependency
-    ReviewDecision {
-        /// Kanban card ID
-        #[arg(long = "card")]
-        card_id: String,
-        /// Decision: approve, rework, escalate, accept, dispute, dismiss, requeue, resume
-        #[arg(long = "decision")]
-        decision: String,
-        /// Optional decision comment
-        #[arg(long)]
-        comment: Option<String>,
-        /// Optional dispatch scope for agent reply decisions
-        #[arg(long = "dispatch")]
-        dispatch_id: Option<String>,
-    },
+    ReviewDecision(ReviewDecisionArgs),
     /// Recover a review dispatch target commit/worktree through the API
-    ReviewRecoverTarget {
-        /// Review dispatch ID
-        #[arg(long = "dispatch")]
-        dispatch_id: Option<String>,
-        /// Kanban card ID, used to resolve the latest review dispatch when --dispatch is omitted
-        #[arg(long = "card")]
-        card_id: Option<String>,
-        /// Reviewed commit SHA to pin
-        #[arg(long = "commit")]
-        target_commit: Option<String>,
-        /// Worktree path whose HEAD must match the reviewed commit
-        #[arg(long = "worktree")]
-        worktree_path: Option<String>,
-        /// Operator reason stored in the audit event
-        #[arg(long)]
-        reason: Option<String>,
-    },
+    ReviewRecoverTarget(ReviewRecoverTargetArgs),
     /// Read API documentation without HTTP server dependency
-    Docs {
-        /// Optional docs category
-        category: Option<String>,
-        /// Emit flat endpoint list
-        #[arg(long)]
-        flat: bool,
-    },
+    Docs(DocsArgs),
     /// Auto-queue operations without HTTP server dependency
     AutoQueue {
         #[command(subcommand)]
@@ -199,20 +66,9 @@ pub(crate) enum Commands {
     /// Inspect or explicitly release one turn lease while preserving its session
     TurnLease(super::turn_lease::TurnLeaseArgs),
     /// Force-kill a session without HTTP server dependency
-    ForceKill {
-        /// Session key
-        #[arg(long = "session-key")]
-        session_key: String,
-        /// Requeue card after force-kill
-        #[arg(long)]
-        retry: bool,
-    },
+    ForceKill(ForceKillArgs),
     /// Sync GitHub issues without HTTP server dependency
-    GithubSync {
-        /// Repository in owner/repo form. Omit to sync all registered sync-enabled repos.
-        #[arg(long)]
-        repo: Option<String>,
-    },
+    GithubSync(GithubSyncArgs),
     /// Monitor status commands for Discord channels
     Monitoring {
         #[command(subcommand)]
@@ -234,182 +90,33 @@ pub(crate) enum Commands {
         action: CardAction,
     },
     /// Cherry-pick a worktree branch into main and optionally close its issue
-    CherryMerge {
-        /// Source branch to merge into main
-        branch: String,
-        /// Close the linked GitHub issue when it can be inferred uniquely
-        #[arg(long)]
-        close_issue: bool,
-    },
+    CherryMerge(CherryMergeArgs),
     /// Claude session wrapper (tmux FIFO on Unix, process pipe on all platforms)
-    TmuxWrapper {
-        /// Path to the output capture file
-        #[arg(long)]
-        output_file: String,
-        /// Path to the input FIFO
-        #[arg(long)]
-        input_fifo: String,
-        /// Path to the prompt file
-        #[arg(long)]
-        prompt_file: String,
-        /// Working directory (defaults to ".")
-        #[arg(long, default_value = ".")]
-        cwd: String,
-        /// Input mode: fifo on Unix or pipe on all platforms
-        #[arg(long, value_enum, default_value_t = InputModeArg::default())]
-        input_mode: InputModeArg,
-        /// Claude command and arguments (after --)
-        #[arg(last = true)]
-        claude_cmd: Vec<String>,
-    },
+    TmuxWrapper(TmuxWrapperArgs),
     /// Codex session wrapper (tmux FIFO on Unix, process pipe on all platforms)
-    CodexTmuxWrapper {
-        /// Path to the output capture file
-        #[arg(long)]
-        output_file: String,
-        /// Path to the input FIFO
-        #[arg(long)]
-        input_fifo: String,
-        /// Path to the prompt file
-        #[arg(long)]
-        prompt_file: String,
-        /// Path to codex binary
-        #[arg(long)]
-        codex_bin: String,
-        /// Optional codex model override
-        #[arg(long)]
-        codex_model: Option<String>,
-        /// Optional reasoning effort (low, normal, high, xhigh)
-        #[arg(long)]
-        reasoning_effort: Option<String>,
-        /// Optional developer instructions passed through Codex config
-        #[arg(long)]
-        developer_instructions: Option<String>,
-        /// Optional resume session id for the first turn
-        #[arg(long)]
-        resume_session_id: Option<String>,
-        /// Override Codex native fast mode for every turn in this wrapper session
-        #[arg(long, value_enum)]
-        fast_mode_state: Option<FastModeStateArg>,
-        /// Override Codex goals feature flag for every turn in this wrapper session
-        #[arg(long, value_enum)]
-        goals_state: Option<FeatureStateArg>,
-        /// Working directory (defaults to ".")
-        #[arg(long, default_value = ".")]
-        cwd: String,
-        /// Additional directory writable alongside the primary workspace
-        #[arg(long = "add-dir")]
-        add_dirs: Vec<String>,
-        /// Input mode: fifo on Unix or pipe on all platforms
-        #[arg(long, value_enum, default_value_t = InputModeArg::default())]
-        input_mode: InputModeArg,
-        /// Auto-compact token limit (absolute token count)
-        #[arg(long)]
-        compact_token_limit: Option<u64>,
-    },
+    CodexTmuxWrapper(CodexTmuxWrapperArgs),
     /// Qwen session wrapper (tmux FIFO on Unix, process pipe on all platforms)
-    QwenTmuxWrapper {
-        /// Path to the output capture file
-        #[arg(long)]
-        output_file: String,
-        /// Path to the input FIFO
-        #[arg(long)]
-        input_fifo: String,
-        /// Path to the prompt file
-        #[arg(long)]
-        prompt_file: String,
-        /// Path to qwen binary
-        #[arg(long)]
-        qwen_bin: String,
-        /// Optional qwen model override
-        #[arg(long)]
-        qwen_model: Option<String>,
-        /// Qwen built-in core tool allowlist entry
-        #[arg(long = "qwen-core-tool")]
-        qwen_core_tools: Vec<String>,
-        /// Optional resume session id for the first turn
-        #[arg(long)]
-        resume_session_id: Option<String>,
-        /// Force the first turn to start without reusing provider session state
-        #[arg(long)]
-        fresh_session: bool,
-        /// Working directory (defaults to ".")
-        #[arg(long, default_value = ".")]
-        cwd: String,
-        /// Input mode: fifo on Unix or pipe on all platforms
-        #[arg(long, value_enum, default_value_t = InputModeArg::default())]
-        input_mode: InputModeArg,
-    },
+    QwenTmuxWrapper(QwenTmuxWrapperArgs),
     /// Relay Claude Code hook stdin JSON to the AgentDesk TUI hook receiver
-    ClaudeHookRelay {
-        /// Hook receiver base endpoint, e.g. http://127.0.0.1:49152
-        #[arg(long)]
-        endpoint: String,
-        /// Provider id, e.g. claude
-        #[arg(long)]
-        provider: String,
-        /// Claude hook event name, e.g. Stop or PreToolUse
-        #[arg(long)]
-        event: String,
-        /// TUI session id assigned by AgentDesk
-        #[arg(long = "session-id")]
-        session_id: String,
-    },
+    ClaudeHookRelay(ClaudeHookRelayArgs),
     /// Relay Codex hook stdin JSON to the AgentDesk TUI hook receiver
-    CodexHookRelay {
-        /// Hook receiver base endpoint, e.g. http://127.0.0.1:49152
-        #[arg(long)]
-        endpoint: String,
-        /// Provider id, e.g. codex
-        #[arg(long)]
-        provider: String,
-        /// Codex hook event name, e.g. Stop or PreToolUse
-        #[arg(long)]
-        event: String,
-        /// TUI session id assigned by AgentDesk
-        #[arg(long = "session-id")]
-        session_id: String,
-    },
+    CodexHookRelay(CodexHookRelayArgs),
     /// Kill all AgentDesk-* tmux sessions and clean temp files
     ResetTmux,
     /// Check if MCP tool(s) are registered in .claude/settings.json
-    Ismcptool {
-        /// Tool names to check
-        #[arg(required = true)]
-        tools: Vec<String>,
-    },
+    Ismcptool(IsmcptoolArgs),
     /// Add MCP tool permission(s) to .claude/settings.json
-    Addmcptool {
-        /// Tool names to add
-        #[arg(required = true)]
-        tools: Vec<String>,
-    },
+    Addmcptool(AddmcptoolArgs),
     /// Show server health, active sessions, and auto-queue status
     Status,
     /// List kanban cards
-    Cards {
-        /// Filter by status (e.g. ready, in_progress, done)
-        #[arg(long)]
-        status: Option<String>,
-    },
+    Cards(CardsArgs),
     /// Dispatch operations
     Dispatch(DispatchArgs),
     /// Resume a stuck kanban card from its current state
-    Resume {
-        /// Card ID or GitHub issue number
-        card_id: String,
-        /// Force resume (bypass guards for manual-intervention states)
-        #[arg(long)]
-        force: bool,
-        /// Reason for audit log
-        #[arg(long)]
-        reason: Option<String>,
-    },
+    Resume(ResumeArgs),
     /// Complete pending dispatch and advance to review
-    Advance {
-        /// GitHub issue number
-        issue_number: String,
-    },
+    Advance(AdvanceArgs),
     /// Show auto-queue status with thread links
     #[command(
         after_help = "Deprecated compatibility command. For the queue-only inspector, use `agentdesk query queue`; use `agentdesk query` for the combined queue, dispatch, and phase-gate snapshot. This command preserves its legacy text and JSON output shapes."
@@ -421,32 +128,13 @@ pub(crate) enum Commands {
     /// python -c '...'` polling pattern. Aggregates the queue run state,
     /// pending dispatches, and phase-gate snapshot into one structured
     /// response. Pass `--json` for machine-readable output.
-    Query {
-        #[command(subcommand)]
-        action: Option<QueryAction>,
-        /// Filter result rows. Repeatable. Format: `key:value`
-        /// (e.g. `--filter status:pending`, `--filter dispatch_type:review`).
-        #[arg(long = "filter", global = true)]
-        filters: Vec<String>,
-        /// Restrict to a specific agent_id when applicable.
-        #[arg(long, global = true)]
-        agent: Option<String>,
-        /// Maximum rows to render per section (0 = unlimited).
-        #[arg(long, global = true, default_value_t = 0)]
-        limit: usize,
-    },
+    Query(QueryArgs),
     /// Phase-gate violation snapshot (issue #2657).
     ///
     /// Read-only inspector that flags auto-queue entries dispatched at a
     /// higher `batch_phase` than the run's live phase pointer. Same data as
     /// `GET /api/queue/phase-gates/violations`.
-    Phase {
-        #[command(subcommand)]
-        action: Option<PhaseAction>,
-        /// Show full per-entry detail.
-        #[arg(long, global = true)]
-        detailed: bool,
-    },
+    Phase(PhaseArgs),
     /// Build + deploy dev + promote to release
     Deploy,
     /// Print this binary's build switches as JSON (read by deploy scripts)
@@ -454,57 +142,18 @@ pub(crate) enum Commands {
     /// List agents and their status
     Agents,
     /// Show turn/session diagnostics for an agent ID or Discord channel ID
-    Diag {
-        /// Agent ID or Discord channel ID
-        identifier: String,
-    },
+    Diag(DiagArgs),
     /// Runtime config get/set
     Config {
         #[command(subcommand)]
         action: ConfigAction,
     },
     /// Call any API endpoint (curl replacement)
-    Api {
-        /// HTTP method (GET, POST, PATCH, PUT, DELETE)
-        method: String,
-        /// API path (e.g. /api/health)
-        path: String,
-        /// Optional JSON body
-        body: Option<String>,
-    },
+    Api(ApiArgs),
     /// List session termination events
-    Terminations {
-        /// Filter by kanban card ID
-        #[arg(long)]
-        card_id: Option<String>,
-        /// Filter by dispatch ID
-        #[arg(long)]
-        dispatch_id: Option<String>,
-        /// Filter by session key
-        #[arg(long)]
-        session: Option<String>,
-        /// Max number of events to show
-        #[arg(long, default_value = "50")]
-        limit: u32,
-    },
+    Terminations(TerminationsArgs),
     /// Environment diagnostics
-    Doctor {
-        /// Apply safe local repairs before running diagnostics
-        #[arg(long)]
-        fix: bool,
-        /// Allow doctor --fix to restart the dcserver service
-        #[arg(long)]
-        allow_restart: bool,
-        /// Allow doctor --fix to run SQLite schema repair and remove stale SQLite cache files
-        #[arg(long)]
-        repair_sqlite_cache: bool,
-        /// Allow sending configured auth tokens to a non-loopback AGENTDESK_API_URL
-        #[arg(long)]
-        allow_remote: bool,
-        /// Restrict checks to a profile
-        #[arg(long, value_enum)]
-        profile: Option<DoctorProfileArg>,
-    },
+    Doctor(DoctorArgs),
     /// Migration helpers
     Migrate {
         #[command(subcommand)]
@@ -529,24 +178,7 @@ pub(crate) enum Commands {
     MachineCompare,
     /// Time-windowed activity report: commits / closed issues / merged PRs /
     /// deploys / incidents in a single table. Uses gh + git + AgentDesk API.
-    Activity {
-        /// Window start. Accepts RFC3339 (`2026-05-19T23:10:00+09:00`),
-        /// duration suffix (`24h`, `90m`, `7d`), or `since:<sha>` to anchor
-        /// on a commit (commit time becomes the start).
-        #[arg(long)]
-        since: String,
-        /// Optional window end (RFC3339). Defaults to `now` when omitted.
-        #[arg(long)]
-        until: Option<String>,
-        /// Repository in owner/repo form. Defaults to the current
-        /// repo's `origin` remote when omitted.
-        #[arg(long)]
-        repo: Option<String>,
-        /// Skip the AgentDesk-side deploy / incident lookup (useful when
-        /// the local API is offline). Pure git + gh report.
-        #[arg(long = "no-agentdesk")]
-        no_agentdesk: bool,
-    },
+    Activity(ActivityArgs),
     /// Herdr-hosted executions on this node: read-only status, and retire of an ended one
     Herdr(crate::cli::herdr::HerdrArgs),
 }
@@ -986,6 +618,17 @@ mod tests {
     use clap::{CommandFactory, Parser, error::ErrorKind};
 
     #[test]
+    fn cli_parse_fits_in_the_windows_default_main_thread_stack() {
+        // Windows gives the main thread 1 MiB, and `run_from_args` parses there before any command runs.
+        let parsed = std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(|| Cli::try_parse_from(["agentdesk", "config", "audit", "--dry-run"]).is_ok())
+            .expect("spawn the 1 MiB parser thread")
+            .join();
+        assert!(matches!(parsed, Ok(true)));
+    }
+
+    #[test]
     fn turn_lease_cli_parses_read_and_exact_release() {
         let read = Cli::try_parse_from([
             "agentdesk",
@@ -1182,11 +825,11 @@ mod tests {
         .expect("legacy file send should still parse");
         assert!(matches!(
             file.command,
-            Some(Commands::DiscordSendfile {
+            Some(Commands::DiscordSendfile(DiscordSendfileArgs {
                 path,
                 channel: 42,
                 key,
-            }) if path == "/tmp/report.txt" && key == "key-hash"
+            })) if path == "/tmp/report.txt" && key == "key-hash"
         ));
 
         let channel = Cli::try_parse_from([
@@ -1200,11 +843,11 @@ mod tests {
         .expect("legacy channel send should still parse");
         assert!(matches!(
             channel.command,
-            Some(Commands::DiscordSendmessage {
+            Some(Commands::DiscordSendmessage(DiscordSendmessageArgs {
                 channel: 42,
                 message,
                 key: None,
-            }) if message == "hello channel"
+            })) if message == "hello channel"
         ));
 
         let dm = Cli::try_parse_from([
@@ -1218,11 +861,11 @@ mod tests {
         .expect("legacy DM send should still parse");
         assert!(matches!(
             dm.command,
-            Some(Commands::DiscordSenddm {
+            Some(Commands::DiscordSenddm(DiscordSenddmArgs {
                 user: 43,
                 message,
                 key: None,
-            }) if message == "hello user"
+            })) if message == "hello user"
         ));
     }
 
@@ -1382,10 +1025,10 @@ mod tests {
         .expect("open-code provider alias should parse");
         assert!(matches!(
             provider_alias.command,
-            Some(Commands::RestartDcserver {
+            Some(Commands::RestartDcserver(RestartDcserverArgs {
                 report_provider: Some(ReportProvider::OpenCode),
                 ..
-            })
+            }))
         ));
     }
 
@@ -1425,7 +1068,7 @@ mod tests {
         .expect("send-to-agent with --expect-reply true should parse");
 
         match cli.command.expect("subcommand") {
-            Commands::SendToAgent { expect_reply, .. } => assert!(expect_reply),
+            Commands::SendToAgent(SendToAgentArgs { expect_reply, .. }) => assert!(expect_reply),
             _ => panic!("unexpected command"),
         }
     }
@@ -1447,7 +1090,7 @@ mod tests {
         .expect("send-to-agent with --expect-reply false should parse");
 
         match cli.command.expect("subcommand") {
-            Commands::SendToAgent { expect_reply, .. } => assert!(!expect_reply),
+            Commands::SendToAgent(SendToAgentArgs { expect_reply, .. }) => assert!(!expect_reply),
             _ => panic!("unexpected command"),
         }
     }

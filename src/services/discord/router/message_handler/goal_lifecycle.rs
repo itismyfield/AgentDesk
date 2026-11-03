@@ -243,86 +243,6 @@ mod codex_goal_lifecycle_unit_tests {
                 .contains("Codex TUI로 전달하지 않았습니다")
         );
     }
-
-    const INTAKE_TURN: &str = include_str!("intake_turn.rs");
-    const HEADLESS_TURN: &str = include_str!("headless_turn.rs");
-    const GOAL_LIFECYCLE: &str = include_str!("goal_lifecycle.rs");
-    const INTAKE_BRANCH: &str =
-        "let force_fresh_provider_session = matches!(turn_goal_kind, GoalCommandKind::FreshStart);";
-    const HEADLESS_BRANCH: &str =
-        "let goal_fresh = matches!(headless_goal_kind, GoalCommandKind::FreshStart);";
-    const BOUNDARY: &str = "record_fresh_session_context_boundary(";
-    const PROVIDER_CLEAR: &str = "clear_codex_goal_start_provider_session(";
-    const HELPER: &str = "pub(super) async fn record_fresh_session_context_boundary(";
-    const DB_BOUNDARY: &str = "crate::db::session_transcripts::record_channel_clear_boundary(";
-
-    /// Classification 2: after the goal-fresh branch, the durable boundary is called as
-    /// written before the provider clear, comments excluded. A lexical tripwire.
-    fn boundary_before_clear_gaps(source: &str, branch_start: &str) -> Vec<String> {
-        use crate::services::discord::router::source_guard_support::Lexed;
-        let source = Lexed::new(source);
-        let Some(branch) = source.find(branch_start) else {
-            return vec![format!("missing goal-fresh branch: {branch_start}")];
-        };
-        match (
-            source.find_after(branch, BOUNDARY),
-            source.find_after(branch, PROVIDER_CLEAR),
-        ) {
-            (Some(boundary), Some(clear)) if boundary < clear => Vec::new(),
-            found => vec![format!(
-                "durable boundary must precede provider clear: {found:?}"
-            )],
-        }
-    }
-
-    /// The helper body itself, not a later item, persists the durable channel boundary.
-    fn helper_gaps(source: &str) -> Vec<String> {
-        use crate::services::discord::router::source_guard_support::Lexed;
-        match Lexed::new(source).block(HELPER) {
-            Some(helper) if helper.contains(DB_BOUNDARY) => Vec::new(),
-            _ => vec!["fresh-session helper must persist the durable channel boundary".into()],
-        }
-    }
-
-    #[test]
-    fn goal_fresh_intake_and_headless_paths_record_durable_boundary_before_clear() {
-        let none = Vec::<String>::new();
-        assert_eq!(boundary_before_clear_gaps(INTAKE_TURN, INTAKE_BRANCH), none);
-        assert_eq!(
-            boundary_before_clear_gaps(HEADLESS_TURN, HEADLESS_BRANCH),
-            none
-        );
-        assert_eq!(helper_gaps(GOAL_LIFECYCLE), none);
-    }
-
-    #[test]
-    fn goal_fresh_guards_reject_commented_and_reordered_boundaries() {
-        use crate::services::discord::router::source_guard_support::{forge, swap};
-        use crate::test_support::CommentForgery;
-        for forgery in CommentForgery::ALL {
-            for (source, branch) in [
-                (INTAKE_TURN, INTAKE_BRANCH),
-                (HEADLESS_TURN, HEADLESS_BRANCH),
-            ] {
-                for needle in [branch, BOUNDARY, PROVIDER_CLEAR] {
-                    let forged = forge(source, needle, forgery);
-                    assert!(forged.contains(needle));
-                    let gaps = boundary_before_clear_gaps(&forged, branch);
-                    assert!(!gaps.is_empty(), "{forgery:?} `{needle}` passes");
-                }
-            }
-            for needle in [HELPER, DB_BOUNDARY] {
-                let forged = forge(GOAL_LIFECYCLE, needle, forgery);
-                assert!(forged.contains(needle));
-                assert!(
-                    !helper_gaps(&forged).is_empty(),
-                    "{forgery:?} `{needle}` passes"
-                );
-            }
-        }
-        let clear_first = swap(INTAKE_TURN, BOUNDARY, PROVIDER_CLEAR);
-        assert!(!boundary_before_clear_gaps(&clear_first, INTAKE_BRANCH).is_empty());
-    }
 }
 
 pub(super) async fn clear_codex_goal_start_provider_session(
@@ -457,6 +377,69 @@ mod host_guard_tests {
             assert_eq!(tmux.take_calls(), Vec::<String>::new(), "{what:?}: no tmux");
             crate::services::session_backend::remove_process_session(&name);
         }
+        db.drop().await;
+    }
+}
+
+#[cfg(test)]
+mod fresh_session_boundary_pg_tests {
+    use super::*;
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+
+    async fn boundary_generation(pool: &sqlx::PgPool, channel: ChannelId) -> Option<i64> {
+        sqlx::query_scalar(
+            "SELECT clear_generation::BIGINT FROM channel_session_clear_boundaries WHERE channel_id = $1",
+        )
+        .bind(channel.get().to_string())
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+    }
+
+    /// `/goal fresh` clears the provider session only after this boundary is durable, so a write
+    /// that does not land must come back as an error the caller stops on.
+    #[tokio::test]
+    async fn fresh_session_boundary_reports_a_write_that_did_not_land_pg() {
+        let channel = ChannelId::new(5_100_000_001);
+        let storeless = crate::services::discord::make_shared_data_for_tests();
+        assert!(
+            record_fresh_session_context_boundary(&storeless, channel)
+                .await
+                .is_err(),
+            "without PostgreSQL there is no durable boundary"
+        );
+
+        let db = TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let shared =
+            crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+        for statement in [
+            "CREATE FUNCTION reject_fresh_boundary() RETURNS trigger AS $$
+             BEGIN RAISE EXCEPTION 'injected fresh boundary failure'; END; $$ LANGUAGE plpgsql",
+            "CREATE TRIGGER reject_fresh_boundary BEFORE INSERT OR UPDATE
+             ON channel_session_clear_boundaries
+             FOR EACH ROW EXECUTE FUNCTION reject_fresh_boundary()",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+        let error = record_fresh_session_context_boundary(&shared, channel)
+            .await
+            .expect_err("a rejected boundary write cannot report success");
+        assert!(
+            format!("{error:#}").contains("injected fresh boundary failure"),
+            "{error:#}"
+        );
+        assert_eq!(boundary_generation(&pool, channel).await, None);
+
+        sqlx::query("DROP TRIGGER reject_fresh_boundary ON channel_session_clear_boundaries")
+            .execute(&pool)
+            .await
+            .unwrap();
+        record_fresh_session_context_boundary(&shared, channel)
+            .await
+            .expect("the boundary lands once the store accepts it");
+        assert_eq!(boundary_generation(&pool, channel).await, Some(1));
+        pool.close().await;
         db.drop().await;
     }
 }

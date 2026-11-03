@@ -11,7 +11,6 @@ pub(in crate::services::discord) fn six_tool_fixture(
 ) -> Arc<SharedData> {
     let mut shared = crate::services::discord::make_shared_data_for_tests();
     let ui = &mut Arc::get_mut(&mut shared).expect("unique fixture").ui;
-    ui.status_panel_v2_enabled = true;
     ui.placeholder_live_events = Arc::new(PlaceholderLiveEvents::with_tool_activity_display(mode));
     for i in 0..6 {
         let id = format!("footer-tool-{i}");

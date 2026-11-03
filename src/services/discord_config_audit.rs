@@ -100,6 +100,8 @@ struct LegacyBotEntry {
     channel_fast_mode_reset_pending: BTreeSet<String>,
     channel_codex_goals: BTreeMap<String, bool>,
     channel_codex_goals_reset_pending: BTreeSet<String>,
+    channel_relaunch_pending: BTreeSet<String>,
+    channel_effort_levels: BTreeMap<String, String>,
 }
 
 impl ConfigAuditReport {

@@ -59,6 +59,9 @@ pub(in crate::services::discord) use self::queued_placeholders::{
     delete_stale_queued_placeholder_cards, delete_stale_queued_placeholder_cards_with,
     filter_restored_queued_placeholders,
 };
+pub(in crate::services::discord) use self::restored_state::{
+    restore_model_overrides, restored_model_overrides,
+};
 use self::shared_data::{
     ProcessLifecycleCounters, RestoredSessionState, RuntimeServices, UiFeatureFlags,
     run_bot_build_shared_data,
@@ -78,8 +81,6 @@ pub(crate) struct RunBotContext {
     pub(crate) api_port: u16,
     pub(crate) pg_pool: Option<sqlx::PgPool>,
     pub(crate) engine: Option<crate::engine::PolicyEngine>,
-    pub(crate) placeholder_live_events_enabled: bool,
-    pub(crate) status_panel_v2_enabled: bool,
     /// #3805 P2: two-message panel rollout gate (default OFF). Scaffolding —
     /// threaded from config into shared UI state, not read by any path in PR-A.
     pub(crate) two_message_panel_enabled: bool,
@@ -164,8 +165,6 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         api_port,
         pg_pool,
         engine,
-        placeholder_live_events_enabled,
-        status_panel_v2_enabled,
         two_message_panel_enabled,
     } = context;
 
@@ -228,16 +227,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     let startup_doctor_started_for_client_start = startup_doctor_started.clone();
     let health_registry_for_client_start = health_registry.clone();
 
-    let restored_model_overrides: Vec<(ChannelId, String)> = bot_settings
-        .channel_model_overrides
-        .iter()
-        .filter_map(|(channel_id, model)| {
-            channel_id
-                .parse::<u64>()
-                .ok()
-                .map(|id| (ChannelId::new(id), model.clone()))
-        })
-        .collect();
+    let restored_model_overrides = restored_model_overrides(&bot_settings);
     let restored_node_overrides: Vec<(ChannelId, String)> = bot_settings
         .channel_node_overrides
         .iter()
@@ -281,8 +271,6 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             shutdown_remaining: shutdown_remaining.clone(),
         },
         UiFeatureFlags {
-            placeholder_live_events_enabled,
-            status_panel_v2_enabled,
             two_message_panel_enabled,
         },
         RestoredSessionState {
@@ -1030,8 +1018,6 @@ mod restart_lifecycle_characterization_tests {
                 shutdown_remaining: shutdown_remaining.clone(),
             },
             UiFeatureFlags {
-                placeholder_live_events_enabled: false,
-                status_panel_v2_enabled: false,
                 two_message_panel_enabled: false,
             },
             RestoredSessionState {
