@@ -21,6 +21,8 @@ This block is generated from the filesystem and is checked in CI for drift.
 ```text
 src/
 ├── cli/
+│   ├── args/
+│   │   └── command_args.rs
 │   ├── client/
 │   │   ├── runtime_config.rs
 │   │   ├── snapshot_reader_tests.rs
