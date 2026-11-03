@@ -298,9 +298,8 @@ enum Step {
     Observe(&'static str),
 }
 
-/// Identical inputs each answer for their own row: on a legacy channel each user turn is relayed
-/// once and an absorbed one not at all, whatever the rescans, a later identical input, or an
-/// earlier identical input whose own caller declared a reader.
+/// Identical inputs each answer for their own row: each legacy user turn is relayed once and an
+/// absorbed one never, whatever the rescans or another identical input declared or not.
 #[test]
 fn identical_inputs_each_answer_for_their_own_row() {
     use Step::{Declare, Observe, Paste, Row, TurnEnds};

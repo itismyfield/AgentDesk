@@ -403,9 +403,8 @@ async fn owned_front_on_a_busy_pane_is_pasted_once_without_completion() {
     drop(drive);
 }
 
-/// A `turn/start` (an iMessage reply) into a busy pane with no idle observer: the real drive's
-/// headless turn pastes it once and reads the turn its row opens. The row comes after a long turn,
-/// past the pending text's 10 s, and the legacy relay still leaves that turn to the caller's reader.
+/// A `turn/start` into a busy pane with no idle observer is pasted once and answered once by its
+/// reader, even when its row comes after a long turn and the relay reads it past 10 s.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_turn_start_into_a_busy_pane_is_pasted_once_and_answered_once() {
     if !creator_child(concat!(

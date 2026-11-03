@@ -1372,9 +1372,8 @@ fn an_idle_channel_hands_its_front_to_the_turn_start() {
     assert!(rig.events().is_empty(), "no key: {:?}", rig.events());
 }
 
-/// A busy pane in tmux copy mode holds its front: through 25 s of virtual time and the pane's
-/// watch reading that same screen again and again, the front is handed once. When only the pane
-/// leaves copy mode, the watch wakes the drive and the front is pasted once; the test wakes nothing.
+/// Copy mode holds a busy pane's front through 25 virtual seconds and repeated reads of that screen;
+/// once only the pane leaves copy mode, its watch wakes the drive and the front is pasted once.
 #[test]
 fn a_front_held_by_copy_mode_is_pasted_once_when_the_pane_leaves_it() {
     use std::sync::mpsc;
