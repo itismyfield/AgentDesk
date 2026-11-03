@@ -2,8 +2,7 @@
 use super::*;
 use std::sync::Arc;
 
-mod parsed;
-pub(super) use parsed::reuse;
+pub(super) use crate::utils::parsed_bytes::reuse;
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct HistoryV2 {

@@ -1,4 +1,4 @@
-//! An owned start that provably sent nothing: the original is retained with one owed notice,
+//! An owned start that provably sent nothing: the original waits at the front with no notice owed,
 //! nothing is resent, and the turn's inflight birth stays the one its bridge captured.
 use super::*;
 use crate::services::discord::inflight::{
@@ -7,7 +7,7 @@ use crate::services::discord::inflight::{
 };
 
 #[test]
-fn an_owned_start_that_sent_nothing_is_retained_once_and_keeps_its_birth() {
+fn an_owned_start_that_sent_nothing_holds_its_front_and_keeps_its_birth() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let rig = rig("ns-idle", 7_272_571, "normal", view("", false), IDLE);
     // The pane's tmux refuses the load, so no key of the prompt can reach the pane.
@@ -45,18 +45,12 @@ fn an_owned_start_that_sent_nothing_is_retained_once_and_keeps_its_birth() {
         matches!(&result, Err(e) if e.starts_with("NotSent")),
         "{result:?}"
     );
-    rig.held_not_sent("known_not_sent");
-    let snapshot = rig.snapshot();
-    let owed = json!({"kind": "retained_retry_required", "enqueued": false});
-    assert_eq!(snapshot["retained_inputs"][0]["notice"], owed, "{snapshot}");
-    assert!(snapshot["head_injection"].is_null(), "{snapshot}");
+    rig.waits_not_sent();
     let front = rig
         .mailbox
         .v2_request(|slot| Ok(slot.as_ref().unwrap().front()));
-    assert!(
-        rig.runtime.block_on(front).unwrap().is_none(),
-        "nothing is left to resend"
-    );
+    let front = rig.runtime.block_on(front).unwrap();
+    assert_eq!(front.map(|f| f.1.message_id), Some(rig.original.message_id));
     let after = load_inflight_state(&ProviderKind::Claude, rig.channel).unwrap();
     assert!(
         after.owned_by_turn_nonce(Some("owned-birth")),

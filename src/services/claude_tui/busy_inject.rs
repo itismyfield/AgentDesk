@@ -378,7 +378,7 @@ impl Pane {
 
     /// `Gone` only on tmux's own word that the pane died or its session is missing.
     #[cfg(unix)]
-    fn lost(&self) -> Screen {
+    pub(crate) fn lost(&self) -> Screen {
         use crate::services::platform::tmux::{SessionPresence, classify_has_session_output};
         let dead = self.ok(&["display-message", "-p", "-t", &self.target, "#{pane_dead}"]);
         if dead.as_deref().map(str::trim) == Some("1") {

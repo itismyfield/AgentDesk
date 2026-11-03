@@ -38,5 +38,6 @@ readonly runtime_store="src/services/discord/runtime_store.rs"
     services::discord::runtime_store::windows_contract::tests::windows_parent_dir_sync_succeeds_without_flushing \
   || exit
 # Keep the Windows-only transcript refusal executable in the required PR job.
+# The CLI parse test pins the Windows 1 MiB default main-thread stack contract on Windows debug.
 exec cargo nextest run --lib --profile ci --no-tests fail \
-  -E 'test(=services::discord::health::turn_deliver::inject::queued_reconcile::mismatched_file_identity_refuses_transcript_proof)'
+  -E 'test(=services::discord::health::turn_deliver::inject::queued_reconcile::mismatched_file_identity_refuses_transcript_proof) | test(=cli::args::tests::cli_parse_fits_in_the_windows_default_main_thread_stack)'

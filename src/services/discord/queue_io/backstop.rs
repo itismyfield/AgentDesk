@@ -24,9 +24,10 @@ impl BackstopSlot {
         }
     }
 
-    fn consume_requests(&self) {
+    /// Whether a schedule coalesced into this slot since the last call.
+    fn consume_requests(&self) -> bool {
         self.pending_request
-            .swap(false, std::sync::atomic::Ordering::AcqRel);
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
     }
 }
 /// Count each live task once, including panic cleanup, while preserving arm requests.
@@ -273,6 +274,17 @@ async fn queued_lane_backlog_units(
     }
 }
 
+/// An input owner's queue is woken by its own events, never by a backstop timer.
+async fn owned(shared: &SharedData, channel_id: ChannelId) -> bool {
+    #[cfg(unix)]
+    return super::input_ingress::installed(&shared.mailbox(channel_id)).await == Ok(true);
+    #[cfg(not(unix))]
+    {
+        let _ = (shared, channel_id);
+        false
+    }
+}
+
 pub(in crate::services::discord) async fn arm_event_backstop_after_no_start_if_queue_nonempty(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -280,7 +292,7 @@ pub(in crate::services::discord) async fn arm_event_backstop_after_no_start_if_q
     outcome: IdleQueueKickoffChannelOutcome,
     reason: &'static str,
 ) -> bool {
-    if outcome.started {
+    if outcome.started || owned(shared, channel_id).await {
         return false;
     }
     let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
@@ -369,6 +381,53 @@ async fn idle_queue_backstop_backlog_units_all(
         .sum()
 }
 
+/// Hands schedules taken from a slot (`coalesced`) to the channel's owner as its wake.
+fn wake_coalesced(shared: &Arc<SharedData>, channel_id: ChannelId, coalesced: bool) {
+    if coalesced {
+        #[cfg(test)]
+        {
+            *OWNER_WAKES_FOR_TESTS.entry(channel_id).or_default() += 1;
+        }
+        #[cfg(unix)]
+        crate::services::discord::router::message_handler::owner_wake(shared, channel_id);
+    }
+}
+
+/// Takes the requests received before the owner check; once the owner holds the channel they are
+/// its wake. Requests arriving during the check stay for the slot's release to evaluate.
+async fn owner_took(shared: &Arc<SharedData>, channel_id: ChannelId, slot: &BackstopSlot) -> bool {
+    let coalesced = slot.consume_requests();
+    let owned = owned(shared, channel_id).await;
+    #[cfg(test)]
+    owner_answered_for_tests(channel_id, owned).await;
+    if owned {
+        wake_coalesced(shared, channel_id, coalesced);
+    }
+    owned
+}
+
+/// Runs in a slow cycle between the owner check's answer and the cycle acting on it.
+#[cfg(test)]
+type OwnerAnsweredHook = Arc<
+    dyn Fn(bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
+>;
+#[cfg(test)]
+static OWNER_ANSWERED_HOOKS: std::sync::LazyLock<dashmap::DashMap<ChannelId, OwnerAnsweredHook>> =
+    std::sync::LazyLock::new(Default::default);
+#[cfg(test)]
+static OWNER_WAKES_FOR_TESTS: std::sync::LazyLock<dashmap::DashMap<ChannelId, usize>> =
+    std::sync::LazyLock::new(Default::default);
+
+#[cfg(test)]
+async fn owner_answered_for_tests(channel_id: ChannelId, owned: bool) {
+    let hook = OWNER_ANSWERED_HOOKS
+        .get(&channel_id)
+        .map(|hook| hook.clone());
+    if let Some(hook) = hook {
+        hook(owned).await;
+    }
+}
+
 async fn run_single_slow_idle_queue_backstop(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -391,7 +450,9 @@ async fn run_single_slow_idle_queue_backstop(
         false
     };
     // This snapshot evaluates all requests received before it; newer requests remain pending.
-    slot.consume_requests();
+    if owner_took(shared, channel_id, slot).await {
+        return None;
+    }
     let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
     let backlog_units =
         idle_queue_backstop_backlog_units(shared.as_ref(), provider, channel_id, &snapshot);
@@ -443,8 +504,11 @@ async fn run_single_slow_idle_queue_backstop(
         }
     }
 
-    // A reported start can still have re-preserved the message at the hosted-TUI gate.
-    slot.consume_requests();
+    // A reported start can still have re-preserved the message at the hosted-TUI gate, and the
+    // owner may have taken the channel meanwhile.
+    if owner_took(shared, channel_id, slot).await {
+        return None;
+    }
     let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
     let mut backlog_units =
         idle_queue_backstop_backlog_units(shared.as_ref(), provider, channel_id, &snapshot);
@@ -667,6 +731,10 @@ pub(in crate::services::discord) fn spawn_turn_completion_idle_queue_listener(
     });
 }
 
+#[cfg(all(test, unix))]
+#[path = "owned_backstop_tests.rs"]
+mod owned_backstop_tests;
+
 #[cfg(test)]
 pub(in crate::services::discord) fn idle_queue_backstop_fires_for_tests() -> usize {
     IDLE_QUEUE_BACKSTOP_FIRES_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed)
@@ -714,11 +782,27 @@ fn schedule_deferred_idle_queue_kickoff_inner(
         active: true,
     };
     super::task_supervisor::spawn_observed("deferred_idle_queue_kickoff", async move {
+        // An owner takes the scheduling event as one direct wake, with no presleep or backstop.
+        let direct = owned(&shared, channel_id).await;
+        #[cfg(unix)]
+        if direct {
+            crate::services::discord::router::message_handler::owner_wake(&shared, channel_id);
+        }
         let initial_presleep = profile.initial_presleep();
-        if !initial_presleep.is_zero() {
+        if !direct && !initial_presleep.is_zero() {
             tokio::select! {
                 _ = tokio::time::sleep(initial_presleep) => {}
                 _ = slot.wake.notified() => {}
+            }
+        }
+        if direct || owned(&shared, channel_id).await {
+            // A schedule coalesced here after the owner took the channel is a new event: it wakes
+            // the owner, until the slot is released with none left.
+            loop {
+                wake_coalesced(&shared, channel_id, slot.consume_requests());
+                if backlog_guard.release() {
+                    return;
+                }
             }
         }
 

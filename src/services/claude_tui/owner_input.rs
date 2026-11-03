@@ -37,6 +37,16 @@ fn current() -> Option<Arc<Scope>> {
 pub(crate) fn active() -> bool {
     current().is_some()
 }
+/// The original queue identity stays the same across execution and attempt changes.
+pub(crate) fn original_identity() -> Option<(u64, u64)> {
+    let scope = current()?;
+    let identity = &scope.target["_attempt"]["identity"];
+    Some((
+        identity["primary"].as_u64()?,
+        identity["queued_generation"].as_u64()?,
+    ))
+}
+
 pub(crate) fn epoch() -> Option<PaneEpoch> {
     #[cfg(unix)]
     return current().and_then(|s| {
@@ -98,6 +108,14 @@ pub(crate) fn load_failed() {
     if let Some(scope) = current() {
         scope.refuse("load_failed".into());
     }
+}
+
+/// Whether this scope's leaf was refused because its text never became a tmux buffer.
+pub(crate) fn buffer_failed() -> bool {
+    current().is_some_and(|scope| {
+        let refused = scope.refused.lock().unwrap_or_else(|e| e.into_inner());
+        refused.as_ref().is_some_and(|r| r.reason == "load_failed")
+    })
 }
 
 /// The leaf's typed veto came before any key; a key already sent keeps it from proving unsent,

@@ -15,6 +15,7 @@ pub mod format;
 pub mod github_links;
 pub(crate) mod input_validation;
 pub mod loopback_url;
+pub(crate) mod parsed_bytes;
 pub mod redact;
 pub mod secret_file;
 // #1099/#3792 WIP detector used by the Discord turn-end warning facade.

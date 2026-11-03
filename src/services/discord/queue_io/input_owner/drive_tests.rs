@@ -70,7 +70,7 @@ fn handoff(
             let text = front.1.text.clone();
             let leaf: Leaf = Box::new(move |frame| {
                 let completion = answer(&frame);
-                if let Completion::NotSent(reason) = &completion {
+                if let Completion::NotSent(reason) | Completion::Held(reason) = &completion {
                     owner_input::vetoed(reason);
                 }
                 Ok(completion)
@@ -248,7 +248,7 @@ async fn a_new_hold_outlives_the_watch_of_the_front_it_replaced() {
                 }
             }),
         );
-        Completion::NotSent("CopyMode".into())
+        Completion::Held("CopyMode".into())
     };
     let before = |_: &Front| Box::pin(async {}) as Pin<Box<dyn Future<Output = ()> + Send>>;
     // A pass ends after the drive handed its held front to the watch.
@@ -301,8 +301,8 @@ async fn a_new_hold_outlives_the_watch_of_the_front_it_replaced() {
     assert_eq!(*handed.lock().unwrap(), ["input 0", "input 1", "input 1"]);
 }
 
-/// A front held on a screen where Enter may not submit stays unretained, owes no notice and is
-/// never handed again by time alone; the next wake (boundary, idle, new input) delivers it once.
+/// A front refused before any key for a reason a later look may clear (a screen where Enter may not
+/// submit, a missing pane, a held lock) stays unretained and waits for its next wake, never time.
 #[tokio::test(start_paused = true)]
 async fn a_held_front_waits_for_its_next_wake_and_is_then_delivered_once() {
     let _root = TestRuntimeRootGuard::new();
@@ -311,13 +311,15 @@ async fn a_held_front_waits_for_its_next_wake_and_is_then_delivered_once() {
         (7_272_704, MODAL),
         (7_272_714, "ScreenUnread"),
         (7_272_724, "CopyMode"),
+        (7_272_734, "PaneUnavailable"),
+        (7_272_744, "LockContended"),
     ] {
         let mailbox = owner(&registry, channel, 1).await;
         let (calls, handed) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
         let held = Arc::new(Mutex::new(None));
         let c = calls.clone();
         let answer = move |_: &str| match c.fetch_add(1, Ordering::SeqCst) {
-            0 => Completion::NotSent(reason.into()),
+            0 => Completion::Held(reason.into()),
             _ => Completion::Submitted,
         };
         let (n, h, m) = (handed.clone(), held.clone(), mailbox.clone());
@@ -574,4 +576,256 @@ async fn a_claim_reserves_only_as_its_owners_current_claim() {
     assert_eq!(sent.load(Ordering::SeqCst), 0);
     assert_eq!(submit(b.clone(), current).await, Ok(Completion::Submitted));
     assert_eq!(sent.load(Ordering::SeqCst), 1);
+}
+
+/// Admits `id` under its own ticket with a caller context naming it.
+async fn admit_named(handle: &ChannelMailboxHandle, channel: u64, id: u64) {
+    let context = json!({"caller": id});
+    let admitted =
+        handle.v2_admit_ticket_with_context(original(channel, id), format!("t{id}"), context);
+    assert!(admitted.await.is_ok(), "{id}");
+}
+
+/// Each queued original's ticket standing and caller context, as its callers read them.
+async fn standing(handle: &ChannelMailboxHandle, channel: u64) -> Vec<String> {
+    let queued = snapshot(handle).await["items"].as_array().unwrap().clone();
+    let mut seen = Vec::new();
+    for item in queued {
+        let id = item["message_id"].as_u64().unwrap() - original(channel, 0).message_id;
+        let bind = handle
+            .v2_exact_turn(original(channel, id), format!("t{id}"))
+            .await
+            .unwrap();
+        let context = handle.v2_admission_context(original(channel, id), format!("t{id}"));
+        seen.push(format!(
+            "{id}:{bind:?}:{}",
+            context.await.unwrap().unwrap_or_default()
+        ));
+    }
+    seen
+}
+
+/// A requeue beside a live head keeps its ticket: once that head is held under a modal, it and the
+/// requeued originals each keep their slot and caller context, across a re-adoption too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_requeue_beside_a_live_head_keeps_every_ticket_through_its_hold() {
+    let _root = TestRuntimeRootGuard::new();
+    let channel = 7_272_791;
+    let dir = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap();
+    let file = dir.join(format!("claude/input-owner-drive/{channel}.json"));
+    let adopt = || async {
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(poise::serenity_prelude::ChannelId::new(channel));
+        handle
+            .v2_adopt(file.clone(), "input-owner".into())
+            .await
+            .unwrap();
+        (registry, handle)
+    };
+    // An older binary retained the unit of 1 and 2 as proven unsent before any ask went out.
+    let (registry, handle) = adopt().await;
+    for id in [1, 2] {
+        admit_named(&handle, channel, id).await;
+    }
+    let reserved = handle.v2_request(|slot| {
+        let owner = slot.as_mut().ok_or("no owner")?;
+        let attempt = serde_json::from_value(json!({"nonce":"old","provider":"claude",
+            "target":{"host":"tmux","owner":"old-pane","root":"/old","execution_nonce":"e"},
+            "source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,
+                "binding_watermark":null}}))
+        .map_err(|e| e.to_string())?;
+        owner.reserve_unit(attempt, |i| Some((String::new(), i.text.clone())))?;
+        owner.json()
+    });
+    let mut state = reserved.await.unwrap();
+    drop((handle, registry));
+    let head = state["head_injection"].take();
+    state["items"] = json!([]);
+    state["retained_inputs"] = json!([{"input":head,"disposition":"known_not_sent",
+        "reason":{"kind":"rejected","reason":"known_not_sent: vetoed: NotBusy"},
+        "notice":{"kind":"retained_retry_required","enqueued":false}}]);
+    std::fs::write(&file, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+    let (registry, mailbox) = adopt().await;
+    for id in [0, 3] {
+        admit_named(&mailbox, channel, id).await;
+    }
+    // The live head 0 meets a requeue during its attempt, then a modal that holds it.
+    let requeued = Arc::new(AtomicUsize::new(0));
+    let (r, m) = (requeued.clone(), mailbox.clone());
+    let answer = move |_: &str| {
+        let moved = m.v2_request(|s| {
+            s.as_mut()
+                .unwrap()
+                .requeue_known_not_sent()
+                .map(|v| v.len())
+        });
+        r.store(
+            tokio::runtime::Handle::current().block_on(moved).unwrap(),
+            Ordering::SeqCst,
+        );
+        Completion::Held(MODAL.into())
+    };
+    let before = |_: &Front| Box::pin(async {}) as Pin<Box<dyn Future<Output = ()> + Send>>;
+    let handoff = handoff(mailbox.clone(), channel, before, answer);
+    let front = grant(
+        &Drive {
+            mailbox: mailbox.clone(),
+            channel,
+            handoff: handoff.clone(),
+            settled: None,
+        },
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(handoff(front).await, Err("NotSent(\"Modal\")".into()));
+    assert_eq!(requeued.load(Ordering::SeqCst), 1);
+    let expected: Vec<String> = [0, 1, 2, 3]
+        .iter()
+        .map(|id| format!("{id}:NotArmed:{}", json!({"caller": id})))
+        .collect();
+    assert_eq!(standing(&mailbox, channel).await, expected);
+    drop((mailbox, registry));
+    let (_registry, mailbox) = adopt().await;
+    assert_eq!(
+        standing(&mailbox, channel).await,
+        expected,
+        "after re-adoption"
+    );
+}
+
+/// What an older binary left: the unit of 1 and 2 retained as proven unsent, its resend ask `told`
+/// or not, and an equal copy of 1 queued before 3 under its own ticket `t1b`.
+async fn equal_copy(channel: u64, told: bool) -> (ChannelMailboxRegistry, ChannelMailboxHandle) {
+    let dir = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap();
+    let file = dir.join(format!("claude/input-owner-drive/{channel}.json"));
+    let adopt = |file: std::path::PathBuf| async move {
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(poise::serenity_prelude::ChannelId::new(channel));
+        handle.v2_adopt(file, "input-owner".into()).await.unwrap();
+        (registry, handle)
+    };
+    let (registry, handle) = adopt(file.clone()).await;
+    for id in [1, 2, 3] {
+        admit_named(&handle, channel, id).await;
+    }
+    let last = original(channel, 3).message_id;
+    let reserved = handle.v2_request(move |slot| {
+        let owner = slot.as_mut().ok_or("no owner")?;
+        let attempt = serde_json::from_value(json!({"nonce":"old","provider":"claude",
+            "target":{"host":"tmux","owner":"old-pane","root":"/old","execution_nonce":"e"},
+            "source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,
+                "binding_watermark":null}}))
+        .map_err(|e| e.to_string())?;
+        let unit =
+            |i: &PendingQueueItem| (i.message_id != last).then(|| (String::new(), i.text.clone()));
+        owner.reserve_unit(attempt, unit)?;
+        owner.json()
+    });
+    let mut state = reserved.await.unwrap();
+    drop((handle, registry));
+    let head = state["head_injection"].take();
+    let items = state["items"].as_array().unwrap().clone();
+    state["items"] = json!([items[0], items[2]]);
+    let binds = state["admission_binds"].as_array_mut().unwrap();
+    for bind in binds.iter_mut().filter(|b| b["at"]["kind"] == "queued") {
+        bind["at"]["index"] = json!(1);
+    }
+    let first = (binds.iter())
+        .find(|b| b["receipt"].as_str().unwrap().starts_with("tk:t1:"))
+        .unwrap()
+        .clone();
+    let digest = first["receipt"].as_str().unwrap()["tk:t1:".len()..].to_string();
+    let receipt = format!("tk:t1b:{digest}");
+    let mut context = first["context"].clone();
+    context["execution"] = json!({"caller": "1b"});
+    binds.push(
+        json!({"receipt":receipt,"at":{"kind":"queued","index":0,"item":digest},
+        "context":context}),
+    );
+    state["admission_receipts"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!(receipt));
+    state["retained_inputs"] = json!([{"input":head,"disposition":"known_not_sent",
+        "reason":{"kind":"rejected","reason":"known_not_sent: vetoed: NotBusy"},
+        "notice":{"kind":"retained_retry_required","enqueued":told}}]);
+    std::fs::write(&file, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+    adopt(file).await
+}
+
+async fn requeued(mailbox: &ChannelMailboxHandle) -> usize {
+    let moved = mailbox.v2_request(|s| s.as_mut().unwrap().requeue_known_not_sent());
+    moved.await.unwrap().len()
+}
+
+/// An equal copy's own ticket follows its original's slot: held once, then submitted, both tickets
+/// of 1 settle with the one attempt that submitted it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn both_tickets_of_an_equal_copy_settle_with_the_attempt_that_submits_it() {
+    let _root = TestRuntimeRootGuard::new();
+    let channel = 7_272_792;
+    let (_registry, mailbox) = equal_copy(channel, false).await;
+    assert_eq!(requeued(&mailbox).await, 1);
+    let answered = AtomicUsize::new(0);
+    let answer = move |_: &str| match answered.fetch_add(1, Ordering::SeqCst) {
+        0 => Completion::Held(MODAL.into()),
+        _ => Completion::Submitted,
+    };
+    let before = |_: &Front| Box::pin(async {}) as Pin<Box<dyn Future<Output = ()> + Send>>;
+    let handoff = handoff(mailbox.clone(), channel, before, answer);
+    let drive = Drive {
+        mailbox: mailbox.clone(),
+        channel,
+        handoff: handoff.clone(),
+        settled: None,
+    };
+    let front = grant(&drive, false).await.unwrap();
+    assert_eq!(handoff(front).await, Err("NotSent(\"Modal\")".into()));
+    let front = grant(&drive, false).await.unwrap();
+    assert_eq!(front.1.message_id, original(channel, 1).message_id);
+    assert_eq!(handoff(front).await, Ok(()));
+    let bind = |ticket: &str| mailbox.v2_exact_turn(original(channel, 1), ticket.to_string());
+    let (own, copy) = (bind("t1").await.unwrap(), bind("t1b").await.unwrap());
+    assert!(format!("{own:?}").starts_with("Settled("), "{own:?}");
+    assert_eq!(format!("{own:?}"), format!("{copy:?}"));
+}
+
+/// A retained input whose resend ask went out never runs again, through an equal copy queued
+/// beside it either: the drive submits only 3, and 1 stays retained.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_told_inputs_equal_queued_copy_is_never_submitted() {
+    let _root = TestRuntimeRootGuard::new();
+    let channel = 7_272_793;
+    let (_registry, mailbox) = equal_copy(channel, true).await;
+    assert_eq!(requeued(&mailbox).await, 0);
+    let frames = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = frames.clone();
+    let answer = move |frame: &str| {
+        seen.lock().unwrap().push(frame.to_string());
+        Completion::Submitted
+    };
+    let before = |_: &Front| Box::pin(async {}) as Pin<Box<dyn Future<Output = ()> + Send>>;
+    let handoff = handoff(mailbox.clone(), channel, before, answer);
+    let drive = Drive {
+        mailbox: mailbox.clone(),
+        channel,
+        handoff: handoff.clone(),
+        settled: None,
+    };
+    for _ in 0..4 {
+        let Some(front) = grant(&drive, false).await else {
+            break;
+        };
+        assert_eq!(handoff(front).await, Ok(()));
+    }
+    assert_eq!(*frames.lock().unwrap(), ["input 3"]);
+    let state = snapshot(&mailbox).await;
+    assert_eq!(
+        state["retained_inputs"].as_array().map(Vec::len),
+        Some(1),
+        "{state}"
+    );
+    let copy = mailbox.v2_exact_turn(original(channel, 1), "t1b".into());
+    assert_eq!(format!("{:?}", copy.await.unwrap()), "NotArmed");
 }

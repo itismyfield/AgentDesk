@@ -100,12 +100,9 @@ async fn run(lane: Arc<Lane>, drive: Arc<Drive>) {
         while let Some(front) = grant(&drive, stalled).await {
             let message = front.1.message_id;
             let result = (drive.handoff)(front).await;
-            // A front held on a screen where Enter may not submit waits for a real wake: a turn
-            // boundary, new input, or its pane's screen recovering. It is never re-handed by time.
-            if result
-                .as_ref()
-                .is_err_and(|error| super::effect::held(error))
-            {
+            // A front refused before any key for a reason a later look may clear waits for a real
+            // wake: a turn boundary, new input, or its pane's screen recovering. Never by time.
+            if result.is_err() && held(&drive, message).await {
                 super::held_watch::watch(drive.clone(), message);
                 break;
             }
@@ -155,6 +152,15 @@ fn settle_at_deadline(lane: Arc<Lane>, drive: Arc<Drive>) {
             None => {}
         }
     });
+}
+
+/// Whether the owner held `message` at the front after its handoff refused before any key.
+async fn held(drive: &Drive, message: u64) -> bool {
+    let held = drive.mailbox.v2_request(move |slot| {
+        let owner = slot.as_mut().ok_or("V2 not adopted")?;
+        Ok(owner.take_held(message))
+    });
+    held.await.unwrap_or(false)
 }
 
 /// The owner's unattempted front, granted in the same actor turn that read it. After a failed

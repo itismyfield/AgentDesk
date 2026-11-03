@@ -21,6 +21,8 @@ This block is generated from the filesystem and is checked in CI for drift.
 ```text
 src/
 ├── cli/
+│   ├── args/
+│   │   └── command_args.rs
 │   ├── client/
 │   │   ├── runtime_config.rs
 │   │   ├── snapshot_reader_tests.rs
@@ -1845,6 +1847,7 @@ src/
 │   │   │   ├── cancel_reclaim_support_test.rs
 │   │   │   ├── idle_queue_tests.rs
 │   │   │   ├── ledger_settlement_tests.rs
+│   │   │   ├── owned_backstop_tests.rs
 │   │   │   ├── queued_head_auto_tests.rs
 │   │   │   ├── queued_head_inject.rs
 │   │   │   ├── queued_head_inject_tests.rs
@@ -2117,6 +2120,7 @@ src/
 │   │   │   │   │   ├── owner_input.rs
 │   │   │   │   │   ├── owner_input_codex_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_tests.rs
+│   │   │   │   │   ├── owner_input_idle_tests.rs
 │   │   │   │   │   ├── owner_input_not_sent_tests.rs
 │   │   │   │   │   ├── owner_input_rollback_tests.rs
 │   │   │   │   │   ├── owner_input_tests.rs
@@ -3681,8 +3685,6 @@ src/
 │   │   │   └── pane.rs
 │   │   ├── human_frame/
 │   │   │   ├── history/
-│   │   │   │   ├── compat/
-│   │   │   │   │   └── parsed.rs
 │   │   │   │   ├── v2/
 │   │   │   │   │   ├── collision.rs
 │   │   │   │   │   ├── migration.rs
@@ -4193,6 +4195,7 @@ src/
 │   │   │   │   ├── owner_tests.rs
 │   │   │   │   ├── projection.rs
 │   │   │   │   ├── projection_tests.rs
+│   │   │   │   ├── requeue_tests.rs
 │   │   │   │   ├── retained.rs
 │   │   │   │   ├── source_admission.rs
 │   │   │   │   ├── sources.rs
@@ -4391,6 +4394,7 @@ src/
 │   ├── input_validation.rs
 │   ├── loopback_url.rs
 │   ├── mod.rs
+│   ├── parsed_bytes.rs
 │   ├── redact.rs
 │   ├── secret_file.rs
 │   └── wip_detect.rs

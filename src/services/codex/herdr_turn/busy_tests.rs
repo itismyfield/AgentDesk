@@ -139,7 +139,7 @@ fn attempt(rig: &Rig, case: usize, ledger: &Typing<'_>) -> (Outcome, usize) {
 }
 
 #[test]
-fn only_a_dimmed_placeholder_reads_as_an_empty_composer() {
+fn owned_drafts_reach_the_gate_while_modal_and_truncated_reads_do_not() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let empty = fixture("busy_empty.ansi");
     let with = |composer: &str| empty.replace(PLACEHOLDER, composer);
@@ -153,53 +153,54 @@ fn only_a_dimmed_placeholder_reads_as_an_empty_composer() {
             "an earlier empty composer above a draft",
             format!("{empty}\n{}", fixture("busy_draft.ansi")),
             false,
-            Veto::ComposerUnread,
+            None,
         ),
         (
             "a capture cut inside the composer",
             "  rest of a draft\n\n  gpt-5.4 xhigh · 87% context left\n".to_string(),
             false,
-            Veto::ComposerUnread,
+            None,
         ),
         (
             "a truncated read",
             empty.clone(),
             true,
-            Veto::PaneUnavailable,
+            Some(Veto::PaneUnavailable),
         ),
         (
             "a placeholder drawn plain",
             with("Ask Codex to do anything"),
             false,
-            Veto::ComposerUnread,
+            None,
         ),
         (
             "a partly dimmed row",
             with("\u{1b}[2mAsk Codex\u{1b}[0m to do anything"),
             false,
-            Veto::ComposerUnread,
+            None,
         ),
         (
             "a multiline draft",
             with("first row\n  second row"),
             false,
-            Veto::ComposerUnread,
+            None,
         ),
-        (
-            "an image above the composer",
-            image,
-            false,
-            Veto::ComposerUnread,
-        ),
-        ("a modal", fixture("overlay.ansi"), false, Veto::Modal),
+        ("an image above the composer", image, false, None),
+        ("a modal", fixture("overlay.ansi"), false, Some(Veto::Modal)),
     ];
     for (case, (name, screen, truncated, veto)) in cases.into_iter().enumerate() {
         let rig = rig();
         rig.rig.answer("pane.read", read(&screen, truncated));
         let (outcome, readies) = attempt(&rig, case + 1, &Typing(None));
-        assert_eq!(outcome, Outcome::NotSent(veto), "{name}");
-        assert!(rig.rig.sends().is_empty(), "{name}: {:?}", rig.rig.sends());
-        assert_eq!(readies, 0, "{name}");
+        if let Some(veto) = veto {
+            assert_eq!(outcome, Outcome::NotSent(veto), "{name}");
+            assert!(rig.rig.sends().is_empty(), "{name}: {:?}", rig.rig.sends());
+            assert_eq!(readies, 0, "{name}");
+        } else {
+            assert_eq!(outcome, Outcome::Injected, "{name}");
+            assert_eq!(rig.rig.sends().len(), 2, "{name}");
+            assert!(readies > 0, "{name}");
+        }
     }
     let rig = rig();
     rig.rig.answer("pane.read", read(&empty, false));
@@ -212,7 +213,7 @@ fn only_a_dimmed_placeholder_reads_as_an_empty_composer() {
 }
 
 #[test]
-fn a_draft_typed_before_the_ready_withdraws_without_asking_it() {
+fn a_draft_typed_before_the_ready_is_delivered_once() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let rig = rig();
     let empty = fixture("busy_empty.ansi");
@@ -222,7 +223,10 @@ fn a_draft_typed_before_the_ready_withdraws_without_asking_it() {
             .answer("pane.read", read(&fixture("busy_draft.ansi"), false));
     })));
     let (outcome, readies) = attempt(&rig, 200, &typing);
-    assert_eq!(outcome, Outcome::NotSent(Veto::ComposerUnread));
-    assert_eq!(readies, 0, "a failed read never reaches the owner's ready");
-    assert!(rig.rig.sends().is_empty(), "{:?}", rig.rig.sends());
+    assert_eq!(outcome, Outcome::Injected);
+    assert!(
+        readies > 0,
+        "the owner's ready still fences the draft delivery"
+    );
+    assert_eq!(rig.rig.sends().len(), 2);
 }

@@ -2,7 +2,8 @@
 //! with C-s, the payload start, then one paste and one Enter on the bound physical pane.
 use std::path::PathBuf;
 
-use super::{Completion, Leaf, MODAL};
+use super::{Completion, Leaf, claude_waits, refused};
+use crate::services::claude_tui::busy_inject::{Screen, Veto};
 use crate::services::claude_tui::composer_lock::DraftSighting;
 use crate::services::claude_tui::host_input::{InputRun, run_herdr};
 use crate::services::claude_tui::input::TuiInputAction;
@@ -44,18 +45,22 @@ impl BusyClaudeHerdr {
     }
 
     fn send(&self, frame: &str) -> Completion {
-        let not_sent = |reason: &str| {
-            owner_input::vetoed(reason);
-            Completion::NotSent(reason.into())
-        };
+        let not_sent = |veto: Veto| refused(format!("{veto:?}"), claude_waits(veto));
         let Some(capture) = self.target.capture_ansi(-80) else {
-            return not_sent("PaneUnavailable");
+            return not_sent(Veto::PaneUnavailable);
         };
         if busy_inject::modal(&capture) {
-            return not_sent(MODAL);
+            let target = self.target.clone();
+            let probe = move || match target.capture_ansi(-80) {
+                Some(capture) if !busy_inject::modal(&capture) => Screen::Ready,
+                Some(_) => Screen::Blocked,
+                None => Screen::Unknown,
+            };
+            super::super::held_watch::arm(self.channel, Box::new(probe));
+            return not_sent(Veto::Modal);
         }
         let Ok(offset) = std::fs::metadata(&self.transcript).map(|meta| meta.len()) else {
-            return not_sent("TranscriptUnavailable");
+            return not_sent(Veto::TranscriptUnavailable);
         };
         let who = (
             "claude",
@@ -64,14 +69,14 @@ impl BusyClaudeHerdr {
             self.author.as_str(),
         );
         if history::register(who, &self.transcript, offset, frame).is_err() {
-            return not_sent("LoadFailed");
+            return not_sent(Veto::LoadFailed);
         }
-        let withdrawn = |reason: &str| {
+        let withdrawn = || {
             history::withdraw(&self.nonce, &self.transcript);
-            not_sent(reason)
+            refused("owner_refused".into(), false)
         };
         if owner_input::ready_payload().is_err() {
-            return withdrawn("owner_refused");
+            return withdrawn();
         }
         // A person's visible draft is parked whichever channel the input names; an unread one,
         // or one beside an existing stash, is not.
@@ -87,7 +92,7 @@ impl BusyClaudeHerdr {
         if owner_input::start_payload().is_err() {
             return match park {
                 true => Completion::Failed(self.alert("stash_failed")),
-                false => withdrawn("owner_refused"),
+                false => withdrawn(),
             };
         }
         owner_input::keyed();
@@ -104,7 +109,7 @@ impl BusyClaudeHerdr {
             InputRun::Refused(_) if !park => {
                 history::withdraw(&self.nonce, &self.transcript);
                 owner_input::first_key_held("PaneUnavailable");
-                Completion::NotSent("PaneUnavailable".into())
+                Completion::Held("PaneUnavailable".into())
             }
             InputRun::Refused(_) => Completion::Failed(self.alert("stash_failed")),
             InputRun::Indeterminate { confirmed: 0, .. } | InputRun::Cancelled { confirmed: 0 } => {

@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 pub(crate) use crate::services::claude_tui::busy_inject::Pane;
 use crate::services::claude_tui::busy_inject::{MAX_INPUT_BYTES, at_offsets, frame};
+use crate::services::claude_tui::owner_input;
 pub(crate) use rollout::{TurnVerdict, read_turn, read_turn_detail, submitted};
 
 /// Why nothing reached the pane; the caller may queue the input instead.
@@ -84,7 +85,7 @@ pub(crate) struct Request<'a> {
     pub name: &'a str,
     pub nonce: &'a str,
     pub text: &'a str,
-    /// The model turn the caller read as open; the paste is refused once it is not.
+    /// The observed model turn; empty when an owned delivery could not identify one.
     pub target_turn: &'a str,
 }
 
@@ -98,6 +99,7 @@ pub(crate) trait Ledger {
         None
     }
     fn admitted(&self) {}
+    fn draft_delivered(&self) {}
 }
 
 /// Tries the composer lock a bounded number of times, then injects under it.
@@ -126,7 +128,7 @@ pub(crate) fn inject(
         || !plain(request.session, &['-', '_'])
         || request.nonce.is_empty()
         || !request.nonce.chars().all(|c| c.is_ascii_alphanumeric())
-        || request.target_turn.trim().is_empty()
+        || (!owner_input::active() && request.target_turn.trim().is_empty())
     {
         return Outcome::NotSent(Veto::InvalidInput);
     }
@@ -154,13 +156,52 @@ pub(crate) fn inject(
     locked.unwrap_or(Outcome::NotSent(Veto::LockContended))
 }
 
-#[derive(PartialEq, Eq)]
 struct ComposerProof {
     identity: (String, u32),
     geometry: (usize, usize),
+    capture: String,
 }
 
-fn composer_proof(pane: &Pane) -> Result<ComposerProof, Veto> {
+pub(crate) fn owned_composer_capture(pane: &Pane) -> Result<String, Veto> {
+    composer_proof(pane, true).map(|proof| proof.capture)
+}
+
+/// An owner pins identity and rejects copy mode atomically with each payload key.
+pub(crate) fn key<const N: usize>(
+    pane: &Pane,
+    command: impl Fn(&str) -> [String; N],
+) -> crate::services::claude_tui::busy_inject::stash::Key {
+    use crate::services::claude_tui::busy_inject::stash::{self, Key};
+    let (target, condition) = match owner_input::pinned() {
+        Ok(Some(pin)) => pin,
+        Ok(None) => return stash::key(pane, command),
+        Err(_) => return Key::Held,
+    };
+    let condition = format!("#{{&&:{condition},#{{==:#{{pane_in_mode}},0}}}}");
+    let applied = format!(
+        "{} ; display-message -p CODEX_OWNER_KEY_APPLIED",
+        command(&target).join(" ")
+    );
+    match pane
+        .ok(&[
+            "if-shell",
+            "-F",
+            "-t",
+            &target,
+            &condition,
+            &applied,
+            "display-message -p CODEX_OWNER_KEY_HELD",
+        ])
+        .as_deref()
+        .map(str::trim)
+    {
+        Some("CODEX_OWNER_KEY_APPLIED") => Key::Applied,
+        Some("CODEX_OWNER_KEY_HELD") => Key::Held,
+        _ => Key::Failed,
+    }
+}
+
+fn composer_proof(pane: &Pane, owned: bool) -> Result<ComposerProof, Veto> {
     let query = [
         "display-message",
         "-p",
@@ -171,20 +212,60 @@ fn composer_proof(pane: &Pane) -> Result<ComposerProof, Veto> {
     let before = pane.ok(&query).ok_or(Veto::PaneUnavailable)?;
     let capture = pane
         .ok(&["capture-pane", "-p", "-e", "-t", pane.target()])
-        .ok_or(Veto::ComposerUnread)?;
+        .ok_or(if owned {
+            Veto::PaneUnavailable
+        } else {
+            Veto::ComposerUnread
+        })?;
     let after = pane.ok(&query).ok_or(Veto::PaneUnavailable)?;
     let shown = screen::read(&capture);
-    if shown.modal {
-        return Err(Veto::Modal);
-    }
-    if let Some(veto) = screen::append_veto(&capture, &shown) {
-        return Err(veto);
+    if owned {
+        if capture.trim().is_empty() {
+            return Err(Veto::PaneUnavailable);
+        }
+        if let Some(veto) = screen::delivery_veto(&capture) {
+            return Err(veto);
+        }
+    } else {
+        if shown.modal {
+            return Err(Veto::Modal);
+        }
+        if let Some(veto) = screen::append_veto(&capture, &shown) {
+            return Err(veto);
+        }
     }
     tracing::debug!(native_queue = shown.queued, "Codex composer admission");
-    if before != after {
+    if !owned && before != after {
         return Err(Veto::ComposerUnread);
     }
     let fields: Vec<_> = after.trim().split('|').collect();
+    if owned {
+        let [id, pid, width, height, _, _, mode] = fields.as_slice() else {
+            return Err(Veto::PaneUnavailable);
+        };
+        let previous: Vec<_> = before.trim().split('|').collect();
+        if previous.len() != 7 {
+            return Err(Veto::PaneUnavailable);
+        }
+        if *mode != "0" || previous[6] != "0" {
+            return Err(Veto::Modal);
+        }
+        if [0, 1, 2, 3].iter().any(|&at| previous[at] != fields[at]) {
+            return Err(Veto::PaneUnavailable);
+        }
+        let positive = |value: &str| value.parse::<u32>().ok().filter(|n| *n > 0);
+        let pid = positive(pid).ok_or(Veto::PaneUnavailable)?;
+        let width = positive(width).ok_or(Veto::PaneUnavailable)? as usize;
+        let height = positive(height).ok_or(Veto::PaneUnavailable)? as usize;
+        if id.is_empty() {
+            return Err(Veto::PaneUnavailable);
+        }
+        return Ok(ComposerProof {
+            identity: (id.to_string(), pid),
+            geometry: (width, height),
+            capture,
+        });
+    }
     let [id, pid, width, height, "2", y, "0"] = fields.as_slice() else {
         return Err(Veto::ComposerUnread);
     };
@@ -216,7 +297,26 @@ fn composer_proof(pane: &Pane) -> Result<ComposerProof, Veto> {
     Ok(ComposerProof {
         identity: (id.to_string(), pid),
         geometry: (width, height),
+        capture,
     })
+}
+
+pub(crate) fn turn(request: &Request<'_>) -> Result<(), Veto> {
+    if owner_input::active()
+        && crate::services::tui_input::human_frame::history::v2::scoped_source()
+            .is_some_and(|source| source.is_err())
+    {
+        return Err(Veto::TranscriptUnavailable);
+    }
+    match read_turn(request.rollout) {
+        Some(_) if owner_input::active() => Ok(()),
+        Some(TurnVerdict::KnownModelTurn(turn)) if turn == request.target_turn => Ok(()),
+        Some(TurnVerdict::KnownModelTurn(_)) => Err(Veto::TurnChanged),
+        Some(TurnVerdict::NonSteerable(_)) => Err(Veto::NotSteerable),
+        Some(TurnVerdict::NotBusy) => Err(Veto::NotBusy),
+        Some(TurnVerdict::Unknown) => Err(Veto::TurnUnknown),
+        None => Err(Veto::TranscriptUnavailable),
+    }
 }
 
 fn inject_locked(
@@ -227,7 +327,7 @@ fn inject_locked(
     timing: &Timing,
 ) -> Outcome {
     let not_sent = Outcome::NotSent;
-    let before = match composer_proof(pane) {
+    let before = match composer_proof(pane, owner_input::active()) {
         Ok(proof) => proof,
         Err(veto) => return not_sent(veto),
     };
@@ -235,13 +335,8 @@ fn inject_locked(
     let Ok(offset) = std::fs::metadata(request.rollout).map(|meta| meta.len()) else {
         return not_sent(Veto::TranscriptUnavailable);
     };
-    match read_turn(request.rollout) {
-        Some(TurnVerdict::KnownModelTurn(turn)) if turn == request.target_turn => {}
-        Some(TurnVerdict::KnownModelTurn(_)) => return not_sent(Veto::TurnChanged),
-        Some(TurnVerdict::NonSteerable(_)) => return not_sent(Veto::NotSteerable),
-        Some(TurnVerdict::NotBusy) => return not_sent(Veto::NotBusy),
-        Some(TurnVerdict::Unknown) => return not_sent(Veto::TurnUnknown),
-        None => return not_sent(Veto::TranscriptUnavailable),
+    if let Err(veto) = turn(request) {
+        return not_sent(veto);
     }
     let Ok(mut file) = tempfile::NamedTempFile::new() else {
         return not_sent(Veto::LoadFailed);
@@ -283,29 +378,31 @@ fn inject_locked(
             Veto::LedgerFull
         });
     }
-    let final_veto = match read_turn(request.rollout) {
-        Some(TurnVerdict::KnownModelTurn(turn)) if turn == request.target_turn => None,
-        Some(TurnVerdict::KnownModelTurn(_)) => Some(Veto::TurnChanged),
-        Some(TurnVerdict::NotBusy) => Some(Veto::NotBusy),
-        Some(TurnVerdict::NonSteerable(_)) => Some(Veto::NotSteerable),
-        Some(TurnVerdict::Unknown) => Some(Veto::TurnUnknown),
-        None => Some(Veto::TranscriptUnavailable),
-    }
-    .or_else(|| match composer_proof(pane) {
-        Ok(current) if current.identity != before.identity => Some(Veto::PaneUnavailable),
-        Ok(current) if current != before => Some(Veto::ComposerUnread),
-        Ok(_) => None,
-        Err(veto) => Some(veto),
-    })
-    .or_else(|| {
-        // An owner refusal before the paste is a not-sent veto like the reads above.
-        use crate::services::claude_tui::owner_input::{ReadyRefusal, ready_payload};
-        match ready_payload() {
-            Ok(()) => None,
-            Err(ReadyRefusal::Target(_)) => Some(Veto::PaneUnavailable),
-            Err(ReadyRefusal::Lease(_)) => Some(Veto::LockContended),
-        }
-    });
+    let mut draft = screen::draft_may_be_present(&before.capture);
+    let final_veto = turn(request)
+        .err()
+        .or_else(|| match composer_proof(pane, owner_input::active()) {
+            Ok(current) if current.identity != before.identity => Some(Veto::PaneUnavailable),
+            Ok(current) if current.geometry != before.geometry => Some(if owner_input::active() {
+                Veto::PaneUnavailable
+            } else {
+                Veto::ComposerUnread
+            }),
+            Ok(current) => {
+                draft |= screen::draft_may_be_present(&current.capture);
+                None
+            }
+            Err(veto) => Some(veto),
+        })
+        .or_else(|| {
+            // An owner refusal before the paste is a not-sent veto like the reads above.
+            use crate::services::claude_tui::owner_input::{ReadyRefusal, ready_payload};
+            match ready_payload() {
+                Ok(()) => None,
+                Err(ReadyRefusal::Target(_)) => Some(Veto::PaneUnavailable),
+                Err(ReadyRefusal::Lease(_)) => Some(Veto::LockContended),
+            }
+        });
     if let Some(veto) = final_veto {
         drop_buffer();
         ledger.withdraw();
@@ -332,7 +429,7 @@ fn inject_locked(
     }
     crate::services::claude_tui::owner_input::keyed();
     // After a write is attempted, its failure cannot prove that the pane took no input.
-    use crate::services::claude_tui::busy_inject::stash::{Key, key};
+    use crate::services::claude_tui::busy_inject::stash::Key;
     let paste = |target: &str| {
         [
             "paste-buffer",
@@ -346,8 +443,20 @@ fn inject_locked(
         ]
         .map(String::from)
     };
-    if !matches!(key(pane, paste), Key::Applied) {
-        return unconfirmed(Unconfirmed::PasteFailed);
+    match key(pane, paste) {
+        Key::Applied => {}
+        #[cfg(unix)]
+        Key::Held if owner_input::active() => {
+            owner_input::first_key_held("pane_moved");
+            ledger.withdraw();
+            crate::services::tui_input::human_frame::history::withdraw(
+                request.nonce,
+                request.rollout,
+            );
+            drop_buffer();
+            return not_sent(Veto::PaneUnavailable);
+        }
+        _ => return unconfirmed(Unconfirmed::PasteFailed),
     }
     std::thread::sleep(timing.settle);
     let enter = |target: &str| ["send-keys", "-t", target, "Enter"].map(String::from);
@@ -361,6 +470,9 @@ fn inject_locked(
             nonce = request.nonce,
             "Codex admission retained without durable confirmation"
         );
+    }
+    if owner_input::active() && draft {
+        ledger.draft_delivered();
     }
     rollout::observe(request, offset, text, timing);
     Outcome::Injected

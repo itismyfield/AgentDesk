@@ -6,6 +6,79 @@ const MAX_UNFOLDED_SUBMISSION_CHARS: usize = 1000;
 const SUBMISSION_RESERVED_ROWS: usize = 10;
 const MAX_SUBMISSION_ROWS: usize = 40;
 
+/// One bracketed paste avoids digit actions and preserves the plan's normalized payload bytes.
+pub(crate) fn owned_prompt_plan(prompt: &str) -> Result<Vec<TuiInputAction>, String> {
+    let text = plan_prompt_submit(prompt)?
+        .into_iter()
+        .filter_map(|action| match action {
+            TuiInputAction::Literal(text) | TuiInputAction::PasteBuffer(text) => Some(text),
+            _ => None,
+        })
+        .collect::<String>();
+    Ok(vec![
+        TuiInputAction::PasteBuffer(text),
+        TuiInputAction::Enter,
+    ])
+}
+
+const DRAFT_NOTICE_KIND: &str = "codex.draft_preservation_unconfirmed";
+
+fn draft_notice_event(channel: u64, original: Option<(u64, u64)>) -> Option<String> {
+    let (primary, generation) = original?;
+    Some(format!(
+        "{DRAFT_NOTICE_KIND}:{channel}:{primary}:{generation}"
+    ))
+}
+
+/// Without an owner identity there is no stable notice key; no draft text leaves this path.
+pub(crate) fn notify_owned_draft(channel: u64) {
+    let Some(event) = draft_notice_event(
+        channel,
+        crate::services::claude_tui::owner_input::original_identity(),
+    ) else {
+        return;
+    };
+    let Some(pool) = crate::db::cancel_tombstones::global_pool() else {
+        return;
+    };
+    let result = crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |pool| async move { enqueue_draft_notice(&pool, channel, &event).await },
+        |error| error,
+    );
+    if let Err(error) = result {
+        tracing::warn!(channel, %error, "Codex draft notice enqueue failed after submission");
+    }
+}
+
+async fn enqueue_draft_notice(
+    pool: &sqlx::PgPool,
+    channel: u64,
+    event: &str,
+) -> Result<i64, String> {
+    use crate::services::message_outbox::{
+        OutboxMessage, enqueue_outbox_pg_returning_id_with_persistent_dedupe,
+    };
+    use sha2::{Digest, Sha256};
+    let key = format!("codex-draft:{:x}", Sha256::digest(event.as_bytes()));
+    let text = crate::services::discord::dispatch_policy::prepend_operational_alert_origin(
+        "Codex에 입력을 전달했습니다. 기존 초안의 보존 여부는 확인하지 못했습니다.",
+    );
+    enqueue_outbox_pg_returning_id_with_persistent_dedupe(
+        pool,
+        OutboxMessage {
+            target: &format!("channel:{channel}"),
+            content: &text,
+            bot: "codex",
+            source: "lifecycle_notifier",
+            reason_code: Some(DRAFT_NOTICE_KIND),
+            session_key: Some(&key),
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
 /// A conservative screen budget; the core checks frame bytes before this payload callback.
 pub(crate) fn prompt_submission_fits_pane(
     frame: &str,
@@ -183,6 +256,125 @@ pub(crate) fn submission_busy_in_pane(pane: &str) -> bool {
 mod tests {
     use super::*;
     use crate::services::codex_tui::host_input::spy::{SpyGuard, SpyState};
+
+    #[tokio::test]
+    async fn codex_draft_notice_is_one_non_turn_outbox_event_pg() {
+        if crate::db::postgres::postgres_test_database_url_base().is_none() {
+            assert_ne!(std::env::var("AGENTDESK_REQUIRE_PG").as_deref(), Ok("1"));
+            return;
+        }
+        const CHANNEL: u64 = 7_676_150;
+        const RESTART_DB: &str = "ADK_CODEX_DRAFT_NOTICE_TEST_DB";
+        let event = |primary: u64, nonce: &str| {
+            #[cfg(unix)]
+            {
+                use crate::services::claude_tui::owner_input;
+                use std::sync::Arc;
+                let target = serde_json::json!({"host":"herdr","execution_nonce":nonce,
+                    "_attempt":{"identity":{"primary":primary,"queued_generation":7,
+                        "sources":[{"message_id":primary,"queued_generation":7}]},
+                        "attempt":{"nonce":nonce}}});
+                owner_input::with_scope(
+                    "codex".into(),
+                    target,
+                    CHANNEL,
+                    Arc::new(|_| Ok(())),
+                    Arc::new(|_, _| Ok(())),
+                    Arc::new(|_| Ok(())),
+                    || draft_notice_event(CHANNEL, owner_input::original_identity()).unwrap(),
+                )
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = nonce;
+                draft_notice_event(CHANNEL, Some((primary, 7))).unwrap()
+            }
+        };
+        assert!(crate::services::claude_tui::owner_input::original_identity().is_none());
+        assert!(draft_notice_event(CHANNEL, None).is_none());
+        if let Ok(url) = std::env::var(RESTART_DB) {
+            let pool = sqlx::PgPool::connect(&url).await.unwrap();
+            for original in [1001, 1002] {
+                enqueue_draft_notice(&pool, CHANNEL, &event(original, "after-restart"))
+                    .await
+                    .unwrap();
+            }
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM message_outbox")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                count, 2,
+                "a fresh process must reuse both original notice keys"
+            );
+            pool.close().await;
+            return;
+        }
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let first = enqueue_draft_notice(&pool, CHANNEL, &event(1001, "first-attempt"))
+            .await
+            .unwrap();
+        let again = enqueue_draft_notice(&pool, CHANNEL, &event(1001, "next-attempt"))
+            .await
+            .unwrap();
+        assert_eq!(
+            first, again,
+            "one original across changed attempts owes one notice"
+        );
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM message_outbox")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        let second = enqueue_draft_notice(&pool, CHANNEL, &event(1002, "next-attempt"))
+            .await
+            .unwrap();
+        assert_ne!(
+            first, second,
+            "identical notice text for different originals stays distinct"
+        );
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM message_outbox")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+        let text: String = sqlx::query_scalar("SELECT content FROM message_outbox WHERE id = $1")
+            .bind(first)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(text.contains("초안의 보존 여부는 확인하지 못했습니다"));
+        assert!(crate::services::discord::dispatch_policy::has_non_turn_provenance(&text));
+        assert!(
+            crate::services::turn_orchestrator::ChannelMailboxHandle::v2_notice_is_non_turn(&text)
+        );
+        pool.close().await;
+        let test = format!(
+            "{}::codex_draft_notice_is_one_non_turn_outbox_event_pg",
+            module_path!().split_once("::").unwrap().1
+        );
+        let restarted = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &test, "--nocapture"])
+            .env(RESTART_DB, &db.database_url)
+            .output()
+            .unwrap();
+        assert!(
+            restarted.status.success()
+                && String::from_utf8_lossy(&restarted.stdout).contains("1 passed"),
+            "{}\n{}",
+            String::from_utf8_lossy(&restarted.stdout),
+            String::from_utf8_lossy(&restarted.stderr)
+        );
+        let pool = db.connect_and_migrate().await;
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM message_outbox")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+        pool.close().await;
+        db.drop().await;
+    }
 
     #[test]
     fn idle_submission_preserves_box_rows_and_modal_choices() {

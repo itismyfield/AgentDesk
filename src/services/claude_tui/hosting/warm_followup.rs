@@ -564,12 +564,21 @@ pub(crate) fn owner_observer(
     cancel: std::sync::Arc<CancelToken>,
 ) -> Option<Box<dyn FnOnce() -> Result<(), String> + Send>> {
     cancel.bind_claude_tmux_session(tmux);
-    let resolved = crate::services::claude::resolve_claude_tui_session_for_launch(
-        working_dir,
-        session_id,
-        None,
+    // The account's home and the pane's live binding find the transcript, as a warm follow-up does.
+    let overlay = crate::services::discord::org_schema::overlay_from_tmux_session(
+        crate::services::provider::ProviderKind::Claude,
+        tmux,
     );
-    let resolved = resolved.ok()?;
+    let overlay = overlay.ok()?;
+    let matches =
+        crate::services::tmux_common::tmux_session_auth_profile_matches(tmux, &overlay.profile_id);
+    let at = (
+        working_dir,
+        matches.then_some(session_id).flatten(),
+        overlay.home.as_deref(),
+    );
+    let resolve = crate::services::claude::resolve_live_claude_tui_session;
+    let resolved = resolve(tmux, at, (true, || Ok(matches))).ok()?.resolution;
     let fallback = std::fs::metadata(&resolved.transcript_path).ok()?.len();
     let hooks = crate::services::claude_tui::hook_server::subscribe_hook_events();
     let (started_at, tmux, prompt) = (chrono::Utc::now(), tmux.to_string(), prompt.to_string());

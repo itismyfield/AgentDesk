@@ -191,9 +191,23 @@ fn untried(owner: &Owner) -> usize {
     (owner.snapshot.head_injection.as_ref()).map_or(0, |head| head.members().count())
 }
 
+/// Requeues the proven-unsent retained inputs `pick` names in the snapshot a cancel or clear
+/// commits, so neither leaves an original it should have taken to come back later.
+fn requeued(owner: &mut Owner, pick: impl Fn(&RetainedInput) -> bool) -> SnapshotV2 {
+    let mut next = owner.snapshot.clone();
+    if !next.requeue_known_not_sent(pick).is_empty() && untried(owner) == 0 {
+        owner.revoke_front();
+    }
+    next
+}
+
+/// Takes only the cancelled original; an unrelated retained input stays where it is.
 fn cancel(owner: &mut Owner, message_id: MessageId) -> CancelQueuedMessageResult {
     let first = untried(owner);
-    let mut next = owner.snapshot.clone();
+    let named = |entry: &RetainedInput| {
+        (entry.input.members()).any(|member| member.message_id == message_id.get())
+    };
+    let mut next = requeued(owner, named);
     let found = next
         .items
         .iter()
@@ -228,7 +242,7 @@ fn cancel(owner: &mut Owner, message_id: MessageId) -> CancelQueuedMessageResult
 
 /// Discards only untried items; the attempted head, retained inputs and terminals stay.
 fn clear(owner: &mut Owner) -> ClearChannelResult {
-    let mut next = owner.snapshot.clone();
+    let mut next = requeued(owner, |_| true);
     let first = untried(owner);
     let discarded: Vec<PendingQueueItem> = next.items.drain(first..).collect();
     if first == 0 && !discarded.is_empty() {
@@ -255,3 +269,7 @@ fn clear(owner: &mut Owner) -> ClearChannelResult {
 #[cfg(test)]
 #[path = "control_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "requeue_tests.rs"]
+mod requeue_tests;
