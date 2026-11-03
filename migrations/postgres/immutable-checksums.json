@@ -830,6 +830,11 @@
       "path": "migrations/postgres/0170_routine_runs_newest_first_index.sql",
       "sha256": "9525b92107be07f19d5415f216a604dc54edcc90e093463d170134a4bd1d88be",
       "version": 170
+    },
+    {
+      "path": "migrations/postgres/0173_message_outbox_body_census.sql",
+      "sha256": "d46a1ce98c32002e93158039c0393fda8967d28086df956d74a87dc6a6746678",
+      "version": 173
     }
   ],
   "version": 1
