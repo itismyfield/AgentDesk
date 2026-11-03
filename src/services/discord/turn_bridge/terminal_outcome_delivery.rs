@@ -870,13 +870,21 @@ pub(super) async fn run_terminal_outcome_delivery(
                 }
                 match super::headless_delivery::headless_delivery_disposition(&delivery_outcome) {
                     super::headless_delivery::HeadlessDeliveryDisposition::Commit => {
-                        cleanup_headless_streaming_placeholder_after_delivery(
-                            shared_owned.as_ref(),
-                            channel_id,
-                            current_msg_id,
-                            status_panel_msg_id,
-                            &last_edit_text,
-                            &provider,
+                        crate::services::discord::outbound::body_census::BodySource::from_state(
+                            &inflight_state,
+                        )
+                        .reason(crate::services::tui_o::channel_policy::ClaimReason::NoClaim)
+                        .observe(
+                            crate::services::tui_o::cutover::BodySite::BridgeHeadless,
+                            crate::services::discord::outbound::body_census::BodyOffer::Unknown,
+                            cleanup_headless_streaming_placeholder_after_delivery(
+                                shared_owned.as_ref(),
+                                channel_id,
+                                current_msg_id,
+                                status_panel_msg_id,
+                                &last_edit_text,
+                                &provider,
+                            ),
                         )
                         .await;
                         terminal_delivery_committed = true;

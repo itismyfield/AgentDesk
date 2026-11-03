@@ -355,12 +355,16 @@ impl DiscordOutboundClient for HttpOutboundClient {
         target_channel: &str,
         content: &str,
     ) -> Result<String, DispatchMessagePostError> {
-        crate::services::dispatches::discord_delivery::post_raw_message_once(
-            &self.client,
-            &self.token,
-            &self.discord_api_base,
+        super::raw_output::request_for_channel(
             target_channel,
-            content,
+            super::raw_output::Operation::Post,
+            crate::services::dispatches::discord_delivery::post_raw_message_once(
+                &self.client,
+                &self.token,
+                &self.discord_api_base,
+                target_channel,
+                content,
+            ),
         )
         .await
     }
@@ -371,13 +375,17 @@ impl DiscordOutboundClient for HttpOutboundClient {
         message_id: &str,
         content: &str,
     ) -> Result<String, DispatchMessagePostError> {
-        crate::services::dispatches::discord_delivery::edit_raw_message_once(
-            &self.client,
-            &self.token,
-            &self.discord_api_base,
+        super::raw_output::request_for_channel(
             target_channel,
-            message_id,
-            content,
+            super::raw_output::Operation::Edit,
+            crate::services::dispatches::discord_delivery::edit_raw_message_once(
+                &self.client,
+                &self.token,
+                &self.discord_api_base,
+                target_channel,
+                message_id,
+                content,
+            ),
         )
         .await
     }

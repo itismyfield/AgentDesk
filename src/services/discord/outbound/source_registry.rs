@@ -76,7 +76,6 @@ enum StaticSendSource {
 
 #[derive(Copy, Clone, Debug)]
 struct SourcePolicy {
-    #[allow(dead_code)]
     source: StaticSendSource,
     label: &'static str,
     caller_mask: u8,
@@ -140,6 +139,51 @@ const POLICIES: &[SourcePolicy] = &[
 pub struct SendSourcePolicyError {
     pub label: String,
     pub caller: SendCallerClass,
+}
+
+/// Only static notice policies establish N; an authorized agent label may carry a body.
+pub(crate) fn is_registered_nonbody_source(source: &str) -> bool {
+    let Some(policy) = POLICIES
+        .iter()
+        .find(|policy| policy.label == source && policy.caller_mask & LOOPBACK != 0)
+    else {
+        return false;
+    };
+    if crate::config::snapshot()
+        .is_none_or(|config| config.agents.iter().any(|agent| agent.id == source))
+    {
+        return false;
+    }
+    use StaticSendSource::*;
+    matches!(
+        policy.source,
+        KanbanRules
+            | TriageRules
+            | ReviewAutomation
+            | AutoQueue
+            | Pipeline
+            | System
+            | Timeouts
+            | LifecycleNotifier
+            | RoutingTransition
+            | RoutineRuntime
+            | ScheduledMessage
+            | SloAlerter
+            | AutoQueueMonitor
+            | Inventory
+            | GithubSync
+            | CatchUpTooOld
+            | BootCustodyNotice
+            | QueueOverflowNotice
+            | RetainedInputNotice
+            | OutboxDeliveryAlert
+            | LongTurnWatchdog
+            | RelaySignalRollup
+            | DispatchWatchdog
+            | StallWatchdog
+            | TuiOAlarm
+            | AdoptFenceForwardNotice
+    )
 }
 
 /// Exact, case-sensitive and fail-closed source authorization.

@@ -71,6 +71,155 @@ fn phases(path: &Path, case: &str) -> Vec<(String, Option<String>)> {
         .collect()
 }
 
+#[tokio::test]
+async fn common_http_client_observes_each_raw_post_and_edit() {
+    if isolated(
+        concat!(
+            module_path!(),
+            "::common_http_client_observes_each_raw_post_and_edit"
+        )
+        .trim_start_matches("agentdesk::"),
+    ) {
+        return;
+    }
+    use crate::services::discord::outbound::{DiscordOutboundClient, HttpOutboundClient};
+    let log = journal().await;
+    let mock = Mock::start(vec![message(9001), message(9001)]).await;
+    let client = HttpOutboundClient::new(reqwest::Client::new(), "test-token", &mock.base);
+    raw_output::census_scope(
+        Some(json!({"case":"common_http","output_class":"LegacyBody","binding_mode":"TUI"})),
+        async {
+            client
+                .post_message(&CHANNEL.to_string(), "body")
+                .await
+                .unwrap();
+            client
+                .edit_message(&CHANNEL.to_string(), "9001", "body")
+                .await
+                .unwrap();
+        },
+    )
+    .await;
+    assert_eq!(mock.requests().len(), 2);
+    flushed().await;
+    assert_eq!(
+        phases(&log, "common_http"),
+        vec![
+            ("begin".into(), None),
+            ("result".into(), Some("confirmed".into())),
+            ("begin".into(), None),
+            ("result".into(), Some("confirmed".into()))
+        ]
+    );
+}
+
+#[tokio::test]
+async fn common_http_client_preserves_errors_retries_and_unknown_destinations() {
+    if isolated(
+        concat!(
+            module_path!(),
+            "::common_http_client_preserves_errors_retries_and_unknown_destinations"
+        )
+        .trim_start_matches("agentdesk::"),
+    ) {
+        return;
+    }
+    use crate::services::discord::outbound::{DiscordOutboundClient, HttpOutboundClient};
+    use crate::services::dispatches::discord_delivery::DispatchMessagePostErrorKind;
+    let log = journal().await;
+    for (case, replies, wire, expected, status) in [
+        (
+            "http-rejected",
+            vec![reply("403 Forbidden", &[], "{}")],
+            1,
+            "rejected",
+            Some(403),
+        ),
+        (
+            "http-too-long",
+            vec![reply(
+                "400 Bad Request",
+                &[],
+                r#"{"code":50035,"message":"BASE_TYPE_MAX_LENGTH"}"#,
+            )],
+            1,
+            "rejected",
+            Some(400),
+        ),
+        (
+            "http-uncertain",
+            vec![reply("500 Internal Server Error", &[], "{}")],
+            1,
+            "uncertain",
+            Some(500),
+        ),
+        (
+            "http-unreadable",
+            vec![reply("200 OK", &[], "{")],
+            1,
+            "uncertain",
+            None,
+        ),
+        (
+            "http-retry",
+            vec![route_429("0"), message(9501)],
+            2,
+            "confirmed",
+            None,
+        ),
+    ] {
+        let mock = Mock::start(replies).await;
+        let client = HttpOutboundClient::new(reqwest::Client::new(), "test-token", &mock.base);
+        let result = raw_output::census_scope(
+            Some(json!({"case":case,"output_class":"LegacyBody","binding_mode":"TUI"})),
+            client.post_message(&CHANNEL.to_string(), "body"),
+        )
+        .await;
+        assert_eq!(result.is_ok(), expected == "confirmed");
+        if let Err(error) = result {
+            assert_eq!(error.http_status().map(|s| s.as_u16()), status);
+            assert_eq!(
+                error.kind(),
+                if case == "http-too-long" {
+                    DispatchMessagePostErrorKind::MessageTooLong
+                } else {
+                    DispatchMessagePostErrorKind::Other
+                }
+            );
+        }
+        assert_eq!(mock.requests().len(), wire);
+        flushed().await;
+        assert_eq!(
+            phases(&log, case),
+            vec![
+                ("begin".into(), None),
+                ("result".into(), Some(expected.into()))
+            ]
+        );
+    }
+    let mock = Mock::start(vec![message(9502)]).await;
+    let client = HttpOutboundClient::new(reqwest::Client::new(), "test-token", &mock.base);
+    let result = raw_output::census_scope(
+        Some(
+            json!({"case":"invalid-destination","output_class":"LegacyBody","binding_mode":"TUI"}),
+        ),
+        client.post_message("0", "body"),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "observation cannot change the existing raw transport result"
+    );
+    assert_eq!(mock.requests().len(), 1);
+    assert!(
+        census::health_json()["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "OUTBOUND_DESTINATION_UNKNOWN")
+    );
+}
+
 pub(in crate::services::discord) async fn flushed() {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {

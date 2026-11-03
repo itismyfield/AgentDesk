@@ -5,7 +5,7 @@ use std::{collections::BTreeSet, sync::LazyLock};
 const EMBEDDED: &str = include_str!("../../../scripts/tui_o_body_probes.json");
 
 pub(super) const EXPECTED_PROBE_ROWS: usize = 68;
-const EXPECTED_TRANSPORT_ROWS: usize = 14;
+const EXPECTED_TRANSPORT_ROWS: usize = 18;
 
 pub(super) fn snapshot() -> Value {
     static SNAPSHOT: LazyLock<Value> = LazyLock::new(|| inspect(EMBEDDED));
@@ -60,7 +60,7 @@ pub(super) fn inspect(raw: &str) -> Value {
             }
             match row["status"].as_str()? {
                 "VERIFIED" => {}
-                "PENDING_0a3" => pending += 1,
+                "PENDING_0a3" | "PENDING_0b2" => pending += 1,
                 _ => return None,
             }
         }

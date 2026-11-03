@@ -94,28 +94,67 @@ impl Drop for Observation {
     }
 }
 
-fn outcome<T>(result: &serenity::Result<T>) -> &'static str {
+pub(in crate::services::discord) trait RequestError {
+    fn rejected(&self) -> bool;
+    fn authority(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self;
+}
+
+impl RequestError for serenity::Error {
+    fn rejected(&self) -> bool {
+        matches!(self, serenity::Error::Http(error) if error.status_code().is_some_and(|s| rejected_status(s.as_u16())))
+    }
+    fn authority(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
+        serenity::Error::Io(std::io::Error::other(error))
+    }
+}
+
+impl RequestError for crate::services::dispatches::discord_delivery::DispatchMessagePostError {
+    fn rejected(&self) -> bool {
+        self.http_status()
+            .is_some_and(|s| rejected_status(s.as_u16()))
+    }
+    fn authority(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
+        Self::new(
+            crate::services::dispatches::discord_delivery::DispatchMessagePostErrorKind::Other,
+            error.into().to_string(),
+        )
+    }
+}
+
+fn rejected_status(status: u16) -> bool {
+    matches!(status, 400 | 401 | 403 | 404 | 405 | 413 | 422 | 429)
+}
+
+fn outcome<T, E: RequestError>(result: &Result<T, E>) -> &'static str {
     match result {
         Ok(_) => "confirmed",
-        Err(serenity::Error::Http(error))
-            if error.status_code().is_some_and(|status| {
-                matches!(
-                    status.as_u16(),
-                    400 | 401 | 403 | 404 | 405 | 413 | 422 | 429
-                )
-            }) =>
-        {
-            "rejected"
-        }
+        Err(error) if error.rejected() => "rejected",
         Err(_) => "uncertain",
     }
 }
 
-pub(in crate::services::discord) fn request<T>(
+pub(in crate::services::discord) async fn request_for_channel<T, E: RequestError>(
+    channel: &str,
+    op: Operation,
+    raw: impl Future<Output = Result<T, E>>,
+) -> Result<T, E> {
+    if let Ok(id) = channel.parse::<std::num::NonZeroU64>() {
+        request(ChannelId::new(id.get()), op, raw).await
+    } else {
+        if current_census().is_some_and(|tag| tag["output_class"] != "NonBody") {
+            crate::services::legacy_body_census::observation_unknown(
+                "OUTBOUND_DESTINATION_UNKNOWN",
+            );
+        }
+        raw.await
+    }
+}
+
+pub(in crate::services::discord) fn request<T, E: RequestError>(
     channel: ChannelId,
     op: Operation,
-    raw: impl Future<Output = serenity::Result<T>>,
-) -> Pin<Box<impl Future<Output = serenity::Result<T>>>> {
+    raw: impl Future<Output = Result<T, E>>,
+) -> Pin<Box<impl Future<Output = Result<T, E>>>> {
     Box::pin(async move {
         let Some(context) = CONTEXT.try_with(Clone::clone).ok() else {
             return raw.await;
@@ -146,7 +185,7 @@ pub(in crate::services::discord) fn request<T>(
                     transport::record(observation.event("not_sent", None));
                     observation.finished = true;
                 }
-                return Err(serenity::Error::Io(std::io::Error::other(error)));
+                return Err(E::authority(error));
             }
         };
         if let Some(observation) = observation.as_mut() {
@@ -170,7 +209,7 @@ pub(in crate::services::discord) fn request<T>(
             transport::record(observation.event("result", Some("uncertain")));
             observation.finished = true;
         }
-        result.map_err(|error| serenity::Error::Io(std::io::Error::other(error)))?
+        result.map_err(E::authority)?
     })
 }
 

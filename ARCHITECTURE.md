@@ -2723,6 +2723,7 @@ src/
 │   │   │   ├── headless_delivery/
 │   │   │   │   ├── durable_outbox.rs
 │   │   │   │   ├── intake_outbox_argument.rs
+│   │   │   │   ├── observation_tests.rs
 │   │   │   │   ├── outcome.rs
 │   │   │   │   └── production_seam_tests.rs
 │   │   │   ├── recovery_text/
@@ -3335,6 +3336,7 @@ src/
 │   │   └── runtime_state.rs
 │   ├── message_outbox/
 │   │   ├── attachments.rs
+│   │   ├── body_census.rs
 │   │   ├── diagnostics.rs
 │   │   ├── identity.rs
 │   │   ├── identity_tests.rs

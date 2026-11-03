@@ -153,6 +153,26 @@ impl Journal {
 static JOURNAL: OnceLock<Journal> = OnceLock::new();
 static READY: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
+pub(crate) fn producer_identity() -> Value {
+    let host = JOURNAL.get().map_or(Value::Null, |journal| {
+        journal
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .header["host"]
+            .clone()
+    });
+    json!({"boot_id":crate::services::process_boot::initialize().id,"host":host})
+}
+
+pub(crate) fn observation_unknown(reason: &str) {
+    if let Some(journal) = JOURNAL.get() {
+        invalidate(&journal.0.state, reason);
+        transport::try_record(json!({"kind":"invalid","reasons":[reason]}));
+    }
+}
+
 pub(crate) fn start() {
     JOURNAL.get_or_init(|| {
         let root: Option<PathBuf> = crate::config::runtime_root();

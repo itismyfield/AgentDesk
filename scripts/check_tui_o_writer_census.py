@@ -647,6 +647,10 @@ def _admission_order_problems(rel: str, text: str) -> list[str]:
 
 # The transport inventory is independent of the unchanged body census.
 TRANSPORT_PROBES = {
+    'RAW:outbound/transport.rs:post_message:1': {'id': 'RAW:outbound/transport.rs:post_message:1', 'path': 'src/services/discord/outbound/transport.rs', 'entrypoint': 'post_message', 'occurrence': 1, 'op': 'POST', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'RAW:outbound/transport.rs:edit_message:1': {'id': 'RAW:outbound/transport.rs:edit_message:1', 'path': 'src/services/discord/outbound/transport.rs', 'entrypoint': 'edit_message', 'occurrence': 1, 'op': 'EDIT', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'RAW:outbound/serenity_reference.rs:post_message:1': {'id': 'RAW:outbound/serenity_reference.rs:post_message:1', 'path': 'src/services/discord/outbound/serenity_reference.rs', 'entrypoint': 'post_message', 'occurrence': 1, 'op': 'POST', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'RAW:outbound/serenity_reference.rs:post_message_with_reference:1': {'id': 'RAW:outbound/serenity_reference.rs:post_message_with_reference:1', 'path': 'src/services/discord/outbound/serenity_reference.rs', 'entrypoint': 'post_message_with_reference', 'occurrence': 1, 'op': 'POST', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
     'RAW:http.rs:dispatch_channel_message:1': {'id': 'RAW:http.rs:dispatch_channel_message:1', 'path': 'src/services/discord/http.rs', 'entrypoint': 'dispatch_channel_message', 'occurrence': 1, 'op': 'POST', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
     'RAW:http.rs:send_channel_message_with_nonce:1': {'id': 'RAW:http.rs:send_channel_message_with_nonce:1', 'path': 'src/services/discord/http.rs', 'entrypoint': 'send_channel_message_with_nonce', 'occurrence': 1, 'op': 'POST', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
     'RAW:http.rs:send_channel_message_with_reference:1': {'id': 'RAW:http.rs:send_channel_message_with_reference:1', 'path': 'src/services/discord/http.rs', 'entrypoint': 'send_channel_message_with_reference', 'occurrence': 1, 'op': 'POST', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
@@ -736,7 +740,7 @@ def _claim_guard_problems(root: Path) -> list[str]:
 
 TRANSPORT_REQUESTS = {(row["path"], row["entrypoint"], row["occurrence"]): row["op"] for row in TRANSPORT_PROBES.values() if "occurrence" in row}
 
-RAW_REQUEST_RE = re.compile(r"\braw_output\s*::\s*request\s*\(")
+RAW_REQUEST_RE = re.compile(r"\braw_output\s*::\s*request(?:_for_channel)?\s*\(")
 RAW_OPERATION_RE = re.compile(
     r"\s*\w+\s*,\s*(?:\w+\s*::\s*)*Operation\s*::\s*(Post|Edit|Delete)\s*,"
 )
@@ -795,6 +799,16 @@ def _transport_guard_problems(root: Path, texts: dict[str, str], ack_sites: dict
     raw_ok = raw_ok and not re.search(r"context\s*\.\s*(?:scope|artifact|body)\s*=", census)
     if any(key.startswith("RAW:") for key in active) and not raw_ok:
         problems.append("transport guard: raw outcome/operation/owner-census composition drifted")
+    if active & {"RAW:outbound/transport.rs:post_message:1", "RAW:outbound/transport.rs:edit_message:1"}:
+        adapter = compact(body(raw_path, "request_for_channel"))
+        adapter_ok = all(token in adapter for token in (
+            "channel.parse::<std::num::NonZeroU64>()",
+            "request(ChannelId::new(id.get()),op,raw).await",
+            "observation_unknown(", "raw.await",
+        )) and adapter.count("raw.await") == 1 and adapter.count("request(") == 1
+        adapter_ok = adapter_ok and not re.search(r"transport\s*::\s*record\s*\(", adapter)
+        if not adapter_ok:
+            problems.append("transport guard: string channel adapter must delegate once or invalidate an unknown destination")
     ack_path = "src/services/legacy_body_census/transport.rs"
     ack = compact(body(ack_path, "record_o_created"))
     ack_ok = all(token in ack for token in ("ifstarted_at_ms.is_some_and(|started|created_at_ms<=started){return;}", "ifid>bucket.latest_id{", "saturating_add(1)"))
@@ -1107,7 +1121,7 @@ def body_probe_snapshot(root: Path) -> dict:
             require("occurrence" not in row or type(row["occurrence"]) is int)
             require(row["id"] not in transport_ids)
             transport_ids.add(row["id"])
-            require(row["status"] in {"PENDING_0a3", "VERIFIED"})
+            require(row["status"] in {"PENDING_0a3", "PENDING_0b2", "VERIFIED"})
             pending += row["status"] != "VERIFIED"
         claims = data["claim_probes"]
         require(isinstance(claims, list) and len(claims) == len(CLAIM_PROBES))

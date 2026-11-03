@@ -188,8 +188,10 @@ pub(super) async fn cleanup_headless_streaming_placeholder_after_delivery(
             }
         }
         HeadlessPlaceholderCleanupAction::Edit(cleaned) => {
-            if let Err(error) =
-                super::http::edit_channel_message(&http, channel_id, current_msg_id, &cleaned).await
+            if let Err(error) = super::super::outbound::body_census::forward(
+                super::http::edit_channel_message(&http, channel_id, current_msg_id, &cleaned),
+            )
+            .await
             {
                 tracing::warn!(
                     "[turn_bridge] failed to clean stale headless streaming placeholder {} in channel {}: {}",
@@ -285,9 +287,13 @@ pub(super) async fn enqueue_headless_delivery(
         provider,
         born_generation,
         intake_outbox_id,
+        body_source,
         content,
         cancel_token,
     } = arguments.into_runtime_arguments();
+    use crate::services::discord::outbound::body_census::BodyOffer;
+    use crate::services::tui_o::{channel_policy::ClaimReason, cutover::BodySite};
+    let body_source = body_source.reason(ClaimReason::NoClaim);
     if should_suppress_headless_delivery_for_cancel(cancel_token) {
         return HeadlessDeliveryOutcome::Cancelled;
     }
@@ -328,16 +334,22 @@ pub(super) async fn enqueue_headless_delivery(
         let delivery_cancel_token = cancel_token.filter(|token| !token.is_completion_cleanup());
         // Terminal headless responses are per-turn facts. Identical content in
         // back-to-back E2E or operator turns must still be delivered.
-        match durable_outbox::enqueue_headless_outbox(
-            pool,
-            outbox_message,
-            owning_user_msg_id,
-            provider,
-            born_generation,
-            delivery_cancel_token,
-            output_origin.as_ref(),
-        )
-        .await
+        match body_source
+            .clone()
+            .observe(
+                BodySite::BridgeHeadless,
+                BodyOffer::body(!content.trim().is_empty()),
+                durable_outbox::enqueue_headless_outbox(
+                    pool,
+                    outbox_message,
+                    owning_user_msg_id,
+                    provider,
+                    born_generation,
+                    delivery_cancel_token,
+                    output_origin.as_ref(),
+                ),
+            )
+            .await
         {
             Ok(crate::services::message_outbox::OutboxEnqueueOutcome::Enqueued {
                 id: outbox_id,
@@ -521,7 +533,13 @@ pub(super) async fn enqueue_headless_delivery(
             scope,
             None,
             content,
-            send_long_message_raw(&http, channel_id, content, shared),
+            body_source.observe(
+                BodySite::BridgeHeadless,
+                BodyOffer::body(!content.trim().is_empty()),
+                super::super::outbound::body_census::forward(send_long_message_raw(
+                    &http, channel_id, content, shared,
+                )),
+            ),
         )
         .await
         .map_err(|error| format!("headless direct delivery failed: {error}"))?;
@@ -536,13 +554,22 @@ pub(super) async fn enqueue_claimed_headless_delivery(
     claim: Option<crate::services::tui_o::cutover::BodyClaim<'_>>,
     arguments: HeadlessDeliveryArguments<'_>,
 ) -> HeadlessDeliveryOutcome {
-    use crate::services::tui_o::cutover::{BodySend, claim_then_send};
-    match claim_then_send(claim, || enqueue_headless_delivery(arguments)).await {
-        Ok(BodySend::Sent(outcome)) => outcome,
-        Ok(BodySend::OwnedByO) | Err(_) => HeadlessDeliveryOutcome::Ambiguous {
-            surfaced_error: Some("TUI output identity held".to_string()),
-        },
-    }
+    use crate::services::tui_o::cutover::{BodySend, BodySite, claim_then_send_at};
+    arguments
+        .body_source()
+        .scope(async {
+            match claim_then_send_at(BodySite::BridgeHeadless, claim, || {
+                enqueue_headless_delivery(arguments)
+            })
+            .await
+            {
+                Ok(BodySend::Sent(outcome)) => outcome,
+                Ok(BodySend::OwnedByO) | Err(_) => HeadlessDeliveryOutcome::Ambiguous {
+                    surfaced_error: Some("TUI output identity held".to_string()),
+                },
+            }
+        })
+        .await
 }
 
 #[cfg(test)]

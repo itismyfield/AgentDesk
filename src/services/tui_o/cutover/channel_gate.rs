@@ -228,6 +228,8 @@ pub(crate) enum BodySite {
     BridgeRolloverRestore,
     #[serde(rename = "W14c")]
     BridgeBlockedRollover,
+    #[serde(rename = "W17")]
+    BridgeHeadless,
     #[serde(rename = "W19")]
     OutputController,
     #[serde(rename = "W30")]
