@@ -31,10 +31,19 @@ pub(crate) enum Completion {
 pub(crate) const MODAL: &str = "Modal";
 /// Refusals of a screen where Enter may not submit; each holds the original at the front too.
 const HELD: [&str; 3] = [MODAL, "ScreenUnread", "CopyMode"];
+/// Refusals before any key that the next turn boundary may clear; they hold the front as well.
+const WAITS: [&str; 5] = [
+    MODAL,
+    "ScreenUnread",
+    "CopyMode",
+    "PaneUnavailable",
+    "LockContended",
+];
 
-/// Whether a drive handoff failed on such a screen, so the front waits for its next opportunity.
+/// Whether a drive handoff was refused so that the front waits for its next opportunity.
 pub(crate) fn held(error: &str) -> bool {
-    HELD.iter()
+    WAITS
+        .iter()
         .any(|reason| error == format!("{:?}", Completion::NotSent((*reason).into())))
 }
 
@@ -72,7 +81,7 @@ pub(crate) async fn run(
         })?;
     let completion = outcome.result.unwrap_or_else(Completion::WriteUncertain);
     if let Some(proof) = outcome.not_sent {
-        let held = matches!(&completion, Completion::NotSent(r) if HELD.contains(&r.as_str()));
+        let held = matches!(&completion, Completion::NotSent(r) if WAITS.contains(&r.as_str()));
         mailbox
             .v2_request(move |slot| {
                 let owner = slot.as_mut().ok_or("V2 not adopted")?;

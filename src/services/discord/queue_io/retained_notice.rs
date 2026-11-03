@@ -52,6 +52,33 @@ pub(crate) async fn enqueue(
     .map_err(|e| e.to_string())
 }
 
+/// Corrects a resend ask already posted for an original that is now queued for automatic delivery;
+/// keyed by the original alone, so a restart posts it once.
+pub(crate) async fn requeued(
+    pool: &sqlx::PgPool,
+    provider: &str,
+    channel: u64,
+    identity: &serde_json::Value,
+) -> Result<i64, String> {
+    let stable = serde_json::to_vec(&(provider, channel, identity)).map_err(|e| e.to_string())?;
+    let key = format!("retained-requeued:{:x}", Sha256::digest(stable));
+    let body = "⚠️ 보관했던 입력을 다시 대기열에 넣었습니다. 입력 가능한 화면이 확인되면 자동으로 전달합니다. 다시 보내지 않아도 됩니다.";
+    let text = super::super::dispatch_policy::prepend_operational_alert_origin(body);
+    enqueue_outbox_pg_returning_id_with_persistent_dedupe(
+        pool,
+        OutboxMessage {
+            target: &format!("channel:{channel}"),
+            content: &text,
+            bot: provider,
+            source: "retained_input_notice",
+            reason_code: Some("retained.requeued"),
+            session_key: Some(&key),
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
 /// The one notice an original owes when its input was pasted beside a draft C-s could not park;
 /// keyed by the original's sources, so a retry of the same original posts nothing more.
 pub(crate) async fn draft_unproven(

@@ -136,8 +136,8 @@ impl Owner {
         Ok(())
     }
 
-    /// A modal refused the input before any key: the attempt ends unretained and the original
-    /// keeps its queue slot and ticket for the release wake.
+    /// A refusal before any key that a later look may clear: the attempt ends unretained and the
+    /// original keeps its queue slot and ticket for the next wake.
     pub(crate) fn hold_not_sent(
         &mut self,
         key: &AttemptRef,
@@ -215,6 +215,111 @@ impl Owner {
             .ok_or("stale notice attempt")?;
         entry.notice.enqueued = true;
         self.commit(next)
+    }
+}
+
+/// Refusals that no later look can turn into a submit; their originals stay retained.
+const PERMANENT: [&str; 2] = ["vetoed: frame_mismatch", "vetoed: InvalidInput"];
+
+/// Whether a retained input was refused before any key for a reason a later look may clear.
+fn requeueable(entry: &RetainedInput, terminal: &[TerminalIdentity]) -> bool {
+    let RetainedReason::Rejected { reason } = &entry.reason else {
+        return false;
+    };
+    let refused = reason.strip_prefix("known_not_sent: ");
+    matches!(entry.disposition, Some(RetainedDisposition::KnownNotSent))
+        && entry.input.phase == HeadPhase::Reserved
+        && entry.input.attempt.is_some()
+        && refused.is_some_and(|refused| !PERMANENT.contains(&refused))
+        && !(entry.input.members().map(sources::identity))
+            .any(|member| terminal.iter().any(|t| t.identity == member))
+}
+
+impl SnapshotV2 {
+    /// Puts every proven-unsent retained input back in the queue, original then followers, behind
+    /// any attempted head; each member's ticket and caller context bind to its new slot.
+    pub(super) fn requeue_known_not_sent(&mut self) -> Vec<RetainedInput> {
+        let at = self
+            .head_injection
+            .as_ref()
+            .map_or(0, |head| head.members().count());
+        let mut moved = Vec::new();
+        let mut index = 0;
+        while index < self.retained_inputs.len() {
+            let entry = &self.retained_inputs[index];
+            let members: Vec<PendingQueueItem> = entry.input.members().cloned().collect();
+            let queued = |m: &PendingQueueItem| {
+                let id = sources::identity(m);
+                self.items.iter().find(|item| sources::identity(item) == id)
+            };
+            // A member queued again under a different body is a conflict this cannot settle.
+            let conflict = members
+                .iter()
+                .any(|m| queued(m).is_some_and(|q| !source_admission::same_original(q, m)));
+            if !requeueable(entry, &self.terminal_identities) || conflict {
+                index += 1;
+                continue;
+            }
+            let fresh: Vec<PendingQueueItem> = members
+                .into_iter()
+                .filter(|m| queued(m).is_none())
+                .collect();
+            let entry = self.retained_inputs.remove(index);
+            let slot = at + moved.iter().map(|(_, n)| n).sum::<usize>();
+            self.insert_unbound(slot, &fresh);
+            let attempt = entry.input.attempt.clone();
+            for (offset, item) in fresh.iter().enumerate() {
+                let (index, identity) = (slot + offset, sources::identity(item));
+                let digest = self.queued_digest(index).expect("requeued item is queued");
+                let bind = self.admission_binds.iter_mut().find(|b| {
+                    matches!(&b.at, BindAt::Attempt { identity: i, attempt: a }
+                        if *i == identity && Some(a) == attempt.as_ref())
+                });
+                if let Some(bind) = bind {
+                    bind.at = BindAt::Queued {
+                        index,
+                        item: digest,
+                    };
+                }
+            }
+            (self.admission_binds).retain(|b| {
+                !matches!(&b.at, BindAt::Attempt { attempt: a, .. } if Some(a) == attempt.as_ref())
+            });
+            moved.push((entry, fresh.len()));
+        }
+        moved.into_iter().map(|(entry, _)| entry).collect()
+    }
+
+    /// Inserts `items` at `slot`, moving every later queued bind with them.
+    fn insert_unbound(&mut self, slot: usize, items: &[PendingQueueItem]) {
+        for bind in &mut self.admission_binds {
+            if let BindAt::Queued { index, .. } = &mut bind.at
+                && *index >= slot
+            {
+                *index += items.len();
+            }
+        }
+        for (offset, item) in items.iter().enumerate() {
+            self.items.insert(slot + offset, item.clone());
+        }
+    }
+}
+
+impl Owner {
+    /// Requeues every proven-unsent retained input in one commit and returns the entries it moved;
+    /// nothing moves when the commit fails.
+    pub(crate) fn requeue_known_not_sent(&mut self) -> Result<Vec<RetainedInput>, String> {
+        let mut next = self.snapshot.clone();
+        let moved = next.requeue_known_not_sent();
+        if moved.is_empty() {
+            return Ok(moved);
+        }
+        if next.head_injection.is_none() {
+            self.revoke_front();
+        }
+        self.commit(next)?;
+        self.project_slots();
+        Ok(moved)
     }
 }
 

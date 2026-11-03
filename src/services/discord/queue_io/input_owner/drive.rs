@@ -100,8 +100,8 @@ async fn run(lane: Arc<Lane>, drive: Arc<Drive>) {
         while let Some(front) = grant(&drive, stalled).await {
             let message = front.1.message_id;
             let result = (drive.handoff)(front).await;
-            // A front held on a screen where Enter may not submit waits for a real wake: a turn
-            // boundary, new input, or its pane's screen recovering. It is never re-handed by time.
+            // A front refused before any key for a reason a later look may clear waits for a real
+            // wake: a turn boundary, new input, or its pane's screen recovering. Never by time.
             if result
                 .as_ref()
                 .is_err_and(|error| super::effect::held(error))
