@@ -176,6 +176,9 @@ async fn catch_up_never_retakes_a_message_a_v2_queue_holds() {
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
+/// The owner's retention of a terminal identity, as `tick` drops it.
+const TERMINAL_RETENTION_MS: u64 = 86_400_000;
+
 #[test]
 fn existing_v2_boots_twice_and_commits_live_and_catch_up_inputs() {
     use sha2::{Digest, Sha256};
@@ -193,7 +196,8 @@ fn existing_v2_boots_twice_and_commits_live_and_catch_up_inputs() {
     std::fs::write(generation, "7").unwrap();
     let cases = ["empty", "queued", "retained", "unknown", "terminal"];
     let mut fixtures = Vec::new();
-    let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let clock = || chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let settled = clock();
     for (index, case) in cases.iter().enumerate() {
         let channel = ChannelId::new(7_676_510 + index as u64);
         let held = id(1, 700).get();
@@ -221,7 +225,7 @@ fn existing_v2_boots_twice_and_commits_live_and_catch_up_inputs() {
             }
             "terminal" => {
                 state["terminal_identities"] = serde_json::json!([{
-                "identity":identity,"settled_at_ms":now}])
+                "identity":identity,"settled_at_ms":settled}])
             }
             _ => {}
         }
@@ -247,6 +251,12 @@ fn existing_v2_boots_twice_and_commits_live_and_catch_up_inputs() {
     }
     let http = Arc::new(serenity::Http::new("Bot test-token"));
     for boot in 1..=2 {
+        // Past the retention the boot rightly drops the terminal identity: that is no restore.
+        let age = clock().saturating_sub(settled);
+        assert!(
+            age < TERMINAL_RETENTION_MS,
+            "terminal fixture expired: {age} ms old at boot {boot}, past the 24 h retention"
+        );
         runtime.block_on(async {
         let stale = crate::services::discord::runtime_bootstrap::restore_queued_and_inflight_for_tests(
             &http, &fx.shared, &fx.provider,
