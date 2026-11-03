@@ -44,6 +44,9 @@ pub struct CreateCampaign {
 #[derive(Deserialize)]
 pub struct ReplaceCampaign {
     pub expected_revision: i64,
+    /// Set on summary-view copies; saving one would clear the node fields it left out.
+    #[serde(default)]
+    pub nodes_partial: bool,
     #[serde(flatten)]
     pub campaign: CampaignInput,
 }
@@ -202,6 +205,11 @@ pub async fn replace(
     Path(id): Path<String>,
     Json(body): Json<ReplaceCampaign>,
 ) -> AppResult<Json<Value>> {
+    if body.nodes_partial {
+        return Err(AppError::bad_request(
+            "summary view documents cannot be saved; GET /api/campaigns/{id} first",
+        ));
+    }
     let pool = pool(&state)?;
     let campaign = campaigns::replace(pool, &id, body.expected_revision, body.campaign)
         .await
@@ -646,6 +654,16 @@ mod tests {
         }
         assert_eq!(node["summary"], "gist");
         assert_eq!(node["acceptance"], json!(["done"]));
+
+        let mut resave = listed.clone();
+        resave["expected_revision"] = listed["revision"].clone();
+        let (status, _) =
+            request(&app, Method::PUT, "/campaigns/summary", Some(resave), true).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a summary copy is not saved"
+        );
 
         let (_, full) = request(&app, Method::GET, "/campaigns", None, true).await;
         assert!(full["campaigns"][0].get("nodes_partial").is_none());

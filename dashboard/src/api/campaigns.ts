@@ -160,9 +160,17 @@ export async function getCampaignDetail(id: string): Promise<{ campaign: Campaig
   return { campaign: result.campaign, live: result.live, read };
 }
 
-/** True when the server answered with a refusal, so the save is known not to have happened. */
+/** A save that stopped before its PUT went out, so the server is unchanged. */
+export class CampaignSaveNotSentError extends Error {
+  constructor(cause: unknown) {
+    super(`Not saved: could not read the campaign first (${cause instanceof Error ? cause.message : String(cause)})`);
+    this.name = "CampaignSaveNotSentError";
+  }
+}
+
+/** True when the save is known not to have happened: the server refused it, or it was never sent. */
 export function isRejectedSave(error: unknown): boolean {
-  return error instanceof ApiRequestError && error.status < 500;
+  return error instanceof CampaignSaveNotSentError || (error instanceof ApiRequestError && error.status < 500);
 }
 
 // A save replaces every node, so fields a summary copy left out come back from a full read first.
@@ -178,7 +186,9 @@ async function withStoredNodeDetails(campaign: Campaign, nodes: CampaignNode[]):
 
 // Omitting auto_queue keeps the stored value, so node edits never switch it.
 async function saveCampaign(campaign: Campaign, patch: Partial<Pick<Campaign, "nodes" | "auto_queue">>, timeoutMs?: number) {
-  const nodes = await withStoredNodeDetails(campaign, patch.nodes ?? campaign.nodes);
+  const nodes = await withStoredNodeDetails(campaign, patch.nodes ?? campaign.nodes).catch((cause: unknown) => {
+    throw new CampaignSaveNotSentError(cause);
+  });
   return request(
     `/api/campaigns/${encodeURIComponent(campaign.id)}`,
     {

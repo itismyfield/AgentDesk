@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { readCachedGet } from "./httpClient";
-import { campaignNodeLiveSchema, campaignSchema, getCampaigns, setCampaignAutoQueue, updateCampaignNode } from "./campaigns";
+import { campaignNodeLiveSchema, campaignSchema, getCampaigns, isRejectedSave, setCampaignAutoQueue, updateCampaignNode } from "./campaigns";
 
 const timestamp = "2026-09-20T00:00:00Z";
 const campaignPayload = {
@@ -120,6 +120,15 @@ it("restores the fields a summary copy left out before any save, so the ledger k
   await setCampaignAutoQueue(summary, true);
   const autoBody = JSON.parse(fetchMock.mock.calls[1][1]?.body as string);
   expect(autoBody.nodes.map((node: { details: string }) => node.details)).toEqual(["review notes", "deploy notes"]);
+});
+
+it("reports a summary save whose pre-read failed as never sent", async () => {
+  const summary = campaignSchema.parse({ ...campaignPayload, nodes_partial: true });
+  fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
+  const failure = await setCampaignAutoQueue(summary, true).catch((error: unknown) => error);
+  expect(isRejectedSave(failure)).toBe(true);
+  expect((failure as Error).message).toContain("Failed to fetch");
+  expect(fetchMock.mock.calls.every(([, options]) => (options?.method ?? "GET") === "GET")).toBe(true);
 });
 
 it("saves against the edited revision while preserving sibling tasks and nullable evidence fields", async () => {
