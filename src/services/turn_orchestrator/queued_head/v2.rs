@@ -34,6 +34,9 @@ pub(crate) struct Owner {
     front_claim: Option<Front>,
     /// The current claim's process-unique number: another owner's or an earlier claim never reserves.
     claim_number: u64,
+    /// Diagnostic identity and successful commit count for this adoption; neither authorizes writes.
+    incarnation: uuid::Uuid,
+    last_success_sequence: u64,
 }
 
 /// The owner's unattempted front as the drive hands it on: its slot's ticket and the original.
@@ -74,6 +77,8 @@ impl Owner {
             front_grant: None,
             front_claim: None,
             claim_number: 0,
+            incarnation: uuid::Uuid::new_v4(),
+            last_success_sequence: 0,
         };
         // A restored bootstrap is possibly sent; missing deadline never proves NotSent.
         let mut restored = owner.snapshot.clone();
