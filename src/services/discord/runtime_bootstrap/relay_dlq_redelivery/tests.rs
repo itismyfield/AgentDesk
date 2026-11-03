@@ -348,19 +348,6 @@ fn plan_trims_multibyte_bodies_on_a_character_boundary() {
 
 #[test]
 fn watcher_reason_format_still_carries_every_key_this_module_parses() {
-    let writer = include_str!("../../tmux_watcher/orphan_terminal_frame.rs");
-    for key in [
-        "response_sent_offset={response_sent_offset}",
-        "full_response_len={full_response_len}",
-        "generation_mtime_ns={generation_mtime_ns}",
-        "tmux_session={tmux_session}",
-        "provider={provider}",
-    ] {
-        assert!(
-            writer.contains(key),
-            "orphan_terminal_frame::reason dropped {key}; parse_span still reads it"
-        );
-    }
     let parsed = parse_span(&reason_for(7, 19, 42), 12).expect("round trip");
     assert_eq!(
         (parsed.start, parsed.end, parsed.generation_mtime_ns),

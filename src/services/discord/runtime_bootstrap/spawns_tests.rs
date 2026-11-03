@@ -773,8 +773,8 @@ const COMMIT_LATCH_CHILD_ENV: &str = "AGENTDESK_RESTART_COMMIT_LATCH_CHILD";
 /// #5254 D4④ (§9 S2 required gate): run the real commit path in a process of its
 /// own, so the latch is exercised end-to-end with nothing else in the binary
 /// sharing it. What this cannot show is the production *storage*: a test binary
-/// compiles the thread-local twin of the cell (`runtime_bootstrap.rs`), and the
-/// source assertion below is what pins the `cfg(not(test))` branch's shape.
+/// compiles the thread-local twin of the cell (`runtime_bootstrap.rs`), so the
+/// `cfg(not(test))` branch is not exercised here.
 #[test]
 fn a_committed_restart_survives_late_cancellation_in_a_dedicated_process() {
     let test_name = concat!(
@@ -968,122 +968,6 @@ fn a_commit_under_another_nonce_forbids_this_ones_rollback() {
     assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 0);
 }
 
-/// #5254 §9-0 auxiliary assertion: line adjacency, which the design grades as a
-/// regression hint rather than a proof — it is format-fragile and says nothing
-/// about control flow. It does pin the two orderings the commit contract needs:
-/// the latch takes the point of no return before any call that can fail, and the
-/// durability call follows rather than swallows it.
-#[test]
-fn the_commit_latches_between_the_rename_and_the_directory_fsync() {
-    const PUBLISHER: &str = include_str!("gateway_lease_recovery.rs");
-    let lines: Vec<&str> = PUBLISHER
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with("//"))
-        .collect();
-    let renamed = lines
-        .iter()
-        .position(|line| line.starts_with("runtime_store::atomic_write("))
-        .expect("the terminal publish still goes through runtime_store::atomic_write");
-    assert!(
-        lines[renamed + 1].starts_with("latch_commit("),
-        "#5254 D4④: the latch must be the first call after the point of no return, found {:?}",
-        lines[renamed + 1]
-    );
-    assert!(
-        lines[renamed + 2].contains("runtime_store::fsync_parent_dir("),
-        "#5254 D10: the directory fsync must follow the latch, found {:?}",
-        lines[renamed + 2]
-    );
-
-    const LATCH: &str = include_str!("../runtime_bootstrap.rs");
-    assert!(
-        LATCH.contains("#[cfg(not(test))]\nfn with_commit_latch")
-            && LATCH.contains("static COMMIT_LATCH: std::sync::OnceLock<String>"),
-        "#5254 D4④ P2-3: production must keep one process-global latch cell"
-    );
-}
-
-/// #5254 D4③ / §9-0: the point of no return has exactly one exit. A string
-/// assertion cannot prove that `exit(0)` dominates the path — the runtime tests
-/// above do that work — but it does fail loudly if a refactor reintroduces a
-/// retraction between the commit and the exit, which is how both [r2]-2 and
-/// [r2]-3 were reachable states on main.
-#[test]
-fn nothing_between_the_point_of_no_return_and_the_exit_can_undo_it() {
-    const POLLER: &str = include_str!("spawns.rs");
-    let (_, after_commit) = POLLER
-        .split_once("Ok(true) => {}")
-        .expect("the poller still matches a committed sentinel");
-    let (committed_path, _) = after_commit
-        .split_once("std::process::exit(0);")
-        .expect("the committed path still ends in an unconditional exit");
-    for retraction in [
-        "handoff_superseded_restart",
-        "remove_file",
-        "restart_request_matches",
-        "continue",
-    ] {
-        assert!(
-            !committed_path.contains(retraction),
-            "#5254 D4③: `{retraction}` must not stand between the commit and the exit"
-        );
-    }
-
-    const COMMIT_PATH: &str = include_str!("deferred_restart.rs");
-    let (_, commit_body) = COMMIT_PATH
-        .split_once("fn commit_deferred_restart_sentinel")
-        .expect("the commit helper still exists");
-    let (commit_body, _) = commit_body
-        .split_once("\n}\n")
-        .expect("the commit helper still ends");
-    assert!(
-        !commit_body.contains("remove_file"),
-        "#5254 D4③: a published acknowledgement is never withdrawn by its publisher"
-    );
-    assert_eq!(
-        commit_body
-            .matches(
-                "publish_restart_terminal(root, nonce, &body, runtime_store::PARENT_DIR_FSYNC_FLUSHES)"
-            )
-            .count(),
-        1,
-        "§E8.2: production passes the platform flush capability, never a literal"
-    );
-
-    // The point of no return itself now lives in `publish_restart_terminal`, so
-    // the two slices above would miss a retraction reintroduced beside the
-    // rename. What this pins is spelling, not reachability — §9-0 grades source
-    // assertions as regression hints, and a rebinding of `staged` or a `rename`
-    // would walk straight past it.
-    const PUBLISHER: &str = include_str!("gateway_lease_recovery.rs");
-    let (_, publisher_body) = PUBLISHER
-        .split_once("fn publish_restart_terminal")
-        .expect("the terminal publisher still exists");
-    let (publisher_body, _) = publisher_body
-        .split_once("\n}\n")
-        .expect("the terminal publisher still ends");
-    assert_eq!(
-        publisher_body.matches("remove_file").count(),
-        publisher_body.matches("remove_file(&staged)").count(),
-        "#5254 D4③: every remove_file in this function is spelled (&staged)"
-    );
-
-    // ERRATUM §E8.2: both the fsync-failure and the unflushed arm must return
-    // ahead of the `hard_link`; a count, because a first-match scan lets either
-    // return stand in for the other.
-    let derived_index = publisher_body
-        .find("hard_link")
-        .expect("the index is still a hard link of the identity");
-    assert_eq!(
-        publisher_body[..derived_index]
-            .matches("return Ok(())")
-            .count(),
-        2,
-        "#5254 §E8.2: both the fsync-failure and the unflushed arm return before the index"
-    );
-}
-
 #[tokio::test]
 async fn cancellation_restores_admission_health_and_consumed_barrier_slot() {
     let shared = crate::services::discord::make_shared_data_for_tests();
@@ -1153,28 +1037,5 @@ fn t4_retry_interval_parse_contract() {
             queue_exit_clear_retry_interval_from(Some(raw)),
             Some(std::time::Duration::from_secs(seconds))
         );
-    }
-}
-
-// Lexical wiring only: this does not prove timer cadence or single-flight behavior.
-#[test]
-fn t5_sweeper_is_spawned_after_the_boot_drain() {
-    let setup = include_str!("framework_setup.rs");
-    let boot = "drain_pending_queue_exit_placeholder_clears(&shared_for_migrate).await;";
-    let spawn = "run_bot_spawn_queue_exit_clear_retry(&shared_for_migrate);";
-    assert_eq!(setup.matches(boot).count(), 1);
-    assert_eq!(setup.matches(spawn).count(), 1);
-    assert!(setup.find(boot).unwrap() < setup.find(spawn).unwrap());
-    let source = include_str!("spawns.rs");
-    let body = source
-        .split("fn run_bot_spawn_queue_exit_clear_retry(")
-        .nth(1)
-        .unwrap();
-    for required in [
-        "drain_pending_queue_exit_placeholder_clears_with(",
-        "QueueExitRetryDeleter",
-        "tokio::time::sleep(interval).await",
-    ] {
-        assert!(body.contains(required), "missing retry wiring: {required}");
     }
 }

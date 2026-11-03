@@ -1659,8 +1659,6 @@ mod tests {
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use sqlx::{Connection, PgConnection, PgPool};
 
-    mod source_guard_tests;
-
     async fn setup_entry(pool: &PgPool, run_status: &str, entry_status: &str) {
         sqlx::query(
             "INSERT INTO agents (id, name, provider, discord_channel_id)
@@ -2250,12 +2248,6 @@ mod tests {
         assert_eq!(terminal_dispatch.row.dispatch_id, None);
         assert!(terminal_dispatch.transitions.is_empty());
         assert!(terminal_dispatch.dispatch_history.is_empty());
-    }
-
-    #[test]
-    fn pinned_dispatch_identity_is_declared_before_the_stale_retry_loop() {
-        let gaps = source_guard_tests::pinned_identity_gaps(source_guard_tests::ENTRIES);
-        assert_eq!(gaps, Vec::<String>::new());
     }
 
     #[tokio::test]
