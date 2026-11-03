@@ -157,6 +157,25 @@ pub(super) fn prepare_with_sync(
     if doctor.is_none() {
         invalidate(state, "DOCTOR_BOOT_ID_UNAVAILABLE");
     }
+    let own_start = json!({"boot_id":boot.id,"started_at_ms":boot.started_at_ms});
+    let coverage_start = match previous.as_ref() {
+        Some(parent)
+            if parent["coverage_start"]
+                .as_object()
+                .is_some_and(|value| value.len() == 2)
+                && parent["coverage_start"]["boot_id"]
+                    .as_str()
+                    .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+                && parent["coverage_start"]["started_at_ms"].as_i64().is_some() =>
+        {
+            parent["coverage_start"].clone()
+        }
+        Some(parent) => {
+            inherited(state, parent["boot_id"].as_str(), "HISTORY_EPOCH_UNKNOWN");
+            own_start
+        }
+        None => own_start,
+    };
     let probes = super::manifest::snapshot();
     let status = state
         .lock()
@@ -166,7 +185,7 @@ pub(super) fn prepare_with_sync(
         "process_role":"server", "host":host, "boot_id":boot.id,
         "doctor_boot_id":doctor, "predecessor_boot_id":predecessor,
         "root_reason":if host.is_null() { json!("HOST_IDENTITY_UNKNOWN") } else if predecessor.is_none() { json!("PREDECESSOR_UNKNOWN") } else { Value::Null },
-        "coverage_start":previous.as_ref().map(|header| &header["coverage_start"]),
+        "coverage_start":coverage_start,
         "started_at_ms":boot.started_at_ms,
         "build_sha":crate::services::release_source::health_json(false)["deployed_repo_head"],
         "census_hash":probes["census_hash"], "probe_coverage":probes["coverage"],

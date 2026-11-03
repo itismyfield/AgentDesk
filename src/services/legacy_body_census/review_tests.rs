@@ -181,7 +181,10 @@ async fn a_missing_or_damaged_head_never_creates_a_normal_root() {
                 .contains(&json!("PREDECESSOR_UNKNOWN"))
         );
         assert_eq!(written["root_reason"], "PREDECESSOR_UNKNOWN");
-        assert!(written["coverage_start"].is_null());
+        assert_eq!(
+            written["coverage_start"],
+            json!({"boot_id":id.id,"started_at_ms":id.started_at_ms})
+        );
         assert!(written["predecessor_boot_id"].is_null());
     }
 }
@@ -420,7 +423,10 @@ async fn head_digest_mismatch_does_not_reset_coverage_to_a_fresh_root() {
         header(root.path(), &b)["root_reason"],
         "PREDECESSOR_UNKNOWN"
     );
-    assert!(header(root.path(), &b)["coverage_start"].is_null());
+    assert_eq!(
+        header(root.path(), &b)["coverage_start"],
+        json!({"boot_id":b.id,"started_at_ms":b.started_at_ms})
+    );
 }
 
 #[tokio::test]

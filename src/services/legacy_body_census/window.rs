@@ -65,3 +65,87 @@ impl Window {
             "status":self.verdict(live_boot,"COMPLETE")})
     }
 }
+
+// Structural evidence only; the collector must also reconcile independent boot inventory.
+#[cfg(test)]
+pub(super) fn valid_chain(
+    headers: &std::collections::BTreeMap<String, Value>,
+    anchor: &Value,
+    end_ms: i64,
+    boundary: Option<&Value>,
+    visits: &mut usize,
+) -> bool {
+    use std::collections::BTreeSet;
+    let Some(epoch) = anchor["boot_id"]
+        .as_str()
+        .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+    else {
+        return false;
+    };
+    let Some(start_ms) = anchor["started_at_ms"].as_i64() else {
+        return false;
+    };
+    if end_ms < start_ms
+        || headers
+            .get(epoch)
+            .is_none_or(|header| header["started_at_ms"].as_i64() != Some(start_ms))
+    {
+        return false;
+    }
+    let mut complete = BTreeSet::new();
+    for start in headers.keys() {
+        let mut path = BTreeSet::new();
+        let mut cursor = Some(start.as_str());
+        while let Some(id) = cursor {
+            *visits += 1;
+            if complete.contains(id) {
+                break;
+            }
+            if !path.insert(id) {
+                return false;
+            }
+            let Some(header) = headers.get(id) else {
+                return false;
+            };
+            let Some(at) = header["started_at_ms"].as_i64() else {
+                return false;
+            };
+            if header["boot_id"] != id
+                || uuid::Uuid::parse_str(id).is_err()
+                || header["coverage_start"] != *anchor
+                || at < start_ms
+                || at > end_ms
+            {
+                return false;
+            }
+            cursor = match header.get("predecessor_boot_id") {
+                Some(Value::Null) if id == epoch => None,
+                Some(Value::String(parent)) if uuid::Uuid::parse_str(parent).is_ok() => {
+                    if let Some(previous) = headers.get(parent) {
+                        if previous["started_at_ms"]
+                            .as_i64()
+                            .is_none_or(|prior| prior > at)
+                        {
+                            return false;
+                        }
+                        Some(parent)
+                    } else if id == epoch
+                        && boundary.is_some_and(|previous| {
+                            previous["boot_id"] == *parent
+                                && previous["started_at_ms"]
+                                    .as_i64()
+                                    .is_some_and(|prior| prior < start_ms)
+                        })
+                    {
+                        None
+                    } else {
+                        return false;
+                    }
+                }
+                _ => return false,
+            };
+        }
+        complete.extend(path);
+    }
+    true
+}

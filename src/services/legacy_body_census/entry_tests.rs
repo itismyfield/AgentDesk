@@ -73,6 +73,9 @@ async fn predecessor_links_a_boot_that_had_no_samples_or_end() {
         header(root.path(), &second)["predecessor_boot_id"],
         first.id
     );
+    let epoch = json!({"boot_id":first.id,"started_at_ms":first.started_at_ms});
+    assert_eq!(header(root.path(), &first)["coverage_start"], epoch);
+    assert_eq!(header(root.path(), &second)["coverage_start"], epoch);
     assert_eq!(new.snapshot()["journal_ready"], true);
     assert!(
         !new.snapshot()["reasons"]
@@ -404,19 +407,87 @@ fn two_processes_keep_unsampled_crash_boots_and_their_incarnations() {
 
 #[test]
 fn dangling_or_cyclic_predecessors_are_inconclusive() {
-    assert!(!window::valid_chain(
-        &std::collections::BTreeMap::new(),
-        &mut 0
-    ));
-    for cyclic in [false, true] {
-        let id = uuid::Uuid::new_v4().to_string();
-        let parent = if cyclic {
-            id.clone()
-        } else {
-            uuid::Uuid::new_v4().to_string()
-        };
-        let headers =
-            std::collections::BTreeMap::from([(id, json!({"predecessor_boot_id":parent}))]);
-        assert!(!window::valid_chain(&headers, &mut 0));
+    use std::collections::BTreeMap;
+    let ids: Vec<_> = (0..4).map(|_| uuid::Uuid::new_v4().to_string()).collect();
+    let anchor = json!({"boot_id":ids[0],"started_at_ms":1000});
+    let original: BTreeMap<_, _> = (0..3)
+        .map(|i| {
+            (
+                ids[i].clone(),
+                json!({
+                    "boot_id":ids[i],"started_at_ms":1000+i as i64,"coverage_start":anchor,
+                    "predecessor_boot_id":i.checked_sub(1).map(|n| &ids[n]),
+                }),
+            )
+        })
+        .collect();
+    for (case, expected) in [
+        ("valid", true),
+        ("same_time", true),
+        ("outside_boundary", true),
+        ("empty", false),
+        ("middle_missing", false),
+        ("cycle", false),
+        ("before_start", false),
+        ("after_end", false),
+        ("reversed_end", false),
+        ("wall_reversed", false),
+        ("anchor_missing", false),
+        ("anchor_reset", false),
+        ("boundary_missing", false),
+        ("boundary_equal_start", false),
+        ("boundary_wrong_id", false),
+        ("identity_alias", false),
+    ] {
+        let mut headers = original.clone();
+        let mut end = 1002;
+        let mut boundary = None;
+        match case {
+            "empty" => headers.clear(),
+            "middle_missing" => {
+                headers.remove(&ids[1]);
+            }
+            "cycle" => {
+                for row in headers.values_mut() {
+                    row["started_at_ms"] = json!(1000);
+                }
+                headers.get_mut(&ids[0]).unwrap()["predecessor_boot_id"] = json!(ids[2]);
+            }
+            "same_time" => {
+                for row in headers.values_mut() {
+                    row["started_at_ms"] = json!(1000);
+                }
+                end = 1000;
+            }
+            "before_start" => headers.get_mut(&ids[1]).unwrap()["started_at_ms"] = json!(999),
+            "after_end" => headers.get_mut(&ids[2]).unwrap()["started_at_ms"] = json!(1003),
+            "reversed_end" => end = 999,
+            "wall_reversed" => headers.get_mut(&ids[2]).unwrap()["started_at_ms"] = json!(1000),
+            "anchor_missing" => {
+                headers.remove(&ids[0]);
+            }
+            "anchor_reset" => {
+                headers.get_mut(&ids[2]).unwrap()["coverage_start"] =
+                    json!({"boot_id":ids[2],"started_at_ms":1002})
+            }
+            "outside_boundary"
+            | "boundary_missing"
+            | "boundary_equal_start"
+            | "boundary_wrong_id" => {
+                headers.get_mut(&ids[0]).unwrap()["predecessor_boot_id"] = json!(ids[3]);
+                if case != "boundary_missing" {
+                    boundary = Some(
+                        json!({"boot_id":if case == "boundary_wrong_id" { &ids[2] } else { &ids[3] },"started_at_ms":if case == "boundary_equal_start" {1000} else {999}}),
+                    );
+                }
+            }
+            "identity_alias" => headers.get_mut(&ids[2]).unwrap()["boot_id"] = json!(ids[1]),
+            _ => {}
+        }
+        assert_eq!(
+            window::valid_chain(&headers, &anchor, end, boundary.as_ref(), &mut 0),
+            expected,
+            "{case}"
+        );
     }
 }
