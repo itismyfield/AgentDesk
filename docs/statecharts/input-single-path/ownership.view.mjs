@@ -42,6 +42,8 @@ const labels = {
   TimerFires: "the drive's fixed recheck fires [main, a2d1]",
   WatchSees: "the held pane's watch reads a screen that would submit [a2d3]",
   WatchEnds: null,
+  WatchMisreads: "one read of the held pane or the queue fails [ends the watch in a2d3]",
+  StaleWatchEnds: "an earlier front's watch ends [drops this hold's watch in a2d3]",
   DeclarationAges: "more than 10 s pass before the relay reads the row",
   RowOpensTurn: "a user row opens a new turn",
   RowEnqueued: "Claude writes an enqueue row",
