@@ -9,6 +9,7 @@ Code versions modelled:
 | `a2d2` | its repair `e6d97a192f` | `InputOwnershipA2d2.cfg` |
 | `a2d3` | the second repair `4def1c6289` | `InputOwnershipA2d3.cfg` |
 | `a2d4` | the third repair | `InputOwnership.cfg` |
+| `c` | slice C | `InputOwnershipC.cfg` |
 
 What the model covers:
 
@@ -28,7 +29,7 @@ Run it like this (exit 1 means a rule breaks):
 
 ```sh
 export TLA2TOOLS=~/.local/share/tla2tools/tla2tools-1.7.4.jar JAVA=/opt/homebrew/opt/openjdk/bin/java
-for c in Main A2d1 A2d2 A2d3 ""; do
+for c in Main A2d1 A2d2 A2d3 "" C; do
   ~/.claude/skills/statechart/scripts/statechart InputOwnership.tla --config InputOwnership$c.cfg \
     --view ownership.view.mjs --out /tmp/sc-own-${c:-A2d4}
 done
@@ -47,10 +48,13 @@ done
 | DraftToldOnce | An owned paste beside a draft C-s could not park tells its original once. | breaks (1) | breaks (1) | holds | holds | holds |
 | HeldResumes | An input held by its screen is not left waiting once that screen would submit. | holds (timer) | holds (timer) | breaks (4) | breaks (5) | holds |
 | NoSilentLoss | Once nothing else happens, the input was answered. | breaks (3) | breaks (3) | breaks (3) | breaks (3) | breaks (3, same path) |
+| NoSilentLossObserved | With an idle observer the channel can build, once all is quiet the input was answered. | breaks | holds (timer) | breaks | breaks | breaks (3) |
+
+Slice C (`c`) keeps every a2d4 result. NoSilentLossObserved holds in `c`. NoSilentLoss still breaks there (3 steps): with no idle observer, the idle submit holds the front (`idle_unobserved`), which slice A owns.
 
 Each break shows the step count of its shortest path.
 
-States reached: main 30,272; a2d1 39,328; a2d2 22,832; a2d3 65,280; a2d4 63,744. `ownership.chart.mmd` is the main chart, drawing the bug paths only.
+States reached: main 30,272; a2d1 39,328; a2d2 22,832; a2d3 65,280; a2d4 63,744; c 63,488. `ownership.chart.mmd` is the main chart, drawing the bug paths only.
 
 ## Counterexamples, replayed against the code
 
@@ -90,9 +94,21 @@ States reached: main 30,272; a2d1 39,328; a2d2 22,832; a2d3 65,280; a2d4 63,744.
      - A read is Ready, Blocked, Gone or Unknown. Only tmux reporting the pane dead or its session missing is Gone.
      - A failed pane or queue read keeps the probe for the next look.
      - Each hold the drive names gets a generation, and a watch ends only its own.
-10. **NoSilentLoss breaks in every version.**
+10. **NoSilentLossObserved breaks on a2d4.**
+   - Path: a person's turn holds the front, then ends, and nothing wakes the drive.
+   - In `c`, a turn AgentDesk did not start wakes a waiting front when it ends: the presence supervisor's idle kickoff reaches `owner_wake`.
+   - Mutant `noBoundaryWake` breaks it again.
+11. **NoSilentLoss breaks in every version.**
    - Path: an idle pane whose observer cannot be built holds the front, and a native turn AgentDesk did not start may end without waking the drive.
    - This is the remaining event-wake gap of the A1 review (P2-1), owned by slice C.
+
+## Mutants of the c model
+
+| Mutant | Breaks besides NoSilentLoss |
+|---|---|
+| noBoundaryWake | NoSilentLossObserved |
+| timer | NoTimedRetry |
+| unknownEnds, noGeneration, noWatch | none: in `c` a turn's end wakes the front, and the model's idle submit does not read the screen, so these show only in a2d4 |
 
 ## Mutants of the a2d4 model
 

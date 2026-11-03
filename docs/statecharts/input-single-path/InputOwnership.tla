@@ -4,13 +4,13 @@
    pane, and who answers it is decided afterwards from the transcript row it produced.
    Code: a1c 0b0fbcbfbe (Fix = "main"), the first A2+D change 524adb6190 (Fix = "a2d1"), its
    repair e6d97a192f (Fix = "a2d2"), the second repair 4def1c6289 (Fix = "a2d3") and the third
-   (Fix = "a2d4"). The channel is turn
+   (Fix = "a2d4"), then slice C (Fix = "c"). The channel is turn
    mode (the O writer answers every native turn) or legacy (the live relay, or a reader the
    input's own turn set up, answers).                                                        *)
 EXTENDS Naturals
 
 CONSTANTS
-    Fix,   \* "main": a1c; "a2d1": first A2+D; "a2d2", "a2d3", "a2d4": its repairs
+    Fix,   \* "main": a1c; "a2d1": first A2+D; "a2d2", "a2d3", "a2d4": its repairs; "c": slice C
     Mut    \* one guard removed in the a2d4 model, "none" as written
 
 VARIABLES
@@ -68,13 +68,16 @@ Init ==
     /\ screen \in {"ok", "held"} /\ draft \in {"none", "unproven"} /\ notices = 0
     /\ wake = TRUE /\ timer = FALSE /\ byTimer = FALSE /\ timed = FALSE /\ envLeft = 1
     /\ heldBy = "none" /\ watch = FALSE /\ aged = FALSE /\ twinPend \in BOOLEAN
-    /\ stale \in IF Fix \in {"a2d3", "a2d4"} THEN BOOLEAN ELSE {FALSE}
+    /\ stale \in IF Fix \in {"a2d3", "a2d4", "c"} THEN BOOLEAN ELSE {FALSE}
 
-A2D == Fix \in {"a2d1", "a2d2", "a2d3", "a2d4"}
-R2 == Fix \in {"a2d2", "a2d3", "a2d4"}
-R3 == Fix \in {"a2d3", "a2d4"}
+A2D == Fix \in {"a2d1", "a2d2", "a2d3", "a2d4", "c"}
+R2 == Fix \in {"a2d2", "a2d3", "a2d4", "c"}
+R3 == Fix \in {"a2d3", "a2d4", "c"}
 \* a2d4 keeps the watch through a failed read and ends a watch without touching a newer hold.
-R4 == Fix = "a2d4"
+R4 == Fix \in {"a2d4", "c"}
+\* Slice C: a turn AgentDesk did not start wakes a waiting front when it ends (the presence
+\* supervisor's idle kickoff reaches the owner drive).
+RC == Fix = "c" /\ Mut # "noBoundaryWake"
 Waiting == inp \in {"queued", "held"}
 
 Paste(r, pl, pd) ==
@@ -261,7 +264,8 @@ TurnEnds ==
             /\ UNCHANGED <<userRow, rcv>>
        ELSE /\ nat' = "idle" /\ natOwner' = "none" /\ UNCHANGED <<inp, userRow, rcv, lp, op>>
     /\ mbx' = "idle"
-    /\ \E w \in (IF natOwner \in {"ad", "adNoObs"} \/ mbx = "active" THEN {TRUE} ELSE BOOLEAN) :
+    /\ \E w \in (IF natOwner \in {"ad", "adNoObs"} \/ mbx = "active" \/ (RC /\ Waiting)
+                 THEN {TRUE} ELSE BOOLEAN) :
          wake' = (wake \/ w)
     /\ UNCHANGED <<mode, pend, obsOk, route, plain, sentInto, win, claim, pastes, envLeft, stale>>
     /\ UNCHANGED drv
@@ -392,4 +396,7 @@ DraftToldOnce ==
 \* 9. An input held by its screen is not left waiting once that screen would submit: something
 \*    still pending (a wake or the pane's watch) hands it again.
 HeldResumes == ~(Quiet /\ inp = "held" /\ heldBy = "screen" /\ screen = "ok" /\ ~watch)
+\* 10. With an idle observer the channel can build, nothing is left waiting once all is quiet: a
+\*     turn AgentDesk did not start ends with a wake of the waiting front.
+NoSilentLossObserved == (Quiet /\ obsOk) => inp = "answered"
 =============================================================================
