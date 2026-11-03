@@ -120,10 +120,10 @@ async fn owner_host_resident_refresh_recovers_after_real_lock_timeout_pg() {
 }
 
 #[tokio::test]
-async fn owner_refresh_readmits_live_input_after_owner_change_on_gateway_host_pg() {
+async fn owner_refresh_readmits_live_input_after_one_transient_pg_failure_pg() {
     if !cutover::test_override::isolated_binding_case(concat!(
         module_path!(),
-        "::owner_refresh_readmits_live_input_after_owner_change_on_gateway_host_pg"
+        "::owner_refresh_readmits_live_input_after_one_transient_pg_failure_pg"
     )) {
         return;
     }
@@ -172,31 +172,40 @@ async fn owner_refresh_readmits_live_input_after_owner_change_on_gateway_host_pg
     })
     .await
     .unwrap();
-    // A routed input makes the channel managed; the 2s loop then installs this node's permit.
-    execution::tests::admission(&pool, "claude", channel, "mac-a").await;
     let refresh =
         || super::super::super::owner_execution::refresh(&ProviderKind::Claude, Some(&pool));
     refresh().await;
-    assert!(snapshot.execution(channel).unwrap().permit.is_ok());
+    assert!(
+        snapshot.execution(channel).is_none(),
+        "an unmanaged channel has no execution view"
+    );
     assert_eq!(
         for_input_placement("claude", channel).await,
         crate::services::tui_o::cutover::intake_route::IntakeRoute::Gateway
     );
-    // The owner moves to a new generation that is still this node, as a fallback switch-back does.
-    let mut tx = pool.begin().await.unwrap();
-    sqlx::query("UPDATE intake_session_owners SET status='superseded' WHERE provider='claude' AND raw_channel_id=$1 AND status='active'").bind(channel.to_string()).execute(&mut *tx).await.unwrap();
-    sqlx::query("INSERT INTO intake_session_owners(provider,raw_channel_id,owner_instance_id,generation,status) VALUES('claude',$1,'mac-a',1,'active')").bind(channel.to_string()).execute(&mut *tx).await.unwrap();
-    tx.commit().await.unwrap();
+    // One read fails transiently: a competing custody holder outlasts the 2s lock timeout.
+    use crate::services::cluster::intake_router_hook::owner_record::{OwnerIdentity, custody};
+    let mut competing = pool.begin().await.unwrap();
+    custody::lock(
+        &mut competing,
+        &OwnerIdentity::new("claude", &channel.to_string()),
+    )
+    .await
+    .unwrap();
+    refresh().await;
+    let paused = snapshot.execution(channel).map(|view| view.permit.err());
+    assert!(
+        matches!(&paused, Some(Some(reason)) if reason.contains("lock timeout")),
+        "the failed read pauses admission: {paused:?}"
+    );
+    competing.rollback().await.unwrap();
     for _ in 0..4 {
         refresh().await;
     }
-    let held = snapshot.execution(channel).unwrap().permit.err();
     assert_eq!(
-        held,
-        None,
-        "a valid local owner in PG must restore execution authority within a few refresh ticks; \
-         admission now answers {:?}",
-        for_input_placement("claude", channel).await
+        for_input_placement("claude", channel).await,
+        crate::services::tui_o::cutover::intake_route::IntakeRoute::Gateway,
+        "PG answering again must readmit live input within a few refresh ticks"
     );
     pool.close().await;
 }
