@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::services::discord::gateway::{DiscordGateway, TurnGateway};
 use crate::services::discord::tui_prompt_relay::bridge_gateway::terminal_notice_test_gateway;
-use crate::services::discord::turn_end_summary::tests::{Isolation, row};
+use crate::services::discord::turn_end_summary::tests::row;
 use crate::services::discord::turn_end_summary::{LiveSummary, post_live};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_summary_line::Outcome;
@@ -120,59 +120,6 @@ impl Drop for Recorder {
     }
 }
 
-/// The proxy every environment variable names while the test runs: a request that leaves the
-/// loopback recorder is caught here and closed instead of reaching the network.
-struct EgressTrap {
-    seen: Arc<Mutex<Vec<String>>>,
-    server: tokio::task::AbortHandle,
-    _env: Vec<crate::config::TestEnvVarGuard>,
-}
-
-impl EgressTrap {
-    /// The caller holds the shared environment lock.
-    async fn start() -> Self {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let seen = Arc::<Mutex<Vec<String>>>::default();
-        let recorded = seen.clone();
-        let server = tokio::spawn(async move {
-            while let Ok((mut stream, _)) = listener.accept().await {
-                let mut head = [0u8; 512];
-                let read = tokio::io::AsyncReadExt::read(&mut stream, &mut head).await;
-                let line = String::from_utf8_lossy(&head[..read.unwrap_or(0)]);
-                recorded
-                    .lock()
-                    .unwrap()
-                    .push(line.lines().next().unwrap_or_default().to_string());
-            }
-        });
-        let set = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock;
-        let proxies = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"];
-        let mut env: Vec<_> = (proxies.into_iter())
-            .chain(["ALL_PROXY", "all_proxy"])
-            .map(|key| set(key, url.as_ref()))
-            .collect();
-        for key in ["NO_PROXY", "no_proxy"] {
-            env.push(set(key, "127.0.0.1,localhost,::1".as_ref()));
-        }
-        Self {
-            seen,
-            server: server.abort_handle(),
-            _env: env,
-        }
-    }
-
-    fn take(&self) -> Vec<String> {
-        std::mem::take(&mut *self.seen.lock().unwrap())
-    }
-}
-
-impl Drop for EgressTrap {
-    fn drop(&mut self) {
-        self.server.abort();
-    }
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn turn_end_summary_spends_one_physical_post_and_consumes_every_response() {
     let _isolation = Isolation::new();
@@ -271,5 +218,88 @@ async fn turn_end_summary_spends_one_physical_post_and_consumes_every_response()
             Vec::<String>::new(),
             "no request may leave the loopback recorder for {reply:?} direct={direct}"
         );
+    }
+}
+
+/// `turn_end_summary::tests::Isolation`, taken here so this file owns the environment lock
+/// that its egress trap writes the proxy variables under.
+struct Isolation {
+    _guards: [crate::config::TestEnvVarGuard; 2],
+    _live: crate::config_live_reload::TestLiveGuard,
+    _root: tempfile::TempDir,
+}
+
+impl Isolation {
+    fn new() -> Self {
+        let live = crate::config_live_reload::test_live_guard(
+            crate::config::test_env_lock::acquire_shared_test_env_lock(),
+        );
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config.yaml");
+        std::fs::write(&config, "server: {}\n").unwrap();
+        let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
+        let guards = [
+            set("AGENTDESK_ROOT_DIR", root.path()),
+            set("AGENTDESK_CONFIG", &config),
+        ];
+        crate::config_live_reload::install(crate::config::Config::default());
+        Self {
+            _guards: guards,
+            _live: live,
+            _root: root,
+        }
+    }
+}
+
+/// The proxy every environment variable names while the test runs: a request that leaves the
+/// loopback recorder is caught here and closed instead of reaching the network.
+struct EgressTrap {
+    seen: Arc<Mutex<Vec<String>>>,
+    server: tokio::task::AbortHandle,
+    _env: Vec<crate::config::TestEnvVarGuard>,
+}
+
+impl EgressTrap {
+    /// The caller holds the shared environment lock.
+    async fn start() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::<Mutex<Vec<String>>>::default();
+        let recorded = seen.clone();
+        let server = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut head = [0u8; 512];
+                let read = tokio::io::AsyncReadExt::read(&mut stream, &mut head).await;
+                let line = String::from_utf8_lossy(&head[..read.unwrap_or(0)]);
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(line.lines().next().unwrap_or_default().to_string());
+            }
+        });
+        let set = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock;
+        let proxies = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"];
+        let mut env: Vec<_> = (proxies.into_iter())
+            .chain(["ALL_PROXY", "all_proxy"])
+            .map(|key| set(key, url.as_ref()))
+            .collect();
+        for key in ["NO_PROXY", "no_proxy"] {
+            env.push(set(key, "127.0.0.1,localhost,::1".as_ref()));
+        }
+        Self {
+            seen,
+            server: server.abort_handle(),
+            _env: env,
+        }
+    }
+
+    fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.seen.lock().unwrap())
+    }
+}
+
+impl Drop for EgressTrap {
+    fn drop(&mut self) {
+        self.server.abort();
     }
 }
