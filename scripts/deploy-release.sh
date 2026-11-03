@@ -2786,8 +2786,9 @@ if _dashboard_build_commit keep "$REPO" "$ADK_REL/dashboard/dist"; then
     STAGING_PHASE_STARTED="$SECONDS"
 else
     echo "▸ Building dashboard..."
+    DASHBOARD_BUILD_COMMIT="$(_dashboard_build_commit capture "$REPO")" || DASHBOARD_BUILD_COMMIT=""
     (cd "$REPO/dashboard" && npm run build --silent)
-    _dashboard_build_commit write "$REPO" "$REPO/dashboard/dist"
+    _dashboard_build_commit write "$DASHBOARD_BUILD_COMMIT" "$REPO/dashboard/dist" 2>/dev/null || echo "⚠ dashboard build commit not recorded"
     echo "▸ [timing] phase=dashboard-build seconds=$((SECONDS - DASHBOARD_PHASE_STARTED))"
     STAGING_PHASE_STARTED="$SECONDS"
 

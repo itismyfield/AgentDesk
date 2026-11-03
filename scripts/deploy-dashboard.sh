@@ -11,8 +11,9 @@ DASHBOARD_SRC="$REPO/dashboard"
 # Build
 echo "▸ Building dashboard..."
 cd "$DASHBOARD_SRC"
+DASHBOARD_BUILD_COMMIT="$(_dashboard_build_commit capture "$REPO")" || DASHBOARD_BUILD_COMMIT=""
 npm run build --silent
-_dashboard_build_commit write "$REPO" "$DASHBOARD_SRC/dist"
+_dashboard_build_commit write "$DASHBOARD_BUILD_COMMIT" "$DASHBOARD_SRC/dist" 2>/dev/null || echo "⚠ dashboard build commit not recorded"
 echo "  ✓ Built → $DASHBOARD_SRC/dist/"
 
 ADK_REL="${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"

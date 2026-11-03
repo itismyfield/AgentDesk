@@ -27,6 +27,7 @@ git -C "$REPO" config user.name fixture
 git -C "$REPO" config user.email fixture@example.invalid
 printf 'dashboard/dist/\n' >"$REPO/.gitignore"
 printf 'old\n' >"$REPO/dashboard/source"
+printf '{}\n' >"$REPO/defaults.json"
 git -C "$REPO" add .
 git -C "$REPO" commit -qm old
 OLD=$(git -C "$REPO" rev-parse HEAD)
@@ -40,7 +41,11 @@ git -C "$REPO" checkout -q "$TARGET"
 
 npm() {
     echo build >>"$TRACE"
+    case "${scenario:-}" in
+        head-moved|standalone-head-moved) git -C "$REPO" checkout -q "$NEW" ;;
+    esac
     mkdir -p "$REPO/dashboard/dist"
+    rm -f "$REPO/dashboard/dist/.build-commit"
     printf 'rebuilt\n' >"$REPO/dashboard/dist/index.html"
 }
 _resolve_dashboard_source() { printf '%s\n' "$REPO/dashboard/dist"; }
@@ -63,6 +68,20 @@ run_case() (
         missing) recorded="" ;;
         dirty) recorded="$NEW+dirty" ;;
         unknown) recorded=0000000000000000000000000000000000000000 ;;
+        target-dirty)
+            recorded="$NEW"
+            printf 'modified\n' >>"$REPO/dashboard/source"
+            ;;
+        missing-index)
+            recorded="$NEW"
+            rm "$ADK_REL/dashboard/dist/index.html"
+            ;;
+        head-moved) recorded="" ;;
+        non-git)
+            recorded=""
+            REPO="$WORK/non-git"
+            mkdir -p "$REPO/dashboard"
+            ;;
         *) fail "unknown scenario $scenario" ;;
     esac
     if [ -n "$recorded" ]; then printf '%s\n' "$recorded" >"$ADK_REL/dashboard/dist/.build-commit"; fi
@@ -83,35 +102,71 @@ run_case() (
     else
         [ "$(cat "$TRACE")" = build ] || fail "$scenario did not build exactly once"
         [ "$(cat "$ADK_REL/dashboard/dist/index.html")" = rebuilt ] || fail "$scenario did not replace dist"
-        [ "$(cat "$ADK_REL/dashboard/dist/.build-commit")" = "$TARGET" ] || fail "$scenario did not record target"
+        expected="$TARGET"
+        [ "$scenario" != target-dirty ] || expected="$TARGET+dirty"
+        if [ "$scenario" = non-git ]; then
+            [ ! -e "$ADK_REL/dashboard/dist/.build-commit" ] || fail 'non-git recorded an unproven commit'
+            [ "$(grep -Fxc '⚠ dashboard build commit not recorded' "$ADK_REL/build.log")" = 1 ] || fail 'non-git warning missing or repeated'
+        else
+            [ "$(cat "$ADK_REL/dashboard/dist/.build-commit")" = "$expected" ] || fail "$scenario did not record build-start commit"
+        fi
     fi
+    git -C "$WORK/repo" checkout -q "$TARGET"
+    git -C "$WORK/repo" checkout -q -- dashboard/source defaults.json
     echo "PASS release-$scenario"
 )
 
-if [ "$#" -gt 0 ]; then run_case "$1"; exit 0; fi
-for scenario in newer same older missing dirty unknown; do run_case "$scenario"; done
-
 # shellcheck disable=SC1090
 . "$BUILD_LIB"
-# shellcheck disable=SC2034 # Consumed by the extracted standalone block.
-DASHBOARD_SRC="$REPO/dashboard"
-export AGENTDESK_ROOT_DIR="$WORK/standalone-root"
-TRACE="$WORK/standalone-trace"
-(
+run_standalone() (
+    scenario="$1"
+    if [ "$scenario" = standalone-non-git ]; then
+        REPO="$WORK/standalone-non-git-repo"
+        mkdir -p "$REPO/dashboard"
+    fi
+    # shellcheck disable=SC2034 # Consumed by the extracted standalone block.
+    DASHBOARD_SRC="$REPO/dashboard"
+    export AGENTDESK_ROOT_DIR="$WORK/$scenario-root"
+    TRACE="$WORK/$scenario-trace"
     # shellcheck disable=SC1091
-    . "$WORK/standalone" >"$WORK/standalone.log"
+    . "$WORK/standalone" >"$WORK/$scenario.log"
+    [ "$(cat "$TRACE")" = build ] || fail "$scenario did not build exactly once"
+    [ "$(cat "$AGENTDESK_ROOT_DIR/dashboard/dist/index.html")" = rebuilt ] || fail "$scenario did not deploy dist"
+    if [ "$scenario" = standalone-non-git ]; then
+        [ ! -e "$AGENTDESK_ROOT_DIR/dashboard/dist/.build-commit" ] || fail 'standalone non-git recorded an unproven commit'
+        [ "$(grep -Fxc '⚠ dashboard build commit not recorded' "$WORK/$scenario.log")" = 1 ] || fail 'standalone non-git warning missing or repeated'
+    else
+        [ "$(cat "$AGENTDESK_ROOT_DIR/dashboard/dist/.build-commit")" = "$TARGET" ] || fail "$scenario did not record build-start commit"
+    fi
+    git -C "$WORK/repo" checkout -q "$TARGET"
+    echo "PASS $scenario"
 )
-[ "$(cat "$WORK/standalone-root/dashboard/dist/.build-commit")" = "$TARGET" ] || fail 'standalone staging lost build record'
-echo 'PASS standalone-record-staging'
-printf 'modified\n' >>"$REPO/dashboard/source"
-_dashboard_build_commit write "$REPO" "$REPO/dashboard/dist"
-[ "$(cat "$REPO/dashboard/dist/.build-commit")" = "$TARGET+dirty" ] || fail 'tracked dashboard change was not dirty'
-git -C "$REPO" checkout -q -- dashboard/source
-printf 'untracked\n' >"$REPO/dashboard/untracked"
-_dashboard_build_commit write "$REPO" "$REPO/dashboard/dist"
-[ "$(cat "$REPO/dashboard/dist/.build-commit")" = "$TARGET+dirty" ] || fail 'untracked dashboard change was not dirty'
-mv "$REPO/dashboard/untracked" "$REPO/outside-dashboard"
-_dashboard_build_commit write "$REPO" "$REPO/dashboard/dist"
-[ "$(cat "$REPO/dashboard/dist/.build-commit")" = "$TARGET" ] || fail 'outside change marked dashboard dirty'
-echo 'PASS dashboard-dirty-scope'
-echo 'dashboard build commit: 8 passed, 0 failed, 0 skipped'
+run_dirty_scope() (
+    mkdir -p "$REPO/dashboard/dist"
+    printf 'modified\n' >>"$REPO/dashboard/source"
+    _dashboard_build_commit write "$(_dashboard_build_commit capture "$REPO")" "$REPO/dashboard/dist"
+    [ "$(cat "$REPO/dashboard/dist/.build-commit")" = "$TARGET+dirty" ] || fail 'tracked dashboard change was not dirty'
+    git -C "$REPO" checkout -q -- dashboard/source
+    printf 'untracked\n' >"$REPO/dashboard/untracked"
+    _dashboard_build_commit write "$(_dashboard_build_commit capture "$REPO")" "$REPO/dashboard/dist"
+    [ "$(cat "$REPO/dashboard/dist/.build-commit")" = "$TARGET+dirty" ] || fail 'untracked dashboard change was not dirty'
+    mv "$REPO/dashboard/untracked" "$REPO/outside-dashboard"
+    _dashboard_build_commit write "$(_dashboard_build_commit capture "$REPO")" "$REPO/dashboard/dist"
+    [ "$(cat "$REPO/dashboard/dist/.build-commit")" = "$TARGET" ] || fail 'outside change marked dashboard dirty'
+    printf 'modified\n' >>"$REPO/defaults.json"
+    _dashboard_build_commit write "$(_dashboard_build_commit capture "$REPO")" "$REPO/dashboard/dist"
+    [ "$(cat "$REPO/dashboard/dist/.build-commit")" = "$TARGET+dirty" ] || fail 'defaults.json change was not dirty'
+    echo 'PASS dashboard-dirty-scope'
+)
+if [ "$#" -gt 0 ]; then
+    case "$1" in
+        standalone-*) run_standalone "$1" ;;
+        dirty-scope) run_dirty_scope ;;
+        *) run_case "$1" ;;
+    esac
+    exit 0
+fi
+for scenario in newer same older missing dirty unknown target-dirty head-moved missing-index non-git; do run_case "$scenario"; done
+for scenario in standalone-record-staging standalone-head-moved standalone-non-git; do run_standalone "$scenario"; done
+run_dirty_scope
+echo 'dashboard build commit: 14 passed, 0 failed, 0 skipped'
