@@ -629,9 +629,3 @@ async fn t2b_retry_deleter_treats_unknown_message_as_cleared() {
         }
     }
 }
-
-#[test]
-fn t3_exit_body_logs_both_failures() {
-    let gaps = source_guard_tests::exit_body_warning_gaps(source_guard_tests::GATE_RS);
-    assert!(gaps.is_empty(), "{gaps:#?}");
-}

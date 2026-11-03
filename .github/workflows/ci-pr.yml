@@ -21,6 +21,7 @@ env:
   RUSTC_WRAPPER: sccache
   SCCACHE_CACHE_SIZE: 10G
   SCCACHE_GHA_ENABLED: "true"
+  SCCACHE_IDLE_TIMEOUT: "0"
   # Pull requests may restore default-branch sccache entries but never write
   # branch-local shards into the repository-wide 10GB cache budget.
   SCCACHE_GHA_RW_MODE: ${{ github.event_name == 'pull_request' && 'READ_ONLY' || 'READ_WRITE' }}
@@ -927,7 +928,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py e053f5c127c059178cc8a47aa573b9c18997641d545a0d5718e47e2415468d70
-          pin scripts/check-ci-runner-hardening.sh 3bf89b89c982a35aacc5325fb154677c6dedae332e0e492cfbfd31b9d7ea0330
+          pin scripts/check-ci-runner-hardening.sh 50fc968a5b672de38bb7c32903e1eb4bf2b6be60d6cf4b9aefa8bfb207ca304b
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks

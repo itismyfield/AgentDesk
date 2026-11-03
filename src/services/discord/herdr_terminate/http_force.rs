@@ -27,7 +27,7 @@ pub(crate) struct Expected {
 
 /// Runs the scoped terminate bound to `expected`, on a retire `postlude` under the held exclusion
 /// and then its released step before the result is logged.
-pub(crate) async fn terminate_for_http<T, P>(
+pub(in crate::services) async fn terminate_for_http<T, P>(
     registry: &HealthRegistry,
     pool: PgPool,
     (request, expected): (OperatorTerminate, Expected),

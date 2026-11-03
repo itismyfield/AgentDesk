@@ -328,9 +328,7 @@ pub(super) async fn run_bridge_stream_tick(
     let _ = authorize_visible_mutation!("turn_bridge::stream_tick::authority_preflight");
 
     let status_panel_generation_before_fence = status_panel_generation;
-    if shared_owned.ui.status_panel_v2_enabled
-        && last_session_panel_lifecycle_refresh.elapsed() >= status_interval
-    {
+    if last_session_panel_lifecycle_refresh.elapsed() >= status_interval {
         last_session_panel_lifecycle_refresh = tokio::time::Instant::now();
         status_panel_dirty |= refresh_session_panel_line_from_lifecycle(
             shared_owned.as_ref(),
@@ -353,17 +351,15 @@ pub(super) async fn run_bridge_stream_tick(
         !response_portion_after_offset(&full_response, response_sent_offset).is_empty(),
     );
 
-    if shared_owned.ui.status_panel_v2_enabled
-        && (bridge_status_panel_dirty_should_edit_separate_panel(
-            status_panel_dirty,
-            single_message_panel_footer_mode,
-        ) || status_panel_msg_id.is_some_and(|status_msg_id| {
-            shared_owned
-                .ui
-                .placeholder_live_events
-                .panel_cache_invalidation_pending(channel_id, status_msg_id.get())
-        }))
-        && !defer_status_panel_for_first_answer
+    if (bridge_status_panel_dirty_should_edit_separate_panel(
+        status_panel_dirty,
+        single_message_panel_footer_mode,
+    ) || status_panel_msg_id.is_some_and(|status_msg_id| {
+        shared_owned
+            .ui
+            .placeholder_live_events
+            .panel_cache_invalidation_pending(channel_id, status_msg_id.get())
+    })) && !defer_status_panel_for_first_answer
         && last_status_panel_edit.elapsed() >= status_interval
         && let Some(status_msg_id) = status_panel_msg_id
         && authorize_visible_mutation!("turn_bridge::stream_tick::status_panel_edit")
@@ -503,8 +499,7 @@ pub(super) async fn run_bridge_stream_tick(
         }
     }
 
-    if shared_owned.ui.placeholder_live_events_enabled
-        && watcher_owns_assistant_relay
+    if watcher_owns_assistant_relay
         && authorize_visible_mutation!("turn_bridge::stream_tick::watcher_placeholder_edit")
         && let Some((key, input, _, _)) = long_running_placeholder_active.as_ref()
         && let Some(block) = shared_owned

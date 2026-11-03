@@ -103,6 +103,7 @@ not the caller, resolves the inflight path.  Its limits:
   that the earlier pattern let grow without limit.
 
 ``host_terminate`` counts spellings of the Herdr close RPCs (``pane.close``,
+``workspace.close``, ``tab.close``, ``group.close``, ``worktree_group.close``,
 ``server.stop``) across all of ``src/**`` including tests: each string or char
 literal after escape decoding, and ``stringify!`` tokens; pieces joined only by a
 real concatenation (``concat!`` arguments, ``+`` chains, ``[..].concat()`` or
@@ -163,8 +164,9 @@ REGISTRY_REMOVE_COMMENT = (
     "is classified as direct channel remove, not remove_tmux_session_locked."
 )
 HOST_TERMINATE_COMMENT = (
-    "Herdr close RPC spellings (pane.close, server.stop, their method names and "
-    "aliases). Only src/services/termination_audit/host_terminate.rs uses this "
+    "Herdr close RPC spellings (pane.close, server.stop, workspace.close, tab.close, "
+    "group.close, worktree_group.close, their method names and aliases). Only "
+    "src/services/termination_audit/host_terminate.rs uses this "
     "baseline map; its growth needs a reviewed diff here. Fixed declaration "
     "sites use checker constants, and every other site fails regardless of this map."
 )
@@ -229,19 +231,22 @@ HOST_TERMINATE_OWNER = "src/services/termination_audit/host_terminate.rs"
 # any additional spelling still exceeds a measured per-file ceiling.
 HOST_TERMINATE_DECLARED_SITES = {
     "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_e2e_tests.rs": 1,
-    "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs": 1,
+    "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs": 2,
     "src/services/session_host/herdr/model.rs": 2,
     "src/services/session_host/herdr_gate.rs": 3,
     "src/services/session_host/herdr_gate_tests.rs": 5,
+    "src/services/session_host/herdr_terminate_real_tests.rs": 1,
 }
 HOST_TERMINATE_LITERAL_PATTERN = re.compile(
-    r"(?i)\bpane\s*\.\s*close\b|\bserver\s*\.\s*stop\b"
+    r"(?i)\b(?:pane|workspace|tab|group|worktree_group)\s*\.\s*close\b"
+    r"|\bserver\s*\.\s*stop\b"
 )
 # Word parts in any case style, so prefixes and suffixes (`herdr_pane_close`,
 # `RPCPaneClose`) still count while `pane_closed` and `PANE_CLOSED` do not.
 HOST_TERMINATE_IDENT_PATTERN = re.compile(
     r"(?:(?<![A-Za-z0-9])|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z]))"
-    r"(?i:pane_?close|server_?stop|close_?pane|stop_?server)"
+    r"(?i:(?:pane|workspace|tab|group|worktree_?group)_?close|server_?stop|"
+    r"close_?(?:pane|workspace|tab|group|worktree_?group)|stop_?server)"
     r"(?:(?<=[a-z])(?![a-z])|(?<=[A-Z])(?![A-Za-z]))"
 )
 _ESCAPE = re.compile(

@@ -60,12 +60,7 @@ pub(in crate::services::discord::tmux::tmux_watcher) fn build_watcher_streaming_
             response_sent_offset == 0,
             raw_current_portion.to_string(),
         );
-    build_watcher_streaming_edit_text(
-        shared.ui.status_panel_v2_enabled,
-        &rendered,
-        status_block,
-        provider,
-    )
+    build_watcher_streaming_edit_text(&rendered, status_block, provider)
 }
 
 pub(in crate::services::discord::tmux::tmux_watcher) fn prefix_watcher_terminal_session_banner(
@@ -99,11 +94,7 @@ mod tests {
 
     #[test]
     fn watcher_rollover_advances_only_raw_response_bytes() {
-        let mut shared = crate::services::discord::make_shared_data_for_tests();
-        std::sync::Arc::get_mut(&mut shared)
-            .expect("fresh test shared data is uniquely owned")
-            .ui
-            .status_panel_v2_enabled = true;
+        let shared = crate::services::discord::make_shared_data_for_tests();
         let channel_id = ChannelId::new(4153);
         assert!(
             shared
@@ -145,11 +136,7 @@ mod tests {
 
     #[test]
     fn terminal_uses_pinned_fallback_identity_after_inflight_cleanup() {
-        let mut shared = crate::services::discord::make_shared_data_for_tests();
-        std::sync::Arc::get_mut(&mut shared)
-            .expect("fresh test shared data is uniquely owned")
-            .ui
-            .status_panel_v2_enabled = true;
+        let shared = crate::services::discord::make_shared_data_for_tests();
         let channel_id = ChannelId::new(4155);
         assert!(
             shared

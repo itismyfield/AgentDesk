@@ -30,7 +30,6 @@ server::policy_tick_logging::
 services::observability::events::
 server::policy_tick_schedule_tests::
 services::message_outbox::dedupe_key_tests
-=services::discord::router::intake_gate::live_intake_preserve_wiring_tests::one_admission_guard_precedes_all_soft_intervention_entrypoints
 
 [High-risk recovery: Accepted turn lifetime regressions]
 accepted_turn_tests

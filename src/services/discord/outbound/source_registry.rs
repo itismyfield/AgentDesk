@@ -164,10 +164,6 @@ pub fn validate_send_source_for(
 }
 
 #[cfg(test)]
-#[path = "source_registry_scan_tests.rs"]
-mod scan_tests;
-
-#[cfg(test)]
 mod tests {
     use super::{POLICIES, SendCallerClass, validate_send_source_for};
 

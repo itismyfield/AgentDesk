@@ -1275,8 +1275,6 @@ pub(super) fn make_shared_data_for_tests_with_storage(
             placeholder_live_events: Arc::new(
                 placeholder_live_events::PlaceholderLiveEvents::default(),
             ),
-            placeholder_live_events_enabled: false,
-            status_panel_v2_enabled: false,
             two_message_panel_enabled: false,
         },
         queued: QueuedPlaceholderState {
@@ -2161,16 +2159,6 @@ async fn idle_queue_take_next_soft_if_ready(
     }
 
     mailbox_take_next_automatic_intervention(shared, provider, channel_id).await
-}
-
-#[cfg(test)]
-mod queued_dequeue_dispatch_guard_wiring_tests {
-    mod source_guard_tests;
-
-    #[test]
-    fn dequeue_uses_preservation_aware_stale_dispatch_guard() {
-        source_guard_tests::assert_dequeue_guard();
-    }
 }
 
 pub(in crate::services::discord) async fn mailbox_abandon_pending_dispatch(

@@ -13,7 +13,7 @@ fn bridge_body_footer_preserves_class_rollover_for_ascii_and_korean() {
     for provider in [ProviderKind::Claude, ProviderKind::Codex] {
         let block = |shared: &SharedData, body: &str| {
             build_bridge_single_message_panel_status_block(
-                shared, channel, &provider, START, "⠋", None, None, body,
+                shared, channel, &provider, START, "⠋", body,
             )
         };
         for unit in ["x", "한"] {

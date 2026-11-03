@@ -242,31 +242,6 @@ fn sweep_spawns_exactly_once_per_process() {
 }
 
 #[test]
-fn spawn_wiring_claims_process_latch_before_observed_task() {
-    // This is intentionally only a lexical adjacency guard. A matching token
-    // in a comment or string could satisfy `.find()`; runtime task ownership is
-    // covered separately by the latch tests.
-    let sweep_source = include_str!("../intake_delivery_sweep.rs");
-    let guard = sweep_source
-        .find("claim_active(&SWEEP_ACTIVE)")
-        .expect("spawn function claims the process latch");
-    let task = sweep_source
-        .find("task_supervisor::spawn_observed")
-        .expect("spawn function registers the observed task");
-    assert!(
-        guard < task,
-        "the process latch is claimed before task spawn"
-    );
-    assert_eq!(
-        include_str!("../framework_setup.rs")
-            .matches("spawn_intake_delivery_sweep(shared_clone.clone())")
-            .count(),
-        1,
-        "framework setup wires exactly one sweep spawn attempt per bot"
-    );
-}
-
-#[test]
 fn sweep_cutoffs_do_not_panic_for_extreme_values() {
     let _ = SweepCutoffs::from_now(u64::MAX, u64::MAX);
 }

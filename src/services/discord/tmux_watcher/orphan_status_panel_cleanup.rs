@@ -37,10 +37,6 @@ pub(super) async fn cleanup_orphan_external_input_status_panel(
     tmux_session_name: &str,
     turn_is_external_input: bool,
 ) -> bool {
-    if !watcher_separate_status_panel_enabled(shared.ui.status_panel_v2_enabled) {
-        *status_panel_msg_id = None;
-        return true;
-    }
     if !turn_is_external_input {
         return true;
     }
@@ -140,9 +136,6 @@ pub(super) async fn complete_watcher_status_panel_v2(
     // for the turn the watcher actually finished. Recovery-driven
     // TurnCompleted still emits the guarded signal (see recovery_engine.rs)
     // because its state snapshot is pinned at recovery entry.
-    if !watcher_should_complete_separate_status_panel(shared.ui.status_panel_v2_enabled) {
-        return true;
-    }
     crate::services::discord::turn_bridge::complete_status_panel_v2_with_http(
         shared,
         http,
@@ -183,9 +176,6 @@ pub(super) async fn refresh_watcher_session_panel_from_lifecycle(
     user_msg_id: u64,
     tmux_session_name: &str,
 ) {
-    if !shared.ui.status_panel_v2_enabled {
-        return;
-    }
     let Some(pg_pool) = shared.pg_pool.as_ref() else {
         return;
     };

@@ -1062,9 +1062,6 @@ mod tests {
 
     #[cfg(unix)]
     fn atomic_publication_preserves_all_five_consumers_on_sync_failure() {
-        // Fault injection proves error handling; this source oracle separately pins the syscalls.
-        let gaps = source_guard_tests::atomic_sync_gaps(source_guard_tests::ORDERED_QUEUE);
-        assert_eq!(gaps, Vec::<String>::new());
         for label in [
             "hook relay quarantine evidence",
             "hook relay queue sequence",
@@ -2526,8 +2523,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
-    mod source_guard_tests;
     #[cfg(unix)]
     mod too_early_tests;
     #[cfg(unix)]

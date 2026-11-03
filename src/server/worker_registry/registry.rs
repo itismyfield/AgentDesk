@@ -382,10 +382,6 @@ impl SupervisedWorkerRegistry {
 
                 #[cfg(unix)]
                 {
-                    if !self.config.cluster.session_bound_relay_enabled {
-                        self.log_skip(spec, "cluster.session_bound_relay_enabled=false");
-                        return Ok(None);
-                    }
                     let shutdown = self.shutdown.clone();
                     // Worker-local: tmux is host-scoped, so every node supervises
                     // its own relays. No leader gating — peer hosts can't observe

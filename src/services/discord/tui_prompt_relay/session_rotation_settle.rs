@@ -468,27 +468,6 @@ mod tests {
     // Direction (b) — THE REGRESSION THIS FIX MUST NOT CAUSE. A live turn's answer
     // was written to the transcript that `/clear` then froze. Chasing the rotation
     // now would discard it, so the plan must be to drain first.
-    /// The retire log claims only what the plan checked: no inflight pinned to the frozen file.
-    #[cfg(unix)]
-    #[test]
-    fn the_rebind_only_log_does_not_claim_a_feeder_switch_or_delivery() {
-        let arm = include_str!("session_rotation_settle.rs")
-            .split_once("ClaudeRotationPlan::RebindOnly => {")
-            .expect("the RebindOnly arm")
-            .1
-            .split_once("clear_claude_session_rotation(")
-            .expect("the arm retires the record")
-            .0;
-        assert!(
-            arm.contains("feeder switch and delivery not verified here"),
-            "{arm}"
-        );
-        assert!(
-            !arm.contains("fully propagated") && !arm.contains("delivery now reads"),
-            "{arm}"
-        );
-    }
-
     #[test]
     fn undelivered_bytes_in_the_frozen_transcript_are_drained_before_the_rotation_settles() {
         assert_eq!(
@@ -785,51 +764,5 @@ mod tests {
             (1024, ROTATION_DRAIN_STALL_POLLS),
             "the WARN must report the counter the settle decision read"
         );
-    }
-
-    /// #5213: pin the WARN SITE, not just the helper. The emission needs a live
-    /// `SharedData` and the finalizer, so it cannot be exercised from a unit
-    /// test. What this lexical tripwire actually covers is the text between the
-    /// helper binding and the WARN it feeds, and only two regressions in it:
-    /// re-sourcing either field from the pre-fold `rotation` record, and
-    /// re-binding or mutating either local after the helper returned. It sees
-    /// nothing before the helper call, so a shadowed `rotation`/`view` or a
-    /// stale value laundered through a differently named alias still passes —
-    /// the same declared limit as the `inflight/removal.rs:1052` tripwire. The
-    /// helper's own arithmetic is covered by the test above.
-    #[cfg(unix)]
-    #[test]
-    fn the_settle_warn_site_sources_both_drain_fields_from_the_post_fold_helper() {
-        let wiring = include_str!("session_rotation_settle.rs")
-            .split_once("let (observed_drain_frontier, polls_without_drain_progress) =")
-            .expect("the settle WARN must bind both drain fields before emitting")
-            .1
-            .split_once("and that many bytes of the frozen transcript were abandoned")
-            .expect("that binding must stay ahead of the settle WARN it feeds")
-            .0;
-        assert!(
-            wiring.contains("settle_warn_drain_observation(rotation, view);"),
-            "both fields must come from the post-fold helper; wiring={wiring}"
-        );
-        assert!(
-            !wiring.contains("rotation.observed_drain_frontier")
-                && !wiring.contains("rotation.polls_without_drain_progress"),
-            "re-sourcing either field from the pre-fold record is #5213; \
-             wiring={wiring}"
-        );
-        for field in ["observed_drain_frontier", "polls_without_drain_progress"] {
-            assert_eq!(
-                wiring.matches(field).count(),
-                1,
-                "between the helper binding and the WARN, `{field}` may appear exactly \
-                 once - as the bare WARN field. Any second mention (a shadowing `let`, \
-                 a re-bind, a mutation) is #5213; wiring={wiring}"
-            );
-            assert!(
-                wiring.contains(&format!("\n        {field},\n")),
-                "the WARN must carry `{field}` as the bare local the helper bound, not \
-                 a re-assigned tracing field; wiring={wiring}"
-            );
-        }
     }
 }

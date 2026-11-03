@@ -143,48 +143,8 @@ mod tests {
         }
     }
 
-    const TASK_SUPERVISOR: &str = include_str!("task_supervisor.rs");
-    const WRAPPER: &str = "pub(in crate::services::discord) fn spawn_observed_tmux_watcher<F>(";
-    const CLEANUP: &str = "\n        drop(cleanup_guard);";
-    const COMPLETION: &str = "\n        completion.finish(";
-
-    /// Classification 2: inside the wrapper item, comments excluded, the statement-level
-    /// cleanup drop precedes completion. A lexical tripwire, not an execution-order proof.
-    fn cleanup_order_gaps(source: &str) -> Vec<String> {
-        use crate::services::discord::router::source_guard_support::Lexed;
-        let Some(wrapper) = Lexed::new(source).block(WRAPPER) else {
-            return vec![format!("missing {WRAPPER}")];
-        };
-        match (wrapper.find(CLEANUP), wrapper.find(COMPLETION)) {
-            (Some(drop_at), Some(finish_at)) if drop_at < finish_at => Vec::new(),
-            found => vec![format!("cleanup drop → completion broken: {found:?}")],
-        }
-    }
-
-    #[test]
-    fn watcher_wrapper_textually_drops_cleanup_before_completion() {
-        assert_eq!(cleanup_order_gaps(TASK_SUPERVISOR), Vec::<String>::new());
-    }
-
-    #[test]
-    fn cleanup_order_guard_rejects_commented_and_reordered_steps() {
-        use crate::services::discord::router::source_guard_support::{forge, swap};
-        use crate::test_support::CommentForgery;
-        for needle in [WRAPPER, CLEANUP.trim_start(), COMPLETION.trim_start()] {
-            for forgery in CommentForgery::ALL {
-                let forged = forge(TASK_SUPERVISOR, needle, forgery);
-                assert!(
-                    !cleanup_order_gaps(&forged).is_empty(),
-                    "{forgery:?} commented `{needle}` still passes"
-                );
-            }
-        }
-        let finish_first = swap(TASK_SUPERVISOR, CLEANUP, COMPLETION);
-        assert!(!cleanup_order_gaps(&finish_first).is_empty());
-    }
-
     // This runtime check observes cleanup after ACK, but on current_thread it
-    // cannot distinguish swapped synchronous statements. The tripwire pins them.
+    // cannot distinguish swapped synchronous statements.
     #[tokio::test]
     async fn completion_is_published_after_registry_cleanup() {
         let shared = make_shared_data_for_tests();

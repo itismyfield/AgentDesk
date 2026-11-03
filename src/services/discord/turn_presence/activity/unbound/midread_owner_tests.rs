@@ -299,135 +299,6 @@ struct DrainCase {
     periodic_only: bool,
 }
 
-fn wake_mutant(name: &str) -> bool {
-    crate::services::claude_tui::source_verify::n2b_mutant(name)
-}
-
-fn classify_enabled() -> bool {
-    std::env::var_os("ADK_A2_CLASSIFY").is_some()
-}
-
-fn classify_row(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel: ChannelId,
-) -> serde_json::Value {
-    let row = match inflight::load_inflight_state_read_only_result(provider, channel.get()) {
-        Ok(None) => serde_json::json!({"state": "absent"}),
-        Err(_) => serde_json::json!({"state": "unreadable"}),
-        Ok(Some(row)) => serde_json::json!({
-            "state": "present", "user": row.user_msg_id, "nonce": row.turn_nonce,
-            "born_generation": row.born_generation, "save_generation": row.save_generation, "restart_generation": row.restart_generation,
-            "tmux": row.tmux_session_name,
-            "panel_generation": row.status_panel_generation, "started_at": row.started_at,
-            "turn_start_offset": row.turn_start_offset, "runtime_kind": row.runtime_kind,
-            "restart_mode": row.restart_mode.is_some(), "rebind_origin": row.rebind_origin,
-            "terminal_committed": row.terminal_delivery_committed,
-            "response_sent_offset": row.response_sent_offset, "response_bytes": row.full_response.len(),
-        }),
-    };
-    serde_json::json!({"row": row, "process_generation": shared.restart.current_generation,
-        "provider_probe_armed": INPUT_EFFECT_PROBE.lock().unwrap().is_some()})
-}
-
-struct PhaseDiagnostic {
-    task: tokio::task::JoinHandle<()>,
-    shared: Arc<SharedData>,
-    provider: ProviderKind,
-    channel: ChannelId,
-    phase: &'static str,
-    logs: LogSink,
-}
-
-impl PhaseDiagnostic {
-    fn install(fixture: &Fixture, periodic_only: bool, logs: &LogSink) -> Option<Self> {
-        if !classify_enabled() {
-            return None;
-        }
-        let shared = fixture.rig.shared.clone();
-        let provider = fixture.provider.clone();
-        let channel = fixture.rig.channel;
-        let phase = if periodic_only { "periodic" } else { "race" };
-        let (observed, kind) = (shared.clone(), provider.clone());
-        let task = tokio::spawn(async move {
-            let mut previous = serde_json::Value::Null;
-            loop {
-                let mailbox = observed.mailbox(channel).snapshot().await;
-                let sample = serde_json::json!({
-                    "durable": classify_row(&observed, &kind, channel),
-                    "active_user": mailbox.active_user_message_id.map(|id| id.get()),
-                    "pending_user": mailbox.pending_user_dispatch.map(|id| id.get()),
-                    "cancel_token": mailbox.cancel_token.is_some(),
-                    "queue": mailbox.intervention_queue.iter().map(|item| item.message_id.get()).collect::<Vec<_>>(),
-                });
-                if sample != previous {
-                    eprintln!("A2_R6_ROW phase={phase} sample={sample}");
-                    previous = sample;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        });
-        Some(Self {
-            task,
-            shared,
-            provider,
-            channel,
-            phase,
-            logs: logs.clone(),
-        })
-    }
-}
-
-impl Drop for PhaseDiagnostic {
-    fn drop(&mut self) {
-        self.task.abort();
-        eprintln!(
-            "A2_R6_FINAL phase={} sample={}",
-            self.phase,
-            classify_row(&self.shared, &self.provider, self.channel)
-        );
-        for event in crate::services::observability::events::recent(10_000) {
-            if event.channel_id != Some(self.channel.get())
-                || !matches!(
-                    event.event_type.as_str(),
-                    "inflight_lifecycle" | "turn_started" | "turn_finished" | "agent_quality_event"
-                )
-            {
-                continue;
-            }
-            let p = &event.payload;
-            let inner = &p["payload"]["details"];
-            let safe = serde_json::json!({"type": event.event_type, "timestamp_ms": event.timestamp_ms,
-                "turn_id": p["turn_id"].as_str().or(p["payload"]["turn_id"].as_str()), "kind": p["kind"], "status": p["status"],
-                "quality_type": p["quality_event_type"],
-                "extra": {"user": p["extra"]["user_msg_id"], "outcome": p["extra"]["guarded_save_outcome"],
-                    "retry": p["extra"]["preserve_inflight_for_cleanup_retry"]},
-                "quality": {"outcome": inner["outcome"], "committed": inner["terminal_delivery_committed"],
-                    "retry": inner["preserved_for_retry"], "cancelled": inner["cancelled"],
-                    "watcher": inner["watcher_relay"], "standby": inner["standby_relay"]}});
-            eprintln!("A2_R6_EVENT phase={} event={safe}", self.phase);
-        }
-        let bytes = self
-            .logs
-            .0
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let markers = [
-            "Processing next queued command",
-            "preserving inflight row in channel",
-            "turn bridge epilogue inflight guarded-clear hit IoError",
-            "QUEUE-GUARD:",
-            "[turn_presence] unbound hold leaf",
-            "queue-eligible completion event received; kicking idle queue channel",
-        ];
-        for line in String::from_utf8_lossy(&bytes).lines() {
-            if let Some(at) = markers.iter().find_map(|m| line.rfind(m)) {
-                eprintln!("A2_R6_TRACE phase={} {}", self.phase, &line[at..]);
-            }
-        }
-    }
-}
-
 struct WakeObservations {
     completion_release: tokio::sync::watch::Sender<bool>,
     completion_blocked: Arc<AtomicUsize>,
@@ -444,7 +315,7 @@ impl WakeObservations {
         let blocked = completion_blocked.clone();
         let observed = requests.clone();
         let hook = crate::services::discord::queue_io::set_idle_queue_kick_hook_for_tests(
-            Arc::new(move |runtime, provider, candidate, reason| {
+            Arc::new(move |_, _, candidate, reason| {
                 let release = release.clone();
                 let blocked = blocked.clone();
                 let observed = observed.clone();
@@ -457,12 +328,6 @@ impl WakeObservations {
                         let mut released = release.subscribe();
                         if !*released.borrow_and_update() {
                             blocked.fetch_add(1, Ordering::SeqCst);
-                            if classify_enabled() {
-                                eprintln!(
-                                    "A2_R6_BARRIER reason={reason} stage=blocked sample={}",
-                                    classify_row(&runtime, &provider, channel)
-                                );
-                            }
                         }
                         loop {
                             let open = *released.borrow_and_update();
@@ -548,13 +413,7 @@ impl PeriodicCompletionFence {
         );
     }
 
-    async fn release_after_a(
-        &mut self,
-        fixture: &Fixture,
-        logs: &LogSink,
-        b: u64,
-        keep_transition: bool,
-    ) {
+    async fn release_after_a(&mut self, fixture: &Fixture, logs: &LogSink, b: u64) {
         let Some(finished) = self.finished.take() else {
             return;
         };
@@ -586,12 +445,9 @@ impl PeriodicCompletionFence {
             ),
             "the actual finalizer must preserve the FIFO head behind the fixture barrier"
         );
-        if !keep_transition {
-            drop(self.transition.take());
-        }
+        drop(self.transition.take());
         eprintln!(
-            "A2_R6_PERIODIC_FENCE a_bridge_exit=1 natural_row_none=1 b_unstarted=1 direct_preserved=1 released={}",
-            usize::from(!keep_transition),
+            "A2_R6_PERIODIC_FENCE a_bridge_exit=1 natural_row_none=1 b_unstarted=1 direct_preserved=1 released=1"
         );
     }
 }
@@ -611,23 +467,12 @@ impl Drop for PeriodicCompletionFence {
     }
 }
 
-type LateRecoveryFence = Arc<
-    std::sync::Mutex<
-        Option<(
-            tokio::time::Instant,
-            usize,
-            tokio::sync::OwnedMutexGuard<()>,
-        )>,
-    >,
->;
-
 struct RecoveryDriver {
     task: Option<tokio::task::JoinHandle<()>>,
     ticks: Arc<AtomicUsize>,
     wakes: Arc<std::sync::Mutex<Vec<tokio::time::Instant>>>,
     changed: Arc<tokio::sync::Notify>,
     last_woken_head: Arc<std::sync::Mutex<Option<u64>>>,
-    late_release: LateRecoveryFence,
 }
 
 impl RecoveryDriver {
@@ -642,8 +487,6 @@ impl RecoveryDriver {
         let published = changed.clone();
         let last_woken_head = Arc::new(std::sync::Mutex::new(None));
         let woken = last_woken_head.clone();
-        let late_release: LateRecoveryFence = Arc::new(std::sync::Mutex::new(None));
-        let delayed = late_release.clone();
         let task = tokio::spawn(async move {
             let mut previous = first_wake;
             let period = LiveSupervisor::SUPERVISOR_TICK;
@@ -653,22 +496,11 @@ impl RecoveryDriver {
             loop {
                 interval.tick().await;
                 let tick = counted.fetch_add(1, Ordering::SeqCst) + 1;
-                if !wake_mutant("a2-periodic-wake-removed") {
-                    supervisor.tick().await;
-                }
+                supervisor.tick().await;
                 if let Some(at) = supervisor.last_kick_at().filter(|at| *at != previous) {
                     previous = at;
                     *woken.lock().unwrap() = supervisor.woken_head();
-                    let mut seen = observed.lock().unwrap();
-                    seen.push(at);
-                    let mut release = delayed.lock().unwrap();
-                    if release.as_ref().is_some_and(|(anchor, count, _)| {
-                        seen.iter().filter(|wake| **wake >= *anchor).count() >= *count
-                    }) {
-                        let count = release.as_ref().unwrap().1;
-                        drop(release.take());
-                        eprintln!("A2_R8_LATE_B release_at_wake={count} native_kick=true");
-                    }
+                    observed.lock().unwrap().push(at);
                     published.notify_waiters();
                 }
                 trace_supervisor_tick(&supervisor, tick, first_wake);
@@ -680,7 +512,6 @@ impl RecoveryDriver {
             wakes,
             changed,
             last_woken_head,
-            late_release,
         }
     }
 
@@ -703,21 +534,6 @@ impl RecoveryDriver {
             }
             changed.await;
         }
-    }
-
-    fn delay_until_wake(
-        &self,
-        anchor: tokio::time::Instant,
-        count: usize,
-        guard: tokio::sync::OwnedMutexGuard<()>,
-    ) {
-        assert!(
-            self.late_release
-                .lock()
-                .unwrap()
-                .replace((anchor, count, guard))
-                .is_none()
-        );
     }
 
     async fn stop(mut self) -> usize {
@@ -809,20 +625,6 @@ impl Drop for RecoveryTiming {
     }
 }
 
-struct ClaimPause {
-    task: Option<tokio::task::JoinHandle<()>>,
-    release: Arc<tokio::sync::Notify>,
-}
-
-impl Drop for ClaimPause {
-    fn drop(&mut self) {
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
-        self.release.notify_one();
-    }
-}
-
 async fn wait_recovery_entry(
     second: &mut ProviderTurn,
     fixture: &Fixture,
@@ -833,12 +635,7 @@ async fn wait_recovery_entry(
     anchor: tokio::time::Instant,
 ) -> u64 {
     // The 96s bound finitely ends either a stopped driver or a claimed dispatch without entry.
-    let deadline = anchor
-        + if wake_mutant("a2-claim-delay-old66") {
-            RECOVERY_LIMIT
-        } else {
-            RECOVERY_SAFETY_LIMIT
-        };
+    let deadline = anchor + RECOVERY_SAFETY_LIMIT;
     let result = tokio::select! {
         biased;
         _ = driver.boundary_after(anchor) => Err("third_actual_wake"),
@@ -846,11 +643,7 @@ async fn wait_recovery_entry(
             Ok(thread) => Ok(thread),
             Err(_) => Err("provider_probe_closed"),
         },
-        _ = tokio::time::sleep_until(deadline) => Err(if wake_mutant("a2-claim-delay-old66") {
-            "old66_deadline"
-        } else {
-            "absolute_safety"
-        }),
+        _ = tokio::time::sleep_until(deadline) => Err("absolute_safety"),
     };
     match result {
         Ok(thread) => second.verify_entry(fixture, expected, thread),
@@ -897,9 +690,6 @@ async fn wait_recovery_entry(
                 "third_actual_wake" => {
                     panic!("B must be claimed within two actual recovery wakes: {context}")
                 }
-                "old66_deadline" => {
-                    panic!("B provider entry exceeded the old66 wall-clock contract: {context}")
-                }
                 _ => panic!("B provider entry reached the absolute safety bound: {context}"),
             }
         }
@@ -921,7 +711,6 @@ async fn supervisor_drains_pair(
         periodic_only,
     } = case;
     let _failure_logs = FailureLogs(logs.clone());
-    let _diagnostic = PhaseDiagnostic::install(fixture, periodic_only, logs);
     // Capture A before its spawn; the existing transition fence suppresses direct finalizer dequeue.
     let mut completion_fence =
         periodic_only.then(|| PeriodicCompletionFence::install(fixture.rig.channel));
@@ -939,12 +728,6 @@ async fn supervisor_drains_pair(
     trace_supervisor_tick(supervisor, 1, first_wake);
     let driver = RecoveryDriver::start(supervisor.clone());
     let mut ledger = vec![first.wait(fixture, a).await];
-    if classify_enabled() {
-        eprintln!(
-            "A2_R6_A_HELD periodic_only={periodic_only} sample={}",
-            classify_row(&fixture.rig.shared, &fixture.provider, fixture.rig.channel)
-        );
-    }
     assert!(
         recovery_kick_observed(logs, fixture.rig.channel),
         "the real LiveEffects recovery kick origin was not observed"
@@ -973,41 +756,6 @@ async fn supervisor_drains_pair(
     let producers = WakeObservations::install(fixture.rig.channel, periodic_only);
     let mut second = ProviderTurn::arm(fixture.rig.channel.get());
     let timing = RecoveryTiming::watch(fixture, &driver, b);
-    let claim_mode = periodic_only
-        && ["a2-claim-stall", "a2-claim-delay", "a2-claim-delay-old66"]
-            .iter()
-            .any(|name| wake_mutant(name));
-    let claim_hook =
-        claim_mode.then(|| install_owner_race_pause(fixture.rig.channel, "intake_after_claim"));
-    if wake_mutant("a2-allow-early-b") {
-        // Premature terminal completion exercises the real consumer before the fixture releases A.
-        first.release.send(()).unwrap();
-        if let Some(fence) = completion_fence.as_mut() {
-            fence.release_after_a(fixture, logs, b, false).await;
-        }
-        until(async || {
-            inflight::load_inflight_state_read_only_result(
-                &fixture.provider,
-                fixture.rig.channel.get(),
-            )
-            .is_ok_and(|row| row.is_none_or(|row| row.user_msg_id == b))
-        })
-        .await;
-        if !periodic_only {
-            crate::services::discord::queue_io::kick_idle_queue_channel_if_context_available(
-                &fixture.rig.shared,
-                &fixture.provider,
-                fixture.rig.channel,
-                "turn_completion_event",
-            )
-            .await;
-        }
-        let _ = tokio::time::timeout_at(first_wake + RECOVERY_LIMIT, &mut second.entered).await;
-        eprintln!(
-            "A2_R5_EARLY_B_FAULT periodic_only={periodic_only} requests={:?} fixture_a_released=false",
-            producers.requests()
-        );
-    }
     tokio::task::yield_now().await;
     assert!(
         matches!(
@@ -1032,11 +780,7 @@ async fn supervisor_drains_pair(
     eprintln!("A2_S3_A_HELD a_entered=1 no_early_b=1");
     first.finish();
     if let Some(fence) = completion_fence.as_mut() {
-        let keep_transition =
-            claim_mode || wake_mutant("a2-preclaim-stall") || wake_mutant("a2-unbounded-recovery");
-        fence
-            .release_after_a(fixture, logs, b, keep_transition)
-            .await;
+        fence.release_after_a(fixture, logs, b).await;
     }
     until(async || {
         inflight::load_inflight_state_read_only_result(&fixture.provider, fixture.rig.channel.get())
@@ -1045,122 +789,18 @@ async fn supervisor_drains_pair(
     .await;
     let a_cleared = tokio::time::Instant::now();
     let ticks_at_cleanup = driver.ticks.load(Ordering::SeqCst);
-    let mut retained_transition = completion_fence
-        .as_mut()
-        .and_then(|fence| fence.transition.take());
-    let _preclaim_fence = if wake_mutant("a2-preclaim-stall") {
-        Some(
-            retained_transition
-                .take()
-                .expect("the periodic fixture must retain its transition fence"),
+    ledger.push(
+        wait_recovery_entry(
+            &mut second,
+            fixture,
+            b,
+            &driver,
+            &timing,
+            first_wake,
+            a_cleared,
         )
-    } else {
-        None
-    };
-    let mut claim_pause = if let Some((entered, release)) = claim_hook {
-        let guard = retained_transition
-            .take()
-            .expect("the claim fixture must retain its transition fence");
-        driver.delay_until_wake(a_cleared, 2, guard);
-        let wakes = driver.wakes.clone();
-        let shared = fixture.rig.shared.clone();
-        let channel = fixture.rig.channel;
-        let provider = fixture.provider.clone();
-        let times = timing.values.clone();
-        let resumed = release.clone();
-        let task = tokio::spawn(async move {
-            entered.notified().await;
-            let claimed_at = tokio::time::Instant::now();
-            let mailbox = shared.mailbox(channel).snapshot().await;
-            assert_eq!(mailbox.active_user_message_id, Some(MessageId::new(b)));
-            assert!(mailbox.cancel_token.is_some());
-            assert!(mailbox.pending_user_dispatch.is_none());
-            assert!(
-                inflight::load_inflight_state_read_only_result(&provider, channel.get())
-                    .unwrap()
-                    .is_none()
-            );
-            assert!(INPUT_EFFECT_PROBE.lock().unwrap().is_some());
-            let observed_wakes = wakes
-                .lock()
-                .unwrap()
-                .iter()
-                .copied()
-                .filter(|wake| *wake >= a_cleared)
-                .collect::<Vec<_>>();
-            assert_eq!(observed_wakes.len(), 2);
-            let second_wake = observed_wakes[1];
-            {
-                let mut observed = times.lock().unwrap();
-                observed.claimed = Some(claimed_at);
-                observed.dequeue_wake = Some(second_wake);
-            }
-            eprintln!(
-                "A2_R11_CLAIM_PAUSE entered=1 user={b} token_present=1 inflight_none=1 recovery_wakes=2"
-            );
-            if wake_mutant("a2-claim-stall") {
-                std::future::pending::<()>().await;
-            }
-            let needed = (a_cleared + RECOVERY_LIMIT + Duration::from_secs(1))
-                .saturating_duration_since(second_wake);
-            let pause_seconds = 8.max(needed.as_secs() + u64::from(needed.subsec_nanos() != 0));
-            let release_at = second_wake + Duration::from_secs(pause_seconds);
-            assert!(release_at > a_cleared + RECOVERY_LIMIT);
-            assert!(release_at <= a_cleared + RECOVERY_SAFETY_LIMIT - Duration::from_secs(10));
-            eprintln!(
-                "A2_R11_CLAIM_DELAY second_wake_ms={} old66_ms=66000 pause_ms={} release_ms={} safety_ms=96000 margin_ms={}",
-                second_wake.duration_since(a_cleared).as_millis(),
-                pause_seconds * 1000,
-                release_at.duration_since(a_cleared).as_millis(),
-                (a_cleared + RECOVERY_SAFETY_LIMIT)
-                    .duration_since(release_at)
-                    .as_millis(),
-            );
-            tokio::time::sleep_until(release_at).await;
-            resumed.notify_one();
-        });
-        Some(ClaimPause {
-            task: Some(task),
-            release,
-        })
-    } else {
-        None
-    };
-    if wake_mutant("a2-unbounded-recovery") {
-        let guard = retained_transition
-            .take()
-            .expect("the late-wake fixture must retain its transition fence");
-        driver.delay_until_wake(a_cleared, 3, guard);
-        let thread = (&mut second.entered)
-            .await
-            .expect("the delayed B provider must actually enter");
-        assert_ne!(thread, std::thread::current().id());
-        assert!(INPUT_EFFECT_PROBE.lock().unwrap().is_none());
-        let row = inflight::load_inflight_state_read_only_result(
-            &fixture.provider,
-            fixture.rig.channel.get(),
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(row.user_msg_id, b);
-        ledger.push(row.user_msg_id);
-    } else {
-        ledger.push(
-            wait_recovery_entry(
-                &mut second,
-                fixture,
-                b,
-                &driver,
-                &timing,
-                first_wake,
-                a_cleared,
-            )
-            .await,
-        );
-    }
-    if let Some(control) = claim_pause.as_mut() {
-        control.task.take().unwrap().await.unwrap();
-    }
+        .await,
+    );
     let recovery_wakes = driver.wakes_after(a_cleared);
     let a_cleared_to_b = a_cleared.elapsed();
     let entered_at = tokio::time::Instant::now();
@@ -1190,14 +830,6 @@ async fn supervisor_drains_pair(
     } else {
         "mixed_observed"
     };
-    if classify_enabled() {
-        eprintln!(
-            "A2_R7_PROVIDER_ENTERED periodic_only={periodic_only} producer={producer} carriers={carriers:?} requests={:?} completion_blocked={} sample={}",
-            producers.requests(),
-            producers.completion_blocked(),
-            classify_row(&fixture.rig.shared, &fixture.provider, fixture.rig.channel)
-        );
-    }
     let b_entry = began.elapsed();
     let b_after_a_kick = first_wake.elapsed();
     let periodic_wake = supervisor

@@ -1145,10 +1145,6 @@ impl ReviewConfig {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct PlaceholderConfig {
-    #[serde(default = "default_true")]
-    pub live_events_enabled: bool,
-    #[serde(default = "default_true")]
-    pub status_panel_v2_enabled: bool,
     pub tool_activity_display: ToolActivityDisplay,
     /// Restart-required rollout gate for the two-message panel model (default OFF).
     #[serde(default)]
@@ -1158,8 +1154,6 @@ pub struct PlaceholderConfig {
 impl Default for PlaceholderConfig {
     fn default() -> Self {
         Self {
-            live_events_enabled: true,
-            status_panel_v2_enabled: true,
             tool_activity_display: ToolActivityDisplay::default(),
             two_message_panel_enabled: false,
         }
@@ -1444,13 +1438,6 @@ mod runtime_hook_registry_config_tests {
             ..RuntimeSettingsConfig::default()
         };
         assert!(!delay_only.is_empty());
-
-        // The rollback flag also keeps the section alive when set to either bool.
-        let disabled = RuntimeSettingsConfig {
-            tui_hook_registry_enabled: Some(false),
-            ..RuntimeSettingsConfig::default()
-        };
-        assert!(!disabled.is_empty());
     }
 
     // The keys survive a YAML round-trip with their types intact, and an absent
@@ -1458,12 +1445,10 @@ mod runtime_hook_registry_config_tests {
     #[test]
     fn hook_registry_keys_round_trip_through_yaml() {
         let yaml = "tui_hook_buffer_ttl_secs: 60\n\
-                    tui_unclaimed_stop_delay_ms: 1500\n\
-                    tui_hook_registry_enabled: false\n";
+                    tui_unclaimed_stop_delay_ms: 1500\n";
         let parsed: RuntimeSettingsConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(parsed.tui_hook_buffer_ttl_secs, Some(60));
         assert_eq!(parsed.tui_unclaimed_stop_delay_ms, Some(1500));
-        assert_eq!(parsed.tui_hook_registry_enabled, Some(false));
 
         let reserialized = serde_yaml::to_string(&parsed).unwrap();
         let reparsed: RuntimeSettingsConfig = serde_yaml::from_str(&reserialized).unwrap();
@@ -1474,7 +1459,6 @@ mod runtime_hook_registry_config_tests {
         let empty: RuntimeSettingsConfig = serde_yaml::from_str("{}").unwrap();
         assert_eq!(empty.tui_hook_buffer_ttl_secs, None);
         assert_eq!(empty.tui_unclaimed_stop_delay_ms, None);
-        assert_eq!(empty.tui_hook_registry_enabled, None);
     }
 
     // #5071 T3-A0: an operator who never writes the key must land on `Legacy`,
@@ -2006,15 +1990,6 @@ fn default_cluster_lease_ttl_secs() -> u64 {
 /// a peer; a dead preferred node only delays the gateway by this much.
 fn default_gateway_yield_grace_secs() -> u64 {
     90
-}
-fn default_session_bound_relay_enabled() -> bool {
-    // Epic #2285 / E5 (#2412): flipped to `true` once the production tmux
-    // frame producer (`services::discord::tmux::tmux_watcher`) pushed frames into
-    // the supervisor-owned StreamRelay via `RelayProducerRegistry`. E4
-    // (#2346) now wires that relay to a Discord sink for session-bound
-    // terminal delivery on eligible inflight shapes, while preserving the
-    // legacy watcher as fallback for bridge-owned/no-inflight envelopes.
-    true
 }
 fn default_memory_backend() -> String {
     "auto".into()

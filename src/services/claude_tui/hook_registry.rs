@@ -664,9 +664,7 @@ fn buffered_event_bytes(event: &HookEvent) -> usize {
 /// overrides at first access. Subsequent calls reuse the same instance — the
 /// TTL is captured at construction; a hot-reload of the TTL takes effect for
 /// the next process (a restart) OR can be observed by reading the live config
-/// in the caller before invoking diagnostic helpers. For P0 the registry is
-/// additive and disabled by a config flag, so capturing-at-first-access keeps
-/// the lock-free hot path simple.
+/// in the caller before invoking diagnostic helpers.
 static GLOBAL: LazyLock<HookRegistry> = LazyLock::new(|| {
     let (ttl, delay) = current_registry_durations();
     HookRegistry::new(ttl, delay)
@@ -681,7 +679,7 @@ static GLOBAL: LazyLock<HookRegistry> = LazyLock::new(|| {
 /// when `GLOBAL` is first initialised — so the resulting durations are frozen on
 /// the immutable `HookRegistry` for the life of the process. Editing
 /// `tui_hook_buffer_ttl_secs` / `tui_unclaimed_stop_delay_ms` therefore requires
-/// a restart; only `registry_enabled()` is re-read per hook.
+/// a restart.
 pub fn current_registry_durations() -> (Duration, Duration) {
     let cfg = crate::config_live_reload::current();
     let ttl = cfg
@@ -697,17 +695,6 @@ pub fn current_registry_durations() -> (Duration, Duration) {
         .map(|ms| Duration::from_millis(ms.min(600_000)))
         .unwrap_or(DEFAULT_UNCLAIMED_STOP_DELAY);
     (ttl, delay)
-}
-
-/// Whether the registry buffering layer is enabled. Reads the hot-reloadable
-/// `tui_hook_registry_enabled` runtime flag; defaults to ON. This is the
-/// documented rollback switch (REQ rollback contract): set it to `false` in
-/// `agentdesk.yaml` and the hook receiver stops feeding the registry, leaving
-/// the legacy broadcast + polling path exactly as before — no restart needed.
-pub fn registry_enabled() -> bool {
-    crate::config_live_reload::current()
-        .and_then(|cfg| cfg.runtime.tui_hook_registry_enabled)
-        .unwrap_or(true)
 }
 
 /// The process-global registry instance.
@@ -1334,7 +1321,7 @@ mod tests {
         assert!(reg.unclaimed_stop_diagnostic(&k).is_none());
     }
 
-    // -------- config defaults / clamping / rollback flag --------
+    // -------- config defaults / clamping --------
 
     /// A configured `0` (or absent) TTL / delay falls back to the compiled-in
     /// default; a huge value is clamped so `Instant + Duration` cannot overflow.
@@ -1344,13 +1331,5 @@ mod tests {
         let (ttl, delay) = current_registry_durations();
         assert_eq!(ttl, DEFAULT_HOOK_BUFFER_TTL);
         assert_eq!(delay, DEFAULT_UNCLAIMED_STOP_DELAY);
-    }
-
-    /// The rollback flag defaults to ON when the config is not installed (the
-    /// unit-test case). This pins the "feature defaults ON" contract — operators
-    /// must explicitly set `tui_hook_registry_enabled: false` to disable it.
-    #[test]
-    fn registry_enabled_defaults_on() {
-        assert!(registry_enabled());
     }
 }

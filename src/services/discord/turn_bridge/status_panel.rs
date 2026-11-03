@@ -213,9 +213,6 @@ async fn complete_status_panel_v2_on_surface<G: TurnGateway + ?Sized>(
     expected_inflight: (Option<u64>, Option<&super::super::InflightTurnState>),
 ) -> bool {
     let (expected_user_msg_id, inflight_snapshot) = expected_inflight;
-    if !shared.ui.status_panel_v2_enabled {
-        return true;
-    }
     shared.ui.placeholder_live_events.push_status_event(
         channel_id,
         StatusEvent::TurnCompleted {
@@ -387,15 +384,6 @@ fn status_panel_message_missing_error(error: &str) -> bool {
     normalized.contains("unknown message") || normalized.contains("10008")
 }
 
-/// A turn-mode turn without an anchor has no card to show a long-running tool on.
-pub(super) fn should_open_long_running_placeholder_controller(
-    status_panel_v2_enabled: bool,
-    (channel_id, current_msg_id): (ChannelId, MessageId),
-) -> bool {
-    !status_panel_v2_enabled
-        && !super::current_message_anchor::turn_mode_anchorless(channel_id, current_msg_id)
-}
-
 pub(super) fn status_panel_message_id_for_turn(
     inflight_state: &mut InflightTurnState,
     reuse_status_panel_message: bool,
@@ -470,7 +458,7 @@ pub(super) fn record_status_panel_events(
     channel_id: ChannelId,
     events: Vec<StatusEvent>,
 ) -> bool {
-    if shared.ui.status_panel_v2_enabled && !events.is_empty() {
+    if !events.is_empty() {
         shared
             .ui
             .placeholder_live_events

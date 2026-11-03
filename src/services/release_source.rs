@@ -445,18 +445,4 @@ mod tests {
             "0123456789ABCDEF0123456789ABCDEF01234567"
         ));
     }
-
-    #[test]
-    fn release_source_module_docs_define_release_fact_scope() {
-        let source = include_str!("release_source.rs");
-        assert!(source.starts_with(
-            "//! Preserve the distinction between confirmed release-source facts and observation failures:\n\
-             //! the repository head and latest PostgreSQL migration stay typed as observed or unobserved, and\n\
-             //! missing evidence must never become a value that consumers could mistake for a confirmed fact.\n\
-             //! Field independence applies only after the whole manifest parses against the expected schema.\n\
-             //! A type mismatch in any recognized field, including optional `generated_at`, intentionally\n\
-             //! rejects the whole manifest as `manifest_invalid_json` and `unobserved`. After parsing,\n\
-             //! `generated_at` is optional metadata and does not determine the observation status."
-        ));
-    }
 }

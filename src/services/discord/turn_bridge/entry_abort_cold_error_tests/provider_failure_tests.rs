@@ -132,10 +132,7 @@ async fn cold_claude(channel_id: u64) -> Cold {
     let writable = Arc::get_mut(&mut shared).unwrap();
     writable.provider = provider.clone();
     writable.restart.current_generation = 17;
-    (
-        writable.ui.status_panel_v2_enabled,
-        writable.ui.two_message_panel_enabled,
-    ) = (true, true);
+    writable.ui.two_message_panel_enabled = true;
     let channel = ChannelId::new(channel_id);
     let cancel = Arc::new(CancelToken::new());
     let owner = owner(&shared, &provider, channel_id);

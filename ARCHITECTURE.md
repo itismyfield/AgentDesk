@@ -163,8 +163,6 @@ src/
 ├── db/
 │   ├── auto_queue/
 │   │   ├── entries/
-│   │   │   ├── tests/
-│   │   │   │   └── source_guard_tests.rs
 │   │   │   └── dispatch_failure.rs
 │   │   ├── run_owner_guard/
 │   │   │   └── writes.rs
@@ -911,7 +909,6 @@ src/
 │   │   │   ├── ordered_queue/
 │   │   │   │   └── tests/
 │   │   │   │       ├── session_start_retry_tests.rs
-│   │   │   │       ├── source_guard_tests.rs
 │   │   │   │       ├── too_early_tests.rs
 │   │   │   │       └── tq_tests.rs
 │   │   │   ├── ordered_queue.rs
@@ -1040,8 +1037,6 @@ src/
 │   │   │   ├── placement.rs
 │   │   │   └── session_owner.rs
 │   │   ├── intake_worker/
-│   │   │   ├── tests/
-│   │   │   │   └── source_guard_tests.rs
 │   │   │   ├── consent_scope_tests.rs
 │   │   │   ├── dispatch_stamp_tests.rs
 │   │   │   ├── drain_tests.rs
@@ -1168,8 +1163,6 @@ src/
 │   │   │   │   ├── herdr_replay.rs
 │   │   │   │   ├── herdr_terminal_tests.rs
 │   │   │   │   └── managed_empty.rs
-│   │   │   ├── tests/
-│   │   │   │   └── source_guard_tests.rs
 │   │   │   ├── child_binding_tests.rs
 │   │   │   ├── discovery.rs
 │   │   │   ├── following_source.rs
@@ -1664,15 +1657,10 @@ src/
 │   │   ├── inject_disposition/
 │   │   │   └── dispatched.rs
 │   │   ├── live_bridge/
-│   │   │   ├── guard_tests/
-│   │   │   │   └── source_guard_tests.rs
 │   │   │   └── guard_tests.rs
 │   │   ├── mailbox_finish/
 │   │   │   └── closed_actor_tests.rs
 │   │   ├── model_catalog/
-│   │   │   ├── claude/
-│   │   │   │   └── tests/
-│   │   │   │       └── source_guard_tests.rs
 │   │   │   ├── bounded_cache_file.rs
 │   │   │   └── claude.rs
 │   │   ├── outbound/
@@ -1749,7 +1737,6 @@ src/
 │   │   │   ├── send_to_agent.rs
 │   │   │   ├── serenity_reference.rs
 │   │   │   ├── source_registry.rs
-│   │   │   ├── source_registry_scan_tests.rs
 │   │   │   ├── transport.rs
 │   │   │   └── turn_output_controller.rs
 │   │   ├── placeholder_controller/
@@ -1867,8 +1854,6 @@ src/
 │   │   │   ├── transport.rs
 │   │   │   ├── turn_admission.rs
 │   │   │   └── turn_admission_tests.rs
-│   │   ├── queued_dequeue_dispatch_guard_wiring_tests/
-│   │   │   └── source_guard_tests.rs
 │   │   ├── recovery_engine/
 │   │   │   ├── herdr_row_end/
 │   │   │   │   ├── diagnostics.rs
@@ -2037,8 +2022,7 @@ src/
 │   │   │   │   │   ├── fallback_queued_tests.rs
 │   │   │   │   │   ├── final_guards.rs
 │   │   │   │   │   ├── owner_ingress_tests.rs
-│   │   │   │   │   ├── replay_hold.rs
-│   │   │   │   │   └── source_guard_tests.rs
+│   │   │   │   │   └── replay_hold.rs
 │   │   │   │   ├── attachment.rs
 │   │   │   │   ├── home_order_tests.rs
 │   │   │   │   ├── initial_fresh_tests.rs
@@ -2052,10 +2036,6 @@ src/
 │   │   │   ├── intake_gate/
 │   │   │   │   ├── busy_inject/
 │   │   │   │   │   └── payload_tests.rs
-│   │   │   │   ├── live_intake_preserve_wiring_tests/
-│   │   │   │   │   └── source_guard_tests.rs
-│   │   │   │   ├── queue_effects/
-│   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   ├── busy_duplicate_notice.rs
 │   │   │   │   ├── busy_inject.rs
 │   │   │   │   ├── busy_inject_test_support.rs
@@ -2185,7 +2165,6 @@ src/
 │   │   │   │   ├── provider_isolation.rs
 │   │   │   │   ├── provider_isolation_host_tests.rs
 │   │   │   │   ├── provider_isolation_seed_save_tests.rs
-│   │   │   │   ├── provider_isolation_source_guard_tests.rs
 │   │   │   │   ├── root_replaced_recovery_tests.rs
 │   │   │   │   ├── s1_entry_tests.rs
 │   │   │   │   ├── session_strategy_lifecycle_tests.rs
@@ -2291,8 +2270,6 @@ src/
 │   │   │   ├── spawns_tests.rs
 │   │   │   └── startup_doctor.rs
 │   │   ├── runtime_store/
-│   │   │   ├── generation_allocation_tests/
-│   │   │   │   └── source_guard_tests.rs
 │   │   │   ├── durable_ancestors.rs
 │   │   │   ├── durable_ancestors_tests.rs
 │   │   │   ├── durable_publish.rs
@@ -2419,8 +2396,7 @@ src/
 │   │   ├── tmux_restart_handoff_mailbox_tests/
 │   │   │   └── fresh_start_failure_tests.rs
 │   │   ├── tmux_session_files/
-│   │   │   ├── orphan_sweep_tests.rs
-│   │   │   └── source_guard_tests.rs
+│   │   │   └── orphan_sweep_tests.rs
 │   │   ├── tmux_watcher/
 │   │   │   ├── cancel_handoff/
 │   │   │   │   ├── completion.rs

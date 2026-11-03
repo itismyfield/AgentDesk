@@ -20,7 +20,7 @@ use crate::db::dispatched_sessions::hosted_execution::tests::{
     TOKEN, future_schema, owner, record, wire,
 };
 use crate::services::discord::herdr_terminate::{
-    OperatorTerminate, TerminationResult, terminate_explicit_herdr,
+    OperatorTerminate, TerminationResult, terminate_explicit_herdr_for_test,
 };
 use crate::services::session_host::herdr_termination_rig as herdr;
 
@@ -226,7 +226,7 @@ async fn scenario(rig: herdr::P11TerminationRig) {
         session_key: herdr_key.clone(),
         execution_nonce: herdr::EXECUTION.into(),
     };
-    let result = terminate_explicit_herdr(request, shared.clone(), &pool).await;
+    let result = terminate_explicit_herdr_for_test(request, shared.clone(), &pool).await;
     assert_eq!(result, TerminationResult::Retired);
     let retired = herdr::row(&pool, &herdr_key).await;
     assert_eq!(
