@@ -1,0 +1,207 @@
+{
+  "identity": {
+    "build_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "dependency_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "binary_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "cases": [
+    {
+      "name": "valid",
+      "edits": [],
+      "missing": false,
+      "manifest_edits": [],
+      "coverage": true,
+      "linked": true
+    },
+    {
+      "name": "missing",
+      "edits": [],
+      "missing": true,
+      "manifest_edits": [],
+      "coverage": false,
+      "linked": false
+    },
+    {
+      "name": "wrong_build",
+      "edits": [
+        [
+          "/build_sha",
+          "dddddddddddddddddddddddddddddddddddddddd"
+        ]
+      ],
+      "missing": false,
+      "manifest_edits": [],
+      "coverage": false,
+      "linked": false
+    },
+    {
+      "name": "wrong_census",
+      "edits": [
+        [
+          "/census_hash",
+          "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        ]
+      ],
+      "missing": false,
+      "manifest_edits": [],
+      "coverage": false,
+      "linked": false
+    },
+    {
+      "name": "wrong_dependency",
+      "edits": [
+        [
+          "/dependency_hash",
+          "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        ]
+      ],
+      "missing": false,
+      "manifest_edits": [],
+      "coverage": false,
+      "linked": false
+    },
+    {
+      "name": "skip",
+      "edits": [
+        [
+          "/tests/0/skipped",
+          1
+        ]
+      ],
+      "missing": false,
+      "manifest_edits": [],
+      "coverage": false,
+      "linked": false
+    },
+    {
+      "name": "failure",
+      "edits": [
+        [
+          "/tests/0/failed",
+          1
+        ]
+      ],
+      "missing": false,
+      "manifest_edits": [],
+      "coverage": false,
+      "linked": false
+    },
+    {
+      "name": "unlinked_id",
+      "edits": [
+        [
+          "/tests/0/id",
+          "fixture::unknown"
+        ]
+      ],
+      "missing": false,
+      "manifest_edits": [],
+      "coverage": false,
+      "linked": false
+    },
+    {
+      "name": "zero_execution",
+      "edits": [
+        [
+          "/tests/0/executed",
+          0
+        ]
+      ],
+      "missing": false,
+      "manifest_edits": [],
+      "coverage": false,
+      "linked": false
+    },
+    {
+      "name": "boolean_execution",
+      "edits": [
+        [
+          "/tests/0/executed",
+          true
+        ]
+      ],
+      "missing": false,
+      "manifest_edits": [],
+      "coverage": false,
+      "linked": false
+    },
+    {
+      "name": "binary_mismatch",
+      "edits": [
+        [
+          "/tests/0/binary_sha256",
+          "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        ]
+      ],
+      "missing": false,
+      "manifest_edits": [],
+      "coverage": false,
+      "linked": false
+    },
+    {
+      "name": "bad_schema",
+      "edits": [
+        [
+          "/schema_version",
+          true
+        ]
+      ],
+      "missing": false,
+      "manifest_edits": [],
+      "coverage": false,
+      "linked": false
+    },
+    {
+      "name": "bad_policy",
+      "edits": [
+        [
+          "/policy_version",
+          2
+        ]
+      ],
+      "missing": false,
+      "manifest_edits": [],
+      "coverage": false,
+      "linked": false
+    },
+    {
+      "name": "empty_required",
+      "edits": [
+        [
+          "/required_test_ids",
+          []
+        ]
+      ],
+      "missing": false,
+      "manifest_edits": [],
+      "coverage": false,
+      "linked": false
+    },
+    {
+      "name": "unlinked_probe",
+      "edits": [],
+      "missing": false,
+      "manifest_edits": [
+        [
+          "/probes/0/verified_by",
+          []
+        ]
+      ],
+      "coverage": false,
+      "linked": false
+    },
+    {
+      "name": "pending",
+      "edits": [],
+      "missing": false,
+      "manifest_edits": [
+        [
+          "/probes/0/status",
+          "PENDING_0b1"
+        ]
+      ],
+      "coverage": false,
+      "linked": true
+    }
+  ]
+}

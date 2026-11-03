@@ -1074,7 +1074,63 @@ def flip_readiness(root: Path) -> tuple[bool, str]:
     return True, f"flip_ready=true: {len(names)} funnel tests over {len(FLIP_READY_TESTS)} rows"
 
 
-def body_probe_snapshot(root: Path) -> dict:
+def _evidence_test_ids(data):
+    linked = set()
+    for group in ("probes", "transport_probes", "claim_probes"):
+        for row in data[group]:
+            ids = row["verified_by"]
+            if (not isinstance(ids, list) or not ids
+                    or any(not isinstance(name, str) or "::" not in name for name in ids)
+                    or len(ids) != len(set(ids))):
+                raise ValueError("manifest_invalid")
+            if ("recording_test" in row
+                    and not any(name.rsplit("::", 1)[-1] == row["recording_test"] for name in ids)):
+                raise ValueError("manifest_invalid")
+            linked.update(ids)
+    if not linked:
+        raise ValueError("manifest_invalid")
+    return linked
+
+
+def _evidence_linked(data, digest, proof, identity):
+    def hex_hash(value, length):
+        return isinstance(value, str) and re.fullmatch("[0-9a-f]{%d}" % length, value) is not None
+
+    try:
+        if (type(proof["schema_version"]) is not int or proof["schema_version"] != 1
+                or type(proof["policy_version"]) is not int or proof["policy_version"] != 1
+                or not hex_hash(identity["build_sha"], 40) or not hex_hash(identity["dependency_hash"], 64)
+                or proof["build_sha"] != identity["build_sha"]
+                or proof["dependency_hash"] != identity["dependency_hash"]
+                or proof["census_hash"] != digest or not hex_hash(identity["binary_sha256"], 64)
+                or proof["binary_sha256"] != identity["binary_sha256"]):
+            return False
+        required = proof["required_test_ids"]
+        if (not isinstance(required, list)
+                or any(not isinstance(name, str) or not name for name in required)
+                or len(set(required)) != len(required)):
+            return False
+        expected = identity["required_test_ids"]
+        if (not isinstance(expected, list)
+                or any(not isinstance(name, str) or not name for name in expected)
+                or len(set(expected)) != len(expected) or set(required) != set(expected)):
+            return False
+        planned, executed = set(required), set()
+        if not _evidence_test_ids(data) <= planned or not isinstance(proof["tests"], list):
+            return False
+        for test in proof["tests"]:
+            if (test["id"] not in planned or test["id"] in executed
+                    or any(type(test[key]) is not int or test[key] != count
+                           for key, count in (("executed", 1), ("failed", 0), ("skipped", 0)))
+                    or test["binary_sha256"] != proof["binary_sha256"]):
+                return False
+            executed.add(test["id"])
+        return executed == planned
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def body_probe_snapshot(root: Path, evidence=None, identity=None) -> dict:
     """Read the same bytes embedded by Rust; incomplete or malformed data cannot certify coverage."""
     try:
         raw = (root / "scripts/tui_o_body_probes.json").read_bytes()
@@ -1120,7 +1176,7 @@ def body_probe_snapshot(root: Path) -> dict:
         transport_ids = set()
         for row in transport:
             expected = TRANSPORT_PROBES.get(row["id"])
-            require(expected is not None and set(row) == set(expected) | {"status"})
+            require(expected is not None and set(row) == set(expected) | {"status", "verified_by"})
             require({key: row[key] for key in expected} == expected)
             require("occurrence" not in row or type(row["occurrence"]) is int)
             require(row["id"] not in transport_ids)
@@ -1132,14 +1188,16 @@ def body_probe_snapshot(root: Path) -> dict:
         claim_ids = set()
         for row in claims:
             expected = CLAIM_PROBES.get(row["id"])
-            require(expected is not None and set(row) == set(expected) | {"status"})
+            require(expected is not None and set(row) == set(expected) | {"status", "verified_by"})
             require({key: row[key] for key in expected} == expected)
             require(row["id"] not in claim_ids and row["id"] not in seen and row["id"] not in transport_ids)
             claim_ids.add(row["id"])
             require(row["status"] in {"PENDING_0a2", "VERIFIED"})
             pending += row["status"] != "VERIFIED"
-        # Execution evidence is not linked until its verifier is installed.
-        return dict(coverage=False, instrumentation_complete=pending == 0,
+        evidence_linked = _evidence_linked(data, digest, evidence, identity)
+        return dict(coverage=pending == 0 and evidence_linked, instrumentation_complete=pending == 0,
+                    evidence_linked=evidence_linked, evidence_error=("execution_evidence_missing" if evidence is None else
+                    None if evidence_linked else "execution_evidence_invalid_or_unlinked"),
                     census_hash=digest, pending=pending, error=None)
     except (AssertionError, KeyError, TypeError, ValueError):
         return dict(coverage=False, instrumentation_complete=False, census_hash=digest, pending=0, error="manifest_invalid")

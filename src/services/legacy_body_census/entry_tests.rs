@@ -203,6 +203,7 @@ async fn blocked_writer_times_out_without_stalling_the_async_runtime() {
 
 #[test]
 fn manifest_coverage_and_hash_follow_the_same_embedded_bytes() {
+    use sha2::Digest;
     let raw = include_str!("../../../scripts/tui_o_body_probes.json");
     let actual = manifest::inspect(raw);
     assert_eq!(actual["coverage"], false);
@@ -227,6 +228,51 @@ fn manifest_coverage_and_hash_follow_the_same_embedded_bytes() {
     );
     assert_eq!(manifest::inspect("{}")["coverage"], false);
     assert_eq!(manifest::inspect("not json")["coverage"], false);
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/legacy_body_census_evidence.json"
+    ))
+    .unwrap();
+    let mut base: Value = serde_json::from_str(raw).unwrap();
+    let mut names = std::collections::BTreeSet::new();
+    for group in ["probes", "transport_probes", "claim_probes"] {
+        for (index, row) in base[group].as_array_mut().unwrap().iter_mut().enumerate() {
+            // These synthetic IDs exercise the verifier, never certify production probes.
+            if row["verified_by"].as_array().unwrap().is_empty() {
+                row["verified_by"] = json!([format!("fixture::{group}_{index}")]);
+            }
+            for id in row["verified_by"].as_array().unwrap() {
+                names.insert(id.as_str().unwrap().to_owned());
+            }
+        }
+    }
+    let mut identity = fixture["identity"].clone();
+    identity["required_test_ids"] = json!(names);
+    identity["binary_sha256"] = fixture["binary_sha256"].clone();
+    for case in fixture["cases"].as_array().unwrap() {
+        let mut data = base.clone();
+        for edit in case["manifest_edits"].as_array().unwrap() {
+            *data.pointer_mut(edit[0].as_str().unwrap()).unwrap() = edit[1].clone();
+        }
+        let raw = data.to_string();
+        let mut proof = json!({"schema_version":1,"policy_version":1,"build_sha":fixture["identity"]["build_sha"],
+            "dependency_hash":fixture["identity"]["dependency_hash"],"census_hash":hex::encode(sha2::Sha256::digest(raw.as_bytes())),
+            "binary_sha256":fixture["binary_sha256"],"required_test_ids":names,
+            "tests":names.iter().map(|id|json!({"id":id,"executed":1,"failed":0,"skipped":0,"binary_sha256":fixture["binary_sha256"]})).collect::<Vec<_>>()});
+        for edit in case["edits"].as_array().unwrap() {
+            *proof.pointer_mut(edit[0].as_str().unwrap()).unwrap() = edit[1].clone();
+        }
+        let result = manifest::inspect_with_evidence(
+            &raw,
+            (case["missing"] != true).then_some(&proof),
+            Some(&identity),
+        );
+        assert_eq!(result["coverage"], case["coverage"], "{}", case["name"]);
+        assert_eq!(
+            result["evidence_linked"], case["linked"],
+            "{}",
+            case["name"]
+        );
+    }
 }
 
 #[test]

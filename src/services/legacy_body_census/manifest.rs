@@ -1,3 +1,4 @@
+use super::evidence;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, sync::LazyLock};
@@ -13,8 +14,17 @@ pub(super) fn snapshot() -> Value {
 }
 
 pub(super) fn inspect(raw: &str) -> Value {
+    inspect_with_evidence(raw, None, None)
+}
+
+pub(super) fn inspect_with_evidence(
+    raw: &str,
+    proof: Option<&Value>,
+    identity: Option<&Value>,
+) -> Value {
+    let data: Option<Value> = serde_json::from_str(raw).ok();
     let pending = (|| -> Option<usize> {
-        let data: Value = serde_json::from_str(raw).ok()?;
+        let data = data.as_ref()?;
         if data["schema_version"] != 1 {
             return None;
         }
@@ -88,7 +98,8 @@ pub(super) fn inspect(raw: &str) -> Value {
             ),
         ] {
             let row = claims.iter().find(|row| row["id"] == id)?;
-            let mut fields = BTreeSet::from(["id", "path", "entrypoint", "guard", "status"]);
+            let mut fields =
+                BTreeSet::from(["id", "path", "entrypoint", "guard", "status", "verified_by"]);
             if id == "CLAIM_SITE_NONE_HELD" {
                 fields.extend(["consumer_path", "consumer_function", "site"]);
             }
@@ -124,9 +135,14 @@ pub(super) fn inspect(raw: &str) -> Value {
         Some(pending)
     })();
     let instrumentation_complete = pending == Some(0);
-    // Execution evidence needs its own verifier before instrumentation can certify coverage.
-    let coverage = false;
-    json!({"coverage":coverage,"instrumentation_complete":instrumentation_complete,"census_hash":hex::encode(Sha256::digest(raw.as_bytes())),
+    let hash = hex::encode(Sha256::digest(raw.as_bytes()));
+    let evidence_linked = pending.is_some()
+        && data
+            .as_ref()
+            .is_some_and(|data| evidence::verify(data, &hash, proof, identity));
+    let coverage = instrumentation_complete && evidence_linked;
+    json!({"coverage":coverage,"instrumentation_complete":instrumentation_complete,"evidence_linked":evidence_linked,"census_hash":hash,
+        "evidence_error":if proof.is_none() { json!("execution_evidence_missing") } else if !evidence_linked { json!("execution_evidence_invalid_or_unlinked") } else { Value::Null },
         "pending":pending.unwrap_or(0),
         "error":if pending.is_some() { Value::Null } else { json!("manifest_invalid") }})
 }

@@ -7,6 +7,7 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
+mod evidence;
 mod history;
 mod manifest;
 #[cfg(test)]

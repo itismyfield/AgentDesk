@@ -13,13 +13,13 @@ SPEC.loader.exec_module(CENSUS)
 
 
 class BodyProbeManifestTests(unittest.TestCase):
-    def snapshot(self, data):
+    def snapshot(self, data, evidence=None, identity=None):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "scripts").mkdir()
             raw = json.dumps(data).encode()
             (root / "scripts/tui_o_body_probes.json").write_bytes(raw)
-            result = CENSUS.body_probe_snapshot(root)
+            result = CENSUS.body_probe_snapshot(root, evidence, identity)
             self.assertEqual(result["census_hash"], hashlib.sha256(raw).hexdigest())
             return result
 
@@ -36,6 +36,37 @@ class BodyProbeManifestTests(unittest.TestCase):
         complete["probes"][0]["status"] = "PENDING_0b1"
         self.assertFalse(self.snapshot(complete)["coverage"])
         self.assertFalse(self.snapshot(complete)["instrumentation_complete"])
+
+        fixture = json.loads((ROOT / "tests/fixtures/legacy_body_census_evidence.json").read_text())
+        base = copy.deepcopy(data)
+        names = set()
+        for group in ("probes", "transport_probes", "claim_probes"):
+            for index, row in enumerate(base[group]):
+                if not row["verified_by"]:
+                    row["verified_by"] = [f"fixture::{group}_{index}"]
+                names.update(row["verified_by"])
+        def edit(target, edits):
+            for path, value in edits:
+                keys = path.lstrip("/").split("/")
+                for key in keys[:-1]:
+                    target = target[int(key)] if isinstance(target, list) else target[key]
+                key = int(keys[-1]) if isinstance(target, list) else keys[-1]
+                target[key] = value
+        identity = dict(fixture["identity"], required_test_ids=sorted(names),
+                        binary_sha256=fixture["binary_sha256"])
+        for case in fixture["cases"]:
+            with self.subTest(case=case["name"]):
+                current = copy.deepcopy(base)
+                edit(current, case["manifest_edits"])
+                proof = dict(schema_version=1, policy_version=1, **fixture["identity"],
+                             census_hash=hashlib.sha256(json.dumps(current).encode()).hexdigest(),
+                             binary_sha256=fixture["binary_sha256"], required_test_ids=sorted(names),
+                             tests=[dict(id=name, executed=1, failed=0, skipped=0,
+                                         binary_sha256=fixture["binary_sha256"]) for name in sorted(names)])
+                edit(proof, case["edits"])
+                result = self.snapshot(current, None if case["missing"] else proof, identity)
+                self.assertEqual(result["coverage"], case["coverage"])
+                self.assertEqual(result.get("evidence_linked", False), case["linked"])
 
     def test_empty_missing_duplicate_and_unknown_states_fail_closed(self):
         self.assertFalse(self.snapshot({"schema_version": 1, "probes": []})["coverage"])
