@@ -705,8 +705,7 @@ fn held_notice(reason: &str) -> String {
 }
 
 /// The mailbox token and the oldest waiting input: an input owner's unattempted front, else queue
-/// head, in-memory reservation, then the on-disk pending marker a failed requeue can leave behind.
-/// Read only; kickoff decides the start.
+/// head, reservation, then the on-disk pending marker a failed requeue left. Read only.
 async fn waiting_input(
     shared: &SharedData,
     provider: &ProviderKind,
