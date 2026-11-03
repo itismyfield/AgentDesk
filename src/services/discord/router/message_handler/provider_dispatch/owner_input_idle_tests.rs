@@ -48,9 +48,8 @@ fn rehydrate(rig: &Rig, session: &str) {
     register_tmux_runtime_binding(&rig.name, binding);
 }
 
-/// A Discord turn on the rig's pane for `front`, resuming `session` in a working dir that holds no
-/// transcript of it, as a session cached for a pane whose transcript lives elsewhere; `driver`
-/// stands in for the provider's driver when the turn launches.
+/// A Discord turn on the rig's pane for `front`, resuming `session` from a dir without its transcript;
+/// `driver` stands in for the provider's driver when the turn launches.
 fn idle_turn(
     rig: &Rig,
     (session, dir): (&str, &Path),
