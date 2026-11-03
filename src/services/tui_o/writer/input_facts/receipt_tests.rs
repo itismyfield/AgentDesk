@@ -231,16 +231,6 @@ fn withdrawn_inputs_owe_no_run() {
         idle(),
     ];
     assert!(!closed_with(&pulled).pending_receipt());
-    let absorbed = [
-        user("a", "first"),
-        enqueue("b"),
-        queue("remove", Some("b"), Some("absorbed_mid_turn")),
-        idle(),
-    ];
-    assert!(
-        closed_with(&absorbed).pending_receipt(),
-        "absorption alone is not the run: its command must follow"
-    );
 }
 
 /// A reader rebuilt from the file start replays the same owed inputs.
@@ -318,16 +308,16 @@ fn a_meta_row_inside_an_open_turn_runs_one_queued_input_with_its_body() {
     }
 }
 
-/// The dequeue Claude writes after an absorption is that absorption's: it takes no other input.
+/// An input Claude absorbed mid-turn, and the command it writes for it, tie no other queued input
+/// to that turn; Claude writes no dequeue for an absorption.
 #[test]
-fn a_dequeue_after_an_absorption_takes_no_other_input() {
+fn an_absorption_ties_no_other_input_to_its_turn() {
     let rows = [
         user("a", "first"),
         enqueue("b"),
         enqueue("c"),
         queue("remove", Some("b"), Some("absorbed_mid_turn")),
         queued_command("b"),
-        queue("dequeue", None, None),
         idle(),
         assistant("a turn that names no input"),
         idle(),
@@ -338,4 +328,38 @@ fn a_dequeue_after_an_absorption_takes_no_other_input() {
         "c is not tied to that turn by b's dequeue"
     );
     assert_eq!(facts.owed_inputs(), 1);
+}
+
+/// Claude may write no command for an input it absorbed mid-turn: the absorption settles it with its
+/// turn, and leaves no credit that would take a later input's dequeue. A command it does write runs
+/// no other input queued with the same body.
+#[test]
+fn an_absorbed_input_settles_with_its_turn_without_a_command() {
+    let absorbed = |text: &str| queue("remove", Some(text), Some("absorbed_mid_turn"));
+    let rows = [
+        user("a", "first"),
+        enqueue("b"),
+        absorbed("b"),
+        idle(),
+        enqueue("c"),
+        queue("dequeue", None, None),
+        user("u-c", "another session sent c"),
+        assistant("handled"),
+        idle(),
+    ];
+    let facts = closed_with(&rows);
+    assert_eq!((facts.pending_receipt(), facts.owed_inputs()), (false, 0));
+    let twin = [
+        user("a", "first"),
+        enqueue("b"),
+        enqueue("b"),
+        absorbed("b"),
+        queued_command("b"),
+        idle(),
+    ];
+    assert_eq!(
+        closed_with(&twin).owed_inputs(),
+        1,
+        "the second b still waits"
+    );
 }

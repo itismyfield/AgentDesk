@@ -458,6 +458,36 @@ mod cases {
         assert_eq!(events(fx.channel.get()), ["complete"]);
     }
 
+    /// History with an input Claude absorbed mid-turn and wrote no command for, then an input it
+    /// dequeued under an opener naming another body: both ran and closed, so the carried row closes.
+    #[tokio::test(flavor = "current_thread")]
+    async fn absorbed_inputs_without_a_command_do_not_hold_a_carried_row() {
+        let absorbed = r#"{"type":"queue-operation","operation":"remove","reason":"absorbed_mid_turn","content":"human b"}"#;
+        let options = Options {
+            transcript: vec![
+                user("earlier"),
+                enqueue("human b"),
+                absorbed.to_string(),
+                answer(),
+                END.to_string(),
+                enqueue("c"),
+                DEQUEUE.to_string(),
+                prompt("another session sent c"),
+                answer(),
+                END.to_string(),
+                user("carried"),
+                answer(),
+                END.to_string(),
+            ],
+            ..Options::default()
+        };
+        let fx = Fixture::new(7_533_399, 9_100_095_491_915_388_099, options).await;
+        fx.pass().await;
+        fx.assert_closed("the absorbed and the dequeued input ran and closed")
+            .await;
+        assert_eq!(events(fx.channel.get()), ["complete"]);
+    }
+
     /// A kept carried turn names its reason once per change, never each pass.
     #[tokio::test(flavor = "current_thread")]
     async fn a_kept_turn_logs_its_reason_once_per_change() {
