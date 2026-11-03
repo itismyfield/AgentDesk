@@ -464,9 +464,8 @@ fn after_the_codex_paste_only_a_replaced_pane_stops_the_enter() {
 
 /// An idle Codex pane takes the prompt's typed text as one pinned paste and one Enter after a
 /// single composer read; nothing reads the pane after the keys, and the head settles unreceipted.
-/// An idle Codex composer whose lock another writer holds, or whose buffer failed to load, gets no
-/// key and keeps the original at the front with its ticket; the next handoff once that cleared
-/// pastes and enters once.
+/// An idle Codex composer held by another writer's lock or a failed buffer load gets no key and keeps
+/// the original at the front with its ticket; once that clears the next handoff pastes once.
 #[test]
 fn an_idle_codex_lock_or_load_refusal_holds_the_front_until_it_clears() {
     let _root = crate::config::TestRuntimeRootGuard::new();

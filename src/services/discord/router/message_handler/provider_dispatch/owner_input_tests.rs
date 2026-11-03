@@ -787,9 +787,8 @@ fn owner_busy_claude_enter_ends_the_transaction_with_or_without_receipt() {
     assert!(alerts.is_empty(), "{alerts:?}");
 }
 
-/// A buffer load that failed, or a transcript missing at the pane read, sends no key and holds the
-/// original at the front with its ticket, retained nowhere; once the cause is gone the next
-/// handoff of the same front pastes and enters once.
+/// A failed buffer load or a transcript missing at the pane read sends no key and holds the front
+/// with its ticket, unretained; once the cause is gone the next handoff pastes and enters once.
 #[test]
 fn a_failed_load_or_a_missing_transcript_holds_the_front_until_it_clears() {
     let _root = crate::config::TestRuntimeRootGuard::new();

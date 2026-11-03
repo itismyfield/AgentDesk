@@ -27,9 +27,8 @@ async fn granted(mailbox: &crate::services::turn_orchestrator::ChannelMailboxHan
     read.await.unwrap()
 }
 
-/// A deferred kick scheduled before the owner took the queue fires nothing at it; a schedule after
-/// is one direct owner wake; the slow arms set nothing: across 3, 5, 30 and 60 seconds no backstop
-/// kicks the owned queue, while an unowned channel's schedule still kicks.
+/// An early deferred kick fires nothing at an owned queue, a later schedule is one owner wake, and
+/// for 3 to 60 seconds no backstop kicks it, while an unowned channel's schedule still kicks.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn no_backstop_schedules_or_fires_a_kick_at_an_owned_queue() {
     let _root = crate::services::discord::relay_recovery::tests::isolated_agentdesk_root();

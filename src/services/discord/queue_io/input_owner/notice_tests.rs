@@ -206,9 +206,8 @@ fn delivering(mailbox: &ChannelMailboxHandle, handed: Arc<Mutex<Vec<u64>>>) -> A
     })
 }
 
-/// Inputs an older binary retained and asked to resend stay retained, unchanged and unannounced,
-/// through restarts, a day passing and a cancel of another input; one whose ask was never posted
-/// is requeued and handed on once at the boot's wake, owing neither ask nor correction.
+/// Told retained inputs stay unchanged and unannounced through restarts, a day and another cancel;
+/// an untold one is requeued and handed on once at the boot's wake, owing no ask or correction.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn told_retained_inputs_stay_and_an_untold_one_is_handed_on_once_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();

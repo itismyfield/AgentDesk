@@ -605,9 +605,8 @@ async fn standing(handle: &ChannelMailboxHandle, channel: u64) -> Vec<String> {
     seen
 }
 
-/// A requeue beside a live head keeps that head's ticket: once the live head is refused under a
-/// modal and held, it and the requeued originals each keep their slot and caller context, across a
-/// re-adoption too.
+/// A requeue beside a live head keeps its ticket: once that head is held under a modal, it and the
+/// requeued originals each keep their slot and caller context, across a re-adoption too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_requeue_beside_a_live_head_keeps_every_ticket_through_its_hold() {
     let _root = TestRuntimeRootGuard::new();
