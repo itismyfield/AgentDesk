@@ -107,7 +107,6 @@ fn strip_headless_placeholder_artifacts(text: &str, provider: &ProviderKind) -> 
 fn headless_streaming_placeholder_cleanup_action(
     last_edit_text: &str,
     provider: &ProviderKind,
-    status_panel_v2_enabled: bool,
     single_message_panel_footer_mode: bool,
 ) -> HeadlessPlaceholderCleanupAction {
     if single_message_panel_footer_mode {
@@ -135,14 +134,10 @@ fn headless_streaming_placeholder_cleanup_action(
             };
         }
     }
-    let mut cleaned = if status_panel_v2_enabled {
-        super::formatting::format_for_discord_with_status_panel(last_edit_text, provider)
-    } else {
-        super::formatting::format_for_discord_with_provider(last_edit_text, provider)
-    };
-    if status_panel_v2_enabled {
-        cleaned = strip_headless_placeholder_artifacts(&cleaned, provider);
-    }
+    let cleaned = strip_headless_placeholder_artifacts(
+        &super::formatting::format_for_discord_with_status_panel(last_edit_text, provider),
+        provider,
+    );
     if cleaned.trim().is_empty() {
         HeadlessPlaceholderCleanupAction::Delete
     } else if cleaned == last_edit_text {
@@ -172,7 +167,6 @@ pub(super) async fn cleanup_headless_streaming_placeholder_after_delivery(
     match headless_streaming_placeholder_cleanup_action(
         last_edit_text,
         provider,
-        shared.ui.status_panel_v2_enabled,
         super::bridge_single_message_panel_footer_enabled(),
     ) {
         HeadlessPlaceholderCleanupAction::Delete => {
@@ -677,7 +671,6 @@ mod headless_delivery_tests {
         let action = headless_streaming_placeholder_cleanup_action(
             "[Bash] /bin/zsh -lc 'cargo test'\n⠙ Processing...",
             &ProviderKind::Codex,
-            true,
             false,
         );
 
@@ -689,7 +682,6 @@ mod headless_delivery_tests {
         let action = headless_streaming_placeholder_cleanup_action(
             "⠂ Processing...\n\n```\n[Bash] /bin/zsh -lc 'grep -n foo src/lib.rs'\n[Bash] /bin/zsh -lc \"sed -n '1,40p' src/lib.rs\"\n```",
             &ProviderKind::Codex,
-            true,
             false,
         );
 
@@ -701,7 +693,6 @@ mod headless_delivery_tests {
         let action = headless_streaming_placeholder_cleanup_action(
             "partial answer\n\n⠙ Processing...",
             &ProviderKind::Codex,
-            true,
             false,
         );
 
@@ -716,7 +707,6 @@ mod headless_delivery_tests {
         let action = headless_streaming_placeholder_cleanup_action(
             "partial answer\n\n⠙ 계속 처리 중",
             &ProviderKind::Codex,
-            true,
             false,
         );
 
@@ -734,7 +724,6 @@ mod headless_delivery_tests {
         let action = headless_streaming_placeholder_cleanup_action(
             &format!("partial answer\n\n{footer}"),
             &ProviderKind::Claude,
-            true,
             true,
         );
 

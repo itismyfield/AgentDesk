@@ -79,15 +79,12 @@ use crate::services::agent_protocol::{StatusEvent, TaskNotificationKind};
 use crate::services::memory::{
     CaptureRequest, TokenUsage, resolve_memory_role_id, resolve_memory_session_id,
 };
-use crate::services::observability::session_inventory::{
-    format_child_inventory_progress, load_child_inventory_by_parent_key_pg,
-};
 use crate::services::provider::cancel_requested;
 use output_lifecycle::BridgeOutputOwner;
 pub(super) use panel_lifecycle::record_placeholder_live_event;
 use panel_lifecycle::{
-    child_progress_line, ensure_active_placeholder_card, first_request_line,
-    refresh_session_panel_line_from_lifecycle, refresh_task_panel_line_from_dispatch,
+    ensure_active_placeholder_card, refresh_session_panel_line_from_lifecycle,
+    refresh_task_panel_line_from_dispatch,
 };
 use response_delivery::{
     done_result_requires_full_terminal_replay, no_answer, push_transcript_event,
@@ -209,8 +206,8 @@ use stale_resume::{
 };
 use status_panel::{
     bridge_epilogue_identity_guards_inflight_clear, migrate_separate_status_panel_to_footer,
-    record_status_panel_events, should_open_long_running_placeholder_controller,
-    status_panel_completion_ready_after_terminal_body, status_panel_message_id_for_turn,
+    record_status_panel_events, status_panel_completion_ready_after_terminal_body,
+    status_panel_message_id_for_turn,
 };
 use terminal_delivery::{
     BridgeLeaseAcquire, bridge_delivery_lease_for_inflight, bridge_delivery_lease_key_for_inflight,
@@ -535,7 +532,6 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         maybe_create_bridge_separate_status_panel_response(
             shared_owned.ui.two_message_panel_enabled,
             single_message_panel_footer_mode,
-            shared_owned.ui.status_panel_v2_enabled,
             gateway.as_ref(),
             channel_id,
             SPINNER[0],
@@ -590,8 +586,6 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                 channel_id,
                 provider: provider.clone(),
                 cancel_token: cancel_token.clone(),
-                user_text_owned: user_text_owned.clone(),
-                request_owner_name: request_owner_name.clone(),
                 adk_session_key: adk_session_key.clone(),
                 adk_session_name: adk_session_name.clone(),
                 adk_session_info: adk_session_info.clone(),

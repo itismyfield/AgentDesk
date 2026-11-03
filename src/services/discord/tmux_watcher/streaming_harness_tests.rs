@@ -54,7 +54,6 @@ mod receipt_watcher_harness_tests;
 mod adopted_run_first_output_tests;
 
 const CHILD: &str = "ADK_STREAMING_HARNESS_CHILD";
-pub(super) const STATUS_PANEL_V2: &str = "ADK_STREAMING_HARNESS_STATUS_PANEL_V2";
 const CLAUDE: ProviderKind = ProviderKind::Claude;
 static LOG: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
@@ -345,10 +344,7 @@ impl Harness {
                 .build(),
         );
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let mut shared = crate::services::discord::make_shared_data_for_tests_with_storage(pool);
-        // A child that sets this runs the separate status-panel-v2 path.
-        let ui = &mut Arc::get_mut(&mut shared).expect("fresh runtime").ui;
-        ui.status_panel_v2_enabled = std::env::var_os(STATUS_PANEL_V2).is_some();
+        let shared = crate::services::discord::make_shared_data_for_tests_with_storage(pool);
         let harness = Self {
             shared,
             channel,

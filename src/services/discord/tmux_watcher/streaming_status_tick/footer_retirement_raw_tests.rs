@@ -169,37 +169,31 @@ fn retired_watcher_tool_only_raw_post_is_minimal_before_the_body_patch() {
     }
     let (_lock, guard) = isolate_root();
     capture_warns(async {
-        for (case, v2) in [(63_272, false), (63_273, true)] {
-            let fx = seed_row(guard.root.path(), case, false, false);
-            let mut shared =
-                six_tool_fixture(crate::config::ToolActivityDisplay::Summary, fx.channel);
-            Arc::get_mut(&mut shared)
-                .unwrap()
-                .ui
-                .status_panel_v2_enabled = v2;
-            let rec = recorder(fx.channel, true).await;
-            let mut locals = tick_locals(&fx, None);
-            let mut tools = WatcherToolState::new();
-            tools.current_tool_line = Some("⚙ Bash: cargo test secret-tool".to_string());
-            tools.any_tool_used = true;
-            run_tick_with_tools(&mut locals, &rec, &shared, &fx, "", &tools).await;
-            assert_eq!(rec.seen("POST").len(), 1);
-            assert_eq!(*rec.bodies.lock().unwrap(), vec![ANCHOR.to_string()]);
-            assert_eq!(locals.edit, ANCHOR);
-            assert_eq!(locals.sent, 0);
-            assert_eq!(locals.placeholder, msg(SERVER_MSG));
-            let body = "도구 뒤에 도착한 실제 답변";
-            run_tick_with_tools(&mut locals, &rec, &shared, &fx, body, &tools).await;
-            let contents = rec.bodies.lock().unwrap().clone();
-            assert_history_is_body_or_anchor(&contents);
-            assert_eq!(contents, vec![ANCHOR.to_string(), body.to_string()]);
-            assert_eq!(
-                rec.seen("POST").len(),
-                1,
-                "the same answer anchor is edited"
-            );
-            assert_eq!(locals.edit, body);
-        }
+        let case = 63_273;
+        let fx = seed_row(guard.root.path(), case, false, false);
+        let shared = six_tool_fixture(crate::config::ToolActivityDisplay::Summary, fx.channel);
+        let rec = recorder(fx.channel, true).await;
+        let mut locals = tick_locals(&fx, None);
+        let mut tools = WatcherToolState::new();
+        tools.current_tool_line = Some("⚙ Bash: cargo test secret-tool".to_string());
+        tools.any_tool_used = true;
+        run_tick_with_tools(&mut locals, &rec, &shared, &fx, "", &tools).await;
+        assert_eq!(rec.seen("POST").len(), 1);
+        assert_eq!(*rec.bodies.lock().unwrap(), vec![ANCHOR.to_string()]);
+        assert_eq!(locals.edit, ANCHOR);
+        assert_eq!(locals.sent, 0);
+        assert_eq!(locals.placeholder, msg(SERVER_MSG));
+        let body = "도구 뒤에 도착한 실제 답변";
+        run_tick_with_tools(&mut locals, &rec, &shared, &fx, body, &tools).await;
+        let contents = rec.bodies.lock().unwrap().clone();
+        assert_history_is_body_or_anchor(&contents);
+        assert_eq!(contents, vec![ANCHOR.to_string(), body.to_string()]);
+        assert_eq!(
+            rec.seen("POST").len(),
+            1,
+            "the same answer anchor is edited"
+        );
+        assert_eq!(locals.edit, body);
     });
 }
 
@@ -210,32 +204,26 @@ fn retired_watcher_empty_existing_anchor_raw_patch_is_minimal() {
     }
     let (_lock, guard) = isolate_root();
     capture_warns(async {
-        for (case, v2) in [(63_274, false), (63_275, true)] {
-            let fx = seed_row(guard.root.path(), case, false, false);
-            let mut shared =
-                six_tool_fixture(crate::config::ToolActivityDisplay::Summary, fx.channel);
-            Arc::get_mut(&mut shared)
-                .unwrap()
-                .ui
-                .status_panel_v2_enabled = v2;
-            let rec = recorder(fx.channel, true).await;
-            let mut locals = tick_locals(&fx, Some(PLACEHOLDER_MSG));
-            run_tick_with_tools(
-                &mut locals,
-                &rec,
-                &shared,
-                &fx,
-                "",
-                &WatcherToolState::new(),
-            )
-            .await;
-            assert!(rec.seen("POST").is_empty());
-            assert_eq!(rec.seen("PATCH").len(), 1);
-            assert_eq!(*rec.bodies.lock().unwrap(), vec![ANCHOR.to_string()]);
-            assert_eq!(locals.edit, ANCHOR);
-            assert_eq!(locals.sent, 0);
-            assert_eq!(locals.placeholder, msg(PLACEHOLDER_MSG));
-        }
+        let case = 63_275;
+        let fx = seed_row(guard.root.path(), case, false, false);
+        let shared = six_tool_fixture(crate::config::ToolActivityDisplay::Summary, fx.channel);
+        let rec = recorder(fx.channel, true).await;
+        let mut locals = tick_locals(&fx, Some(PLACEHOLDER_MSG));
+        run_tick_with_tools(
+            &mut locals,
+            &rec,
+            &shared,
+            &fx,
+            "",
+            &WatcherToolState::new(),
+        )
+        .await;
+        assert!(rec.seen("POST").is_empty());
+        assert_eq!(rec.seen("PATCH").len(), 1);
+        assert_eq!(*rec.bodies.lock().unwrap(), vec![ANCHOR.to_string()]);
+        assert_eq!(locals.edit, ANCHOR);
+        assert_eq!(locals.sent, 0);
+        assert_eq!(locals.placeholder, msg(PLACEHOLDER_MSG));
     });
 }
 

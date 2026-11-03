@@ -165,15 +165,6 @@ mod tests {
 
     const BANNER: &str = "🆕 새 세션 시작";
 
-    fn shared_with_v2(enabled: bool) -> std::sync::Arc<SharedData> {
-        let mut shared = crate::services::discord::make_shared_data_for_tests();
-        std::sync::Arc::get_mut(&mut shared)
-            .expect("fresh test shared data is uniquely owned")
-            .ui
-            .status_panel_v2_enabled = enabled;
-        shared
-    }
-
     fn arm_session(shared: &SharedData, channel_id: ChannelId, nonce: &str, provider_id: &str) {
         assert!(
             shared
@@ -193,7 +184,7 @@ mod tests {
 
     #[test]
     fn banner_is_top_and_sticky_across_streaming_then_terminal() {
-        let shared = shared_with_v2(true);
+        let shared = crate::services::discord::make_shared_data_for_tests();
         let channel_id = ChannelId::new(4147);
         arm_session(&shared, channel_id, "AgentDesk-claude#nonce-a", "session-a");
 
@@ -222,7 +213,7 @@ mod tests {
 
     #[test]
     fn later_turn_same_session_is_not_bannered_but_new_session_rearms() {
-        let shared = shared_with_v2(true);
+        let shared = crate::services::discord::make_shared_data_for_tests();
         let channel_id = ChannelId::new(4148);
         arm_session(&shared, channel_id, "AgentDesk-claude#nonce-a", "session-a");
         let _ = with_session_banner_prefix(
@@ -258,7 +249,7 @@ mod tests {
 
     #[test]
     fn zero_id_turns_use_offset_identity_and_missing_identity_does_not_claim() {
-        let shared = shared_with_v2(true);
+        let shared = crate::services::discord::make_shared_data_for_tests();
         let channel_id = ChannelId::new(4154);
         arm_session(&shared, channel_id, "AgentDesk-codex#nonce-a", "session-a");
 
@@ -311,7 +302,7 @@ mod tests {
 
     #[test]
     fn winning_turn_keeps_prefix_while_snapshot_is_temporarily_cleared() {
-        let shared = shared_with_v2(true);
+        let shared = crate::services::discord::make_shared_data_for_tests();
         let channel_id = ChannelId::new(4149);
         arm_session(&shared, channel_id, "AgentDesk-codex#nonce-a", "session-a");
         let _ = with_session_banner_prefix(
@@ -351,7 +342,7 @@ mod tests {
 
     #[test]
     fn non_first_empty_disabled_and_missing_snapshot_paths_do_not_claim() {
-        let shared = shared_with_v2(true);
+        let shared = crate::services::discord::make_shared_data_for_tests();
         let channel_id = ChannelId::new(4150);
         arm_session(&shared, channel_id, "AgentDesk-claude#nonce-a", "session-a");
         assert_eq!(
@@ -431,7 +422,7 @@ mod tests {
 
     #[test]
     fn real_rollover_plan_freezes_banner_but_advances_only_raw_bytes() {
-        let shared = shared_with_v2(true);
+        let shared = crate::services::discord::make_shared_data_for_tests();
         let channel_id = ChannelId::new(4152);
         arm_session(&shared, channel_id, "AgentDesk-codex#nonce-a", "session-a");
         let raw = "가나다 응답 본문 ".repeat(400);

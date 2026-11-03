@@ -17,34 +17,6 @@ pub(in crate::services::discord) fn record_placeholder_live_event(
     }
 }
 
-pub(super) fn first_request_line(user_text: &str) -> Option<String> {
-    user_text
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(str::to_string)
-}
-
-pub(super) async fn child_progress_line(
-    pg_pool: Option<&sqlx::PgPool>,
-    parent_session_key: Option<&str>,
-) -> Option<String> {
-    let (Some(pg_pool), Some(parent_session_key)) = (pg_pool, parent_session_key) else {
-        return None;
-    };
-    match load_child_inventory_by_parent_key_pg(pg_pool, parent_session_key).await {
-        Ok(summary) => format_child_inventory_progress(&summary, chrono::Utc::now()),
-        Err(error) => {
-            tracing::warn!(
-                "Failed to load background child inventory for {}: {}",
-                parent_session_key,
-                error
-            );
-            None
-        }
-    }
-}
-
 pub(super) async fn refresh_session_panel_line_from_lifecycle(
     shared: &SharedData,
     channel_id: ChannelId,

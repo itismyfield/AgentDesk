@@ -74,23 +74,16 @@ pub(super) fn status_panel_edit_defer_for_first_answer(
 // Separate-panel creation is retired; the legacy panel path removal drops this gate.
 pub(super) fn bridge_should_create_separate_status_panel(
     _single_message_panel_footer_mode: bool,
-    _status_panel_v2_enabled: bool,
     _status_panel_msg_id: Option<MessageId>,
     _current_msg_id: MessageId,
 ) -> bool {
     false
 }
 
-#[cfg(test)]
-pub(super) fn bridge_should_complete_separate_status_panel(status_panel_v2_enabled: bool) -> bool {
-    status_panel_v2_enabled
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn maybe_create_bridge_separate_status_panel_response<G: TurnGateway + ?Sized>(
     two_message_panel_enabled: bool,
     single_message_panel_footer_mode: bool,
-    status_panel_v2_enabled: bool,
     gateway: &G,
     channel_id: ChannelId,
     initial_indicator: &str,
@@ -114,7 +107,6 @@ pub(super) async fn maybe_create_bridge_separate_status_panel_response<G: TurnGa
         if super::two_message_panel::bridge_should_create_two_message_status_panel(
             two_message_panel_enabled,
             single_message_panel_footer_mode,
-            status_panel_v2_enabled,
             *status_panel_msg_id,
             *current_msg_id,
         ) {
@@ -137,7 +129,6 @@ pub(super) async fn maybe_create_bridge_separate_status_panel_response<G: TurnGa
 
     if !bridge_should_create_separate_status_panel(
         single_message_panel_footer_mode,
-        status_panel_v2_enabled,
         *status_panel_msg_id,
         *current_msg_id,
     ) {
@@ -183,8 +174,6 @@ pub(super) fn build_bridge_single_message_panel_status_block(
     provider: &ProviderKind,
     started_at_unix: i64,
     indicator: &str,
-    prev_tool_status: Option<&str>,
-    current_tool_line: Option<&str>,
     full_response: &str,
 ) -> String {
     // Retired snapshots omit this block, but keep its budget to preserve rollover offsets.
@@ -197,16 +186,7 @@ pub(super) fn build_bridge_single_message_panel_status_block(
             .placeholder_live_events
             .render_footer_status_panel(channel_id, provider, started_at_unix, content);
     }
-    if shared.ui.status_panel_v2_enabled {
-        super::formatting::build_processing_status_block(indicator)
-    } else {
-        super::formatting::build_placeholder_status_block(
-            indicator,
-            prev_tool_status,
-            current_tool_line,
-            full_response,
-        )
-    }
+    super::formatting::build_processing_status_block(indicator)
 }
 
 pub(super) fn finalize_bridge_streaming_footer(

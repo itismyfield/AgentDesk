@@ -183,11 +183,7 @@ async fn only_a_tick_that_streams_a_body_ends_a_pending_adoption() {
 
 /// A footer-mode shared state whose live panel saw `Bash` start in `channel`.
 fn panel_with_last_tool(channel: ChannelId) -> Arc<SharedData> {
-    let mut shared = crate::services::discord::make_shared_data_for_tests();
-    Arc::get_mut(&mut shared)
-        .expect("fresh shared")
-        .ui
-        .status_panel_v2_enabled = true;
+    let shared = crate::services::discord::make_shared_data_for_tests();
     let events = crate::services::discord::placeholder_live_events::status_events_from_tool_use(
         "Bash",
         r#"{"command":"cargo test"}"#,

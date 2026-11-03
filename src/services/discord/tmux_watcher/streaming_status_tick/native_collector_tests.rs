@@ -146,7 +146,6 @@ fn native_collector_case(test_name: &str, mode: u8) {
         fx.identity = InflightTurnIdentity::from_state(&row);
         let mut shared = crate::services::discord::make_shared_data_for_tests();
         let ui = &mut Arc::get_mut(&mut shared).expect("unshared fixture").ui;
-        ui.status_panel_v2_enabled = true;
         ui.two_message_panel_enabled = true;
         let rec = recorder_for_cycle(fx.channel, true, true).await;
         let actor = Arc::new(

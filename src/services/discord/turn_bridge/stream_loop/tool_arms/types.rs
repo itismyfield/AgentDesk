@@ -32,8 +32,6 @@ pub(in crate::services::discord::turn_bridge::stream_loop) struct StreamToolArmC
     pub(in crate::services::discord::turn_bridge::stream_loop) gateway: &'a Arc<dyn TurnGateway>,
     pub(in crate::services::discord::turn_bridge::stream_loop) channel_id: ChannelId,
     pub(in crate::services::discord::turn_bridge::stream_loop) provider: &'a ProviderKind,
-    pub(in crate::services::discord::turn_bridge::stream_loop) user_text_owned: &'a String,
-    pub(in crate::services::discord::turn_bridge::stream_loop) request_owner_name: &'a str,
     pub(in crate::services::discord::turn_bridge::stream_loop) adk_session_key: &'a Option<String>,
     pub(in crate::services::discord::turn_bridge::stream_loop) adk_session_name: &'a Option<String>,
     pub(in crate::services::discord::turn_bridge::stream_loop) role_binding:

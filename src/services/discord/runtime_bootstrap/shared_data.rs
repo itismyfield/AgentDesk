@@ -110,8 +110,6 @@ pub(super) fn run_bot_build_shared_data(
             placeholder_live_events: Arc::new(
                 crate::services::discord::placeholder_live_events::PlaceholderLiveEvents::with_tool_activity_display(crate::config::runtime_config().placeholder.tool_activity_display),
             ),
-            // Config switch retired: the v2 panel is the production layout.
-            status_panel_v2_enabled: true,
             two_message_panel_enabled,
         },
         // #3038 S1: wrapped verbatim at the first-member position (evaluation-order preserved).

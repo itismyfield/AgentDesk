@@ -29,7 +29,6 @@ use super::*;
 pub(super) fn bridge_should_create_two_message_status_panel(
     _two_message_panel_enabled: bool,
     _single_message_panel_footer_mode: bool,
-    _status_panel_v2_enabled: bool,
     _status_panel_msg_id: Option<MessageId>,
     _current_msg_id: MessageId,
 ) -> bool {
@@ -449,11 +448,7 @@ mod tests {
     }
 
     fn make_status_panel_v2_shared_for_tests() -> Arc<SharedData> {
-        let mut shared = super::super::make_shared_data_for_tests();
-        Arc::get_mut(&mut shared)
-            .expect("fresh shared data should be uniquely owned")
-            .ui
-            .status_panel_v2_enabled = true;
+        let shared = super::super::make_shared_data_for_tests();
         shared
     }
 
@@ -585,7 +580,7 @@ mod tests {
         let synthetic = MessageId::new(9_100_000_000_000_000_123);
         assert!(is_synthetic_headless_message_id(synthetic));
         assert!(!bridge_should_create_two_message_status_panel(
-            true, false, true, None, synthetic,
+            true, false, None, synthetic,
         ));
     }
 

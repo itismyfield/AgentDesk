@@ -113,7 +113,7 @@ async fn finish_turn(
     let _separate = SeparatePanel;
     let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
     let ui = &mut Arc::get_mut(&mut driver.shared).expect("fresh driver").ui;
-    (ui.status_panel_v2_enabled, ui.two_message_panel_enabled) = (true, true);
+    ui.two_message_panel_enabled = true;
     driver.inflight.runtime_kind = Some(ClaudeTui);
     driver.inflight.status_message_id = Some(PANEL);
     driver.inflight.full_response = driver.body.clone();
