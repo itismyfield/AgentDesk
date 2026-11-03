@@ -263,7 +263,11 @@ async fn assemble(
         json["resident_loops"] = crate::services::resident_loops::health_json();
         json["release_source"] = release_source;
         json["boot_incarnation"] = serde_json::json!(boot_incarnation());
-        json["legacy_body_census"] = crate::services::legacy_body_census::health_json();
+        json["legacy_body_census"] = if detailed {
+            crate::services::legacy_body_census::detail_json()
+        } else {
+            crate::services::legacy_body_census::health_json()
+        };
         attach_runtime_profile(&mut json, &state.config);
         json["intake_routing"] =
             crate::services::cluster::intake_router_hook::intake_routing_status_json();
@@ -335,7 +339,7 @@ async fn assemble(
             "recovery_duration": 0.0,
             "degraded_reasons": serde_json::Value::Array(degraded_reasons),
             "boot_incarnation": boot_incarnation(),
-            "legacy_body_census": crate::services::legacy_body_census::health_json(),
+            "legacy_body_census": if detailed { crate::services::legacy_body_census::detail_json() } else { crate::services::legacy_body_census::health_json() },
         });
         if !worker_restart_flapping.is_empty() {
             json["worker_restart_flapping"] = serde_json::Value::Array(worker_restart_flapping);

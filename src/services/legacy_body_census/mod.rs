@@ -7,6 +7,9 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
+mod cache;
+mod collector;
+mod evaluation;
 mod evidence;
 mod history;
 mod manifest;
@@ -198,8 +201,38 @@ pub(crate) async fn ensure_ready_with(host: Option<&str>) {
 pub(crate) async fn record_selection(config: &crate::config::Config, installed: bool) {
     use crate::services::tui_o::channel_policy;
     let writer = &channel_policy::tui_o_of(config).writer;
+    let bindings: Option<std::collections::BTreeSet<u64>> = config
+        .agents
+        .iter()
+        .flat_map(|agent| agent.channels.iter())
+        .filter(|(provider, channel)| {
+            let provider = channel
+                .provider()
+                .unwrap_or_else(|| (*provider).to_string());
+            crate::services::provider_hosting::channel_effective_tui_request(
+                config, channel, &provider,
+            )
+        })
+        .map(|(_, channel)| {
+            channel
+                .channel_id()?
+                .parse::<std::num::NonZeroU64>()
+                .ok()
+                .map(|id| id.get())
+        })
+        .collect();
+    let selection_source = if writer.all_tui == Some(false) && writer.channels.is_empty() {
+        "explicit_off"
+    } else if !writer.channels.is_empty() {
+        "explicit_list"
+    } else if writer.all_tui == Some(true) {
+        "explicit_all_tui"
+    } else {
+        "default_all_tui"
+    };
     let record = json!({"kind":"selection", "installed":installed,
-        "host":config.cluster.instance_id,
+        "host":config.cluster.instance_id,"tui_bindings":bindings,"selection_source":selection_source,
+        "owner":channel_policy::boot().and_then(|boot| boot.configured_id()),
         "requested":{"all_tui":writer.all_tui,"channels":writer.channels},
         "effective":channel_policy::boot().filter(|_| installed).map(|boot| boot.selected()),
         "dormant":channel_policy::boot().filter(|_| installed).map(|boot| boot.dormant_channels())});
@@ -228,4 +261,36 @@ pub(crate) fn health_json() -> Value {
             .as_millis()
     );
     value
+}
+
+pub(crate) fn detail_json() -> Value {
+    let now = chrono::Utc::now().timestamp_millis();
+    #[cfg(test)]
+    if let Ok(value) = TEST_PROJECTION.try_with(|(cache, now)| cache.snapshot(*now)) {
+        return value;
+    }
+    JOURNAL.get().map_or_else(
+        || {
+            json!({"schema_version":1,"policy_version":1,"status":"INCONCLUSIVE",
+            "inventory_source":{"available":false},"errors":["JOURNAL_NOT_STARTED"]})
+        },
+        |journal| journal.0.projection.snapshot(now),
+    )
+}
+
+#[cfg(test)]
+pub(crate) use cache::ProjectionCache;
+#[cfg(test)]
+pub(crate) use collector::Collector;
+#[cfg(test)]
+pub(crate) use evaluation::evaluate;
+#[cfg(test)]
+tokio::task_local! { static TEST_PROJECTION: (Arc<ProjectionCache>, i64); }
+#[cfg(test)]
+pub(crate) async fn with_projection_for_test<T>(
+    cache: Arc<ProjectionCache>,
+    now: i64,
+    next: impl std::future::Future<Output = T>,
+) -> T {
+    TEST_PROJECTION.scope((cache, now), next).await
 }

@@ -1,10 +1,10 @@
-use super::{Shared, State, history, invalidate};
+use super::{Shared, State, cache::ProjectionCache, collector::Collector, history, invalidate};
 use crate::services::process_boot::Boot;
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex, mpsc},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::oneshot;
 
@@ -42,6 +42,7 @@ pub(super) struct Writer {
     sender: mpsc::SyncSender<Message>,
     pub(super) state: Shared,
     timeout: Duration,
+    pub(super) projection: Arc<ProjectionCache>,
 }
 
 fn persist_invalid(file: &mut std::fs::File, state: &Shared, persisted: &mut Vec<String>) {
@@ -88,6 +89,8 @@ impl Writer {
         let state = Arc::new(Mutex::new(State::new(&boot, options.host.clone())));
         let shared = state.clone();
         let timeout = options.timeout;
+        let projection = Arc::new(ProjectionCache::default());
+        let cached = projection.clone();
         let thread = std::thread::Builder::new()
             .name("legacy-body-census-writer".into())
             .spawn(move || {
@@ -95,7 +98,25 @@ impl Writer {
                 let mut prepared = false;
                 let mut persisted = Vec::new();
                 let mut last_cut = 0;
-                while let Ok(message) = receiver.recv() {
+                let mut collector = Collector::default();
+                let mut refreshed = None::<Instant>;
+                loop {
+                    let message = match receiver.recv_timeout(Duration::from_secs(60)) {
+                        Ok(message) => message,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            if prepared && let Some(root) = root.as_deref() {
+                                cached.refresh(
+                                    &mut collector,
+                                    root,
+                                    &boot.id,
+                                    chrono::Utc::now().timestamp_millis(),
+                                );
+                                refreshed = Some(Instant::now());
+                            }
+                            continue;
+                        }
+                    };
                     (options.before_write)();
                     if !prepared {
                         prepared = true;
@@ -155,6 +176,18 @@ impl Writer {
                             persist_invalid(file, &shared, &mut persisted);
                         }
                     }
+                    drop(gate);
+                    if refreshed.is_none_or(|at| at.elapsed() >= Duration::from_secs(60))
+                        && let Some(root) = root.as_deref()
+                    {
+                        cached.refresh(
+                            &mut collector,
+                            root,
+                            &boot.id,
+                            chrono::Utc::now().timestamp_millis(),
+                        );
+                        refreshed = Some(Instant::now());
+                    }
                 }
                 let gate = root
                     .as_deref()
@@ -175,6 +208,7 @@ impl Writer {
             sender,
             state,
             timeout,
+            projection,
         }
     }
 

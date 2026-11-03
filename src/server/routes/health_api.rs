@@ -2664,6 +2664,289 @@ mod tests {
             &[]
         ));
     }
+    #[tokio::test]
+    async fn legacy_body_census_detail_exposes_cached_file_evidence() {
+        use crate::services::legacy_body_census::{
+            Collector, ProjectionCache, evaluate, with_projection_for_test,
+        };
+        use serde_json::json;
+        const START: i64 = 60_000;
+        const CUT: i64 = 240_000;
+        const BUILD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const CENSUS: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        fn fixture(root: &std::path::Path, host: &str, case: &str) -> String {
+            let directory = root.join("legacy_body_census");
+            let doctor = root.join("runtime/doctor/startup");
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::create_dir_all(&doctor).unwrap();
+            std::fs::File::create(directory.join("writer.lock")).unwrap();
+            let ids: Vec<_> = (0..3).map(|_| uuid::Uuid::new_v4().to_string()).collect();
+            let offset = i64::from(case == "late_epoch");
+            let anchor = json!({"boot_id":ids[1],"started_at_ms":START + offset});
+            let last = if case == "no_restart" { 1 } else { 2 };
+            for i in 0..=last {
+                let started = if case == "same_time" && i == 2 {
+                    START
+                } else {
+                    i as i64 * START + if i > 0 { offset } else { 0 }
+                };
+                let doc = format!("{}-{}", i + 1, i * 60);
+                let mut header = json!({"kind":"header","schema_version":1,"observation_policy_version":1,
+                    "host":host,"process_role":"server","boot_id":ids[i],"doctor_boot_id":doc,
+                    "predecessor_boot_id":i.checked_sub(1).map(|n| &ids[n]),"started_at_ms":started,
+                    "coverage_start":if i==0 {json!({"boot_id":ids[0],"started_at_ms":0})} else {anchor.clone()},
+                    "build_sha":BUILD,"census_hash":CENSUS,"probe_coverage":true,"pending_probes":0});
+                if case == "wrong_census" && i == 2 {
+                    header["census_hash"] = json!("d".repeat(64));
+                }
+                if case == "wrong_build" && i == 2 {
+                    header["build_sha"] = json!("d".repeat(40));
+                }
+                let selection = json!({"kind":"selection","installed":true,"tui_bindings":[1],"effective":[1],"dormant":[],"selection_source":"explicit_all_tui"});
+                let mut records = vec![json!({"kind":"boot_ready"}), selection];
+                if case == "selection_off" && i == 2 {
+                    records[1]["effective"] = json!([]);
+                }
+                if i == last && case != "denominator_missing" {
+                    let turns = if case == "no_traffic" { 9 } else { 10 };
+                    let ack = if case == "no_ack" { 0 } else { 1 };
+                    let opportunities = if case == "no_site_traffic" { 0 } else { 1 };
+                    let begin = if case == "late_epoch" { 180000 } else { 120000 };
+                    records.push(json!({"kind":"denominator","bucket_start_ms":begin,"bucket_end_ms":begin+60000,
+                        "complete":true,"tui_turns":turns,"o_ack":ack,"opportunities":{"W11":opportunities,"W01":1}}));
+                    if case == "bucket_duplicate" {
+                        records.push(records.last().unwrap().clone());
+                    }
+                    if case == "partial_bucket" {
+                        records.last_mut().unwrap()["bucket_end_ms"] = json!(CUT + 1);
+                    }
+                }
+                let target_at = match case {
+                    "start_minus_one" if i == 0 => Some(START - 1),
+                    "start_at" if i == 0 => Some(START),
+                    "body" | "mixed_invalid" | "end_at" | "end_plus_one" | "unknown_body"
+                    | "nonbody" | "refresh" | "runtime_unknown" | "owner_unknown"
+                        if i == 2 =>
+                    {
+                        Some(CUT)
+                    }
+                    _ => None,
+                };
+                if let Some(at) = target_at {
+                    records.push(json!({"kind":"target","phase":"begin","op":"POST","at_ms":at,
+                        "census":{"site":"W11","binding_mode":"TUI","body_owner":"Legacy","actual_runtime":"codex_tui",
+                        "source_incarnation":{"file":1,"generation":1},"output_class":match case {"unknown_body"=>"UnknownBody","nonbody"=>"NonBody","refresh"=>"LegacyBodyRefresh",_=>"LegacyBody"}}}));
+                }
+                if case == "runtime_unknown" && i == 2 {
+                    records.last_mut().unwrap()["census"]["actual_runtime"] = json!("unknown");
+                }
+                if case == "owner_unknown" && i == 2 {
+                    records.last_mut().unwrap()["census"]["body_owner"] = serde_json::Value::Null;
+                }
+                if i < last {
+                    records.push(json!({"kind":"end","outputs_drained":true,"ended_at_ms":if case=="start_at" && i==0 {CUT} else {(i as i64+1)*START-1}}));
+                }
+                let mut text = header.to_string() + "\n";
+                for record in &records {
+                    text += &(record.to_string() + "\n");
+                }
+                text+=&(json!({"kind":"drain","boot_id":ids[i],"cut":records.len(),"closed":i<last,"invalid":false}).to_string()+"\n");
+                if case == "mixed_invalid" && i == 2 {
+                    text += "{";
+                }
+                if case == "truncated" && i == 2 {
+                    text.pop();
+                }
+                let path = directory.join(format!("{}.jsonl", ids[i]));
+                std::fs::write(path, text).unwrap();
+                let timestamp = chrono::DateTime::from_timestamp_millis(started + 1)
+                    .unwrap()
+                    .to_rfc3339();
+                std::fs::write(doctor.join(format!("{doc}.json")),json!({"schema_version":1,"run_context":"startup_once","boot_id":doc,"started_at":timestamp}).to_string()).unwrap();
+            }
+            if case == "middle_boot_missing" {
+                let at = chrono::DateTime::from_timestamp_millis(90000)
+                    .unwrap()
+                    .to_rfc3339();
+                std::fs::write(doctor.join("999-90.json"),json!({"schema_version":1,"run_context":"startup_once","boot_id":"999-90","started_at":at}).to_string()).unwrap();
+            }
+            if case == "read_error" {
+                std::fs::remove_file(directory.join("writer.lock")).unwrap();
+            }
+            ids[last].clone()
+        }
+        for (case, expected) in [
+            ("valid", "PASS"),
+            ("same_time", "PASS"),
+            ("staggered_epochs", "FAIL"),
+            ("bucket_duplicate", "PASS"),
+            ("no_traffic", "NO_TRAFFIC"),
+            ("no_ack", "NO_TRAFFIC"),
+            ("no_site_traffic", "PASS"),
+            ("denominator_missing", "INCONCLUSIVE"),
+            ("no_restart", "INCONCLUSIVE"),
+            ("partial_bucket", "INCONCLUSIVE"),
+            ("host_missing", "INCONCLUSIVE"),
+            ("empty", "INCONCLUSIVE"),
+            ("duplicate_host", "INCONCLUSIVE"),
+            ("middle_boot_missing", "INCONCLUSIVE"),
+            ("read_error", "INCONCLUSIVE"),
+            ("truncated", "INCONCLUSIVE"),
+            ("stale", "INCONCLUSIVE"),
+            ("skew", "INCONCLUSIVE"),
+            ("wrong_build", "INCONCLUSIVE"),
+            ("wrong_census", "FAIL"),
+            ("runtime_unknown", "INCONCLUSIVE"),
+            ("owner_unknown", "INCONCLUSIVE"),
+            ("unknown_body", "INCONCLUSIVE"),
+            ("selection_off", "FAIL"),
+            ("body", "FAIL"),
+            ("mixed_invalid", "FAIL"),
+            ("start_minus_one", "PASS"),
+            ("start_at", "FAIL"),
+            ("end_at", "FAIL"),
+            ("end_plus_one", "PASS"),
+            ("nonbody", "PASS"),
+            ("refresh", "PASS"),
+        ] {
+            let mut observations = Vec::new();
+            for name in ["mini", "book"] {
+                let root = tempfile::tempdir().unwrap();
+                let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+                let active = if case == "staggered_epochs" {
+                    if name == "mini" {
+                        "start_at"
+                    } else {
+                        "late_epoch"
+                    }
+                } else if name == "mini" || case == "no_site_traffic" {
+                    case
+                } else {
+                    "valid"
+                };
+                let current = fixture(root.path(), name, active);
+                let cut = if name == "book" && case == "end_plus_one" {
+                    CUT - 1
+                } else if name == "book" && case == "skew" {
+                    CUT - 5001
+                } else {
+                    CUT
+                };
+                let cache = ProjectionCache::fixture(root.path(), &current, cut);
+                let now = if active == "stale" { CUT + 120001 } else { CUT };
+                let detail = with_projection_for_test(
+                    cache.clone(),
+                    now,
+                    health_body("/health/detail", None),
+                )
+                .await;
+                if case == "valid" {
+                    assert_eq!(detail["legacy_body_census"]["probe_coverage"], true);
+                    assert_eq!(detail["legacy_body_census"]["pending_probes"], 0);
+                    assert_eq!(detail["legacy_body_census"]["read_error"], false);
+                }
+                if active == "stale" {
+                    let local = &detail["legacy_body_census"]["local_evaluation"];
+                    assert_eq!(local["status"], "INCONCLUSIVE");
+                    assert_eq!(local["sites"]["W11"]["status"], "DELETE_NOT_READY");
+                }
+                observations.push(detail["legacy_body_census"].clone());
+                let public =
+                    with_projection_for_test(cache, now, health_body("/health", None)).await;
+                assert!(public["legacy_body_census"]["boot_files"].is_null());
+            }
+            match case {
+                "host_missing" => {
+                    observations.pop();
+                }
+                "empty" => observations.clear(),
+                "duplicate_host" => observations[1]["host"] = json!("mini"),
+                _ => {}
+            }
+            let report = evaluate(["mini", "book"], &observations, CUT, BUILD, CENSUS);
+            assert_eq!(report["stage1"], expected, "{case}: {report}");
+            if case == "valid" {
+                assert_eq!(report["sites"]["W11"]["status"], "DELETE_READY");
+                assert_eq!(report["sites"]["W01"]["status"], "DELETE_NOT_READY");
+            }
+            if case == "no_site_traffic" {
+                assert_eq!(report["sites"]["W11"]["status"], "DELETE_NOT_READY");
+            }
+            if case == "mixed_invalid" {
+                assert_eq!(report["complete"], false);
+            }
+        }
+        // A blocked cache publisher must not stall an actual detail request.
+        let root = tempfile::tempdir().unwrap();
+        let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+        let current = fixture(root.path(), "mini", "valid");
+        let cache = ProjectionCache::fixture(root.path(), &current, CUT);
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let blocked = cache.clone();
+        let a = entered.clone();
+        let b = release.clone();
+        let writer = std::thread::spawn(move || {
+            blocked.block_for_test(|| {
+                a.wait();
+                b.wait();
+            })
+        });
+        entered.wait();
+        let (sent, received) = std::sync::mpsc::channel();
+        let request = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let response = runtime.block_on(with_projection_for_test(
+                cache,
+                CUT,
+                health_body("/health/detail", None),
+            ));
+            sent.send(response).unwrap();
+        });
+        let response = received.recv_timeout(std::time::Duration::from_secs(3));
+        release.wait();
+        writer.join().unwrap();
+        request.join().unwrap();
+        assert!(response.unwrap()["legacy_body_census"]["inventory_source"]["available"] == false);
+        let mut collector = Collector::default();
+        assert_eq!(
+            collector.collect(root.path(), &current, CUT)["local_evaluation"]["status"],
+            "PASS"
+        );
+        let old = std::fs::read_dir(root.path().join("legacy_body_census"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| {
+                entry.path().extension().is_some_and(|ext| ext == "jsonl")
+                    && std::fs::read_to_string(entry.path())
+                        .unwrap()
+                        .lines()
+                        .next()
+                        .unwrap()
+                        .contains("\"started_at_ms\":0")
+            })
+            .unwrap()
+            .path();
+        let bytes = std::fs::read_to_string(&old).unwrap();
+        std::fs::write(
+            old,
+            bytes.replace("\"host\":\"mini\"", "\"host\":\"changed\""),
+        )
+        .unwrap();
+        for _ in 0..2 {
+            let observed = collector.collect(root.path(), &current, CUT);
+            assert!(
+                observed["errors"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("CLOSED_JOURNAL_CHANGED"))
+            );
+            assert_eq!(observed["local_evaluation"]["status"], "INCONCLUSIVE");
+        }
+    }
 }
 
 fn parse_status_code(s: &str) -> StatusCode {

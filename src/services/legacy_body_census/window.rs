@@ -67,7 +67,6 @@ impl Window {
 }
 
 // Structural evidence only; the collector must also reconcile independent boot inventory.
-#[cfg(test)]
 pub(super) fn valid_chain(
     headers: &std::collections::BTreeMap<String, Value>,
     anchor: &Value,
