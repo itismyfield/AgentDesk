@@ -3681,7 +3681,6 @@ src/
 │   │   │   └── pane.rs
 │   │   ├── human_frame/
 │   │   │   ├── history/
-│   │   │   │   ├── compat/
 │   │   │   │   ├── v2/
 │   │   │   │   │   ├── collision.rs
 │   │   │   │   │   ├── migration.rs
