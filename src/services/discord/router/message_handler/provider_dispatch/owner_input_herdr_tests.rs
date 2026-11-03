@@ -480,6 +480,72 @@ fn owned_herdr_codex_first_prompt_takes_only_a_fresh_execution() {
     );
 }
 
+#[test]
+fn owned_herdr_codex_first_prompt_delivers_over_draft_and_busy_but_holds_modal() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let menu = include_str!(
+        "../../../../../../tests/fixtures/tui_input/codex-0.160.0-security-banner.ansi"
+    )
+    .replace(
+        "Press a number to choose · esc to dismiss · type to continue",
+        "Press a number to choose",
+    );
+    for (n, screen, allowed) in [
+        (0, "\n› a person's draft\ngpt-5.4 xhigh · /tmp", true),
+        (
+            1,
+            "• Working (1s • esc to interrupt)\n\n› \ngpt-5.4 xhigh · /tmp",
+            true,
+        ),
+        (
+            2,
+            "Approval required\n› 1. Yes\ngpt-5.4 xhigh · /tmp",
+            false,
+        ),
+        (3, menu.as_str(), false),
+        (
+            4,
+            "  /model     choose what model and reasoning effort to use\n› /memories  configure memory use and generation\n  /mention   mention a file\n  /mcp       list MCP tools\n\n› /m\n\n  model · high · fast",
+            false,
+        ),
+        (5, "\n› /a person's draft\n\n  100% context left", true),
+    ] {
+        let owner = HerdrOwner::start("codex", 7_676_140 + n);
+        let _registry = owner.rig.registry_on_this_thread();
+        let mut shown = codex_ready();
+        shown["read"]["text"] = json!(screen);
+        owner.rig.answer("pane.read", shown);
+        let pool = unused_pool(&owner);
+        let turn = owner.codex_turn(&pool);
+        let record = owner.record("codex", HostedState::Pending);
+        let _entered = owner.runtime.enter();
+        let _waiting = owner.wait_for("codex", Lineage::Created);
+        let result = crate::services::codex::herdr_turn::owned_first_prompt_for_tests(
+            &turn,
+            &record,
+            Lineage::Created,
+        );
+        if allowed {
+            assert_eq!(result, Ok(()), "case {n}");
+            owner.delivered_once(PROMPT);
+            assert!(
+                owner.rig.sends()[0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("\u{1b}[200~")
+            );
+        } else {
+            assert!(result.is_err(), "case {n}");
+            assert!(owner.rig.sends().is_empty(), "case {n}");
+            let snapshot = owner.snapshot();
+            assert_eq!(
+                snapshot["retained_inputs"][0]["disposition"], "known_not_sent",
+                "{snapshot}"
+            );
+        }
+    }
+}
+
 /// A Codex Herdr first prompt is reserved as the text its write types: with LF, CRLF or a bare CR
 /// line ending, the head's frame and digest, the history's frame and the sent text are one string.
 #[test]

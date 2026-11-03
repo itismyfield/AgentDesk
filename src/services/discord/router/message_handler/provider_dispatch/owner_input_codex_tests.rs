@@ -152,8 +152,270 @@ fn owner_busy_codex_pastes_and_enters_once() {
     rig.delivered();
 }
 
+#[test]
+fn owner_drive_codex_delivers_draft_busy_and_unknown_turn_once() {
+    use crate::services::discord::queue_io::input_owner::drive::{Drive, Handoff, wake};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let ready =
+        include_str!("../../../../../../tests/fixtures/tui_input/codex-status-sol-80-idle.ansi");
+    let draft = ready.replace("\x1b[2mAsk Codex to do anything\x1b[0m", "a person's draft");
+    let busy = format!("• Working (12s • esc to interrupt)\n{ready}");
+    let control_words = ready.replace(
+        "\x1b[2mAsk Codex to do anything\x1b[0m",
+        "Approval required: my draft text",
+    );
+    let banner = include_str!(
+        "../../../../../../tests/fixtures/tui_input/codex-0.160.0-security-banner.ansi"
+    );
+    for (n, phase, screen, rollout) in [
+        (0, target::Phase::Busy, draft.as_str(), Some("")),
+        (1, target::Phase::Busy, busy.as_str(), Some("{not json}\n")),
+        (2, target::Phase::Busy, draft.as_str(), None),
+        (3, target::Phase::Idle, draft.as_str(), None),
+        (4, target::Phase::Idle, busy.as_str(), None),
+        (5, target::Phase::Idle, banner, None),
+        (
+            6,
+            target::Phase::Idle,
+            "an unfamiliar composer layout",
+            None,
+        ),
+        (7, target::Phase::Idle, control_words.as_str(), None),
+        (8, target::Phase::Busy, ready, None),
+        (
+            9,
+            target::Phase::Idle,
+            "\n› /a person's draft\n\n  100% context left",
+            None,
+        ),
+    ] {
+        let name = format!("oc-deliver-{n}");
+        let rig = codex_rig_on(&name, 7_676_100 + n, true);
+        if let Some(rollout) = rollout {
+            fs::write(rig.transcript(), rollout).unwrap();
+        }
+        // All effect threads read this capture through the existing tmux fixture.
+        let shim = rig.f.root.path().join("tmux");
+        let inner = rig.f.root.path().join("tmux-inner");
+        let capture = rig.f.root.path().join("delivery-capture");
+        fs::write(&capture, screen).unwrap();
+        fs::rename(&shim, &inner).unwrap();
+        let counter = rig.f.root.path().join("cursor-reads");
+        let cursor = if n == 8 {
+            format!(
+                "case \"$*\" in *cursor_x*) n=$(cat '{}' 2>/dev/null || echo 0); n=$((n+1)); echo \"$n\" > '{}'; '{}' \"$@\" | awk -F '|' -v n=\"$n\" 'BEGIN {{OFS=\"|\"}} {{$5=($5+n)%$3; print}}'; exit 0 ;; esac\n",
+                counter.display(),
+                counter.display(),
+                inner.display()
+            )
+        } else {
+            String::new()
+        };
+        fs::write(&shim, format!("#!/bin/sh\n{cursor}case \"$*\" in *capture-pane*) cat '{}'; exit 0 ;; esac\nexec '{}' \"$@\"\n", capture.display(), inner.display())).unwrap();
+        fs::set_permissions(&shim, fs::metadata(&inner).unwrap().permissions()).unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let handoff: Handoff = Arc::new(move |front| {
+            let (reply, settled) = tokio::sync::oneshot::channel();
+            send.send((front, reply)).unwrap();
+            Box::pin(async move { settled.await.unwrap() })
+        });
+        let (settle_send, settle_receive) = std::sync::mpsc::channel();
+        let drive = Arc::new(Drive {
+            mailbox: rig.mailbox.clone(),
+            channel: rig.channel,
+            handoff,
+            settled: Some(Arc::new(move || {
+                settle_send.send(()).unwrap();
+                Box::pin(async {})
+            })),
+        });
+        {
+            let _entered = rig.runtime.enter();
+            wake(drive.clone());
+        }
+        let (front, reply) = receive
+            .recv_timeout(Duration::from_secs(5))
+            .expect("owner drive handoff");
+        let result = rig.handoff(front, ProviderKind::Codex, phase, &rig.transcript());
+        reply.send(result.clone()).unwrap();
+        assert_eq!(result, Ok(()), "case {n}");
+        assert_eq!(rig.events(), ["paste", "Enter"], "case {n}");
+        let expected = if phase == target::Phase::Busy {
+            rig.frame()
+        } else {
+            codex_herdr_frame(PROMPT).unwrap()
+        };
+        assert_eq!(rig.pasted(), expected, "case {n}");
+        rig.delivered();
+        settle_receive
+            .recv_timeout(Duration::from_secs(5))
+            .expect("drive settled after delivery");
+        {
+            let _entered = rig.runtime.enter();
+            wake(drive.clone());
+            wake(drive);
+        }
+        settle_receive
+            .recv_timeout(Duration::from_secs(5))
+            .expect("duplicate wake exhausted the queue");
+        assert!(
+            receive.try_recv().is_err(),
+            "original submitted again in case {n}"
+        );
+        assert_eq!(rig.events(), ["paste", "Enter"], "case {n}");
+    }
+}
+
+#[test]
+fn owner_codex_holds_modal_missing_capture_and_copy_mode_without_keys() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let ready =
+        include_str!("../../../../../../tests/fixtures/tui_input/codex-status-sol-80-idle.ansi");
+    let modal = format!("Approval required?\n1. Yes\n2. No\n{}", ready.trim_start());
+    let menu = include_str!(
+        "../../../../../../tests/fixtures/tui_input/codex-0.160.0-security-banner.ansi"
+    )
+    .replace(
+        "Press a number to choose · esc to dismiss · type to continue",
+        "Press a number to choose",
+    );
+    let confirmation = menu.replace(
+        "Press a number to choose",
+        "Press enter to confirm or esc to cancel",
+    );
+    for (n, capture, mode) in [
+        (0, Some(modal.as_str()), false),
+        (1, None, false),
+        (2, Some(ready), true),
+        (3, Some(menu.as_str()), false),
+        (4, Some(confirmation.as_str()), false),
+        // Codex 0.166.0's slash_popup_footer_wide and default_unified_mention_popup snapshots.
+        (
+            5,
+            Some(
+                "  /model     choose what model and reasoning effort to use\n› /memories  configure memory use and generation\n  /mention   mention a file\n  /mcp       list MCP tools\n\n› /m\n\n  model · high · fast",
+            ),
+            false,
+        ),
+        (
+            6,
+            Some(
+                "  Mentions\n› Sample Plugin   Plugin with skills and an MCP server\n  enter/tab insert · esc close · ↑/↓ select · ←/→ filter\n\n› @sa\n\n  100% context left",
+            ),
+            false,
+        ),
+    ] {
+        let name = format!("oc-hold-{n}");
+        let rig = codex_rig_on(&name, 7_676_120 + n, true);
+        let shim = rig.f.root.path().join("tmux");
+        let inner = rig.f.root.path().join("tmux-inner");
+        let shown = rig.f.root.path().join("held-capture");
+        if let Some(capture) = capture {
+            fs::write(&shown, capture).unwrap();
+        }
+        fs::rename(&shim, &inner).unwrap();
+        fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\ncase \"$*\" in *capture-pane*) {} ;; esac\nexec '{}' \"$@\"\n",
+                if capture.is_some() {
+                    format!("cat '{}'; exit 0", shown.display())
+                } else {
+                    "exit 1".into()
+                },
+                inner.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&shim, fs::metadata(&inner).unwrap().permissions()).unwrap();
+        if mode {
+            rig.f.tmux(&["copy-mode", "-t", &format!("={name}:")]);
+        }
+        let result = rig.dispatch(ProviderKind::Codex, target::Phase::Idle, &rig.transcript());
+        assert!(result.is_err(), "case {n}: {result:?}");
+        assert!(rig.events().is_empty(), "case {n}: {:?}", rig.events());
+        let snapshot = rig.snapshot();
+        assert!(snapshot["head_injection"].is_null(), "{snapshot}");
+        assert_eq!(
+            snapshot["items"].as_array().unwrap().len()
+                + snapshot["retained_inputs"].as_array().unwrap().len(),
+            1,
+            "{snapshot}"
+        );
+    }
+}
+
+/// A Codex modal on an idle pane holds the front and leaves the composer read with the held watch:
+/// nothing is handed on while it stays, a ready composer wakes the drive to deliver once.
+#[test]
+fn a_codex_modal_that_closes_wakes_the_drive_to_deliver_once() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let ready =
+        include_str!("../../../../../../tests/fixtures/tui_input/codex-status-sol-80-idle.ansi");
+    let modal = format!("Approval required?\n1. Yes\n2. No\n{}", ready.trim_start());
+    let rig = codex_rig_on("oc-watch", 7_676_140, true);
+    let (shim, inner) = (
+        rig.f.root.path().join("tmux"),
+        rig.f.root.path().join("tmux-inner"),
+    );
+    let shown = rig.f.root.path().join("held-capture");
+    fs::write(&shown, &modal).unwrap();
+    fs::rename(&shim, &inner).unwrap();
+    let script = format!(
+        "#!/bin/sh\ncase \"$*\" in *capture-pane*) cat '{}'; exit 0 ;; esac\nexec '{}' \"$@\"\n",
+        shown.display(),
+        inner.display()
+    );
+    fs::write(&shim, script).unwrap();
+    fs::set_permissions(&shim, fs::metadata(&inner).unwrap().permissions()).unwrap();
+    let (drive, inbox) = rig.drive();
+    rig.wake(&drive);
+    let idle = (ProviderKind::Codex, target::Phase::Idle);
+    let held = rig.serve(&inbox, &idle, 10);
+    assert_eq!(held, Some(Err("NotSent(\"Modal\")".into())));
+    assert_eq!(
+        rig.serve(&inbox, &idle, 5),
+        None,
+        "an open modal hands nothing on"
+    );
+    fs::write(&shown, ready).unwrap();
+    assert_eq!(rig.serve(&inbox, &idle, 15), Some(Ok(())));
+    assert_eq!(rig.events(), ["paste", "Enter"]);
+    rig.delivered();
+}
+
+#[test]
+fn owner_codex_changed_source_and_late_copy_mode_never_receive_payload() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    for (n, copy_mode) in [(0, false), (1, true)] {
+        let name = format!("oc-late-hold-{n}");
+        let rig = codex_rig(&name, 7_676_130 + n);
+        if copy_mode {
+            rig.mark(
+                "before-paste",
+                &format!(
+                    "'{}' -L '{}' -f /dev/null copy-mode -t '={name}:'",
+                    rig.f.real.display(),
+                    rig.f.socket
+                ),
+            );
+        } else {
+            rig.mark(
+                "after-load",
+                &format!("truncate -s 0 '{}'", rig.transcript().display()),
+            );
+        }
+        let result = rig.codex();
+        assert!(result.is_err(), "case {n}: {result:?}");
+        assert!(rig.events().is_empty(), "case {n}: {:?}", rig.events());
+    }
+}
+
 /// An owner refusal after the buffer is loaded and before the paste proves the same attempt was
-/// not sent: the original goes back to custody unarmed, with no key, no buffer and no ledger row.
+/// not sent: the original stays at the queue front unarmed, with no key, buffer or ledger row.
 #[test]
 fn owner_ready_refusal_before_the_codex_paste_is_known_not_sent() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -163,13 +425,7 @@ fn owner_ready_refusal_before_the_codex_paste_is_known_not_sent() {
     rig.mark("after-load", &format!("printf other > '{marker}'"));
     let result = rig.codex();
     assert_eq!(result, Err("NotSent(\"PaneUnavailable\")".into()));
-    rig.held_not_sent("owner_refused");
-    let snapshot = rig.snapshot();
-    assert_eq!(
-        snapshot["retained_inputs"][0]["input"]["attempt"]["nonce"],
-        rig.nonce.as_str(),
-        "{snapshot}"
-    );
+    rig.waits_not_sent();
     assert_eq!(rig.bind(), TurnBind::NotArmed);
     assert!(!rig.buffered(), "the loaded buffer is dropped");
     let register = crate::services::tui_prompt_dedupe::register_injected_steer;
@@ -208,6 +464,112 @@ fn after_the_codex_paste_only_a_replaced_pane_stops_the_enter() {
 
 /// An idle Codex pane takes the prompt's typed text as one pinned paste and one Enter after a
 /// single composer read; nothing reads the pane after the keys, and the head settles unreceipted.
+/// An idle Codex composer held by another writer's lock or a failed buffer load gets no key and keeps
+/// the original at the front with its ticket; only that cause clearing wakes the drive to paste once.
+#[test]
+fn an_idle_codex_lock_or_load_refusal_holds_the_front_until_it_clears() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    use crate::services::codex_tui::input::try_with_composer_mutation_lock;
+    for (n, locked) in [(0_u64, true), (1, false)] {
+        let rig = codex_rig_on(&format!("oc-wait-{n}"), 7_676_130 + n, true);
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let holder = match locked {
+            true => {
+                let (name, (taken, took)) = (rig.name.clone(), std::sync::mpsc::channel());
+                let holder = std::thread::spawn(move || {
+                    try_with_composer_mutation_lock(&name, || {
+                        taken.send(()).unwrap();
+                        released.recv().ok()
+                    })
+                });
+                took.recv().unwrap();
+                Some(holder)
+            }
+            false => {
+                rig.mark("fail-load", "");
+                None
+            }
+        };
+        let reason = if locked {
+            "LockContended"
+        } else {
+            "LoadFailed"
+        };
+        let (drive, inbox) = rig.drive();
+        rig.wake(&drive);
+        let idle = (ProviderKind::Codex, target::Phase::Idle);
+        let held = rig.serve(&inbox, &idle, 10);
+        assert_eq!(held, Some(Err(format!("NotSent({reason:?})"))));
+        rig.waits_not_sent();
+        assert_eq!(rig.bind(), TurnBind::NotArmed, "{reason}");
+        let stays = rig.serve(&inbox, &idle, 6);
+        assert_eq!(
+            stays, None,
+            "{reason}: nothing is handed on while the cause stays"
+        );
+        match holder {
+            Some(holder) => {
+                release.send(()).unwrap();
+                holder.join().unwrap();
+            }
+            None => {
+                let dir = rig.f.root.path().join(format!("{}-owner", rig.name));
+                fs::remove_file(dir.join("fail-load")).unwrap();
+            }
+        }
+        assert_eq!(rig.serve(&inbox, &idle, 15), Some(Ok(())), "{reason}");
+        assert_eq!(rig.events(), ["paste", "Enter"], "{reason}");
+        rig.delivered();
+    }
+}
+
+/// A buffer load that fails once and loads again before the hold commits is still the hold's
+/// cause clearing: the watch's first look wakes the drive, which pastes and enters once.
+#[test]
+fn an_idle_codex_load_that_fails_once_is_pasted_once_without_another_wake() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = codex_rig_on("oc-load-once", 7_676_150, true);
+    rig.mark("fail-load", "once");
+    let (drive, inbox) = rig.drive();
+    rig.wake(&drive);
+    let idle = (ProviderKind::Codex, target::Phase::Idle);
+    let held = rig.serve(&inbox, &idle, 10);
+    assert_eq!(held, Some(Err("NotSent(\"LoadFailed\")".into())));
+    assert_eq!(rig.serve(&inbox, &idle, 15), Some(Ok(())));
+    assert_eq!(rig.events(), ["paste", "Enter"]);
+    rig.delivered();
+}
+
+/// A load watch whose pane is gone ends: no read runs at 2, 5, 30 or 60 s and nothing is handed on.
+#[test]
+fn a_cause_watch_ends_when_its_pane_is_gone() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = codex_rig_on("oc-cause-gone", 7_676_151, true);
+    rig.mark("fail-load", "");
+    let (drive, inbox) = rig.drive();
+    rig.wake(&drive);
+    let idle = (ProviderKind::Codex, target::Phase::Idle);
+    let held = rig.serve(&inbox, &idle, 10);
+    assert_eq!(held, Some(Err("NotSent(\"LoadFailed\")".into())));
+    rig.f
+        .tmux(&["kill-session", "-t", &format!("={}", rig.name)]);
+    let trace = rig.f.root.path().join(format!("{}-owner/trace", rig.name));
+    let loads = || {
+        let trace = fs::read_to_string(&trace).unwrap_or_default();
+        trace.lines().filter(|l| l.contains("load-buffer")).count()
+    };
+    // One look after the kill sees the pane gone.
+    std::thread::sleep(std::time::Duration::from_millis(4_500));
+    let (ended, mut waited) = (loads(), 0);
+    for at in [2, 5, 30, 60] {
+        std::thread::sleep(std::time::Duration::from_secs(at - waited));
+        waited = at;
+        assert_eq!(loads(), ended, "a read at {at}s after the watch ended");
+    }
+    assert!(inbox.try_recv().is_err(), "nothing is handed on");
+    assert!(rig.events().is_empty(), "{:?}", rig.events());
+}
+
 #[test]
 fn owner_idle_codex_pastes_and_enters_once_without_a_later_read() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -258,13 +620,19 @@ fn owner_idle_codex_pastes_and_enters_once_without_a_later_read() {
     );
 }
 
+// A child must inherit the stable PATH, not another test's short-lived tmux shim.
+fn capacity_child(test: &str) -> bool {
+    let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    crate::services::discord::admin_host_guard::tests::api_child(test)
+}
+
 /// An idle pane's owner effect needs the node's execution capacity first: a refused capacity sends
 /// no key and reserves nothing, so the handoff never returns ahead of the capacity it runs under.
 #[test]
 fn an_idle_owner_front_needs_execution_capacity_before_any_key() {
     let path = module_path!().split_once("::").unwrap().1;
     let test = format!("{path}::an_idle_owner_front_needs_execution_capacity_before_any_key");
-    if !crate::services::discord::admin_host_guard::tests::api_child(&test) {
+    if !capacity_child(&test) {
         return;
     }
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -298,7 +666,7 @@ fn an_idle_owner_front_needs_execution_capacity_before_any_key() {
 fn an_idle_owner_turn_holds_its_capacity_until_its_ai_turn_ends_pg() {
     let path = module_path!().split_once("::").unwrap().1;
     let test = format!("{path}::an_idle_owner_turn_holds_its_capacity_until_its_ai_turn_ends_pg");
-    if crate::services::discord::admin_host_guard::tests::api_child(&test) {
+    if capacity_child(&test) {
         holds_capacity_to_the_turn_end(Fault::None);
     }
 }
@@ -309,7 +677,7 @@ fn an_uncertain_idle_write_holds_its_capacity_until_its_ai_turn_ends_pg() {
     let path = module_path!().split_once("::").unwrap().1;
     let test =
         format!("{path}::an_uncertain_idle_write_holds_its_capacity_until_its_ai_turn_ends_pg");
-    if crate::services::discord::admin_host_guard::tests::api_child(&test) {
+    if capacity_child(&test) {
         holds_capacity_to_the_turn_end(Fault::Enter);
     }
 }
@@ -320,7 +688,7 @@ fn a_sent_idle_turn_whose_settlement_fails_holds_its_capacity_until_its_ai_turn_
     let path = module_path!().split_once("::").unwrap().1;
     let name =
         "a_sent_idle_turn_whose_settlement_fails_holds_its_capacity_until_its_ai_turn_ends_pg";
-    if crate::services::discord::admin_host_guard::tests::api_child(&format!("{path}::{name}")) {
+    if capacity_child(&format!("{path}::{name}")) {
         holds_capacity_to_the_turn_end(Fault::Settle);
     }
 }
@@ -331,7 +699,7 @@ fn a_sent_idle_turn_whose_settlement_fails_holds_its_capacity_until_its_ai_turn_
 fn an_unsent_idle_write_whose_custody_fails_returns_its_capacity_at_once_pg() {
     let path = module_path!().split_once("::").unwrap().1;
     let name = "an_unsent_idle_write_whose_custody_fails_returns_its_capacity_at_once_pg";
-    if crate::services::discord::admin_host_guard::tests::api_child(&format!("{path}::{name}")) {
+    if capacity_child(&format!("{path}::{name}")) {
         unsent_returns_its_capacity_at_once();
     }
 }
@@ -409,8 +777,12 @@ fn holds_capacity_to_the_turn_end(fault: Fault) {
         let answered = rig.runtime.block_on(wait);
         let (held, refused) = (leases(&rig, &pool), other_run(&rig, &pool, 7_272_540).err());
         let waiting = release.send(()).is_ok();
-        assert!(waiting, "the capacity holder still waits for the AI turn");
         let first = first.join().unwrap();
+        assert!(
+            waiting,
+            "the capacity holder ended before the AI turn: {first:?}; tmux={}",
+            rig.f.real.display()
+        );
         match fault {
             Fault::None => assert_eq!(first, Ok(())),
             Fault::Enter => assert_eq!(first, Err("WriteUncertain(\"enter_failed\")".into())),
@@ -511,15 +883,14 @@ fn an_idle_codex_paste_held_before_it_ran_settles_not_sent() {
     after.uncertain();
 }
 
-/// The real Codex leaf passes ready, fails only its start commit, releases both temporary stores,
-/// and leaves A in the owner's custody while the same pane accepts a newly admitted successor B.
+/// The real Codex leaf passes ready, fails only its start commit, releases both temporary stores
+/// and keeps A at the queue front, which the next attempt delivers once under a fresh nonce.
 #[test]
 fn a_codex_start_only_refusal_keeps_custody_and_releases_buffer_and_ledger() {
     use crate::services::discord::queue_io::input_owner::{
         effect::{BusyCodex, CodexInput, PreparedPayload},
         pump,
     };
-    use crate::services::turn_orchestrator::PendingQueueItem;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -616,13 +987,9 @@ fn a_codex_start_only_refusal_keeps_custody_and_releases_buffer_and_ledger() {
     );
     let held = rig.snapshot();
     assert!(held["head_injection"].is_null(), "{held}");
-    assert_eq!(held["retained_inputs"].as_array().unwrap().len(), 1);
+    assert_eq!(held["retained_inputs"], json!([]), "{held}");
     assert_eq!(
-        held["retained_inputs"][0]["input"]["attempt"]["nonce"],
-        rig.nonce
-    );
-    assert_eq!(
-        held["retained_inputs"][0]["input"]["original"],
+        held["items"][0],
         serde_json::to_value(&rig.original).unwrap()
     );
     assert!(
@@ -639,45 +1006,20 @@ fn a_codex_start_only_refusal_keeps_custody_and_releases_buffer_and_ledger() {
     );
     crate::services::tui_prompt_dedupe::withdraw_injected_steer("codex", &rig.name, &rig.nonce);
     assert!(free, "start refusal must withdraw the legacy ledger row");
-    let next_id = rig.original.message_id + 1;
-    let mut next: PendingQueueItem = rig.original.clone();
-    next.message_id = next_id;
-    next.source_message_ids = vec![next_id];
-    next.text = "successor B".into();
-    let ticket = crate::services::discord::queue_io::input_owner::admission::AdmissionTicket::new();
-    rig.runtime.block_on(async {
-        assert!(matches!(
-            crate::services::discord::queue_io::input_owner::admission::admit(
-                &rig.mailbox,
-                &next,
-                ticket
-            )
-            .await,
-            crate::services::discord::queue_io::input_owner::admission::Admission::Accepted(_)
-        ));
-        let result = pump::submit(
-            &rig.mailbox,
-            payload("successor0b", &next.text, next_id),
-            Arc::new(|| 10_000),
-            leaf(input("successor0b", &next.text)),
-        )
-        .await;
-        assert_eq!(result, Ok(effect::Completion::Submitted));
-    });
+    // The next attempt takes A from the front under a fresh nonce and delivers it once.
+    let result = rig.runtime.block_on(pump::submit(
+        &rig.mailbox,
+        payload("retry0a", PROMPT, rig.original.message_id),
+        Arc::new(|| 10_000),
+        leaf(input("retry0a", PROMPT)),
+    ));
+    assert_eq!(result, Ok(effect::Completion::Submitted));
     assert_eq!(rig.events(), ["paste", "Enter"]);
     assert_eq!(
         fs::read_to_string(rig.renderer.join("body")).unwrap(),
-        crate::services::claude_tui::busy_inject::frame(
-            "discord",
-            AUTHOR,
-            NAME,
-            "successor0b",
-            "successor B"
-        )
+        crate::services::claude_tui::busy_inject::frame("discord", AUTHOR, NAME, "retry0a", PROMPT)
     );
-    assert_eq!(
-        rig.snapshot()["retained_inputs"],
-        held["retained_inputs"],
-        "B cannot consume A's custody"
-    );
+    let after = rig.snapshot();
+    assert_eq!(after["retained_inputs"], json!([]), "{after}");
+    assert_eq!(after["items"], json!([]), "{after}");
 }

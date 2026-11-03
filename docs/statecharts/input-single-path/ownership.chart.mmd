@@ -8,8 +8,8 @@ stateDiagram-v2
     lg2: Done
     lg3: Delivered
     lg4: Breaks AnswerOnce or NoRetryRequired or StartNotDropped
-    lg5: Breaks DraftToldOnce or NoSilentLoss or NoTimedRetry in some cases
-    lg6: Path to the AnswerOnce or DraftToldOnce or NoRetryRequired or NoSilentLoss or NoTimedRetry or StartNotDropped bug
+    lg5: Breaks DraftToldOnce or NoSilentLoss or NoSilentLossObserved or NoTimedRetry in some cases
+    lg6: Path to the AnswerOnce or DraftToldOnce or NoRetryRequired or NoSilentLoss or NoSilentLossObserved or NoTimedRetry or StartNotDropped bug
   }
   class lg0 blue
   class lg1 pink
@@ -32,9 +32,10 @@ stateDiagram-v2
   [*] --> s0
   [*] --> s1
   s0 --> s5: the owner pastes into the AgentDesk turn [refused when the transcript is idle, main]
-  s0 --> s2: the owner pastes into the AgentDesk turn [refused when the transcript is idle, main]
+  s0 --> s2: the owner pastes into the AgentDesk turn [refused when the transcript is idle, main] or the owner meets a busy pane with no AgentDesk turn
   s1 --> s4: the owner pastes into the AgentDesk turn [refused when the transcript is idle, main]
   s1 --> s3: the owner submits to an idle pane
+  s1 --> s0: a person starts a turn at the terminal
   s0 --> s6: a turn/start's turn meets a busy pane [read as idle in main and a2d1]
   s2 --> s2: the drive's fixed recheck fires [main, a2d1] or the owner pastes into the AgentDesk turn [refused when the transcript is idle, main]
   s3 --> s2: a person starts a turn at the terminal

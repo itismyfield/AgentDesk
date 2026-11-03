@@ -7,7 +7,7 @@ use crate::services::claude_tui::input::submission::tests::{events, renderer_wit
 use crate::services::discord::queue_io::input_owner::admission::{
     AdmissionTicket, TurnBind, admit, exact_turn,
 };
-use crate::services::discord::queue_io::input_owner::drive::{Front, claim_turn};
+use crate::services::discord::queue_io::input_owner::drive::{Drive, Front, Handoff, claim_turn};
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture;
 use crate::services::turn_orchestrator::{ChannelMailboxRegistry, PendingQueueItem};
@@ -30,6 +30,10 @@ static OWNER_TIMING: Timing = Timing {
     confirm_window: Duration::from_millis(500),
     confirm_poll: Duration::from_millis(10),
 };
+
+type Answer = tokio::sync::oneshot::Sender<Result<(), String>>;
+/// The handoffs a rig's drive made, each waiting for this thread's answer.
+pub(super) type Inbox = std::sync::mpsc::Receiver<(Front, Answer)>;
 
 pub(super) struct Rig {
     pub(super) f: Fixture,
@@ -58,7 +62,8 @@ fn rig(name: &str, channel: u64, mode: &str, before: String, transcript: &str) -
 }
 
 /// An owner with one admitted original over the `provider` pane in session `name`. Its tmux fails
-/// `fail-load`'s load and `fail-dead`'s pane read, respawns on `swap-after`, runs `after-<step>`.
+/// loads while `fail-load` stays (once if it has content), `fail-dead`'s pane read, respawns on
+/// `swap-after`, runs `after-<step>`.
 pub(super) fn owned(
     f: Fixture,
     name: &str,
@@ -79,7 +84,8 @@ pub(super) fn owned(
     fs::create_dir_all(&dir).unwrap();
     let script = format!(
         "#!/bin/sh\nd='{dir}'\nprintf '%s\\n' \"$*\" >> \"$d/trace\"\n\
-         case \"$*\" in *load-buffer*) [ ! -f \"$d/fail-load\" ] || exit 1 ;; esac\n\
+         case \"$*\" in *load-buffer*) [ ! -f \"$d/fail-load\" ] || {{ [ ! -s \"$d/fail-load\" ] || rm \"$d/fail-load\"; exit 1; }} ;; esac\n\
+         case \"$*\" in *pane_dead*) [ ! -f \"$d/before-read\" ] || {{ sh \"$d/before-read\"; rm \"$d/before-read\"; }} ;; esac\n\
          case \"$*\" in *pane_dead*) [ ! -f \"$d/fail-dead\" ] || {{ rm \"$d/fail-dead\"; exit 1; }} ;; esac\n\
          case \"$*\" in *paste-buffer*) [ ! -f \"$d/before-paste\" ] || {{ sh \"$d/before-paste\" || printf 'before-paste rc=%s\\n' \"$?\" >> \"$d/hook-timeout\"; rm \"$d/before-paste\"; }} ;; esac\n\
          case \"$*\" in *send-keys*Enter*) [ ! -f \"$d/before-Enter\" ] || {{ sh \"$d/before-Enter\" || printf 'before-Enter rc=%s\\n' \"$?\" >> \"$d/hook-timeout\"; rm \"$d/before-Enter\"; }} ;; esac\n\
@@ -393,6 +399,46 @@ impl Rig {
         assert!(matches!(self.bind(), TurnBind::Settled(turn) if turn.attempt == self.nonce));
     }
 
+    /// The owner's drive on this rig, whose every handoff this thread answers through `serve`.
+    pub(super) fn drive(&self) -> (Arc<Drive>, Inbox) {
+        let (fronts, inbox) = std::sync::mpsc::channel::<(Front, Answer)>();
+        let fronts = std::sync::Mutex::new(fronts);
+        let handoff: Handoff = Arc::new(move |front| {
+            let (reply, answer) = tokio::sync::oneshot::channel();
+            let sent = fronts.lock().unwrap().send((front, reply));
+            Box::pin(async move {
+                sent.map_err(|e| e.to_string())?;
+                answer.await.map_err(|e| e.to_string())?
+            })
+        });
+        let drive = Drive {
+            mailbox: self.mailbox.clone(),
+            channel: self.channel,
+            handoff,
+            settled: None,
+        };
+        (Arc::new(drive), inbox)
+    }
+
+    pub(super) fn wake(&self, drive: &Arc<Drive>) {
+        let _entered = self.runtime.enter();
+        crate::services::discord::queue_io::input_owner::drive::wake(drive.clone());
+    }
+
+    /// Runs the next handoff the drive makes within `secs` through this rig's turn; `None` when it
+    /// made none.
+    pub(super) fn serve(
+        &self,
+        inbox: &Inbox,
+        (provider, phase): &(ProviderKind, target::Phase),
+        secs: u64,
+    ) -> Option<Result<(), String>> {
+        let (front, reply) = inbox.recv_timeout(Duration::from_secs(secs)).ok()?;
+        let result = self.handoff(front, provider.clone(), *phase, &self.transcript());
+        let _ = reply.send(result.clone());
+        Some(result)
+    }
+
     /// The original back in custody with the owner's not-sent proof, and no key sent.
     pub(super) fn held_not_sent(&self, reason: &str) {
         let snapshot = self.snapshot();
@@ -402,6 +448,15 @@ impl Rig {
         let why = retained[0]["reason"]["reason"].as_str().unwrap_or_default();
         assert!(why.contains(reason), "{why}");
         assert_eq!(retained[0]["input"]["original"]["text"], PROMPT);
+        assert!(self.events().is_empty(), "no key: {:?}", self.events());
+    }
+
+    /// The original kept at the queue front for the next wake with no attempt bound, and no key sent.
+    pub(super) fn waits_not_sent(&self) {
+        let snapshot = self.snapshot();
+        assert!(snapshot["head_injection"].is_null(), "{snapshot}");
+        assert_eq!(snapshot["retained_inputs"], json!([]), "{snapshot}");
+        assert_eq!(snapshot["items"][0]["text"], PROMPT, "{snapshot}");
         assert!(self.events().is_empty(), "no key: {:?}", self.events());
     }
 
@@ -661,6 +716,38 @@ fn owner_idle_claude_holds_a_modal_front_until_the_modal_is_gone() {
     rig.delivered();
 }
 
+/// A modal on an idle pane holds the front and leaves the pane's read with the held watch: nothing
+/// is handed on while it stays, its closing wakes the drive to deliver once, a later wake nothing.
+#[test]
+fn a_closing_modal_wakes_the_drive_to_deliver_its_held_front_once() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let modal = "Do you want to proceed?\n❯ 1. Yes\n  2. No\nEnter to select · Esc to cancel\n";
+    let rig = rig("oi-watch", 7_272_551, "normal", modal.into(), IDLE);
+    let (drive, inbox) = rig.drive();
+    rig.wake(&drive);
+    let idle = (ProviderKind::Claude, target::Phase::Idle);
+    let held = rig.serve(&inbox, &idle, 10);
+    assert_eq!(held, Some(Err("NotSent(\"Modal\")".into())));
+    assert_eq!(
+        rig.serve(&inbox, &idle, 5),
+        None,
+        "an open modal hands nothing on"
+    );
+    let pane = format!("={}:", rig.name);
+    rig.f.tmux(&["send-keys", "-t", &pane, "C-u"]);
+    wait("modal-closed", || rig.events() == ["clear"]);
+    rig.f.tmux(&["clear-history", "-t", &pane]);
+    assert_eq!(rig.serve(&inbox, &idle, 15), Some(Ok(())));
+    assert_eq!(rig.events(), ["clear", "paste", "Enter"]);
+    rig.delivered();
+    rig.wake(&drive);
+    assert_eq!(
+        rig.serve(&inbox, &idle, 3),
+        None,
+        "a later wake hands on nothing"
+    );
+}
+
 /// A legacy draft guard does not stop the owner's transaction: the guard is legacy state.
 #[test]
 fn legacy_guard_value_does_not_block_owner_a() {
@@ -701,17 +788,100 @@ fn owner_busy_claude_enter_ends_the_transaction_with_or_without_receipt() {
     assert!(alerts.is_empty(), "{alerts:?}");
 }
 
-/// A load that never became a buffer sends nothing and proves it: the original and its ticket
-/// stay with the owner.
+/// A failed buffer load or a transcript missing at the pane read sends no key and holds the front
+/// with its ticket; only that cause clearing wakes the drive, which pastes and enters once.
 #[test]
-fn load_failed_is_definitely_not_submitted() {
+fn a_failed_load_or_a_missing_transcript_holds_the_front_until_it_clears() {
     let _root = crate::config::TestRuntimeRootGuard::new();
-    let rig = rig("ob-load", 7_272_507, "normal", view("", false), BUSY);
-    rig.mark("fail-load", "");
-    let result = rig.dispatch(ProviderKind::Claude, target::Phase::Busy, &rig.transcript());
-    assert_eq!(result, Err("NotSent(\"LoadFailed\")".into()));
-    rig.held_not_sent("load_failed");
-    assert_eq!(rig.bind(), TurnBind::NotArmed);
+    for (name, channel, load) in [("ob-load", 7_272_507, true), ("ob-gone", 7_272_549, false)] {
+        let rig = rig(name, channel, "normal", view("", false), BUSY);
+        let transcript = rig.transcript();
+        let hidden = transcript.with_extension("hidden");
+        match load {
+            true => rig.mark("fail-load", ""),
+            false => {
+                let hide = format!("mv '{}' '{}'", transcript.display(), hidden.display());
+                rig.mark("before-read", &hide);
+            }
+        }
+        let (drive, inbox) = rig.drive();
+        rig.wake(&drive);
+        let busy = (ProviderKind::Claude, target::Phase::Busy);
+        let reasons = [
+            "NotSent(\"LoadFailed\")",
+            "NotSent(\"TranscriptUnavailable\")",
+        ];
+        let held = rig.serve(&inbox, &busy, 10);
+        assert_eq!(
+            held,
+            Some(Err(reasons[usize::from(!load)].into())),
+            "{name}"
+        );
+        rig.waits_not_sent();
+        assert_eq!(rig.bind(), TurnBind::NotArmed, "{name}");
+        let stays = rig.serve(&inbox, &busy, 6);
+        assert_eq!(
+            stays, None,
+            "{name}: nothing is handed on while the cause stays"
+        );
+        let dir = rig.f.root.path().join(format!("{name}-owner"));
+        match load {
+            true => fs::remove_file(dir.join("fail-load")).unwrap(),
+            false => fs::rename(&hidden, &transcript).unwrap(),
+        }
+        assert_eq!(rig.serve(&inbox, &busy, 15), Some(Ok(())), "{name}");
+        let events = rig.events();
+        let count = |key: &str| events.iter().filter(|e| *e == key).count();
+        assert_eq!(
+            (count("paste"), count("Enter")),
+            (1, 1),
+            "{name}: {events:?}"
+        );
+        rig.delivered();
+    }
+}
+
+/// A busy pane's buffer that fails to load once is a cause the watch reads: its first look after the
+/// hold wakes the drive, which pastes and enters once.
+#[test]
+fn a_busy_buffer_that_fails_to_load_once_is_pasted_once_without_another_wake() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig("ob-load-once", 7_272_598, "normal", view("", false), BUSY);
+    rig.mark("fail-load", "once");
+    let (drive, inbox) = rig.drive();
+    rig.wake(&drive);
+    let busy = (ProviderKind::Claude, target::Phase::Busy);
+    let held = rig.serve(&inbox, &busy, 10);
+    assert_eq!(held, Some(Err("NotSent(\"LoadFailed\")".into())));
+    assert_eq!(rig.serve(&inbox, &busy, 15), Some(Ok(())));
+    let events = rig.events();
+    let count = |key: &str| events.iter().filter(|e| *e == key).count();
+    assert_eq!((count("paste"), count("Enter")), (1, 1), "{events:?}");
+    rig.delivered();
+}
+
+/// A frame ledger refusal is no cause a read sees: the front is held with no watch, so no probe runs
+/// and nothing is handed on while the busy turn lasts.
+#[test]
+fn a_busy_ledger_refusal_holds_the_front_without_a_watch() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig("ob-ledger", 7_272_599, "normal", view("", false), BUSY);
+    // The transcript shrinks below the attempt's observed offset, so the ledger refuses the frame.
+    let cut = format!("printf '{{}}\\n' > '{}'", rig.transcript().display());
+    rig.mark("before-read", &cut);
+    let (drive, inbox) = rig.drive();
+    rig.wake(&drive);
+    let busy = (ProviderKind::Claude, target::Phase::Busy);
+    let held = rig.serve(&inbox, &busy, 10);
+    assert_eq!(held, Some(Err("NotSent(\"LoadFailed\")".into())));
+    rig.waits_not_sent();
+    assert_eq!(rig.serve(&inbox, &busy, 12), None, "no watch hands it on");
+    let trace = rig.f.root.path().join("ob-ledger-owner/trace");
+    let trace = fs::read_to_string(trace).unwrap_or_default();
+    assert!(
+        !trace.contains("load-buffer"),
+        "no load ran or was probed: {trace}"
+    );
 }
 
 /// The pane's process replaced before ready sends nothing and proves it; after C-s it is a stash
@@ -727,7 +897,7 @@ fn pane_pid_swap_stages_map_to_not_sent_or_write_uncertain() {
         &rig_ready.transcript(),
     );
     assert_eq!(result, Err("NotSent(\"PaneUnavailable\")".into()));
-    rig_ready.held_not_sent("owner_refused");
+    rig_ready.waits_not_sent();
     for (name, channel, step, reached, outcome) in [
         (
             "ps-cs",
@@ -1598,6 +1768,9 @@ mod not_sent;
 
 #[path = "owner_provenance_tests.rs"]
 mod provenance;
+
+#[path = "owner_input_idle_tests.rs"]
+mod idle;
 
 /// One input admitted, granted and claimed on `channel`'s own owner, carried as the turn the drive's
 /// idle start hands over; the receiver hears that input's settlement.

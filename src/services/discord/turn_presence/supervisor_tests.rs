@@ -111,6 +111,7 @@ struct Fake {
     typed: Mutex<Vec<(u64, Duration)>>,
     succeeded: Mutex<Vec<(u64, Duration)>>,
     kicks: Mutex<Vec<(u64, Duration)>>,
+    owner_wakes: Mutex<Vec<(u64, Duration)>>,
     notices: Mutex<Vec<(u64, Duration, String)>>,
     notice_delay: Mutex<Option<Duration>>,
     notice_error: AtomicBool,
@@ -138,6 +139,7 @@ impl Fake {
             typed: Mutex::new(Vec::new()),
             succeeded: Mutex::new(Vec::new()),
             kicks: Mutex::new(Vec::new()),
+            owner_wakes: Mutex::new(Vec::new()),
             notices: Mutex::new(Vec::new()),
             notice_delay: Mutex::new(None),
             notice_error: AtomicBool::new(false),
@@ -212,7 +214,7 @@ impl Effects for Fake {
         Reading::unwatched_for_tests(observed, Some("pane"), Some("/t.jsonl"))
     }
 
-    async fn mailbox(&self, channel: u64) -> (bool, Option<u64>) {
+    async fn mailbox(&self, channel: u64) -> (bool, Option<u64>, bool) {
         let delay = lock(&self.mailbox_delay).remove(&channel);
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
@@ -221,7 +223,7 @@ impl Effects for Fake {
         if let Some(shared) = live {
             return waiting_input(&shared, &ProviderKind::Claude, ChannelId::new(channel)).await;
         }
-        (self.token.load(Ordering::SeqCst), *lock(&self.head))
+        (self.token.load(Ordering::SeqCst), *lock(&self.head), false)
     }
 
     async fn typing(&self, channel: u64) -> Result<(), String> {
@@ -239,6 +241,10 @@ impl Effects for Fake {
 
     fn kickoff(&self, channel: u64) {
         lock(&self.kicks).push((channel, self.since()));
+    }
+
+    fn wake_owner(&self, channel: u64) {
+        lock(&self.owner_wakes).push((channel, self.since()));
     }
 
     fn idle(&self, channel: u64) {
@@ -390,7 +396,7 @@ async fn a_send_overtaken_by_idle_counts_nothing_and_schedules_nothing() {
             channel,
             now,
             &read(observed),
-            (false, None),
+            (false, None, false),
             None,
         );
         first = first.or(actions.into_iter().find_map(|action| match action {
@@ -620,6 +626,88 @@ async fn a_marker_left_on_disk_alone_is_woken_at_once_and_every_half_minute() {
     wait(65).await;
     run.abort();
     assert_eq!(fake.kick_secs(), [12, 42, 72]);
+}
+
+/// A front only an input owner holds is read from that owner: the idle transition wakes the owner
+/// once, and an unchanged Idle at 2, 5, 30 and 60 seconds wakes neither it nor a kickoff.
+#[tokio::test(start_paused = true)]
+async fn an_owned_front_wakes_its_owner_once_at_the_idle_transition_and_never_by_time() {
+    use crate::services::discord::queue_io::input_owner::admission::{
+        Admission, AdmissionTicket, admit,
+    };
+    let _root = crate::services::discord::relay_recovery::tests::isolated_agentdesk_root();
+    let channel = 6_200_017;
+    let _confirmed = TestConfirmation::new(channel);
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let mailbox = shared.mailbox(ChannelId::new(channel));
+    let dir = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap();
+    let file = dir.join(format!("claude/presence-owner/{channel}.json"));
+    mailbox
+        .v2_adopt(file, "presence-owner".into())
+        .await
+        .unwrap();
+    let original = serde_json::from_value(serde_json::json!({"author_id":7,"message_id":62_000_171,
+        "channel_id":channel,"source_message_ids":[62_000_171],"queued_generation":1,"text":"owned"}))
+    .unwrap();
+    let admitted = admit(&mailbox, &original, AdmissionTicket::new()).await;
+    assert!(matches!(admitted, Admission::Accepted(_)));
+    let fake = Fake::new(&[channel], BUSY);
+    *lock(&fake.live_mailbox) = Some(shared.clone());
+    let run = supervise(&fake);
+    wait(10).await;
+    fake.set(channel, IDLE);
+    let owner_wakes = || {
+        lock(&fake.owner_wakes)
+            .iter()
+            .map(|w| w.1.as_secs())
+            .collect::<Vec<_>>()
+    };
+    for at in [5, 2, 30, 60] {
+        wait(at).await;
+        assert_eq!(owner_wakes(), [12], "{at}s more");
+    }
+    run.abort();
+    assert_eq!(fake.kick_secs(), Vec::<u64>::new());
+}
+
+/// The live effects' owner wake reaches the channel's owner drive, which grants the queued front
+/// and hands it to the idle start.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_live_owner_wake_hands_the_queued_front_to_the_owner_drive() {
+    use crate::services::discord::queue_io::input_owner::admission::{AdmissionTicket, admit};
+    let _root = crate::services::discord::relay_recovery::tests::isolated_agentdesk_root();
+    let channel = ChannelId::new(6_200_018);
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let mailbox = shared.mailbox(channel);
+    let dir = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap();
+    let file = dir.join("claude/presence-live/6200018.json");
+    mailbox
+        .v2_adopt(file, "presence-live".into())
+        .await
+        .unwrap();
+    let original =
+        serde_json::from_value(serde_json::json!({"author_id":7,"message_id":62_000_181,
+        "channel_id":channel.get(),"source_message_ids":[62_000_181],"queued_generation":1,
+        "text":"owned"}))
+        .unwrap();
+    let _ = admit(&mailbox, &original, AdmissionTicket::new()).await;
+    let granted = || mailbox.v2_request(|slot| Ok(slot.as_ref().unwrap().front_outstanding()));
+    assert!(!granted().await.unwrap(), "no grant before the wake");
+    let effects = LiveEffects {
+        shared: shared.clone(),
+        provider: ProviderKind::Claude,
+    };
+    effects.wake_owner(channel.get());
+    let mut handed = false;
+    for _ in 0..100 {
+        handed = granted().await.unwrap();
+        if handed {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(handed, "the owner drive granted its front");
 }
 
 /// A waiting input's notice that takes 30 seconds holds neither another channel's typing nor stop.

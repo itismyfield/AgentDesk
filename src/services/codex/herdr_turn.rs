@@ -1,6 +1,6 @@
 //! A Codex turn on a Herdr pane behind the default-off `runtime.herdr_codex_turn_enabled` switch:
 //! one prompt to a launch's ready composer, its hold ending only once the hook Source is bound;
-//! a Bound pane takes each later prompt once, never over a draft or changed launch options.
+//! a Bound pane takes each later prompt once; owned delivery also permits a person's draft.
 
 #[cfg(unix)]
 pub(crate) mod busy;
@@ -25,6 +25,7 @@ use crate::services::agent_protocol::{RuntimeHandoff, RuntimeHandoffKind, Stream
 use crate::services::claude::herdr_turn::{
     HoldRelease, composer, gate, hold, launched, load, not_held, release_hold,
 };
+use crate::services::claude_tui::guarded_outcome::SubmissionError;
 use crate::services::codex_tui::host_input::{InputRun, PlanRun, legacy_result, run_herdr};
 use crate::services::codex_tui::input::{
     ComposerContent, PROMPT_READY_CANCELLED_ERROR, active_composer_content_in_pane,
@@ -43,7 +44,7 @@ use crate::services::provider::cancel_token_claude_interrupt::{
     HerdrSubmission, HerdrTurnStart, herdr_stop_settlement_available,
 };
 use crate::services::provider::{
-    CancelToken, ProviderKind, ReadOutputResult, is_readonly_tool_policy,
+    CancelToken, ProviderKind, ReadOutputResult, cancel_requested, is_readonly_tool_policy,
 };
 use crate::services::session_host::HerdrTarget;
 use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
@@ -344,6 +345,29 @@ fn empty_composer(target: &HerdrTarget, cancel: Option<&CancelToken>) -> Result<
     }
 }
 
+/// The owner carries a typed no-key proof without installing Claude's draft recovery guard.
+fn owned_hold(reason: &'static str) -> SubmissionError {
+    crate::services::claude_tui::owner_input::vetoed(reason);
+    SubmissionError::Legacy(format!("herdr turn: {reason}"))
+}
+
+fn owned_composer(
+    target: &HerdrTarget,
+    cancel: Option<&CancelToken>,
+) -> Result<bool, SubmissionError> {
+    if cancel_requested(cancel) {
+        return Err(owned_hold("cancelled"));
+    }
+    let capture = target
+        .capture_ansi(-80)
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| owned_hold("capture_unavailable"))?;
+    if crate::services::codex_tui::busy_inject::screen::delivery_veto(&capture).is_some() {
+        return Err(owned_hold("Modal"));
+    }
+    Ok(crate::services::codex_tui::busy_inject::screen::draft_may_be_present(&capture))
+}
+
 /// What execution `nonce` keeps of the options it was launched with.
 fn kept_options(nonce: &str, options: &CodexLaunchOptions) -> String {
     format!("{nonce} {}", codex_tui_launch_options_fingerprint(options))
@@ -509,7 +533,10 @@ fn followup(
         None => return Err(refused(PromptRefused::NoSource)),
     };
     options_kept(turn, nonce)?;
-    empty_composer(&target, turn.cancel.as_deref())?;
+    let hook = crate::services::claude_tui::owner_input::launch_hook();
+    if hook.is_none() {
+        empty_composer(&target, turn.cancel.as_deref())?;
+    }
     // Read before the write, so the reply is read from where this prompt's lines begin.
     let meta = std::fs::metadata(&path).map_err(|_| refused(PromptRefused::NoSource))?;
     let before = meta.len();
@@ -523,7 +550,7 @@ fn followup(
             plan,
         )
     };
-    match crate::services::claude_tui::owner_input::launch_hook() {
+    match hook {
         // The owner waiting on this thread writes the prompt as its own effect.
         Some(hook) => {
             use std::os::unix::fs::MetadataExt;
@@ -544,11 +571,23 @@ fn followup(
                 target.clone(),
             );
             let cancel = turn.cancel.clone();
+            let channel = turn.channel_id;
             let submit = Box::new(move |frame: String| {
-                let plan = plan_prompt_submit(&frame)?;
+                let draft = owned_composer(&target, cancel.as_deref())?;
+                if crate::services::tui_input::human_frame::history::v2::scoped_source()
+                    .is_some_and(|source| source.is_err())
+                {
+                    return Err(owned_hold("source_unavailable"));
+                }
+                let plan = crate::services::codex_tui::input::owned_prompt_plan(&frame)?;
                 let at = (path.as_path(), before);
                 match followup_write(&logical, &nonce, cancel.as_deref(), at, &target, &plan)? {
-                    true => Ok(()),
+                    true => {
+                        if draft {
+                            crate::services::codex_tui::input::notify_owned_draft(channel);
+                        }
+                        Ok(())
+                    }
                     false => Err("herdr turn: the input closed before its first key"
                         .to_string()
                         .into()),
@@ -563,8 +602,11 @@ fn followup(
                 submit,
             )?;
         }
-        None if !write(&plan)? => return Ok(()),
-        None => {}
+        None => {
+            if !write(&plan).map_err(SubmissionError::into_legacy)? {
+                return Ok(());
+            }
+        }
     }
     read_reply(turn, &target, &path, before, session_id, sender)
 }
@@ -578,8 +620,12 @@ fn followup_write(
     (path, before): (&std::path::Path, u64),
     target: &HerdrTarget,
     plan: &[crate::services::codex_tui::input::TuiInputAction],
-) -> Result<bool, String> {
-    hold(nonce)?;
+) -> Result<bool, SubmissionError> {
+    hold(nonce).inspect_err(|_| {
+        if crate::services::claude_tui::owner_input::active() {
+            crate::services::claude_tui::owner_input::vetoed("hold_unavailable");
+        }
+    })?;
     #[cfg(test)]
     crate::services::provider::herdr_before_start::test_input_boundary(cancel);
     let start = || {
@@ -598,11 +644,18 @@ fn followup_write(
             ) {
                 release_closed_hold(logical, nonce);
             }
+            if crate::services::claude_tui::owner_input::active() {
+                return Err(owned_hold("input_closed"));
+            }
             return Ok(false);
         }
     };
     if run.run == InputRun::Applied || composer_untouched(&run) {
         warn_release(logical, release_hold(nonce));
+    }
+    if crate::services::claude_tui::owner_input::active() && composer_untouched(&run) {
+        crate::services::claude_tui::owner_input::first_key_held("herdr_input_untouched");
+        return Err(owned_hold("gate_refused"));
     }
     legacy_result(run.run)?;
     Ok(true)

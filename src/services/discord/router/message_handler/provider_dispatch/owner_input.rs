@@ -48,7 +48,8 @@ pub(super) type UntilDone = Box<dyn FnOnce() -> Result<(), String> + Send>;
 
 impl Registration {
     /// A front's registration read from what its turn observes: host verdict, tmux spawn marker or
-    /// Bound Herdr row, live transcript. Without a live execution it is Absent, whatever `busy`.
+    /// Bound Herdr row, live transcript. Without a live execution under the channel's account it is
+    /// Absent, whatever `busy`.
     pub(super) fn observed(
         mailbox: ChannelMailboxHandle,
         (provider, origin, busy): (&str, InputOrigin, bool),
@@ -63,7 +64,7 @@ impl Registration {
         // A pane kept after its process exited is no live execution; an unknown answer refuses.
         let alive = match host {
             TurnHost::Tmux => match crate::services::platform::tmux::pane_liveness(session) {
-                PaneLiveness::Live => true,
+                PaneLiveness::Live => !other_account(provider, session),
                 PaneLiveness::DeadOrAbsent => false,
                 PaneLiveness::ProbeError => return Err("NotSent(\"pane_unobserved\")".into()),
             },
@@ -112,6 +113,17 @@ impl Registration {
             until_done,
         })
     }
+}
+
+/// A tmux pane under another account than its channel's: no execution of this channel, so its
+/// driver replaces it as the live path does, and nothing is written into it.
+fn other_account(provider: &str, session: &str) -> bool {
+    let Some(kind) = ProviderKind::from_str(provider) else {
+        return false;
+    };
+    let overlay = crate::services::discord::org_schema::overlay_from_tmux_session(kind, session);
+    let matches = crate::services::tmux_common::tmux_session_auth_profile_matches;
+    overlay.is_ok_and(|overlay| !matches(session, &overlay.profile_id))
 }
 
 /// A Bound Herdr row's gated pane, its physical writer `socket#pane` and its attempt target.
@@ -489,7 +501,9 @@ pub(super) fn execute_owned(
         origin,
     } = owner;
     let session = turn.tmux_session_name.unwrap_or_default();
-    let live = matches!(turn.host, TurnHost::Tmux) && pane_liveness(session) == PaneLiveness::Live;
+    let live = matches!(turn.host, TurnHost::Tmux)
+        && pane_liveness(session) == PaneLiveness::Live
+        && !other_account(turn.provider.as_str(), session);
     let running = live.then(|| running_transcript(&turn, session)).flatten();
     let registered = match &running {
         Some(transcript) => {
@@ -794,13 +808,21 @@ fn run(
             }
             .leaf(),
         ),
-        target::Route::ClaudeIdle => (turn.prompt.into(), effect::idle_claude(session()?.into())),
+        target::Route::ClaudeIdle => (
+            turn.prompt.into(),
+            effect::idle_claude(
+                busy_inject::Pane::with_program(session()?, r.program),
+                session()?.into(),
+                turn.channel_id,
+            ),
+        ),
         target::Route::CodexIdle => (
             codex_herdr_frame(turn.prompt)
                 .map_err(|error| format!("NotSent(\"invalid_prompt: {error}\")"))?,
             effect::idle_codex(
                 busy_inject::Pane::with_program(session()?, r.program),
                 session()?.into(),
+                turn.channel_id,
             ),
         ),
         target::Route::ClaudeHerdrBusy => {
@@ -825,11 +847,12 @@ fn run(
             )
         }
         target::Route::CodexBusy | target::Route::CodexHerdrBusy => {
-            // Main's busy preparation: the open model turn the paste is aimed at, read up front.
+            // A readable rollout supplies a diagnostic turn, not permission to deliver.
             use crate::services::codex_tui::busy_inject::{TIMING, TurnVerdict, read_turn};
             let target_turn = match read_turn(&r.transcript) {
                 Some(TurnVerdict::KnownModelTurn(turn)) => turn,
-                other => return Err(format!("NotSent(\"busy_turn: {other:?}\")")),
+                Some(_) => String::new(),
+                None => return Err("NotSent(\"busy_turn: transcript unavailable\")".into()),
             };
             let frame = busy_inject::frame("discord", &r.author, &r.name, &nonce, turn.prompt);
             let input = CodexInput {
