@@ -9,7 +9,7 @@ Code versions modelled:
 | `a2d2` | its repair `e6d97a192f` | `InputOwnershipA2d2.cfg` |
 | `a2d3` | the second repair `4def1c6289` | `InputOwnershipA2d3.cfg` |
 | `a2d4` | the third repair | `InputOwnership.cfg` |
-| `c` | slice C | `InputOwnershipC.cfg` |
+| `c` | slice C, its tested transitions only | `InputOwnershipC.cfg` |
 
 What the model covers:
 
@@ -24,6 +24,7 @@ What the model covers:
 - A long running turn that outlives the 10 s pending text.
 - The receipt thread's 3 s window.
 - The relay reading the input's row once.
+- In `c`, an input an older binary retained, with or without its resend ask posted, and the boot that finds it.
 
 Run it like this (exit 1 means a rule breaks):
 
@@ -37,24 +38,37 @@ done
 
 ## Rules
 
-| Rule | Reader's sentence | main | a2d1 | a2d2 | a2d3 | a2d4 |
-|---|---|---|---|---|---|---|
-| NoDuplicate | The input is pasted at most once. | holds | holds | holds | holds | holds |
-| NoRetryRequired | No input ends asking the person to send it again. | breaks (1) | holds | holds | holds | holds |
-| AnswerOnce | An answered input was posted once. In turn mode only the O writer posts it; in legacy, the relay or the reader the input's turn set up posts it. | breaks (5) | breaks (4) | breaks (4) | holds | holds |
-| HandedHasRow | Time alone never makes the input Handed. | holds | holds | holds | holds | holds |
-| StartNotDropped | A turn/start into a busy pane is never dropped for want of an idle observer. | breaks (1) | breaks (1) | holds | holds | holds |
-| NoTimedRetry | A held input is handed again only by an event, never by a fixed timer alone. | breaks (3) | breaks (3) | holds | holds | holds |
-| DraftToldOnce | An owned paste beside a draft C-s could not park tells its original once. | breaks (1) | breaks (1) | holds | holds | holds |
-| HeldResumes | An input held by its screen is not left waiting once that screen would submit. | holds (timer) | holds (timer) | breaks (4) | breaks (5) | holds |
-| NoSilentLoss | Once nothing else happens, the input was answered. | breaks (3) | breaks (3) | breaks (3) | breaks (3) | breaks (3, same path) |
-| NoSilentLossObserved | With an idle observer the channel can build, once all is quiet the input was answered. | breaks | holds (timer) | breaks | breaks | breaks (3) |
+| Rule | Reader's sentence | main | a2d1 | a2d2 | a2d3 | a2d4 | c |
+|---|---|---|---|---|---|---|---|
+| NoDuplicate | The input is pasted at most once. | holds | holds | holds | holds | holds | holds |
+| NoRetryRequired | No input ends asking the person to send it again, besides one an older binary already asked. | breaks (1) | holds | holds | holds | holds | holds |
+| AnswerOnce | An answered input was posted once. In turn mode only the O writer posts it; in legacy, the relay or the reader the input's turn set up posts it. | breaks (5) | breaks (4) | breaks (4) | holds | holds | holds |
+| HandedHasRow | Time alone never makes the input Handed. | holds | holds | holds | holds | holds | holds |
+| StartNotDropped | A turn/start into a busy pane is never dropped for want of an idle observer. | breaks (1) | breaks (1) | holds | holds | holds | holds |
+| NoTimedRetry | A held input is handed again only by an event, never by a fixed timer alone. | breaks (3) | breaks (3) | holds | holds | holds | holds |
+| DraftToldOnce | An owned paste beside a draft C-s could not park tells its original once. | breaks (1) | breaks (1) | holds | holds | holds | holds |
+| HeldResumes | An input held by its screen is not left waiting once that screen would submit. | holds (timer) | holds (timer) | breaks (4) | breaks (5) | holds | holds |
+| NoSilentLoss | Once nothing else happens, the input was answered or an older binary already asked to resend it. | breaks (3) | breaks (3) | breaks (3) | breaks (3) | breaks (3) | breaks (3, same path) |
+| NoSilentLossObserved | On a turn-mode channel with an idle observer, once all is quiet the input was answered. | breaks | holds (timer) | breaks | breaks | breaks | holds |
+| ToldStays | An input whose resend ask an older binary posted is never pasted again. | holds | holds | holds | holds | holds | holds |
 
-Slice C (`c`) keeps every a2d4 result. NoSilentLossObserved holds in `c`. NoSilentLoss still breaks there (3 steps): with no idle observer, the idle submit holds the front (`idle_unobserved`), which slice A owns.
+NoSilentLoss still breaks in `c` (3 steps): with no idle observer, the idle submit holds the front (`idle_unobserved`), which slice A owns.
 
 Each break shows the step count of its shortest path.
 
-States reached: main 30,272; a2d1 39,328; a2d2 22,832; a2d3 65,280; a2d4 63,744; c 63,488. `ownership.chart.mmd` is the main chart, drawing the bug paths only.
+States reached: main 30,272; a2d1 39,328; a2d2 22,832; a2d3 65,280; a2d4 63,744; c 65,924. `ownership.chart.mmd` is the main chart, drawing the bug paths only.
+
+### What `c` adds, and the test that drives each step through the code
+
+Only a step a test drives through its real entry point is in the `c` model; a step read in the code but not tested is left nondeterministic.
+
+| `c` step | Code | Test |
+|---|---|---|
+| A turn-mode turn ends: the supervisor reads the V2 front and wakes the owner once (`TurnEnds`, `RC`) | `turn_presence/supervisor.rs` `waiting_input`, `wake`, `Action::WakeOwner` | `supervisor_tests::an_owned_front_wakes_its_owner_once_at_the_idle_transition_and_never_by_time` |
+| No timer wakes an owned queue (no `TimerFires` in `c`) | supervisor `wake` (`due` needs `!owned`), `queue_io/backstop.rs` `owned` | the same supervisor test; `owned_backstop_tests::no_backstop_schedules_or_fires_a_kick_at_an_owned_queue` |
+| A held pane's recovery wakes the drive (`WatchSees`) for Claude and Codex modals | `effect.rs` `arm_screen`, `effect/codex.rs` `composer`, `held_watch.rs` | `owner_input_tests::a_closing_modal_wakes_the_drive_to_deliver_its_held_front_once`, `owner_input_codex_tests::a_codex_modal_that_closes_wakes_the_drive_to_deliver_once` |
+| A boot requeues an input retained before its ask went out, and keeps a told one (`BootRequeues`) | `v2/retained.rs` `requeueable`, `recovery.rs` | `notice_tests::told_retained_inputs_stay_and_an_untold_one_is_handed_on_once_pg`, `requeue_tests::only_an_untold_proven_unsent_input_requeues_and_a_told_one_stays` |
+| A legacy channel's turn end: not assumed. The watcher epilogue's schedule becomes one owner wake in code (`backstop.rs`), but the epilogue itself is not driven by a test | — | — |
 
 ## Counterexamples, replayed against the code
 
@@ -96,7 +110,7 @@ States reached: main 30,272; a2d1 39,328; a2d2 22,832; a2d3 65,280; a2d4 63,744;
      - Each hold the drive names gets a generation, and a watch ends only its own.
 10. **NoSilentLossObserved breaks on a2d4.**
    - Path: a person's turn holds the front, then ends, and nothing wakes the drive.
-   - In `c`, a turn AgentDesk did not start wakes a waiting front when it ends: the presence supervisor's idle kickoff reaches `owner_wake`.
+   - In `c`, on a turn-mode channel the presence supervisor reads the owner's V2 front and wakes the owner once at the idle transition.
    - Mutant `noBoundaryWake` breaks it again.
 11. **NoSilentLoss breaks in every version.**
    - Path: an idle pane whose observer cannot be built holds the front, and a native turn AgentDesk did not start may end without waking the drive.
@@ -104,11 +118,14 @@ States reached: main 30,272; a2d1 39,328; a2d2 22,832; a2d3 65,280; a2d4 63,744;
 
 ## Mutants of the c model
 
-| Mutant | Breaks besides NoSilentLoss |
-|---|---|
-| noBoundaryWake | NoSilentLossObserved |
-| timer | NoTimedRetry |
-| unknownEnds, noGeneration, noWatch | none: in `c` a turn's end wakes the front, and the model's idle submit does not read the screen, so these show only in a2d4 |
+| Mutant | What it removes | Breaks besides NoSilentLoss |
+|---|---|---|
+| noBoundaryWake | the supervisor's V2 front read and owner wake | NoSilentLossObserved |
+| requeueTold | the boot keeps a told input retained | ToldStays |
+| unknownEnds | a failed read keeps the watch | HeldResumes |
+| noGeneration | a watch ends only its own hold | HeldResumes |
+| noWatch | the held pane's watch | HeldResumes |
+| timer | no fixed recheck | NoTimedRetry |
 
 ## Mutants of the a2d4 model
 
@@ -135,7 +152,7 @@ Each mutant breaks a rule besides the known NoSilentLoss gap.
 
 Left out of the model:
 
-- Codex and Herdr panes: A2 keeps their hold, and they arm no watch.
+- Codex and Herdr panes: the model's pane is Claude tmux; slice C arms the same watch on their modals.
 - Restart replay of the relay's claim ledger.
 - Two inputs racing one paste.
 - A screen that never clears.

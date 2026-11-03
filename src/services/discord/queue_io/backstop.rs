@@ -681,6 +681,10 @@ pub(in crate::services::discord) fn spawn_turn_completion_idle_queue_listener(
     });
 }
 
+#[cfg(all(test, unix))]
+#[path = "owned_backstop_tests.rs"]
+mod owned_backstop_tests;
+
 #[cfg(test)]
 pub(in crate::services::discord) fn idle_queue_backstop_fires_for_tests() -> usize {
     IDLE_QUEUE_BACKSTOP_FIRES_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed)
@@ -728,17 +732,23 @@ fn schedule_deferred_idle_queue_kickoff_inner(
         active: true,
     };
     super::task_supervisor::spawn_observed("deferred_idle_queue_kickoff", async move {
-        if owned(&shared, channel_id).await {
-            slot.consume_requests();
-            let _ = backlog_guard.release();
-            return;
+        // An owner takes the scheduling event as one direct wake, with no presleep or backstop.
+        let direct = owned(&shared, channel_id).await;
+        #[cfg(unix)]
+        if direct {
+            crate::services::discord::router::message_handler::owner_wake(&shared, channel_id);
         }
         let initial_presleep = profile.initial_presleep();
-        if !initial_presleep.is_zero() {
+        if !direct && !initial_presleep.is_zero() {
             tokio::select! {
                 _ = tokio::time::sleep(initial_presleep) => {}
                 _ = slot.wake.notified() => {}
             }
+        }
+        if direct || owned(&shared, channel_id).await {
+            slot.consume_requests();
+            let _ = backlog_guard.release();
+            return;
         }
 
         let _ =

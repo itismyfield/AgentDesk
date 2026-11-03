@@ -7,7 +7,7 @@ use crate::services::claude_tui::input::submission::tests::{events, renderer_wit
 use crate::services::discord::queue_io::input_owner::admission::{
     AdmissionTicket, TurnBind, admit, exact_turn,
 };
-use crate::services::discord::queue_io::input_owner::drive::{Front, claim_turn};
+use crate::services::discord::queue_io::input_owner::drive::{Drive, Front, Handoff, claim_turn};
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture;
 use crate::services::turn_orchestrator::{ChannelMailboxRegistry, PendingQueueItem};
@@ -30,6 +30,10 @@ static OWNER_TIMING: Timing = Timing {
     confirm_window: Duration::from_millis(500),
     confirm_poll: Duration::from_millis(10),
 };
+
+type Answer = tokio::sync::oneshot::Sender<Result<(), String>>;
+/// The handoffs a rig's drive made, each waiting for this thread's answer.
+pub(super) type Inbox = std::sync::mpsc::Receiver<(Front, Answer)>;
 
 pub(super) struct Rig {
     pub(super) f: Fixture,
@@ -80,6 +84,7 @@ pub(super) fn owned(
     let script = format!(
         "#!/bin/sh\nd='{dir}'\nprintf '%s\\n' \"$*\" >> \"$d/trace\"\n\
          case \"$*\" in *load-buffer*) [ ! -f \"$d/fail-load\" ] || exit 1 ;; esac\n\
+         case \"$*\" in *pane_dead*) [ ! -f \"$d/before-read\" ] || {{ sh \"$d/before-read\"; rm \"$d/before-read\"; }} ;; esac\n\
          case \"$*\" in *pane_dead*) [ ! -f \"$d/fail-dead\" ] || {{ rm \"$d/fail-dead\"; exit 1; }} ;; esac\n\
          case \"$*\" in *paste-buffer*) [ ! -f \"$d/before-paste\" ] || {{ sh \"$d/before-paste\" || printf 'before-paste rc=%s\\n' \"$?\" >> \"$d/hook-timeout\"; rm \"$d/before-paste\"; }} ;; esac\n\
          case \"$*\" in *send-keys*Enter*) [ ! -f \"$d/before-Enter\" ] || {{ sh \"$d/before-Enter\" || printf 'before-Enter rc=%s\\n' \"$?\" >> \"$d/hook-timeout\"; rm \"$d/before-Enter\"; }} ;; esac\n\
@@ -393,6 +398,46 @@ impl Rig {
         assert!(matches!(self.bind(), TurnBind::Settled(turn) if turn.attempt == self.nonce));
     }
 
+    /// The owner's drive on this rig, whose every handoff this thread answers through `serve`.
+    pub(super) fn drive(&self) -> (Arc<Drive>, Inbox) {
+        let (fronts, inbox) = std::sync::mpsc::channel::<(Front, Answer)>();
+        let fronts = std::sync::Mutex::new(fronts);
+        let handoff: Handoff = Arc::new(move |front| {
+            let (reply, answer) = tokio::sync::oneshot::channel();
+            let sent = fronts.lock().unwrap().send((front, reply));
+            Box::pin(async move {
+                sent.map_err(|e| e.to_string())?;
+                answer.await.map_err(|e| e.to_string())?
+            })
+        });
+        let drive = Drive {
+            mailbox: self.mailbox.clone(),
+            channel: self.channel,
+            handoff,
+            settled: None,
+        };
+        (Arc::new(drive), inbox)
+    }
+
+    pub(super) fn wake(&self, drive: &Arc<Drive>) {
+        let _entered = self.runtime.enter();
+        crate::services::discord::queue_io::input_owner::drive::wake(drive.clone());
+    }
+
+    /// Runs the next handoff the drive makes within `secs` through this rig's turn; `None` when it
+    /// made none.
+    pub(super) fn serve(
+        &self,
+        inbox: &Inbox,
+        (provider, phase): &(ProviderKind, target::Phase),
+        secs: u64,
+    ) -> Option<Result<(), String>> {
+        let (front, reply) = inbox.recv_timeout(Duration::from_secs(secs)).ok()?;
+        let result = self.handoff(front, provider.clone(), *phase, &self.transcript());
+        let _ = reply.send(result.clone());
+        Some(result)
+    }
+
     /// The original back in custody with the owner's not-sent proof, and no key sent.
     pub(super) fn held_not_sent(&self, reason: &str) {
         let snapshot = self.snapshot();
@@ -670,6 +715,38 @@ fn owner_idle_claude_holds_a_modal_front_until_the_modal_is_gone() {
     rig.delivered();
 }
 
+/// A modal on an idle pane holds the front and leaves the pane's read with the held watch: nothing
+/// is handed on while it stays, its closing wakes the drive to deliver once, a later wake nothing.
+#[test]
+fn a_closing_modal_wakes_the_drive_to_deliver_its_held_front_once() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let modal = "Do you want to proceed?\n❯ 1. Yes\n  2. No\nEnter to select · Esc to cancel\n";
+    let rig = rig("oi-watch", 7_272_551, "normal", modal.into(), IDLE);
+    let (drive, inbox) = rig.drive();
+    rig.wake(&drive);
+    let idle = (ProviderKind::Claude, target::Phase::Idle);
+    let held = rig.serve(&inbox, &idle, 10);
+    assert_eq!(held, Some(Err("NotSent(\"Modal\")".into())));
+    assert_eq!(
+        rig.serve(&inbox, &idle, 5),
+        None,
+        "an open modal hands nothing on"
+    );
+    let pane = format!("={}:", rig.name);
+    rig.f.tmux(&["send-keys", "-t", &pane, "C-u"]);
+    wait("modal-closed", || rig.events() == ["clear"]);
+    rig.f.tmux(&["clear-history", "-t", &pane]);
+    assert_eq!(rig.serve(&inbox, &idle, 15), Some(Ok(())));
+    assert_eq!(rig.events(), ["clear", "paste", "Enter"]);
+    rig.delivered();
+    rig.wake(&drive);
+    assert_eq!(
+        rig.serve(&inbox, &idle, 3),
+        None,
+        "a later wake hands on nothing"
+    );
+}
+
 /// A legacy draft guard does not stop the owner's transaction: the guard is legacy state.
 #[test]
 fn legacy_guard_value_does_not_block_owner_a() {
@@ -710,17 +787,48 @@ fn owner_busy_claude_enter_ends_the_transaction_with_or_without_receipt() {
     assert!(alerts.is_empty(), "{alerts:?}");
 }
 
-/// A load that never became a buffer sends nothing and proves it: the original and its ticket
-/// stay with the owner.
+/// A buffer load that failed, or a transcript missing at the pane read, sends no key and holds the
+/// original at the front with its ticket, retained nowhere; once the cause is gone the next
+/// handoff of the same front pastes and enters once.
 #[test]
-fn load_failed_is_definitely_not_submitted() {
+fn a_failed_load_or_a_missing_transcript_holds_the_front_until_it_clears() {
     let _root = crate::config::TestRuntimeRootGuard::new();
-    let rig = rig("ob-load", 7_272_507, "normal", view("", false), BUSY);
-    rig.mark("fail-load", "");
-    let result = rig.dispatch(ProviderKind::Claude, target::Phase::Busy, &rig.transcript());
-    assert_eq!(result, Err("NotSent(\"LoadFailed\")".into()));
-    rig.held_not_sent("load_failed");
-    assert_eq!(rig.bind(), TurnBind::NotArmed);
+    for (name, channel, load) in [("ob-load", 7_272_507, true), ("ob-gone", 7_272_549, false)] {
+        let rig = rig(name, channel, "normal", view("", false), BUSY);
+        let transcript = rig.transcript();
+        let hidden = transcript.with_extension("hidden");
+        match load {
+            true => rig.mark("fail-load", ""),
+            false => {
+                let hide = format!("mv '{}' '{}'", transcript.display(), hidden.display());
+                rig.mark("before-read", &hide);
+            }
+        }
+        let busy = target::Phase::Busy;
+        let held = rig.handoff(rig.granted_front(), ProviderKind::Claude, busy, &transcript);
+        let reasons = [
+            "NotSent(\"LoadFailed\")",
+            "NotSent(\"TranscriptUnavailable\")",
+        ];
+        assert_eq!(held, Err(reasons[usize::from(!load)].into()), "{name}");
+        rig.waits_not_sent();
+        assert_eq!(rig.bind(), TurnBind::NotArmed, "{name}");
+        let dir = rig.f.root.path().join(format!("{name}-owner"));
+        match load {
+            true => fs::remove_file(dir.join("fail-load")).unwrap(),
+            false => fs::rename(&hidden, &transcript).unwrap(),
+        }
+        let sent = rig.handoff(rig.granted_front(), ProviderKind::Claude, busy, &transcript);
+        assert_eq!(sent, Ok(()), "{name}");
+        let events = rig.events();
+        let count = |key: &str| events.iter().filter(|e| *e == key).count();
+        assert_eq!(
+            (count("paste"), count("Enter")),
+            (1, 1),
+            "{name}: {events:?}"
+        );
+        rig.delivered();
+    }
 }
 
 /// The pane's process replaced before ready sends nothing and proves it; after C-s it is a stash

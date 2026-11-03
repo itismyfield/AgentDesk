@@ -348,6 +348,45 @@ fn owner_codex_holds_modal_missing_capture_and_copy_mode_without_keys() {
     }
 }
 
+/// A Codex modal on an idle pane holds the front and leaves the composer read with the held watch:
+/// nothing is handed on while it stays, a ready composer wakes the drive to deliver once.
+#[test]
+fn a_codex_modal_that_closes_wakes_the_drive_to_deliver_once() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let ready =
+        include_str!("../../../../../../tests/fixtures/tui_input/codex-status-sol-80-idle.ansi");
+    let modal = format!("Approval required?\n1. Yes\n2. No\n{}", ready.trim_start());
+    let rig = codex_rig_on("oc-watch", 7_676_140, true);
+    let (shim, inner) = (
+        rig.f.root.path().join("tmux"),
+        rig.f.root.path().join("tmux-inner"),
+    );
+    let shown = rig.f.root.path().join("held-capture");
+    fs::write(&shown, &modal).unwrap();
+    fs::rename(&shim, &inner).unwrap();
+    let script = format!(
+        "#!/bin/sh\ncase \"$*\" in *capture-pane*) cat '{}'; exit 0 ;; esac\nexec '{}' \"$@\"\n",
+        shown.display(),
+        inner.display()
+    );
+    fs::write(&shim, script).unwrap();
+    fs::set_permissions(&shim, fs::metadata(&inner).unwrap().permissions()).unwrap();
+    let (drive, inbox) = rig.drive();
+    rig.wake(&drive);
+    let idle = (ProviderKind::Codex, target::Phase::Idle);
+    let held = rig.serve(&inbox, &idle, 10);
+    assert_eq!(held, Some(Err("NotSent(\"Modal\")".into())));
+    assert_eq!(
+        rig.serve(&inbox, &idle, 5),
+        None,
+        "an open modal hands nothing on"
+    );
+    fs::write(&shown, ready).unwrap();
+    assert_eq!(rig.serve(&inbox, &idle, 15), Some(Ok(())));
+    assert_eq!(rig.events(), ["paste", "Enter"]);
+    rig.delivered();
+}
+
 #[test]
 fn owner_codex_changed_source_and_late_copy_mode_never_receive_payload() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -425,6 +464,42 @@ fn after_the_codex_paste_only_a_replaced_pane_stops_the_enter() {
 
 /// An idle Codex pane takes the prompt's typed text as one pinned paste and one Enter after a
 /// single composer read; nothing reads the pane after the keys, and the head settles unreceipted.
+/// An idle Codex composer whose lock another writer holds, or whose buffer failed to load, gets no
+/// key and keeps the original at the front with its ticket; the next handoff once that cleared
+/// pastes and enters once.
+#[test]
+fn an_idle_codex_lock_or_load_refusal_holds_the_front_until_it_clears() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    use crate::services::codex_tui::input::try_with_composer_mutation_lock;
+    for (n, locked) in [(0_u64, true), (1, false)] {
+        let rig = codex_rig_on(&format!("oc-wait-{n}"), 7_676_130 + n, true);
+        let (idle, transcript) = (target::Phase::Idle, rig.transcript());
+        let handoff = || rig.handoff(rig.granted_front(), ProviderKind::Codex, idle, &transcript);
+        let held = match locked {
+            true => try_with_composer_mutation_lock(&rig.name, handoff).unwrap(),
+            false => {
+                rig.mark("fail-load", "");
+                handoff()
+            }
+        };
+        let reason = if locked {
+            "LockContended"
+        } else {
+            "LoadFailed"
+        };
+        assert_eq!(held, Err(format!("NotSent({reason:?})")));
+        rig.waits_not_sent();
+        assert_eq!(rig.bind(), TurnBind::NotArmed, "{reason}");
+        if !locked {
+            let dir = rig.f.root.path().join(format!("{}-owner", rig.name));
+            fs::remove_file(dir.join("fail-load")).unwrap();
+        }
+        assert_eq!(handoff(), Ok(()), "{reason}");
+        assert_eq!(rig.events(), ["paste", "Enter"], "{reason}");
+        rig.delivered();
+    }
+}
+
 #[test]
 fn owner_idle_codex_pastes_and_enters_once_without_a_later_read() {
     let _root = crate::config::TestRuntimeRootGuard::new();

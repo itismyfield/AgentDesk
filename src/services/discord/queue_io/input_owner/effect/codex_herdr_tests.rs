@@ -353,7 +353,7 @@ fn owner_ready_refusal_pins_the_physical_pane_and_sends_nothing() {
         Arc::new(|_| Ok(())),
         || leaf(pane.frame()),
     );
-    assert_eq!(completion, Ok(Completion::NotSent("LockContended".into())));
+    assert_eq!(completion, Ok(Completion::Held("LockContended".into())));
     assert_eq!(
         *pinned.lock().unwrap(),
         [format!("herdr:{}", pane.physical())]

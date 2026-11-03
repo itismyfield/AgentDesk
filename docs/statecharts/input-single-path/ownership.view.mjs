@@ -8,7 +8,8 @@ export const state = (v) => {
   switch (v.inp) {
     case "queued": return `Input waits for the owner (${pane(v)})`;
     case "held": return `Input held for a later wake (${pane(v)})`;
-    case "retained": return "Input kept, person asked to send again";
+    case "retained":
+      return v.old === "untold" ? "Input an older binary kept, no ask sent yet" : "Input kept, person asked to send again";
     case "failed": return "Turn ended with a failure, input never pasted";
     case "sent": return "Pasted, no row yet";
     case "enq": return "Claude queued it behind the running turn";
@@ -49,7 +50,8 @@ const labels = {
   RowEnqueued: "Claude writes an enqueue row",
   Absorb: "Claude takes it into the running turn",
   WindowPasses: "the 3 s receipt window passes",
-  DriveFindsNothing: null,
+  DriveFindsNothing: "the wake finds nothing the owner may take",
+  BootRequeues: "a restart requeues an input kept before its ask went out [slice C]",
   Observe: "the relay reads the input's row",
   TimeHands: "the 3 s window passes with only an enqueue",
   TurnEnds: "the turn ends",
