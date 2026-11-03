@@ -361,16 +361,16 @@ async fn recovered_notices_record_bodies_without_counting_neutral_markers() {
         let shared = crate::services::discord::make_shared_data_for_tests();
         let outcome = match entry {
             "worktree" => {
-                super::completion_delivery::relay_worktree_recovery_refusal(
-                    &http,
-                    &shared,
+                super::completion_delivery::observe_worktree_recovery_refusal(
                     &row,
-                    (
+                    super::relay_recovered_terminal_text_to_placeholder(
+                        &http,
+                        &shared,
                         ChannelId::new(row.channel_id),
                         Some(MessageId::new(row.current_msg_id)),
+                        &format!("❌ {text}\nmain workspace fallback blocked."),
+                        None,
                     ),
-                    text,
-                    None,
                 )
                 .await
             }

@@ -204,6 +204,30 @@ pub(crate) async fn claim_then_send_held<T, F: std::future::Future<Output = T>>(
 
 #[derive(Clone, Copy, serde::Serialize)]
 pub(crate) enum BodySite {
+    #[serde(rename = "W01")]
+    WatcherTerminal,
+    #[serde(rename = "W01a")]
+    WatcherDirectFallback,
+    #[serde(rename = "W01b")]
+    WatcherReplace,
+    #[serde(rename = "W01c")]
+    WatcherPostFallback,
+    #[serde(rename = "W01d")]
+    WatcherShortController,
+    #[serde(rename = "W01e")]
+    WatcherLongController,
+    #[serde(rename = "W01f")]
+    WatcherLongChunks,
+    #[serde(rename = "W02")]
+    WatcherStreaming,
+    #[serde(rename = "W02b")]
+    WatcherProviderGuard,
+    #[serde(rename = "FOOTER-INITIAL")]
+    FooterInitial,
+    #[serde(rename = "FOOTER-STRIP")]
+    FooterStrip,
+    #[serde(rename = "FOOTER-REFRESH")]
+    FooterRefresh,
     #[serde(rename = "W06")]
     StandbyRelay,
     #[serde(rename = "W10")]

@@ -12,7 +12,7 @@ fn isolated(test: &str) -> bool {
     }
     let name = format!("{}::{test}", module_path!().split_once("::").unwrap().1);
     let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", &name, "--nocapture", "--test-threads=1"])
+        .args(["--exact", &name, "--nocapture"])
         .env(CHILD, "1")
         .env("AGENTDESK_SINGLE_MESSAGE_PANEL", "1")
         .env(
@@ -159,6 +159,96 @@ fn retired_watcher_rollover_raw_history_keeps_rich_budget_and_visible_progress()
         assert_eq!(row.response_sent_offset, sent);
         assert_eq!(row.current_msg_id, SERVER_MSG);
         assert_eq!(row.full_response, body);
+        use crate::services::discord::outbound::raw_output::tests as recording;
+        let log = recording::journal().await;
+        for (case, fail_post, marker, expect_wire) in [
+            (63_280, false, "", true),
+            (63_281, true, "", true),
+            (
+                63_282,
+                false,
+                "[SYSTEM NOTIFICATION - NOT USER INPUT] <output-file>/private/x</output-file>",
+                true,
+            ),
+            (63_283, false, "[SYSTEM NOTIF", false),
+        ] {
+            let fx = seed_row(guard.root.path(), case, false, false);
+            let mut row = load_inflight_state(&fx.provider, fx.channel.get()).unwrap();
+            row.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+            save_inflight_state(&row).unwrap();
+            let shared = six_tool_fixture(crate::config::ToolActivityDisplay::Summary, fx.channel);
+            let rec = recorder(fx.channel, true).await;
+            rec.fail_next_post.store(fail_post, Ordering::Release);
+            let mut locals = tick_locals(&fx, Some(PLACEHOLDER_MSG));
+            let body = format!("{}{}", "x".repeat(2100), marker);
+            let lock = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(log.parent().unwrap().join("writer.lock"))
+                .unwrap();
+            lock.lock().unwrap();
+            let result = tokio::time::timeout(
+                Duration::from_secs(3),
+                run_tick_with_tools(
+                    &mut locals,
+                    &rec,
+                    &shared,
+                    &fx,
+                    &body,
+                    &WatcherToolState::new(),
+                ),
+            )
+            .await;
+            let completed_while_locked = result.is_ok();
+            let wire = rec.total();
+            drop(lock);
+            assert!(
+                completed_while_locked,
+                "journal delayed watcher case {case}; wire={wire}"
+            );
+            assert_eq!(wire > 0, expect_wire, "case {case}");
+            if fail_post {
+                assert!(
+                    rec.seen("PATCH").len() >= 2,
+                    "freeze and failed-POST restoration must both reach HTTP"
+                );
+            }
+            recording::flushed().await;
+            let rows: Vec<serde_json::Value> = std::fs::read_to_string(&log)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .filter(|row| row["kind"] == "target" && row["channel"] == fx.channel.get())
+                .collect();
+            let body_requests = rec
+                .bodies
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|body| body.as_str() != ANCHOR)
+                .count();
+            assert_eq!(
+                rows.len(),
+                body_requests * 2,
+                "every body HTTP request, including restoration, is observed once: case {case}"
+            );
+            assert!(rows.iter().all(|row| row["census"]["binding_mode"] == "TUI"
+                && row["census"]["output_class"] == "LegacyBody"));
+            assert!(
+                rows.iter()
+                    .all(|row| !row["census"]["read_source"]["file"].is_null())
+            );
+            if !marker.is_empty() && expect_wire {
+                assert!(rows.iter().any(|row| row["census"]["site"] == "W02b"));
+                assert!(
+                    rec.bodies
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .all(|body| !body.contains("<output-file>"))
+                );
+            }
+        }
     });
 }
 
@@ -386,6 +476,7 @@ async fn recorder_with_failed_tail(channel: ChannelId) -> Recorder {
     );
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     Recorder {
+        fail_next_post: Arc::new(AtomicBool::new(false)),
         calls,
         bodies,
         visible,
@@ -416,6 +507,14 @@ async fn run_tick_with_tools(
         watcher_provider: &fx.provider,
         tmux_session_name: &fx.tmux,
         output_path: &fx.output_path,
+        source_authority: WatcherSourceAuthority {
+            source_file: crate::services::cluster::stream_relay::SourceFileIdentity::from_open_file(
+                &std::fs::File::open(&fx.output_path).unwrap(),
+            ),
+            generation_mtime_ns: 1,
+            reset_incarnation: 0,
+            source_stamp: None,
+        },
         turn_delivered: &delivered_flag,
         host: &HostSnapshot::new(WatchHost::Legacy),
     };

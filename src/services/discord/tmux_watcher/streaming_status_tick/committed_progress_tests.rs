@@ -157,6 +157,7 @@ fn wrapper_patch(fx: &Fixture, identity: Option<&InflightTurnIdentity>,
 }
 
 struct Recorder {
+    fail_next_post: Arc<AtomicBool>,
     calls: Arc<Mutex<Vec<(String, String)>>>,
     bodies: Arc<Mutex<Vec<String>>>,
     visible: Arc<Mutex<std::collections::BTreeMap<u64, String>>>,
@@ -195,6 +196,8 @@ async fn recorder_for_cycle(channel: ChannelId, delete_ok: bool, cycle: bool) ->
     use axum::http::{Method, StatusCode, Uri};
     use axum::response::IntoResponse;
     use axum::{Json, Router, routing::any};
+    let fail_next_post = Arc::new(AtomicBool::new(false));
+    let captured_fail = fail_next_post.clone();
     let calls = Arc::new(Mutex::new(Vec::new()));
     let recorded = calls.clone();
     let bodies = Arc::new(Mutex::new(Vec::new()));
@@ -211,6 +214,7 @@ async fn recorder_for_cycle(channel: ChannelId, delete_ok: bool, cycle: bool) ->
         let (recorded, channel_text, bodies) =
             (recorded.clone(), channel_text.clone(), captured_bodies.clone());
         let body_check = captured_check.clone();
+        let fail_next_post = captured_fail.clone();
         let (visible, terminal_gate, next_id) =
             (captured_visible.clone(), captured_gate.clone(), next_id.clone());
         async move {
@@ -236,6 +240,9 @@ async fn recorder_for_cycle(channel: ChannelId, delete_ok: bool, cycle: bool) ->
                             "message": "Must be 2000 or fewer in length."}]}}
                     }))).into_response();
                 }
+            }
+            if method == Method::POST && fail_next_post.swap(false, Ordering::AcqRel) {
+                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"code":50035,"message":"fixture rejects placeholder POST"}))).into_response();
             }
             if cycle && method == Method::POST
                 && payload["content"].as_str().is_some_and(|body| body.contains("ADK5833-final")) {
@@ -267,7 +274,7 @@ async fn recorder_for_cycle(channel: ChannelId, delete_ok: bool, cycle: bool) ->
             .build(),
     );
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    Recorder { calls, bodies, visible, terminal_gate, check, http, server: server.abort_handle() }
+    Recorder { fail_next_post, calls, bodies, visible, terminal_gate, check, http, server: server.abort_handle() }
 }
 
 #[rustfmt::skip]
@@ -322,6 +329,10 @@ async fn run_tick_body(
     let ctx = StreamingStatusTickContext {
         http: &rec.http, shared, channel_id: fx.channel, watcher_provider: &fx.provider,
         tmux_session_name: &fx.tmux, output_path: &fx.output_path,
+        source_authority: WatcherSourceAuthority {
+            source_file: crate::services::cluster::stream_relay::SourceFileIdentity::from_open_file(&std::fs::File::open(&fx.output_path).unwrap()),
+            generation_mtime_ns: 1, reset_incarnation: 0, source_stamp: None,
+        },
         turn_delivered: &delivered_flag, host: &HostSnapshot::new(WatchHost::Legacy),
     };
     let turn = StreamingStatusTickTurn {

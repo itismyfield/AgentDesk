@@ -379,29 +379,13 @@ pub(super) async fn relay_recovery_body_notice(
         .await
 }
 
-/// The registered worktree-refusal notice keeps its existing delivery and authority path.
-pub(super) async fn relay_worktree_recovery_refusal(
-    http: &Arc<serenity::Http>,
-    shared: &Arc<SharedData>,
+/// Only the worktree-refusal producers use this nonbody envelope; delivery remains at the caller.
+pub(super) async fn observe_worktree_recovery_refusal<T>(
     state: &super::inflight::InflightTurnState,
-    target: (ChannelId, Option<MessageId>),
-    error: &str,
-    recovery_context: Option<&RecoveryDeliveryContext>,
-) -> RecoveryRelayOutcome {
-    let text = format!("❌ {error}\nmain workspace fallback blocked.");
+    notice: impl std::future::Future<Output = T>,
+) -> T {
     BodySource::from_state(state)
-        .observe(
-            BodySite::RecoveredTerminal,
-            BodyOffer::NonBody,
-            relay_recovered_terminal_text_to_placeholder(
-                http,
-                shared,
-                target.0,
-                target.1,
-                &text,
-                recovery_context,
-            ),
-        )
+        .observe(BodySite::RecoveredTerminal, BodyOffer::NonBody, notice)
         .await
 }
 

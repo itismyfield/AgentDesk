@@ -6,6 +6,9 @@
 //! watermark/idle-commit epilogue. The `relay_ok` value is returned to the parent
 //! arm unchanged.
 
+use crate::services::discord::outbound::body_census::{BodyOffer, BodySource};
+use crate::services::tui_o::cutover::BodySite;
+
 use std::sync::Arc;
 
 use super::*;
@@ -16,7 +19,7 @@ use crate::services::discord::task_notification_delivery as task_delivery;
 use crate::services::discord::turn_finalizer::TurnKey;
 use crate::services::discord::{DeliveryLeaseCell, SharedData};
 use crate::services::provider::ProviderKind;
-use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send};
+use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send_at};
 
 #[path = "terminal_direct_fallback_edit.rs"]
 mod edit_fallback;
@@ -328,16 +331,18 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                         expected: expected_transcript.as_ref(),
                         range_end: watcher_lease_end,
                     };
-                    let Some(replace_outcome) = replace_or_post_after_edit_failure(
-                        http,
-                        shared,
-                        (channel_id, msg_id),
-                        &relay_text,
-                        recheck,
-                        body_claim,
-                        &mut last_chunk_anchor,
-                    )
-                    .await
+                    let Some(replace_outcome) =
+                        watcher_body_source(inflight_before_relay.as_ref(), source_authority)
+                            .scope(replace_or_post_after_edit_failure(
+                                http,
+                                shared,
+                                (channel_id, msg_id),
+                                &relay_text,
+                                recheck,
+                                body_claim,
+                                &mut last_chunk_anchor,
+                            ))
+                            .await
                     else {
                         return false; // Nothing sent: O owns the channel or its identity is held.
                     };
@@ -639,16 +644,24 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                 // The rollback sender makes chunk failure all-or-nothing before a rewind; an
                 // accepted POST that times out stays ambiguous, left to the attempt cap below.
                 let send = || {
-                    crate::services::discord::formatting::send_long_message_raw_with_reference_rollback_returning_receipts(
+                    BodySource::inherited().observe(BodySite::WatcherDirectFallback, BodyOffer::Body, crate::services::discord::formatting::send_long_message_raw_with_reference_rollback_returning_receipts(
                         &http,
                         channel_id,
                         rollback_anchor_msg_id,
                         &relay_text,
                         &shared,
                         prompt_anchor_reference,
-                    )
+                    ))
                 };
-                let Ok(BodySend::Sent(sent)) = claim_then_send(body_claim, send).await else {
+                let Ok(BodySend::Sent(sent)) =
+                    watcher_body_source(inflight_before_relay.as_ref(), source_authority)
+                        .scope(claim_then_send_at(
+                            BodySite::WatcherDirectFallback,
+                            body_claim,
+                            send,
+                        ))
+                        .await
+                else {
                     return false; // Nothing was sent: O owns the channel or its identity is held.
                 };
                 match sent.and_then(crate::services::discord::formatting::message_ids_from_receipts)

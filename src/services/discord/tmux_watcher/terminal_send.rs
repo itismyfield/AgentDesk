@@ -4,6 +4,9 @@
 //! `tmux_watcher.rs` root. Long-chunk helpers live in `terminal_long_chunks.rs`;
 //! the shared heartbeat adapter lives in `controller_heartbeat.rs`.
 
+use crate::services::discord::outbound::body_census::{BodyOffer, BodySource};
+use crate::services::tui_o::cutover::BodySite;
+
 use std::sync::Arc;
 
 use super::*;
@@ -243,46 +246,51 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
             end,
         )
     };
-    let outcome = toc::deliver_turn_output_with_fallback_revalidation(
-        gateway,
-        toc::TurnOutputCtx {
-            turn,
-            lease_key,
-            owner: RelayOwnerKind::Watcher,
-            holder,
-            lease: &**cell,
-            channel_id,
-            placeholder_controller: &shared.ui.placeholder_controller,
-            placeholder: toc::PlaceholderSlot::Active {
-                message_id: msg_id,
-                key: PlaceholderKey {
-                    provider: provider.clone(),
+    let outcome = BodySource::inherited()
+        .observe(
+            BodySite::WatcherShortController,
+            BodyOffer::Body,
+            toc::deliver_turn_output_with_fallback_revalidation(
+                gateway,
+                toc::TurnOutputCtx {
+                    turn,
+                    lease_key,
+                    owner: RelayOwnerKind::Watcher,
+                    holder,
+                    lease: &**cell,
                     channel_id,
-                    message_id: msg_id,
+                    placeholder_controller: &shared.ui.placeholder_controller,
+                    placeholder: toc::PlaceholderSlot::Active {
+                        message_id: msg_id,
+                        key: PlaceholderKey {
+                            provider: provider.clone(),
+                            channel_id,
+                            message_id: msg_id,
+                        },
+                    },
+                    body: relay_text,
+                    send_range: (start, end),
+                    // `Replace { Active }` → non-terminal → `post_send_finalize` no-ops (no
+                    // placeholder transition), matching the legacy edit-in-place.
+                    plan: toc::OutputPlan::Replace {
+                        lifecycle: PlaceholderLifecycle::Active,
+                    },
+                    // #2757: the watcher NEVER deletes the original on edit-fail fallback
+                    // (the conditional-delete predicate is const-false). PreserveAlways is
+                    // byte-identical; `DeleteIfProvenStale` stays dormant.
+                    edit_fail_policy: toc::EditFailPlaceholderPolicy::PreserveAlways,
+                    fallback_commit_policy: toc::FallbackCommitPolicy::CommitOnFallback,
+                    // B2 (single-holder, §5.2): a lost acquire is another holder's range → do
+                    // NOT re-send. Mirrors the legacy `watcher_lease_b2_skip` arm.
+                    acquire_failure_mode: toc::AcquireFailureMode::Transient,
+                    advance: Some(&advance),
+                    heartbeat: Some(&heartbeat),
+                    body_claim,
                 },
-            },
-            body: relay_text,
-            send_range: (start, end),
-            // `Replace { Active }` → non-terminal → `post_send_finalize` no-ops (no
-            // placeholder transition), matching the legacy edit-in-place.
-            plan: toc::OutputPlan::Replace {
-                lifecycle: PlaceholderLifecycle::Active,
-            },
-            // #2757: the watcher NEVER deletes the original on edit-fail fallback
-            // (the conditional-delete predicate is const-false). PreserveAlways is
-            // byte-identical; `DeleteIfProvenStale` stays dormant.
-            edit_fail_policy: toc::EditFailPlaceholderPolicy::PreserveAlways,
-            fallback_commit_policy: toc::FallbackCommitPolicy::CommitOnFallback,
-            // B2 (single-holder, §5.2): a lost acquire is another holder's range → do
-            // NOT re-send. Mirrors the legacy `watcher_lease_b2_skip` arm.
-            acquire_failure_mode: toc::AcquireFailureMode::Transient,
-            advance: Some(&advance),
-            heartbeat: Some(&heartbeat),
-            body_claim,
-        },
-        Some(&revalidate_after_edit_failure),
-    )
-    .await;
+                Some(&revalidate_after_edit_failure),
+            ),
+        )
+        .await;
 
     let outcome = match outcome {
         toc::RevalidatedDeliveryOutcome::Delivery(outcome) => outcome,
@@ -436,25 +444,26 @@ pub(in crate::services::discord) async fn apply_watcher_short_replace_controller
         provider.clone(),
         None,
     );
-    let result = deliver_short_replace_via_controller(
-        &gateway,
-        shared,
-        provider,
-        channel_id,
-        tmux_session_name,
-        msg_id,
-        relay_text,
-        delivered_body,
-        cell,
-        turn,
-        lease_key,
-        instance_id,
-        source_authority,
-        range.0,
-        range.1,
-        body_claim,
-    )
-    .await;
+    let result = watcher_body_source(inflight_before_relay, source_authority)
+        .scope(deliver_short_replace_via_controller(
+            &gateway,
+            shared,
+            provider,
+            channel_id,
+            tmux_session_name,
+            msg_id,
+            relay_text,
+            delivered_body,
+            cell,
+            turn,
+            lease_key,
+            instance_id,
+            source_authority,
+            range.0,
+            range.1,
+            body_claim,
+        ))
+        .await;
     if let WatcherShortReplaceResult::AlreadyCommittedAfterEditFailure { edit_error } = result {
         committed_placeholder_cleanup::reconcile_already_committed_after_edit_failure(
             committed_placeholder_cleanup::CommittedEditFailureReconcileCtx {

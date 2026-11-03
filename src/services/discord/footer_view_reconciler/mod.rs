@@ -12,7 +12,12 @@ use serenity::{ChannelId, MessageId};
 
 use super::{ProviderKind, SharedData, single_message_panel as smp};
 use crate::services::agent_protocol::StatusEvent;
-use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send};
+use crate::services::discord::outbound::{
+    body_census::{BodyOffer, BodySource, forward},
+    current_census,
+};
+use crate::services::tui_o::channel_policy::ClaimReason;
+use crate::services::tui_o::cutover::{BodyClaim, BodySend, BodySite, claim_then_send_at};
 
 mod registry;
 
@@ -86,8 +91,18 @@ impl<'a> FooterViewWriter<'a> {
             Self::Watcher { body, .. } => body.filter(|_| carries_body),
             _ => None,
         };
-        let edit = || self.edit_channel_message(channel_id, msg_id, text, true);
-        BodySend::flatten(claim_then_send(claim, edit).await)
+        BodySource::inherited()
+            .observe(
+                BodySite::FooterInitial,
+                BodyOffer::body(carries_body),
+                async {
+                    let edit = || self.edit_channel_message(channel_id, msg_id, text, true);
+                    BodySend::flatten(
+                        claim_then_send_at(BodySite::FooterInitial, claim, edit).await,
+                    )
+                },
+            )
+            .await
     }
 
     #[cfg(test)]
@@ -128,17 +143,19 @@ impl<'a> FooterViewWriter<'a> {
                 let Some(http) = shared.serenity_http_or_token_fallback() else {
                     return Err("no Discord HTTP available for completion footer edit".to_string());
                 };
-                super::http::edit_channel_message(&http, channel_id, msg_id, text)
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| error.to_string())
+                forward(super::http::edit_channel_message(
+                    &http, channel_id, msg_id, text,
+                ))
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
             }
-            Self::Watcher { http, .. } => {
-                super::http::edit_channel_message(http, channel_id, msg_id, text)
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| error.to_string())
-            }
+            Self::Watcher { http, .. } => forward(super::http::edit_channel_message(
+                http, channel_id, msg_id, text,
+            ))
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
             #[cfg(test)]
             Self::Test { sink, .. } => {
                 sink.push(channel_id, msg_id, text);
@@ -312,23 +329,38 @@ pub(in crate::services::discord) async fn note_turn_completed_footer(
         channel_id,
         Some(owner.user_msg_id),
     );
+    let source_metadata = if current_census().is_some() {
+        BodySource::captured(current_census())
+    } else {
+        inflight
+            .as_ref()
+            .map(BodySource::from_state)
+            .unwrap_or_else(|| BodySource::captured(None))
+    };
     let wip_warning = super::turn_end_wip_warning::reserve_turn_end_wip_warning(inflight.as_ref());
-    let plan = prepare_turn_completed_footer(
-        writer.shared(),
-        channel_id,
-        terminal_msg_id,
-        owner,
-        provider,
-        terminal_text,
-        indicator,
-        background,
-        background_agent_pending,
-        wip_warning.as_ref(),
-    )
-    .await;
+    let plan = source_metadata
+        .clone()
+        .scope(prepare_turn_completed_footer(
+            writer.shared(),
+            channel_id,
+            terminal_msg_id,
+            owner,
+            provider,
+            terminal_text,
+            indicator,
+            background,
+            background_agent_pending,
+            wip_warning.as_ref(),
+        ))
+        .await;
     if let Some(edit) = plan.supersede_edit
-        && let Err(error) = writer
-            .edit_channel_message(channel_id, edit.message_id, &edit.text, true)
+        && let Err(error) = BodySource::captured(edit.census.clone())
+            .reason(ClaimReason::NoClaim)
+            .observe(
+                BodySite::FooterRefresh,
+                BodyOffer::refresh(edit.carries_body, edit.legacy_body_confirmed),
+                writer.edit_channel_message(channel_id, edit.message_id, &edit.text, true),
+            )
             .await
     {
         tracing::warn!(
@@ -342,13 +374,13 @@ pub(in crate::services::discord) async fn note_turn_completed_footer(
     let Some(terminal_edit) = plan.terminal_edit else {
         return true;
     };
-    let edited = match writer
-        .edit_body_message(
+    let edited = match source_metadata
+        .scope(writer.edit_body_message(
             channel_id,
             terminal_edit.message_id,
             &terminal_edit.text,
             terminal_edit.carries_body,
-        )
+        ))
         .await
     {
         Ok(()) => true,
@@ -399,8 +431,13 @@ pub(in crate::services::discord) async fn note_footer_superseded(
     else {
         return false;
     };
-    match writer
-        .edit_channel_message(channel_id, edit.message_id, &edit.text, true)
+    match BodySource::captured(edit.census.clone())
+        .reason(ClaimReason::NoClaim)
+        .observe(
+            BodySite::FooterRefresh,
+            BodyOffer::refresh(edit.carries_body, edit.legacy_body_confirmed),
+            writer.edit_channel_message(channel_id, edit.message_id, &edit.text, true),
+        )
         .await
     {
         Ok(()) => true,
@@ -438,8 +475,13 @@ pub(in crate::services::discord) async fn note_background_refresh_due(
     if !registry::completion_footer_edit_still_registered(channel_id, &edit) {
         return false;
     }
-    let edited = match writer
-        .edit_channel_message(channel_id, edit.message_id, &edit.text, false)
+    let edited = match BodySource::captured(edit.census.clone())
+        .reason(ClaimReason::NoClaim)
+        .observe(
+            BodySite::FooterRefresh,
+            BodyOffer::refresh(edit.carries_body, edit.legacy_body_confirmed),
+            writer.edit_channel_message(channel_id, edit.message_id, &edit.text, false),
+        )
         .await
     {
         Ok(()) => true,
@@ -480,8 +522,12 @@ pub(in crate::services::discord) async fn note_footer_suppressed_for_tui_mirror(
     else {
         return true;
     };
-    match writer
-        .edit_body_message(channel_id, msg_id, &finalized, !finalized.trim().is_empty())
+    match BodySource::captured(current_census())
+        .observe(
+            BodySite::FooterStrip,
+            BodyOffer::body(!finalized.trim().is_empty()),
+            writer.edit_body_message(channel_id, msg_id, &finalized, !finalized.trim().is_empty()),
+        )
         .await
     {
         Ok(()) => true,
@@ -727,6 +773,16 @@ mod tests {
 
     #[tokio::test]
     async fn unfinished_background_refresh_schedules_registered_footer_edit() {
+        use crate::services::discord::outbound::raw_output::tests as recording;
+        if recording::isolated(
+            concat!(
+                module_path!(),
+                "::unfinished_background_refresh_schedules_registered_footer_edit"
+            )
+            .trim_start_matches("agentdesk::"),
+        ) {
+            return;
+        }
         let channel_id = ChannelId::new(4_049_421);
         let shared = push_unfinished_subagent(channel_id);
         let sink = FooterViewTestSink::default();
@@ -758,6 +814,168 @@ mod tests {
         assert!(edits[0].text.contains("Review ⠼"));
         assert!(completion_footer_has_registered_target(channel_id));
         completion_footer_forget_registered_target(channel_id);
+        let log = recording::journal().await;
+        let mock =
+            recording::Mock::start((0..24).map(|id| recording::message(4049600 + id)).collect())
+                .await;
+        let http = Arc::new(recording::client(&mock));
+        for (case, body, known, registered_only, original_o) in [
+            (4_049_451, "Final answer", true, false, false),
+            (4_049_452, "", true, false, false),
+            (4_049_453, "Final answer", false, false, false),
+            (4_049_454, "Old answer", false, true, false),
+            (4_049_455, "O answer", false, false, true),
+        ] {
+            let channel = ChannelId::new(case);
+            let shared = push_unfinished_subagent(channel);
+            let owner = CompletionFooterOwner::new(case + 100, chrono::Utc::now().timestamp());
+            let message = MessageId::new(case + 200);
+            let mut state = super::super::inflight::InflightTurnState::new(
+                provider.clone(),
+                case,
+                None,
+                1,
+                owner.user_msg_id,
+                message.get(),
+                "input".into(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            );
+            state.runtime_kind =
+                Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+            let source = if original_o {
+                BodySource::captured(Some(
+                    serde_json::json!({"binding_mode":"TUI","body_owner":"O","output_class":"OBody"}),
+                ))
+            } else if known {
+                BodySource::from_state(&state)
+            } else {
+                BodySource::captured(None)
+            };
+            let writer = FooterViewWriter::watcher(&shared, &http);
+            if registered_only {
+                register_completion_footer_target_for_owner(
+                    channel,
+                    message,
+                    owner,
+                    &provider,
+                    owner.started_at_unix,
+                    body,
+                    None,
+                    true,
+                );
+            } else {
+                let lock = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(log.parent().unwrap().join("writer.lock"))
+                    .unwrap();
+                lock.lock().unwrap();
+                let before = mock.requests().len();
+                let outcome = tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    source.clone().scope(note_turn_completed_footer(
+                        writer,
+                        channel,
+                        Some(message),
+                        owner,
+                        &provider,
+                        body,
+                        "⠋",
+                        false,
+                        true,
+                        "recording",
+                    )),
+                )
+                .await;
+                let wire = mock.requests().len() - before;
+                drop(lock);
+                assert!(
+                    matches!(outcome, Ok(true)) && wire == 1,
+                    "initial footer must send while journal is blocked: {case}"
+                );
+            }
+            // A later trigger belongs to a different source; refresh retains the registered origin.
+            for indicator in ["⠼", "⠇"] {
+                assert!(crate::services::discord::outbound::census_scope(Some(serde_json::json!({"site":"unrelated-trigger", "binding_mode":"NON_TUI", "body_owner":"O"})),
+                    note_background_refresh_due(writer, channel, Some(owner), indicator, "recording")).await);
+            }
+            assert!(note_footer_superseded(writer, channel, owner, "recording").await);
+            if !body.is_empty() {
+                let dirty = format!(
+                    "{body}\n\n{}",
+                    smp::compose_footer_status_block("⠸", "🟢 진행 중 — Claude (<t:1700000000:R>)")
+                );
+                assert!(
+                    source
+                        .scope(note_footer_suppressed_for_tui_mirror(
+                            writer,
+                            channel,
+                            Some(message),
+                            &provider,
+                            &dirty,
+                            "recording"
+                        ))
+                        .await
+                );
+            }
+            recording::flushed().await;
+            let rows: Vec<serde_json::Value> = std::fs::read_to_string(&log)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .filter(|row| row["kind"] == "target" && row["channel"] == case)
+                .collect();
+            if body.is_empty() {
+                assert!(rows.is_empty(), "pure footer panels are N");
+                continue;
+            }
+            let expected = if registered_only { 8 } else { 10 };
+            assert_eq!(
+                rows.len(),
+                expected,
+                "initial/refresh/supersede/strip each own one begin/result: {case}"
+            );
+            let refresh: Vec<_> = rows
+                .iter()
+                .filter(|row| row["census"]["site"] == "FOOTER-REFRESH")
+                .collect();
+            assert_eq!(refresh.len(), 6);
+            assert!(refresh.iter().all(|row| row["census"]["output_class"]
+                == if known {
+                    "LegacyBodyRefresh"
+                } else {
+                    "UnknownBody"
+                }));
+            if known {
+                assert!(
+                    rows.iter()
+                        .all(|row| row["census"]["binding_mode"] == "TUI")
+                );
+                assert_eq!(
+                    rows.iter()
+                        .filter(|row| row["census"]["site"] == "FOOTER-INITIAL"
+                            && row["census"]["output_class"] == "LegacyBody")
+                        .count(),
+                    2
+                );
+                assert_eq!(
+                    rows.iter()
+                        .filter(|row| row["census"]["site"] == "FOOTER-STRIP"
+                            && row["census"]["output_class"] == "LegacyBody")
+                        .count(),
+                    2
+                );
+            } else {
+                assert!(
+                    rows.iter()
+                        .all(|row| row["census"]["output_class"] == "UnknownBody")
+                );
+            }
+        }
     }
 
     #[tokio::test]

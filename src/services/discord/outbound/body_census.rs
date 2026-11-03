@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use std::future::Future;
 
 #[derive(Clone)]
-pub(in crate::services::discord) struct BodySource(Value);
+pub(in crate::services::discord) struct BodySource(Value, bool);
 
 #[derive(Clone, Copy)]
 pub(in crate::services::discord) enum BodyOffer {
@@ -16,6 +16,7 @@ pub(in crate::services::discord) enum BodyOffer {
     Recovered,
     NonBody,
     Unknown,
+    Refresh,
 }
 
 impl BodyOffer {
@@ -24,6 +25,19 @@ impl BodyOffer {
             Self::Body
         } else {
             Self::NonBody
+        }
+    }
+
+    pub(in crate::services::discord) fn refresh(
+        carries_body: bool,
+        legacy_body_confirmed: bool,
+    ) -> Self {
+        if !carries_body {
+            Self::NonBody
+        } else if legacy_body_confirmed {
+            Self::Refresh
+        } else {
+            Self::Unknown
         }
     }
 
@@ -38,10 +52,44 @@ impl BodyOffer {
 
 impl BodySource {
     pub(in crate::services::discord) fn inherited() -> Self {
-        Self(json!({"binding_mode":"UNKNOWN", "actual_runtime":"unknown",
+        Self(
+            json!({"binding_mode":"UNKNOWN", "actual_runtime":"unknown",
             "session_temperature":"unknown", "source_incarnation":null,
             "producer_host":null, "input_origin":"unknown", "provider":null,
-            "body_owner":"Legacy"}))
+            "body_owner":"Legacy"}),
+            true,
+        )
+    }
+
+    pub(in crate::services::discord) fn captured(tag: Option<Value>) -> Self {
+        let tag = tag.filter(Value::is_object);
+        let unknown = tag.as_ref().is_none_or(|tag| {
+            tag["output_class"] == "UnknownBody"
+                || !matches!(tag["binding_mode"].as_str(), Some("TUI" | "NON_TUI"))
+                || tag["body_owner"] != "Legacy"
+        });
+        let mut source = Self(tag.unwrap_or_else(|| Self::inherited().0), false);
+        let object = source
+            .0
+            .as_object_mut()
+            .expect("source metadata is an object");
+        object.remove("site");
+        object.remove("output_class");
+        if unknown {
+            object.insert("output_class".into(), json!("UnknownBody"));
+        }
+        source
+    }
+
+    pub(in crate::services::discord) fn read_source(
+        mut self,
+        file: Option<(u64, u64)>,
+        generation: i64,
+        reset: u64,
+    ) -> Self {
+        self.0["read_source"] =
+            json!({"file":file,"generation":generation,"reset_incarnation":reset});
+        self
     }
 
     pub(in crate::services::discord) fn from_state(state: &InflightTurnState) -> Self {
@@ -98,7 +146,9 @@ impl BodySource {
 
     fn inherited_tag(self) -> Value {
         let mut tag = self.0;
-        if let Some(Value::Object(outer)) = current_census() {
+        if self.1
+            && let Some(Value::Object(outer)) = current_census()
+        {
             tag.as_object_mut()
                 .expect("source metadata is an object")
                 .extend(outer);
@@ -125,6 +175,7 @@ impl BodySource {
             BodyOffer::Recovered => "RecoveredLegacyBody",
             BodyOffer::NonBody => "NonBody",
             BodyOffer::Unknown => "UnknownBody",
+            BodyOffer::Refresh => "LegacyBodyRefresh",
         };
         // Explicit notices mask an outer body; nested body helpers retain that mask.
         if matches!(offer, BodyOffer::NonBody) {
@@ -162,6 +213,18 @@ mod tests {
             0,
         );
         for (site, wire) in [
+            (BodySite::WatcherTerminal, "W01"),
+            (BodySite::WatcherDirectFallback, "W01a"),
+            (BodySite::WatcherReplace, "W01b"),
+            (BodySite::WatcherPostFallback, "W01c"),
+            (BodySite::WatcherShortController, "W01d"),
+            (BodySite::WatcherLongController, "W01e"),
+            (BodySite::WatcherLongChunks, "W01f"),
+            (BodySite::WatcherStreaming, "W02"),
+            (BodySite::WatcherProviderGuard, "W02b"),
+            (BodySite::FooterInitial, "FOOTER-INITIAL"),
+            (BodySite::FooterStrip, "FOOTER-STRIP"),
+            (BodySite::FooterRefresh, "FOOTER-REFRESH"),
             (BodySite::BridgeTerminal, "W10"),
             (BodySite::BridgeShortController, "W10b"),
             (BodySite::BridgeLongController, "W10c"),
