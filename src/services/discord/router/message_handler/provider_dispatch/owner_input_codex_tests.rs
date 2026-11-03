@@ -523,6 +523,53 @@ fn an_idle_codex_lock_or_load_refusal_holds_the_front_until_it_clears() {
     }
 }
 
+/// A buffer load that fails once and loads again before the hold commits is still the hold's
+/// cause clearing: the watch's first look wakes the drive, which pastes and enters once.
+#[test]
+fn an_idle_codex_load_that_fails_once_is_pasted_once_without_another_wake() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = codex_rig_on("oc-load-once", 7_676_150, true);
+    rig.mark("fail-load", "once");
+    let (drive, inbox) = rig.drive();
+    rig.wake(&drive);
+    let idle = (ProviderKind::Codex, target::Phase::Idle);
+    let held = rig.serve(&inbox, &idle, 10);
+    assert_eq!(held, Some(Err("NotSent(\"LoadFailed\")".into())));
+    assert_eq!(rig.serve(&inbox, &idle, 15), Some(Ok(())));
+    assert_eq!(rig.events(), ["paste", "Enter"]);
+    rig.delivered();
+}
+
+/// A load watch whose pane is gone ends: no read runs at 2, 5, 30 or 60 s and nothing is handed on.
+#[test]
+fn a_cause_watch_ends_when_its_pane_is_gone() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = codex_rig_on("oc-cause-gone", 7_676_151, true);
+    rig.mark("fail-load", "");
+    let (drive, inbox) = rig.drive();
+    rig.wake(&drive);
+    let idle = (ProviderKind::Codex, target::Phase::Idle);
+    let held = rig.serve(&inbox, &idle, 10);
+    assert_eq!(held, Some(Err("NotSent(\"LoadFailed\")".into())));
+    rig.f
+        .tmux(&["kill-session", "-t", &format!("={}", rig.name)]);
+    let trace = rig.f.root.path().join(format!("{}-owner/trace", rig.name));
+    let loads = || {
+        let trace = fs::read_to_string(&trace).unwrap_or_default();
+        trace.lines().filter(|l| l.contains("load-buffer")).count()
+    };
+    // One look after the kill sees the pane gone.
+    std::thread::sleep(std::time::Duration::from_millis(4_500));
+    let (ended, mut waited) = (loads(), 0);
+    for at in [2, 5, 30, 60] {
+        std::thread::sleep(std::time::Duration::from_secs(at - waited));
+        waited = at;
+        assert_eq!(loads(), ended, "a read at {at}s after the watch ended");
+    }
+    assert!(inbox.try_recv().is_err(), "nothing is handed on");
+    assert!(rig.events().is_empty(), "{:?}", rig.events());
+}
+
 #[test]
 fn owner_idle_codex_pastes_and_enters_once_without_a_later_read() {
     let _root = crate::config::TestRuntimeRootGuard::new();

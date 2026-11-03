@@ -693,3 +693,139 @@ async fn a_requeue_beside_a_live_head_keeps_every_ticket_through_its_hold() {
         "after re-adoption"
     );
 }
+
+/// What an older binary left: the unit of 1 and 2 retained as proven unsent, its resend ask `told`
+/// or not, and an equal copy of 1 queued before 3 under its own ticket `t1b`.
+async fn equal_copy(channel: u64, told: bool) -> (ChannelMailboxRegistry, ChannelMailboxHandle) {
+    let dir = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap();
+    let file = dir.join(format!("claude/input-owner-drive/{channel}.json"));
+    let adopt = |file: std::path::PathBuf| async move {
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(poise::serenity_prelude::ChannelId::new(channel));
+        handle.v2_adopt(file, "input-owner".into()).await.unwrap();
+        (registry, handle)
+    };
+    let (registry, handle) = adopt(file.clone()).await;
+    for id in [1, 2, 3] {
+        admit_named(&handle, channel, id).await;
+    }
+    let last = original(channel, 3).message_id;
+    let reserved = handle.v2_request(move |slot| {
+        let owner = slot.as_mut().ok_or("no owner")?;
+        let attempt = serde_json::from_value(json!({"nonce":"old","provider":"claude",
+            "target":{"host":"tmux","owner":"old-pane","root":"/old","execution_nonce":"e"},
+            "source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,
+                "binding_watermark":null}}))
+        .map_err(|e| e.to_string())?;
+        let unit =
+            |i: &PendingQueueItem| (i.message_id != last).then(|| (String::new(), i.text.clone()));
+        owner.reserve_unit(attempt, unit)?;
+        owner.json()
+    });
+    let mut state = reserved.await.unwrap();
+    drop((handle, registry));
+    let head = state["head_injection"].take();
+    let items = state["items"].as_array().unwrap().clone();
+    state["items"] = json!([items[0], items[2]]);
+    let binds = state["admission_binds"].as_array_mut().unwrap();
+    for bind in binds.iter_mut().filter(|b| b["at"]["kind"] == "queued") {
+        bind["at"]["index"] = json!(1);
+    }
+    let first = (binds.iter())
+        .find(|b| b["receipt"].as_str().unwrap().starts_with("tk:t1:"))
+        .unwrap()
+        .clone();
+    let digest = first["receipt"].as_str().unwrap()["tk:t1:".len()..].to_string();
+    let receipt = format!("tk:t1b:{digest}");
+    let mut context = first["context"].clone();
+    context["execution"] = json!({"caller": "1b"});
+    binds.push(
+        json!({"receipt":receipt,"at":{"kind":"queued","index":0,"item":digest},
+        "context":context}),
+    );
+    state["admission_receipts"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!(receipt));
+    state["retained_inputs"] = json!([{"input":head,"disposition":"known_not_sent",
+        "reason":{"kind":"rejected","reason":"known_not_sent: vetoed: NotBusy"},
+        "notice":{"kind":"retained_retry_required","enqueued":told}}]);
+    std::fs::write(&file, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+    adopt(file).await
+}
+
+async fn requeued(mailbox: &ChannelMailboxHandle) -> usize {
+    let moved = mailbox.v2_request(|s| s.as_mut().unwrap().requeue_known_not_sent());
+    moved.await.unwrap().len()
+}
+
+/// An equal copy's own ticket follows its original's slot: held once, then submitted, both tickets
+/// of 1 settle with the one attempt that submitted it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn both_tickets_of_an_equal_copy_settle_with_the_attempt_that_submits_it() {
+    let _root = TestRuntimeRootGuard::new();
+    let channel = 7_272_792;
+    let (_registry, mailbox) = equal_copy(channel, false).await;
+    assert_eq!(requeued(&mailbox).await, 1);
+    let answered = AtomicUsize::new(0);
+    let answer = move |_: &str| match answered.fetch_add(1, Ordering::SeqCst) {
+        0 => Completion::Held(MODAL.into()),
+        _ => Completion::Submitted,
+    };
+    let before = |_: &Front| Box::pin(async {}) as Pin<Box<dyn Future<Output = ()> + Send>>;
+    let handoff = handoff(mailbox.clone(), channel, before, answer);
+    let drive = Drive {
+        mailbox: mailbox.clone(),
+        channel,
+        handoff: handoff.clone(),
+        settled: None,
+    };
+    let front = grant(&drive, false).await.unwrap();
+    assert_eq!(handoff(front).await, Err("NotSent(\"Modal\")".into()));
+    let front = grant(&drive, false).await.unwrap();
+    assert_eq!(front.1.message_id, original(channel, 1).message_id);
+    assert_eq!(handoff(front).await, Ok(()));
+    let bind = |ticket: &str| mailbox.v2_exact_turn(original(channel, 1), ticket.to_string());
+    let (own, copy) = (bind("t1").await.unwrap(), bind("t1b").await.unwrap());
+    assert!(format!("{own:?}").starts_with("Settled("), "{own:?}");
+    assert_eq!(format!("{own:?}"), format!("{copy:?}"));
+}
+
+/// A retained input whose resend ask went out never runs again, through an equal copy queued
+/// beside it either: the drive submits only 3, and 1 stays retained.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_told_inputs_equal_queued_copy_is_never_submitted() {
+    let _root = TestRuntimeRootGuard::new();
+    let channel = 7_272_793;
+    let (_registry, mailbox) = equal_copy(channel, true).await;
+    assert_eq!(requeued(&mailbox).await, 0);
+    let frames = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = frames.clone();
+    let answer = move |frame: &str| {
+        seen.lock().unwrap().push(frame.to_string());
+        Completion::Submitted
+    };
+    let before = |_: &Front| Box::pin(async {}) as Pin<Box<dyn Future<Output = ()> + Send>>;
+    let handoff = handoff(mailbox.clone(), channel, before, answer);
+    let drive = Drive {
+        mailbox: mailbox.clone(),
+        channel,
+        handoff: handoff.clone(),
+        settled: None,
+    };
+    for _ in 0..4 {
+        let Some(front) = grant(&drive, false).await else {
+            break;
+        };
+        assert_eq!(handoff(front).await, Ok(()));
+    }
+    assert_eq!(*frames.lock().unwrap(), ["input 3"]);
+    let state = snapshot(&mailbox).await;
+    assert_eq!(
+        state["retained_inputs"].as_array().map(Vec::len),
+        Some(1),
+        "{state}"
+    );
+    let copy = mailbox.v2_exact_turn(original(channel, 1), "t1b".into());
+    assert_eq!(format!("{:?}", copy.await.unwrap()), "NotArmed");
+}

@@ -24,9 +24,10 @@ impl BackstopSlot {
         }
     }
 
-    fn consume_requests(&self) {
+    /// Whether a schedule coalesced into this slot since the last call.
+    fn consume_requests(&self) -> bool {
         self.pending_request
-            .swap(false, std::sync::atomic::Ordering::AcqRel);
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
     }
 }
 /// Count each live task once, including panic cleanup, while preserving arm requests.
@@ -402,8 +403,13 @@ async fn run_single_slow_idle_queue_backstop(
         false
     };
     // This snapshot evaluates all requests received before it; newer requests remain pending.
-    slot.consume_requests();
+    let coalesced = slot.consume_requests();
     if owned(shared, channel_id).await {
+        // The owner takes a coalesced schedule as its event; a timer alone never wakes it.
+        if coalesced {
+            #[cfg(unix)]
+            crate::services::discord::router::message_handler::owner_wake(shared, channel_id);
+        }
         return None;
     }
     let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
@@ -746,9 +752,19 @@ fn schedule_deferred_idle_queue_kickoff_inner(
             }
         }
         if direct || owned(&shared, channel_id).await {
-            slot.consume_requests();
-            let _ = backlog_guard.release();
-            return;
+            // A schedule coalesced here after the owner took the channel is a new event: it wakes
+            // the owner, until the slot is released with none left.
+            loop {
+                if slot.consume_requests() {
+                    #[cfg(unix)]
+                    crate::services::discord::router::message_handler::owner_wake(
+                        &shared, channel_id,
+                    );
+                }
+                if backlog_guard.release() {
+                    return;
+                }
+            }
         }
 
         let _ =

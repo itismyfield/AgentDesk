@@ -91,3 +91,40 @@ async fn no_backstop_schedules_or_fires_a_kick_at_an_owned_queue() {
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     assert!(plain_kicks.load(Ordering::SeqCst) >= 1);
 }
+
+/// A schedule coalesced into a slot whose task started before the owner took the channel is a new
+/// event: once that task finds the owner, it wakes it, and still kicks nothing.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_schedule_coalesced_after_the_owner_took_the_channel_wakes_it() {
+    let _root = crate::services::discord::relay_recovery::tests::isolated_agentdesk_root();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let owned = ChannelId::new(7_676_203);
+    let provider = ProviderKind::Claude;
+    let (owned_kicks, _hook) = kicks(owned);
+    schedule_deferred_idle_queue_kickoff(shared.clone(), provider.clone(), owned, "before_owner");
+    tokio::task::yield_now().await;
+    let mailbox = shared.mailbox(owned);
+    let dir = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap();
+    let file = dir.join("claude/owned-backstop/7676203.json");
+    mailbox
+        .v2_adopt(file, "owned-backstop".into())
+        .await
+        .unwrap();
+    let original: crate::services::turn_orchestrator::PendingQueueItem =
+        serde_json::from_value(serde_json::json!({"author_id":7,"message_id":76_762_031,
+            "channel_id":owned.get(),"source_message_ids":[76_762_031],"queued_generation":1,
+            "text":"owned front"}))
+        .unwrap();
+    let _ = admit(&mailbox, &original, AdmissionTicket::new()).await;
+    schedule_deferred_idle_queue_kickoff(shared.clone(), provider, owned, "after_owner");
+    assert!(!granted(&mailbox).await, "coalesced into the waiting task");
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        granted(&mailbox).await,
+        "the coalesced schedule woke the owner"
+    );
+    assert_eq!(owned_kicks.load(Ordering::SeqCst), 0);
+}

@@ -62,7 +62,8 @@ fn rig(name: &str, channel: u64, mode: &str, before: String, transcript: &str) -
 }
 
 /// An owner with one admitted original over the `provider` pane in session `name`. Its tmux fails
-/// `fail-load`'s load and `fail-dead`'s pane read, respawns on `swap-after`, runs `after-<step>`.
+/// loads while `fail-load` stays (once if it has content), `fail-dead`'s pane read, respawns on
+/// `swap-after`, runs `after-<step>`.
 pub(super) fn owned(
     f: Fixture,
     name: &str,
@@ -83,7 +84,7 @@ pub(super) fn owned(
     fs::create_dir_all(&dir).unwrap();
     let script = format!(
         "#!/bin/sh\nd='{dir}'\nprintf '%s\\n' \"$*\" >> \"$d/trace\"\n\
-         case \"$*\" in *load-buffer*) [ ! -f \"$d/fail-load\" ] || exit 1 ;; esac\n\
+         case \"$*\" in *load-buffer*) [ ! -f \"$d/fail-load\" ] || {{ [ ! -s \"$d/fail-load\" ] || rm \"$d/fail-load\"; exit 1; }} ;; esac\n\
          case \"$*\" in *pane_dead*) [ ! -f \"$d/before-read\" ] || {{ sh \"$d/before-read\"; rm \"$d/before-read\"; }} ;; esac\n\
          case \"$*\" in *pane_dead*) [ ! -f \"$d/fail-dead\" ] || {{ rm \"$d/fail-dead\"; exit 1; }} ;; esac\n\
          case \"$*\" in *paste-buffer*) [ ! -f \"$d/before-paste\" ] || {{ sh \"$d/before-paste\" || printf 'before-paste rc=%s\\n' \"$?\" >> \"$d/hook-timeout\"; rm \"$d/before-paste\"; }} ;; esac\n\

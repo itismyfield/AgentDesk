@@ -226,10 +226,17 @@ impl BusyClaude {
                         Modal | ScreenUnread | CopyMode => {
                             arm_screen(self.channel, self.pane.clone())
                         }
-                        LoadFailed => arm_cause(self.channel, loads(self.pane.clone())),
+                        // The buffer load and the frame ledger both refuse as LoadFailed; only a
+                        // load failing now is a cause a read sees, else the busy turn's end wakes.
+                        LoadFailed => {
+                            let mut load = loads(self.pane.clone());
+                            if !load() {
+                                arm_cause(self.channel, self.pane.clone(), load);
+                            }
+                        }
                         TranscriptUnavailable => {
                             let transcript = self.transcript.clone();
-                            arm_cause(self.channel, move || transcript.exists());
+                            arm_cause(self.channel, self.pane.clone(), move || transcript.exists());
                         }
                         _ => {}
                     }
@@ -277,15 +284,16 @@ fn arm_screen(channel: u64, pane: busy_inject::Pane) {
     );
 }
 
-/// Leaves `clear` with the held watch when it reads the refusal's cause now, so that cause clearing
-/// wakes the drive once; a cause it cannot see leaves the front for the next real wake.
-pub(super) fn arm_cause(channel: u64, mut clear: impl FnMut() -> bool + Send + 'static) {
-    if clear() {
-        return;
-    }
+/// Leaves `clear`, a read of the refusal's own cause, with the held watch: its first clear look after
+/// the hold wakes the drive once, even when the cause had cleared before, and a lost pane ends it.
+pub(super) fn arm_cause(
+    channel: u64,
+    pane: busy_inject::Pane,
+    mut clear: impl FnMut() -> bool + Send + 'static,
+) {
     let read = move || match clear() {
         true => busy_inject::Screen::Ready,
-        false => busy_inject::Screen::Blocked,
+        false => pane.lost(),
     };
     super::held_watch::arm(channel, Box::new(read));
 }

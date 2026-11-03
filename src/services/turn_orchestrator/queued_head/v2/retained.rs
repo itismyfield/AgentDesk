@@ -298,13 +298,50 @@ impl SnapshotV2 {
     }
 }
 
+impl SnapshotV2 {
+    /// A told entry stays retained, so an equal untried copy of its member leaves the queue from
+    /// `from` on, its tickets bound to the entry's attempt; returns whether any copy left.
+    fn isolate_told_copies(&mut self, from: usize) -> bool {
+        let told: Vec<(PendingQueueItem, AttemptIdentity)> = (self.retained_inputs.iter())
+            .filter(|entry| entry.notice.enqueued)
+            .filter_map(|entry| {
+                Some((entry.input.members().cloned(), entry.input.attempt.clone()?))
+            })
+            .flat_map(|(members, attempt)| members.map(move |m| (m, attempt.clone())))
+            .collect();
+        let (mut at, before) = (from, self.items.len());
+        while at < self.items.len() {
+            let item = &self.items[at];
+            let Some((_, attempt)) = told
+                .iter()
+                .find(|(m, _)| source_admission::same_original(item, m))
+            else {
+                at += 1;
+                continue;
+            };
+            let identity = sources::identity(item);
+            for bind in &mut self.admission_binds {
+                if matches!(bind.at, BindAt::Queued { index, .. } if index == at) {
+                    let (identity, attempt) = (identity.clone(), attempt.clone());
+                    bind.at = BindAt::Attempt { identity, attempt };
+                }
+            }
+            self.items.remove(at);
+            self.unbind_item(at);
+        }
+        self.items.len() != before
+    }
+}
+
 impl Owner {
-    /// Requeues every proven-unsent retained input in one commit and returns the entries it moved;
-    /// nothing moves when the commit fails.
+    /// Requeues every proven-unsent retained input, and takes a told input's queued copies out, in
+    /// one commit; returns the entries it moved, and nothing moves when the commit fails.
     pub(crate) fn requeue_known_not_sent(&mut self) -> Result<Vec<RetainedInput>, String> {
         let mut next = self.snapshot.clone();
+        let from = (next.head_injection.as_ref()).map_or(0, |head| head.members().count());
+        let isolated = next.isolate_told_copies(from);
         let moved = next.requeue_known_not_sent(|_| true);
-        if moved.is_empty() {
+        if moved.is_empty() && !isolated {
             return Ok(moved);
         }
         if next.head_injection.is_none() {

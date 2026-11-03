@@ -464,13 +464,14 @@ impl SnapshotV2 {
             let Some(item) = self.queued_digest(at) else {
                 break;
             };
-            let receipt = (self.admission_binds.iter()).find_map(|b| match &b.at {
+            // Every ticket bound to the slot follows it, an equal copy's own as well.
+            let receipts = (self.admission_binds.iter()).filter_map(|b| match &b.at {
                 BindAt::Queued { index, item: bound } if *index == at && *bound == item => {
                     Some(b.receipt.clone())
                 }
                 _ => None,
             });
-            moved.extend(receipt.map(|receipt| (receipt, identity)));
+            moved.extend(receipts.map(|receipt| (receipt, identity.clone())));
         }
         let live: Vec<(QueueIdentity, AttemptIdentity)> = (self.retained_inputs.iter())
             .flat_map(|r| {

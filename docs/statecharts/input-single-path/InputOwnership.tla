@@ -35,7 +35,8 @@ VARIABLES
     pastes,    \* paste+Enter count
     lp, op,    \* legacy-side / O writer answer posts for the input
     screen,    \* what refuses a paste before any key: ok; held, the pane's screen (modal, unread
-               \* capture, copy mode); cause, a lock, a buffer load or a missing transcript
+               \* capture, copy mode); cause, a lock, a buffer load or a missing transcript; gone,
+               \* the pane a cause was read through is gone
     draft,     \* a person's composer text the owned paste meets: none, or unproven (C-s can't park)
     notices,   \* draft notices sent to the input's original
     wake,      \* an owner drive wake is pending
@@ -48,14 +49,15 @@ VARIABLES
     twinPend,  \* an earlier identical input's declaration is still pending (it was absorbed)
     envLeft,   \* direct terminal turns a person may still start
     stale,     \* an earlier held front's watch still runs on the channel when this input is held
-    old        \* an older binary retained the input: none, told (its resend ask went out), untold
+    old,       \* an older binary retained the input: none, told (its resend ask went out), untold
+    acct       \* the channel's live idle pane runs under another account than the channel's
 
 vars == <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain, sentInto, win,
           rcv, userRow, twin, claim, pastes, lp, op, screen, draft, notices, wake, timer, byTimer,
-          timed, heldBy, watch, aged, twinPend, envLeft, stale, old>>
+          timed, heldBy, watch, aged, twinPend, envLeft, stale, old, acct>>
 \* What the Claude rows and answers touch; the drive and screen keep the rest.
 drv == <<screen, draft, notices, timer, byTimer, timed, reader, src, twin, heldBy, watch, aged,
-         twinPend, stale, old>>
+         twinPend, stale, old, acct>>
 
 Init ==
     /\ mode \in {"turn", "legacy"}
@@ -72,11 +74,16 @@ Init ==
     /\ win = "open" /\ rcv = "none" /\ userRow = FALSE /\ twin \in BOOLEAN /\ claim = "none"
     /\ pastes = 0 /\ lp = 0 /\ op = 0
     /\ screen \in {"ok", "held", "cause"} /\ draft \in {"none", "unproven"} /\ notices = 0
-    /\ wake = (old = "none") /\ timer = FALSE /\ byTimer = FALSE /\ timed = FALSE /\ envLeft = 1
+    /\ wake = (old = "none") /\ timer = FALSE /\ byTimer = FALSE /\ timed = FALSE
     /\ heldBy = "none" /\ watch = FALSE /\ aged = FALSE /\ twinPend \in BOOLEAN
     /\ stale \in IF Fix \in {"a2d3", "a2d4", "c"} THEN BOOLEAN ELSE {FALSE}
     \* A kept input's boot is checked on one plain channel: no twin, draft, held screen or old watch.
     /\ old # "none" => ~twin /\ ~twinPend /\ draft = "none" /\ screen = "ok" /\ ~stale
+    \* In c a live idle pane may run under another account after the channel's account changed;
+    \* no person starts a turn in it during the check.
+    /\ acct \in IF Fix = "c" THEN BOOLEAN ELSE {FALSE}
+    /\ acct => mbx = "idle" /\ nat = "idle" /\ old = "none" /\ screen = "ok" /\ ~stale
+    /\ envLeft = IF acct THEN 0 ELSE 1
 
 A2D == Fix \in {"a2d1", "a2d2", "a2d3", "a2d4", "c"}
 R2 == Fix \in {"a2d2", "a2d3", "a2d4", "c"}
@@ -118,29 +125,29 @@ Handoff == wake /\ Waiting /\ wake' = FALSE /\ byTimer' = FALSE /\ timed' = (tim
 \* pane is NotBusy -> retain_not_sent ("send again"). a2d: the owned busy entry pastes whatever
 \* the transcript reads and declares no Answer. A start waits for an idle mailbox.
 DriveBusy ==
-    /\ Handoff /\ src = "discord" /\ mbx = "active"
+    /\ Handoff /\ ~acct /\ src = "discord" /\ mbx = "active"
     /\ IF A2D \/ nat = "busy"
        THEN OwnedPaste("busyOwned", Mut = "pendOnBusy", FALSE)
        ELSE Stays("retained", "none")
     /\ UNCHANGED <<mode, src, mbx, nat, natOwner, obsOk, rcv, userRow, twin, claim, lp, op,
-                   screen, draft, aged, twinPend, envLeft, stale, old>>
+                   screen, draft, aged, twinPend, envLeft, stale, old, acct>>
 
 \* start_idle -> intake: a transcript-busy pane with an idle mailbox. main: the front is deferred
 \* to the next wake. a2d: the same owned busy entry pastes now.
 DriveIdleBusyPane ==
-    /\ Handoff /\ src = "discord" /\ mbx = "idle" /\ nat = "busy"
+    /\ Handoff /\ ~acct /\ src = "discord" /\ mbx = "idle" /\ nat = "busy"
     /\ IF A2D
        THEN OwnedPaste("busyOwned", Mut = "pendOnBusy", FALSE)
        ELSE Stays("held", "other")
     /\ UNCHANGED <<mode, src, mbx, nat, natOwner, obsOk, rcv, userRow, twin, claim, lp, op,
-                   screen, draft, aged, twinPend, envLeft, stale, old>>
+                   screen, draft, aged, twinPend, envLeft, stale, old, acct>>
 
 \* A turn/start's headless turn on a busy pane: execute_owned. main and a2d1 fix busy=false, so
 \* an absent idle observer ends the turn NotSent("idle_unobserved") with a failure notice (the
 \* 11-02 iMessage loss). a2d2 reads the pane busy and pastes through the owned busy entry, with a
 \* reader of the row the input takes set up before the paste.
 DriveStartBusy ==
-    /\ Handoff /\ src = "start" /\ mbx = "idle" /\ nat = "busy"
+    /\ Handoff /\ ~acct /\ src = "start" /\ mbx = "idle" /\ nat = "busy"
     /\ IF R2 /\ Mut # "startIdle"
        THEN OwnedPaste("busyStart", TRUE, TRUE) /\ mbx' = "active"
        ELSE IF obsOk
@@ -148,18 +155,24 @@ DriveStartBusy ==
             /\ heldBy' = "none" /\ UNCHANGED <<notices, timer, watch>>
        ELSE Stays("failed", "none") /\ UNCHANGED mbx
     /\ UNCHANGED <<mode, src, nat, natOwner, obsOk, rcv, userRow, twin, claim, lp, op, screen,
-                   draft, aged, twinPend, envLeft, stale, old>>
+                   draft, aged, twinPend, envLeft, stale, old, acct>>
 
 \* An idle pane with its observer: the warm submit records the Answer declaration and the turn's
 \* observer reads the AI turn it starts. Without an observer the owner refuses (idle_unobserved)
 \* in every model: a Claude observer is missing only when the transcript cannot be resolved, so
 \* no source proves where a paste would land. The front waits for the next wake (slice C).
+\* In c a pane under another account is no execution of the channel: the live path's driver
+\* replaces it and the owner writes the new pane's first prompt, read as an idle paste's turn.
+\* Mutant noRelaunch keeps the pane as idle and refuses unobserved.
 DriveIdle ==
     /\ Handoff /\ mbx = "idle" /\ nat = "idle"
-    /\ IF obsOk
+    /\ IF acct /\ Mut # "noRelaunch"
        THEN /\ Paste("idleObserved", TRUE, TRUE) /\ reader' = TRUE /\ mbx' = "active"
-            /\ heldBy' = "none" /\ UNCHANGED <<notices, timer, watch>>
-       ELSE Stays("held", "other") /\ UNCHANGED mbx
+            /\ heldBy' = "none" /\ acct' = FALSE /\ UNCHANGED <<notices, timer, watch>>
+       ELSE IF obsOk /\ ~acct
+       THEN /\ Paste("idleObserved", TRUE, TRUE) /\ reader' = TRUE /\ mbx' = "active"
+            /\ heldBy' = "none" /\ UNCHANGED <<notices, timer, watch, acct>>
+       ELSE Stays("held", "other") /\ UNCHANGED <<mbx, acct>>
     /\ UNCHANGED <<mode, src, nat, natOwner, obsOk, rcv, userRow, twin, claim, lp, op, screen,
                    draft, aged, twinPend, envLeft, stale, old>>
 
@@ -299,11 +312,11 @@ MailboxReleases ==
 
 \* The refusal clears with no event of its own (a modal closed, a lock freed, a load recovered).
 ScreenClears ==
-    /\ screen # "ok"
+    /\ screen \in {"held", "cause"}
     /\ screen' = "ok"
     /\ UNCHANGED <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain,
                    sentInto, win, rcv, userRow, twin, claim, pastes, lp, op, draft, notices, wake,
-                   timer, byTimer, timed, heldBy, watch, aged, twinPend, envLeft, stale, old>>
+                   timer, byTimer, timed, heldBy, watch, aged, twinPend, envLeft, stale, old, acct>>
 
 \* The watch reads the held pane: a screen that would now submit wakes the drive once (a2d3).
 \* Mutant watchBlind wakes on a read of the unchanged screen.
@@ -312,7 +325,7 @@ WatchSees ==
     /\ watch' = FALSE /\ wake' = TRUE /\ byTimer' = (~wake /\ screen # "ok")
     /\ UNCHANGED <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain,
                    sentInto, win, rcv, userRow, twin, claim, pastes, lp, op, screen, draft,
-                   notices, timer, timed, heldBy, aged, twinPend, envLeft, stale, old>>
+                   notices, timer, timed, heldBy, aged, twinPend, envLeft, stale, old, acct>>
 
 \* One read of the held pane or of the queue fails and tmux, or the owner, answers again next time.
 \* a2d3 ends the watch on it; a2d4 keeps its probe, so the read changes nothing.
@@ -321,7 +334,7 @@ WatchMisreads ==
     /\ watch' = FALSE
     /\ UNCHANGED <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain,
                    sentInto, win, rcv, userRow, twin, claim, pastes, lp, op, screen, draft,
-                   notices, wake, timer, byTimer, timed, heldBy, aged, twinPend, envLeft, stale, old>>
+                   notices, wake, timer, byTimer, timed, heldBy, aged, twinPend, envLeft, stale, old, acct>>
 
 \* The earlier front's watch ends because that front no longer leads. a2d3 drops the channel's
 \* watch with it, this input's hold included; a2d4 ends only its own generation.
@@ -330,7 +343,32 @@ StaleWatchEnds ==
     /\ watch' = IF R4 /\ Mut # "noGeneration" THEN watch ELSE FALSE
     /\ UNCHANGED <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain,
                    sentInto, win, rcv, userRow, twin, claim, pastes, lp, op, screen, draft,
-                   notices, wake, timer, byTimer, timed, heldBy, aged, twinPend, envLeft, old>>
+                   notices, wake, timer, byTimer, timed, heldBy, aged, twinPend, envLeft, old, acct>>
+
+\* A cause that clears before its watch's first read: in c that read still sees it and wakes the
+\* drive once. Mutant clearedDrops is the arm that dropped a cause it already saw cleared.
+CauseClearsBeforeRead ==
+    /\ Fix = "c" /\ watch /\ inp = "held" /\ screen = "cause"
+    /\ screen' = "ok" /\ watch' = (Mut # "clearedDrops")
+    /\ UNCHANGED <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain,
+                   sentInto, win, rcv, userRow, twin, claim, pastes, lp, op, draft,
+                   notices, wake, timer, byTimer, timed, heldBy, aged, twinPend, envLeft, stale, old, acct>>
+
+\* The pane a cause is read through goes away while that cause still stands.
+PaneGoes ==
+    /\ Fix = "c" /\ watch /\ inp = "held" /\ screen = "cause"
+    /\ screen' = "gone"
+    /\ UNCHANGED <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain,
+                   sentInto, win, rcv, userRow, twin, claim, pastes, lp, op, draft, watch,
+                   notices, wake, timer, byTimer, timed, heldBy, aged, twinPend, envLeft, stale, old, acct>>
+
+\* A cause read through a gone pane ends its watch; mutant causeBlind reads the cause alone.
+WatchLosesPane ==
+    /\ watch /\ screen = "gone" /\ Mut # "causeBlind"
+    /\ watch' = FALSE
+    /\ UNCHANGED <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain,
+                   sentInto, win, rcv, userRow, twin, claim, pastes, lp, op, screen, draft,
+                   notices, wake, timer, byTimer, timed, heldBy, aged, twinPend, envLeft, stale, old, acct>>
 
 \* The watch ends once the held front no longer leads (another wake delivered it).
 WatchEnds ==
@@ -338,7 +376,7 @@ WatchEnds ==
     /\ watch' = FALSE
     /\ UNCHANGED <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain,
                    sentInto, win, rcv, userRow, twin, claim, pastes, lp, op, screen, draft,
-                   notices, wake, timer, byTimer, timed, heldBy, aged, twinPend, envLeft, stale, old>>
+                   notices, wake, timer, byTimer, timed, heldBy, aged, twinPend, envLeft, stale, old, acct>>
 
 \* More than 10 s pass between the paste and the relay reading the row (a long running turn):
 \* pending text recorded for the input, or for an absorbed twin, expires.
@@ -348,7 +386,7 @@ DeclarationAges ==
     /\ aged' = TRUE
     /\ UNCHANGED <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain,
                    sentInto, win, rcv, userRow, twin, claim, pastes, lp, op, screen, draft,
-                   notices, wake, timer, byTimer, timed, heldBy, watch, twinPend, envLeft, stale, old>>
+                   notices, wake, timer, byTimer, timed, heldBy, watch, twinPend, envLeft, stale, old, acct>>
 
 \* The drive's fixed recheck fires (main and a2d1 drive.rs: sleep(recheck) -> wake).
 TimerFires ==
@@ -356,7 +394,7 @@ TimerFires ==
     /\ timer' = FALSE /\ wake' = TRUE /\ byTimer' = (~wake /\ inp = "held")
     /\ UNCHANGED <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain,
                    sentInto, win, rcv, userRow, twin, claim, pastes, lp, op, screen, draft,
-                   notices, timed, heldBy, watch, aged, twinPend, envLeft, stale, old>>
+                   notices, timed, heldBy, watch, aged, twinPend, envLeft, stale, old, acct>>
 
 \* A wake with nothing the owner may take.
 DriveFindsNothing ==
@@ -364,7 +402,7 @@ DriveFindsNothing ==
     /\ wake' = FALSE /\ byTimer' = FALSE
     /\ UNCHANGED <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain,
                    sentInto, win, rcv, userRow, twin, claim, pastes, lp, op, screen, draft,
-                   notices, timer, timed, heldBy, watch, aged, twinPend, envLeft, stale, old>>
+                   notices, timer, timed, heldBy, watch, aged, twinPend, envLeft, stale, old, acct>>
 
 \* Slice C's boot requeues an input an older binary retained before its resend ask went out, then
 \* wakes the owner (notice_tests). One whose ask went out stays retained; mutant requeueTold moves it.
@@ -373,7 +411,7 @@ BootRequeues ==
     /\ inp' = "queued" /\ wake' = TRUE
     /\ UNCHANGED <<mode, src, mbx, nat, natOwner, pend, reader, obsOk, route, plain, sentInto,
                    win, rcv, userRow, twin, claim, pastes, lp, op, screen, draft, notices, timer,
-                   byTimer, timed, heldBy, watch, aged, twinPend, envLeft, stale, old>>
+                   byTimer, timed, heldBy, watch, aged, twinPend, envLeft, stale, old, acct>>
 
 \* Loss is judged once the pane's refusal cleared and no watch is left to read it: a screen that
 \* never clears holds by design.
@@ -381,8 +419,10 @@ Quiet == nat = "idle" /\ ~wake /\ ~timer /\ screen = "ok" /\ ~watch
          /\ inp \in {"queued", "held", "retained", "failed", "answered"}
          /\ envLeft = 0 /\ mbx = "idle" /\ ~ENABLED BootRequeues
 
+\* A front whose pane is gone waits, unwatched, for a new event; nothing else is left to happen.
 Done ==
-    /\ Quiet
+    /\ \/ Quiet
+       \/ nat = "idle" /\ ~wake /\ ~timer /\ mbx = "idle" /\ envLeft = 0 /\ screen = "gone" /\ ~watch
     /\ UNCHANGED vars
 
 Next ==
@@ -391,6 +431,7 @@ Next ==
     \/ Observe \/ TimeHands \/ TurnEnds
     \/ HumanStartsTurn \/ MailboxReleases \/ ScreenClears \/ TimerFires
     \/ WatchSees \/ WatchEnds \/ WatchMisreads \/ StaleWatchEnds \/ DeclarationAges \/ Done
+    \/ CauseClearsBeforeRead \/ PaneGoes \/ WatchLosesPane
     \/ BootRequeues
 
 Spec == Init /\ [][Next]_vars
@@ -424,4 +465,9 @@ HeldResumes == ~(Quiet /\ inp = "held" /\ heldBy = "screen" /\ screen = "ok" /\ 
 NoSilentLossObserved == (Quiet /\ obsOk /\ mode = "turn") => inp = "answered" \/ old = "told"
 \* 11. An input whose resend ask an older binary posted is never pasted again by the owner.
 ToldStays == old = "told" => pastes = 0
+\* 12. Nothing is pasted into a pane under another account than the channel's.
+ForeignUntouched == acct => pastes = 0
+\* 13. A watch whose pane is gone ends once nothing else is left to happen.
+GoneWatchEnds == ~(nat = "idle" /\ ~wake /\ ~timer /\ mbx = "idle" /\ envLeft = 0
+                   /\ screen = "gone" /\ watch /\ ~ENABLED WatchLosesPane)
 =============================================================================

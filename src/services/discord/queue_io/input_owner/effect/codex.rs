@@ -192,7 +192,7 @@ pub(crate) fn idle_codex(pane: busy_inject::Pane, session: String, channel: u64)
                     && pane.ok(&["load-buffer", "-b", &buffer, &path]).is_some()
             });
             if loaded.is_none() {
-                super::arm_cause(channel, super::loads(pane.clone()));
+                super::arm_cause(channel, pane.clone(), super::loads(pane.clone()));
                 return vetoed(Veto::LoadFailed);
             }
             if owner_input::ready_payload().is_err() || owner_input::start_payload().is_err() {
@@ -243,7 +243,7 @@ pub(crate) fn idle_codex(pane: busy_inject::Pane, session: String, channel: u64)
         Ok(
             try_with_composer_mutation_lock(&session, send).unwrap_or_else(|| {
                 let held = session.clone();
-                super::arm_cause(channel, move || {
+                super::arm_cause(channel, pane.clone(), move || {
                     try_with_composer_mutation_lock(&held, || ()).is_some()
                 });
                 vetoed(Veto::LockContended)
