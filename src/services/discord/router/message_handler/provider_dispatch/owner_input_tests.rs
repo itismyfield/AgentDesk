@@ -1372,24 +1372,33 @@ fn an_idle_channel_hands_its_front_to_the_turn_start() {
     assert!(rig.events().is_empty(), "no key: {:?}", rig.events());
 }
 
-/// A busy pane in tmux copy mode holds its front: the drive hands it once and, through 25 s of
-/// virtual time on the same screen, never again. When only the pane leaves copy mode, the pane's
-/// watch wakes the drive and the front is pasted once; the test wakes nothing.
+/// A busy pane in tmux copy mode holds its front: through 25 s of virtual time and the pane's
+/// watch reading that same screen again and again, the front is handed once. When only the pane
+/// leaves copy mode, the watch wakes the drive and the front is pasted once; the test wakes nothing.
 #[test]
 fn a_front_held_by_copy_mode_is_pasted_once_when_the_pane_leaves_it() {
     use std::sync::mpsc;
-    type Ask = (Front, tokio::sync::oneshot::Sender<Result<(), String>>);
+    use tokio::sync::oneshot;
+    type Ask = (Front, oneshot::Sender<Result<(), String>>);
     let _root = crate::config::TestRuntimeRootGuard::new();
     let rig = rig("hold-watch", 7_272_523, "normal", view("", false), BUSY);
     let target = format!("={}:", rig.name);
     rig.f.tmux(&["copy-mode", "-t", &target]);
+    let trace = rig.f.root.path().join(format!("{}-owner/trace", rig.name));
+    let mode_reads = || {
+        let trace = fs::read_to_string(&trace).unwrap_or_default();
+        trace
+            .lines()
+            .filter(|line| line.contains("#{pane_in_mode}"))
+            .count()
+    };
     // The drive runs on virtual time in its own thread; this thread runs each handoff on the rig.
     let (asks, asked) = mpsc::channel::<Ask>();
     let idle: crate::services::discord::queue_io::input_owner::drive::Handoff =
         Arc::new(move |front: Front| {
             let asks = asks.clone();
             Box::pin(async move {
-                let (answer, answered) = tokio::sync::oneshot::channel();
+                let (answer, answered) = oneshot::channel();
                 asks.send((front, answer)).map_err(|e| e.to_string())?;
                 answered.await.map_err(|e| e.to_string())?
             })
@@ -1399,8 +1408,8 @@ fn a_front_held_by_copy_mode_is_pasted_once_when_the_pane_leaves_it() {
         (ProviderKind::Claude, rig.channel),
         idle,
     );
-    let (mailbox, (said, heard), (go, went)) =
-        (rig.mailbox.clone(), mpsc::channel(), mpsc::channel());
+    let (mailbox, (said, heard)) = (rig.mailbox.clone(), mpsc::channel());
+    let ((held, on_hold), (left, on_left)) = (oneshot::channel(), oneshot::channel::<()>());
     let driver = std::thread::spawn(move || {
         let paused = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1413,17 +1422,14 @@ fn a_front_held_by_copy_mode_is_pasted_once_when_the_pane_leaves_it() {
                 json.unwrap()["items"].clone()
             };
             crate::services::discord::queue_io::input_owner::drive::wake(drive);
-            while went.try_recv().is_err() {
-                tokio::task::yield_now().await;
-                std::thread::sleep(Duration::from_millis(5));
-            }
+            on_hold.await.unwrap();
             tokio::time::sleep(Duration::from_secs(25)).await;
             said.send(items().await).unwrap();
-            while went.try_recv().is_err() {
-                tokio::task::yield_now().await;
-                std::thread::sleep(Duration::from_millis(5));
+            if on_left.await.is_err() {
+                return;
             }
-            for _ in 0..600 {
+            // Real time too: the paste runs on the rig's own thread.
+            for _ in 0..3_000 {
                 if items().await == json!([]) {
                     break;
                 }
@@ -1433,10 +1439,10 @@ fn a_front_held_by_copy_mode_is_pasted_once_when_the_pane_leaves_it() {
             said.send(items().await).unwrap();
         });
     });
-    let mut handed = 0;
+    let (mut handed, mut seen, mut since) = (0, Vec::new(), None);
+    let (mut held, mut left) = (Some(held), Some(left));
     let deadline = std::time::Instant::now() + Duration::from_secs(120);
-    let mut heard_items = Vec::new();
-    while heard_items.len() < 2 && std::time::Instant::now() < deadline {
+    while seen.len() < 2 && std::time::Instant::now() < deadline {
         if let Ok((front, answer)) = asked.recv_timeout(Duration::from_millis(10)) {
             handed += 1;
             let transcript = rig.transcript();
@@ -1447,23 +1453,30 @@ fn a_front_held_by_copy_mode_is_pasted_once_when_the_pane_leaves_it() {
                 &transcript,
             );
             let _ = answer.send(result);
-            if handed == 1 {
-                go.send(()).unwrap();
+            if let Some(held) = held.take() {
+                since = Some(mode_reads());
+                held.send(()).unwrap();
             }
         }
         if let Ok(items) = heard.try_recv() {
-            heard_items.push(items);
-            if heard_items.len() == 1 {
-                assert_eq!(handed, 1, "the same screen hands nothing");
-                assert!(rig.events().is_empty(), "{:?}", rig.events());
-                assert_eq!(heard_items[0][0]["text"], PROMPT);
-                rig.f.tmux(&["send-keys", "-t", &target, "-X", "cancel"]);
-                go.send(()).unwrap();
-            }
+            seen.push(items);
+        }
+        // The watch has read the unchanged screen three times since the hold.
+        let read = since.is_some_and(|since| mode_reads() >= since + 3);
+        if seen.len() == 1
+            && read
+            && let Some(left) = left.take()
+        {
+            assert_eq!(handed, 1, "the same screen hands nothing");
+            assert!(rig.events().is_empty(), "{:?}", rig.events());
+            assert_eq!(seen[0][0]["text"], PROMPT);
+            rig.f.tmux(&["send-keys", "-t", &target, "-X", "cancel"]);
+            left.send(()).unwrap();
         }
     }
+    assert!(left.take().is_none(), "the watch never read the held screen");
     driver.join().unwrap();
-    assert_eq!(heard_items.get(1), Some(&json!([])), "{}", rig.snapshot());
+    assert_eq!(seen.get(1), Some(&json!([])), "{}", rig.snapshot());
     assert_eq!(handed, 2);
     assert_eq!(rig.events(), ["paste", "Enter"]);
 }
