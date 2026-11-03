@@ -325,7 +325,29 @@ async fn unsampled_boot_child() {
     let Ok(root) = std::env::var("ADK_I7651_CHILD_ROOT") else {
         return;
     };
-    let _journal = open(std::path::Path::new(&root), process_boot::initialize()).await;
+    let root = std::path::Path::new(&root);
+    std::fs::create_dir_all(root.join("runtime")).unwrap();
+    std::fs::write(
+        root.join("runtime/dcserver.pid"),
+        std::process::id().to_string(),
+    )
+    .unwrap();
+    assert!(crate::config::snapshot().is_none());
+    start();
+    let config: crate::config::Config =
+        serde_json::from_value(json!({"server":{},"cluster":{"instance_id":"test-node"}})).unwrap();
+    crate::bootstrap::prepare_and_install_boot_snapshots(&config, None)
+        .await
+        .unwrap();
+    ensure_ready().await;
+    let written = header(root, process_boot::initialize());
+    assert_eq!(written["host"], "test-node");
+    assert!(
+        !health_json()["reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("HOST_IDENTITY_UNKNOWN"))
+    );
     std::process::exit(0);
 }
 
@@ -340,6 +362,7 @@ fn two_processes_keep_unsampled_crash_boots_and_their_incarnations() {
                 "--nocapture",
             ])
             .env("ADK_I7651_CHILD_ROOT", root.path())
+            .env("AGENTDESK_ROOT_DIR", root.path())
             .output()
             .unwrap();
         assert!(

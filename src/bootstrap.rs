@@ -98,7 +98,8 @@ pub(crate) async fn prepare_and_install_boot_snapshots(
     config: &crate::config::Config,
     pool: Option<&sqlx::PgPool>,
 ) -> Result<()> {
-    crate::services::legacy_body_census::ensure_ready().await;
+    crate::services::legacy_body_census::ensure_ready_with(config.cluster.instance_id.as_deref())
+        .await;
     let result = async {
         crate::config::validate_config(config)?;
         let candidate = crate::config::session_hosts::BootSessionHosts::from_config(config)?;

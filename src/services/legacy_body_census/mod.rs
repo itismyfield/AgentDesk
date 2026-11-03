@@ -42,12 +42,6 @@ impl State {
             window: window::Window::new(boot.id.clone()),
             predecessor_window: json!({"status":"INCONCLUSIVE","reason":"PREDECESSOR_UNKNOWN"}),
         };
-        if state.header["host"]
-            .as_str()
-            .is_none_or(|host| host.trim().is_empty())
-        {
-            state.mark("HOST_IDENTITY_UNKNOWN");
-        }
         if probes["error"].is_string() {
             state.mark("MANIFEST_INVALID");
         }
@@ -185,11 +179,16 @@ pub(crate) fn start() {
 }
 
 pub(crate) async fn ensure_ready() {
+    let host = crate::config::snapshot().and_then(|config| config.cluster.instance_id.clone());
+    ensure_ready_with(host.as_deref()).await;
+}
+
+pub(crate) async fn ensure_ready_with(host: Option<&str>) {
     start();
     READY
         .get_or_init(|| async {
             if let Some(journal) = JOURNAL.get() {
-                journal.append(json!({"kind":"boot_ready"})).await;
+                journal.0.prepare(host.map(str::to_owned)).await;
             }
         })
         .await;

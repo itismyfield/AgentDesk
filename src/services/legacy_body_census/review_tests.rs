@@ -343,6 +343,10 @@ async fn production_selection_records_both_installation_outcomes() {
     let result = crate::bootstrap::prepare_and_install_boot_snapshots(&config, None).await;
     assert_eq!(result.is_ok(), case == "installed");
     let all = records(&root, process_boot::initialize());
+    assert_eq!(
+        all[0]["host"], "test-node",
+        "loaded config host survives either install result"
+    );
     let selected: Vec<_> = all
         .iter()
         .filter(|record| record["kind"] == "selection")
@@ -569,6 +573,7 @@ async fn head_publication_holds_the_boot_lock() {
             ..Default::default()
         },
     ));
+    current.0.try_append(json!({"kind":"boot_ready"}));
     tokio::time::timeout(Duration::from_secs(2), entered.notified())
         .await
         .expect("writer reached header sync");

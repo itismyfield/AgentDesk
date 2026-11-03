@@ -23,10 +23,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             doctor: None,
-            host: crate::config::snapshot()
-                .and_then(|config| config.cluster.instance_id.clone())
-                .map(|host| host.trim().to_owned())
-                .filter(|host| !host.is_empty()),
+            host: None,
             timeout: Duration::from_secs(2),
             before_write: Arc::new(|| {}),
             sync_parent: None,
@@ -38,6 +35,7 @@ struct Message {
     record: Value,
     ack: Option<oneshot::Sender<bool>>,
     cut: u64,
+    host: Option<Option<String>>,
 }
 
 pub(super) struct Writer {
@@ -85,38 +83,54 @@ fn write_drain(file: &mut Option<std::fs::File>, state: &Shared, cut: u64, close
 }
 
 impl Writer {
-    pub(super) fn spawn(root: Option<PathBuf>, boot: Boot, options: Options) -> Self {
+    pub(super) fn spawn(root: Option<PathBuf>, boot: Boot, mut options: Options) -> Self {
         let (sender, receiver) = mpsc::sync_channel::<Message>(64);
-        let state = Arc::new(Mutex::new(State::new(&boot, options.host)));
+        let state = Arc::new(Mutex::new(State::new(&boot, options.host.clone())));
         let shared = state.clone();
         let timeout = options.timeout;
         let thread = std::thread::Builder::new()
             .name("legacy-body-census-writer".into())
             .spawn(move || {
-                (options.before_write)();
-                let opened = root
-                    .as_deref()
-                    .ok_or("RUNTIME_ROOT_UNAVAILABLE")
-                    .and_then(|root| match options.sync_parent {
-                        Some(sync) => {
-                            history::prepare_with_sync(root, &boot, options.doctor, &shared, sync)
-                        }
-                        None => history::prepare(root, &boot, options.doctor, &shared),
-                    });
-                let mut file = match opened {
-                    Ok(file) => Some(file),
-                    Err(reason) => {
-                        invalidate(&shared, reason);
-                        None
-                    }
-                };
+                let mut file = None;
+                let mut prepared = false;
                 let mut persisted = Vec::new();
-                if let Some(file) = file.as_mut() {
-                    persist_invalid(file, &shared, &mut persisted);
-                }
                 let mut last_cut = 0;
                 while let Ok(message) = receiver.recv() {
                     (options.before_write)();
+                    if !prepared {
+                        prepared = true;
+                        let host = message
+                            .host
+                            .unwrap_or_else(|| options.host.take())
+                            .map(|host| host.trim().to_owned())
+                            .filter(|host| !host.is_empty());
+                        shared
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .header["host"] = json!(host);
+                        let opened =
+                            root.as_deref()
+                                .ok_or("RUNTIME_ROOT_UNAVAILABLE")
+                                .and_then(|root| match options.sync_parent {
+                                    Some(sync) => history::prepare_with_sync(
+                                        root,
+                                        &boot,
+                                        options.doctor.take(),
+                                        &shared,
+                                        sync,
+                                    ),
+                                    None => history::prepare(
+                                        root,
+                                        &boot,
+                                        options.doctor.take(),
+                                        &shared,
+                                    ),
+                                });
+                        match opened {
+                            Ok(opened) => file = Some(opened),
+                            Err(reason) => invalidate(&shared, reason),
+                        }
+                    }
                     let gate = root
                         .as_deref()
                         .and_then(|root| history::lock_writer(root).ok());
@@ -166,14 +180,19 @@ impl Writer {
 
     pub(super) fn enqueue(&self, record: Value) -> Option<oneshot::Receiver<bool>> {
         let (ack, received) = oneshot::channel();
-        self.queue(record, Some(ack)).then_some(received)
+        self.queue(record, Some(ack), None).then_some(received)
     }
 
     pub(super) fn try_append(&self, record: Value) {
-        self.queue(record, None);
+        self.queue(record, None, None);
     }
 
-    fn queue(&self, record: Value, ack: Option<oneshot::Sender<bool>>) -> bool {
+    fn queue(
+        &self,
+        record: Value,
+        ack: Option<oneshot::Sender<bool>>,
+        host: Option<Option<String>>,
+    ) -> bool {
         let mut state = self
             .state
             .lock()
@@ -182,13 +201,28 @@ impl Writer {
             state.mark("CUT_OVERFLOW");
             return false;
         };
-        if self.sender.try_send(Message { record, ack, cut }).is_err() {
+        if self
+            .sender
+            .try_send(Message {
+                record,
+                ack,
+                cut,
+                host,
+            })
+            .is_err()
+        {
             state.mark("WRITE_QUEUE_UNAVAILABLE");
             false
         } else {
             state.window.cut = cut;
             true
         }
+    }
+
+    pub(super) async fn prepare(&self, host: Option<String>) -> bool {
+        let (ack, received) = oneshot::channel();
+        self.queue(json!({"kind":"boot_ready"}), Some(ack), Some(host))
+            && self.wait_for_ack(received).await
     }
 
     pub(super) async fn append(&self, record: Value) -> bool {

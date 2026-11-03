@@ -140,7 +140,12 @@ pub(super) fn prepare_with_sync(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .header["host"]
         .clone();
-    let previous = predecessor(&dir, boot, &host, state);
+    let previous = if host.as_str().is_some() {
+        predecessor(&dir, boot, &host, state)
+    } else {
+        invalidate(state, "HOST_IDENTITY_UNKNOWN");
+        None
+    };
     let predecessor = previous
         .as_ref()
         .and_then(|header| header["boot_id"].as_str());
@@ -160,7 +165,7 @@ pub(super) fn prepare_with_sync(
         "kind":"header", "schema_version":1, "observation_policy_version":1,
         "process_role":"server", "host":host, "boot_id":boot.id,
         "doctor_boot_id":doctor, "predecessor_boot_id":predecessor,
-        "root_reason":if predecessor.is_none() { json!("PREDECESSOR_UNKNOWN") } else { Value::Null },
+        "root_reason":if host.is_null() { json!("HOST_IDENTITY_UNKNOWN") } else if predecessor.is_none() { json!("PREDECESSOR_UNKNOWN") } else { Value::Null },
         "coverage_start":previous.as_ref().map(|header| &header["coverage_start"]),
         "started_at_ms":boot.started_at_ms,
         "build_sha":crate::services::release_source::health_json(false)["deployed_repo_head"],
