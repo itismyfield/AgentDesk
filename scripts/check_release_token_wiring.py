@@ -12,6 +12,9 @@ import tempfile
 
 REPO = Path(__file__).resolve().parents[1]
 DEPLOY_END = "\n_clean_release_build_cache_after_staging\n"
+# Shell files deploy-release.sh sources, copied verbatim into the dry repo.
+HELPERS = ("_deploy_policy_generation.sh", "lib/deploy_allow_degraded.sh",
+           "lib/dashboard_build_commit.sh")
 DEFAULTS = """
 ADK_DEFAULT_PORT=1
 setup_sccache_env() { return 1; }
@@ -47,7 +50,7 @@ def prepare(root: Path, repo: Path, script: str) -> dict[str, str]:
     scripts = root / "repo/scripts"
     (scripts / script).write_text(source + '\nprintf complete > "$DRY_ROOT/completed"\n')
     (scripts / "_defaults.sh").write_text(DEFAULTS)
-    for helper in ("_deploy_policy_generation.sh", "lib/deploy_allow_degraded.sh"):
+    for helper in HELPERS:
         (scripts / helper).write_text((repo / "scripts" / helper).read_text())
     (root / "shell-env").write_text(SHELL_ENV)
     (root / "repo/dashboard/dist/index.html").write_text("dry dashboard")
