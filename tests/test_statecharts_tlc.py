@@ -2,8 +2,10 @@
 
 import importlib.util
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SCRIPT_PATH = Path(__file__).parents[1] / "scripts" / "ci" / "statecharts_tlc.py"
 SPEC = importlib.util.spec_from_file_location("statecharts_tlc", SCRIPT_PATH)
@@ -49,19 +51,62 @@ class ClassifyTest(unittest.TestCase):
 
 class ConfigTest(unittest.TestCase):
     def test_render_keeps_only_the_given_rules(self) -> None:
-        text = ('CONSTANTS\n  Mut = "INVARIANT"\n\\* INVARIANT Hidden\nINIT Init\nNEXT Next\n'
+        text = ('CONSTANTS\n  Mut = "INVARIANT (* \\*"\n\\* INVARIANT Hidden (*\nINIT Init\nNEXT Next\n'
+                "(* INVARIANT Gone\n  \\* still a block comment *)\n"
                 "INVARIANTS\n  A\n  B\nCHECK_DEADLOCK TRUE\nINVARIANT C\n")
         config = tlc.parse_config(text)
         self.assertEqual(config.rules(), ["A", "B", "C", "NoDeadlock"])
         again = tlc.parse_config(config.render(["B"], False))
         self.assertEqual(again.rules(), ["B"])
-        self.assertIn('Mut = "INVARIANT"', config.render(["B"], False))
+        self.assertIn('Mut = "INVARIANT (* \\*"', config.render(["B"], False))
 
     def test_unsupported_or_ambiguous_configs_fail(self) -> None:
         for text in ("INIT Init\nPROPERTY Live\n", "INVARIANT\nINIT Init\n", "INVARIANT NoDeadlock\n",
                      "CHECK_DEADLOCK maybe\n"):
             with self.subTest(text), self.assertRaises(tlc.CheckError):
                 tlc.parse_config(text)
+
+    def test_text_tlc_reads_past_fails(self) -> None:
+        cases = {
+            "nested comment": ("INIT Init\n(* outer\n  (* inner *)\n  INVARIANT Ghost\n  \\* outer ends *)\n"
+                               "INVARIANT Bad\n"),
+            "unclosed comment": "INIT Init\n(* open\nINVARIANT Bad\n",
+            "comment closed inside quotes": 'INIT Init\n(* a "*)" *)\nINVARIANT Bad\n',
+            "unclosed string": 'INIT Init\n"abc\nINVARIANT Bad\n',
+        }
+        for label, text in cases.items():
+            with self.subTest(label), self.assertRaisesRegex(tlc.CheckError, "not closed|nested"):
+                tlc.parse_config(text)
+
+    def test_check_deadlock_is_declared_at_most_once(self) -> None:
+        for first in ("TRUE", "FALSE"):
+            for second in ("TRUE", "FALSE"):
+                with self.subTest(f"{first}/{second}"), self.assertRaisesRegex(tlc.CheckError, "twice"):
+                    tlc.parse_config(f"INVARIANT A\nCHECK_DEADLOCK {first}\nCHECK_DEADLOCK {second}\n")
+        for text, on in (("INVARIANT A\n", True), ("CHECK_DEADLOCK TRUE\nINVARIANT A\n", True),
+                         ("INVARIANT A\nCHECK_DEADLOCK FALSE\n", False)):
+            with self.subTest(text):
+                self.assertEqual(tlc.parse_config(text).check_deadlock, on)
+
+
+class CheckCfgTest(unittest.TestCase):
+    def check(self, outputs: list[tuple[int, str]]) -> "tlc.Result":
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "M.tla").write_text("---- MODULE M ----\n====\n", encoding="utf-8")
+            (root / "M.cfg").write_text("INIT Init\nNEXT Next\nINVARIANT Known\nCHECK_DEADLOCK FALSE\n",
+                                        encoding="utf-8")
+            with mock.patch.object(tlc, "run_tlc", side_effect=outputs) as run:
+                result = tlc.check_cfg(root, "M.cfg", "M", {"Known"}, "java", root / "tla2tools.jar", 60)
+            self.assertEqual(run.call_count, len(outputs))
+            return result
+
+    def test_run_after_the_last_rule_breaks_must_finish_clean(self) -> None:
+        known = (12, msg(2107, "Invariant Known is violated by the initial state:"))
+        self.assertEqual(self.check([known, (0, SUCCESS)]).problems(), [])
+        failed = self.check([known, (255, msg(2179, "Attempted to apply the operator \\div to 1 and 0"))])
+        self.assertEqual(failed.broken, {"Known"})
+        self.assertIn("exit 255", failed.error or "")
 
 
 class ProblemsTest(unittest.TestCase):

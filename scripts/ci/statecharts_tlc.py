@@ -39,10 +39,11 @@ CFG_KEYWORDS = {
     "TYPE_CONSTRAINT", "CHECK_DEADLOCK", "POSTCONDITION", "ALIAS",
 }
 CFG_TOKEN = re.compile(
-    r'(?P<comment>\\\*[^\n]*|\(\*.*?\*\))|(?P<string>"(?:[^"\\]|\\.)*")'
-    r"|(?P<word>[A-Za-z_][A-Za-z0-9_]*)|(?P<other>\S)",
-    re.S,
+    r'(?P<comment>\\\*[^\n]*)|(?P<block>\(\*)|(?P<string>"(?:[^"\\\n]|\\[^\n])*")|(?P<quote>")'
+    r"|(?P<word>[A-Za-z_][A-Za-z0-9_]*)|(?P<other>\S)"
 )
+# Inside a block comment TLC sees neither strings nor line comments, only these marks.
+BLOCK_MARK = re.compile(r"\(\*|\*\)")
 TOOL_MESSAGE = re.compile(r"@!@!@STARTMSG (\d+):\d+ @!@!@\n(.*?)@!@!@ENDMSG \1 @!@!@", re.S)
 VIOLATED = re.compile(r"Invariant (\w+) is violated")
 
@@ -74,10 +75,34 @@ class Config:
         return body + f"CHECK_DEADLOCK {'TRUE' if check_deadlock else 'FALSE'}\n"
 
 
+def cfg_tokens(text: str) -> list[re.Match[str]]:
+    """Tokens outside comments, refusing what TLC would read past without a word.
+
+    TLC nests block comments, and both an unclosed comment and an unclosed string
+    silently swallow the rest of the file, so rewriting such a config could drop
+    every rule it checks.
+    """
+    tokens, pos = [], 0
+    while match := CFG_TOKEN.search(text, pos):
+        pos = match.end()
+        if match.group("quote"):
+            raise CheckError("string not closed on its line")
+        if match.group("block"):
+            mark = BLOCK_MARK.search(text, pos)
+            if not mark:
+                raise CheckError("block comment not closed")
+            if mark.group() == "(*":
+                raise CheckError("nested block comments are not supported")
+            pos = mark.end()
+        elif not match.group("comment"):
+            tokens.append(match)
+    return tokens
+
+
 def parse_config(text: str) -> Config:
-    tokens = [m for m in CFG_TOKEN.finditer(text) if not m.group("comment")]
+    tokens = cfg_tokens(text)
     invariants: list[str] = []
-    check_deadlock = True
+    check_deadlock, seen_check_deadlock = True, False
     cut: list[tuple[int, int]] = []
     i = 0
     while i < len(tokens):
@@ -98,6 +123,9 @@ def parse_config(text: str) -> Config:
             invariants += [t.group("word") for t in args]
             cut.append((tokens[i].start(), end))
         elif word == "CHECK_DEADLOCK":
+            if seen_check_deadlock:
+                raise CheckError("CHECK_DEADLOCK appears twice; TLC refuses that config")
+            seen_check_deadlock = True
             values = [t.group(0) for t in args]
             if values not in (["TRUE"], ["FALSE"]):
                 raise CheckError(f"CHECK_DEADLOCK must be TRUE or FALSE, got {values}")
@@ -197,8 +225,6 @@ def check_cfg(root: Path, cfg: str, module: str, expected: set[str], java: str, 
                     check_deadlock = False
                 else:
                     invariants.remove(broke)
-                if not invariants and not check_deadlock:
-                    break
     except (CheckError, OSError) as error:
         result.error = f"{error} (limit {timeout:g} s per config)" if str(error) == "timed out" else str(error)
     result.seconds = time.monotonic() - started
