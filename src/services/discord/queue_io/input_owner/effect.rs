@@ -226,13 +226,10 @@ impl BusyClaude {
                         Modal | ScreenUnread | CopyMode => {
                             arm_screen(self.channel, self.pane.clone())
                         }
-                        // The buffer load and the frame ledger both refuse as LoadFailed; only a
-                        // load failing now is a cause a read sees, else the busy turn's end wakes.
-                        LoadFailed => {
-                            let mut load = loads(self.pane.clone());
-                            if !load() {
-                                arm_cause(self.channel, self.pane.clone(), load);
-                            }
+                        // A buffer that failed to load is a cause a read sees; a frame ledger refusal
+                        // is not, so that front waits for the busy turn's end wake.
+                        LoadFailed if owner_input::buffer_failed() => {
+                            arm_cause(self.channel, self.pane.clone(), loads(self.pane.clone()))
                         }
                         TranscriptUnavailable => {
                             let transcript = self.transcript.clone();

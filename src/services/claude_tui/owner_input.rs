@@ -110,6 +110,14 @@ pub(crate) fn load_failed() {
     }
 }
 
+/// Whether this scope's leaf was refused because its text never became a tmux buffer.
+pub(crate) fn buffer_failed() -> bool {
+    current().is_some_and(|scope| {
+        let refused = scope.refused.lock().unwrap_or_else(|e| e.into_inner());
+        refused.as_ref().is_some_and(|r| r.reason == "load_failed")
+    })
+}
+
 /// The leaf's typed veto came before any key; a key already sent keeps it from proving unsent,
 /// and a refusal the scope already recorded keeps its own reason.
 #[cfg(unix)]

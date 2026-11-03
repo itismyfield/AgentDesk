@@ -128,3 +128,71 @@ async fn a_schedule_coalesced_after_the_owner_took_the_channel_wakes_it() {
     );
     assert_eq!(owned_kicks.load(Ordering::SeqCst), 0);
 }
+
+/// While the slow cycle's kick runs, V1 drains, the owner takes the channel and a new event's
+/// schedule coalesces into the cycle's slot: once that cycle ends, the schedule is the owner's wake.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_schedule_coalesced_during_the_slow_cycles_kick_wakes_the_new_owner() {
+    let _root = crate::services::discord::relay_recovery::tests::isolated_agentdesk_root();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let channel = ChannelId::new(7_676_204);
+    let provider = ProviderKind::Claude;
+    let persistence = crate::services::discord::queue_dispatch::persistence_context;
+    let queued =
+        crate::services::turn_orchestrator::ChannelMailboxRegistry::queued_for_test(76_762_040);
+    let context = persistence(&shared, &provider, channel);
+    shared
+        .mailbox(channel)
+        .replace_queue(vec![queued], context)
+        .await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let hook = Arc::new(move |shared: Arc<SharedData>, provider, at, _| {
+        let seen = seen.clone();
+        Box::pin(async move {
+            if at != channel {
+                return None;
+            }
+            seen.fetch_add(1, Ordering::SeqCst);
+            let mailbox = shared.mailbox(at);
+            mailbox
+                .replace_queue(Vec::new(), persistence(&shared, &provider, at))
+                .await;
+            let dir = crate::services::discord::runtime_store::discord_pending_queue_root();
+            let file = dir.unwrap().join("claude/owned-backstop/7676204.json");
+            mailbox
+                .v2_ensure(file, "owned-backstop".into())
+                .await
+                .unwrap();
+            let original: crate::services::turn_orchestrator::PendingQueueItem =
+                serde_json::from_value(serde_json::json!({"author_id":7,"message_id":76_762_041,
+                    "channel_id":at.get(),"source_message_ids":[76_762_041],
+                    "queued_generation":1,"text":"owned front"}))
+                .unwrap();
+            let _ = admit(&mailbox, &original, AdmissionTicket::new()).await;
+            schedule_deferred_idle_queue_kickoff(shared.clone(), provider, at, "after_owner");
+            Some(IdleQueueKickoffChannelOutcome::default())
+        }) as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
+    });
+    let _hook = super::super::set_idle_queue_kick_hook_for_tests(hook);
+    let outcome = IdleQueueKickoffChannelOutcome::default();
+    let armed = arm_event_backstop_after_no_start_if_queue_nonempty(
+        &shared, &provider, channel, outcome, "slow",
+    );
+    assert!(armed.await, "the unowned backlog arms the slow cycle");
+    let cycle = DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY + std::time::Duration::from_secs(1);
+    tokio::time::sleep(cycle).await;
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the slow cycle kicked once"
+    );
+    let mailbox = shared.mailbox(channel);
+    assert!(
+        granted(&mailbox).await,
+        "the coalesced schedule woke the owner"
+    );
+}

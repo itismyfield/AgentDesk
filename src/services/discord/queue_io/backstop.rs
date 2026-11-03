@@ -381,6 +381,25 @@ async fn idle_queue_backstop_backlog_units_all(
         .sum()
 }
 
+/// Hands a schedule coalesced into `slot` to the channel's owner as its wake.
+fn wake_coalesced(shared: &Arc<SharedData>, channel_id: ChannelId, slot: &BackstopSlot) {
+    if slot.consume_requests() {
+        #[cfg(unix)]
+        crate::services::discord::router::message_handler::owner_wake(shared, channel_id);
+    }
+}
+
+/// Consumes the slot's requests; once the owner holds the channel a coalesced one is its wake, and
+/// a timer alone never wakes it. Returns whether the owner holds the channel.
+async fn owner_took(shared: &Arc<SharedData>, channel_id: ChannelId, slot: &BackstopSlot) -> bool {
+    if owned(shared, channel_id).await {
+        wake_coalesced(shared, channel_id, slot);
+        return true;
+    }
+    slot.consume_requests();
+    false
+}
+
 async fn run_single_slow_idle_queue_backstop(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -403,13 +422,7 @@ async fn run_single_slow_idle_queue_backstop(
         false
     };
     // This snapshot evaluates all requests received before it; newer requests remain pending.
-    let coalesced = slot.consume_requests();
-    if owned(shared, channel_id).await {
-        // The owner takes a coalesced schedule as its event; a timer alone never wakes it.
-        if coalesced {
-            #[cfg(unix)]
-            crate::services::discord::router::message_handler::owner_wake(shared, channel_id);
-        }
+    if owner_took(shared, channel_id, slot).await {
         return None;
     }
     let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
@@ -463,8 +476,11 @@ async fn run_single_slow_idle_queue_backstop(
         }
     }
 
-    // A reported start can still have re-preserved the message at the hosted-TUI gate.
-    slot.consume_requests();
+    // A reported start can still have re-preserved the message at the hosted-TUI gate, and the
+    // owner may have taken the channel meanwhile.
+    if owner_took(shared, channel_id, slot).await {
+        return None;
+    }
     let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
     let mut backlog_units =
         idle_queue_backstop_backlog_units(shared.as_ref(), provider, channel_id, &snapshot);
@@ -755,12 +771,7 @@ fn schedule_deferred_idle_queue_kickoff_inner(
             // A schedule coalesced here after the owner took the channel is a new event: it wakes
             // the owner, until the slot is released with none left.
             loop {
-                if slot.consume_requests() {
-                    #[cfg(unix)]
-                    crate::services::discord::router::message_handler::owner_wake(
-                        &shared, channel_id,
-                    );
-                }
+                wake_coalesced(&shared, channel_id, &slot);
                 if backlog_guard.release() {
                     return;
                 }

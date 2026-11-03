@@ -841,6 +841,49 @@ fn a_failed_load_or_a_missing_transcript_holds_the_front_until_it_clears() {
     }
 }
 
+/// A busy pane's buffer that fails to load once is a cause the watch reads: its first look after the
+/// hold wakes the drive, which pastes and enters once.
+#[test]
+fn a_busy_buffer_that_fails_to_load_once_is_pasted_once_without_another_wake() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig("ob-load-once", 7_272_598, "normal", view("", false), BUSY);
+    rig.mark("fail-load", "once");
+    let (drive, inbox) = rig.drive();
+    rig.wake(&drive);
+    let busy = (ProviderKind::Claude, target::Phase::Busy);
+    let held = rig.serve(&inbox, &busy, 10);
+    assert_eq!(held, Some(Err("NotSent(\"LoadFailed\")".into())));
+    assert_eq!(rig.serve(&inbox, &busy, 15), Some(Ok(())));
+    let events = rig.events();
+    let count = |key: &str| events.iter().filter(|e| *e == key).count();
+    assert_eq!((count("paste"), count("Enter")), (1, 1), "{events:?}");
+    rig.delivered();
+}
+
+/// A frame ledger refusal is no cause a read sees: the front is held with no watch, so no probe runs
+/// and nothing is handed on while the busy turn lasts.
+#[test]
+fn a_busy_ledger_refusal_holds_the_front_without_a_watch() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig("ob-ledger", 7_272_599, "normal", view("", false), BUSY);
+    // The transcript shrinks below the attempt's observed offset, so the ledger refuses the frame.
+    let cut = format!("printf '{{}}\\n' > '{}'", rig.transcript().display());
+    rig.mark("before-read", &cut);
+    let (drive, inbox) = rig.drive();
+    rig.wake(&drive);
+    let busy = (ProviderKind::Claude, target::Phase::Busy);
+    let held = rig.serve(&inbox, &busy, 10);
+    assert_eq!(held, Some(Err("NotSent(\"LoadFailed\")".into())));
+    rig.waits_not_sent();
+    assert_eq!(rig.serve(&inbox, &busy, 12), None, "no watch hands it on");
+    let trace = rig.f.root.path().join("ob-ledger-owner/trace");
+    let trace = fs::read_to_string(trace).unwrap_or_default();
+    assert!(
+        !trace.contains("load-buffer"),
+        "no load ran or was probed: {trace}"
+    );
+}
+
 /// The pane's process replaced before ready sends nothing and proves it; after C-s it is a stash
 /// failure and after the paste a write that may have landed: both stay Unknown, never resent.
 #[test]
