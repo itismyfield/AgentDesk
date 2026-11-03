@@ -92,9 +92,8 @@ impl LocalEvidence {
     }
 }
 
-/// Where a completed observation of one ledger for one request list ended. The writer only appends,
-/// and its recovery and POST withdrawal cut only the last complete line, so a later observation of
-/// the same file resumes here once that line still reads the same.
+/// Where a completed observation of a ledger ended; the writer only appends and cuts only its last
+/// complete line, so the next observation resumes here while that line reads the same.
 #[derive(Clone)]
 struct Resume {
     path: PathBuf,

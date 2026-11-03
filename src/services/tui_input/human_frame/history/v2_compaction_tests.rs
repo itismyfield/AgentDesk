@@ -536,9 +536,8 @@ fn rank_rise_and_late_bind_are_compacted_and_still_recognized() {
     );
 }
 
-/// Unchanged history bytes are parsed once by the non-scoped readers at production size; new
-/// bytes are read again whether the writer published them, a replacement brought them, or an
-/// in-place rewrite kept the old length and mtime.
+/// Unchanged production-size history bytes are parsed once; bytes from the writer, a replacement
+/// or an in-place rewrite keeping length and mtime are read again.
 #[test]
 fn unchanged_history_bytes_are_parsed_once_and_new_bytes_are_read_again() {
     let _root = TestRuntimeRootGuard::new();
