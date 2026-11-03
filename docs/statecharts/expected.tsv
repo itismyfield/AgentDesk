@@ -1,6 +1,9 @@
 # One row per TLC config under docs/statecharts: cfg path, module, rules expected to break.
 # Rules are comma-separated invariant names, plus NoDeadlock for a deadlock; "-" means every rule holds.
 # scripts/ci/statecharts_tlc.py fails when a run breaks a rule not listed here or a listed rule holds.
+execution-authority/ExecutionAuthority.cfg	ExecutionAuthority	-
+execution-authority/ExecutionAuthorityMain.cfg	ExecutionAuthority	-
+execution-authority/ExecutionAuthorityNoWait.cfg	ExecutionAuthority	NoForeignPermitHost
 host-migration/HostMigration.cfg	HostMigration	NoDeadlock,RecordMatchesProcesses
 host-migration/HostMigrationClean.cfg	HostMigration	-
 host-migration/HostMigrationIdOnly.cfg	HostMigration	NoDeadlock

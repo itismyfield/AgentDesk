@@ -84,6 +84,15 @@ elif NAME == "bash":
         pass
     else:
         blocked(f"unexpected Bash call: {ARGS}")
+elif NAME == "git":
+    # Dashboard build-commit probe: a clean fixture checkout at a fixed commit.
+    if len(ARGS) < 3 or ARGS[0] != "-C":
+        blocked(f"unexpected git: {ARGS}")
+    local(ARGS[1])
+    if ARGS[2:] == ["rev-parse", "HEAD"]:
+        print("0" * 40)
+    elif ARGS[2:4] != ["status", "--porcelain"]:
+        blocked(f"unexpected git: {ARGS}")
 elif NAME == "dirname":
     print(os.path.dirname(ARGS[0]) or ".")
 elif NAME == "uname":

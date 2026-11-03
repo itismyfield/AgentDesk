@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from scripts.check_release_token_wiring import REPO, observe, prepare
+from scripts.check_release_token_wiring import HELPERS, REPO, observe, prepare
 from scripts import build_token as bt
 
 VARIANTS = {
@@ -30,8 +30,7 @@ class ReleaseTokenWiringTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.repo = Path(temp.name)
         (self.repo / "scripts/lib").mkdir(parents=True)
-        for name in ("build-release.sh", "deploy-release.sh", "_deploy_policy_generation.sh",
-                     "build_token.py", "lib/deploy_allow_degraded.sh"):
+        for name in ("build-release.sh", "deploy-release.sh", "build_token.py", *HELPERS):
             shutil.copy2(REPO / "scripts" / name, self.repo / "scripts" / name)
 
     def inject(self, script, command):
@@ -199,7 +198,7 @@ raise SystemExit(bt.run(sys.argv[3:], path={str(self.root / 'token')!r}))
             source = (REPO / "scripts" / script).read_text()
             start = 'export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-15G}"'
             end = ('echo "[2/3] Dashboard' if script == "build-release.sh" else
-                   '# Rebuild dashboard so deploy never ships a stale dist.')
+                   '# Rebuild dashboard unless a newer deployed build is known.')
             self.assertEqual(source.count(start), 1)
             self.assertEqual(source.count(end), 1)
             fragment = source.split(start)[1].split(end)[0]

@@ -2776,26 +2776,35 @@ if _binary_would_revert_o_ledger "$SOURCE_BINARY"; then
     exit 1
 fi
 
-# Rebuild dashboard so deploy never ships a stale dist.
+# Rebuild dashboard unless a newer deployed build is known.
 echo "▸ [timing] phase=release-binary seconds=$((SECONDS - BINARY_PHASE_STARTED)) transferred=$PEER_BINARY_ACCEPTED"
 DASHBOARD_PHASE_STARTED="$SECONDS"
-echo "▸ Building dashboard..."
-(cd "$REPO/dashboard" && npm run build --silent)
-echo "▸ [timing] phase=dashboard-build seconds=$((SECONDS - DASHBOARD_PHASE_STARTED))"
-STAGING_PHASE_STARTED="$SECONDS"
+. "$SCRIPT_DIR/lib/dashboard_build_commit.sh"
+KEEP_DEPLOYED_DASHBOARD=0
+if _dashboard_build_commit keep "$REPO" "$ADK_REL/dashboard/dist"; then
+    KEEP_DEPLOYED_DASHBOARD=1
+    STAGING_PHASE_STARTED="$SECONDS"
+else
+    echo "▸ Building dashboard..."
+    DASHBOARD_BUILD_COMMIT="$(_dashboard_build_commit capture "$REPO")" || DASHBOARD_BUILD_COMMIT=""
+    (cd "$REPO/dashboard" && npm run build --silent)
+    _dashboard_build_commit write "$DASHBOARD_BUILD_COMMIT" "$REPO/dashboard/dist" 2>/dev/null || echo "⚠ dashboard build commit not recorded"
+    echo "▸ [timing] phase=dashboard-build seconds=$((SECONDS - DASHBOARD_PHASE_STARTED))"
+    STAGING_PHASE_STARTED="$SECONDS"
 
-# Re-resolve after fresh build (source path may have changed).
-if ! DASHBOARD_SOURCE=$(_resolve_dashboard_source); then
-    echo "✗ Dashboard build succeeded but dist not found — aborting"
-    exit 1
+    # Re-resolve after fresh build (source path may have changed).
+    if ! DASHBOARD_SOURCE=$(_resolve_dashboard_source); then
+        echo "✗ Dashboard build succeeded but dist not found — aborting"
+        exit 1
+    fi
+
+    # Stage dashboard before stopping release so missing dist never causes downtime.
+    echo "▸ Staging dashboard..."
+    mkdir -p "$ADK_REL/dashboard"
+    DIST_STAGED="$ADK_REL/dashboard/dist.new"
+    rm -rf "$DIST_STAGED"
+    cp -r "$DASHBOARD_SOURCE" "$DIST_STAGED"
 fi
-
-# Stage dashboard before stopping release so missing dist never causes downtime.
-echo "▸ Staging dashboard..."
-mkdir -p "$ADK_REL/dashboard"
-DIST_STAGED="$ADK_REL/dashboard/dist.new"
-rm -rf "$DIST_STAGED"
-cp -r "$DASHBOARD_SOURCE" "$DIST_STAGED"
 
 # Stage agent prompt files atomically (source-of-truth: Obsidian vault, private).
 # See docs/source-of-truth.md.
@@ -3643,19 +3652,21 @@ else
 fi
 
 # Atomic swap: old → .old, staged → dist, cleanup
-if [ ! -d "$DIST_STAGED" ]; then
-    echo "⚠ Dashboard staging dir missing ($DIST_STAGED) — re-staging from source"
-    cp -r "$DASHBOARD_SOURCE" "$DIST_STAGED"
+if [ "$KEEP_DEPLOYED_DASHBOARD" != 1 ]; then
+    if [ ! -d "$DIST_STAGED" ]; then
+        echo "⚠ Dashboard staging dir missing ($DIST_STAGED) — re-staging from source"
+        cp -r "$DASHBOARD_SOURCE" "$DIST_STAGED"
+    fi
+    rm -rf "$ADK_REL/dashboard/dist.old"
+    if [ -d "$ADK_REL/dashboard/dist" ]; then
+        mv "$ADK_REL/dashboard/dist" "$ADK_REL/dashboard/dist.old"
+    fi
+    if ! mv "$DIST_STAGED" "$ADK_REL/dashboard/dist"; then
+        echo "✗ Dashboard swap failed — restoring from backup"
+        [ -d "$ADK_REL/dashboard/dist.old" ] && mv "$ADK_REL/dashboard/dist.old" "$ADK_REL/dashboard/dist"
+    fi
+    rm -rf "$ADK_REL/dashboard/dist.old"
 fi
-rm -rf "$ADK_REL/dashboard/dist.old"
-if [ -d "$ADK_REL/dashboard/dist" ]; then
-    mv "$ADK_REL/dashboard/dist" "$ADK_REL/dashboard/dist.old"
-fi
-if ! mv "$DIST_STAGED" "$ADK_REL/dashboard/dist"; then
-    echo "✗ Dashboard swap failed — restoring from backup"
-    [ -d "$ADK_REL/dashboard/dist.old" ] && mv "$ADK_REL/dashboard/dist.old" "$ADK_REL/dashboard/dist"
-fi
-rm -rf "$ADK_REL/dashboard/dist.old"
 
 rm -rf "$ADK_REL/skills.old"
 [ -d "$ADK_REL/skills" ] && mv "$ADK_REL/skills" "$ADK_REL/skills.old"
