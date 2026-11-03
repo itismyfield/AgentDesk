@@ -1,4 +1,6 @@
 import type { Agent } from "../types";
+import AnimatedBotAvatar from "./agent-avatar/AnimatedBotAvatar";
+import { botAvatarColor, botAvatarFor, botAvatarStill } from "./agent-avatar/botAvatar";
 
 export type PersonaState = "idle" | "working" | "waiting" | "error" | "offline";
 
@@ -10,6 +12,8 @@ interface AgentPersonaProps {
   /** Overrides the state derived from `agent.status` (e.g. waiting for review). */
   state?: PersonaState;
   size?: number;
+  /** Live motion for a single prominent avatar (profile headers); lists stay still. */
+  animated?: boolean;
   className?: string;
 }
 
@@ -29,35 +33,22 @@ const STATE_LABEL_KO: Record<PersonaState, string> = {
   offline: "오프라인",
 };
 
+const UNKNOWN_AGENT = { id: "agent", avatar_emoji: "🤖" };
+const UNKNOWN_TONE = "#9ca3af";
+
 export function personaStateFromAgent(status: Agent["status"] | undefined): PersonaState {
   if (status === "working") return "working";
   if (status === "offline") return "offline";
   return "idle";
 }
 
-function initialsOf(name: string): string {
-  const trimmed = name.trim();
-  if (!trimmed) return "?";
-  const words = trimmed.split(/[\s_-]+/).filter(Boolean);
-  if (words.length > 1 && /^[A-Za-z]/.test(words[0])) {
-    return (words[0][0] + words[1][0]).toUpperCase();
-  }
-  return Array.from(trimmed).slice(0, /^[A-Za-z]/.test(trimmed) ? 2 : 1).join("").toUpperCase();
-}
-
-// Stable fallback tone so agents without a department color stay distinguishable.
-function fallbackColor(id: string): string {
-  let hash = 0;
-  for (let i = 0; i < id.length; i += 1) hash = (hash * 31 + id.charCodeAt(i)) >>> 0;
-  return `hsl(${hash % 360} 55% 55%)`;
-}
-
-/** Circle persona: department-tinted initials or emoji with a status dot. */
-export default function AgentPersona({ agent, state, size = 32, className = "" }: AgentPersonaProps) {
+/** Circle persona: the agent's bot avatar in its department color, with a status dot. */
+export default function AgentPersona({ agent, state, size = 32, animated = false, className = "" }: AgentPersonaProps) {
   const resolvedState = state ?? personaStateFromAgent(agent?.status);
   const displayName = agent?.name_ko || agent?.alias || agent?.name || "Agent";
-  const tone = agent?.department_color || (agent ? fallbackColor(agent.id) : "var(--th-text-muted)");
-  const emoji = agent?.avatar_emoji?.trim();
+  const avatar = botAvatarFor(agent ?? UNKNOWN_AGENT);
+  const tone = agent ? botAvatarColor(agent.department_color, agent.id) : UNKNOWN_TONE;
+  const face = Math.round(size * 0.8);
   const dotSize = Math.max(6, Math.round(size * 0.2));
   const label = `${displayName} · ${STATE_LABEL_KO[resolvedState]}`;
 
@@ -67,17 +58,34 @@ export default function AgentPersona({ agent, state, size = 32, className = "" }
       aria-label={label}
       title={label}
       data-persona-state={resolvedState}
-      className={`relative inline-flex shrink-0 items-center justify-center rounded-full border font-semibold ${className}`.trim()}
+      data-bot-avatar={avatar.definition.id}
+      className={`relative inline-flex shrink-0 items-center justify-center rounded-full border ${className}`.trim()}
       style={{
         width: size,
         height: size,
-        fontSize: Math.round(size * (emoji ? 0.5 : 0.38)),
         background: `color-mix(in srgb, ${tone} 12%, var(--th-bg-surface))`,
         borderColor: `color-mix(in srgb, ${tone} 35%, var(--th-border-subtle))`,
-        color: `color-mix(in srgb, ${tone} 70%, var(--th-text-heading))`,
       }}
     >
-      <span aria-hidden className="leading-none">{emoji || initialsOf(displayName)}</span>
+      <span aria-hidden className={resolvedState === "offline" ? "opacity-60 grayscale" : undefined}>
+        {animated ? (
+          <AnimatedBotAvatar
+            definition={avatar.definition}
+            color={tone}
+            mood={resolvedState === "working" ? "thinking" : "idle"}
+            size={face}
+          />
+        ) : (
+          <img
+            src={botAvatarStill(avatar.definition, tone)}
+            alt=""
+            width={face}
+            height={face}
+            draggable={false}
+            className="pointer-events-none block select-none"
+          />
+        )}
+      </span>
       {resolvedState === "working" ? (
         <span
           aria-hidden

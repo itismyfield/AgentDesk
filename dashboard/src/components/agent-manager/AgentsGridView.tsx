@@ -152,7 +152,7 @@ export function AgentsGridView({
         return (
           <div className="space-y-5">
             <div className="flex items-start gap-3">
-              <AgentPersona agent={selectedAgent} size={48} />
+              <AgentPersona agent={selectedAgent} size={48} animated />
               <div className="min-w-0 flex-1">
                 <div className="truncate text-base font-semibold" style={{ color: "var(--th-text-heading)" }}>
                   {selectedName}
