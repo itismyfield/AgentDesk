@@ -133,8 +133,11 @@ fn snapshot(channel: u64, items: Vec<u64>, retained: Vec<RetainedInput>) -> Snap
     snapshot
 }
 
-/// Queued ids in order, and each queued receipt with the caller context it still carries.
-fn queue(owner: &Owner) -> (Vec<u64>, Vec<(usize, String, Option<serde_json::Value>)>) {
+/// A queued slot's index, its receipt and the caller context that receipt still carries.
+type Slot = (usize, String, Option<serde_json::Value>);
+
+/// Queued ids in order, and each queued slot.
+fn queue(owner: &Owner) -> (Vec<u64>, Vec<Slot>) {
     let ids = owner.snapshot.items.iter().map(|i| i.message_id).collect();
     let mut binds: Vec<_> = (owner.snapshot.admission_binds.iter())
         .filter_map(|b| match &b.at {
