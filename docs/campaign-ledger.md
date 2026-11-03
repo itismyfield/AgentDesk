@@ -25,7 +25,7 @@ All routes are under `/api` and use the same protected admin middleware as
 
 | Method | Route | Result |
 | --- | --- | --- |
-| GET | `/campaigns?limit=100&offset=0` | `{campaigns: Campaign[], live, issue_drift, limit, offset}`; latest updated first, limit 1–500 |
+| GET | `/campaigns?limit=100&offset=0` | `{campaigns: Campaign[], live, issue_drift, limit, offset}`; latest updated first, limit 1–500; `view=summary` drops node `details`/`evidence`/`evidence_records`/`findings` and marks the campaign `nodes_partial: true` |
 | POST | `/campaigns` | HTTP 201 `{campaign}`; optional client ID, otherwise UUID; existing ID returns 409 |
 | GET | `/campaigns/{id}` | `{campaign, live, issue_drift}`; missing ID returns 404 |
 | PUT | `/campaigns/{id}` | `{campaign}`; requires `expected_revision`, replaces complete aggregate |
@@ -89,6 +89,9 @@ Keep long raw logs in artifacts and preserve their conclusion and revision here.
 
 PUT uses campaign-wide optimistic concurrency. Read, modify the needed fields,
 then send the full document with its observed revision in `expected_revision`.
+Read it from `GET /campaigns/{id}`, never from a `view=summary` list: written back,
+a summary node clears the fields it left out, and a document still marked
+`nodes_partial: true` is refused with 400.
 On 409, reload and reconcile; do not blindly resend a stale document with a new
 revision. Nodes omitted from PUT are removed from the current DAG, but remain in
 revision history. Both the current aggregate and history commit in one database

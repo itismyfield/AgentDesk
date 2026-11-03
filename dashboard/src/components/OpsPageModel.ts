@@ -184,7 +184,15 @@ export function describeDegradedReason(reason: string, isKo: boolean): string {
   return reason.split(":")[0].replace(/_\d{6,}$/, "").replaceAll("_", " ");
 }
 
+/** Why detail-only health numbers are missing, or null when they are there. */
+export function publicOnlyHealthNote(health: HealthResponse | null | undefined, tr: (ko: string, en: string) => string): string | null {
+  if (health?.publicOnly === "forbidden") return tr("자세한 지표는 서버가 도는 맥에서 열 때만 보여요.", "Detailed metrics show only on the Mac running the server.");
+  if (health?.publicOnly === "failed") return tr("자세한 상태를 읽지 못해 요약만 보여요.", "Detailed health did not load; showing the summary.");
+  return null;
+}
+
 export function buildSignalCards(data: HealthResponse, isKo: boolean): SignalCard[] {
+  if (data.publicOnly) return [];
   const deferredHooks = data.deferred_hooks ?? 0;
   const outboxAge = data.outbox_age ?? data.dispatch_outbox?.oldest_pending_age ?? 0;
   const pendingQueue = data.queue_depth ?? 0;

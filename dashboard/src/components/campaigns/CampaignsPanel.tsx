@@ -64,6 +64,10 @@ export default function CampaignsPanel({ language }: { language: string }) {
   useEffect(() => { writeLocalStorageValue(STORAGE_KEYS.dashboardActiveCampaign, selectedId); }, [selectedId]);
 
   const [mode, setMode] = useState<CampaignLocation["mode"]>(linked?.mode ?? "legacy");
+  // The list carries node summaries; the campaign on screen is read in full as soon as it shows.
+  const selectedPartial = tab === "campaigns" && mode === "legacy" && campaigns.some((value) => value.id === selectedId && value.nodes_partial);
+  const { refreshCampaign } = legacy;
+  useEffect(() => { if (selectedPartial && selectedId) void refreshCampaign(selectedId); }, [selectedPartial, selectedId, refreshCampaign]);
   const [serverSelected, setServerSelected] = useState<string | null>(linked?.mode === "server" ? linked.campaign : null);
   const [node, setNode] = useState<string | null>(linked?.node ?? null);
   const server = useServerCampaignReads(mode === "server" ? serverSelected : null);
@@ -254,7 +258,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
       {summaries.length > 0 && <ServerCampaignList summaries={summaries} selectedId={mode === "server" ? serverSelected : null} onSelect={selectServer} tr={tr} />}
       {mode === "legacy" && campaign && <LegacyCampaignView campaign={campaign} live={live[campaign.id] ?? NO_LIVE} selector={selector} refreshedAt={refreshedAt} checkedRead={checkedRead} language={language}
         drafts={drafts} onDraftChange={onDraftChange} node={node} onNode={setNode} onSaved={onSaved} tr={tr} />}
-      {mode === "server" && serverSelected && <div className="campaign-main gap-4 rounded-lg p-3 sm:p-5">
+      {mode === "server" && serverSelected && <div className="campaign-main gap-3 rounded-lg p-3 max-sm:border-0 max-sm:bg-transparent max-sm:p-0 sm:gap-4 sm:p-5">
         <div className="campaign-row campaign-summary-header">{selector}</div>
         {detail?.error && <WidgetState kind={serverDoc ? "stale" : "error"} title={tr("이 서버 캠페인을 갱신하지 못했습니다.", "Could not refresh this server campaign.")} description={detail.error + (serverDoc ? tr(" · 마지막 서버 스냅샷을 표시 중이며 중단만 보낼 수 있습니다.", " · Showing the last server snapshot; only stop can be sent.") : "")} />}
         {serverDoc ? <>
