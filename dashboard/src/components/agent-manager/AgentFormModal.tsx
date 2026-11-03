@@ -7,8 +7,7 @@ import { catalogLabel, useProviderCatalog } from "../../api/providers";
 import type { Department } from "../../types";
 import { localeName, useI18n } from "../../i18n";
 import AgentPersona from "../AgentPersona";
-import BotAvatarPicker from "./BotAvatarPicker";
-import { botAvatarColor } from "../agent-avatar/botAvatar";
+import EmojiPicker from "./EmojiPicker";
 import AgentPromptEditor from "./AgentPromptEditor";
 import type { FormData } from "./types";
 import { useFocusTrap } from "../common/overlay/useFocusTrap";
@@ -52,7 +51,7 @@ export default function AgentFormModal({
   form: FormData;
   departments: Department[];
   isEdit: boolean;
-  /** The edited agent's id, so the preview resolves the same avatar as the lists. */
+  /** The edited agent's id, so the preview draws the same avatar as the lists. */
   agentId?: string;
   saving: boolean;
   onSave: (values: FormData) => void | Promise<void>;
@@ -74,8 +73,6 @@ export default function AgentFormModal({
     mode: "onChange",
   });
   const formValues = watch();
-  const previewId = agentId ?? (formValues.name || "new-agent");
-  const departmentColor = departments.find((d) => d.id === formValues.department_id)?.color ?? null;
   const providerCatalog = useProviderCatalog(formValues.cli_provider);
 
   // ESC 키로 닫기
@@ -150,16 +147,14 @@ export default function AgentFormModal({
           <SurfaceSubsection
             className="min-w-0"
             title={tr("기본 정보", "Basic Info")}
-            description={tr("이름, 아바타, 부서를 먼저 설정합니다.", "Set the name, avatar, and department first.")}
+            description={tr("이름, 이모지, 부서를 먼저 설정합니다.", "Set the identity, emoji, and department first.")}
           >
             <div className="space-y-4">
             <div className="flex min-h-11 items-start gap-3">
               <AgentPersona
                 agent={{
-                  id: previewId,
+                  id: agentId ?? (formValues.name || "new-agent"),
                   name: formValues.name || "Agent",
-                  avatar_emoji: formValues.avatar_emoji,
-                  department_color: departmentColor,
                 }}
                 state="idle"
                 size={48}
@@ -241,15 +236,11 @@ export default function AgentFormModal({
             <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 md:grid-cols-[72px_minmax(0,1fr)_minmax(0,1fr)]">
               <div>
                 <label htmlFor="agent-emoji" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
-                  {tr("아바타", "Avatar")}
+                  {tr("아이콘", "Icon")}
                 </label>
-                <BotAvatarPicker
+                <EmojiPicker
                   id="agent-emoji"
-                  agentId={previewId}
                   value={formValues.avatar_emoji}
-                  color={botAvatarColor(departmentColor, previewId)}
-                  isKo={isKo}
-                  tr={tr}
                   onChange={(emoji) => setValue("avatar_emoji", emoji, { shouldDirty: true, shouldValidate: true })}
                 />
               </div>

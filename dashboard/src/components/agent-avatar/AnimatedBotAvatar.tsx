@@ -1,16 +1,15 @@
 import { useEffect, useRef } from "react";
-import type { AvatarDefinition, AvatarMotion } from "open-bot-avatar";
+import type { AvatarMotion } from "open-bot-avatar";
 import { mountAvatar, type MountedAvatar } from "open-bot-avatar/dom";
+import type { BotAvatar } from "./botAvatar";
 
 /** Live avatar (idle motion, blinking, moods); the library owns this element's children. */
 export default function AnimatedBotAvatar({
-  definition,
-  color,
+  avatar: { definition, color, eyeColor },
   mood,
   size,
 }: {
-  definition: AvatarDefinition;
-  color: string;
+  avatar: BotAvatar;
   mood: AvatarMotion;
   size: number;
 }) {
@@ -19,7 +18,7 @@ export default function AnimatedBotAvatar({
 
   useEffect(() => {
     if (!host.current) return;
-    const mounted = mountAvatar(host.current, { definition, color, mood, label: "" });
+    const mounted = mountAvatar(host.current, { definition, color, eyeColor, mood, label: "" });
     avatar.current = mounted;
     return () => {
       mounted.destroy();
@@ -29,8 +28,8 @@ export default function AnimatedBotAvatar({
   }, []);
 
   useEffect(() => {
-    avatar.current?.update({ definition, color, mood });
-  }, [definition, color, mood]);
+    avatar.current?.update({ definition, color, eyeColor, mood });
+  }, [definition, color, eyeColor, mood]);
 
   return <span ref={host} aria-hidden className="block" style={{ width: size, height: size }} />;
 }

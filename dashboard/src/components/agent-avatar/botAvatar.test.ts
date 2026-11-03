@@ -1,50 +1,46 @@
 import { describe, expect, it } from "vitest";
-import { validateAvatar } from "open-bot-avatar";
-import { BOT_AVATARS, botAvatarColor, botAvatarFor, botAvatarStill } from "./botAvatar";
+import { examples, validateAvatar } from "open-bot-avatar";
+import { AVATAR_PALETTE, AVATAR_SHAPES, avatarRoster, botAvatarFor, botAvatarStill } from "./botAvatar";
+import { GALLERY_AVATARS } from "./galleryAvatars";
 
-describe("bot avatar catalog", () => {
-  it("resolves every listed shape to a valid definition with its own emoji", () => {
-    expect(BOT_AVATARS).toHaveLength(35);
-    for (const avatar of BOT_AVATARS) expect(validateAvatar(avatar.definition)).toMatchObject({ ok: true });
-    expect(new Set(BOT_AVATARS.map((a) => a.definition.id)).size).toBe(BOT_AVATARS.length);
-    expect(new Set(BOT_AVATARS.map((a) => a.emoji)).size).toBe(BOT_AVATARS.length);
+const lookOf = (avatar: ReturnType<typeof botAvatarFor>) => `${avatar.definition.id}|${avatar.color}`;
+
+describe("bot avatars", () => {
+  it("mixes the package templates with round bodies and polygons, all valid and distinct", () => {
+    expect(AVATAR_SHAPES).toHaveLength(examples.length + GALLERY_AVATARS.length + 6 + 10);
+    for (const shape of AVATAR_SHAPES) expect(validateAvatar(shape)).toMatchObject({ ok: true });
+    expect(new Set(AVATAR_SHAPES.map((shape) => shape.id)).size).toBe(AVATAR_SHAPES.length);
+    expect(new Set(AVATAR_PALETTE.map(([body]) => body)).size).toBe(AVATAR_PALETTE.length);
   });
 
-  it("maps the emoji agents use today to their shapes", () => {
-    const shapeOf = (emoji: string) => botAvatarFor({ id: "agent", avatar_emoji: emoji }).definition.id;
-    expect({
-      "🧪": shapeOf("🧪"), "📊": shapeOf("📊"), "🎯": shapeOf("🎯"), "🎭": shapeOf("🎭"), "🎨": shapeOf("🎨"),
-      "📐": shapeOf("📐"), "🔍": shapeOf("🔍"), "✍️": shapeOf("✍️"), "🖌️": shapeOf("🖌️"), "🔧": shapeOf("🔧"),
-      "👨‍🍳": shapeOf("👨‍🍳"), "⛺": shapeOf("⛺"), "🏡": shapeOf("🏡"), "🏠": shapeOf("🏠"), "🧑‍💼": shapeOf("🧑‍💼"),
-      "👩‍💼": shapeOf("👩‍💼"), "🏗️": shapeOf("🏗️"), "🏭": shapeOf("🏭"), "🤖": shapeOf("🤖"), "📡": shapeOf("📡"),
-    }).toEqual({
-      "🧪": "flask", "📊": "bar-chart", "🎯": "target", "🎭": "theater-mask", "🎨": "palette",
-      "📐": "set-square", "🔍": "magnifier", "✍️": "book", "🖌️": "paint-brush", "🔧": "wrench",
-      "👨‍🍳": "chef-hat", "⛺": "tent", "🏡": "cottage", "🏠": "house", "🧑‍💼": "briefcase",
-      "👩‍💼": "briefcase", "🏗️": "hard-hat", "🏭": "factory", "🤖": "robot", "📡": "cloud",
-    });
-    // Same emoji typed without the variation selector.
-    expect(shapeOf("🖌")).toBe("paint-brush");
+  it("picks a stable look from the id and spreads ids over every shape and color", () => {
+    expect(botAvatarFor("ch-td")).toEqual(botAvatarFor("ch-td"));
+    const looks = Array.from({ length: 2000 }, (_, i) => botAvatarFor(`agent-${i}`));
+    expect(new Set(looks.map((avatar) => avatar.definition.id)).size).toBe(AVATAR_SHAPES.length);
+    expect(new Set(looks.map((avatar) => avatar.color)).size).toBe(AVATAR_PALETTE.length);
   });
 
-  it("gives an unknown or empty emoji a stable shape from the agent id", () => {
-    const first = botAvatarFor({ id: "ops-bot", avatar_emoji: "🦄" });
-    expect(botAvatarFor({ id: "ops-bot", avatar_emoji: "" })).toBe(first);
-    expect(BOT_AVATARS).toContain(first);
+  it("gives every roster agent its own look, moving only the newer agent of a clash", () => {
+    const agents = Array.from({ length: 120 }, (_, i) => ({ id: `agent-${i}`, created_at: i }));
+    const roster = avatarRoster(agents);
+    expect(new Set([...roster.values()].map(lookOf)).size).toBe(agents.length);
+
+    const [older, newer] = agents
+      .flatMap((a, i) => agents.slice(i + 1).filter((b) => lookOf(botAvatarFor(a.id)) === lookOf(botAvatarFor(b.id))).map((b) => [a, b]))[0];
+    const pair = avatarRoster([newer, older]);
+    expect(lookOf(pair.get(older.id)!)).toBe(lookOf(botAvatarFor(older.id)));
+    expect(pair.get(newer.id)!.definition).toBe(botAvatarFor(newer.id).definition);
+    expect(pair.get(newer.id)!.color).not.toBe(botAvatarFor(newer.id).color);
+    expect(avatarRoster(agents)).toBe(roster);
+    expect(botAvatarFor("not-listed", roster)).toEqual(botAvatarFor("not-listed"));
   });
 
-  it("keeps hex department colors and derives a hex color otherwise", () => {
-    expect(botAvatarColor("#f97316", "a")).toBe("#f97316");
-    const derived = botAvatarColor("hsl(10 50% 50%)", "ch-ad");
-    expect(derived).toMatch(/^#[0-9a-f]{6}$/);
-    expect(botAvatarColor(null, "ch-ad")).toBe(derived);
-  });
-
-  it("renders a cached SVG still", () => {
-    const { definition } = botAvatarFor({ id: "a", avatar_emoji: "🧪" });
-    const url = botAvatarStill(definition, "#f97316");
+  it("renders a cached, open-eyed SVG still in the avatar's colors", () => {
+    const avatar = { definition: AVATAR_SHAPES[0], color: "#2563eb", eyeColor: "#ffffff" };
+    const url = botAvatarStill(avatar);
     expect(url.startsWith("data:image/svg+xml;charset=utf-8,")).toBe(true);
-    expect(decodeURIComponent(url)).toContain('fill="#f97316"');
-    expect(botAvatarStill(definition, "#f97316")).toBe(url);
+    expect(decodeURIComponent(url)).toContain('fill="#2563eb"');
+    expect(decodeURIComponent(url)).toContain("#ffffff");
+    expect(botAvatarStill(avatar)).toBe(url);
   });
 });

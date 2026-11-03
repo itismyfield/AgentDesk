@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, expect, it } from "vitest";
 import AgentPersona from "./AgentPersona";
+import { botAvatarFor } from "./agent-avatar/botAvatar";
 
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
@@ -22,13 +23,13 @@ async function render(element: React.ReactNode) {
   return container;
 }
 
-const agent = { id: "chef-goat", name: "Chef", name_ko: "최고의 셰프", avatar_emoji: "👨‍🍳", department_color: "#06b6d4", status: "working" as const };
+const agent = { id: "chef-goat", name: "Chef", name_ko: "최고의 셰프", status: "working" as const };
 
-it("draws the agent's bot avatar as a still image with its state in the label", async () => {
+it("draws the agent's avatar as a still image with its state in the label", async () => {
   const target = await render(<AgentPersona agent={agent} size={40} />);
   const persona = target.querySelector('[role="img"]');
   expect(persona?.getAttribute("aria-label")).toBe("최고의 셰프 · 작업 중");
-  expect(persona?.getAttribute("data-bot-avatar")).toBe("chef-hat");
+  expect(persona?.getAttribute("data-bot-avatar")).toBe(botAvatarFor("chef-goat").definition.id);
   expect(persona?.querySelector("img")?.getAttribute("src")).toMatch(/^data:image\/svg\+xml/);
   expect(persona?.textContent).toBe("");
 });
