@@ -21,6 +21,7 @@ async fn registered_notice<T>(
     text: &str,
     next: impl std::future::Future<Output = T>,
 ) -> T {
+    let next = Box::pin(next);
     if text == RECOVERY_NEUTRAL_NOTICE {
         source.observe(site, BodyOffer::NonBody, next).await
     } else {
@@ -385,7 +386,11 @@ pub(super) async fn observe_worktree_recovery_refusal<T>(
     notice: impl std::future::Future<Output = T>,
 ) -> T {
     BodySource::from_state(state)
-        .observe(BodySite::RecoveredTerminal, BodyOffer::NonBody, notice)
+        .observe(
+            BodySite::RecoveredTerminal,
+            BodyOffer::NonBody,
+            Box::pin(notice),
+        )
         .await
 }
 
