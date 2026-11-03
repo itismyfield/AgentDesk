@@ -330,9 +330,8 @@ fn an_absorption_ties_no_other_input_to_its_turn() {
     assert_eq!(facts.owed_inputs(), 1);
 }
 
-/// Claude may write no command for an input it absorbed mid-turn: the absorption settles it with its
-/// turn, and leaves no credit that would take a later input's dequeue. A command it does write runs
-/// no other input queued with the same body.
+/// An absorption with no command settles its input with its turn and takes no later dequeue; a
+/// command Claude does write for it runs no other input with the same body.
 #[test]
 fn an_absorbed_input_settles_with_its_turn_without_a_command() {
     let absorbed = |text: &str| queue("remove", Some(text), Some("absorbed_mid_turn"));
