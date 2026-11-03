@@ -680,6 +680,7 @@ end
 
 # Test results travel only as the plan artifact and per-attempt worker artifacts the audit reads.
 expected_uploads = {
+  "test_evidence" => [{"name" => "Upload census execution evidence", "if" => "${{ steps.audit.outputs.census_evidence_dir != '' }}", "continue-on-error" => true, "uses" => "actions/upload-artifact@v4", "with" => {"name" => "legacy-body-census-test-evidence-${{ github.run_attempt }}", "path" => "${{ steps.audit.outputs.census_evidence_dir }}", "if-no-files-found" => "warn", "retention-days" => 7}}],
   "rust_build" => [{"name" => "Upload nextest plan", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "nextest-plan", "path" => "${{ runner.temp }}/nextest", "if-no-files-found" => "error", "retention-days" => 1}}],
   "rust_tests" => [{"name" => "Upload worker results", "if" => "always()", "timeout-minutes" => 10, "uses" => "actions/upload-artifact@v4", "with" => {"name" => "nextest-worker-${{ matrix.worker }}-attempt-${{ github.run_attempt }}", "path" => "${{ runner.temp }}/nextest-result", "if-no-files-found" => "warn", "retention-days" => 7}}],
 }
@@ -696,7 +697,7 @@ targets = {
   "rust_build" => {
     "label" => "nextest build and plan job", "name" => "Rust tests build and plan",
     "needs" => "changes", "if" => rust_tests_gate, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 100, "job_sha256" => "ca0b5f75c9e2aad794a5cef33a393de0cc29a017017e484f5dc579e8142f8025",
+    "job_timeout_minutes" => 100, "job_sha256" => "f036d52e53f439f5499aae5ad2b70e4675b7924667f6f9a4ff2e3db5c961ca46",
     "cargo_steps" => {
       "Check Rust test source wiring" => {"commands" => ["python3 scripts/ci/rust_test_sources.py check"], "timeout_minutes" => nil, "env" => {"BASH_ENV" => "/dev/null"}},
       "Archive, list, compare and plan" => {
@@ -704,7 +705,7 @@ targets = {
           "set -euo pipefail", 'NEXTEST_DIR="$RUNNER_TEMP/nextest"', 'mkdir -p "$NEXTEST_DIR"',
           'cargo nextest archive --lib --archive-file "$NEXTEST_DIR/lib-tests.tar.zst"',
           'cargo nextest list --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" \\',
-          '--ignore-default-filter --message-format json > "$NEXTEST_DIR/universe.json"',
+          '--extract-to "$RUNNER_TEMP/nextest-census" --ignore-default-filter --message-format json > "$NEXTEST_DIR/universe.json"',
           'python3 scripts/check_relay_authority_contract.py --nextest-list "$NEXTEST_DIR/universe.json"',
           'python3 scripts/ci/rust_test_sources.py compare --platform linux --list "$NEXTEST_DIR/universe.json" \\',
           '--json-out "$NEXTEST_DIR/compare.json"',
@@ -750,7 +751,7 @@ targets = {
   "test_evidence" => {
     "label" => "nextest evidence job", "name" => "Rust tests evidence",
     "needs" => %w[changes rust_build rust_tests], "if" => built_gate, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 15, "job_sha256" => "5b87ed3331e067487761fda779525791d9c3d7a46070f8466d685e8d13098be4", "require_debug_env" => false,
+    "job_timeout_minutes" => 15, "job_sha256" => "0ef6d5301e839a0d7f8628afa5350a2ca4852cffec1241dc52122390351309ff", "require_debug_env" => false,
     "cargo_steps" => {
       "Audit worker results" => {
         "commands" => [
@@ -1041,8 +1042,9 @@ unless evidence == [["scripts", {"name" => "Upload giant-file progress evidence"
   errors << "giant-file progress evidence upload must remain exact, unconditional and only in the cargo shard job"
 end
 clippy_upload = {"name" => "Upload Clippy observation", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "clippy-observation-${{ github.sha }}", "path" => "target/clippy-observation/", "if-no-files-found" => "error"}}
+census_upload = {"name" => "Upload census execution evidence", "if" => "${{ steps.audit.outputs.census_evidence_dir != '' }}", "continue-on-error" => true, "uses" => "actions/upload-artifact@v4", "with" => {"name" => "legacy-body-census-test-evidence-${{ github.run_attempt }}", "path" => "${{ steps.audit.outputs.census_evidence_dir }}", "if-no-files-found" => "warn", "retention-days" => 7}}
 nextest_upload = ->(job_id, step) { %w[rust_build rust_tests].include?(job_id) && step["uses"] == "actions/upload-artifact@v4" && step["with"].to_h["name"].to_s.start_with?("nextest-") }
-errors << "artifact uploads must stay in their approved jobs" unless uploads.all? { |job_id, step| job_id == "scripts" || (job_id == "lint" && step == clippy_upload) || nextest_upload.(job_id, step) }
+errors << "artifact uploads must stay in their approved jobs" unless uploads.all? { |job_id, step| job_id == "scripts" || (job_id == "lint" && step == clippy_upload) || nextest_upload.(job_id, step) || (job_id == "test_evidence" && step == census_upload) }
 errors.each { |message| warn "#{path}: #{message}" }
 exit(errors.empty? ? 0 : 1)
 RUBY

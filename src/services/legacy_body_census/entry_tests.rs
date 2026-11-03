@@ -273,6 +273,83 @@ fn manifest_coverage_and_hash_follow_the_same_embedded_bytes() {
             case["name"]
         );
     }
+    #[cfg(unix)]
+    {
+        let script = "import json; from tests.test_nextest_ci import CensusEvidence; t=CensusEvidence(); t.setUp(); result=t.packaged_fixture(); t.doCleanups(); print(json.dumps(result))";
+        let output = std::process::Command::new("python3")
+            .args(["-c", script])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let bundle: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("runtime")).unwrap();
+        let binary = dir.path().join("binary");
+        let bytes = hex::decode(bundle["runtime_binary"].as_str().unwrap()).unwrap();
+        std::fs::write(&binary, &bytes).unwrap();
+        for case in [
+            "valid",
+            "missing",
+            "wrong-head",
+            "wrong-binary",
+            "wrong-lock",
+            "stale-run",
+            "corrupt-proof",
+        ] {
+            for (name, value) in bundle["files"].as_object().unwrap() {
+                std::fs::write(
+                    dir.path().join("runtime").join(name),
+                    value.as_str().unwrap(),
+                )
+                .unwrap();
+            }
+            std::fs::write(&binary, &bytes).unwrap();
+            let source_path = dir.path().join("runtime/release-source.json");
+            let mut source = bundle["source"].clone();
+            let mut identity = bundle["identity"].clone();
+            let mut head = source["repo_head"].clone();
+            match case {
+                "missing" => {
+                    std::fs::remove_file(
+                        dir.path()
+                            .join("runtime/legacy_body_census-test-evidence.json"),
+                    )
+                    .unwrap();
+                }
+                "wrong-head" => head = json!("0".repeat(40)),
+                "wrong-binary" => std::fs::write(&binary, b"other build").unwrap(),
+                "wrong-lock" => {
+                    identity["dependency_hash"] = json!("0".repeat(64));
+                    let raw = identity.to_string();
+                    std::fs::write(
+                        dir.path()
+                            .join("runtime/legacy_body_census-test-identity.json"),
+                        &raw,
+                    )
+                    .unwrap();
+                    source["legacy_body_census"]["identity_sha256"] =
+                        json!(hex::encode(sha2::Sha256::digest(raw.as_bytes())));
+                }
+                "stale-run" => source["legacy_body_census"]["ci_run_id"] = json!("old"),
+                "corrupt-proof" => std::fs::write(
+                    dir.path()
+                        .join("runtime/legacy_body_census-test-evidence.json"),
+                    b"{}",
+                )
+                .unwrap(),
+                _ => {}
+            }
+            std::fs::write(&source_path, source.to_string()).unwrap();
+            let result =
+                manifest::packaged(dir.path(), bundle["raw"].as_str().unwrap(), &binary, &head);
+            assert_eq!(result["coverage"], case == "valid", "{case}");
+        }
+    }
 }
 
 #[test]

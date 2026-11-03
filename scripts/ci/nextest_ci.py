@@ -22,6 +22,8 @@ import os
 from pathlib import Path
 import re
 import sys
+import subprocess
+import tempfile
 import tomllib
 import xml.etree.ElementTree as ET
 
@@ -350,6 +352,62 @@ def only_listed(universe, ignored, path):
     return keep, {t for t in ignored if t[1] in names}
 
 
+def census_source(root):
+    head = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+    dirty = subprocess.check_output(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=normal"], text=True)
+    if dirty.strip():
+        raise ValueError("census source is dirty")
+    return {"build_sha":head, "dependency_hash":_sha256_file(root / "Cargo.lock"),
+            "census_hash":_sha256_file(root / "scripts/tui_o_body_probes.json")}
+
+
+def census_build(args, plan):
+    # Capture the real test binary in the build job, independently of worker reports.
+    try:
+        identity = census_source(Path.cwd())
+        suites = json.loads(Path(args.universe).read_text())["rust-suites"].values()
+        binaries = [s["binary-path"] for s in suites if s["binary-id"] == "agentdesk" and s["kind"] == "lib"]
+        if len(binaries) != 1 or identity["build_sha"] != plan["identity"]["sha"] or args.only:
+            raise ValueError("census build identity unavailable")
+        identity.update(binary_sha256=_sha256_file(binaries[0]),
+                        required_test_ids=sorted(t[1] for w in plan["workers"] for t in w["tests"] if t[0] == "agentdesk"),
+                        plan_digest=plan["plan_digest"], archive_sha256=plan["identity"]["archive_sha256"],
+                        ci_run_id=plan["identity"]["run_id"])
+        return identity
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
+        return {"available":False}
+
+
+def census_artifact(args, plan, verdict, cases):
+    # A fresh output directory prevents a failed re-run from publishing an older proof.
+    try:
+        directory = Path(tempfile.mkdtemp(prefix="legacy-body-census-", dir=Path(args.json_out).parent))
+        proof, identity = {"available":False}, {"available":False}
+        try:
+            identity = json.loads((Path(args.plan).parent / "census-build.json").read_text())
+            source = census_source(Path.cwd())
+            if (os.environ["GITHUB_RUN_ATTEMPT"] != "1" or verdict["verdict"] != "pass" or any(identity.get(k) != v for k, v in source.items())
+                or identity["plan_digest"] != plan["plan_digest"]
+                or identity["archive_sha256"] != plan["identity"]["archive_sha256"]
+                or identity["ci_run_id"] != os.environ["GITHUB_RUN_ID"]):
+                raise ValueError("census audit identity mismatch")
+            identity["ci_run_attempt"] = os.environ["GITHUB_RUN_ATTEMPT"]
+            proof = {"schema_version":1, "policy_version":1, **identity,
+                     "tests":[{"id":c["id"][1], "executed":c["attempts"],
+                               "failed":c["attempts"] - (c["outcome"] == "passed"), "skipped":0,
+                               "binary_sha256":identity["binary_sha256"]}
+                              for c in cases if c["id"][0] == "agentdesk"]}
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
+            identity = {"available":False}
+        for name, value in (("evidence", proof), ("identity", identity)):
+            (directory / f"legacy_body_census-test-{name}.json").write_text(json.dumps(value, sort_keys=True) + "\n")
+        if os.environ.get("GITHUB_OUTPUT"):
+            with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+                output.write(f"census_evidence_dir={directory}\n")
+    except (OSError, ValueError, TypeError):
+        print("::warning::Census evidence unavailable; coverage remains false", file=sys.stderr)
+
+
 def cmd_plan(args):
     if args.identity_from:
         adopt_identity(args)
@@ -386,6 +444,10 @@ def cmd_plan(args):
             "timing": timing, "workers": workers}
     plan["plan_digest"] = _plan_digest(plan)
     (out / "plan.json").write_text(json.dumps(plan, indent=1, sort_keys=True) + "\n")
+    try:
+        (out / "census-build.json").write_text(json.dumps(census_build(args, plan), sort_keys=True) + "\n")
+    except OSError:
+        print("::warning::Census build identity unavailable", file=sys.stderr)
     print(f"planned {len(universe)} tests on {args.workers} workers "
           f"(timing {timing['mode']}, known {timing['known']}, fallback {timing['fallback']}, "
           f"retry mode {args.retry_mode}); "
@@ -537,7 +599,7 @@ def audit_worker(plan, index, wdir, policy_ids):
     return problems, cases, row
 
 
-def audit(plan, results):
+def audit(plan, results, census_cases=None):
     policy = {(e["binary_id"], e["test"]): e for e in plan["retry_policy"]}
     mode = retry_mode(plan)
     problems, rows, retry_pass, totals = [], [], [], {"planned": plan["universe_count"], "executed": 0,
@@ -550,6 +612,8 @@ def audit(plan, results):
         found, cases, row = audit_worker(plan, worker["index"], results / f"worker-{worker['index']}",
                                          set(policy))
         problems += found
+        if census_cases is not None:
+            census_cases.extend(cases)
         rows.append(row)
         totals["executed"] += row["executed"]
         for case in cases:
@@ -600,8 +664,10 @@ def cmd_audit(args):
     except PlanError as exc:
         print(f"ERROR {exc}", file=sys.stderr)
         return 1
-    verdict = audit(plan, Path(args.results))
+    cases = []
+    verdict = audit(plan, Path(args.results), cases)
     Path(args.json_out).write_text(json.dumps(verdict, indent=1, sort_keys=True) + "\n")
+    census_artifact(args, plan, verdict, cases)
     summary = render_summary(verdict)
     Path(args.summary_out).write_text(summary)
     print(summary)

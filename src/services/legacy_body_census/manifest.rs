@@ -13,6 +13,80 @@ pub(super) fn snapshot() -> Value {
     SNAPSHOT.clone()
 }
 
+pub(super) fn packaged(
+    root: &std::path::Path,
+    raw: &str,
+    binary: &std::path::Path,
+    head: &Value,
+) -> Value {
+    use std::{fs, io::Read};
+    let load = || -> Option<(Value, Value)> {
+        let read = |name: &str| -> Option<Vec<u8>> {
+            let path = root.join("runtime").join(name);
+            let meta = fs::symlink_metadata(&path).ok()?;
+            if !meta.is_file() || meta.len() > 16 * 1024 * 1024 {
+                return None;
+            }
+            fs::read(path).ok()
+        };
+        let source: Value = serde_json::from_slice(&read("release-source.json")?).ok()?;
+        let attestation = &source["legacy_body_census"];
+        let proof_bytes = read("legacy_body_census-test-evidence.json")?;
+        let identity_bytes = read("legacy_body_census-test-identity.json")?;
+        let proof: Value = serde_json::from_slice(&proof_bytes).ok()?;
+        let identity: Value = serde_json::from_slice(&identity_bytes).ok()?;
+        let mut digest = Sha256::new();
+        let mut file = fs::File::open(binary).ok()?;
+        let mut bytes = [0u8; 64 * 1024];
+        loop {
+            let count = file.read(&mut bytes).ok()?;
+            if count == 0 {
+                break;
+            }
+            digest.update(&bytes[..count]);
+        }
+        if source["repo_dirty"] != "false"
+            || head.as_str().is_none()
+            || source["repo_head"] != *head
+            || attestation["available"] != true
+            || attestation["runtime_binary_sha256"] != hex::encode(digest.finalize())
+            || attestation["evidence_sha256"] != hex::encode(Sha256::digest(&proof_bytes))
+            || attestation["identity_sha256"] != hex::encode(Sha256::digest(&identity_bytes))
+            || identity["build_sha"] != *head
+            || identity["dependency_hash"]
+                != hex::encode(Sha256::digest(include_bytes!("../../../Cargo.lock")))
+        {
+            return None;
+        }
+        for key in ["ci_run_id", "ci_run_attempt"] {
+            if attestation[key].as_str().is_none_or(str::is_empty)
+                || attestation[key] != identity[key]
+                || attestation[key] != proof[key]
+            {
+                return None;
+            }
+        }
+        if attestation["ci_run_attempt"] != "1" {
+            return None;
+        }
+        Some((proof, identity))
+    };
+    let inputs = load();
+    inspect_with_evidence(
+        raw,
+        inputs.as_ref().map(|v| &v.0),
+        inputs.as_ref().map(|v| &v.1),
+    )
+}
+
+pub(super) fn snapshot_for_build(root: &std::path::Path, head: &Value) -> Value {
+    // Artifact I/O and hashing run once on the journal writer, never on a send or health task.
+    std::env::current_exe().map_or_else(
+        |_| snapshot(),
+        |binary| packaged(root, EMBEDDED, &binary, head),
+    )
+}
+
 pub(super) fn inspect(raw: &str) -> Value {
     inspect_with_evidence(raw, None, None)
 }

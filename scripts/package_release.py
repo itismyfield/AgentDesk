@@ -78,6 +78,33 @@ def write_json(path: Path, data: object) -> None:
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
 
 
+def census_bundle(root: Path, staging: Path, head: str, dirty: bool, binary: Path) -> dict:
+    # Optional observation must never change whether the native release can be packaged.
+    try:
+        directory = Path(os.environ["AGENTDESK_CENSUS_EVIDENCE_DIR"])
+        files = {kind:(directory / f"legacy_body_census-test-{kind}.json").read_bytes()
+                 for kind in ("evidence", "identity")}
+        proof, identity = (json.loads(files[k]) for k in ("evidence", "identity"))
+        expected = {"build_sha":head, "dependency_hash":sha256(root / "Cargo.lock"),
+                    "census_hash":sha256(root / "scripts/tui_o_body_probes.json"),
+                    "ci_run_id":os.environ["AGENTDESK_CENSUS_CI_RUN_ID"],
+                    "ci_run_attempt":os.environ["AGENTDESK_CENSUS_CI_RUN_ATTEMPT"]}
+        if (dirty or expected["ci_run_attempt"] != "1" or not expected["ci_run_id"]
+            or any(proof.get(k) != v or identity.get(k) != v for k, v in expected.items())
+            or any(proof.get(k) != identity.get(k) or not identity.get(k)
+                   for k in ("binary_sha256", "required_test_ids", "archive_sha256", "plan_digest"))):
+            raise ValueError("census identity mismatch")
+        for kind, raw in files.items():
+            path = staging / f"runtime/legacy_body_census-test-{kind}.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(raw)
+        return {"available":True, **{f"{k}_sha256":hashlib.sha256(v).hexdigest() for k, v in files.items()},
+                "runtime_binary_sha256":sha256(binary), "ci_run_id":expected["ci_run_id"],
+                "ci_run_attempt":expected["ci_run_attempt"]}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {"available":False}
+
+
 def package(root: Path, binary: Path, target: str, output: Path, dashboard: bool = True, profile: str = "release") -> Path:
     if profile not in {"release", "release-fast"}:
         raise ValueError("unsupported build profile")
@@ -117,6 +144,7 @@ def package(root: Path, binary: Path, target: str, output: Path, dashboard: bool
             "latest_postgres_migration": migrations[-1].name if migrations else None,
             "build_profile": profile,
         }
+        source_manifest["legacy_body_census"] = census_bundle(root, staging, head, dirty, binary)
         write_json(staging / "runtime/release-source.json", source_manifest)
         manifest = {
             "schema_version": 1, "version": version, "target": target,

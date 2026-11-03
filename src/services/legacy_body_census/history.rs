@@ -176,7 +176,9 @@ pub(super) fn prepare_with_sync(
         }
         None => own_start,
     };
-    let probes = super::manifest::snapshot();
+    let build_sha =
+        crate::services::release_source::health_json(false)["deployed_repo_head"].clone();
+    let probes = super::manifest::snapshot_for_build(root, &build_sha);
     let status = state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -187,7 +189,7 @@ pub(super) fn prepare_with_sync(
         "root_reason":if host.is_null() { json!("HOST_IDENTITY_UNKNOWN") } else if predecessor.is_none() { json!("PREDECESSOR_UNKNOWN") } else { Value::Null },
         "coverage_start":coverage_start,
         "started_at_ms":boot.started_at_ms,
-        "build_sha":crate::services::release_source::health_json(false)["deployed_repo_head"],
+        "build_sha":build_sha,
         "census_hash":probes["census_hash"], "probe_coverage":probes["coverage"],
         "pending_probes":probes["pending"], "manifest_error":probes["error"],
         "startup_reasons":status.own_reasons, "history_problems":status.history_problems,

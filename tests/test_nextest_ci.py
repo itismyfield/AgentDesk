@@ -11,6 +11,9 @@ import posixpath
 import random
 import re
 import sys
+import subprocess
+import hashlib
+import shutil
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -1827,6 +1830,177 @@ fn opaque() { run(&pick()); }
         rc, err = self.cli("classify", "--json-out", self.root / "out.json")
         self.assertEqual(rc, 1)
         self.assertIn("unresolved-external-test-module", err)
+
+
+
+
+class CensusEvidence(Fixture):
+    def evidence_fixture(self, outcome="pass"):
+        raw = json.loads((ROOT / "scripts/tui_o_body_probes.json").read_text())
+        names = set()
+        for group in ("probes", "transport_probes", "claim_probes"):
+            for index, row in enumerate(raw[group]):
+                if not row["verified_by"]:
+                    row["verified_by"] = [f"fixture::{group}_{index}"]
+                names.update(row["verified_by"])
+        self.write("scripts/tui_o_body_probes.json", raw)
+        shutil.copyfile(ROOT / "Cargo.lock", self.dir / "Cargo.lock")
+        self.write(".gitignore", "*\n!Cargo.lock\n!.gitignore\n!scripts/\n!scripts/tui_o_body_probes.json\n")
+        for argv in (["init", "-q"], ["add", "."], ["-c", "user.name=Evidence Test", "-c",
+                     "user.email=evidence@example.invalid", "commit", "-qm", "fixture"]):
+            subprocess.run(["git", "-C", str(self.dir), *argv], check=True, capture_output=True)
+        head = subprocess.check_output(["git", "-C", str(self.dir), "rev-parse", "HEAD"], text=True).strip()
+        binary = self.dir / "test-binary"
+        binary.write_bytes(b"actual fixture test binary")
+        with contextlib.chdir(self.dir):
+            plan = self.plan_ok(sorted(names), sha=head, workers=1, mode="all-once")
+            doc = json.loads((self.dir / "list.json").read_text())
+            doc["rust-suites"][BIN]["binary-path"] = str(binary)
+            self.write("list.json", doc)
+            # Re-run the real planning entry with binary metadata present.
+            args = ["plan", "--universe", self.dir / "list.json", "--archive", self.archive,
+                    "--workers", 1, "--sha", head, "--scope", "linux-lib", "--run-id", "7",
+                    "--base-config", self.dir / "base.toml", "--retry-policy", self.dir / "empty.toml",
+                    "--retry-mode", "all-once", "--output", self.dir / "plan"]
+            args += [x for k, v in BUILD.items() for x in (k, v)]
+            self.assertEqual(self.run_cli(*args)[0], 0)
+            plan = json.loads((self.dir / "plan/plan.json").read_text())
+            self.assertEqual(self.run_cli("verify-archive", "--plan", self.dir / "plan/plan.json",
+                "--worker", 0, "--archive", self.archive, "--config", self.dir / "plan/worker-0.toml",
+                "--sha", head, "--run-id", "7", "--record", self.dir / "results/worker-0")[0], 0)
+            cases = [(name, "", 0.1) for name in sorted(names)]
+            if outcome != "pass":
+                name, _, seconds = cases[0]
+                body = {"skip":"<skipped/>", 'retry':'<flakyFailure time="0.1"/>', "fail":"<failure/>"}.get(outcome, "")
+                cases[0] = (name, body, seconds)
+                if outcome == "missing":
+                    cases.pop(0)
+            self.write("results/worker-0/exit-code", "0")
+            self.write("results/worker-0/junit.xml", junit(cases))
+        self.head, self.names = head, names
+        return plan
+
+    def evidence_audit(self):
+        output = self.dir / "github-output"
+        output.write_text("")
+        with contextlib.chdir(self.dir), mock.patch.dict(os.environ, {
+            "GITHUB_OUTPUT":str(output), "GITHUB_RUN_ID":"7", "GITHUB_RUN_ATTEMPT":"1"}):
+            rc, verdict, err = self.audit()
+        emitted = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        self.assertIn("census_evidence_dir", emitted, err)
+        directory = Path(emitted["census_evidence_dir"])
+        self.evidence_directory = directory
+        return rc, directory, json.loads((directory / "legacy_body_census-test-evidence.json").read_text())
+
+    def test_execution_and_identity_are_required_for_census_artifacts(self):
+        for outcome in ("pass", "skip", "missing", "retry", "fail"):
+            with self.subTest(outcome=outcome):
+                # A separate checkout keeps every case independent, including output files.
+                case = CensusEvidence()
+                case.setUp()
+                try:
+                    case.evidence_fixture(outcome)
+                    rc, directory, proof = case.evidence_audit()
+                    if outcome in ("skip", "missing", "fail"):
+                        self.assertNotEqual(rc, 0)
+                        self.assertEqual(proof.get("available"), False)
+                        continue
+                    self.assertEqual(rc, 0)
+                    identity = json.loads((directory / "legacy_body_census-test-identity.json").read_text())
+                    self.assertEqual(proof["build_sha"], case.head)
+                    self.assertEqual(proof["binary_sha256"], hashlib.sha256(b"actual fixture test binary").hexdigest())
+                    self.assertEqual(set(proof["required_test_ids"]), case.names)
+                    sys.path.insert(0, str(ROOT / "scripts"))
+                    import check_tui_o_writer_census as census
+                    result = census.body_probe_snapshot(case.dir, proof, identity)
+                    self.assertEqual(result["coverage"], outcome == "pass")
+                finally:
+                    case.doCleanups()
+
+    def test_packaging_and_native_verifier_round_trip(self):
+        bundle = self.packaged_fixture()
+        self.assertTrue(bundle["proof"]["tests"])
+
+    def packaged_fixture(self):
+        self.evidence_fixture()
+        _, directory, proof = self.evidence_audit()
+        self.write("Cargo.toml", '[package]\nname="agentdesk"\nversion="1.2.3"\n')
+        self.write("scripts/runtime-assets.txt", "policies\n")
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import package_release as packaging
+        from tests.test_package_release import ReleasePackagingTests
+        binary = self.dir / "release-binary"
+        header = bytearray(64)
+        header[:6] = b"\x7fELF\x02\x01"
+        header[18] = 62
+        binary.write_bytes(header)
+        with mock.patch.dict(os.environ, {"AGENTDESK_CENSUS_EVIDENCE_DIR":str(directory),
+             "AGENTDESK_CENSUS_CI_RUN_ID":"7", "AGENTDESK_CENSUS_CI_RUN_ATTEMPT":"1"}):
+            archive = packaging.package(self.dir, binary, "x86_64-unknown-linux-gnu", self.dir / "dist", False)
+        files = ReleasePackagingTests.read_archive(self, archive)
+        prefix = "agentdesk-linux-x86_64/runtime/"
+        self.assertIn(prefix + "legacy_body_census-test-evidence.json", files)
+        packaged = json.loads(files[prefix + "legacy_body_census-test-evidence.json"])
+        self.assertEqual(packaged, proof)
+        return {"raw":(self.dir / "scripts/tui_o_body_probes.json").read_text(),
+                "proof":packaged, "identity":json.loads(files[prefix + "legacy_body_census-test-identity.json"]),
+                "source":json.loads(files[prefix + "release-source.json"]),
+                "files":{name.removeprefix(prefix):value.decode() for name, value in files.items() if name.startswith(prefix)},
+                "runtime_binary":binary.read_bytes().hex()}
+
+    def test_packaging_failure_is_optional_and_stale_identity_is_not_carried(self):
+        self.packaged_fixture()
+        import package_release as packaging
+        from tests.test_package_release import ReleasePackagingTests
+        directory = self.evidence_directory
+        original = {p:p.read_bytes() for p in directory.iterdir()}
+        environment = {"AGENTDESK_CENSUS_EVIDENCE_DIR":str(directory),
+                       "AGENTDESK_CENSUS_CI_RUN_ID":"7", "AGENTDESK_CENSUS_CI_RUN_ATTEMPT":"1"}
+        for case in ("missing", "build_sha", "dependency_hash", "census_hash", "ci_run_id", "ci_run_attempt", "write-error"):
+            for p, raw in original.items():
+                p.write_bytes(raw)
+            if case == "missing":
+                (directory / "legacy_body_census-test-evidence.json").unlink()
+            elif case != "write-error":
+                for kind in ("identity", "evidence"):
+                    p = directory / f"legacy_body_census-test-{kind}.json"
+                    doc = json.loads(p.read_text())
+                    doc[case] = "other"
+                    p.write_text(json.dumps(doc))
+            with self.subTest(case=case), mock.patch.dict(os.environ, environment):
+                # Failure is confined to optional proof copying, after normal source reads.
+                original_write = Path.write_bytes
+                def write(path, data):
+                    if case == "write-error" and path.name == "legacy_body_census-test-identity.json":
+                        raise OSError("fixture evidence I/O failure")
+                    return original_write(path, data)
+                with mock.patch.object(Path, "write_bytes", write):
+                    archive = packaging.package(self.dir, self.dir / "release-binary", "x86_64-unknown-linux-gnu", self.dir / "dist", False)
+                files = ReleasePackagingTests.read_archive(self, archive)
+                source = json.loads(files["agentdesk-linux-x86_64/runtime/release-source.json"])
+                self.assertEqual(source["legacy_body_census"]["available"], False)
+        for p, raw in original.items():
+            p.write_bytes(raw)
+        with contextlib.chdir(self.dir), mock.patch.dict(os.environ, {
+            "GITHUB_OUTPUT":str(self.dir / "github-output"), "GITHUB_RUN_ID":"7", "GITHUB_RUN_ATTEMPT":"2"}):
+            self.assertEqual(self.audit()[0], 0)
+        output = (self.dir / "github-output").read_text().splitlines()[-1].split("=",1)[1]
+        self.assertEqual(json.loads((Path(output) / "legacy_body_census-test-evidence.json").read_text())["available"], False)
+        with contextlib.chdir(self.dir), mock.patch.object(nci.tempfile, "mkdtemp", side_effect=OSError("full")):
+            self.assertEqual(self.audit()[0], 0)
+
+    def test_stale_source_and_dependency_cannot_emit_positive_evidence(self):
+        self.evidence_fixture()
+        for relative in ("Cargo.lock", "scripts/tui_o_body_probes.json"):
+            original = (self.dir / relative).read_bytes()
+            (self.dir / relative).write_bytes(original + b"\n")
+            with self.subTest(relative=relative):
+                self.assertEqual(self.evidence_audit()[2].get("available"), False)
+            (self.dir / relative).write_bytes(original)
+        subprocess.run(["git", "-C", str(self.dir), "-c", "user.name=Evidence Test", "-c",
+                        "user.email=evidence@example.invalid", "commit", "--allow-empty", "-qm", "new head"],
+                       check=True, capture_output=True)
+        self.assertEqual(self.evidence_audit()[2].get("available"), False)
 
 
 if __name__ == "__main__":
