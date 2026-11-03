@@ -1,5 +1,5 @@
-//! A front held on a screen where Enter may not submit is watched only through that pane's state:
-//! the first read that would submit wakes the drive once, and an unchanged screen hands nothing.
+//! A front held by its pane's screen or by a cause a read can see (a lock, a buffer load, the
+//! transcript) is watched only through that read: the first that clears wakes the drive once.
 #![cfg(unix)]
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
@@ -8,7 +8,7 @@ use std::time::Duration;
 use super::drive::{Drive, wake};
 use crate::services::claude_tui::busy_inject::Screen;
 
-/// One read of the refusing pane.
+/// One read of the refusing pane or of the cause that refused it.
 pub(crate) type ScreenProbe = Box<dyn FnMut() -> Screen + Send>;
 
 /// A held pane is read this often; each read is a few bounded tmux queries and no handoff.

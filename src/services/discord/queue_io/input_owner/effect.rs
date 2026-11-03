@@ -219,9 +219,19 @@ impl BusyClaude {
             };
             Ok(match outcome {
                 Ok(Outcome::NotSent(veto)) => {
-                    use busy_inject::Veto::{CopyMode, Modal, ScreenUnread};
-                    if matches!(veto, Modal | ScreenUnread | CopyMode) {
-                        arm_screen(self.channel, self.pane.clone());
+                    use busy_inject::Veto::{
+                        CopyMode, LoadFailed, Modal, ScreenUnread, TranscriptUnavailable,
+                    };
+                    match veto {
+                        Modal | ScreenUnread | CopyMode => {
+                            arm_screen(self.channel, self.pane.clone())
+                        }
+                        LoadFailed => arm_cause(self.channel, loads(self.pane.clone())),
+                        TranscriptUnavailable => {
+                            let transcript = self.transcript.clone();
+                            arm_cause(self.channel, move || transcript.exists());
+                        }
+                        _ => {}
                     }
                     refused(format!("{veto:?}"), claude_waits(veto))
                 }
@@ -265,6 +275,35 @@ fn arm_screen(channel: u64, pane: busy_inject::Pane) {
         channel,
         Box::new(move || busy_inject::screen_submits(&pane)),
     );
+}
+
+/// Leaves `clear` with the held watch when it reads the refusal's cause now, so that cause clearing
+/// wakes the drive once; a cause it cannot see leaves the front for the next real wake.
+pub(super) fn arm_cause(channel: u64, mut clear: impl FnMut() -> bool + Send + 'static) {
+    if clear() {
+        return;
+    }
+    let read = move || match clear() {
+        true => busy_inject::Screen::Ready,
+        false => busy_inject::Screen::Blocked,
+    };
+    super::held_watch::arm(channel, Box::new(read));
+}
+
+/// Whether tmux loads a buffer for `pane` again; the probe's buffer is deleted and nothing pasted.
+pub(super) fn loads(pane: busy_inject::Pane) -> impl FnMut() -> bool + Send + 'static {
+    move || {
+        let Ok(file) = tempfile::NamedTempFile::new() else {
+            return false;
+        };
+        let (path, buffer) = (file.path().to_string_lossy(), "agentdesk-owner-load-probe");
+        let loaded = std::fs::write(file.path(), "probe").is_ok()
+            && pane.ok(&["load-buffer", "-b", buffer, &path]).is_some();
+        if loaded {
+            let _ = pane.ok(&["delete-buffer", "-b", buffer]);
+        }
+        loaded
+    }
 }
 
 /// An idle Claude tmux pane: main's warm submission, whose stash the owner scope admits.
