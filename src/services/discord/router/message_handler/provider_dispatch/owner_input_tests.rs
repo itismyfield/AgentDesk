@@ -788,7 +788,7 @@ fn owner_busy_claude_enter_ends_the_transaction_with_or_without_receipt() {
 }
 
 /// A failed buffer load or a transcript missing at the pane read sends no key and holds the front
-/// with its ticket, unretained; once the cause is gone the next handoff pastes and enters once.
+/// with its ticket; only that cause clearing wakes the drive, which pastes and enters once.
 #[test]
 fn a_failed_load_or_a_missing_transcript_holds_the_front_until_it_clears() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -803,22 +803,32 @@ fn a_failed_load_or_a_missing_transcript_holds_the_front_until_it_clears() {
                 rig.mark("before-read", &hide);
             }
         }
-        let busy = target::Phase::Busy;
-        let held = rig.handoff(rig.granted_front(), ProviderKind::Claude, busy, &transcript);
+        let (drive, inbox) = rig.drive();
+        rig.wake(&drive);
+        let busy = (ProviderKind::Claude, target::Phase::Busy);
         let reasons = [
             "NotSent(\"LoadFailed\")",
             "NotSent(\"TranscriptUnavailable\")",
         ];
-        assert_eq!(held, Err(reasons[usize::from(!load)].into()), "{name}");
+        let held = rig.serve(&inbox, &busy, 10);
+        assert_eq!(
+            held,
+            Some(Err(reasons[usize::from(!load)].into())),
+            "{name}"
+        );
         rig.waits_not_sent();
         assert_eq!(rig.bind(), TurnBind::NotArmed, "{name}");
+        let stays = rig.serve(&inbox, &busy, 6);
+        assert_eq!(
+            stays, None,
+            "{name}: nothing is handed on while the cause stays"
+        );
         let dir = rig.f.root.path().join(format!("{name}-owner"));
         match load {
             true => fs::remove_file(dir.join("fail-load")).unwrap(),
             false => fs::rename(&hidden, &transcript).unwrap(),
         }
-        let sent = rig.handoff(rig.granted_front(), ProviderKind::Claude, busy, &transcript);
-        assert_eq!(sent, Ok(()), "{name}");
+        assert_eq!(rig.serve(&inbox, &busy, 15), Some(Ok(())), "{name}");
         let events = rig.events();
         let count = |key: &str| events.iter().filter(|e| *e == key).count();
         assert_eq!(
@@ -1714,6 +1724,9 @@ mod not_sent;
 
 #[path = "owner_provenance_tests.rs"]
 mod provenance;
+
+#[path = "owner_input_idle_tests.rs"]
+mod idle;
 
 /// One input admitted, granted and claimed on `channel`'s own owner, carried as the turn the drive's
 /// idle start hands over; the receiver hears that input's settlement.

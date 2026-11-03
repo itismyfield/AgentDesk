@@ -465,20 +465,29 @@ fn after_the_codex_paste_only_a_replaced_pane_stops_the_enter() {
 /// An idle Codex pane takes the prompt's typed text as one pinned paste and one Enter after a
 /// single composer read; nothing reads the pane after the keys, and the head settles unreceipted.
 /// An idle Codex composer held by another writer's lock or a failed buffer load gets no key and keeps
-/// the original at the front with its ticket; once that clears the next handoff pastes once.
+/// the original at the front with its ticket; only that cause clearing wakes the drive to paste once.
 #[test]
 fn an_idle_codex_lock_or_load_refusal_holds_the_front_until_it_clears() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     use crate::services::codex_tui::input::try_with_composer_mutation_lock;
     for (n, locked) in [(0_u64, true), (1, false)] {
         let rig = codex_rig_on(&format!("oc-wait-{n}"), 7_676_130 + n, true);
-        let (idle, transcript) = (target::Phase::Idle, rig.transcript());
-        let handoff = || rig.handoff(rig.granted_front(), ProviderKind::Codex, idle, &transcript);
-        let held = match locked {
-            true => try_with_composer_mutation_lock(&rig.name, handoff).unwrap(),
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let holder = match locked {
+            true => {
+                let (name, (taken, took)) = (rig.name.clone(), std::sync::mpsc::channel());
+                let holder = std::thread::spawn(move || {
+                    try_with_composer_mutation_lock(&name, || {
+                        taken.send(()).unwrap();
+                        released.recv().ok()
+                    })
+                });
+                took.recv().unwrap();
+                Some(holder)
+            }
             false => {
                 rig.mark("fail-load", "");
-                handoff()
+                None
             }
         };
         let reason = if locked {
@@ -486,14 +495,29 @@ fn an_idle_codex_lock_or_load_refusal_holds_the_front_until_it_clears() {
         } else {
             "LoadFailed"
         };
-        assert_eq!(held, Err(format!("NotSent({reason:?})")));
+        let (drive, inbox) = rig.drive();
+        rig.wake(&drive);
+        let idle = (ProviderKind::Codex, target::Phase::Idle);
+        let held = rig.serve(&inbox, &idle, 10);
+        assert_eq!(held, Some(Err(format!("NotSent({reason:?})"))));
         rig.waits_not_sent();
         assert_eq!(rig.bind(), TurnBind::NotArmed, "{reason}");
-        if !locked {
-            let dir = rig.f.root.path().join(format!("{}-owner", rig.name));
-            fs::remove_file(dir.join("fail-load")).unwrap();
+        let stays = rig.serve(&inbox, &idle, 6);
+        assert_eq!(
+            stays, None,
+            "{reason}: nothing is handed on while the cause stays"
+        );
+        match holder {
+            Some(holder) => {
+                release.send(()).unwrap();
+                holder.join().unwrap();
+            }
+            None => {
+                let dir = rig.f.root.path().join(format!("{}-owner", rig.name));
+                fs::remove_file(dir.join("fail-load")).unwrap();
+            }
         }
-        assert_eq!(handoff(), Ok(()), "{reason}");
+        assert_eq!(rig.serve(&inbox, &idle, 15), Some(Ok(())), "{reason}");
         assert_eq!(rig.events(), ["paste", "Enter"], "{reason}");
         rig.delivered();
     }

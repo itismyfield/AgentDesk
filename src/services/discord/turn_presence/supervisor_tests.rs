@@ -670,6 +670,46 @@ async fn an_owned_front_wakes_its_owner_once_at_the_idle_transition_and_never_by
     assert_eq!(fake.kick_secs(), Vec::<u64>::new());
 }
 
+/// The live effects' owner wake reaches the channel's owner drive, which grants the queued front
+/// and hands it to the idle start.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_live_owner_wake_hands_the_queued_front_to_the_owner_drive() {
+    use crate::services::discord::queue_io::input_owner::admission::{AdmissionTicket, admit};
+    let _root = crate::services::discord::relay_recovery::tests::isolated_agentdesk_root();
+    let channel = ChannelId::new(6_200_018);
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let mailbox = shared.mailbox(channel);
+    let dir = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap();
+    let file = dir.join("claude/presence-live/6200018.json");
+    mailbox
+        .v2_adopt(file, "presence-live".into())
+        .await
+        .unwrap();
+    let original =
+        serde_json::from_value(serde_json::json!({"author_id":7,"message_id":62_000_181,
+        "channel_id":channel.get(),"source_message_ids":[62_000_181],"queued_generation":1,
+        "text":"owned"}))
+        .unwrap();
+    let _ = admit(&mailbox, &original, AdmissionTicket::new()).await;
+    let granted = || mailbox.v2_request(|slot| Ok(slot.as_ref().unwrap().front_outstanding()));
+    assert!(!granted().await.unwrap(), "no grant before the wake");
+    let effects = LiveEffects {
+        shared: shared.clone(),
+        provider: ProviderKind::Claude,
+    };
+    effects.wake_owner(channel.get());
+    let mut handed = false;
+    for _ in 0..100 {
+        handed = granted().await.unwrap();
+        if handed {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(handed, "the owner drive granted its front");
+}
+
 /// A waiting input's notice that takes 30 seconds holds neither another channel's typing nor stop.
 #[tokio::test(start_paused = true)]
 async fn a_slow_notice_holds_only_its_own_channel() {
