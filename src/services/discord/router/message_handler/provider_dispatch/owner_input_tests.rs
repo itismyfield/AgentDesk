@@ -1474,7 +1474,10 @@ fn a_front_held_by_copy_mode_is_pasted_once_when_the_pane_leaves_it() {
             left.send(()).unwrap();
         }
     }
-    assert!(left.take().is_none(), "the watch never read the held screen");
+    assert!(
+        left.take().is_none(),
+        "the watch never read the held screen"
+    );
     driver.join().unwrap();
     assert_eq!(seen.get(1), Some(&json!([])), "{}", rig.snapshot());
     assert_eq!(handed, 2);
