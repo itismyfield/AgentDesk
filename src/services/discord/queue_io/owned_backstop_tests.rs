@@ -28,7 +28,7 @@ async fn granted(mailbox: &crate::services::turn_orchestrator::ChannelMailboxHan
 }
 
 /// A deferred kick scheduled before the owner took the queue fires nothing at it; a schedule after
-/// is one direct owner wake; the slow arms set nothing: across 2, 5, 30 and 60 seconds no backstop
+/// is one direct owner wake; the slow arms set nothing: across 3, 5, 30 and 60 seconds no backstop
 /// kicks the owned queue, while an unowned channel's schedule still kicks.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn no_backstop_schedules_or_fires_a_kick_at_an_owned_queue() {
@@ -56,7 +56,7 @@ async fn no_backstop_schedules_or_fires_a_kick_at_an_owned_queue() {
         admitted,
         super::super::input_owner::admission::Admission::Accepted(_)
     ));
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     assert_eq!(
         owned_kicks.load(Ordering::SeqCst),
         0,
