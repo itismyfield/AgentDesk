@@ -6,8 +6,10 @@ use serde::de::DeserializeOwned;
 use std::{
     collections::HashMap,
     fs::File,
-    io::{BufRead, BufReader, Read},
-    path::Path,
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
+    path::{Path, PathBuf},
+    sync::{LazyLock, Mutex, PoisonError},
+    time::SystemTime,
 };
 use tokio::time::Instant;
 
@@ -66,13 +68,16 @@ pub(crate) fn stamp(root: &Path, channel: u64) -> Option<std::time::SystemTime> 
 }
 
 // Candidates are scoped to one manifest; they never authorize a writer or replace ledger replay.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct LocalEvidence {
     pieces: HashMap<(UnitKey, u32), (u64, ledger::PieceRecord)>,
     #[cfg(test)]
     pub retained_payload_bytes: usize,
     #[cfg(test)]
     pub max_line_bytes: usize,
+    /// Ledger lines this observation parsed.
+    #[cfg(test)]
+    pub parsed_lines: usize,
 }
 
 impl LocalEvidence {
@@ -85,6 +90,64 @@ impl LocalEvidence {
             .get(&(key.clone(), index))
             .map(|(serial, record)| (*serial, record))
     }
+}
+
+/// Where a completed observation of a ledger ended; the writer only appends and cuts only its last
+/// complete line, so the next observation resumes here while that line reads the same.
+#[derive(Clone)]
+struct Resume {
+    path: PathBuf,
+    requested: Vec<(UnitKey, u32)>,
+    identity: (u64, u64),
+    end: u64,
+    modified: SystemTime,
+    last: (u64, Vec<u8>),
+    next_serial: u64,
+    payload_bytes: usize,
+    state: LocalEvidence,
+}
+
+/// A few concurrent terminal frames per host; each entry holds at most the payload cap.
+const RESUME_LIMIT: usize = 8;
+
+static RESUMES: LazyLock<Mutex<Vec<Resume>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+
+/// The kept observation `file` still extends: the same file, not shorter, rewritten in place only
+/// by growing, with its last complete line unchanged. A file without identity never resumes.
+fn resume_point(
+    file: &mut File,
+    path: &Path,
+    requested: &[(UnitKey, u32)],
+    meta: &std::fs::Metadata,
+) -> Option<Resume> {
+    let identity = crate::services::tui_o::shadow::capture::file_identity(meta);
+    if identity == (0, 0) {
+        return None;
+    }
+    let kept = (RESUMES.lock().unwrap_or_else(PoisonError::into_inner))
+        .iter()
+        .find(|kept| kept.path == path && kept.requested == requested)?
+        .clone();
+    if kept.identity != identity
+        || meta.len() < kept.end
+        || (meta.len() == kept.end && meta.modified().ok()? != kept.modified)
+    {
+        return None;
+    }
+    let (start, line) = &kept.last;
+    let mut read = vec![0; line.len()];
+    file.seek(SeekFrom::Start(*start)).ok()?;
+    file.read_exact(&mut read).ok()?;
+    (read == *line).then_some(kept)
+}
+
+fn keep(resume: Resume) {
+    let mut kept = RESUMES.lock().unwrap_or_else(PoisonError::into_inner);
+    kept.retain(|old| old.path != resume.path || old.requested != resume.requested);
+    if kept.len() >= RESUME_LIMIT {
+        kept.remove(0);
+    }
+    kept.push(resume);
 }
 
 #[cfg(test)]
@@ -114,7 +177,7 @@ pub(crate) fn local(
     let store = OStore::existing(root)?;
     store.read_init(channel).ok()??;
     let path = store.channel_dir(channel).join(LEDGER_FILE);
-    let file = File::open(&path).ok()?;
+    let mut file = File::open(&path).ok()?;
     let before = file.metadata().ok()?;
     let identity = crate::services::tui_o::shadow::capture::file_identity(&before);
     #[cfg(test)]
@@ -123,15 +186,31 @@ pub(crate) fn local(
             hook();
         }
     });
-    let mut reader = BufReader::new(file.take(before.len()));
+    let resumed = resume_point(&mut file, &path, requested, &before);
+    let (start, mut state, mut next_serial, mut payload_bytes, mut last) = match resumed {
+        Some(kept) => (
+            kept.end,
+            kept.state,
+            kept.next_serial,
+            kept.payload_bytes,
+            kept.last,
+        ),
+        None => (0, LocalEvidence::default(), 0, 0, (0, Vec::new())),
+    };
+    #[cfg(test)]
+    {
+        state.parsed_lines = 0;
+    }
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut reader = BufReader::new(file.take(before.len().checked_sub(start)?));
     let mut line = Vec::new();
-    let mut state = LocalEvidence::default();
-    let mut next_serial = 0;
-    let mut payload_bytes = 0;
+    // An oversized row is skipped without recording where it ended, so that scan is not kept.
+    let mut resumable = true;
     loop {
         if Instant::now() >= deadline {
             return None;
         }
+        let line_start = before.len() - reader.get_ref().limit() - reader.buffer().len() as u64;
         line.clear();
         let read = reader
             .by_ref()
@@ -143,6 +222,7 @@ pub(crate) fn local(
         }
         if line.len() > LINE_CAP {
             streaming::notice(std::io::Cursor::new(&line).chain(&mut reader), deadline)?;
+            resumable = false;
             continue;
         }
         if line.last() != Some(&b'\n') {
@@ -153,6 +233,12 @@ pub(crate) fn local(
             state.max_line_bytes = state.max_line_bytes.max(line.len());
         }
         let parsed: ledger::LedgerLine = serde_json::from_slice(&line).ok()?;
+        #[cfg(test)]
+        {
+            state.parsed_lines += 1;
+        }
+        last.0 = line_start;
+        std::mem::swap(&mut last.1, &mut line);
         match parsed.entry {
             ledger::LedgerEntry::Prepared {
                 serial,
@@ -247,6 +333,19 @@ pub(crate) fn local(
     #[cfg(test)]
     {
         state.retained_payload_bytes = payload_bytes;
+    }
+    if let (true, Ok(modified)) = (resumable && identity != (0, 0), before.modified()) {
+        keep(Resume {
+            path,
+            requested: requested.to_vec(),
+            identity,
+            end: before.len(),
+            modified,
+            last,
+            next_serial,
+            payload_bytes,
+            state: state.clone(),
+        });
     }
     Some(state)
 }

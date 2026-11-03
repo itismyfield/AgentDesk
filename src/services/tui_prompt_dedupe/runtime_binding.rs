@@ -9,9 +9,11 @@ mod binding_access;
 mod codex_cursor;
 pub(crate) use codex_cursor::exports::*;
 mod codex_policy;
+#[cfg(test)]
+pub(crate) use codex_policy::DISPOSITIONS;
 pub(crate) use codex_policy::{
     clear_relaunch, codex_verified_channel_delivery_allowed, codex_verified_channel_requires_proof,
-    codex_verified_event_allowed, codex_verified_hold_detail, codex_verified_hold_reason,
+    codex_verified_events_allowed, codex_verified_hold_detail, codex_verified_hold_reason,
     codex_verified_input_blocked, codex_verified_o_source_allowed, codex_verified_requires_proof,
     codex_verified_requires_proof_under_source_authority, codex_verified_source_allowed,
     codex_verified_source_allowed_under_source_authority,
