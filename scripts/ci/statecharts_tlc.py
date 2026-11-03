@@ -105,6 +105,8 @@ def cfg_tokens(text: str) -> list[re.Match[str]]:
             pos = mark.end()
         elif not match.group("comment"):
             tokens.append(match)
+    if bad := UNREADABLE.search(text, pos):
+        raise CheckError(f"character {bad.group()!r} outside a comment is not supported")
     return tokens
 
 

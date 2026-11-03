@@ -93,6 +93,13 @@ class ConfigTest(unittest.TestCase):
         for line in (";", "?", '"x`x"', "é", "\fx"):
             with self.subTest(line), self.assertRaisesRegex(tlc.CheckError, "outside a comment"):
                 tlc.parse_config(f"INIT Init\n{line}\nINVARIANT Bad\n")
+        for char in ("\u00a0", "\v", "\f", "\u2028"):
+            for text in (f"INIT Init\nNEXT Next\nINVARIANT Bad\n{char}", f"INVARIANT Bad\n\\* note\n{char}"):
+                with self.subTest(text), self.assertRaisesRegex(tlc.CheckError, "outside a comment"):
+                    tlc.parse_config(text)
+            with self.subTest(f"{char!r} in comment bodies"):
+                text = f"INIT Init\n(* a {char} *)\nINVARIANT A\n\\* b {char}"
+                self.assertEqual(tlc.parse_config(text).rules(), ["A", "NoDeadlock"])
 
     def test_check_deadlock_is_declared_at_most_once(self) -> None:
         for first in ("TRUE", "FALSE"):
