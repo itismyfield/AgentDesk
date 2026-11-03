@@ -26,6 +26,7 @@ What the model covers:
 - The relay reading the input's row once.
 - In `c`, an input an older binary retained, with or without its resend ask posted, and the boot that finds it.
 - In `c`, a cause that clears before its watch's first read, a pane that goes away while its cause stands, and a live idle pane under another account than the channel's.
+- In `c`, a busy turn-mode pane's frame ledger refusal: a `LoadFailed` no read sees, told apart from a buffer that failed to load.
 
 Run it like this (exit 1 means a rule breaks):
 
@@ -60,7 +61,7 @@ Each break shows the step count of its shortest path. `—`: the version has no 
 - Quiet now also needs the pane's refusal cleared and no watch left to read it, so a screen that never clears is not counted as a loss.
 - a2d4 breaks HeldResumes once a lock, buffer load or missing transcript can hold the front, because it watched only screens.
 
-States reached: main 38,304; a2d1 47,184; a2d2 24,976; a2d3 69,568; a2d4 68,608; c 47,326. `ownership.chart.mmd` is the main chart, drawing the bug paths only.
+States reached: main 38,304; a2d1 47,184; a2d2 24,976; a2d3 69,568; a2d4 68,608; c 48,830. `ownership.chart.mmd` is the main chart, drawing the bug paths only.
 
 ### What `c` adds, and the test that drives each step through the code
 
@@ -75,6 +76,7 @@ Only a step a test drives through its real entry point is in the `c` model; a st
 | A held pane's recovery wakes the drive (`WatchSees`) for Claude and Codex modals | `effect.rs` `arm_screen`, `effect/codex.rs` `composer`, `held_watch.rs` | `owner_input_tests::a_closing_modal_wakes_the_drive_to_deliver_its_held_front_once`, `owner_input_codex_tests::a_codex_modal_that_closes_wakes_the_drive_to_deliver_once` |
 | A lock, buffer load or missing transcript that clears wakes the drive (`screen = "cause"`, `WatchSees`) | `effect.rs` `arm_cause`, `loads`; `effect/codex.rs` `idle_codex` | `owner_input_tests::a_failed_load_or_a_missing_transcript_holds_the_front_until_it_clears`, `owner_input_codex_tests::an_idle_codex_lock_or_load_refusal_holds_the_front_until_it_clears` |
 | A cause that cleared before the watch's first read still wakes the drive once (`CauseClearsBeforeRead`) | `effect.rs` `arm_cause` (no check at the refusal) | `owner_input_codex_tests::an_idle_codex_load_that_fails_once_is_pasted_once_without_another_wake` |
+| A busy Claude pane's buffer that failed to load is watched, even if it loads again before the first read; a frame ledger refusal leaves no watch and waits for the turn's end (`screen = "ledger"`) | `effect.rs` `BusyClaude::leaf` (`LoadFailed` with `owner_input::buffer_failed`), `claude_tui/owner_input.rs` `buffer_failed` | `owner_input_tests::a_busy_buffer_that_fails_to_load_once_is_pasted_once_without_another_wake`, `owner_input_tests::a_busy_ledger_refusal_holds_the_front_without_a_watch` |
 | A cause read through a pane that is gone ends its watch (`PaneGoes`, `WatchLosesPane`) | `effect.rs` `arm_cause` → `Pane::lost`, `held_watch.rs` `verdict` | `owner_input_codex_tests::a_cause_watch_ends_when_its_pane_is_gone` |
 | A live idle pane under another account is no execution of the channel: the front takes the launch route, and the owner writes the replacement's first prompt (`DriveIdle`, `acct`) | `owner_input.rs` `other_account` in `Registration::observed` and `execute_owned` → `Route::Cold` → `Taken::Launch` | `owner_input_tests::idle::a_pane_under_another_account_is_replaced_before_any_front_is_written` |
 | A boot requeues an input retained before its ask went out, and keeps a told one (`BootRequeues`) | `v2/retained.rs` `requeueable`, `recovery.rs` | `notice_tests::told_retained_inputs_stay_and_an_untold_one_is_handed_on_once_pg`, `requeue_tests::only_an_untold_proven_unsent_input_requeues_and_a_told_one_stays` |
@@ -86,7 +88,7 @@ Assumed, not driven by a test:
 - The idle start's Discord turn (`start_idle` → `start_owner_front` → `finish_admitted_local` → `provider_dispatch::execute`). The tests drive both sides of it: the drive's grant before it, and `execute_owned` with the claimed front after it.
 - An idle live pane has a transcript the live path's resolve finds (`obsOk` in `c`). A pane with no transcript anywhere still ends `idle_unobserved`.
 - The launch route's driver. On a profile mismatch the Claude driver (`claude.rs` `execute_streaming_local_tui_tmux`) cleans the stale pane up and creates one under the channel's account, then hands its first prompt to the owner's hook. Launching Claude is outside the tests, so the test stands in for that driver at `CLAUDE_LEGACY_PROBE`: it replaces the pane and runs the owner's hook.
-- A busy Claude pane's `LoadFailed` from the frame ledger is not modelled. Only a buffer load that fails at the refusal arms a watch; a ledger failure leaves the front for the busy turn's end wake.
+- A ledger refusal is checked only on a busy turn-mode pane, whose turn end wakes the owner (`RC`). On a legacy channel that wake is not assumed, as for every legacy turn end.
 
 ## Counterexamples, replayed against the code
 
@@ -129,7 +131,7 @@ Assumed, not driven by a test:
 10. **NoSilentLossObserved breaks on a2d4.**
    - Path: a person's turn holds the front, then ends, and nothing wakes the drive.
    - In `c`, on a turn-mode channel the presence supervisor reads the owner's V2 front and wakes the owner once at the idle transition.
-   - Mutant `noBoundaryWake` no longer breaks a rule in `c` (see the mutant table below). The code tests catch the wake's removal instead: deletion mutants `noliveowner` and `norecoverwake` fail `the_live_owner_wake_hands_the_queued_front_to_the_owner_drive` and `a_boot_recovery_hands_the_kept_front_to_the_owner_drive`.
+   - Mutant `noBoundaryWake` breaks it again: a front held by a frame ledger refusal has no watch, so the turn-end wake is its only one. The code tests also catch the wake's removal: deletion mutants `noliveowner` and `norecoverwake` fail `the_live_owner_wake_hands_the_queued_front_to_the_owner_drive` and `a_boot_recovery_hands_the_kept_front_to_the_owner_drive`.
 11. **NoSilentLoss breaks in every version before `c`.**
    - Path: an idle pane whose observer cannot be built holds the front, and a native turn AgentDesk did not start may end without waking the drive.
    - In production (11-03), every owned idle submit on one channel ended `idle_unobserved`. The drive's observer looked for the transcript only in the default home under the turn's working dir, while the live path uses the account's home and the pane's runtime binding.
@@ -138,6 +140,7 @@ Assumed, not driven by a test:
    - Path: a lock, buffer load or missing transcript holds the front, and the cause later clears with no event.
    - `c` arms the watch with a read of that cause. The effect is never retried while the cause stays; the first read that finds it cleared wakes the drive once, even when it cleared before that read.
    - Mutant `noCauseWatch` breaks it again. Mutant `clearedDrops`, the arm that dropped a cause it already saw cleared, breaks NoSilentLoss and HeldResumes.
+   - A busy Claude `LoadFailed` is a buffer load or a frame ledger refusal. The owner scope's `load_failed` mark tells them apart at the refusal: a buffer is watched, a ledger refusal is not (`watchLedger` breaks NoTimedRetry).
 13. **NoSilentLoss breaks in `c` without the relaunch.**
    - Path: the channel's account changed while its idle pane stayed live. The observer would not read another account's transcript, so the owner refused `idle_unobserved` on every wake.
    - `c` reads the pane as no execution of the channel and takes the launch route, as the live path does. Mutant `noRelaunch` breaks NoSilentLoss and NoSilentLossObserved.
@@ -156,15 +159,13 @@ Assumed, not driven by a test:
 | noGeneration | a watch ends only its own hold | NoSilentLoss, HeldResumes |
 | noWatch | the held pane's watch | NoSilentLoss, HeldResumes |
 | timer | no fixed recheck | NoTimedRetry |
-| noBoundaryWake | the supervisor's V2 front read and owner wake | none |
+| noBoundaryWake | the supervisor's V2 front read and owner wake | NoSilentLoss, HeldResumes, NoSilentLossObserved |
+| watchLedger | a ledger refusal leaves no load read | NoTimedRetry |
 | clearedDrops | a cause that cleared before the first read still wakes | NoSilentLoss, HeldResumes |
 | noRelaunch | another account's pane takes the launch route | NoSilentLoss, NoSilentLossObserved |
 | causeBlind | a cause's watch also reads its pane | GoneWatchEnds, NoDeadlock |
 
-`noBoundaryWake` no longer breaks a rule in `c`:
-
-- With the observer attached, every handoff pastes or leaves a watch, so the model finds no path where the turn-end wake is the only one.
-- The wake and its test stay in the code.
+`noBoundaryWake` breaks a rule in `c` only through the ledger refusal: every other handoff pastes or leaves a watch. `watchLedger` arms a load read for that refusal; the read sees a working load while the ledger still refuses, so the front is handed again on every read.
 
 ## Mutants of the a2d4 model
 

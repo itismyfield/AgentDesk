@@ -36,7 +36,8 @@ VARIABLES
     lp, op,    \* legacy-side / O writer answer posts for the input
     screen,    \* what refuses a paste before any key: ok; held, the pane's screen (modal, unread
                \* capture, copy mode); cause, a lock, a buffer load or a missing transcript; gone,
-               \* the pane a cause was read through is gone
+               \* the pane a cause was read through is gone; ledger, the frame ledger refused a busy
+               \* paste (a LoadFailed no read sees)
     draft,     \* a person's composer text the owned paste meets: none, or unproven (C-s can't park)
     notices,   \* draft notices sent to the input's original
     wake,      \* an owner drive wake is pending
@@ -73,12 +74,14 @@ Init ==
     /\ route = "none" /\ plain = FALSE /\ sentInto = "idle"
     /\ win = "open" /\ rcv = "none" /\ userRow = FALSE /\ twin \in BOOLEAN /\ claim = "none"
     /\ pastes = 0 /\ lp = 0 /\ op = 0
-    /\ screen \in {"ok", "held", "cause"} /\ draft \in {"none", "unproven"} /\ notices = 0
+    /\ screen \in {"ok", "held", "cause"} \cup (IF Fix = "c" THEN {"ledger"} ELSE {}) /\ draft \in {"none", "unproven"} /\ notices = 0
     /\ wake = (old = "none") /\ timer = FALSE /\ byTimer = FALSE /\ timed = FALSE
     /\ heldBy = "none" /\ watch = FALSE /\ aged = FALSE /\ twinPend \in BOOLEAN
     /\ stale \in IF Fix \in {"a2d3", "a2d4", "c"} THEN BOOLEAN ELSE {FALSE}
     \* A kept input's boot is checked on one plain channel: no twin, draft, held screen or old watch.
     /\ old # "none" => ~twin /\ ~twinPend /\ draft = "none" /\ screen = "ok" /\ ~stale
+    \* A ledger refusal is checked on a busy turn-mode pane, whose turn end wakes the owner (RC).
+    /\ screen = "ledger" => nat = "busy" /\ mode = "turn"
     \* In c a live idle pane may run under another account after the channel's account changed;
     \* no person starts a turn in it during the check.
     /\ acct \in IF Fix = "c" THEN BOOLEAN ELSE {FALSE}
@@ -100,14 +103,17 @@ Paste(r, pl, pd) ==
     /\ sentInto' = nat /\ pastes' = pastes + 1 /\ win' = "open"
 
 \* The owned busy entry: a held screen sends no key and, from a2d3, leaves a watch of that pane;
-\* in c a refusing cause leaves a read of that cause too (noCauseWatch removes it);
+\* in c a refusing cause leaves a read of that cause too (noCauseWatch removes it), but a ledger
+\* refusal leaves none and waits for the turn's end (watchLedger arms a load read for it);
 \* otherwise one paste, and an unparked draft owes its original one notice (a2d2; the outbox key
 \* is the original's).
 OwnedPaste(r, pd, rd) ==
     IF screen # "ok"
     THEN /\ inp' = "held" /\ timer' = (~R2 \/ Mut = "timer") /\ heldBy' = "screen"
          /\ watch' = (R3 /\ Mut # "noWatch"
-                      /\ (screen = "held" \/ (Fix = "c" /\ Mut # "noCauseWatch")))
+                      /\ (screen = "held"
+                          \/ (Fix = "c" /\ Mut # "noCauseWatch" /\ screen # "ledger")
+                          \/ (screen = "ledger" /\ Mut = "watchLedger")))
          /\ UNCHANGED <<route, plain, pend, sentInto, pastes, win, notices, reader>>
     ELSE /\ Paste(r, FALSE, pd) /\ reader' = rd /\ UNCHANGED <<timer, watch>>
          /\ heldBy' = "none"
@@ -312,16 +318,17 @@ MailboxReleases ==
 
 \* The refusal clears with no event of its own (a modal closed, a lock freed, a load recovered).
 ScreenClears ==
-    /\ screen \in {"held", "cause"}
+    /\ screen \in {"held", "cause", "ledger"}
     /\ screen' = "ok"
     /\ UNCHANGED <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain,
                    sentInto, win, rcv, userRow, twin, claim, pastes, lp, op, draft, notices, wake,
                    timer, byTimer, timed, heldBy, watch, aged, twinPend, envLeft, stale, old, acct>>
 
 \* The watch reads the held pane: a screen that would now submit wakes the drive once (a2d3).
-\* Mutant watchBlind wakes on a read of the unchanged screen.
+\* Mutant watchBlind wakes on a read of the unchanged screen; a load read under a ledger refusal
+\* sees a load that works while the ledger still refuses.
 WatchSees ==
-    /\ watch /\ inp = "held" /\ (screen = "ok" \/ Mut = "watchBlind")
+    /\ watch /\ inp = "held" /\ (screen \in {"ok", "ledger"} \/ Mut = "watchBlind")
     /\ watch' = FALSE /\ wake' = TRUE /\ byTimer' = (~wake /\ screen # "ok")
     /\ UNCHANGED <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain,
                    sentInto, win, rcv, userRow, twin, claim, pastes, lp, op, screen, draft,
