@@ -716,7 +716,7 @@ async fn section_i_defers_herdr_rows_and_repairs_legacy_rows_pg() {
     seed(&pool, "legacy", 300, None, "pending").await;
     seed(&pool, "herdr-live", 301, herdr(301), "pending").await;
     seed(&pool, "herdr-idle", 302, herdr(302), "dispatched").await;
-    let root = crate::cli::agentdesk_runtime_root().unwrap();
+    let root = crate::config::runtime_root().unwrap();
     let inflight_dir = root.join("runtime/discord_inflight/claude");
     std::fs::create_dir_all(&inflight_dir).unwrap();
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();

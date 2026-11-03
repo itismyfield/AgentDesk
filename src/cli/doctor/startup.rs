@@ -8,8 +8,7 @@ use serde_json::{Value, json};
 pub(crate) const LATEST_STARTUP_DOCTOR_ENDPOINT: &str = "/api/doctor/startup/latest";
 
 pub(crate) fn startup_artifact_root() -> Option<PathBuf> {
-    crate::cli::agentdesk_runtime_root()
-        .map(|root| root.join("runtime").join("doctor").join("startup"))
+    crate::config::runtime_root().map(|root| root.join("runtime").join("doctor").join("startup"))
 }
 
 fn boot_id_from_pid_file(pid_file: &std::path::Path) -> Result<String, String> {
@@ -35,7 +34,7 @@ fn boot_id_from_pid_file(pid_file: &std::path::Path) -> Result<String, String> {
 }
 
 pub(crate) fn current_boot_id() -> Result<String, String> {
-    let root = crate::cli::agentdesk_runtime_root()
+    let root = crate::config::runtime_root()
         .ok_or_else(|| "AGENTDESK runtime root is not resolvable".to_string())?;
     boot_id_from_pid_file(&root.join("runtime").join("dcserver.pid"))
 }

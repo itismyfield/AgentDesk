@@ -2431,7 +2431,7 @@ pub fn cmd_phase_status(json: bool, detailed: bool) -> Result<(), String> {
 ///
 /// Build the workspace for release and promote directly to release.
 pub fn cmd_deploy() -> Result<(), String> {
-    let workspace = crate::cli::agentdesk_runtime_root()
+    let workspace = crate::config::runtime_root()
         .and_then(|r| {
             let ws = r.parent()?.join("workspaces/agentdesk");
             if ws.exists() { Some(ws) } else { None }

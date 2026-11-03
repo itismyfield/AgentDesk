@@ -250,9 +250,6 @@ mod utils;
 #[cfg(test)]
 mod high_risk_recovery;
 
-// Re-export for crate-level access (used by services::discord::mod.rs)
-pub(crate) use cli::agentdesk_runtime_root;
-
 use anyhow::{Context, Result};
 
 pub fn run_from_args() -> Result<()> {

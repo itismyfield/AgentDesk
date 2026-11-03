@@ -42,6 +42,10 @@ To lower the baseline after moving shared types/helpers out of `src/server`:
    the new lower current findings.
 4. Run `python3 scripts/audit_maintainability.py --check`.
 
+The same check also rejects any Rust reference (production or test) to the
+removed `agentdesk_runtime_root` alias. That rule has no baseline; call
+`crate::config::runtime_root()` directly.
+
 Do not raise this baseline to admit new backflow; a PR that raises it together
 with a new reference bypasses the gate, so reviewers reject any increase. Call
 the canonical service path instead of a route re-export, or pass server-owned

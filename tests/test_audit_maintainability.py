@@ -604,6 +604,31 @@ class ServiceServerBackflowCheck(unittest.TestCase):
             hits = list(service_server_backflow.CHECK.runner(set()))
         self.assertEqual(sorted(f.file for f in hits), sorted(dirty))
 
+    def test_removed_runtime_root_alias_fails_check_in_any_rust_file(self) -> None:
+        dirty = {
+            "src/cli/dcserver.rs": (
+                "pub fn agentdesk_runtime_root() -> Option<PathBuf> {\n"
+                "    crate::config::runtime_root()\n}\n"
+            ),
+            "src/lib.rs": "pub(crate) use cli::agentdesk_runtime_root;\n",
+            "src/services/fence_tests.rs": "let r = crate::cli::agentdesk_runtime_root();\n",
+        }
+        clean = (
+            "// agentdesk_runtime_root() was removed\n"
+            "fn isolate_agentdesk_runtime_root() { let _ = \"agentdesk_runtime_root\"; }\n"
+        )
+        baseline = json.dumps({"schema_version": 1, "total_count": 0, "files": {}})
+        with _FakeSrcTree({**dirty, "src/services/clean_tests.rs": clean,
+                           service_server_backflow.BASELINE_REL_PATH: baseline}), \
+                mock.patch.object(HARNESS, "load_check_specs",
+                                  return_value=[service_server_backflow.CHECK]), \
+                mock.patch.object(HARNESS, "load_allowlist", return_value={}), \
+                mock.patch.object(sys, "stdout"), mock.patch.object(sys, "stderr"):
+            hits = list(service_server_backflow.CHECK.runner(set()))
+            rc = HARNESS.main(["--check"])
+        self.assertEqual(sorted(f.file for f in hits), sorted(dirty))
+        self.assertEqual(rc, 1)
+
     def test_baseline_gate_allows_committed_file_counts(self) -> None:
         body = """
         use crate::server::routes::AppState;

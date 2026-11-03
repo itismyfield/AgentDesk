@@ -89,7 +89,7 @@ async fn orphan_recovery_clears_stale_links_and_requeues_pending_dispatches_pg()
     card_and_dispatch(&pool, "c2b2a-b", "c2b2a-done-b", "completed").await;
     active_session(&pool, "c2b2a-b", sibling, "c2b2a-done-b").await;
     card_and_dispatch(&pool, "c2b2a-b", "c2b2a-pending-b", "pending").await;
-    let pid = crate::cli::agentdesk_runtime_root().unwrap();
+    let pid = crate::config::runtime_root().unwrap();
     let pid = pid.join("runtime").join("dcserver.pid");
     std::fs::create_dir_all(pid.parent().unwrap()).unwrap();
     std::fs::write(&pid, "1").unwrap();
@@ -152,7 +152,7 @@ async fn recovery_orphan_boot_keeps_protected_dispatch_notify_fenced_pg() {
         }
         dispatches.push((dispatch, state));
     }
-    let path = crate::cli::agentdesk_runtime_root()
+    let path = crate::config::runtime_root()
         .unwrap()
         .join("runtime/dcserver.pid");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -203,7 +203,7 @@ async fn owner_state(pool: &PgPool, id: &str) -> (String, String, i64) {
 }
 
 fn owner_pid(at: i64) {
-    let pid = crate::cli::agentdesk_runtime_root()
+    let pid = crate::config::runtime_root()
         .unwrap()
         .join("runtime/dcserver.pid");
     std::fs::create_dir_all(pid.parent().unwrap()).unwrap();

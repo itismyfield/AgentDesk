@@ -92,7 +92,7 @@ Files under src/server/routes/ that mix raw SQL, json!() shaping, and crate::ser
 
 ## Server-layer backflow (`service_server_backflow`)
 
-Production modules outside server/cli/launch/bootstrap that reference crate::server server-layer modules.
+Production modules outside server/cli/launch/bootstrap that reference crate::server server-layer modules, and any use of the removed agentdesk_runtime_root alias.
 
 _No findings._
 

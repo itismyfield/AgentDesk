@@ -5,6 +5,7 @@ depend on ``crate::server``. Services, engine, kanban, dispatch, and the crate
 root call the canonical service paths instead of the route re-exports. Existing
 debt is tracked by a committed baseline; new or increased references fail
 ``--check``. Inline ``#[cfg(test)]`` items and test files are not production.
+The removed ``agentdesk_runtime_root`` alias is a zero rule over every Rust file.
 """
 
 from __future__ import annotations
@@ -16,8 +17,10 @@ from pathlib import Path
 from typing import Iterable
 
 try:
+    from rust_lex import StripState, strip_line
     from rust_production import _production_text
 except ModuleNotFoundError:
+    from scripts.rust_lex import StripState, strip_line
     from scripts.rust_production import _production_text
 
 from .. import common
@@ -36,6 +39,10 @@ UNQUALIFIED = re.compile(r"(?<![\w:$])(?P<server>server)\s*::")
 GROUP_OPEN = re.compile(_ROOT + r"\{")
 GROUP_MEMBER = re.compile(r"(?<![\w:$])(?P<server>server)\b")
 PREFILTER = re.compile(r"\bserver\b")
+# Callers use `crate::config::runtime_root()`; the CLI alias must not return.
+REMOVED_ALIAS = re.compile(r"\bagentdesk_runtime_root\b")
+BACKFLOW_RULE = "service_server_backflow"
+ALIAS_RULE = "removed_runtime_root_alias"
 
 
 def _is_assembly_file(rel: str) -> bool:
@@ -75,11 +82,38 @@ def _server_reference_offsets(text: str) -> list[tuple[int, str]]:
     return sorted(found.items())
 
 
+def _removed_alias_findings() -> list[Finding]:
+    from ..common import all_rust_files
+
+    findings: list[Finding] = []
+    for path in all_rust_files():
+        raw = path.read_text(encoding="utf-8")
+        if not REMOVED_ALIAS.search(raw):
+            continue
+        state = StripState()
+        for lineno, line in enumerate(raw.splitlines(), start=1):
+            if REMOVED_ALIAS.search(strip_line(line, state)):
+                findings.append(
+                    Finding(
+                        rule=ALIAS_RULE,
+                        severity="error",
+                        file=rel_posix(path),
+                        line=lineno,
+                        message=(
+                            "removed alias `agentdesk_runtime_root` is referenced; "
+                            "call `crate::config::runtime_root()` directly"
+                        ),
+                        extra={"reference": "agentdesk_runtime_root"},
+                    )
+                )
+    return findings
+
+
 def _run(allowlist: set[str]) -> Iterable[Finding]:
     del allowlist
     from ..common import production_rust_files
 
-    findings: list[Finding] = []
+    findings: list[Finding] = _removed_alias_findings()
     for path in production_rust_files():
         rel = rel_posix(path)
         if not rel.endswith(".rs") or _is_assembly_file(rel):
@@ -91,7 +125,7 @@ def _run(allowlist: set[str]) -> Iterable[Finding]:
         for offset, reference in _server_reference_offsets(text):
             findings.append(
                 Finding(
-                    rule="service_server_backflow",
+                    rule=BACKFLOW_RULE,
                     severity="warn",
                     file=rel,
                     line=line_of(text, offset),
@@ -160,7 +194,9 @@ def _baseline_gate(findings: list[Finding]) -> Iterable[Finding]:
             )
         ]
 
-    current_counts = Counter(finding.file for finding in findings)
+    current_counts = Counter(
+        finding.file for finding in findings if finding.rule == BACKFLOW_RULE
+    )
     current_total = sum(current_counts.values())
     regressions: list[Finding] = []
 
@@ -206,7 +242,8 @@ CHECK = CheckSpec(
     title="Server-layer backflow",
     description=(
         "Production modules outside server/cli/launch/bootstrap that reference "
-        "crate::server server-layer modules."
+        "crate::server server-layer modules, and any use of the removed "
+        "agentdesk_runtime_root alias."
     ),
     hard_gate=False,
     runner=_run,

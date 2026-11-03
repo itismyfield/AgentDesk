@@ -488,7 +488,7 @@ async fn self_fence_gateway(
     // so launchd never gets an exit to restart. Publish the same durable marker
     // used by deploy/standby promotion so every provider poller drains its slot
     // and the final one exits the process.
-    let restart_request_error = match crate::agentdesk_runtime_root() {
+    let restart_request_error = match crate::config::runtime_root() {
         Some(root) => {
             let nonce = uuid::Uuid::new_v4().to_string();
             create_gateway_self_fence_restart_request(&root, provider, &nonce).err()
