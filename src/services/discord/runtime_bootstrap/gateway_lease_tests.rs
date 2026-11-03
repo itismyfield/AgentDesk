@@ -381,16 +381,27 @@ async fn gateway_self_fence_keeps_the_execution_owner_and_native_session_pg() {
     let shared =
         crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
     let channel_id = serenity::ChannelId::new(channel);
-    crate::services::discord::host_defer_gate::tests::map_channel(&shared, channel_id, "fenced")
-        .await;
+    let session = crate::services::discord::DiscordSession {
+        session_id: Some("native-session".into()),
+        memento_context_loaded: false,
+        memento_reflected: false,
+        current_path: None,
+        history: Vec::new(),
+        pending_uploads: Default::default(),
+        cleared: false,
+        channel_id: Some(channel),
+        channel_name: Some("fenced".into()),
+        category_name: None,
+        last_active: tokio::time::Instant::now(),
+        worktree: None,
+        born_generation: shared.restart.current_generation,
+    };
     shared
         .core
         .lock()
         .await
         .sessions
-        .get_mut(&channel_id)
-        .unwrap()
-        .session_id = Some("native-session".into());
+        .insert(channel_id, session);
     shared
         .bot_connected
         .store(true, std::sync::atomic::Ordering::SeqCst);
