@@ -37,7 +37,7 @@ export const colors = { Waiting: "blue", Lost: "pink", Done: "teal", Delivered: 
 const labels = {
   DriveBusy: "the owner pastes into the AgentDesk turn [refused when the transcript is idle, main]",
   DriveIdleBusyPane: "the owner meets a busy pane with no AgentDesk turn",
-  DriveIdle: "the owner submits to an idle pane",
+  DriveIdle: "the owner submits to an idle pane [another account's pane takes the launch route in c]",
   DriveStartBusy: "a turn/start's turn meets a busy pane [read as idle in main and a2d1]",
   ScreenClears: "the modal, copy mode, lock, buffer load or transcript clears, with no event",
   TimerFires: "the drive's fixed recheck fires [main, a2d1]",
@@ -57,6 +57,9 @@ const labels = {
   TurnEnds: "the turn ends",
   HumanStartsTurn: "a person starts a turn at the terminal",
   MailboxReleases: "the AgentDesk turn is released",
+  CauseClearsBeforeRead: "the cause clears before its watch's first read [slice C]",
+  PaneGoes: "the pane goes away while its cause stands [slice C]",
+  WatchLosesPane: "the cause's watch reads its pane gone and ends [slice C]",
   Done: null,
 };
 
