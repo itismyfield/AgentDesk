@@ -484,8 +484,8 @@ async fn a_turn_start_into_a_busy_pane_is_pasted_once_and_answered_once() {
     drop(drive);
 }
 
-/// A `turn/start` the running native turn takes as a queued command: that turn's owner (the
-/// legacy relay, for a person's turn) posts its answer, so the caller's reader posts no body.
+/// A `turn/start` the running native turn takes as a queued command joins that turn at the relay,
+/// whose stream carries the answer; the caller settles once and its reader posts no body.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_turn_start_absorbed_into_a_running_turn_posts_no_second_body() {
     if !creator_child(concat!(
@@ -521,8 +521,37 @@ async fn a_turn_start_absorbed_into_a_running_turn_posts_no_second_body() {
     for row in rows {
         std::io::Write::write_all(&mut file, format!("{row}\n").as_bytes()).unwrap();
     }
+    // The legacy relay reads the absorbed row as joining the running turn, opening none of its own.
+    let mut relayed = crate::services::tui_prompt_dedupe::subscribe_observed_prompts();
+    let session =
+        ProviderKind::Claude.build_tmux_session_name(&format!("a1-rollback-{}", 7_676_107));
+    let observe = crate::services::tui_prompt_dedupe::observe_prompt_by_tmux_with_row_ids_at;
+    let joined = observe(
+        "claude",
+        &session,
+        &frame,
+        Some("absorbed-row"),
+        None,
+        chrono::Utc::now(),
+    );
+    assert_eq!(
+        joined,
+        crate::services::tui_prompt_dedupe::PromptObservation::InjectedSteer
+    );
     // The reader's own turn settles; a body it took would be posted well within this wait.
     tokio::time::sleep(Duration::from_secs(40)).await;
+    let mut legacy = 0;
+    while let Ok(event) = relayed.try_recv() {
+        legacy += usize::from(event.prompt == frame);
+    }
+    assert_eq!(
+        legacy, 0,
+        "the relay opened a turn of its own for the absorbed input"
+    );
+    assert!(
+        settled.try_recv().is_err(),
+        "the caller settled more than once"
+    );
     let posted = rig.mock.written_texts();
     // No second body, and no failure notice for a turn that ended as its input joined another.
     assert_eq!(posted, Vec::<String>::new(), "{}", rig.trace.text());

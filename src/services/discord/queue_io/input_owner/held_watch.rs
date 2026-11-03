@@ -25,11 +25,22 @@ struct Watch {
     running: bool,
 }
 
-/// What one look decided for the hold it read.
-enum Look {
+/// What one look decides for the hold it read.
+#[derive(Debug, PartialEq)]
+enum Verdict {
     Wake,
-    Keep(ScreenProbe),
+    Keep,
     End,
+}
+
+/// A look's verdict from the pane read (`None` when the probe failed to run) and whether its front
+/// still leads; a failed read of the pane or of the queue keeps the watch for the next look.
+fn verdict(read: Option<Screen>, leads: Result<bool, String>) -> Verdict {
+    match (read, leads) {
+        (None, _) | (_, Ok(false)) | (Some(Screen::Gone), _) => Verdict::End,
+        (Some(Screen::Ready), Ok(true)) => Verdict::Wake,
+        _ => Verdict::Keep,
+    }
 }
 
 fn watches() -> MutexGuard<'static, HashMap<u64, Watch>> {
@@ -70,12 +81,8 @@ pub(crate) fn watch(drive: Arc<Drive>, message: u64) {
                 break;
             };
             let read = tokio::task::spawn_blocking(move || (probe(), probe)).await;
-            let look = match (read, leads(&drive, message).await) {
-                (Err(_), _) | (_, Ok(false)) | (Ok((Screen::Gone, _)), _) => Look::End,
-                (Ok((Screen::Ready, _)), Ok(true)) => Look::Wake,
-                // A failed read of the pane or of the queue keeps the watch for the next look.
-                (Ok((_, probe)), _) => Look::Keep(probe),
-            };
+            let (read, probe) = read.map_or((None, None), |(read, p)| (Some(read), Some(p)));
+            let look = verdict(read, leads(&drive, message).await);
             let mut all = watches();
             let Some(watch) = all.get_mut(&channel) else {
                 break;
@@ -84,14 +91,14 @@ pub(crate) fn watch(drive: Arc<Drive>, message: u64) {
                 continue;
             }
             match look {
-                Look::Keep(probe) => watch.probe = Some(probe),
-                Look::End | Look::Wake => {
+                Verdict::Keep => watch.probe = probe,
+                Verdict::End | Verdict::Wake => {
                     watch.running = false;
                     if watch.armed.is_none() {
                         all.remove(&channel);
                     }
                     drop(all);
-                    if matches!(look, Look::Wake) {
+                    if look == Verdict::Wake {
                         wake(drive);
                     }
                     return;
@@ -111,4 +118,31 @@ async fn leads(drive: &Drive, message: u64) -> Result<bool, String> {
         Ok(front.map(|front| front.1.message_id))
     });
     Ok(front.await? == Some(message))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A look wakes only on a ready screen whose front still leads; a failed pane or queue read keeps
+    /// the watch, and only a gone pane, a probe that did not run or a moved front ends it.
+    #[test]
+    fn a_look_ends_only_on_a_gone_pane_or_a_moved_front() {
+        let failed = || Err("mailbox unreachable".to_string());
+        let cases = [
+            (Some(Screen::Ready), Ok(true), Verdict::Wake),
+            (Some(Screen::Ready), failed(), Verdict::Keep),
+            (Some(Screen::Unknown), Ok(true), Verdict::Keep),
+            (Some(Screen::Unknown), failed(), Verdict::Keep),
+            (Some(Screen::Blocked), Ok(true), Verdict::Keep),
+            (Some(Screen::Blocked), failed(), Verdict::Keep),
+            (Some(Screen::Ready), Ok(false), Verdict::End),
+            (Some(Screen::Gone), Ok(true), Verdict::End),
+            (Some(Screen::Gone), failed(), Verdict::End),
+            (None, Ok(true), Verdict::End),
+        ];
+        for (read, leads, expected) in cases {
+            assert_eq!(verdict(read, leads.clone()), expected, "{read:?} {leads:?}");
+        }
+    }
 }
