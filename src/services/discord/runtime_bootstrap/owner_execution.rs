@@ -118,6 +118,19 @@ pub(super) async fn refresh(provider: &ProviderKind, pool: Option<&sqlx::PgPool>
         };
         let permit = match result {
             Err(error) => {
+                // The loop runs every 2 s, so only a new or changed reason is logged.
+                let held = snapshot
+                    .execution(channel)
+                    .and_then(|view| view.permit.err());
+                if held.as_deref() != Some(error.reason.as_str()) {
+                    tracing::warn!(
+                        provider = provider.as_str(),
+                        channel_id = channel,
+                        reason = %error.reason,
+                        temporary = error.temporary,
+                        "execution owner refresh read failed"
+                    );
+                }
                 snapshot.suspend_execution(channel, error.reason, error.temporary);
                 continue;
             }
@@ -128,15 +141,29 @@ pub(super) async fn refresh(provider: &ProviderKind, pool: Option<&sqlx::PgPool>
         {
             continue;
         }
-        if snapshot.execution(channel).is_some() {
-            snapshot.suspend_execution(channel, "execution identity changed".into(), false);
-            if tokio::time::timeout(Duration::from_secs(3), async {
-                while crate::services::tui_o::writer::host::process_readiness().is_hosted(channel) {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .is_err()
+        if let Some(view) = snapshot.execution(channel) {
+            const CHANGED: &str = "execution identity changed";
+            if view.permit.as_ref().err().map(String::as_str) != Some(CHANGED) {
+                tracing::warn!(
+                    provider = provider.as_str(),
+                    channel_id = channel,
+                    prior_permit = view.verified().is_some(),
+                    next_permit = permit.is_some(),
+                    "execution identity changed; admission suspended"
+                );
+            }
+            snapshot.suspend_execution(channel, CHANGED.into(), false);
+            let readiness = crate::services::tui_o::writer::host::process_readiness();
+            // A writer hosted under the gateway lease never retires on an execution gate close.
+            let lease = crate::services::tui_o::ownership::gate(provider.as_str());
+            if !readiness.hosted_under(channel, &lease)
+                && tokio::time::timeout(Duration::from_secs(3), async {
+                    while readiness.is_hosted(channel) {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .is_err()
             {
                 continue;
             }
