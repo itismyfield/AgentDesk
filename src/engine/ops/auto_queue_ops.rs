@@ -246,7 +246,7 @@ pub(super) fn register_auto_queue_ops<'js>(
 }
 
 fn activate_raw(pg_pool: Option<&PgPool>, bridge: &BridgeHandle, body_json: &str) -> String {
-    let body: crate::server::routes::auto_queue::ActivateBody =
+    let body: crate::services::auto_queue::route::ActivateBody =
         match serde_json::from_str(body_json) {
             Ok(body) => body,
             Err(error) => {
@@ -279,7 +279,8 @@ fn activate_raw(pg_pool: Option<&PgPool>, bridge: &BridgeHandle, body_json: &str
             let body = body;
             let engine = engine.clone();
             move |_bridge_pool| async move {
-                match crate::server::routes::auto_queue::activate_with_bridge_pg(engine, body).await
+                match crate::services::auto_queue::route::activate_with_bridge_pg(engine, body)
+                    .await
                 {
                     Ok((_status, response)) => Ok(response.0.to_string()),
                     Err(error) => Ok(error.to_json_value().to_string()),

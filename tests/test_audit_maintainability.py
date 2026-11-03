@@ -546,7 +546,7 @@ class RouteSrpCheck(unittest.TestCase):
 
 
 class ServiceServerBackflowCheck(unittest.TestCase):
-    def test_flags_service_references_to_server_layer(self) -> None:
+    def test_flags_server_paths_outside_assembly_modules(self) -> None:
         body = """
         use crate::server::routes::AppState;
         async fn handler() {
@@ -558,17 +558,51 @@ class ServiceServerBackflowCheck(unittest.TestCase):
         /* super::server::routes::dispatches */
         pub fn clean() {}
         """
+        inline_test_module = """
+        pub fn clean() {}
+
+        #[cfg(test)]
+        mod tests {
+            use crate::server::outbox_worker::drain_message_outbox_once;
+        }
+        """
         with _FakeSrcTree(
             {
                 "src/services/dirty.rs": body,
+                "src/engine/dirty.rs": body,
+                "src/lib.rs": "pub use server::routes::AppState;\n",
                 "src/services/comments.rs": comments_only,
+                "src/services/inline_test_module.rs": inline_test_module,
                 "src/server/routes/dirty.rs": body,
+                "src/cli/dirty.rs": body,
+                "src/launch.rs": body,
                 "src/services/dirty_tests.rs": body,
             }
         ):
             hits = list(service_server_backflow.CHECK.runner(set()))
-        self.assertEqual(_files(hits), {"src/services/dirty.rs"})
-        self.assertEqual(len(hits), 2)
+        self.assertEqual(
+            _files(hits), {"src/services/dirty.rs", "src/engine/dirty.rs", "src/lib.rs"}
+        )
+        self.assertEqual(len(hits), 5)
+
+    def test_flags_import_forms_without_a_crate_server_literal(self) -> None:
+        dirty = {
+            "src/kanban/group.rs": "use crate::{config, server::routes::AppState};\n",
+            "src/kanban/alias.rs": "use crate::{server as srv};\n",
+            "src/kanban/glob.rs": "use crate::*;\nfn f() { server::routes::run(); }\n",
+            "src/kanban/nested.rs": "use super::super::server::cluster;\n",
+            "src/kanban/macro_body.rs": (
+                "macro_rules! m { () => { $crate::server::run() }; }\n"
+            ),
+        }
+        clean = (
+            "use crate::config::server_surface;\n"
+            "use crate::services::{opencode::{server}};\n"
+            "fn f(server: u8) -> u8 { let s = \"crate::server::x\"; server }\n"
+        )
+        with _FakeSrcTree({**dirty, "src/kanban/clean.rs": clean}):
+            hits = list(service_server_backflow.CHECK.runner(set()))
+        self.assertEqual(sorted(f.file for f in hits), sorted(dirty))
 
     def test_baseline_gate_allows_committed_file_counts(self) -> None:
         body = """
@@ -969,7 +1003,6 @@ class HarnessCli(unittest.TestCase):
         warning_only = {
             "giant_file_ratchet",
             "route_srp_violations",
-            "service_server_backflow",
             "limit_clamp_duplication",
             "parent_test_residue",
         }
@@ -1042,9 +1075,9 @@ class HarnessCli(unittest.TestCase):
                 rc = HARNESS.main(["--check", "--format", "json", "--allowlist", str(allowlist)])
         self.assertEqual(rc, 0)
 
-    def test_check_mode_warns_on_service_server_backflow_regression(self) -> None:
+    def test_check_mode_fails_on_server_backflow_regression(self) -> None:
         body = "use crate::server::routes::AppState;\n"
-        with _FakeSrcTree({"src/services/new.rs": body}) as root:
+        with _FakeSrcTree({"src/engine/new.rs": body}) as root:
             _write(
                 root,
                 service_server_backflow.BASELINE_REL_PATH,
@@ -1063,7 +1096,7 @@ class HarnessCli(unittest.TestCase):
                 sys, "stderr", new=mock.MagicMock()
             ):
                 rc = HARNESS.main(["--check", "--format", "json", "--allowlist", str(allowlist)])
-        self.assertEqual(rc, 0)
+        self.assertEqual(rc, 1)
 
     def test_check_mode_fails_on_legacy_sqlite_regression(self) -> None:
         body = "use rusqlite::Connection;\n"

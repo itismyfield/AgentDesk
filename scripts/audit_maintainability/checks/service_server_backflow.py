@@ -1,10 +1,10 @@
-"""Check: service-layer modules referencing server-layer modules.
+"""Check: modules outside the assembly layer referencing server-layer modules.
 
-Code under ``src/services/**`` should not depend on ``crate::server`` (or a
-relative ``super::server`` sibling). Server routes may call services, but
-services calling back into routes, DTOs, websocket emitters, or cluster helpers
-keeps the layers coupled. Existing debt is tracked by a committed baseline; new
-or increased references fail ``--check``.
+Only the assembly modules (``server``, ``cli``, ``launch``, ``bootstrap``) may
+depend on ``crate::server``. Services, engine, kanban, dispatch, and the crate
+root call the canonical service paths instead of the route re-exports. Existing
+debt is tracked by a committed baseline; new or increased references fail
+``--check``. Inline ``#[cfg(test)]`` items and test files are not production.
 """
 
 from __future__ import annotations
@@ -15,16 +15,64 @@ from collections import Counter
 from pathlib import Path
 from typing import Iterable
 
+try:
+    from rust_production import _production_text
+except ModuleNotFoundError:
+    from scripts.rust_production import _production_text
+
 from .. import common
-from ..common import Finding, line_of, read_text, rel_posix, strip_rust_comments
+from ..common import Finding, line_of, rel_posix
 from . import CheckSpec
 
 BASELINE_REL_PATH = "scripts/audit_maintainability/baselines/service_server_backflow.json"
-SERVER_BACKFLOW = re.compile(r"\b(?P<root>crate|super)\s*::\s*server\b")
+ASSEMBLY_MODULES = frozenset({"server", "cli", "launch", "bootstrap"})
+_ROOT = r"(?<![\w$])(?P<root>\$crate|crate|super|self)\s*::\s*(?:super\s*::\s*)*"
+# `crate::server`, `super::super::server`, `$crate::server` in macro bodies.
+QUALIFIED = re.compile(_ROOT + r"(?P<server>server)\b")
+# A bare `server::` path reaches the module through a crate-root glob import or
+# a crate-root-relative path; no module outside `src/server` is named `server`.
+UNQUALIFIED = re.compile(r"(?<![\w:$])(?P<server>server)\s*::")
+# `use crate::{server, ..}` / `use super::{server as alias}` import the module.
+GROUP_OPEN = re.compile(_ROOT + r"\{")
+GROUP_MEMBER = re.compile(r"(?<![\w:$])(?P<server>server)\b")
+PREFILTER = re.compile(r"\bserver\b")
 
 
-def _is_service_file(rel: str) -> bool:
-    return rel.startswith("src/services/") and rel.endswith(".rs")
+def _is_assembly_file(rel: str) -> bool:
+    parts = rel.split("/")
+    if len(parts) < 2 or parts[0] != "src":
+        return False
+    top = parts[1][:-3] if parts[1].endswith(".rs") else parts[1]
+    return top in ASSEMBLY_MODULES
+
+
+def _group_member_offsets(text: str, open_end: int) -> Iterable[int]:
+    """Offsets of `server` tokens at the first nesting level of a use group."""
+    depth = 1
+    top_level = []
+    index = open_end
+    while index < len(text) and depth:
+        char = text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+        top_level.append(char if depth == 1 and char not in "{}" else " ")
+        index += 1
+    for match in GROUP_MEMBER.finditer("".join(top_level)):
+        yield open_end + match.start("server")
+
+
+def _server_reference_offsets(text: str) -> list[tuple[int, str]]:
+    found: dict[int, str] = {}
+    for match in QUALIFIED.finditer(text):
+        found.setdefault(match.start("server"), f"{match.group('root')}::server")
+    for match in UNQUALIFIED.finditer(text):
+        found.setdefault(match.start("server"), "server")
+    for match in GROUP_OPEN.finditer(text):
+        for offset in _group_member_offsets(text, match.end()):
+            found.setdefault(offset, f"{match.group('root')}::{{server}}")
+    return sorted(found.items())
 
 
 def _run(allowlist: set[str]) -> Iterable[Finding]:
@@ -34,22 +82,24 @@ def _run(allowlist: set[str]) -> Iterable[Finding]:
     findings: list[Finding] = []
     for path in production_rust_files():
         rel = rel_posix(path)
-        if not _is_service_file(rel):
+        if not rel.endswith(".rs") or _is_assembly_file(rel):
             continue
-        text = strip_rust_comments(read_text(path))
-        for match in SERVER_BACKFLOW.finditer(text):
-            root = match.group("root")
-            reference = f"{root}::server"
+        # Unreadable sources raise instead of reading as zero references.
+        if not PREFILTER.search(path.read_text(encoding="utf-8")):
+            continue
+        text = _production_text(path)
+        for offset, reference in _server_reference_offsets(text):
             findings.append(
                 Finding(
                     rule="service_server_backflow",
                     severity="warn",
                     file=rel,
-                    line=line_of(text, match.start()),
+                    line=line_of(text, offset),
                     message=(
-                        "service-layer module references server-layer path "
-                        f"`{reference}`; move shared types/helpers below "
-                        "services or pass server dependencies in from routes"
+                        "module outside server/cli/launch/bootstrap references "
+                        f"server-layer path `{reference}`; call the canonical "
+                        "service path or pass server dependencies in from the "
+                        "assembly layer"
                     ),
                     extra={"reference": reference},
                 )
@@ -118,11 +168,11 @@ def _baseline_gate(findings: list[Finding]) -> Iterable[Finding]:
         regressions.append(
             Finding(
                 rule="service_server_backflow",
-                severity="warn",
+                severity="error",
                 file=BASELINE_REL_PATH,
                 line=None,
                 message=(
-                    "service/server backflow finding count increased from "
+                    "server backflow finding count increased from "
                     f"baseline {baseline_total} to {current_total}"
                 ),
                 extra={"baseline": str(baseline_total), "current": str(current_total)},
@@ -137,11 +187,11 @@ def _baseline_gate(findings: list[Finding]) -> Iterable[Finding]:
         regressions.append(
             Finding(
                 rule="service_server_backflow",
-                severity="warn",
+                severity="error",
                 file=file,
                 line=None,
                 message=(
-                    "service/server backflow finding count for file increased "
+                    "server backflow finding count for file increased "
                     f"from baseline {baseline} to {current}"
                 ),
                 extra={"baseline": str(baseline), "current": str(current)},
@@ -153,10 +203,10 @@ def _baseline_gate(findings: list[Finding]) -> Iterable[Finding]:
 
 CHECK = CheckSpec(
     key="service_server_backflow",
-    title="Service/server backflow",
+    title="Server-layer backflow",
     description=(
-        "Files under src/services/ that reference crate::server or "
-        "super::server server-layer modules."
+        "Production modules outside server/cli/launch/bootstrap that reference "
+        "crate::server server-layer modules."
     ),
     hard_gate=False,
     runner=_run,
