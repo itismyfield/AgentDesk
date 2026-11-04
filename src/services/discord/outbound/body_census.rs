@@ -97,14 +97,12 @@ impl BodySource {
                 || tag["body_owner"] != "Legacy"
         });
         let mut source = Self(tag.unwrap_or_else(|| Self::inherited().0), false);
-        let object = source
-            .0
-            .as_object_mut()
-            .expect("source metadata is an object");
-        object.remove("site");
-        object.remove("output_class");
-        if unknown {
-            object.insert("output_class".into(), json!("UnknownBody"));
+        if let Some(object) = source.0.as_object_mut() {
+            object.remove("site");
+            object.remove("output_class");
+            if unknown {
+                object.insert("output_class".into(), json!("UnknownBody"));
+            }
         }
         source
     }
@@ -188,10 +186,9 @@ impl BodySource {
         let mut tag = self.0;
         if self.1
             && let Some(Value::Object(outer)) = current_census()
+            && let Some(object) = tag.as_object_mut()
         {
-            tag.as_object_mut()
-                .expect("source metadata is an object")
-                .extend(outer);
+            object.extend(outer);
         }
         tag
     }
@@ -207,8 +204,10 @@ impl BodySource {
         offer: BodyOffer,
         next: impl Future<Output = T>,
     ) -> T {
-        let mut tag = self.inherited_tag();
-        let object = tag.as_object_mut().expect("source metadata is an object");
+        let mut object = match self.inherited_tag() {
+            Value::Object(object) => object,
+            _ => serde_json::Map::new(),
+        };
         object.entry("site").or_insert_with(|| json!(site));
         let class = match offer {
             BodyOffer::Body => "LegacyBody",
@@ -223,7 +222,7 @@ impl BodySource {
         } else {
             object.entry("output_class").or_insert_with(|| json!(class));
         }
-        census_scope(Some(tag), next).await
+        census_scope(Some(Value::Object(object)), next).await
     }
 }
 
