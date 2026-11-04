@@ -630,6 +630,7 @@ async fn a_marker_left_on_disk_alone_is_woken_at_once_and_every_half_minute() {
 
 /// A front only an input owner holds is read from that owner: the idle transition wakes the owner
 /// once, and an unchanged Idle at 2, 5, 30 and 60 seconds wakes neither it nor a kickoff.
+#[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn an_owned_front_wakes_its_owner_once_at_the_idle_transition_and_never_by_time() {
     use crate::services::discord::queue_io::input_owner::admission::{

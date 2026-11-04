@@ -546,7 +546,7 @@ class RouteSrpCheck(unittest.TestCase):
 
 
 class ServiceServerBackflowCheck(unittest.TestCase):
-    def test_flags_service_references_to_server_layer(self) -> None:
+    def test_flags_server_paths_outside_assembly_modules(self) -> None:
         body = """
         use crate::server::routes::AppState;
         async fn handler() {
@@ -558,17 +558,76 @@ class ServiceServerBackflowCheck(unittest.TestCase):
         /* super::server::routes::dispatches */
         pub fn clean() {}
         """
+        inline_test_module = """
+        pub fn clean() {}
+
+        #[cfg(test)]
+        mod tests {
+            use crate::server::outbox_worker::drain_message_outbox_once;
+        }
+        """
         with _FakeSrcTree(
             {
                 "src/services/dirty.rs": body,
+                "src/engine/dirty.rs": body,
+                "src/lib.rs": "pub use server::routes::AppState;\n",
                 "src/services/comments.rs": comments_only,
+                "src/services/inline_test_module.rs": inline_test_module,
                 "src/server/routes/dirty.rs": body,
+                "src/cli/dirty.rs": body,
+                "src/launch.rs": body,
                 "src/services/dirty_tests.rs": body,
             }
         ):
             hits = list(service_server_backflow.CHECK.runner(set()))
-        self.assertEqual(_files(hits), {"src/services/dirty.rs"})
-        self.assertEqual(len(hits), 2)
+        self.assertEqual(
+            _files(hits), {"src/services/dirty.rs", "src/engine/dirty.rs", "src/lib.rs"}
+        )
+        self.assertEqual(len(hits), 5)
+
+    def test_flags_import_forms_without_a_crate_server_literal(self) -> None:
+        dirty = {
+            "src/kanban/group.rs": "use crate::{config, server::routes::AppState};\n",
+            "src/kanban/alias.rs": "use crate::{server as srv};\n",
+            "src/kanban/glob.rs": "use crate::*;\nfn f() { server::routes::run(); }\n",
+            "src/kanban/nested.rs": "use super::super::server::cluster;\n",
+            "src/kanban/macro_body.rs": (
+                "macro_rules! m { () => { $crate::server::run() }; }\n"
+            ),
+        }
+        clean = (
+            "use crate::config::server_surface;\n"
+            "use crate::services::{opencode::{server}};\n"
+            "fn f(server: u8) -> u8 { let s = \"crate::server::x\"; server }\n"
+        )
+        with _FakeSrcTree({**dirty, "src/kanban/clean.rs": clean}):
+            hits = list(service_server_backflow.CHECK.runner(set()))
+        self.assertEqual(sorted(f.file for f in hits), sorted(dirty))
+
+    def test_removed_runtime_root_alias_fails_check_in_any_rust_file(self) -> None:
+        dirty = {
+            "src/cli/dcserver.rs": (
+                "pub fn agentdesk_runtime_root() -> Option<PathBuf> {\n"
+                "    crate::config::runtime_root()\n}\n"
+            ),
+            "src/lib.rs": "pub(crate) use cli::agentdesk_runtime_root;\n",
+            "src/services/fence_tests.rs": "let r = crate::cli::agentdesk_runtime_root();\n",
+        }
+        clean = (
+            "// agentdesk_runtime_root() was removed\n"
+            "fn isolate_agentdesk_runtime_root() { let _ = \"agentdesk_runtime_root\"; }\n"
+        )
+        baseline = json.dumps({"schema_version": 1, "total_count": 0, "files": {}})
+        with _FakeSrcTree({**dirty, "src/services/clean_tests.rs": clean,
+                           service_server_backflow.BASELINE_REL_PATH: baseline}), \
+                mock.patch.object(HARNESS, "load_check_specs",
+                                  return_value=[service_server_backflow.CHECK]), \
+                mock.patch.object(HARNESS, "load_allowlist", return_value={}), \
+                mock.patch.object(sys, "stdout"), mock.patch.object(sys, "stderr"):
+            hits = list(service_server_backflow.CHECK.runner(set()))
+            rc = HARNESS.main(["--check"])
+        self.assertEqual(sorted(f.file for f in hits), sorted(dirty))
+        self.assertEqual(rc, 1)
 
     def test_baseline_gate_allows_committed_file_counts(self) -> None:
         body = """
@@ -615,6 +674,215 @@ class ServiceServerBackflowCheck(unittest.TestCase):
             self.assertIsNotNone(baseline_gate)
             failures = list(baseline_gate(hits)) if baseline_gate else []
         self.assertEqual(_files(failures), {"src/services/new.rs"})
+
+
+class ServiceServerBackflowRegressionCheck(unittest.TestCase):
+    def _fixture_check(self, files, allowlist=None):
+        baseline = json.dumps({"schema_version": 1, "total_count": 0, "files": {}})
+        allowlist = {} if allowlist is None else allowlist
+        source_files = {
+            **files,
+            service_server_backflow.BASELINE_REL_PATH: baseline,
+            "fixture-allowlist.toml": "\n".join(
+                f"{key} = {json.dumps(entries)}" for key, entries in allowlist.items()
+            ),
+        }
+        with _FakeSrcTree(source_files) as root:
+            raw_hits = list(service_server_backflow.CHECK.runner(set()))
+            with mock.patch.object(HARNESS, "load_check_specs",
+                                   return_value=[service_server_backflow.CHECK]), \
+                    mock.patch.object(sys, "stdout", new=io.StringIO()) as stdout, \
+                    mock.patch.object(sys, "stderr", new=io.StringIO()) as stderr:
+                rc = HARNESS.main([
+                    "--check", "--format", "json", "--allowlist",
+                    str(root / "fixture-allowlist.toml"),
+                ])
+            hits = json.loads(stdout.getvalue())["checks"]["service_server_backflow"]["findings"]
+        return raw_hits, hits, rc, stderr.getvalue()
+
+    def test_root_module_reexport_cannot_hide_server_dependency(self) -> None:
+        for original in ("server", "crate::server"):
+            with self.subTest(original=original):
+                raw, _hits, rc, _stderr = self._fixture_check({
+                    "src/lib.rs": f"mod server;\nmod engine;\npub(crate) use {original} as srv;\n",
+                    "src/server.rs": "pub(crate) fn run() {}\n",
+                    "src/engine.rs": "pub(crate) fn f() { crate::srv::run(); }\n",
+                })
+                self.assertEqual([(f.file, f.line) for f in raw], [("src/lib.rs", 3)])
+                self.assertEqual(rc, 1)
+
+    def test_bare_local_server_imports_are_not_root_dependencies(self) -> None:
+        local = "mod server {}\nuse server as srv;\n"
+        raw, _hits, rc, _stderr = self._fixture_check({
+            "src/engine.rs": local,
+            "src/lib.rs": "mod local {\n" + local + "}\n",
+        })
+        self.assertEqual(raw, [])
+        self.assertEqual(rc, 0)
+
+    def test_use_group_alias_destination_is_not_a_server_path(self) -> None:
+        for visibility in ("", "pub(crate) "):
+            for imports in (
+                "use crate::{config::runtime_root as server, error::AppResult};\n",
+                "use crate::config::runtime_root as server;\nuse crate::error::AppResult;\n",
+                "use crate::services::{opencode::{server}};\n",
+            ):
+                with self.subTest(visibility=visibility, imports=imports):
+                    raw, _hits, rc, _stderr = self._fixture_check({
+                        "src/engine.rs": visibility + imports + "fn f() { let _ = server(); }\n",
+                    })
+                    self.assertEqual(raw, [])
+                    self.assertEqual(rc, 0)
+
+    def test_use_groups_keep_original_server_paths_and_nested_prefixes(self) -> None:
+        imports = (
+            "use crate::{server as srv, error::AppResult};\n",
+            "pub(crate) use crate::{config, {server as srv}};\n",
+            "use super::super::{config, {server as srv}};\n",
+            "macro_rules! m { () => { use $crate::{server as srv}; }; }\n",
+        )
+        for source in imports:
+            with self.subTest(source=source):
+                raw, _hits, rc, _stderr = self._fixture_check({"src/engine/probe.rs": source})
+                self.assertEqual(len(raw), 1)
+                self.assertEqual(raw[0].rule, service_server_backflow.BACKFLOW_RULE)
+                self.assertEqual(rc, 1)
+
+    def test_backflow_allowlist_is_rejected_and_findings_are_preserved(self) -> None:
+        path = "src/engine/probe.rs"
+        for entry in (path, f"{path}:1"):
+            with self.subTest(entry=entry):
+                raw, hits, rc, stderr = self._fixture_check(
+                    {path: "use crate::server as srv;\n"},
+                    {"service_server_backflow": [entry]},
+                )
+                self.assertEqual(len(raw), 1)
+                self.assertTrue(any(f["file"] == path and f["line"] == 1 for f in hits))
+                self.assertEqual(rc, 1)
+                self.assertIn("does not support allowlist", stderr)
+
+    def test_removed_alias_allowlist_is_rejected_and_error_is_preserved(self) -> None:
+        path = "src/lib.rs"
+        for entry in (path, f"{path}:1"):
+            with self.subTest(entry=entry):
+                raw, hits, rc, stderr = self._fixture_check(
+                    {path: "pub use crate::config::runtime_root as agentdesk_runtime_root;\n"},
+                    {"service_server_backflow": [entry]},
+                )
+                self.assertEqual(len(raw), 1)
+                self.assertTrue(any(f["rule"] == service_server_backflow.ALIAS_RULE
+                                    and f["severity"] == "error" for f in hits))
+                self.assertEqual(rc, 1)
+                self.assertIn("does not support allowlist", stderr)
+
+    def test_invalid_backflow_allowlist_fails_without_source_findings(self) -> None:
+        raw, hits, rc, stderr = self._fixture_check(
+            {"src/lib.rs": "pub fn clean() {}\n"},
+            {"service_server_backflow": ["src/absent.rs"]},
+        )
+        self.assertEqual(raw, [])
+        self.assertTrue(any(f["severity"] == "error" for f in hits))
+        self.assertEqual(rc, 1)
+        self.assertIn("does not support allowlist", stderr)
+        for allowlist in ({}, {"service_server_backflow": []}):
+            with self.subTest(allowlist=allowlist):
+                raw, hits, rc, _stderr = self._fixture_check(
+                    {"src/lib.rs": "pub fn clean() {}\n"}, allowlist,
+                )
+                self.assertEqual((raw, hits, rc), ([], [], 0))
+
+    def test_backflow_allowlist_rejection_applies_to_report_mode(self) -> None:
+        path = "src/engine/probe.rs"
+        with _FakeSrcTree({path: "use crate::server as srv;\n"}):
+            for check_stale in (False, True):
+                with self.subTest(check_stale=check_stale):
+                    findings, _stale = HARNESS.run_all(
+                        [service_server_backflow.CHECK],
+                        {"service_server_backflow": {path}}, check_stale=check_stale,
+                    )
+                    hits = findings[service_server_backflow.CHECK.key]
+                    self.assertTrue(any(f.file == path and f.line == 1 for f in hits))
+                    self.assertTrue(any(f.severity == "error" and
+                                        "does not support allowlist" in f.message for f in hits))
+
+    def test_other_checks_keep_file_and_line_allowlists(self) -> None:
+        path = "src/services/probe.rs"
+        body = "async fn f() { ch.send_message(&http, |m| m.content(\"x\")).await; }\n"
+        with _FakeSrcTree({path: body}) as root:
+            raw = list(direct_discord_sends.CHECK.runner(set()))
+            self.assertEqual(len(raw), 1)
+            for entry in (path, f"{path}:{raw[0].line}"):
+                with self.subTest(entry=entry):
+                    _write(root, "fixture-allowlist.toml",
+                           "direct_discord_sends = " + json.dumps([entry]))
+                    allowlist = HARNESS.load_allowlist(root / "fixture-allowlist.toml")
+                    for check_stale in (False, True):
+                        findings, stale = HARNESS.run_all(
+                            [direct_discord_sends.CHECK], allowlist, check_stale=check_stale,
+                        )
+                        self.assertEqual(findings[direct_discord_sends.CHECK.key], [])
+                        self.assertEqual(stale, {})
+
+    def test_renamed_public_runtime_root_forwarder_and_glob_fail_check(self) -> None:
+        for location in ("src/cli/mod.rs", "src/cli/dcserver.rs", "src/lib.rs"):
+            for body in ("crate::config::runtime_root()", "return crate::config::runtime_root();"):
+                with self.subTest(location=location, body=body):
+                    files = {
+                        "src/lib.rs": "mod cli;\npub(crate) use cli::*;\n",
+                        "src/engine.rs": "fn consume() { let _ = crate::different_root(); }\n",
+                        location: "pub(crate) fn different_root() -> Option<PathBuf> { " + body + " }\n",
+                    }
+                    raw, _hits, rc, _stderr = self._fixture_check(files)
+                    self.assertEqual([(f.file, f.rule, f.severity) for f in raw],
+                                     [(location, service_server_backflow.ALIAS_RULE, "error")])
+                    self.assertEqual(rc, 1)
+
+    def test_renamed_public_runtime_root_reexports_fail_check(self) -> None:
+        sources = (
+            ("src/lib.rs", "pub(crate) use config::runtime_root as different_root;\n"),
+            ("src/lib.rs", "pub use crate::config::{runtime_root as different_root, something};\n"),
+            ("src/cli/mod.rs", "pub use crate::config::runtime_root as different_root;\n"),
+        )
+        for path, source in sources:
+            with self.subTest(path=path, source=source):
+                raw, _hits, rc, _stderr = self._fixture_check({path: source})
+                self.assertEqual(len(raw), 1)
+                self.assertEqual((raw[0].file, raw[0].rule, raw[0].severity),
+                                 (path, service_server_backflow.ALIAS_RULE, "error"))
+                self.assertEqual(rc, 1)
+
+    def test_runtime_root_forwarders_under_cfg_and_macro_are_detected(self) -> None:
+        sources = (
+            "#[cfg(windows)]\npub fn different_root() -> Option<PathBuf> { crate::config::runtime_root() }\n",
+            "#[cfg(feature = \"probe\")]\npub fn different_root() -> Option<PathBuf> { crate::config::runtime_root() }\n",
+            "macro_rules! root { () => { pub fn different_root() -> Option<PathBuf> { $crate::config::runtime_root() } }; }\n",
+        )
+        for source in sources:
+            with self.subTest(source=source):
+                raw, _hits, rc, _stderr = self._fixture_check({"src/cli/nested.rs": source})
+                self.assertEqual(len(raw), 1)
+                self.assertEqual(raw[0].rule, service_server_backflow.ALIAS_RULE)
+                self.assertEqual(rc, 1)
+
+    def test_canonical_calls_helpers_and_prose_are_not_runtime_root_aliases(self) -> None:
+        clean = {
+            "src/config.rs": "pub fn runtime_root() -> Option<PathBuf> { resolve() }\n",
+            "src/engine.rs": "pub fn read() -> Option<PathBuf> { crate::config::runtime_root() }\n",
+            "src/cli/mod.rs": (
+                "fn private_helper() -> Option<PathBuf> { crate::config::runtime_root() }\n"
+                "pub fn with_behavior() -> Option<PathBuf> { log(); crate::config::runtime_root() }\n"
+                "pub fn initialize() { crate::config::runtime_root(); }\n"
+                "#[cfg(test)]\npub fn fixture_root() -> Option<PathBuf> { crate::config::runtime_root() }\n"
+                "#[cfg(test)]\nfn isolate_agentdesk_runtime_root() { let _ = crate::config::runtime_root(); }\n"
+                "// pub fn prose() { crate::config::runtime_root() }\n"
+                "const EXAMPLE: &str = r#\"pub fn example() { crate::config::runtime_root() }\"#;\n"
+                "/* agentdesk_runtime_root() */\n"
+            ),
+            "src/cli/nested.rs": "pub fn local() -> Option<PathBuf> { super::config::runtime_root() }\n",
+            "src/services/clean_tests.rs": "fn isolate_agentdesk_runtime_root() {}\n",
+        }
+        raw, hits, rc, _stderr = self._fixture_check(clean)
+        self.assertEqual((raw, hits, rc), ([], [], 0))
 
 
 class DirectDiscordSendsCheck(unittest.TestCase):
@@ -969,7 +1237,6 @@ class HarnessCli(unittest.TestCase):
         warning_only = {
             "giant_file_ratchet",
             "route_srp_violations",
-            "service_server_backflow",
             "limit_clamp_duplication",
             "parent_test_residue",
         }
@@ -1042,9 +1309,9 @@ class HarnessCli(unittest.TestCase):
                 rc = HARNESS.main(["--check", "--format", "json", "--allowlist", str(allowlist)])
         self.assertEqual(rc, 0)
 
-    def test_check_mode_warns_on_service_server_backflow_regression(self) -> None:
+    def test_check_mode_fails_on_server_backflow_regression(self) -> None:
         body = "use crate::server::routes::AppState;\n"
-        with _FakeSrcTree({"src/services/new.rs": body}) as root:
+        with _FakeSrcTree({"src/engine/new.rs": body}) as root:
             _write(
                 root,
                 service_server_backflow.BASELINE_REL_PATH,
@@ -1063,7 +1330,7 @@ class HarnessCli(unittest.TestCase):
                 sys, "stderr", new=mock.MagicMock()
             ):
                 rc = HARNESS.main(["--check", "--format", "json", "--allowlist", str(allowlist)])
-        self.assertEqual(rc, 0)
+        self.assertEqual(rc, 1)
 
     def test_check_mode_fails_on_legacy_sqlite_regression(self) -> None:
         body = "use rusqlite::Connection;\n"

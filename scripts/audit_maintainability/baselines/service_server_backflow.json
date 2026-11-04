@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "rule": "service_server_backflow",
-  "description": "No-regression baseline for src/services references to crate::server or super::server server-layer modules.",
+  "description": "No-regression baseline for production references to crate::server from modules outside server/cli/launch/bootstrap.",
   "captured_at": "2026-06-09",
   "total_count": 0,
   "files": {}

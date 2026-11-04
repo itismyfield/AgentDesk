@@ -252,10 +252,6 @@ pub fn restart_windows_dcserver_and_verify(timeout: Duration) -> Result<(), Stri
     verify_dcserver_ready_since(start_offset, timeout)
 }
 
-pub fn agentdesk_runtime_root() -> Option<PathBuf> {
-    crate::config::runtime_root()
-}
-
 pub fn current_dcserver_launchd_label() -> String {
     env::var(AGENTDESK_DCSERVER_LABEL_ENV)
         .ok()
@@ -332,19 +328,19 @@ pub fn dcserver_instance_pids() -> Vec<u32> {
 }
 
 pub fn instance_agentdesk_config_path() -> Option<PathBuf> {
-    agentdesk_runtime_root().map(|root| crate::config::config_path::config_path_in(&root))
+    crate::config::runtime_root().map(|root| crate::config::config_path::config_path_in(&root))
 }
 
 pub fn dcserver_stdout_log_path() -> Option<PathBuf> {
-    agentdesk_runtime_root().map(|root| root.join("logs").join("dcserver.stdout.log"))
+    crate::config::runtime_root().map(|root| root.join("logs").join("dcserver.stdout.log"))
 }
 
 pub fn current_release_link_path() -> Option<PathBuf> {
-    agentdesk_runtime_root().map(|root| root.join("releases").join("current"))
+    crate::config::runtime_root().map(|root| root.join("releases").join("current"))
 }
 
 pub fn previous_release_link_path() -> Option<PathBuf> {
-    agentdesk_runtime_root().map(|root| root.join("releases").join("previous"))
+    crate::config::runtime_root().map(|root| root.join("releases").join("previous"))
 }
 
 pub fn read_release_link_target(path: &Path) -> Option<PathBuf> {
@@ -594,7 +590,7 @@ pub fn handle_restart_dcserver(
     let new_generation = services::discord::runtime_store::next_process_generation();
 
     // Show version transition if available
-    if let Some(root) = agentdesk_runtime_root() {
+    if let Some(root) = crate::config::runtime_root() {
         let version_file = root.join("runtime").join("dcserver.version");
         if let Ok(running_version) = std::fs::read_to_string(&version_file) {
             let running = running_version.trim();
@@ -616,7 +612,7 @@ pub fn handle_restart_dcserver(
         .and_then(read_release_link_target);
 
     let report_claim = report_context.as_ref().and_then(restart_claim_for_context);
-    let runtime_root = agentdesk_runtime_root();
+    let runtime_root = crate::config::runtime_root();
     let (quick_attempt, outcome) = match (report_context.as_ref(), runtime_root.as_deref()) {
         (Some(context), Some(root)) => {
             let attempt =
@@ -738,7 +734,7 @@ pub fn handle_restart_dcserver(
     // NOTE: We intentionally do NOT kill AgentDesk-* work sessions here.
     // They will be reconnected by restore_tmux_watchers() after the new dcserver starts.
     let runtime_root =
-        agentdesk_runtime_root().ok_or_else(|| "Cannot determine runtime root".to_string())?;
+        crate::config::runtime_root().ok_or_else(|| "Cannot determine runtime root".to_string())?;
     let scripts_dir = runtime_root.join("scripts");
     std::fs::create_dir_all(&scripts_dir)
         .map_err(|error| format!("Failed to create scripts directory: {error}"))?;
@@ -856,7 +852,7 @@ pub fn handle_dcserver(token: Option<String>) {
     let exe_watch = crate::cli::dcserver_pg_bootstrap::BinaryWatch::capture_current_exe();
 
     // Ensure directory structure exists first (needed for lock file)
-    if let Some(root) = agentdesk_runtime_root() {
+    if let Some(root) = crate::config::runtime_root() {
         for subdir in ["config", "credential", "runtime", "logs", "scripts"] {
             let _ = std::fs::create_dir_all(root.join(subdir));
         }
@@ -868,7 +864,7 @@ pub fn handle_dcserver(token: Option<String>) {
     }
 
     #[cfg(unix)]
-    let singleton = replay_recovery::Singleton::acquire(agentdesk_runtime_root().as_deref())
+    let singleton = replay_recovery::Singleton::acquire(crate::config::runtime_root().as_deref())
         .unwrap_or_else(|error| {
             eprintln!("  ✗ {error}");
             std::process::exit(1)
@@ -881,7 +877,7 @@ pub fn handle_dcserver(token: Option<String>) {
     // Also kill any stale processes (e.g. orphaned without lock)
     kill_existing_dcserver_processes();
 
-    let runtime_root = agentdesk_runtime_root();
+    let runtime_root = crate::config::runtime_root();
     if let Some(root) = runtime_root.as_ref() {
         match crate::runtime_layout::ensure_runtime_layout(&root) {
             Ok(report) => {
@@ -904,7 +900,7 @@ pub fn handle_dcserver(token: Option<String>) {
     }
 
     // Write PID/version files
-    if let Some(root) = agentdesk_runtime_root() {
+    if let Some(root) = crate::config::runtime_root() {
         let runtime_dir = root.join("runtime");
         let _ = std::fs::write(
             runtime_dir.join("dcserver.pid"),
@@ -1215,7 +1211,7 @@ pub fn handle_dcserver(token: Option<String>) {
         // every channel that already has a monitoring row whenever free space
         // dips below 5 GiB or an ENOSPC fault was recorded in the last 5 min,
         // and removes the row when health returns.
-        let disk_probe_path = crate::cli::agentdesk_runtime_root()
+        let disk_probe_path = crate::config::runtime_root()
             .unwrap_or_else(|| std::path::PathBuf::from("/"));
         services::disk_monitor::spawn_disk_monitor_tick(disk_probe_path);
 

@@ -292,7 +292,7 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
             // request to persist cheap local state and exit; managed
             // TUI/tmux sessions survive and the next process
             // rehydrates transcript tailing from runtime state.
-            if let Some(root) = crate::agentdesk_runtime_root() {
+            if let Some(root) = crate::config::runtime_root() {
                 let marker = root.join("restart_pending");
                 if marker.exists() {
                     let request = std::fs::read_to_string(&marker).unwrap_or_default();

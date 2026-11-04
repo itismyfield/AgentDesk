@@ -252,7 +252,7 @@ async fn load_channels(
 }
 
 fn saved_onboarding_bot_token_without_pg(_state: &AppState) -> Option<String> {
-    crate::cli::agentdesk_runtime_root()
+    crate::config::runtime_root()
         .as_ref()
         .and_then(|root| load_onboarding_config(root).ok())
         .and_then(|config| {
