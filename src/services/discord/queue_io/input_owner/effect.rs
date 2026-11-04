@@ -216,6 +216,7 @@ impl BusyClaude {
             if matches!(outcome, Ok((Outcome::NotSent(_), _)))
                 && self.cancel.native_stop.receipt_sink().stopped_before_key()
             {
+                owner_input::stop_took_gate();
                 return Ok(Completion::WriteUncertain("stopped_before_key".into()));
             }
             let outcome = outcome.map(|(outcome, unproven)| {
@@ -333,9 +334,15 @@ pub(crate) fn idle_claude(
     use crate::services::claude_tui::guarded_outcome::SubmissionError;
     Box::new(move |frame| {
         crate::services::claude_tui::guarded_outcome::with_receipt_sink(Some(&receipt), || {
-            match crate::services::claude_tui::input::send_warm_followup_owned(
+            let sent = crate::services::claude_tui::input::send_warm_followup_owned(
                 &session, &frame, None,
-            ) {
+            );
+            // A stop that took the writer's gate first left no key and nothing to send again.
+            if sent.is_err() && receipt.native_stop.receipt_sink().stopped_before_key() {
+                owner_input::stop_took_gate();
+                return Ok(Completion::WriteUncertain("stopped_before_key".into()));
+            }
+            match sent {
                 Ok(()) => Ok(Completion::Submitted),
                 Err(SubmissionError::Held(hold)) if hold.modal => {
                     arm_screen(channel, pane.clone());

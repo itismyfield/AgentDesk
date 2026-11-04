@@ -146,3 +146,72 @@ fn a_codex_idle_write_a_stop_found_ungated_still_awaits_its_ai_turn() {
         "the AI turn the paste may start is awaited"
     );
 }
+
+/// A stop that took the idle writer's gate outranks the hold the writer meets after it, a pane
+/// read that fails: unconfirmed, never held to resend once the pane reads again.
+#[test]
+fn an_owner_idle_submit_held_after_a_stop_took_its_gate_is_never_kept_to_resend() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig("oi-stop-held", 7_754_340, "normal", view("", false), IDLE);
+    let path = rig.transcript();
+    let dir = rig.f.root.path().join("stop-held");
+    fs::create_dir_all(&dir).unwrap();
+    let (reading, go, unread, shim) = (
+        dir.join("reading"),
+        dir.join("go"),
+        dir.join("unread"),
+        rig.f.root.path().join("tmux"),
+    );
+    let original = fs::read_to_string(&shim).unwrap();
+    let hook = format!(
+        "case \"$*\" in *pane_dead*) if [ ! -f '{r}' ]; then touch '{r}'; while [ ! -f '{g}' ]; do sleep 0.01; done; [ -f '{u}' ] && exit 1; fi ;; esac\n",
+        r = reading.display(),
+        g = go.display(),
+        u = unread.display()
+    );
+    fs::write(
+        &shim,
+        original.replacen("#!/bin/sh\n", &format!("#!/bin/sh\n{hook}"), 1),
+    )
+    .unwrap();
+    let claim = rig.claim(&rig.granted_front()).unwrap();
+    let owner = rig.registration(
+        &ProviderKind::Claude,
+        target::Phase::Idle,
+        &path,
+        Execution::LocalTui,
+    );
+    let (settled, _) = tokio::sync::oneshot::channel();
+    let result = rig.with_turn(&ProviderKind::Claude, Some(&rig.name), |turn, sender| {
+        let cancel = turn.cancel.clone();
+        cancel.native_stop.receipt_sink().arm_first_key();
+        let stopper = std::thread::spawn(move || {
+            wait("writer reads the pane", || reading.exists());
+            let stop = StopCancel::decide(Some(cancel), "!stop".into());
+            // The held pane read then fails, so the writer holds before its first key.
+            fs::write(unread, "").unwrap();
+            fs::write(go, "").unwrap();
+            matches!(stop, StopCancel::Published(_))
+        });
+        let result = execute_front(turn, sender, claim, owner, settled);
+        assert!(stopper.join().unwrap(), "the stop published main's cancel");
+        result
+    });
+    fs::write(&shim, &original).unwrap();
+    assert!(
+        result.as_ref().is_err_and(|e| !effect::surely_unsent(e)),
+        "unconfirmed: {result:?}"
+    );
+    assert!(rig.events().is_empty(), "no key reached the pane");
+    let snapshot = rig.snapshot();
+    assert_eq!(snapshot["retained_inputs"], json!([]), "{snapshot}");
+    assert!(!snapshot["head_injection"].is_null(), "{snapshot}");
+    let requeue = rig
+        .mailbox
+        .v2_request(|slot| slot.as_mut().unwrap().requeue_known_not_sent());
+    assert_eq!(
+        rig.runtime.block_on(requeue).unwrap().len(),
+        0,
+        "nothing goes back in line"
+    );
+}
