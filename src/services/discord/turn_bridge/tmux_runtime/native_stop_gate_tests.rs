@@ -89,9 +89,8 @@ fn a_stop_takes_a_fresh_writers_gate_only_before_its_first_key() {
     });
 }
 
-/// An applied input is pinned within the stop budget, from a row no reader saw or one landing
-/// later, and escaped; one that never lands gets no Escape and no main cancel. A late pin leaves
-/// the turn's exit only what remains of that one budget.
+/// An applied input is pinned within one stop budget, then escaped, and a late pin leaves the
+/// exit wait only the rest of it; an input that never lands gets no Escape and no main cancel.
 #[test]
 fn an_applied_input_is_pinned_within_the_stop_budget_before_the_stop_judges() {
     let fx = Fixture::new();
