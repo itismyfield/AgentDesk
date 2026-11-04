@@ -267,7 +267,8 @@ def update_baseline(path, payload, moves, *, upgrade=False, legacy_records=None)
                     if (_ordered(accepted[key]) != _ordered(payload[key])
                             or _ordered(accepted[key]) != _ordered(legacy_records[key])):
                         raise ValueError(f"record upgrade changed existing debt or measurement: {key}")
-                if compare(legacy_records, payload, moves)["errors"]:
+                upgrade_diff = compare(legacy_records, payload, moves)
+                if upgrade_diff["errors"] or upgrade_diff["warnings"]:
                     raise ValueError("record upgrade changed historical individual debts")
                 result = payload
             else:

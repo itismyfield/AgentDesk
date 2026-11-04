@@ -64,6 +64,12 @@ class ModuleLayerRatchetTest(unittest.TestCase):
     def compare(self, accepted, candidate, moves=None):
         return self.ratchet.compare(accepted, candidate, self.moves() if moves is None else moves)
 
+    def assert_warning_only(self, result, section=None, record_id=None):
+        self.assertEqual(result["errors"], [], result)
+        self.assertTrue(any(section is None or (row.get("section") == section
+                                                and (record_id is None or row.get("id") == record_id))
+                            for row in result["warnings"]), result)
+
     def assert_error(self, result, section=None, record_id=None):
         self.assertTrue(result["errors"], result)
         if section is not None:
@@ -121,35 +127,53 @@ class ModuleLayerRatchetTest(unittest.TestCase):
                 self.assertFalse(any(row.get("section") == "reverse_dependencies" and row.get("id") == original["id"]
                                      for row in result["decreases"]), result)
 
-    def test_changed_indeterminate_target_is_error_even_with_equal_totals(self):
+    def test_changed_indeterminate_target_warns_even_with_equal_totals(self):
         old, replacement = self.edge("mixed", "old"), self.edge("mixed", "new")
         accepted, candidate = self.snapshot(indeterminate=[old]), self.snapshot(indeterminate=[replacement])
         self.assertEqual(accepted["indeterminate_edges"], candidate["indeterminate_edges"])
         self.assertEqual(accepted["indeterminate_occurrences"], candidate["indeterminate_occurrences"])
-        self.assert_error(self.compare(accepted, candidate), "indeterminate_dependencies", replacement["id"])
+        self.assert_warning_only(self.compare(accepted, candidate), "indeterminate_dependencies", replacement["id"])
 
-    def test_existing_indeterminate_occurrence_increase_is_error(self):
+    def test_existing_indeterminate_occurrence_increase_warns(self):
         old = self.edge("mixed", count=2)
-        self.assert_error(self.compare(self.snapshot(indeterminate=[old]),
+        self.assert_warning_only(self.compare(self.snapshot(indeterminate=[old]),
                                        self.snapshot(indeterminate=[dict(old, count=3)])),
                           "indeterminate_dependencies", old["id"])
 
-    def test_unclassified_count_increase_is_error(self):
-        self.assert_error(self.compare(self.snapshot(unclassified=1), self.snapshot(unclassified=2)))
+    def test_unclassified_count_increase_warns(self):
+        self.assert_warning_only(self.compare(self.snapshot(unclassified=1), self.snapshot(unclassified=2)),
+                                 "unclassified_modules")
 
-    def test_indeterminate_aggregate_count_increase_is_error(self):
+    def test_indeterminate_aggregate_count_without_records_is_invalid(self):
         for name in ("indeterminate_edges", "indeterminate_occurrences"):
             with self.subTest(field=name):
                 candidate = self.snapshot()
                 candidate[name] += 1
-                self.assert_error(self.compare(self.snapshot(), candidate))
+                self.assert_error(self.compare(self.snapshot(), candidate), "configuration")
 
-    def test_uncertainty_new_identifiers_and_occurrence_increases_are_errors(self):
+    def test_uncertainty_new_identifiers_and_occurrence_increases_warn(self):
         old, added = self.uncertainty("old"), self.uncertainty("new", 1)
         for candidate, identifier in (([dict(old, count=3)], old["id"]), ([old, added], added["id"])):
             with self.subTest(identifier=identifier):
-                self.assert_error(self.compare(self.snapshot(uncertainties=[old]),
-                                               self.snapshot(uncertainties=candidate)), "uncertainties", identifier)
+                self.assert_warning_only(self.compare(self.snapshot(uncertainties=[old]),
+                                                      self.snapshot(uncertainties=candidate)),
+                                         "uncertainties", identifier)
+
+    def test_reduction_records_decreases_without_absorbing_warned_growth(self):
+        reverse, mixed, added = self.edge(count=4), self.edge("mixed", count=1), self.edge("mixed", "new", count=2)
+        accepted = self.snapshot([reverse], indeterminate=[mixed], uncertainties=[self.uncertainty("old")])
+        candidate = self.snapshot([dict(reverse, count=3)], indeterminate=[dict(mixed, count=2), added],
+                                  uncertainties=[self.uncertainty("old", 3), self.uncertainty("new", 1)],
+                                  unclassified=2)
+        updated = self.ratchet.reduced_baseline(accepted, candidate, self.moves())
+        self.assertEqual(updated["reverse_dependencies"], [dict(reverse, count=3)])
+        self.assertEqual(updated["indeterminate_dependencies"], [mixed])
+        self.assertEqual(updated["uncertainties"], [self.uncertainty("old")])
+        self.assertEqual((updated["unclassified_modules"], updated["indeterminate_edges"],
+                          updated["indeterminate_occurrences"]), (1, 1, 1))
+        rerun = self.compare(updated, candidate)
+        self.assertEqual(rerun["errors"], [])
+        self.assertEqual(len(rerun["warnings"]), 7, rerun)
 
     def test_reduction_removes_debt_and_freezes_zero_rule(self):
         old = self.edge()
@@ -316,8 +340,6 @@ class ModuleLayerBaselineUpdateTest(unittest.TestCase):
         candidates = (
             self.snapshot([dict(old, count=2), self.edge("new", count=1)], uncertainties=[self.uncertainty()]),
             self.snapshot([dict(old, count=5)], uncertainties=[self.uncertainty()]),
-            self.snapshot([dict(old, count=2)], uncertainties=[self.uncertainty(count=3)]),
-            self.snapshot([dict(old, count=2)], uncertainties=[self.uncertainty()], unclassified=2),
         )
         for candidate in candidates:
             with self.subTest(candidate=candidate), TemporaryDirectory() as temporary:

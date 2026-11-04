@@ -1,4 +1,8 @@
-"""Compare individual layer debts; reductions never purchase unrelated growth."""
+"""Compare individual layer debts; reductions never purchase unrelated growth.
+
+Only layer-direction debt blocks. Coverage gaps (indeterminate edges, unresolved
+references, unclassified modules) grow with ordinary new code, so their growth is
+reported as warnings unless it hides accepted reverse debt."""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -11,6 +15,7 @@ from .module_layer_baseline import BASELINE, _id
 MOVES = "scripts/audit_maintainability/layer_moves.toml"
 SECTIONS = ("reverse_dependencies", "indeterminate_dependencies", "uncertainties")
 TOTALS = ("unclassified_modules", "indeterminate_edges", "indeterminate_occurrences")
+BLOCKING_SECTIONS = ("reverse_dependencies",)
 
 
 def load_inputs(repo):
@@ -109,20 +114,26 @@ def _normalized(accepted, candidate, manifest):
 
 
 def compare(accepted, candidate, moves):
-    errors, decreases = [], []
+    errors, warnings, decreases = [], [], []
     try:
         old, zeros, current = _normalized(accepted, candidate, moves)
         unknown_ids = {row["id"] for row in candidate["indeterminate_dependencies"]}
         moved_reverse = {row["old_id"]: row["new_id"] for row in moves["moves"]
                          if row["section"] == "reverse_dependencies"}
+        # Accepted reverse debt that resurfaces as indeterminate still blocks.
+        reverse_ids = old["reverse_dependencies"].keys() | zeros["reverse_dependencies"].keys()
+        hidden_reverse = reverse_ids | {moved_reverse.get(identity, identity) for identity in reverse_ids}
         for section in SECTIONS:
             for identity, row in sorted(current[section].items()):
                 previous = old[section].get(identity, {"count": 0})["count"]
                 if row["count"] > previous:
                     code = "zero-rule" if identity in zeros[section] else "increase" if previous else "new-id"
-                    errors.append({"code": code, "section": section, "id": identity,
-                                   "baseline_count": previous, "current_count": row["count"],
-                                   "message": f"{code}: {section} {identity} {previous} -> {row['count']}"})
+                    blocking = section in BLOCKING_SECTIONS or (
+                        section == "indeterminate_dependencies" and identity in hidden_reverse)
+                    (errors if blocking else warnings).append({
+                        "code": code, "section": section, "id": identity,
+                        "baseline_count": previous, "current_count": row["count"],
+                        "message": f"{code}: {section} {identity} {previous} -> {row['count']}"})
             for identity, row in sorted(old[section].items()):
                 if section == "reverse_dependencies" and moved_reverse.get(identity, identity) in unknown_ids:
                     continue
@@ -132,12 +143,13 @@ def compare(accepted, candidate, moves):
                                       "baseline_count": row["count"], "current_count": count})
         for key in TOTALS:
             if candidate[key] > accepted[key]:
-                errors.append({"code": "total-increase", "section": key,
+                warnings.append({"code": "total-increase", "section": key,
                                "baseline_count": accepted[key], "current_count": candidate[key],
                                "message": f"{key} increased: {accepted[key]} -> {candidate[key]}"})
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
         errors.append({"code": "invalid-input", "section": "configuration", "message": str(exc)})
-    return {"errors": sorted(errors, key=lambda r: (r["section"], r.get("id", ""), r["code"])),
+    order = lambda r: (r["section"], r.get("id", ""), r["code"])
+    return {"errors": sorted(errors, key=order), "warnings": sorted(warnings, key=order),
             "decreases": sorted(decreases, key=lambda r: (r["section"], r["id"]))}
 
 
@@ -151,10 +163,14 @@ def reduced_baseline(accepted, candidate, moves):
     for section in SECTIONS:
         output[section] = []
         for identity, row in sorted(old[section].items()):
-            count = current[section].get(identity, {"count": 0})["count"]
+            # Accepted counts are ceilings: reductions are recorded, warned growth is not absorbed.
+            count = min(row["count"], current[section].get(identity, {"count": 0})["count"])
             if count:
                 output[section].append({**row, "count": count})
             else:
                 output["zero_rules"].append({**row, "section": section, "count": 0})
     output["zero_rules"].sort(key=lambda r: (r["section"], r["id"]))
+    output["unclassified_modules"] = min(accepted["unclassified_modules"], candidate["unclassified_modules"])
+    output["indeterminate_edges"] = len(output["indeterminate_dependencies"])
+    output["indeterminate_occurrences"] = sum(r["count"] for r in output["indeterminate_dependencies"])
     return output
