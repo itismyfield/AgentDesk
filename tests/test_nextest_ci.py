@@ -651,10 +651,11 @@ class VerifyArchive(Fixture):
         self.assertFalse((self.dir / "rec/worker.json").exists())
 
     def test_cli_retry_override_in_environment_is_refused(self):
-        with mock.patch.dict(os.environ, {"NEXTEST_RETRIES": "3"}):
-            rc, err = self.verify()
-        self.assertEqual(rc, 1)
-        self.assertIn("NEXTEST_RETRIES is set", err)
+        for name in nci.FORBIDDEN_ENV:
+            with self.subTest(name=name), mock.patch.dict(os.environ, {name: "3"}):
+                rc, err = self.verify()
+                self.assertEqual(rc, 1)
+                self.assertIn(f"{name} is set", err)
 
 
 def source_losses(removed=None, ignored=None, present=None):
@@ -1948,7 +1949,10 @@ class CensusEvidence(Fixture):
         head = subprocess.check_output(["git", "-C", str(self.dir), "rev-parse", "HEAD"], text=True).strip()
         binary = self.dir / "test-binary"
         binary.write_bytes(b"actual fixture test binary")
-        with contextlib.chdir(self.dir):
+        with contextlib.chdir(self.dir), mock.patch.dict(os.environ):
+            # This synthetic worker has its own plan, independent of the enclosing nextest test.
+            for name in nci.FORBIDDEN_ENV:
+                os.environ.pop(name, None)
             plan = self.plan_ok(sorted(names), sha=head, workers=1, mode="all-once")
             doc = json.loads((self.dir / "list.json").read_text())
             doc["rust-suites"][BIN]["binary-path"] = str(binary)
@@ -1961,9 +1965,10 @@ class CensusEvidence(Fixture):
             args += [x for k, v in BUILD.items() for x in (k, v)]
             self.assertEqual(self.run_cli(*args)[0], 0)
             plan = json.loads((self.dir / "plan/plan.json").read_text())
-            self.assertEqual(self.run_cli("verify-archive", "--plan", self.dir / "plan/plan.json",
+            rc, err = self.run_cli("verify-archive", "--plan", self.dir / "plan/plan.json",
                 "--worker", 0, "--archive", self.archive, "--config", self.dir / "plan/worker-0.toml",
-                "--sha", head, "--run-id", "7", "--record", self.dir / "results/worker-0")[0], 0)
+                "--sha", head, "--run-id", "7", "--record", self.dir / "results/worker-0")
+            self.assertEqual(rc, 0, err)
             cases = [(name, "", 0.1) for name in sorted(names)]
             if outcome != "pass":
                 name, _, seconds = cases[0]
@@ -2014,8 +2019,15 @@ class CensusEvidence(Fixture):
                     case.doCleanups()
 
     def test_packaging_and_native_verifier_round_trip(self):
-        bundle = self.packaged_fixture()
-        self.assertTrue(bundle["proof"]["tests"])
+        for ambient in ({}, {name: "1" for name in nci.FORBIDDEN_ENV}):
+            with self.subTest(ambient=bool(ambient)), mock.patch.dict(os.environ, ambient):
+                case = CensusEvidence()
+                case.setUp()
+                try:
+                    bundle = case.packaged_fixture()
+                    self.assertTrue(bundle["proof"]["tests"])
+                finally:
+                    case.doCleanups()
 
     def packaged_fixture(self):
         self.evidence_fixture()

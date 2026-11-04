@@ -198,32 +198,35 @@ impl BodySource {
         census_scope(Some(self.inherited_tag()), next).await
     }
 
-    pub(in crate::services::discord) async fn observe<T>(
+    pub(in crate::services::discord) fn observe<T>(
         self,
         site: BodySite,
         offer: BodyOffer,
         next: impl Future<Output = T>,
-    ) -> T {
-        let mut object = match self.inherited_tag() {
-            Value::Object(object) => object,
-            _ => serde_json::Map::new(),
-        };
-        object.entry("site").or_insert_with(|| json!(site));
-        let class = match offer {
-            BodyOffer::Body => "LegacyBody",
-            BodyOffer::Recovered => "RecoveredLegacyBody",
-            BodyOffer::NonBody => "NonBody",
-            BodyOffer::Unknown => "UnknownBody",
-            BodyOffer::Refresh => "LegacyBodyRefresh",
-        };
-        // Explicit notices mask an outer body; nested body helpers retain that mask.
-        if matches!(offer, BodyOffer::NonBody) {
-            object.insert("output_class".into(), json!(class));
-        } else {
-            object.entry("output_class").or_insert_with(|| json!(class));
-        }
-        let tag = Value::Object(object);
-        census_scope(Some(tag), next).await
+    ) -> std::pin::Pin<Box<impl Future<Output = T>>> {
+        // Keep the observation envelope off callers' stacks even for large delivery futures.
+        Box::pin(async move {
+            let mut object = match self.inherited_tag() {
+                Value::Object(object) => object,
+                _ => serde_json::Map::new(),
+            };
+            object.entry("site").or_insert_with(|| json!(site));
+            let class = match offer {
+                BodyOffer::Body => "LegacyBody",
+                BodyOffer::Recovered => "RecoveredLegacyBody",
+                BodyOffer::NonBody => "NonBody",
+                BodyOffer::Unknown => "UnknownBody",
+                BodyOffer::Refresh => "LegacyBodyRefresh",
+            };
+            // Explicit notices mask an outer body; nested body helpers retain that mask.
+            if matches!(offer, BodyOffer::NonBody) {
+                object.insert("output_class".into(), json!(class));
+            } else {
+                object.entry("output_class").or_insert_with(|| json!(class));
+            }
+            let tag = Value::Object(object);
+            census_scope(Some(tag), next).await
+        })
     }
 }
 
