@@ -14,7 +14,8 @@ input-single-path/InputOwnershipA2d3.cfg	InputOwnership	HeldResumes,NoSilentLoss
 input-single-path/InputOwnershipC.cfg	InputOwnership	-
 input-single-path/InputOwnershipCF.cfg	InputOwnership	CarriedRowEnds,NoSilentLoss,NoSilentLossObserved
 input-single-path/InputOwnershipF.cfg	InputOwnership	NoSilentLoss,NoSilentLossObserved
-input-single-path/InputOwnershipF4.cfg	InputOwnership	-
+input-single-path/InputOwnershipF4.cfg	InputOwnership	NoSilentLoss,NoSilentLossObserved
+input-single-path/InputOwnershipF5.cfg	InputOwnership	-
 input-single-path/InputOwnershipF6.cfg	InputOwnership	-
 input-single-path/InputOwnershipF6Before.cfg	InputOwnership	ObserverResumes
 input-single-path/InputOwnershipF6DoubleWake.cfg	InputOwnership	ObserverAttachmentWakesOnce

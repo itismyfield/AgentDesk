@@ -984,6 +984,13 @@ mod cases {
         );
     }
 
+    /// Under the paused clock: all a step set off that is shorter than a third of the slow backstop
+    /// cycle has run, and that cycle has not fired even after two steps.
+    async fn parked() {
+        let cycle = discord::queue_io::idle_queue_backstop_delay_for_tests();
+        tokio::time::sleep(cycle / 3).await;
+    }
+
     /// A close wakes the queue a refused front waits in exactly once: through the finalizer's
     /// mailbox release when it ended a restored episode, by its own kick when none was restored.
     #[tokio::test(flavor = "current_thread")]
@@ -997,10 +1004,11 @@ mod cases {
                 ..Options::default()
             };
             let fx = Fixture::new(channel, user_msg_id, options).await;
+            // Queued without an enqueue kick: every kick counted below is the close's.
             let waiting = discord::relay_recovery::tests::orphan_token_finish::queued(channel + 1);
-            let queued =
-                discord::mailbox_enqueue_intervention(&fx.shared, &PROVIDER, fx.channel, waiting);
-            assert!(queued.await.enqueued);
+            let context = discord::queue_persistence_context(&fx.shared, &PROVIDER, fx.channel);
+            let mailbox = fx.shared.mailbox(fx.channel);
+            mailbox.replace_queue(vec![waiting], context).await;
             let kicks = Arc::new(Mutex::new(0_usize));
             let (seen, at) = (kicks.clone(), fx.channel);
             let _hook = discord::queue_io::set_idle_queue_kick_hook_for_tests(Arc::new(
@@ -1014,20 +1022,30 @@ mod cases {
                 },
             ));
             discord::spawn_turn_completion_idle_queue_listener(fx.shared.clone(), PROVIDER);
-            // The enqueue's own kick met the row; what follows is the close's.
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            let before = *kicks.lock().unwrap();
+            let support =
+                discord::queue_io::cancel_backstop_test_support::listener_completed_reconciles;
+            let ready = std::time::Instant::now() + Duration::from_secs(10);
+            while support(fx.channel) == 0 {
+                assert!(std::time::Instant::now() < ready, "the listener reconciled");
+                tokio::task::yield_now().await;
+            }
+            tokio::time::pause();
             fx.pass().await;
             fx.assert_closed(&format!("episode={episode}")).await;
-            for _ in 0..100 {
-                if *kicks.lock().unwrap() > before {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            let after = *kicks.lock().unwrap() - before;
-            assert_eq!(after, 1, "episode={episode}: the close kicks once");
+            parked().await;
+            assert_eq!(
+                *kicks.lock().unwrap(),
+                1,
+                "episode={episode}: the close kicks once"
+            );
+            fx.pass().await;
+            parked().await;
+            assert_eq!(
+                *kicks.lock().unwrap(),
+                1,
+                "episode={episode}: a closed turn kicks no more"
+            );
+            tokio::time::resume();
         }
     }
 }

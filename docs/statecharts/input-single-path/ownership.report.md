@@ -12,7 +12,8 @@ Code versions modelled:
 | `c` | slice C, its tested transitions only | `InputOwnershipC.cfg` |
 | `cf` | main after C `a9d59259e5`, with slice F's paths | `InputOwnershipCF.cfg` |
 | `f` | main after slice F `40c556ae6c` | `InputOwnershipF.cfg`, `InputOwnershipFOutside.cfg` |
-| `f4` | `f` plus the carried close's queue wake | `InputOwnershipF4.cfg` |
+| `f4` | `f` plus the carried close's queue wake `501692a3d7` | `InputOwnershipF4.cfg` |
+| `f5` | `f4` plus an intake start's create retried once past a marked row it removed | `InputOwnershipF5.cfg` |
 
 What the model covers:
 
@@ -201,7 +202,7 @@ Left out of the model:
 - A screen or cause that never clears (Quiet waits for it).
 - A gone pane before `c`: it has no screen that would submit. In `c` its front waits, unwatched, for a new event.
 
-## Slice F: a carried row that never closes (`cf`, `f`, `f4`)
+## Slice F: a carried row that never closes (`cf`, `f`, `f4`, `f5`)
 
 Code: `a9d59259e5`. Paths added only for `cf` and `f`; `c` and the older columns keep their state space (C: 48,830 states, unchanged).
 
@@ -209,13 +210,15 @@ Code: `a9d59259e5`. Paths added only for `cf` and `f`; `c` and the older columns
 - `DriveMeetsRow`: every owner start on an idle mailbox creates a row, meets the carried one and is refused (`router/message_handler/foreign_row.rs:63-81`); the front keeps its place (`input_owner/drive.rs:100-112`).
 - `CarriedCloses`: the carried-turn close archives the row once the transcript reads the native turn closed (`health/recovery/carried_turn_close.rs:197-288`). With a restored episode (`ep`) its finalizer releases the mailbox and the QueueEligible listener wakes the owner (`queue_io/backstop.rs:636`, `queue_dispatch/kickoff.rs:120`). Without one, `f` runs no finalizer and nothing wakes the front `foreign_row` refused; `f4` schedules one kickoff after the archive either way.
 - `leak`: the transcript holds an input Claude absorbed mid-turn with no `queued_command` row. `tui_o/writer/input_facts/queued.rs:81` keeps that body owed and gives a dequeue credit no dequeue repays, so `closed_boundary.rs:47` answers `pending_receipt` for ever.
+- `row = marked` (from `f4`): a finished turn's row kept, stamped, because its origin receipt failed to record (`receipt_settle.rs:94-143`); checked with the receipt store healthy again. The next start's admission records and removes it (`settle_marked_row`). A headless start then retries its create (`foreign_row.rs` `admit_headless`); up to `f4` an intake start drops itself anyway (`admit`: requeue refused by the V2 owner, no new wake), `f5` retries the create once. An owned busy paste creates no row, so a marked row neither holds nor settles it, and `CarriedRowEnds` reads only carried rows.
 - `HandedOutside`: a person types the text at the terminal, or another session sends it over its own socket.
 
 | Config | Result |
 |---|---|
 | `CF` | `NoSilentLoss`, `NoSilentLossObserved`, `CarriedRowEnds` break: a person's terminal turn ends, the owner is woken, its start meets the carried row, and nothing closes it. Code-confirmed on adk-dash-cc 11-03: `pending_receipt:owed_inputs=75..78` from 04:51Z to 18:59Z, front refused at every wake. |
 | `F` | `NoSilentLoss` and `NoSilentLossObserved` break: the boot wake meets the carried row, the close archives it with no episode, and the front is never woken again. Seen on adk-dash-cc 11-04 00:57Z: close with `episode_released=false`, then no owner wake for 4 queued inputs. Mutant `leakKept` (the reader still counts the absorbed input) also breaks `CarriedRowEnds`. |
-| `F4` | every rule holds (14 rules and NoDeadlock, 195,288 states). Mutant `closeNoKick` (no kick after an episode-less archive) breaks `NoSilentLoss`. |
+| `F4` | `NoSilentLoss` and `NoSilentLossObserved` break on a marked row: the wake's start removes the row, drops itself, and nothing wakes the front again. Without a marked row (the F4 change itself) every rule held, 195,288 states; mutant `closeNoKick` breaks `NoSilentLoss`. |
+| `F5` | every rule holds (14 rules and NoDeadlock, 197,052 states). Mutant `noRetry` (the intake start drops itself after the settle) breaks `NoSilentLoss`. |
 | `FOutside` | `SeenOnce` breaks in `f` too: AgentDesk records no identity for an outside copy, so its own single paste is the second time the session sees the text. Kept as a documented gap; `NoDuplicate` (AgentDesk pastes at most once) holds. |
 
 The model folds the transcript reader into `leak`: which order an input's command and absorption rows come in, and how same-body inputs pair, are checked by the Rust reader tests (`tui_o/writer/input_facts/receipt_tests.rs`), not here.

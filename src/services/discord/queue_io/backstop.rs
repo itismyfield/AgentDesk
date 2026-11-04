@@ -786,6 +786,10 @@ fn schedule_deferred_idle_queue_kickoff_inner(
         let direct = owned(&shared, channel_id).await;
         #[cfg(unix)]
         if direct {
+            #[cfg(test)]
+            {
+                *OWNER_WAKES_FOR_TESTS.entry(channel_id).or_default() += 1;
+            }
             crate::services::discord::router::message_handler::owner_wake(&shared, channel_id);
         }
         let initial_presleep = profile.initial_presleep();
