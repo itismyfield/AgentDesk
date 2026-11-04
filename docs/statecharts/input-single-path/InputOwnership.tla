@@ -194,7 +194,9 @@ DriveIdleBusyPane ==
        ELSE Stays("held", "other")
     /\ UNCHANGED <<mode, src, mbx, nat, natOwner, obsOk, rcv, userRow, twin, claim, lp, op,
                    screen, draft, aged, twinPend, envLeft, stale, old, acct>>
-    /\ UNCHANGED fvars
+    /\ IF Mut = "ownerClearsMarked"
+       THEN /\ row' = "none" /\ UNCHANGED <<ep, leak, outside, observer>>
+       ELSE UNCHANGED fvars
 
 \* A turn/start's headless turn on a busy pane: execute_owned. main and a2d1 fix busy=false, so
 \* an absent idle observer ends the turn NotSent("idle_unobserved") with a failure notice (the
@@ -202,7 +204,7 @@ DriveIdleBusyPane ==
 \* reader of the row the input takes set up before the paste.
 DriveStartBusy ==
     /\ Handoff /\ ~acct /\ src = "start" /\ mbx = "idle" /\ nat = "busy"
-    /\ row # "carried"
+    /\ RowClear
     /\ IF R2 /\ Mut # "startIdle"
        THEN OwnedPaste("busyStart", TRUE, TRUE) /\ mbx' = "active"
        ELSE IF obsOk
@@ -211,7 +213,8 @@ DriveStartBusy ==
        ELSE Stays("failed", "none") /\ UNCHANGED mbx
     /\ UNCHANGED <<mode, src, nat, natOwner, obsOk, rcv, userRow, twin, claim, lp, op, screen,
                    draft, aged, twinPend, envLeft, stale, old, acct>>
-    /\ UNCHANGED fvars
+    /\ row' = IF Mut = "headlessKeepsMarked" THEN row ELSE "none"
+    /\ UNCHANGED <<ep, leak, outside, observer>>
 
 \* An idle pane with its observer: the warm submit records the Answer declaration and the turn's
 \* observer reads the AI turn it starts. Without an observer the owner refuses (idle_unobserved)
@@ -597,6 +600,8 @@ GoneWatchEnds == ~(nat = "idle" /\ ~wake /\ ~timer /\ mbx = "idle" /\ envLeft = 
 CarriedRowEnds == Quiet => row # "carried"
 \* 15. The session sees the input's text once: AgentDesk's paste or the outside copy, not both.
 SeenOnce == pastes + (IF outside THEN 1 ELSE 0) <= 1
+\* A headless admission records and clears the previous marked row before provider input.
+HeadlessSettlesMarked == (src = "start" /\ pastes > 0) => row # "marked"
 
 \* ------------------------------------------------------------------------------ slice F6
 \* The old columns keep their transitions; this bounded slice isolates boot's late observer.

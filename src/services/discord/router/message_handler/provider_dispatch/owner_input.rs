@@ -363,6 +363,14 @@ fn drive(shared: &Shared, channel: ChannelId) -> std::sync::Arc<Drive> {
 
 /// Wakes the channel's owner drive.
 pub(in crate::services::discord) fn wake(shared: &Shared, channel: ChannelId) {
+    #[cfg(test)]
+    crate::services::discord::queue_io::cancel_backstop_test_support::record_owner_wake(channel);
+    #[cfg(test)]
+    if crate::services::discord::queue_io::cancel_backstop_test_support::run_owner_wake_for_tests(
+        channel,
+    ) {
+        return;
+    }
     crate::services::discord::queue_io::input_owner::drive::wake(drive(shared, channel));
 }
 

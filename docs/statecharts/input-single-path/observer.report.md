@@ -151,3 +151,16 @@ change the reader-visible state collapse into self steps. No failure state or de
 The model leaves out busy panes, actual transcript I/O, provider capacity refusals, new source
 rotations after delivery, and more than one queued original. Their implementation behavior is
 covered by the Rust owner and relay tests. There is no new modelled timer or periodic retry.
+
+## F5/F6 model integration
+
+The merged model preserves `observer` in every legacy action, including `DriveIdle` and
+`DriveMeetsRow` when they explicitly update `row`. `InputOwnershipIdleMerge.cfg` executes
+the ordinary `DriveIdle` for both an empty previous row and a marked row, so F6's isolated
+`ObserverNext` configs cannot hide an unassigned legacy variable. Missing preservation is a
+TLC assignment error, rather than an expected semantic counterexample.
+
+Headless busy admission clears a previous marked row before provider input (`DriveStartBusy`);
+the ordinary Discord owner busy shortcut has no admission/create step and preserves that row
+(`DriveIdleBusyPane`). The full integration probes, mutants, safety/temporal matrix and F7
+merge surfaces are recorded in [admission.report.md](admission.report.md).

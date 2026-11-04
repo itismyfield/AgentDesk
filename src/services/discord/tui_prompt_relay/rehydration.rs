@@ -308,7 +308,15 @@ fn wake_attached_observer(
         return None;
     }
     let channel = crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(tmux)?;
-    wake_observed_source(shared, provider, channel, binding)
+    wake_observed_source(
+        shared,
+        provider,
+        tmux.to_owned(),
+        channel,
+        binding,
+        #[cfg(test)]
+        crate::services::tui_prompt_dedupe::binding_events::test_root(),
+    )
 }
 
 /// A newly published source wakes through its channel's existing runtime and owner drive.
@@ -326,6 +334,8 @@ pub(crate) fn observer_binding_published(
     {
         published();
     }
+    #[cfg(test)]
+    let binding_root = crate::services::tui_prompt_dedupe::binding_events::test_root();
     let Some(registry) = crate::engine::ops::turn_ops::health_registry() else {
         return;
     };
@@ -348,15 +358,17 @@ pub(crate) fn observer_binding_published(
                     return None;
                 }
                 let channel = crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(&tmux)?;
-                Some((channel, current))
+                Some((tmux.clone(), channel, current))
             })
         }).await;
-        let Ok(Some((channel, binding))) = attached else {
+        let Ok(Some((tmux, channel, binding))) = attached else {
             return;
         };
         let shared = registry.shared_for_provider_on_channel(&provider, ChannelId::new(channel)).await;
         if let Some(shared) = shared
-            && let Some(wake) = wake_observed_source(&shared, &provider, channel, binding)
+            && let Some(wake) = wake_observed_source(&shared, &provider, tmux, channel, binding,
+                #[cfg(test)] binding_root,
+            )
         {
             let _ = wake.await;
         }
@@ -367,16 +379,13 @@ pub(crate) fn observer_binding_published(
 fn wake_observed_source(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
+    tmux: String,
     channel: u64,
     binding: crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+    #[cfg(test)] binding_root: Option<std::path::PathBuf>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     if binding.session_id.as_deref().is_none_or(str::is_empty)
         || std::fs::metadata(&binding.output_path).is_err()
-        || crate::services::tui_turn_state::observe_provider_jsonl_turn_state(
-            provider,
-            Path::new(&binding.output_path),
-        )
-        .is_busy()
     {
         return None;
     }
@@ -403,6 +412,32 @@ fn wake_observed_source(
                 waiting();
             }
             finished.wait().await;
+        }
+        let pending = mailbox
+            .v2_request(|slot| Ok(slot.as_ref().is_some_and(|owner| owner.front().is_some())));
+        if pending.await != Ok(true) {
+            return;
+        }
+        let published = super::super::turn_presence::supervisor::observe_source_busy(
+            &shared,
+            &provider,
+            channel,
+            &tmux,
+            &binding,
+            #[cfg(test)]
+            binding_root,
+        )
+        .await;
+        if published.unwrap_or_else(|| {
+            crate::services::tui_turn_state::observe_provider_jsonl_turn_state(
+                &provider,
+                Path::new(&binding.output_path),
+            )
+            .is_busy()
+        }) {
+            #[cfg(test)]
+            observer_busy_seen_for_tests(channel);
+            return;
         }
         let pending = mailbox
             .v2_request(|slot| Ok(slot.as_ref().is_some_and(|owner| owner.front().is_some())));
@@ -440,6 +475,22 @@ pub(in crate::services::discord) static OBSERVER_KICKOFF_FOR_TESTS: std::sync::L
 pub(in crate::services::discord) static OBSERVER_WAITING_FOR_TESTS: std::sync::LazyLock<
     std::sync::Mutex<HashMap<u64, ObserverKickoff>>,
 > = std::sync::LazyLock::new(Default::default);
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) static OBSERVER_BUSY_FOR_TESTS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<u64, ObserverKickoff>>,
+> = std::sync::LazyLock::new(Default::default);
+#[cfg(all(test, unix))]
+fn observer_busy_seen_for_tests(channel: u64) {
+    let seen = OBSERVER_BUSY_FOR_TESTS
+        .lock()
+        .unwrap()
+        .get(&channel)
+        .cloned();
+    if let Some(seen) = seen {
+        seen();
+    }
+}
+
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) static OBSERVER_PUBLICATION_FOR_TESTS: std::sync::LazyLock<
     std::sync::Mutex<HashMap<String, ObserverKickoff>>,

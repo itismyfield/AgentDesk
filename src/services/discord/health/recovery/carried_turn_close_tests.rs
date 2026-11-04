@@ -984,13 +984,6 @@ mod cases {
         );
     }
 
-    /// Under the paused clock: all a step set off that is shorter than a third of the slow backstop
-    /// cycle has run, and that cycle has not fired even after two steps.
-    async fn parked() {
-        let cycle = discord::queue_io::idle_queue_backstop_delay_for_tests();
-        tokio::time::sleep(cycle / 3).await;
-    }
-
     /// A close wakes the queue a refused front waits in exactly once: through the finalizer's
     /// mailbox release when it ended a restored episode, by its own kick when none was restored.
     #[tokio::test(flavor = "current_thread")]
@@ -1021,25 +1014,27 @@ mod cases {
                     Box::pin(async move { outcome })
                 },
             ));
+            let completion =
+                discord::queue_io::cancel_backstop_test_support::KickoffCompletion::install(
+                    fx.channel,
+                );
             discord::spawn_turn_completion_idle_queue_listener(fx.shared.clone(), PROVIDER);
-            let support =
-                discord::queue_io::cancel_backstop_test_support::listener_completed_reconciles;
-            let ready = std::time::Instant::now() + Duration::from_secs(10);
-            while support(fx.channel) == 0 {
-                assert!(std::time::Instant::now() < ready, "the listener reconciled");
-                tokio::task::yield_now().await;
-            }
+            completion.listener_ready(Duration::from_secs(10)).await;
             tokio::time::pause();
             fx.pass().await;
             fx.assert_closed(&format!("episode={episode}")).await;
-            parked().await;
+            completion
+                .processed(usize::from(episode), Duration::from_secs(55))
+                .await;
             assert_eq!(
                 *kicks.lock().unwrap(),
                 1,
                 "episode={episode}: the close kicks once"
             );
             fx.pass().await;
-            parked().await;
+            completion
+                .processed(usize::from(episode), Duration::from_secs(55))
+                .await;
             assert_eq!(
                 *kicks.lock().unwrap(),
                 1,

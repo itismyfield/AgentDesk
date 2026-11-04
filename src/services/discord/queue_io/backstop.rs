@@ -6,6 +6,8 @@ use super::*;
 pub(in crate::services) struct BackstopSlot {
     pub(in crate::services) wake: tokio::sync::Notify,
     pub(super) pending_request: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    request_acks: std::sync::Mutex<cancel_backstop_test_support::DeferredRequestAcks>,
 }
 
 impl BackstopSlot {
@@ -13,6 +15,8 @@ impl BackstopSlot {
         Self {
             wake: tokio::sync::Notify::new(),
             pending_request: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            request_acks: Default::default(),
         }
     }
 
@@ -26,8 +30,44 @@ impl BackstopSlot {
 
     /// Whether a schedule coalesced into this slot since the last call.
     fn consume_requests(&self) -> bool {
+        #[cfg(test)]
+        {
+            let mut acks = self.request_acks.lock().unwrap();
+            let requested = self
+                .pending_request
+                .swap(false, std::sync::atomic::Ordering::AcqRel);
+            let pending = std::mem::take(&mut acks.pending);
+            acks.evaluating.extend(pending);
+            requested
+        }
+        #[cfg(not(test))]
         self.pending_request
             .swap(false, std::sync::atomic::Ordering::AcqRel)
+    }
+
+    #[cfg(test)]
+    fn request_observed(&self, channel: ChannelId, wake_existing: bool) {
+        let mut acks = self.request_acks.lock().unwrap();
+        acks.pending
+            .extend(cancel_backstop_test_support::deferred_request_started(
+                channel,
+            ));
+        self.request(wake_existing);
+    }
+
+    #[cfg(test)]
+    fn observe_initial_request(&self, channel: ChannelId) {
+        self.request_acks.lock().unwrap().evaluating.extend(
+            cancel_backstop_test_support::deferred_request_started(channel),
+        );
+    }
+
+    #[cfg(test)]
+    fn complete_requests(&self) {
+        let evaluating = std::mem::take(&mut self.request_acks.lock().unwrap().evaluating);
+        for ack in evaluating {
+            ack.complete();
+        }
     }
 }
 /// Count each live task once, including panic cleanup, while preserving arm requests.
@@ -384,10 +424,6 @@ async fn idle_queue_backstop_backlog_units_all(
 /// Hands schedules taken from a slot (`coalesced`) to the channel's owner as its wake.
 fn wake_coalesced(shared: &Arc<SharedData>, channel_id: ChannelId, coalesced: bool) {
     if coalesced {
-        #[cfg(test)]
-        {
-            *OWNER_WAKES_FOR_TESTS.entry(channel_id).or_default() += 1;
-        }
         #[cfg(unix)]
         crate::services::discord::router::message_handler::owner_wake(shared, channel_id);
     }
@@ -413,9 +449,6 @@ type OwnerAnsweredHook = Arc<
 >;
 #[cfg(test)]
 static OWNER_ANSWERED_HOOKS: std::sync::LazyLock<dashmap::DashMap<ChannelId, OwnerAnsweredHook>> =
-    std::sync::LazyLock::new(Default::default);
-#[cfg(test)]
-static OWNER_WAKES_FOR_TESTS: std::sync::LazyLock<dashmap::DashMap<ChannelId, usize>> =
     std::sync::LazyLock::new(Default::default);
 
 #[cfg(test)]
@@ -542,7 +575,10 @@ async fn run_slow_idle_queue_backstop_loop(
         )
         .await;
         #[cfg(test)]
-        cancel_backstop_test_support::completed_cycle(channel_id);
+        {
+            slot.complete_requests();
+            cancel_backstop_test_support::completed_cycle(channel_id);
+        }
         if let Some(rearm) = rearm {
             tracing::debug!(
                 channel_id = channel_id.get(),
@@ -683,6 +719,8 @@ pub(in crate::services::discord) fn spawn_turn_completion_idle_queue_listener(
                         "turn_completion_event",
                     )
                     .await;
+                    #[cfg(test)]
+                    cancel_backstop_test_support::listener_event_completed(event.channel_id);
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                     emit_idle_queue_backstop_warn(
@@ -754,6 +792,11 @@ fn schedule_deferred_idle_queue_kickoff_inner(
 ) {
     let slot = match shared.restart.deferred_hook_channels.entry(channel_id) {
         dashmap::mapref::entry::Entry::Occupied(entry) => {
+            #[cfg(test)]
+            entry
+                .get()
+                .request_observed(channel_id, profile.wakes_existing_task());
+            #[cfg(not(test))]
             entry.get().request(profile.wakes_existing_task());
             tracing::debug!(
                 provider = provider.as_str(),
@@ -781,15 +824,13 @@ fn schedule_deferred_idle_queue_kickoff_inner(
         slot: slot.clone(),
         active: true,
     };
+    #[cfg(test)]
+    slot.observe_initial_request(channel_id);
     super::task_supervisor::spawn_observed("deferred_idle_queue_kickoff", async move {
         // An owner takes the scheduling event as one direct wake, with no presleep or backstop.
         let direct = owned(&shared, channel_id).await;
         #[cfg(unix)]
         if direct {
-            #[cfg(test)]
-            {
-                *OWNER_WAKES_FOR_TESTS.entry(channel_id).or_default() += 1;
-            }
             crate::services::discord::router::message_handler::owner_wake(&shared, channel_id);
         }
         let initial_presleep = profile.initial_presleep();
@@ -805,6 +846,8 @@ fn schedule_deferred_idle_queue_kickoff_inner(
             loop {
                 wake_coalesced(&shared, channel_id, slot.consume_requests());
                 if backlog_guard.release() {
+                    #[cfg(test)]
+                    slot.complete_requests();
                     return;
                 }
             }
@@ -813,6 +856,8 @@ fn schedule_deferred_idle_queue_kickoff_inner(
         let _ =
             kick_idle_queue_channel_if_context_available(&shared, &provider, channel_id, reason)
                 .await;
+        #[cfg(test)]
+        slot.complete_requests();
         run_slow_idle_queue_backstop_loop(
             &shared,
             &provider,

@@ -395,6 +395,10 @@ impl Drop for AttachedOwner {
             .lock()
             .unwrap()
             .remove(&self.rig.channel);
+        crate::services::discord::tui_prompt_relay::rehydration::OBSERVER_BUSY_FOR_TESTS
+            .lock()
+            .unwrap()
+            .remove(&self.rig.channel);
         crate::services::discord::tui_prompt_relay::rehydration::OBSERVER_PUBLICATION_FOR_TESTS
             .lock()
             .unwrap()
@@ -531,7 +535,10 @@ fn a_busy_source_attachment_does_not_wake_the_owner() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let owner = AttachedOwner::new("oi-attach-busy", 7_676_603, BUSY);
     owner.launch_source();
-    assert!(!owner.attach(), "busy source adds no idle-submit event");
+    assert!(
+        owner.attach(),
+        "the source check runs without an idle-submit event"
+    );
     assert_eq!(owner.wakes(), 0);
     assert!(owner.fronts.try_recv().is_err());
     assert_eq!(owner.keys(), (0, 0));
@@ -1181,4 +1188,262 @@ fn a_pane_under_another_account_is_replaced_before_any_front_is_written() {
     );
     assert_eq!(snapshot["retained_inputs"], json!([]), "{snapshot}");
     crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&rig.name);
+}
+
+/// A short native turn the periodic reader misses still ends the attachment's Busy deferral.
+#[test]
+fn a_short_native_busy_attachment_wakes_at_the_next_idle_presence() {
+    short_native_busy_attachment(false);
+}
+
+/// A brief native turn can end before the refused bridge releases its old token.
+#[test]
+fn a_short_native_busy_attachment_waits_for_the_refused_token_to_finish() {
+    short_native_busy_attachment(true);
+}
+
+fn short_native_busy_attachment(with_token: bool) {
+    use crate::services::discord::queue_io::cancel_backstop_test_support as counted;
+    use crate::services::discord::turn_presence::{activity, supervisor::tests::LiveSupervisor};
+    use crate::services::tui_prompt_dedupe::{self as dedupe, binding_events};
+    use crate::services::turn_orchestrator::QueuePersistenceContext;
+    use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+
+    struct BindingLogScope(Option<std::path::PathBuf>, u64);
+    impl Drop for BindingLogScope {
+        fn drop(&mut self) {
+            binding_events::forget_channel_for_tests(self.1);
+            binding_events::set_test_root(self.0.as_deref());
+        }
+    }
+    struct WakeScope(ChannelId, Option<Arc<dyn Fn() + Send + Sync>>);
+    impl Drop for WakeScope {
+        fn drop(&mut self) {
+            counted::set_owner_wake_for_tests(self.0, self.1.take());
+        }
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let channel = 7_676_610 + u64::from(with_token);
+    let _binding_log = BindingLogScope(binding_events::test_root(), channel);
+    binding_events::set_test_root(crate::config::runtime_root().as_deref());
+    let name = if with_token {
+        "oi-attach-short-busy-token"
+    } else {
+        "oi-attach-short-busy"
+    };
+    let owner = AttachedOwner::new(name, channel, IDLE);
+    crate::services::discord::tui_prompt_relay::rehydration::OBSERVER_KICKOFF_FOR_TESTS
+        .lock()
+        .unwrap()
+        .remove(&channel);
+    let _trace = owner.rig.trace_driver();
+    let (session, path) = owner.launch_source();
+    let binding = TuiRuntimeBinding {
+        runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+        output_path: path.display().to_string(),
+        relay_output_path: None,
+        input_fifo_path: None,
+        session_id: Some(session.clone()),
+        last_offset: 0,
+        relay_last_offset: None,
+    };
+    assert!(dedupe::register_rehydrated_tmux_runtime_binding(
+        "claude",
+        &owner.rig.name,
+        channel,
+        binding.clone()
+    ));
+    let sequence = || {
+        binding_events::records_strict(channel)
+            .unwrap()
+            .unwrap()
+            .last()
+            .unwrap()
+            .seq
+    };
+    let before = sequence();
+    activity::tests::companion_attach_log_watcher(&owner.shared, channel, &owner.rig.name, &path);
+    let _confirmed = crate::services::tui_o::turn_mode::TestConfirmation::new(channel);
+    let live = LiveSupervisor::new(owner.shared.clone(), ProviderKind::Claude, channel);
+    let token = Arc::new(CancelToken::new());
+    assert!(
+        owner.rig.runtime.block_on(owner.rig.mailbox.try_start_turn(
+            token,
+            UserId::new(7),
+            MessageId::new(9)
+        ))
+    );
+    let old_idle = owner.rig.runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let reading = activity::reading_now(
+                    &owner.shared,
+                    &ProviderKind::Claude,
+                    ChannelId::new(channel),
+                )
+                .await;
+                if reading.observed.activity == activity::Activity::Idle {
+                    break reading;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap()
+    });
+    owner.rig.runtime.block_on(live.tick());
+    assert_eq!(live.state()["activity"], json!("idle"));
+    dedupe::clear_tmux_runtime_binding(&owner.rig.name);
+    owner
+        .rig
+        .runtime
+        .block_on(owner.rig.mailbox.finish_turn(QueuePersistenceContext::new(
+            &ProviderKind::Claude,
+            "attached-owner",
+            None,
+        )));
+    owner.rig.wake(&owner.drive);
+    assert_eq!(owner.serve(), Err("NotSent(\"idle_unobserved\")".into()));
+    owner.settled();
+    assert_eq!(owner.keys(), (0, 0));
+
+    let held = with_token.then(|| Arc::new(CancelToken::new()));
+    if let Some(token) = &held {
+        assert!(owner.rig.runtime.block_on(owner.rig.mailbox.try_start_turn(
+            token.clone(),
+            UserId::new(7),
+            MessageId::new(9),
+        )));
+    }
+    let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
+    if !with_token {
+        owner
+            .rig
+            .runtime
+            .block_on(registry.register("claude".into(), owner.shared.clone()));
+        crate::engine::ops::turn_ops::set_global_health_registry(&registry);
+    }
+    let drive = owner.drive.clone();
+    let (woke, owner_woken) = std::sync::mpsc::channel();
+    let woke = std::sync::Mutex::new(woke);
+    let _wake = WakeScope(
+        ChannelId::new(channel),
+        counted::set_owner_wake_for_tests(
+            ChannelId::new(channel),
+            Some(Arc::new(move || {
+                crate::services::discord::queue_io::input_owner::drive::wake(drive.clone());
+                woke.lock().unwrap().send(()).unwrap();
+            })),
+        ),
+    );
+    let (seen, source_seen) = std::sync::mpsc::channel();
+    let seen = Arc::new(std::sync::Mutex::new(seen));
+    let busy = seen.clone();
+    crate::services::discord::tui_prompt_relay::rehydration::OBSERVER_BUSY_FOR_TESTS
+        .lock()
+        .unwrap()
+        .insert(
+            channel,
+            Arc::new(move || {
+                busy.lock().unwrap().send("busy").unwrap();
+            }),
+        );
+    if with_token {
+        crate::services::discord::tui_prompt_relay::rehydration::OBSERVER_WAITING_FOR_TESTS
+            .lock()
+            .unwrap()
+            .insert(
+                channel,
+                Arc::new(move || {
+                    seen.lock().unwrap().send("waiting").unwrap();
+                }),
+            );
+    }
+    let mut transcript = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    writeln!(
+        transcript,
+        "{{\"type\":\"user\",\"uuid\":\"brief-native\",\"message\":{{\"content\":\"native\"}}}}"
+    )
+    .unwrap();
+    let source_task = {
+        let _entered = owner.rig.runtime.enter();
+        if with_token {
+            Some(
+                crate::services::discord::tui_prompt_relay::rehydrate_owner_pane_for_tests(
+                    &owner.shared,
+                    &owner.rig.name,
+                    channel,
+                    &owner.home,
+                )
+                .expect("the rehydrated source checks its held owner"),
+            )
+        } else {
+            assert!(dedupe::register_rehydrated_tmux_runtime_binding(
+                "claude",
+                &owner.rig.name,
+                channel,
+                binding,
+            ));
+            None
+        }
+    };
+    let phase = source_seen
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the source check reached its real waiting or Busy event");
+    assert_eq!(sequence(), before, "the same durable source is Unchanged");
+    assert_eq!(
+        counted::owner_wakes(ChannelId::new(channel)),
+        0,
+        "Busy sends no wake"
+    );
+    assert_eq!(owner.keys(), (0, 0));
+    let old_idle_invalidated = owner
+        .rig
+        .runtime
+        .block_on(old_idle.publish_if_current(|| ()))
+        .is_none();
+    writeln!(transcript, "{}", IDLE.trim_end()).unwrap();
+    owner.rig.runtime.block_on(live.tick());
+    if let Some(token) = &held {
+        assert_eq!(
+            counted::owner_wakes(ChannelId::new(channel)),
+            0,
+            "the observed Idle cannot wake while the refused token is held"
+        );
+        let released = owner.rig.runtime.block_on(owner.rig.mailbox.finish_turn(
+            QueuePersistenceContext::new(&ProviderKind::Claude, "attached-owner", None),
+        ));
+        assert!(
+            released
+                .removed_token
+                .as_ref()
+                .is_some_and(|removed| Arc::ptr_eq(removed, token))
+        );
+    }
+    if let Some(task) = source_task {
+        owner.rig.runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(10), task)
+                .await
+                .expect("the source check finishes after the real token release")
+                .unwrap();
+        });
+    }
+    let wake_seen = owner_woken.recv_timeout(Duration::from_secs(10)).is_ok();
+    assert_eq!(
+        counted::owner_wakes(ChannelId::new(channel)),
+        1,
+        "the next Idle wakes the kept front once; token={with_token}; phase={phase}; wake_seen={wake_seen}; old_idle_invalidated={old_idle_invalidated}; actor={}; keys={:?}",
+        owner.rig.snapshot(),
+        owner.keys(),
+    );
+    if !with_token {
+        assert!(
+            old_idle_invalidated,
+            "Busy invalidates the earlier stamped Idle read"
+        );
+    }
+    assert_eq!(owner.serve(), Ok(()));
+    owner.settled();
+    assert_eq!(owner.keys(), (1, 1));
+    owner.rig.delivered();
 }

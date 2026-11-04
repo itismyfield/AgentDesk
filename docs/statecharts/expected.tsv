@@ -23,7 +23,12 @@ input-single-path/InputOwnershipF6InitiallyAttached.cfg	InputOwnership	-
 input-single-path/InputOwnershipF6NoFront.cfg	InputOwnership	-
 input-single-path/InputOwnershipF6NoWake.cfg	InputOwnership	ObserverResumes
 input-single-path/InputOwnershipFOutside.cfg	InputOwnership	SeenOnce
+input-single-path/InputOwnershipHeadlessMarked.cfg	InputOwnershipAdmission	-
+input-single-path/InputOwnershipHeadlessMarkedMutant.cfg	InputOwnershipAdmission	HeadlessSettlesMarked
+input-single-path/InputOwnershipIdleMerge.cfg	InputOwnershipAdmission	-
 input-single-path/InputOwnershipMain.cfg	InputOwnership	AnswerOnce,DraftToldOnce,NoRetryRequired,NoSilentLoss,NoSilentLossObserved,NoTimedRetry,StartNotDropped
+input-single-path/InputOwnershipOwnerBusyMarked.cfg	InputOwnershipAdmission	-
+input-single-path/InputOwnershipOwnerBusyMarkedMutant.cfg	InputOwnershipAdmission	OwnerBusyKeepsMarked
 input-single-path/InputPath.cfg	InputPath	BusyInputLands,DraftSafe,HeldNotDropped,NoDeadlock,NoSilentLoss
 input-single-path/InputPathClean.cfg	InputPath	-
 session-lifecycle/HerdrSession.cfg	HerdrSession	NoDeadlock,NoOrphanPane,PromptOnlyToAgent,RowMatchesPane
