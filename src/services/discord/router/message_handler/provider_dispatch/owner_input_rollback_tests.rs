@@ -1121,9 +1121,8 @@ async fn next_settle(
         .unwrap()
 }
 
-/// A start waiting when the process restarts stays in the owner's queue file: boot recovery hands it
-/// again, a carried row of the earlier process keeps it unpasted, and that row's close (its archive
-/// and one queue kick) runs it once as its own turn.
+/// A start waiting across a restart stays queued: boot recovery hands it again, the earlier process's
+/// carried row keeps it unpasted, and that row's close (archive and one kick) runs it once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_start_waiting_across_a_restart_runs_once_after_the_carried_row_closes_pg() {
     if !creator_child(concat!(
