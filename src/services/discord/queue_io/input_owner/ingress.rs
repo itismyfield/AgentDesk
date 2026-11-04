@@ -80,12 +80,17 @@ impl Intake {
 /// Why an arrival waits in the queue instead of joining the running input; only these notify.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Hold {
+    #[cfg(any(unix, test))]
     SessionSwitch,
     RestartRecovery,
     Uploads,
+    #[cfg(any(unix, test))]
     ScreenMissing,
+    #[cfg(any(unix, test))]
     Modal,
+    #[cfg(any(unix, test))]
     ScreenContention,
+    #[cfg(any(unix, test))]
     OwnerChange,
 }
 
@@ -103,12 +108,17 @@ impl Hold {
 
     fn reason(self) -> &'static str {
         match self {
+            #[cfg(any(unix, test))]
             Self::SessionSwitch => "세션 전환(/clear·/resume·헤드리스 시작) 처리",
             Self::RestartRecovery => "재시작 직후 복구 대기",
             Self::Uploads => "첨부 업로드 미완료·실패",
+            #[cfg(any(unix, test))]
             Self::ScreenMissing => "TUI 화면·대화 기록 확인 불가",
+            #[cfg(any(unix, test))]
             Self::Modal => "모달 창 표시",
+            #[cfg(any(unix, test))]
             Self::ScreenContention => "같은 화면 주입 충돌",
+            #[cfg(any(unix, test))]
             Self::OwnerChange => "턴 주인 변경 충돌",
         }
     }
@@ -121,6 +131,7 @@ impl Hold {
     }
 
     /// Only a refusal proven to precede any content can owe a queue-hold notice.
+    #[cfg(unix)]
     pub(crate) fn from_refusal(error: &str) -> Option<Self> {
         if !error.starts_with("NotSent(") {
             return None;

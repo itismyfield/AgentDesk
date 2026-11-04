@@ -69,6 +69,9 @@ fn busy_arrival_before_row_handoff(merge: bool, missing: bool) {
     use crate::services::discord::inflight::{InflightTurnState, save_inflight_state};
     use poise::serenity_prelude::{MessageId, UserId};
     let _root = crate::config::TestRuntimeRootGuard::new();
+    let generation = crate::services::discord::runtime_store::generation_path().unwrap();
+    fs::create_dir_all(generation.parent().unwrap()).unwrap();
+    fs::write(generation, "1").unwrap();
     let rig = rig(
         "oi-busy-arrival",
         7_272_797,
@@ -434,7 +437,11 @@ fn busy_hold_notice(hold: Option<crate::services::discord::queue_io::input_ingre
         assert!(cancelled.removed.is_some());
         item.message_id += 10;
         item.source_message_ids = vec![item.message_id];
-        item.pending_uploads = vec!["/missing-owner-upload".into()];
+        item.pending_uploads = vec![
+            "UPLOAD-RECORD".into();
+            crate::services::cluster::attachment_transfer::store::MAX_FILES
+                + 1
+        ];
         assert!(matches!(
             rig.runtime
                 .block_on(admit(&rig.mailbox, &item, AdmissionTicket::new())),
