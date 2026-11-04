@@ -2,10 +2,12 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
+#[cfg(not(test))]
 use std::sync::OnceLock;
 
 use crate::services::discord::runtime_store::fsync_parent_dir;
 
+#[cfg(not(test))]
 pub(crate) fn session_host_label() -> String {
     static LABEL: OnceLock<String> = OnceLock::new();
     LABEL.get_or_init(|| {
@@ -21,6 +23,31 @@ pub(crate) fn session_host_label() -> String {
             }
         }
     }).clone()
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_LABEL: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn session_host_label() -> String {
+    TEST_LABEL
+        .with(|label| label.borrow().clone())
+        .unwrap_or_else(super::shell::hostname_short)
+}
+
+#[cfg(test)]
+pub(crate) fn with_session_host_label_path_for_test<R>(path: &Path, run: impl FnOnce() -> R) -> R {
+    struct Reset(Option<String>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_LABEL.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let label = load_label(path, &super::shell::hostname_short()).expect("load fixture host label");
+    let _reset = Reset(TEST_LABEL.with(|slot| slot.replace(Some(label))));
+    run()
 }
 
 fn normalized(label: &str) -> String {

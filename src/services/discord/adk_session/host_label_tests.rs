@@ -30,14 +30,23 @@ fn saved_host_case_keeps_session_key() {
     crate::services::platform::shell::with_hostname_for_test(
         "macbook-pro-14.tail9b57d2.ts.net",
         || {
-            assert_eq!(
-                build_namespaced_session_key("fixture", &ProviderKind::Claude, "fixture-session"),
-                "claude/fixture/MacBook-Pro-14:fixture-session"
-            );
-            assert_eq!(
-                build_legacy_session_key("fixture-session"),
-                "MacBook-Pro-14:fixture-session"
-            );
+            let path = crate::config::runtime_root()
+                .unwrap()
+                .join("runtime/session_host_label");
+            crate::services::platform::with_session_host_label_path_for_test(&path, || {
+                assert_eq!(
+                    build_namespaced_session_key(
+                        "fixture",
+                        &ProviderKind::Claude,
+                        "fixture-session"
+                    ),
+                    "claude/fixture/MacBook-Pro-14:fixture-session"
+                );
+                assert_eq!(
+                    build_legacy_session_key("fixture-session"),
+                    "MacBook-Pro-14:fixture-session"
+                );
+            });
         },
     );
 }
@@ -98,8 +107,14 @@ async fn saved_host_case_resumes_original_selector_and_ignores_foreign_hosts_pg(
     let keys = crate::services::platform::shell::with_hostname_for_test(
         "macbook-pro-14.tail9b57d2.ts.net",
         || {
-            ["fixture-local", "fixture-foreign"]
-                .map(|name| build_namespaced_session_key("fixture", &ProviderKind::Claude, name))
+            let path = crate::config::runtime_root()
+                .unwrap()
+                .join("runtime/session_host_label");
+            crate::services::platform::with_session_host_label_path_for_test(&path, || {
+                ["fixture-local", "fixture-foreign"].map(|name| {
+                    build_namespaced_session_key("fixture", &ProviderKind::Claude, name)
+                })
+            })
         },
     );
     let local = crate::db::dispatched_sessions::load_provider_session_ids_pg(
