@@ -387,7 +387,7 @@ mod tests {
             let mut creates = 0;
             let create = |state: &mut InflightTurnState| {
                 creates += 1;
-                if creates == 2 {
+                if creates == 2 && !blocked {
                     inflight::save_inflight_state_create_new(&row(77)).unwrap();
                 }
                 inflight::save_inflight_state_create_new(state)
