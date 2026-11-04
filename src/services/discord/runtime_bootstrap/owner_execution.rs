@@ -5,6 +5,68 @@ use crate::services::tui_o::shadow::ShadowProvider;
 use crate::services::tui_o::writer::binding::{BindingEvents, ChannelBindingLog};
 use crate::services::tui_o::{cutover, ownership::execution};
 
+struct RefreshDiagnostic {
+    held_since: std::time::Instant,
+    retirement: Option<&'static str>,
+}
+
+// Diagnostic history never authorizes admission or changes a refresh decision.
+static REFRESH_DIAGNOSTICS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::BTreeMap<(String, u64), RefreshDiagnostic>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn record_hold(provider: &str, channel: u64) {
+    REFRESH_DIAGNOSTICS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry((provider.into(), channel))
+        .or_insert_with(|| RefreshDiagnostic {
+            held_since: std::time::Instant::now(),
+            retirement: None,
+        });
+}
+
+fn record_retirement(provider: &str, channel: u64, outcome: &'static str) {
+    let changed = {
+        let mut diagnostics = REFRESH_DIAGNOSTICS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(prior) = diagnostics.get_mut(&(provider.into(), channel)) else {
+            return;
+        };
+        prior.retirement.replace(outcome) != Some(outcome)
+    };
+    if changed {
+        tracing::info!(
+            provider,
+            channel_id = channel,
+            outcome,
+            "execution owner refresh retirement outcome"
+        );
+    }
+}
+
+fn record_readmission(provider: &str, channel: u64) {
+    if cutover::intake_route::route(provider, channel)
+        != cutover::intake_route::IntakeRoute::Gateway
+    {
+        return;
+    }
+    let prior = REFRESH_DIAGNOSTICS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&(provider.into(), channel));
+    if let Some(prior) = prior {
+        let held_ms = prior.held_since.elapsed().as_millis();
+        tracing::info!(
+            provider,
+            channel_id = channel,
+            held_ms,
+            "execution owner refresh admission resumed"
+        );
+    }
+}
+
 pub(super) async fn prepare(provider: &ProviderKind, pool: Option<&sqlx::PgPool>) {
     let Some(snapshot) = cutover::boot_snapshot() else {
         return;
@@ -43,6 +105,7 @@ pub(super) async fn prepare(provider: &ProviderKind, pool: Option<&sqlx::PgPool>
             Ok(None) => None,
             Ok(Some(permit)) => Some(Ok(permit)),
             Err(reason) => {
+                record_hold(provider.as_str(), channel);
                 tracing::warn!(provider=provider.as_str(),channel_id=channel,%reason,"execution restore held");
                 Some(Err(reason))
             }
@@ -118,6 +181,7 @@ pub(super) async fn refresh(provider: &ProviderKind, pool: Option<&sqlx::PgPool>
         };
         let permit = match result {
             Err(error) => {
+                record_hold(provider.as_str(), channel);
                 // The loop runs every 2 s, so only a new or changed reason is logged.
                 let held = snapshot
                     .execution(channel)
@@ -136,12 +200,12 @@ pub(super) async fn refresh(provider: &ProviderKind, pool: Option<&sqlx::PgPool>
             }
             Ok(permit) => permit,
         };
-        if let Some(next) = &permit
-            && snapshot.resume_execution(channel, next)
-        {
+        if snapshot.resume_execution(channel, permit.as_ref()) {
+            record_readmission(provider.as_str(), channel);
             continue;
         }
         if let Some(view) = snapshot.execution(channel) {
+            record_hold(provider.as_str(), channel);
             const CHANGED: &str = "execution identity changed";
             if view.permit.as_ref().err().map(String::as_str) != Some(CHANGED) {
                 tracing::warn!(
@@ -156,18 +220,23 @@ pub(super) async fn refresh(provider: &ProviderKind, pool: Option<&sqlx::PgPool>
             let readiness = crate::services::tui_o::writer::host::process_readiness();
             // A writer hosted under the gateway lease never retires on an execution gate close.
             let lease = crate::services::tui_o::ownership::gate(provider.as_str());
-            if !readiness.hosted_under(channel, &lease)
-                && tokio::time::timeout(Duration::from_secs(3), async {
-                    while readiness.is_hosted(channel) {
-                        tokio::time::sleep(Duration::from_millis(10)).await;
-                    }
-                })
-                .await
-                .is_err()
+            if readiness.hosted_under(channel, &lease) {
+                record_retirement(provider.as_str(), channel, "lease_host_install");
+            } else if tokio::time::timeout(Duration::from_secs(3), async {
+                while readiness.is_hosted(channel) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .is_err()
             {
+                record_retirement(provider.as_str(), channel, "wait_timeout_continue");
                 continue;
+            } else {
+                record_retirement(provider.as_str(), channel, "retired_host_install");
             }
         }
         snapshot.install_execution(channel, permit.map(Ok));
+        record_readmission(provider.as_str(), channel);
     }
 }
