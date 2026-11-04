@@ -315,9 +315,8 @@ fn bind_pane(session: &str, path: &std::path::Path) {
     );
 }
 
-/// A token recovered for a persisted turn keeps the busy inputs its episode handed in, whether the
-/// pane binding returns before or after restore; another episode's, session's or an unrecorded
-/// busy row still sends no Escape.
+/// A recovered token keeps its episode's busy inputs whether the binding returns before or after
+/// restore; another episode's, session's or an unrecorded busy row still sends no Escape.
 #[test]
 fn a_recovered_turn_escapes_past_only_its_own_busy_inputs() {
     let fx = Fixture::new();
