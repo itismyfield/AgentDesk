@@ -112,12 +112,12 @@ def rust_tokens(text, *, extended=False):
 def production_tokens(path, *, unreadable=None, diagnostic_path=None):
     """Return production tokens, or None when a file-level test gate excludes the file."""
     try:
-        from rust_production import _production_text
+        from rust_production import _production_text, production_lines
         from rust_lex import StripState, cfg_item_end, strip_line
         from rust_cfg import find_test_only_cfg_attributes
         from generate_inventory_docs import scan_balanced
     except ModuleNotFoundError:
-        from scripts.rust_production import _production_text
+        from scripts.rust_production import _production_text, production_lines
         from scripts.rust_lex import StripState, cfg_item_end, strip_line
         from scripts.rust_cfg import find_test_only_cfg_attributes
         from scripts.generate_inventory_docs import scan_balanced
@@ -146,7 +146,23 @@ def production_tokens(path, *, unreadable=None, diagnostic_path=None):
             names = tuple(t.value for t in attr[:path_end] if t.kind == "ident")
             if names in TEST_ATTRS:
                 gated.add(token.start)
-    ranges, exact = [], True
+    parameter_gates, parameter_ranges, same_line = set(), {}, {}
+    if gated and "|" in code:
+        list(production_lines(path, parameter_gates=parameter_gates, parameter_ranges=parameter_ranges))
+    for match in matches:
+        line = raw.count("\n", 0, match.attribute_end() - 1)
+        same_line.setdefault(line, []).append(match.start())
+    for starts in same_line.values():
+        if len(starts) < 2:
+            continue
+        for start in starts:
+            queried, ends = set(), {}
+            list(production_lines(path, parameter_gates=queried, parameter_ranges=ends, gate_start=start))
+            parameter_gates.discard(start)
+            parameter_ranges.pop(start, None)
+            parameter_gates.update(queried)
+            parameter_ranges.update(ends)
+    ranges, exact, handled_gates = [], True, set()
     for start in sorted(gated | inner):
         if ranges and start < ranges[-1][1]:
             continue
@@ -155,6 +171,15 @@ def production_tokens(path, *, unreadable=None, diagnostic_path=None):
                 _, end = scan_balanced(code, containers[start], "{", "}")
                 end -= 1  # Keep the enclosing module's closing delimiter.
             else:
+                if start in parameter_gates:
+                    if start not in parameter_ranges:
+                        raise ValueError("closure parameter boundary is uncertain")
+                    ranges.append((start, parameter_ranges[start]))
+                    handled_gates.add(start)
+                    if unreadable is not None:
+                        unreadable.append(f"{diagnostic_path if diagnostic_path is not None else path}:"
+                                          f"{raw.count(chr(10), 0, start) + 1} uncertain test-only range: closure parameter boundary is uncertain")
+                    continue
                 end = cfg_item_end(code, start, scan_balanced)
                 if code[end - 1:end] == "," and "<" in code[start:end]:
                     raise ValueError("generic field boundary is uncertain")
@@ -169,7 +194,7 @@ def production_tokens(path, *, unreadable=None, diagnostic_path=None):
         else:
             ranges.append((start, end))
     range_starts = [start for start, _ in ranges]
-    masked = _production_text(path).splitlines() if not exact else ()
+    masked = _production_text(path, handled_gates=handled_gates).splitlines() if not exact else ()
     starts, offset = [], 0
     for line in raw.splitlines(keepends=True):
         starts.append(offset)
@@ -377,7 +402,7 @@ def walk(root, repo_root, inventory=None, *, production=False):
                     child = next((c for c in candidates if c.is_file()), None)
                     if child is None:
                         inv.errors.append(f"{site} mod {name}: no file at "
-                                          f"{', '.join(str(c.relative_to(repo_root)) for c in candidates)}")
+                                          f"{', '.join(str(c.relative_to(repo_root)) if c.is_relative_to(repo_root) else str(c) for c in candidates)}")
                     else:
                         owns_dir = pending_path is not None or child.name == "mod.rs"
                         queue.append((child, names + (name,), child.parent if owns_dir else child.parent / child.stem,
