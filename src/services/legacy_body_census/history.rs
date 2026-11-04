@@ -191,6 +191,8 @@ pub(super) fn prepare_with_sync(
         "started_at_ms":boot.started_at_ms,
         "build_sha":build_sha,
         "census_hash":probes["census_hash"], "probe_coverage":probes["coverage"],
+        "static_instrumentation":{"schema_version":1,"complete":probes["instrumentation_complete"],
+            "manifest_error":probes["error"],"pending":probes["pending"],"census_hash":probes["census_hash"]},
         "pending_probes":probes["pending"], "manifest_error":probes["error"],
         "startup_reasons":status.own_reasons, "history_problems":status.history_problems,
     });

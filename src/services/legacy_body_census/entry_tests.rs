@@ -52,37 +52,80 @@ async fn eager_identity_is_shared_with_header_before_any_sample() {
     assert_eq!(written["census_hash"].as_str().unwrap().len(), 64);
     assert_eq!(journal.snapshot()["status"], "INCONCLUSIVE");
     assert_eq!(written["probe_coverage"], false);
+    assert_eq!(written["static_instrumentation"]["complete"], true);
+    assert_eq!(
+        written["static_instrumentation"]["manifest_error"],
+        Value::Null
+    );
+    assert_eq!(
+        written["static_instrumentation"]["census_hash"],
+        written["census_hash"]
+    );
 }
 
 #[tokio::test]
 async fn predecessor_links_a_boot_that_had_no_samples_or_end() {
-    let root = tempfile::tempdir().unwrap();
-    let first = boot();
-    let old = open(root.path(), &first).await;
-    assert_eq!(old.snapshot()["status"], "INCONCLUSIVE");
-    assert!(
-        old.snapshot()["reasons"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("PREDECESSOR_UNKNOWN"))
-    );
-    let mut second = boot();
-    second.started_at_ms = first.started_at_ms + 1;
-    let new = open(root.path(), &second).await;
-    assert_eq!(
-        header(root.path(), &second)["predecessor_boot_id"],
-        first.id
-    );
-    let epoch = json!({"boot_id":first.id,"started_at_ms":first.started_at_ms});
-    assert_eq!(header(root.path(), &first)["coverage_start"], epoch);
-    assert_eq!(header(root.path(), &second)["coverage_start"], epoch);
-    assert_eq!(new.snapshot()["journal_ready"], true);
-    assert!(
-        !new.snapshot()["reasons"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("PREDECESSOR_UNKNOWN"))
-    );
+    for legacy_header in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let first = boot();
+        let old = open(root.path(), &first).await;
+        assert_eq!(old.snapshot()["status"], "INCONCLUSIVE");
+        assert!(
+            old.snapshot()["reasons"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("PREDECESSOR_UNKNOWN"))
+        );
+        let mut second = boot();
+        if legacy_header {
+            use sha2::{Digest, Sha256};
+            let path = root
+                .path()
+                .join("legacy_body_census")
+                .join(format!("{}.jsonl", first.id));
+            let mut lines: Vec<Value> = std::fs::read_to_string(&path)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            lines[0]
+                .as_object_mut()
+                .unwrap()
+                .remove("static_instrumentation");
+            let raw: String = lines.iter().map(|line| format!("{line}\n")).collect();
+            std::fs::write(path, raw).unwrap();
+            let pointer = json!({"boot_id":first.id,"header_digest":hex::encode(Sha256::digest(format!("{}\n", lines[0]).as_bytes()))});
+            std::fs::write(
+                root.path().join("legacy_body_census/HEAD"),
+                pointer.to_string(),
+            )
+            .unwrap();
+        }
+        second.started_at_ms = first.started_at_ms + 1;
+        let new = open(root.path(), &second).await;
+        assert_eq!(
+            header(root.path(), &second)["predecessor_boot_id"],
+            first.id
+        );
+        let epoch = json!({"boot_id":first.id,"started_at_ms":first.started_at_ms});
+        assert_eq!(header(root.path(), &first)["coverage_start"], epoch);
+        assert_eq!(header(root.path(), &second)["coverage_start"], epoch);
+        assert_eq!(
+            header(root.path(), &first)["static_instrumentation"].is_null(),
+            legacy_header
+        );
+        assert_eq!(
+            header(root.path(), &second)["static_instrumentation"]["complete"],
+            true
+        );
+        assert_eq!(new.snapshot()["journal_ready"], true);
+        assert!(
+            !new.snapshot()["reasons"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("PREDECESSOR_UNKNOWN"))
+        );
+    }
 }
 
 #[tokio::test]

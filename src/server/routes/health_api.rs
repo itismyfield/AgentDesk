@@ -2695,7 +2695,49 @@ mod tests {
                     "host":host,"process_role":"server","boot_id":ids[i],"doctor_boot_id":doc,
                     "predecessor_boot_id":i.checked_sub(1).map(|n| &ids[n]),"started_at_ms":started,
                     "coverage_start":if i==0 {json!({"boot_id":ids[0],"started_at_ms":0})} else {anchor.clone()},
-                    "build_sha":BUILD,"census_hash":CENSUS,"probe_coverage":true,"pending_probes":0});
+                    "build_sha":BUILD,"census_hash":CENSUS,"probe_coverage":true,"pending_probes":0,
+                    "static_instrumentation":{"schema_version":1,"complete":true,"manifest_error":null,"pending":0,"census_hash":CENSUS}});
+                if case == "artifact_absent" {
+                    header["probe_coverage"] = json!(false);
+                }
+                if case == "historic_static_missing" && i == 1 {
+                    header
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("static_instrumentation");
+                }
+                if i == last {
+                    match case {
+                        "static_missing" => {
+                            header
+                                .as_object_mut()
+                                .unwrap()
+                                .remove("static_instrumentation");
+                        }
+                        "static_false" => {
+                            header["static_instrumentation"]["complete"] = json!(false)
+                        }
+                        "static_malformed" => header["static_instrumentation"] = json!(true),
+                        "static_error" => {
+                            header["static_instrumentation"]["manifest_error"] =
+                                json!("manifest_invalid")
+                        }
+                        "static_hash" => {
+                            header["static_instrumentation"]["census_hash"] = json!("c".repeat(64))
+                        }
+                        "static_pending" => header["static_instrumentation"]["pending"] = json!(1),
+                        "static_error_missing" => {
+                            header["static_instrumentation"]
+                                .as_object_mut()
+                                .unwrap()
+                                .remove("manifest_error");
+                        }
+                        "static_schema" => {
+                            header["static_instrumentation"]["schema_version"] = json!(2)
+                        }
+                        _ => {}
+                    }
+                }
                 if case == "old_uncovered" && i == 0 {
                     header["probe_coverage"] = json!(false);
                     header["pending_probes"] = json!(7);
@@ -2714,26 +2756,36 @@ mod tests {
                 if case == "selection_off" && i == 2 {
                     records[1]["effective"] = json!([]);
                 }
-                if case == "selection_disabled" || case == "no_bindings" {
+                let no_bindings = case == "no_bindings" || case.starts_with("na_");
+                if case == "selection_disabled" || no_bindings {
                     records[1]["installed"] = json!(false);
                     records[1]["effective"] = serde_json::Value::Null;
                     records[1]["dormant"] = serde_json::Value::Null;
-                    if case == "no_bindings" {
+                    if no_bindings && !(case == "na_history_binding" && i == 1) {
                         records[1]["tui_bindings"] = json!([]);
                     }
+                }
+                if case == "na_history_binding" && i == 1 {
+                    records[1]["installed"] = json!(true);
+                    records[1]["effective"] = json!([1]);
+                    records[1]["dormant"] = json!([]);
+                }
+                if case == "na_unknown" && i == last {
+                    records[1]["installed"] = serde_json::Value::Null;
                 }
                 if case == "selection_unknown" && i == 2 {
                     records[1]["installed"] = serde_json::Value::Null;
                 }
                 if i == last && case != "denominator_missing" {
-                    let turns = if case == "no_bindings" {
+                    let turns = if no_bindings && case != "na_positive_counters" {
                         0
                     } else if case == "no_traffic" {
                         9
                     } else {
                         10
                     };
-                    let ack = if case == "no_ack" || case == "no_bindings" {
+                    let ack = if case == "no_ack" || (no_bindings && case != "na_positive_counters")
+                    {
                         0
                     } else {
                         1
@@ -2758,7 +2810,7 @@ mod tests {
                     "start_at" if i == 0 => Some(START),
                     "body" | "mixed_invalid" | "end_at" | "end_plus_one" | "unknown_body"
                     | "nonbody" | "refresh" | "runtime_unknown" | "runtime_empty"
-                    | "owner_unknown"
+                    | "owner_unknown" | "na_body" | "na_refresh"
                         if i == 2 =>
                     {
                         Some(CUT)
@@ -2768,7 +2820,7 @@ mod tests {
                 if let Some(at) = target_at {
                     records.push(json!({"kind":"target","phase":"begin","op":"POST","at_ms":at,
                         "census":{"site":"W11","binding_mode":"TUI","body_owner":"Legacy","actual_runtime":"codex_tui",
-                        "source_incarnation":{"file":1,"generation":1},"output_class":match case {"unknown_body"|"old_unknown"|"after_end"=>"UnknownBody","nonbody"=>"NonBody","refresh"=>"LegacyBodyRefresh",_=>"LegacyBody"}}}));
+                        "source_incarnation":{"file":1,"generation":1},"output_class":match case {"unknown_body"|"old_unknown"|"after_end"=>"UnknownBody","nonbody"=>"NonBody","refresh"|"na_refresh"=>"LegacyBodyRefresh",_=>"LegacyBody"}}}));
                 }
                 if case == "runtime_unknown" && i == 2 {
                     records.last_mut().unwrap()["census"]["actual_runtime"] = json!("unknown");
@@ -2779,7 +2831,7 @@ mod tests {
                 if case == "owner_unknown" && i == 2 {
                     records.last_mut().unwrap()["census"]["body_owner"] = serde_json::Value::Null;
                 }
-                if i < last {
+                if i < last && !(case == "na_end_missing" && i == 1) {
                     let trailing = if case == "after_end" && i == 0 {
                         records.pop()
                     } else {
@@ -2821,8 +2873,19 @@ mod tests {
             }
             ids[last].clone()
         }
+        let mut contract_failures = Vec::new();
         for (case, expected) in [
             ("valid", "PASS"),
+            ("artifact_absent", "PASS"),
+            ("static_missing", "INCONCLUSIVE"),
+            ("static_false", "INCONCLUSIVE"),
+            ("static_malformed", "INCONCLUSIVE"),
+            ("static_error", "INCONCLUSIVE"),
+            ("static_hash", "INCONCLUSIVE"),
+            ("static_pending", "INCONCLUSIVE"),
+            ("static_error_missing", "INCONCLUSIVE"),
+            ("static_schema", "INCONCLUSIVE"),
+            ("historic_static_missing", "INCONCLUSIVE"),
             ("same_time", "PASS"),
             ("asynchronous_cuts", "PASS"),
             ("staggered_epochs", "FAIL"),
@@ -2857,7 +2920,13 @@ mod tests {
             ("old_drain_missing", "INCONCLUSIVE"),
             ("selection_disabled", "FAIL"),
             ("selection_unknown", "INCONCLUSIVE"),
-            ("no_bindings", "NO_TRAFFIC"),
+            ("no_bindings", "PASS"),
+            ("na_unknown", "INCONCLUSIVE"),
+            ("na_history_binding", "NO_TRAFFIC"),
+            ("na_body", "FAIL"),
+            ("na_refresh", "INCONCLUSIVE"),
+            ("na_end_missing", "INCONCLUSIVE"),
+            ("na_positive_counters", "INCONCLUSIVE"),
             ("selection_off", "FAIL"),
             ("body", "FAIL"),
             ("mixed_invalid", "FAIL"),
@@ -2913,6 +2982,10 @@ mod tests {
                 .await;
                 if case == "valid" {
                     assert_eq!(detail["legacy_body_census"]["probe_coverage"], true);
+                    assert_eq!(
+                        detail["legacy_body_census"]["static_instrumentation"]["complete"],
+                        true
+                    );
                     assert_eq!(detail["legacy_body_census"]["pending_probes"], 0);
                     assert_eq!(detail["legacy_body_census"]["read_error"], false);
                 }
@@ -2942,7 +3015,21 @@ mod tests {
                 _ => {}
             }
             let report = evaluate(["mini", "book"], &observations, CUT, BUILD, CENSUS);
-            assert_eq!(report["stage1"], expected, "{case}: {report}");
+            if report["stage1"] != expected {
+                contract_failures.push(format!("{case}: expected {expected}: {report}"));
+            }
+            if case == "no_bindings" {
+                assert_eq!(report["sites"]["W11"]["status"], "DELETE_NOT_READY");
+                assert_eq!(report["hosts"]["mini"]["status"], "NO_TUI_BINDING");
+            }
+            if case == "artifact_absent"
+                && report["hosts"]["mini"]["reasons"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("BOOT_EVIDENCE_UNKNOWN"))
+            {
+                contract_failures.push(format!("artifact absence still gates routine: {report}"));
+            }
             if case == "valid" {
                 assert_eq!(report["sites"]["W11"]["status"], "DELETE_READY");
                 assert_eq!(report["sites"]["W01"]["status"], "DELETE_NOT_READY");
@@ -2958,6 +3045,71 @@ mod tests {
                 assert_eq!(report["complete"], false);
             }
         }
+        let cases = [
+            "valid",
+            "body",
+            "selection_unknown",
+            "no_traffic",
+            "no_bindings",
+        ];
+        let verdicts = [
+            ["PASS", "FAIL", "INCONCLUSIVE", "NO_TRAFFIC", "PASS"],
+            ["FAIL", "FAIL", "FAIL", "FAIL", "FAIL"],
+            [
+                "INCONCLUSIVE",
+                "FAIL",
+                "INCONCLUSIVE",
+                "INCONCLUSIVE",
+                "INCONCLUSIVE",
+            ],
+            [
+                "NO_TRAFFIC",
+                "FAIL",
+                "INCONCLUSIVE",
+                "NO_TRAFFIC",
+                "NO_TRAFFIC",
+            ],
+            [
+                "PASS",
+                "FAIL",
+                "INCONCLUSIVE",
+                "NO_TRAFFIC",
+                "NO_TUI_BINDING",
+            ],
+        ];
+        for (a, left) in cases.iter().enumerate() {
+            for (b, right) in cases.iter().enumerate() {
+                let mut observations = Vec::new();
+                for (host, case) in [("mini", *left), ("book", *right)] {
+                    let root = tempfile::tempdir().unwrap();
+                    let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+                    let current = fixture(root.path(), host, case);
+                    let cache = ProjectionCache::fixture(root.path(), &current, CUT);
+                    let detail =
+                        with_projection_for_test(cache, CUT, health_body("/health/detail", None))
+                            .await;
+                    observations.push(detail["legacy_body_census"].clone());
+                }
+                let report = evaluate(["mini", "book"], &observations, CUT, BUILD, CENSUS);
+                if report["stage1"] != verdicts[a][b] {
+                    contract_failures.push(format!(
+                        "pair {left}/{right}: expected {}: {report}",
+                        verdicts[a][b]
+                    ));
+                }
+                if a == 4 || b == 4 {
+                    assert_eq!(
+                        report["sites"]["W11"]["status"], "DELETE_NOT_READY",
+                        "{left}/{right}: {report}"
+                    );
+                }
+            }
+        }
+        assert!(
+            contract_failures.is_empty(),
+            "{}",
+            contract_failures.join("\n")
+        );
         // A blocked cache publisher must not stall an actual detail request.
         let root = tempfile::tempdir().unwrap();
         let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());

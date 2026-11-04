@@ -26,6 +26,16 @@ fn error(errors: &mut BTreeSet<String>, reason: &str) {
 fn number(value: &Value) -> Option<u64> {
     value.as_u64()
 }
+fn static_evidence(value: &Value, census: &str) -> bool {
+    value.as_object().is_some_and(|object| {
+        object.len() == 5
+            && value["schema_version"].as_u64() == Some(1)
+            && value["complete"] == true
+            && object.get("manifest_error").is_some_and(Value::is_null)
+            && value["pending"].as_u64() == Some(0)
+            && value["census_hash"] == census
+    })
+}
 fn list(value: &Value) -> Option<BTreeSet<u64>> {
     let rows = value.as_array()?;
     let values = rows
@@ -89,6 +99,9 @@ fn inspect_host(data: &Value, end: i64, start: i64, build: &str, census: &str) -
         || census.len() != 64
     {
         error(&mut errors, "BUILD_OR_CENSUS_UNKNOWN");
+    }
+    if !static_evidence(&data["static_instrumentation"], census) {
+        error(&mut errors, "STATIC_INSTRUMENTATION_UNKNOWN");
     }
     if data["build_sha"] == build
         && data["census_hash"]
@@ -220,7 +233,7 @@ fn inspect_host(data: &Value, end: i64, start: i64, build: &str, census: &str) -
             || h["host"] != data["host"]
             || h["build_sha"] != build
             || h["census_hash"] != census
-            || h["probe_coverage"] != true
+            || !static_evidence(&h["static_instrumentation"], census)
             || h["pending_probes"] != 0
         {
             error(&mut errors, "BOOT_EVIDENCE_UNKNOWN");
@@ -398,11 +411,25 @@ fn inspect_host(data: &Value, end: i64, start: i64, build: &str, census: &str) -
     if is_violation(&data["known_violation"]) && within(&data["known_violation"], start, end) {
         failures.insert("LEGACY_TUI_BODY");
     }
+    let no_bindings = bindings_seen.is_empty();
+    if no_bindings
+        && (!end_available
+            || turns.is_some_and(|n| n > 0)
+            || ack.is_some_and(|n| n > 0)
+            || events.iter().any(|event| {
+                event["census"]["binding_mode"] == "TUI"
+                    && event["census"]["output_class"] != "NonBody"
+            }))
+    {
+        error(&mut errors, "NO_TUI_BINDING_UNPROVEN");
+    }
     let status = if !failures.is_empty() {
         "FAIL"
     } else if !errors.is_empty() {
         "INCONCLUSIVE"
-    } else if bindings_seen.is_empty() || turns.is_some_and(|n| n < 10) || ack == Some(0) {
+    } else if no_bindings {
+        "NO_TUI_BINDING"
+    } else if turns.is_some_and(|n| n < 10) || ack == Some(0) {
         "NO_TRAFFIC"
     } else {
         "PASS"
@@ -514,6 +541,8 @@ pub(crate) fn evaluate(
         "INCONCLUSIVE"
     } else if reports.values().any(|r| r["status"] == "NO_TRAFFIC") {
         "NO_TRAFFIC"
+    } else if reports.values().all(|r| r["status"] == "NO_TUI_BINDING") {
+        "NO_TUI_BINDING"
     } else {
         "PASS"
     };
@@ -541,7 +570,7 @@ pub(crate) fn evaluate(
             body_events = body_events.saturating_add(s["body_events"].as_u64().unwrap_or(0));
             pending |= s["provenance_pending"] == true;
         }
-        sites.insert(name, json!({"status":if status == "PASS" && count.is_some_and(|n| n>0) && body_events == 0 && !pending {"DELETE_READY"} else {"DELETE_NOT_READY"},"opportunities":count,"body_events":body_events,"provenance_pending":pending}));
+        sites.insert(name, json!({"status":if status == "PASS" && reports.values().all(|r| r["status"] == "PASS") && count.is_some_and(|n| n>0) && body_events == 0 && !pending {"DELETE_READY"} else {"DELETE_NOT_READY"},"opportunities":count,"body_events":body_events,"provenance_pending":pending}));
     }
     json!({"sites":sites,"stage1":status,"complete":errors.is_empty() && reports.values().all(|r| r["complete"] == true),"coverage_start_ms":start,"cut_ms":end,"hosts":reports,"reasons":errors})
 }

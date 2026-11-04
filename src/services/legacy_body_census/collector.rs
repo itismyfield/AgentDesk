@@ -226,6 +226,7 @@ impl Collector {
         let mut value = json!({"schema_version":1,"policy_version":1,"live_journal":live_journal,"host":header["host"],
             "process_role":"server","current_boot_id":current,"build_sha":header["build_sha"],
             "census_hash":header["census_hash"],"probe_coverage":header["probe_coverage"],"pending_probes":header["pending_probes"],
+            "static_instrumentation":header["static_instrumentation"],
             "started_at_ms":header["started_at_ms"],"coverage_start":anchor,"cut_ms":now_ms,"stale_snapshot":false,
             "read_error":errors.iter().any(|reason| reason.starts_with("JOURNAL_") || reason == "START_INVENTORY_UNAVAILABLE"),
             "inventory_source":{"source":"doctor/startup","version":1,"from_ms":anchor["started_at_ms"],"to_ms":now_ms,"available":inventory.is_some() && !starts.is_empty()},
