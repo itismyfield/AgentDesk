@@ -482,7 +482,7 @@ pub(super) fn stale_removal_reason(
                     && tmux_pane_alive_for_stale_check(name, state)
                 {
                     tracing::info!(
-                        "  ⚠ inflight stale-age ({age_secs}s > {max_age}s) overridden — tmux pane '{name}' still alive (channel {})",
+                        "  ⚠ inflight stale-age ({age_secs}s > {max_age}s) overridden — session '{name}' not confirmed dead (channel {})",
                         state.channel_id
                     );
                     return None;
@@ -500,7 +500,7 @@ pub(super) fn stale_removal_reason(
                     && tmux_pane_alive_for_stale_check(name, state)
                 {
                     tracing::info!(
-                        "  ⚠ inflight stale-age ({age_secs}s > {INFLIGHT_MAX_AGE_SECS}s) overridden — tmux pane '{name}' still alive (channel {})",
+                        "  ⚠ inflight stale-age ({age_secs}s > {INFLIGHT_MAX_AGE_SECS}s) overridden — session '{name}' not confirmed dead (channel {})",
                         state.channel_id
                     );
                     return None;
