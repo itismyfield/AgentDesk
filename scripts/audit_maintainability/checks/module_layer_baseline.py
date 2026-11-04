@@ -200,6 +200,10 @@ def _uncertainties(graph):
              "count": value["count"], "sites": sorted(value["sites"])} for key, value in sorted(grouped.items())]
 
 
+def uncertainty_sources(graph, mapping, occurrence_projection):
+    return {row["id"]: row["source"] for row in project(graph, mapping, occurrence_projection)["uncertainties"]}
+
+
 def baseline(graph, mapping, input_sha, occurrence_projection):
     result = project(graph, mapping, occurrence_projection)
     return {"schema_version": 3, "count_unit_version": 1, "input_sha": input_sha, "source_grain": "module",
@@ -245,7 +249,7 @@ def write_baseline(path, payload):
         output.write(data)
 
 
-def update_baseline(path, payload, moves, *, upgrade=False, legacy_records=None):
+def update_baseline(path, payload, moves, *, upgrade=False, legacy_records=None, sources=None):
     """Only the explicit reduction command may replace an accepted snapshot."""
     from audit_maintainability.checks.module_layer_ratchet import compare, reduced_baseline, _validate
     lock = path.with_name(path.name + ".lock")
@@ -272,7 +276,7 @@ def update_baseline(path, payload, moves, *, upgrade=False, legacy_records=None)
                     raise ValueError("record upgrade changed historical individual debts")
                 result = payload
             else:
-                result = reduced_baseline(accepted, payload, moves)
+                result = reduced_baseline(accepted, payload, moves, sources)
             result["generation_command"] += " --upgrade-records" if upgrade else " --update-reductions"
             data = encode_baseline(result).encode("utf-8")
             if original == data:
@@ -351,7 +355,8 @@ def main():
         from audit_maintainability.checks.module_layer_ratchet import MOVES
         moves = tomllib.loads((args.repo / MOVES).read_text("utf-8"))
         legacy_records = historical_baseline(args.repo, json.loads(args.output.read_bytes())["input_sha"], mapping) if args.upgrade_records else None
-        update_baseline(args.output, payload, moves, upgrade=args.upgrade_records, legacy_records=legacy_records)
+        update_baseline(args.output, payload, moves, upgrade=args.upgrade_records, legacy_records=legacy_records,
+                        sources=uncertainty_sources(graph, mapping, occurrences))
     else:
         write_baseline(args.output, payload)
     print(f"wrote {args.output} input_sha={args.input_sha}")

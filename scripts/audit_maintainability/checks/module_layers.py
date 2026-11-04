@@ -386,7 +386,9 @@ def _run(allowlist):
     from .module_layer_ratchet import compare, load_inputs
     try:
         accepted, moves = load_inputs(common.REPO_ROOT)
-        comparison = compare(accepted, baseline(result, load_mapping(common.REPO_ROOT), result["input_sha"], occurrences), moves)
+        sources = {row["id"]: row["source"] for row in assessment["uncertainties"]}
+        comparison = compare(accepted, baseline(result, load_mapping(common.REPO_ROOT), result["input_sha"], occurrences),
+                             moves, sources)
     except (OSError, UnicodeError, ValueError, TypeError) as exc:
         comparison = {"errors": [{"code": "invalid-input", "message": _reason(str(exc))}], "warnings": [], "decreases": []}
     yield Finding("module_layers", "info", "src", None,

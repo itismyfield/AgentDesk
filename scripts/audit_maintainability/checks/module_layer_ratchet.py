@@ -16,6 +16,7 @@ MOVES = "scripts/audit_maintainability/layer_moves.toml"
 SECTIONS = ("reverse_dependencies", "indeterminate_dependencies", "uncertainties")
 TOTALS = ("unclassified_modules", "indeterminate_edges", "indeterminate_occurrences")
 BLOCKING_SECTIONS = ("reverse_dependencies",)
+EDGE_KINDS = ("import", "path", "reexport", "macro")
 
 
 def load_inputs(repo):
@@ -113,30 +114,39 @@ def _normalized(accepted, candidate, manifest):
     return old, zeros, normalized
 
 
-def compare(accepted, candidate, moves):
+def compare(accepted, candidate, moves, sources=None):
+    """`sources` maps uncertainty IDs to their measured source module; records do not store it."""
     errors, warnings, decreases = [], [], []
     try:
         old, zeros, current = _normalized(accepted, candidate, moves)
         unknown_ids = {row["id"] for row in candidate["indeterminate_dependencies"]}
         moved_reverse = {row["old_id"]: row["new_id"] for row in moves["moves"]
                          if row["section"] == "reverse_dependencies"}
-        # Accepted reverse debt must not resurface as indeterminate or unresolved references,
-        # whatever the reference kind: match endpoints, and block coverage growth in a source
-        # module whose reverse debt shrank.
+        # Accepted reverse debt (including zero-rules and moved IDs) must not resurface as
+        # indeterminate edges or unresolved references under any reference kind.
         accepted_reverse = {**zeros["reverse_dependencies"], **old["reverse_dependencies"]}
-        hidden_reverse = accepted_reverse.keys() | {moved_reverse.get(i, i) for i in accepted_reverse}
-        reverse_ends = {(row["source"], row["target"]) for row in accepted_reverse.values()}
-        shrunk_sources = {row["source"] for identity, row in old["reverse_dependencies"].items()
-                          if current["reverse_dependencies"].get(identity, {"count": 0})["count"] < row["count"]}
+        hidden_ids = accepted_reverse.keys() | {moved_reverse.get(i, i) for i in accepted_reverse}
+        shrunk = {i: row for i, row in old["reverse_dependencies"].items()
+                  if current["reverse_dependencies"].get(i, {"count": 0})["count"] < row["count"]}
+        shrunk_ids = shrunk.keys() | {moved_reverse.get(i, i) for i in shrunk}
+        shrunk_sources = {row["source"] for row in shrunk.values()}
+        shrunk_targets = {row["target"] for row in shrunk.values()}
+
+        def reaches(source, targets, identities):
+            return any(_id("edge", source, target, kind) in identities
+                       for target in targets for kind in EDGE_KINDS)
+
         for section in SECTIONS:
             for identity, row in sorted(current[section].items()):
                 previous = old[section].get(identity, {"count": 0})["count"]
                 if row["count"] > previous:
                     code = "zero-rule" if identity in zeros[section] else "increase" if previous else "new-id"
-                    blocking = (section in BLOCKING_SECTIONS or row.get("source") in shrunk_sources
+                    source = (sources or {}).get(identity, row.get("source"))
+                    blocking = (section in BLOCKING_SECTIONS
                                 or (section == "indeterminate_dependencies"
-                                    and (identity in hidden_reverse
-                                         or (row["source"], row["target"]) in reverse_ends)))
+                                    and reaches(source, [row["target"]], hidden_ids))
+                                or (source is not None and (source in shrunk_sources
+                                                            or reaches(source, shrunk_targets, shrunk_ids))))
                     (errors if blocking else warnings).append({
                         "code": code, "section": section, "id": identity,
                         "baseline_count": previous, "current_count": row["count"],
@@ -160,8 +170,8 @@ def compare(accepted, candidate, moves):
             "decreases": sorted(decreases, key=lambda r: (r["section"], r["id"]))}
 
 
-def reduced_baseline(accepted, candidate, moves):
-    result = compare(accepted, candidate, moves)
+def reduced_baseline(accepted, candidate, moves, sources=None):
+    result = compare(accepted, candidate, moves, sources)
     if result["errors"]:
         raise ValueError("baseline reduction refused: " + "; ".join(r["message"] for r in result["errors"]))
     old, zeros, current = _normalized(accepted, candidate, moves)

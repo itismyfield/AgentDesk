@@ -149,6 +149,29 @@ class ModuleLayerRatchetTest(unittest.TestCase):
                 moved = self.snapshot(indeterminate=[self.edge(kind=current_kind)])
                 self.assert_error(self.compare(self.snapshot([reverse]), moved), "indeterminate_dependencies")
 
+    def test_moved_or_zero_rule_reverse_debt_reappearing_under_another_kind_is_error(self):
+        for accepted_kind, current_kind in (("import", "path"), ("path", "import")):
+            for zero in (False, True):
+                with self.subTest(accepted=accepted_kind, current=current_kind, zero=zero):
+                    original, moved = self.edge(kind=accepted_kind), self.edge("moved", kind=accepted_kind)
+                    accepted = self.snapshot([original])
+                    if zero:
+                        accepted = self.ratchet.reduced_baseline(accepted, self.snapshot(), self.moves())
+                    moves = self.moves({"section": "reverse_dependencies", "old_id": original["id"], "new_id": moved["id"]})
+                    candidate = self.snapshot(indeterminate=[self.edge("moved", kind=current_kind)])
+                    self.assert_error(self.compare(accepted, candidate, moves), "indeterminate_dependencies")
+                    with self.assertRaises(ValueError):
+                        self.ratchet.reduced_baseline(accepted, candidate, moves)
+
+    def test_measured_sources_reveal_a_glob_from_a_moved_reverse_source(self):
+        original, moved = self.edge(), self.edge("moved")
+        moves = self.moves({"section": "reverse_dependencies", "old_id": original["id"], "new_id": moved["id"]})
+        glob = self.uncertainty("glob", 1)
+        candidate = self.snapshot(uncertainties=[glob])
+        self.assert_warning_only(self.compare(self.snapshot([original]), candidate, moves), "uncertainties")
+        self.assert_error(self.ratchet.compare(self.snapshot([original]), candidate, moves,
+                                               {glob["id"]: "src/lib.rs::crate::moved"}), "uncertainties")
+
     def test_changed_indeterminate_target_warns_even_with_equal_totals(self):
         old, replacement = self.edge("mixed", "old"), self.edge("mixed", "new")
         accepted, candidate = self.snapshot(indeterminate=[old]), self.snapshot(indeterminate=[replacement])
@@ -628,6 +651,51 @@ assembly = 1
                 self.assertEqual(baseline.read_bytes(), original)
             self.assertFalse(any(row["severity"] == "error" for name, check in checks.items()
                                  if name != "module_layers" for row in check["findings"]))
+
+    def test_cli_refuses_to_record_reverse_debt_hidden_behind_a_glob_import(self):
+        with TemporaryDirectory() as temporary:
+            repo = Path(temporary) / "repo"
+            repo.mkdir()
+            def git(*arguments):
+                return subprocess.run(["git", "-C", str(repo), *arguments], capture_output=True,
+                                      text=True, check=True).stdout.strip()
+            def put(relative, text):
+                path = repo / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+            def commit(message):
+                git("add", "src", "scripts", "Cargo.toml")
+                git("commit", "-qm", message)
+            git("init", "-q")
+            git("config", "user.name", "Fixture")
+            git("config", "user.email", "fixture@example.invalid")
+            put("Cargo.toml", '[package]\nname="fixture"\nversion="0.1.0"\nedition="2024"\n')
+            put("src/lib.rs", "mod lower; mod upper;\n")
+            put("src/lower.rs", "use crate::upper::call;\nfn run() { call(); }\n")
+            put("src/upper.rs", "pub fn call() {}\n")
+            put("scripts/audit_maintainability/layers.toml", """schema_version = 1
+rules = [{prefix="",layer="assembly",reason="fixture assembly"},
+         {prefix="lower",layer="foundation",reason="fixture lower layer"},
+         {prefix="upper",layer="assembly",reason="fixture upper layer"}]
+[layers]
+foundation = 0
+assembly = 1
+""")
+            put("scripts/audit_maintainability/layer_moves.toml", "schema_version = 1\nmoves = []\n")
+            commit("fixture")
+            output = Path(temporary) / "accepted.json"
+            command = [sys.executable, str(Path(self.provider.__file__).resolve()), "--repo", str(repo),
+                       "--input-sha", "HEAD", "--output", str(output)]
+            created = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(created.returncode, 0, created.stderr)
+            self.assertTrue(json.loads(output.read_bytes())["reverse_dependencies"])
+            original = output.read_bytes()
+            put("src/lower.rs", "use crate::upper::*;\nfn run() { call(); }\n")
+            commit("glob")
+            refused = subprocess.run([*command, "--update-reductions"], capture_output=True, text=True)
+            self.assertNotEqual(refused.returncode, 0, refused.stdout)
+            self.assertIn("uncertainties", refused.stderr)
+            self.assertEqual(output.read_bytes(), original)
 
     def test_cli_reduces_committed_fixture_and_refuses_a_replacement_debt(self):
         with TemporaryDirectory() as temporary:
