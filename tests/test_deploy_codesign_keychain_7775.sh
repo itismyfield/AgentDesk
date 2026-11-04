@@ -158,9 +158,60 @@ new_case() {
 }
 run_case() {
     set +e
-    PATH="$CASE_ROOT/bin:$TMP_ROOT/tools" /bin/bash "$TMP_ROOT/driver.sh" >"$CASE_ROOT/output" 2>&1 </dev/null
+    if [ "${1:-}" = pty ]; then
+        PATH="$CASE_ROOT/bin:$TMP_ROOT/tools" python3 - "$TMP_ROOT/driver.sh" "$CASE_ROOT" >"$CASE_ROOT/output" 2>&1 <<'PY'
+import errno
+import os
+import pty
+import sys
+import traceback
+
+driver, case_root = sys.argv[1:]
+output_fd = os.dup(1)
+pid, master = pty.fork()
+if pid == 0:
+    try:
+        with open("/dev/tty", "rb", buffering=0) as tty:
+            if not os.isatty(tty.fileno()):
+                raise RuntimeError("PTY child has no controlling tty")
+        with open(os.path.join(case_root, "driver.tty"), "w") as evidence:
+            evidence.write("controlling tty available before driver redirection\n")
+        with open(os.devnull, "rb") as stdin:
+            os.dup2(stdin.fileno(), 0)
+        os.dup2(output_fd, 1)
+        os.dup2(output_fd, 2)
+        os.close(output_fd)
+        os.execv("/bin/bash", ["/bin/bash", driver])
+    except BaseException:
+        traceback.print_exc()
+        os._exit(125)
+
+try:
+    while True:
+        try:
+            data = os.read(master, 4096)
+        except OSError as error:
+            if error.errno == errno.EIO:
+                break
+            raise
+        if not data:
+            break
+        os.write(output_fd, data)
+finally:
+    _, status = os.waitpid(pid, 0)
+    os.close(master)
+    os.close(output_fd)
+exit_code = os.waitstatus_to_exitcode(status)
+sys.exit(exit_code if exit_code >= 0 else 128 - exit_code)
+PY
+    else
+        PATH="$CASE_ROOT/bin:$TMP_ROOT/tools" /bin/bash "$TMP_ROOT/driver.sh" >"$CASE_ROOT/output" 2>&1 </dev/null
+    fi
     case_rc=$?
     set -e
+    if [ "${1:-}" = pty ]; then
+        check 'PTY child had a controlling tty before driver redirection' contains 'controlling tty available before driver redirection' "$CASE_ROOT/driver.tty"
+    fi
     check 'password absent from every recorded argv' not_contains 'stub-password-7775-never-argv' "$CASE_ROOT/argv"
     check 'password absent from output, errors, and xtrace' not_contains 'stub-password-7775-never-argv' "$CASE_ROOT/output"
 }
@@ -176,7 +227,7 @@ assert_no_unlock() {
 
 new_case locked_with_ref
 STUB_XTRACE=1
-run_case
+run_case pty
 check 'signing succeeds' test "$case_rc" = 0
 check 'host-local reference read' contains 'agent-op <read> <op://AgentDesk/test-host/password>' "$CASE_ROOT/argv"
 check 'login keychain default used' contains "security <unlock-keychain> <$HOME/Library/Keychains/login.keychain-db>" "$CASE_ROOT/argv"
