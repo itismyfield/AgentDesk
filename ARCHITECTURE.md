@@ -2126,6 +2126,7 @@ src/
 │   │   │   │   │   ├── owner_input_herdr_tests.rs
 │   │   │   │   │   ├── owner_input_idle_tests.rs
 │   │   │   │   │   ├── owner_input_not_sent_tests.rs
+│   │   │   │   │   ├── owner_input_parent_tests.rs
 │   │   │   │   │   ├── owner_input_rollback_tests.rs
 │   │   │   │   │   ├── owner_input_tests.rs
 │   │   │   │   │   ├── owner_provenance_tests.rs
@@ -2848,6 +2849,7 @@ src/
 │   │   │   │   ├── judged_stop_tests.rs
 │   │   │   │   ├── native_stop.rs
 │   │   │   │   ├── native_stop_contract_tests.rs
+│   │   │   │   ├── native_stop_identity_tests.rs
 │   │   │   │   ├── native_stop_ownership_tests.rs
 │   │   │   │   ├── pid_exit.rs
 │   │   │   │   ├── process_backend_cancel.rs
