@@ -77,6 +77,39 @@ fn all_65_busy_children_keep_their_pin_but_an_external_input_does_not() {
     });
 }
 
+/// The first stop of a fresh token judges the external row itself, with no earlier Escape to reuse.
+#[test]
+fn an_external_input_after_65_busy_children_gets_no_escape_on_the_first_stop() {
+    let fx = Fixture::new();
+    run(async {
+        fx.serve(Server::Live);
+        fx.pane(&running());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(7_757_101);
+        let session = "native-identity-65-external";
+        let (token, path) = generating_turn(&fx, session);
+        start(&shared, channel, &token).await;
+        native_inflight_row(channel, &token, session);
+        for child in 0..65 {
+            let attempt = format!("busy-{child}");
+            let frame = ledger(session, &attempt, &path, &format!("follow up {child}"));
+            token.native_stop.register_busy_child(&attempt);
+            append(&path, queued(&format!("row-{child}"), &frame));
+        }
+        let frame = ledger(session, "external", &path, "another input");
+        append(&path, queued("row-external", &frame));
+        append(&path, tool_use("tool-external"));
+        let _ = fx.take_calls();
+        let result = begin_user_stop(&shared, &ProviderKind::Claude, channel, true, "!stop").await;
+        assert!(matches!(result, CommandStop::Native(_)));
+        assert_eq!(escapes(&fx), 0);
+        assert!(!token.cancelled.load(Ordering::Acquire));
+        assert!(mailbox_holds(&shared, channel, &token).await);
+        assert_eq!(tombstone(channel), None);
+        crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+    });
+}
+
 /// Neutral and own busy rows after the pinned input keep the Escape; any other prompt, a missing
 /// pin or a changed pane or file sends none and never falls back to a raw cancel.
 #[test]
