@@ -1678,6 +1678,36 @@ class ModuleLayersCheck(unittest.TestCase):
                 self.assertIn("src/lib.rs:7", outer["sites"])
                 self.assertNotIn("src/lib.rs:7", inner["sites"])
 
+    def test_block_alias_shadows_same_named_child_without_creating_a_cycle(self) -> None:
+        with _FakeSrcTree({"src/lib.rs": """
+            mod a { pub fn f() {} }
+            mod m {
+                mod child { pub fn f() { crate::m::f(); } }
+                pub fn f() {
+                    use crate::a as child;
+                    child::f();
+                }
+            }
+        """}) as root:
+            result = self.layers.analyze(root)
+        paths = {(e["source"], e["target"]) for e in result["edges"] if e["kind"] == "path"}
+        self.assertIn((self._node("m"), self._node("a")), paths)
+        self.assertNotIn((self._node("m"), self._node("m::child")), paths)
+        self.assertEqual(len(result["sccs"][0]), 1)
+
+    def test_module_and_reexported_function_share_a_name_without_alias_cycles(self) -> None:
+        with _FakeSrcTree({"src/lib.rs": """
+            mod utils {
+                mod flag { pub fn flag() {} }
+                pub use flag::flag;
+            }
+            mod caller { fn f() { crate::utils::flag(); } }
+        """}) as root:
+            result = self.layers.analyze(root)
+        targets = {e["target"] for e in result["edges"] if e["source"] == self._node("caller")}
+        self.assertEqual(targets, {self._node("utils::flag")})
+        self.assertFalse(result["coverage"]["unresolved_references"])
+
     def test_cfg_disjoint_aliases_keep_both_imports_and_expose_ambiguity(self) -> None:
         with _FakeSrcTree({"src/lib.rs": """
             mod unix_side { pub struct T; }

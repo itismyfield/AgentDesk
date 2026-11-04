@@ -194,12 +194,12 @@ def _crate(root, repo, coverage, external):
                     return None, "super outside crate"
                 prefix, rest = prefix[:-1], rest[1:]
         else:
-            if owner + (first,) in modules:
-                return follow(owner, [first, *rest], trail, macro)
             for n in range(len(scope), 0, -1):
                 key = (owner, scope[:n], first)
                 if key in imports:
                     if key in trail:
+                        if owner + (first,) in modules:
+                            return follow(owner, [first, *rest], trail, macro)
                         return None, "alias cycle"
                     if len(imports[key]) != 1:
                         return None, "cfg-ambiguous alias"
@@ -232,6 +232,9 @@ def _crate(root, repo, coverage, external):
             name, *rest = rest
             if name == "*":
                 return None, "unresolved glob"
+            if rest and prefix + (name,) in modules:
+                prefix += (name,)
+                continue
             key = (prefix, name)
             if key in exports:
                 if key in trail or len(exports[key]) != 1:
