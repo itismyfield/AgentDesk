@@ -562,8 +562,8 @@ Next ==
     \/ DriveMeetsRow \/ CarriedCloses \/ HandedOutside
 
 Spec == Init /\ [][Next]_vars
-\* Liveness, checked outside CI: a step that stays possible happens (a failed read is read again,
-\* the native turn ends, a pending wake runs the drive).
+\* Liveness, checked outside CI: weak fairness of Next as a whole, not of each action; runs whose
+\* reads keep failing or whose native turn never ends are outside what it proves.
 LiveSpec == Spec /\ WF_vars(Next)
 
 \* ------------------------------------------------------------------------------------ rules
