@@ -53,6 +53,7 @@ services::discord::tui_prompt_relay::local_model_queue_wake_e2e
 
 [High-risk recovery: Input observer attachment regressions]
 services::discord::router::message_handler::provider_dispatch::owner_input::tests::idle::
+services::discord::runtime_bootstrap::shared_data::tests::
 
 [High-risk recovery: Transition-busy requeue spin regressions]
 services::discord::router::message_handler::intake_turn::race_loss::

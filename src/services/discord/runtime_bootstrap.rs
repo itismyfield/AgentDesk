@@ -253,7 +253,6 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     let restored_codex_goals_channels = restored_codex_goals_enabled_channels(&bot_settings);
     let restored_codex_goals_reset_channels = restored_codex_goals_reset_channels(&bot_settings);
 
-    crate::engine::ops::turn_ops::set_global_health_registry(&health_registry);
     owner_execution::prepare(&provider, pg_pool.as_ref()).await;
     let shared = run_bot_build_shared_data(
         bot_settings,
