@@ -475,8 +475,6 @@ fn inspect_host(data: &Value, end: i64, start: i64, build: &str, census: &str) -
         "tui_turns":turns,"o_ack":ack,"denominator_available":turns.is_some() && ack.is_some(),"sites":sites})
 }
 
-// The exact routine adapter activates this paired entry; until then only fixture callers exist.
-#[cfg(test)]
 pub(crate) fn evaluate(
     expected: [&str; 2],
     observations: &[Value],

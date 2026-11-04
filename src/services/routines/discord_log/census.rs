@@ -1,0 +1,80 @@
+//! Census runs publish their native verdict once; all diagnostic detail stays in result_json.
+use super::*;
+
+fn render(outcome: &RoutineRunOutcome) -> String {
+    let report = outcome.result_json.as_ref().unwrap_or(&Value::Null);
+    let verdict = if outcome.status == "succeeded" {
+        match report["stage1"].as_str() {
+            Some(value @ ("PASS" | "FAIL" | "INCONCLUSIVE" | "NO_TRAFFIC" | "NO_TUI_BINDING")) => {
+                value
+            }
+            _ => "INCONCLUSIVE",
+        }
+    } else {
+        "INCONCLUSIVE"
+    };
+    let count = |host: &str, field: &str| {
+        if report["hosts"][host]["status"] == "NO_TUI_BINDING" {
+            return "N/A".to_owned();
+        }
+        report["hosts"][host][field]
+            .as_u64()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "?".into())
+    };
+    format!(
+        "Legacy body census {verdict} | TUI turns mini={}/10 book={}/10 | restarts mini={}/1 book={}/1 | O ACK mini={} book={} | complete={}",
+        count("mac-mini", "tui_turns"),
+        count("mac-book", "tui_turns"),
+        count("mac-mini", "restarts"),
+        count("mac-book", "restarts"),
+        count("mac-mini", "o_ack"),
+        count("mac-book", "o_ack"),
+        report["complete"] == true
+    )
+}
+
+impl RoutineDiscordLogger {
+    pub(super) async fn log_census_outcome(
+        &self,
+        store: &RoutineStore,
+        routine: &RoutineRecord,
+        outcome: &RoutineRunOutcome,
+    ) -> RoutineDiscordLogStatus {
+        let content = render(outcome);
+        let state = match store
+            .record_run_discord_log_section(&outcome.run_id, "outcome", &content)
+            .await
+        {
+            Ok(state) => state,
+            Err(error) => return RoutineDiscordLogStatus::failed(error),
+        };
+        let target = match self
+            .resolve_routine_log_target(
+                Some(store),
+                Some(&routine.id),
+                Some(&routine.name),
+                routine.agent_id.as_deref(),
+                routine.discord_thread_id.as_deref(),
+            )
+            .await
+        {
+            Ok(Some(target)) => target,
+            Ok(None) => return RoutineDiscordLogStatus::skipped(),
+            Err(error) => return RoutineDiscordLogStatus::failed(error),
+        };
+        match self
+            .send_or_edit_run_log(&target, state.message_id.as_deref(), &content)
+            .await
+        {
+            Ok(id) => match store
+                .record_run_discord_message_id(&outcome.run_id, &id)
+                .await
+            {
+                Ok(_) => RoutineDiscordLogStatus::ok(),
+                Err(error) => RoutineDiscordLogStatus::failed(error),
+            },
+            Err(error) => RoutineDiscordLogStatus::failed(error),
+        }
+    }
+}

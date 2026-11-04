@@ -282,7 +282,6 @@ pub(crate) fn detail_json() -> Value {
 pub(crate) use cache::ProjectionCache;
 #[cfg(test)]
 pub(crate) use collector::Collector;
-#[cfg(test)]
 pub(crate) use evaluation::evaluate;
 #[cfg(test)]
 tokio::task_local! { static TEST_PROJECTION: (Arc<ProjectionCache>, i64); }
