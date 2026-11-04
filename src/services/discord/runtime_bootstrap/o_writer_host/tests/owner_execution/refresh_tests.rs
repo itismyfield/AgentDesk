@@ -1,6 +1,232 @@
 use super::*;
 use crate::services::tui_o::cutover::intake_route::{IntakeRoute, for_input_placement};
 
+#[cfg(unix)]
+async fn gateway_context(shared: &SharedData, channel: u64) -> tokio::task::JoinHandle<()> {
+    use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
+    let state = discord_mock::DiscordMockState::new();
+    state.allow_channel(channel);
+    let (proxy, gateway, server) = discord_mock::start(state).await;
+    let context = discord_mock::serenity_context(proxy, gateway).await;
+    assert!(shared.http.cached_serenity_ctx.set(context).is_ok());
+    server
+}
+
+#[cfg(unix)]
+async fn unregistered_gateway(
+    pool: &sqlx::PgPool,
+    registry: &Arc<health::HealthRegistry>,
+    channel: u64,
+) -> Arc<SharedData> {
+    let mut shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let data = Arc::get_mut(&mut shared).unwrap();
+    data.provider = ProviderKind::Claude;
+    data.health_registry = Arc::downgrade(registry);
+    shared.settings.write().await.allowed_channel_ids = vec![channel];
+    shared
+        .http
+        .cached_bot_token
+        .set("test-token".into())
+        .unwrap();
+    shared
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn owner_cleanup_gateway_starts_unmanaged_writer_after_first_prepare_failure_pg() {
+    if !cutover::test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::owner_cleanup_gateway_starts_unmanaged_writer_after_first_prepare_failure_pg"
+    )) {
+        return;
+    }
+    use crate::services::cluster::intake_router_hook::owner_record::{OwnerIdentity, custody};
+    use crate::services::tui_o::channel_policy::Adoption;
+    use crate::services::tui_o::store::{Initialized, OStore, StoreConfig};
+    let root = crate::config::TestRuntimeRootGuard::new();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let channel = 73369496;
+    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, root.path())
+        .unwrap()
+        .unwrap();
+    store
+        .begin_era(&[channel], chrono::Utc::now(), |channel| {
+            Ok(Initialized {
+                channel,
+                sources: vec![],
+                initial_anchor: 100,
+                build_digest: "test".into(),
+                at: chrono::Utc::now(),
+            })
+        })
+        .unwrap();
+    let config = serde_json::from_value(json!({"server":{},"cluster":{"enabled":true,"instance_id":"mac-a","gateway_preferred_instance_id":"mac-a"},
+        "agents":[{"id":"custody-agent","name":"fixture","channels":{"claude":{"id":channel.to_string(),"runtime":"tui"}}}],
+        "tui_o":{"writer":{"channels":[channel]}}})).unwrap();
+    let _selected = cutover::test_override::force_boot(
+        BootChannels::validate(&config)
+            .unwrap()
+            .adopted(Adoption::Committed),
+    );
+    let snapshot = cutover::boot_snapshot().unwrap();
+    let (registry, shared) = runtime(&pool, ProviderKind::Claude, channel, "gateway").await;
+    let server = gateway_context(&shared, channel).await;
+    let gate = crate::services::tui_o::ownership::gate("claude");
+    gate.acquired();
+    let ready = host::process_readiness();
+    let config = TuiOConfig::default();
+    let mut competing = pool.begin().await.unwrap();
+    custody::lock(
+        &mut competing,
+        &OwnerIdentity::new("claude", &channel.to_string()),
+    )
+    .await
+    .unwrap();
+    super::super::super::owner_execution::prepare(&ProviderKind::Claude, Some(&pool)).await;
+    assert!(snapshot.execution(channel).unwrap().permit.is_err());
+    spawn(&shared, &ProviderKind::Claude, None, true);
+    assert!(!ready.is_hosted(channel));
+    assert!(matches!(
+        for_input_placement("claude", channel).await,
+        IntakeRoute::Hold(_)
+    ));
+    super::super::super::owner_cleanup::refresh_writers(
+        &shared,
+        &ProviderKind::Claude,
+        Some(&config),
+    )
+    .await;
+    assert!(
+        !ready.is_hosted(channel),
+        "a temporary observation cannot start the skipped unmanaged host"
+    );
+    assert!(matches!(
+        for_input_placement("claude", channel).await,
+        IntakeRoute::Hold(_)
+    ));
+    competing.rollback().await.unwrap();
+    super::super::super::owner_execution::refresh(&ProviderKind::Claude, Some(&pool)).await;
+    assert!(snapshot.execution(channel).is_none());
+    gate.uncertain();
+    super::super::super::owner_cleanup::refresh_writers(
+        &shared,
+        &ProviderKind::Claude,
+        Some(&config),
+    )
+    .await;
+    assert!(
+        !ready.is_hosted(channel),
+        "Unknown lease cannot start a host"
+    );
+    gate.lost();
+    super::super::super::owner_cleanup::refresh_writers(
+        &shared,
+        &ProviderKind::Claude,
+        Some(&config),
+    )
+    .await;
+    assert!(!ready.is_hosted(channel), "Lost lease cannot start a host");
+    gate.acquired();
+    for role in ["worker", "standby"] {
+        let (_registry, other) = runtime(&pool, ProviderKind::Claude, channel, role).await;
+        super::super::super::owner_cleanup::refresh_writers(
+            &other,
+            &ProviderKind::Claude,
+            Some(&config),
+        )
+        .await;
+        assert!(
+            !ready.is_hosted(channel),
+            "{role} cannot start an unmanaged host"
+        );
+    }
+    {
+        let (ambiguous, first) = runtime(&pool, ProviderKind::Claude, channel, "gateway").await;
+        let second = unregistered_gateway(&pool, &ambiguous, channel).await;
+        ambiguous.register("claude".into(), second.clone()).await;
+        for candidate in [&first, &second] {
+            super::super::super::owner_cleanup::refresh_writers(
+                candidate,
+                &ProviderKind::Claude,
+                Some(&config),
+            )
+            .await;
+            assert!(
+                !ready.is_hosted(channel),
+                "ambiguous gateway runtimes cannot start an unmanaged host"
+            );
+        }
+    }
+    let unregistered = unregistered_gateway(&pool, &registry, channel).await;
+    super::super::super::owner_cleanup::refresh_writers(
+        &unregistered,
+        &ProviderKind::Claude,
+        Some(&config),
+    )
+    .await;
+    assert!(
+        !ready.is_hosted(channel),
+        "an unregistered runtime cannot use another runtime's gateway registration"
+    );
+    for (name, flag) in [
+        ("shutting_down", &shared.restart.shutting_down),
+        ("restart_pending", &shared.restart.restart_pending),
+    ] {
+        flag.store(true, Ordering::SeqCst);
+        super::super::super::owner_cleanup::refresh_writers(
+            &shared,
+            &ProviderKind::Claude,
+            Some(&config),
+        )
+        .await;
+        assert!(
+            !ready.is_hosted(channel),
+            "{name} cannot start an unmanaged host"
+        );
+        flag.store(false, Ordering::SeqCst);
+    }
+    shared.settings.write().await.allowed_channel_ids = vec![channel + 1];
+    super::super::super::owner_cleanup::refresh_writers(
+        &shared,
+        &ProviderKind::Claude,
+        Some(&config),
+    )
+    .await;
+    assert!(
+        !ready.is_hosted(channel),
+        "a gateway cannot start a channel outside its allowlist"
+    );
+    shared.settings.write().await.allowed_channel_ids = vec![channel];
+    super::super::super::owner_cleanup::refresh_writers(&shared, &ProviderKind::Claude, None).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while for_input_placement("claude", channel).await != IntakeRoute::Gateway {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("live input must resume after the gateway starts the skipped writer");
+    let hosted = ready
+        .hosted_by(channel)
+        .expect("the recovered writer exists");
+    for _ in 0..2 {
+        super::super::super::owner_cleanup::refresh_writers(
+            &shared,
+            &ProviderKind::Claude,
+            Some(&config),
+        )
+        .await;
+        assert_eq!(ready.hosted_by(channel), Some(hosted));
+        assert_eq!(
+            for_input_placement("claude", channel).await,
+            IntakeRoute::Gateway
+        );
+    }
+    server.abort();
+    pool.close().await;
+}
+
 #[tokio::test]
 async fn owner_host_resident_refresh_recovers_after_real_lock_timeout_pg() {
     if !cutover::test_override::isolated_binding_case(concat!(
@@ -396,6 +622,10 @@ async fn owner_refresh_stale_unmanaged_claim_releases_only_execution_hold_pg() {
             .adopted(Adoption::Held),
     );
     let snapshot = cutover::boot_snapshot().unwrap();
+    #[cfg(unix)]
+    let (_registry, shared) = runtime(&pool, ProviderKind::Claude, channel, "gateway").await;
+    #[cfg(unix)]
+    let server = gateway_context(&shared, channel).await;
     let source_root = tempfile::tempdir().unwrap();
     let transcript = source_root.path().join("live.jsonl");
     std::fs::write(&transcript, b"").unwrap();
@@ -449,6 +679,13 @@ async fn owner_refresh_stale_unmanaged_claim_releases_only_execution_hold_pg() {
     competing.rollback().await.unwrap();
     for _ in 0..2 {
         refresh().await;
+        #[cfg(unix)]
+        super::super::super::owner_cleanup::refresh_writers(
+            &shared,
+            &ProviderKind::Claude,
+            Some(&TuiOConfig::default()),
+        )
+        .await;
         assert!(
             snapshot.execution(channel).is_none(),
             "a stale host must not retain a recovered execution read's hold"
@@ -460,6 +697,8 @@ async fn owner_refresh_stale_unmanaged_claim_releases_only_execution_hold_pg() {
             IntakeRoute::Hold(_)
         ));
     }
+    #[cfg(unix)]
+    server.abort();
     pool.close().await;
 }
 

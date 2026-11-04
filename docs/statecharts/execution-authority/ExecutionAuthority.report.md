@@ -1,14 +1,25 @@
-# ExecutionAuthority: temporary refresh recovery
+# ExecutionAuthority: prepare 실패 뒤 누락된 gateway writer 복구
 
-기준 코드는 `02887f80a0da52493b223e0b91e10f605999b66e`다. `Fix="main"`은 #7733 이전, `fix1`은 배포된 #7733, `fix2`는 이번 레인에서 구현한 같은 absent permit의 복구, `nowait`는 모든 host retirement 대기를 건너뛰는 음성 대조군이다. 모델은 생산 gate를 전수조사한 뒤 **provider lease gate와 execution permit gate만** 사용한다. 별도의 “permit 없는 view gate”는 생산 코드에 없다. `fix2`는 `refresh`가 Option permit 전체를 전달하고 `resume_execution`이 verified permit과 다음 permit이 모두 None이면 Held view를 제거하는 수리와 대응한다. 계측용 진단 기록은 권한 판정을 바꾸지 않아 모델의 권한 상태에 포함하지 않는다.
+기준 수리 전 코드는 `46f4d73a2d78ccdc77c52369c7106cea07c61b1c`다. r2 모델은 `Prepare`가 항상 성공하고 `TickFails`는 이미 writer가 첫 POST를 잡은 뒤에만 가능했다. 따라서 첫 prepare 실패 때문에 **claim 자체가 만들어지지 않는 부팅**은 이전 PASS의 검증 범위에 없었다. r3는 이 누락을 생산 시작 경로에 맞춰 추가했다.
 
-아래 기존 경로의 file:line 좌표는 기준 코드의 좌표다. 이번 구현의 최종 좌표와 실행 증거는 레인 `report-2.md`에 기록한다.
+이번 모델은 두 결함을 분리한다. `None → temporary → None`의 허위 CHANGED는 fix2에서 이미 수리했다. 최초 prepare 실패로 시작이 제외된 unmanaged writer를 정상 None 뒤 다시 시작시키는 연결은 fix3가 추가한다. 운영 17:21 표본의 영구 입력 중단 원인 전체를 확정했다는 뜻은 아니며, actor crash나 stale claim을 그 표본에 임의로 더하지 않는다.
 
-이번 모델은 출력 custody 경합과 허위 CHANGED를 증명한다. **제공된 운영 표본의 영구 입력 중단 원인 전체를 확정한 모델은 아니다.** 정상 tracked lease writer는 배포된 `fix1`에서도 허위 CHANGED를 기록한 뒤 대기 없이 view를 복원한다. 영구 wait 반례에는 아래의 추가 abnormal host 사건이 필요하며, 그 사건은 운영 표본에서 관측되지 않았다.
+## 시작 경로와 값 영역
 
-## 생산 시작 경로와 모델 값 영역
+생산 host gate는 provider lease와 execution permit 두 종류다. permit 없는 Held view는 별도의 gate가 아니며 `cutover::boot_ownership`이 candidate를 제거한다. gateway ordinary spawn도 claim 이전에 해당 채널을 제외한다. worker/standby의 기존 `spawn_execution`은 verified permit view가 있는 채널을 대상으로 유지한다.
 
-공통 생산 constructor는 `runtime_bootstrap/o_writer_host.rs:361-400`이며 :398에서 항상 provider별 `ownership::gate`를 전달한다. `tui_o/ownership.rs:190-196`은 같은 provider에 같은 Arc를 돌려주며 생산에서 map 제거/교체는 없다. `writer/host.rs:555-582`는 Some(Ok(permit))에 한해서 이 gate를 permit.gate로 대체한다. None은 `pg_gateway=true`일 때 lease gate로만 시작하고, Err view는 claim을 release하고 시작하지 않는다.
+| 모델 요소 | 생산 대응 |
+|---|---|
+| `Prepare` / `PrepareFails` | `runtime_bootstrap.rs:256`의 `owner_execution::prepare`; 성공이면 None/permit 설치, 최초 일시 오류면 permit 없는 Held 설치 |
+| `StartWriter` / `StartWriterSkipsHeld` | ordinary gateway spawn과 `boot_ownership`의 Err candidate 제외; 제외 시 `Readiness::claim` 자체를 부르지 않음 |
+| `TickObserves` | 기존 2초 cleanup의 정상 execution 관측; fix2/fix3는 같은 None의 Held view만 제거 |
+| `SpawnExecution` | 기존 worker/standby/managed permit 시작. unmanaged의 view None을 대상으로 넓히지 않음 |
+| `ResumeGatewayWriter` | r3 cleanup의 gateway 전용 복구 시작 연결. 정상 None과 claim 없음, 같은 provider의 유일한 현재 gateway 시작 권한이 있어야 함 |
+| `TrackWriter` | claim 이후 store/actor 준비와 Live 등록. 건강한 저장소·metadata가 결국 준비된다는 시작 공정성 |
+| `FirstPostBegins → TickFails → FirstPostCompletes` | 기존 출력 custody 획득·2초 lock timeout·Discord future 완료 뒤 해제 |
+| `HostAbnormalExit` / `hk="stale"` | 별도 actor/host 비정상 종료로 Live 없이 claim만 남음. 이번 P1 반례에는 필요하지 않은 추가 사건 |
+
+기존 시작 경로 전수표를 유지한다. 아래 좌표는 최초 조사 기준 `02887f80a0`이며 r3에서 기존 gate 선택을 바꾸지 않는다. r3의 새 복구 진입점은 위 행동 표의 `ResumeGatewayWriter`다.
 
 | 시작 진입점 | gate / 닫히는 사건 | None / 같은 permit / 다른 permit / temporary | 모델·시험 대응 |
 |---|---|---|---|
@@ -24,99 +35,101 @@
 
 permit gate는 `channel_policy.rs:478-483`에서 temporary이면 uncertain, non-temporary면 close된다. 같은 tuple은 retained permit을 :517-526에서 같은 gate로 복구하며 실제 owner/generation 변경은 old gate를 닫고 host retirement를 확인한다. lease gate의 정상 종료/불확실 처리는 `gateway_lease.rs:590-593,:620-624,:644,:669,:691`, `shutdown.rs:259-263`에 있다. execution refresh는 이 lease를 교체하지 않는다.
 
-## 행동과 운영 시각 대조
+`Role="gateway"`는 단순 문자열 역할보다 구체적인 **시작 판정 권한**의 추상값이다. 현재 provider가 같고, health registry의 Gateway entry가 같은 SharedData Arc를 가리키며, shutting_down/restart_pending이 아니고, 해당 채널이 현재 런타임에 허용되는 조건을 통과한 경우다. worker/standby 대조는 이 권한이 없다. 등록 누락·지난 SharedData·비활성/채널 불허는 같은 gateway 자격 실패로 소스와 PG 대조시험에서 확인한다; 각 세부 guard를 별도 모델 변수로 만들지는 않았다.
 
-| 모델 행동 | 생산 코드 / 의미 | 운영 표본과의 관계 |
-|---|---|---|
-| 초기 restart → `Prepare` | `runtime_bootstrap.rs:256`, `owner_execution.rs:42-50`: None 정상 read면 view 없음 | 재시작 뒤 unmanaged 판정이면 gateway 시작만 가능 |
-| `StartWriter → TrackWriter` | `host.rs:549` claim, :855 actor spawn, :859 gate Live 등록 | 새 관측에서 hosted는 17:21:14.982~15.037, resume 15.072~25.878. 정상 실행이라면 17:21:27 첫 POST보다 약 12초 전에 등록됨 |
-| `FirstPostBegins` | `outbound/o_writer_io.rs:128-145`, `owner_record/output.rs:95,:143-157`: Discord raw future 동안 custody xact lock 유지 | first_post 17:21:27.425. 60초 raw timeout보다 짧은 POST도 2초 lock timeout을 일으킴 |
-| `TickFails` | `ownership/execution.rs:134-140` lock_timeout=2s, `owner_execution.rs:125-134` temporary suspend | 17:21:29.869 temporary lock timeout과 부합. 실제 PG backend holder ID까지 관측한 것은 아님 |
-| `FirstPostCompletes` | raw 완료/guard rollback으로 custody 해제 | first_posted 17:21:33.149 |
-| `TickObserves` | `owner_execution.rs:139-155`는 None 복구를 시도하지 않고 CHANGED로 분류 | 17:21:33.151 prior_permit=false/next_permit=false와 일치. CHANGED 로그는 hosted_under 검사 **전**이므로 이 로그만으로 false/3초 timeout을 알 수 없음 |
-| `HostAbnormalExit` | `host.rs:988` join 실패→settled=false, :612에서 release 생략, Drop :141-143이 Live만 제거하고 hosted claim 유지 | **추가 가정**. 제공 표본에 actor 비정상 종료나 stale claim 증거가 없음 |
-| `WaitTimeout` 반복 | `owner_execution.rs:161-170` hosted_under=false, is_hosted=true 3초 지속이면 continue | stale claim에서는 실코드 반례. 정상 tracked lease에서는 이 경로를 타지 않으므로 운영의 영구 중단 원인은 미확정 |
+`Lease`는 시작 판정 시 provider lease의 `owned`/`unknown`/`lost` 샘플이다. permit gate의 ExecutionOwned는 이 provider lease 값이 아니다. worker/standby/Unknown/Lost 네 음성 cfg는 역할·lease 상태를 고정한 대조이며, **샘플 뒤 lease 전환을 모델링하지 않는다.** 생산도 gate mutex로 host claim 생성을 원자화하지 않는다. 샘플 뒤 lease가 바뀌면 이미 생겼거나 방금 생긴 host는 같은 provider gate의 기존 until_owned/readiness/raw-effect fence를 따른다. 이 모델의 safety를 “lease가 Lost면 기존 host claim을 제거해야 한다”는 불변식으로 읽으면 안 된다.
 
-첫 번째 운영 표본의 17:13:07 temporary→17:14:35 CHANGED 간격은 단일 채널 모델로 설명하지 않는다. refresh는 provider 채널을 순차 처리하고, 다른 채널 작업·lease 상태·actor 건강성 증거가 없으므로 간격을 추정 원인으로 채우지 않는다.
+`UniqueGateway`는 같은 provider의 Gateway registry entry가 현재 SharedData 하나뿐이라는 복구 전용 guard다. 일반 부팅의 `StartWriter`는 기존 `CanStartUnmanaged`(역할·lease)만 사용하고, 새 `ResumeGatewayWriter`만 `CanRecoverUnmanaged`(역할·lease·유일성)를 사용한다. 모델 전용 `recovered_gateway` history monitor와 `NoAmbiguousRecoveryStart`는 복수 Gateway에서 새 복구 경로가 claim을 만들지 않음을 검사한다. 기존 ordinary boot에도 유일성 규칙이 있다고 가정하지 않는다.
 
-## 규칙과 검사 결과
+이 guard가 필요한 이유는 실제 PG gateway lease는 token_hash별이고 O gate는 provider별이기 때문이다. 모델은 토큰별 실제 lease owner/epoch를 독립적으로 추적하지 않는다. 같은 provider의 복수 Gateway는 복구를 fail closed하는 범위이며, 정밀 lease binding까지 이 모델이 증명했다는 뜻이 아니다.
 
-- `SameUnmanagedReadmits`: 동일 None을 읽고 CHANGED로 분류한 적이 없어야 한다. `misclassified`는 이 분류 사건을 기억하는 **모델 전용 history monitor**다. 정상 lease host가 즉시 view를 제거해도 잘못된 CHANGED 분류를 놓치지 않는다. 생산 새 상태를 제안하지 않는다.
-- `TemporaryReadHolds`: 읽기 오류인 동안 접수는 Hold다. 처음 실패하거나 연속 실패해도 이전 권한 없이 열리지 않는다.
-- `NoForeignPermitHost`: 다른 tuple을 설치할 때 옛 permit host가 살아 있으면 안 된다.
-- `AuthorityResumes`: identity 변경이 없는 실행에서는 PG가 다시 답한 뒤 execution view는 결국 held가 아니게 된다. stale claim이어도 execution authority를 영구 보류하면 실패한다.
-- `AdmissionResumes`: identity가 같고 abnormal stale host가 발생하지 않은 실행에서는 live 입력이 결국 재개된다. prepare/start/track, POST 완료, refresh tick, permit retire/spawn에 약한 공정성을 둔다.
-- `UnconditionalAdmissionResumes`: host 건강성 전제가 전혀 없는 원래 뜻의 `<>[]Admitted`도 별도로 실행한다. **stale host 자체는 이번 수정으로 고치지 않으므로 수정 후에도 실패한다.** 이 실패를 이름 변경으로 숨기지 않는다.
+## 새 prepare 실패 반례
 
-모든 변경 cfg를 그대로 읽고, liveness 실행에서만 safety invariant 줄을 제거한 임시 cfg에 PROPERTY 한 줄을 더했다. bounds나 Fix 값을 바꾸지 않았다. safety RED는 raw TLC rc=12 / statechart rc=1, liveness RED는 raw TLC rc=13이다.
+`ExecutionAuthorityBeforeGateway.cfg`는 r2의 fix2를 그대로 보존했다. 실제 TLC의 가장 짧은 AdmissionResumes 반례는5개 상태다.
 
-| cfg / 의미 | bounds (failure/change) | safety | AuthorityResumes | 건강한 host의 AdmissionResumes | 무조건 AdmissionResumes |
-|---|---:|---|---|---|---|
-| `ExecutionAuthorityMain.cfg` / #7733 전 | 1/0 | RED 12: SameUnmanagedReadmits | RED 13 | RED 13 | RED 13 |
-| `ExecutionAuthorityDeployed.cfg` / 수정 전 배포 #7733 | 1/0 | RED 12: SameUnmanagedReadmits | RED 13: 추가 stale claim 사건 필요 | **GREEN 0** | RED 13 |
-| `ExecutionAuthority.cfg` / 수정 후 | 2/2 | **GREEN 0**, 555 distinct | **GREEN 0** | **GREEN 0** | **RED 13**, stale host / 실제 identity 변경 별도 |
-| `ExecutionAuthorityNoWait.cfg` / fence 제거 mutant | 2/2 | RED 12: NoForeignPermitHost | GREEN 0 | GREEN 0 | RED 13 |
+1. restart: PG는 unmanaged None, execution view 없음, host/claim 없음.
+2. `PrepareFails`: 최초 읽기 일시 실패로 Held view 설치; host는 여전히 없음.
+3. `StartWriterSkipsHeld`: ordinary gateway spawn이 candidate에서 제외하므로 claim도 없음.
+4. `TickObserves`: PG 정상 None을 읽어 execution Held는 제거되지만 `spawn_execution`은 None view를 고르지 않음.
+5. stuttering: 기존 tick은 정상 None을 계속 읽어도 host 없음이 유지되어 입력이 계속 Hold.
 
-따라서 liveness 통과만으로 fence 안전성을 보증하지 않으며, 정상 host 조건을 생략해 입력 복구를 주장하지 않는다. `expected.tsv`에는 수정 전의 의도된 safety 실패와 수정 후 성공, fence mutant 실패를 등록했다. CI 검사기는 수정하지 않았다. CI safety 전체 21 cfg는 예상 violation 집합과 일치해 rc=0이다. CI는 여전히 PROPERTY를 거부하며 liveness 자동 실행 등록은 #7764 레인의 별도 범위다.
-
-## 최단 반례와 복구
-
-수정 전 safety 최단 경로는 7 step이다. **추가 crash 없이도** restart→prepare None→gateway start→Live track→첫 POST custody 획득→temporary timeout→POST 완료→정상 None에서 허위 CHANGED가 나온다. 정상 lease host라면 그 tick에 view를 바로 복원하므로 이것은 영구 중단 반례가 아니다.
-
-수정 전 `AuthorityResumes`의 10-state lasso는 위 흐름 중 POST 완료 뒤 **추가 `HostAbnormalExit`**를 넣고 정상 None→CHANGED/대기→3초 timeout→정상 None/대기를 영원히 반복한다. actor abnormal event가 운영에서 있었다고 주장하지 않는다. 수정 후 같은 None은 gate 종류나 claim 상태를 조회하기 전에 복구되므로 authority liveness가 통과한다. stale actor가 여전히 입력을 못 받는 것은 `UnconditionalAdmissionResumes` 실패로 남는다.
-
-실행한 차트는 `logs/authority-r1-deployed-classification-chart/chart.mmd`와 fixed 차트에 있다. 수정 전 차트는 17 state/20 arrow이고, 같은 label 안에 머무는 7개 step만 숨긴다. 제공된 운영 순서 중 미확정 추가 사건을 화살표에 “추가 가정”으로 표시한다. 관측된 정상 lease 경로의 핵심 Mermaid는 다음과 같다(별도 전체 생성 차트에는 stale 갈래도 포함).
+이 경로는 actor crash, stale claim, lease loss, owner 변경, 첫 POST를 필요로 하지 않는다. 기존 O 채널의 Committed store가 건강하다는 이번 회귀시험 전제에서 순수하게 시작 연결이 빠진 반례다.
 
 ```mermaid
 stateDiagram-v2
   [*] --> Restart
-  Restart --> Prepared: prepare 정상 None
-  Prepared --> LeaseWriter: gateway 시작과 Live 등록
-  LeaseWriter --> Posting: 첫 POST가 custody 잠금 획득
-  Posting --> Held: 2초 lock timeout temporary
-  Held --> Readable: POST 완료와 custody 해제
-  Readable --> Restored: 다음 tick 같은 None
-  Restored: 수정 후 권한 복구
-  Readable --> WrongChanged: 수정 전 허위 CHANGED
-  WrongChanged --> HealthyRestored: 정상 lease host는 즉시 복구
-  Readable --> StaleClaim: 추가 가정: actor 비정상 종료
-  StaleClaim --> Waiting: 수정 전 같은 None을 CHANGED로 오판
-  Waiting --> Continue: 3초 만료
-  Continue --> Waiting: 다음 tick 같은 None
-  StaleClaim --> Restored: 수정 후 같은 None 즉시 복구
+  Restart --> HeldNoHost: prepare 최초 temporary
+  HeldNoHost --> Skipped: ordinary gateway 시작 제외
+  Skipped --> NormalNoHost: 다음 refresh 정상 None
+  NormalNoHost --> NormalNoHost: 수리 전 다음 tick도 host 없음
+  NormalNoHost --> Claimed: 수리 후 현재 gateway 권한으로 재시작
+  Claimed --> Ready: 같은 provider gate 아래 actor와 Live 준비
+  Ready --> Ready: 입력 Gateway
 ```
+
+fix3의 `ResumeGatewayWriter`는 같은 조건에서 claim을 만들고 기존 `TrackWriter`를 통해 입력을 재개한다. 기존 claim이 있으면 이 행동은 disabled이므로 stale claim을 지우거나 덮어쓰지 않는다. managed permit 시작과 retirement는 이전 행동을 그대로 사용한다.
+
+## 규칙과 실제 결과
+
+- `SameUnmanagedReadmits`: 동일 None을 허위 CHANGED로 분류하지 않는다. 모델 history monitor는 생산 새 권한 상태가 아니다.
+- `TemporaryReadHolds`: 첫 prepare 실패와 이후 연속 실패 모두 정상 관측 전에는 접수를 열지 않는다.
+- `NoForeignPermitHost`: 다른 tuple이 설치되었는데 옛 permit host가 살아 있으면 안 된다.
+- `NoUnauthorizedUnmanagedHost`: 고정 역할/lease 대조에서 gateway 자격과 Owned lease 없이 unmanaged host/claim을 만들지 않는다.
+- `NoAmbiguousRecoveryStart`: 복수 Gateway registry에서는 새 복구 시작 경로가 unmanaged claim을 생성하지 않는다. 기존 ordinary boot의 권한 계약을 넓히지 않는다.
+- `AuthorityResumes`: identity가 바뀌지 않는 실행에서 정상 관측 후 authority Held가 영구 유지되지 않는다.
+- `AdmissionResumes`: identity가 같고 stale host가 발생하지 않으며 이 런타임이 해당 채널을 처리할 권한이 있으면 실제 입력이 결국 재개된다. 기존 네 positive cfg는 모두 gateway/Owned이므로 이 권한 조건을 추가해도 기존 속성의 의미가 약해지지 않는다.
+- `UnconditionalAdmissionResumes`: 건강성·역할 권한 전제를 두지 않는 원래 무조건 속성도 유지·실행한다. 죽은 writer나 권한 없는 unmanaged 런타임에서 입력을 열지 않으므로 해당 RED를 숨기지 않는다.
+
+| cfg / 의미 | Safety raw rc | AuthorityResumes | AdmissionResumes | UnconditionalAdmissionResumes |
+|---|---:|---:|---:|---:|
+| `ExecutionAuthorityMain.cfg` / #7733 전 | 12 | 13 | 13 | 13 |
+| `ExecutionAuthorityDeployed.cfg` / #7733 | 12 | 13 | 13 | 13 |
+| `ExecutionAuthorityBeforeGateway.cfg` / r2 수리 전 | 0 | 0 | 13 | 13 |
+| `ExecutionAuthority.cfg` / r3 수리 후 | 0 | 0 | 0 | 13 |
+| `ExecutionAuthorityNoWait.cfg` / retirement 제거 mutant | 12 | 0 | 13 | 13 |
+| `ExecutionAuthorityWorker.cfg` / worker / Owned | 0 | 0 | 0 | 13 |
+| `ExecutionAuthorityStandby.cfg` / standby / Owned | 0 | 0 | 0 | 13 |
+| `ExecutionAuthorityUnknown.cfg` / gateway / Unknown | 0 | 0 | 0 | 13 |
+| `ExecutionAuthorityLost.cfg` / gateway / Lost | 0 | 0 | 0 | 13 |
+| `ExecutionAuthorityAmbiguousGateway.cfg` / 복수 gateway / Owned | 0 | 0 | 0 | 13 |
+
+
+raw rc0=해당 검사 통과, safety12=선언된 invariant 반례, temporal13=liveness 반례다. 수정 후 positive cfg는 safety·authority·admission **GREEN**이며 safety 탐색은 **951 distinct states**다. 수정 전 main/fix1/fix2/nowait의 AdmissionResumes는 모두 **RED13**이다. fix2는 authority와 safety가 원래 GREEN이어도 prepare 실패 뒤 실제 입력은 돌아오지 않음을 드러낸다.
+
+worker/standby/Unknown/Lost/복수 Gateway cfg의 조건부 AdmissionResumes0은 권한 없는 unmanaged 입력을 열었다는 뜻이 아니다. 그 경우 input liveness의 serving-runtime 전제가 거짓이며, managed permit의 정상 시작 경로는 계속 검사한다. 새 unmanaged 시작 금지는 별도 `NoUnauthorizedUnmanagedHost`와 `NoAmbiguousRecoveryStart` safety가 검사한다. 기존 claim 중복 방지는 hk=none이라는 생성 행동의 전제와 실제 생산 claim 시험으로 대조하며, 모델이 동시 host 두 개를 별도 개체로 탐색하는 것은 아니다.
+
+cfg는 INVARIANT와 SPECIFICATION만 갖는다. liveness는 각각 같은 cfg의 INVARIANT 줄만 제거하고 임시 PROPERTY 한 줄을 더한 복사본에서 실행했다. bounds나 Fix 값을 실행 때 바꾸지 않았다. `expected.tsv`는 예상 safety 위반 집합을 저장하는 기존 형식을 유지한다. BeforeGateway의 safety `-`는 temporal 통과를 뜻하지 않으며, 수리 전 AdmissionResumes13/수리 후0을 주석과 이 표에 분리했다. CI liveness 등록은 #7764 레인의 별도 범위로, 이 레인은 CI 검사기 소스를 바꾸지 않았다.
+
+전체 CI safety는 **27 cfg / 196.5초 / rc0**으로 예상 violation 집합과 일치했다. 최종 rc와 원시 로그는 레인 `model-r3.md`에 기록한다.
+
+## 범위와 가정
+
+- 로컬 O 채널의 정상 Committed store/metadata와 scheduler/기존 cleanup·host start의 약한 공정성을 가정한다. 디스크 손상, native source proof 실패, 초기화가 영구 멈추는 actor 건강성은 이번 P1의 전제가 아니다.
+- lease/role은 각 cfg에서 고정되어 있다. lease-loss 뒤 기존 host의 대기/재획득을 없애는 새 계약을 만들지 않는다.
+- gateway 복구의 새 권한 계약은 정상 None·허용된 유일한 현재 gateway·Owned 샘플·기존 claim 보존이다. 새 authority source를 만들지 않고 기존 health registry/provider gate/host claim을 재사용한다. 새로운 시작 연결과 safety 계약이므로 단순 delta 이상으로 첫 리뷰가 필요한 변경임을 인계 보고서에 표시한다.
+- 출력 custody와 Discord 요청 직렬화는 유지한다. 처음 prepare의 오류는 출력 경로 없이도 가능하도록 모델에 추가했지만, 기존 첫 POST lock timeout 행동도 남겼다.
+- runtime 역할·허용 channel·current SharedData mismatch의 세부 interleaving, token_hash별 lease owner/epoch, 여러 채널의 순차 지연은 별도 변수로 탐색하지 않는다. 생산 부정 대조와 source 좌표로 보완해야 한다.
+- 현재 production의 routed intake row 삭제가 없어 managed→unmanaged 전이는 없다. owner A/B는 identity/executor/generation/session_ref tuple 변화의 추상화이며 새 retention이 생기면 이 가정을 다시 검토해야 한다.
+- 운영 장기 중단의 실제 branch 판별은 r2에 추가한 outcome/readmission 계측을 이용한 별도 관측 사항이다. 이번 P1 경로를 수리했다고 특정 운영 표본에 최초 prepare 오류가 있었다고 단정하지 않는다.
 
 ## 이전 범위 밖 항목 재검토
 
 | 기존 범위 밖 | 이번 결함과의 관계 / 이번 범위 |
 |---|---|
-| lease loss/re-acquisition | view가 복구되어도 lease Unknown/Lost면 입력은 닫혀야 한다. 모델은 lease Owned 구간에 한정한다. 이번 수리가 lease를 강제로 열지 않는다. 실제 운영 중단의 다른 가능성은 미확정으로 남는다. |
-| host crashes | **포함**: abnormal join으로 Live 없는 stale claim이 남는 행동. 이 사건은 authority의 영구 wait를 재현하지만 실제 운영에서 관측됐다는 주장은 하지 않는다. host 건강성 없는 무조건 admission liveness는 수정 후에도 실패함을 검사한다. |
-| other channels | custody key는 provider+channel이므로 다른 채널 POST가 같은 key를 직접 잠그지는 않는다. provider 순차 refresh/PG 부하로 지연이 늘 수 있으나 한 채널 모델에서 제외한다. |
-| O output path | **포함**: 첫 POST가 custody를 획득·보유·해제하고 held 동안만 lock timeout이 발생한다. Discord 응답 내용·취소·재전송은 모델 밖이며 기존 output owner fence를 바꾸지 않는다. |
+| lease loss/re-acquisition | 시작 판정의 Owned/Unknown/Lost 음성 대조를 추가했다. 고정 cfg는 sample 이후 lease 전환 자체를 탐색하지 않으며 기존 gate fence를 재사용한다. |
+| host crashes | abnormal join 뒤 stale claim 행동은 유지한다. 이번 최초 prepare 실패 반례에는 필요하지 않다. stale 건강성을 수리하지 않으므로 무조건 admission은 여전히 RED다. |
+| other channels | custody key는 provider+channel이다. provider 순차 refresh/PG 부하 지연, 여러 채널 공정성은 한 채널 모델 밖이다. |
+| O output path | 첫 POST의 custody 보유·해제와 lock timeout 행동은 포함한다. 최초 prepare 실패는 host/POST 이전에도 가능하도록 추가했다. Discord 응답·취소·재전송과 출력 직렬화 계약은 바꾸지 않는다. |
 
-기타 한계: local native binding 검증, Fresh→Bound 정제, 외국 executor의 read error 문자열, DB SQL별 latency는 추상화했다. owner tuple 변화는 A/B로 표현한다. 현재 생산에 routed intake row DELETE가 없다는 코드 전수조사에 따라 managed→unmanaged 전이는 여전히 없으며, 새 retention이 생기면 재검토해야 한다.
+## 재현과 증거
 
-## 재현 명령과 증거
-
-저장소 root에서 safety를 재현한다.
+레인 증거 루트는 `/Users/itismyfield/.adk/release/lane-runs/hl-20260925/i7731b`다.
 
 ```sh
+python3 <lane>/logs/run-authority-r3.py
 python3 scripts/ci/statecharts_tlc.py \
   --java /opt/homebrew/opt/openjdk/bin/java \
   --jar /Users/itismyfield/.local/share/tla2tools/tla2tools-1.7.4.jar
 ```
 
-모든 cfg의 liveness를 재현한 스크립트는 레인 증거 `logs/run-authority-r2.py`다. 각 cfg를 TemporaryDirectory에 복사하고 INVARIANT 줄을 제거한 뒤 `PROPERTY AuthorityResumes`, `PROPERTY AdmissionResumes`, `PROPERTY UnconditionalAdmissionResumes`를 각각 추가한다. raw 결과는 `logs/*-r2.log`, 요약은 `logs/authority-r2-summary.json`이다. 재부팅 뒤 모델·cfg·expected.tsv의 SHA256이 저장된 입력과 같고 16개 로그가 각각 정상 종료한 것을 확인하여 완료된 결과를 재사용했다(`logs/authority-final-source-hashes.json`). 중간에 끊긴 전체 CI 검사만 다시 끝까지 실행한 로그는 `logs/statecharts-ci-final.log`다. 상태 수 555는 수정 후 safety와 각 liveness에서 각각 확인했다. Java/TLC 오류는 실패로 구분했으며 rc12/13 이외 오류를 성공으로 집계하지 않았다.
-
-전체 생성 차트를 새 출력 폴더에 재생성하는 명령은 다음과 같다. scratch source는 저장소 모델 복사본에 `UnmanagedInit == Init /\ pg="none"`만 더하고, cfg는 같은 1 failure/0 change로 고정하여 permit 경로를 숨긴 시각화다. 위 전체 cfg 검사와 분리한다.
-
-```sh
-TLA2TOOLS=/Users/itismyfield/.local/share/tla2tools/tla2tools-1.7.4.jar \
-JAVA=/opt/homebrew/opt/openjdk/bin/java \
-/Users/itismyfield/.codex/skills/statechart/scripts/statechart \
-  <lane-logs>/authority-r1-source/ExecutionAuthority.tla \
-  --config <lane-logs>/authority-r1-source/deployed.cfg \
-  --view <lane-logs>/authority-r1-source/authority.view.mjs \
-  --out /tmp/authority-new-output
-```
+첫 명령은 scratch TemporaryDirectory에 모델/cfg를 복사하여 safety와 세 liveness를 10cfg×4=40회 실행한다. 원시 결과 `logs/*-r3.log`, 요약 `logs/authority-r3-summary.json`, 모델/cfg/expected SHA256은 `logs/authority-r3-source-hashes.json`이다. source 모델에 PROPERTY를 직접 넣지 않는다. 전체 CI는 `logs/statecharts-ci-r3.log`이며, 진행 중 로그를 PASS로 쓰지 않는다.
