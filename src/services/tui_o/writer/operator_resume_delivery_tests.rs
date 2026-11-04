@@ -420,6 +420,7 @@ async fn operator_resume_schema_and_existing_ledger_violations_stay_stopped() {
         .append_ledger(LedgerEntry::Posted {
             serial: 9,
             msg_id: 50,
+            confirmation: None,
         })
         .unwrap();
     drop(channel);

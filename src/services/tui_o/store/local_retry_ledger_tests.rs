@@ -70,6 +70,7 @@ fn local_retry_reducer_rejects_duplicate_mismatched_or_ineligible_children() {
         LedgerEntry::Posted {
             serial: 0,
             msg_id: 1,
+            confirmation: None,
         },
     ];
     for outcome in outcomes {

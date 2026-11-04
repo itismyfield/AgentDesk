@@ -261,6 +261,7 @@ async fn admission_failure_case(failure: Failure, broken: bool) {
         LedgerEntry::Posted {
             serial: 1,
             msg_id: 900,
+            confirmation: None,
         },
     );
     let record = writer.store.ledger().piece(0).unwrap().clone();

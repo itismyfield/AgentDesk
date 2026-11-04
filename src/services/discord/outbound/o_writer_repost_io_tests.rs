@@ -767,7 +767,11 @@ mod settle_over_http {
             };
             recorded.append_ledger(prepared).unwrap();
             recorded
-                .append_ledger(LedgerEntry::Posted { serial, msg_id })
+                .append_ledger(LedgerEntry::Posted {
+                    serial,
+                    msg_id,
+                    confirmation: None,
+                })
                 .unwrap();
         }
         drop(recorded);
