@@ -163,11 +163,10 @@ pub(in crate::services::discord) fn owner_drive(
         Box::pin(async move {
             use crate::services::discord::queue_io::input_ingress as ingress;
             let original = front.clone();
+            let synthetic = synthetic(&mailbox, &front).await;
             let result = match mailbox.has_active_turn().await {
                 // A routine, scheduled or HTTP start completes only on its own turn.
-                Ok(true) if synthetic(&mailbox, &front).await => {
-                    Err("NotSent(\"synthetic_waits_idle\")".into())
-                }
+                Ok(true) if synthetic => Err("NotSent(\"synthetic_waits_idle\")".into()),
                 Ok(true) => {
                     let transition = runtime.as_ref().map(|shared| {
                         shared
@@ -192,7 +191,8 @@ pub(in crate::services::discord) fn owner_drive(
                 Ok(false) => idle(front).await,
                 Err(unreachable) => Err(format!("{unreachable:?}")),
             };
-            if let (Some(shared), Err(error)) = (&runtime, &result)
+            if !synthetic
+                && let (Some(shared), Err(error)) = (&runtime, &result)
                 && let Some(hold) = ingress::Hold::from_refusal(error)
             {
                 ingress::handoff_held(shared, &provider, ChannelId::new(channel), &original, hold)

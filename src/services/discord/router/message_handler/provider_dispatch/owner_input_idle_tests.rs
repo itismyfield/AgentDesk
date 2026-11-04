@@ -106,11 +106,24 @@ fn busy_arrival_before_row_handoff(merge: bool, missing: bool) {
         None,
     );
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (release_claim, claim_gate) = tokio::sync::oneshot::channel();
+    let claim_gate = Arc::new(std::sync::Mutex::new(Some(claim_gate)));
+    let (claim_entered, on_claim) = std::sync::mpsc::channel();
     let (record, handoff) = (seen.clone(), drive.handoff.clone());
     Arc::get_mut(&mut drive).unwrap().handoff = Arc::new(move |front| {
         let (record, handoff) = (record.clone(), handoff.clone());
+        let gate = if merge && front.1.message_id == 1_567_441_638_974_947_377 {
+            claim_gate.lock().unwrap().take()
+        } else {
+            None
+        };
+        let entered = claim_entered.clone();
         Box::pin(async move {
             let id = front.1.message_id;
+            if let Some(gate) = gate {
+                let _ = entered.send(());
+                let _ = gate.await;
+            }
             let result = handoff(front).await;
             record.lock().unwrap().push((id, result.clone()));
             result
@@ -204,17 +217,46 @@ fn busy_arrival_before_row_handoff(merge: bool, missing: bool) {
         }
         let id = 1_567_441_638_974_947_378;
         let channel = poise::serenity_prelude::ChannelId::new(rig.channel);
+        let mut release_pass = Some(release_pass);
         if merge {
-            let mut older = rig.original.clone();
-            older.message_id = id - 1;
-            older.source_message_ids = vec![older.message_id];
-            older.text = "older queued input".into();
-            older.merge_consecutive = true;
-            assert!(matches!(
+            let older =
+                crate::services::discord::router::response_format::build_race_requeued_intervention(
+                    UserId::new(7),
+                    MessageId::new(id - 1),
+                    "older queued input",
+                    true,
+                    None,
+                    false,
+                    true,
+                    vec![],
+                );
+            let intake = crate::services::discord::queue_io::input_ingress::ADOPTS.scope(
+                true,
+                crate::services::discord::queue_io::mailbox_enqueue_observed_intervention(
+                    &shared,
+                    &ProviderKind::Claude,
+                    channel,
+                    older,
+                    None,
+                ),
+            );
+            assert!(rig.runtime.block_on(intake).enqueued);
+            release_pass.take().unwrap().send(()).unwrap();
+            on_claim
+                .recv_timeout(Duration::from_secs(20))
+                .expect("older front's handoff in flight");
+            assert!(
                 rig.runtime
-                    .block_on(admit(&rig.mailbox, &older, AdmissionTicket::new())),
-                crate::services::discord::queue_io::input_owner::admission::Admission::Accepted(_)
-            ));
+                    .block_on(
+                        rig.mailbox
+                            .v2_request(|slot| Ok(slot.as_ref().unwrap().front_outstanding()))
+                    )
+                    .unwrap()
+            );
+            assert!(
+                rig.snapshot()["head_injection"].is_null(),
+                "no attempt before the claim"
+            );
         }
         let second =
             crate::services::discord::router::response_format::build_race_requeued_intervention(
@@ -242,7 +284,11 @@ fn busy_arrival_before_row_handoff(merge: bool, missing: bool) {
             intake.enqueued,
             "B committed through the real ingress: {intake:?}"
         );
-        release_pass.send(()).unwrap();
+        if merge {
+            release_claim.send(()).unwrap();
+        } else {
+            release_pass.take().unwrap().send(()).unwrap();
+        }
         let busy_settled = on_settled.recv_timeout(Duration::from_secs(20));
         let before_end = rig.events();
         let kept = rig.snapshot();
@@ -901,4 +947,101 @@ fn a_pane_under_another_account_is_replaced_before_any_front_is_written() {
     );
     assert_eq!(snapshot["retained_inputs"], json!([]), "{snapshot}");
     crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&rig.name);
+}
+
+/// Synthetic starts keep their own failure channel and wait for idle; neither phase posts a
+/// person's queue notice to their synthetic message id.
+#[tokio::test]
+async fn synthetic_starts_wait_busy_and_owe_no_human_hold_notice() {
+    use crate::services::discord::queue_io::input_owner::admission::admit_with_context;
+    use crate::services::discord::shared_state::test_rest;
+    use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    shared.restart.reconcile_done.store(true, Ordering::Relaxed);
+    for (index, origin) in ["headless", "routine", "scheduled"].into_iter().enumerate() {
+        let channel = ChannelId::new(7_272_830 + index as u64);
+        let mailbox = shared.mailbox(channel);
+        let path = crate::services::discord::runtime_store::discord_pending_queue_root()
+            .unwrap()
+            .join(format!("synthetic-notice/{channel}.json"));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        mailbox
+            .v2_adopt(path, "synthetic-notice".into())
+            .await
+            .unwrap();
+        let item: PendingQueueItem = serde_json::from_value(json!({
+            "author_id":1, "message_id":8_000_000_000_000_007_000u64 + index as u64,
+            "channel_id":channel.get(), "queued_generation":1,"text":"own turn only"
+        }))
+        .unwrap();
+        assert!(matches!(
+            admit_with_context(
+                &mailbox,
+                &item,
+                AdmissionTicket::new(),
+                json!({"origin":origin})
+            )
+            .await,
+            crate::services::discord::queue_io::input_owner::admission::Admission::Accepted(_)
+        ));
+        let (requests, _http) = test_rest::recording_mock(100, channel.get()).await;
+        let started = Arc::new(AtomicUsize::new(0));
+        let counted = started.clone();
+        let idle: Handoff = Arc::new(move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err("NotSent(\"idle_unobserved\")".into()) })
+        });
+        let mut drive = owner_drive(
+            (mailbox.clone(), None),
+            (ProviderKind::Claude, channel.get()),
+            idle,
+            Some(shared.clone()),
+        );
+        let (settled, mut on_settled) = tokio::sync::mpsc::unbounded_channel();
+        Arc::get_mut(&mut drive).unwrap().settled = Some(Arc::new(move || {
+            let settled = settled.clone();
+            Box::pin(async move {
+                let _ = settled.send(());
+            })
+        }));
+        crate::services::discord::queue_io::input_owner::drive::wake(drive.clone());
+        tokio::time::timeout(Duration::from_secs(20), on_settled.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+        mailbox
+            .restore_active_turn(
+                Arc::new(CancelToken::new()),
+                UserId::new(9),
+                MessageId::new(1),
+            )
+            .await;
+        crate::services::discord::queue_io::input_owner::drive::wake(drive);
+        tokio::time::timeout(Duration::from_secs(20), on_settled.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            started.load(Ordering::SeqCst),
+            1,
+            "{origin} waits while busy"
+        );
+        let snapshot = mailbox
+            .v2_request(|slot| slot.as_ref().unwrap().json())
+            .await
+            .unwrap();
+        assert_eq!(
+            snapshot["items"].as_array().unwrap().len(),
+            1,
+            "{origin} stays queued"
+        );
+        assert!(snapshot["head_injection"].is_null());
+        assert!(
+            requests.lock().unwrap().is_empty(),
+            "{origin} never posts human hold guidance"
+        );
+    }
 }

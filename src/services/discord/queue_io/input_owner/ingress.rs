@@ -160,6 +160,8 @@ impl Hold {
             || error.contains("unread")
             || error.contains("draft")
             || error.contains("notbusy")
+            || error.contains("notsteerable")
+            || error.contains("copymode")
             || error.contains("loadfailed")
             || error.contains("ledgerfull")
             || error.contains("ambiguousidenticalpending")
