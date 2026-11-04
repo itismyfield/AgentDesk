@@ -39,6 +39,44 @@ fn escapes(fx: &Fixture) -> usize {
     calls.iter().filter(escape).count()
 }
 
+#[test]
+fn all_65_busy_children_keep_their_pin_but_an_external_input_does_not() {
+    let fx = Fixture::new();
+    run(async {
+        fx.serve(Server::Live);
+        fx.pane(&running());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(7_757_100);
+        let session = "native-identity-65";
+        let (token, path) = generating_turn(&fx, session);
+        start(&shared, channel, &token).await;
+        native_inflight_row(channel, &token, session);
+        for child in 0..65 {
+            let attempt = format!("busy-{child}");
+            let frame = ledger(session, &attempt, &path, &format!("follow up {child}"));
+            token.native_stop.register_busy_child(&attempt);
+            append(&path, queued(&format!("row-{child}"), &frame));
+        }
+        append(&path, tool_use("tool-65"));
+        for external in [false, true] {
+            if external {
+                let frame = ledger(session, "external", &path, "another input");
+                append(&path, queued("row-external", &frame));
+                append(&path, tool_use("tool-external"));
+            }
+            let _ = fx.take_calls();
+            let result =
+                begin_user_stop(&shared, &ProviderKind::Claude, channel, true, "!stop").await;
+            assert!(matches!(result, CommandStop::Native(_)));
+            assert_eq!(escapes(&fx), usize::from(!external), "external={external}");
+            assert!(!token.cancelled.load(Ordering::Acquire));
+            assert!(mailbox_holds(&shared, channel, &token).await);
+            assert_eq!(tombstone(channel), None);
+        }
+        crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+    });
+}
+
 /// Neutral and own busy rows after the pinned input keep the Escape; any other prompt, a missing
 /// pin or a changed pane or file sends none and never falls back to a raw cancel.
 #[test]
@@ -181,22 +219,13 @@ fn rows_landing_while_the_stop_waits_on_the_composer_are_judged_again() {
             });
             held.recv_timeout(std::time::Duration::from_secs(1))
                 .unwrap();
+            let probed = super::super::super::native_stop::identity_probe_rendezvous(&session);
             let _ = fx.take_calls();
             let request = begin_user_stop(&shared, &ProviderKind::Claude, channel, true, "!stop");
             let land = async {
-                tokio::time::timeout(std::time::Duration::from_secs(8), async {
-                    while !fx
-                        .calls()
-                        .iter()
-                        .any(|call| call.starts_with("capture-pane"))
-                    {
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                    }
-                })
-                .await
-                .expect("the stop reads the pane before waiting on the composer");
-                // The probe's own check ends well inside this, so the row lands under the wait.
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                tokio::time::timeout(std::time::Duration::from_secs(8), probed)
+                    .await
+                    .expect("the stop checks its identity before waiting on the composer");
                 match case {
                     "own-busy-input" => {
                         let frame = ledger(&session, "busy-late", &path, "late follow up");
@@ -205,6 +234,7 @@ fn rows_landing_while_the_stop_waits_on_the_composer_are_judged_again() {
                     }
                     _ => append(&path, queued("row-late-typed", "typed while waiting")),
                 }
+                append(&path, tool_use("tool-after-rendezvous"));
                 release.send(()).unwrap();
             };
             let (result, ()) = tokio::join!(request, land);
