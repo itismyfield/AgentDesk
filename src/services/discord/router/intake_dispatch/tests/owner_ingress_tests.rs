@@ -71,10 +71,35 @@ fn said(bodies: &Bodies) -> Vec<(String, u64)> {
         .collect()
 }
 
+// reserve/write/submitted supply this fixture's pump and leaf. Keep a runtime drive from
+// racing that manual writer, and restore the previous wake hook with the handle's scope.
+struct ManualOwner {
+    handle: ChannelMailboxHandle,
+    channel: ChannelId,
+    previous_wake: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl std::ops::Deref for ManualOwner {
+    type Target = ChannelMailboxHandle;
+
+    fn deref(&self) -> &Self::Target {
+        &self.handle
+    }
+}
+
+impl Drop for ManualOwner {
+    fn drop(&mut self) {
+        crate::services::discord::queue_io::cancel_backstop_test_support::set_owner_wake_for_tests(
+            self.channel,
+            self.previous_wake.take(),
+        );
+    }
+}
+
 async fn adopt(
     shared: &Arc<crate::services::discord::SharedData>,
     channel: ChannelId,
-) -> (ChannelMailboxHandle, std::path::PathBuf) {
+) -> (ManualOwner, std::path::PathBuf) {
     let path = crate::services::discord::runtime_store::discord_pending_queue_root()
         .unwrap()
         .join("claude")
@@ -85,7 +110,19 @@ async fn adopt(
         .v2_adopt(path.clone(), shared.token_hash.clone())
         .await
         .unwrap();
-    (handle, path)
+    let previous_wake =
+        crate::services::discord::queue_io::cancel_backstop_test_support::set_owner_wake_for_tests(
+            channel,
+            Some(Arc::new(|| {})),
+        );
+    (
+        ManualOwner {
+            handle,
+            channel,
+            previous_wake,
+        },
+        path,
+    )
 }
 
 fn live(channel: ChannelId, message: u64, text: &str) -> IntakeSubmission {
