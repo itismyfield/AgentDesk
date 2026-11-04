@@ -66,8 +66,8 @@ pub enum InputResult {
     },
 }
 
-/// Reads queue files, inflight rows, then receipts; each writer commits the next record before it
-/// removes the last, so the later record wins and an owed receipt stands in for an unwritten one.
+/// Reads queue files, inflight rows, then receipts, each writer committing the next before removing
+/// the last; any terminal outranks a running row, which outranks a waiting one.
 pub async fn lookup(
     pool: &PgPool,
     agent_id: &str,
@@ -85,13 +85,15 @@ pub async fn lookup(
         .iter()
         .map(|channel| channel.channel_id.to_string())
         .collect();
+    let marked = matches!(running, Some(InputResult::Terminal(_)));
+    let owed = matches!(waiting, Ok(Some(InputResult::Terminal(_))));
     match find_origin_receipt(pool, origin_id, agent_id, &channel_ids).await {
         Ok(Some(receipt)) => Ok(Some(InputResult::Terminal(receipt))),
+        // A terminal not yet in the database: a marked row's, then a removal still owed.
+        _ if marked => Ok(running),
+        _ if owed => waiting,
         Ok(None) if running.is_some() => Ok(running),
         Ok(None) => waiting,
-        // A row kept marked already confirmed its terminal while the database could not take it.
-        Err(_) if matches!(running, Some(InputResult::Terminal(_))) => Ok(running),
-        Err(_) if matches!(waiting, Ok(Some(InputResult::Terminal(_)))) => waiting,
         Err(error) => Err(error.to_string()),
     }
 }

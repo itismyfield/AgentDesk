@@ -264,3 +264,102 @@ fn an_unreadable_queue_file_is_an_error_not_an_absent_origin() {
     assert!(waiting_origin("claude", 7_340_304, "o-1").is_err());
     assert_eq!(waiting_origin("claude", 7_340_305, "o-1"), Ok(None));
 }
+
+/// An origin an inflight row still names while its owner already owes it failed reads that
+/// terminal through the route: a removal not yet in the database outranks a running row.
+#[tokio::test(flavor = "current_thread")]
+async fn an_owed_terminal_outranks_a_running_row_naming_the_same_origin_pg() {
+    let _root = TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let (registry, channel) = (ChannelMailboxRegistry::default(), 7_340_306);
+    let insert = crate::db::agents::insert_agent_channels_for_tests;
+    insert(&pool, "owed-agent", Some(&channel.to_string()), None).await;
+    let (handle, path) = owner(&registry, channel).await;
+    admit(&handle, channel, 61, Some("o-both")).await;
+    refuse_head(&handle, channel, "nonce-61", "InvalidInput").await;
+    let at = on_disk(&path)["owed_drop_receipts"][0]["at_ms"]
+        .as_i64()
+        .unwrap();
+    let inflight = crate::config::runtime_root()
+        .unwrap()
+        .join("runtime/discord_inflight/claude");
+    std::fs::create_dir_all(&inflight).unwrap();
+    let row = json!({"version": 1, "provider": "claude", "user_msg_id": 61,
+        "input_origin_ids": ["o-both"]});
+    std::fs::write(inflight.join(format!("{channel}.json")), row.to_string()).unwrap();
+
+    let config = crate::config::Config::default();
+    let broadcast = crate::eventbus::new_broadcast();
+    let app = crate::server::routes::api_router_with_pg(
+        crate::engine::PolicyEngine::new(&config).unwrap(),
+        config,
+        broadcast.clone(),
+        crate::eventbus::spawn_batch_flusher(broadcast),
+        None,
+        Some(pool.clone()),
+    );
+    let request = axum::http::Request::builder()
+        .uri("/agents/owed-agent/input-result?origin_id=o-both")
+        .extension(axum::extract::ConnectInfo(
+            "127.0.0.1:50000".parse::<std::net::SocketAddr>().unwrap(),
+        ))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let response = tower::ServiceExt::oneshot(app, request).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await;
+    let body: Value = serde_json::from_slice(&bytes.unwrap()).unwrap();
+    let confirmed = body["terminal"]["confirmed_at"]
+        .as_str()
+        .unwrap_or_default();
+    let confirmed = chrono::DateTime::parse_from_rfc3339(confirmed).map(|t| t.timestamp_millis());
+    assert_eq!(
+        (body["terminal"]["outcome"].as_str(), confirmed),
+        (Some("failed"), Ok(at)),
+        "{body}"
+    );
+    pool.close().await;
+    db.drop().await;
+}
+
+/// Telling a refused input owes at most once: a permanent refusal was owed when retained, and a
+/// repeated notice owes nothing after the receipt is settled, so its time stays the first one.
+#[tokio::test(flavor = "current_thread")]
+async fn a_repeated_notice_never_owes_a_settled_refusal_again_pg() {
+    let _root = TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let (registry, channel) = (ChannelMailboxRegistry::default(), 7_340_307);
+    let (handle, path) = owner(&registry, channel).await;
+    let id = ChannelId::new(channel);
+    let settle = || crate::services::discord::settle_v2_drops(Some(&pool), &handle, "claude", id);
+    let confirmed = |message: u64| {
+        let sql = "SELECT terminal_confirmed_at FROM turns WHERE turn_id = $1";
+        let read = sqlx::query_scalar(sql).bind(format!("discord:{channel}:{message}"));
+        async { read.fetch_one(&pool).await.unwrap() }
+    };
+    let tell = |key: Value| {
+        handle.v2_request(move |slot| {
+            let key = serde_json::from_value(key).map_err(|e| e.to_string())?;
+            slot.as_mut().ok_or("no owner")?.notice_enqueued(&key)
+        })
+    };
+    for (message, veto) in [(71, "InvalidInput"), (72, "pane_busy")] {
+        admit(&handle, channel, message, Some(&format!("o-{message}"))).await;
+        let key = refuse_head(&handle, channel, &format!("nonce-{message}"), veto).await;
+        if veto == "pane_busy" {
+            tell(key.clone()).await.unwrap();
+        }
+        settle().await;
+        assert!(owed(&on_disk(&path)).is_empty(), "{veto}");
+        let first: chrono::DateTime<chrono::Utc> = confirmed(message).await;
+        for _ in 0..2 {
+            tell(key.clone()).await.unwrap();
+            assert_eq!(owed(&on_disk(&path)), [], "{veto}");
+        }
+        settle().await;
+        assert_eq!(confirmed(message).await, first, "{veto}");
+    }
+    pool.close().await;
+    db.drop().await;
+}

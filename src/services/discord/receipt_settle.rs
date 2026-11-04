@@ -452,10 +452,44 @@ async fn record_drop(
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        match record_turn_receipt(pool, &receipt).await {
+        match commit_drop(pool, &receipt).await {
             Ok(()) => return true,
             Err(error) => tracing::warn!(%error, turn_id, "dropped input receipt not committed"),
         }
     }
     false
+}
+
+/// Commits a removed input's receipt in one statement: the first terminal wins and origins
+/// accumulate, and a row an unrun attempt left without a terminal takes the removal's shape.
+async fn commit_drop(pool: &PgPool, receipt: &TurnReceipt<'_>) -> Result<(), sqlx::Error> {
+    let sql = "INSERT INTO turns (turn_id, channel_id, provider, started_at, finished_at,
+                   consumed_origin_ids, terminal_outcome, terminal_confirmed_at)
+               VALUES ($1, $2, $3, $4, $4, $5, $6, $4)
+               ON CONFLICT(turn_id) DO UPDATE SET
+                   consumed_origin_ids = ARRAY(
+                       SELECT DISTINCT origin
+                       FROM unnest(turns.consumed_origin_ids || EXCLUDED.consumed_origin_ids) AS origin
+                       ORDER BY origin),
+                   started_at = CASE WHEN turns.terminal_outcome IS NULL
+                       THEN EXCLUDED.started_at ELSE turns.started_at END,
+                   finished_at = CASE WHEN turns.terminal_outcome IS NULL
+                       THEN EXCLUDED.finished_at ELSE turns.finished_at END,
+                   session_id = CASE WHEN turns.terminal_outcome IS NULL
+                       THEN NULL ELSE turns.session_id END,
+                   duration_ms = CASE WHEN turns.terminal_outcome IS NULL
+                       THEN NULL ELSE turns.duration_ms END,
+                   terminal_outcome = COALESCE(turns.terminal_outcome, EXCLUDED.terminal_outcome),
+                   terminal_confirmed_at =
+                       COALESCE(turns.terminal_confirmed_at, EXCLUDED.terminal_confirmed_at)";
+    sqlx::query(sql)
+        .bind(receipt.turn_id)
+        .bind(receipt.channel_id)
+        .bind(receipt.provider)
+        .bind(receipt.confirmed_at)
+        .bind(receipt.consumed_origin_ids)
+        .bind(receipt.outcome.as_str())
+        .execute(pool)
+        .await?;
+    Ok(())
 }

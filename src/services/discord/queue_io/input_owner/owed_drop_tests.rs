@@ -260,3 +260,66 @@ async fn the_cancel_and_clear_entries_settle_what_they_remove_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+/// A restart whose notice post fails still settles the receipt a removal owes, then reports the
+/// notice failure; the notice stays owed for the next drain.
+#[tokio::test(flavor = "current_thread")]
+async fn a_failed_notice_post_still_settles_what_a_removal_owes_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let channel = 7_340_503;
+    let (head, removed) = (8_000_000_000_000_340_531, 8_000_000_000_000_340_532);
+    let persistence = QueuePersistenceContext::new(&ProviderKind::Claude, "owed", None);
+    let (path, namespace) = v2_queue(&persistence, ChannelId::new(channel)).unwrap();
+    let registry = ChannelMailboxRegistry::default();
+    let handle = registry.handle(ChannelId::new(channel));
+    handle
+        .v2_adopt(path.clone(), namespace.clone())
+        .await
+        .unwrap();
+    admit(&handle, channel, head, "G-head").await;
+    admit(&handle, channel, removed, "G-removed").await;
+    let cancel = handle.cancel_queued_primary_message(MessageId::new(removed), persistence);
+    assert!(cancel.await.removed.is_some());
+    // The head's attempt lapses unconfirmed, so its owner owes a notice and no receipt.
+    let attempt = json!({"nonce":"lapsed","provider":"claude",
+        "target":{"host":"tmux","owner":"owed-lapsed","root":"/test","execution_nonce":"e"},
+        "source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}});
+    let lapsed = handle.v2_request(move |slot| {
+        let owner = slot.as_mut().ok_or("no owner")?;
+        let attempt = serde_json::from_value(attempt).map_err(|e| e.to_string())?;
+        let key = owner.reserve_unit(attempt, |item| Some((String::new(), item.text.clone())))?;
+        drop(owner.arm(&key, 1)?);
+        owner.tick(40_000)
+    });
+    lapsed.await.unwrap();
+    let drops = owed(&handle).await;
+    assert_eq!(drops.len(), 1);
+    sqlx::query("ALTER TABLE message_outbox RENAME TO message_outbox_unavailable")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let history = tempfile::TempDir::new().unwrap();
+    let registry = Registry::at(history.path().join("history.json"));
+    let now = Utc::now().timestamp_millis() as u64;
+    let recovered = super::recover(
+        &handle,
+        (path, namespace),
+        registry,
+        Some(&pool),
+        ("claude", channel, now),
+    );
+    assert!(recovered.await.is_err(), "the notice failure is reported");
+    assert!(owed(&handle).await.is_empty());
+    assert_eq!(
+        receipts(&pool, channel).await,
+        expected(channel, &drops, "cancelled")
+    );
+    let untold = handle.v2_request(|slot| Ok(slot.as_ref().ok_or("no owner")?.json()?));
+    let untold = untold.await.unwrap()["retained_inputs"][0]["notice"]["enqueued"].clone();
+    assert_eq!(untold, json!(false));
+    pool.close().await;
+    db.drop().await;
+}

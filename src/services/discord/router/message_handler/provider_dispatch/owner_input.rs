@@ -414,6 +414,65 @@ pub(in crate::services::discord) async fn recover(shared: &Shared, channel: Chan
     }
 }
 
+/// Whether a start must wait for its pane's idle: a turn AgentDesk did not start holds the channel,
+/// or the channel pane the start would take runs a native Claude turn.
+async fn start_waits(shared: &Shared, channel: ChannelId, context: &Value) -> bool {
+    use crate::services::discord::inflight::{TurnSource, load_inflight_state_read_only};
+    use crate::services::discord::turn_presence::activity::{Activity, activity_now};
+    let (provider, id) = (&shared.provider, channel.get());
+    let rest = crate::services::discord::recovery_engine::herdr_row_end::owner::holds_rest;
+    let row = load_inflight_state_read_only(provider, id)
+        .is_some_and(|row| row.turn_source != TurnSource::Managed);
+    if row || rest(provider, id) {
+        return true;
+    }
+    if crate::services::tui_o::turn_mode::transcript_turns(id) {
+        return activity_now(shared, provider, channel).await.activity != Activity::Idle;
+    }
+    native_turn_runs(shared, channel, context).await
+}
+
+/// Whether the channel's own Claude pane runs a turn now, read as the start's execution reads it;
+/// a labelled or process start takes another pane or none.
+async fn native_turn_runs(shared: &Shared, channel: ChannelId, context: &Value) -> bool {
+    let named = |value: &Value, key: &str| value[key].as_str().is_some_and(|s| !s.is_empty());
+    let metadata = &context["metadata"];
+    let snapshot = "scheduled_snapshot_session_label";
+    let elsewhere = named(context, "synthetic_label")
+        || named(context, snapshot)
+        || named(metadata, snapshot)
+        || metadata["execution_mode"] == "process";
+    if elsewhere || shared.provider != ProviderKind::Claude {
+        return false;
+    }
+    let (dir, session_id, name) = {
+        let core = shared.core.lock().await;
+        let Some(session) = core.sessions.get(&channel) else {
+            return false;
+        };
+        let name = session.channel_name.clone();
+        (
+            session.current_path.clone(),
+            session.session_id.clone(),
+            name,
+        )
+    };
+    let hint = context["channel_name_hint"].as_str().map(str::to_string);
+    let Some(name) = name.or(hint) else {
+        return false;
+    };
+    let tmux = shared.provider.build_tmux_session_name(&name);
+    if crate::services::platform::tmux::pane_liveness(&tmux) != PaneLiveness::Live {
+        return false;
+    }
+    let resolve = super::super::tui_followup::claude_followup_transcript;
+    let path = resolve(dir.as_deref(), session_id.as_deref(), Some(&tmux));
+    let busy = |path: &std::path::Path| {
+        crate::services::tui_turn_state::observe_claude_jsonl_turn_state(path).is_busy()
+    };
+    path.is_some_and(|path| busy(&path))
+}
+
 /// An idle channel's front: the owner claims it, then a queued start presenting that claim runs
 /// it; the drive hears the input's settlement, never the AI turn's.
 async fn start_idle(
@@ -434,6 +493,12 @@ async fn start_idle(
         None => Ok(None),
     };
     let kept = kept.map_err(effect::unsent)?;
+    // A start waits unclaimed behind a turn it did not start; that turn's idle wakes the owner.
+    if let Some(context) = &kept
+        && start_waits(&shared, channel, context).await
+    {
+        return Err("NotSent(\"synthetic_waits_idle\")".into());
+    }
     let claim = claim_turn(&mailbox, front.1.message_id, &front).await?;
     let claim = claim.ok_or("NotSent(\"front_not_granted\")")?;
     let (settled, answer) = tokio::sync::oneshot::channel();

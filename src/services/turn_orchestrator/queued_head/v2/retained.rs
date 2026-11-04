@@ -228,9 +228,13 @@ impl Owner {
             .iter_mut()
             .find(|entry| key.matches(&entry.input))
             .ok_or("stale notice attempt")?;
+        if entry.notice.enqueued {
+            return Ok(());
+        }
         entry.notice.enqueued = true;
-        // A told proven-unsent input is never resubmitted; an unconfirmed one may have run.
-        if matches!(entry.disposition, Some(RetainedDisposition::KnownNotSent)) {
+        // A told retryable proven-unsent input is never resubmitted; a permanent one owed at retain.
+        let known = matches!(entry.disposition, Some(RetainedDisposition::KnownNotSent));
+        if known && !permanently_refused(entry) {
             let input = entry.input.clone();
             next.owe_attempt(&input, TerminalOutcome::Failed, super::origin::now_ms());
         }
@@ -240,6 +244,12 @@ impl Owner {
 
 /// Refusals that no later look can turn into a submit; their originals stay retained.
 const PERMANENT: [&str; 2] = ["vetoed: frame_mismatch", "vetoed: InvalidInput"];
+
+/// Whether the owner refused a retained input for a reason no later look clears.
+fn permanently_refused(entry: &RetainedInput) -> bool {
+    matches!(&entry.reason, RetainedReason::Rejected { reason }
+        if reason.strip_prefix("known_not_sent: ").is_some_and(|r| PERMANENT.contains(&r)))
+}
 
 /// Whether a retained input was refused before any key for a reason a later look may clear. One
 /// whose resend ask already went out stays retained: resending it is now the person's choice.
