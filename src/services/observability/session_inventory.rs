@@ -1,4 +1,4 @@
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sqlx::{PgPool, Row};
 
@@ -172,65 +172,4 @@ fn child_item_is_stale_alive(item: &ChildInventoryItem, now: DateTime<Utc>) -> b
                 now.signed_duration_since(spawned).num_seconds() >= STALE_CHILD_WINDOW_SECS
             })
             .unwrap_or(false)
-}
-
-pub fn format_child_inventory_progress(
-    summary: &ChildInventorySummary,
-    now: DateTime<Utc>,
-) -> Option<String> {
-    if summary.alive.is_empty() {
-        return None;
-    }
-
-    let alive = summary
-        .alive
-        .iter()
-        .take(4)
-        .enumerate()
-        .map(|(index, child)| {
-            let label = child_label(index);
-            let age = child
-                .spawned_at
-                .map(|spawned| now.signed_duration_since(spawned))
-                .unwrap_or_else(Duration::zero);
-            format!("{label} {}", format_compact_duration(age))
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let extra = summary.alive.len().saturating_sub(4);
-    let alive = if extra > 0 {
-        format!("{alive}, +{extra} more")
-    } else {
-        alive
-    };
-
-    Some(format!(
-        "{} alive ({alive}) / {} closed",
-        summary.alive.len(),
-        summary.closed_count
-    ))
-}
-
-pub fn format_compact_duration(duration: Duration) -> String {
-    let total = duration.num_seconds().max(0);
-    let hours = total / 3600;
-    let minutes = (total % 3600) / 60;
-    let seconds = total % 60;
-    if hours > 0 {
-        format!("{hours}h{minutes:02}m")
-    } else if minutes > 0 {
-        format!("{minutes}m{seconds:02}s")
-    } else {
-        format!("{seconds}s")
-    }
-}
-
-fn child_label(index: usize) -> String {
-    if index < 26 {
-        let letter = char::from(b'A' + u8::try_from(index).unwrap_or(0));
-        format!("#{letter}")
-    } else {
-        format!("#{}", index + 1)
-    }
 }

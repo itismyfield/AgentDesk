@@ -8,11 +8,12 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/campaigns",
             "campaigns",
-            "List durable campaign DAG checkpoints from canonical PostgreSQL, newest updated first. `live` maps campaign id -> node id -> what the kanban card behind the node's GitHub issue_url is doing now (card_id, card_status, newest dispatch_type/dispatch_status, session_status/session_seen_at of the session holding that dispatch, running, newest auto-queue queue_status); `running` is true only while that session is mid-turn with a fresh heartbeat. It is read per request and never stored in the ledger. `issue_drift` maps campaign id -> completed nodes whose linked issue github-sync saw open (reason open_issue or changed_after_auto_close); it is reported, never acted on.",
+            "List durable campaign DAG checkpoints from canonical PostgreSQL, newest updated first. `live` maps campaign id -> node id -> what the kanban card behind the node's GitHub issue_url is doing now (card_id, card_status, newest dispatch_type/dispatch_status, session_status/session_seen_at of the session holding that dispatch, running, newest auto-queue queue_status); `running` is true only while that session is mid-turn with a fresh heartbeat. It is read per request and never stored in the ledger. `issue_drift` maps campaign id -> completed nodes whose linked issue github-sync saw open (reason open_issue or changed_after_auto_close); it is reported, never acted on. Answers carry a strong `ETag` and `Cache-Control: no-cache`; a request whose If-None-Match lists that tag gets 304 Not Modified with an empty body.",
         )
         .with_params([
             ("limit", query_param("integer", false, "Page size 1..500; default 100.")),
             ("offset", query_param("integer", false, "Zero-based offset; default 0.")),
+            ("view", query_param("string", false, "full (default) or summary; any other value is 400. summary drops each node's details, evidence, evidence_records and findings and marks the campaign nodes_partial: true; read them, and any document to write back, from GET /api/campaigns/{id}.")),
         ])
         .with_example(json!({}), json!({"campaigns": [], "live": {}, "issue_drift": {}, "limit": 100, "offset": 0}))
         .with_curl("curl -H \"Authorization: Bearer $ADK_AUTH_TOKEN\" \"$ADK_URL/api/campaigns\""),
@@ -50,7 +51,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "PUT",
             "/api/campaigns/{id}",
             "campaigns",
-            "Atomically replace the complete campaign DAG and append revision history. Requires the revision just read; stale writers receive 409 and must reload/reconcile. Omitted nodes are removed from the current DAG, retained in history.",
+            "Atomically replace the complete campaign DAG and append revision history. Requires the revision just read; stale writers receive 409 and must reload/reconcile. Omitted nodes are removed from the current DAG, retained in history. Build the body from GET /api/campaigns/{id}, not a view=summary list: a summary node written back clears its details, evidence, evidence_records and findings, and a document marked nodes_partial: true is refused with 400.",
         )
         .with_params([
             ("id", path_param("Campaign ID.")),

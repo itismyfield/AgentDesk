@@ -274,7 +274,7 @@ pub fn authoritative_evaluation_context(
     Some(normalized)
 }
 
-fn legacy_context_lacks_declaration_snapshot(phase_gate: &Value) -> bool {
+pub(crate) fn legacy_context_lacks_declaration_snapshot(phase_gate: &Value) -> bool {
     let Some(object) = phase_gate.as_object() else {
         return false;
     };

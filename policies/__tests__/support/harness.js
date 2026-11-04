@@ -162,19 +162,14 @@ function createAgentdeskMock(options) {
     autoQueueCompletes: [],
     autoQueuePauses: [],
     autoQueueResumes: [],
+    phaseGateContextCalls: [],
+    phaseGateEvaluations: [],
     autoQueueSavedPhaseGates: [],
     autoQueueClearedPhaseGates: [],
-    timeoutClearFreshCounterCalls: [],
-    timeoutStaleWorkingScans: [],
-    timeoutDeadlockCandidateScans: [],
     timeoutHostObservations: [],
-    timeoutRepairCalls: [],
-    timeoutDispatchTypeLookups: [],
-    timeoutTerminationRecords: [],
-    timeoutInactiveCounterCleanups: 0,
-    timeoutHistoryCleanupCalls: [],
     retrospectiveCalls: [],
     runtimeSignals: [],
+    orphanMaintenanceCalls: 0,
     httpPosts: [],
     httpGets: [],
     deadlockAlerts: [],
@@ -353,6 +348,12 @@ function createAgentdeskMock(options) {
       }
     },
     runtime: {
+      maintainOrphanDispatches() {
+        state.orphanMaintenanceCalls++;
+        if (typeof settings.maintainOrphanDispatches === "function") {
+          return settings.maintainOrphanDispatches(state);
+        }
+      },
       emitSignal(signalName, evidence) {
         state.runtimeSignals.push({ signalName, evidence: clone(evidence || null) });
         if (typeof settings.emitSignal === "function") {
@@ -367,26 +368,18 @@ function createAgentdeskMock(options) {
       refreshInventoryDocs() {}
     },
     timeouts: {
-      clearDeadlockCountersForFreshSessions(staleScanMinutes) {
-        state.timeoutClearFreshCounterCalls.push({ staleScanMinutes });
-        if (typeof timeouts.clearDeadlockCountersForFreshSessions === "function") {
-          return clone(timeouts.clearDeadlockCountersForFreshSessions(staleScanMinutes, state));
-        }
-        return { ok: true, deleted: 0 };
+      maintainStaleSessions(...args) {
+        if (!state.timeoutMaintenanceCalls) state.timeoutMaintenanceCalls = [];
+        state.timeoutMaintenanceCalls.push(args);
+        return typeof timeouts.maintainStaleSessions === "function"
+          ? clone(timeouts.maintainStaleSessions(state))
+          : { ok: true };
       },
-      listStaleWorkingSessions(graceMinutes) {
-        state.timeoutStaleWorkingScans.push({ graceMinutes });
-        if (typeof timeouts.listStaleWorkingSessions === "function") {
-          return clone(timeouts.listStaleWorkingSessions(graceMinutes, state));
+      maintainUnsentNotifications() {
+        if (typeof timeouts.maintainUnsentNotifications === "function") {
+          return clone(timeouts.maintainUnsentNotifications(...arguments));
         }
-        return clone(timeouts.staleWorkingSessions || []);
-      },
-      listDeadlockCandidates(staleScanMinutes, limit) {
-        state.timeoutDeadlockCandidateScans.push({ staleScanMinutes, limit });
-        if (typeof timeouts.listDeadlockCandidates === "function") {
-          return clone(timeouts.listDeadlockCandidates(staleScanMinutes, limit, state));
-        }
-        return clone(timeouts.deadlockCandidates || []);
+        return { ok: true };
       },
       observeSessionHost(sessionKey) {
         state.timeoutHostObservations.push(sessionKey);
@@ -401,44 +394,6 @@ function createAgentdeskMock(options) {
           return { state: liveness, session_id: 1, tmux_name: name };
         }
         return { state: "unknown", reason: "probe_failed" };
-      },
-      repairStaleSession(sessionKey, request) {
-        state.timeoutRepairCalls.push({ sessionKey, request: clone(request || {}) });
-        if (typeof timeouts.repairStaleSession === "function") {
-          return clone(timeouts.repairStaleSession(sessionKey, request || {}, state));
-        }
-        return { ok: true, repaired: true, rows_affected: 1, dispatch_rows_affected: 1, dispatch_error: null };
-      },
-      getDispatchType(dispatchId) {
-        state.timeoutDispatchTypeLookups.push({ dispatchId });
-        if (typeof timeouts.getDispatchType === "function") {
-          return timeouts.getDispatchType(dispatchId, state);
-        }
-        if (timeouts.dispatchTypes && Object.prototype.hasOwnProperty.call(timeouts.dispatchTypes, dispatchId)) {
-          return timeouts.dispatchTypes[dispatchId];
-        }
-        return null;
-      },
-      recordDeadlockTermination(payload) {
-        state.timeoutTerminationRecords.push(clone(payload || {}));
-        if (typeof timeouts.recordDeadlockTermination === "function") {
-          return clone(timeouts.recordDeadlockTermination(payload || {}, state));
-        }
-        return { ok: true, rows_affected: 1 };
-      },
-      cleanupDeadlockCountersForInactiveSessions() {
-        state.timeoutInactiveCounterCleanups += 1;
-        if (typeof timeouts.cleanupDeadlockCountersForInactiveSessions === "function") {
-          return clone(timeouts.cleanupDeadlockCountersForInactiveSessions(state));
-        }
-        return { ok: true, deleted: 0 };
-      },
-      cleanupDeadlockHistoryBefore(cutoffMs) {
-        state.timeoutHistoryCleanupCalls.push({ cutoffMs });
-        if (typeof timeouts.cleanupDeadlockHistoryBefore === "function") {
-          return clone(timeouts.cleanupDeadlockHistoryBefore(cutoffMs, state));
-        }
-        return { ok: true, deleted: 0 };
       }
     },
     http: {
@@ -530,6 +485,20 @@ function createAgentdeskMock(options) {
         return { retryCount: 1, retryLimit: 3, to: "pending", changed: true };
       }
     },
+    phaseGate: {
+      authoritativeContext(runId, phase, context) {
+        state.phaseGateContextCalls.push({ runId, phase, context: clone(context) });
+        return typeof settings.phaseGateContext === "function"
+          ? clone(settings.phaseGateContext(runId, phase, context)) : clone(context);
+      },
+      evaluate(context, result) {
+        state.phaseGateEvaluations.push({ context: clone(context), result: clone(result) });
+        if (typeof settings.phaseGateEvaluation !== "function") {
+          throw new Error("phaseGateEvaluation fixture is required; verdict logic belongs to Rust");
+        }
+        return clone(settings.phaseGateEvaluation(context, result));
+      }
+    },
     prTracking: {
       load(cardId) {
         return clone((settings.prTracking && settings.prTracking.load && settings.prTracking.load(cardId, state)) || null);
@@ -549,6 +518,30 @@ function createAgentdeskMock(options) {
           );
         }
         return { card_id: cardId, repo_id: repoId, branch, pr_number: prNumber, state: trackingState, last_error: lastError };
+      },
+      // Existing Node sweep fixtures model the native read; PG owner tests verify its SQL.
+      listStrandedCreatePr(limit) {
+        return agentdesk.db.query(
+          "SELECT card_id, last_error, retry_count, dispatch_generation FROM pr_tracking " +
+          "WHERE state IN ('create-pr', 'escalated') AND retry_count > 0 " +
+          "AND COALESCE(last_error, '') NOT LIKE 'handed-off:%' " +
+          "AND updated_at > datetime('now', '-30 days') ORDER BY updated_at LIMIT " + limit,
+          []
+        );
+      },
+      // Model native bookkeeping through the sweep tests' SQL-aware fake.
+      markHandedOff(cardId, errorMsg) {
+        return agentdesk.db.execute(
+          "UPDATE pr_tracking SET last_error = ?, updated_at = datetime('now') " +
+          "WHERE card_id = ? AND state IN ('create-pr', 'escalated')",
+          ["handed-off:" + errorMsg, cardId]
+        );
+      },
+      touchGeneration(cardId, generation) {
+        return agentdesk.db.execute(
+          "UPDATE pr_tracking SET updated_at = datetime('now') WHERE card_id = ? AND dispatch_generation = ?",
+          [cardId, generation || ""]
+        );
       },
       findOpenPrByBranch(repoId, branch) {
         if (settings.prTracking && typeof settings.prTracking.findOpenPrByBranch === "function") {

@@ -163,6 +163,21 @@ fn probe_user_default_reports_the_reason_without_config_database_or_writes() {
         "probe_reports_the_same_action_as_health_contract: {report}"
     );
 
+    // Presence is reported apart from the policy reason: this socket answers, so nothing would start.
+    assert_eq!(
+        (
+            &report["autostart"]["presence"],
+            &report["autostart"]["eligible"],
+            &report["autostart"]["reason"]
+        ),
+        (
+            &json!("present"),
+            &json!(false),
+            &json!("not_needed_present")
+        ),
+        "probe_reports_presence_and_start_eligibility_dry_run_contract: {report}"
+    );
+
     assert!(super::run(Some("relative.sock".into()), None, &mut Vec::new()).is_err());
     assert!(
         server.methods().iter().all(|method| method == "ping"),

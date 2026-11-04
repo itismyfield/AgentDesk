@@ -13,7 +13,6 @@ db:
     tables:
       - kv_meta
       - sessions
-      - session_termination_events
   raw_sql:
     mode: forbidden
     rationale: active monitor session/deadlock DB access is mediated by agentdesk.timeouts.* and agentdesk.kv.*

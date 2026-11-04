@@ -1,0 +1,83 @@
+{
+  "version": 2,
+  "items": [],
+  "head_injection": null,
+  "retained_inputs": [],
+  "terminal_identities": [
+    {
+      "identity": {
+        "primary": 1566614922605891837,
+        "queued_generation": 447,
+        "sources": [
+          {
+            "message_id": 1566614922605891837,
+            "queued_generation": 447
+          }
+        ]
+      },
+      "settled_at_ms": 1793580510212
+    },
+    {
+      "identity": {
+        "primary": 1566614992705425561,
+        "queued_generation": 447,
+        "sources": [
+          {
+            "message_id": 1566614992705425561,
+            "queued_generation": 447
+          }
+        ]
+      },
+      "settled_at_ms": 1793580525912
+    },
+    {
+      "identity": {
+        "primary": 1566615047227047999,
+        "queued_generation": 447,
+        "sources": [
+          {
+            "message_id": 1566615047227047999,
+            "queued_generation": 447
+          }
+        ]
+      },
+      "settled_at_ms": 1793580540370
+    }
+  ],
+  "namespace": "claude/discord_c2adc5461e12b989",
+  "admission_receipts": [
+    "tk:discord-f101763572cbad0b297e5a009d802a4a:8cc7f3e0ea1e5a4907d188fc030bc6ed",
+    "tk:discord-b1f451b4bb304673d0c7b0b2724b7e79:8134d5d29ac2499f429fc18f5eb36cbc",
+    "tk:discord-109d92f6b6065ae1d46827850642119b:5b8e76a7648cabe1a455d856314e4da5"
+  ],
+  "admission_sequence": 3,
+  "admission_binds": [
+    {
+      "receipt": "tk:discord-f101763572cbad0b297e5a009d802a4a:8cc7f3e0ea1e5a4907d188fc030bc6ed",
+      "at": {
+        "kind": "settled",
+        "attempt": "d1d180dc",
+        "source": null,
+        "settled_at_ms": 1793580510212
+      }
+    },
+    {
+      "receipt": "tk:discord-b1f451b4bb304673d0c7b0b2724b7e79:8134d5d29ac2499f429fc18f5eb36cbc",
+      "at": {
+        "kind": "settled",
+        "attempt": "bc8e01a5",
+        "source": null,
+        "settled_at_ms": 1793580525912
+      }
+    },
+    {
+      "receipt": "tk:discord-109d92f6b6065ae1d46827850642119b:5b8e76a7648cabe1a455d856314e4da5",
+      "at": {
+        "kind": "settled",
+        "attempt": "fc3aed06",
+        "source": null,
+        "settled_at_ms": 1793580540370
+      }
+    }
+  ]
+}

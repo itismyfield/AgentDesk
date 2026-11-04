@@ -85,7 +85,6 @@ pub(super) async fn resolve_gate(
                     &prompt.prompt,
                     super::super::single_message_panel::footer_mode_enabled(
                         super::super::single_message_panel::enabled(),
-                        shared.ui.status_panel_v2_enabled,
                     ),
                 ),
             super::super::placeholder_live_events::TaskCompletionDisplayPolicy::FooterOnly

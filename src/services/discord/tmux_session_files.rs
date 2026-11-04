@@ -962,9 +962,6 @@ fn sweep_orphan_session_files_in(dir: &std::path::Path, live: &std::collections:
 #[cfg(test)]
 #[path = "tmux_session_files/orphan_sweep_tests.rs"]
 mod orphan_sweep_tests;
-#[cfg(test)]
-#[path = "tmux_session_files/source_guard_tests.rs"]
-mod source_guard_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1230,11 +1227,6 @@ mod tests {
             generation_mtime <= nonce_mtime,
             "generation must be written before the nonce"
         );
-    }
-
-    #[test]
-    fn every_spawn_site_uses_the_combined_marker_gate() {
-        super::source_guard_tests::assert_combined_marker_gate();
     }
 
     #[test]

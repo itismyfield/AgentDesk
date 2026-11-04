@@ -101,11 +101,7 @@ struct Incident {
 impl Incident {
     async fn start() -> Self {
         let mut h = RelayE2eHarness::start().await;
-        let mut shared = discord::make_shared_data_for_tests();
-        Arc::get_mut(&mut shared)
-            .unwrap()
-            .ui
-            .status_panel_v2_enabled = true;
+        let shared = discord::make_shared_data_for_tests();
         {
             let mut settings = shared.settings.write().await;
             settings.owner_user_id = Some(USER_ID);

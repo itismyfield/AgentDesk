@@ -1,10 +1,12 @@
-"""Check: service-layer modules referencing server-layer modules.
+"""Check: modules outside the assembly layer referencing server-layer modules.
 
-Code under ``src/services/**`` should not depend on ``crate::server`` (or a
-relative ``super::server`` sibling). Server routes may call services, but
-services calling back into routes, DTOs, websocket emitters, or cluster helpers
-keeps the layers coupled. Existing debt is tracked by a committed baseline; new
-or increased references fail ``--check``.
+Only the assembly modules (``server``, ``cli``, ``launch``, ``bootstrap``) may
+depend on ``crate::server``. Services, engine, kanban, dispatch, and the crate
+root call the canonical service paths instead of the route re-exports. Existing
+debt is tracked by a committed baseline; new or increased references fail
+``--check``. Inline ``#[cfg(test)]`` items and test files are not production.
+The removed ``agentdesk_runtime_root`` alias is a zero rule over every Rust file.
+Public runtime-root forwarders in the CLI and crate root are also forbidden.
 """
 
 from __future__ import annotations
@@ -15,41 +17,213 @@ from collections import Counter
 from pathlib import Path
 from typing import Iterable
 
+try:
+    from rust_lex import StripState, strip_line
+    from rust_production import _production_text
+except ModuleNotFoundError:
+    from scripts.rust_lex import StripState, strip_line
+    from scripts.rust_production import _production_text
+
 from .. import common
-from ..common import Finding, line_of, read_text, rel_posix, strip_rust_comments
+from ..common import Finding, line_of, rel_posix
 from . import CheckSpec
 
 BASELINE_REL_PATH = "scripts/audit_maintainability/baselines/service_server_backflow.json"
-SERVER_BACKFLOW = re.compile(r"\b(?P<root>crate|super)\s*::\s*server\b")
+ASSEMBLY_MODULES = frozenset({"server", "cli", "launch", "bootstrap"})
+_ROOT = r"(?<![\w$])(?P<root>\$crate|crate|super|self)\s*::\s*(?:super\s*::\s*)*"
+# `crate::server`, `super::super::server`, `$crate::server` in macro bodies.
+QUALIFIED = re.compile(_ROOT + r"(?P<server>server)\b")
+# A bare `server::` path reaches the module through a crate-root glob import or
+# a crate-root-relative path; no module outside `src/server` is named `server`.
+UNQUALIFIED = re.compile(r"(?<![\w:$])(?P<server>server)\s*::")
+USE_TREE = re.compile(r"\b(?P<public>pub(?:\s*\([^)]*\))?\s+)?use\s+(?P<tree>[^;]+);")
+USE_TOKEN = re.compile(r"\$crate|(?:r#)?[A-Za-z_]\w*|::|[{},*]")
+PREFILTER = re.compile(r"\bserver\b")
+# Callers use `crate::config::runtime_root()`; the CLI alias must not return.
+REMOVED_ALIAS = re.compile(r"\bagentdesk_runtime_root\b")
+RUNTIME_ROOT = re.compile(r"\bruntime_root\b")
+ROOT_FILES = frozenset({"src/lib.rs", "src/main.rs"})
+PUBLIC_FORWARDER = re.compile(
+    r"\bpub(?:\s*\([^)]*\))?\s+(?:(?:const|async|unsafe)\s+)*"
+    r"fn\s+(?P<name>(?:r#)?[A-Za-z_]\w*)\s*\(\s*\)\s*"
+    r"(?:->[^{};]+)?\{(?P<body>[^{}]*)\}"
+)
+RUNTIME_CALL = re.compile(
+    r"\s*(?P<return>return\s+)?(?P<path>(?:(?:\$crate|(?:r#)?[A-Za-z_]\w*)\s*::\s*)*"
+    r"runtime_root)\s*\(\s*\)\s*(?P<semicolon>;?)\s*"
+)
+BACKFLOW_RULE = "service_server_backflow"
+ALIAS_RULE = "removed_runtime_root_alias"
 
 
-def _is_service_file(rel: str) -> bool:
-    return rel.startswith("src/services/") and rel.endswith(".rs")
+def _is_assembly_file(rel: str) -> bool:
+    parts = rel.split("/")
+    if len(parts) < 2 or parts[0] != "src":
+        return False
+    top = parts[1][:-3] if parts[1].endswith(".rs") else parts[1]
+    return top in ASSEMBLY_MODULES
+
+
+def _use_paths(text: str, start: int, end: int) -> Iterable[list[tuple[str, int]]]:
+    """Read source paths, carrying group prefixes and skipping alias names."""
+    tokens = list(USE_TOKEN.finditer(text, start, end))
+    index = 0
+
+    def group(prefix: list[tuple[str, int]]) -> Iterable[list[tuple[str, int]]]:
+        nonlocal index
+        while index < len(tokens) and tokens[index][0] != "}":
+            path = list(prefix)
+            while index < len(tokens) and tokens[index][0] not in {"{", "}", ",", "as"}:
+                token = tokens[index]
+                if token[0] != "::":
+                    path.append((token[0].removeprefix("r#"), token.start()))
+                index += 1
+            if index < len(tokens) and tokens[index][0] == "{":
+                index += 1
+                yield from group(path)
+            else:
+                yield path
+                if index < len(tokens) and tokens[index][0] == "as":
+                    index += 2
+            if index < len(tokens) and tokens[index][0] == ",":
+                index += 1
+        if index < len(tokens):
+            index += 1
+
+    yield from group([])
+
+
+def _at_file_scope(text: str, offset: int) -> bool:
+    prefix = text[:offset]
+    return prefix.count("{") == prefix.count("}")
+
+
+def _server_reference_offsets(text: str, is_root: bool = False) -> list[tuple[int, str]]:
+    found: dict[int, str] = {}
+    for match in QUALIFIED.finditer(text):
+        found.setdefault(match.start("server"), f"{match.group('root')}::server")
+    for match in UNQUALIFIED.finditer(text):
+        found.setdefault(match.start("server"), "server")
+    for match in USE_TREE.finditer(text):
+        for path in _use_paths(text, match.start("tree"), match.end("tree")):
+            names = [name for name, _ in path]
+            if names and names[0] in {"$crate", "crate", "super", "self"}:
+                index = 1
+                while index < len(names) and names[index] == "super":
+                    index += 1
+            elif is_root and _at_file_scope(text, match.start()):
+                index = 0
+            else:
+                continue
+            if index < len(names) and names[index] == "server":
+                found.setdefault(path[index][1], "::".join(names[:index + 1]))
+    return sorted(found.items())
+
+
+def _is_runtime_root_path(names: list[str], root_scope: bool) -> bool:
+    return names in (
+        ["crate", "config", "runtime_root"], ["$crate", "config", "runtime_root"]
+    ) or (
+        root_scope and names in (
+            ["config", "runtime_root"], ["self", "config", "runtime_root"]
+        )
+    )
+
+
+def _runtime_root_forwarders(text: str, is_root: bool) -> Iterable[tuple[int, str]]:
+    for match in PUBLIC_FORWARDER.finditer(text):
+        name = match.group("name").removeprefix("r#")
+        if REMOVED_ALIAS.fullmatch(name):
+            continue
+        call = RUNTIME_CALL.fullmatch(match.group("body"))
+        if call is None or (call.group("semicolon") and not call.group("return")):
+            continue
+        names = re.sub(r"\s+", "", call.group("path")).replace("r#", "").split("::")
+        if _is_runtime_root_path(names, is_root and _at_file_scope(text, match.start())):
+            yield match.start("name"), name
+    for match in USE_TREE.finditer(text):
+        if not match.group("public") or REMOVED_ALIAS.search(match[0]):
+            continue
+        for path in _use_paths(text, match.start("tree"), match.end("tree")):
+            names = [name for name, _ in path]
+            if _is_runtime_root_path(names, is_root and _at_file_scope(text, match.start())):
+                yield path[-1][1], "::".join(names)
+
+
+def _removed_alias_findings() -> list[Finding]:
+    from ..common import all_rust_files
+
+    findings: list[Finding] = []
+    for path in all_rust_files():
+        raw = path.read_text(encoding="utf-8")
+        rel = rel_posix(path)
+        forwarding_scope = (
+            rel in ROOT_FILES or rel == "src/cli.rs" or rel.startswith("src/cli/")
+        ) and not common.is_test_rs(path)
+        if not REMOVED_ALIAS.search(raw) and not (
+            forwarding_scope and RUNTIME_ROOT.search(raw)
+        ):
+            continue
+        state = StripState()
+        for lineno, line in enumerate(raw.splitlines(), start=1):
+            if REMOVED_ALIAS.search(strip_line(line, state)):
+                findings.append(
+                    Finding(
+                        rule=ALIAS_RULE,
+                        severity="error",
+                        file=rel_posix(path),
+                        line=lineno,
+                        message=(
+                            "removed alias `agentdesk_runtime_root` is referenced; "
+                            "call `crate::config::runtime_root()` directly"
+                        ),
+                        extra={"reference": "agentdesk_runtime_root"},
+                    )
+                )
+        if forwarding_scope and RUNTIME_ROOT.search(raw):
+            text = _production_text(path)
+            for offset, reference in _runtime_root_forwarders(text, rel in ROOT_FILES):
+                findings.append(
+                    Finding(
+                        rule=ALIAS_RULE,
+                        severity="error",
+                        file=rel,
+                        line=line_of(text, offset),
+                        message=(
+                            f"public runtime_root forwarding alias `{reference}`; "
+                            "call `crate::config::runtime_root()` directly"
+                        ),
+                        extra={"reference": reference},
+                    )
+                )
+    return findings
 
 
 def _run(allowlist: set[str]) -> Iterable[Finding]:
     del allowlist
     from ..common import production_rust_files
 
-    findings: list[Finding] = []
+    findings: list[Finding] = _removed_alias_findings()
     for path in production_rust_files():
         rel = rel_posix(path)
-        if not _is_service_file(rel):
+        if not rel.endswith(".rs") or _is_assembly_file(rel):
             continue
-        text = strip_rust_comments(read_text(path))
-        for match in SERVER_BACKFLOW.finditer(text):
-            root = match.group("root")
-            reference = f"{root}::server"
+        # Unreadable sources raise instead of reading as zero references.
+        if not PREFILTER.search(path.read_text(encoding="utf-8")):
+            continue
+        text = _production_text(path)
+        for offset, reference in _server_reference_offsets(text, is_root=rel in ROOT_FILES):
             findings.append(
                 Finding(
-                    rule="service_server_backflow",
+                    rule=BACKFLOW_RULE,
                     severity="warn",
                     file=rel,
-                    line=line_of(text, match.start()),
+                    line=line_of(text, offset),
                     message=(
-                        "service-layer module references server-layer path "
-                        f"`{reference}`; move shared types/helpers below "
-                        "services or pass server dependencies in from routes"
+                        "module outside server/cli/launch/bootstrap references "
+                        f"server-layer path `{reference}`; call the canonical "
+                        "service path or pass server dependencies in from the "
+                        "assembly layer"
                     ),
                     extra={"reference": reference},
                 )
@@ -110,7 +284,9 @@ def _baseline_gate(findings: list[Finding]) -> Iterable[Finding]:
             )
         ]
 
-    current_counts = Counter(finding.file for finding in findings)
+    current_counts = Counter(
+        finding.file for finding in findings if finding.rule == BACKFLOW_RULE
+    )
     current_total = sum(current_counts.values())
     regressions: list[Finding] = []
 
@@ -118,11 +294,11 @@ def _baseline_gate(findings: list[Finding]) -> Iterable[Finding]:
         regressions.append(
             Finding(
                 rule="service_server_backflow",
-                severity="warn",
+                severity="error",
                 file=BASELINE_REL_PATH,
                 line=None,
                 message=(
-                    "service/server backflow finding count increased from "
+                    "server backflow finding count increased from "
                     f"baseline {baseline_total} to {current_total}"
                 ),
                 extra={"baseline": str(baseline_total), "current": str(current_total)},
@@ -137,11 +313,11 @@ def _baseline_gate(findings: list[Finding]) -> Iterable[Finding]:
         regressions.append(
             Finding(
                 rule="service_server_backflow",
-                severity="warn",
+                severity="error",
                 file=file,
                 line=None,
                 message=(
-                    "service/server backflow finding count for file increased "
+                    "server backflow finding count for file increased "
                     f"from baseline {baseline} to {current}"
                 ),
                 extra={"baseline": str(baseline), "current": str(current)},
@@ -153,10 +329,11 @@ def _baseline_gate(findings: list[Finding]) -> Iterable[Finding]:
 
 CHECK = CheckSpec(
     key="service_server_backflow",
-    title="Service/server backflow",
+    title="Server-layer backflow",
     description=(
-        "Files under src/services/ that reference crate::server or "
-        "super::server server-layer modules."
+        "Production modules outside server/cli/launch/bootstrap that reference "
+        "crate::server server-layer modules, and any use of the removed "
+        "agentdesk_runtime_root alias."
     ),
     hard_gate=False,
     runner=_run,

@@ -39,11 +39,13 @@ class DeadlineEntrypointsTest(unittest.TestCase):
         for filename in (
             "generate_inventory_docs.py", "giant_file_progress.py", "ratchet_admission.py",
             "generate_env_reference.py", "generate_cli_reference.py", "check_hotfile_ratchet.py",
-            "audit_maintainability.py", "rust_lex.py",
+            "audit_maintainability.py", "rust_lex.py", "rust_cfg.py", "rust_production.py",
         ):
             shutil.copy2(ROOT / "scripts" / filename, scripts / filename)
         shutil.copytree(ROOT / "scripts/audit_maintainability", scripts / "audit_maintainability",
                         ignore=shutil.ignore_patterns("__pycache__"))
+        (scripts / "ci").mkdir()
+        shutil.copy2(ROOT / "scripts/ci/rust_test_sources.py", scripts / "ci/rust_test_sources.py")
         tree = ast.parse((scripts / "generate_inventory_docs.py").read_text())
         purposes = next(ast.literal_eval(node.value) for node in tree.body
                         if isinstance(node, ast.Assign)

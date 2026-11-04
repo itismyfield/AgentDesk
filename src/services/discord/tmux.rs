@@ -23,8 +23,7 @@ use crate::services::tmux_diagnostics::{
 };
 
 use super::formatting::{
-    ReplaceLongMessageOutcome, build_streaming_placeholder_text, format_tool_input,
-    plan_streaming_rollover, truncate_str,
+    ReplaceLongMessageOutcome, format_tool_input, plan_streaming_rollover, truncate_str,
 };
 use super::placeholder_cleanup::{PlaceholderCleanupOperation, PlaceholderCleanupOutcome};
 use super::placeholder_live_events::{
@@ -313,6 +312,7 @@ mod restored_seed_discard_tests {
             same_turn_rewind: false,
             delivery_source: None,
             body_source: None,
+            producer_turn_nonce: None,
         };
 
         let seed_reassigned_to_different_turn = restored_seed_reassigned_to_different_turn(

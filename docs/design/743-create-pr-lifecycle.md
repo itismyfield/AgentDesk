@@ -101,7 +101,7 @@ API 미응답 시 gate skip(복구 배포 false-block 방지). `$DEV_PORT` 할�
 
 | # | Contract | 출처 | 보존 방식 |
 |---|---|---|---|
-| C1 | `upsertPrTracking` facade COALESCE | `00-pr-tracking.js:36` | signature 불변, 새 컬럼은 Rust bridge op만 write |
+| C1 | `upsertPrTracking` facade COALESCE | `src/engine/ops/pr_tracking_ops.rs` (`observe_on_pg_tx`) | facade signature 불변, 병합·쓰기 규칙은 Rust bridge op 소유 |
 | C2 | `create_dispatch_core` 자체 tx | `dispatch_create.rs:160,579` | `_on_conn` variant 분리 + thin shim |
 | C3 | `processTrackedMergeQueue` terminal only | `merge-automation.js:1711` | handoffCreatePr가 status 안 건드림 |
 | C4 | `markPrCreateFailed`는 terminal force 전이 | `review-automation.js:772` | JS orchestration 유지 (setStatus 포함). #5716 slice B 이후 4단계 = `handOffPrCreateFailure` (아래 C7) |

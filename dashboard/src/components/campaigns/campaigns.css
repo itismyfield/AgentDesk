@@ -40,11 +40,6 @@
 .campaign-glance-buckets { display: flex; flex-wrap: wrap; gap: 6px; }
 .campaigns-panel .campaign-glance-buckets button { padding: 6px 10px; border-radius: 999px; font-size: 12px; }
 .campaigns-panel .campaign-glance-buckets button[aria-expanded="true"] { border-color: var(--th-badge-sky-text); color: var(--th-badge-sky-text); }
-.campaign-glance-list { max-height: 40vh; overflow-y: auto; border: 1px solid var(--th-border); border-radius: 9px; }
-.campaign-glance-list li + li { border-top: 1px solid color-mix(in srgb, var(--th-border) 50%, transparent); }
-.campaigns-panel .campaign-glance-list button { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; width: 100%; border: 0; border-radius: 0; text-align: left; background: transparent; }
-.campaign-glance-list button > span:first-of-type { overflow: hidden; text-overflow: ellipsis; white-space: normal; overflow-wrap: anywhere; }
-.campaign-glance-list button > :is(small, span:last-child) { color: var(--th-text-muted); font-size: 10px; }
 .campaign-toolbar { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(110px, 150px) minmax(110px, 170px) auto; gap: 10px; align-items: end; }
 .campaign-filter-toggle { display: none; }
 .campaigns-panel .campaign-check { display: flex; gap: 6px; align-items: center; min-height: 34px; white-space: nowrap; }
@@ -148,7 +143,6 @@
   .campaign-selector select { min-height: 40px; font-size: 13px; }
   .campaign-summary-round { margin-right: auto; }
   .campaign-freshness { display: none; }
-  .campaign-explorer { gap: 8px; padding-top: 10px; }
   .campaign-glance-cards { grid-template-columns: minmax(0, 1fr); gap: 6px; }
   .campaigns-panel .campaign-glance-card { padding: 8px 10px; gap: 4px; }
   .campaign-toolbar { grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }

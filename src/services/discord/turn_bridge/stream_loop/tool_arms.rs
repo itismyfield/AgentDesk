@@ -42,8 +42,6 @@ pub(super) async fn handle_stream_tool_message(
     let gateway = Arc::clone(ctx.gateway);
     let channel_id = ctx.channel_id;
     let provider = ctx.provider.clone();
-    let user_text_owned = ctx.user_text_owned.clone();
-    let request_owner_name = ctx.request_owner_name;
     let adk_session_key = ctx.adk_session_key;
     let adk_session_name = ctx.adk_session_name;
     let role_binding = ctx.role_binding;
@@ -183,21 +181,8 @@ pub(super) async fn handle_stream_tool_message(
             current_tool_line = Some(display.clone());
             last_tool_name = Some(name.clone());
             last_tool_summary = Some(display_summary.clone());
-            // #1255 live-turn long-running tool detection.
-            //
-            // Classifier returns `Some` for Monitor and for
-            // Bash/Task/Agent calls with explicit
-            // `run_in_background=true`.  Everything else
-            // streams its result inline and never touches the
-            // placeholder card.
-            // codex round-11 P2 on PR #1308: restart commands
-            // already own a planned ♻️ handoff message via the
-            // `is_dcserver_restart_command(&input)` branch
-            // below; opening a long-running placeholder on
-            // the same message_id would let a later
-            // Done/Result write a generic background card
-            // over the planned restart notice. Skip setup
-            // for those.
+            // Background tool calls register a child session; restart commands own their
+            // handoff notice, so they are never classified.
             let long_running_tool = if !is_dcserver_restart_command(&input) {
                 super::super::super::formatting::classify_long_running_tool(&name, &input)
             } else {
@@ -247,44 +232,6 @@ pub(super) async fn handle_stream_tool_message(
                             );
                         }
                     }
-                }
-            }
-            if should_open_long_running_placeholder_controller(
-                shared_owned.ui.status_panel_v2_enabled,
-                (channel_id, *current_msg_id),
-            ) && long_running_placeholder_active.is_none()
-                && pending_long_running_open_after_state_save.is_none()
-                && pending_long_running_retarget_after_state_save.is_none()
-            {
-                if let Some((reason, close_trigger, reason_detail)) =
-                    long_running_tool
-                {
-                    let started_at_unix = chrono::Utc::now().timestamp();
-                    let key =
-                        super::super::super::placeholder_controller::PlaceholderKey {
-                            provider: provider.clone(),
-                            channel_id,
-                            message_id: *current_msg_id,
-                        };
-                    let input_payload =
-                        super::super::super::placeholder_controller::PlaceholderActiveInput {
-                            reason,
-                            started_at_unix,
-                            tool_summary: Some(name.clone()),
-                            command_summary: Some(display_summary.clone()),
-                            reason_detail,
-                            context_line: last_assistant_text_line.clone(),
-                            request_line: first_request_line(&user_text_owned),
-                            progress_line: child_progress_line(
-                                shared_owned.pg_pool.as_ref(),
-                                adk_session_key.as_deref(),
-                            )
-                            .await,
-                        };
-                    pending_long_running_open_after_state_save =
-                        Some((key, input_payload, close_trigger, false));
-                    inflight_state.long_running_placeholder_active = true;
-                    state_dirty = true;
                 }
             }
             push_transcript_event(

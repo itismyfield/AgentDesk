@@ -145,6 +145,7 @@ fn retry(confirmation: Confirmation) -> String {
 
 /// A resume binds the taken transcript again under another nonce: a clear of that later execution
 /// does not end the taken one, a clear of the taken nonce does.
+#[cfg(unix)]
 #[test]
 fn claude_takeover_confirmation_follows_the_taken_nonce_through_a_resume() {
     let _guard = crate::config::TestRuntimeRootGuard::new();
@@ -171,6 +172,7 @@ fn claude_takeover_confirmation_follows_the_taken_nonce_through_a_resume() {
 
 /// A promptless takeover whose Herdr execution was terminated never reads Idle; the Herdr end of
 /// the taken nonce confirms it, another execution's does not.
+#[cfg(unix)]
 #[test]
 fn claude_promptless_takeover_confirms_on_a_herdr_end_without_idle() {
     let _guard = crate::config::TestRuntimeRootGuard::new();
@@ -193,6 +195,7 @@ fn claude_promptless_takeover_confirms_on_a_herdr_end_without_idle() {
 
 /// A takeover committed before a restart is not confirmed at boot, where its turn may still run;
 /// the task boot started confirms it once the taken turn ends, with no adoption in this process.
+#[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn claude_takeover_turn_mode_waits_at_boot_and_its_task_confirms_after_the_turn() {
     let _guard = crate::config::TestRuntimeRootGuard::new();
@@ -330,6 +333,7 @@ async fn herdr_end_outlives_the_row() {
 
 /// A promptless takeover cleared inside the CLI ends only by the hop O's rotation proved; a bind
 /// of the next transcript alone or an unproven hop keeps it waiting.
+#[cfg(unix)]
 #[test]
 fn claude_promptless_takeover_confirms_on_a_proven_rotation_hop() {
     use crate::services::tui_o::store::rotation::{BOUNDARY_FILE, Rotation, Successor};

@@ -952,7 +952,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // empty/TUI-gated and placeholderless fresh sends remain legacy.
         let cutover_short_replace = task_notification_kind.is_none()
             && terminal_send::watcher_short_replace_cutover_decision(
-                shared.ui.status_panel_v2_enabled,
                 relay_decision.should_tag_monitor_origin,
                 &watcher_provider,
                 &direct_terminal_response,

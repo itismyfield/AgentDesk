@@ -219,7 +219,7 @@ async fn durable_exact_path_observes_cancellation_before_database_work() {
         &ProviderKind::Claude,
         7,
         Some(&cancel_token),
-        true,
+        (true, None),
     )
     .await
     .expect("pre-cancelled durable enqueue must not touch postgres");
@@ -265,7 +265,7 @@ async fn durable_enqueue_with(
         provider,
         generation,
         None,
-        enabled,
+        (enabled, None),
     )
     .await
     .unwrap()
@@ -336,6 +336,76 @@ async fn durable_exact_identity_is_content_free_and_owner_sensitive_pg() {
     assert!(
         finite_expiry,
         "durable sent rows must remain retention-eligible"
+    );
+}
+
+/// A durable retry that lands on the exact identity keeps the turn that first queued the row.
+#[tokio::test]
+async fn durable_exact_conflict_keeps_first_producer_turn_nonce_pg() {
+    let Some((_pg_db, pool)) = durable_test_pool("agentdesk_headless_producer_turn").await else {
+        return;
+    };
+    let enqueue = |nonce| {
+        durable_outbox::enqueue_headless_outbox_with_rollout(
+            &pool,
+            OutboxMessage {
+                target: "channel:5191",
+                content: "answer",
+                bot: "claude",
+                source: "headless_turn",
+                reason_code: Some("headless.delivery"),
+                session_key: Some("session"),
+            },
+            Some(MessageId::new(8)),
+            &ProviderKind::Claude,
+            7,
+            None,
+            (true, nonce),
+        )
+    };
+    let id = enqueued_id(enqueue(Some("turn-a")).await.unwrap());
+    assert_eq!(
+        enqueue(Some("turn-b")).await.unwrap(),
+        OutboxEnqueueOutcome::Enqueued { id }
+    );
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT producer_turn_nonce FROM message_outbox WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("read producer turn");
+    assert_eq!(stored.as_deref(), Some("turn-a"));
+}
+
+/// Turns sharing the bridge's session key still name their own turn on every headless row, so a
+/// row of one turn never reads as the other's.
+#[cfg(unix)]
+#[tokio::test]
+async fn turns_sharing_a_session_key_keep_their_own_producer_turn_pg() {
+    let Some((_pg_db, pool)) = durable_test_pool("agentdesk_headless_shared_session").await else {
+        return;
+    };
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let mut ids = Vec::new();
+    for nonce in ["turn-a", "turn-b"] {
+        let mut state = test_inflight_state();
+        state.turn_nonce = Some(nonce.to_string());
+        let outcome =
+            enqueue_headless_turn_row_for_test(&shared, &state, Some("shared-session"), "answer")
+                .await;
+        ids.push(enqueued_id(outcome));
+    }
+    let stored: Vec<Option<String>> = sqlx::query_scalar(
+        "SELECT producer_turn_nonce FROM message_outbox WHERE id = ANY($1) ORDER BY id",
+    )
+    .bind(&ids)
+    .fetch_all(&pool)
+    .await
+    .expect("read producer turns");
+    assert_eq!(
+        stored,
+        [Some("turn-a".to_string()), Some("turn-b".to_string())]
     );
 }
 

@@ -9,41 +9,11 @@ pub(in crate::services::discord) fn record_placeholder_live_event(
     channel_id: ChannelId,
     event: Option<super::super::placeholder_live_events::RecentPlaceholderEvent>,
 ) {
-    if (shared.ui.placeholder_live_events_enabled || shared.ui.status_panel_v2_enabled)
-        && let Some(event) = event
-    {
+    if let Some(event) = event {
         shared
             .ui
             .placeholder_live_events
             .push_event(channel_id, event);
-    }
-}
-
-pub(super) fn first_request_line(user_text: &str) -> Option<String> {
-    user_text
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(str::to_string)
-}
-
-pub(super) async fn child_progress_line(
-    pg_pool: Option<&sqlx::PgPool>,
-    parent_session_key: Option<&str>,
-) -> Option<String> {
-    let (Some(pg_pool), Some(parent_session_key)) = (pg_pool, parent_session_key) else {
-        return None;
-    };
-    match load_child_inventory_by_parent_key_pg(pg_pool, parent_session_key).await {
-        Ok(summary) => format_child_inventory_progress(&summary, chrono::Utc::now()),
-        Err(error) => {
-            tracing::warn!(
-                "Failed to load background child inventory for {}: {}",
-                parent_session_key,
-                error
-            );
-            None
-        }
     }
 }
 
@@ -216,11 +186,10 @@ pub(super) async fn ensure_active_placeholder_card<G: TurnGateway + ?Sized>(
     key: super::super::placeholder_controller::PlaceholderKey,
     input: super::super::placeholder_controller::PlaceholderActiveInput,
 ) -> super::super::placeholder_controller::PlaceholderControllerOutcome {
-    if shared.ui.placeholder_live_events_enabled
-        && let Some(block) = shared
-            .ui
-            .placeholder_live_events
-            .render_block(key.channel_id)
+    if let Some(block) = shared
+        .ui
+        .placeholder_live_events
+        .render_block(key.channel_id)
     {
         return shared
             .ui

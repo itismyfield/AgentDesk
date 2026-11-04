@@ -1140,7 +1140,7 @@ async fn phase_gate_run_phase_uses_legacy_default_on_pg_tx(
     })
 }
 
-async fn authoritative_phase_gate_context_on_pg_tx(
+pub(crate) async fn authoritative_phase_gate_context_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: &str,
     phase: i64,
@@ -3161,9 +3161,8 @@ mod reconcile_phase_gate_pg_tests {
         );
     }
 
-    /// JS's `entryIsPass` does NOT trim whitespace before comparing. Mirror
-    /// that so a status of `" pass "` is rejected (it would also be rejected
-    /// in JS).
+    /// Persisted check statuses remain whitespace-sensitive.
+    /// A padded `" pass "` must never infer a passing verdict.
     #[test]
     fn whitespace_padded_check_status_is_not_inferred_as_pass() {
         let context = gate_context();
@@ -3177,7 +3176,7 @@ mod reconcile_phase_gate_pg_tests {
         assert_eq!(
             resolve_verdict(Some(&context), &result),
             VerdictResolution::Missing,
-            "whitespace-padded status must not be inferred (JS parity)"
+            "whitespace-padded status must not be inferred (persisted contract)"
         );
     }
 

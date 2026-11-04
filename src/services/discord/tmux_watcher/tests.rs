@@ -3051,6 +3051,7 @@ fn cross_turn_watcher_reuse_discards_restored_seed_through_watcher_wiring_4105()
         same_turn_rewind: false,
         delivery_source: None,
         body_source: None,
+        producer_turn_nonce: None,
     };
 
     let disposition = watcher_stream_seed_after_restored_seed_discard(
@@ -3476,25 +3477,12 @@ fn tmux_dead_marker_short_circuits_liveness_interval() {
 #[test]
 fn status_panel_v2_watcher_streaming_edit_moves_processing_footer_to_response_message() {
     let rendered = build_watcher_streaming_edit_text(
-        true,
         "PIPE-E2E-CODEX OK",
         "⠙ 계속 처리 중",
         &ProviderKind::Codex,
     );
 
     assert_eq!(rendered, "PIPE-E2E-CODEX OK");
-}
-
-#[test]
-fn legacy_watcher_streaming_edit_keeps_processing_footer() {
-    let rendered = build_watcher_streaming_edit_text(
-        false,
-        "Partial answer",
-        "⠙ 계속 처리 중",
-        &ProviderKind::Codex,
-    );
-
-    assert_eq!(rendered, "Partial answer");
 }
 
 #[test]

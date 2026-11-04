@@ -250,9 +250,6 @@ mod utils;
 #[cfg(test)]
 mod high_risk_recovery;
 
-// Re-export for crate-level access (used by services::discord::mod.rs)
-pub(crate) use cli::agentdesk_runtime_root;
-
 use anyhow::{Context, Result};
 
 pub fn run_from_args() -> Result<()> {
@@ -288,9 +285,9 @@ pub mod home_runtime {
 pub mod campaign_adapter {
     pub use crate::db::server_campaigns::evidence_store;
     pub use crate::services::campaign_execution::{
-        adk_observe, adk_profile, adk_resources, adk_workspace, candidate_seal, evidence,
-        evidence_gate, execution_pin, main_integration, profile, review_gate, verification_run,
-        verification_runner,
+        adk_observe, adk_profile, adk_resources, adk_workspace, candidate_seal, effect_envelope,
+        evidence, evidence_gate, execution_pin, host_gate, main_integration, profile, review_gate,
+        verification_run, verification_runner,
     };
 }
 

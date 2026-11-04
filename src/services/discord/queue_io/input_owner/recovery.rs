@@ -1,5 +1,5 @@
-//! A restarted owner settles a head whose window passed, projects its history, then posts the
-//! notices it owes. A projection failure is logged only: it holds nothing and confirms nothing.
+//! A restarted owner settles a head whose window passed, requeues proven-unsent retained inputs,
+//! projects its history, then posts the notices it owes. A projection failure is only logged.
 use crate::services::tui_input::human_frame::history::v2::Registry;
 use crate::services::turn_orchestrator::ChannelMailboxHandle;
 
@@ -15,6 +15,13 @@ pub(crate) async fn recover(
     handle.v2_ensure(path, namespace).await?;
     handle
         .v2_request(move |slot| slot.as_mut().ok_or("no input owner")?.tick(now))
+        .await?;
+    // Requeued before the notice drain, so an input requeued here never gets a resend ask.
+    handle
+        .v2_request(|slot| {
+            let owner = slot.as_mut().ok_or("no input owner")?;
+            owner.requeue_known_not_sent().map(drop)
+        })
         .await?;
     let synced = handle
         .v2_request(move |slot| {

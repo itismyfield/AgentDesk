@@ -68,7 +68,6 @@ function loadCiRecoveryScenario({ cardLifecycle, runConclusion = "failure", fail
         }
       },
       prTracking: {
-        importLegacyOnce() {},
         load(cardId) {
           assert.equal(cardId, "card-1878");
           return {
@@ -173,7 +172,6 @@ test("ci-recovery marks failed checks on done fallback PRs as pending handoff", 
         }
       },
       prTracking: {
-        importLegacyOnce() {},
         load(cardId) {
           assert.equal(cardId, "card-1878");
           return {

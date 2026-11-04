@@ -1,9 +1,7 @@
 //! Classification 2: every session forwarder builds its request through `trusted_request`,
 //! judged inside each real forwarder item. Bans count in code and literals, not comments.
 
-use crate::test_support::{
-    CommentForgery, braced_item_span, comment_out_code, rust_code_mask, strip_rust_comments,
-};
+use crate::test_support::{braced_item_span, rust_code_mask, strip_rust_comments};
 use std::ops::Range;
 
 pub(super) const SESSION_FORWARDING: &str = include_str!("../../session_forwarding.rs");
@@ -44,45 +42,4 @@ pub(super) fn trusted_request_gaps(source: &str) -> Vec<String> {
         }
     }
     gaps
-}
-
-#[test]
-fn trusted_request_guard_rejects_commented_calls_and_counts_coded_bypasses() {
-    let mask = rust_code_mask(SESSION_FORWARDING).expect("forwarding source lexes");
-    let edit = |name: &str, change: &dyn Fn(&str) -> String| {
-        let span = forwarder_span(&mask, name).expect("forwarder item");
-        let body = change(&SESSION_FORWARDING[span.clone()]);
-        [
-            &SESSION_FORWARDING[..span.start],
-            &body,
-            &SESSION_FORWARDING[span.end..],
-        ]
-        .concat()
-    };
-    for name in FORWARDERS {
-        for forgery in CommentForgery::ALL {
-            let forged = comment_out_code(SESSION_FORWARDING, &format!("fn {name}("), forgery);
-            assert_eq!(
-                trusted_request_gaps(&forged),
-                [format!("{name} is missing")]
-            );
-            let forged = edit(name, &|body| comment_out_code(body, TRUSTED, forgery));
-            assert!(forged.contains(TRUSTED));
-            let gaps = trusted_request_gaps(&forged);
-            assert_eq!(gaps, [format!("{name} bypassed shared trusted_request")]);
-        }
-        let open = |line: &'static str| {
-            move |body: &str| body.replacen("{\n", &format!("{{\n{line}\n"), 1)
-        };
-        let noted = edit(
-            name,
-            &open("    // reqwest::Client::builder() /* format!(\"http://x\") */"),
-        );
-        assert_eq!(trusted_request_gaps(&noted), Vec::<String>::new(), "{name}");
-        let coded = edit(
-            name,
-            &open("    let _ = (reqwest::Client::builder(), format!(\"http://x\"));"),
-        );
-        assert_eq!(trusted_request_gaps(&coded).len(), 2, "{name}");
-    }
 }

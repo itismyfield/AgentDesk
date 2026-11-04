@@ -639,6 +639,7 @@ async fn actual_owner_retry_card_apply_and_duplicate_use_one_original_mailbox_pa
         token: "test-token".into(),
         provider: ProviderKind::Claude,
     };
+    let ensured = crate::services::session_host::autostart::spawn::ensured_on_this_thread();
     let retry_result = crate::services::discord::commands::handle_text_command(
         &ctx,
         &message,
@@ -650,6 +651,10 @@ async fn actual_owner_retry_card_apply_and_duplicate_use_one_original_mailbox_pa
     assert!(
         matches!(retry_result, Ok(true)),
         "actual owner retry must be handled before ordinary text-command policy"
+    );
+    assert!(
+        crate::services::session_host::autostart::spawn::ensured_on_this_thread() > ensured,
+        "a fresh card asks for its live server first"
     );
     let bound = store().load(&key).unwrap().unwrap();
     assert_eq!(

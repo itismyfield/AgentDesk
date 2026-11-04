@@ -359,7 +359,7 @@ fi
 # The floor check runs on the selected binary once it exists, before anything is staged.
 floor_check="$(awk '
     /^[[:space:]]*\[ -e "\$SOURCE_BINARY" \] && touch "\$SOURCE_BINARY"$/ { collecting = 1; next }
-    collecting && /^# Rebuild dashboard so deploy never ships a stale dist\.$/ { print body; exit }
+    collecting && /^# Rebuild dashboard unless a newer deployed build is known\.$/ { print body; exit }
     collecting { body = body $0 ORS }
 ' "$DEPLOY_SH")"
 if ! grep -qx 'if _binary_would_revert_o_ledger "$SOURCE_BINARY"; then' <<<"$floor_check" \

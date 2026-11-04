@@ -12,7 +12,7 @@
 //   - policies/lib/auto-queue-error-recovery.js   stuck-entry alerts + consultation dispatch
 //
 // The `autoQueue` policy object + `module.exports` shape are preserved verbatim
-// so callers (registerPolicy(), `__test.inferPhaseGatePassVerdict`, etc.) keep
+// so callers (registerPolicy(), `__test.evaluatePhaseGate`, etc.) keep
 // working without changes.
 var _autoQueueLogLib = require("./lib/auto-queue-log");
 var _autoQueueConfigLib = require("./lib/auto-queue-config");
@@ -77,9 +77,7 @@ var PHASE_GATE_HUMAN_ESCALATION_THRESHOLD = _autoQueuePhaseGateLib.PHASE_GATE_HU
 var PHASE_GATE_FAILURE_TTL_SEC = _autoQueuePhaseGateLib.PHASE_GATE_FAILURE_TTL_SEC;
 var PHASE_GATE_ALERT_DEBOUNCE_TTL_SEC = _autoQueuePhaseGateLib.PHASE_GATE_ALERT_DEBOUNCE_TTL_SEC;
 var PHASE_GATE_GRACE_WINDOW_MS = _autoQueuePhaseGateLib.PHASE_GATE_GRACE_WINDOW_MS;
-var _inferPhaseGatePassVerdict = _autoQueuePhaseGateLib.inferPhaseGatePassVerdict;
-var _phaseGateVerdictMatches = _autoQueuePhaseGateLib.phaseGateVerdictMatches;
-var _phaseGateDiagnosticVerdict = _autoQueuePhaseGateLib.phaseGateDiagnosticVerdict;
+var _evaluatePhaseGate = _autoQueuePhaseGateLib.evaluatePhaseGate;
 var _phaseGateFailureReason = _autoQueuePhaseGateLib.phaseGateFailureReason;
 var authoritativePhaseGateContext = _autoQueuePhaseGateLib.authoritativePhaseGateContext;
 var _phaseGateGroupKey = _autoQueuePhaseGateLib.phaseGateGroupKey;
@@ -247,32 +245,19 @@ var autoQueue = {
     }
 
     var authoritativeContext = authoritativePhaseGateContext(gate.run_id, phase, context);
-    var authoritativeGate = authoritativeContext && authoritativeContext.phase_gate;
-    var verdict = result.verdict || result.decision || result.phase_gate_verdict || null;
-    var passVerdict = authoritativeGate ? authoritativeGate.pass_verdict : "phase_gate_passed";
-
-    // #699 fallback: legacy callers may have persisted a phase-gate result
-    // with every declared check passing but no explicit `verdict`. The
-    // server finalize path now injects the verdict, but this guard recovers
-    // rows stored before the fix shipped. Never infer "pass" when any check
-    // reports fail, and never override an explicit verdict/decision.
-    if (!verdict) {
-      var inferred = _inferPhaseGatePassVerdict(authoritativeContext, result);
-      if (inferred) {
-        verdict = inferred;
-        autoQueueLog("info", "Inferred phase gate verdict '" + inferred + "' for dispatch " + dispatch.id + " (no explicit verdict)", {
-          run_id: gate.run_id,
-          dispatch_id: dispatch.id,
-          card_id: dispatch.kanban_card_id,
-          batch_phase: phase
-        });
-      }
+    var evaluation = _evaluatePhaseGate(authoritativeContext, result);
+    var verdict = evaluation.verdict;
+    var passVerdict = evaluation.pass_verdict;
+    if (evaluation.inferred) {
+      autoQueueLog("info", "Inferred phase gate verdict '" + verdict + "' for dispatch " + dispatch.id + " (no explicit verdict)", {
+        run_id: gate.run_id, dispatch_id: dispatch.id,
+        card_id: dispatch.kanban_card_id, batch_phase: phase
+      });
     }
-
-    if (!_phaseGateVerdictMatches(verdict, passVerdict, authoritativeContext, result)) {
+    if (!evaluation.matches) {
       state.status = "failed";
       state.failed_dispatch_id = dispatch.id;
-      state.failed_verdict = _phaseGateDiagnosticVerdict(result, verdict);
+      state.failed_verdict = evaluation.diagnostic;
       state.failed_reason = _phaseGateFailureReason(result, passVerdict, state.failed_verdict);
       savePhaseGateState(gate.run_id, phase, state);
       pauseRun(gate.run_id);
@@ -339,27 +324,19 @@ var autoQueue = {
         try { gateResult = JSON.parse(gateDispatch.result); } catch (e) { gateResult = {}; }
       }
       var siblingContext = authoritativePhaseGateContext(gate.run_id, phase, gateContext);
-      var expectedVerdict = (siblingContext && siblingContext.phase_gate && siblingContext.phase_gate.pass_verdict) || "phase_gate_passed";
-      var gateVerdict = gateResult.verdict || gateResult.decision || gateResult.phase_gate_verdict || null;
-      // #699 (round 2): sibling gate dispatches persisted before the server
-      // fix shipped will still be missing `verdict`. Re-run the inference
-      // here so the aggregate gate evaluation does not trip on legacy rows.
-      if (!gateVerdict) {
-        var siblingInferred = _inferPhaseGatePassVerdict(siblingContext, gateResult);
-        if (siblingInferred) {
-          gateVerdict = siblingInferred;
-          autoQueueLog("info", "Inferred sibling phase gate verdict '" + siblingInferred + "' for dispatch " + gateDispatch.id + " (legacy row, no explicit verdict)", {
-            run_id: gate.run_id,
-            dispatch_id: gateDispatch.id,
-            card_id: state.anchor_card_id || dispatch.kanban_card_id,
-            batch_phase: phase
-          });
-        }
+      var siblingEvaluation = _evaluatePhaseGate(siblingContext, gateResult);
+      var expectedVerdict = siblingEvaluation.pass_verdict;
+      var gateVerdict = siblingEvaluation.verdict;
+      if (siblingEvaluation.inferred) {
+        autoQueueLog("info", "Inferred sibling phase gate verdict '" + gateVerdict + "' for dispatch " + gateDispatch.id + " (legacy row, no explicit verdict)", {
+          run_id: gate.run_id, dispatch_id: gateDispatch.id,
+          card_id: state.anchor_card_id || dispatch.kanban_card_id, batch_phase: phase
+        });
       }
-      if (gateDispatch.status !== "completed" || !_phaseGateVerdictMatches(gateVerdict, expectedVerdict, siblingContext, gateResult)) {
+      if (gateDispatch.status !== "completed" || !siblingEvaluation.matches) {
         state.status = "failed";
         state.failed_dispatch_id = gateDispatch.id;
-        state.failed_verdict = _phaseGateDiagnosticVerdict(gateResult, gateVerdict);
+        state.failed_verdict = siblingEvaluation.diagnostic;
         state.failed_reason = _phaseGateFailureReason(
           gateResult,
           expectedVerdict,
@@ -584,9 +561,7 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     policy: autoQueue,
     __test: {
-      inferPhaseGatePassVerdict: _inferPhaseGatePassVerdict,
-      phaseGateVerdictMatches: _phaseGateVerdictMatches,
-      phaseGateDiagnosticVerdict: _phaseGateDiagnosticVerdict,
+      evaluatePhaseGate: _evaluatePhaseGate,
       phaseGateFailureReason: _phaseGateFailureReason,
       phaseGateGroupKey: _phaseGateGroupKey,
       dispatchableTargets: _dispatchableTargets,

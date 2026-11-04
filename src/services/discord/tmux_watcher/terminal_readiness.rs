@@ -136,6 +136,7 @@ pub(super) fn watcher_terminal_rewind_seed(
             same_turn_rewind: true,
             delivery_source: None,
             body_source: None,
+            producer_turn_nonce: None,
         })
 }
 

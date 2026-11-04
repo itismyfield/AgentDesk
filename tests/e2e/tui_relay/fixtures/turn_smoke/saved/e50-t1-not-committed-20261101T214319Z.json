@@ -1,0 +1,47 @@
+{
+ "schema_version": 2,
+ "run_id": "20261101T214319Z-4180-E-50-claude-tui",
+ "cell": "claude-tui",
+ "provider": "claude",
+ "runtime": "tui",
+ "channel_id": "1559670200419352696",
+ "coverage_class_violations": [],
+ "scenarios": [
+  {
+   "id": "E-50",
+   "run_id": "20261101T214319Z-4180-E-50-claude-tui",
+   "cell": "claude-tui",
+   "channel_id": "1559670200419352696",
+   "status": "fail",
+   "reason": "assertion: timeout waiting for Discord text '[E2E:E50:20261101T214319Z-4180-E-50-claude-tui:T1]'; diagnostic={\"after_id\": \"1566569611057434625\", \"body_complete_head_for_tail\": null, \"cell\": \"claude-tui\", \"classification\": \"no_direct_input_or_relay_evidence\", \"health\": {\"fully_recovered\": true, \"global_active\": 0, \"global_finalizing\": 1, \"global_queue_depth\": 0, \"ok\": null, \"status\": \"healthy\", \"ta",
+   "marker_counts": {
+    "[E2E:E50:20261101T214319Z-4180-E-50-claude-tui:T1]": 0,
+    "[E2E:E50:20261101T214319Z-4180-E-50-claude-tui:T2]": 0,
+    "[E2E:E50:20261101T214319Z-4180-E-50-claude-tui:AFTER_CLEAR]": 0
+   },
+   "failure_attribution": {
+    "source": "assertion",
+    "raw_reason": "timeout waiting for Discord text '[E2E:E50:20261101T214319Z-4180-E-50-claude-tui:T1]'; diagnostic={\"after_id\": \"1566569611057434625\", \"body_complete_head_for_tail\": null, \"cell\": \"claude-tui\", \"classification\": \"no_direct_input_or_relay_evidence\", \"health\": {\"fully_recovered\": true, \"global_active\": 0, \"global_finalizing\": 1, \"global_queue_depth\": 0, \"ok\": null, \"status\": \"healthy\", \"target_mailbo",
+    "wait_timeout_classifications": [
+     "no_direct_input_or_relay_evidence"
+    ]
+   },
+   "prompt_sends": [
+    {
+     "step": "send_discord_prompt",
+     "send_state": "acknowledged",
+     "message_id": "1566569647464128638"
+    }
+   ],
+   "started_at": "2026-11-02T06:48:20",
+   "completed_at": "2026-11-02T06:49:33",
+   "wait_timeouts": [
+    {
+     "needle": "[E2E:E50:20261101T214319Z-4180-E-50-claude-tui:T1]",
+     "after_id": "1566569611057434625",
+     "classification": "no_direct_input_or_relay_evidence"
+    }
+   ]
+  }
+ ]
+}

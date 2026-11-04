@@ -130,6 +130,11 @@ pub(crate) fn watcher_soft_terminal_has_turn_authority(
 }
 
 impl WatcherSoftTerminalAuthority {
+    /// The turn nonce this watcher bound when the frame's first data was read, if any.
+    pub(crate) fn bound_turn_nonce(&self) -> Option<&str> {
+        self.watcher_turn_nonce.as_deref()
+    }
+
     /// Pre-#5175 verdict against the pre-turn startup snapshot. Telemetry only.
     pub(crate) fn startup_snapshot_authorized(&self) -> bool {
         self.startup_snapshot_authorized

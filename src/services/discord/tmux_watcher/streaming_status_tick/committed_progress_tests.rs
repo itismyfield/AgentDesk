@@ -427,11 +427,7 @@ fn legacy_tick_observes_actual_progress() {
     let fx = seed_row(guard.root.path(), 6_325, false, true);
     let before = fx.row_bytes();
     capture_warns(async {
-        let mut shared = crate::services::discord::make_shared_data_for_tests();
-        Arc::get_mut(&mut shared)
-            .unwrap()
-            .ui
-            .status_panel_v2_enabled = true;
+        let shared = crate::services::discord::make_shared_data_for_tests();
         let rec = recorder(fx.channel, false).await;
         let mut locals = tick_locals(&fx, None);
         let observation = crate::services::discord::inflight::o_seed_observation::Guard::new(
@@ -484,7 +480,6 @@ fn legacy_tick_with_legacy_ownership_emits_long_body() {
     capture_warns(async {
         let mut shared = crate::services::discord::make_shared_data_for_tests();
         let ui = &mut Arc::get_mut(&mut shared).unwrap().ui;
-        ui.status_panel_v2_enabled = true;
         ui.two_message_panel_enabled = true;
         assert_eq!(
             crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux(
@@ -931,9 +926,7 @@ async fn panel_parity_variant(guard: &RootGuard, case: u64, terminal: bool) {
         "separate-panel mode must be pinned by the parent"
     );
     let fx = seed_row(guard.root.path(), case, terminal, false);
-    let mut shared = crate::services::discord::make_shared_data_for_tests();
-    let ui = &mut Arc::get_mut(&mut shared).unwrap().ui;
-    ui.status_panel_v2_enabled = true;
+    let shared = crate::services::discord::make_shared_data_for_tests();
     let before = fx.row_bytes();
     let rec = recorder(fx.channel, true).await;
     let mut locals = tick_locals(&fx, None);

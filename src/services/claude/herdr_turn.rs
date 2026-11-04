@@ -601,6 +601,10 @@ fn resumed_session(
     let working_dir = Path::new(turn.working_dir);
     let home = overlay.home.as_deref();
     let Some(source) = session_handoff::transcript_file(working_dir, session, home)? else {
+        use crate::services::claude_tui::transcript_tail::claude_transcript_path;
+        let missing = claude_transcript_path(working_dir, session, home)?;
+        let channel = Some(turn.channel_id);
+        super::fresh_notice::announce(Some(turn.pool), channel, session, &missing);
         return Ok(None);
     };
     if !session_handoff::o_reads(turn.channel_id, &source)? {

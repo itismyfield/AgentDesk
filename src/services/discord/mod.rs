@@ -656,7 +656,7 @@ pub(super) fn check_deferred_restart(shared: &SharedData) {
     {
         return;
     }
-    let version = crate::agentdesk_runtime_root()
+    let version = crate::config::runtime_root()
         .map(|root| root.join("restart_pending"))
         .and_then(|marker| {
             let version = fs::read_to_string(&marker).unwrap_or_default();
@@ -843,6 +843,10 @@ pub(super) struct DiscordBotSettings {
     pub(super) channel_codex_goals: std::collections::HashMap<String, bool>,
     /// channel_id (string) → pending Codex goals session reset on the next turn
     pub(super) channel_codex_goals_reset_pending: std::collections::HashSet<String>,
+    /// channel_id (string) → pending same-session relaunch of the channel's local Claude TUI
+    pub(super) channel_relaunch_pending: std::collections::HashSet<String>,
+    /// channel_id (string) → effort level a local Claude TUI launches with
+    pub(super) channel_effort_levels: std::collections::HashMap<String, String>,
     /// channel_id (string) → selected cluster node instance for intake routing
     pub(super) channel_node_overrides: std::collections::HashMap<String, String>,
     /// Discord user ID of the registered owner (must be configured explicitly)
@@ -871,6 +875,8 @@ impl Default for DiscordBotSettings {
             channel_fast_mode_reset_pending: std::collections::HashSet::new(),
             channel_codex_goals: std::collections::HashMap::new(),
             channel_codex_goals_reset_pending: std::collections::HashSet::new(),
+            channel_relaunch_pending: std::collections::HashSet::new(),
+            channel_effort_levels: std::collections::HashMap::new(),
             channel_node_overrides: std::collections::HashMap::new(),
             owner_user_id: None,
             allowed_user_ids: Vec::new(),
@@ -1269,8 +1275,6 @@ pub(super) fn make_shared_data_for_tests_with_storage(
             placeholder_live_events: Arc::new(
                 placeholder_live_events::PlaceholderLiveEvents::default(),
             ),
-            placeholder_live_events_enabled: false,
-            status_panel_v2_enabled: false,
             two_message_panel_enabled: false,
         },
         queued: QueuedPlaceholderState {
@@ -2155,16 +2159,6 @@ async fn idle_queue_take_next_soft_if_ready(
     }
 
     mailbox_take_next_automatic_intervention(shared, provider, channel_id).await
-}
-
-#[cfg(test)]
-mod queued_dequeue_dispatch_guard_wiring_tests {
-    mod source_guard_tests;
-
-    #[test]
-    fn dequeue_uses_preservation_aware_stale_dispatch_guard() {
-        source_guard_tests::assert_dequeue_guard();
-    }
 }
 
 pub(in crate::services::discord) async fn mailbox_abandon_pending_dispatch(

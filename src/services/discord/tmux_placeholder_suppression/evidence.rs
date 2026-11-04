@@ -204,8 +204,7 @@ pub(crate) fn guarded_nonterminal_delete_decision(
 /// correct for the no-response arm (nothing was delivered, so the placeholder is
 /// disposable chrome), but in the terminal-committed arm that same row would
 /// delete a sink-delivered body whenever no positive delivered-elsewhere anchor
-/// exists — e.g. the durable delivered-frontier shadow is disabled
-/// (`AGENTDESK_DELIVERY_RECORD_SHADOW` default OFF), so
+/// exists — e.g. no current-generation delivered frontier is on record, so
 /// `current_generation_delivered_anchor` returns `None` → `NotFound`, and the
 /// sink's delivery marks `session_bound_delivered`, NOT the
 /// `terminal_delivery_committed` that `committed_terminal_anchor_protects_delete`

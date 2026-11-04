@@ -34,6 +34,11 @@ pub(crate) struct Owner {
     front_claim: Option<Front>,
     /// The current claim's process-unique number: another owner's or an earlier claim never reserves.
     claim_number: u64,
+    /// The front a refusal before any key returned to wait for a real wake; never persisted.
+    held: Option<u64>,
+    /// Diagnostic identity and successful commit count for this adoption; neither authorizes writes.
+    incarnation: uuid::Uuid,
+    last_success_sequence: u64,
 }
 
 /// The owner's unattempted front as the drive hands it on: its slot's ticket and the original.
@@ -73,7 +78,10 @@ impl Owner {
             unacknowledged: Vec::new(),
             front_grant: None,
             front_claim: None,
+            held: None,
             claim_number: 0,
+            incarnation: uuid::Uuid::new_v4(),
+            last_success_sequence: 0,
         };
         // A restored bootstrap is possibly sent; missing deadline never proves NotSent.
         let mut restored = owner.snapshot.clone();
@@ -277,6 +285,7 @@ impl Owner {
 
     /// Lets one owner claim presenting exactly this front start a turn.
     pub(crate) fn grant_front(&mut self, front: &Front) -> Result<(), String> {
+        self.held = None;
         match self.front() {
             Some(now) if is_front(&now, front) => {
                 self.front_grant = Some(now);
@@ -336,6 +345,11 @@ impl Owner {
     }
 
     /// Whether the drive's right on the front is still neither spent by a reserve nor revoked.
+    /// Whether the last handoff of `message` was held to wait for a real wake; read once.
+    pub(crate) fn take_held(&mut self, message: u64) -> bool {
+        self.held.take() == Some(message)
+    }
+
     pub(crate) fn front_outstanding(&self) -> bool {
         self.front_grant.is_some() || self.front_claim.is_some()
     }

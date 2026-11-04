@@ -46,6 +46,8 @@ pub(in crate::services::discord) struct RestoredWatcherTurn {
         Option<super::super::outbound::delivery_record::ExactJsonlSourceIdentity>,
     /// Records the producer actually read to build `full_response`; unknown for every other seed.
     pub(super) body_source: Option<SeedBodySource>,
+    /// Turn nonce of the restored row, naming the turn whose bridge queued its headless outbox row.
+    pub(super) producer_turn_nonce: Option<String>,
 }
 
 /// The transcript range one producer read for a seed body, in that file and session generation.
@@ -179,6 +181,7 @@ pub(in crate::services::discord) fn restored_watcher_turn_from_inflight(
         same_turn_rewind: false,
         delivery_source,
         body_source: None,
+        producer_turn_nonce: state.turn_nonce.clone().filter(|nonce| !nonce.is_empty()),
     })
 }
 

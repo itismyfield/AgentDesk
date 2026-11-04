@@ -377,7 +377,10 @@ async fn load_capability_claim_owner_pg_tx(
     };
 
     let worker_nodes = load_live_capability_route_nodes_pg_tx(tx).await?;
-    let route_candidates = crate::server::cluster::select_capability_route(&worker_nodes, required);
+    let route_candidates = crate::services::cluster::capability_routing::select_capability_route(
+        &worker_nodes,
+        required,
+    );
     let Some(selected_owner) = route_candidates
         .first()
         .and_then(|candidate| candidate.decision.instance_id.as_deref())

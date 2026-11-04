@@ -7,7 +7,11 @@ use crate::services::discord::relay_recovery::AxisBSite;
 use crate::services::discord::session_identity::SessionIdentity;
 use crate::services::provider::ProviderKind;
 
+#[cfg(test)]
+pub(crate) mod owner_boundary_tests;
+mod policy_maintenance;
 mod test_barriers;
+pub(crate) use policy_maintenance::{PolicyMaintenanceIo, maintain_policy_sessions};
 #[cfg(test)]
 use test_barriers::await_stale_sweep_apply_barrier;
 #[cfg(test)]

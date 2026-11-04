@@ -43,6 +43,7 @@ struct Pane {
     execution: String,
     target: crate::services::session_host::HerdrTarget,
     rollout: std::path::PathBuf,
+    context: std::path::PathBuf,
     _dir: tempfile::TempDir,
 }
 
@@ -50,7 +51,8 @@ impl Pane {
     fn start(channel: u64) -> Self {
         let rig = HerdrRig::start();
         let execution = uuid::Uuid::new_v4().simple().to_string();
-        rig.run_provider(&rig.context(&execution), false);
+        let context = rig.context(&execution);
+        rig.run_provider(&context, false);
         let logical = format!("AgentDesk-codex-owner-{channel}");
         let marker = crate::services::tmux_common::session_temp_path(&logical, "host_kind");
         std::fs::create_dir_all(Path::new(&marker).parent().unwrap()).unwrap();
@@ -109,6 +111,7 @@ impl Pane {
             execution,
             target,
             rollout,
+            context,
             _dir: dir,
         }
     }
@@ -140,8 +143,15 @@ impl Pane {
         busy_inject::frame("discord", "7", "tester", &self.nonce(), PROMPT)
     }
 
-    /// One owner attempt through the V2 pump with this pane's leaf aimed at `target_turn`.
-    fn attempt(&self, target_turn: &str) -> (Completion, Value) {
+    /// One admitted original on the real mailbox, shared by one attempt or an automatic retry.
+    fn with_owner<R>(
+        &self,
+        run: impl FnOnce(
+            &tokio::runtime::Runtime,
+            crate::services::turn_orchestrator::ChannelMailboxHandle,
+            PreparedPayload,
+        ) -> R,
+    ) -> R {
         let _registry = self.rig.registry_on_this_thread();
         open();
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -171,37 +181,51 @@ impl Pane {
                     "transcript":self.rollout.display().to_string(),
                     "file":[meta.dev(), meta.ino()],"offset":meta.len()}}),
         };
-        let leaf = BusyCodexHerdr {
+        let channel = self.channel;
+        runtime.block_on(async {
+            let context = crate::services::turn_orchestrator::QueuePersistenceContext::new(
+                &crate::services::provider::ProviderKind::Codex,
+                "owner-herdr",
+                None,
+            );
+            let id = poise::serenity_prelude::ChannelId::new(channel);
+            let (path, _) = crate::services::turn_orchestrator::v2_queue(&context, id).unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            mailbox.v2_ensure_channel(&context, id).await.unwrap();
+            use crate::services::discord::queue_io::input_owner::admission::{
+                Admission, AdmissionTicket, admit,
+            };
+            assert!(matches!(
+                admit(&mailbox, &original, AdmissionTicket::new()).await,
+                Admission::Accepted(_)
+            ));
+        });
+        run(&runtime, mailbox, prepared)
+    }
+
+    fn leaf(&self, target_turn: &str) -> Leaf {
+        BusyCodexHerdr {
             target: self.target.clone(),
             writer: self.physical(),
             input: self.input(target_turn),
         }
-        .leaf();
-        let channel = self.channel;
-        let completion = runtime.block_on(async {
-            let queue = crate::services::discord::runtime_store::discord_pending_queue_root()
-                .unwrap()
-                .join("codex/input-owner-herdr");
-            std::fs::create_dir_all(&queue).unwrap();
-            mailbox
-                .v2_adopt(queue.join(format!("{channel}.json")), "input-owner".into())
-                .await
+        .leaf()
+    }
+
+    /// One owner attempt through the V2 pump with this pane's leaf aimed at `target_turn`.
+    fn attempt(&self, target_turn: &str) -> (Completion, Value) {
+        self.with_owner(|runtime, mailbox, prepared| {
+            let completion = runtime.block_on(pump::submit(
+                &mailbox,
+                prepared,
+                Arc::new(|| 10_000),
+                self.leaf(target_turn),
+            ));
+            let snapshot = runtime
+                .block_on(mailbox.v2_request(|s| s.as_ref().unwrap().json()))
                 .unwrap();
-            mailbox
-                .v2_request(move |s| {
-                    s.as_mut()
-                        .unwrap()
-                        .enqueue_fixture(&original)
-                        .map_err(|e| format!("{e:?}"))
-                })
-                .await
-                .unwrap();
-            pump::submit(&mailbox, prepared, Arc::new(|| 10_000), leaf).await
-        });
-        let snapshot = runtime
-            .block_on(mailbox.v2_request(|s| s.as_ref().unwrap().json()))
-            .unwrap();
-        (completion.unwrap(), snapshot)
+            (completion.unwrap(), snapshot)
+        })
     }
 
     /// The legacy ledger holds no row for this nonce: registering it again is accepted.
@@ -235,23 +259,27 @@ fn owner_herdr_busy_codex_pastes_and_enters_once() {
     assert!(pane.ledger_free());
 }
 
-/// A moved model turn and a person's draft are refused before any key: the original goes back to
-/// custody as known not sent, with no ledger row left.
+/// Model turn observations and a person's draft do not veto an owned delivery.
 #[test]
-fn owner_herdr_busy_codex_refuses_a_moved_turn_or_a_draft_before_any_key() {
+fn owner_herdr_busy_codex_delivers_a_moved_turn_or_a_draft_once() {
     let _root = crate::config::TestRuntimeRootGuard::new();
-    for (channel, draft, target_turn, reason) in [
-        (7_272_542, "", "01b-another-turn", "TurnChanged"),
-        (7_272_543, "a person's draft", T, "ComposerUnread"),
+    for (channel, draft, target_turn) in [
+        (7_272_542, "", "01b-another-turn"),
+        (7_272_543, "a person's draft", ""),
     ] {
         let pane = Pane::start(channel);
         pane.rig.answer("pane.read", screen(draft));
         let (completion, snapshot) = pane.attempt(target_turn);
-        assert_eq!(completion, Completion::NotSent(reason.into()), "{snapshot}");
-        assert!(pane.rig.sends().is_empty(), "{:?}", pane.rig.sends());
-        let retained = &snapshot["retained_inputs"];
-        assert_eq!(retained[0]["disposition"], "known_not_sent", "{snapshot}");
-        assert!(pane.ledger_free(), "{reason}");
+        assert_eq!(completion, Completion::Submitted, "{snapshot}");
+        let sends = pane.rig.sends();
+        assert_eq!(sends.len(), 2, "{sends:?}");
+        assert_eq!(
+            sends[0]["text"],
+            format!("\u{1b}[200~{}\u{1b}[201~", pane.frame())
+        );
+        assert_eq!(sends[1]["keys"], json!(["enter"]));
+        assert_eq!(snapshot["retained_inputs"], json!([]), "{snapshot}");
+        assert!(pane.ledger_free());
     }
 }
 
@@ -325,11 +353,270 @@ fn owner_ready_refusal_pins_the_physical_pane_and_sends_nothing() {
         Arc::new(|_| Ok(())),
         || leaf(pane.frame()),
     );
-    assert_eq!(completion, Ok(Completion::NotSent("LockContended".into())));
+    assert_eq!(completion, Ok(Completion::Held("LockContended".into())));
     assert_eq!(
         *pinned.lock().unwrap(),
         [format!("herdr:{}", pane.physical())]
     );
     assert!(pane.rig.sends().is_empty(), "{:?}", pane.rig.sends());
     assert!(pane.ledger_free());
+}
+
+/// The adapter catches an injection panic and emits one alert carrying this input's context.
+#[test]
+fn codex_adapter_panic_emits_one_owned_alert() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let pane = Pane::start(7_272_546);
+    let (completion, events) =
+        crate::services::observability::events::test_capture::capture_sync(|| {
+            pane.input(T).run(
+                |_, _| panic!("injected busy adapter panic"),
+                || Screen::Unknown,
+            )
+        });
+    assert_eq!(
+        completion,
+        Completion::WriteUncertain("executor_failed".into())
+    );
+    let alerts: Vec<_> = events
+        .iter()
+        .filter(|event| event.event_type == "busy_inject_unconfirmed")
+        .collect();
+    assert_eq!(alerts.len(), 1, "exactly one panic alert: {events:?}");
+    let alert = alerts[0];
+    assert_eq!(alert.channel_id, Some(pane.channel));
+    assert_eq!(alert.payload["nonce"], pane.nonce());
+    assert_eq!(alert.payload["detail"], "executor_failed");
+    assert_eq!(alert.payload["owner"], true);
+    assert!(pane.rig.sends().is_empty());
+}
+
+/// A real Codex Modal veto holds the same admission with no timer; the next wake retries the
+/// actual adapter.
+#[test]
+fn a_codex_modal_is_retried_by_the_drive_on_its_next_wake() {
+    use crate::services::discord::queue_io::input_owner::drive::{self, Drive, Handoff};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let pane = Pane::start(7_272_547);
+    let _registry = pane.rig.registry_on_this_thread();
+    let mut modal = screen("");
+    modal["read"]["text"] = json!("Approval required\n› 1. Yes\ngpt-5.4 xhigh · /tmp");
+    pane.rig.answer("pane.read", modal);
+    pane.with_owner(|runtime, mailbox, prepared| {
+        let refused = Arc::new(AtomicBool::new(false));
+        let observed = refused.clone();
+        let (m, target, writer, logical, rollout, nonce, channel) = (
+            mailbox.clone(),
+            pane.target.clone(),
+            pane.physical(),
+            pane.logical.clone(),
+            pane.rollout.clone(),
+            pane.nonce(),
+            pane.channel,
+        );
+        let handoff: Handoff = Arc::new(move |front| {
+            let (m, observed) = (m.clone(), observed.clone());
+            let payload = PreparedPayload {
+                frame: prepared.frame.clone(),
+                sources: prepared.sources.clone(),
+                attempt: prepared.attempt.clone(),
+            };
+            let leaf = BusyCodexHerdr {
+                target: target.clone(),
+                writer: writer.clone(),
+                input: CodexInput {
+                    session: logical.clone(),
+                    rollout: rollout.clone(),
+                    target_turn: T.into(),
+                    channel,
+                    message: None,
+                    source: "discord".into(),
+                    author: "7".into(),
+                    name: "tester".into(),
+                    nonce: nonce.clone(),
+                    text: PROMPT.into(),
+                },
+            }
+            .leaf();
+            Box::pin(async move {
+                let claim = drive::claim_turn(&m, front.1.message_id, &front)
+                    .await?
+                    .ok_or("missing front")?;
+                let completion =
+                    pump::submit_front(&m, Some(claim), payload, Arc::new(|| 10_000), leaf).await?;
+                observed.store(true, Ordering::SeqCst);
+                match completion {
+                    Completion::Submitted => Ok(()),
+                    other => Err(format!("{other:?}")),
+                }
+            })
+        });
+        let drive = Arc::new(Drive {
+            mailbox: mailbox.clone(),
+            channel: pane.channel,
+            handoff,
+            settled: None,
+        });
+        runtime.block_on(async {
+            drive::wake(drive.clone());
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !refused.load(Ordering::SeqCst) {
+                assert!(
+                    Instant::now() < deadline,
+                    "the actual Codex adapter did not settle"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let held = mailbox
+                .v2_request(|s| s.as_ref().unwrap().json())
+                .await
+                .unwrap();
+            assert!(held["head_injection"].is_null(), "{held}");
+            assert_eq!(held["retained_inputs"], json!([]));
+            assert_eq!(held["items"].as_array().unwrap().len(), 1);
+            let ticket = held["admission_receipts"][0]["ticket"].clone();
+            assert_eq!(held["admission_receipts"].as_array().unwrap().len(), 1);
+            assert!(pane.rig.sends().is_empty());
+            assert!(pane.ledger_free());
+            pane.rig.answer("pane.read", screen(""));
+            drive::wake(drive);
+            loop {
+                let done = mailbox
+                    .v2_request(|s| s.as_ref().unwrap().json())
+                    .await
+                    .unwrap();
+                if done["items"] == json!([]) && done["head_injection"].is_null() {
+                    assert_eq!(done["admission_receipts"].as_array().unwrap().len(), 1);
+                    assert_eq!(done["admission_receipts"][0]["ticket"], ticket);
+                    assert_eq!(done["terminal_identities"].as_array().unwrap().len(), 1);
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "the drive did not retry the real Codex adapter: {done}"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        let sends = pane.rig.sends();
+        assert_eq!(sends.len(), 2, "{sends:?}");
+        assert_eq!(
+            sends[0]["text"],
+            format!("\u{1b}[200~{}\u{1b}[201~", pane.frame())
+        );
+        assert_eq!(sends[1]["keys"], json!(["enter"]));
+    });
+}
+
+#[test]
+fn a_pre_write_herdr_gate_refusal_has_no_unknown_attempt() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let pane = Arc::new(Pane::start(7_676_160));
+    let _registry = pane.rig.registry_on_this_thread();
+    pane.rig.answer("pane.read", screen(""));
+    pane.with_owner(|runtime, mailbox, prepared| {
+        let replacement = pane.clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let clock: super::super::Clock = Arc::new(move || {
+            if counted.fetch_add(1, Ordering::SeqCst) == 1 {
+                replacement.rig.run_provider(&replacement.context, true);
+            }
+            10_000
+        });
+        let result = runtime
+            .block_on(pump::submit(&mailbox, prepared, clock, pane.leaf(T)))
+            .unwrap();
+        assert_eq!(result, Completion::NotSent("PaneUnavailable".into()));
+        assert!(calls.load(Ordering::SeqCst) >= 2);
+        assert!(pane.rig.sends().is_empty());
+        let snapshot = runtime
+            .block_on(mailbox.v2_request(|s| s.as_ref().unwrap().json()))
+            .unwrap();
+        assert!(snapshot["head_injection"].is_null(), "{snapshot}");
+        assert_eq!(
+            snapshot["items"].as_array().unwrap().len()
+                + snapshot["retained_inputs"].as_array().unwrap().len(),
+            1,
+            "{snapshot}"
+        );
+        if let Some(kept) = snapshot["retained_inputs"].as_array().unwrap().first() {
+            assert_eq!(kept["disposition"], "known_not_sent", "{snapshot}");
+        }
+    });
+}
+
+/// A paste with no acknowledgement remains Unknown through clear and checked purge.
+#[test]
+fn a_possible_herdr_paste_stays_owned_through_clear_and_purge() {
+    use crate::services::turn_orchestrator::QueuePersistenceContext;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let pane = Arc::new(Pane::start(7_272_549));
+    let _registry = pane.rig.registry_on_this_thread();
+    pane.rig.answer("pane.read", screen(""));
+    pane.rig.leave_sends_unanswered(true);
+    pane.with_owner(|runtime, mailbox, prepared| {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let clock: super::super::Clock = Arc::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            10_000
+        });
+        let completion = runtime
+            .block_on(pump::submit(&mailbox, prepared, clock, pane.leaf(T)))
+            .unwrap();
+        let before = runtime
+            .block_on(mailbox.v2_request(|s| s.as_ref().unwrap().json()))
+            .unwrap();
+        assert_eq!(
+            before["head_injection"]["phase"], "unknown",
+            "an attempted paste prevents a false not-sent proof: {before}"
+        );
+        assert_eq!(
+            completion,
+            Completion::WriteUncertain("paste_failed".into()),
+            "the actual paste was attempted without an acknowledgement"
+        );
+        assert!(
+            calls.load(Ordering::SeqCst) >= 2,
+            "the refusal followed ready and start"
+        );
+        assert_eq!(pane.rig.sends().len(), 1);
+        runtime.block_on(async {
+            assert_eq!(before["retained_inputs"], json!([]));
+            let context = QueuePersistenceContext::new(
+                &crate::services::provider::ProviderKind::Codex,
+                "owner-herdr",
+                None,
+            );
+            let cleared = mailbox.clear(context.clone()).await;
+            assert!(cleared.discarded_message_ids.is_empty());
+            assert!(cleared.persistence.failed.is_empty());
+            let captured = mailbox.try_capture_v2().await.unwrap().unwrap();
+            let purged = mailbox
+                .try_purge_queue_if_unchanged(context, captured)
+                .await
+                .unwrap();
+            assert!(purged.failed.is_none(), "{:?}", purged.failed);
+            assert!(
+                purged.receipt.is_empty(),
+                "the attempted original cannot be purged"
+            );
+            let after = mailbox
+                .v2_request(|s| s.as_ref().unwrap().json())
+                .await
+                .unwrap();
+            assert_eq!(
+                after["head_injection"], before["head_injection"],
+                "clear and purge retain the exact attempt"
+            );
+            assert_eq!(after["items"], before["items"]);
+            assert_eq!(after["admission_receipts"], before["admission_receipts"]);
+            assert_eq!(after["retained_inputs"], json!([]));
+        });
+    });
 }

@@ -245,7 +245,7 @@ async fn make_binding_only(fixture: &CanaryFixture, assert_absent: bool) {
                 }
         })
         .expect("the actual N2 hook must retain its exact durable Source binding");
-    assert!(!dedupe::codex_verified_event_allowed(prior));
+    assert_eq!(dedupe::codex_verified_events_allowed(&[prior]), [false]);
     use crate::services::tui_o::writer::binding::{
         BindingEvents, BindingRecord, ChannelBindingLog,
     };
@@ -323,8 +323,14 @@ pub(super) async fn assert_bridge_once(
                 let body = parts.next().unwrap_or_default();
                 matches!(method, "POST" | "PATCH")
                     && path.contains(&format!("/channels/{CANARY_CHANNEL}/messages"))
-                    && serde_json::from_str::<serde_json::Value>(body)
-                        .is_ok_and(|value| value["content"] == "clear relaunch completed")
+                    && serde_json::from_str::<serde_json::Value>(body).is_ok_and(|value| {
+                        value["content"].as_str().is_some_and(|content| {
+                            crate::services::discord::session_banner::relays_body(
+                                content,
+                                "clear relaunch completed",
+                            )
+                        })
+                    })
             });
             let summary = sent.iter().any(|call| {
                 let mut parts = call.splitn(3, ' ');

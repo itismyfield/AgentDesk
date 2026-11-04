@@ -1931,6 +1931,25 @@ test.describe("Dashboard smoke tests", () => {
     }
   });
 
+  test("ops: a tailnet device without detail access sees the summary, not zeros or error toasts", async ({ page }) => {
+    await mockOpsHealthApi(page, () => ({ status: "healthy", version: "2.4.1", db: true }));
+    let detailCalls = 0;
+    await page.route(/\/api\/health\/detail$/, (route) => {
+      detailCalls += 1;
+      return route.fulfill({ status: 403, json: { error: "auth_token required for non-loopback host" } });
+    });
+    await page.goto("/ops");
+
+    await expect(page.getByTestId("ops-public-only-note")).toContainText("서버가 도는 맥");
+    await expect(page.getByTestId("ops-providers-card")).toContainText("—");
+    await expect(page.getByTestId("ops-dispatch-outbox-card")).toContainText("—");
+    await page.goto("/settings?settingsPanel=connections");
+    await expect(page.getByText("이 기기에서는 확인할 수 없어요")).toBeVisible();
+    await expect(page.getByText(/API 오류/)).toHaveCount(0);
+    // One probe per page load; polling reuses the public summary after the 403.
+    expect(detailCalls).toBe(2);
+  });
+
   test("ops: cluster controls distinguish readiness, bound output and stale state", async ({ page }, testInfo) => {
     await page.route(/\/api\/settings$/, route => route.fulfill({ json: {
       language: testInfo.project.name === "desktop" ? "en" : "ko", theme: "dark",

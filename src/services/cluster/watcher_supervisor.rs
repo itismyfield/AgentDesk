@@ -30,14 +30,8 @@
 //! every node runs its own discovery, so every node owns relays for its own
 //! sessions. Cross-host relay placement is out of scope here.
 //!
-//! ## Flag gate
-//!
-//! `cluster.session_bound_relay_enabled` (default `true` since E5 / #2412).
-//! When `false`, the supervisor is not started by the worker registry and
-//! the legacy turn-bound relay path remains the only delivery channel —
-//! that escape hatch lets operators disable the new path if a regression
-//! surfaces. Under the default-on configuration the production worker wires a
-//! Discord sink and the production tmux frame producer
+//! The worker registry always starts the supervisor on Unix. The production
+//! worker wires a Discord sink and the production tmux frame producer
 //! (`services::discord::tmux_watcher`) pushes frames into the supervisor-owned
 //! relay via [`super::relay_producer_registry::RelayProducerRegistry`]. The
 //! metrics-only [`super::registry_adapter_sink::RegistryAdapterSink`] remains

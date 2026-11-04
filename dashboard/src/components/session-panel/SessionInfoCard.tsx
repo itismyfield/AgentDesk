@@ -75,7 +75,7 @@ export function SessionInfoCard({
         >
           <div className="max-h-[min(78vh,720px)] overflow-y-auto">
             <div className="flex items-start gap-4 border-b px-5 py-5 sm:px-6" style={{ borderColor: "var(--th-border-subtle)" }}>
-              <AgentPersona {...sessionPersona(s)} size={56} />
+              <AgentPersona {...sessionPersona(s)} size={56} animated />
 
               <div className="min-w-0 flex-1">
                 <TooltipLabel

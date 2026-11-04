@@ -128,7 +128,7 @@ fn footer_mode_skips_recovery_status_panel_completion_for_stale_persisted_id() {
     persisted.status_message_id = Some(4004);
 
     let target =
-        recovery_status_panel::completion_target_for_flags(true, &snapshot, Some(&persisted));
+        recovery_status_panel::completion_target_with_persisted(&snapshot, Some(&persisted));
 
     assert_eq!(
         target,
@@ -141,7 +141,7 @@ fn footer_mode_skips_recovery_status_panel_completion_for_stale_persisted_id() {
 fn flag_off_recovery_none_target_still_requests_send_fallback() {
     let snapshot = state_for_recovery(9101);
 
-    let target = recovery_status_panel::completion_target_for_flags(true, &snapshot, None);
+    let target = recovery_status_panel::completion_target_with_persisted(&snapshot, None);
 
     assert_eq!(
         target, None,
@@ -152,11 +152,7 @@ fn flag_off_recovery_none_target_still_requests_send_fallback() {
 #[tokio::test]
 async fn recovery_status_panel_completion_emits_background_agent_pending_payload() {
     let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
-    let mut shared = super::super::make_shared_data_for_tests();
-    Arc::get_mut(&mut shared)
-        .expect("fresh test shared data should be uniquely owned")
-        .ui
-        .status_panel_v2_enabled = true;
+    let shared = super::super::make_shared_data_for_tests();
     let http = poise::serenity_prelude::Http::new("Bot test-token");
     let provider = ProviderKind::Claude;
     let state = state_for_recovery(9101);

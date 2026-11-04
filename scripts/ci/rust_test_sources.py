@@ -12,6 +12,7 @@ Nothing here runs cargo.
 """
 
 import argparse
+from bisect import bisect_right
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
@@ -40,7 +41,7 @@ class RustToken:
     start: int = field(default=-1, compare=False)
 
 
-def rust_tokens(text):
+def rust_tokens(text, *, extended=False):
     """Tokenize the Rust subset needed for attributes, items, macros and brace scopes."""
     tokens, index, line = [], 0, 1
     while index < len(text):
@@ -91,15 +92,98 @@ def rust_tokens(text):
             if literal:
                 index = literal.end()
                 continue
+        if extended and text.startswith("r#", index):
+            raw_ident = IDENT.match(text, index + 2)
+            if raw_ident:
+                tokens.append(RustToken(raw_ident.group(), line, "ident", index))
+                index = raw_ident.end()
+                continue
         ident = IDENT.match(text, index)
         if ident:
             tokens.append(RustToken(ident.group(), line, "ident", index))
             index = ident.end()
             continue
-        if char in "#![]{}();=:":
+        if char in "#![]{}();=:" or extended and char in ",*$<>.'":
             tokens.append(RustToken(char, line, "punct", index))
         index += 1
     return tokens
+
+
+def production_tokens(path, *, unreadable=None, diagnostic_path=None):
+    """Return production tokens, or None when a file-level test gate excludes the file."""
+    try:
+        from rust_production import _production_text
+        from rust_lex import StripState, cfg_item_end, strip_line
+        from rust_cfg import find_test_only_cfg_attributes
+        from generate_inventory_docs import scan_balanced
+    except ModuleNotFoundError:
+        from scripts.rust_production import _production_text
+        from scripts.rust_lex import StripState, cfg_item_end, strip_line
+        from scripts.rust_cfg import find_test_only_cfg_attributes
+        from scripts.generate_inventory_docs import scan_balanced
+    raw = path.read_text("utf-8")
+    tokens = rust_tokens(raw, extended=True)
+    state = StripState()
+    code = "".join(strip_line(line, state).ljust(len(line)) for line in raw.splitlines(keepends=True))
+    matches = list(find_test_only_cfg_attributes(code))
+    gated = {match.start() for match in matches if not match.is_inner}
+    inner = {match.start() for match in matches if match.is_inner}
+    containers, braces = {}, []
+    for token in tokens:
+        if token.start in inner:
+            if not braces:
+                return None
+            containers[token.start] = braces[-1]
+        if token.kind == "punct" and token.value == "{":
+            braces.append(token.start)
+        elif token.kind == "punct" and token.value == "}" and braces:
+            braces.pop()
+    for index, token in enumerate(tokens):
+        span = attribute_span(tokens, index)
+        if span is not None:
+            attr = tokens[span[0] + 1:span[1] - 1]
+            path_end = next((n for n, t in enumerate(attr) if t.value in ("(", "=")), len(attr))
+            names = tuple(t.value for t in attr[:path_end] if t.kind == "ident")
+            if names in TEST_ATTRS:
+                gated.add(token.start)
+    ranges, exact = [], True
+    for start in sorted(gated | inner):
+        if ranges and start < ranges[-1][1]:
+            continue
+        try:
+            if start in inner:
+                _, end = scan_balanced(code, containers[start], "{", "}")
+                end -= 1  # Keep the enclosing module's closing delimiter.
+            else:
+                end = cfg_item_end(code, start, scan_balanced)
+                if code[end - 1:end] == "," and "<" in code[start:end]:
+                    raise ValueError("generic field boundary is uncertain")
+        except ValueError as exc:
+            exact = False
+            if unreadable is not None:
+                unreadable.append(f"{diagnostic_path if diagnostic_path is not None else path}:"
+                                  f"{raw.count(chr(10), 0, start) + 1} uncertain test-only range: {exc}")
+            continue
+        if ranges and start <= ranges[-1][1]:
+            ranges[-1] = (ranges[-1][0], max(ranges[-1][1], end))
+        else:
+            ranges.append((start, end))
+    range_starts = [start for start, _ in ranges]
+    masked = _production_text(path).splitlines() if not exact else ()
+    starts, offset = [], 0
+    for line in raw.splitlines(keepends=True):
+        starts.append(offset)
+        offset += len(line)
+    result = []
+    for token in tokens:
+        region = bisect_right(range_starts, token.start) - 1
+        if region >= 0 and token.start < ranges[region][1]:
+            continue
+        column = token.start - starts[token.line - 1]
+        line = masked[token.line - 1] if token.line <= len(masked) else ""
+        if exact or token.kind == "string" or column < len(line) and not line[column].isspace():
+            result.append(token)
+    return result
 
 
 def attribute_span(tokens, index):
@@ -161,11 +245,17 @@ class Inventory:
     unreadable: list = field(default_factory=list)
     # Declaration site -> its ignore conditions: () for a plain #[ignore], else a cfg_attr predicate.
     ignores: dict = field(default_factory=dict)
+    # Production occurrences retain inherited cfgs, including mutually exclusive targets.
+    sources: list = field(default_factory=list)
+    logical_modules: set = field(default_factory=set)
+    read_failures: list = field(default_factory=list)
+    source_tokens: dict = field(default_factory=dict)
 
 
 def _include_target(tokens, index, source, repo_root):
     """Path an `include!(...)` at tokens[index] names, None for a non-literal form."""
-    args = tokens[index + 3:index + 3 + len(MANIFEST_DIR_INCLUDE) + 1]
+    args = [t for t in tokens[index + 3:index + 5 + len(MANIFEST_DIR_INCLUDE)]
+            if t.kind != "punct" or t.value != ","][:len(MANIFEST_DIR_INCLUDE) + 1]
     if tokens[index + 3].kind == "string":
         return source.parent / tokens[index + 3].value
     if tuple(t.value for t in args[:-1]) == MANIFEST_DIR_INCLUDE and args[-1].kind == "string":
@@ -173,21 +263,52 @@ def _include_target(tokens, index, source, repo_root):
     return None
 
 
-def walk(root, repo_root, inventory=None):
+def walk(root, repo_root, inventory=None, *, production=False):
     """Add every test the crate root reaches to the inventory, following mod, #[path] and include!."""
     inv = inventory if inventory is not None else Inventory()
+    if production:
+        try:
+            from rust_cfg import cfg_requires_test
+        except ModuleNotFoundError:
+            from scripts.rust_cfg import cfg_requires_test
     # (file, module names, children directory, directory its own #[path] resolves against, cfg chain)
     queue = [(root, (), root.parent, root.parent, ())]
     seen = set()
     while queue:
         source, outer, base_dir, path_dir, file_cfgs = queue.pop()
         identity = (source.resolve(), outer, file_cfgs)
-        if identity in seen or not source.is_file():
+        if identity in seen:
             continue
         seen.add(identity)
+        if production and any(cfg_requires_test("".join(cfg[1:-1])) for cfg in file_cfgs):
+            continue
+        if production and not source.resolve().is_relative_to(repo_root.resolve()):
+            inv.errors.append(f"{source}: source is outside repository root")
+            continue
+        if not source.is_file():
+            if production:
+                inv.read_failures.append(f"{source}: source is missing or not a file")
+            continue
         inv.reached.add(source.resolve())
         inv.modules.setdefault(source.resolve(), set()).add(outer)
-        tokens = rust_tokens(source.read_text("utf-8"))
+        try:
+            if production:
+                if source.resolve() not in inv.source_tokens:
+                    inv.source_tokens[source.resolve()] = production_tokens(
+                        source, unreadable=inv.unreadable, diagnostic_path=source.relative_to(repo_root).as_posix())
+                tokens = inv.source_tokens[source.resolve()]
+            else:
+                tokens = rust_tokens(source.read_text("utf-8"))
+        except (OSError, UnicodeError) as exc:
+            if not production:
+                raise
+            inv.read_failures.append(f"{source}: {type(exc).__name__}: {exc}")
+            continue
+        if production and tokens is None:
+            continue
+        if production:
+            inv.sources.append((source.resolve(), outer, file_cfgs))
+            inv.logical_modules.add(outer)
         rel = source.relative_to(repo_root)
         scopes, cfg_stack = [], [(0, file_cfgs)]
         depth, pending_path, pending_test, pending_cfgs, pending_ignore = 0, None, False, (), ()
@@ -245,6 +366,8 @@ def walk(root, repo_root, inventory=None):
                     depth += 1
                     scopes.append((depth, name, redirect_dir / pending_path if pending_path else directory / name))
                     cfg_stack.append((depth, cfgs + pending_cfgs))
+                    if production:
+                        inv.logical_modules.add(names + (name,))
                     index = cursor + 1
                     pending_path, pending_test, pending_cfgs = None, False, ()
                     continue

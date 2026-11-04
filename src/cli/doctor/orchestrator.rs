@@ -1543,7 +1543,7 @@ fn print_group(title: &str, checks: &[Check]) {
 fn apply_safe_fixes(cfg: &config::Config, options: &DoctorOptions) -> Vec<FixAction> {
     let mut actions = Vec::new();
 
-    match dcserver::agentdesk_runtime_root() {
+    match crate::config::runtime_root() {
         Some(root) => {
             let dirs = [
                 root.clone(),
@@ -1626,7 +1626,7 @@ fn apply_safe_fixes(cfg: &config::Config, options: &DoctorOptions) -> Vec<FixAct
         return actions;
     }
 
-    match dcserver::agentdesk_runtime_root() {
+    match crate::config::runtime_root() {
         Some(root) => {
             let stale_paths = stale_zero_byte_db_candidates(&root, &db_path);
             if stale_paths.is_empty() {
@@ -2441,7 +2441,7 @@ fn check_server_running(snapshot: &HealthSnapshot) -> Check {
 }
 
 fn check_runtime_root() -> Check {
-    match dcserver::agentdesk_runtime_root() {
+    match crate::config::runtime_root() {
         Some(path) if path.exists() && path.is_dir() => Check::ok(
             "runtime_root",
             CheckGroup::Core,
@@ -3289,7 +3289,7 @@ fn postgres_migration_status_is_healthy(
 }
 
 fn check_stale_zero_byte_db_files(cfg: &config::Config) -> Check {
-    let Some(runtime_root) = dcserver::agentdesk_runtime_root() else {
+    let Some(runtime_root) = crate::config::runtime_root() else {
         return Check::warn(
             "stale_db_files",
             CheckGroup::Core,
@@ -3436,7 +3436,7 @@ fn recursive_dir_size(path: &Path) -> std::io::Result<u64> {
 }
 
 fn check_disk_usage() -> Check {
-    match dcserver::agentdesk_runtime_root() {
+    match crate::config::runtime_root() {
         Some(path) if !path.exists() => Check::warn(
             "disk_usage",
             CheckGroup::Core,

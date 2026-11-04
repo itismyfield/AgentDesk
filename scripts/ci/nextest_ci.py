@@ -735,6 +735,10 @@ def platform_losses(path, binary_id):
 
 def cmd_base_diff(args):
     plan = load_plan(args.plan)
+    # A digest only proves the plan is self-consistent; this run's rust_build must have written it.
+    head = (plan["identity"]["sha"], plan["identity"]["run_id"])
+    if head != (args.head_sha, args.head_run_id):
+        raise PlanError(f"head plan is {head[0]} run {head[1]}, expected {args.head_sha} run {args.head_run_id}")
     justified = load_justifications(args.justifications)
     path = Path(args.baseline)
     if not path.is_file():
@@ -873,6 +877,8 @@ def main(argv=None):
     b.add_argument("--plan", required=True)
     b.add_argument("--baseline", required=True)
     b.add_argument("--comparison-base-sha", required=True)
+    b.add_argument("--head-sha", required=True, help="SHA the head plan must have been planned for")
+    b.add_argument("--head-run-id", required=True, help="run whose rust_build must have written the head plan")
     b.add_argument("--justifications", required=True, help="scripts/ci/test-removal-justifications.txt")
     b.add_argument("--source-removed", required=True, help="rust_test_sources.py removed JSON")
     b.add_argument("--json-out", required=True)

@@ -382,8 +382,7 @@ pub(super) async fn update_streaming_status_tick(
                 tool_state.current_tool_line.as_deref(),
                 task_notification_kind,
             );
-        if watcher_separate_status_panel_enabled(shared.ui.status_panel_v2_enabled)
-            && status_panel_msg_id.is_none()
+        if status_panel_msg_id.is_none()
             && has_visible_streaming_work
             // #3805 P2 (PR-C): under the two-message flag, defer panel
             // creation until the answer placeholder exists so the panel
@@ -433,7 +432,6 @@ pub(super) async fn update_streaming_status_tick(
                 status_panel_msg_id = Some(persisted);
             } else if watcher_should_create_separate_status_panel(
                 single_message_panel_footer_mode,
-                shared.ui.status_panel_v2_enabled,
                 status_panel_msg_id.is_some(),
                 panel_eligible_turn,
             ) && !watcher_external_input_turn_abandoned(

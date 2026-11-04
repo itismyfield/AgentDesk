@@ -307,7 +307,11 @@ fn owner_herdr_modal_holds_the_front_without_a_key() {
     let modal =
         read("Do you want to proceed?\n❯ 1. Yes\n  2. No\nEnter to select · Esc to cancel\n");
     let (rig, completion, snapshot, _, stashed) = attempt(7_272_535, true, None, modal);
-    assert_eq!(completion, Completion::NotSent(MODAL.into()), "{snapshot}");
+    assert_eq!(
+        completion,
+        Completion::NotSent("Modal".into()),
+        "{snapshot}"
+    );
     assert!(rig.sends().is_empty(), "{:?}", rig.sends());
     assert!(stashed.lock().unwrap().is_none());
     assert!(snapshot["head_injection"].is_null(), "{snapshot}");
@@ -378,7 +382,7 @@ fn the_tmux_owner_parks_only_what_the_herdr_owner_parks() {
             nonce: &nonce,
             text: PROMPT,
         };
-        let report = busy_inject::inject_owned(&pane, &request, &busy_inject::TIMING);
+        let report = busy_inject::inject_owned(&pane, &request, &busy_inject::TIMING, false);
         assert_eq!(
             report.outcome,
             busy_inject::Outcome::Injected,

@@ -1515,12 +1515,4 @@ mod rekey_window_tests {
             assert_eq!(disk, map);
         }
     }
-    #[test]
-    fn reuse_caller_keeps_lock_snapshot_seam_order() {
-        use super::source_guard_tests::{QUEUE_EFFECTS, reuse_seam_gaps};
-        assert_eq!(reuse_seam_gaps(QUEUE_EFFECTS), Vec::<String>::new());
-    }
 }
-
-#[cfg(test)]
-mod source_guard_tests;

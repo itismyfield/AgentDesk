@@ -49,6 +49,7 @@ CHECK_MODULES = (
     "audit_maintainability.checks.git_subprocess",
     "audit_maintainability.checks.legacy_sqlite",
     "audit_maintainability.checks.source_of_truth_alias",
+    "audit_maintainability.checks.module_layers",
 )
 
 DEFAULT_ALLOWLIST_FILE = REPO_ROOT / "scripts" / "audit_allowlist.toml"
@@ -153,6 +154,21 @@ def run_all(
     stale_entries: dict[str, list[str]] = {}
     for spec in specs:
         al = allowlist.get(spec.key, set())
+        if spec.key == "service_server_backflow" and al:
+            out[spec.key] = [
+                Finding(
+                    rule=spec.key,
+                    severity="error",
+                    file="scripts/audit_allowlist.toml",
+                    line=None,
+                    message=(
+                        "service_server_backflow does not support allowlist entries; "
+                        "remove the entries so backflow and alias findings stay visible"
+                    ),
+                ),
+                *spec.runner(set()),
+            ]
+            continue
         if not check_stale:
             out[spec.key] = list(spec.runner(al))
             continue

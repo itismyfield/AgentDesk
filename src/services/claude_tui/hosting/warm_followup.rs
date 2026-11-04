@@ -564,12 +564,21 @@ pub(crate) fn owner_observer(
     cancel: std::sync::Arc<CancelToken>,
 ) -> Option<Box<dyn FnOnce() -> Result<(), String> + Send>> {
     cancel.bind_claude_tmux_session(tmux);
-    let resolved = crate::services::claude::resolve_claude_tui_session_for_launch(
-        working_dir,
-        session_id,
-        None,
+    // The account's home and the pane's live binding find the transcript, as a warm follow-up does.
+    let overlay = crate::services::discord::org_schema::overlay_from_tmux_session(
+        crate::services::provider::ProviderKind::Claude,
+        tmux,
     );
-    let resolved = resolved.ok()?;
+    let overlay = overlay.ok()?;
+    let matches =
+        crate::services::tmux_common::tmux_session_auth_profile_matches(tmux, &overlay.profile_id);
+    let at = (
+        working_dir,
+        matches.then_some(session_id).flatten(),
+        overlay.home.as_deref(),
+    );
+    let resolve = crate::services::claude::resolve_live_claude_tui_session;
+    let resolved = resolve(tmux, at, (true, || Ok(matches))).ok()?.resolution;
     let fallback = std::fs::metadata(&resolved.transcript_path).ok()?.len();
     let hooks = crate::services::claude_tui::hook_server::subscribe_hook_events();
     let (started_at, tmux, prompt) = (chrono::Utc::now(), tmux.to_string(), prompt.to_string());
@@ -583,6 +592,75 @@ pub(crate) fn owner_observer(
         owner_settles(observed, &sender)
     }))
 }
+
+/// A paste into a running turn read as its caller's answer, from the user row the attempt took to
+/// that turn's end; a dead pane or a turn ending with no such row ends the read in error, unresent.
+#[cfg(unix)]
+pub(crate) fn busy_owner_observer(
+    (tmux, nonce, frame, channel): (&str, &str, &str, u64),
+    transcript: &std::path::Path,
+    sender: Sender<StreamMessage>,
+    cancel: std::sync::Arc<CancelToken>,
+) -> Option<Box<dyn FnOnce() -> Result<(), String> + Send>> {
+    use std::sync::atomic::Ordering;
+    cancel.bind_claude_tmux_session(tmux);
+    let session_id = transcript.file_stem()?.to_str()?.to_string();
+    let hooks = crate::services::claude_tui::hook_server::subscribe_hook_events();
+    let (tmux, nonce, frame) = (tmux.to_string(), nonce.to_string(), frame.to_string());
+    let transcript = transcript.to_path_buf();
+    Some(Box::new(move || {
+        use crate::services::claude_tui::host_input::legacy_pane_alive;
+        let (mut idle_since, mut dead_reads) = (None, 0);
+        let at = loop {
+            if cancel.cancelled.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            let taken = crate::services::tui_input::human_frame::history::attempt_row;
+            match taken("claude", &tmux, &nonce) {
+                Some((offset, true)) => break offset,
+                // A queued command joins the running turn, whose owner posts its answer.
+                Some((_, false)) => return Ok(()),
+                None => {}
+            }
+            // Three misses in a row, so one failed probe does not end a live turn's read.
+            dead_reads = if legacy_pane_alive(&tmux) {
+                0
+            } else {
+                dead_reads + 1
+            };
+            if dead_reads >= 3 {
+                return Err("claude tui session died before taking the input".into());
+            }
+            let busy =
+                crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&transcript);
+            match (busy.is_busy(), idle_since) {
+                (true, _) => idle_since = None,
+                (false, None) => idle_since = Some(std::time::Instant::now()),
+                (false, Some(since)) if since.elapsed() > BUSY_ROW_GRACE => {
+                    return Err("claude tui turn ended without taking the input".into());
+                }
+                (false, Some(_)) => {}
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        };
+        let host = FollowupHost::legacy_tmux(&tmux);
+        let path = transcript.display().to_string();
+        let to = (sender.clone(), Some(cancel), Some(channel));
+        let read = (tmux.as_str(), session_id.as_str(), frame.as_str());
+        let observed = observe_submitted(
+            &host,
+            read,
+            (transcript.as_path(), path.as_str()),
+            to,
+            (hooks, chrono::Utc::now(), at),
+        );
+        owner_settles(observed, &sender)
+    }))
+}
+
+/// How long a pane may read idle with no row for the pasted input before its reader gives up.
+#[cfg(unix)]
+const BUSY_ROW_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// An observed owner submit's result. The session that died before any output is already
 /// retired; the user reads that the input was not resent, and the turn ends in error.

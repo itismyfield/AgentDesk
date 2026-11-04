@@ -1,0 +1,23 @@
+# One row per TLC config under docs/statecharts: cfg path, module, rules expected to break.
+# Rules are comma-separated invariant names, plus NoDeadlock for a deadlock; "-" means every rule holds.
+# scripts/ci/statecharts_tlc.py fails when a run breaks a rule not listed here or a listed rule holds.
+execution-authority/ExecutionAuthority.cfg	ExecutionAuthority	-
+execution-authority/ExecutionAuthorityMain.cfg	ExecutionAuthority	-
+execution-authority/ExecutionAuthorityNoWait.cfg	ExecutionAuthority	NoForeignPermitHost
+host-migration/HostMigration.cfg	HostMigration	NoDeadlock,RecordMatchesProcesses
+host-migration/HostMigrationClean.cfg	HostMigration	-
+host-migration/HostMigrationIdOnly.cfg	HostMigration	NoDeadlock
+input-single-path/InputOwnership.cfg	InputOwnership	HeldResumes,NoSilentLoss,NoSilentLossObserved
+input-single-path/InputOwnershipA2d1.cfg	InputOwnership	AnswerOnce,DraftToldOnce,NoSilentLoss,NoTimedRetry,StartNotDropped
+input-single-path/InputOwnershipA2d2.cfg	InputOwnership	AnswerOnce,HeldResumes,NoSilentLoss,NoSilentLossObserved
+input-single-path/InputOwnershipA2d3.cfg	InputOwnership	HeldResumes,NoSilentLoss,NoSilentLossObserved
+input-single-path/InputOwnershipC.cfg	InputOwnership	-
+input-single-path/InputOwnershipCF.cfg	InputOwnership	CarriedRowEnds,NoSilentLoss,NoSilentLossObserved
+input-single-path/InputOwnershipF.cfg	InputOwnership	NoSilentLoss,NoSilentLossObserved
+input-single-path/InputOwnershipF4.cfg	InputOwnership	-
+input-single-path/InputOwnershipFOutside.cfg	InputOwnership	SeenOnce
+input-single-path/InputOwnershipMain.cfg	InputOwnership	AnswerOnce,DraftToldOnce,NoRetryRequired,NoSilentLoss,NoSilentLossObserved,NoTimedRetry,StartNotDropped
+input-single-path/InputPath.cfg	InputPath	BusyInputLands,DraftSafe,HeldNotDropped,NoDeadlock,NoSilentLoss
+input-single-path/InputPathClean.cfg	InputPath	-
+session-lifecycle/HerdrSession.cfg	HerdrSession	NoDeadlock,NoOrphanPane,PromptOnlyToAgent,RowMatchesPane
+session-lifecycle/TmuxSession.cfg	TmuxSession	NoDeadlock,RowNamesSession,RowOnlyWithTurn

@@ -107,6 +107,7 @@ impl<B: BindingEvents> Sources<B> {
         record: &CapturedRecord,
         version: u32,
     ) -> Vec<Derived> {
+        deriver.enter_source(source);
         if !deriver.input_notices_enabled() {
             return deriver.derive_with_version(record, version);
         }

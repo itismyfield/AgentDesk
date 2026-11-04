@@ -1,6 +1,5 @@
 (function() {
-  var legacyScanStamp = null;
-
+  var store = agentdesk.prTrackingStore ? agentdesk.prTrackingStore.create() : null;
   function parseJsonObject(raw) {
     if (!raw) return {};
     try {
@@ -17,7 +16,7 @@
 
   function loadCardMeta(cardId) {
     var rows = agentdesk.db.query(
-      "SELECT id, status, blocked_reason, repo_id, github_issue_url " +
+      "SELECT repo_id, github_issue_url " +
       "FROM kanban_cards WHERE id = ? LIMIT 1",
       [cardId]
     );
@@ -35,108 +34,19 @@
   }
 
   function upsertPrTracking(cardId, repoId, worktreePath, branch, prNumber, headSha, state, lastError) {
-    agentdesk.db.execute(
-      "INSERT INTO pr_tracking (card_id, repo_id, worktree_path, branch, pr_number, head_sha, state, last_error, created_at, updated_at) " +
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now')) " +
-      "ON CONFLICT(card_id) DO UPDATE SET " +
-      "repo_id = COALESCE(excluded.repo_id, pr_tracking.repo_id), " +
-      "worktree_path = COALESCE(excluded.worktree_path, pr_tracking.worktree_path), " +
-      // Freshness semantics: branch/head_sha/state are authoritative on
-      // each write. Do not keep stale values alive via COALESCE when a
-      // caller intentionally clears or replaces them.
-      "branch = excluded.branch, " +
-      "pr_number = COALESCE(excluded.pr_number, pr_tracking.pr_number), " +
-      "head_sha = excluded.head_sha, " +
-      "state = excluded.state, " +
-      "last_error = excluded.last_error, " +
-      "updated_at = datetime('now')",
-      [cardId, repoId, worktreePath, branch, prNumber, headSha, state, lastError]
-    );
+    return store.upsert(cardId, repoId, worktreePath, branch, prNumber, headSha, state, lastError);
   }
 
-  function inferLegacyState(card, info, fallbackState) {
-    if (info && info.state) return String(info.state);
-    if (fallbackState) return fallbackState;
-
-    var blockedReason = card && card.blocked_reason ? String(card.blocked_reason) : "";
-    if (blockedReason.indexOf("ci:") === 0) return "wait-ci";
-    if (info && (info.number || info.pr_number)) return "merge";
-    return "create-pr";
+  function markHandedOff(cardId, errorMsg) {
+    return store.markHandedOff(cardId, String(errorMsg));
   }
 
-  function importLegacyPrTracking(cardId, fallbackState) {
-    var existing = loadPrTrackingCanonical(cardId);
-    if (existing) return existing;
-
-    var cached = agentdesk.kv.get("pr:" + cardId);
-    if (!cached) return null;
-
-    var info = parseJsonObject(cached);
-    if (!info || (!info.number && !info.pr_number && !info.branch && !info.headRefName)) {
-      return null;
-    }
-
-    var card = loadCardMeta(cardId);
-    var repoId = info.repo || (card ? (card.repo_id || extractRepoFromIssueUrl(card.github_issue_url)) : null);
-    upsertPrTracking(
-      cardId,
-      repoId,
-      null,
-      info.branch || info.headRefName || null,
-      info.number || info.pr_number || null,
-      info.sha || info.head_sha || null,
-      inferLegacyState(card, info, fallbackState),
-      null
-    );
-    return loadPrTrackingCanonical(cardId);
+  function touchGeneration(cardId, generation) {
+    return store.touchGeneration(cardId, generation || "");
   }
 
-  function legacyScanStampValue() {
+  function findByRepoPr(repoId, prNumber) {
     var rows = agentdesk.db.query(
-      "SELECT COUNT(*) AS count, COALESCE(MIN(key), '') AS min_key, COALESCE(MAX(key), '') AS max_key " +
-      "FROM kv_meta WHERE key LIKE 'pr:%' AND (expires_at IS NULL OR expires_at > datetime('now'))",
-      []
-    );
-    if (rows.length === 0) return "0::";
-    return String(rows[0].count || 0) + ":" + String(rows[0].min_key || "") + ":" + String(rows[0].max_key || "");
-  }
-
-  function importLegacyPrTrackingOnce(fallbackState) {
-    var nextStamp = legacyScanStampValue();
-    if (legacyScanStamp === nextStamp) return;
-
-    var cached = agentdesk.db.query(
-      "SELECT key FROM kv_meta WHERE key LIKE 'pr:%' AND (expires_at IS NULL OR expires_at > datetime('now'))",
-      []
-    );
-    for (var i = 0; i < cached.length; i++) {
-      var cardId = String(cached[i].key || "").replace("pr:", "");
-      if (!cardId) continue;
-      if (loadPrTrackingCanonical(cardId)) continue;
-      importLegacyPrTracking(cardId, fallbackState);
-    }
-    legacyScanStamp = nextStamp;
-  }
-
-  function loadPrTracking(cardId, options) {
-    var tracking = loadPrTrackingCanonical(cardId);
-    if (tracking) return tracking;
-    var fallbackState = options && options.fallback_state ? options.fallback_state : null;
-    return importLegacyPrTracking(cardId, fallbackState);
-  }
-
-  function findByRepoPr(repoId, prNumber, options) {
-    var rows = agentdesk.db.query(
-      "SELECT card_id, repo_id, worktree_path, branch, pr_number, head_sha, state, last_error, " +
-      "dispatch_generation, review_round, retry_count " +
-      "FROM pr_tracking WHERE repo_id = ? AND pr_number = ? LIMIT 1",
-      [repoId, prNumber]
-    );
-    if (rows.length > 0) return rows[0];
-
-    var fallbackState = options && options.fallback_state ? options.fallback_state : null;
-    importLegacyPrTrackingOnce(fallbackState);
-    rows = agentdesk.db.query(
       "SELECT card_id, repo_id, worktree_path, branch, pr_number, head_sha, state, last_error, " +
       "dispatch_generation, review_round, retry_count " +
       "FROM pr_tracking WHERE repo_id = ? AND pr_number = ? LIMIT 1",
@@ -145,10 +55,7 @@
     return rows.length > 0 ? rows[0] : null;
   }
 
-  function listTrackedPrRows(whereClause, params, options) {
-    var fallbackState = options && options.fallback_state ? options.fallback_state : null;
-    importLegacyPrTrackingOnce(fallbackState);
-
+  function listTrackedPrRows(whereClause, params) {
     var query =
       "SELECT card_id, repo_id, worktree_path, branch, pr_number, head_sha, state, last_error, " +
       "dispatch_generation, review_round, retry_count " +
@@ -190,7 +97,7 @@
 
   function resolvePrInfoForCard(cardId, options) {
     var fallbackState = options && options.fallback_state ? options.fallback_state : null;
-    var tracking = loadPrTracking(cardId, options);
+    var tracking = loadPrTrackingCanonical(cardId);
     if (!tracking) return null;
 
     var repo = tracking.repo_id || repoForCard(cardId);
@@ -231,15 +138,16 @@
     parseJsonObject: parseJsonObject,
     extractRepoFromIssueUrl: extractRepoFromIssueUrl,
     loadCanonical: loadPrTrackingCanonical,
-    load: loadPrTracking,
+    load: loadPrTrackingCanonical,
     upsert: upsertPrTracking,
+    markHandedOff: markHandedOff,
+    listStrandedCreatePr: function(limit) { return store.listStrandedCreatePr(limit); },
+    touchGeneration: touchGeneration,
     list: listTrackedPrRows,
     findByRepoPr: findByRepoPr,
     findOpenPrByBranch: findOpenPrByTrackedBranch,
     repoForCard: repoForCard,
-    resolvePrInfoForCard: resolvePrInfoForCard,
-    importLegacyForCard: importLegacyPrTracking,
-    importLegacyOnce: importLegacyPrTrackingOnce
+    resolvePrInfoForCard: resolvePrInfoForCard
   };
 })();
 

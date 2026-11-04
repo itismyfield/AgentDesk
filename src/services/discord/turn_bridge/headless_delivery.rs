@@ -107,7 +107,6 @@ fn strip_headless_placeholder_artifacts(text: &str, provider: &ProviderKind) -> 
 fn headless_streaming_placeholder_cleanup_action(
     last_edit_text: &str,
     provider: &ProviderKind,
-    status_panel_v2_enabled: bool,
     single_message_panel_footer_mode: bool,
 ) -> HeadlessPlaceholderCleanupAction {
     if single_message_panel_footer_mode {
@@ -135,14 +134,10 @@ fn headless_streaming_placeholder_cleanup_action(
             };
         }
     }
-    let mut cleaned = if status_panel_v2_enabled {
-        super::formatting::format_for_discord_with_status_panel(last_edit_text, provider)
-    } else {
-        super::formatting::format_for_discord_with_provider(last_edit_text, provider)
-    };
-    if status_panel_v2_enabled {
-        cleaned = strip_headless_placeholder_artifacts(&cleaned, provider);
-    }
+    let cleaned = strip_headless_placeholder_artifacts(
+        &super::formatting::format_for_discord_with_status_panel(last_edit_text, provider),
+        provider,
+    );
     if cleaned.trim().is_empty() {
         HeadlessPlaceholderCleanupAction::Delete
     } else if cleaned == last_edit_text {
@@ -172,8 +167,7 @@ pub(super) async fn cleanup_headless_streaming_placeholder_after_delivery(
     match headless_streaming_placeholder_cleanup_action(
         last_edit_text,
         provider,
-        shared.ui.status_panel_v2_enabled,
-        super::bridge_single_message_panel_footer_enabled(shared.ui.status_panel_v2_enabled),
+        super::bridge_single_message_panel_footer_enabled(),
     ) {
         HeadlessPlaceholderCleanupAction::Delete => {
             if let Err(error) =
@@ -278,6 +272,10 @@ use outcome::{classify_visible_outbox_result, run_headless_direct_fallback};
 pub(super) async fn enqueue_headless_delivery(
     arguments: HeadlessDeliveryArguments<'_>,
 ) -> HeadlessDeliveryOutcome {
+    let runtime = arguments.into_runtime_arguments();
+    use crate::services::discord::outbound::body_census::BodyOffer;
+    use crate::services::tui_o::{channel_policy::ClaimReason, cutover::BodySite};
+    let body_source = runtime.body_source.clone().reason(ClaimReason::NoClaim);
     let HeadlessDeliveryRuntimeArguments {
         shared,
         channel_id,
@@ -285,15 +283,11 @@ pub(super) async fn enqueue_headless_delivery(
         session_key,
         delivery_bot,
         provider,
-        born_generation,
         intake_outbox_id,
-        body_source,
         content,
         cancel_token,
-    } = arguments.into_runtime_arguments();
-    use crate::services::discord::outbound::body_census::BodyOffer;
-    use crate::services::tui_o::{channel_policy::ClaimReason, cutover::BodySite};
-    let body_source = body_source.reason(ClaimReason::NoClaim);
+        ..
+    } = runtime;
     if should_suppress_headless_delivery_for_cancel(cancel_token) {
         return HeadlessDeliveryOutcome::Cancelled;
     }
@@ -318,36 +312,13 @@ pub(super) async fn enqueue_headless_delivery(
                 };
             }
         };
-    let target = format!("channel:{}", channel_id.get());
-    let bot = headless_delivery_bot_alias(delivery_bot, provider);
-
-    let outbox_message = crate::services::message_outbox::OutboxMessage {
-        target: &target,
-        content,
-        bot,
-        source: "headless_turn",
-        // Explicit reason_code keeps dedupe consistent across PG/SQLite.
-        reason_code: Some("headless.delivery"),
-        session_key,
-    };
     if let Some(pool) = shared.pg_pool.as_ref() {
-        let delivery_cancel_token = cancel_token.filter(|token| !token.is_completion_cleanup());
-        // Terminal headless responses are per-turn facts. Identical content in
-        // back-to-back E2E or operator turns must still be delivered.
         match body_source
             .clone()
             .observe(
                 BodySite::BridgeHeadless,
                 BodyOffer::body(!content.trim().is_empty()),
-                durable_outbox::enqueue_headless_outbox(
-                    pool,
-                    outbox_message,
-                    owning_user_msg_id,
-                    provider,
-                    born_generation,
-                    delivery_cancel_token,
-                    output_origin.as_ref(),
-                ),
+                enqueue_headless_turn_row(pool, runtime, output_origin.as_ref()),
             )
             .await
         {
@@ -548,6 +519,70 @@ pub(super) async fn enqueue_headless_delivery(
     run_headless_direct_fallback(suppress_for_cancel, || direct_fallback).await
 }
 
+/// Writes the turn's headless outbox row. Terminal headless responses are per-turn facts:
+/// identical content in back-to-back E2E or operator turns must still be delivered.
+async fn enqueue_headless_turn_row(
+    pool: &sqlx::PgPool,
+    runtime: HeadlessDeliveryRuntimeArguments<'_>,
+    output_origin: Option<
+        &crate::services::cluster::intake_router_hook::owner_record::output::Artifact,
+    >,
+) -> Result<
+    crate::services::message_outbox::OutboxEnqueueOutcome,
+    crate::services::message_outbox::OutboxEnqueueError,
+> {
+    let target = format!("channel:{}", runtime.channel_id.get());
+    let outbox_message = crate::services::message_outbox::OutboxMessage {
+        target: &target,
+        content: runtime.content,
+        bot: headless_delivery_bot_alias(runtime.delivery_bot, runtime.provider),
+        source: "headless_turn",
+        // Explicit reason_code keeps dedupe consistent across PG/SQLite.
+        reason_code: Some("headless.delivery"),
+        session_key: runtime.session_key,
+    };
+    let delivery_cancel_token = runtime
+        .cancel_token
+        .filter(|token| !token.is_completion_cleanup());
+    durable_outbox::enqueue_headless_outbox(
+        pool,
+        outbox_message,
+        runtime.owning_user_msg_id,
+        runtime.provider,
+        runtime.born_generation,
+        delivery_cancel_token,
+        (output_origin, runtime.producer_turn_nonce),
+    )
+    .await
+}
+
+/// The production row write for `state`'s turn, without waiting for the worker to send it.
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) async fn enqueue_headless_turn_row_for_test(
+    shared: &Arc<SharedData>,
+    state: &InflightTurnState,
+    session_key: Option<&str>,
+    content: &str,
+) -> crate::services::message_outbox::OutboxEnqueueOutcome {
+    let provider = state.provider_kind().expect("turn provider");
+    let runtime = assemble_headless_delivery_arguments(
+        state,
+        HeadlessDeliveryInputs {
+            shared,
+            channel_id: ChannelId::new(state.channel_id),
+            owning_user_msg_id: (state.user_msg_id != 0).then(|| MessageId::new(state.user_msg_id)),
+            session_key,
+            provider: &provider,
+            content,
+            cancel_token: None,
+        },
+    )
+    .into_runtime_arguments();
+    enqueue_headless_turn_row(shared.pg_pool.as_ref().expect("outbox pool"), runtime, None)
+        .await
+        .expect("headless row write")
+}
+
 /// Enqueues under `claim`; O owning the channel or a held identity enqueues nothing and the
 /// turn stays preserved for retry.
 pub(super) async fn enqueue_claimed_headless_delivery(
@@ -664,7 +699,6 @@ mod headless_delivery_tests {
         let action = headless_streaming_placeholder_cleanup_action(
             "[Bash] /bin/zsh -lc 'cargo test'\n⠙ Processing...",
             &ProviderKind::Codex,
-            true,
             false,
         );
 
@@ -676,7 +710,6 @@ mod headless_delivery_tests {
         let action = headless_streaming_placeholder_cleanup_action(
             "⠂ Processing...\n\n```\n[Bash] /bin/zsh -lc 'grep -n foo src/lib.rs'\n[Bash] /bin/zsh -lc \"sed -n '1,40p' src/lib.rs\"\n```",
             &ProviderKind::Codex,
-            true,
             false,
         );
 
@@ -688,7 +721,6 @@ mod headless_delivery_tests {
         let action = headless_streaming_placeholder_cleanup_action(
             "partial answer\n\n⠙ Processing...",
             &ProviderKind::Codex,
-            true,
             false,
         );
 
@@ -703,7 +735,6 @@ mod headless_delivery_tests {
         let action = headless_streaming_placeholder_cleanup_action(
             "partial answer\n\n⠙ 계속 처리 중",
             &ProviderKind::Codex,
-            true,
             false,
         );
 
@@ -721,7 +752,6 @@ mod headless_delivery_tests {
         let action = headless_streaming_placeholder_cleanup_action(
             &format!("partial answer\n\n{footer}"),
             &ProviderKind::Claude,
-            true,
             true,
         );
 

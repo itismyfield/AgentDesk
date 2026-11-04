@@ -458,6 +458,36 @@ mod cases {
         assert_eq!(events(fx.channel.get()), ["complete"]);
     }
 
+    /// History with an input Claude absorbed mid-turn and wrote no command for, then an input it
+    /// dequeued under an opener naming another body: both ran and closed, so the carried row closes.
+    #[tokio::test(flavor = "current_thread")]
+    async fn absorbed_inputs_without_a_command_do_not_hold_a_carried_row() {
+        let absorbed = r#"{"type":"queue-operation","operation":"remove","reason":"absorbed_mid_turn","content":"human b"}"#;
+        let options = Options {
+            transcript: vec![
+                user("earlier"),
+                enqueue("human b"),
+                absorbed.to_string(),
+                answer(),
+                END.to_string(),
+                enqueue("c"),
+                DEQUEUE.to_string(),
+                prompt("another session sent c"),
+                answer(),
+                END.to_string(),
+                user("carried"),
+                answer(),
+                END.to_string(),
+            ],
+            ..Options::default()
+        };
+        let fx = Fixture::new(7_533_399, 9_100_095_491_915_388_099, options).await;
+        fx.pass().await;
+        fx.assert_closed("the absorbed and the dequeued input ran and closed")
+            .await;
+        assert_eq!(events(fx.channel.get()), ["complete"]);
+    }
+
     /// A kept carried turn names its reason once per change, never each pass.
     #[tokio::test(flavor = "current_thread")]
     async fn a_kept_turn_logs_its_reason_once_per_change() {
@@ -952,5 +982,52 @@ mod cases {
             !discord::mailbox_has_blocking_active_turn(&fx.shared, fx.channel).await,
             "a queued input's dequeue is no longer held by the carried episode"
         );
+    }
+
+    /// A close wakes the queue a refused front waits in exactly once: through the finalizer's
+    /// mailbox release when it ended a restored episode, by its own kick when none was restored.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_close_kicks_the_waiting_queue_once_with_or_without_an_episode() {
+        for (channel, user_msg_id, episode) in [
+            (7_533_402, 9_100_095_491_915_388_102, true),
+            (7_533_401, 9_100_095_491_915_388_101, false),
+        ] {
+            let options = Options {
+                episode,
+                ..Options::default()
+            };
+            let fx = Fixture::new(channel, user_msg_id, options).await;
+            let waiting = discord::relay_recovery::tests::orphan_token_finish::queued(channel + 1);
+            let queued =
+                discord::mailbox_enqueue_intervention(&fx.shared, &PROVIDER, fx.channel, waiting);
+            assert!(queued.await.enqueued);
+            let kicks = Arc::new(Mutex::new(0_usize));
+            let (seen, at) = (kicks.clone(), fx.channel);
+            let _hook = discord::queue_io::set_idle_queue_kick_hook_for_tests(Arc::new(
+                move |_, _, kicked, _| {
+                    let ours = kicked == at;
+                    if ours {
+                        *seen.lock().unwrap() += 1;
+                    }
+                    let outcome = ours.then(discord::IdleQueueKickoffChannelOutcome::default);
+                    Box::pin(async move { outcome })
+                },
+            ));
+            discord::spawn_turn_completion_idle_queue_listener(fx.shared.clone(), PROVIDER);
+            // The enqueue's own kick met the row; what follows is the close's.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let before = *kicks.lock().unwrap();
+            fx.pass().await;
+            fx.assert_closed(&format!("episode={episode}")).await;
+            for _ in 0..100 {
+                if *kicks.lock().unwrap() > before {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let after = *kicks.lock().unwrap() - before;
+            assert_eq!(after, 1, "episode={episode}: the close kicks once");
+        }
     }
 }

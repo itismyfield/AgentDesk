@@ -15,6 +15,9 @@ pub(in crate::services::discord::tmux::tmux_watcher) fn restore_stream_seed(
     let seed_source = restored_turn_seed
         .as_ref()
         .and_then(|seed| seed.body_source);
+    let seed_turn_nonce = restored_turn_seed
+        .as_ref()
+        .and_then(|seed| seed.producer_turn_nonce.clone());
     let prompt_anchor_for_seed_discard =
         crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
             watcher_provider.as_str(),
@@ -38,6 +41,8 @@ pub(in crate::services::discord::tmux::tmux_watcher) fn restore_stream_seed(
             "watcher: preserving restored stream seed with undelivered body for idle SSH-direct prompt"
         );
     }
+    // A discarded seed no longer names this collection's turn.
+    let seed_turn_nonce = seed_turn_nonce.filter(|_| !seed_disposition.discard_restored_seed);
     if seed_disposition.discard_restored_seed {
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(
@@ -69,6 +74,7 @@ pub(in crate::services::discord::tmux::tmux_watcher) fn restore_stream_seed(
         .unwrap_or_else(|| RestoredResponseSeed {
             body: stream_seed.full_response.clone(),
             source: seed_source.filter(|_| !stream_seed.full_response.is_empty()),
+            producer_turn_nonce: seed_turn_nonce,
         });
     let restored_assistant_text_seen = !stream_seed.full_response.trim().is_empty();
     (

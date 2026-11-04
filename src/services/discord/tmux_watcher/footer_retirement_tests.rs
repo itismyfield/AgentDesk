@@ -4,21 +4,15 @@ use crate::services::discord::formatting;
 #[test]
 fn retired_watcher_disables_new_surfaces_but_keeps_upgrade_completion() {
     for single in [false, true] {
-        for v2 in [false, true] {
-            assert!(!footer_mode_enabled(single, v2));
-            for present in [false, true] {
-                for eligible in [false, true] {
-                    assert!(!watcher_should_create_separate_status_panel(
-                        single, v2, present, eligible
-                    ));
-                }
+        assert!(!footer_mode_enabled(single));
+        for present in [false, true] {
+            for eligible in [false, true] {
+                assert!(!watcher_should_create_separate_status_panel(
+                    single, present, eligible
+                ));
             }
         }
     }
-    assert!(watcher_should_complete_separate_status_panel(true));
-    assert!(!watcher_should_complete_separate_status_panel(false));
-    assert!(watcher_separate_status_panel_enabled(true));
-    assert!(!watcher_separate_status_panel_enabled(false));
     assert!(
         !crate::services::discord::turn_bridge::two_message_should_reanchor_panel_on_rollover(
             true, true

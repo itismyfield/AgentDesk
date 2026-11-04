@@ -13,7 +13,7 @@
  * change the policy semantics by accident. So this module owns:
  *   - failure counter + escalation (`handlePhaseGateFailure`)
  *   - human-alert debounce (`_maybeAlertPhaseGateVerdictMismatch`)
- *   - verdict inference (`_inferPhaseGatePassVerdict`)
+ *   - Rust verdict/declaration bridge (`_evaluatePhaseGate`)
  *   - state load/save/clear and dispatch fanout (`loadPhaseGateState`,
  *     `savePhaseGateState`, `clearPhaseGateState`, `loadPhaseGateDispatches`,
  *     `_buildPhaseGateGroups`, `_phaseGateTitle`, `_createPhaseGateDispatches`)
@@ -43,35 +43,8 @@ var PHASE_GATE_ALERT_DEBOUNCE_TTL_SEC = 60 * 60;
 // `continueRunAfterEntry` and respect it in finalization.
 var PHASE_GATE_GRACE_WINDOW_MS = 30 * 1000; // 30s
 
-// #699 (round 2): mirror of src/dispatch/dispatch_status.rs
-// maybe_inject_phase_gate_verdict. Infers `pass_verdict` for a phase-gate
-// result only when (a) no explicit verdict/decision/phase_gate_verdict is present, (b) every
-// declared dispatch-result check in `context.phase_gate.required_checks` is present in
-// `result.checks` and passes, and (c) every present entry passes. Returns the inferred
-// verdict or null. Pure function — caller applies the value.
-function _inferPhaseGatePassVerdict(ctx, result) {
-  if (_explicitPhaseGateVerdict(result)) return null;
-  return _inferPhaseGatePassVerdictFromChecks(ctx, result);
-}
-
-function _explicitPhaseGateVerdict(result) {
-  return result && (result.verdict || result.decision || result.phase_gate_verdict || null);
-}
-
-function _phaseGateDiagnosticVerdict(result, verdict) {
-  if (typeof verdict === "string" && verdict.length > 0) return verdict;
-  if (!result || typeof result !== "object") return null;
-  var keys = ["verdict", "decision", "phase_gate_verdict"];
-  for (var i = 0; i < keys.length; i++) {
-    var value = result[keys[i]];
-    if (!value) continue;
-    if (Array.isArray(value)) return "<non-string:array>";
-    if (value !== null && typeof value === "object") return "<non-string:object>";
-    if (typeof value === "boolean") return "<non-string:boolean>";
-    if (typeof value === "number") return "<non-string:number>";
-    return "<non-string:unknown>";
-  }
-  return null;
+function _evaluatePhaseGate(context, result) {
+  return agentdesk.phaseGate.evaluate(context, result);
 }
 
 function _phaseGateFailureReason(result, passVerdict, diagnostic) {
@@ -80,121 +53,8 @@ function _phaseGateFailureReason(result, passVerdict, diagnostic) {
   return summary || reason || ("expected " + passVerdict + ", got " + (diagnostic || "none"));
 }
 
-function _phaseGateDeclarationMatches(phaseGate) {
-  if (!phaseGate || typeof phaseGate !== "object" || typeof phaseGate.kind !== "string") {
-    return false;
-  }
-  var current = agentdesk.pipeline.resolvePhaseGateDeclaration(phaseGate.kind);
-  if (!current || current.available !== true) return false;
-  var fields = [
-    "kind",
-    "declaration_version",
-    "pass_verdict",
-    "evidence_requirement",
-    "required_checks"
-  ];
-  for (var i = 0; i < fields.length; i++) {
-    var field = fields[i];
-    if (JSON.stringify(phaseGate[field]) !== JSON.stringify(current[field])) return false;
-  }
-  return true;
-}
-
-function _phaseGateLegacySnapshotMissing(phaseGate) {
-  if (!phaseGate || typeof phaseGate !== "object") return false;
-  var fields = ["kind", "declaration_version", "required_checks", "evidence_requirement"];
-  for (var i = 0; i < fields.length; i++) {
-    if (Object.prototype.hasOwnProperty.call(phaseGate, fields[i])) return false;
-  }
-  return true;
-}
-
 function authoritativePhaseGateContext(runId, phase, context) {
-  var gate = context && context.phase_gate;
-  if (_phaseGateDeclarationMatches(gate)) return context;
-  if (!_phaseGateLegacySnapshotMissing(gate)) return null;
-
-  var rows = agentdesk.db.query(
-    "SELECT COUNT(*) as entry_count, " +
-    "SUM(CASE WHEN phase_gate_kind IS NULL OR BTRIM(phase_gate_kind, E' \\t\\n\\r\\f\\v') = '' THEN 1 ELSE 0 END) as legacy_default_count " +
-    "FROM auto_queue_entries WHERE run_id = ? AND COALESCE(batch_phase, 0) = ?",
-    [runId, phase]
-  );
-  var entryCount = rows.length > 0 ? Number(rows[0].entry_count || 0) : 0;
-  var legacyCount = rows.length > 0 ? Number(rows[0].legacy_default_count || 0) : 0;
-  if (entryCount <= 0 || legacyCount !== entryCount) return null;
-
-  var declaration = agentdesk.pipeline.resolvePhaseGateDeclaration("pr-confirm");
-  if (!declaration || declaration.available !== true) return null;
-  var normalized = JSON.parse(JSON.stringify(context));
-  var fields = [
-    "kind",
-    "declaration_version",
-    "pass_verdict",
-    "evidence_requirement",
-    "required_checks"
-  ];
-  for (var i = 0; i < fields.length; i++) {
-    normalized.phase_gate[fields[i]] = declaration[fields[i]];
-  }
-  return normalized;
-}
-
-function _dispatchResultCheckNames(phaseGate) {
-  if (!_phaseGateDeclarationMatches(phaseGate) || !Array.isArray(phaseGate.required_checks)) {
-    return null;
-  }
-  var names = [];
-  for (var i = 0; i < phaseGate.required_checks.length; i++) {
-    var required = phaseGate.required_checks[i];
-    if (!required || typeof required !== "object" ||
-        required.authority !== "dispatch_result" || typeof required.check !== "string") {
-      return null;
-    }
-    names.push(required.check);
-  }
-  return names.length > 0 ? names : null;
-}
-
-function _inferPhaseGatePassVerdictFromChecks(ctx, result) {
-  if (!result || typeof result !== "object") return null;
-  var phaseGate = ctx && ctx.phase_gate;
-  var declared = _dispatchResultCheckNames(phaseGate);
-  if (!declared) return null;
-
-  var checks = result.checks;
-  if (!checks || typeof checks !== "object" || Array.isArray(checks)) return null;
-
-  var checkNames = Object.keys(checks);
-  if (checkNames.length === 0) return null;
-
-  function entryIsPass(entry) {
-    var entryStatus = null;
-    if (entry && typeof entry === "object") {
-      entryStatus = entry.status || entry.result || null;
-    } else if (typeof entry === "string") {
-      entryStatus = entry;
-    }
-    var normalized = entryStatus ? String(entryStatus).toLowerCase() : null;
-    return normalized === "pass" || normalized === "passed";
-  }
-
-  for (var di = 0; di < declared.length; di++) {
-    if (!entryIsPass(checks[declared[di]])) return null;
-  }
-
-  for (var ci = 0; ci < checkNames.length; ci++) {
-    if (!entryIsPass(checks[checkNames[ci]])) return null;
-  }
-
-  return phaseGate.pass_verdict;
-}
-
-function _phaseGateVerdictMatches(actualVerdict, expectedVerdict, ctx, result) {
-  if (!actualVerdict || (actualVerdict !== expectedVerdict && actualVerdict !== "pass" && actualVerdict !== "passed")) {
-    return false;
-  }
-  return _inferPhaseGatePassVerdictFromChecks(ctx, result) === expectedVerdict;
+  return agentdesk.phaseGate.authoritativeContext(runId, phase, context);
 }
 
 function _phaseGateGroupKey(sourceAgentId, targetAgentId, dispatchType, declaration) {
@@ -680,9 +540,7 @@ module.exports = {
   PHASE_GATE_FAILURE_TTL_SEC: PHASE_GATE_FAILURE_TTL_SEC,
   PHASE_GATE_ALERT_DEBOUNCE_TTL_SEC: PHASE_GATE_ALERT_DEBOUNCE_TTL_SEC,
   PHASE_GATE_GRACE_WINDOW_MS: PHASE_GATE_GRACE_WINDOW_MS,
-  inferPhaseGatePassVerdict: _inferPhaseGatePassVerdict,
-  phaseGateVerdictMatches: _phaseGateVerdictMatches,
-  phaseGateDiagnosticVerdict: _phaseGateDiagnosticVerdict,
+  evaluatePhaseGate: _evaluatePhaseGate,
   phaseGateFailureReason: _phaseGateFailureReason,
   phaseGateGroupKey: _phaseGateGroupKey,
   authoritativePhaseGateContext: authoritativePhaseGateContext,

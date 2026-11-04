@@ -350,6 +350,23 @@ fn segment_entry(
     Some(entry)
 }
 
+/// Whether `prior` copied the file now at `source`; a reboot may renumber its volume's dev, so the
+/// stored dev and inode are judged as `capture::file_match` judges a stored source.
+fn copied_from(prior: &Value, source: &Path, live: (u64, u64)) -> bool {
+    use crate::services::tui_o::shadow::{SourceId, capture};
+    let (Some(dev), Some(ino)) = (prior["dev"].as_u64(), prior["ino"].as_u64()) else {
+        return false;
+    };
+    let session_id = String::new();
+    let recorded = SourceId {
+        session_id,
+        path: source.into(),
+        dev,
+        ino,
+    };
+    capture::file_match(&recorded, live) != capture::FileMatch::Other
+}
+
 /// Resumes at the latest copy's end while the file keeps its identity and head; `false` when
 /// nothing is new.
 fn copy_segment(
@@ -362,7 +379,8 @@ fn copy_segment(
     let mut file = fs::File::open(source)?;
     let (metadata, mut head) = (file.metadata()?, Vec::new());
     (&mut file).take(HEAD_HASH_BYTES).read_to_end(&mut head)?;
-    let ((dev, ino), size) = (file_identity(&metadata), metadata.len());
+    let identity = crate::services::tui_o::shadow::capture::file_identity(&metadata);
+    let ((dev, ino), size) = (identity, metadata.len());
     let same_head = |prior: &Value| {
         let len = prior["head_len"]
             .as_u64()
@@ -370,7 +388,7 @@ fn copy_segment(
         let prior_head = len.and_then(|len| head.get(..len));
         prior_head.is_some_and(|bytes| prior["head_sha256"] == sha(bytes))
     };
-    let same_file = |prior: &&Value| prior["dev"] == dev && prior["ino"] == ino && same_head(prior);
+    let same_file = |prior: &&Value| copied_from(prior, source, (dev, ino)) && same_head(prior);
     let kept = prior.filter(same_file);
     let kept = kept.filter(|prior| prior["to"].as_u64().is_some_and(|to| to <= size));
     // Earlier copies cover this turn only when they start at or before its offset.
@@ -410,15 +428,4 @@ fn copy_segment(
             "short copy: {copied} of {len} bytes"
         ))),
     }
-}
-
-#[cfg(unix)]
-fn file_identity(metadata: &fs::Metadata) -> (u64, u64) {
-    use std::os::unix::fs::MetadataExt;
-    (metadata.dev(), metadata.ino())
-}
-
-#[cfg(not(unix))]
-fn file_identity(_metadata: &fs::Metadata) -> (u64, u64) {
-    (0, 0)
 }

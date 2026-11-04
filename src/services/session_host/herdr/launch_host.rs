@@ -30,6 +30,24 @@ use crate::services::herdr_launch::{
 use crate::services::session_host::herdr_gate::residue;
 use crate::services::session_host::model::HostMutation;
 
+/// What serves an endpoint now, against the server a nonce's grant admitted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GrantedServer {
+    /// The granted server answers, or no grant names one.
+    Kept,
+    /// No server answered.
+    Unanswered,
+    Replaced(ReplacedServer),
+}
+
+/// Another server than the granted one answers; `startup` says `observe_policy` proved its policy
+/// from its start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReplacedServer {
+    pub(crate) current: ServerWitness,
+    pub(crate) startup: bool,
+}
+
 pub(crate) struct SocketHerdrLaunchHost {
     endpoints: Vec<(HerdrEndpoint, Arc<HerdrSocketTransport>)>,
     policy: ProofCache,
@@ -155,6 +173,19 @@ pub(crate) fn probe_source(socket: &Path) -> Result<Arc<dyn PeerSource>, String>
     Ok(peer_source(socket, &Arc::new(transport)))
 }
 
+/// The pid of the server on `socket` that answered a hello within `wait`; a socket that only
+/// accepts is no server yet.
+pub(crate) fn accepting_pid(socket: &Path, wait: Duration) -> Option<u32> {
+    let endpoint = HerdrEndpoint::new("autostart", "autostart", socket, "autostart").ok()?;
+    let config = HerdrSocketConfig {
+        io_timeout: wait,
+        read_deadline: wait,
+        ..HerdrSocketConfig::default()
+    };
+    let transport = HerdrSocketTransport::new(&endpoint, config, LineJsonFraming);
+    transport.hello().ok().map(|hello| hello.witness.pid)
+}
+
 impl SocketHerdrLaunchHost {
     /// No I/O: every call dials its own connection.
     pub(crate) fn new(endpoints: Vec<HerdrEndpoint>, config: HerdrSocketConfig) -> Self {
@@ -198,6 +229,38 @@ impl SocketHerdrLaunchHost {
                 &launch.herdr_session,
             )
         })
+    }
+
+    /// The current next-restart policy of `launch`'s server, recorded for health and remembered
+    /// as the witness later mutations of this endpoint compare against.
+    pub(crate) async fn observe_policy(
+        &self,
+        launch: &HerdrLaunchEndpoint,
+    ) -> Result<super::policy::NextRestartProof, String> {
+        let source = self.source(launch).ok_or("endpoint is not configured")?;
+        let (checked, _) = self.observe_policy_from(launch, source).await;
+        checked.map_err(|why| format!("next_restart_policy_unverified: {why:?}"))
+    }
+
+    /// `observe_policy` through `source`, with the health observation it recorded.
+    pub(crate) async fn observe_policy_from(
+        &self,
+        launch: &HerdrLaunchEndpoint,
+        source: Arc<dyn PeerSource>,
+    ) -> (
+        Result<super::policy::NextRestartProof, Unverified>,
+        serde_json::Value,
+    ) {
+        let mut checked = self.policy.next_restart(source, &LocalChecker).await;
+        if let Ok(proof) = &checked {
+            match self.witnessed.lock() {
+                Ok(mut witnessed) => _ = witnessed.insert(launch.clone(), proof.witness().clone()),
+                Err(_) => checked = Err(Unverified::Cache),
+            }
+        }
+        let socket = Path::new(&launch.socket_addr);
+        let observation = super::policy::diagnostics::record(socket, &self.policy, &checked);
+        (checked, observation)
     }
 
     fn source(&self, launch: &HerdrLaunchEndpoint) -> Option<Arc<dyn PeerSource>> {
@@ -254,6 +317,34 @@ impl SocketHerdrLaunchHost {
         }
         let grant = grant.map(|grant| grant.grant.clone());
         Ok(ExistingMutationEvidence { startup, grant })
+    }
+
+    /// The server on `launch` against the one `nonce`'s grant admitted; reads no policy.
+    pub(crate) fn granted_server(
+        &self,
+        launch: &HerdrLaunchEndpoint,
+        nonce: &str,
+    ) -> GrantedServer {
+        let Some((endpoint, transport)) = self.endpoint(launch) else {
+            return GrantedServer::Kept;
+        };
+        let Ok(current) = transport.server_witness() else {
+            return GrantedServer::Unanswered;
+        };
+        let Ok(evidence) = self.mutation_evidence(endpoint, nonce) else {
+            return GrantedServer::Kept;
+        };
+        let granted = evidence
+            .grant
+            .as_ref()
+            .map(|g| g.witness_for(launch, nonce));
+        match granted {
+            Some(Ok(granted)) if *granted != current => {
+                let startup = evidence.startup.is_some_and(|p| p.witness() == &current);
+                GrantedServer::Replaced(ReplacedServer { current, startup })
+            }
+            _ => GrantedServer::Kept,
+        }
     }
 
     #[cfg(test)]
@@ -432,19 +523,9 @@ impl HerdrLaunchHost for SocketHerdrLaunchHost {
             if self.mode(launch) != EndpointMode::UserDefault {
                 return Err("endpoint mode is not user_default".into());
             }
-            let source = self.source(launch).ok_or("endpoint is not configured")?;
-            let checked = self.policy.next_restart(source, &LocalChecker).await;
-            super::policy::diagnostics::record(
-                Path::new(&launch.socket_addr),
-                &self.policy,
-                &checked,
-            );
-            let proof =
-                checked.map_err(|why| format!("next_restart_policy_unverified: {why:?}"))?;
-            self.witnessed
-                .lock()
-                .map_err(|_| "policy cache unavailable")?
-                .insert(launch.clone(), proof.witness().clone());
+            // A start only makes a server answer; the policy below still decides the permit.
+            super::autostart::spawn::ensure(launch).await;
+            let proof = self.observe_policy(launch).await?;
             CreatePermit::new(launch.clone(), proof).map_err(|why| format!("{why:?}"))
         })
     }

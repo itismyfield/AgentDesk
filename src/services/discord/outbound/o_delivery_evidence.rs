@@ -341,14 +341,20 @@ fn headless_content_matches(content: &str, bodies: &[&str]) -> bool {
     })
 }
 
-/// A headless bridge body leaves a sent `message_outbox` row, not an O receipt; only a row with
-/// this body queued after the records that wrote it covers it, never an earlier turn's answer.
+/// A headless bridge body leaves a sent `message_outbox` row, not an O receipt; only a row the
+/// frame's own turn queued with this body after its records covers it, never another turn's.
+/// `turns` are the held turn nonces in preference order, each with where another stored turn
+/// starts: a turn speaks for the body only if every body record ends by that start.
 pub(in crate::services::discord) async fn headless_outbox(
     shared: &SharedData,
     frame: Frame<'_>,
     producer: manifest::BodyProducer,
+    turns: &[(&str, Option<u64>)],
     deadline: Instant,
 ) -> Option<TailCovered> {
+    if turns.iter().all(|(nonce, _)| nonce.is_empty()) {
+        return None;
+    }
     let pool = shared.pg_pool.as_ref()?;
     let (provider, path) = (frame.provider.clone(), frame.path.to_path_buf());
     let (channel, file, range) = (frame.channel.get(), frame.file, frame.range);
@@ -356,7 +362,7 @@ pub(in crate::services::discord) async fn headless_outbox(
     let written = tokio::time::timeout_at(
         deadline,
         tokio::task::spawn_blocking(move || {
-            manifest::body_written_ms(
+            manifest::body_written(
                 manifest::Query {
                     provider: &provider,
                     channel,
@@ -373,33 +379,33 @@ pub(in crate::services::discord) async fn headless_outbox(
     .await
     .ok()?
     .ok()??;
-    let floor = chrono::DateTime::from_timestamp_millis(written - HEADLESS_OUTBOX_SKEW_MS)?;
+    let producer_turn_nonce = turns
+        .iter()
+        .find(|(nonce, next_turn_start)| {
+            !nonce.is_empty() && next_turn_start.is_none_or(|start| written.records_end <= start)
+        })
+        .map(|(nonce, _)| *nonce)?;
+    let floor = chrono::DateTime::from_timestamp_millis(written.at_ms - HEADLESS_OUTBOX_SKEW_MS)?;
     let rows: Vec<String> = tokio::time::timeout_at(
         deadline,
         sqlx::query_scalar(
             "SELECT content FROM message_outbox
               WHERE target = $1 AND source = 'headless_turn' AND status = 'sent'
-                AND created_at >= $2
+                AND created_at >= $2 AND producer_turn_nonce = $3
               ORDER BY id DESC LIMIT 32",
         )
         .bind(format!("channel:{channel}"))
         .bind(floor)
+        .bind(producer_turn_nonce)
         .fetch_all(pool),
     )
     .await
     .ok()?
     .ok()?;
-    let formatted = if shared.ui.status_panel_v2_enabled {
-        crate::services::discord::formatting::format_for_discord_with_status_panel(
-            frame.body,
-            frame.provider,
-        )
-    } else {
-        crate::services::discord::formatting::format_for_discord_with_provider(
-            frame.body,
-            frame.provider,
-        )
-    };
+    let formatted = crate::services::discord::formatting::format_for_discord_with_status_panel(
+        frame.body,
+        frame.provider,
+    );
     let bodies = [frame.body, formatted.as_str()];
     if !rows
         .iter()

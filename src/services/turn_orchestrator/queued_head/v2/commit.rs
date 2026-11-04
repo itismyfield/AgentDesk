@@ -20,11 +20,16 @@ impl Owner {
         }
         let candidate = serde_json::to_string_pretty(&next).map_err(|e| e.to_string())?;
         let actual = read(&self.path)?;
+        if self.last_success_sequence == 0 {
+            self.observe_snapshot(actual.as_deref(), &candidate, false);
+        }
         if actual != self.bytes {
+            self.observe_snapshot(actual.as_deref(), &candidate, true);
             return Err("snapshot changed outside owner".into());
         }
         if Some(&candidate) == self.bytes.as_ref() {
             self.snapshot = next;
+            self.last_success_sequence = self.last_success_sequence.saturating_add(1);
             return Ok(());
         }
         let mut sync_unconfirmed = false;
@@ -60,6 +65,7 @@ impl Owner {
         }
         self.bytes = Some(candidate);
         self.snapshot = next;
+        self.last_success_sequence = self.last_success_sequence.saturating_add(1);
         Ok(())
     }
 
@@ -93,6 +99,7 @@ impl Owner {
             let (bytes, snapshot) = self.pending.take().ok_or("candidate disappeared")?;
             self.bytes = Some(bytes);
             self.snapshot = snapshot;
+            self.last_success_sequence = self.last_success_sequence.saturating_add(1);
             self.project_slots();
             Ok(())
         } else if actual == self.bytes {
@@ -102,6 +109,48 @@ impl Owner {
             Err("commit unknown: preserve original and candidate; inspect storage manually".into())
         }
     }
+
+    /// Correlates adoptions and conflicts without exposing queue contents or namespace/path text.
+    fn observe_snapshot(&self, actual: Option<&str>, candidate: &str, mismatch: bool) {
+        let expected = self.bytes.as_deref();
+        let observation = if mismatch { "cas_mismatch" } else { "adopt" };
+        macro_rules! record {
+            ($level:path) => {
+                tracing::event!(
+                    $level,
+                    observation,
+                    namespace_sha256 = %fingerprint(self.snapshot.namespace.as_deref().map(str::as_bytes)),
+                    path_sha256 = %fingerprint(Some(self.path.as_os_str().as_encoded_bytes())),
+                    owner_pid = std::process::id(),
+                    owner_incarnation = %self.incarnation,
+                    last_success_sequence = self.last_success_sequence,
+                    last_admission_sequence = self.snapshot.admission_sequence,
+                    expected_sha256 = %fingerprint(expected.map(str::as_bytes)),
+                    expected_bytes = expected.map_or(0, str::len),
+                    expected_present = expected.is_some(),
+                    actual_sha256 = %fingerprint(actual.map(str::as_bytes)),
+                    actual_bytes = actual.map_or(0, str::len),
+                    actual_present = actual.is_some(),
+                    candidate_sha256 = %fingerprint(Some(candidate.as_bytes())),
+                    candidate_bytes = candidate.len(),
+                    "queued input owner snapshot observation"
+                );
+            };
+        }
+        if mismatch {
+            record!(tracing::Level::WARN);
+        } else {
+            record!(tracing::Level::INFO);
+        }
+    }
+}
+
+fn fingerprint(bytes: Option<&[u8]>) -> String {
+    use sha2::{Digest, Sha256};
+    bytes.map_or_else(
+        || "absent".into(),
+        |bytes| hex::encode(Sha256::digest(bytes)),
+    )
 }
 
 fn read(path: &std::path::Path) -> Result<Option<String>, String> {

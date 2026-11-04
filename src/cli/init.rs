@@ -414,7 +414,7 @@ fn launchd_plist_filename(flavor: LaunchdPlistFlavorArg) -> String {
 fn default_launchd_root_dir(home: &Path, flavor: LaunchdPlistFlavorArg) -> PathBuf {
     match flavor {
         LaunchdPlistFlavorArg::Release => {
-            dcserver::agentdesk_runtime_root().unwrap_or_else(|| home.join(".adk").join("release"))
+            crate::config::runtime_root().unwrap_or_else(|| home.join(".adk").join("release"))
         }
     }
 }
@@ -840,7 +840,7 @@ fn write_init_artifacts(
 // ── Main init flow ─────────────────────────────────────────────────
 
 pub fn handle_init(reconfigure: bool) {
-    let root = dcserver::agentdesk_runtime_root().unwrap_or_else(|| {
+    let root = crate::config::runtime_root().unwrap_or_else(|| {
         eprintln!("Error: cannot determine runtime directory");
         std::process::exit(1);
     });
@@ -1389,7 +1389,7 @@ fn install_service(home: &Path, agentdesk_bin: &Path, reconfigure: bool) -> Resu
 fn install_service(home: &Path, agentdesk_bin: &Path, _reconfigure: bool) -> Result<(), String> {
     let service_name = "agentdesk-dcserver";
     let root_dir =
-        dcserver::agentdesk_runtime_root().unwrap_or_else(|| home.join(".adk").join("release"));
+        crate::config::runtime_root().unwrap_or_else(|| home.join(".adk").join("release"));
     let logs_dir = root_dir.join("logs");
     fs::create_dir_all(&logs_dir).map_err(|e| format!("Failed to create logs directory: {e}"))?;
     let unit_content = format!(
@@ -1440,7 +1440,7 @@ fn install_service(home: &Path, agentdesk_bin: &Path, _reconfigure: bool) -> Res
 #[cfg(target_os = "windows")]
 fn install_service(_home: &Path, agentdesk_bin: &Path, _reconfigure: bool) -> Result<(), String> {
     let service_name = "AgentDeskDcserver";
-    let root_dir = dcserver::agentdesk_runtime_root().unwrap_or_else(|| {
+    let root_dir = crate::config::runtime_root().unwrap_or_else(|| {
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".adk")

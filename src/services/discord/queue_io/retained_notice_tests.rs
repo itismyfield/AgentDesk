@@ -88,3 +88,28 @@ async fn a_batch_over_a_submitted_source_asks_only_for_its_new_part_pg() {
     assert!(posted[0].contains(RESEND), "{posted:?}");
     assert!(!posted[0].contains(OPAQUE), "{posted:?}");
 }
+
+/// An original pasted beside an unparkable draft is told once, however many of its attempts met
+/// the draft, and the notice never carries text a person typed; another original is told apart.
+#[tokio::test(flavor = "current_thread")]
+async fn a_draft_notice_posts_once_per_original_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let channel = 7_676_611;
+    let first = vec![(BASE + 1).to_string()];
+    for sources in [&first, &first, &vec![(BASE + 2).to_string()]] {
+        super::draft_unproven(&pool, "claude", channel, sources)
+            .await
+            .unwrap();
+    }
+    let posted = posts(&pool, channel).await;
+    assert_eq!(posted.len(), 2, "{posted:?}");
+    assert!(
+        posted
+            .iter()
+            .all(|text| text.contains("초안은 보존 여부를 확인하지 못했습니다")),
+        "{posted:?}"
+    );
+    db.drop().await;
+}

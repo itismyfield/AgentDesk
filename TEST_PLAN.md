@@ -18,6 +18,7 @@ Every PR must include:
 - Risk and rollback notes
 
 ## Verification Commands
+- **Writing tests:** follow [`docs/agent-maintenance/test-policy.md`](docs/agent-maintenance/test-policy.md).
 - **Rust Changes:** `cargo check --all-targets`, `cargo test <narrow-target>`. When executing commands that might terminate the shell session (like `cargo check --all-targets`), wrap them in `bash -c '<command>'` to prevent session loss and preserve environment state.
 - **Dashboard Changes:** `./scripts/verify-dashboard.sh`
 - **Policy Changes:** `npm run test:policies`

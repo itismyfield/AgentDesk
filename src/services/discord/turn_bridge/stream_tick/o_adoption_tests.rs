@@ -183,11 +183,7 @@ async fn only_a_tick_that_streams_a_body_ends_a_pending_adoption() {
 
 /// A footer-mode shared state whose live panel saw `Bash` start in `channel`.
 fn panel_with_last_tool(channel: ChannelId) -> Arc<SharedData> {
-    let mut shared = crate::services::discord::make_shared_data_for_tests();
-    Arc::get_mut(&mut shared)
-        .expect("fresh shared")
-        .ui
-        .status_panel_v2_enabled = true;
+    let shared = crate::services::discord::make_shared_data_for_tests();
     let events = crate::services::discord::placeholder_live_events::status_events_from_tool_use(
         "Bash",
         r#"{"command":"cargo test"}"#,
@@ -218,7 +214,7 @@ async fn o_channel_panel_shows_the_last_tool_in_place_even_below_o_posts() {
             ..Default::default()
         });
         let shared = panel_with_last_tool(channel);
-        let footer = crate::services::discord::turn_bridge::single_message_footer::bridge_single_message_panel_footer_enabled(shared.ui.status_panel_v2_enabled);
+        let footer = crate::services::discord::turn_bridge::single_message_footer::bridge_single_message_panel_footer_enabled();
         let state = tick_with(shared, channel, BODY, gateway.clone(), false, footer).await;
         let edits = gateway.edits.lock().unwrap().clone();
         assert!(
@@ -248,7 +244,7 @@ async fn a_last_tick_tool_is_edited_into_the_panel_below_o_posts() {
         ..Default::default()
     });
     let shared = panel_with_last_tool(channel);
-    let footer = crate::services::discord::turn_bridge::single_message_footer::bridge_single_message_panel_footer_enabled(shared.ui.status_panel_v2_enabled);
+    let footer = crate::services::discord::turn_bridge::single_message_footer::bridge_single_message_panel_footer_enabled();
     let state = tick_with(shared, channel, BODY, gateway.clone(), true, footer).await;
     let edits = gateway.edits.lock().unwrap().clone();
     assert!(

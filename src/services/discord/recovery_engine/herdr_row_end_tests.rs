@@ -438,3 +438,48 @@ fn an_ended_sources_torn_tail_counts_only_when_it_parses_whole() {
         ]
     );
 }
+
+/// A queued input's end request starts its local user_default server before the end reads the
+/// row; a sweep's request for the same row starts nothing.
+#[tokio::test(flavor = "current_thread")]
+async fn only_an_input_end_request_asks_for_the_channel_server() {
+    use crate::services::session_host::autostart::spawn::ensured_on_this_thread;
+    let _root = root();
+    let _boot = crate::config::session_hosts::force_for_test(Some("node"), &[(CHANNEL, "node")])
+        .with_mode(crate::config::session_hosts::EndpointMode::UserDefault);
+    let claude = ProviderKind::Claude;
+    inflight::save_inflight_state(&row(&claude, &session(&claude, "ask", true))).unwrap();
+    let mut shared = crate::services::discord::make_shared_data_for_tests();
+    Arc::get_mut(&mut shared)
+        .unwrap()
+        .restart
+        .current_generation = CURRENT;
+    let settled = || async {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while Ending::claim(&claude, CHANNEL).is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the end task never finished"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
+    let asked = |ask| {
+        let before = ensured_on_this_thread();
+        request_row_end(&shared, &claude, ChannelId::new(CHANNEL), ask);
+        async move {
+            settled().await;
+            ensured_on_this_thread() - before
+        }
+    };
+    assert_eq!(
+        asked(RowEndAsk::Sweep).await,
+        0,
+        "a sweep only reads the row"
+    );
+    assert_eq!(
+        asked(RowEndAsk::Input).await,
+        1,
+        "an input asks for its server"
+    );
+}

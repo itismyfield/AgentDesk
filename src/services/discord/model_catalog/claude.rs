@@ -757,8 +757,6 @@ mod tests {
 
     use super::*;
 
-    mod source_guard_tests;
-
     fn api_cache_json(fetched_at_ms: u64, models: serde_json::Value) -> Vec<u8> {
         serde_json::json!({
             "version": API_CACHE_VERSION,
@@ -767,12 +765,6 @@ mod tests {
         })
         .to_string()
         .into_bytes()
-    }
-
-    #[test]
-    fn invariant_claude_model_catalog_global_test_state_uses_canonical_lock_scope() {
-        use source_guard_tests::{CLAUDE, refresh_state_lock_gaps};
-        assert_eq!(refresh_state_lock_gaps(CLAUDE), Vec::<String>::new());
     }
 
     #[test]

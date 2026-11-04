@@ -114,12 +114,10 @@ pub(super) fn relay_producer(
 ) {
     // E5 (#2412): cache the supervisor-owned StreamRelay producer for this
     // tmux session, if the supervisor is running and has matched the
-    // session. `None` covers three legitimate cases:
-    //   1. `cluster.session_bound_relay_enabled = false` (supervisor never
-    //      spawned, registry empty).
-    //   2. SessionDiscovery hasn't yet observed this session — the cache is
+    // session. `None` covers two legitimate cases:
+    //   1. SessionDiscovery hasn't yet observed this session — the cache is
     //      refreshed below per chunk-read in that case.
-    //   3. This watcher attached to a session the registry doesn't know
+    //   2. This watcher attached to a session the registry doesn't know
     //      (e.g. legacy session name pattern). The watcher keeps the legacy
     //      fallback path for envelopes the supervisor-owned relay cannot own.
     let producer_registry =
