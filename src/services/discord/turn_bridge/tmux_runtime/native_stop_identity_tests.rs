@@ -37,9 +37,8 @@ fn escapes(fx: &Fixture) -> usize {
     calls.iter().filter(escape).count()
 }
 
-/// Rows after the pinned input decide the Escape: neutral and own busy rows keep it, while a later
-/// prompt, an unregistered human prompt, a frame of another token or session, a missing pin and a
-/// changed pane or file send none and never fall back to a raw cancel.
+/// Neutral and own busy rows after the pinned input keep the Escape; any other prompt, a missing
+/// pin or a changed pane or file sends none and never falls back to a raw cancel.
 #[test]
 fn a_stop_escapes_only_the_turn_its_own_input_still_owns() {
     let fx = Fixture::new();
