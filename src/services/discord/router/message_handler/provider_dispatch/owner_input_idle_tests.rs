@@ -459,16 +459,12 @@ fn busy_hold_notice(hold: Option<crate::services::discord::queue_io::input_ingre
         hold != Some(Hold::RestartRecovery),
         std::sync::atomic::Ordering::Relaxed,
     );
-    let server = rig.runtime.block_on(async {
-        mock.allow_channel(channel);
-        let (proxy, gateway, server) = discord_mock::start(mock.clone()).await;
-        shared
-            .http
-            .cached_serenity_ctx
-            .set(discord_mock::serenity_context(proxy, gateway).await)
-            .unwrap();
-        server
-    });
+    mock.allow_channel(channel);
+    let (proxy, gateway, server) = rig.runtime.block_on(discord_mock::start(mock.clone()));
+    let context = rig
+        .runtime
+        .block_on(discord_mock::serenity_context(proxy, gateway));
+    shared.http.cached_serenity_ctx.set(context).unwrap();
     let mut item = rig.original.clone();
     if hold == Some(Hold::Uploads) {
         let persistence = crate::services::turn_orchestrator::QueuePersistenceContext::new(
