@@ -31,7 +31,23 @@ The command exits 1 when any rule breaks, which is the expected result for a mod
 
 CI (`.github/workflows/statecharts-tlc.yml`, PRs touching this folder and nightly, alert only) runs every `.cfg` with plain TLC through `scripts/ci/statecharts_tlc.py` and fails when the broken rules differ from that config's row in `expected.tsv`; run it locally with `TLA2TOOLS` and `JAVA` set as above.
 A change that adds a config, breaks a rule or closes a known gap updates `expected.tsv` and the report in the same PR.
+The first three TSV fields retain their meaning (config, module, expected invariant/deadlock violations).
+An optional fourth field lists expected liveness violations; use comma-separated PROPERTY names or `-`.
+An unlisted violation or an expected violation that now holds fails the check.
+
+`PROPERTY` and `PROPERTIES` require `SPECIFICATION <name>` instead of `INIT`/`NEXT`.
+That specification must include the model's fairness assumptions; the checker validates the cfg entry, not the TLA+ formula.
+Safety rules run first, then each temporal property runs alone: TLC 1.7.4 reports a temporal violation without its name.
+A temporal run must report temporal checking and a clean finish or exit 13 with a temporal violation.
+Constant or state-only PROPERTY formulas that TLC optimizes away from temporal checking are refused; use INVARIANT for state predicates.
+ExecutionAuthorityMain expects `AdmissionResumes` to break, while ExecutionAuthority expects it to hold.
+
 Add a new model only with small constants that finish within the CI limits (5 minutes per config, 15 minutes per job).
+The 300-second config budget includes every safety rerun and every property; timeout always fails.
+Measure the full checker and its per-config times before and after adding liveness.
+If a config exceeds that budget or the suite approaches 15 minutes, reduce its PR bounds and move the larger cfg
+to a separate nightly-only root with its own `expected.tsv` and explicit timeout/job budget.
+Wire that root into the scheduled workflow before moving it; do not omit a config from the current manifest to hide a timeout.
 
 ## Index
 

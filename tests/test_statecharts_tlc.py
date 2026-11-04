@@ -15,12 +15,18 @@ sys.modules[SPEC.name] = tlc
 SPEC.loader.exec_module(tlc)
 
 
-def msg(code: int, body: str) -> str:
-    return f"@!@!@STARTMSG {code}:1 @!@!@\n{body}\n@!@!@ENDMSG {code} @!@!@\n"
+def msg(code: int, body: str, level: int = 1) -> str:
+    return f"@!@!@STARTMSG {code}:{level} @!@!@\n{body}\n@!@!@ENDMSG {code} @!@!@\n"
 
 
-SUCCESS = msg(2193, "Model checking completed. No error has been found.")
+SUCCESS = msg(2193, "Model checking completed. No error has been found.", 0)
 DEADLOCK = msg(2114, "Deadlock reached.")
+# TLC 1.7.4 ExecutionAuthority main/fix1 output with -tool.
+TEMPORAL_START = msg(2192, "Checking temporal properties for the complete state space with "
+                     "6 total distinct states at (2026-11-04 17:40:44)", 0)
+TEMPORAL_FINISH = msg(2267, "Finished checking temporal properties in 00s at 2026-11-04 17:40:44", 0)
+TEMPORAL_BROKEN = TEMPORAL_START + msg(2116, "Temporal properties were violated.\n") + TEMPORAL_FINISH
+TEMPORAL_SUCCESS = TEMPORAL_START + TEMPORAL_FINISH + SUCCESS
 
 
 def violated(name: str) -> str:
@@ -48,8 +54,59 @@ class ClassifyTest(unittest.TestCase):
             with self.subTest(label), self.assertRaises(tlc.CheckError):
                 tlc.classify(status, output, ["A", "B"], label != "deadlock while deadlock is off")
 
+    def test_temporal_violation_is_attributed_to_the_only_checked_property(self) -> None:
+        self.assertEqual(tlc.classify(13, TEMPORAL_BROKEN, [], False, "Live"), "Live")
+        self.assertIsNone(tlc.classify(0, TEMPORAL_SUCCESS, [], False, "Live"))
+
+    def test_temporal_endings_require_matching_exit_and_check_evidence(self) -> None:
+        cases = {
+            "property ignored": (0, SUCCESS),
+            "check never completed": (0, TEMPORAL_START + SUCCESS),
+            "violation without temporal checking": (13, msg(2116, "Temporal properties were violated.")),
+            "wrong violation exit": (12, TEMPORAL_BROKEN),
+            "missing violation message": (13, TEMPORAL_START + TEMPORAL_FINISH),
+            "success and violation": (13, TEMPORAL_BROKEN + SUCCESS),
+            "success exit and violation": (0, TEMPORAL_BROKEN + SUCCESS),
+            "two violations": (13, TEMPORAL_BROKEN + msg(2116, "Temporal properties were violated.")),
+            "safety during a temporal run": (12, violated("A")),
+            "temporal and safety": (13, TEMPORAL_BROKEN + violated("A")),
+            "temporal and deadlock": (13, TEMPORAL_BROKEN + DEADLOCK),
+        }
+        for label, (status, output) in cases.items():
+            with self.subTest(label), self.assertRaises(tlc.CheckError):
+                tlc.classify(status, output, [], False, "Live")
+        with self.assertRaises(tlc.CheckError):
+            tlc.classify(13, TEMPORAL_BROKEN, [], False)
+        with self.assertRaises(tlc.CheckError):
+            tlc.classify(0, TEMPORAL_BROKEN + SUCCESS, ["A"], True)
+
 
 class ConfigTest(unittest.TestCase):
+    def test_property_keywords_and_render_keep_only_selected_rules(self) -> None:
+        config = tlc.parse_config('SPECIFICATION Spec\nINVARIANT Safe\nPROPERTY Live\n'
+                                  'PROPERTIES\n  Later\n  Last\nCHECK_DEADLOCK TRUE\n'
+                                  '\\* PROPERTY Hidden\n')
+        self.assertEqual(config.properties, ["Live", "Later", "Last"])
+        self.assertEqual(config.rules(), ["Safe", "Live", "Later", "Last", "NoDeadlock"])
+        safety = tlc.parse_config(config.render(["Safe"], True))
+        self.assertEqual(safety.properties, [])
+        self.assertEqual(safety.rules(), ["Safe", "NoDeadlock"])
+        temporal = tlc.parse_config(config.render([], False, ["Later"]))
+        self.assertEqual(temporal.rules(), ["Later"])
+        self.assertIn("SPECIFICATION Spec", temporal.text)
+
+    def test_property_names_and_specification_must_be_unambiguous(self) -> None:
+        cases = ("PROPERTY\n", "PROPERTY Live,Later\n", "PROPERTY Live\nPROPERTY Live\n",
+                 "INVARIANT Live\nPROPERTY Live\n", "PROPERTY NoDeadlock\n")
+        for tail in cases:
+            with self.subTest(tail), self.assertRaises(tlc.CheckError):
+                tlc.parse_config("SPECIFICATION Spec\n" + tail)
+        for spec in ("", "SPECIFICATION\n", "SPECIFICATION Spec Other\n",
+                     "SPECIFICATION Spec\nSPECIFICATION Other\n",
+                     "SPECIFICATION Spec\nINIT Init\nNEXT Next\n"):
+            with self.subTest(spec), self.assertRaisesRegex(tlc.CheckError, "SPECIFICATION"):
+                tlc.parse_config(spec + "PROPERTY Live\n")
+
     def test_render_keeps_only_the_given_rules(self) -> None:
         text = ('CONSTANTS\n  Mut = "INVARIANT (* x"\n\\* INVARIANT Hidden (* "a\\b" ; ? é\nINIT Init\nNEXT Next\n'
                 '(* INVARIANT Gone "a\\b" ` é\n  \\* still a block comment *)\n'
@@ -130,6 +187,87 @@ class CheckCfgTest(unittest.TestCase):
         failed = self.check([known, (255, msg(2179, "Attempted to apply the operator \\div to 1 and 0"))])
         self.assertEqual(failed.broken, {"Known"})
         self.assertIn("exit 255", failed.error or "")
+
+
+class LivenessCfgTest(unittest.TestCase):
+    def check(self, outputs: list, expected: set[str],
+              config: str = "SPECIFICATION Spec\nINVARIANT Known\nPROPERTY Live\n") -> tuple:
+        rendered = []
+        deadlines = []
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "M.tla").write_text("---- MODULE M ----\n====\n", encoding="utf-8")
+            (root / "M.cfg").write_text(config, encoding="utf-8")
+
+            def run(java, jar, workdir, module, name, deadline):
+                rendered.append(tlc.parse_config((workdir / name).read_text(encoding="utf-8")))
+                deadlines.append(deadline)
+                output = outputs[len(rendered) - 1]
+                if isinstance(output, Exception):
+                    raise output
+                return output
+
+            with mock.patch.object(tlc, "run_tlc", side_effect=run) as runner:
+                result = tlc.check_cfg(root, "M.cfg", "M", expected, "java", root / "tla2tools.jar", 60)
+        return result, rendered, deadlines, runner.call_count
+
+    def test_expected_liveness_violation_passes(self) -> None:
+        result, rendered, _, count = self.check([(0, SUCCESS), (13, TEMPORAL_BROKEN)], {"Live"})
+        self.assertEqual(result.problems(), [])
+        self.assertEqual(result.broken, {"Live"})
+        self.assertEqual(count, 2)
+        self.assertEqual(rendered[1].rules(), ["Live"])
+
+    def test_unexpected_liveness_violation_fails(self) -> None:
+        result, _, _, _ = self.check([(0, SUCCESS), (13, TEMPORAL_BROKEN)], set())
+        self.assertEqual(len(result.problems()), 1)
+        self.assertIn("Live: newly broken", result.problems()[0])
+
+    def test_expected_liveness_violation_now_holds_fails(self) -> None:
+        result, _, _, _ = self.check([(0, SUCCESS), (0, TEMPORAL_SUCCESS)], {"Live"})
+        self.assertEqual(len(result.problems()), 1)
+        self.assertIn("Live: now holds", result.problems()[0])
+
+    def test_properties_run_separately_after_safety_finishes(self) -> None:
+        config = "SPECIFICATION Spec\nINVARIANT Known\nPROPERTIES Live Later\n"
+        outputs = [(12, violated("Known")), (0, SUCCESS), (13, TEMPORAL_BROKEN), (0, TEMPORAL_SUCCESS)]
+        result, rendered, deadlines, count = self.check(outputs, {"Known", "Live"}, config)
+        self.assertEqual(result.problems(), [])
+        self.assertEqual(count, 4)
+        self.assertEqual([c.rules() for c in rendered], [["Known", "NoDeadlock"], ["NoDeadlock"], ["Live"], ["Later"]])
+        self.assertEqual(len(set(deadlines)), 1)
+
+    def test_liveness_without_specification_never_invokes_tlc(self) -> None:
+        result, _, _, count = self.check([], set(), "INIT Init\nNEXT Next\nPROPERTY Live\n")
+        self.assertEqual(count, 0)
+        self.assertIn("SPECIFICATION", result.error or "")
+
+    def test_ignored_property_and_timeout_are_errors(self) -> None:
+        ignored, _, _, _ = self.check([(0, SUCCESS), (0, SUCCESS)], set())
+        self.assertTrue(ignored.problems())
+        self.assertIsNotNone(ignored.error)
+        timeout, _, _, _ = self.check([(0, SUCCESS), tlc.CheckError("timed out")], set())
+        self.assertIn("timed out", timeout.error or "")
+        self.assertIn("limit 60 s per config", timeout.error or "")
+
+
+class ExpectedTest(unittest.TestCase):
+    def read(self, text: str) -> dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "expected.tsv"
+            path.write_text(text, encoding="utf-8")
+            return tlc.read_expected(path)
+
+    def test_three_column_rows_and_optional_liveness_column(self) -> None:
+        rows = self.read("old.cfg\tM\tKnown,NoDeadlock\nclean.cfg\tM\t-\n"
+                         "live.cfg\tM\tKnown\tLive,Later\nfixed.cfg\tM\t-\t-\n")
+        self.assertEqual(rows, {"old.cfg": ("M", {"Known", "NoDeadlock"}), "clean.cfg": ("M", set()),
+                                "live.cfg": ("M", {"Known", "Live", "Later"}), "fixed.cfg": ("M", set())})
+
+    def test_malformed_liveness_columns_fail(self) -> None:
+        for text in ("a.cfg\tM\t-\tLive,\n", "a.cfg\tM\t-\tLive\textra\n"):
+            with self.subTest(text), self.assertRaises(tlc.CheckError):
+                self.read(text)
 
 
 class ProblemsTest(unittest.TestCase):
