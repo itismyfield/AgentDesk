@@ -22,5 +22,6 @@ input-single-path/InputPathClean.cfg	InputPath	-
 input-single-path/InputPathStopGate.cfg	InputPath	-
 input-single-path/InputPathStopNoGate.cfg	InputPath	StoppedBeforeKey
 input-single-path/InputPathStopNotSent.cfg	InputPath	StoppedBeforeKey
+input-single-path/InputPathStopBusyNoGate.cfg	InputPath	StoppedBeforeKey
 session-lifecycle/HerdrSession.cfg	HerdrSession	NoDeadlock,NoOrphanPane,PromptOnlyToAgent,RowMatchesPane
 session-lifecycle/TmuxSession.cfg	TmuxSession	NoDeadlock,RowNamesSession,RowOnlyWithTurn

@@ -197,10 +197,11 @@ Enter(k) ==
 \* The writer's token is NoKeyYet: the stop takes the gate, main cancels and the writer sends no
 \* key, ending Cancelled{0} as WriteUncertain -> Unknown, never a NotSent the drive resends.
 \* Mutants: the writer never sees the gate and keys on, or Cancelled{0} is held as NotSent.
+\* busyNoGate: only the busy-pane writer (prov busy, the ClaudeBusy route) skips the gate.
 StopBeforeKey(k) ==
     /\ drv[k] \in {"reserved", "direct", "stash"} /\ stopped = {}
     /\ stopped' = {cur[k]}
-    /\ IF Mut = "noKeyGate"
+    /\ IF Mut = "noKeyGate" \/ (Mut = "busyNoGate" /\ prov = "busy")
        THEN UNCHANGED <<queue, head, drv, cur, wake, heldWait>>
        ELSE /\ drv' = [drv EXCEPT ![k] = "idle"] /\ cur' = [cur EXCEPT ![k] = 0] /\ wake' = TRUE
             /\ IF Mut = "cancelledNotSent"
