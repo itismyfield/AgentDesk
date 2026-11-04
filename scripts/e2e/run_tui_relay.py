@@ -2612,12 +2612,27 @@ def _mailbox_idle_evidence(mailbox: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-# SnapshotV2 in src/services/turn_orchestrator/queued_head/v2_types.rs. Items, head_injection,
-# retained_inputs and any admission bind not yet settled wait for delivery; the rest is settled history.
+# SnapshotV2 in src/services/turn_orchestrator/queued_head/v2_types.rs: items and head_injection wait.
+# Known completed retained notices are history; unsettled admission binds still wait.
 QUEUE_V2_KEYS = frozenset({
     "version", "items", "head_injection", "retained_inputs", "terminal_identities", "namespace",
     "admission_receipts", "admission_sequence", "admission_binds",
 })
+
+
+def _retained_input_waiting(entry: Any) -> bool:
+    """Only known notices already enqueued leave no retained work for the owner."""
+    if not isinstance(entry, dict):
+        return True
+    notice = entry.get("notice")
+    if (not isinstance(notice, dict) or set(notice) != {"kind", "enqueued"}
+            or notice.get("enqueued") is not True):
+        return True
+    return (entry.get("disposition"), notice["kind"]) not in (
+        ("known_not_sent", "retained_retry_required"),
+        ("opaque_unsent", "retained_retry_required"),
+        (None, "unconfirmed"),
+    )
 
 
 def _queue_v2_waiting(payload: Any) -> bool | None:
@@ -2631,7 +2646,8 @@ def _queue_v2_waiting(payload: Any) -> bool | None:
     binds = payload.get("admission_binds", [])
     if not isinstance(binds, list) or not all(isinstance(b, dict) and isinstance(b.get("at"), dict) for b in binds):
         return None
-    return bool(payload["items"] or payload["retained_inputs"] or payload["head_injection"] is not None
+    return bool(payload["items"] or any(_retained_input_waiting(entry) for entry in payload["retained_inputs"])
+                or payload["head_injection"] is not None
                 or any(b["at"].get("kind") != "settled" for b in binds))
 
 

@@ -240,11 +240,13 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
     initial_watcher_delivery_pin: Option<WatcherClaimIncarnation>,
 ) {
     use tracing::Instrument;
+    let bridge_lifetime = cancel_token.native_stop.register_bridge();
     let original_registration = super::live_bridge::retain_original(
         &bridge.provider,
         bridge.channel_id.get(),
         &cancel_token,
     );
+    super::inflight::bind_native_stop_pin(&bridge.inflight_state, &cancel_token);
     let bridge_turn_id = discord_turn_id(
         &bridge.provider,
         bridge.channel_id,
@@ -265,6 +267,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
     #[cfg(all(test, unix))]
     let probe_channel = bridge.channel_id;
     let _bridge_task = super::task_supervisor::spawn_observed("discord_turn_bridge", async move {
+        let _bridge_lifetime = bridge_lifetime;
         let _original_registration = original_registration;
         #[cfg(test)]
         #[cfg(unix)]

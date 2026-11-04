@@ -312,18 +312,27 @@ pub(super) fn loads(pane: busy_inject::Pane) -> impl FnMut() -> bool + Send + 's
 }
 
 /// An idle Claude tmux pane: main's warm submission, whose stash the owner scope admits.
-pub(crate) fn idle_claude(pane: busy_inject::Pane, session: String, channel: u64) -> Leaf {
+pub(crate) fn idle_claude(
+    pane: busy_inject::Pane,
+    session: String,
+    channel: u64,
+    receipt: Arc<crate::services::provider::CancelToken>,
+) -> Leaf {
     use crate::services::claude_tui::guarded_outcome::SubmissionError;
     Box::new(move |frame| {
-        match crate::services::claude_tui::input::send_warm_followup_owned(&session, &frame, None) {
-            Ok(()) => Ok(Completion::Submitted),
-            Err(SubmissionError::Held(hold)) if hold.modal => {
-                arm_screen(channel, pane.clone());
-                Ok(Completion::Held(MODAL.into()))
+        crate::services::claude_tui::guarded_outcome::with_receipt_sink(Some(&receipt), || {
+            match crate::services::claude_tui::input::send_warm_followup_owned(
+                &session, &frame, None,
+            ) {
+                Ok(()) => Ok(Completion::Submitted),
+                Err(SubmissionError::Held(hold)) if hold.modal => {
+                    arm_screen(channel, pane.clone());
+                    Ok(Completion::Held(MODAL.into()))
+                }
+                Err(SubmissionError::Held(hold)) => Ok(Completion::Held(format!("held: {hold:?}"))),
+                Err(error) => Ok(Completion::WriteUncertain(format!("{error:?}"))),
             }
-            Err(SubmissionError::Held(hold)) => Ok(Completion::Held(format!("held: {hold:?}"))),
-            Err(error) => Ok(Completion::WriteUncertain(format!("{error:?}"))),
-        }
+        })
     })
 }
 
@@ -372,3 +381,7 @@ pub(crate) use herdr::BusyClaudeHerdr;
 #[cfg(test)]
 #[path = "effect_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "native_receipt_tests.rs"]
+mod native_receipt_tests;
