@@ -386,7 +386,7 @@ def _run(allowlist):
     from .module_layer_ratchet import compare, load_inputs
     try:
         accepted, moves = load_inputs(common.REPO_ROOT)
-        sources = {row["id"]: row["source"] for row in assessment["uncertainties"]}
+        sources = {row["id"]: {"source": row["source"], "path": row["path"]} for row in assessment["uncertainties"]}
         comparison = compare(accepted, baseline(result, load_mapping(common.REPO_ROOT), result["input_sha"], occurrences),
                              moves, sources)
     except (OSError, UnicodeError, ValueError, TypeError) as exc:

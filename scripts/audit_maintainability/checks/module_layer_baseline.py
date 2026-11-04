@@ -201,7 +201,8 @@ def _uncertainties(graph):
 
 
 def uncertainty_sources(graph, mapping, occurrence_projection):
-    return {row["id"]: row["source"] for row in project(graph, mapping, occurrence_projection)["uncertainties"]}
+    return {row["id"]: {"source": row["source"], "path": row["path"]}
+            for row in project(graph, mapping, occurrence_projection)["uncertainties"]}
 
 
 def baseline(graph, mapping, input_sha, occurrence_projection):

@@ -114,8 +114,26 @@ def _normalized(accepted, candidate, manifest):
     return old, zeros, normalized
 
 
+def _path_targets(source, path):
+    """Module nodes a crate/self/super-rooted written path can name; other roots stay unknown."""
+    if not source or not path or "::crate" not in source:
+        return []
+    root, _, module = source.partition("::crate")
+    names = [name for name in path.split("::") if name and name != "*"]
+    base = [name for name in module.split("::") if name]
+    if names[:1] in (["crate"], ["$crate"]):
+        base, names = [], names[1:]
+    elif names[:1] in (["self"], ["super"]):
+        while names[:1] in (["self"], ["super"]):
+            if names.pop(0) == "super" and base:
+                base.pop()
+    else:
+        return []
+    return [root + "::crate" + "".join("::" + name for name in base + names[:n]) for n in range(len(names) + 1)]
+
+
 def compare(accepted, candidate, moves, sources=None):
-    """`sources` maps uncertainty IDs to their measured source module; records do not store it."""
+    """`sources` maps uncertainty IDs to their measured {source, path}; records do not store them."""
     errors, warnings, decreases = [], [], []
     try:
         old, zeros, current = _normalized(accepted, candidate, moves)
@@ -141,11 +159,15 @@ def compare(accepted, candidate, moves, sources=None):
                 previous = old[section].get(identity, {"count": 0})["count"]
                 if row["count"] > previous:
                     code = "zero-rule" if identity in zeros[section] else "increase" if previous else "new-id"
-                    source = (sources or {}).get(identity, row.get("source"))
+                    evidence = (sources or {}).get(row["id"], row)
+                    source = evidence.get("source")
+                    if section == "indeterminate_dependencies":
+                        targets = [row["target"]]
+                    else:
+                        targets = _path_targets(source, evidence.get("path"))
                     blocking = (section in BLOCKING_SECTIONS
-                                or (section == "indeterminate_dependencies"
-                                    and reaches(source, [row["target"]], hidden_ids))
-                                or (source is not None and (source in shrunk_sources
+                                or (source is not None and (reaches(source, targets, hidden_ids)
+                                                            or source in shrunk_sources
                                                             or reaches(source, shrunk_targets, shrunk_ids))))
                     (errors if blocking else warnings).append({
                         "code": code, "section": section, "id": identity,

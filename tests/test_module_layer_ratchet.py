@@ -170,7 +170,21 @@ class ModuleLayerRatchetTest(unittest.TestCase):
         candidate = self.snapshot(uncertainties=[glob])
         self.assert_warning_only(self.compare(self.snapshot([original]), candidate, moves), "uncertainties")
         self.assert_error(self.ratchet.compare(self.snapshot([original]), candidate, moves,
-                                               {glob["id"]: "src/lib.rs::crate::moved"}), "uncertainties")
+                                               {glob["id"]: {"source": "src/lib.rs::crate::moved"}}), "uncertainties")
+
+    def test_glob_reintroducing_a_zero_rule_is_error_but_an_unrelated_macro_warns(self):
+        reverse = self.edge(count=1)
+        cleared = self.ratchet.reduced_baseline(self.snapshot([reverse]), self.snapshot(), self.moves())
+        glob, macro = self.uncertainty("glob", 1), self.uncertainty("macro", 1)
+        evidence = {glob["id"]: {"source": "src/lib.rs::crate::lower", "path": "crate::upper::*"},
+                    macro["id"]: {"source": "src/lib.rs::crate::lower", "path": "matches"}}
+        self.assert_error(self.ratchet.compare(cleared, self.snapshot(uncertainties=[glob]), self.moves(), evidence),
+                          "uncertainties", glob["id"])
+        result = self.ratchet.compare(cleared, self.snapshot(uncertainties=[macro]), self.moves(), evidence)
+        self.assert_warning_only(result, "uncertainties", macro["id"])
+        relative = {glob["id"]: {"source": "src/lib.rs::crate::lower", "path": "super::upper::*"}}
+        self.assert_error(self.ratchet.compare(cleared, self.snapshot(uncertainties=[glob]), self.moves(), relative),
+                          "uncertainties", glob["id"])
 
     def test_changed_indeterminate_target_warns_even_with_equal_totals(self):
         old, replacement = self.edge("mixed", "old"), self.edge("mixed", "new")
@@ -696,6 +710,18 @@ assembly = 1
             self.assertNotEqual(refused.returncode, 0, refused.stdout)
             self.assertIn("uncertainties", refused.stderr)
             self.assertEqual(output.read_bytes(), original)
+            # Clear the debt into a zero-rule, then reintroduce it through a glob.
+            put("src/lower.rs", "fn run() {}\n")
+            commit("clear")
+            cleared = subprocess.run([*command, "--update-reductions"], capture_output=True, text=True)
+            self.assertEqual(cleared.returncode, 0, cleared.stderr)
+            self.assertTrue(json.loads(output.read_bytes())["zero_rules"])
+            zero_rule = output.read_bytes()
+            put("src/lower.rs", "use crate::upper::*;\nfn run() { call(); }\n")
+            commit("reintroduce")
+            reintroduced = subprocess.run([*command, "--update-reductions"], capture_output=True, text=True)
+            self.assertNotEqual(reintroduced.returncode, 0, reintroduced.stdout)
+            self.assertEqual(output.read_bytes(), zero_rule)
 
     def test_cli_reduces_committed_fixture_and_refuses_a_replacement_debt(self):
         with TemporaryDirectory() as temporary:
