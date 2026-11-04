@@ -217,6 +217,16 @@ pub(in crate::services::discord) async fn hand_busy(
     }
     let claim = claim_turn(&mailbox, front.1.message_id, &front).await?;
     let claim = claim.ok_or("NotSent(\"front_not_granted\")")?;
+    // The running turn's token learns the attempt before its paste can land a row.
+    let active = mailbox.cancel_token().await.ok().flatten();
+    if let (Some(active), Some(attempt)) = (active, owner.attempt["nonce"].as_str())
+        && active
+            .turn_nonce()
+            .is_some_and(|nonce| row.turn_nonce.as_deref() == Some(nonce))
+        && !active.native_stop.is_completed()
+    {
+        crate::services::discord::inflight::record_native_busy_child(&row, &active, attempt);
+    }
     let (settled, answer) = tokio::sync::oneshot::channel();
     let thread = paste_busy(
         (pool, provider),
@@ -814,6 +824,7 @@ fn run(
                 busy_inject::Pane::with_program(session()?, r.program),
                 session()?.into(),
                 turn.channel_id,
+                turn.cancel.clone(),
             ),
         ),
         target::Route::CodexIdle => (

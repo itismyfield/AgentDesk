@@ -49,6 +49,7 @@ CHECK_MODULES = (
     "audit_maintainability.checks.git_subprocess",
     "audit_maintainability.checks.legacy_sqlite",
     "audit_maintainability.checks.source_of_truth_alias",
+    "audit_maintainability.checks.module_layers",
 )
 
 DEFAULT_ALLOWLIST_FILE = REPO_ROOT / "scripts" / "audit_allowlist.toml"
