@@ -153,9 +153,8 @@ async fn attempted(
         .unwrap();
 }
 
-/// A restart re-adopts only the V2 queue files that still hold an input; an input-free file, as a
-/// finished routine turn leaves it, mints no mailbox for health to judge and stays on disk for the
-/// next input's owner with its admission history.
+/// A restart re-adopts only V2 queue files that still hold an input; an input-free file mints no
+/// mailbox for health to judge and stays on disk for the next input's owner with its history.
 #[cfg(unix)]
 #[test]
 fn boot_readopts_only_v2_queue_files_that_still_hold_an_input() {
