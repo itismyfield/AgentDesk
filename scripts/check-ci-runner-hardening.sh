@@ -699,12 +699,12 @@ targets = {
   "rust_build" => {
     "label" => "nextest build and plan job", "name" => "Rust tests build and plan",
     "needs" => "changes", "if" => rust_tests_gate, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 100, "job_sha256" => "8244368486984c3524f2425be53931224269b32fd0cbd2d8a245525e5239a721",
+    "job_timeout_minutes" => 100, "job_sha256" => "998f138d30df8c49df49cc71483aeb0fc659a04b08ffa5f302ab0d4074806c41",
     "cargo_steps" => {
       "Check Rust test source wiring" => {"commands" => ["python3 scripts/ci/rust_test_sources.py check"], "timeout_minutes" => nil, "env" => {"BASH_ENV" => "/dev/null"}},
       "Archive, list, compare and plan" => {
         "commands" => [
-          "set -euo pipefail", 'NEXTEST_DIR="$RUNNER_TEMP/nextest"', 'mkdir -p "$NEXTEST_DIR"',
+          "set -euo pipefail", 'NEXTEST_DIR="$RUNNER_TEMP/nextest"', 'mkdir -p "$NEXTEST_DIR" "$RUNNER_TEMP/nextest-census"',
           'cargo nextest archive --lib --archive-file "$NEXTEST_DIR/lib-tests.tar.zst"',
           'cargo nextest list --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" \\',
           '--extract-to "$RUNNER_TEMP/nextest-census" --ignore-default-filter --message-format json > "$NEXTEST_DIR/universe.json"',

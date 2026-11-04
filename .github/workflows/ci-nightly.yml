@@ -297,7 +297,7 @@ jobs:
         run: |
           set -euo pipefail
           NEXTEST_DIR="$RUNNER_TEMP/nextest"
-          mkdir -p "$NEXTEST_DIR"
+          mkdir -p "$NEXTEST_DIR" "$RUNNER_TEMP/nextest-census"
           cargo nextest archive --lib --archive-file "$NEXTEST_DIR/lib-tests.tar.zst"
           cargo nextest list --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" \
             --extract-to "$RUNNER_TEMP/nextest-census" --ignore-default-filter --message-format json > "$NEXTEST_DIR/universe.json"
