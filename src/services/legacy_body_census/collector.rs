@@ -146,7 +146,12 @@ impl Collector {
                                     truncated = true;
                                 }
                             }
-                            Some("selection") => selection = record,
+                            Some("selection") => {
+                                if !selection.is_null() && selection != record {
+                                    problem(&mut errors, "SELECTION_HISTORY_CONFLICT");
+                                }
+                                selection = record;
+                            }
                             Some("denominator") => buckets.push(record),
                             Some("end") => end = record,
                             Some("drain" | "boot_ready") => {}

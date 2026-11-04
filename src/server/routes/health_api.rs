@@ -2776,6 +2776,18 @@ mod tests {
                 if case == "selection_unknown" && i == 2 {
                     records[1]["installed"] = serde_json::Value::Null;
                 }
+                if i == last
+                    && matches!(
+                        case,
+                        "na_changed_selection" | "na_earlier_unknown_selection"
+                    )
+                {
+                    records.insert(1, if case == "na_changed_selection" {
+                        json!({"kind":"selection","installed":true,"tui_bindings":[1],"effective":[1],"dormant":[],"selection_source":"explicit_all_tui"})
+                    } else {
+                        json!({"kind":"selection","installed":null,"tui_bindings":null})
+                    });
+                }
                 if i == last && case != "denominator_missing" {
                     let turns = if no_bindings && case != "na_positive_counters" {
                         0
@@ -2927,6 +2939,8 @@ mod tests {
             ("na_refresh", "INCONCLUSIVE"),
             ("na_end_missing", "INCONCLUSIVE"),
             ("na_positive_counters", "INCONCLUSIVE"),
+            ("na_changed_selection", "INCONCLUSIVE"),
+            ("na_earlier_unknown_selection", "INCONCLUSIVE"),
             ("selection_off", "FAIL"),
             ("body", "FAIL"),
             ("mixed_invalid", "FAIL"),
