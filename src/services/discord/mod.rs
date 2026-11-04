@@ -184,6 +184,8 @@ pub(crate) use tui_direct_pending_start::turn_retirement::claude::{
     confirmed_now as claude_takeover_confirmed_now, tests::seed_takeover as seed_claude_takeover,
 };
 mod tui_prompt_relay;
+#[cfg(unix)]
+pub(crate) use tui_prompt_relay::rehydration::observer_binding_published;
 #[cfg(all(test, unix))]
 pub(crate) use tmux::commit_codex_watcher_restore_for_tests;
 #[cfg(all(test, unix))]

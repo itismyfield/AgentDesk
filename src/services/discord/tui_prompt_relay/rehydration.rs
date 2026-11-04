@@ -258,7 +258,7 @@ pub(super) fn rehydrate_existing_claude_tui_bindings(shared: &Arc<SharedData>) {
     match claude_session_names() {
         Ok(sessions) => {
             for tmux_session_name in sessions {
-                rehydrate_claude_tui_pane(shared, &tmux_session_name);
+                let _ = rehydrate_claude_tui_pane(shared, &tmux_session_name);
             }
             crate::services::claude_tui::hook_server::mark_boot_discovery_complete();
         }
@@ -275,7 +275,165 @@ pub(super) fn rehydrate_existing_claude_tui_bindings(shared: &Arc<SharedData>) {
 
 /// One pane of the rehydrate pass; a durable Pending is restored before the binding judgment.
 #[cfg(unix)]
-fn rehydrate_claude_tui_pane(shared: &Arc<SharedData>, tmux_session_name: &str) {
+fn rehydrate_claude_tui_pane(
+    shared: &Arc<SharedData>,
+    tmux_session_name: &str,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let before =
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name);
+    rehydrate_claude_tui_pane_inner(shared, tmux_session_name);
+    if crate::engine::ops::turn_ops::health_registry().is_some() {
+        return None;
+    }
+    wake_attached_observer(
+        shared,
+        &ProviderKind::Claude,
+        tmux_session_name,
+        before.as_ref(),
+    )
+}
+
+#[cfg(unix)]
+fn wake_attached_observer(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    tmux: &str,
+    before: Option<&crate::services::tui_prompt_dedupe::TuiRuntimeBinding>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux)?;
+    let source = |b: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding| {
+        (b.runtime_kind, b.session_id.clone(), b.output_path.clone())
+    };
+    if before.map(source) == Some(source(&binding)) {
+        return None;
+    }
+    let channel = crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(tmux)?;
+    wake_observed_source(shared, provider, channel, binding)
+}
+
+/// A newly published source wakes through its channel's existing runtime and owner drive.
+#[cfg(unix)]
+pub(crate) fn observer_binding_published(
+    tmux: String,
+    published: crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+) {
+    let Some(registry) = crate::engine::ops::turn_ops::health_registry() else {
+        return;
+    };
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    let provider = match published.runtime_kind {
+        RuntimeHandoffKind::ClaudeTui => ProviderKind::Claude,
+        RuntimeHandoffKind::CodexTui => ProviderKind::Codex,
+        _ => return,
+    };
+    runtime.spawn(async move {
+        // Publication keeps source authority until its channel mapping is installed too.
+        let attached = tokio::task::spawn_blocking(move || {
+            crate::services::tmux_common::with_tmux_source_authority(&tmux, |authority| {
+                let current = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(authority)?;
+                if (current.runtime_kind, &current.session_id, &current.output_path)
+                    != (published.runtime_kind, &published.session_id, &published.output_path)
+                {
+                    return None;
+                }
+                let channel = crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(&tmux)?;
+                Some((channel, current))
+            })
+        }).await;
+        let Ok(Some((channel, binding))) = attached else {
+            return;
+        };
+        let shared = registry.shared_for_provider_on_channel(&provider, ChannelId::new(channel)).await;
+        if let Some(shared) = shared
+            && let Some(wake) = wake_observed_source(&shared, &provider, channel, binding)
+        {
+            let _ = wake.await;
+        }
+    });
+}
+
+#[cfg(unix)]
+fn wake_observed_source(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: u64,
+    binding: crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if binding.session_id.as_deref().is_none_or(str::is_empty)
+        || std::fs::metadata(&binding.output_path).is_err()
+        || crate::services::tui_turn_state::observe_provider_jsonl_turn_state(
+            provider,
+            Path::new(&binding.output_path),
+        )
+        .is_busy()
+    {
+        return None;
+    }
+    let runtime = tokio::runtime::Handle::try_current().ok()?;
+    let (shared, provider) = (shared.clone(), provider.clone());
+    Some(runtime.spawn(async move {
+        let channel_id = ChannelId::new(channel);
+        let mailbox = shared.mailbox(channel_id);
+        let finished = shared.mailboxes.turn_finished(channel_id);
+        let pending = mailbox
+            .v2_request(|slot| Ok(slot.as_ref().is_some_and(|owner| owner.front().is_some())));
+        if pending.await != Ok(true) {
+            return;
+        }
+        // An idle refusal answers its drive before its bridge releases the turn token.
+        if mailbox.has_active_turn().await == Ok(true) {
+            #[cfg(test)]
+            if let Some(waiting) = OBSERVER_WAITING_FOR_TESTS
+                .lock()
+                .unwrap()
+                .get(&channel)
+                .cloned()
+            {
+                waiting();
+            }
+            finished.wait().await;
+        }
+        let pending = mailbox
+            .v2_request(|slot| Ok(slot.as_ref().is_some_and(|owner| owner.front().is_some())));
+        if pending.await != Ok(true) {
+            return;
+        }
+        #[cfg(test)]
+        let kickoff = OBSERVER_KICKOFF_FOR_TESTS
+            .lock()
+            .unwrap()
+            .get(&channel)
+            .cloned();
+        #[cfg(test)]
+        if let Some(kickoff) = kickoff {
+            kickoff();
+            return;
+        }
+        // The existing drive coalesces a source attaching during its refused handoff.
+        super::super::schedule_deferred_idle_queue_kickoff_immediate(
+            shared,
+            provider,
+            channel_id,
+            "idle_observer_attached",
+        );
+    }))
+}
+
+#[cfg(all(test, unix))]
+type ObserverKickoff = Arc<dyn Fn() + Send + Sync>;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) static OBSERVER_KICKOFF_FOR_TESTS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<u64, ObserverKickoff>>,
+> = std::sync::LazyLock::new(Default::default);
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) static OBSERVER_WAITING_FOR_TESTS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<u64, ObserverKickoff>>,
+> = std::sync::LazyLock::new(Default::default);
+
+#[cfg(unix)]
+fn rehydrate_claude_tui_pane_inner(shared: &Arc<SharedData>, tmux_session_name: &str) {
     // #3018: dedupe lookup here is a diagnostic/mirror rehydration hint only
     // (subordinate to the freshly resolved channel below), never a routing
     // authority — the authoritative resolver is owner_channel_for_tmux_session.
@@ -528,6 +686,9 @@ pub(super) fn rehydrate_existing_codex_tui_bindings(shared: &Arc<SharedData>) {
             }
         }
 
+        let before = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(
+            &tmux_session_name,
+        );
         let Some(fresh) = rehydrate_codex_tui_binding_transaction(
             &tmux_session_name,
             channel_id,
@@ -548,6 +709,14 @@ pub(super) fn rehydrate_existing_codex_tui_bindings(shared: &Arc<SharedData>) {
             last_offset = fresh.last_offset,
             "rehydrated Codex TUI direct relay binding from live rollout"
         );
+        if crate::engine::ops::turn_ops::health_registry().is_none() {
+            let _ = wake_attached_observer(
+                shared,
+                &ProviderKind::Codex,
+                &tmux_session_name,
+                before.as_ref(),
+            );
+        }
         claimed_rollout_paths.insert(canonical_rollout_claim_path(Path::new(&fresh.output_path)));
     }
 }

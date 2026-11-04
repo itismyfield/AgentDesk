@@ -241,7 +241,21 @@ impl Candidate<'_> {
                 false
             }
             Some(Ok(Committed::Stale)) => wait(failure),
-            Some(Ok(_)) => {
+            Some(Ok(committed)) => {
+                #[cfg(unix)]
+                if committed == Committed::Appended
+                    && proposal.is_some_and(|p| {
+                        p.session_id == self.bound.session_id.as_deref()
+                            && p.path == self.bound.output_path
+                    })
+                {
+                    crate::services::discord::observer_binding_published(
+                        tmux.to_owned(),
+                        self.bound.clone(),
+                    );
+                }
+                #[cfg(not(unix))]
+                let _ = committed;
                 // A re-pin after the pin is what reclaims, so only the gate above can supersede.
                 if let (true, Some(p)) = (reclaimable, proposal) {
                     self.log_reclaim(p, &source);

@@ -78,6 +78,8 @@ use self::rehydration::{
 };
 #[cfg(all(unix, test))]
 pub(crate) use rehydration::run_codex_rehydrate_pass_for_tests;
+#[cfg(all(unix, test))]
+pub(in crate::services::discord) use rehydration::claude_pass_tests::rehydrate_owner_pane_for_tests;
 
 mod anchor_completion;
 mod bridge_completion;

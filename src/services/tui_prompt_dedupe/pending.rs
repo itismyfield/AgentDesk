@@ -15,6 +15,8 @@ use crate::services::tmux_common::{TmuxSourceAuthority, with_tmux_source_authori
 use crate::services::tui_prompt_dedupe::binding_context::{
     SpawnNonceMarker, observe_spawn_nonce_marker,
 };
+#[cfg(unix)]
+use crate::services::tui_prompt_dedupe::binding_events::pending_seq;
 use crate::services::tui_prompt_dedupe::binding_events::{
     BindingCause, BindingEvent, BindingTarget, CauseSource, Corrupt, CorruptKind, HookSignal,
     Proposal, SourceId, pinned_source_at, records_strict, subscribe_binding_events,
@@ -601,6 +603,8 @@ fn restore_under_source_authority(
         // A held binding keeps its read offsets and only gets its record logged; any other is replaced.
         let persisted = match runtime().filter(target) {
             Some(held) => {
+                #[cfg(unix)]
+                let waiting = pending_seq(channel_id, tmux_session, session).is_some();
                 let cause = CauseSource::Observed;
                 let proposal =
                     Proposal::for_binding(Some(channel_id), tmux_session, &held, None, cause);
@@ -611,6 +615,16 @@ fn restore_under_source_authority(
                     let launch = Some(session);
                     pane_registration::note_claude_pane_registered_under_source_authority(
                         authority, launch,
+                    );
+                }
+                #[cfg(unix)]
+                if waiting
+                    && persisted == Some(Persisted::Logged)
+                    && pending_seq(channel_id, tmux_session, session).is_none()
+                {
+                    crate::services::discord::observer_binding_published(
+                        tmux_session.to_owned(),
+                        held.clone(),
                     );
                 }
                 persisted

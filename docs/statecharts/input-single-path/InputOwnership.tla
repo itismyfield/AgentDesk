@@ -15,7 +15,8 @@ EXTENDS Naturals
 
 CONSTANTS
     Fix,   \* "main": a1c; "a2d1": first A2+D; "a2d2", "a2d3", "a2d4": its repairs; "c": slice C;
-           \* "cf": main after C with F's paths; "f": main after F; "f4": its close wake
+           \* "cf": main after C with F's paths; "f": main after F; "f4": its close wake;
+           \* "observerBefore" / "observerWake": the isolated late-observer slice F6
     Mut    \* one guard removed in the a2d4 model, "none" as written
 
 VARIABLES
@@ -60,12 +61,13 @@ VARIABLES
     row,       \* an earlier generation's durable inflight row on the channel: none or carried
     ep,        \* restore re-minted the carried row's mailbox episode, which the close's finalizer ends
     leak,      \* its transcript holds an input Claude absorbed mid-turn with no queued_command row
-    outside    \* a person or another session handed the input's text to the session directly
+    outside,   \* a person or another session handed the input's text to the session directly
+    observer   \* slice F6: late attachment and the drive right left by idle_unobserved
 
 vars == <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain, sentInto, win,
           rcv, userRow, twin, claim, pastes, lp, op, screen, draft, notices, wake, timer, byTimer,
-          timed, heldBy, watch, aged, twinPend, envLeft, stale, old, acct, row, ep, leak, outside>>
-fvars == <<row, ep, leak, outside>>
+          timed, heldBy, watch, aged, twinPend, envLeft, stale, old, acct, row, ep, leak, outside, observer>>
+fvars == <<row, ep, leak, outside, observer>>
 \* What the Claude rows and answers touch; the drive and screen keep the rest.
 drv == <<screen, draft, notices, timer, byTimer, timed, reader, src, twin, heldBy, watch, aged,
          twinPend, stale, old, acct>>
@@ -109,6 +111,12 @@ Init ==
     /\ ep \in IF F2 THEN BOOLEAN ELSE {FALSE}
     /\ ep => row = "carried"
     /\ outside = FALSE
+    /\ observer = [attached |-> Mut = "observerInitiallyAttached",
+                    initialAttached |-> Mut = "observerInitiallyAttached",
+                    pending |-> Mut # "observerNoFront", initialPending |-> Mut # "observerNoFront",
+                    wake |-> Mut # "observerNoFront", running |-> FALSE, turnHeld |-> FALSE, observed |-> FALSE,
+                    frontOutstanding |-> FALSE, rejected |-> FALSE, pastes |-> 0,
+                    attachWakes |-> 0, bindings |-> (IF Mut = "observerInitiallyAttached" THEN 1 ELSE 0)]
     /\ row = "carried" => mode = "turn" /\ mbx = "idle" /\ old = "none" /\ ~acct /\ screen = "ok"
                          /\ ~stale /\ ~twin /\ ~twinPend /\ draft = "none"
 
@@ -479,7 +487,7 @@ DriveMeetsRow ==
     /\ Handoff /\ F2 /\ mbx = "idle" /\ row = "carried"
     /\ Stays(inp, heldBy)
     /\ UNCHANGED <<mode, src, mbx, nat, natOwner, obsOk, rcv, userRow, twin, claim, lp, op,
-                   screen, draft, aged, twinPend, envLeft, stale, old, acct, row, ep, leak, outside>>
+                   screen, draft, aged, twinPend, envLeft, stale, old, acct, row, ep, leak, outside, observer>>
 
 \* The carried-turn close archives the row once the transcript reads its native turn closed and
 \* O owes nothing (carried_turn_close.rs try_close). In cf the reader counts an absorbed input
@@ -496,7 +504,7 @@ CarriedCloses ==
     /\ UNCHANGED <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain, sentInto,
                    win, rcv, userRow, twin, claim, pastes, lp, op, screen, draft, notices, timer,
                    byTimer, timed, heldBy, watch, aged, twinPend, envLeft, stale, old, acct, leak,
-                   outside>>
+                   outside, observer>>
 
 \* While the input waits, a person types its text at the terminal or another session sends it over
 \* its own socket. AgentDesk records no identity for that copy.
@@ -506,7 +514,7 @@ HandedOutside ==
     /\ UNCHANGED <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain, sentInto,
                    win, rcv, userRow, twin, claim, pastes, lp, op, screen, draft, notices, wake,
                    timer, byTimer, timed, heldBy, watch, aged, twinPend, envLeft, stale, old, acct,
-                   row, ep, leak>>
+                   row, ep, leak, observer>>
 
 \* Loss is judged once the pane's refusal cleared and no watch is left to read it: a screen that
 \* never clears holds by design.
@@ -572,4 +580,74 @@ GoneWatchEnds == ~(nat = "idle" /\ ~wake /\ ~timer /\ mbx = "idle" /\ envLeft = 
 CarriedRowEnds == Quiet => row = "none"
 \* 15. The session sees the input's text once: AgentDesk's paste or the outside copy, not both.
 SeenOnce == pastes + (IF outside THEN 1 ELSE 0) <= 1
+
+\* ------------------------------------------------------------------------------ slice F6
+\* The old columns keep their transitions; this bounded slice isolates boot's late observer.
+ObserverLegacy == <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain,
+                   sentInto, win, rcv, userRow, twin, claim, pastes, lp, op, screen, draft,
+                   notices, wake, timer, byTimer, timed, heldBy, watch, aged, twinPend, envLeft,
+                   stale, old, acct, row, ep, leak, outside>>
+ObserverInit ==
+    /\ Init
+    /\ mode = "turn" /\ src = "discord" /\ mbx = "idle" /\ nat = "idle" /\ natOwner = "none"
+    /\ old = "none" /\ obsOk /\ ~twin /\ screen = "ok" /\ draft = "none" /\ ~twinPend
+    /\ ~stale /\ ~acct /\ row = "none" /\ ~ep /\ ~leak
+
+\* drive.rs:98-124, 168-180; v2.rs:248-315. A new wake starts with stalled=false and
+\* regrants the same front even when the refused pass left its claim outstanding.
+ObserverDriveGrants ==
+    /\ observer.wake /\ observer.pending /\ ~observer.running /\ ~observer.turnHeld
+    /\ observer' = [observer EXCEPT !.wake = FALSE, !.running = TRUE,
+                                   !.turnHeld = TRUE, !.observed = observer.attached, !.frontOutstanding = TRUE]
+    /\ UNCHANGED ObserverLegacy
+
+\* owner_input.rs:686-687 refuses before reserve or keys; the turn claim remains outstanding.
+ObserverIdleUnobserved ==
+    /\ observer.running /\ ~observer.observed
+    /\ observer' = [observer EXCEPT !.running = FALSE, !.rejected = TRUE]
+    /\ UNCHANGED ObserverLegacy
+
+\* The local refusal settles before the bridge drops its mailbox token. The existing
+\* turn-finished latch keeps an attachment kickoff pending until that token releases.
+ObserverTurnReleases ==
+    /\ observer.turnHeld /\ ~observer.running
+    /\ observer' = [observer EXCEPT !.turnHeld = FALSE]
+    /\ UNCHANGED ObserverLegacy
+
+\* owner_input.rs:706-710 runs the reserved front with its observer exactly once.
+ObserverSubmits ==
+    /\ observer.running /\ observer.observed
+    /\ observer' = [observer EXCEPT !.running = FALSE, !.pending = FALSE,
+                                   !.frontOutstanding = FALSE, !.pastes = @ + 1]
+    /\ UNCHANGED ObserverLegacy
+
+\* Binding publication makes owner_observer resolvable and schedules the existing kickoff;
+\* its pending wake also represents a kickoff waiting for the existing mailbox release latch.
+\* Wake only with a pending front; reattaching the same source and an empty queue add no wake.
+ObserverAttaches ==
+    /\ observer.bindings < 2
+    /\ LET kick == ~observer.attached /\ observer.pending /\ Fix = "observerWake"
+                   /\ Mut # "observerNoWake"
+       IN observer' = [observer EXCEPT !.attached = TRUE, !.bindings = @ + 1,
+                        !.wake = @ \/ kick,
+                        !.attachWakes = @ + (IF kick THEN (IF Mut = "observerDoubleWake" THEN 2 ELSE 1) ELSE 0)]
+    /\ UNCHANGED ObserverLegacy
+
+ObserverDone == UNCHANGED vars
+ObserverNext == ObserverDriveGrants \/ ObserverIdleUnobserved \/ ObserverTurnReleases \/ ObserverSubmits
+                \/ ObserverAttaches \/ ObserverDone
+ObserverSpec == ObserverInit /\ [][ObserverNext]_vars
+                /\ WF_vars(ObserverDriveGrants) /\ WF_vars(ObserverIdleUnobserved)
+                /\ WF_vars(ObserverSubmits) /\ WF_vars(ObserverAttaches) /\ WF_vars(ObserverTurnReleases)
+
+\* No original disappears, and a front whose observer is ready is never left without a wake.
+ObserverNoSilentLoss == (observer.initialPending /\ ~observer.pending) => observer.pastes = 1
+ObserverResumes == ~(observer.attached /\ observer.pending /\ ~observer.wake
+                     /\ ~observer.running /\ ~observer.turnHeld)
+ObserverExactlyOnce == observer.pastes <= 1
+ObserverRefusalHasNoKeys == (observer.rejected /\ observer.pending) => observer.pastes = 0
+ObserverAttachmentWakesOnce == observer.attachWakes <= 1
+ObserverNoExtraWake == (~observer.initialPending \/ observer.initialAttached) => observer.attachWakes = 0
+\* Checked separately with plain TLC: the CI invariant checker deliberately rejects PROPERTY.
+ObserverEventuallyDelivered == (observer.attached /\ observer.pending) ~> observer.pastes = 1
 =============================================================================
