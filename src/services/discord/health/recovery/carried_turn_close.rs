@@ -287,6 +287,16 @@ async fn try_close(
             .await;
     }
     drop(transition);
+    // With no episode no finalizer release kicks the queue, and a front the row refused has no
+    // other wake: kick it once here.
+    if !target_episode {
+        discord::schedule_deferred_idle_queue_kickoff_immediate(
+            shared.clone(),
+            provider.clone(),
+            channel,
+            "carried_turn_closed",
+        );
+    }
     let released = !episode(shared, channel)
         .await
         .is(target.finalizer_turn_id, target.nonce.as_deref());

@@ -983,4 +983,51 @@ mod cases {
             "a queued input's dequeue is no longer held by the carried episode"
         );
     }
+
+    /// A close wakes the queue a refused front waits in exactly once: through the finalizer's
+    /// mailbox release when it ended a restored episode, by its own kick when none was restored.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_close_kicks_the_waiting_queue_once_with_or_without_an_episode() {
+        for (channel, user_msg_id, episode) in [
+            (7_533_402, 9_100_095_491_915_388_102, true),
+            (7_533_401, 9_100_095_491_915_388_101, false),
+        ] {
+            let options = Options {
+                episode,
+                ..Options::default()
+            };
+            let fx = Fixture::new(channel, user_msg_id, options).await;
+            let waiting = discord::relay_recovery::tests::orphan_token_finish::queued(channel + 1);
+            let queued =
+                discord::mailbox_enqueue_intervention(&fx.shared, &PROVIDER, fx.channel, waiting);
+            assert!(queued.await.enqueued);
+            let kicks = Arc::new(Mutex::new(0_usize));
+            let (seen, at) = (kicks.clone(), fx.channel);
+            let _hook = discord::queue_io::set_idle_queue_kick_hook_for_tests(Arc::new(
+                move |_, _, kicked, _| {
+                    let ours = kicked == at;
+                    if ours {
+                        *seen.lock().unwrap() += 1;
+                    }
+                    let outcome = ours.then(discord::IdleQueueKickoffChannelOutcome::default);
+                    Box::pin(async move { outcome })
+                },
+            ));
+            discord::spawn_turn_completion_idle_queue_listener(fx.shared.clone(), PROVIDER);
+            // The enqueue's own kick met the row; what follows is the close's.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let before = *kicks.lock().unwrap();
+            fx.pass().await;
+            fx.assert_closed(&format!("episode={episode}")).await;
+            for _ in 0..100 {
+                if *kicks.lock().unwrap() > before {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let after = *kicks.lock().unwrap() - before;
+            assert_eq!(after, 1, "episode={episode}: the close kicks once");
+        }
+    }
 }
