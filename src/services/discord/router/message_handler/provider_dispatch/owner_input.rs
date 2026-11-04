@@ -225,7 +225,7 @@ pub(in crate::services::discord) async fn hand_busy(
             .is_some_and(|nonce| row.turn_nonce.as_deref() == Some(nonce))
         && !active.native_stop.is_completed()
     {
-        active.native_stop.register_busy_child(attempt);
+        crate::services::discord::inflight::record_native_busy_child(&row, &active, attempt);
     }
     let (settled, answer) = tokio::sync::oneshot::channel();
     let thread = paste_busy(

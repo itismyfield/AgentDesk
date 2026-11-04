@@ -25,8 +25,11 @@ mod invariant_test_capture;
 mod model;
 mod native_stop_pin;
 pub(in crate::services::discord) use native_stop_pin::{
-    bind_native_stop_pin, restore_native_stop_pin,
+    bind_native_stop_pin, record_native_busy_child, restore_native_stop_pin,
 };
+#[cfg(all(test, unix))]
+#[path = "inflight/native_stop_busy_tests.rs"]
+mod native_stop_busy_tests;
 #[cfg(all(test, unix))]
 #[path = "inflight/native_stop_pin/tests.rs"]
 mod native_stop_pin_tests;

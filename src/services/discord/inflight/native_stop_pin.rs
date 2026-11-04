@@ -51,6 +51,40 @@ impl VerifiedNativeUserPin {
     }
 }
 
+/// Busy inputs the owner handed into this episode's running turn, kept for a recovered token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(in crate::services::discord) struct NativeBusyChildren {
+    provider: String,
+    channel_id: u64,
+    request_owner_user_id: u64,
+    user_msg_id: u64,
+    turn_nonce: String,
+    started_at: String,
+    attempts: Vec<String>,
+}
+
+impl NativeBusyChildren {
+    fn of(row: &InflightTurnState) -> Option<Self> {
+        (row.provider == "claude" && !row.has_native_herdr_input()).then_some(())?;
+        Some(Self {
+            provider: row.provider.clone(),
+            channel_id: row.channel_id,
+            request_owner_user_id: row.request_owner_user_id,
+            user_msg_id: row.user_msg_id,
+            turn_nonce: row.turn_nonce.clone().filter(|n| !n.is_empty())?,
+            started_at: row.started_at.clone(),
+            attempts: Vec::new(),
+        })
+    }
+    fn owned_by(&self, row: &InflightTurnState) -> bool {
+        let episode = Self {
+            attempts: Vec::new(),
+            ..self.clone()
+        };
+        Self::of(row).is_some_and(|fresh| fresh == episode)
+    }
+}
+
 /// A stale same-episode snapshot keeps the verified pin; a successor never inherits it.
 pub(super) fn carry_forward(
     existing: Option<&InflightTurnState>,
@@ -73,6 +107,49 @@ pub(super) fn carry_forward(
     {
         outgoing.native_stop_user_pin = Some(pin.clone());
     }
+    let mut children = (outgoing.native_stop_busy_children.take()).filter(|c| c.owned_by(outgoing));
+    if let Some(kept) = existing.and_then(|row| {
+        (row.native_stop_busy_children.as_ref()).filter(|c| c.owned_by(row) && c.owned_by(outgoing))
+    }) {
+        let merged = children.get_or_insert_with(|| kept.clone());
+        for attempt in &kept.attempts {
+            if !merged.attempts.contains(attempt) {
+                merged.attempts.push(attempt.clone());
+            }
+        }
+    }
+    outgoing.native_stop_busy_children = children;
+}
+
+/// The running turn's token learns a busy attempt before its paste, and the attempt's birth
+/// episode keeps it; a failed save leaves a recovered token without it, so its stop stays refused.
+pub(in crate::services::discord) fn record_native_busy_child(
+    row: &InflightTurnState,
+    token: &CancelToken,
+    attempt: &str,
+) {
+    token.native_stop.register_busy_child(attempt);
+    let Some(fresh) = NativeBusyChildren::of(row) else {
+        return;
+    };
+    let episode = InflightEpisodePin::from_state(row);
+    let claude = &ProviderKind::Claude;
+    let Ok(mut locked) =
+        episode_guard::lock_inflight_birth_episode(claude, row.channel_id, &episode)
+    else {
+        return;
+    };
+    let mut updated = locked.state().clone();
+    let mut children = match updated.native_stop_busy_children.take() {
+        Some(children) if children.owned_by(&updated) => children,
+        _ if fresh.owned_by(&updated) => fresh,
+        _ => return,
+    };
+    if !children.attempts.iter().any(|kept| kept == attempt) {
+        children.attempts.push(attempt.to_string());
+    }
+    updated.native_stop_busy_children = Some(children);
+    let _ = locked.persist_verified_under_guard(&updated, "native_busy_child");
 }
 
 pub(in crate::services::discord) fn bind_native_stop_pin(
@@ -94,6 +171,13 @@ pub(in crate::services::discord) fn bind_native_stop_pin(
             .native_stop
             .receipt_sink()
             .restore_candidate(pin.input.clone());
+    }
+    let children = row
+        .native_stop_busy_children
+        .iter()
+        .filter(|c| c.owned_by(row));
+    for attempt in children.flat_map(|children| &children.attempts) {
+        token.native_stop.register_busy_child(attempt);
     }
     let episode = InflightEpisodePin::from_state(row);
     let channel = row.channel_id;
