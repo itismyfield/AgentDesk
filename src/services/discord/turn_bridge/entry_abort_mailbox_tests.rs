@@ -1162,3 +1162,15 @@ mod herdr_settlement {
         }
     }
 }
+
+#[cfg(unix)]
+impl TurnBridgeContext {
+    pub(in crate::services::discord) fn spawn_for_native_pin_test(
+        self,
+        shared: Arc<SharedData>,
+        token: Arc<CancelToken>,
+        rx: mpsc::Receiver<StreamMessage>,
+    ) {
+        super::spawn_turn_bridge(shared, token, rx, self);
+    }
+}

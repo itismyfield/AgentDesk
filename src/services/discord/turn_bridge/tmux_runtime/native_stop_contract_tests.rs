@@ -3,9 +3,11 @@ use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
 use crate::services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::{
     cold_error::Shown, seed_context,
 };
+use crate::services::discord::turn_bridge::cancel_backstop_test_support::BridgePause;
 use crate::services::discord::{self as discord, Data};
 use poise::serenity_prelude as serenity;
 use std::io::Write;
+use std::time::Duration;
 
 fn run<F: std::future::Future>(future: F) -> F::Output {
     // This fixture owns Legacy delivery with a verified empty O selection.
@@ -13,7 +15,7 @@ fn run<F: std::future::Future>(future: F) -> F::Output {
     super::run(future)
 }
 
-fn running() -> String {
+pub(super) fn running() -> String {
     include_str!("../../../../../tests/fixtures/tui_input/claude-2.1.293-tool-running.txt")
         .lines()
         .filter(|line| !line.contains("Tomfoolering"))
@@ -66,6 +68,31 @@ async fn mailbox_released(
         std::fs::read_to_string(path),
         fx.calls(),
     );
+}
+
+pub(super) async fn paused_bridge(
+    shared: &Arc<SharedData>,
+    channel: ChannelId,
+    token: &Arc<CancelToken>,
+    direct: bool,
+) -> (
+    BridgePause,
+    std::sync::mpsc::Sender<crate::services::agent_protocol::StreamMessage>,
+) {
+    let row =
+        inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get()).unwrap();
+    let mut context = seed_context("", row);
+    context.provider = ProviderKind::Claude;
+    context.is_external_input_tui_direct = direct;
+    let pause = BridgePause::install(channel);
+    let (tx, rx) = std::sync::mpsc::channel();
+    discord::turn_bridge::spawn_turn_bridge(shared.clone(), token.clone(), rx, context);
+    assert!(pause.wait_for_entry(Duration::from_secs(8)).await);
+    assert!(
+        discord::live_bridge::retain_original(&ProviderKind::Claude, channel.get(), token)
+            .is_none()
+    );
+    (pause, tx)
 }
 
 fn bridge(
@@ -825,7 +852,11 @@ fn preserve_stop_unconfirmed_native_api_reports_delivery_state() {
             let (shared, registry) = runtime().await;
             let channel = ChannelId::new(7_193_801 + n as u64 * 3);
             let session = format!("native-unconfirmed-api-recovery-{n}");
-            let (token, transcript) = generating_turn(&fx, &session);
+            // A token with no proof of its own input is the case the long tail stands for.
+            let (token, transcript) = match n {
+                3 => super::super::super::stop_host::tests::unpinned_generating_turn(&fx, &session),
+                _ => generating_turn(&fx, &session),
+            };
             if n == 3 {
                 eprintln!("NATIVE_TAIL_UNOBSERVED bytes=300000 same_recorded_input=true");
                 fx.pane(&running());
@@ -979,6 +1010,17 @@ fn preserve_stop_completed_owner_keeps_natural_first() {
         let (token, path) = generating_turn(&fx, session);
         start(&shared, channel, &token).await;
         let row = native_inflight_row(channel, &token, session);
+        let state =
+            inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get()).unwrap();
+        let _owner = discord::live_bridge::register_without_requeue(
+            &shared,
+            &ProviderKind::Claude,
+            &state,
+            &token,
+        )
+        .await
+        .unwrap()
+        .expect("the completed turn has a live original owner");
         append(
             &path,
             serde_json::json!({"type":"system","subtype":"turn_duration"}),
@@ -1111,6 +1153,7 @@ fn preserve_stop_recovery_rechecks_owner_before_publish() {
                     &shared,
                     &ProviderKind::Claude,
                     channel,
+                    &shared.mailbox_peek(channel).unwrap(),
                     &token,
                     &session,
                     "!stop"
@@ -1162,9 +1205,16 @@ fn preserve_stop_recovery_rechecks_owner_before_publish() {
                 .mailbox(channel)
                 .cancel_active_turn_if_current_unless_herdr(token.clone(), "recovery_race".into())
                 .await;
-            assert!(matches!(result, crate::services::provider::cancel_token_claude_interrupt::StopCancel::NotCurrent), "changed recovery authority must be rechecked: {change}");
+            assert!(
+                if change == "owner" {
+                    matches!(result, crate::services::provider::cancel_token_claude_interrupt::StopCancel::Published(_))
+                } else {
+                    matches!(result, crate::services::provider::cancel_token_claude_interrupt::StopCancel::NotCurrent)
+                },
+                "a completed nonce-only row adds no recovery authority: {change}"
+            );
             drop(owner);
-            assert!(!token.cancelled.load(Ordering::Acquire));
+            assert_eq!(token.cancelled.load(Ordering::Acquire), change == "owner");
             assert!(mailbox_holds(&shared, channel, &token).await);
             assert_eq!(tombstone(channel), None);
             crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&session);

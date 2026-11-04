@@ -71,7 +71,8 @@ error다. 단순 합계가 같아도 판정 불가 edge의 대상이 바뀌면 �
 
 정본 경로는 [`baselines/generated/module_layers.json`](../../scripts/audit_maintainability/baselines/generated/module_layers.json)이다.
 초기 측정 소스 SHA는 `0aeb8fc5996b790b3dabc1f788ea9a6982dcde1b`이고,
-schema 3 최초 활성화 입력 SHA/base `6d7c1851e5a127d153b0193bab54c0a32e7c391e`에서만 #7749(`90fe`)의 `src/services/discord/health/recovery/carried_turn_close.rs:293`에 추가된 `discord::schedule_deferred_idle_queue_kickoff_immediate` 참조(`use super::*` 뒤 unknown path root), uncertainty ID `42bf71b862c248fc38e947e6246e23801bcef7d3e8c35815f5c4572576f6b8cf`의 발생 1회를 승인해 기록했다.
+schema 3 준비 입력 SHA/base `6d7c1851e5a127d153b0193bab54c0a32e7c391e`에서 #7749(`90fe`)의 `src/services/discord/health/recovery/carried_turn_close.rs:293`에 추가된 `discord::schedule_deferred_idle_queue_kickoff_immediate` 참조(`use super::*` 뒤 unknown path root), uncertainty ID `42bf71b862c248fc38e947e6246e23801bcef7d3e8c35815f5c4572576f6b8cf`의 발생 1회를 승인해 기록했다.
+최종 활성화 기준은 착지 직전 main `75726b3b1dfd5ea53aa9164324ed54030194a7cb`이며, 역방향 부채의 신규·증가가 0임을 확인했다.
 생성 명령과 입력 SHA를 생성 JSON에도 기록한다. 소스 입력은 `src/**`와 `Cargo.toml`이며
 생성기는 지정 commit과 추적 소스가 일치하는지, 버전 관리 밖의 소스가 없는지 확인한다.
 층 설정의 의미 기반 SHA256도 기록한다. 같은 입력 SHA·소스·매핑에서 재생성한
@@ -108,12 +109,13 @@ SCC 구성원·전체 sites·미분류 목록 같은 진단 snapshot은 감사 J
 
 ## 최초 활성화 기록
 
-schema 3 활성화 정본은 위 base에서 승인된 한 번의 생성으로 만들었다.
-다음은 그 생성 명령의 재현 기록이며 이후 변경을 수용하는 방법이 아니다.
+schema 3 활성화 정본은 착지 직전 main에서 생성했다. 준비 기준 6d7 이후 main에 들어온
+변경은 판정 불가 의존·uncertainty만 늘렸으며 역방향 부채는 130 ID/316회로 같았다.
+다음은 승인된 활성화 생성의 재현 기록이다. 활성화 뒤 변경을 수용하는 방법이 아니다.
 
 ```sh
 python3 scripts/audit_maintainability/checks/module_layer_baseline.py \
-  --input-sha 6d7c1851e5a127d153b0193bab54c0a32e7c391e \
+  --input-sha 75726b3b1dfd5ea53aa9164324ed54030194a7cb \
   --output scripts/audit_maintainability/baselines/generated/module_layers.json
 ```
 
@@ -131,7 +133,7 @@ python3 scripts/audit_maintainability/checks/module_layer_baseline.py \
 
 ```sh
 python3 scripts/audit_maintainability/checks/module_layer_baseline.py \
-  --input-sha 6d7c1851e5a127d153b0193bab54c0a32e7c391e \
+  --input-sha 75726b3b1dfd5ea53aa9164324ed54030194a7cb \
   --output scripts/audit_maintainability/baselines/generated/module_layers.json \
   --update-reductions
 ```
@@ -159,8 +161,9 @@ new_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 ```
 
 `section`은 `reverse_dependencies`, `indeterminate_dependencies`, `uncertainties` 중 하나다.
-대응은 section 안에서 일대일이어야 한다. `old_id`는 기존 양수 부채 또는 zero-rule에
-있어야 하며, 중복 old/new ID·같은 ID로의 대응·기존 ID와의 충돌은 error다.
+`old_id`는 지정 section의 기존 양수 부채 또는 zero-rule에 있어야 한다.
+`new_id`는 모든 section의 양수 부채·zero-rule ID와 충돌하면 error이며,
+section이 달라도 같은 목적지를 중복 지정할 수 없다. 같은 ID로의 대응도 error다.
 명시하지 않은 새 ID는 신규 부채로 차단한다. 일부 item 분리의 발생 수를 자동 배분하지 않는다.
 
 갱신 뒤에도 baseline은 이전 ID와 이전 source/target metadata를 유지하고 현재의
