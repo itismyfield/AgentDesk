@@ -1,0 +1,1 @@
+생성물: 손으로 고치지 않는다. 생성 명령: `python3 scripts/audit_maintainability/checks/module_layer_baseline.py --input-sha 0aeb8fc5996b790b3dabc1f788ea9a6982dcde1b --output scripts/audit_maintainability/baselines/generated/module_layers.json`

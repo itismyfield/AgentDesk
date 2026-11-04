@@ -31,7 +31,7 @@ class Finding:
     file: str
     line: int | None
     message: str
-    extra: dict[str, str] = field(default_factory=dict)
+    extra: dict[str, object] = field(default_factory=dict)
 
 
 def is_test_rs(path: Path) -> bool:
