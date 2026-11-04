@@ -240,7 +240,7 @@ Code: r3, kept in r5 (`owner_input.rs:484-502`). The watch's probe of a native h
 
 - `NativeWatchMisreads` (Fix `a2b`): a read of a native-held pane fails. The watch is kept; mutant `nativeReadGone` (r2b) ends it.
 - `NativeHeldRuns` (liveness, under `LiveSpec == Spec /\ WF_vars(Next)`): a native-held start is handed again unless its pane is gone. `WF_vars(Next)` is weak fairness of `Next` as a whole, not of each action: a run whose reads keep failing or whose native turn never ends is outside what the property proves. CI's checker reads invariants only, so this property is run outside CI with a `PROPERTY` config.
-- Only a failed pane read is projected. A Claude transcript that is resolved but unreadable reads as not busy (`native_busy` returns `Some(false)`), so its watch wakes the drive rather than keeping the hold; the model leaves that read out.
+- Only a failed pane read is projected. A Claude transcript that is resolved but unreadable reads as not busy (in `native_turn`, `observe_claude_jsonl_turn_state(...).is_busy()` is false, so the probe returns `Screen::Ready`, `owner_input.rs:491-500`), so its watch wakes the drive rather than keeping the hold; the model leaves that read out.
 - Out of scope: the model has one Claude tmux channel; Herdr panes are not modelled.
 - Out of scope: Codex. This PR keeps Codex on main's path, so a Codex start into a native busy turn is the existing defect; its native-busy gate and turn-end read moved to #7772.
 
