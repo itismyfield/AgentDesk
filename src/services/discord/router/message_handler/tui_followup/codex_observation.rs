@@ -6,23 +6,6 @@ pub(in crate::services::discord::router::message_handler) fn observe_codex_tui_r
     tmux_session_name: Option<&str>,
     provider_session_id: Option<&str>,
 ) -> crate::services::tui_turn_state::TuiTurnState {
-    let observe = crate::services::codex_tui::rollout_tail::observe_rollout_turn_state;
-    observe_codex_tui_rollout_with(
-        current_path,
-        tmux_session_name,
-        provider_session_id,
-        observe,
-    )
-}
-
-/// The same rollout selection with the caller's read of the selected rollout.
-#[cfg(unix)]
-pub(in crate::services::discord::router::message_handler) fn observe_codex_tui_rollout_with(
-    current_path: Option<&str>,
-    tmux_session_name: Option<&str>,
-    provider_session_id: Option<&str>,
-    observe: fn(&std::path::Path) -> crate::services::tui_turn_state::TuiTurnState,
-) -> crate::services::tui_turn_state::TuiTurnState {
     if tmux_session_name
         .is_some_and(crate::services::tui_prompt_dedupe::codex_verified_input_blocked)
     {
@@ -33,10 +16,11 @@ pub(in crate::services::discord::router::message_handler) fn observe_codex_tui_r
         .filter(|binding| {
             binding.runtime_kind == crate::services::agent_protocol::RuntimeHandoffKind::CodexTui
         });
-    rollout_state_with(
-        (current_path, provider_session_id),
-        (None, runtime_binding.as_ref()),
-        observe,
+    observe_codex_tui_rollout_state_for_cwd_with_sessions(
+        current_path,
+        provider_session_id,
+        None,
+        runtime_binding.as_ref(),
     )
 }
 
@@ -46,23 +30,6 @@ pub(in crate::services::discord::router::message_handler) fn observe_codex_tui_r
     provider_session_id: Option<&str>,
     sessions_dir: Option<&std::path::Path>,
     runtime_binding: Option<&crate::services::tui_prompt_dedupe::TuiRuntimeBinding>,
-) -> crate::services::tui_turn_state::TuiTurnState {
-    let observe = crate::services::codex_tui::rollout_tail::observe_rollout_turn_state;
-    rollout_state_with(
-        (current_path, provider_session_id),
-        (sessions_dir, runtime_binding),
-        observe,
-    )
-}
-
-#[cfg(unix)]
-fn rollout_state_with(
-    (current_path, provider_session_id): (Option<&str>, Option<&str>),
-    (sessions_dir, runtime_binding): (
-        Option<&std::path::Path>,
-        Option<&crate::services::tui_prompt_dedupe::TuiRuntimeBinding>,
-    ),
-    observe: fn(&std::path::Path) -> crate::services::tui_turn_state::TuiTurnState,
 ) -> crate::services::tui_turn_state::TuiTurnState {
     let Some(current_path) = current_path else {
         return crate::services::tui_turn_state::TuiTurnState::Unknown;
@@ -76,7 +43,7 @@ fn rollout_state_with(
         if !crate::services::codex_tui::rollout_tail::rollout_file_matches_cwd(rollout_path, cwd) {
             return crate::services::tui_turn_state::TuiTurnState::Unknown;
         }
-        return observe(rollout_path);
+        return crate::services::codex_tui::rollout_tail::observe_rollout_turn_state(rollout_path);
     }
     let resolved = sessions_dir
         .map(std::path::Path::to_path_buf)
@@ -95,7 +62,9 @@ fn rollout_state_with(
             false,
         );
         if let Some(rollout_path) = selection.rollout_path.as_deref() {
-            return observe(rollout_path);
+            return crate::services::codex_tui::rollout_tail::observe_rollout_turn_state(
+                rollout_path,
+            );
         }
         return crate::services::tui_turn_state::TuiTurnState::Unknown;
     }
@@ -107,7 +76,8 @@ fn rollout_state_with(
         // No rollout file found for this cwd — treat as idle (session not yet started).
         return crate::services::tui_turn_state::TuiTurnState::Idle;
     };
-    let rollout_state = observe(&rollout_path);
+    let rollout_state =
+        crate::services::codex_tui::rollout_tail::observe_rollout_turn_state(&rollout_path);
     if rollout_state.is_busy() {
         return rollout_state;
     }

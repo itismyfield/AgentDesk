@@ -432,7 +432,7 @@ enum Wait {
 }
 
 /// Whether a start must wait for its pane's idle: a turn AgentDesk did not start holds the channel,
-/// or the channel pane the start would take runs a native turn.
+/// or the channel pane the start would take runs a native Claude turn.
 async fn start_waits(shared: &Shared, channel: ChannelId, context: &Value) -> Wait {
     use crate::services::discord::inflight::{TurnSource, load_inflight_state_read_only};
     use crate::services::discord::turn_presence::activity::{Activity, activity_now};
@@ -450,8 +450,8 @@ async fn start_waits(shared: &Shared, channel: ChannelId, context: &Value) -> Wa
     native_turn(shared, channel, context).await
 }
 
-/// The channel's own Claude or Codex pane running a turn now, read as the start's execution reads
-/// it, with a read of that turn's end; a labelled or process start takes another pane or none.
+/// The channel's own Claude pane running a turn now, read as the start's execution reads it, with
+/// a read of that turn's end; a labelled or process start takes another pane or none.
 async fn native_turn(shared: &Shared, channel: ChannelId, context: &Value) -> Wait {
     use busy_inject::Screen;
     let named = |value: &Value, key: &str| value[key].as_str().is_some_and(|s| !s.is_empty());
@@ -461,8 +461,7 @@ async fn native_turn(shared: &Shared, channel: ChannelId, context: &Value) -> Wa
         || named(context, snapshot)
         || named(metadata, snapshot)
         || metadata["execution_mode"] == "process";
-    let provider = shared.provider.clone();
-    if elsewhere || !matches!(provider, ProviderKind::Claude | ProviderKind::Codex) {
+    if elsewhere || shared.provider != ProviderKind::Claude {
         return Wait::Go;
     }
     let (dir, session_id, name) = {
@@ -489,53 +488,21 @@ async fn native_turn(shared: &Shared, channel: ChannelId, context: &Value) -> Wa
             // A pane that could not be read is not gone; the watch reads it again.
             PaneLiveness::ProbeError => return Screen::Unknown,
         }
-        match native_busy(&provider, (dir.as_deref(), session_id.as_deref()), &tmux) {
-            Some(true) => Screen::Blocked,
-            Some(false) => Screen::Ready,
+        let resolve = super::super::tui_followup::claude_followup_transcript;
+        match resolve(dir.as_deref(), session_id.as_deref(), Some(&tmux)) {
+            Some(path)
+                if crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&path)
+                    .is_busy() =>
+            {
+                Screen::Blocked
+            }
+            Some(_) => Screen::Ready,
             None => Screen::Unknown,
         }
     };
     match read() {
         Screen::Blocked => Wait::Watch(Box::new(read)),
         _ => Wait::Go,
-    }
-}
-
-/// Whether the pane's native turn runs now, read from the transcript or rollout its execution
-/// would observe; `None` when that record is not found or not readable.
-fn native_busy(
-    provider: &ProviderKind,
-    (dir, session_id): (Option<&str>, Option<&str>),
-    tmux: &str,
-) -> Option<bool> {
-    use crate::services::tui_turn_state::{TuiTurnState, observe_claude_jsonl_turn_state};
-    match provider {
-        ProviderKind::Claude => {
-            let resolve = super::super::tui_followup::claude_followup_transcript;
-            let path = resolve(dir, session_id, Some(tmux))?;
-            Some(observe_claude_jsonl_turn_state(&path).is_busy())
-        }
-        ProviderKind::Codex => {
-            let observe = super::super::tui_followup::observe_codex_tui_rollout_with;
-            match observe(dir, Some(tmux), session_id, codex_turn_state) {
-                TuiTurnState::Unknown => None,
-                state => Some(state.is_busy()),
-            }
-        }
-        _ => None,
-    }
-}
-
-/// A Codex rollout's state, where a latest turn ended under its own id, an Esc abort included,
-/// reads idle; another turn's or an unnamed end proves nothing.
-fn codex_turn_state(path: &std::path::Path) -> crate::services::tui_turn_state::TuiTurnState {
-    use crate::services::codex_tui::busy_inject::{TurnVerdict, read_turn};
-    use crate::services::tui_turn_state::TuiTurnState;
-    match crate::services::codex_tui::rollout_tail::observe_rollout_turn_state(path) {
-        state if state.is_busy() && read_turn(path) == Some(TurnVerdict::NotBusy) => {
-            TuiTurnState::Idle
-        }
-        state => state,
     }
 }
 
@@ -629,8 +596,8 @@ async fn start_idle(
     }
 }
 
-/// An owner front's turn, registered from its own host and pane: a running Claude pane takes it
-/// through the busy entry, a running Codex pane holds a start, an idle pane's turn is read here.
+/// An owner front's turn, registered from this turn's own host and pane: a running Claude pane
+/// takes it through the busy entry, an idle pane's AI turn is read on this turn's sender.
 pub(super) fn execute_owned(
     turn: StreamingTurn<'_>,
     sender: std::sync::mpsc::Sender<crate::services::agent_protocol::StreamMessage>,
@@ -648,12 +615,6 @@ pub(super) fn execute_owned(
         && pane_liveness(session) == PaneLiveness::Live
         && !other_account(turn.provider.as_str(), session);
     let running = live.then(|| running_transcript(&turn, session)).flatten();
-    // A start never joins a running Codex turn; a Discord input keeps its one composer paste there.
-    let dir = Some(turn.working_dir).filter(|dir| !dir.is_empty());
-    let codex_busy = live
-        && origin != InputOrigin::Discord
-        && *turn.provider == ProviderKind::Codex
-        && native_busy(turn.provider, (dir, turn.session_id), session) == Some(true);
     let registered = match &running {
         Some(transcript) => {
             let kind = (turn.provider.as_str(), origin, true);
@@ -668,10 +629,10 @@ pub(super) fn execute_owned(
             })
         }
         None => {
-            let observer = (live && !codex_busy).then(|| observer(&turn, &sender));
-            let kind = (turn.provider.as_str(), origin, codex_busy);
+            let observer = live.then(|| observer(&turn, &sender)).flatten();
+            let kind = (turn.provider.as_str(), origin, false);
             let at = (turn.host, session, None);
-            Registration::observed(mailbox, kind, at, &claim.front().1, observer.flatten())
+            Registration::observed(mailbox, kind, at, &claim.front().1, observer)
         }
     };
     match registered {

@@ -9,8 +9,6 @@ mod nameless_gate;
 pub(super) use codex_observation::observe_codex_tui_rollout_state_for_cwd;
 #[cfg(all(test, unix))]
 pub(super) use codex_observation::observe_codex_tui_rollout_state_for_cwd_with_sessions;
-#[cfg(unix)]
-pub(super) use codex_observation::observe_codex_tui_rollout_with;
 pub(in crate::services::discord) use nameless_gate::hosted_tui_promote_readiness_blocked;
 
 use super::*;

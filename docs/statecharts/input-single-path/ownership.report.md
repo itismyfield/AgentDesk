@@ -236,13 +236,13 @@ Code: `8b28712958` (A2b on main `6d7c1851e5`). Only `DriveStartWaits` and three 
 
 ### r3: a failed read of the native-held pane (`NativeWatchMisreads`)
 
-Code: r3 on `6edbba69c8` (`owner_input.rs:485-497`). The watch's probe of a native hold reads the pane's liveness first. A dead or absent pane is `Gone` and ends the watch (`held_watch.rs:38-44`). A tmux read that fails (`liveness.rs:59-77`, `ProbeError`) is now `Unknown`, which keeps the watch for the next 2 s look. r2b mapped every non-`Live` answer to `Gone`, so one failed read ended the watch, and nothing woke the held start after its turn ended.
+Code: r3, kept in r5 (`owner_input.rs:484-502`). The watch's probe of a native hold reads the pane's liveness first. A dead or absent pane is `Gone` and ends the watch (`held_watch.rs:38-44`). A tmux read that fails (`liveness.rs:59-77`, `ProbeError`) is now `Unknown`, which keeps the watch for the next 2 s look. r2b mapped every non-`Live` answer to `Gone`, so one failed read ended the watch, and nothing woke the held start after its turn ended.
 
 - `NativeWatchMisreads` (Fix `a2b`): a read of a native-held pane fails. The watch is kept; mutant `nativeReadGone` (r2b) ends it.
 - `NativeHeldRuns` (liveness, under `LiveSpec == Spec /\ WF_vars(Next)`): a native-held start is handed again unless its pane is gone. `WF_vars(Next)` is weak fairness of `Next` as a whole, not of each action: a run whose reads keep failing or whose native turn never ends is outside what the property proves. CI's checker reads invariants only, so this property is run outside CI with a `PROPERTY` config.
 - Only a failed pane read is projected. A Claude transcript that is resolved but unreadable reads as not busy (`native_busy` returns `Some(false)`), so its watch wakes the drive rather than keeping the hold; the model leaves that read out.
-- Out of scope: the model has one Claude tmux channel. Codex's native-busy gate (the same probe, read from the rollout) and Herdr panes are not modelled.
-- Out of scope: the Codex end read (its own turn's `task_complete` or `turn_aborted` ends it, another turn's does not) is not modelled; three PG tests check it.
+- Out of scope: the model has one Claude tmux channel; Herdr panes are not modelled.
+- Out of scope: Codex. This PR keeps Codex on main's path, so a Codex start into a native busy turn is the existing defect; its native-busy gate and turn-end read moved to #7772.
 
 | Config | Invariants | `NativeHeldRuns` |
 |---|---|---|
