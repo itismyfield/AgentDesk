@@ -116,7 +116,7 @@ pub(super) const SITES: [(&str, &str, Span); 9] = [
 
 const FLUSH_SCOPE: &str = "pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(";
 const FLUSH_CALL: &str = "delete_stale_queued_placeholder_cards(";
-const FLUSH_END: &str = "mark_reconcile_complete(";
+const FLUSH_END: &str = "complete_active_reconcile(";
 const FLUSH_SHARED: &str = "&shared_for_tmux2";
 const DETACH_CALL: &str = ".detach_by_message(";
 
