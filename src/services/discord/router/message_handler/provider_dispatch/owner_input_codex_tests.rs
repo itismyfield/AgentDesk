@@ -104,7 +104,7 @@ fn codex_rig(name: &str, channel: u64) -> Rig {
     codex_rig_on(name, channel, false)
 }
 
-fn codex_rig_on(name: &str, channel: u64, idle: bool) -> Rig {
+pub(super) fn codex_rig_on(name: &str, channel: u64, idle: bool) -> Rig {
     let f = Fixture::after_shared_test_env_lock();
     let renderer = codex_renderer(&f, name, idle);
     owned(f, name, channel, renderer, "codex")
