@@ -23,11 +23,13 @@ enum Record {
     Enqueue(String),
     /// Removed without running (`remove` other than mid-turn absorption).
     Withdraw(String),
+    /// Handed to another agent (`remove`, `delivered_to_agent`); Claude writes no dequeue for it.
+    Delivered(String),
     /// Every queued input pulled back to the prompt.
     WithdrawAll,
     Dequeue,
-    /// Taken into the running turn (`remove`, `absorbed_mid_turn`). Claude writes no dequeue for
-    /// it, and its `queued_command` row may or may not follow.
+    /// Taken into the turn (`remove`, `absorbed_mid_turn`); Claude writes no dequeue for it, and its
+    /// `queued_command` row may come before it, after it, or not at all.
     Absorbed(String),
     /// A human prompt command (`queued_command`, `prompt` mode, human origin).
     Human(String),
@@ -37,13 +39,31 @@ enum Record {
     Prompt(String),
 }
 
+/// One received input, with which of its own command and absorption records were read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Input {
+    body: String,
+    stage: Stage,
+    command: bool,
+    absorbed: bool,
+}
+
+impl Input {
+    fn new(body: String, stage: Stage) -> Self {
+        Self {
+            body,
+            stage,
+            command: false,
+            absorbed: false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct QueuedInputs {
-    inputs: Vec<(String, Stage)>,
+    inputs: Vec<Input>,
     /// Removals whose own `dequeue` record is still to come; that dequeue takes no other input.
     removed: usize,
-    /// Absorbed bodies whose own `queued_command` row may still come in this turn; it runs nothing.
-    absorbed: Vec<String>,
 }
 
 impl QueuedInputs {
@@ -52,7 +72,7 @@ impl QueuedInputs {
         let waiting = self
             .inputs
             .iter()
-            .filter(|(_, stage)| *stage != Stage::Running);
+            .filter(|input| input.stage != Stage::Running);
         waiting.count()
     }
 
@@ -68,50 +88,48 @@ impl QueuedInputs {
         if provider != ShadowProvider::Claude {
             return;
         }
-        let mut record = classify(value);
-        if let Some(Record::Human(body) | Record::Command(body)) = &record
-            && let Some(at) = self.absorbed.iter().position(|taken| taken == body)
-        {
-            self.absorbed.remove(at);
-            record = None;
-        }
+        let record = classify(value);
         if mutant("bulk") && (opened || value["type"] == "attachment") {
             self.inputs.clear();
             return;
         }
         match record {
-            Some(Record::Enqueue(body)) => self.inputs.push((body, Stage::Waiting)),
+            Some(Record::Enqueue(body)) => self.inputs.push(Input::new(body, Stage::Waiting)),
             Some(Record::Withdraw(body)) => {
                 self.removed += 1;
-                if let Some(at) = self.find(&body, |stage| stage != Stage::Running) {
-                    self.inputs.remove(at);
-                }
+                self.withdraw(&body);
             }
-            Some(Record::Absorbed(body)) => {
-                self.run(&body);
-                self.absorbed.push(body);
-            }
-            Some(Record::WithdrawAll) => self.inputs.retain(|(_, stage)| *stage == Stage::Running),
+            Some(Record::Delivered(body)) => self.withdraw(&body),
+            Some(Record::Absorbed(body)) => self.absorb(&body, open),
+            Some(Record::WithdrawAll) => self.inputs.retain(|input| input.stage == Stage::Running),
             Some(Record::Dequeue) if self.removed > 0 && !mutant("dequeue_credit") => {
                 self.removed -= 1
             }
             Some(Record::Dequeue) => {
-                if let Some(at) = self.find_stage(Stage::Waiting) {
-                    self.inputs[at].1 = Stage::Dequeued;
+                if let Some(at) = self.find(|input| input.stage == Stage::Waiting) {
+                    self.inputs[at].stage = Stage::Dequeued;
                 }
             }
-            Some(Record::Human(body)) if open => self.run(&body),
-            Some(Record::Human(body)) => match self.find(&body, |stage| stage == Stage::Waiting) {
-                Some(at) => self.inputs[at].1 = Stage::Attached,
-                None => self.inputs.push((body, Stage::Attached)),
-            },
-            Some(Record::Command(body) | Record::Prompt(body)) if open => self.run(&body),
-            Some(Record::Command(_) | Record::Prompt(_)) | None => {}
+            // A command row outside a turn first pairs with an absorption read before it.
+            Some(Record::Human(body) | Record::Command(body))
+                if !open && self.paired_command(&body) => {}
+            Some(Record::Human(body) | Record::Command(body)) if open => self.command(&body),
+            Some(Record::Human(body)) => {
+                let mut input = Input::new(body, Stage::Attached);
+                input.command = true;
+                match self.find(|i| i.body == input.body && i.stage == Stage::Waiting) {
+                    Some(at) => self.inputs[at] = input,
+                    None => self.inputs.push(input),
+                }
+            }
+            Some(Record::Command(_)) => {}
+            Some(Record::Prompt(body)) if open => self.run(&body),
+            Some(Record::Prompt(_)) | None => {}
         }
         if opened {
-            for (_, stage) in &mut self.inputs {
-                if matches!(stage, Stage::Dequeued | Stage::Attached) {
-                    *stage = Stage::Running;
+            for input in &mut self.inputs {
+                if matches!(input.stage, Stage::Dequeued | Stage::Attached) {
+                    input.stage = Stage::Running;
                 }
             }
         }
@@ -119,24 +137,66 @@ impl QueuedInputs {
 
     /// The open turn closed: what it ran is settled.
     pub(super) fn closed(&mut self) {
-        self.inputs.retain(|(_, stage)| *stage != Stage::Running);
-        self.absorbed.clear();
+        self.inputs.retain(|input| input.stage != Stage::Running);
     }
 
-    fn run(&mut self, body: &str) {
-        if let Some(at) = self.find(body, |stage| stage != Stage::Running) {
-            self.inputs[at].1 = Stage::Running;
+    fn withdraw(&mut self, body: &str) {
+        if let Some(at) = self.find(|i| i.body == body && i.stage != Stage::Running) {
+            self.inputs.remove(at);
         }
     }
 
-    fn find(&self, body: &str, stage: impl Fn(Stage) -> bool) -> Option<usize> {
-        self.inputs
-            .iter()
-            .position(|(queued, at)| queued == body && stage(*at))
+    /// An absorption is its input's run: the open turn runs it, or the turn it opens after a close.
+    /// An input whose command row already ran it only records the absorption.
+    fn absorb(&mut self, body: &str, open: bool) {
+        let ran =
+            |i: &Input| i.body == body && i.command && !i.absorbed && i.stage != Stage::Waiting;
+        if let Some(at) = self.find(ran) {
+            self.inputs[at].absorbed = true;
+            return;
+        }
+        let taken = |i: &Input| i.body == body && !i.absorbed && i.stage != Stage::Running;
+        if let Some(at) = self.find(taken) {
+            let input = &mut self.inputs[at];
+            input.absorbed = true;
+            input.stage = if open {
+                Stage::Running
+            } else {
+                Stage::Attached
+            };
+        }
     }
 
-    fn find_stage(&self, stage: Stage) -> Option<usize> {
-        self.inputs.iter().position(|(_, at)| *at == stage)
+    /// A command row in the open turn runs its input, unless its absorption already did.
+    fn command(&mut self, body: &str) {
+        if self.paired_command(body) {
+            return;
+        }
+        if let Some(at) = self.find(|i| i.body == body && i.stage != Stage::Running) {
+            self.inputs[at].stage = Stage::Running;
+            self.inputs[at].command = true;
+        }
+    }
+
+    /// Records the command of an input whose absorption was read before it.
+    fn paired_command(&mut self, body: &str) -> bool {
+        match self.find(|i| i.body == body && i.absorbed && !i.command) {
+            Some(at) => {
+                self.inputs[at].command = true;
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn run(&mut self, body: &str) {
+        if let Some(at) = self.find(|i| i.body == body && i.stage != Stage::Running) {
+            self.inputs[at].stage = Stage::Running;
+        }
+    }
+
+    fn find(&self, matches: impl Fn(&Input) -> bool) -> Option<usize> {
+        self.inputs.iter().position(matches)
     }
 }
 
@@ -147,6 +207,9 @@ fn classify(value: &Value) -> Option<Record> {
             "enqueue" => Some(Record::Enqueue(text("content")?)),
             "remove" if value["reason"] == "absorbed_mid_turn" => {
                 Some(Record::Absorbed(text("content")?))
+            }
+            "remove" if value["reason"] == "delivered_to_agent" => {
+                Some(Record::Delivered(text("content")?))
             }
             "remove" => Some(Record::Withdraw(text("content")?)),
             "popAll" => Some(Record::WithdrawAll),

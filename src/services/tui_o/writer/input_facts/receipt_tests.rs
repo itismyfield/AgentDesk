@@ -362,3 +362,73 @@ fn an_absorbed_input_settles_with_its_turn_without_a_command() {
         "the second b still waits"
     );
 }
+
+/// One input's command and absorption rows pair in either file order; twins with the same body
+/// stay two inputs, also when a reader is rebuilt between the two rows.
+#[test]
+fn an_inputs_command_and_absorption_pair_in_either_order() {
+    let absorbed = || queue("remove", Some("b"), Some("absorbed_mid_turn"));
+    let orders = [
+        [absorbed(), queued_command("b")],
+        [queued_command("b"), absorbed()],
+    ];
+    for [first, second] in orders {
+        let head = [user("a", "first"), enqueue("b"), enqueue("b")];
+        let one = [&head[..], &[first.clone(), second.clone(), idle()]].concat();
+        assert_eq!(closed_with(&one).owed_inputs(), 1, "the twin still waits");
+        let both = [
+            &head[..],
+            &[first.clone(), second.clone(), first.clone(), second.clone()],
+        ]
+        .concat();
+        assert_eq!(
+            closed_with(&[&both[..], &[idle()]].concat()).owed_inputs(),
+            0
+        );
+        let root = tempfile::tempdir().unwrap();
+        let (path, mut early) = reader(&root);
+        append(&path, &[&head[..], std::slice::from_ref(&first)].concat());
+        early.poll(u64::MAX).unwrap();
+        append(&path, &[second.clone(), idle()]);
+        early.poll(u64::MAX).unwrap();
+        let rebuilt = closed_with(&one);
+        assert_eq!((early.owed_inputs(), rebuilt.owed_inputs()), (1, 1));
+    }
+}
+
+/// An absorption read after a close is taken into the turn it opens: owed until that turn runs.
+#[test]
+fn an_absorption_after_a_close_is_owed_until_its_turn_opens() {
+    let rows = [
+        user("a", "first"),
+        idle(),
+        enqueue("b"),
+        queue("remove", Some("b"), Some("absorbed_mid_turn")),
+    ];
+    let facts = closed_with(&rows);
+    assert_eq!((facts.pending_receipt(), facts.owed_inputs()), (true, 1));
+    let next = [
+        user("u-b", "a notification turn"),
+        assistant("handled"),
+        idle(),
+    ];
+    let ran = closed_with(&[&rows[..], &next[..]].concat());
+    assert_eq!((ran.pending_receipt(), ran.owed_inputs()), (false, 0));
+}
+
+/// Claude writes no dequeue for an input handed to another agent: the next input's dequeue is its own.
+#[test]
+fn a_delivered_to_agent_removal_takes_no_later_dequeue() {
+    let rows = [
+        user("a", "first"),
+        enqueue("b"),
+        queue("remove", Some("b"), Some("delivered_to_agent")),
+        idle(),
+        enqueue("c"),
+        queue("dequeue", None, None),
+        user("u-c", "an opener naming another body"),
+        assistant("handled"),
+        idle(),
+    ];
+    assert_eq!(closed_with(&rows).owed_inputs(), 0);
+}
