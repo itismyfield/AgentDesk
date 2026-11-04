@@ -38,8 +38,9 @@ class ModuleLayerRatchetTest(unittest.TestCase):
                 "target": target, "kind": kind, "count": count}
 
     @staticmethod
-    def uncertainty(label="unresolved", count=2):
-        return {"id": _id("uncertainty", label), "count": count}
+    def uncertainty(label="unresolved", count=2, source=None):
+        row = {"id": _id("uncertainty", label), "count": count}
+        return row if source is None else {**row, "source": "src/lib.rs::crate::" + source}
 
     @staticmethod
     def moves(*records):
@@ -63,6 +64,12 @@ class ModuleLayerRatchetTest(unittest.TestCase):
 
     def compare(self, accepted, candidate, moves=None):
         return self.ratchet.compare(accepted, candidate, self.moves() if moves is None else moves)
+
+    def assert_warning_only(self, result, section=None, record_id=None):
+        self.assertEqual(result["errors"], [], result)
+        self.assertTrue(any(section is None or (row.get("section") == section
+                                                and (record_id is None or row.get("id") == record_id))
+                            for row in result["warnings"]), result)
 
     def assert_error(self, result, section=None, record_id=None):
         self.assertTrue(result["errors"], result)
@@ -121,35 +128,124 @@ class ModuleLayerRatchetTest(unittest.TestCase):
                 self.assertFalse(any(row.get("section") == "reverse_dependencies" and row.get("id") == original["id"]
                                      for row in result["decreases"]), result)
 
-    def test_changed_indeterminate_target_is_error_even_with_equal_totals(self):
+    def test_reverse_debt_turning_into_an_unresolved_glob_reference_is_error(self):
+        reverse = self.edge(count=1)
+        accepted = self.snapshot([reverse])
+        hidden = self.snapshot(uncertainties=[self.uncertainty("glob", 1, source="lower")])
+        self.assert_error(self.compare(accepted, hidden), "uncertainties")
+        with self.assertRaises(ValueError):
+            self.ratchet.reduced_baseline(accepted, hidden, self.moves())
+        unrelated = self.snapshot(uncertainties=[self.uncertainty("glob", 1, source="other")])
+        result = self.compare(accepted, unrelated)
+        self.assert_warning_only(result, "uncertainties")
+        self.assertTrue(any(row.get("id") == reverse["id"] for row in result["decreases"]), result)
+
+    def test_reverse_debt_changing_reference_kind_into_indeterminate_is_error(self):
+        for accepted_kind, current_kind in (("import", "path"), ("path", "import")):
+            with self.subTest(accepted=accepted_kind, current=current_kind):
+                reverse = self.edge(kind=accepted_kind)
+                kept = self.snapshot([reverse], indeterminate=[self.edge(kind=current_kind, count=1)])
+                self.assert_error(self.compare(self.snapshot([reverse]), kept), "indeterminate_dependencies")
+                moved = self.snapshot(indeterminate=[self.edge(kind=current_kind)])
+                self.assert_error(self.compare(self.snapshot([reverse]), moved), "indeterminate_dependencies")
+
+    def test_moved_or_zero_rule_reverse_debt_reappearing_under_another_kind_is_error(self):
+        for accepted_kind, current_kind in (("import", "path"), ("path", "import")):
+            for zero in (False, True):
+                with self.subTest(accepted=accepted_kind, current=current_kind, zero=zero):
+                    original, moved = self.edge(kind=accepted_kind), self.edge("moved", kind=accepted_kind)
+                    accepted = self.snapshot([original])
+                    if zero:
+                        accepted = self.ratchet.reduced_baseline(accepted, self.snapshot(), self.moves())
+                    moves = self.moves({"section": "reverse_dependencies", "old_id": original["id"], "new_id": moved["id"]})
+                    candidate = self.snapshot(indeterminate=[self.edge("moved", kind=current_kind)])
+                    self.assert_error(self.compare(accepted, candidate, moves), "indeterminate_dependencies")
+                    with self.assertRaises(ValueError):
+                        self.ratchet.reduced_baseline(accepted, candidate, moves)
+
+    def test_measured_sources_reveal_a_glob_from_a_moved_reverse_source(self):
+        original, moved = self.edge(), self.edge("moved")
+        moves = self.moves({"section": "reverse_dependencies", "old_id": original["id"], "new_id": moved["id"]})
+        glob = self.uncertainty("glob", 1)
+        candidate = self.snapshot(uncertainties=[glob])
+        self.assert_warning_only(self.compare(self.snapshot([original]), candidate, moves), "uncertainties")
+        self.assert_error(self.ratchet.compare(self.snapshot([original]), candidate, moves,
+                                               {glob["id"]: {"source": "src/lib.rs::crate::moved"}}), "uncertainties")
+
+    def test_glob_reintroducing_a_zero_rule_is_error_but_an_unrelated_macro_warns(self):
+        reverse = self.edge(count=1)
+        cleared = self.ratchet.reduced_baseline(self.snapshot([reverse]), self.snapshot(), self.moves())
+        glob, macro = self.uncertainty("glob", 1), self.uncertainty("macro", 1)
+        evidence = {glob["id"]: {"source": "src/lib.rs::crate::lower", "path": "crate::upper::*"},
+                    macro["id"]: {"source": "src/lib.rs::crate::lower", "path": "matches"}}
+        self.assert_error(self.ratchet.compare(cleared, self.snapshot(uncertainties=[glob]), self.moves(), evidence),
+                          "uncertainties", glob["id"])
+        result = self.ratchet.compare(cleared, self.snapshot(uncertainties=[macro]), self.moves(), evidence)
+        self.assert_warning_only(result, "uncertainties", macro["id"])
+        relative = {glob["id"]: {"source": "src/lib.rs::crate::lower", "path": "super::upper::*"}}
+        self.assert_error(self.ratchet.compare(cleared, self.snapshot(uncertainties=[glob]), self.moves(), relative),
+                          "uncertainties", glob["id"])
+        child = {glob["id"]: {"source": "src/lib.rs::crate::lower", "path": "crate::upper::utils::*"}}
+        self.assert_warning_only(self.ratchet.compare(cleared, self.snapshot(uncertainties=[glob]), self.moves(), child),
+                                 "uncertainties", glob["id"])
+        kept = self.uncertainty("kept", 1)
+        beside = {kept["id"]: {"source": "src/lib.rs::crate::lower", "path": "crate::upper::*"}}
+        accepted = self.snapshot([reverse], uncertainties=[kept])
+        dropped_named = self.snapshot(uncertainties=[kept])
+        self.assert_error(self.ratchet.compare(accepted, dropped_named, self.moves(), beside), "reverse_dependencies")
+        with self.assertRaises(ValueError):
+            self.ratchet.reduced_baseline(accepted, dropped_named, self.moves(), beside)
+        item = {glob["id"]: {"source": "src/lib.rs::crate::lower", "path": "crate::upper::hit"}}
+        self.assert_error(self.ratchet.compare(cleared, self.snapshot(uncertainties=[glob]), self.moves(), item),
+                          "uncertainties", glob["id"])
+
+    def test_changed_indeterminate_target_warns_even_with_equal_totals(self):
         old, replacement = self.edge("mixed", "old"), self.edge("mixed", "new")
         accepted, candidate = self.snapshot(indeterminate=[old]), self.snapshot(indeterminate=[replacement])
         self.assertEqual(accepted["indeterminate_edges"], candidate["indeterminate_edges"])
         self.assertEqual(accepted["indeterminate_occurrences"], candidate["indeterminate_occurrences"])
-        self.assert_error(self.compare(accepted, candidate), "indeterminate_dependencies", replacement["id"])
+        self.assert_warning_only(self.compare(accepted, candidate), "indeterminate_dependencies", replacement["id"])
 
-    def test_existing_indeterminate_occurrence_increase_is_error(self):
+    def test_existing_indeterminate_occurrence_increase_warns(self):
         old = self.edge("mixed", count=2)
-        self.assert_error(self.compare(self.snapshot(indeterminate=[old]),
+        self.assert_warning_only(self.compare(self.snapshot(indeterminate=[old]),
                                        self.snapshot(indeterminate=[dict(old, count=3)])),
                           "indeterminate_dependencies", old["id"])
 
-    def test_unclassified_count_increase_is_error(self):
-        self.assert_error(self.compare(self.snapshot(unclassified=1), self.snapshot(unclassified=2)))
+    def test_unclassified_count_increase_warns(self):
+        self.assert_warning_only(self.compare(self.snapshot(unclassified=1), self.snapshot(unclassified=2)),
+                                 "unclassified_modules")
 
-    def test_indeterminate_aggregate_count_increase_is_error(self):
+    def test_indeterminate_aggregate_count_without_records_is_invalid(self):
         for name in ("indeterminate_edges", "indeterminate_occurrences"):
             with self.subTest(field=name):
                 candidate = self.snapshot()
                 candidate[name] += 1
-                self.assert_error(self.compare(self.snapshot(), candidate))
+                self.assert_error(self.compare(self.snapshot(), candidate), "configuration")
 
-    def test_uncertainty_new_identifiers_and_occurrence_increases_are_errors(self):
+    def test_uncertainty_new_identifiers_and_occurrence_increases_warn(self):
         old, added = self.uncertainty("old"), self.uncertainty("new", 1)
         for candidate, identifier in (([dict(old, count=3)], old["id"]), ([old, added], added["id"])):
             with self.subTest(identifier=identifier):
-                self.assert_error(self.compare(self.snapshot(uncertainties=[old]),
-                                               self.snapshot(uncertainties=candidate)), "uncertainties", identifier)
+                self.assert_warning_only(self.compare(self.snapshot(uncertainties=[old]),
+                                                      self.snapshot(uncertainties=candidate)),
+                                         "uncertainties", identifier)
+
+    def test_reduction_records_decreases_without_absorbing_warned_growth(self):
+        reverse, mixed, added = self.edge(count=4), self.edge("mixed", count=1), self.edge("mixed", "new", count=2)
+        accepted = self.snapshot([reverse], indeterminate=[mixed], uncertainties=[self.uncertainty("old")])
+        candidate = self.snapshot([dict(reverse, count=3)], indeterminate=[dict(mixed, count=2), added],
+                                  uncertainties=[self.uncertainty("old", 3), self.uncertainty("new", 1)],
+                                  unclassified=2)
+        updated = self.ratchet.reduced_baseline(accepted, candidate, self.moves())
+        self.assertEqual(updated["reverse_dependencies"], [dict(reverse, count=3)])
+        self.assertEqual(updated["indeterminate_dependencies"], [mixed])
+        self.assertEqual(updated["uncertainties"], [self.uncertainty("old")])
+        self.assertEqual((updated["unclassified_modules"], updated["indeterminate_edges"],
+                          updated["indeterminate_occurrences"]), (1, 1, 1))
+        rerun = self.compare(updated, candidate)
+        self.assertEqual(rerun["errors"], [])
+        self.assertEqual(len(rerun["warnings"]), 7, rerun)
 
     def test_reduction_removes_debt_and_freezes_zero_rule(self):
         old = self.edge()
@@ -316,8 +412,6 @@ class ModuleLayerBaselineUpdateTest(unittest.TestCase):
         candidates = (
             self.snapshot([dict(old, count=2), self.edge("new", count=1)], uncertainties=[self.uncertainty()]),
             self.snapshot([dict(old, count=5)], uncertainties=[self.uncertainty()]),
-            self.snapshot([dict(old, count=2)], uncertainties=[self.uncertainty(count=3)]),
-            self.snapshot([dict(old, count=2)], uncertainties=[self.uncertainty()], unclassified=2),
         )
         for candidate in candidates:
             with self.subTest(candidate=candidate), TemporaryDirectory() as temporary:
@@ -584,6 +678,108 @@ assembly = 1
                 self.assertEqual(baseline.read_bytes(), original)
             self.assertFalse(any(row["severity"] == "error" for name, check in checks.items()
                                  if name != "module_layers" for row in check["findings"]))
+
+    def test_cli_refuses_to_record_reverse_debt_hidden_behind_a_glob_import(self):
+        with TemporaryDirectory() as temporary:
+            repo = Path(temporary) / "repo"
+            repo.mkdir()
+            def git(*arguments):
+                return subprocess.run(["git", "-C", str(repo), *arguments], capture_output=True,
+                                      text=True, check=True).stdout.strip()
+            def put(relative, text):
+                path = repo / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+            def commit(message):
+                git("add", "src", "scripts", "Cargo.toml")
+                git("commit", "-qm", message)
+            git("init", "-q")
+            git("config", "user.name", "Fixture")
+            git("config", "user.email", "fixture@example.invalid")
+            put("Cargo.toml", '[package]\nname="fixture"\nversion="0.1.0"\nedition="2024"\n')
+            put("src/lib.rs", "mod lower; mod upper;\n")
+            put("src/lower.rs", "use crate::upper::call;\nfn run() { call(); }\n")
+            put("src/upper.rs", "pub fn call() {}\n")
+            put("scripts/audit_maintainability/layers.toml", """schema_version = 1
+rules = [{prefix="",layer="assembly",reason="fixture assembly"},
+         {prefix="lower",layer="foundation",reason="fixture lower layer"},
+         {prefix="upper",layer="assembly",reason="fixture upper layer"}]
+[layers]
+foundation = 0
+assembly = 1
+""")
+            put("scripts/audit_maintainability/layer_moves.toml", "schema_version = 1\nmoves = []\n")
+            commit("fixture")
+            output = Path(temporary) / "accepted.json"
+            command = [sys.executable, str(Path(self.provider.__file__).resolve()), "--repo", str(repo),
+                       "--input-sha", "HEAD", "--output", str(output)]
+            created = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(created.returncode, 0, created.stderr)
+            self.assertTrue(json.loads(output.read_bytes())["reverse_dependencies"])
+            original = output.read_bytes()
+            put("src/lower.rs", "use crate::upper::*;\nfn run() { call(); }\n")
+            commit("glob")
+            refused = subprocess.run([*command, "--update-reductions"], capture_output=True, text=True)
+            self.assertNotEqual(refused.returncode, 0, refused.stdout)
+            self.assertIn("uncertainties", refused.stderr)
+            self.assertEqual(output.read_bytes(), original)
+            # Clear the debt into a zero-rule, then reintroduce it through a glob.
+            put("src/lower.rs", "fn run() {}\n")
+            commit("clear")
+            cleared = subprocess.run([*command, "--update-reductions"], capture_output=True, text=True)
+            self.assertEqual(cleared.returncode, 0, cleared.stderr)
+            self.assertTrue(json.loads(output.read_bytes())["zero_rules"])
+            zero_rule = output.read_bytes()
+            put("src/lower.rs", "use crate::upper::*;\nfn run() { call(); }\n")
+            commit("reintroduce")
+            reintroduced = subprocess.run([*command, "--update-reductions"], capture_output=True, text=True)
+            self.assertNotEqual(reintroduced.returncode, 0, reintroduced.stdout)
+            self.assertEqual(output.read_bytes(), zero_rule)
+
+    def test_cli_refuses_a_reduction_while_a_kept_glob_still_names_the_target(self):
+        with TemporaryDirectory() as temporary:
+            repo = Path(temporary) / "repo"
+            repo.mkdir()
+            def git(*arguments):
+                return subprocess.run(["git", "-C", str(repo), *arguments], capture_output=True,
+                                      text=True, check=True).stdout.strip()
+            def put(relative, text):
+                path = repo / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+            def commit(message):
+                git("add", "src", "scripts", "Cargo.toml")
+                git("commit", "-qm", message)
+            git("init", "-q")
+            git("config", "user.name", "Fixture")
+            git("config", "user.email", "fixture@example.invalid")
+            put("Cargo.toml", '[package]\nname="fixture"\nversion="0.1.0"\nedition="2024"\n')
+            put("src/lib.rs", "mod lower; mod upper;\n")
+            put("src/lower.rs", "use crate::upper::{call, *};\nfn run() { call(); }\n")
+            put("src/upper.rs", "pub fn call() {}\n")
+            put("scripts/audit_maintainability/layers.toml", """schema_version = 1
+rules = [{prefix="",layer="assembly",reason="fixture assembly"},
+         {prefix="lower",layer="foundation",reason="fixture lower layer"},
+         {prefix="upper",layer="assembly",reason="fixture upper layer"}]
+[layers]
+foundation = 0
+assembly = 1
+""")
+            put("scripts/audit_maintainability/layer_moves.toml", "schema_version = 1\nmoves = []\n")
+            commit("fixture")
+            output = Path(temporary) / "accepted.json"
+            command = [sys.executable, str(Path(self.provider.__file__).resolve()), "--repo", str(repo),
+                       "--input-sha", "HEAD", "--output", str(output)]
+            created = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(created.returncode, 0, created.stderr)
+            self.assertTrue(json.loads(output.read_bytes())["reverse_dependencies"])
+            original = output.read_bytes()
+            put("src/lower.rs", "use crate::upper::*;\nfn run() { call(); }\n")
+            commit("glob")
+            refused = subprocess.run([*command, "--update-reductions"], capture_output=True, text=True)
+            self.assertNotEqual(refused.returncode, 0, refused.stdout)
+            self.assertIn("hidden-reverse", refused.stderr)
+            self.assertEqual(output.read_bytes(), original)
 
     def test_cli_reduces_committed_fixture_and_refuses_a_replacement_debt(self):
         with TemporaryDirectory() as temporary:
