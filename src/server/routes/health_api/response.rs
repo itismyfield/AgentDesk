@@ -66,7 +66,7 @@ async fn assemble(
     let release_source = crate::services::release_source::health_json(detailed);
 
     let dashboard_ok = state.config.cluster.runtime_profile.modules().dashboard && {
-        let dashboard_dir = crate::cli::agentdesk_runtime_root()
+        let dashboard_dir = crate::config::runtime_root()
             .map(|r| r.join("dashboard/dist"))
             .unwrap_or_else(|| std::path::PathBuf::from("dashboard/dist"));
         dashboard_dir.join("index.html").exists()
@@ -75,7 +75,7 @@ async fn assemble(
     // ENOSPC silently breaks inflight state writes and tool buffers, so surface free
     // disk on the runtime partition for the dashboard and `agentdesk doctor` to warn on.
     let disk_probe_path =
-        crate::cli::agentdesk_runtime_root().unwrap_or_else(|| std::path::PathBuf::from("/"));
+        crate::config::runtime_root().unwrap_or_else(|| std::path::PathBuf::from("/"));
     let disk_snapshot = disk_monitor::probe(&disk_probe_path);
 
     let outbox_stats = initial.outbox.ok().flatten();

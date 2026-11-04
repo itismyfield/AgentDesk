@@ -30,7 +30,7 @@ impl Config {
     pub fn default_runtime() -> Self {
         // Prefer `~/.adk/release/logs/` when the runtime root is resolvable;
         // otherwise fall back to `./logs/` (works in dev checkouts).
-        let logs_dir = crate::cli::agentdesk_runtime_root()
+        let logs_dir = crate::config::runtime_root()
             .map(|root| root.join("logs"))
             .unwrap_or_else(|| PathBuf::from("logs"));
         Self {

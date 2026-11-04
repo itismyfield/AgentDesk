@@ -139,7 +139,7 @@ mod tests {
 /// Locate and provision assets only for profiles exposing the dashboard.
 pub(super) async fn prepare_dashboard(enabled: bool) -> std::path::PathBuf {
     // Resolve dashboard dist path relative to runtime root or binary location
-    let dashboard_dir = crate::cli::agentdesk_runtime_root()
+    let dashboard_dir = crate::config::runtime_root()
         .map(|r| r.join("dashboard/dist"))
         .unwrap_or_else(|| std::path::PathBuf::from("dashboard/dist"));
 
