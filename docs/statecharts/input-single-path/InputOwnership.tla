@@ -9,7 +9,8 @@
    reader never settles, and the same text handed to the session outside AgentDesk; "f" is main
    after F (40c556ae6c); "f4" adds the close's queue wake when the row had no restored episode.
    "a2b" is f4 with #7340 S2-A2b: a start meeting a native busy turn waits unclaimed, woken by the
-   turn-mode idle transition or, on legacy, by a read of that turn's end.
+   turn-mode idle transition or, on legacy, by a read of that turn's end. A failed read of that pane
+   keeps the watch (r3); Mut "nativeReadGone" is r2b, which read the failure as a gone pane.
    The channel is turn
    mode (the O writer answers every native turn) or legacy (the live relay, or a reader the
    input's own turn set up, answers).                                                        *)
@@ -403,6 +404,16 @@ WatchMisreads ==
                    notices, wake, timer, byTimer, timed, heldBy, aged, twinPend, envLeft, stale, old, acct>>
     /\ UNCHANGED fvars
 
+\* A read of a native-held pane fails (tmux has-session or list-panes errs); tmux answers next time.
+\* The watch keeps its probe; mutant nativeReadGone reads the failure as a gone pane and ends it.
+NativeWatchMisreads ==
+    /\ Fix = "a2b" /\ watch /\ inp = "held" /\ heldBy = "native"
+    /\ watch' = (Mut # "nativeReadGone")
+    /\ UNCHANGED <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain,
+                   sentInto, win, rcv, userRow, twin, claim, pastes, lp, op, screen, draft,
+                   notices, wake, timer, byTimer, timed, heldBy, aged, twinPend, envLeft, stale, old, acct>>
+    /\ UNCHANGED fvars
+
 \* The earlier front's watch ends because that front no longer leads. a2d3 drops the channel's
 \* watch with it, this input's hold included; a2d4 ends only its own generation.
 StaleWatchEnds ==
@@ -545,11 +556,15 @@ Next ==
     \/ Observe \/ TimeHands \/ TurnEnds
     \/ HumanStartsTurn \/ MailboxReleases \/ ScreenClears \/ TimerFires
     \/ WatchSees \/ WatchEnds \/ WatchMisreads \/ StaleWatchEnds \/ DeclarationAges \/ Done
+    \/ NativeWatchMisreads
     \/ CauseClearsBeforeRead \/ PaneGoes \/ WatchLosesPane
     \/ BootRequeues
     \/ DriveMeetsRow \/ CarriedCloses \/ HandedOutside
 
 Spec == Init /\ [][Next]_vars
+\* Liveness, checked outside CI: a step that stays possible happens (a failed read is read again,
+\* the native turn ends, a pending wake runs the drive).
+LiveSpec == Spec /\ WF_vars(Next)
 
 \* ------------------------------------------------------------------------------------ rules
 \* 1. The input is pasted at most once.
@@ -595,4 +610,8 @@ NativeHeldResumes == ~(Quiet /\ inp = "held" /\ heldBy = "native")
 StartOwnTurn == (src = "start" /\ pastes = 1) => sentInto = "idle"
 \* 18. An answered start was pasted exactly once.
 StartOnce == (src = "start" /\ inp = "answered") => pastes = 1
+\* 19. (liveness) A start a native busy turn holds is handed again unless its pane is gone, which
+\*     leaves it for the next event as Done does.
+NativeHeldRuns ==
+    (inp = "held" /\ heldBy = "native") ~> (inp # "held" \/ heldBy # "native" \/ screen = "gone")
 =============================================================================

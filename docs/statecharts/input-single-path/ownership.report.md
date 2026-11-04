@@ -13,7 +13,7 @@ Code versions modelled:
 | `cf` | main after C `a9d59259e5`, with slice F's paths | `InputOwnershipCF.cfg` |
 | `f` | main after slice F `40c556ae6c` | `InputOwnershipF.cfg`, `InputOwnershipFOutside.cfg` |
 | `f4` | `f` plus the carried close's queue wake | `InputOwnershipF4.cfg` |
-| `a2b` | `f4` plus #7340 S2-A2b `8b28712958`: a start waits out a native busy turn | `InputOwnershipA2b.cfg` |
+| `a2b` | `f4` plus #7340 S2-A2b `8b28712958`: a start waits out a native busy turn | `InputOwnershipA2b.cfg`; r2b's read failure (Mut `nativeReadGone`): `InputOwnershipA2bReadGone.cfg` |
 
 What the model covers:
 
@@ -234,3 +234,18 @@ Code: `8b28712958` (A2b on main `6d7c1851e5`). Only `DriveStartWaits` and three 
 |---|---|
 | `A2b` | every rule holds (17 rules and NoDeadlock, 129,692 states). Mutant `nativeNoWatch` (no read of the turn's end) breaks `NativeHeldResumes` and `NoSilentLoss` on legacy; `noBoundaryWake` breaks them on turn mode; `startPastes` (the f4 paste) breaks `StartOwnTurn`. |
 
+### r3: a failed read of the native-held pane (`NativeWatchMisreads`)
+
+Code: r3 on `6edbba69c8` (`owner_input.rs:485-497`). The watch's probe of a native hold reads the pane's liveness first. A dead or absent pane is `Gone` and ends the watch (`held_watch.rs:38-44`). A tmux read that fails (`liveness.rs:59-77`, `ProbeError`) is now `Unknown`, which keeps the watch for the next 2 s look. r2b mapped every non-`Live` answer to `Gone`, so one failed read ended the watch, and nothing woke the held start after its turn ended.
+
+- `NativeWatchMisreads` (Fix `a2b`): a read of a native-held pane fails. The watch is kept; mutant `nativeReadGone` (r2b) ends it.
+- `NativeHeldRuns` (liveness, under `LiveSpec == Spec /\ WF_vars(Next)`): a native-held start is handed again unless its pane is gone. CI's checker reads invariants only, so this property is run outside CI with a `PROPERTY` config.
+- Out of scope: the model has one Claude tmux channel. Codex's native-busy gate (the same probe, read from the rollout) and Herdr panes are not modelled.
+
+| Config | Invariants | `NativeHeldRuns` |
+|---|---|---|
+| `A2b` before r3 (no read failure) | every rule holds, 129,692 states | not defined |
+| `A2b` (r3) | every rule holds, 129,692 states | holds, 129,692 states |
+| `A2bReadGone` (r2b) | `NativeHeldResumes`, `NoSilentLoss` break | violated, 130,860 states |
+
+The r2b counterexample: a person's turn runs, the start is held with a watch (`DriveStartWaits`), the turn ends, one read fails and ends the watch (`NativeWatchMisreads`), and the start is left held once all is quiet.
