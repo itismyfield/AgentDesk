@@ -11,6 +11,7 @@ import importlib
 import importlib.util
 import io
 import json
+import subprocess
 import sys
 import textwrap
 import unittest
@@ -1981,6 +1982,295 @@ class ModuleLayersCheck(unittest.TestCase):
         self.assertTrue(any(r["path"] == "crate::lower::upper"
                             and "ambiguous" in r["reason"] for r in unresolved))
 
+
+
+class ModuleLayerBaselineCheck(unittest.TestCase):
+    def setUp(self) -> None:
+        self.baselines = importlib.import_module("audit_maintainability.checks.module_layer_baseline")
+
+    @staticmethod
+    def _node(name: str = "", crate: str = "src/lib.rs") -> str:
+        return f"{crate}::crate" + (f"::{name}" if name else "")
+
+    @staticmethod
+    def _mapping() -> dict:
+        return {
+            "schema_version": 1,
+            "layers": {"vocabulary": 0, "foundation": 1, "adapter": 2,
+                       "application": 3, "discord": 4, "assembly": 5},
+            "rules": [
+                {"prefix": "a", "layer": "foundation", "reason": "pure helpers", "evidence": ["src/a.rs:1"]},
+                {"prefix": "upper", "layer": "assembly", "reason": "HTTP assembly", "evidence": ["src/upper.rs:1"]},
+            ],
+            "unclassified": [{"prefix": "mixed", "reason": "mixed responsibilities need review"}],
+        }
+
+    def _graph(self) -> dict:
+        a, upper, mixed = (self._node(name) for name in ("a", "upper", "mixed"))
+        return {
+            "schema_version": 1, "tool_version": 1, "input_sha": "a" * 40,
+            "nodes": [a, upper, mixed],
+            "edges": [
+                {"source": a, "target": upper, "kind": "path", "sites": ["src/a.rs:7", "src/a.rs:9"]},
+                {"source": a, "target": upper, "kind": "import", "sites": ["src/a.rs:3"]},
+                {"source": upper, "target": a, "kind": "path", "sites": ["src/upper.rs:4"]},
+                {"source": a, "target": mixed, "kind": "path", "sites": ["src/a.rs:11"]},
+                {"source": mixed, "target": a, "kind": "path", "sites": ["src/mixed.rs:5"]},
+            ],
+            "sccs": [[a, upper, mixed]], "census": [],
+            "coverage": {
+                "reached_files": ["src/a.rs", "src/upper.rs", "src/mixed.rs"],
+                "logical_modules": 3, "cfg_scope": "all-non-test-cfg-union",
+                "target_os": "all", "read_failures": [], "module_errors": [],
+                "cfg_conditions": [], "unclassified_modules": [a, upper, mixed],
+                "classification": "not-configured", "complete": False,
+                "unresolved_references": [
+                    {"source": a, "site": "src/a.rs:15", "path": "unknown_macro",
+                     "reason": "macro expansion not evaluated"},
+                    {"source": upper, "site": "src/upper.rs:8", "path": "crate::absent::run",
+                     "reason": "unknown internal item"},
+                ],
+                "cfg_uncertainties": ["src/a.rs:19 retained attribute: cfg_attr ( optional , path )"],
+            },
+        }
+
+    @staticmethod
+    def _ids(value) -> set[str]:
+        found = set()
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key == "id":
+                    found.add(json.dumps(child, sort_keys=True))
+                found.update(ModuleLayerBaselineCheck._ids(child))
+        elif isinstance(value, list):
+            for child in value:
+                found.update(ModuleLayerBaselineCheck._ids(child))
+        return found
+
+    def test_mapping_uses_responsibility_overrides_and_namespace_boundaries(self) -> None:
+        graph, mapping = self._graph(), self._mapping()
+        mapping["rules"].extend([
+            {"prefix": "a::http", "layer": "assembly", "reason": "HTTP handler"},
+            {"prefix": "services::provider", "layer": "adapter", "reason": "provider runtime"},
+            {"prefix": "services::discord", "layer": "discord", "reason": "Discord transport"},
+            {"prefix": "app_state", "root": "src/lib.rs", "layer": "assembly", "reason": "HTTP AppState"},
+            {"prefix": "", "layer": "assembly", "reason": "crate assembly"},
+        ])
+        graph["nodes"].extend(self._node(name) for name in (
+            "a::http", "a::httpx", "services::provider", "services::discord", "services::unreviewed", "app_state", ""))
+        graph["nodes"].append(self._node("app_state", "src/main.rs"))
+        graph["coverage"]["logical_modules"] = len(graph["nodes"])
+        graph["coverage"]["unclassified_modules"] = list(graph["nodes"])
+        original = json.dumps(graph, sort_keys=True)
+        result = self.baselines.project(graph, mapping)
+        classified = {row["module"]: row["layer"] for row in result["classifications"]}
+        for name, expected in (("a::http", "assembly"), ("a::httpx", "foundation"),
+                               ("services::provider", "adapter"), ("services::discord", "discord"),
+                               ("app_state", "assembly"), ("", "assembly"), ("services::unreviewed", None)):
+            with self.subTest(module=name):
+                self.assertEqual(classified[self._node(name)], expected)
+        self.assertIsNone(classified[self._node("app_state", "src/main.rs")])
+        self.assertEqual(json.dumps(graph, sort_keys=True), original)
+
+    def test_unclassified_endpoints_are_indeterminate_instead_of_zero_violations(self) -> None:
+        result = self.baselines.project(self._graph(), self._mapping())
+        self.assertEqual(result["layer_counts"]["foundation"], 1)
+        self.assertEqual(result["layer_counts"]["assembly"], 1)
+        self.assertEqual([row["module"] for row in result["unclassified"]], [self._node("mixed")])
+        self.assertTrue(result["unclassified"][0]["reason"])
+        self.assertEqual(len(result["reverse_dependencies"]), 2)
+        self.assertEqual(sorted(row["count"] for row in result["reverse_dependencies"]), [1, 2])
+        self.assertEqual(len({row["id"] for row in result["reverse_dependencies"]}), 2)
+        self.assertEqual(len(result["indeterminate_edges"]), 2)
+        self.assertTrue(all(row["reason"] for row in result["indeterminate_edges"]))
+        self.assertTrue(all(row["source"] == self._node("a") and row["target"] == self._node("upper")
+                            for row in result["reverse_dependencies"]))
+
+    def test_conflicting_mapping_rules_remain_unclassified(self) -> None:
+        graph, mapping = self._graph(), self._mapping()
+        mapping["rules"].append({"prefix": "a", "layer": "assembly", "reason": "conflicting ownership"})
+        result = self.baselines.project(graph, mapping)
+        a = next(row for row in result["classifications"] if row["module"] == self._node("a"))
+        self.assertIsNone(a["layer"])
+        self.assertTrue(a["reason"])
+        self.assertFalse(result["reverse_dependencies"])
+        self.assertEqual(len(result["indeterminate_edges"]), len(graph["edges"]))
+
+    def test_baseline_encoding_is_deterministic_under_input_reordering(self) -> None:
+        graph, mapping = self._graph(), self._mapping()
+        shuffled = json.loads(json.dumps(graph))
+        for key in ("nodes", "edges", "sccs"):
+            shuffled[key].reverse()
+        for edge in shuffled["edges"]:
+            edge["sites"].reverse()
+        for members in shuffled["sccs"]:
+            members.reverse()
+        for key, value in shuffled["coverage"].items():
+            if isinstance(value, list):
+                value.reverse()
+        reversed_mapping = json.loads(json.dumps(mapping))
+        reversed_mapping["rules"].reverse()
+        before = self.baselines.encode_baseline(self.baselines.baseline(graph, mapping, "a" * 40))
+        after = self.baselines.encode_baseline(self.baselines.baseline(shuffled, reversed_mapping, "a" * 40))
+        self.assertEqual(before, after)
+        self.assertEqual(json.loads(before)["input_sha"], "a" * 40)
+
+    def test_baseline_ids_ignore_evidence_locations_and_input_revision(self) -> None:
+        graph, mapping = self._graph(), self._mapping()
+        moved = json.loads(json.dumps(graph))
+        for edge in moved["edges"]:
+            edge["sites"] = ["/tmp/another-checkout/" + site.rsplit(":", 1)[0] + ":99" for site in edge["sites"]]
+        for row in moved["coverage"]["unresolved_references"]:
+            row["site"] = "/tmp/another-checkout/" + row["site"].rsplit(":", 1)[0] + ":99"
+        moved["coverage"]["cfg_uncertainties"] = [
+            "/tmp/another-checkout/src/a.rs:99 retained attribute: cfg_attr ( optional , path )"]
+        original_ids = self._ids(self.baselines.baseline(graph, mapping, "a" * 40))
+        moved_ids = self._ids(self.baselines.baseline(moved, mapping, "b" * 40))
+        self.assertTrue(original_ids)
+        self.assertEqual(original_ids, moved_ids)
+        self.assertTrue(all("another-checkout" not in value and ":99" not in value for value in moved_ids))
+
+    def test_baseline_writer_allows_identical_replay_and_rejects_replacement(self) -> None:
+        payload = self.baselines.baseline(self._graph(), self._mapping(), "a" * 40)
+        with TemporaryDirectory() as temporary:
+            target = Path(temporary) / "baselines" / "module_layers.json"
+            self.baselines.write_baseline(target, payload)
+            original = target.read_bytes()
+            self.assertEqual(original.decode("utf-8"), self.baselines.encode_baseline(payload))
+            self.baselines.write_baseline(target, payload)
+            self.assertEqual(target.read_bytes(), original)
+            replacement = dict(payload, input_sha="b" * 40)
+            with self.assertRaises(ValueError):
+                self.baselines.write_baseline(target, replacement)
+            self.assertEqual(target.read_bytes(), original)
+
+    def test_uncertainty_ids_normalize_windows_read_failure_paths(self) -> None:
+        cases = (
+            ("Windows checkout", ("C:\\checkout-a", "D:\\checkout-b"), "\\", False),
+            ("POSIX checkout with spaces", ("/workspace/one path", "/workspace/two path"), "/", False),
+            ("decode byte position", ("/workspace/encoding", "/workspace/encoding"), "/", True),
+        )
+        for label, checkouts, separator, decoding in cases:
+            with self.subTest(evidence=label):
+                snapshots = []
+                for position, checkout in enumerate(checkouts, start=8):
+                    graph = self._graph()
+                    file = checkout + separator + "src" + separator + "a.rs"
+                    reason = (f"UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position {position}: invalid start byte"
+                              if decoding else "PermissionError: [Errno 13] Permission denied: '" + file + "'")
+                    graph["coverage"]["read_failures"] = [file + ": " + reason]
+                    snapshots.append(self.baselines.baseline(graph, self._mapping(), "a" * 40))
+                self.assertEqual(self._ids(snapshots[0]), self._ids(snapshots[1]))
+                for snapshot in snapshots:
+                    row = next(row for row in snapshot["uncertainties"] if row["category"] == "read_failures")
+                    self.assertEqual(row["source"], "file:src/a.rs")
+                    self.assertNotIn("checkout-", row["reason"])
+                    self.assertNotIn("/workspace/", row["reason"])
+
+    def test_invalid_mapping_structures_return_configuration_errors(self) -> None:
+        mappings = []
+        for label, replacement in (("layers array", {"layers": []}),
+                                   ("non-table rule", {"rules": ["oops"]}),
+                                   ("non-table unclassified rule", {"unclassified": [123]}),
+                                   ("duplicate ranks", {"layers": {"foundation": 1, "assembly": 1}})):
+            mappings.append((label, {**self._mapping(), **replacement}))
+        graph = self._graph()
+        for label, mapping in mappings:
+            with self.subTest(mapping=label):
+                try:
+                    result = self.baselines.project(graph, mapping)
+                except Exception as exc:
+                    self.fail(f"invalid mapping raised {type(exc).__name__}: {exc}")
+                self.assertTrue(result["coverage"]["configuration_errors"])
+                self.assertFalse(result["coverage"]["complete"])
+                self.assertEqual(len(result["unclassified"]), len(graph["nodes"]))
+                self.assertFalse(result["reverse_dependencies"])
+                self.assertEqual(len(result["indeterminate_edges"]), len(graph["edges"]))
+
+    def test_cli_records_full_input_sha_and_rejects_source_changes(self) -> None:
+        with TemporaryDirectory() as temporary:
+            repo = Path(temporary) / "repo"
+            repo.mkdir()
+            def git(*args):
+                return subprocess.run(["git", "-C", str(repo), *args],
+                                      capture_output=True, text=True, check=True).stdout.strip()
+            git("init", "-q")
+            git("config", "user.name", "Fixture")
+            git("config", "user.email", "fixture@example.invalid")
+            _write(repo, "src/lib.rs", "mod a;\n")
+            _write(repo, "src/a.rs", "pub fn run() {}\n")
+            _write(repo, "scripts/audit_maintainability/layers.toml", """
+                schema_version = 1
+                [layers]
+                vocabulary = 0
+                foundation = 1
+                adapter = 2
+                application = 3
+                discord = 4
+                assembly = 5
+                [[rules]]
+                prefix = ""
+                layer = "assembly"
+                reason = "crate assembly"
+                [[rules]]
+                prefix = "a"
+                layer = "foundation"
+                reason = "pure helper"
+            """)
+            git("add", "src", "scripts")
+            git("commit", "-qm", "fixture sources")
+            revision = git("rev-parse", "HEAD")
+            first = Path(temporary) / "first.json"
+            second = Path(temporary) / "second.json"
+            changed = Path(temporary) / "changed.json"
+            command = [sys.executable, str(Path(self.baselines.__file__).resolve()), "--repo", str(repo)]
+            initial = subprocess.run([*command, "--input-sha", "HEAD", "--output", str(first)],
+                                     capture_output=True, text=True)
+            self.assertEqual(initial.returncode, 0, initial.stderr)
+            snapshot = json.loads(first.read_text("utf-8"))
+            self.assertEqual(snapshot["input_sha"], revision)
+            self.assertIn(revision, snapshot["generation_command"])
+            replay = subprocess.run([*command, "--input-sha", revision, "--output", str(second)],
+                                    capture_output=True, text=True)
+            self.assertEqual(replay.returncode, 0, replay.stderr)
+            self.assertEqual(first.read_bytes(), second.read_bytes())
+            original = first.read_bytes()
+            _write(repo, "src/a.rs", "pub fn changed() {}\n")
+            refused = subprocess.run([*command, "--input-sha", revision, "--output", str(changed)],
+                                     capture_output=True, text=True)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertFalse(changed.exists())
+            self.assertEqual(first.read_bytes(), original)
+            _write(repo, "src/a.rs", "pub fn run() {}\n")
+            _write(repo, ".gitignore", "/src/ignored.rs\n")
+            _write(repo, "src/ignored.rs", "pub fn unrecorded() {}\n")
+            ignored = Path(temporary) / "ignored.json"
+            refused_ignored = subprocess.run([*command, "--input-sha", revision, "--output", str(ignored)],
+                                             capture_output=True, text=True)
+            self.assertNotEqual(refused_ignored.returncode, 0)
+            self.assertFalse(ignored.exists())
+            self.assertEqual(first.read_bytes(), original)
+
+    def test_uncertainty_rows_and_reference_kinds_survive_the_snapshot(self) -> None:
+        graph, mapping = self._graph(), self._mapping()
+        snapshot = self.baselines.baseline(graph, mapping, "a" * 40)
+        self.assertEqual(snapshot["source_grain"], "module")
+        self.assertFalse(snapshot["coverage"]["complete"])
+        encoded = self.baselines.encode_baseline(snapshot)
+        for expected in ("unknown_macro", "macro expansion not evaluated", "crate::absent::run",
+                         "unknown internal item", "retained attribute"):
+            with self.subTest(uncertainty=expected):
+                self.assertIn(expected, encoded)
+        changed = json.loads(json.dumps(graph))
+        changed["coverage"]["unresolved_references"][0]["path"] = "different_macro"
+        self.assertNotEqual(self._ids(self.baselines.baseline(graph, mapping, "a" * 40)),
+                            self._ids(self.baselines.baseline(changed, mapping, "a" * 40)))
+        duplicate = dict(graph["coverage"]["unresolved_references"][0], site="src/a.rs:25")
+        graph["coverage"]["unresolved_references"].append(duplicate)
+        grouped = self.baselines.baseline(graph, mapping, "a" * 40)["uncertainties"]
+        row = next(row for row in grouped if row["path"] == "unknown_macro")
+        self.assertEqual(row["count"], 2)
+        self.assertEqual(set(row["sites"]), {"src/a.rs:15", "src/a.rs:25"})
 
 
 if __name__ == "__main__":

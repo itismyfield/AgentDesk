@@ -13,6 +13,7 @@ from .service_server_backflow import USE_TREE, _use_paths
 from .. import common
 from ..common import Finding
 from . import CheckSpec
+from .module_layer_baseline import load_mapping, project
 
 SCHEMA_VERSION = 1
 ITEMS = {"fn", "struct", "enum", "union", "trait", "type", "const", "static"}
@@ -367,7 +368,7 @@ def _run(allowlist):
     result = analyze(common.REPO_ROOT)
     yield Finding("module_layers", "info", "src", None,
                   f"{len(result['nodes'])} modules, {len(result['edges'])} dependency edges; coverage incomplete (informational)",
-                  {"measurement": result})
+                  {"measurement": result, "layer_analysis": project(result, load_mapping(common.REPO_ROOT))})
 
 
 CHECK = CheckSpec(key="module_layers", title="Module dependency coverage", description="Canonical module graph and direct boundary references (informational)",
