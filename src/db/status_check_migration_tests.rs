@@ -44,8 +44,9 @@ pub(crate) async fn execute_with_status_check_lifted(pool: &PgPool, table: &str,
 struct StatusTable {
     name: &'static str,
     allowed: Vec<&'static str>,
-    /// `$1` is the status and `$2` a unique key; returns the row id as text.
-    insert: &'static str,
+    /// `$1` is the status and `$2` a unique key; returns the row id as text. `None` means
+    /// raw INSERT is closed by the repository guard, so rows come from the service helper.
+    insert: Option<&'static str>,
 }
 
 fn status_tables() -> Vec<StatusTable> {
@@ -63,12 +64,14 @@ fn status_tables() -> Vec<StatusTable> {
                 ENTRY_STATUS_USER_CANCELLED,
                 "cancelled",
             ],
-            insert: "INSERT INTO auto_queue_entries (id, status) VALUES ($2, $1) RETURNING id",
+            insert: Some(
+                "INSERT INTO auto_queue_entries (id, status) VALUES ($2, $1) RETURNING id",
+            ),
         },
         StatusTable {
             name: "auto_queue_runs",
             allowed: runs,
-            insert: "INSERT INTO auto_queue_runs (id, status) VALUES ($2, $1) RETURNING id",
+            insert: Some("INSERT INTO auto_queue_runs (id, status) VALUES ($2, $1) RETURNING id"),
         },
         StatusTable {
             name: "message_outbox",
@@ -81,9 +84,7 @@ fn status_tables() -> Vec<StatusTable> {
                 "cancelled",
                 "delivered",
             ],
-            insert: "INSERT INTO message_outbox (target, content, status, cancelled_at)
-                     VALUES ($2, 'body', $1, CASE WHEN $1 = 'cancelled' THEN NOW() END)
-                     RETURNING id::TEXT",
+            insert: None,
         },
         StatusTable {
             name: "dispatch_outbox",
@@ -95,14 +96,18 @@ fn status_tables() -> Vec<StatusTable> {
                 "acknowledged",
                 "claimed",
             ],
-            insert: "INSERT INTO dispatch_outbox (dispatch_id, action, status)
-                     VALUES ($2, 'status_reaction', $1) RETURNING id::TEXT",
+            insert: Some(
+                "INSERT INTO dispatch_outbox (dispatch_id, action, status)
+                 VALUES ($2, 'status_reaction', $1) RETURNING id::TEXT",
+            ),
         },
         StatusTable {
             name: "routines",
             allowed: vec!["enabled", "paused", "detached"],
-            insert: "INSERT INTO routines (id, script_ref, name, status)
-                     VALUES ($2, 'routine.js', $2, $1) RETURNING id",
+            insert: Some(
+                "INSERT INTO routines (id, script_ref, name, status)
+                 VALUES ($2, 'routine.js', $2, $1) RETURNING id",
+            ),
         },
         StatusTable {
             name: "routine_runs",
@@ -115,22 +120,46 @@ fn status_tables() -> Vec<StatusTable> {
                 "interrupted",
                 "error",
             ],
-            insert: "INSERT INTO routine_runs (id, routine_id, status)
-                     VALUES ($2, 'status-check-routine', $1) RETURNING id",
+            insert: Some(
+                "INSERT INTO routine_runs (id, routine_id, status)
+                 VALUES ($2, 'status-check-routine', $1) RETURNING id",
+            ),
         },
     ]
 }
 
 async fn insert_row(
     pool: &PgPool,
-    table: &StatusTable,
+    insert: &'static str,
     status: &str,
 ) -> Result<String, sqlx::Error> {
-    sqlx::query_scalar(table.insert)
+    sqlx::query_scalar(insert)
         .bind(status)
         .bind(uuid::Uuid::new_v4().to_string())
         .fetch_one(pool)
         .await
+}
+
+async fn base_row(pool: &PgPool, table: &StatusTable) -> String {
+    if let Some(insert) = table.insert {
+        return insert_row(pool, insert, table.allowed[0]).await.unwrap();
+    }
+    let content = uuid::Uuid::new_v4().to_string();
+    let id = crate::services::message_outbox::enqueue_outbox_pg_returning_id(
+        pool,
+        crate::services::message_outbox::OutboxMessage {
+            target: "channel:1",
+            content: &content,
+            bot: "notify",
+            source: "routine-runtime",
+            reason_code: Some("routine.result"),
+            session_key: None,
+        },
+    )
+    .await
+    .unwrap()
+    .expect("enqueue a message_outbox row");
+    id.to_string()
 }
 
 async fn set_status(
@@ -187,17 +216,21 @@ async fn migrated_pool() -> (TestPostgresDb, PgPool) {
 async fn core_status_checks_admit_every_writer_and_past_value_and_reject_others_pg() {
     let (db, pool) = migrated_pool().await;
     for table in status_tables() {
-        let row = insert_row(&pool, &table, table.allowed[0]).await.unwrap();
+        let row = base_row(&pool, &table).await;
         for status in &table.allowed {
-            insert_row(&pool, &table, status)
-                .await
-                .unwrap_or_else(|error| panic!("{} INSERT {status}: {error}", table.name));
+            if let Some(insert) = table.insert {
+                insert_row(&pool, insert, status)
+                    .await
+                    .unwrap_or_else(|error| panic!("{} INSERT {status}: {error}", table.name));
+            }
             let updated = set_status(&pool, table.name, &row, status)
                 .await
                 .unwrap_or_else(|error| panic!("{} UPDATE {status}: {error}", table.name));
             assert_eq!(updated, 1, "{} UPDATE {status}", table.name);
         }
-        assert_status_check_rejected(insert_row(&pool, &table, "bogus").await, table.name);
+        if let Some(insert) = table.insert {
+            assert_status_check_rejected(insert_row(&pool, insert, "bogus").await, table.name);
+        }
         assert_status_check_rejected(
             set_status(&pool, table.name, &row, "bogus").await,
             table.name,
@@ -211,7 +244,7 @@ async fn core_status_checks_admit_every_writer_and_past_value_and_reject_others_
 async fn core_status_checks_add_over_legacy_rows_and_let_them_move_into_the_set_pg() {
     let (db, pool) = migrated_pool().await;
     for table in status_tables() {
-        let row = insert_row(&pool, &table, table.allowed[0]).await.unwrap();
+        let row = base_row(&pool, &table).await;
         let name = format!("{}_status_check", table.name);
         sqlx::query(AssertSqlSafe(format!(
             "ALTER TABLE {} DROP CONSTRAINT {name}",
