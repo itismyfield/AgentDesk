@@ -324,7 +324,7 @@ async fn status_pg(pool: &sqlx::PgPool) -> Result<serde_json::Value, String> {
     let command_provider_2 = pg_kv_value(pool, "onboarding_command_provider_2").await?;
 
     let completed = has_bots && agent_count > 0;
-    let runtime_root = crate::cli::agentdesk_runtime_root();
+    let runtime_root = crate::config::runtime_root();
     let completion_state = runtime_root
         .as_ref()
         .and_then(|root| load_onboarding_completion_state(root).ok().flatten());
@@ -372,7 +372,7 @@ async fn status_pg(pool: &sqlx::PgPool) -> Result<serde_json::Value, String> {
 }
 
 fn status_config() -> Result<serde_json::Value, String> {
-    let runtime_root = crate::cli::agentdesk_runtime_root();
+    let runtime_root = crate::config::runtime_root();
     let config = match runtime_root.as_ref() {
         Some(root) => load_onboarding_config(root)?,
         None => crate::config::Config::default(),
@@ -453,7 +453,7 @@ pub async fn draft_get(state: &AppState) -> AppResult<(StatusCode, Json<serde_js
         }
     } else {
         {
-            crate::cli::agentdesk_runtime_root()
+            crate::config::runtime_root()
                 .as_ref()
                 .and_then(|root| load_onboarding_config(root).ok())
                 .map(|config| config.discord.guild_id.is_some() && !config.agents.is_empty())
@@ -461,7 +461,7 @@ pub async fn draft_get(state: &AppState) -> AppResult<(StatusCode, Json<serde_js
         }
     };
 
-    let root = crate::cli::agentdesk_runtime_root()
+    let root = crate::config::runtime_root()
         .ok_or_else(|| AppError::internal("cannot determine runtime root"))?;
 
     let draft = load_onboarding_draft(&root)
@@ -487,7 +487,7 @@ pub async fn draft_get(state: &AppState) -> AppResult<(StatusCode, Json<serde_js
 /// PUT /api/onboarding/draft
 /// Persists the in-progress onboarding draft required to resume across browsers.
 pub async fn draft_put(body: OnboardingDraft) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
-    let root = crate::cli::agentdesk_runtime_root()
+    let root = crate::config::runtime_root()
         .ok_or_else(|| AppError::internal("cannot determine runtime root"))?;
 
     crate::runtime_layout::ensure_runtime_layout(&root).map_err(|error| {
@@ -513,7 +513,7 @@ pub async fn draft_put(body: OnboardingDraft) -> AppResult<(StatusCode, Json<ser
 /// DELETE /api/onboarding/draft
 /// Explicitly removes the in-progress onboarding draft.
 pub async fn draft_delete() -> AppResult<(StatusCode, Json<serde_json::Value>)> {
-    let root = crate::cli::agentdesk_runtime_root()
+    let root = crate::config::runtime_root()
         .ok_or_else(|| AppError::internal("cannot determine runtime root"))?;
 
     clear_onboarding_draft(&root).map_err(AppError::internal)?;
@@ -2138,7 +2138,7 @@ fn validate_complete_request(
 fn prepare_complete_runtime_root(
     ctx: &CompleteErrorContext<'_>,
 ) -> Result<PathBuf, (StatusCode, serde_json::Value)> {
-    let Some(root) = crate::cli::agentdesk_runtime_root() else {
+    let Some(root) = crate::config::runtime_root() else {
         return Err(ctx.error(
             StatusCode::INTERNAL_SERVER_ERROR,
             None,
