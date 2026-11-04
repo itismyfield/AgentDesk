@@ -40,6 +40,7 @@ Left out: Codex (4f §4 leaf has the same read-before-key shape), cold Bootstrap
 6. `HeldNotDropped`: an input held for a passing reason (modal, unreadable) is not dropped from the line.
 7. `BusyInputLands`: an input sent while Claude was busy reached this turn or the next one.
 8. `NoDeadlock`: a waiting input can always move. The only end state is a quiet channel with every input admitted.
+9. `StoppedBeforeKey`: an input a user stop took before the drive's first key never reaches the pane or Claude (checked by the `InputPathStop*` configs).
 
 ## Results, `InputPath.cfg`
 
@@ -131,6 +132,18 @@ All rules hold: NoDuplicate, NoSilentLoss, DraftSafe, OneExecutor, Fifo, HeldNot
 | `BackstopMayHaveSent = FALSE` | backstop for a MayHaveSent head | NoDeadlock |
 
 Command for a mutant: copy `InputPathClean.cfg`, change the constant, and run the command below with that config.
+
+## Stop before the first key (#7754)
+
+Code: branch `feat/i7754-stop-gate` on `e85948c2c3`. `StopBeforeKey(k)` is a user stop while the drive holds an input in `reserved`, `direct` or `stash`, before `ArmAndKey`. The writer token's gate is NoKeyYet (`provider/native_stop.rs` `ReceiptSink`): the stop takes it under the cancel decision (`StopCancel::decide` -> `State::admit`), main cancels, and the writer's first-key check (`claude_tui/input/submission.rs` `run`) ends `Cancelled{0}`, which the owner leaf settles as WriteUncertain (`queue_io/input_owner/effect.rs` `idle_claude`), so the head is Unknown and never resent. The transition is enabled in every InputPath config, so the existing rules (DraftSafe, NoDuplicate and the rest) are checked again with it.
+
+| Config | Constants | Distinct states | Rules that break | Path |
+|---|---|---|---|---|
+| `InputPathStopGate.cfg` | clean constants, `Mut = "none"` | 26,694 | none | - |
+| `InputPathStopNoGate.cfg` | `Mut = "noKeyGate"`: the writer never sees the gate and keys on | (stops at the first break) | StoppedBeforeKey | Arrive, DriveTakesFront, Prepare, StopBeforeKey, ArmAndKey, Paste: the stopped input is in the composer |
+| `InputPathStopNotSent.cfg` | `Mut = "cancelledNotSent"`: `Cancelled{0}` kept at the front as NotSent | (stops at the first break) | StoppedBeforeKey | Arrive, DriveTakesFront, StopBeforeKey, DriveTakesFront, Prepare, ArmAndKey, Paste: the stopped input is resent |
+
+`InputPath.cfg` and `InputPathClean.cfg` keep their rows in `expected.tsv` with the transition enabled.
 
 ## Counterexamples replayed against the code and the 4f design
 
