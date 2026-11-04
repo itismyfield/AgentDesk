@@ -316,7 +316,7 @@ async fn due_census_tick_collects_both_hosts_and_posts_one_verdict_pg() {
             assert!(requests.lock().unwrap().is_empty());
             continue;
         }
-        let posts = received.lock().unwrap();
+        let posts = received.lock().unwrap().clone();
         assert_eq!(posts.len(), 1, "{case}: {posts:?}");
         assert_eq!(posts[0]["channel"], "76510001");
         let content = posts[0]["body"]["content"].as_str().unwrap();

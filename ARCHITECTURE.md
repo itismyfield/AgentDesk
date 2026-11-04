@@ -3294,7 +3294,11 @@ src/
 │   │   ├── token_store.rs
 │   │   └── transport_tests.rs
 │   ├── legacy_body_census/
+│   │   ├── cache.rs
+│   │   ├── collector.rs
 │   │   ├── entry_tests.rs
+│   │   ├── evaluation.rs
+│   │   ├── evidence.rs
 │   │   ├── history.rs
 │   │   ├── manifest.rs
 │   │   ├── mod.rs
@@ -3483,6 +3487,7 @@ src/
 │   │   │   ├── reliability.rs
 │   │   │   └── start_deferral.rs
 │   │   ├── discord_log/
+│   │   │   ├── census.rs
 │   │   │   └── failure_alert.rs
 │   │   ├── loader/
 │   │   │   └── discovery.rs
@@ -3492,6 +3497,8 @@ src/
 │   │   ├── agent_executor.rs
 │   │   ├── discord_log.rs
 │   │   ├── fresh_session_reaper.rs
+│   │   ├── legacy_body_census.rs
+│   │   ├── legacy_body_census_tests.rs
 │   │   ├── loader.rs
 │   │   ├── migrated.rs
 │   │   ├── mod.rs
