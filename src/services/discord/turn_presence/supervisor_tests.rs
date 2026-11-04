@@ -707,16 +707,18 @@ async fn the_live_presence_read_never_mints_a_mailbox_for_an_absent_channel() {
         shared: shared.clone(),
         provider,
     };
-    let cases = [
+    let mut observed = Vec::new();
+    for channel in [bare, marked, owned] {
+        let read = effects.mailbox(channel).await;
+        let present = shared.mailbox_peek(ChannelId::new(channel)).is_some();
+        observed.push((channel, read, present));
+    }
+    let expected = [
         (bare, (false, None, false), false),
         (marked, (false, Some(41), false), false),
         (owned, (false, Some(62_000_331), true), true),
     ];
-    for (channel, expected, registered) in cases {
-        assert_eq!(effects.mailbox(channel).await, expected, "{channel}");
-        let present = shared.mailbox_peek(ChannelId::new(channel)).is_some();
-        assert_eq!(present, registered, "{channel} registry entry");
-    }
+    assert_eq!(observed, expected, "(channel, read, registry entry)");
 }
 
 /// The live effects' owner wake reaches the channel's owner drive, which grants the queued front
