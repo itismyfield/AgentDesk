@@ -10,6 +10,8 @@ Code versions modelled:
 | `a2d3` | the second repair `4def1c6289` | `InputOwnershipA2d3.cfg` |
 | `a2d4` | the third repair | `InputOwnership.cfg` |
 | `c` | slice C, its tested transitions only | `InputOwnershipC.cfg` |
+| `cf` | main after C `a9d59259e5`, with slice F's paths | `InputOwnershipCF.cfg` |
+| `f` | slice F design (F1 plan) | `InputOwnershipF.cfg`, `InputOwnershipFOutside.cfg` |
 
 What the model covers:
 
@@ -197,3 +199,19 @@ Left out of the model:
 - Two inputs racing one paste.
 - A screen or cause that never clears (Quiet waits for it).
 - A gone pane before `c`: it has no screen that would submit. In `c` its front waits, unwatched, for a new event.
+
+## Slice F: a carried row that never closes (`cf`, `f`)
+
+Code: `a9d59259e5`. Paths added only for `cf` and `f`; `c` and the older columns keep their state space (C: 48,830 states, unchanged).
+
+- `row = carried`: an earlier generation's durable inflight row on a turn-mode channel. Restore keeps it and reattaches a watcher to the live pane (`recovery_engine/restore_inflight.rs:1769-1780`); it re-intakes nothing.
+- `DriveMeetsRow`: every owner start on an idle mailbox creates a row, meets the carried one and is refused (`router/message_handler/foreign_row.rs:63-81`); the front keeps its place (`input_owner/drive.rs:100-112`).
+- `CarriedCloses`: the carried-turn close archives the row and kicks the queue once the transcript reads the native turn closed (`health/recovery/carried_turn_close.rs:197-288`).
+- `leak`: the transcript holds an input Claude absorbed mid-turn with no `queued_command` row. `tui_o/writer/input_facts/queued.rs:81` keeps that body owed and gives a dequeue credit no dequeue repays, so `closed_boundary.rs:47` answers `pending_receipt` for ever.
+- `HandedOutside`: a person types the text at the terminal, or another session sends it over its own socket.
+
+| Config | Result |
+|---|---|
+| `CF` | `NoSilentLoss`, `NoSilentLossObserved`, `CarriedRowEnds` break: a person's terminal turn ends, the owner is woken, its start meets the carried row, and nothing closes it. Code-confirmed on adk-dash-cc 11-03: `pending_receipt:owed_inputs=75..78` from 04:51Z to 18:59Z, front refused at every wake. |
+| `F` | every rule holds (195,224 states). Mutant `leakKept` (the reader still counts the absorbed input) breaks the same three rules. |
+| `FOutside` | `SeenOnce` breaks in `f` too: AgentDesk records no identity for an outside copy, so its own single paste is the second time the session sees the text. Kept as a documented gap; `NoDuplicate` (AgentDesk pastes at most once) holds. |
