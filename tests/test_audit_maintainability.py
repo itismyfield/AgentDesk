@@ -1468,5 +1468,323 @@ class HarnessCli(unittest.TestCase):
         self.assertNotIn("src/services/notify.rs", data.get("giant_files", set()))
 
 
+class ModuleLayersCheck(unittest.TestCase):
+    def setUp(self) -> None:
+        self.layers = importlib.import_module("audit_maintainability.checks.module_layers")
+
+    @staticmethod
+    def _node(name: str = "", crate: str = "src/lib.rs") -> str:
+        return f"{crate}::crate" + (f"::{name}" if name else "")
+
+    def test_nested_import_aliases_and_reexports_keep_canonical_owners(self) -> None:
+        with _FakeSrcTree({"src/lib.rs": """
+            mod origin {
+                pub struct Item;
+                pub mod nested { pub struct Other; }
+            }
+            mod facade {
+                pub use crate::origin::Item as Export;
+                pub use crate::origin::nested;
+            }
+            mod consumer {
+                use crate::{facade::{Export as Alias, nested::{self as deep, Other}}};
+                struct Holder { value: Alias, other: Other }
+                fn call() { deep::Other; crate::facade::Export; }
+            }
+        """}) as root:
+            result = self.layers.analyze(root)
+        consumer, origin = self._node("consumer"), self._node("origin")
+        edges = [e for e in result["edges"] if e["source"] == consumer]
+        targets = {e["target"] for e in edges}
+        self.assertIn(origin, targets)
+        self.assertIn(self._node("origin::nested"), targets)
+        self.assertNotIn(self._node("facade"), targets)
+        self.assertTrue(all(e["sites"] for e in edges))
+        self.assertTrue(all(site.startswith("src/lib.rs:") for e in edges for site in e["sites"]))
+
+    def test_relative_paths_follow_logical_modules_and_declarations_are_not_edges(self) -> None:
+        with _FakeSrcTree({"src/lib.rs": """
+            mod target { pub fn hit() {} }
+            mod consumer {
+                mod local { pub fn hit() {} }
+                fn call() {
+                    crate::target::hit();
+                    super::target::hit();
+                    self::local::hit();
+                }
+            }
+        """}) as root:
+            result = self.layers.analyze(root)
+        pairs = {(e["source"], e["target"]) for e in result["edges"]}
+        self.assertIn((self._node("consumer"), self._node("target")), pairs)
+        self.assertIn((self._node("consumer"), self._node("consumer::local")), pairs)
+        self.assertFalse(any(source == self._node() for source, _target in pairs))
+        self.assertEqual(result["coverage"]["logical_modules"], 4)
+
+    def test_test_only_functions_fields_and_modules_do_not_add_production_edges(self) -> None:
+        with _FakeSrcTree({"src/lib.rs": """
+            mod production { pub struct Kept; }
+            mod testing { pub struct Hidden; }
+            #[cfg(test)]
+            mod tests;
+            mod consumer {
+                struct Record {
+                    kept: crate::production::Kept,
+                    #[cfg(test)]
+                    hidden: crate::testing::Hidden,
+                }
+                #[cfg(test)]
+                fn only_test() { crate::testing::Hidden; }
+                fn regular() { crate::production::Kept; }
+            }
+        """, "src/tests.rs": "use crate::testing::Hidden;"}) as root:
+            result = self.layers.analyze(root)
+        targets = {e["target"] for e in result["edges"] if e["source"] == self._node("consumer")}
+        self.assertEqual(targets, {self._node("production")})
+        self.assertNotIn("src/tests.rs", result["coverage"]["reached_files"])
+        self.assertNotIn(self._node("tests"), result["nodes"])
+
+    def test_non_test_cfgs_and_multiple_crate_roots_remain_visible(self) -> None:
+        with _FakeSrcTree({"src/lib.rs": """
+            #[cfg(unix)] mod unix_side;
+            #[cfg(windows)] mod windows_side;
+            #[cfg(feature = "optional")] mod feature_side;
+        """, "src/unix_side.rs": "pub fn run() {}",
+            "src/windows_side.rs": "pub fn run() {}",
+            "src/feature_side.rs": "pub fn run() {}",
+            "src/main.rs": "mod main_only { pub fn run() {} }"}) as root:
+            result = self.layers.analyze(root)
+        coverage = result["coverage"]
+        self.assertEqual(coverage["cfg_scope"], "all-non-test-cfg-union")
+        self.assertTrue({"src/unix_side.rs", "src/windows_side.rs", "src/feature_side.rs"}
+                        <= set(coverage["reached_files"]))
+        self.assertIn(self._node(), result["nodes"])
+        self.assertIn(self._node(crate="src/main.rs"), result["nodes"])
+        self.assertEqual(set(coverage["unclassified_modules"]), set(result["nodes"]))
+        self.assertEqual(result["schema_version"], 1)
+        self.assertIn("input_sha", result)
+
+    def test_read_failures_and_missing_modules_are_coverage_failures(self) -> None:
+        real_read = Path.read_text
+        with _FakeSrcTree({"src/lib.rs": "mod unreadable; mod missing;",
+                           "src/unreadable.rs": "pub fn invisible() {}"}) as root:
+            def read(path, *args, **kwargs):
+                if path == root / "src/unreadable.rs":
+                    raise OSError("synthetic permission denied")
+                return real_read(path, *args, **kwargs)
+            with mock.patch.object(Path, "read_text", read):
+                result = self.layers.analyze(root)
+        coverage = result["coverage"]
+        self.assertIn("unreadable.rs", str(coverage["read_failures"]))
+        self.assertIn("synthetic permission denied", str(coverage["read_failures"]))
+        self.assertIn("missing", str(coverage["module_errors"]))
+
+    def test_unresolved_globs_macros_and_dynamic_includes_stay_visible(self) -> None:
+        with _FakeSrcTree({"src/lib.rs": """
+            mod target { pub struct Item; }
+            mod consumer {
+                use crate::target::*;
+                include!(concat!(env!("OUT_DIR"), "/generated.rs"));
+                unknown_macro!();
+                fn call() { crate::absent::run(); }
+            }
+        """}) as root:
+            result = self.layers.analyze(root)
+        unresolved = str(result["coverage"]["unresolved_references"])
+        self.assertIn("glob", unresolved)
+        self.assertIn("macro", unresolved)
+        self.assertIn("absent", unresolved)
+        self.assertIn("include", str(result["coverage"]["cfg_uncertainties"]))
+
+    def test_exported_macro_dependencies_are_attributed_to_callers(self) -> None:
+        with _FakeSrcTree({"src/lib.rs": """
+            mod upper { pub fn trace() {} }
+            mod macros {
+                #[macro_export]
+                macro_rules! trace_call { () => { $crate::upper::trace(); } }
+            }
+            mod lower { fn call() { crate::trace_call!(); } }
+        """}) as root:
+            result = self.layers.analyze(root)
+        edges = [e for e in result["edges"] if e["source"] == self._node("lower")]
+        self.assertIn(self._node("upper"), {e["target"] for e in edges})
+        self.assertTrue(any("src/lib.rs:6" in e["sites"] for e in edges))
+
+    def test_census_distinguishes_path_import_and_reexport_without_blocking(self) -> None:
+        with _FakeSrcTree({"src/lib.rs": """
+            mod services { pub mod discord { pub struct Handle; } }
+            mod adapter {
+                use crate::services::discord::Handle;
+                pub use crate::services::discord::Handle as Export;
+                fn run() { crate::services::discord::Handle; }
+            }
+        """}) as root:
+            result = self.layers.analyze(root)
+            findings = list(self.layers.CHECK.runner(set()))
+        census = [r for r in result["census"] if r["source"] == self._node("adapter")]
+        self.assertEqual({r["kind"] for r in census}, {"import", "reexport", "path"})
+        self.assertTrue(all(r["file"] == "src/lib.rs" and r["line"] > 0 for r in census))
+        self.assertTrue(findings)
+        self.assertTrue(all(f.severity == "info" for f in findings))
+        self.assertFalse(self.layers.CHECK.hard_gate)
+        self.assertIn(self.layers.CHECK.key, {spec.key for spec in HARNESS.load_check_specs()})
+
+    def test_alias_paths_preserve_associated_items_reexport_chains_and_block_scope(self) -> None:
+        cases = (
+            ("associated item", """
+                mod origin { pub struct T; impl T { pub fn run() {} } }
+                mod consumer {
+                    use crate::origin::T as Handle;
+                    fn call() { Handle::run(); }
+                }
+            """, {"origin"}),
+            ("reexport chain", """
+                mod origin { pub struct T; }
+                mod first { pub use crate::origin::T as Mid; }
+                mod second { pub use crate::first::Mid as Final; }
+                mod consumer {
+                    use crate::second::Final as Handle;
+                    fn call() { Handle::run(); }
+                }
+            """, {"origin"}),
+            ("block scope", """
+                mod origin { pub struct T; }
+                mod other { pub struct T; }
+                mod consumer {
+                    use crate::origin::T as Handle;
+                    fn call() {
+                        { use crate::other::T as Handle; Handle::run(); }
+                        Handle::run();
+                    }
+                }
+            """, {"origin", "other"}),
+            ("raw identifiers", """
+                mod r#type { pub struct r#struct; }
+                mod consumer {
+                    use crate::r#type::r#struct as Handle;
+                    fn call() { Handle::run(); }
+                }
+            """, {"type"}),
+        )
+        for label, code, expected in cases:
+            with self.subTest(case=label), _FakeSrcTree({"src/lib.rs": code}) as root:
+                result = self.layers.analyze(root)
+            edges = [e for e in result["edges"]
+                     if e["source"] == self._node("consumer") and e["kind"] == "path"]
+            self.assertEqual({e["target"] for e in edges}, {self._node(n) for n in expected})
+            if label == "block scope":
+                outer = next(e for e in edges if e["target"] == self._node("origin"))
+                inner = next(e for e in edges if e["target"] == self._node("other"))
+                self.assertIn("src/lib.rs:7", outer["sites"])
+                self.assertNotIn("src/lib.rs:7", inner["sites"])
+
+    def test_cfg_disjoint_aliases_keep_both_imports_and_expose_ambiguity(self) -> None:
+        with _FakeSrcTree({"src/lib.rs": """
+            mod unix_side { pub struct T; }
+            mod windows_side { pub struct T; }
+            mod consumer {
+                #[cfg(unix)] use crate::unix_side::T as Handle;
+                #[cfg(windows)] use crate::windows_side::T as Handle;
+                fn call() { Handle::run(); }
+            }
+        """}) as root:
+            result = self.layers.analyze(root)
+        edges = [e for e in result["edges"]
+                 if e["source"] == self._node("consumer") and e["kind"] == "import"]
+        self.assertEqual({e["target"] for e in edges},
+                         {self._node("unix_side"), self._node("windows_side")})
+        self.assertTrue(any("ambiguous" in ref["reason"] and ref["path"] == "Handle::run"
+                            for ref in result["coverage"]["unresolved_references"]))
+
+    def test_path_redirects_and_literal_includes_keep_logical_owners(self) -> None:
+        cases = (
+            ({"src/lib.rs": '#[path="relocated.rs"] mod target; mod consumer;',
+              "src/relocated.rs": "pub fn hit() {}",
+              "src/consumer.rs": 'include!("bits.rs");',
+              "src/bits.rs": "fn call() { crate::target::hit(); }"},
+             "consumer", "src/bits.rs:1"),
+            ({"src/lib.rs": 'mod target { pub fn hit() {} } mod outer { #[path="moved.rs"] mod inner; }',
+              "src/outer/moved.rs": "fn call() { crate::target::hit(); }"},
+             "outer::inner", "src/outer/moved.rs:1"),
+        )
+        for files, owner, site in cases:
+            with self.subTest(owner=owner), _FakeSrcTree(files) as root:
+                result = self.layers.analyze(root)
+            edges = [e for e in result["edges"] if e["source"] == self._node(owner)]
+            self.assertTrue(any(e["target"] == self._node("target") and site in e["sites"]
+                                for e in edges))
+            self.assertEqual(result["coverage"]["module_errors"], [])
+
+    def test_mixed_line_test_items_and_test_attribute_are_excluded(self) -> None:
+        bodies = (
+            "fn regular() { crate::kept::K; } #[cfg(test)] fn hidden() { crate::testing::T; }",
+            "struct Record { kept: crate::kept::K, #[cfg(test)] hidden: crate::testing::T }",
+            "struct Record { #[cfg(test)] hidden: crate::testing::T, kept: crate::kept::K }",
+            "#[test] fn only_test() { crate::testing::T; } fn regular() { crate::kept::K; }",
+        )
+        for body in bodies:
+            with self.subTest(body=body), _FakeSrcTree({"src/lib.rs":
+                    "mod kept { pub struct K; }\nmod testing { pub struct T; }\n"
+                    + "mod consumer { " + body + " }\n"}) as root:
+                result = self.layers.analyze(root)
+            targets = {e["target"] for e in result["edges"] if e["source"] == self._node("consumer")}
+            self.assertEqual(targets, {self._node("kept")})
+
+    def test_sccs_measure_dependency_cycles_without_module_declaration_edges(self) -> None:
+        with _FakeSrcTree({"src/lib.rs": """
+            mod a { use crate::b::B; pub struct A; }
+            mod b { use crate::c::C; pub struct B; }
+            mod c { use crate::a::A; pub struct C; }
+            mod isolated { pub struct Alone; }
+        """}) as root:
+            result = self.layers.analyze(root)
+        self.assertEqual(set(result["sccs"][0]), {self._node(n) for n in ("a", "b", "c")})
+        self.assertIn([self._node()], result["sccs"])
+        self.assertIn([self._node("isolated")], result["sccs"])
+        self.assertFalse(any(e["source"] == self._node() for e in result["edges"]))
+
+    def test_macro_namespaces_visibility_and_body_spans_keep_edges_precise(self) -> None:
+        cases = (
+            ("separate namespaces", """
+                fn same() {}
+                mod macros { #[macro_export] macro_rules! same { () => {} } }
+                mod caller { fn call() { crate::same(); crate::same!(); } }
+            """, {("caller", "", "path"), ("caller", "macros", "macro")},
+             {("caller", "macros", "path")}),
+            ("visibility restriction", """
+                mod a {
+                    pub fn call() { self::b::run(); }
+                    pub mod b { pub(in crate::a) fn run() {} }
+                }
+            """, {("a", "a::b", "path")}, {("a::b", "a", "path")}),
+            ("same line macro boundary", """
+                mod high { pub fn hit() {} }
+                mod macros { #[macro_export] macro_rules! noop { () => {} } fn ordinary() { crate::high::hit(); } }
+                mod caller { fn call() { crate::noop!(); } }
+            """, {("macros", "high", "path"), ("caller", "macros", "macro")},
+             {("caller", "high", "macro")}),
+        )
+        for label, code, expected, absent in cases:
+            with self.subTest(case=label), _FakeSrcTree({"src/lib.rs": code}) as root:
+                result = self.layers.analyze(root)
+            edges = {(e["source"], e["target"], e["kind"]) for e in result["edges"]}
+            self.assertTrue({(self._node(s), self._node(t), k) for s, t, k in expected} <= edges)
+            self.assertFalse({(self._node(s), self._node(t), k) for s, t, k in absent} & edges)
+            if label == "visibility restriction":
+                self.assertTrue(all(len(group) == 1 for group in result["sccs"]))
+
+    def test_module_paths_outside_repository_are_reported_without_crashing(self) -> None:
+        with TemporaryDirectory() as outside:
+            external = Path(outside) / "external.rs"
+            external.write_text("pub fn external() {}", encoding="utf-8")
+            for declaration in (f'#[path="{external.as_posix()}"] mod external;',
+                                f'include!("{external.as_posix()}");'):
+                with self.subTest(declaration=declaration), _FakeSrcTree({"src/lib.rs": declaration}) as root:
+                    result = self.layers.analyze(root)
+                coverage = result["coverage"]
+                self.assertTrue(coverage["module_errors"])
+                self.assertIn("external.rs", str(coverage["module_errors"]))
+
+
 if __name__ == "__main__":
     unittest.main()
