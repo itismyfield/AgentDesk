@@ -1841,11 +1841,14 @@ mod tests {
         }
 
         async fn set_run_status(pool: &PgPool, status: &str) {
-            sqlx::query("UPDATE auto_queue_runs SET status = $1 WHERE id = 'activate-live-run'")
-                .bind(status)
-                .execute(pool)
-                .await
-                .expect("set activate run status");
+            crate::db::status_check_migration_tests::execute_with_status_check_lifted(
+                pool,
+                "auto_queue_runs",
+                &format!(
+                    "UPDATE auto_queue_runs SET status = '{status}' WHERE id = 'activate-live-run'"
+                ),
+            )
+            .await;
         }
 
         async fn run_status(pool: &PgPool) -> String {
