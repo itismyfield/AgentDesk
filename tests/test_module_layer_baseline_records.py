@@ -18,7 +18,7 @@ class IndeterminateBaselineRecordsTest(unittest.TestCase):
     def test_readme_activation_command_matches_canonical_input_sha(self):
         canonical = json.loads((ROOT / snapshots.BASELINE).read_text("utf-8"))
         readme = (ROOT / snapshots.BASELINE).with_name("README.md").read_text("utf-8")
-        match = re.search(r"--input-sha ([0-9a-f]{40})", readme)
+        match = re.search(r"--input-sha ([^\s`]+)", readme)
         self.assertIsNotNone(match)
         self.assertEqual(match.group(1), canonical["input_sha"])
 
