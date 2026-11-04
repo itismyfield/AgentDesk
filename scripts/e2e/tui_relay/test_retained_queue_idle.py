@@ -76,6 +76,31 @@ class RetainedQueueIdle(unittest.TestCase):
                 self.assert_busy({**self.snapshot, key: value}, True)
         self.assert_busy({**self.snapshot, "admission_binds": [{"receipt": "r", "at": {"kind": "settled"}}]}, False)
 
+    def test_attempt_bind_of_the_completed_retained_input_is_idle(self):
+        at = {"kind": "attempt", "identity": self.retained["input"]["identity"],
+              "attempt": self.retained["input"]["attempt"]}
+        self.assert_busy({**self.snapshot, "admission_binds": [{"receipt": "r", "at": at}]}, False)
+        def changed(path, value):
+            bind = copy.deepcopy(at)
+            node = bind
+            for key in path[:-1]:
+                node = node[key]
+            node[path[-1]] = value
+            return bind
+        others = [changed(("attempt", "nonce"), "other"), changed(("identity", "primary"), 2),
+                  changed(("attempt", "provider"), "claude"), changed(("attempt", "target", "owner"), "other"),
+                  changed(("attempt", "source", "kind"), "other")]
+        for other in others:
+            with self.subTest(other=other):
+                self.assert_busy({**self.snapshot, "admission_binds": [{"receipt": "r", "at": other}]}, True)
+        owed = {**self.retained, "notice": {"kind": "retained_retry_required", "enqueued": False}}
+        self.assert_busy({**self.snapshot, "retained_inputs": [owed], "admission_binds": [{"receipt": "r", "at": at}]}, True)
+        blank = {**self.retained, "input": {}}
+        for bind in ({"kind": "attempt"}, {"kind": "attempt", "identity": None, "attempt": None},
+                     {"kind": "attempt", "identity": {}, "attempt": {}}):
+            with self.subTest(bind=bind):
+                self.assert_busy({**self.snapshot, "retained_inputs": [blank], "admission_binds": [{"receipt": "r", "at": bind}]}, True)
+
     def test_unknown_dispositions_and_notice_shapes_stay_busy(self):
         for disposition in ("future", [], {}, 1):
             with self.subTest(disposition=disposition):
