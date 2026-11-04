@@ -222,7 +222,8 @@ impl BodySource {
         } else {
             object.entry("output_class").or_insert_with(|| json!(class));
         }
-        census_scope(Some(Value::Object(object)), next).await
+        let tag = Value::Object(object);
+        census_scope(Some(tag), next).await
     }
 }
 
