@@ -48,6 +48,527 @@ fn rehydrate(rig: &Rig, session: &str) {
     register_tmux_runtime_binding(&rig.name, binding);
 }
 
+/// A's idle handoff settles before its AI turn ends; B uses that pane's binding while the
+/// Claude inflight row still has the prelaunch empty output path.
+#[test]
+fn a_busy_arrival_uses_the_idle_turns_live_binding_before_its_row_handoff() {
+    busy_arrival_before_row_handoff(false, false);
+}
+
+#[test]
+fn queued_and_new_busy_arrivals_merge_once_before_the_idle_turns_row_handoff() {
+    busy_arrival_before_row_handoff(true, false);
+}
+
+#[test]
+fn an_unobserved_busy_arrival_waits_and_starts_once_after_the_turn_boundary() {
+    busy_arrival_before_row_handoff(false, true);
+}
+
+fn busy_arrival_before_row_handoff(merge: bool, missing: bool) {
+    use crate::services::discord::inflight::{InflightTurnState, save_inflight_state};
+    use poise::serenity_prelude::{MessageId, UserId};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig(
+        "oi-busy-arrival",
+        7_272_797,
+        "normal",
+        view("", false),
+        IDLE,
+    );
+    let session = uuid::Uuid::new_v4().to_string();
+    rehydrate(&rig, &session);
+    let elsewhere = tempfile::tempdir().unwrap();
+    let (asks, asked) = std::sync::mpsc::channel::<(Front, Settled)>();
+    let mailbox = rig.mailbox.clone();
+    let idle: Handoff = Arc::new(move |front| {
+        let (mailbox, asks) = (mailbox.clone(), asks.clone());
+        Box::pin(async move {
+            mailbox
+                .restore_active_turn(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(front.1.author_id),
+                    MessageId::new(front.1.message_id),
+                )
+                .await;
+            let (settled, answer) = tokio::sync::oneshot::channel();
+            asks.send((front, settled)).map_err(|e| e.to_string())?;
+            answer.await.map_err(|e| e.to_string())?
+        })
+    });
+    let mut drive = owner_drive(
+        (rig.mailbox.clone(), None),
+        (ProviderKind::Claude, rig.channel),
+        idle,
+        None,
+    );
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (record, handoff) = (seen.clone(), drive.handoff.clone());
+    Arc::get_mut(&mut drive).unwrap().handoff = Arc::new(move |front| {
+        let (record, handoff) = (record.clone(), handoff.clone());
+        Box::pin(async move {
+            let id = front.1.message_id;
+            let result = handoff(front).await;
+            record.lock().unwrap().push((id, result.clone()));
+            result
+        })
+    });
+    let mut shared = crate::services::discord::make_shared_data_for_tests();
+    Arc::get_mut(&mut shared).unwrap().mailboxes = rig._registry.clone();
+    shared
+        .restart
+        .reconcile_done
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let (release_pass, first_pass) = tokio::sync::oneshot::channel();
+    let first_pass = std::sync::Mutex::new(Some(first_pass));
+    let (settled, on_settled) = std::sync::mpsc::channel();
+    Arc::get_mut(&mut drive).unwrap().settled = Some(Arc::new(move || {
+        let settled = settled.clone();
+        let first_pass = first_pass.lock().unwrap().take();
+        Box::pin(async move {
+            let _ = settled.send(());
+            if let Some(first_pass) = first_pass {
+                let _ = first_pass.await;
+            }
+        })
+    }));
+    {
+        let _entered = rig.runtime.enter();
+        crate::services::discord::queue_io::input_owner::drive::wake(drive.clone());
+    }
+    let first = asked
+        .recv_timeout(Duration::from_secs(20))
+        .expect("A's idle handoff");
+    let mut row = InflightTurnState::new(
+        ProviderKind::Claude,
+        rig.channel,
+        None,
+        7,
+        rig.original.message_id,
+        1,
+        PROMPT.into(),
+        Some(session.clone()),
+        Some(rig.name.clone()),
+        None,
+        None,
+        0,
+    );
+    row.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+    save_inflight_state(&row).unwrap();
+    std::thread::scope(|scope| {
+        let first =
+            scope.spawn(|| idle_turn(&rig, (session.as_str(), elsewhere.path()), first, |_| None));
+        struct CloseOnUnwind(std::path::PathBuf);
+        impl Drop for CloseOnUnwind {
+            fn drop(&mut self) {
+                if let Ok(mut file) = fs::OpenOptions::new().append(true).open(&self.0) {
+                    let _ = writeln!(file, "{}", IDLE.trim_end());
+                }
+            }
+        }
+        let _close = CloseOnUnwind(rig.transcript());
+        on_settled
+            .recv_timeout(Duration::from_secs(20))
+            .expect("A settled before turn end");
+        assert!(
+            !first.is_finished(),
+            "A's observer still owns its running AI turn"
+        );
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(rig.transcript())
+            .unwrap();
+        writeln!(file, "{}", BUSY.trim_end()).unwrap();
+        if missing {
+            crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&rig.name);
+        }
+        let id = 1_567_441_638_974_947_378;
+        let channel = poise::serenity_prelude::ChannelId::new(rig.channel);
+        if merge {
+            let mut older = rig.original.clone();
+            older.message_id = id - 1;
+            older.source_message_ids = vec![older.message_id];
+            older.text = "older queued input".into();
+            older.merge_consecutive = true;
+            assert!(matches!(
+                rig.runtime
+                    .block_on(admit(&rig.mailbox, &older, AdmissionTicket::new())),
+                crate::services::discord::queue_io::input_owner::admission::Admission::Accepted(_)
+            ));
+        }
+        let second =
+            crate::services::discord::router::response_format::build_race_requeued_intervention(
+                UserId::new(7),
+                MessageId::new(id),
+                "B arrived during A",
+                true,
+                None,
+                false,
+                true,
+                vec![],
+            );
+        let intake = crate::services::discord::queue_io::input_ingress::ADOPTS.scope(
+            true,
+            crate::services::discord::queue_io::mailbox_enqueue_observed_intervention(
+                &shared,
+                &ProviderKind::Claude,
+                channel,
+                second,
+                None,
+            ),
+        );
+        assert!(
+            rig.runtime.block_on(intake).enqueued,
+            "B committed through the real ingress"
+        );
+        release_pass.send(()).unwrap();
+        let busy_settled = on_settled.recv_timeout(Duration::from_secs(20));
+        let before_end = rig.events();
+        let kept = rig.snapshot();
+        writeln!(
+            file,
+            "{}\n{}",
+            ASSISTANT.replace("{n}", "A"),
+            IDLE.trim_end()
+        )
+        .unwrap();
+        let (result, _) = first.join().unwrap();
+        assert_eq!(result, Ok(()), "A's observer completes once");
+        println!(
+            "BUSY_ARRIVAL merge={merge} B_settled={busy_settled:?} handoffs={:?}",
+            seen.lock().unwrap()
+        );
+        assert!(
+            busy_settled.is_ok(),
+            "the arrival wake must service B before A ends"
+        );
+        if missing {
+            assert_eq!(
+                before_end.iter().filter(|e| *e == "paste").count(),
+                1,
+                "no key for an unobserved pane"
+            );
+            assert_eq!(kept["items"].as_array().unwrap().len(), 1);
+            assert!(kept["head_injection"].is_null());
+            assert!(
+                seen.lock().unwrap()[1]
+                    .1
+                    .as_ref()
+                    .unwrap_err()
+                    .contains("TranscriptUnavailable")
+            );
+            rehydrate(&rig, &session);
+            rig.runtime.block_on(rig.mailbox.finish_turn(
+                crate::services::turn_orchestrator::QueuePersistenceContext::new(
+                    &ProviderKind::Claude,
+                    "input-owner-dispatch",
+                    None,
+                ),
+            ));
+            {
+                let _entered = rig.runtime.enter();
+                crate::services::discord::queue_io::input_owner::drive::wake(drive.clone());
+            }
+            let next = asked
+                .recv_timeout(Duration::from_secs(20))
+                .expect("B's one idle start after A ends");
+            std::thread::scope(|scope| {
+                let next = scope.spawn(|| {
+                    idle_turn(&rig, (session.as_str(), elsewhere.path()), next, |_| None)
+                });
+                let _close = CloseOnUnwind(rig.transcript());
+                let settled = on_settled.recv_timeout(Duration::from_secs(20));
+                writeln!(
+                    file,
+                    "{}\n{}",
+                    ASSISTANT.replace("{n}", "B"),
+                    IDLE.trim_end()
+                )
+                .unwrap();
+                assert_eq!(next.join().unwrap().0, Ok(()));
+                assert!(settled.is_ok(), "B's idle submit settled once");
+            });
+            rig.runtime.block_on(rig.mailbox.finish_turn(
+                crate::services::turn_orchestrator::QueuePersistenceContext::new(
+                    &ProviderKind::Claude,
+                    "input-owner-dispatch",
+                    None,
+                ),
+            ));
+            {
+                let _entered = rig.runtime.enter();
+                crate::services::discord::queue_io::input_owner::drive::wake(drive.clone());
+            }
+            on_settled.recv_timeout(Duration::from_secs(20)).unwrap();
+            assert_eq!(
+                seen.lock().unwrap().len(),
+                3,
+                "A, B refused busy, B's one idle start"
+            );
+            assert!(asked.try_recv().is_err(), "B never starts a second time");
+            assert_eq!(rig.events().iter().filter(|e| *e == "paste").count(), 2);
+            assert!(rig.snapshot()["items"].as_array().unwrap().is_empty());
+            return;
+        }
+        let handed = seen.lock().unwrap();
+        assert_eq!(handed.len(), 2, "exactly one handoff for A and the B unit");
+        assert!(
+            handed.iter().all(|(_, result)| result.is_ok()),
+            "{handed:?}"
+        );
+        let body = fs::read_to_string(rig.renderer.join("body")).unwrap();
+        assert!(body.contains("B arrived during A"), "{body}");
+        if merge {
+            assert!(
+                body.find("older queued input").unwrap() < body.find("B arrived during A").unwrap(),
+                "{body}"
+            );
+        }
+        let pastes = before_end.iter().filter(|event| *event == "paste").count();
+        assert_eq!(
+            pastes, 2,
+            "A then B each pasted once before A ended; queue={kept}"
+        );
+        assert!(kept["items"].as_array().unwrap().is_empty(), "{kept}");
+        assert!(kept["head_injection"].is_null(), "{kept}");
+        assert_eq!(kept["retained_inputs"], json!([]));
+        drop(handed);
+        rig.runtime.block_on(rig.mailbox.finish_turn(
+            crate::services::turn_orchestrator::QueuePersistenceContext::new(
+                &ProviderKind::Claude,
+                "input-owner-dispatch",
+                None,
+            ),
+        ));
+        {
+            let _entered = rig.runtime.enter();
+            crate::services::discord::queue_io::input_owner::drive::wake(drive.clone());
+        }
+        on_settled
+            .recv_timeout(Duration::from_secs(20))
+            .expect("turn-end wake settled");
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            2,
+            "the turn end never starts B again"
+        );
+        assert!(asked.try_recv().is_err(), "no second idle start");
+        assert_eq!(
+            rig.events(),
+            before_end,
+            "no duplicate keys after the turn end"
+        );
+    });
+    crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&rig.name);
+}
+
+/// Exercises a runtime refusal through the real owner drive and reads the mock Discord posts.
+fn busy_hold_notice(hold: Option<crate::services::discord::queue_io::input_ingress::Hold>) {
+    use crate::services::discord::queue_io::input_ingress::Hold;
+    use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
+    use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let channel = 7_272_810
+        + hold.map_or(7, |hold| Hold::ALL.iter().position(|h| *h == hold).unwrap()) as u64;
+    let before = if hold == Some(Hold::Modal) {
+        format!("Run this tool? allow / deny\n{}", view("", false))
+    } else {
+        view("", false)
+    };
+    let rig = rig(
+        &format!("oi-hold-{channel}"),
+        channel,
+        "normal",
+        before,
+        BUSY,
+    );
+    let id = ChannelId::new(channel);
+    let (mut shared, mock) = (
+        crate::services::discord::make_shared_data_for_tests(),
+        discord_mock::DiscordMockState::new(),
+    );
+    Arc::get_mut(&mut shared).unwrap().mailboxes = rig._registry.clone();
+    shared.restart.reconcile_done.store(
+        hold != Some(Hold::RestartRecovery),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    let server = rig.runtime.block_on(async {
+        mock.allow_channel(channel);
+        let (proxy, gateway, server) = discord_mock::start(mock.clone()).await;
+        shared
+            .http
+            .cached_serenity_ctx
+            .set(discord_mock::serenity_context(proxy, gateway).await)
+            .unwrap();
+        server
+    });
+    let mut item = rig.original.clone();
+    if hold == Some(Hold::Uploads) {
+        let persistence = crate::services::turn_orchestrator::QueuePersistenceContext::new(
+            &ProviderKind::Claude,
+            "input-owner-dispatch",
+            None,
+        );
+        let cancelled = rig.runtime.block_on(
+            rig.mailbox
+                .cancel_queued_primary_message(MessageId::new(item.message_id), persistence),
+        );
+        assert!(cancelled.removed.is_some());
+        item.message_id += 10;
+        item.source_message_ids = vec![item.message_id];
+        item.pending_uploads = vec!["/missing-owner-upload".into()];
+        assert!(matches!(
+            rig.runtime
+                .block_on(admit(&rig.mailbox, &item, AdmissionTicket::new())),
+            crate::services::discord::queue_io::input_owner::admission::Admission::Accepted(_)
+        ));
+    }
+    if hold == Some(Hold::ScreenMissing) {
+        running_row(&rig, "oi-absent-held-pane");
+    } else {
+        running_row(&rig, &rig.name);
+    }
+    rig.runtime.block_on(rig.mailbox.restore_active_turn(
+        Arc::new(CancelToken::new()),
+        UserId::new(9),
+        MessageId::new(1),
+    ));
+    let idle: Handoff = Arc::new(|_| Box::pin(async { Err("unexpected idle start".into()) }));
+    let mut drive = owner_drive(
+        (rig.mailbox.clone(), None),
+        (ProviderKind::Claude, channel),
+        idle,
+        Some(shared.clone()),
+    );
+    if hold == Some(Hold::OwnerChange) {
+        let (mailbox, handoff) = (rig.mailbox.clone(), drive.handoff.clone());
+        Arc::get_mut(&mut drive).unwrap().handoff = Arc::new(move |front| {
+            let (mailbox, handoff) = (mailbox.clone(), handoff.clone());
+            Box::pin(async move {
+                let stolen = front.clone();
+                mailbox
+                    .v2_request(move |slot| {
+                        let owner = slot.as_mut().ok_or("no owner")?;
+                        assert!(owner.claim_turn(stolen.1.message_id, &stolen).is_some());
+                        Ok(())
+                    })
+                    .await?;
+                handoff(front).await
+            })
+        });
+    }
+    let (settled, on_settled) = std::sync::mpsc::channel();
+    Arc::get_mut(&mut drive).unwrap().settled = Some(Arc::new(move || {
+        let settled = settled.clone();
+        Box::pin(async move {
+            let _ = settled.send(());
+        })
+    }));
+    let transition = (hold == Some(Hold::SessionSwitch)).then(|| {
+        rig.runtime
+            .block_on(shared.session_transition_lock(id).lock_owned())
+    });
+    let exercise = || {
+        for _ in 0..2 {
+            {
+                let _entered = rig.runtime.enter();
+                crate::services::discord::queue_io::input_owner::drive::wake(drive.clone());
+            }
+            on_settled
+                .recv_timeout(Duration::from_secs(20))
+                .expect("real drive settled");
+        }
+    };
+    if hold == Some(Hold::ScreenContention) {
+        crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
+            &rig.name, exercise,
+        );
+    } else {
+        exercise();
+    }
+    drop(transition);
+    let texts = mock.written_texts();
+    let notices: Vec<_> = texts
+        .iter()
+        .filter(|t| t.ends_with("즉시주입 하지 못하고 메시지큐에 들어갔습니다"))
+        .collect();
+    if let Some(hold) = hold {
+        assert_eq!(
+            notices,
+            [&hold.notice()],
+            "one notice after repeated real refusals: {texts:?}"
+        );
+        assert!(
+            rig.events().is_empty(),
+            "a refused input sent keys: {:?}",
+            rig.events()
+        );
+        assert_eq!(rig.snapshot()["items"].as_array().unwrap().len(), 1);
+    } else {
+        assert!(
+            notices.is_empty(),
+            "successful input owes no hold notice: {texts:?}"
+        );
+        assert_eq!(rig.events().iter().filter(|e| *e == "paste").count(), 1);
+    }
+    assert!(mock.unhandled.lock().unwrap().is_empty());
+    server.abort();
+}
+
+#[test]
+fn owner_session_switch_posts_one_runtime_hold_notice() {
+    busy_hold_notice(Some(
+        crate::services::discord::queue_io::input_ingress::Hold::SessionSwitch,
+    ));
+}
+
+#[test]
+fn owner_restart_recovery_posts_one_runtime_hold_notice() {
+    busy_hold_notice(Some(
+        crate::services::discord::queue_io::input_ingress::Hold::RestartRecovery,
+    ));
+}
+
+#[test]
+fn owner_upload_failure_posts_one_runtime_hold_notice() {
+    busy_hold_notice(Some(
+        crate::services::discord::queue_io::input_ingress::Hold::Uploads,
+    ));
+}
+
+#[test]
+fn owner_missing_screen_posts_one_runtime_hold_notice() {
+    busy_hold_notice(Some(
+        crate::services::discord::queue_io::input_ingress::Hold::ScreenMissing,
+    ));
+}
+
+#[test]
+fn owner_modal_posts_one_runtime_hold_notice() {
+    busy_hold_notice(Some(
+        crate::services::discord::queue_io::input_ingress::Hold::Modal,
+    ));
+}
+
+#[test]
+fn owner_screen_contention_posts_one_runtime_hold_notice() {
+    busy_hold_notice(Some(
+        crate::services::discord::queue_io::input_ingress::Hold::ScreenContention,
+    ));
+}
+
+#[test]
+fn owner_changed_claim_posts_one_runtime_hold_notice() {
+    busy_hold_notice(Some(
+        crate::services::discord::queue_io::input_ingress::Hold::OwnerChange,
+    ));
+}
+
+#[test]
+fn owner_success_posts_no_runtime_hold_notice() {
+    busy_hold_notice(None);
+}
+
 /// A Discord turn on the rig's pane for `front`, resuming `session` from a dir without its transcript;
 /// `driver` stands in for the provider's driver when the turn launches.
 fn idle_turn(
@@ -129,6 +650,7 @@ fn an_idle_pane_takes_each_queued_front_once_through_its_own_observer() {
         (rig.mailbox.clone(), None),
         (ProviderKind::Claude, rig.channel),
         idle,
+        None,
     );
     // The person's turn ends; the supervisor's boundary wake is the one event.
     let mut file = fs::OpenOptions::new()
@@ -299,6 +821,7 @@ fn a_pane_under_another_account_is_replaced_before_any_front_is_written() {
         (rig.mailbox.clone(), None),
         (ProviderKind::Claude, rig.channel),
         idle,
+        None,
     );
     let mut file = fs::OpenOptions::new()
         .append(true)

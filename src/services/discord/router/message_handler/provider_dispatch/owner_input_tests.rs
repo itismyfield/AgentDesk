@@ -1527,7 +1527,7 @@ fn an_idle_channel_hands_its_front_to_the_turn_start() {
             Box::pin(async { Err("left queued".into()) })
         });
     let owner = (rig.mailbox.clone(), None);
-    let drive = owner_drive(owner, (ProviderKind::Claude, rig.channel), idle);
+    let drive = owner_drive(owner, (ProviderKind::Claude, rig.channel), idle, None);
     let _entered = rig.runtime.enter();
     crate::services::discord::queue_io::input_owner::drive::wake(drive);
     for _ in 0..200 {
@@ -1577,6 +1577,7 @@ fn a_front_held_by_copy_mode_is_pasted_once_when_the_pane_leaves_it() {
         (rig.mailbox.clone(), None),
         (ProviderKind::Claude, rig.channel),
         idle,
+        None,
     );
     let (mailbox, (said, heard)) = (rig.mailbox.clone(), mpsc::channel());
     let ((held, on_hold), (left, on_left)) = (oneshot::channel(), oneshot::channel::<()>());
@@ -1739,6 +1740,7 @@ async fn a_busy_channel_leaves_a_start_for_its_own_turn() {
             (mailbox.clone(), None),
             (ProviderKind::Claude, channel),
             idle,
+            None,
         );
         let front = mailbox.v2_request(|slot| {
             let owner = slot.as_mut().ok_or("no owner")?;
