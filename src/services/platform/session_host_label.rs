@@ -4,6 +4,8 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::sync::OnceLock;
 
+use crate::services::discord::runtime_store::fsync_parent_dir;
+
 pub(crate) fn session_host_label() -> String {
     static LABEL: OnceLock<String> = OnceLock::new();
     LABEL.get_or_init(|| {
@@ -61,7 +63,7 @@ fn load_label(path: &Path, current: &str) -> io::Result<String> {
                     Ok(mut file) => {
                         writeln!(file, "{current}")?;
                         file.sync_all()?;
-                        sync_parent(parent)?;
+                        fsync_parent_dir(path)?;
                         return Ok(current.to_owned());
                     }
                     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -76,16 +78,8 @@ fn load_label(path: &Path, current: &str) -> io::Result<String> {
     writeln!(replacement, "{current}")?;
     replacement.as_file().sync_all()?;
     replacement.persist(path).map_err(|error| error.error)?;
-    sync_parent(parent)?;
+    fsync_parent_dir(path)?;
     Ok(current.to_owned())
-}
-
-fn sync_parent(parent: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    fs::File::open(parent)?.sync_all()?;
-    #[cfg(not(unix))]
-    let _ = parent;
-    Ok(())
 }
 
 #[cfg(test)]

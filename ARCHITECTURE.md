@@ -1202,6 +1202,8 @@ src/
 │   ├── discord/
 │   │   ├── abandon_request_store/
 │   │   │   └── probe_contract_tests.rs
+│   │   ├── adk_session/
+│   │   │   └── host_label_tests.rs
 │   │   ├── agent_handoff/
 │   │   │   └── accepted_tests.rs
 │   │   ├── busy_followup_retry_store/
@@ -3386,6 +3388,8 @@ src/
 │   │   │   ├── resolution.rs
 │   │   │   ├── runtime_path.rs
 │   │   │   └── windows_codex.rs
+│   │   ├── session_host_label/
+│   │   │   └── tests.rs
 │   │   ├── tmux/
 │   │   │   ├── liveness/
 │   │   │   │   └── tests.rs
@@ -3400,6 +3404,7 @@ src/
 │   │   ├── dump_tool.rs
 │   │   ├── mod.rs
 │   │   ├── network.rs
+│   │   ├── session_host_label.rs
 │   │   ├── shell.rs
 │   │   ├── tmux.rs
 │   │   └── windows_job.rs
