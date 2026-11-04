@@ -60,6 +60,9 @@ const labels = {
   CauseClearsBeforeRead: "the cause clears before its watch's first read [slice C]",
   PaneGoes: "the pane goes away while its cause stands [slice C]",
   WatchLosesPane: "the cause's watch reads its pane gone and ends [slice C]",
+  DriveMeetsRow: "the owner's turn start meets an earlier turn's carried row and is refused",
+  CarriedCloses: "the carried row closes once its native turn reads closed [never with the reader leak in cf]",
+  HandedOutside: "a person or another session hands the same text to the session directly",
   Done: null,
 };
 
