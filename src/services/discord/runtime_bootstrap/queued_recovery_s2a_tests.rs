@@ -198,8 +198,8 @@ fn boot_readopts_only_v2_queue_files_that_still_hold_an_input() {
             attempted(&handle, Some(queued(channel, 1)), settle).await;
             files.push(path);
         }
-        // Admitted by ticket, then discarded by /clear in the previous run: a queued bind outlives
-        // its item.
+        // Admitted by ticket, held by a modal before any key, then discarded by /clear in the
+        // previous run: a queued bind outlives its item.
         let channel = ChannelId::new(cleared);
         let persistence = super::super::queue_dispatch::persistence_context;
         let persistence = persistence(&previous, &provider, channel);
@@ -211,6 +211,37 @@ fn boot_readopts_only_v2_queue_files_that_still_hold_an_input() {
         let ticket = "cleared-ticket".to_string();
         let admitted = handle.v2_admit_ticket(queued(cleared, 1), ticket).await;
         admitted.unwrap();
+        let attempt = serde_json::json!({"nonce":"cleared","provider":"claude",
+            "target":{"host":"tmux","owner":"cleared","root":"/test","execution_nonce":"e"},
+            "source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,
+                "binding_watermark":null}});
+        let payload = serde_json::json!({"frame":"frame","digest":"digest","attribution":{}});
+        let reserved = handle.v2_request(move |slot| {
+            let attempt = serde_json::from_value(attempt).map_err(|e| e.to_string())?;
+            let payload = serde_json::from_value(payload).map_err(|e| e.to_string())?;
+            let owner = slot.as_mut().ok_or("no owner")?;
+            owner.reserve(attempt, payload).map(drop)
+        });
+        reserved.await.unwrap();
+        use crate::services::discord::queue_io::input_owner::effect;
+        let modal: effect::Leaf = Box::new(|_| {
+            crate::services::claude_tui::owner_input::vetoed(effect::MODAL);
+            Ok(effect::Completion::Held(effect::MODAL.into()))
+        });
+        let held = effect::run(&handle, Arc::new(|| 1), modal).await;
+        assert_eq!(held, Ok(effect::Completion::NotSent(effect::MODAL.into())));
+        let state = handle.v2_request(|slot| slot.as_ref().ok_or("no owner")?.json());
+        let state = state.await.unwrap();
+        let kinds: Vec<_> = (state["admission_binds"].as_array().unwrap().iter())
+            .map(|bind| bind["at"]["kind"].as_str().unwrap().to_string())
+            .collect();
+        assert!(state["head_injection"].is_null(), "{state}");
+        assert_eq!(state["items"].as_array().map(Vec::len), Some(1), "{state}");
+        assert_eq!(
+            kinds,
+            ["queued"],
+            "the hold keeps the queued bind alone: {state}"
+        );
         crate::services::discord::mailbox_clear_channel(&previous, &provider, channel).await;
         files.push(
             crate::services::turn_orchestrator::v2_queue(&persistence, channel)
