@@ -103,14 +103,14 @@ def rust_tokens(text, *, extended=False):
             tokens.append(RustToken(ident.group(), line, "ident", index))
             index = ident.end()
             continue
-        if char in "#![]{}();=:" or extended and char in ",*$":
+        if char in "#![]{}();=:" or extended and char in ",*$<>.'":
             tokens.append(RustToken(char, line, "punct", index))
         index += 1
     return tokens
 
 
-def production_tokens(path, *, unreadable=None):
-    """Keep production code tokens and literal values needed by path/include attributes."""
+def production_tokens(path, *, unreadable=None, diagnostic_path=None):
+    """Return production tokens, or None when a file-level test gate excludes the file."""
     try:
         from rust_production import _production_text
         from rust_lex import StripState, cfg_item_end, strip_line
@@ -132,7 +132,7 @@ def production_tokens(path, *, unreadable=None):
     for token in tokens:
         if token.start in inner:
             if not braces:
-                return []
+                return None
             containers[token.start] = braces[-1]
         if token.kind == "punct" and token.value == "{":
             braces.append(token.start)
@@ -161,7 +161,8 @@ def production_tokens(path, *, unreadable=None):
         except ValueError as exc:
             exact = False
             if unreadable is not None:
-                unreadable.append(f"{path}:{raw.count(chr(10), 0, start) + 1} uncertain test-only range: {exc}")
+                unreadable.append(f"{diagnostic_path if diagnostic_path is not None else path}:"
+                                  f"{raw.count(chr(10), 0, start) + 1} uncertain test-only range: {exc}")
             continue
         if ranges and start <= ranges[-1][1]:
             ranges[-1] = (ranges[-1][0], max(ranges[-1][1], end))
@@ -293,7 +294,8 @@ def walk(root, repo_root, inventory=None, *, production=False):
         try:
             if production:
                 if source.resolve() not in inv.source_tokens:
-                    inv.source_tokens[source.resolve()] = production_tokens(source, unreadable=inv.unreadable)
+                    inv.source_tokens[source.resolve()] = production_tokens(
+                        source, unreadable=inv.unreadable, diagnostic_path=source.relative_to(repo_root).as_posix())
                 tokens = inv.source_tokens[source.resolve()]
             else:
                 tokens = rust_tokens(source.read_text("utf-8"))
@@ -301,6 +303,8 @@ def walk(root, repo_root, inventory=None, *, production=False):
             if not production:
                 raise
             inv.read_failures.append(f"{source}: {type(exc).__name__}: {exc}")
+            continue
+        if production and tokens is None:
             continue
         if production:
             inv.sources.append((source.resolve(), outer, file_cfgs))

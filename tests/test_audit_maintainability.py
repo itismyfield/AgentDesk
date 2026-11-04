@@ -1816,5 +1816,172 @@ class ModuleLayersCheck(unittest.TestCase):
                 self.assertIn("external.rs", str(coverage["module_errors"]))
 
 
+    def test_module_paths_keep_their_cycle_with_same_named_functions_and_methods(self) -> None:
+        cases = (
+            ("no collision", "", ""),
+            ("free function", "fn upper() {}", ""),
+            ("renamed free function", "fn renamed() {}", ""),
+            ("associated method", "struct Marker; impl Marker { fn upper() {} }", ""),
+            ("renamed associated method", "struct Marker; impl Marker { fn renamed() {} }", ""),
+            ("local function", "", "fn upper() {}"),
+        )
+        expected = {(self._node("lower"), self._node("lower::upper")),
+                    (self._node("lower::upper"), self._node("lower"))}
+        for label, items, local in cases:
+            code = """
+                mod lower {
+                    mod upper { pub fn hit() { super::entry(); } }
+                    ITEMS
+                    pub fn entry() { LOCAL upper::hit(); }
+                }
+            """.replace("ITEMS", items).replace("LOCAL", local)
+            with self.subTest(case=label):
+                with _FakeSrcTree({"src/lib.rs": code}) as root:
+                    result = self.layers.analyze(root)
+                pairs = {(e["source"], e["target"]) for e in result["edges"]}
+                self.assertEqual(pairs, expected)
+                self.assertEqual(set(result["sccs"][0]),
+                                 {self._node("lower"), self._node("lower::upper")})
+                self.assertFalse(result["coverage"]["unresolved_references"])
+
+    def test_turbofish_type_arguments_remain_independent_internal_paths(self) -> None:
+        cases = (
+            ("crate path", "mod a { pub struct B; }", "consumer", "",
+             "std::sync::mpsc::channel::<crate::a::B>();", "a"),
+            ("relative path", "pub struct K;", "consumer", "",
+             "serde_json::from_value::<super::K>();", ""),
+            ("module alias", "mod a { pub struct B; }", "consumer",
+             "use crate::a as origin;", "std::sync::mpsc::channel::<origin::B>();", "a"),
+            ("boundary census", "mod services { pub mod discord { pub struct Handle; } }",
+             "consumer", "", "Vec::<crate::services::discord::Handle>::new();", "services::discord"),
+        )
+        for label, declarations, owner, imports, expression, target in cases:
+            code = declarations + "\nmod " + owner + " { " + imports + " fn run() { " + expression + " } }"
+            with self.subTest(case=label):
+                with _FakeSrcTree({"src/lib.rs": code}) as root:
+                    result = self.layers.analyze(root)
+                edges = [e for e in result["edges"]
+                         if e["source"] == self._node(owner) and e["kind"] == "path"]
+                self.assertIn(self._node(target), {e["target"] for e in edges})
+                if label == "boundary census":
+                    census = [r for r in result["census"] if r["source"] == self._node(owner)]
+                    self.assertEqual([(r["kind"], r["path"]) for r in census],
+                                     [("path", "crate::services::discord::Handle")])
+
+    def test_static_lifetime_does_not_declare_a_value_named_after_its_type(self) -> None:
+        with _FakeSrcTree({"src/lib.rs": """
+            mod consumer {
+                pub fn borrowed() -> &'static std::path::Path { loop {} }
+                fn run() { std::path::Path::new("file"); }
+            }
+        """}) as root:
+            result = self.layers.analyze(root)
+        self.assertFalse(result["coverage"]["unresolved_references"])
+        self.assertFalse(result["edges"])
+
+    def test_boolean_operators_and_method_turbofish_do_not_create_uncertainty(self) -> None:
+        with _FakeSrcTree({"src/lib.rs": """
+            mod consumer {
+                enum Kind { Ready }
+                fn run() {
+                    if !ok {}
+                    let different = value != 1;
+                    let changed = Kind::Ready != Kind::Ready;
+                    row.try_get::<String, _>(0);
+                }
+            }
+        """}) as root:
+            result = self.layers.analyze(root)
+        self.assertFalse(result["coverage"]["unresolved_references"])
+
+    def test_external_macro_import_names_do_not_hide_real_macro_and_alias_uncertainty(self) -> None:
+        with _FakeSrcTree({"Cargo.toml": """
+            [package]
+            name = "fixture"
+            version = "0.1.0"
+            [dependencies]
+            anyhow = "1"
+        """, "src/lib.rs": """
+            mod consumer {
+                use anyhow::{Result, anyhow};
+                fn run() { anyhow!("failure"); }
+            }
+            mod cyclic {
+                use self::second as first;
+                use self::first as second;
+                fn run() { unknown_macro!(); first::run(); }
+            }
+        """}) as root:
+            result = self.layers.analyze(root)
+        unresolved = result["coverage"]["unresolved_references"]
+        external = [r for r in unresolved if r["source"] == self._node("consumer")]
+        self.assertFalse(any("cycle" in r["reason"] or "cyclic" in r["reason"] for r in external))
+        self.assertTrue(any(r["path"] == "unknown_macro" for r in unresolved))
+        self.assertTrue(any(r["source"] == self._node("cyclic")
+                            and ("cycle" in r["reason"] or "cyclic" in r["reason"])
+                            for r in unresolved))
+
+    def test_cfg_uncertainty_evidence_is_stable_across_checkout_paths(self) -> None:
+        files = {"src/lib.rs": """
+            struct Record {
+                #[cfg(test)]
+                hidden: std::collections::HashMap<String, u64>,
+                kept: u64,
+            }
+        """}
+        reports = []
+        for _ in range(2):
+            with _FakeSrcTree(files) as root:
+                result = self.layers.analyze(root)
+                reports.append(result["coverage"]["cfg_uncertainties"])
+        self.assertTrue(reports[0])
+        self.assertEqual(reports[0], reports[1])
+        self.assertTrue(all(row.startswith("src/lib.rs:") for row in reports[0]))
+
+    def test_file_inner_test_gate_excludes_its_node_but_keeps_empty_production_modules(self) -> None:
+        with _FakeSrcTree({"src/lib.rs": "mod hidden; mod empty;",
+                           "src/hidden.rs": "#![cfg(test)]\npub fn only_test() {}\n",
+                           "src/empty.rs": ""}) as root:
+            result = self.layers.analyze(root)
+        self.assertNotIn(self._node("hidden"), result["nodes"])
+        self.assertIn(self._node("empty"), result["nodes"])
+        self.assertEqual(result["coverage"]["logical_modules"], 2)
+
+
+    def test_same_named_module_and_function_resolve_in_their_call_namespaces(self) -> None:
+        with _FakeSrcTree({"src/lib.rs": """
+            mod lower {
+                pub mod upper { pub fn hit() {} }
+                pub fn upper() {}
+            }
+            mod caller {
+                fn run() {
+                    crate::lower::upper();
+                    crate::lower::upper::hit();
+                }
+            }
+        """}) as root:
+            result = self.layers.analyze(root)
+        targets = {e["target"] for e in result["edges"]
+                   if e["source"] == self._node("caller") and e["kind"] == "path"}
+        self.assertEqual(targets, {self._node("lower"), self._node("lower::upper")})
+        self.assertFalse(result["coverage"]["unresolved_references"])
+
+    def test_bare_import_with_unresolved_module_value_namespace_stays_uncertain(self) -> None:
+        with _FakeSrcTree({"src/lib.rs": """
+            mod lower {
+                pub mod upper {}
+                pub fn upper() {}
+            }
+            mod caller { use crate::lower::upper; }
+        """}) as root:
+            result = self.layers.analyze(root)
+        unresolved = [r for r in result["coverage"]["unresolved_references"]
+                      if r["source"] == self._node("caller")]
+        self.assertTrue(any(r["path"] == "crate::lower::upper"
+                            and "ambiguous" in r["reason"] for r in unresolved))
+
+
+
 if __name__ == "__main__":
     unittest.main()

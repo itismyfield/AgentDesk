@@ -73,7 +73,7 @@ def _crate(root, repo, coverage, external):
     coverage["cfg_conditions"].extend({"root": rel_root, "module": node(outer), "conditions": cfgs}
                                       for _source, outer, cfgs in inv.sources if cfgs)
     symbols, imports, exports, refs, macros = {}, {}, {}, [], {}
-    module_scopes = {}
+    module_scopes, symbol_kinds, scoped_items = {}, {}, {}
     for source, outer, cfgs in inv.sources:
         tokens = inv.source_tokens[source]
         values = [t.value for t in tokens]
@@ -96,8 +96,14 @@ def _crate(root, repo, coverage, external):
                 if module_scopes.get((owners[-1], str(source))) == (str(source), *scopes) and len(owners) > 1:
                     owners.pop()
                 scopes.pop()
-            if token.kind == "ident" and token.value in ITEMS and i + 1 < len(tokens) and tokens[i + 1].kind == "ident":
-                symbols[owners[-1] + (values[i + 1],)] = owners[-1]
+            if (token.kind == "ident" and token.value in ITEMS and i + 1 < len(tokens)
+                    and tokens[i + 1].kind == "ident" and values[max(0, i - 1):i] != ["'"]):
+                name, owner = values[i + 1], owners[-1]
+                if scope == module_scopes.get((owner, str(source))):
+                    symbols[owner + (name,)] = owner
+                    symbol_kinds[owner + (name,)] = token.value
+                else:
+                    scoped_items[(owner, scope, name)] = token.value
         code = _code(tokens)
         used = set()
         for match in USE_TREE.finditer(code):
@@ -110,7 +116,7 @@ def _crate(root, repo, coverage, external):
                 names = tuple(p[0] for p in path)
                 leaf = path[-1][1]
                 line = tokens[max(0, bisect_right(offsets, leaf) - 1)].line
-                ref = (names, owner, scope, rel, line, kind, leaf)
+                ref = (names, owner, scope, rel, line, kind, leaf, "unknown")
                 refs.append(ref)
                 alias = re.match(r"\s+as\s+((?:r#)?[A-Za-z_]\w*)", code[leaf + len(names[-1]):])
                 local = alias[1].removeprefix("r#") if alias else names[-1]
@@ -168,15 +174,19 @@ def _crate(root, repo, coverage, external):
                 names.append(values[i + 2])
                 i += 3
             owner, scope = metadata[start]
-            is_macro = values[i:i + 1] == ["!"]
-            if len(names) > 1 or is_macro:
-                refs.append((tuple(names), owner, scope, rel, token.line, "macro" if is_macro else "path", token.start))
+            is_macro = (values[i:i + 1] == ["!"] and i + 1 < len(tokens)
+                        and tokens[i + 1].kind == "punct" and values[i + 1] in {"(", "[", "{"}
+                        and names[0] not in {"if", "while", "return", "break", "yield", "match", "let"})
+            method = start > 0 and values[start - 1] == "." and values[max(0, start - 2):start] != [".", "."]
+            if (len(names) > 1 or is_macro) and not method:
+                namespace = "value" if values[i:i + 1] == ["("] else "unknown"
+                refs.append((tuple(names), owner, scope, rel, token.line, "macro" if is_macro else "path", token.start, namespace))
     modules = set(inv.logical_modules)
 
     macro_symbols = {key: definition[0] for key, definition in macros.items()}
     symbol_tables = ({**macro_symbols, **symbols}, {**symbols, **macro_symbols})
 
-    def resolve(path, owner, scope, trail=frozenset(), macro=False):
+    def resolve(path, owner, scope, trail=frozenset(), macro=False, namespace="unknown"):
         symbols = symbol_tables[macro]
         if not path or len(trail) > 64:
             return None, "alias cycle or depth limit"
@@ -197,19 +207,28 @@ def _crate(root, repo, coverage, external):
             for n in range(len(scope), 0, -1):
                 key = (owner, scope[:n], first)
                 if key in imports:
+                    if (rest and owner + (first,) in modules
+                            and scope[:n] == module_scopes.get((owner, scope[0]))
+                            and len(imports[key]) == 1 and imports[key][0][0][:1] == (first,)):
+                        return follow(owner, [first, *rest], trail, macro, namespace)
                     if key in trail:
                         if owner + (first,) in modules:
-                            return follow(owner, [first, *rest], trail, macro)
+                            return follow(owner, [first, *rest], trail, macro, namespace)
+                        if first in external and len(imports[key]) == 1 and imports[key][0][0][:1] == (first,):
+                            return (None, path), "external"
                         return None, "alias cycle"
                     if len(imports[key]) != 1:
                         return None, "cfg-ambiguous alias"
                     binding = imports[key][0]
-                    result, reason = resolve(binding[0], binding[1], binding[2], trail | {key}, macro)
+                    result, reason = resolve(binding[0], binding[1], binding[2], trail | {key}, macro, "module" if rest else namespace)
                     if result is None:
                         return None, reason
                     if result[0] is None:
                         return (None, result[1] + tuple(rest)), reason
-                    return follow(result[1], rest, trail | {key}, macro)
+                    return follow(result[1], rest, trail | {key}, macro, namespace)
+            for n in range(len(scope), 0, -1):
+                if scoped_items.get((owner, scope[:n], first)) in {"struct", "enum", "union", "trait", "type"}:
+                    return (owner, owner + path), "resolved"
             if owner + (first,) in symbols or owner + (first,) in modules:
                 prefix = owner
             elif (first,) in symbols or (first,) in modules:
@@ -219,28 +238,32 @@ def _crate(root, repo, coverage, external):
             else:
                 return None, "unknown path root"
             rest = [first, *rest]
-        return follow(prefix, rest, trail, macro)
+        return follow(prefix, rest, trail, macro, namespace)
 
-    def follow(prefix, rest, trail, macro):
+    def follow(prefix, rest, trail, macro, namespace):
         symbols = symbol_tables[macro]
         if rest and rest[-1] == "self":
             rest = rest[:-1]
         while rest:
             for n in range(len(prefix), 0, -1):
-                if prefix[:n] in symbols:
+                if prefix[:n] in symbols and prefix[:n] not in modules:
+                    if not macro and symbol_kinds.get(prefix[:n]) in {"fn", "const", "static"}:
+                        return None, "value item used as path prefix"
                     return (symbols[prefix[:n]], prefix + tuple(rest)), "resolved"
             name, *rest = rest
             if name == "*":
                 return None, "unresolved glob"
-            if rest and prefix + (name,) in modules:
+            if (rest or namespace == "module") and prefix + (name,) in modules:
                 prefix += (name,)
                 continue
             key = (prefix, name)
+            if prefix + (name,) in modules and namespace == "unknown" and (prefix + (name,) in symbols or key in exports):
+                return None, "ambiguous module/value namespace"
             if key in exports:
                 if key in trail or len(exports[key]) != 1:
                     return None, "cyclic or cfg-ambiguous reexport"
                 binding = exports[key][0]
-                result, reason = resolve(binding[0], binding[1], binding[2], trail | {key}, macro)
+                result, reason = resolve(binding[0], binding[1], binding[2], trail | {key}, macro, "module" if rest else namespace)
                 if result is None:
                     return None, reason
                 if result[0] is None:
@@ -248,11 +271,16 @@ def _crate(root, repo, coverage, external):
                 prefix = result[1]
             else:
                 prefix += (name,)
-                if prefix in symbols:
-                    # Associated items remain owned by the declared type's module.
+                if prefix in symbols and (prefix not in modules or namespace == "value"):
+                    if rest and not macro and symbol_kinds.get(prefix) in {"fn", "const", "static"}:
+                        return None, "value item used as path prefix"
                     return (symbols[prefix], prefix + tuple(rest)), "resolved"
                 if prefix not in modules:
                     return None, "unknown internal item"
+        if prefix in modules and namespace != "value":
+            if prefix in symbols and namespace == "unknown":
+                return None, "ambiguous module/value namespace"
+            return (prefix, prefix), "resolved"
         for n in range(len(prefix), 0, -1):
             if prefix[:n] in symbols:
                 return (symbols[prefix[:n]], prefix), "resolved"
@@ -261,8 +289,8 @@ def _crate(root, repo, coverage, external):
     edges, census = defaultdict(set), []
     resolved_refs = []
     for ref in refs:
-        path, owner, scope, file, line, kind, _offset = ref
-        result, reason = resolve(path, owner, scope, macro=kind == "macro")
+        path, owner, scope, file, line, kind, _offset, namespace = ref
+        result, reason = resolve(path, owner, scope, macro=kind == "macro", namespace=namespace)
         site = f"{file}:{line}"
         if result is None or kind == "macro":
             coverage["unresolved_references"].append({"source": node(owner), "site": site, "path": "::".join(path),
