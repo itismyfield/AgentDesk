@@ -135,7 +135,7 @@ Command for a mutant: copy `InputPathClean.cfg`, change the constant, and run th
 
 ## Stop before the first key (#7754)
 
-Code: branch `feat/i7754-stop-gate` on `e85948c2c3`. `StopBeforeKey(k)` is a user stop while the drive holds an input in `reserved`, `direct` or `stash`, before `ArmAndKey`. The writer token's gate is NoKeyYet (`provider/native_stop.rs` `ReceiptSink`): the stop takes it under the cancel decision (`StopCancel::decide` -> `State::admit`), main cancels, and the writer's first-key check (`claude_tui/input/submission.rs` `run`) ends `Cancelled{0}`, which the owner leaf settles as WriteUncertain (`queue_io/input_owner/effect.rs` `idle_claude`), so the head is Unknown and never resent. The transition is enabled in every InputPath config, so the existing rules (DraftSafe, NoDuplicate and the rest) are checked again with it.
+Code: branch `feat/i7754-stop-gate` on `e85948c2c3`. `StopBeforeKey(k)` is a user stop while the drive holds an input in `reserved`, `direct` or `stash`, before `ArmAndKey`. The writer token's gate is NoKeyYet (`provider/native_stop.rs` `ReceiptSink`): the stop takes it under the cancel decision (`StopCancel::decide` -> `State::admit`), main cancels, and the writer's first-key check (`claude_tui/input/submission.rs` `run`, after the fence claim) ends `Cancelled{0}`. The claimed attempt yields no not-sent proof (`claude_tui/owner_input.rs` `capture_scope`), so the owner settles it WriteUncertain: the head is Unknown and never resent. The transition is enabled in every InputPath config, so the existing rules (DraftSafe, NoDuplicate and the rest) are checked again with it.
 
 | Config | Constants | Distinct states | Rules that break | Path |
 |---|---|---|---|---|
