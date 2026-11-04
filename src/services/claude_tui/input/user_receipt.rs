@@ -4,6 +4,7 @@ use crate::services::tui_prompt_dedupe::binding_context::{self, SpawnNonceMarker
 use crate::services::tui_prompt_dedupe::{self, TuiRuntimeBinding};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::sync::Arc;
 
 /// A pane stays the same across handoff and SID rehydration, but not a respawn.
 #[derive(Debug, PartialEq, Eq)]
@@ -35,16 +36,196 @@ impl PaneIdentity {
 #[derive(Debug)]
 pub(crate) struct UserReceipt {
     session: String,
-    pane: PaneIdentity,
+    pane: Arc<PaneIdentity>,
     sid: String,
     file: Option<File>,
     offset: u64,
+    #[cfg(unix)]
+    scanned: u64,
+    #[cfg(unix)]
+    partial: Vec<u8>,
     end: Option<u64>,
     ended: bool,
     frame: String,
 }
 
 impl UserReceipt {
+    /// Share the writer's snapshot, never recapture its boundary for a second consumer.
+    pub(crate) fn copy_for_native(&self) -> Option<Self> {
+        Some(Self {
+            session: self.session.clone(),
+            pane: self.pane.clone(),
+            sid: self.sid.clone(),
+            file: match &self.file {
+                Some(file) => Some(file.try_clone().ok()?),
+                None => None,
+            },
+            offset: self.offset,
+            #[cfg(unix)]
+            scanned: self.offset,
+            #[cfg(unix)]
+            partial: Vec::new(),
+            end: None,
+            ended: false,
+            frame: self.frame.clone(),
+        })
+    }
+
+    pub(crate) fn pane_identity(&self) -> Arc<PaneIdentity> {
+        self.pane.clone()
+    }
+
+    /// Continue at the unread byte, retaining a partial row until its newline arrives.
+    pub(crate) fn try_pin_native_user(
+        &mut self,
+    ) -> Result<Option<crate::services::provider::native_stop::NativeUserPin>, ()> {
+        #[cfg(not(unix))]
+        {
+            Err(())
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{FileExt, MetadataExt};
+            const CAP: u64 = 16 * 1024 * 1024;
+            let session = self.session.clone();
+            crate::services::tmux_common::with_tmux_source_authority(&session, |authority| {
+                let Some(current) =
+                    tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(
+                        authority,
+                    )
+                else {
+                    return Ok(None);
+                };
+                let Some(pane) = PaneIdentity::from_binding(&self.session, &current) else {
+                    return Ok(None);
+                };
+                if &pane != self.pane.as_ref()
+                    || current
+                        .session_id
+                        .as_deref()
+                        .is_some_and(|sid| sid != self.sid)
+                {
+                    return Err(());
+                }
+                if self.file.is_none() {
+                    let Ok(file) = open(&current.output_path) else {
+                        return Ok(None);
+                    };
+                    self.file = Some(file);
+                }
+                let file = self.file.as_ref().ok_or(())?;
+                let Ok(metadata) = file.metadata() else {
+                    return Ok(None);
+                };
+                let Ok(path_metadata) = std::fs::symlink_metadata(&self.pane.output_path) else {
+                    return Ok(None);
+                };
+                if !path_metadata.is_file()
+                    || (metadata.dev(), metadata.ino())
+                        != (path_metadata.dev(), path_metadata.ino())
+                    || metadata.len() < self.scanned
+                {
+                    return Err(());
+                }
+                while self.scanned < metadata.len() {
+                    let remaining = CAP.saturating_sub(self.scanned - self.offset);
+                    if remaining == 0 {
+                        return Err(());
+                    }
+                    let size = (metadata.len() - self.scanned)
+                        .min(remaining)
+                        .min(64 * 1024) as usize;
+                    let mut bytes = vec![0; size];
+                    if file.read_exact_at(&mut bytes, self.scanned).is_err() {
+                        return Ok(None);
+                    }
+                    #[cfg(test)]
+                    {
+                        NATIVE_READ_BYTES.with(|total| total.set(total.get() + size as u64));
+                    }
+                    self.scanned += size as u64;
+                    self.partial.extend_from_slice(&bytes);
+                    if !bytes.contains(&b'\n') {
+                        continue;
+                    }
+                    let mut consumed = 0;
+                    for line in self.partial.split_inclusive(|byte| *byte == b'\n') {
+                        if !line.ends_with(b"\n") {
+                            break;
+                        }
+                        let start = self.scanned - self.partial.len() as u64 + consumed as u64;
+                        consumed += line.len();
+                        let record: serde_json::Value =
+                            serde_json::from_slice(line).map_err(|_| ())?;
+                        if let Some(pin) = self.native_pin_for_row(
+                            &record,
+                            line,
+                            start,
+                            (metadata.dev(), metadata.ino()),
+                            &current,
+                        )? {
+                            return Ok(Some(pin));
+                        }
+                    }
+                    self.partial.drain(..consumed);
+                }
+                if self.scanned - self.offset >= CAP {
+                    Err(())
+                } else {
+                    Ok(None)
+                }
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    fn native_pin_for_row(
+        &self,
+        record: &serde_json::Value,
+        line: &[u8],
+        start: u64,
+        source: (u64, u64),
+        current: &TuiRuntimeBinding,
+    ) -> Result<Option<crate::services::provider::native_stop::NativeUserPin>, ()> {
+        if record["isSidechain"] == true {
+            return Ok(None);
+        }
+        let Some((_, uuid)) =
+            tui_prompt_dedupe::extract_claude_transcript_user_prompt_with_entry_id(record)
+        else {
+            return Ok(None);
+        };
+        let exact = user_text(record).is_some_and(|text| {
+            super::super::busy_inject::exact_receipt(&normalize(&text), &self.frame)
+        });
+        if record["sessionId"].as_str() != Some(self.sid.as_str())
+            || !exact
+            || !same_file(self.file.as_ref().ok_or(())?, &self.pane.output_path)
+            || PaneIdentity::from_binding(&self.session, current).as_ref()
+                != Some(self.pane.as_ref())
+        {
+            return Err(());
+        }
+        Ok(Some(
+            crate::services::provider::native_stop::NativeUserPin {
+                uuid: uuid.filter(|id| !id.is_empty()).ok_or(())?,
+                source_file: source,
+                range: (start, start + line.len() as u64),
+                receipt_start: self.offset,
+                row_digest: digest(line),
+                frame_digest: digest(self.frame.as_bytes()),
+                session_id: self.sid.clone(),
+                output_path: self.pane.output_path.clone(),
+                tmux_session: self.session.clone(),
+                spawn_nonce: match &self.pane.nonce {
+                    SpawnNonceMarker::Known(nonce) => Some(nonce.clone()),
+                    _ => None,
+                },
+                direct: false,
+            },
+        ))
+    }
+
     pub(crate) fn before(session: &str, prompt: &str, sid: Option<&str>) -> Option<Self> {
         crate::services::tmux_common::with_tmux_source_authority(session, |authority| {
             let mut binding =
@@ -87,7 +268,7 @@ impl UserReceipt {
         binding: TuiRuntimeBinding,
         allow_missing: bool,
     ) -> Option<Self> {
-        let pane = PaneIdentity::from_binding(session, &binding)?;
+        let pane = Arc::new(PaneIdentity::from_binding(session, &binding)?);
         let sid = binding.session_id.clone()?;
         let (file, offset) = match open(&binding.output_path) {
             Ok(mut file) => {
@@ -105,6 +286,10 @@ impl UserReceipt {
             sid,
             file,
             offset,
+            #[cfg(unix)]
+            scanned: offset,
+            #[cfg(unix)]
+            partial: Vec::new(),
             end: None,
             ended: false,
             frame: prompt.replace("\r\n", "\n").replace('\r', "\n"),
@@ -124,7 +309,9 @@ impl UserReceipt {
             else {
                 return;
             };
-            if PaneIdentity::from_binding(&self.session, &current).as_ref() != Some(&self.pane) {
+            if PaneIdentity::from_binding(&self.session, &current).as_ref()
+                != Some(self.pane.as_ref())
+            {
                 return;
             }
             if self.file.is_none() {
@@ -190,9 +377,80 @@ impl UserReceipt {
             return None;
         }
         receipt.offset = range.0;
+        receipt.scanned = range.0;
         receipt.end = Some(range.1);
         receipt.ended = true;
         Some(receipt)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn native_pin_before_tail(
+        session: &str,
+        prompt: &str,
+        sid: Option<&str>,
+        end: u64,
+    ) -> Option<crate::services::provider::native_stop::NativeUserPin> {
+        use std::os::unix::fs::{FileExt, MetadataExt};
+        let binding = tui_prompt_dedupe::runtime_binding_for_tmux_session(session)?;
+        let file = open(&binding.output_path).ok()?;
+        let metadata = file.metadata().ok()?;
+        if end == 0 || end > metadata.len() {
+            return None;
+        }
+        // Search only the sealed final row; old prefix and later reader frames are irrelevant.
+        let mut bytes = vec![0; end.min(128 * 1024) as usize];
+        let mut cursor = bytes.len();
+        let row_offset = loop {
+            let next = cursor.saturating_sub(4 * 1024);
+            let start = end - (bytes.len() - next) as u64;
+            file.read_exact_at(&mut bytes[next..cursor], start).ok()?;
+            #[cfg(test)]
+            NATIVE_READ_BYTES.with(|total| total.set(total.get() + (cursor - next) as u64));
+            cursor = next;
+            if bytes.last() != Some(&b'\n') {
+                return None;
+            }
+            if let Some(offset) = bytes[cursor..bytes.len() - 1]
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+            {
+                break cursor + offset + 1;
+            }
+            if cursor == 0 {
+                if end == bytes.len() as u64 {
+                    break 0;
+                }
+                return None;
+            }
+        };
+        let line = &bytes[row_offset..];
+        let row_start = end - line.len() as u64;
+        let record: serde_json::Value = serde_json::from_slice(line).ok()?;
+        let sid = sid
+            .filter(|sid| !sid.is_empty())
+            .or_else(|| record["sessionId"].as_str().filter(|sid| !sid.is_empty()))?;
+        let source = (metadata.dev(), metadata.ino());
+        let receipt =
+            Self::from_native_range(session, prompt, Some(sid), (row_start, end), source)?;
+        let mut pin =
+            crate::services::tmux_common::with_tmux_source_authority(session, |authority| {
+                let current =
+                    tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(
+                        authority,
+                    )?;
+                if current
+                    .session_id
+                    .as_deref()
+                    .is_some_and(|current| current != sid)
+                {
+                    return None;
+                }
+                receipt
+                    .native_pin_for_row(&record, line, row_start, source, &current)
+                    .ok()?
+            })?;
+        pin.direct = true;
+        Some(pin)
     }
 
     pub(crate) fn confirmed(&mut self) -> bool {
@@ -208,7 +466,9 @@ impl UserReceipt {
             else {
                 return false;
             };
-            if PaneIdentity::from_binding(&self.session, &current).as_ref() != Some(&self.pane) {
+            if PaneIdentity::from_binding(&self.session, &current).as_ref()
+                != Some(self.pane.as_ref())
+            {
                 return false;
             }
             self.matches_through(end)
@@ -255,6 +515,93 @@ impl UserReceipt {
             line.clear();
         }
         matches == 1 && same_file(file, &self.pane.output_path)
+    }
+}
+
+#[cfg(all(test, unix))]
+thread_local! { static NATIVE_READ_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+#[cfg(all(test, unix))]
+pub(crate) fn native_read_byte_total() -> u64 {
+    NATIVE_READ_BYTES.with(std::cell::Cell::get)
+}
+
+#[cfg(unix)]
+fn normalize(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+#[cfg(unix)]
+fn digest(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
+}
+
+/// Re-adopt only the stored row on the same live pane, never search for another input.
+pub(crate) fn revalidate_native_pin(
+    pin: &crate::services::provider::native_stop::NativeUserPin,
+) -> bool {
+    #[cfg(not(unix))]
+    {
+        let _ = pin;
+        false
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{FileExt, MetadataExt};
+        crate::services::tmux_common::with_tmux_source_authority(&pin.tmux_session, |authority| {
+            let validate = || -> Option<()> {
+                let binding =
+                    tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(
+                        authority,
+                    )?;
+                let pane = PaneIdentity::from_binding(&pin.tmux_session, &binding)?;
+                let SpawnNonceMarker::Known(nonce) = pane.nonce else {
+                    return None;
+                };
+                if pin.spawn_nonce.as_deref() != Some(nonce.as_str())
+                    || binding.runtime_kind != RuntimeHandoffKind::ClaudeTui
+                    || binding.output_path != pin.output_path
+                    || binding
+                        .session_id
+                        .as_deref()
+                        .is_some_and(|sid| sid != pin.session_id)
+                    || pin.uuid.is_empty()
+                    || pin.session_id.is_empty()
+                    || pin.range.0 < pin.receipt_start
+                    || pin.range.0 >= pin.range.1
+                    || pin.range.1 - pin.range.0 > 16 * 1024 * 1024
+                {
+                    return None;
+                }
+                let file = open(&pin.output_path).ok()?;
+                let metadata = file.metadata().ok()?;
+                if (metadata.dev(), metadata.ino()) != pin.source_file
+                    || metadata.len() < pin.range.1
+                {
+                    return None;
+                }
+                let mut bytes = vec![0; (pin.range.1 - pin.range.0) as usize];
+                file.read_exact_at(&mut bytes, pin.range.0).ok()?;
+                if !bytes.ends_with(b"\n") || digest(&bytes) != pin.row_digest {
+                    return None;
+                }
+                let record: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+                let (_, uuid) =
+                    tui_prompt_dedupe::extract_claude_transcript_user_prompt_with_entry_id(
+                        &record,
+                    )?;
+                let body = normalize(&user_text(&record)?);
+                if uuid.as_deref() != Some(pin.uuid.as_str())
+                    || record["sessionId"].as_str() != Some(pin.session_id.as_str())
+                    || !(digest(body.as_bytes()) == pin.frame_digest
+                        || super::super::busy_inject::pasted_inner(&body)
+                            .is_some_and(|inner| digest(inner.as_bytes()) == pin.frame_digest))
+                {
+                    return None;
+                }
+                same_file(&file, &pin.output_path).then_some(())
+            };
+            validate().is_some()
+        })
     }
 }
 
@@ -311,6 +658,123 @@ mod tests {
     use serde_json::json;
     #[cfg(unix)]
     use std::io::Write;
+
+    #[cfg(unix)]
+    fn direct_pin_fixture(
+        row: &str,
+        sid: Option<&str>,
+    ) -> (
+        Option<crate::services::provider::native_stop::NativeUserPin>,
+        u64,
+        u64,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("direct-prefix.jsonl");
+        let session = format!("native-direct-prefix-{}", uuid::Uuid::new_v4());
+        let mut file = File::create(&path).unwrap();
+        file.write_all(b"{\"type\":\"system\",\"padding\":\"")
+            .unwrap();
+        for _ in 0..320 {
+            file.write_all(&[b'x'; 64 * 1024]).unwrap();
+        }
+        file.write_all(b"\"}\n").unwrap();
+        let start = file.stream_position().unwrap();
+        file.write_all(row.as_bytes()).unwrap();
+        let end = file.stream_position().unwrap();
+        for _ in 0..64 {
+            file.write_all(&[b'x'; 64 * 1024]).unwrap();
+        }
+        tui_prompt_dedupe::register_tmux_runtime_binding(
+            &session,
+            TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                output_path: path.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: sid.map(str::to_owned),
+                last_offset: end,
+                relay_last_offset: None,
+            },
+        );
+        let before = native_read_byte_total();
+        let pin = UserReceipt::native_pin_before_tail(&session, "own", sid, end);
+        let read = native_read_byte_total() - before;
+        tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
+        if let Some(pin) = &pin {
+            assert_eq!(pin.range, (start, end));
+            assert_eq!(pin.uuid, "direct-own");
+            assert_eq!(pin.session_id, "direct-sid");
+            assert!(pin.direct);
+        }
+        (pin, read, end - start)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn f6_direct_prefix_reader_caps_io_after_twenty_mib_and_ignores_successors() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let row = json!({"type":"user", "uuid":"direct-own", "sessionId":"direct-sid",
+            "message":{"role":"user", "content":"own"}})
+        .to_string()
+            + "\n";
+        for sid in [Some("direct-sid"), None] {
+            let (pin, read, _) = direct_pin_fixture(&row, sid);
+            assert!(
+                pin.is_some(),
+                "the sealed user row supplies its native identity"
+            );
+            assert!(
+                read <= 128 * 1024,
+                "read {read} bytes for a small direct user row"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn f6_direct_prefix_reader_rejects_rows_crossing_the_read_window() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        for (size, expected) in [
+            (128 * 1024 - 1, true),
+            (128 * 1024, false),
+            (128 * 1024 + 1, false),
+        ] {
+            let mut row = json!({"type":"user", "uuid":"direct-own", "sessionId":"direct-sid",
+                "message":{"role":"user", "content":"own"}, "padding":""});
+            let overhead = row.to_string().len() + 1;
+            row["padding"] = serde_json::Value::String("x".repeat(size - overhead));
+            let row = row.to_string() + "\n";
+            let (pin, read, actual_size) = direct_pin_fixture(&row, None);
+            assert_eq!(actual_size, size as u64);
+            assert_eq!(pin.is_some(), expected, "row size {size}");
+            assert!(read <= 128 * 1024, "read {read} bytes for row size {size}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn f6_direct_prefix_reader_never_borrows_an_unsealed_or_different_user() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let user = json!({"type":"user", "uuid":"direct-own", "sessionId":"direct-sid",
+            "message":{"role":"user", "content":"own"}});
+        let mut other_prompt = user.clone();
+        other_prompt["message"]["content"] = "other input".into();
+        let mut sidechain = user.clone();
+        sidechain["isSidechain"] = true.into();
+        for (row, sid) in [
+            (user.to_string(), None),
+            (user.to_string() + "\n", Some("different-sid")),
+            (other_prompt.to_string() + "\n", None),
+            (sidechain.to_string() + "\n", None),
+        ] {
+            let (pin, read, _) = direct_pin_fixture(&row, sid);
+            assert!(
+                pin.is_none(),
+                "only this sealed main user row can be pinned"
+            );
+            assert!(read <= 128 * 1024, "rejected row read {read} bytes");
+        }
+    }
 
     #[test]
     #[cfg(unix)]
