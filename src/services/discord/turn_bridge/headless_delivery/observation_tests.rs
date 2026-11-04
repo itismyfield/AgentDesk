@@ -38,6 +38,7 @@ async fn enqueue(
             None,
             None,
             Some(&artifact),
+            None,
         ),
     )
     .await
