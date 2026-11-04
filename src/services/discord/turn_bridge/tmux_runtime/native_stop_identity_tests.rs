@@ -63,7 +63,7 @@ fn a_stop_escapes_only_the_turn_its_own_input_still_owns() {
             fx.serve(Server::Live);
             fx.pane(&running());
             let shared = crate::services::discord::make_shared_data_for_tests();
-            let channel = ChannelId::new(7_212_300 + n as u64);
+            let channel = ChannelId::new(7_212_600 + n as u64);
             let session = format!("native-identity-{case}");
             let (token, path) = match case {
                 "no-pin" => unpinned_generating_turn(&fx, &session),
@@ -162,7 +162,7 @@ fn rows_landing_while_the_stop_waits_on_the_composer_are_judged_again() {
             fx.serve(Server::Live);
             fx.pane(&running());
             let shared = crate::services::discord::make_shared_data_for_tests();
-            let channel = ChannelId::new(7_212_320 + n as u64);
+            let channel = ChannelId::new(7_212_620 + n as u64);
             let session = format!("native-identity-lock-{case}");
             let (token, path) = generating_turn(&fx, &session);
             start(&shared, channel, &token).await;
@@ -255,7 +255,7 @@ fn hook_context_beside_a_tool_result_keeps_the_turn_its_own() {
             fx.serve(Server::Live);
             fx.pane(&running());
             let shared = crate::services::discord::make_shared_data_for_tests();
-            let channel = ChannelId::new(7_212_340 + n as u64);
+            let channel = ChannelId::new(7_212_640 + n as u64);
             let session = format!("native-identity-hook-{case}");
             let (token, path) = generating_turn(&fx, &session);
             start(&shared, channel, &token).await;
@@ -331,7 +331,7 @@ fn a_recovered_turn_escapes_past_only_its_own_busy_inputs() {
         for (n, (case, bound_first, sent)) in cases.into_iter().enumerate() {
             fx.serve(Server::Live);
             fx.pane(&running());
-            let channel = ChannelId::new(7_212_360 + n as u64);
+            let channel = ChannelId::new(7_212_660 + n as u64);
             let session = format!("native-identity-restart-{n}");
             let (old, path) = generating_turn(&fx, &session);
             let row_path = native_inflight_row(channel, &old, &session);
