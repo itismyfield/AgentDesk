@@ -319,9 +319,15 @@ impl NativeStop {
             return Some(stop);
         }
         let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(session);
-        let identity = binding
-            .as_ref()
-            .and_then(|binding| ClaudeStopTurnIdentity::capture(&binding.output_path));
+        // Escape targets only this token's verified input; the latest row only witnesses an idle pane.
+        let pinned = token.native_stop.receipt_sink().stop_pin();
+        let identity = match &pinned {
+            Some(pin) => (binding.as_ref())
+                .filter(|binding| binding.output_path == pin.output_path)
+                .map(|_| ClaudeStopTurnIdentity::pinned(pin, token)),
+            None => (binding.as_ref())
+                .and_then(|binding| ClaudeStopTurnIdentity::capture(&binding.output_path)),
+        };
         if let (Some(binding), Some(identity)) = (binding, identity) {
             let key = format!(
                 "{}:{session}:{identity:?}",
@@ -358,7 +364,8 @@ impl NativeStop {
                     return None;
                 }
                 stop.finished = true;
-            } else if token.tmux_session_name().as_deref() == Some(session)
+            } else if pinned.is_some()
+                && token.tmux_session_name().as_deref() == Some(session)
                 && let Some(attempt) = token.native_stop.attempt(key, terminal)
             {
                 if attempt.start() {

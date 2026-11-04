@@ -425,7 +425,7 @@ pub(super) async fn interrupt_claude_session(
 
     if expected_identity
         .as_ref()
-        .is_some_and(|expected| turn_identity.as_ref() != Some(expected))
+        .is_some_and(|expected| !expected.still_current())
     {
         return ProviderTurnInterruptOutcome {
             tmux_session,
@@ -536,7 +536,7 @@ pub(super) async fn interrupt_claude_session(
                 token,
                 &session_for_task,
                 delivery,
-                turn_identity.as_ref(),
+                expected_identity.as_ref().or(turn_identity.as_ref()),
                 recheck,
                 write,
             ),

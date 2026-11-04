@@ -9,6 +9,8 @@ pub(crate) struct State {
     notice: AtomicBool,
     bridges: Mutex<Vec<Weak<()>>>,
     input: Arc<ReceiptSink>,
+    /// Busy attempts handed into this token's running turn, keyed by their frame ledger id.
+    busy: Mutex<Vec<String>>,
 }
 
 /// Stable evidence of one native input; no prompt text is persisted here.
@@ -198,6 +200,22 @@ impl State {
     }
 
     /// Every bridge holds its own lifetime guard, including overlapping recovered bridges.
+    pub(crate) fn register_busy_child(&self, attempt: &str) {
+        const KEPT: usize = 64;
+        let mut busy = self.busy.lock().unwrap_or_else(|e| e.into_inner());
+        if !busy.iter().any(|kept| kept == attempt) {
+            if busy.len() >= KEPT {
+                busy.remove(0);
+            }
+            busy.push(attempt.to_string());
+        }
+    }
+
+    pub(crate) fn is_busy_child(&self, attempt: &str) -> bool {
+        let busy = self.busy.lock().unwrap_or_else(|e| e.into_inner());
+        busy.iter().any(|kept| kept == attempt)
+    }
+
     pub(crate) fn register_bridge(&self) -> Arc<()> {
         let guard = Arc::new(());
         let mut bridges = self
