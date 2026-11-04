@@ -2005,6 +2005,151 @@ class ModuleLayerBaselineCheck(unittest.TestCase):
             "unclassified": [{"prefix": "mixed", "reason": "mixed responsibilities need review"}],
         }
 
+    def test_reference_occurrences_survive_same_line_grouped_import(self) -> None:
+        layers = importlib.import_module("audit_maintainability.checks.module_layers")
+        rows = []
+        for leaves in ("a", "a, b"):
+            with _FakeSrcTree({"src/lib.rs": "mod a; mod upper { pub fn a() {} pub fn b() {} }",
+                               "src/a.rs": f"use crate::upper::{{{leaves}}};"}) as root:
+                occurrences = []
+                graph = layers.analyze(root, occurrence_projection=occurrences)
+            rows.append(self.baselines.baseline(graph, self._mapping(), "a" * 40, occurrences)["reverse_dependencies"])
+        self.assertEqual(rows[0][0]["id"], rows[1][0]["id"])
+        self.assertEqual([row[0]["count"] for row in rows], [1, 2])
+
+    def test_reference_occurrences_count_calls_without_counting_line_layout(self) -> None:
+        layers = importlib.import_module("audit_maintainability.checks.module_layers")
+        measurements, snapshots = [], []
+        for calls in ("crate::upper::a();", "crate::upper::a(); crate::upper::b();",
+                      "crate::upper::a();\ncrate::upper::b();"):
+            with _FakeSrcTree({"src/lib.rs": "mod a; mod upper { pub fn a() {} pub fn b() {} }",
+                               "src/a.rs": f"fn call() {{ {calls} }}"}) as root:
+                occurrences = []
+                graph = layers.analyze(root, occurrence_projection=occurrences)
+            measurements.append(graph)
+            snapshots.append(self.baselines.baseline(graph, self._mapping(), "a" * 40, occurrences))
+        rows = [snapshot["reverse_dependencies"][0] for snapshot in snapshots]
+        self.assertEqual(len({row["id"] for row in rows}), 1)
+        self.assertEqual([row["count"] for row in rows], [1, 2, 2])
+        self.assertEqual(self._counts(snapshots[1]), self._counts(snapshots[2]))
+        self.assertEqual([len(graph["edges"][0]["sites"]) for graph in measurements], [1, 1, 2])
+
+    def test_occurrence_collection_preserves_all_measurement_fields(self) -> None:
+        layers = importlib.import_module("audit_maintainability.checks.module_layers")
+        with _FakeSrcTree({"src/lib.rs": "mod a; mod upper { pub fn run() {} }",
+                           "src/a.rs": "use crate::upper::run; fn call() { crate::upper::run(); }"}) as root:
+            original = layers.analyze(root)
+            occurrences = []
+            collected = layers.analyze(root, occurrence_projection=occurrences)
+        self.assertEqual(original, collected)
+        self.assertTrue(occurrences)
+        self.assertTrue(all(set(row) == {"source", "target", "kind", "count"} for row in occurrences))
+
+    def test_occurrence_deduplication_retains_distinct_logical_owners(self) -> None:
+        layers = importlib.import_module("audit_maintainability.checks.module_layers")
+        with _FakeSrcTree({"src/lib.rs": """
+            mod upper { pub fn run() {} }
+            #[cfg(unix)] #[path = "shared.rs"] mod a;
+            #[cfg(windows)] #[path = "shared.rs"] mod a;
+            #[path = "shared.rs"] mod b;
+        """, "src/shared.rs": "fn call() { crate::upper::run(); }"}) as root:
+            occurrences = []
+            layers.analyze(root, occurrence_projection=occurrences)
+        rows = {(row["source"], row["target"], row["kind"]): row["count"] for row in occurrences}
+        self.assertEqual(rows, {(self._node("a"), self._node("upper"), "path"): 1,
+                                (self._node("b"), self._node("upper"), "path"): 1})
+
+    def test_macro_occurrences_preserve_two_static_body_paths(self) -> None:
+        layers = importlib.import_module("audit_maintainability.checks.module_layers")
+        with _FakeSrcTree({"src/lib.rs": """
+            mod upper { pub fn first() {} pub fn second() {} }
+            mod macros {
+                #[macro_export]
+                macro_rules! both { () => { $crate::upper::first(); $crate::upper::second(); } }
+            }
+            mod a { fn call() { crate::both!(); } }
+        """}) as root:
+            occurrences = []
+            graph = layers.analyze(root, occurrence_projection=occurrences)
+        caller_edge = next(row for row in graph["edges"] if row["source"] == self._node("a")
+                           and row["target"] == self._node("upper"))
+        self.assertEqual(len(caller_edge["sites"]), 1)
+        caller_occurrence = next(row for row in occurrences if row["source"] == self._node("a")
+                                 and row["target"] == self._node("upper"))
+        self.assertEqual(caller_occurrence["kind"], "macro")
+        self.assertEqual(caller_occurrence["count"], 2)
+
+    def test_real_mapping_classifies_pure_leaf_overrides(self) -> None:
+        provider, discord, restart_mode, terminal_proof, application = map(self._node, (
+            "services::provider", "services::discord::transport", "services::discord::restart_mode",
+            "cli::restart_terminal_proof", "engine"))
+        graph = self._graph()
+        graph["nodes"] = [provider, discord, restart_mode, terminal_proof, application]
+        graph["edges"] = [{"source": source, "target": target, "kind": "path", "sites": ["src/fixture.rs:1"]}
+                          for source, target in ((provider, restart_mode), (discord, terminal_proof),
+                                                 (restart_mode, provider), (terminal_proof, application))]
+        graph["occurrence_projection"] = [{key: edge[key] for key in ("source", "target", "kind")} | {"count": 1}
+                                          for edge in graph["edges"]]
+        result = self.project(graph, self.baselines.load_mapping(REPO_ROOT))
+        classified = {row["module"]: row["layer"] for row in result["classifications"]}
+        for module, layer in ((restart_mode, "vocabulary"), (terminal_proof, "foundation")):
+            with self.subTest(module=module):
+                self.assertEqual(classified[module], layer)
+        self.assertEqual({(row["source"], row["target"]) for row in result["reverse_dependencies"]},
+                         {(restart_mode, provider), (terminal_proof, application)})
+
+    def test_baseline_writer_rejects_crlf_replay_without_changing_bytes(self) -> None:
+        payload = self.snapshot(self._graph(), self._mapping(), "a" * 40)
+        with TemporaryDirectory() as temporary:
+            target = Path(temporary) / "baseline.json"
+            original = self.baselines.encode_baseline(payload).encode("utf-8").replace(b"\n", b"\r\n")
+            target.write_bytes(original)
+            with self.assertRaises(ValueError):
+                self.baselines.write_baseline(target, payload)
+            self.assertEqual(target.read_bytes(), original)
+
+    def test_canonical_baseline_contains_only_comparison_records_and_metadata(self) -> None:
+        graph, mapping = self._graph(), self._mapping()
+        payload = self.snapshot(graph, mapping, "a" * 40)
+        self.assertEqual(payload["schema_version"], 2)
+        self.assertEqual(payload["count_unit_version"], 1)
+        self.assertEqual(payload["edge_count_unit"], "static reference occurrences")
+        self.assertEqual(payload["unclassified_modules"], 1)
+        self.assertEqual(payload["indeterminate_edges"], 2)
+        for key in ("sccs", "classifications", "unclassified", "layer_counts", "coverage"):
+            self.assertNotIn(key, payload)
+        for row in payload["reverse_dependencies"]:
+            self.assertEqual(set(row), {"id", "source", "target", "kind", "count"})
+        for row in payload["uncertainties"]:
+            self.assertEqual(set(row), {"id", "count"})
+        diagnostics = self.project(graph, mapping)
+        self.assertEqual(payload["indeterminate_occurrences"],
+                         sum(row["count"] for row in diagnostics["indeterminate_edges"]))
+        self.assertEqual({row["id"]: row["count"] for row in payload["uncertainties"]},
+                         {row["id"]: row["count"] for row in diagnostics["uncertainties"]})
+        self.assertEqual(diagnostics["sccs"], graph["sccs"])
+
+    def test_canonical_count_change_modifies_only_its_record_line(self) -> None:
+        graph, mapping = self._graph(), self._mapping()
+        original = self.snapshot(graph, mapping, "a" * 40)
+        graph["occurrence_projection"][0]["count"] += 1
+        changed = self.snapshot(graph, mapping, "a" * 40)
+        before, after = (self.baselines.encode_baseline(payload).splitlines() for payload in (original, changed))
+        self.assertEqual(len(before), len(after))
+        differing = [(old, new) for old, new in zip(before, after) if old != new]
+        self.assertEqual(len(differing), 1)
+        original_row = next(row for row in original["reverse_dependencies"] if row["kind"] == "path")
+        for line in differing[0]:
+            self.assertIn(original_row["id"], line)
+            self.assertEqual(line.count('"id"'), 1)
+        uncertainty = dict(graph["coverage"]["unresolved_references"][0], site="src/a.rs:25")
+        graph["coverage"]["unresolved_references"].append(uncertainty)
+        increased = self.baselines.encode_baseline(self.snapshot(graph, mapping, "a" * 40)).splitlines()
+        self.assertEqual(len(after), len(increased))
+        differing = [(old, new) for old, new in zip(after, increased) if old != new]
+        self.assertEqual(len(differing), 1)
+        self.assertTrue(all(line.count('"id"') == 1 for line in differing[0]))
+
     def _graph(self) -> dict:
         a, upper, mixed = (self._node(name) for name in ("a", "upper", "mixed"))
         return {
@@ -2018,6 +2163,13 @@ class ModuleLayerBaselineCheck(unittest.TestCase):
                 {"source": mixed, "target": a, "kind": "path", "sites": ["src/mixed.rs:5"]},
             ],
             "sccs": [[a, upper, mixed]], "census": [],
+            "occurrence_projection": [
+                {"source": a, "target": upper, "kind": "path", "count": 2},
+                {"source": a, "target": upper, "kind": "import", "count": 1},
+                {"source": upper, "target": a, "kind": "path", "count": 1},
+                {"source": a, "target": mixed, "kind": "path", "count": 1},
+                {"source": mixed, "target": a, "kind": "path", "count": 1},
+            ],
             "coverage": {
                 "reached_files": ["src/a.rs", "src/upper.rs", "src/mixed.rs"],
                 "logical_modules": 3, "cfg_scope": "all-non-test-cfg-union",
@@ -2033,6 +2185,17 @@ class ModuleLayerBaselineCheck(unittest.TestCase):
                 "cfg_uncertainties": ["src/a.rs:19 retained attribute: cfg_attr ( optional , path )"],
             },
         }
+
+    def project(self, graph, mapping):
+        return self.baselines.project(graph, mapping, graph["occurrence_projection"])
+
+    def snapshot(self, graph, mapping, input_sha):
+        return self.baselines.baseline(graph, mapping, input_sha, graph["occurrence_projection"])
+
+    @staticmethod
+    def _counts(snapshot):
+        return {row["id"]: row["count"] for section in ("reverse_dependencies", "uncertainties")
+                for row in snapshot[section]}
 
     @staticmethod
     def _ids(value) -> set[str]:
@@ -2062,7 +2225,7 @@ class ModuleLayerBaselineCheck(unittest.TestCase):
         graph["coverage"]["logical_modules"] = len(graph["nodes"])
         graph["coverage"]["unclassified_modules"] = list(graph["nodes"])
         original = json.dumps(graph, sort_keys=True)
-        result = self.baselines.project(graph, mapping)
+        result = self.project(graph, mapping)
         classified = {row["module"]: row["layer"] for row in result["classifications"]}
         for name, expected in (("a::http", "assembly"), ("a::httpx", "foundation"),
                                ("services::provider", "adapter"), ("services::discord", "discord"),
@@ -2073,7 +2236,7 @@ class ModuleLayerBaselineCheck(unittest.TestCase):
         self.assertEqual(json.dumps(graph, sort_keys=True), original)
 
     def test_unclassified_endpoints_are_indeterminate_instead_of_zero_violations(self) -> None:
-        result = self.baselines.project(self._graph(), self._mapping())
+        result = self.project(self._graph(), self._mapping())
         self.assertEqual(result["layer_counts"]["foundation"], 1)
         self.assertEqual(result["layer_counts"]["assembly"], 1)
         self.assertEqual([row["module"] for row in result["unclassified"]], [self._node("mixed")])
@@ -2089,7 +2252,7 @@ class ModuleLayerBaselineCheck(unittest.TestCase):
     def test_conflicting_mapping_rules_remain_unclassified(self) -> None:
         graph, mapping = self._graph(), self._mapping()
         mapping["rules"].append({"prefix": "a", "layer": "assembly", "reason": "conflicting ownership"})
-        result = self.baselines.project(graph, mapping)
+        result = self.project(graph, mapping)
         a = next(row for row in result["classifications"] if row["module"] == self._node("a"))
         self.assertIsNone(a["layer"])
         self.assertTrue(a["reason"])
@@ -2099,7 +2262,7 @@ class ModuleLayerBaselineCheck(unittest.TestCase):
     def test_baseline_encoding_is_deterministic_under_input_reordering(self) -> None:
         graph, mapping = self._graph(), self._mapping()
         shuffled = json.loads(json.dumps(graph))
-        for key in ("nodes", "edges", "sccs"):
+        for key in ("nodes", "edges", "sccs", "occurrence_projection"):
             shuffled[key].reverse()
         for edge in shuffled["edges"]:
             edge["sites"].reverse()
@@ -2110,8 +2273,8 @@ class ModuleLayerBaselineCheck(unittest.TestCase):
                 value.reverse()
         reversed_mapping = json.loads(json.dumps(mapping))
         reversed_mapping["rules"].reverse()
-        before = self.baselines.encode_baseline(self.baselines.baseline(graph, mapping, "a" * 40))
-        after = self.baselines.encode_baseline(self.baselines.baseline(shuffled, reversed_mapping, "a" * 40))
+        before = self.baselines.encode_baseline(self.snapshot(graph, mapping, "a" * 40))
+        after = self.baselines.encode_baseline(self.snapshot(shuffled, reversed_mapping, "a" * 40))
         self.assertEqual(before, after)
         self.assertEqual(json.loads(before)["input_sha"], "a" * 40)
 
@@ -2124,19 +2287,21 @@ class ModuleLayerBaselineCheck(unittest.TestCase):
             row["site"] = "/tmp/another-checkout/" + row["site"].rsplit(":", 1)[0] + ":99"
         moved["coverage"]["cfg_uncertainties"] = [
             "/tmp/another-checkout/src/a.rs:99 retained attribute: cfg_attr ( optional , path )"]
-        original_ids = self._ids(self.baselines.baseline(graph, mapping, "a" * 40))
-        moved_ids = self._ids(self.baselines.baseline(moved, mapping, "b" * 40))
+        original = self.snapshot(graph, mapping, "a" * 40)
+        relocated = self.snapshot(moved, mapping, "b" * 40)
+        original_ids, moved_ids = self._ids(original), self._ids(relocated)
+        self.assertEqual(self._counts(original), self._counts(relocated))
         self.assertTrue(original_ids)
         self.assertEqual(original_ids, moved_ids)
         self.assertTrue(all("another-checkout" not in value and ":99" not in value for value in moved_ids))
 
     def test_baseline_writer_allows_identical_replay_and_rejects_replacement(self) -> None:
-        payload = self.baselines.baseline(self._graph(), self._mapping(), "a" * 40)
+        payload = self.snapshot(self._graph(), self._mapping(), "a" * 40)
         with TemporaryDirectory() as temporary:
-            target = Path(temporary) / "baselines" / "module_layers.json"
+            target = Path(temporary) / "baselines" / "generated" / "module_layers.json"
             self.baselines.write_baseline(target, payload)
             original = target.read_bytes()
-            self.assertEqual(original.decode("utf-8"), self.baselines.encode_baseline(payload))
+            self.assertEqual(original, self.baselines.encode_baseline(payload).encode("utf-8"))
             self.baselines.write_baseline(target, payload)
             self.assertEqual(target.read_bytes(), original)
             replacement = dict(payload, input_sha="b" * 40)
@@ -2159,7 +2324,7 @@ class ModuleLayerBaselineCheck(unittest.TestCase):
                     reason = (f"UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position {position}: invalid start byte"
                               if decoding else "PermissionError: [Errno 13] Permission denied: '" + file + "'")
                     graph["coverage"]["read_failures"] = [file + ": " + reason]
-                    snapshots.append(self.baselines.baseline(graph, self._mapping(), "a" * 40))
+                    snapshots.append(self.project(graph, self._mapping()))
                 self.assertEqual(self._ids(snapshots[0]), self._ids(snapshots[1]))
                 for snapshot in snapshots:
                     row = next(row for row in snapshot["uncertainties"] if row["category"] == "read_failures")
@@ -2178,7 +2343,7 @@ class ModuleLayerBaselineCheck(unittest.TestCase):
         for label, mapping in mappings:
             with self.subTest(mapping=label):
                 try:
-                    result = self.baselines.project(graph, mapping)
+                    result = self.project(graph, mapping)
                 except Exception as exc:
                     self.fail(f"invalid mapping raised {type(exc).__name__}: {exc}")
                 self.assertTrue(result["coverage"]["configuration_errors"])
@@ -2230,6 +2395,7 @@ class ModuleLayerBaselineCheck(unittest.TestCase):
             snapshot = json.loads(first.read_text("utf-8"))
             self.assertEqual(snapshot["input_sha"], revision)
             self.assertIn(revision, snapshot["generation_command"])
+            self.assertIn("baselines/generated/module_layers.json", snapshot["generation_command"])
             replay = subprocess.run([*command, "--input-sha", revision, "--output", str(second)],
                                     capture_output=True, text=True)
             self.assertEqual(replay.returncode, 0, replay.stderr)
@@ -2253,21 +2419,24 @@ class ModuleLayerBaselineCheck(unittest.TestCase):
 
     def test_uncertainty_rows_and_reference_kinds_survive_the_snapshot(self) -> None:
         graph, mapping = self._graph(), self._mapping()
-        snapshot = self.baselines.baseline(graph, mapping, "a" * 40)
+        snapshot = self.snapshot(graph, mapping, "a" * 40)
         self.assertEqual(snapshot["source_grain"], "module")
-        self.assertFalse(snapshot["coverage"]["complete"])
-        encoded = self.baselines.encode_baseline(snapshot)
+        diagnostics = self.project(graph, mapping)
+        self.assertFalse(diagnostics["coverage"]["complete"])
+        encoded = json.dumps(diagnostics["uncertainties"])
+        self.assertEqual({row["id"]: row["count"] for row in snapshot["uncertainties"]},
+                         {row["id"]: row["count"] for row in diagnostics["uncertainties"]})
         for expected in ("unknown_macro", "macro expansion not evaluated", "crate::absent::run",
                          "unknown internal item", "retained attribute"):
             with self.subTest(uncertainty=expected):
                 self.assertIn(expected, encoded)
         changed = json.loads(json.dumps(graph))
         changed["coverage"]["unresolved_references"][0]["path"] = "different_macro"
-        self.assertNotEqual(self._ids(self.baselines.baseline(graph, mapping, "a" * 40)),
-                            self._ids(self.baselines.baseline(changed, mapping, "a" * 40)))
+        self.assertNotEqual(self._ids(self.snapshot(graph, mapping, "a" * 40)),
+                            self._ids(self.snapshot(changed, mapping, "a" * 40)))
         duplicate = dict(graph["coverage"]["unresolved_references"][0], site="src/a.rs:25")
         graph["coverage"]["unresolved_references"].append(duplicate)
-        grouped = self.baselines.baseline(graph, mapping, "a" * 40)["uncertainties"]
+        grouped = self.project(graph, mapping)["uncertainties"]
         row = next(row for row in grouped if row["path"] == "unknown_macro")
         self.assertEqual(row["count"], 2)
         self.assertEqual(set(row["sites"]), {"src/a.rs:15", "src/a.rs:25"})

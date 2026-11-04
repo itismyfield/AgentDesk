@@ -12,7 +12,7 @@ import sys
 import tomllib
 
 MAPPING = "scripts/audit_maintainability/layers.toml"
-BASELINE = "scripts/audit_maintainability/baselines/module_layers.json"
+BASELINE = "scripts/audit_maintainability/baselines/generated/module_layers.json"
 GENERATOR = "python3 scripts/audit_maintainability/checks/module_layer_baseline.py"
 
 
@@ -86,13 +86,20 @@ def _classify(node, mapping, layers):
     return {"module": node, "layer": best[0][1], "reason": "; ".join(sorted({row[2] for row in best}))}
 
 
-def _edges(graph):
-    grouped = {}
+def _edges(graph, occurrence_projection):
+    grouped, counts = {}, {}
     for edge in graph["edges"]:
         key = (edge["source"], edge["target"], edge["kind"])
         grouped.setdefault(key, set()).update(_location(site)[1] for site in edge["sites"])
+    for row in occurrence_projection:
+        key = (row["source"], row["target"], row["kind"])
+        if key in counts or type(row["count"]) is not int or row["count"] < 1:
+            raise ValueError("occurrence projection must contain one positive count per edge")
+        counts[key] = row["count"]
+    if counts.keys() != grouped.keys():
+        raise ValueError("occurrence projection does not match measurement edges")
     return [{"id": _id("edge", *key), "source": key[0], "target": key[1], "kind": key[2],
-             "count": len(sites), "sites": sorted(sites)} for key, sites in sorted(grouped.items())]
+             "count": counts[key], "sites": sorted(sites)} for key, sites in sorted(grouped.items())]
 
 
 def _mapping_errors(mapping):
@@ -133,7 +140,7 @@ def _reason(text):
     return re.sub(r"\b(offset|position|line|column) \d+(?:-\d+)?", r"\1 <position>", text)
 
 
-def project(graph, mapping):
+def project(graph, mapping, occurrence_projection):
     """Assess known endpoints; missing or conflicting classifications remain indeterminate."""
     layers, errors = _mapping_errors(mapping)
     classifications = [_classify(node, {} if errors else mapping, layers) for node in sorted(set(graph["nodes"]))]
@@ -142,15 +149,16 @@ def project(graph, mapping):
     for layer in assigned.values():
         if layer is not None:
             counts[layer] += 1
-    reverse, indeterminate, pairs = [], [], defaultdict(lambda: {"edges": 0, "sites": 0})
-    for edge in _edges(graph):
+    reverse, indeterminate, pairs = [], [], defaultdict(lambda: {"edges": 0, "sites": 0, "occurrences": 0})
+    for edge in _edges(graph, occurrence_projection):
         source, target = assigned.get(edge["source"]), assigned.get(edge["target"])
         if source is None or target is None:
             indeterminate.append({**edge, "reason": "unclassified source or target"})
             continue
         pair = pairs[(source, target)]
         pair["edges"] += 1
-        pair["sites"] += edge["count"]
+        pair["sites"] += len(edge["sites"])
+        pair["occurrences"] += edge["count"]
         if layers[source] < layers[target]:
             reverse.append(edge)
     unknown = [row for row in classifications if row["layer"] is None]
@@ -164,7 +172,7 @@ def project(graph, mapping):
             "reverse_dependencies": reverse, "indeterminate_edges": indeterminate, "coverage": coverage,
             "layer_pairs": [{"source_layer": source, "target_layer": target, **value,
                               "reverse": layers[source] < layers[target]} for (source, target), value in sorted(pairs.items())],
-            "sccs": graph["sccs"]}
+            "sccs": graph["sccs"], "uncertainties": _uncertainties(graph)}
 
 
 def _uncertainties(graph):
@@ -188,30 +196,45 @@ def _uncertainties(graph):
              "count": value["count"], "sites": sorted(value["sites"])} for key, value in sorted(grouped.items())]
 
 
-def baseline(graph, mapping, input_sha):
-    result = project(graph, mapping)
-    return {"schema_version": 1, "input_sha": input_sha, "source_grain": "module", "edge_count_unit": "distinct file:line sites from 0A",
+def baseline(graph, mapping, input_sha, occurrence_projection):
+    result = project(graph, mapping, occurrence_projection)
+    return {"schema_version": 2, "count_unit_version": 1, "input_sha": input_sha, "source_grain": "module",
+            "edge_count_unit": "static reference occurrences",
             "generation_command": f"{GENERATOR} --input-sha {input_sha} --output {BASELINE}",
-            "mapping_sha256": _id(_ordered(mapping)), "layer_counts": result["layer_counts"], "unclassified": result["unclassified"],
-            "reverse_dependencies": result["reverse_dependencies"], "indeterminate_edges": result["indeterminate_edges"],
-            "sccs": [{"id": _id("scc", sorted(members)), "members": sorted(members)}
-                     for members in sorted(graph["sccs"], key=lambda group: tuple(sorted(group)))],
-            "uncertainties": _uncertainties(graph), "coverage": result["coverage"]}
+            "mapping_sha256": _id(_ordered(mapping)),
+            "reverse_dependencies": [{key: row[key] for key in ("id", "source", "target", "kind", "count")}
+                                     for row in sorted(result["reverse_dependencies"], key=lambda row: row["id"])],
+            "uncertainties": [{"id": row["id"], "count": row["count"]}
+                              for row in sorted(result["uncertainties"], key=lambda row: row["id"])],
+            "unclassified_modules": len(result["unclassified"]), "indeterminate_edges": len(result["indeterminate_edges"]),
+            "indeterminate_occurrences": sum(row["count"] for row in result["indeterminate_edges"]),
+            "configuration_errors": result["coverage"]["configuration_errors"]}
 
 
 def encode_baseline(payload):
-    """Keep generated arrays compact; each top-level section occupies one JSON line."""
-    return "{\n" + ",\n".join("  " + _json(key) + ":" + _json(value) for key, value in sorted(payload.items())) + "\n}\n"
+    """Write each debt/uncertainty record on its own deterministic JSON line."""
+    lines = ["{"]
+    keys = sorted(payload)
+    for index, key in enumerate(keys):
+        suffix = "," if index + 1 < len(keys) else ""
+        if key in {"reverse_dependencies", "uncertainties"}:
+            rows = sorted(payload[key], key=lambda row: row["id"])
+            lines.append("  " + _json(key) + ":[")
+            lines.extend("    " + _json(row) + ("," if n + 1 < len(rows) else "") for n, row in enumerate(rows))
+            lines.append("  ]" + suffix)
+        else:
+            lines.append("  " + _json(key) + ":" + _json(payload[key]) + suffix)
+    return "\n".join([*lines, "}", ""])
 
 
 def write_baseline(path, payload):
-    data = encode_baseline(payload)
+    data = encode_baseline(payload).encode("utf-8")
     if path.exists():
-        if path.read_text("utf-8") == data:
+        if path.read_bytes() == data:
             return
         raise ValueError("baseline already exists with different content; explicit debt migration review is required")
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("x", encoding="utf-8") as output:
+    with path.open("xb") as output:
         output.write(data)
 
 
@@ -236,7 +259,9 @@ def main():
     mapping = load_mapping(args.repo)
     if _mapping_errors(mapping)[1]:
         parser.error("invalid or missing layer mapping")
-    payload = baseline(analyze(args.repo), mapping, args.input_sha)
+    occurrences = []
+    graph = analyze(args.repo, occurrence_projection=occurrences)
+    payload = baseline(graph, mapping, args.input_sha, occurrences)
     write_baseline(args.output, payload)
     print(f"wrote {args.output} input_sha={args.input_sha}")
 

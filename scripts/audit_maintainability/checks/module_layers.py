@@ -61,7 +61,7 @@ def _sccs(nodes, edges):
     return sorted(groups, key=lambda group: (-len(group), group))
 
 
-def _crate(root, repo, coverage, external):
+def _crate(root, repo, coverage, external, occurrences=None):
     inv = walk(root, repo, production=True)
     root, repo = root.resolve(), repo.resolve()
     rel_root = root.relative_to(repo).as_posix()
@@ -299,7 +299,10 @@ def _crate(root, repo, coverage, external):
         if result is not None and result[0] is not None:
             target, canonical = result
             if target != owner:
-                edges[(node(owner), node(target), kind)].add(site)
+                key = (node(owner), node(target), kind)
+                edges[key].add(site)
+                if occurrences is not None:
+                    occurrences.add((*key, file, _offset))
             resolved_refs.append((ref, canonical, target))
         # This census counts written boundary paths, independent of canonical ownership.
         clean = list(path)
@@ -328,11 +331,14 @@ def _crate(root, repo, coverage, external):
         definition_tokens = next((inv.source_tokens[s] for s, _o, _c in inv.sources if s.relative_to(repo).as_posix() == definition_file), [])
         for body, body_target in body_refs[(definition_file, definition_owner)]:
             if definition_tokens[start].start <= body[6] <= definition_tokens[end - 1].start and caller[1] != body_target:
-                edges[(node(caller[1]), node(body_target), "macro")].add(f"{caller[3]}:{caller[4]}")
+                key = (node(caller[1]), node(body_target), "macro")
+                edges[key].add(f"{caller[3]}:{caller[4]}")
+                if occurrences is not None:
+                    occurrences.add((*key, caller[3], caller[6], body[3], body[6]))
     return nodes, edges, census
 
 
-def analyze(repo: Path) -> dict:
+def analyze(repo: Path, *, occurrence_projection: list[dict] | None = None) -> dict:
     """Measure every production crate root; unknown constructs always retain evidence."""
     coverage = {"reached_files": set(), "cfg_scope": "all-non-test-cfg-union", "read_failures": [],
                 "module_errors": [], "cfg_uncertainties": [], "unresolved_references": [], "cfg_conditions": [],
@@ -347,15 +353,23 @@ def analyze(repo: Path) -> dict:
         except (OSError, UnicodeError, ValueError) as exc:
             coverage["read_failures"].append(f"Cargo.toml: {exc}")
     nodes, edges, census = set(), defaultdict(set), []
+    # Physical token provenance preserves repeated references and removes repeated cfg visits.
+    occurrences = set() if occurrence_projection is not None else None
     roots = crate_roots(repo)
     if not roots:
         coverage["module_errors"].append("no crate roots found")
     for root in roots:
-        found, dependencies, references = _crate(root, repo, coverage, external)
+        found, dependencies, references = _crate(root, repo, coverage, external, occurrences)
         nodes.update(found)
         for key, sites in dependencies.items():
             edges[key].update(sites)
         census.extend(references)
+    if occurrence_projection is not None:
+        counts = defaultdict(int)
+        for source, target, kind, *_provenance in occurrences:
+            counts[(source, target, kind)] += 1
+        occurrence_projection.extend({"source": source, "target": target, "kind": kind, "count": count}
+                                     for (source, target, kind), count in sorted(counts.items()))
     git = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True)
     coverage.update(reached_files=sorted(coverage["reached_files"]), logical_modules=len(nodes),
                     unclassified_modules=sorted(nodes), classification="not-configured", complete=False)
@@ -365,10 +379,12 @@ def analyze(repo: Path) -> dict:
 
 
 def _run(allowlist):
-    result = analyze(common.REPO_ROOT)
+    occurrences = []
+    result = analyze(common.REPO_ROOT, occurrence_projection=occurrences)
     yield Finding("module_layers", "info", "src", None,
                   f"{len(result['nodes'])} modules, {len(result['edges'])} dependency edges; coverage incomplete (informational)",
-                  {"measurement": result, "layer_analysis": project(result, load_mapping(common.REPO_ROOT))})
+                  {"measurement": result, "reference_occurrences": occurrences,
+                   "layer_analysis": project(result, load_mapping(common.REPO_ROOT), occurrences)})
 
 
 CHECK = CheckSpec(key="module_layers", title="Module dependency coverage", description="Canonical module graph and direct boundary references (informational)",
