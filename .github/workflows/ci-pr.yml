@@ -358,6 +358,7 @@ jobs:
               - 'src/services/discord/runtime_bootstrap/**'
               - 'src/services/discord/runtime_store.rs'
               - 'src/services/discord/session_idle_cleanup.rs'
+              - 'src/services/discord/session_transition.rs'
               - 'src/services/discord/settings/**'
               - 'src/services/discord/status_panel_orphan_store_tests.rs'
               - 'src/services/discord/status_panel_singleton_store.rs'
