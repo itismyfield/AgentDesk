@@ -51,14 +51,14 @@ class ClassifyTest(unittest.TestCase):
 
 class ConfigTest(unittest.TestCase):
     def test_render_keeps_only_the_given_rules(self) -> None:
-        text = ('CONSTANTS\n  Mut = "INVARIANT (* \\*"\n\\* INVARIANT Hidden (*\nINIT Init\nNEXT Next\n'
-                "(* INVARIANT Gone\n  \\* still a block comment *)\n"
+        text = ('CONSTANTS\n  Mut = "INVARIANT (* x"\n\\* INVARIANT Hidden (* "a\\b" ; ? é\nINIT Init\nNEXT Next\n'
+                '(* INVARIANT Gone "a\\b" ` é\n  \\* still a block comment *)\n'
                 "INVARIANTS\n  A\n  B\nCHECK_DEADLOCK TRUE\nINVARIANT C\n")
         config = tlc.parse_config(text)
         self.assertEqual(config.rules(), ["A", "B", "C", "NoDeadlock"])
         again = tlc.parse_config(config.render(["B"], False))
         self.assertEqual(again.rules(), ["B"])
-        self.assertIn('Mut = "INVARIANT (* \\*"', config.render(["B"], False))
+        self.assertIn('Mut = "INVARIANT (* x"', config.render(["B"], False))
 
     def test_unsupported_or_ambiguous_configs_fail(self) -> None:
         for text in ("INIT Init\nPROPERTY Live\n", "INVARIANT\nINIT Init\n", "INVARIANT NoDeadlock\n",
@@ -77,6 +77,29 @@ class ConfigTest(unittest.TestCase):
         for label, text in cases.items():
             with self.subTest(label), self.assertRaisesRegex(tlc.CheckError, "not closed|nested"):
                 tlc.parse_config(text)
+
+    def test_backslash_in_a_string_fails(self) -> None:
+        cases = {
+            "unknown escape before the rules": ('INIT Init\nNEXT Next\n"bad \\* escape"\n'
+                                                "INVARIANT Bad\nCHECK_DEADLOCK FALSE\n"),
+            "escape in a constant value": 'CONSTANTS\n  Mut = "a\\"b"\nINVARIANT Bad\n',
+            "line comment mark in a string": 'CONSTANTS\n  Mut = "INVARIANT (* \\*"\nINVARIANT Bad\n',
+        }
+        for label, text in cases.items():
+            with self.subTest(label), self.assertRaisesRegex(tlc.CheckError, "escaped"):
+                tlc.parse_config(text)
+
+    def test_characters_tlc_cannot_read_fail(self) -> None:
+        for line in (";", "?", '"x`x"', "é", "\fx"):
+            with self.subTest(line), self.assertRaisesRegex(tlc.CheckError, "outside a comment"):
+                tlc.parse_config(f"INIT Init\n{line}\nINVARIANT Bad\n")
+        for char in ("\u00a0", "\v", "\f", "\u2028"):
+            for text in (f"INIT Init\nNEXT Next\nINVARIANT Bad\n{char}", f"INVARIANT Bad\n\\* note\n{char}"):
+                with self.subTest(text), self.assertRaisesRegex(tlc.CheckError, "outside a comment"):
+                    tlc.parse_config(text)
+            with self.subTest(f"{char!r} in comment bodies"):
+                text = f"INIT Init\n(* a {char} *)\nINVARIANT A\n\\* b {char}"
+                self.assertEqual(tlc.parse_config(text).rules(), ["A", "NoDeadlock"])
 
     def test_check_deadlock_is_declared_at_most_once(self) -> None:
         for first in ("TRUE", "FALSE"):
