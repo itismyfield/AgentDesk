@@ -219,8 +219,8 @@ fn boot_readopts_only_v2_queue_files_that_still_hold_an_input() {
     runtime.block_on(async {
         restore_queued_and_inflight_work(&http, &shared, &provider).await;
         let mut minted: Vec<u64> = (shared.mailboxes.snapshot_all().await)
-            .into_iter()
-            .map(|(channel, _)| channel.get())
+            .into_keys()
+            .map(|channel| channel.get())
             .collect();
         minted.sort_unstable();
         assert_eq!(
