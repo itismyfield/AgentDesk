@@ -25,6 +25,8 @@ pub(in crate::services::discord) struct NativeStop {
     sent: bool,
     finished: bool,
     notify: bool,
+    /// The one stop budget's end, fixed when the stop first waits for its evidence.
+    deadline: Option<tokio::time::Instant>,
 }
 
 pub(in crate::services::discord) fn protected(provider: &ProviderKind, session: &str) -> bool {
@@ -219,6 +221,7 @@ impl NativeStop {
             sent: false,
             finished: false,
             notify: false,
+            deadline: None,
         };
         if token.cancelled.load(Ordering::Acquire) {
             return None;
@@ -329,7 +332,7 @@ impl NativeStop {
         // Escape targets only this token's verified input; the latest row only witnesses an idle pane.
         let sink = token.native_stop.receipt_sink();
         let pinned = match sink.stop_pin() {
-            None if sink.pin_pending() => pin_within_budget(&sink).await,
+            None if sink.pin_pending() => pin_within_budget(&sink, stop.budget()).await,
             pinned => pinned,
         };
         // Input that may have reached the pane without a pin is neither escaped nor main-cancelled.
@@ -492,11 +495,19 @@ impl NativeStop {
         }
     }
 
+    /// The stop's evidence deadline, started on the first wait and kept for every later one.
+    fn budget(&mut self) -> tokio::time::Instant {
+        *self
+            .deadline
+            .get_or_insert_with(|| tokio::time::Instant::now() + STOP_BUDGET)
+    }
+
     pub(in crate::services::discord) async fn finish(&self) -> CancelActiveTurnResult {
         if !self.sent || self.finished {
             return empty();
         }
-        let deadline = tokio::time::Instant::now() + STOP_BUDGET;
+        // The exit wait spends what remains of the budget a pin wait already started.
+        let deadline = (self.deadline).unwrap_or_else(|| tokio::time::Instant::now() + STOP_BUDGET);
         loop {
             if !self.current().await {
                 return empty();
@@ -537,8 +548,8 @@ const STOP_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 /// A writer that may have written has the stop budget to pin its own input before the stop judges.
 async fn pin_within_budget(
     sink: &crate::services::provider::native_stop::ReceiptSink,
+    deadline: tokio::time::Instant,
 ) -> Option<crate::services::provider::native_stop::NativeUserPin> {
-    let deadline = tokio::time::Instant::now() + STOP_BUDGET;
     while sink.pin_pending() && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         if let Some(pin) = sink.stop_pin() {

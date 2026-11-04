@@ -90,12 +90,18 @@ fn a_stop_takes_a_fresh_writers_gate_only_before_its_first_key() {
 }
 
 /// An applied input is pinned within the stop budget, from a row no reader saw or one landing
-/// later, and escaped; one that never lands gets no Escape and no main cancel.
+/// later, and escaped; one that never lands gets no Escape and no main cancel. A late pin leaves
+/// the turn's exit only what remains of that one budget.
 #[test]
 fn an_applied_input_is_pinned_within_the_stop_budget_before_the_stop_judges() {
     let fx = Fixture::new();
     run(async {
-        let cases = [("unread-row", 1), ("row-lands-later", 1), ("no-row", 0)];
+        let cases = [
+            ("unread-row", 1),
+            ("row-lands-later", 1),
+            ("row-lands-late", 1),
+            ("no-row", 0),
+        ];
         for (n, (case, sent)) in cases.into_iter().enumerate() {
             fx.serve(Server::Live);
             fx.pane(&running());
@@ -117,10 +123,11 @@ fn an_applied_input_is_pinned_within_the_stop_budget_before_the_stop_judges() {
                     append(&path, tool_use());
                     None
                 }
-                "row-lands-later" => {
+                "row-lands-later" | "row-lands-late" => {
                     let (path, row) = (path.clone(), own_row(&session));
+                    let after = if case == "row-lands-late" { 2_000 } else { 300 };
                     Some(tokio::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(after)).await;
                         append(&path, row);
                         append(&path, tool_use());
                     }))
@@ -128,6 +135,7 @@ fn an_applied_input_is_pinned_within_the_stop_budget_before_the_stop_judges() {
                 _ => None,
             };
             let _ = fx.take_calls();
+            let begun = tokio::time::Instant::now();
             let result =
                 begin_user_stop(&shared, &ProviderKind::Claude, channel, true, "!stop").await;
             if let Some(lands) = lands {
@@ -135,6 +143,19 @@ fn an_applied_input_is_pinned_within_the_stop_budget_before_the_stop_judges() {
             }
             assert!(matches!(result, CommandStop::Native(_)), "{case}");
             assert_eq!(escapes(&fx), sent, "{case}");
+            if case == "row-lands-late"
+                && let CommandStop::Native(stop) = &result
+            {
+                // The turn never exits, so the exit wait runs out at the pin wait's deadline.
+                let _ = stop.finish().await;
+                let waited = begun.elapsed();
+                let budget = std::time::Duration::from_secs(5);
+                assert!(
+                    waited >= budget - std::time::Duration::from_millis(500)
+                        && waited < budget + std::time::Duration::from_millis(600),
+                    "{case}: one stop budget, waited {waited:?}"
+                );
+            }
             assert!(
                 !token.cancelled.load(Ordering::Acquire),
                 "{case}: no raw cancel"
