@@ -75,6 +75,8 @@ async fn no_backstop_schedules_or_fires_a_kick_at_an_owned_queue() {
         granted(&mailbox).await,
         "a schedule is one direct owner wake"
     );
+    let wakes = OWNER_WAKES_FOR_TESTS.get(&owned).map(|n| *n);
+    assert_eq!(wakes, Some(1), "and only one");
     assert!(!arm_slow_idle_queue_backstop_if_queue_nonempty(&shared, &provider, owned, "o").await);
     let outcome = IdleQueueKickoffChannelOutcome::default();
     let armed = arm_event_backstop_after_no_start_if_queue_nonempty(

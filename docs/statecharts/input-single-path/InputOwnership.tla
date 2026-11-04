@@ -170,8 +170,9 @@ DriveBusy ==
                    screen, draft, aged, twinPend, envLeft, stale, old, acct>>
     /\ UNCHANGED fvars
 
-\* A start meeting a marked row records and removes it. A headless start then retries its create
-\* (foreign_row admit_headless); an intake start up to f4 drops itself (admit), f5 retries once.
+\* An idle start meeting a marked row records and removes it. A headless start then retries its
+\* create (foreign_row admit_headless); an intake start up to f4 drops itself (admit), f5 retries
+\* once. An owned busy paste creates no row, so a marked row neither holds nor settles it.
 Retries == src = "start" \/ (Fix = "f5" /\ Mut # "noRetry")
 RowClear == row = "none" \/ (row = "marked" /\ Retries)
 
@@ -179,13 +180,13 @@ RowClear == row = "none" \/ (row = "marked" /\ Retries)
 \* to the next wake. a2d: the same owned busy entry pastes now.
 DriveIdleBusyPane ==
     /\ Handoff /\ ~acct /\ src = "discord" /\ mbx = "idle" /\ nat = "busy"
-    /\ RowClear
+    /\ row # "carried"
     /\ IF A2D
        THEN OwnedPaste("busyOwned", Mut = "pendOnBusy", FALSE)
        ELSE Stays("held", "other")
     /\ UNCHANGED <<mode, src, mbx, nat, natOwner, obsOk, rcv, userRow, twin, claim, lp, op,
                    screen, draft, aged, twinPend, envLeft, stale, old, acct>>
-    /\ row' = "none" /\ UNCHANGED <<ep, leak, outside>>
+    /\ UNCHANGED fvars
 
 \* A turn/start's headless turn on a busy pane: execute_owned. main and a2d1 fix busy=false, so
 \* an absent idle observer ends the turn NotSent("idle_unobserved") with a failure notice (the
@@ -193,7 +194,7 @@ DriveIdleBusyPane ==
 \* reader of the row the input takes set up before the paste.
 DriveStartBusy ==
     /\ Handoff /\ ~acct /\ src = "start" /\ mbx = "idle" /\ nat = "busy"
-    /\ RowClear
+    /\ row # "carried"
     /\ IF R2 /\ Mut # "startIdle"
        THEN OwnedPaste("busyStart", TRUE, TRUE) /\ mbx' = "active"
        ELSE IF obsOk
@@ -202,7 +203,7 @@ DriveStartBusy ==
        ELSE Stays("failed", "none") /\ UNCHANGED mbx
     /\ UNCHANGED <<mode, src, nat, natOwner, obsOk, rcv, userRow, twin, claim, lp, op, screen,
                    draft, aged, twinPend, envLeft, stale, old, acct>>
-    /\ row' = "none" /\ UNCHANGED <<ep, leak, outside>>
+    /\ UNCHANGED fvars
 
 \* An idle pane with its observer: the warm submit records the Answer declaration and the turn's
 \* observer reads the AI turn it starts. Without an observer the owner refuses (idle_unobserved)
@@ -489,7 +490,8 @@ BootRequeues ==
 \* row: foreign_row refuses it (NotSent, not held) and the front keeps its place for a later wake.
 \* A marked row the start does not retry past is removed all the same, and the wake is spent.
 DriveMeetsRow ==
-    /\ Handoff /\ F2 /\ mbx = "idle" /\ (row = "carried" \/ (row = "marked" /\ ~Retries))
+    /\ Handoff /\ F2 /\ mbx = "idle"
+    /\ (row = "carried" \/ (row = "marked" /\ nat = "idle" /\ ~Retries))
     /\ Stays(inp, heldBy)
     /\ row' = IF row = "marked" THEN "none" ELSE row
     /\ UNCHANGED <<mode, src, mbx, nat, natOwner, obsOk, rcv, userRow, twin, claim, lp, op,
@@ -582,8 +584,9 @@ ForeignUntouched == acct => pastes = 0
 \* 13. A watch whose pane is gone ends once nothing else is left to happen.
 GoneWatchEnds == ~(nat = "idle" /\ ~wake /\ ~timer /\ mbx = "idle" /\ envLeft = 0
                    /\ screen = "gone" /\ watch /\ ~ENABLED WatchLosesPane)
-\* 14. A finished turn's carried row does not stay once nothing else is left to happen.
-CarriedRowEnds == Quiet => row = "none"
+\* 14. A finished turn's carried row does not stay once nothing else is left to happen. A marked
+\*     row may: it holds no paste and the next idle start settles it.
+CarriedRowEnds == Quiet => row # "carried"
 \* 15. The session sees the input's text once: AgentDesk's paste or the outside copy, not both.
 SeenOnce == pastes + (IF outside THEN 1 ELSE 0) <= 1
 =============================================================================
