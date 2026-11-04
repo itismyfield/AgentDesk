@@ -95,7 +95,7 @@ fn native_pin_successor_stops_observing_across_a_thousand_reader_lines() {
             path.to_str().unwrap(),
             user.len() as u64,
             tx,
-            Some(token),
+            Some(token.clone()),
             crate::services::provider::SessionProbe::process(|| true),
         )
         .unwrap();
@@ -108,6 +108,14 @@ fn native_pin_successor_stops_observing_across_a_thousand_reader_lines() {
         (1..=2).contains(&attempts),
         "a terminal successor refusal ran {attempts} storage callbacks"
     );
+    for attempt in 1..=3 {
+        token.native_stop.receipt_sink().retry_persistence();
+        assert_eq!(
+            native_pin_observation_count(channel),
+            attempts,
+            "successor refusal must stay terminal after forced retry {attempt}"
+        );
+    }
     let stored = load_inflight_state(&ProviderKind::Claude, channel).unwrap();
     assert_eq!(stored.turn_nonce, successor.turn_nonce);
     assert!(
