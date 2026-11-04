@@ -215,3 +215,100 @@ fn an_owner_idle_submit_held_after_a_stop_took_its_gate_is_never_kept_to_resend(
         "nothing goes back in line"
     );
 }
+
+/// An owner cold first prompt on an armed token whose composer liveness read, after readiness, is
+/// held and then fails; a stop takes the gate during the hold when `stop`.
+fn cold_first_prompt_held(name: &str, channel: u64, stop: bool) -> (Result<(), String>, Rig) {
+    let rig = rig(name, channel, "normal", view("", false), IDLE);
+    let dir = rig.f.root.path().join("cold-held");
+    fs::create_dir_all(&dir).unwrap();
+    let (reading, go, shim) = (
+        dir.join("reading"),
+        dir.join("go"),
+        rig.f.root.path().join("tmux"),
+    );
+    let original = fs::read_to_string(&shim).unwrap();
+    // Only the busy-inject composer read passes `-u`; readiness reads pane liveness otherwise.
+    let hook = format!(
+        "case \"$*\" in \"-u display-message\"*pane_dead*) if [ ! -f '{r}' ]; then touch '{r}'; while [ ! -f '{g}' ]; do sleep 0.01; done; exit 1; fi ;; esac\n",
+        r = reading.display(),
+        g = go.display()
+    );
+    fs::write(
+        &shim,
+        original.replacen("#!/bin/sh\n", &format!("#!/bin/sh\n{hook}"), 1),
+    )
+    .unwrap();
+    let token = Arc::new(CancelToken::new());
+    token.native_stop.receipt_sink().arm_first_key();
+    let stopper = token.clone();
+    let other = std::thread::spawn(move || {
+        wait("the cold writer reads the composer", || reading.exists());
+        if stop {
+            let decided = StopCancel::decide(Some(stopper), "!stop".into());
+            assert!(matches!(decided, StopCancel::Published(_)), "main cancels");
+        }
+        fs::write(go, "").unwrap();
+    });
+    let target = scope::created_tmux_target("claude", &rig.name).unwrap();
+    let source = json!({"kind":"pre_source","expected_session_id":null,
+        "expected_transcript":null,"binding_watermark":null});
+    let (transcript, pane) = (rig.transcript().display().to_string(), rig.name.clone());
+    let submit: scope::CreatedSubmit = Box::new(move |frame| {
+        crate::services::claude::first_input::submit(&transcript, 0, Some(&token), &pane, &frame)
+            .map(drop)
+    });
+    let hook = created(
+        prepared_before_launch(&rig),
+        PROMPT.into(),
+        scope::Lineage::Created,
+        (None, reply_once(None)),
+    );
+    let result = {
+        let _entered = rig.runtime.enter();
+        hook(scope::Lineage::Created, target, source, None, submit)
+    };
+    other.join().unwrap();
+    fs::write(&shim, &original).unwrap();
+    (result, rig)
+}
+
+/// Whether the owner would hand its front to the next drain.
+fn front_offered(rig: &Rig) -> bool {
+    let front = rig
+        .mailbox
+        .v2_request(|slot| Ok::<_, String>(slot.as_mut().ok_or("no owner")?.front().is_some()));
+    rig.runtime.block_on(front).unwrap()
+}
+
+/// A stop that took a cold first prompt's gate outranks the hold its failed composer read records:
+/// unconfirmed, nothing retained, and the next drain is offered nothing to send again.
+#[test]
+fn a_cold_first_prompt_held_after_a_stop_took_its_gate_is_never_sent_again() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (result, rig) = cold_first_prompt_held("oc-stop-cold", 7_754_350, true);
+    assert!(
+        result.as_ref().is_err_and(|e| !effect::surely_unsent(e)),
+        "unconfirmed: {result:?}"
+    );
+    assert!(rig.events().is_empty(), "no key: {:?}", rig.events());
+    let snapshot = rig.snapshot();
+    assert_eq!(snapshot["retained_inputs"], json!([]), "{snapshot}");
+    assert!(!snapshot["head_injection"].is_null(), "Unknown: {snapshot}");
+    assert!(!front_offered(&rig), "no drain resends it: {snapshot}");
+}
+
+/// Without a stop the same failed composer read keeps the cold first prompt held to send later.
+#[test]
+fn a_cold_first_prompt_held_without_a_stop_stays_in_line() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (result, rig) = cold_first_prompt_held("oc-held-cold", 7_754_351, false);
+    assert!(
+        result.as_ref().is_err_and(|e| effect::surely_unsent(e)),
+        "{result:?}"
+    );
+    assert!(rig.events().is_empty(), "no key: {:?}", rig.events());
+    let snapshot = rig.snapshot();
+    assert!(snapshot["head_injection"].is_null(), "{snapshot}");
+    assert!(front_offered(&rig), "held to send later: {snapshot}");
+}
