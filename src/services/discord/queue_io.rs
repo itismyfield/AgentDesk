@@ -101,13 +101,20 @@ pub(in crate::services::discord) async fn mailbox_cancel_queued_primary_message(
     channel_id: ChannelId,
     message_id: MessageId,
 ) -> Option<Intervention> {
-    let result: CancelQueuedMessageResult = shared
-        .mailbox(channel_id)
+    let mailbox = shared.mailbox(channel_id);
+    let result: CancelQueuedMessageResult = mailbox
         .cancel_queued_primary_message(
             message_id,
             queue_persistence_context(shared, provider, channel_id),
         )
         .await;
+    super::receipt_settle::settle_v2_drops(
+        shared.pg_pool.as_ref(),
+        &mailbox,
+        provider.as_str(),
+        channel_id,
+    )
+    .await;
     apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
     result.removed
 }

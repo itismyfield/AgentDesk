@@ -244,3 +244,72 @@ fn inspect_refuses_unauthorized_users_before_answering() {
         }
     });
 }
+
+/// A cancelled or failed receipt for an input removed before it ran is no turn, while a run
+/// turn that ended failed and a row with no terminal yet stay the latest turn.
+#[tokio::test(flavor = "current_thread")]
+async fn latest_turn_skips_removed_input_receipts_only_pg() {
+    use crate::db::turns::{TerminalOutcome, TurnReceipt, record_turn_receipt};
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let channel = "7340701";
+    let at = |minute: u32| {
+        let text = format!("2026-11-04T01:{minute:02}:00Z");
+        DateTime::parse_from_rfc3339(&text)
+            .unwrap()
+            .with_timezone(&Utc)
+    };
+    let row = "INSERT INTO turns (turn_id, channel_id, provider, session_id, started_at,
+                   finished_at, terminal_outcome, terminal_confirmed_at)
+               VALUES ($1, $2, 'claude', $3, $4, $5, $6, CASE WHEN $6::TEXT IS NULL THEN NULL ELSE $5 END)";
+    let insert = |turn: &'static str,
+                  session: Option<&'static str>,
+                  (start, end): (u32, u32),
+                  outcome: Option<&'static str>| {
+        let query = sqlx::query(row).bind(turn).bind(channel).bind(session);
+        query
+            .bind(at(start))
+            .bind(at(end))
+            .bind(outcome)
+            .execute(&pool)
+    };
+    insert("ran-failed", Some("native"), (1, 2), Some("failed"))
+        .await
+        .unwrap();
+    let origins = vec!["G-removed".to_string()];
+    for (turn, minute, outcome) in [
+        ("removed-cancelled", 3, TerminalOutcome::Cancelled),
+        ("removed-failed", 4, TerminalOutcome::Failed),
+    ] {
+        let receipt = TurnReceipt {
+            turn_id: turn,
+            channel_id: channel,
+            agent_id: None,
+            provider: "claude",
+            session_key: None,
+            started_at: None,
+            consumed_origin_ids: &origins,
+            outcome,
+            confirmed_at: at(minute),
+        };
+        record_turn_receipt(&pool, &receipt).await.unwrap();
+    }
+    let latest = super::query::load_latest_turn(&pool, channel)
+        .await
+        .unwrap();
+    assert_eq!(
+        latest.map(|turn| turn.turn_id).as_deref(),
+        Some("ran-failed")
+    );
+
+    insert("no-terminal", None, (5, 5), None).await.unwrap();
+    let latest = super::query::load_latest_turn(&pool, channel)
+        .await
+        .unwrap();
+    assert_eq!(
+        latest.map(|turn| turn.turn_id).as_deref(),
+        Some("no-terminal")
+    );
+    pool.close().await;
+    db.drop().await;
+}

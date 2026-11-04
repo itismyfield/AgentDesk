@@ -148,6 +148,23 @@ pub(crate) async fn force_purge_channel_mailbox(
     Some(purge.into())
 }
 
+/// The forced purge, then the receipts its owner owes for each removed origin.
+pub(crate) async fn force_purge_and_settle(
+    health_registry: Option<&Arc<HealthRegistry>>,
+    target: &TurnLifecycleTarget,
+    session_key: Option<&str>,
+    pool: Option<&sqlx::PgPool>,
+) -> Option<PurgeCounts> {
+    let purged = force_purge_channel_mailbox(health_registry, target, session_key).await;
+    if let (Some(provider), Some(channel)) = (&target.provider, target.channel_id)
+        && let Some(handle) =
+            crate::services::turn_orchestrator::ChannelMailboxRegistry::global_handle(channel)
+    {
+        crate::services::discord::settle_v2_drops(pool, &handle, provider.as_str(), channel).await;
+    }
+    purged
+}
+
 /// Purges `handle`'s queue; `None` when the actor did not answer or refused for a queued head.
 async fn purge_on(
     handle: &ChannelMailboxHandle,
@@ -388,6 +405,8 @@ pub(super) mod herdr {
         let complete = failed.is_none();
         let loss = record_purge_receipt_on(actor, &target, receipt, complete, Some(pool), reason);
         let loss = loss.await;
+        crate::services::discord::settle_v2_drops(Some(pool), actor, provider.as_str(), channel)
+            .await;
         let purge = checked.as_ref().ok().map(|purge| QueuePurge {
             removed: purge.receipt.len(),
             preserved: purge.queue_preserved(),

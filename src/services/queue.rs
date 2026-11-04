@@ -20,6 +20,8 @@ mod herdr_stop;
 #[cfg(unix)]
 mod http_force;
 
+pub(super) use cancel_effects::force_purge_and_settle;
+#[cfg(test)]
 pub(super) use cancel_effects::force_purge_channel_mailbox;
 pub(crate) use cancel_effects::schedule_post_cancel_queue_drain;
 #[cfg(test)]
@@ -578,7 +580,8 @@ impl QueueService {
                 .filter(|name| !name.is_empty())
                 .unwrap_or_else(|| tmux_name.clone());
             let queue_purge = if force {
-                force_purge_channel_mailbox(health_registry, &target, session_key.as_deref()).await
+                let (key, pool) = (session_key.as_deref(), self.pg_pool.as_ref());
+                force_purge_and_settle(health_registry, &target, key, pool).await
             } else {
                 None
             };

@@ -387,3 +387,75 @@ pub(in crate::services::discord) async fn entry_aborted(
         record_or_stamp(shared.pg_pool.as_ref(), &row, TerminalOutcome::Failed).await;
     }
 }
+
+/// Commits each receipt `channel`'s V2 owner owes for an input it removed unrun, at its removal
+/// instant, then acks exactly the committed ones; the rest stay owed for the next settle or boot.
+pub(crate) async fn settle_v2_drops(
+    pool: Option<&PgPool>,
+    mailbox: &crate::services::turn_orchestrator::ChannelMailboxHandle,
+    provider: &str,
+    channel: ChannelId,
+) {
+    let Some(pool) = pool else {
+        return;
+    };
+    let owed = mailbox.v2_request(|slot| Ok(slot.as_ref().map(|o| o.owed_drops())));
+    let owed = match owed.await {
+        Ok(Some(owed)) => owed,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(channel_id = channel.get(), %error, "owed drop receipts unread");
+            return;
+        }
+    };
+    let mut done = Vec::new();
+    for owed in owed {
+        if record_drop(pool, provider, channel, &owed).await {
+            done.push(owed);
+        }
+    }
+    if done.is_empty() {
+        return;
+    }
+    let acked = mailbox.v2_request(move |slot| match slot.as_mut() {
+        Some(owner) => owner.ack_owed_drops(&done),
+        None => Ok(()),
+    });
+    if let Err(error) = acked.await {
+        tracing::warn!(channel_id = channel.get(), %error, "owed drop receipts stay owed");
+    }
+}
+
+async fn record_drop(
+    pool: &PgPool,
+    provider: &str,
+    channel: ChannelId,
+    owed: &crate::services::turn_orchestrator::OwedDrop,
+) -> bool {
+    let Some(at) = DateTime::<Utc>::from_timestamp_millis(owed.at_ms as i64) else {
+        return false;
+    };
+    let turn_id = format!("discord:{}:{}", channel.get(), owed.message_id);
+    let channel_id = channel.get().to_string();
+    let receipt = TurnReceipt {
+        turn_id: &turn_id,
+        channel_id: &channel_id,
+        agent_id: None,
+        provider,
+        session_key: None,
+        started_at: None,
+        consumed_origin_ids: &owed.origins,
+        outcome: owed.outcome,
+        confirmed_at: at,
+    };
+    for delay in RECORD_RETRY_DELAYS {
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        match record_turn_receipt(pool, &receipt).await {
+            Ok(()) => return true,
+            Err(error) => tracing::warn!(%error, turn_id, "dropped input receipt not committed"),
+        }
+    }
+    false
+}

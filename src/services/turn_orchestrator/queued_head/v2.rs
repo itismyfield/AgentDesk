@@ -1,4 +1,4 @@
-//! V2 owner foundation, reachable through the mailbox only in tests until admission is wired.
+//! The V2 input owner the mailbox actor holds for a channel's queue file.
 use super::v2_types::*;
 use super::{HeadPhase, PendingQueueItem, QueueIdentity};
 #[cfg(test)]
@@ -10,6 +10,7 @@ mod attempt;
 mod commit;
 pub(crate) mod control;
 mod migration;
+pub(crate) mod origin;
 pub(crate) mod projection;
 mod retained;
 pub(crate) mod source_admission;
@@ -67,6 +68,7 @@ impl Owner {
                 retained_inputs: vec![],
                 terminal_identities: vec![],
                 namespace: Some(namespace),
+                owed_drop_receipts: Vec::new(),
             },
         };
         let mut owner = Self {

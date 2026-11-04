@@ -1,5 +1,5 @@
-//! Which execution consumed an accepted input and how it ended, read only from owner records:
-//! its inflight row, then its `turns` receipt. A delivery response is never evidence.
+//! Which execution consumed an accepted input and how it ended, read only from owner records: its
+//! queue file, its inflight row, then its `turns` receipt. A delivery response is never evidence.
 
 use serde_json::Value;
 use sqlx::PgPool;
@@ -60,16 +60,22 @@ pub enum InputResult {
         execution_id: String,
     },
     Terminal(OriginReceipt),
+    /// Admitted and still waiting in the channel's owner queue; no execution has taken it.
+    Accepted {
+        channel_id: u64,
+    },
 }
 
-/// Reads the inflight rows before the receipts: a writer commits the receipt before it clears
-/// the row, so an execution passing between the two reads is still found by the second.
+/// Reads the queue files, then the inflight rows, then the receipts: an input moves from queue to
+/// row to receipt, and each writer commits the next record before it removes the last, so a later
+/// read always finds it. The later record wins; an owed receipt stands in for one not yet written.
 pub async fn lookup(
     pool: &PgPool,
     agent_id: &str,
     origin_id: &str,
     channels: &[OriginChannel],
 ) -> Result<Option<InputResult>, String> {
+    let waiting = queued(origin_id, channels);
     let mut running = None;
     for channel in channels {
         if running.is_none() {
@@ -81,11 +87,37 @@ pub async fn lookup(
         .map(|channel| channel.channel_id.to_string())
         .collect();
     match find_origin_receipt(pool, origin_id, agent_id, &channel_ids).await {
-        Ok(receipt) => Ok(receipt.map(InputResult::Terminal).or(running)),
+        Ok(Some(receipt)) => Ok(Some(InputResult::Terminal(receipt))),
+        Ok(None) if running.is_some() => Ok(running),
+        Ok(None) => waiting,
         // A row kept marked already confirmed its terminal while the database could not take it.
         Err(_) if matches!(running, Some(InputResult::Terminal(_))) => Ok(running),
+        Err(_) if matches!(waiting, Ok(Some(InputResult::Terminal(_)))) => waiting,
         Err(error) => Err(error.to_string()),
     }
+}
+
+/// An origin still in an owner queue file reads accepted; one removed unrun reads its owed receipt.
+fn queued(origin_id: &str, channels: &[OriginChannel]) -> Result<Option<InputResult>, String> {
+    use crate::services::turn_orchestrator::{Waiting, waiting_origin};
+    for channel in channels {
+        let id = channel.channel_id;
+        match waiting_origin(&channel.provider, id, origin_id)? {
+            Some(Waiting::Accepted) => return Ok(Some(InputResult::Accepted { channel_id: id })),
+            Some(Waiting::Owed(owed)) => {
+                let at = chrono::DateTime::from_timestamp_millis(owed.at_ms as i64)
+                    .ok_or("owed receipt instant out of range")?;
+                return Ok(Some(InputResult::Terminal(OriginReceipt {
+                    turn_id: format!("discord:{id}:{}", owed.message_id),
+                    channel_id: id.to_string(),
+                    terminal_outcome: owed.outcome.as_str().to_string(),
+                    terminal_confirmed_at: at,
+                })));
+            }
+            None => {}
+        }
+    }
+    Ok(None)
 }
 
 fn running_execution(

@@ -1,4 +1,5 @@
 use super::*;
+use crate::db::turns::TerminalOutcome;
 
 impl Owner {
     /// Positive no-content ends this attempt; the original keeps its queue slot and receipt.
@@ -175,6 +176,10 @@ impl Owner {
         let mut input = next.head_injection.take().ok_or("missing NotSent input")?;
         remove_members(&mut next, &input)?;
         input.phase = HeadPhase::Reserved;
+        // No later look submits a permanent refusal, so its origin's execution has failed.
+        if PERMANENT.contains(&reason.as_str()) {
+            next.owe_attempt(&input, TerminalOutcome::Failed, super::origin::now_ms());
+        }
         next.retained_inputs.push(RetainedInput {
             input,
             reason: RetainedReason::Rejected {
@@ -224,6 +229,11 @@ impl Owner {
             .find(|entry| key.matches(&entry.input))
             .ok_or("stale notice attempt")?;
         entry.notice.enqueued = true;
+        // A told proven-unsent input is never resubmitted; an unconfirmed one may have run.
+        if matches!(entry.disposition, Some(RetainedDisposition::KnownNotSent)) {
+            let input = entry.input.clone();
+            next.owe_attempt(&input, TerminalOutcome::Failed, super::origin::now_ms());
+        }
         self.commit(next)
     }
 }

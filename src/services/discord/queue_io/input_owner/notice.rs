@@ -37,6 +37,9 @@ pub(crate) async fn drain(
             })
             .await?;
     }
+    // A told proven-unsent input, or a removal still owed, gets its receipt after the notices.
+    let channel_id = poise::serenity_prelude::ChannelId::new(channel);
+    crate::services::discord::settle_v2_drops(Some(pool), handle, provider, channel_id).await;
     Ok(owed.len())
 }
 
