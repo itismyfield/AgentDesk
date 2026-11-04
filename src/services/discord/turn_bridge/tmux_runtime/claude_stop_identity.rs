@@ -127,6 +127,18 @@ fn later_row(record: &serde_json::Value, token: &CancelToken, session: &str) -> 
     if record["isSidechain"] == true {
         return Later::Neutral;
     }
+    // A tool result's envelope may carry hook context beside it; that text is no new input.
+    let blocks = record["message"]["content"]
+        .as_array()
+        .into_iter()
+        .flatten();
+    if record["type"] == "user"
+        && blocks
+            .into_iter()
+            .any(|block| block["type"] == "tool_result")
+    {
+        return Later::Neutral;
+    }
     if crate::services::tui_prompt_dedupe::extract_claude_transcript_user_prompt_with_entry_id(
         record,
     )
