@@ -58,19 +58,24 @@ pub(super) async fn admit_headless(
     )))
 }
 
-/// Intake turn: a marked row is recorded and removed first; on a foreign row, releases the claim
-/// and front-requeues the prompt to start once after it clears. `Ok(false)` stops before spawn.
+/// Intake turn: a marked row is recorded and removed, then `create` runs once more under the claim.
+/// A foreign row releases the claim and front-requeues the prompt. `Ok(false)` stops before spawn.
 pub(super) async fn admit(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
-    state: &InflightTurnState,
+    state: &mut InflightTurnState,
     cancel_token: &Arc<CancelToken>,
-    created: Result<(), CreateNewInflightError>,
+    mut create: impl FnMut(&mut InflightTurnState) -> Result<(), CreateNewInflightError>,
 ) -> Result<bool, String> {
+    let mut created = create(state);
+    if matches!(created, Err(CreateNewInflightError::AlreadyExists))
+        && receipt_settle::settle_marked_row(shared, provider, state.channel_id).await
+    {
+        created = create(state);
+    }
     if !held_by_another_turn(created, provider, state) {
         return Ok(true);
     }
-    receipt_settle::settle_marked_row(shared, provider, state.channel_id).await;
     let reason = "foreign_row_start_deferred";
     if defer_unstarted_turn(shared, provider, state, cancel_token, true, reason).await {
         return Ok(false);
@@ -131,8 +136,9 @@ mod tests {
         state.source_message_ids = sources.iter().map(|id| id.get()).collect();
         state.busy_followup_retry_user_msg_id = retry.get();
         state.set_followup_requeue_context(None, false, false, Vec::new(), true);
-        let created = inflight::save_inflight_state_create_new(&state);
-        let verdict = admit(shared, &provider, &state, &token, created).await;
+        let create =
+            |state: &mut InflightTurnState| inflight::save_inflight_state_create_new(state);
+        let verdict = admit(shared, &provider, &mut state, &token, create).await;
         (token, verdict)
     }
 

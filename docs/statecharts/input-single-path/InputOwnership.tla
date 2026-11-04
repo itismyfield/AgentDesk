@@ -7,7 +7,8 @@
    (Fix = "a2d4"), then slice C (CX, with only the C transitions a test drives). "cf" is main
    after C (a9d59259e5) with slice F's paths: a restart-carried row, an absorbed input the transcript
    reader never settles, and the same text handed to the session outside AgentDesk; "f" is main
-   after F (40c556ae6c); "f4" adds the close's queue wake when the row had no restored episode.
+   after F (40c556ae6c); "f4" adds the close's queue wake when the row had no restored episode;
+   "f5" lets an intake start whose admission removed a marked row retry its create once.
    The channel is turn
    mode (the O writer answers every native turn) or legacy (the live relay, or a reader the
    input's own turn set up, answers).                                                        *)
@@ -15,7 +16,8 @@ EXTENDS Naturals
 
 CONSTANTS
     Fix,   \* "main": a1c; "a2d1": first A2+D; "a2d2", "a2d3", "a2d4": its repairs; "c": slice C;
-           \* "cf": main after C with F's paths; "f": main after F; "f4": its close wake
+           \* "cf": main after C with F's paths; "f": main after F; "f4": its close wake;
+           \* "f5": a marked row's start retried
     Mut    \* one guard removed in the a2d4 model, "none" as written
 
 VARIABLES
@@ -57,7 +59,8 @@ VARIABLES
     stale,     \* an earlier held front's watch still runs on the channel when this input is held
     old,       \* an older binary retained the input: none, told (its resend ask went out), untold
     acct,      \* the channel's live idle pane runs under another account than the channel's
-    row,       \* an earlier generation's durable inflight row on the channel: none or carried
+    row,       \* a durable inflight row on the channel: none, carried (an earlier generation's) or
+               \* marked (a finished turn's, kept until its origin receipt is recorded)
     ep,        \* restore re-minted the carried row's mailbox episode, which the close's finalizer ends
     leak,      \* its transcript holds an input Claude absorbed mid-turn with no queued_command row
     outside    \* a person or another session handed the input's text to the session directly
@@ -70,10 +73,10 @@ fvars == <<row, ep, leak, outside>>
 drv == <<screen, draft, notices, timer, byTimer, timed, reader, src, twin, heldBy, watch, aged,
          twinPend, stale, old, acct>>
 
-\* Slice C's transitions; "cf", "f" and "f4" keep them.
-CX == Fix \in {"c", "cf", "f", "f4"}
+\* Slice C's transitions; "cf", "f", "f4" and "f5" keep them.
+CX == Fix \in {"c", "cf", "f", "f4", "f5"}
 \* Slice F's paths are in the model.
-F2 == Fix \in {"cf", "f", "f4"}
+F2 == Fix \in {"cf", "f", "f4", "f5"}
 
 Init ==
     /\ mode \in {"turn", "legacy"}
@@ -92,7 +95,7 @@ Init ==
     /\ screen \in {"ok", "held", "cause"} \cup (IF CX THEN {"ledger"} ELSE {}) /\ draft \in {"none", "unproven"} /\ notices = 0
     /\ wake = (old = "none") /\ timer = FALSE /\ byTimer = FALSE /\ timed = FALSE
     /\ heldBy = "none" /\ watch = FALSE /\ aged = FALSE /\ twinPend \in BOOLEAN
-    /\ stale \in IF Fix \in {"a2d3", "a2d4", "c", "cf", "f", "f4"} THEN BOOLEAN ELSE {FALSE}
+    /\ stale \in IF Fix \in {"a2d3", "a2d4", "c", "cf", "f", "f4", "f5"} THEN BOOLEAN ELSE {FALSE}
     \* A kept input's boot is checked on one plain channel: no twin, draft, held screen or old watch.
     /\ old # "none" => ~twin /\ ~twinPend /\ draft = "none" /\ screen = "ok" /\ ~stale
     \* A ledger refusal is checked on a busy turn-mode pane, whose turn end wakes the owner (RC).
@@ -104,19 +107,23 @@ Init ==
     /\ envLeft = IF acct THEN 0 ELSE 1
     \* An earlier turn's row a restart carried (restore_inflight reattaches a watcher to a live pane,
     \* re-intakes nothing): checked on a plain turn-mode channel whose mailbox holds no turn.
-    /\ row \in IF F2 THEN {"none", "carried"} ELSE {"none"}
+    \* A marked row: the turn ended and released its mailbox, but its origin receipt failed to record,
+    \* so the row stays stamped for the next admission to record and remove (receipt_settle.rs).
+    \* Checked with the receipt store healthy again, from f4 on.
+    /\ row \in IF F2 THEN {"none", "carried"} \cup (IF Fix \in {"f4", "f5"} THEN {"marked"} ELSE {})
+              ELSE {"none"}
     /\ leak \in IF F2 THEN BOOLEAN ELSE {FALSE}
     /\ ep \in IF F2 THEN BOOLEAN ELSE {FALSE}
     /\ ep => row = "carried"
     /\ outside = FALSE
-    /\ row = "carried" => mode = "turn" /\ mbx = "idle" /\ old = "none" /\ ~acct /\ screen = "ok"
+    /\ row # "none" => mode = "turn" /\ mbx = "idle" /\ old = "none" /\ ~acct /\ screen = "ok"
                          /\ ~stale /\ ~twin /\ ~twinPend /\ draft = "none"
 
-A2D == Fix \in {"a2d1", "a2d2", "a2d3", "a2d4", "c", "cf", "f", "f4"}
-R2 == Fix \in {"a2d2", "a2d3", "a2d4", "c", "cf", "f", "f4"}
-R3 == Fix \in {"a2d3", "a2d4", "c", "cf", "f", "f4"}
+A2D == Fix \in {"a2d1", "a2d2", "a2d3", "a2d4", "c", "cf", "f", "f4", "f5"}
+R2 == Fix \in {"a2d2", "a2d3", "a2d4", "c", "cf", "f", "f4", "f5"}
+R3 == Fix \in {"a2d3", "a2d4", "c", "cf", "f", "f4", "f5"}
 \* a2d4 keeps the watch through a failed read and ends a watch without touching a newer hold.
-R4 == Fix \in {"a2d4", "c", "cf", "f", "f4"}
+R4 == Fix \in {"a2d4", "c", "cf", "f", "f4", "f5"}
 \* Slice C: on a turn-mode channel the presence supervisor reads the owner's V2 front and wakes the
 \* owner once at the idle transition (supervisor_tests). Legacy channels are not assumed woken.
 RC == CX /\ Mut # "noBoundaryWake"
@@ -163,17 +170,22 @@ DriveBusy ==
                    screen, draft, aged, twinPend, envLeft, stale, old, acct>>
     /\ UNCHANGED fvars
 
+\* A start meeting a marked row records and removes it. A headless start then retries its create
+\* (foreign_row admit_headless); an intake start up to f4 drops itself (admit), f5 retries once.
+Retries == src = "start" \/ (Fix = "f5" /\ Mut # "noRetry")
+RowClear == row = "none" \/ (row = "marked" /\ Retries)
+
 \* start_idle -> intake: a transcript-busy pane with an idle mailbox. main: the front is deferred
 \* to the next wake. a2d: the same owned busy entry pastes now.
 DriveIdleBusyPane ==
     /\ Handoff /\ ~acct /\ src = "discord" /\ mbx = "idle" /\ nat = "busy"
-    /\ row = "none"
+    /\ RowClear
     /\ IF A2D
        THEN OwnedPaste("busyOwned", Mut = "pendOnBusy", FALSE)
        ELSE Stays("held", "other")
     /\ UNCHANGED <<mode, src, mbx, nat, natOwner, obsOk, rcv, userRow, twin, claim, lp, op,
                    screen, draft, aged, twinPend, envLeft, stale, old, acct>>
-    /\ UNCHANGED fvars
+    /\ row' = "none" /\ UNCHANGED <<ep, leak, outside>>
 
 \* A turn/start's headless turn on a busy pane: execute_owned. main and a2d1 fix busy=false, so
 \* an absent idle observer ends the turn NotSent("idle_unobserved") with a failure notice (the
@@ -181,7 +193,7 @@ DriveIdleBusyPane ==
 \* reader of the row the input takes set up before the paste.
 DriveStartBusy ==
     /\ Handoff /\ ~acct /\ src = "start" /\ mbx = "idle" /\ nat = "busy"
-    /\ row = "none"
+    /\ RowClear
     /\ IF R2 /\ Mut # "startIdle"
        THEN OwnedPaste("busyStart", TRUE, TRUE) /\ mbx' = "active"
        ELSE IF obsOk
@@ -190,7 +202,7 @@ DriveStartBusy ==
        ELSE Stays("failed", "none") /\ UNCHANGED mbx
     /\ UNCHANGED <<mode, src, nat, natOwner, obsOk, rcv, userRow, twin, claim, lp, op, screen,
                    draft, aged, twinPend, envLeft, stale, old, acct>>
-    /\ UNCHANGED fvars
+    /\ row' = "none" /\ UNCHANGED <<ep, leak, outside>>
 
 \* An idle pane with its observer: the warm submit records the Answer declaration and the turn's
 \* observer reads the AI turn it starts. Without an observer the owner refuses (idle_unobserved)
@@ -201,7 +213,7 @@ DriveStartBusy ==
 \* Mutant noRelaunch keeps the pane as idle and refuses unobserved.
 DriveIdle ==
     /\ Handoff /\ mbx = "idle" /\ nat = "idle"
-    /\ row = "none"
+    /\ RowClear
     /\ IF acct /\ Mut # "noRelaunch"
        THEN /\ Paste("idleObserved", TRUE, TRUE) /\ reader' = TRUE /\ mbx' = "active"
             /\ heldBy' = "none" /\ acct' = FALSE /\ UNCHANGED <<notices, timer, watch>>
@@ -211,7 +223,7 @@ DriveIdle ==
        ELSE Stays("held", "other") /\ UNCHANGED <<mbx, acct>>
     /\ UNCHANGED <<mode, src, nat, natOwner, obsOk, rcv, userRow, twin, claim, lp, op, screen,
                    draft, aged, twinPend, envLeft, stale, old>>
-    /\ UNCHANGED fvars
+    /\ row' = "none" /\ UNCHANGED <<ep, leak, outside>>
 
 \* ------------------------------------------------------------------- Claude and its rows
 \* Pasted into an idle Claude, or queued by a turn that has since ended: a user row opens a new
@@ -475,11 +487,13 @@ BootRequeues ==
 \* ------------------------------------------------------------------------------ slice F
 \* A front the owner hands while the mailbox is idle starts a turn whose create meets the carried
 \* row: foreign_row refuses it (NotSent, not held) and the front keeps its place for a later wake.
+\* A marked row the start does not retry past is removed all the same, and the wake is spent.
 DriveMeetsRow ==
-    /\ Handoff /\ F2 /\ mbx = "idle" /\ row = "carried"
+    /\ Handoff /\ F2 /\ mbx = "idle" /\ (row = "carried" \/ (row = "marked" /\ ~Retries))
     /\ Stays(inp, heldBy)
+    /\ row' = IF row = "marked" THEN "none" ELSE row
     /\ UNCHANGED <<mode, src, mbx, nat, natOwner, obsOk, rcv, userRow, twin, claim, lp, op,
-                   screen, draft, aged, twinPend, envLeft, stale, old, acct, row, ep, leak, outside>>
+                   screen, draft, aged, twinPend, envLeft, stale, old, acct, ep, leak, outside>>
 
 \* The carried-turn close archives the row once the transcript reads its native turn closed and
 \* O owes nothing (carried_turn_close.rs try_close). In cf the reader counts an absorbed input
@@ -490,9 +504,9 @@ DriveMeetsRow ==
 \* archive either way; mutant closeNoKick drops that kick.
 CarriedCloses ==
     /\ row = "carried" /\ nat = "idle"
-    /\ (~leak \/ (Fix \in {"f", "f4"} /\ Mut # "leakKept"))
+    /\ (~leak \/ (Fix \in {"f", "f4", "f5"} /\ Mut # "leakKept"))
     /\ row' = "none" /\ ep' = FALSE
-    /\ wake' = (wake \/ ep \/ (Fix = "f4" /\ Mut # "closeNoKick"))
+    /\ wake' = (wake \/ ep \/ (Fix \in {"f4", "f5"} /\ Mut # "closeNoKick"))
     /\ UNCHANGED <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain, sentInto,
                    win, rcv, userRow, twin, claim, pastes, lp, op, screen, draft, notices, timer,
                    byTimer, timed, heldBy, watch, aged, twinPend, envLeft, stale, old, acct, leak,
