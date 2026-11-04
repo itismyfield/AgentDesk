@@ -689,7 +689,7 @@ fn restore_under_source_authority(
             let record = exact
                 .verified
                 .clone()
-                .map_or(Record::AwaitFirstRecord, Record::Verified);
+                .map_or(Record::AwaitFirst, Record::Verified);
             let launch_session = &exact.launch_session_id;
             exact.outcome(register(
                 &exact.session_id,

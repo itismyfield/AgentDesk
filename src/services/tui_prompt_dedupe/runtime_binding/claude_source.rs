@@ -22,7 +22,7 @@ pub(crate) enum Record {
     /// A source the Claude check verified; recorded as this identity if the path still names it.
     Verified(SourceId),
     /// A restored exact path whose transcript is not verified yet: published, nothing logged.
-    AwaitFirstRecord,
+    AwaitFirst,
     /// A logged source the path must still name; anything else publishes nothing.
     Exact(SourceId),
 }
@@ -62,7 +62,7 @@ impl Record {
             }
             // A file replaced since the check is judged against the pin, or left for the next check.
             Self::Verified(_) => binding_events::judge_moved(proposal).map(persisted),
-            Self::AwaitFirstRecord => Ok(Persisted::AwaitingExact),
+            Self::AwaitFirst => Ok(Persisted::AwaitingExact),
             Self::Exact(source) if binding_events::codex::source_file_matches(source) => {
                 binding_events::record_verified(proposal, source).map(|committed| match committed {
                     Committed::Appended | Committed::Unchanged => Persisted::Logged,
@@ -78,7 +78,7 @@ impl Record {
     pub(crate) fn unlogged(&self) -> Persisted {
         match self {
             Self::Stat => Persisted::Logged,
-            Self::Verified(_) | Self::AwaitFirstRecord => Persisted::AwaitingExact,
+            Self::Verified(_) | Self::AwaitFirst => Persisted::AwaitingExact,
             Self::Exact(_) => Persisted::Recheck,
         }
     }
