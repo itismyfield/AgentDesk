@@ -656,7 +656,7 @@ pub(super) fn check_deferred_restart(shared: &SharedData) {
     {
         return;
     }
-    let version = crate::agentdesk_runtime_root()
+    let version = crate::config::runtime_root()
         .map(|root| root.join("restart_pending"))
         .and_then(|marker| {
             let version = fs::read_to_string(&marker).unwrap_or_default();

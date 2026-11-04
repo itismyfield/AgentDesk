@@ -21,7 +21,7 @@ pub(crate) async fn recover_once(pg_pool: Option<&sqlx::PgPool>) {
     // not a wall-clock offset that could mis-classify old pending dispatches.
     let boot_time: String = {
         let pid_path =
-            crate::cli::agentdesk_runtime_root().map(|r| r.join("runtime").join("dcserver.pid"));
+            crate::config::runtime_root().map(|r| r.join("runtime").join("dcserver.pid"));
         let mtime = pid_path
             .as_ref()
             .and_then(|p| std::fs::metadata(p).ok())
