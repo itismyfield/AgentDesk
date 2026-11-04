@@ -71,7 +71,7 @@ error다. 단순 합계가 같아도 판정 불가 edge의 대상이 바뀌면 �
 
 정본 경로는 [`baselines/generated/module_layers.json`](../../scripts/audit_maintainability/baselines/generated/module_layers.json)이다.
 초기 측정 소스 SHA는 `0aeb8fc5996b790b3dabc1f788ea9a6982dcde1b`이고,
-schema 3 확장 입력 SHA는 `6d7c1851e5a127d153b0193bab54c0a32e7c391e`다.
+schema 3 최초 활성화 입력 SHA/base `6d7c1851e5a127d153b0193bab54c0a32e7c391e`에서만 #7749(`90fe`)의 `src/services/discord/health/recovery/carried_turn_close.rs:293`에 추가된 `discord::schedule_deferred_idle_queue_kickoff_immediate` 참조(`use super::*` 뒤 unknown path root), uncertainty ID `42bf71b862c248fc38e947e6246e23801bcef7d3e8c35815f5c4572576f6b8cf`의 발생 1회를 승인해 기록했다.
 생성 명령과 입력 SHA를 생성 JSON에도 기록한다. 소스 입력은 `src/**`와 `Cargo.toml`이며
 생성기는 지정 commit과 추적 소스가 일치하는지, 버전 관리 밖의 소스가 없는지 확인한다.
 층 설정의 의미 기반 SHA256도 기록한다. 같은 입력 SHA·소스·매핑에서 재생성한
@@ -106,9 +106,27 @@ SCC 구성원·전체 sites·미분류 목록 같은 진단 snapshot은 감사 J
 줄끝이 CRLF로 바뀐 파일도 동일 바이트로 인정하지 않는다. 새 파일은 exclusive-create로 쓴다.
 소스/매핑 변경 뒤 초기 파일을 지워 다시 만드는 방식으로 부채를 지우지 않는다.
 
+## 최초 활성화 기록
+
+schema 3 활성화 정본은 위 base에서 승인된 한 번의 생성으로 만들었다.
+다음은 그 생성 명령의 재현 기록이며 이후 변경을 수용하는 방법이 아니다.
+
+```sh
+python3 scripts/audit_maintainability/checks/module_layer_baseline.py \
+  --input-sha 6d7c1851e5a127d153b0193bab54c0a32e7c391e \
+  --output scripts/audit_maintainability/baselines/generated/module_layers.json
+```
+
+기존 정본에 실행하면 동일 bytes replay만 허용하고, 새 output은 exclusive-create로
+쓴다. 활성화 뒤에는 정본을 삭제·재생성하지 않고 아래의 감소 전용 갱신을 사용한다.
+
+`--upgrade-records`는 기존 schema 2 정본과 역방향·불확실성 ID/count 및 집계 수가
+모두 같은 경우 판정 불가 record만 보강하는 제한된 기능으로 남아 있다.
+이번 최초 활성화에는 이 옵션을 사용하지 않았고, 해당 equality guard도 유지한다.
+
 ## 감소만 반영하는 갱신
 
-소스를 commit한 뒤 해당 SHA로 실행한다. 아래 SHA는 현재 확장 기준점이며,
+소스를 commit한 뒤 해당 SHA로 실행한다. 아래 SHA는 현재 활성화 기준점이며,
 이후 감소를 반영할 때는 감소가 들어간 commit의 SHA를 넣는다.
 
 ```sh
@@ -123,10 +141,6 @@ python3 scripts/audit_maintainability/checks/module_layer_baseline.py \
 삭제된 부채는 zero-rule로 남긴다.
 동시 갱신은 exclusive lock 획득에 실패하면 거부하고, 허용된 변경만 같은 디렉터리의
 임시 파일에서 atomic replace로 반영한다. 일반 생성기의 덮어쓰기 거부는 유지한다.
-
-schema 2에서 판정 불가 record를 추가하는 최초 확장은 같은 명령의 마지막 옵션을
-`--upgrade-records`로 바꿔 한 번 실행한다. 기존 역방향·불확실성 ID/count와
-집계 수가 같을 때만 record를 추가하며, 신규 부채를 수용하는 갱신에 사용하지 않는다.
 
 ## 검토된 모듈 이동의 old→new 대응
 
