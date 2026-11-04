@@ -317,7 +317,7 @@ async fn a_failed_notice_post_still_settles_what_a_removal_owes_pg() {
         receipts(&pool, channel).await,
         expected(channel, &drops, "cancelled")
     );
-    let untold = handle.v2_request(|slot| Ok(slot.as_ref().ok_or("no owner")?.json()?));
+    let untold = handle.v2_request(|slot| slot.as_ref().ok_or("no owner")?.json());
     let untold = untold.await.unwrap()["retained_inputs"][0]["notice"]["enqueued"].clone();
     assert_eq!(untold, json!(false));
     pool.close().await;
