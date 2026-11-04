@@ -2,6 +2,11 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
+use std::time::{Duration, Instant};
+
+#[cfg(test)]
+#[path = "native_stop/persistence_tests.rs"]
+mod persistence_tests;
 
 #[derive(Default)]
 pub(crate) struct State {
@@ -29,7 +34,21 @@ pub(crate) struct NativeUserPin {
     pub(crate) direct: bool,
 }
 
-type PinObserver = Arc<dyn Fn(&NativeUserPin) -> bool + Send + Sync>;
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PinSaveOutcome {
+    Saved,
+    #[default]
+    Retry,
+    Never,
+}
+
+type PinObserver = Arc<dyn Fn(&NativeUserPin) -> PinSaveOutcome + Send + Sync>;
+
+#[derive(Default)]
+struct PinPersistence {
+    outcome: PinSaveOutcome,
+    retry_after: Option<Instant>,
+}
 
 /// The writer's receipt is observational; it grants no cancellation authority.
 #[derive(Default)]
@@ -38,7 +57,7 @@ pub(crate) struct ReceiptSink {
     accepted: OnceLock<NativeUserPin>,
     rejected: AtomicBool,
     observer: OnceLock<PinObserver>,
-    persisted: AtomicBool,
+    persistence: Mutex<PinPersistence>,
     /// A durable pin restored unchecked; only a stop accepts it after rechecking the live pane.
     restored: Mutex<Option<NativeUserPin>>,
 }
@@ -89,7 +108,7 @@ impl ReceiptSink {
     }
     pub(crate) fn observe(&self) -> Option<Result<NativeUserPin, ()>> {
         if let Some(result) = self.cached() {
-            self.notify();
+            self.notify(false);
             return Some(result);
         }
         {
@@ -112,7 +131,7 @@ impl ReceiptSink {
             }
         }
         // Source and receipt locks are released before a callback takes the row lock.
-        self.notify();
+        self.notify(false);
         self.cached()
     }
     pub(crate) fn adopt(&self, pin: NativeUserPin) {
@@ -123,7 +142,7 @@ impl ReceiptSink {
                 input.receipt = None;
             }
         }
-        self.notify();
+        self.notify(false);
     }
     pub(crate) fn restore_candidate(&self, pin: NativeUserPin) {
         if self.cached().is_none() {
@@ -154,14 +173,27 @@ impl ReceiptSink {
     }
     pub(crate) fn on_pin(&self, observer: PinObserver) {
         let _ = self.observer.set(observer);
-        self.notify();
+        self.notify(false);
     }
-    fn notify(&self) {
-        if !self.persisted.load(Ordering::Acquire)
-            && let (Some(pin), Some(observer)) = (self.accepted.get(), self.observer.get())
-            && observer(pin)
+    /// The direct reader has no token; its first bridge frame supplies one immediate retry.
+    #[cfg(any(unix, test))]
+    pub(crate) fn retry_persistence(&self) {
+        self.notify(true);
+    }
+    fn notify(&self, retry_now: bool) {
+        let mut state = self.persistence.lock().unwrap_or_else(|e| e.into_inner());
+        if state.outcome != PinSaveOutcome::Retry
+            || (!retry_now
+                && state
+                    .retry_after
+                    .is_some_and(|after| Instant::now() < after))
         {
-            self.persisted.store(true, Ordering::Release);
+            return;
+        }
+        if let (Some(pin), Some(observer)) = (self.accepted.get(), self.observer.get()) {
+            state.outcome = observer(pin);
+            state.retry_after = (state.outcome == PinSaveOutcome::Retry)
+                .then(|| Instant::now() + Duration::from_secs(1));
         }
     }
     #[cfg(all(test, unix))]

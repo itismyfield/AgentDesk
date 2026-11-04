@@ -381,11 +381,25 @@ def analyze(repo: Path, *, occurrence_projection: list[dict] | None = None) -> d
 def _run(allowlist):
     occurrences = []
     result = analyze(common.REPO_ROOT, occurrence_projection=occurrences)
+    assessment = project(result, load_mapping(common.REPO_ROOT), occurrences)
+    from .module_layer_baseline import baseline, _reason
+    from .module_layer_ratchet import compare, load_inputs
+    try:
+        accepted, moves = load_inputs(common.REPO_ROOT)
+        sources = {row["id"]: {"source": row["source"], "path": row["path"]} for row in assessment["uncertainties"]}
+        comparison = compare(accepted, baseline(result, load_mapping(common.REPO_ROOT), result["input_sha"], occurrences),
+                             moves, sources)
+    except (OSError, UnicodeError, ValueError, TypeError) as exc:
+        comparison = {"errors": [{"code": "invalid-input", "message": _reason(str(exc))}], "warnings": [], "decreases": []}
     yield Finding("module_layers", "info", "src", None,
-                  f"{len(result['nodes'])} modules, {len(result['edges'])} dependency edges; coverage incomplete (informational)",
+                  f"{len(result['nodes'])} modules, {len(result['edges'])} dependency edges; coverage incomplete; {len(comparison['decreases'])} debt reductions",
                   {"measurement": result, "reference_occurrences": occurrences,
-                   "layer_analysis": project(result, load_mapping(common.REPO_ROOT), occurrences)})
+                   "layer_analysis": assessment, "ratchet": comparison})
+    for warning in comparison["warnings"]:
+        yield Finding("module_layers", "warn", "src", None, warning["message"], warning)
+    for error in comparison["errors"]:
+        yield Finding("module_layers", "error", "src", None, error["message"], error)
 
 
-CHECK = CheckSpec(key="module_layers", title="Module dependency coverage", description="Canonical module graph and direct boundary references (informational)",
-                  hard_gate=False, runner=_run)
+CHECK = CheckSpec(key="module_layers", title="Module dependency coverage", description="Canonical module graph and layer debt ratchet",
+                  hard_gate=True, runner=_run)

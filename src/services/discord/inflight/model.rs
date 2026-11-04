@@ -104,6 +104,17 @@ pub(in crate::services::discord) struct TerminalReceiptStamp {
     pub confirmed_at: chrono::DateTime<chrono::Utc>,
 }
 
+fn deserialize_native_stop_user_pin_tolerant<'de, D>(
+    deserializer: D,
+) -> Result<Option<super::native_stop_pin::VerifiedNativeUserPin>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    // An unusable proof withholds native stop without discarding the turn's other state.
+    let raw = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(raw).ok())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(in crate::services::discord) struct InflightTurnState {
     pub version: u32,
@@ -151,7 +162,11 @@ pub(in crate::services::discord) struct InflightTurnState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed_submission: Option<super::managed_submission::ManagedSubmissionRecord>,
     /// Proof recorded while this native input was live; old rows carry no proof.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_native_stop_user_pin_tolerant",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub native_stop_user_pin: Option<super::native_stop_pin::VerifiedNativeUserPin>,
     /// Busy inputs handed into this native turn; old rows carry none.
     #[serde(default, skip_serializing_if = "Option::is_none")]

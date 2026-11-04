@@ -773,6 +773,7 @@ required_shell_suites=(
   tests/test_cluster_deploy_peer_transfer_7242.sh
   tests/test_cluster_deploy_peer_host_paths_6162.sh
   tests/test_cluster_deploy_peer_verdict_5189.sh
+  tests/test_deploy_codesign_keychain_7775.sh
   tests/test_deploy_e2e_readers_gate_6577.sh
   tests/test_deploy_migration_floor_fail_forward_6090.sh
   tests/test_deploy_o_writer_rollback_guard_6325.sh
@@ -807,7 +808,7 @@ if run_check cargo "Agent maintenance freshness tests"; then
 fi
 
 if run_check cargo "Maintainability audit tests"; then
-"$PYTHON" -m unittest tests.test_audit_maintainability
+"$PYTHON" -m unittest tests.test_audit_maintainability tests.test_module_layer_baseline_records tests.test_module_layer_measurement tests.test_module_layer_ratchet
 fi
 
 if run_check cargo "Maintainability audit"; then
