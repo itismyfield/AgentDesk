@@ -111,6 +111,7 @@ impl Writer {
                                     root,
                                     &boot.id,
                                     chrono::Utc::now().timestamp_millis(),
+                                    &shared,
                                 );
                                 refreshed = Some(Instant::now());
                             }
@@ -185,6 +186,7 @@ impl Writer {
                             root,
                             &boot.id,
                             chrono::Utc::now().timestamp_millis(),
+                            &shared,
                         );
                         refreshed = Some(Instant::now());
                     }

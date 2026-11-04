@@ -744,6 +744,19 @@ async fn a_new_enqueue_cannot_reuse_the_previous_drain() {
     let root = tempfile::tempdir().unwrap();
     let id = boot();
     let current = open(root.path(), &id).await;
+    let mut collector = Collector::default();
+    let before = collector.collect(
+        root.path(),
+        &id.id,
+        chrono::Utc::now().timestamp_millis(),
+        Some(&current.0.state),
+    );
+    assert!(
+        !before["local_evaluation"]["reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("LIVE_CUT_UNVERIFIED"))
+    );
     let lock = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -756,8 +769,57 @@ async fn a_new_enqueue_cannot_reuse_the_previous_drain() {
         assert_eq!(state.window.verdict(Some(&id.id), "PASS"), "INCONCLUSIVE");
         assert_ne!(Some(state.window.cut), state.window.drained);
     }
+    let queued = collector.collect(
+        root.path(),
+        &id.id,
+        chrono::Utc::now().timestamp_millis(),
+        Some(&current.0.state),
+    );
+    assert!(
+        queued["live_journal"]["enqueued_cut"].as_u64().unwrap()
+            > before["live_journal"]["enqueued_cut"].as_u64().unwrap()
+    );
+    assert!(
+        queued["local_evaluation"]["reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("LIVE_CUT_UNVERIFIED"))
+    );
     drop(lock);
     assert!(current.append(json!({"kind":"checkpoint"})).await);
-    let state = current.0.state.lock().unwrap();
-    assert_eq!(state.window.verdict(Some(&id.id), "PASS"), "PASS");
+    {
+        let state = current.0.state.lock().unwrap();
+        assert_eq!(state.window.verdict(Some(&id.id), "PASS"), "PASS");
+    }
+    let drained = collector.collect(
+        root.path(),
+        &id.id,
+        chrono::Utc::now().timestamp_millis(),
+        Some(&current.0.state),
+    );
+    assert!(
+        !drained["local_evaluation"]["reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("LIVE_CUT_UNVERIFIED"))
+    );
+    current
+        .0
+        .state
+        .lock()
+        .unwrap()
+        .mark("WRITE_QUEUE_UNAVAILABLE");
+    let invalid = collector.collect(
+        root.path(),
+        &id.id,
+        chrono::Utc::now().timestamp_millis(),
+        Some(&current.0.state),
+    );
+    assert_eq!(invalid["live_journal"]["invalid"], true);
+    assert!(
+        invalid["local_evaluation"]["reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("LIVE_CUT_UNVERIFIED"))
+    );
 }

@@ -25,7 +25,18 @@ fn problem(errors: &mut Vec<String>, reason: &str) {
 }
 
 impl Collector {
-    pub(crate) fn collect(&mut self, root: &Path, current: &str, now_ms: i64) -> Value {
+    pub(super) fn collect(
+        &mut self,
+        root: &Path,
+        current: &str,
+        now_ms: i64,
+        state: Option<&super::Shared>,
+    ) -> Value {
+        // Capture the producer watermark before file I/O; a drained prefix can still have queued records.
+        let live_journal = state.map(|state| {
+            let state = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            json!({"boot_id":state.window.boot_id,"enqueued_cut":state.window.cut,"invalid":state.window.invalid})
+        }).unwrap_or(Value::Null);
         let mut errors = Vec::new();
         let mut truncated = false;
         let mut files = Vec::new();
@@ -106,6 +117,9 @@ impl Collector {
                             window.invalid = true;
                             continue;
                         };
+                        if end.is_object() && record["kind"] != "drain" {
+                            window.invalid = true;
+                        }
                         window.observe(&record);
                         match record["kind"].as_str() {
                             Some("target") => {
@@ -209,7 +223,7 @@ impl Collector {
             problem(&mut errors, "CLOCK_REVERSED");
         }
         self.previous_cut = Some(now_ms);
-        let mut value = json!({"schema_version":1,"policy_version":1,"host":header["host"],
+        let mut value = json!({"schema_version":1,"policy_version":1,"live_journal":live_journal,"host":header["host"],
             "process_role":"server","current_boot_id":current,"build_sha":header["build_sha"],
             "census_hash":header["census_hash"],"probe_coverage":header["probe_coverage"],"pending_probes":header["pending_probes"],
             "started_at_ms":header["started_at_ms"],"coverage_start":anchor,"cut_ms":now_ms,"stale_snapshot":false,
@@ -221,12 +235,34 @@ impl Collector {
             value["evidence_truncated"] = json!(true);
             value["boot_files"] = json!([]);
         }
-        value["local_evaluation"] = evaluation::host(
-            &value,
-            now_ms,
-            header["build_sha"].as_str().unwrap_or(""),
-            header["census_hash"].as_str().unwrap_or(""),
-        );
+        evaluate_host(&mut value, now_ms);
+        value
+    }
+}
+
+fn evaluate_host(value: &mut Value, now: i64) {
+    let report = evaluation::host(
+        value,
+        now,
+        value["build_sha"].as_str().unwrap_or(""),
+        value["census_hash"].as_str().unwrap_or(""),
+    );
+    value["local_evaluation"] = report;
+}
+
+#[cfg(test)]
+impl Collector {
+    pub(crate) fn fixture(&mut self, root: &Path, current: &str, now: i64) -> Value {
+        let mut value = self.collect(root, current, now, None);
+        let cut = value["boot_files"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|file| file["header"]["boot_id"] == current)
+            .map(|file| file["window"]["cut"].clone())
+            .unwrap_or(Value::Null);
+        value["live_journal"] = json!({"boot_id":current,"enqueued_cut":cut,"invalid":false});
+        evaluate_host(&mut value, now);
         value
     }
 }

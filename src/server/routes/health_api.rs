@@ -2696,6 +2696,13 @@ mod tests {
                     "predecessor_boot_id":i.checked_sub(1).map(|n| &ids[n]),"started_at_ms":started,
                     "coverage_start":if i==0 {json!({"boot_id":ids[0],"started_at_ms":0})} else {anchor.clone()},
                     "build_sha":BUILD,"census_hash":CENSUS,"probe_coverage":true,"pending_probes":0});
+                if case == "old_uncovered" && i == 0 {
+                    header["probe_coverage"] = json!(false);
+                    header["pending_probes"] = json!(7);
+                }
+                if case == "old_schema" && i == 0 {
+                    header["schema_version"] = json!(2);
+                }
                 if case == "wrong_census" && i == 2 {
                     header["census_hash"] = json!("d".repeat(64));
                 }
@@ -2707,9 +2714,30 @@ mod tests {
                 if case == "selection_off" && i == 2 {
                     records[1]["effective"] = json!([]);
                 }
+                if case == "selection_disabled" || case == "no_bindings" {
+                    records[1]["installed"] = json!(false);
+                    records[1]["effective"] = serde_json::Value::Null;
+                    records[1]["dormant"] = serde_json::Value::Null;
+                    if case == "no_bindings" {
+                        records[1]["tui_bindings"] = json!([]);
+                    }
+                }
+                if case == "selection_unknown" && i == 2 {
+                    records[1]["installed"] = serde_json::Value::Null;
+                }
                 if i == last && case != "denominator_missing" {
-                    let turns = if case == "no_traffic" { 9 } else { 10 };
-                    let ack = if case == "no_ack" { 0 } else { 1 };
+                    let turns = if case == "no_bindings" {
+                        0
+                    } else if case == "no_traffic" {
+                        9
+                    } else {
+                        10
+                    };
+                    let ack = if case == "no_ack" || case == "no_bindings" {
+                        0
+                    } else {
+                        1
+                    };
                     let opportunities = if case == "no_site_traffic" { 0 } else { 1 };
                     let begin = if case == "late_epoch" { 180000 } else { 120000 };
                     records.push(json!({"kind":"denominator","bucket_start_ms":begin,"bucket_end_ms":begin+60000,
@@ -2722,10 +2750,15 @@ mod tests {
                     }
                 }
                 let target_at = match case {
+                    "old_unknown" if i == 0 => Some(START),
+                    "after_end" if i == 0 => Some(START - 1),
+                    "clock_reverse" if i == 2 => Some(START - 1),
+                    "clock_forward" if i == 2 => Some(CUT + 5001),
                     "start_minus_one" if i == 0 => Some(START - 1),
                     "start_at" if i == 0 => Some(START),
                     "body" | "mixed_invalid" | "end_at" | "end_plus_one" | "unknown_body"
-                    | "nonbody" | "refresh" | "runtime_unknown" | "owner_unknown"
+                    | "nonbody" | "refresh" | "runtime_unknown" | "runtime_empty"
+                    | "owner_unknown"
                         if i == 2 =>
                     {
                         Some(CUT)
@@ -2735,22 +2768,35 @@ mod tests {
                 if let Some(at) = target_at {
                     records.push(json!({"kind":"target","phase":"begin","op":"POST","at_ms":at,
                         "census":{"site":"W11","binding_mode":"TUI","body_owner":"Legacy","actual_runtime":"codex_tui",
-                        "source_incarnation":{"file":1,"generation":1},"output_class":match case {"unknown_body"=>"UnknownBody","nonbody"=>"NonBody","refresh"=>"LegacyBodyRefresh",_=>"LegacyBody"}}}));
+                        "source_incarnation":{"file":1,"generation":1},"output_class":match case {"unknown_body"|"old_unknown"|"after_end"=>"UnknownBody","nonbody"=>"NonBody","refresh"=>"LegacyBodyRefresh",_=>"LegacyBody"}}}));
                 }
                 if case == "runtime_unknown" && i == 2 {
                     records.last_mut().unwrap()["census"]["actual_runtime"] = json!("unknown");
+                }
+                if case == "runtime_empty" && i == 2 {
+                    records.last_mut().unwrap()["census"]["actual_runtime"] = json!("");
                 }
                 if case == "owner_unknown" && i == 2 {
                     records.last_mut().unwrap()["census"]["body_owner"] = serde_json::Value::Null;
                 }
                 if i < last {
+                    let trailing = if case == "after_end" && i == 0 {
+                        records.pop()
+                    } else {
+                        None
+                    };
                     records.push(json!({"kind":"end","outputs_drained":true,"ended_at_ms":if case=="start_at" && i==0 {CUT} else {(i as i64+1)*START-1}}));
+                    if let Some(target) = trailing {
+                        records.push(target);
+                    }
                 }
                 let mut text = header.to_string() + "\n";
                 for record in &records {
                     text += &(record.to_string() + "\n");
                 }
-                text+=&(json!({"kind":"drain","boot_id":ids[i],"cut":records.len(),"closed":i<last,"invalid":false}).to_string()+"\n");
+                if case != "old_drain_missing" || i != 0 {
+                    text+=&(json!({"kind":"drain","boot_id":ids[i],"cut":records.len(),"closed":i<last,"invalid":false}).to_string()+"\n");
+                }
                 if case == "mixed_invalid" && i == 2 {
                     text += "{";
                 }
@@ -2778,6 +2824,7 @@ mod tests {
         for (case, expected) in [
             ("valid", "PASS"),
             ("same_time", "PASS"),
+            ("asynchronous_cuts", "PASS"),
             ("staggered_epochs", "FAIL"),
             ("bucket_duplicate", "PASS"),
             ("no_traffic", "NO_TRAFFIC"),
@@ -2786,6 +2833,9 @@ mod tests {
             ("denominator_missing", "INCONCLUSIVE"),
             ("no_restart", "INCONCLUSIVE"),
             ("partial_bucket", "INCONCLUSIVE"),
+            ("live_missing", "INCONCLUSIVE"),
+            ("live_pending", "INCONCLUSIVE"),
+            ("live_invalid", "INCONCLUSIVE"),
             ("host_missing", "INCONCLUSIVE"),
             ("empty", "INCONCLUSIVE"),
             ("duplicate_host", "INCONCLUSIVE"),
@@ -2797,11 +2847,22 @@ mod tests {
             ("wrong_build", "INCONCLUSIVE"),
             ("wrong_census", "FAIL"),
             ("runtime_unknown", "INCONCLUSIVE"),
+            ("runtime_empty", "INCONCLUSIVE"),
             ("owner_unknown", "INCONCLUSIVE"),
             ("unknown_body", "INCONCLUSIVE"),
+            ("old_unknown", "INCONCLUSIVE"),
+            ("after_end", "INCONCLUSIVE"),
+            ("old_schema", "INCONCLUSIVE"),
+            ("old_uncovered", "PASS"),
+            ("old_drain_missing", "INCONCLUSIVE"),
+            ("selection_disabled", "FAIL"),
+            ("selection_unknown", "INCONCLUSIVE"),
+            ("no_bindings", "NO_TRAFFIC"),
             ("selection_off", "FAIL"),
             ("body", "FAIL"),
             ("mixed_invalid", "FAIL"),
+            ("clock_reverse", "INCONCLUSIVE"),
+            ("clock_forward", "INCONCLUSIVE"),
             ("start_minus_one", "PASS"),
             ("start_at", "FAIL"),
             ("end_at", "FAIL"),
@@ -2825,15 +2886,25 @@ mod tests {
                     "valid"
                 };
                 let current = fixture(root.path(), name, active);
-                let cut = if name == "book" && case == "end_plus_one" {
+                let cut = if name == "book" && case == "asynchronous_cuts" {
+                    CUT - 60000
+                } else if name == "book" && case == "end_plus_one" {
                     CUT - 1
-                } else if name == "book" && case == "skew" {
-                    CUT - 5001
                 } else {
                     CUT
                 };
-                let cache = ProjectionCache::fixture(root.path(), &current, cut);
-                let now = if active == "stale" { CUT + 120001 } else { CUT };
+                let cache = if name == "book" && case == "asynchronous_cuts" {
+                    ProjectionCache::fixture_at_age(root.path(), &current, cut, 60000)
+                } else {
+                    ProjectionCache::fixture(root.path(), &current, cut)
+                };
+                let now = if active == "stale" {
+                    CUT + 120001
+                } else if name == "book" && case == "skew" {
+                    CUT + 5001
+                } else {
+                    CUT
+                };
                 let detail = with_projection_for_test(
                     cache.clone(),
                     now,
@@ -2856,6 +2927,13 @@ mod tests {
                 assert!(public["legacy_body_census"]["boot_files"].is_null());
             }
             match case {
+                "live_missing" => observations[0]["live_journal"] = serde_json::Value::Null,
+                "live_pending" => {
+                    observations[0]["live_journal"] = json!({"boot_id":observations[0]["current_boot_id"],"enqueued_cut":999,"invalid":false});
+                }
+                "live_invalid" => {
+                    observations[0]["live_journal"] = json!({"boot_id":observations[0]["current_boot_id"],"enqueued_cut":3,"invalid":true});
+                }
                 "host_missing" => {
                     observations.pop();
                 }
@@ -2871,6 +2949,10 @@ mod tests {
             }
             if case == "no_site_traffic" {
                 assert_eq!(report["sites"]["W11"]["status"], "DELETE_NOT_READY");
+            }
+            if case == "refresh" {
+                assert_eq!(report["sites"]["W11"]["status"], "DELETE_NOT_READY");
+                assert_eq!(report["sites"]["W11"]["body_events"], 1);
             }
             if case == "mixed_invalid" {
                 assert_eq!(report["complete"], false);
@@ -2913,7 +2995,7 @@ mod tests {
         assert!(response.unwrap()["legacy_body_census"]["inventory_source"]["available"] == false);
         let mut collector = Collector::default();
         assert_eq!(
-            collector.collect(root.path(), &current, CUT)["local_evaluation"]["status"],
+            collector.fixture(root.path(), &current, CUT)["local_evaluation"]["status"],
             "PASS"
         );
         let old = std::fs::read_dir(root.path().join("legacy_body_census"))
@@ -2937,7 +3019,7 @@ mod tests {
         )
         .unwrap();
         for _ in 0..2 {
-            let observed = collector.collect(root.path(), &current, CUT);
+            let observed = collector.fixture(root.path(), &current, CUT);
             assert!(
                 observed["errors"]
                     .as_array()

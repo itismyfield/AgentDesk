@@ -106,6 +106,24 @@ fn inspect_host(data: &Value, end: i64, start: i64, build: &str, census: &str) -
         .as_array()
         .map(Vec::as_slice)
         .unwrap_or(&[]);
+    let live = &data["live_journal"];
+    let live_valid = data["current_boot_id"]
+        .as_str()
+        .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+        .is_some_and(|id| {
+            live["boot_id"] == id
+                && live["invalid"] == false
+                && live["enqueued_cut"].as_u64().is_some_and(|cut| {
+                    files
+                        .iter()
+                        .find(|file| file["header"]["boot_id"] == id)
+                        .and_then(|file| file["window"]["drained"].as_u64())
+                        .is_some_and(|drained| drained >= cut)
+                })
+        });
+    if !live_valid {
+        error(&mut errors, "LIVE_CUT_UNVERIFIED");
+    }
     let parent = files
         .iter()
         .find(|file| file["header"]["boot_id"] == anchor["boot_id"])
@@ -116,6 +134,8 @@ fn inspect_host(data: &Value, end: i64, start: i64, build: &str, census: &str) -
                 .as_i64()
                 .is_some_and(|at| at < epoch)
     });
+    let mut end_available = !files.is_empty();
+    let mut drain_available = !files.is_empty();
     for file in files {
         let h = &file["header"];
         let Some(id) = h["boot_id"].as_str() else {
@@ -144,11 +164,54 @@ fn inspect_host(data: &Value, end: i64, start: i64, build: &str, census: &str) -
         {
             error(&mut errors, "OUTPUT_DRAIN_UNKNOWN");
         }
-        let ended_before = file["end"]["outputs_drained"] == true
+        let header_known = h["schema_version"] == 1
+            && h["observation_policy_version"] == 1
+            && h["process_role"] == "server"
+            && h["host"].as_str().is_some_and(|host| !host.is_empty());
+        let w = &file["window"];
+        let drained = w["cut"].as_u64().is_some()
+            && w["cut"] == w["drained"]
+            && w["invalid"] == false
+            && w["boot_id"] == id
+            && (w["closed"] == true || h["boot_id"] == data["current_boot_id"])
+            && w["status"] == "COMPLETE";
+        let clock_valid = file["targets"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .all(|event| {
+                event["at_ms"].as_i64().is_none_or(|time| {
+                    time >= at
+                        && data["cut_ms"]
+                            .as_i64()
+                            .is_some_and(|cut| time.saturating_sub(cut) <= 5000)
+                        && (file["end"]["outputs_drained"] != true
+                            || file["end"]["ended_at_ms"]
+                                .as_i64()
+                                .is_none_or(|end| time <= end))
+                })
+            });
+        if !clock_valid {
+            error(&mut errors, "EVENT_CLOCK_INVALID");
+        }
+        let end_verified = header_known
+            && drained
+            && clock_valid
+            && file["targets"].is_array()
+            && file["buckets"].is_array()
+            && file["end"]["outputs_drained"] == true
+            && file["end"]["ended_at_ms"]
+                .as_i64()
+                .is_some_and(|end| end >= at);
+        drain_available &= header_known && drained;
+        if h["boot_id"] != data["current_boot_id"] {
+            end_available &= end_verified;
+        }
+        let ended_before = end_verified
             && file["end"]["ended_at_ms"]
                 .as_i64()
                 .is_some_and(|at| at < start);
-        if at > end || ended_before {
+        if (at > end && header_known) || ended_before {
             continue;
         }
         if h["schema_version"] != 1
@@ -165,14 +228,7 @@ fn inspect_host(data: &Value, end: i64, start: i64, build: &str, census: &str) -
         if !file["targets"].is_array() || !file["buckets"].is_array() {
             error(&mut errors, "FILE_EVIDENCE_UNKNOWN");
         }
-        let w = &file["window"];
-        if w["cut"].as_u64().is_none()
-            || w["cut"] != w["drained"]
-            || w["invalid"] != false
-            || w["boot_id"] != id
-            || !(w["closed"] == true || h["boot_id"] == data["current_boot_id"])
-            || file["window"]["status"] != "COMPLETE"
-        {
+        if !drained {
             error(&mut errors, "DRAIN_OR_EXIT_UNKNOWN");
         }
         if let Some(doctor) = h["doctor_boot_id"].as_str() {
@@ -183,17 +239,27 @@ fn inspect_host(data: &Value, end: i64, start: i64, build: &str, census: &str) -
             error(&mut errors, "DOCTOR_BOOT_UNKNOWN");
         }
         let selection = &file["selection"];
+        let bindings = list(&selection["tui_bindings"]);
+        if selection["installed"].as_bool().is_none() {
+            error(&mut errors, "SELECTION_UNKNOWN");
+        }
+        if selection["installed"] == false
+            && bindings
+                .as_ref()
+                .is_some_and(|bindings| !bindings.is_empty())
+        {
+            failures.insert("TUI_SELECTION_INCOMPLETE");
+        }
         match (
-            list(&selection["tui_bindings"]),
+            bindings,
             list(&selection["effective"]),
             list(&selection["dormant"]),
         ) {
+            (Some(bindings), _, _) if bindings.is_empty() => {}
             (Some(bindings), Some(selected), Some(dormant)) => {
                 bindings_seen.extend(bindings.iter().copied());
                 if !bindings.is_empty()
-                    && (selection["installed"] != true
-                        || !bindings.is_subset(&selected)
-                        || !bindings.is_disjoint(&dormant))
+                    && (!bindings.is_subset(&selected) || !bindings.is_disjoint(&dormant))
                 {
                     failures.insert("TUI_SELECTION_INCOMPLETE");
                 }
@@ -221,7 +287,7 @@ fn inspect_host(data: &Value, end: i64, start: i64, build: &str, census: &str) -
                     || !matches!(tag["binding_mode"].as_str(), Some("TUI" | "NON_TUI"))
                     || tag["actual_runtime"]
                         .as_str()
-                        .is_none_or(|r| r == "unknown")
+                        .is_none_or(|r| r.is_empty() || r == "unknown")
                     || tag["source_incarnation"].is_null()
                     || tag["body_owner"] != "Legacy")
             {
@@ -349,9 +415,15 @@ fn inspect_host(data: &Value, end: i64, start: i64, build: &str, census: &str) -
         .chain(["W11", "W13", "W33", "W35"])
         .collect();
     for site in names {
+        // Historical refreshes do not fail stage 1, but still prevent deleting their site.
         let body_events = events
             .iter()
-            .filter(|event| event["census"]["site"] == site && is_violation(event))
+            .filter(|event| {
+                event["census"]["site"] == site
+                    && (is_violation(event)
+                        || (event["census"]["output_class"] == "LegacyBodyRefresh"
+                            && event["census"]["binding_mode"] == "TUI"))
+            })
             .count();
         let pending = site == "W01" || site == "W01g" || site.starts_with("W20");
         let opportunity = opportunities.get(site).copied().flatten();
@@ -372,7 +444,7 @@ fn inspect_host(data: &Value, end: i64, start: i64, build: &str, census: &str) -
         );
         *traffic.entry(key).or_default() += 1;
     }
-    json!({"traffic":traffic,"termination":{"source":"drain_closed_or_current_live","available":!files.is_empty() && files.iter().all(|file|file["window"]["status"]=="COMPLETE"),"process_end_available":!files.is_empty() && files.iter().filter(|file|file["header"]["boot_id"]!=data["current_boot_id"]).all(|file|file["end"]["outputs_drained"]==true)},"status":status,"complete":errors.is_empty(),"reasons":errors,"violations":failures,"restarts":restarts,
+    json!({"traffic":traffic,"termination":{"source":"drain_closed_or_current_live","available":drain_available,"process_end_available":end_available},"status":status,"complete":errors.is_empty(),"reasons":errors,"violations":failures,"restarts":restarts,
         "tui_turns":turns,"o_ack":ack,"denominator_available":turns.is_some() && ack.is_some(),"sites":sites})
 }
 
@@ -411,10 +483,25 @@ pub(crate) fn evaluate(
         if !expected.contains(&name) || reports.contains_key(name) {
             error(&mut errors, "HOST_IDENTITY_DUPLICATE_OR_FOREIGN");
         }
-        if observation["cut_ms"].as_i64().is_none_or(|cut| {
-            now < cut || now.saturating_sub(cut) > 120_000 || cut.saturating_sub(end) > 5000
-        }) {
+        if observation["cut_ms"]
+            .as_i64()
+            .is_none_or(|cut| now < cut || now.saturating_sub(cut) > 120_000)
+        {
             error(&mut errors, "STALE_OR_SKEWED_SNAPSHOT");
+        }
+        let clock_valid = observation["served_at_ms"].as_i64().is_some_and(|served| {
+            served.abs_diff(now) <= 5000
+                && observation["monotonic_age_ms"].as_u64().is_some_and(|age| {
+                    age <= 120_000
+                        && observation["cut_ms"].as_i64().is_some_and(|cut| {
+                            u64::try_from(served.saturating_sub(cut))
+                                .ok()
+                                .is_some_and(|wall_age| wall_age.abs_diff(age) <= 5000)
+                        })
+                })
+        });
+        if !clock_valid {
+            error(&mut errors, "RESPONSE_CLOCK_UNKNOWN");
         }
         reports.insert(name, report);
     }
