@@ -98,6 +98,23 @@ def _files(findings: Iterable) -> set[str]:
     return {f.file for f in findings}
 
 
+
+class _LayerSrcTree(_FakeSrcTree):
+    """Give harness fixtures a generated initial debt baseline for their own source."""
+    def __enter__(self):
+        root = super().__enter__()
+        from audit_maintainability.checks import module_layers, module_layer_baseline as snapshots
+        if not any((root / "src" / name).exists() for name in ("lib.rs", "main.rs")):
+            _write(root, "src/lib.rs", "")
+        _write(root, snapshots.MAPPING, 'schema_version=1\n[layers]\nassembly=5\n'
+               '[[rules]]\nprefix=""\nlayer="assembly"\nreason="fixture assembly"\n')
+        _write(root, "scripts/audit_maintainability/layer_moves.toml", "schema_version=1\nmoves=[]\n")
+        occurrences = []
+        graph = module_layers.analyze(root, occurrence_projection=occurrences)
+        snapshots.write_baseline(root / snapshots.BASELINE,
+                                 snapshots.baseline(graph, snapshots.load_mapping(root), "fixture", occurrences))
+        return root
+
 class GiantFilesCheck(unittest.TestCase):
     def test_flags_files_over_threshold(self) -> None:
         big = "fn x() {}\n" * (giant_files.THRESHOLD + 5)
@@ -1170,7 +1187,7 @@ class SourceOfTruthAliasCheck(unittest.TestCase):
 
 class HarnessCli(unittest.TestCase):
     def test_runs_all_fourteen_checks_and_emits_yaml_keys(self) -> None:
-        with _FakeSrcTree({"src/main.rs": "fn main() {}\n"}):
+        with _LayerSrcTree({"src/main.rs": "fn main() {}\n"}):
             specs = HARNESS.load_check_specs()
             findings, _ = HARNESS.run_all(specs, {})
             yaml_text = HARNESS.render_yaml(specs, findings)
@@ -1197,7 +1214,7 @@ class HarnessCli(unittest.TestCase):
             self.assertIn(f"`{key}`", md_text, f"missing markdown section for {key}")
 
     def test_markdown_summary_includes_every_registered_check(self) -> None:
-        with _FakeSrcTree({"src/main.rs": "fn main() {}\n"}):
+        with _LayerSrcTree({"src/main.rs": "fn main() {}\n"}):
             specs = HARNESS.load_check_specs()
             findings, _ = HARNESS.run_all(specs, {})
             md_text = HARNESS.render_markdown(specs, findings)
@@ -1229,6 +1246,7 @@ class HarnessCli(unittest.TestCase):
                 "legacy_sqlite_refs",
                 "source_of_truth_alias_writes",
                 "git_subprocess_callsites",
+                "module_layers",
             },
         )
         self.assertEqual(
@@ -1244,20 +1262,20 @@ class HarnessCli(unittest.TestCase):
         self.assertTrue(all(not spec.hard_gate for spec in specs if spec.key in warning_only))
 
     def test_renderers_report_hard_gate_enabled(self) -> None:
-        with _FakeSrcTree({"src/main.rs": "fn main() {}\n"}):
+        with _LayerSrcTree({"src/main.rs": "fn main() {}\n"}):
             specs = HARNESS.load_check_specs()
             findings, _ = HARNESS.run_all(specs, {})
             yaml_text = HARNESS.render_yaml(specs, findings)
             json_payload = json.loads(HARNESS.render_json(specs, findings))
         self.assertIn("hard_gate_enabled: true", yaml_text)
-        self.assertIn("hard_gate_count: 7", yaml_text)
+        self.assertIn("hard_gate_count: 8", yaml_text)
         self.assertIn("baseline_gate_count: 3", yaml_text)
         self.assertIs(json_payload["hard_gate_enabled"], True)
-        self.assertEqual(json_payload["hard_gate_count"], 7)
+        self.assertEqual(json_payload["hard_gate_count"], 8)
         self.assertEqual(json_payload["baseline_gate_count"], 3)
 
     def test_check_mode_returns_zero_with_no_findings(self) -> None:
-        with _FakeSrcTree({"src/main.rs": "fn main() {}\n"}) as root:
+        with _LayerSrcTree({"src/main.rs": "fn main() {}\n"}) as root:
             allowlist = root / "empty.toml"
             allowlist.write_text("", encoding="utf-8")
             with mock.patch.object(sys, "stdout", new=mock.MagicMock()):
@@ -1266,13 +1284,37 @@ class HarnessCli(unittest.TestCase):
                 )
         self.assertEqual(rc, 0)
 
+    def test_check_mode_blocks_new_layer_debt_through_the_real_runner(self):
+        with _LayerSrcTree({"src/lib.rs": "mod lower { fn run() { crate::upper::hit(); } } mod upper { pub fn hit() {} }"}) as root:
+            stream = io.StringIO()
+            with mock.patch.object(sys, "stdout", stream):
+                self.assertEqual(HARNESS.main(["--check", "--format", "json"]), 0)
+            mapping = root / "scripts/audit_maintainability/layers.toml"
+            mapping.write_text(mapping.read_text() + '\n[[rules]]\nprefix="lower"\nlayer="foundation"\nreason="pure fixture"\n[[rules]]\nprefix="upper"\nlayer="assembly"\nreason="assembly fixture"\n')
+            mapping.write_text(mapping.read_text().replace("assembly=5", "assembly=5\nfoundation=1"))
+            stream = io.StringIO()
+            with mock.patch.object(sys, "stdout", stream), mock.patch.object(sys, "stderr", io.StringIO()):
+                self.assertEqual(HARNESS.main(["--check", "--format", "json"]), 1)
+            checks = json.loads(stream.getvalue())["checks"]
+            self.assertTrue(any(row["severity"] == "error" for row in checks["module_layers"]["findings"]))
+            self.assertFalse(any(row["severity"] == "error" for key, value in checks.items()
+                                 if key != "module_layers" for row in value["findings"]))
+
+    def test_missing_layer_baseline_cannot_pass_check_mode(self):
+        with _FakeSrcTree({"src/main.rs": "fn main() {}"}):
+            stream = io.StringIO()
+            with mock.patch.object(sys, "stdout", stream), mock.patch.object(sys, "stderr", io.StringIO()):
+                self.assertEqual(HARNESS.main(["--check", "--format", "json"]), 1)
+            self.assertTrue(any(row["severity"] == "error" for row in
+                                json.loads(stream.getvalue())["checks"]["module_layers"]["findings"]))
+
     def test_check_mode_fails_on_direct_discord_send_regression(self) -> None:
         body = """
         async fn notify(http: Arc<Http>, ch: ChannelId) {
             ch.send_message(&http, |m| m.content("x")).await.ok();
         }
         """
-        with _FakeSrcTree({"src/services/agents.rs": body}) as root:
+        with _LayerSrcTree({"src/services/agents.rs": body}) as root:
             allowlist = root / "empty.toml"
             allowlist.write_text("", encoding="utf-8")
             with mock.patch.object(sys, "stdout", new=mock.MagicMock()), mock.patch.object(
@@ -1289,7 +1331,7 @@ class HarnessCli(unittest.TestCase):
             return json!({"ok": true});
         }
         """
-        with _FakeSrcTree({"src/server/routes/new.rs": body}) as root:
+        with _LayerSrcTree({"src/server/routes/new.rs": body}) as root:
             _write(
                 root,
                 route_srp.BASELINE_REL_PATH,
@@ -1312,7 +1354,7 @@ class HarnessCli(unittest.TestCase):
 
     def test_check_mode_fails_on_server_backflow_regression(self) -> None:
         body = "use crate::server::routes::AppState;\n"
-        with _FakeSrcTree({"src/engine/new.rs": body}) as root:
+        with _LayerSrcTree({"src/engine/new.rs": body}) as root:
             _write(
                 root,
                 service_server_backflow.BASELINE_REL_PATH,
@@ -1335,7 +1377,7 @@ class HarnessCli(unittest.TestCase):
 
     def test_check_mode_fails_on_legacy_sqlite_regression(self) -> None:
         body = "use rusqlite::Connection;\n"
-        with _FakeSrcTree({"src/services/foo.rs": body}) as root:
+        with _LayerSrcTree({"src/services/foo.rs": body}) as root:
             allowlist = root / "empty.toml"
             allowlist.write_text("", encoding="utf-8")
             with mock.patch.object(sys, "stdout", new=mock.MagicMock()), mock.patch.object(
@@ -1349,7 +1391,7 @@ class HarnessCli(unittest.TestCase):
         let path = repo_root.join("ARCHITECTURE.md");
         std::fs::write(&path, contents)?;
         """
-        with _FakeSrcTree({"src/services/agents.rs": body}) as root:
+        with _LayerSrcTree({"src/services/agents.rs": body}) as root:
             allowlist = root / "empty.toml"
             allowlist.write_text("", encoding="utf-8")
             with mock.patch.object(sys, "stdout", new=mock.MagicMock()), mock.patch.object(
@@ -1360,7 +1402,7 @@ class HarnessCli(unittest.TestCase):
 
     def test_check_mode_warns_on_undocumented_new_giant(self) -> None:
         big = "fn x() {}\n" * (giant_files.THRESHOLD + 5)
-        with _FakeSrcTree({"src/new_giant.rs": big,
+        with _LayerSrcTree({"src/new_giant.rs": big,
                            GiantFileRatchetCheck._BASELINE: "[giant_file_ratchet]\n",
                            **GiantFileRatchetCheck._HISTORY}) as root:
             allowlist = root / "empty.toml"
@@ -1382,7 +1424,7 @@ class HarnessCli(unittest.TestCase):
                     (git_subprocess.CHECK, 'std::process::Command::new("git");'),
                     (source_of_truth_alias.CHECK, 'let path = repo_root.join("ARCHITECTURE.md"); std::fs::write(&path, contents)?;'))
         for spec, source in fixtures:
-            with self.subTest(rule=spec.key), _FakeSrcTree({"src/services/fixture.rs": source}), \
+            with self.subTest(rule=spec.key), _LayerSrcTree({"src/services/fixture.rs": source}), \
                     mock.patch.object(HARNESS, "load_check_specs", return_value=[spec]), \
                     mock.patch.object(HARNESS, "load_allowlist", return_value={}), \
                     mock.patch.object(sys, "stdout"), mock.patch.object(sys, "stderr"):
@@ -1409,7 +1451,7 @@ class HarnessCli(unittest.TestCase):
             self.assertEqual(HARNESS.main(["--check"]), 1)
 
     def test_malformed_warning_baseline_still_blocks(self) -> None:
-        with _FakeSrcTree({"src/services/fixture.rs": "use crate::server::routes::AppState;",
+        with _LayerSrcTree({"src/services/fixture.rs": "use crate::server::routes::AppState;",
                            service_server_backflow.BASELINE_REL_PATH: "invalid json"}), \
                 mock.patch.object(HARNESS, "load_check_specs", return_value=[service_server_backflow.CHECK]), \
                 mock.patch.object(HARNESS, "load_allowlist", return_value={}), \
@@ -1430,7 +1472,7 @@ class HarnessCli(unittest.TestCase):
                      '[namespace_size_caps]\n"src/size.rs" = 2\n'}),
                     (parent_test_residue.CHECK, {"src/residue.rs": _residue_body(100, 450)}))
         for spec, files in fixtures:
-            with self.subTest(rule=spec.key), _FakeSrcTree(files), \
+            with self.subTest(rule=spec.key), _LayerSrcTree(files), \
                     mock.patch.object(HARNESS, "load_check_specs", return_value=[spec]), \
                     mock.patch.object(HARNESS, "load_allowlist", return_value={}), \
                     mock.patch.object(sys, "stdout", new=mock.MagicMock()), \
@@ -1612,7 +1654,7 @@ class ModuleLayersCheck(unittest.TestCase):
         self.assertTrue(any("src/lib.rs:6" in e["sites"] for e in edges))
 
     def test_census_distinguishes_path_import_and_reexport_without_blocking(self) -> None:
-        with _FakeSrcTree({"src/lib.rs": """
+        with _LayerSrcTree({"src/lib.rs": """
             mod services { pub mod discord { pub struct Handle; } }
             mod adapter {
                 use crate::services::discord::Handle;
@@ -1627,7 +1669,7 @@ class ModuleLayersCheck(unittest.TestCase):
         self.assertTrue(all(r["file"] == "src/lib.rs" and r["line"] > 0 for r in census))
         self.assertTrue(findings)
         self.assertTrue(all(f.severity == "info" for f in findings))
-        self.assertFalse(self.layers.CHECK.hard_gate)
+        self.assertTrue(self.layers.CHECK.hard_gate)
         self.assertIn(self.layers.CHECK.key, {spec.key for spec in HARNESS.load_check_specs()})
 
     def test_alias_paths_preserve_associated_items_reexport_chains_and_block_scope(self) -> None:
@@ -2111,7 +2153,7 @@ class ModuleLayerBaselineCheck(unittest.TestCase):
     def test_canonical_baseline_contains_only_comparison_records_and_metadata(self) -> None:
         graph, mapping = self._graph(), self._mapping()
         payload = self.snapshot(graph, mapping, "a" * 40)
-        self.assertEqual(payload["schema_version"], 2)
+        self.assertEqual(payload["schema_version"], 3)
         self.assertEqual(payload["count_unit_version"], 1)
         self.assertEqual(payload["edge_count_unit"], "static reference occurrences")
         self.assertEqual(payload["unclassified_modules"], 1)
