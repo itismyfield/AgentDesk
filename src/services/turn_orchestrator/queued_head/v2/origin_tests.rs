@@ -70,9 +70,8 @@ fn waiting(channel: u64, origin: &str) -> Option<Waiting> {
     waiting_origin("claude", channel, origin).unwrap()
 }
 
-/// A cancel or clear owes each removed origin in the commit that removes it, never an input
-/// without an origin; the owed set leaves only by an exact ack, and an empty set leaves the
-/// file in the shape an older build reads.
+/// A cancel or clear owes each removed origin in its removing commit, never an origin-less input;
+/// only an exact ack clears it, and an empty set keeps the file in the shape an older build reads.
 #[tokio::test]
 async fn removed_origins_are_owed_by_the_removing_commit_until_acked() {
     let _root = TestRuntimeRootGuard::new();

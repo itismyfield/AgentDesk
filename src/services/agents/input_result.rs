@@ -66,9 +66,8 @@ pub enum InputResult {
     },
 }
 
-/// Reads the queue files, then the inflight rows, then the receipts: an input moves from queue to
-/// row to receipt, and each writer commits the next record before it removes the last, so a later
-/// read always finds it. The later record wins; an owed receipt stands in for one not yet written.
+/// Reads queue files, inflight rows, then receipts; each writer commits the next record before it
+/// removes the last, so the later record wins and an owed receipt stands in for an unwritten one.
 pub async fn lookup(
     pool: &PgPool,
     agent_id: &str,
