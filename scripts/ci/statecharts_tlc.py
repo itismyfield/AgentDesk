@@ -23,14 +23,18 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ROOT = REPO_ROOT / "docs/statecharts"
+FAIRNESS_HELPER = Path(__file__).with_name("StatechartFairness.java")
 DEADLOCK = "NoDeadlock"
 
 # tlc2.output.EC message codes and tlc2.TLC exit codes (tla2tools 1.7.4).
 MSG_INVARIANT_INITIAL = 2107
 MSG_INVARIANT_BEHAVIOR = 2110
 MSG_DEADLOCK = 2114
+MSG_TEMPORAL_VIOLATION = 2116
+MSG_TEMPORAL_CHECK = 2192
+MSG_TEMPORAL_DONE = 2267
 MSG_SUCCESS = 2193
-EXIT_OK, EXIT_DEADLOCK, EXIT_SAFETY = 0, 11, 12
+EXIT_OK, EXIT_DEADLOCK, EXIT_SAFETY, EXIT_LIVENESS = 0, 11, 12, 13
 
 CFG_KEYWORDS = {
     "CONSTANT", "CONSTANTS", "CONSTRAINT", "CONSTRAINTS", "ACTION_CONSTRAINT",
@@ -59,13 +63,14 @@ class CheckError(Exception):
 class Config:
     text: str
     invariants: list[str]
+    properties: list[str]
     check_deadlock: bool
     cut: list[tuple[int, int]]
 
     def rules(self) -> list[str]:
-        return self.invariants + ([DEADLOCK] if self.check_deadlock else [])
+        return self.invariants + self.properties + ([DEADLOCK] if self.check_deadlock else [])
 
-    def render(self, invariants: list[str], check_deadlock: bool) -> str:
+    def render(self, invariants: list[str], check_deadlock: bool, properties: list[str] | None = None) -> str:
         """The config with only the given rules checked."""
         parts, start = [], 0
         for begin, end in self.cut:
@@ -75,6 +80,8 @@ class Config:
         body = "".join(parts).rstrip() + "\n"
         if invariants:
             body += f"INVARIANT {' '.join(invariants)}\n"
+        if properties:
+            body += f"PROPERTY {' '.join(properties)}\n"
         return body + f"CHECK_DEADLOCK {'TRUE' if check_deadlock else 'FALSE'}\n"
 
 
@@ -113,6 +120,9 @@ def cfg_tokens(text: str) -> list[re.Match[str]]:
 def parse_config(text: str) -> Config:
     tokens = cfg_tokens(text)
     invariants: list[str] = []
+    properties: list[str] = []
+    specifications: list[list[str]] = []
+    init_next, symmetry = False, False
     check_deadlock, seen_check_deadlock = True, False
     cut: list[tuple[int, int]] = []
     i = 0
@@ -126,13 +136,18 @@ def parse_config(text: str) -> Config:
             j += 1
         args = tokens[i + 1:j]
         end = tokens[j].start() if j < len(tokens) else len(text)
-        if word in ("PROPERTY", "PROPERTIES"):
-            raise CheckError("PROPERTY is not supported; this checker reads invariants and deadlock only")
-        if word in ("INVARIANT", "INVARIANTS"):
+        if word in ("INVARIANT", "INVARIANTS", "PROPERTY", "PROPERTIES"):
             if not args or any(not t.group("word") for t in args):
-                raise CheckError(f"{word} must list invariant names")
-            invariants += [t.group("word") for t in args]
+                raise CheckError(f"{word} must list rule names")
+            names = invariants if word in ("INVARIANT", "INVARIANTS") else properties
+            names += [t.group("word") for t in args]
             cut.append((tokens[i].start(), end))
+        elif word == "SPECIFICATION":
+            specifications.append([t.group("word") or "" for t in args])
+        elif word in ("INIT", "NEXT"):
+            init_next = True
+        elif word == "SYMMETRY":
+            symmetry = True
         elif word == "CHECK_DEADLOCK":
             if seen_check_deadlock:
                 raise CheckError("CHECK_DEADLOCK appears twice; TLC refuses that config")
@@ -143,23 +158,38 @@ def parse_config(text: str) -> Config:
             check_deadlock = values == ["TRUE"]
             cut.append((tokens[i].start(), end))
         i = j
-    if len(set(invariants)) != len(invariants) or DEADLOCK in invariants:
-        raise CheckError(f"invariant names must be unique and not {DEADLOCK}: {invariants}")
-    return Config(text, invariants, check_deadlock, cut)
+    rules = invariants + properties
+    if len(set(rules)) != len(rules) or DEADLOCK in rules:
+        raise CheckError(f"rule names must be unique and not {DEADLOCK}: {rules}")
+    if properties and (len(specifications) != 1 or len(specifications[0]) != 1
+                       or not specifications[0][0] or init_next):
+        raise CheckError("liveness PROPERTY requires SPECIFICATION with fairness, without INIT/NEXT")
+    if properties and symmetry:
+        raise CheckError("SYMMETRY cannot be used with liveness PROPERTY")
+    return Config(text, invariants, properties, check_deadlock, cut)
 
 
-def classify(status: int, output: str, invariants: list[str], check_deadlock: bool) -> str | None:
+def classify(status: int, output: str, invariants: list[str], check_deadlock: bool,
+             property_name: str | None = None) -> str | None:
     """None when every checked rule holds, the broken rule's name, or CheckError."""
     messages = [(int(code), body) for code, body in TOOL_MESSAGE.findall(output)]
     violated = [name for code, body in messages if code in (MSG_INVARIANT_INITIAL, MSG_INVARIANT_BEHAVIOR)
                 for name in VIOLATED.findall(body)]
     deadlocks = sum(code == MSG_DEADLOCK for code, _ in messages)
+    temporal = sum(code == MSG_TEMPORAL_VIOLATION for code, _ in messages)
+    temporal_check = any(code == MSG_TEMPORAL_CHECK for code, _ in messages)
+    temporal_done = any(code == MSG_TEMPORAL_DONE for code, _ in messages)
     success = any(code == MSG_SUCCESS for code, _ in messages)
-    if status == EXIT_OK and success and not violated and not deadlocks:
+    if (status == EXIT_OK and success and not violated and not deadlocks and not temporal
+            and (property_name is None or (temporal_check and temporal_done))):
         return None
-    if status == EXIT_SAFETY and not success and not deadlocks and len(violated) == 1 and violated[0] in invariants:
+    if (status == EXIT_LIVENESS and property_name is not None and temporal_check
+            and temporal == 1 and not success and not violated and not deadlocks):
+        return property_name
+    if (status == EXIT_SAFETY and not success and not deadlocks and not temporal
+            and len(violated) == 1 and violated[0] in invariants):
         return violated[0]
-    if status == EXIT_DEADLOCK and not success and not violated and deadlocks == 1 and check_deadlock:
+    if status == EXIT_DEADLOCK and not success and not violated and not temporal and deadlocks == 1 and check_deadlock:
         return DEADLOCK
     tail = "\n".join(output.strip().splitlines()[-25:])
     raise CheckError(f"TLC ended without a clean finish or one named rule breaking (exit {status}):\n{tail}")
@@ -187,15 +217,14 @@ class Result:
         return out
 
 
-def run_tlc(java: str, jar: Path, workdir: Path, module: str, cfg_name: str, deadline: float) -> tuple[int, str]:
+def run_java(java: str, jar: Path, workdir: Path, cfg_name: str, arguments: list[str],
+             deadline: float) -> tuple[int, str]:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise CheckError("timed out")
     jtmp = workdir / f"{cfg_name}.tmp"
     jtmp.mkdir()
-    cmd = [java, "-XX:+UseParallelGC", f"-Djava.io.tmpdir={jtmp}", "-cp", str(jar), "tlc2.TLC",
-           "-tool", "-workers", "1", "-fp", "0", "-metadir", str(workdir / f"{cfg_name}.meta"),
-           "-config", cfg_name, f"{module}.tla"]
+    cmd = [java, "-XX:+UseParallelGC", f"-Djava.io.tmpdir={jtmp}", "-cp", str(jar), *arguments]
     proc = subprocess.Popen(cmd, cwd=workdir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, start_new_session=True)
     try:
@@ -205,6 +234,21 @@ def run_tlc(java: str, jar: Path, workdir: Path, module: str, cfg_name: str, dea
         proc.communicate()
         raise CheckError("timed out") from None
     return proc.returncode, output
+
+
+def run_tlc(java: str, jar: Path, workdir: Path, module: str, cfg_name: str, deadline: float) -> tuple[int, str]:
+    arguments = ["tlc2.TLC", "-tool", "-workers", "1", "-fp", "0",
+                 "-metadir", str(workdir / f"{cfg_name}.meta"), "-config", cfg_name, f"{module}.tla"]
+    return run_java(java, jar, workdir, cfg_name, arguments, deadline)
+
+
+def check_fairness(java: str, jar: Path, workdir: Path, module: str, cfg_name: str, deadline: float) -> None:
+    status, output = run_java(java, jar, workdir, cfg_name, [str(FAIRNESS_HELPER), module, cfg_name], deadline)
+    checked = re.findall(r"^STATECHART_FAIRNESS_OK assumptions=([1-9][0-9]*) properties=([1-9][0-9]*)$",
+                         output, re.M)
+    if status != EXIT_OK or len(checked) != 1:
+        tail = "\n".join(output.strip().splitlines()[-25:])
+        raise CheckError(f"fairness precheck failed (exit {status}):\n{tail}")
 
 
 def check_cfg(root: Path, cfg: str, module: str, expected: set[str], java: str, jar: Path,
@@ -222,13 +266,22 @@ def check_cfg(root: Path, cfg: str, module: str, expected: set[str], java: str, 
             workdir = Path(tmp)
             for spec in path.parent.glob("*.tla"):
                 shutil.copy(spec, workdir)
-            invariants, check_deadlock = list(config.invariants), config.check_deadlock
-            while True:
+            if config.properties:
+                name = "fairness.cfg"
+                (workdir / name).write_text(config.render([], False, config.properties), encoding="utf-8")
+                check_fairness(java, jar, workdir, module, name, deadline)
+
+            def check_rules(invariants: list[str], check_deadlock: bool, property_name: str | None = None) -> str | None:
                 result.runs += 1
                 name = f"run{result.runs}.cfg"
-                (workdir / name).write_text(config.render(invariants, check_deadlock), encoding="utf-8")
+                properties = [property_name] if property_name is not None else []
+                (workdir / name).write_text(config.render(invariants, check_deadlock, properties), encoding="utf-8")
                 status, output = run_tlc(java, jar, workdir, module, name, deadline)
-                broke = classify(status, output, invariants, check_deadlock)
+                return classify(status, output, invariants, check_deadlock, property_name)
+
+            invariants, check_deadlock = list(config.invariants), config.check_deadlock
+            while True:
+                broke = check_rules(invariants, check_deadlock)
                 if broke is None:
                     break
                 result.broken.add(broke)
@@ -236,6 +289,10 @@ def check_cfg(root: Path, cfg: str, module: str, expected: set[str], java: str, 
                     check_deadlock = False
                 else:
                     invariants.remove(broke)
+            # TLC's temporal violation has no name, so attribute only a singleton PROPERTY run.
+            for property_name in config.properties:
+                if broke := check_rules([], False, property_name):
+                    result.broken.add(broke)
     except (CheckError, OSError) as error:
         result.error = f"{error} (limit {timeout:g} s per config)" if str(error) == "timed out" else str(error)
     result.seconds = time.monotonic() - started
@@ -248,11 +305,14 @@ def read_expected(path: Path) -> dict[str, tuple[str, set[str]]]:
         if not line.strip() or line.startswith("#"):
             continue
         fields = line.split("\t")
-        if len(fields) != 3 or not fields[0] or not fields[1]:
-            raise CheckError(f"{path.name}:{number}: want 3 tab-separated fields: cfg, module, rules")
-        rules = set() if fields[2].strip() in ("", "-") else {r.strip() for r in fields[2].split(",")}
-        if "" in rules or fields[0] in rules:
-            raise CheckError(f"{path.name}:{number}: bad rule list {fields[2]!r}")
+        if len(fields) not in (3, 4) or not fields[0] or not fields[1]:
+            raise CheckError(f"{path.name}:{number}: want 3 or 4 tab-separated fields: cfg, module, safety, [liveness]")
+        rules: set[str] = set()
+        for names in fields[2:]:
+            listed = set() if names.strip() in ("", "-") else {r.strip() for r in names.split(",")}
+            if "" in listed or fields[0] in listed:
+                raise CheckError(f"{path.name}:{number}: bad rule list {names!r}")
+            rules.update(listed)
         if fields[0] in rows:
             raise CheckError(f"{path.name}:{number}: {fields[0]} listed twice")
         rows[fields[0]] = (fields[1], rules)

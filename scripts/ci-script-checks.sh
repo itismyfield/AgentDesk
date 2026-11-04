@@ -532,6 +532,7 @@ if run_check guards "TUI relay e2e harness unit tests (#5065/#5997)"; then
   scripts.e2e.tui_relay.test_matrix_runner \
   scripts.e2e.tui_relay.test_post_deploy_relay_continuity \
   scripts.e2e.tui_relay.test_post_deploy_turn_smoke \
+  scripts.e2e.tui_relay.test_retained_queue_idle \
   scripts.e2e.tui_relay.test_midturn_kill
 "$PYTHON" -m unittest tests.test_e2e_scenario_lane_wiring
 fi
@@ -806,7 +807,7 @@ if run_check cargo "Agent maintenance freshness tests"; then
 fi
 
 if run_check cargo "Maintainability audit tests"; then
-"$PYTHON" -m unittest tests.test_audit_maintainability
+"$PYTHON" -m unittest tests.test_audit_maintainability tests.test_module_layer_baseline_records tests.test_module_layer_measurement tests.test_module_layer_ratchet
 fi
 
 if run_check cargo "Maintainability audit"; then

@@ -348,6 +348,26 @@ pub(super) async fn stream_tui_idle_response_with_gateway(
     } else {
         None
     };
+    if provider == ProviderKind::Claude && claim.row.full_response.is_empty() {
+        let session = tmux_session_name.to_owned();
+        let prompt = prompt_text.to_owned();
+        let sid = claim.row.session_id.clone();
+        let pin = tokio::task::spawn_blocking(move || {
+            crate::services::claude_tui::input::UserReceipt::native_pin_before_tail(
+                &session,
+                &prompt,
+                sid.as_deref(),
+                start_offset,
+            )
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(pin) = pin.filter(|pin| output_path.to_str() == Some(pin.output_path.as_str()))
+        {
+            claim.actor.native_stop.receipt_sink().adopt(pin);
+        }
+    }
     let inflight_state = claim.row.clone();
     let bridge = TurnBridgeContext {
         provider: provider.clone(),
@@ -639,7 +659,20 @@ fn forward_idle_stream_into_bridge_with_logging(
     // flows immediately. A failed reader closes the bridge without claiming Done.
     let strict_terminal = reader_end.is_some();
     let mut terminal = None;
+    let mut first_frame = true;
     for message in prefix.into_iter().chain(reader_rx) {
+        if let Some(actor) = source
+            .as_ref()
+            .filter(|source| source.provider == ProviderKind::Claude)
+            .and_then(|source| source.actor.upgrade())
+        {
+            if first_frame {
+                actor.native_stop.receipt_sink().retry_persistence();
+            } else {
+                let _ = actor.native_stop.observe_native_input();
+            }
+        }
+        first_frame = false;
         if strict_terminal
             && (terminal.is_some()
                 || matches!(

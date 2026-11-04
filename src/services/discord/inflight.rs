@@ -23,6 +23,26 @@ pub(in crate::services::discord) use host_recovery_guard::{marker_witness, with_
 #[cfg(test)]
 mod invariant_test_capture;
 mod model;
+mod native_stop_pin;
+pub(in crate::services::discord) use native_stop_pin::{
+    bind_native_stop_pin, record_native_busy_child, restore_native_stop_pin,
+};
+#[cfg(all(test, unix))]
+#[path = "inflight/native_stop_busy_tests.rs"]
+mod native_stop_busy_tests;
+#[cfg(all(test, unix))]
+#[path = "inflight/native_stop_pin/retry_tests.rs"]
+mod native_stop_pin_retry_tests;
+#[cfg(test)]
+#[path = "inflight/native_stop_pin/serde_tests.rs"]
+mod native_stop_pin_serde_tests;
+#[cfg(all(test, unix))]
+#[path = "inflight/native_stop_pin/tests.rs"]
+mod native_stop_pin_tests;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use native_stop_pin::{
+    native_pin_observation_count, wait_native_pin_observations,
+};
 pub(crate) mod read_only_owner_snapshot;
 pub(in crate::services::discord) mod terminal_delivery_evidence_loss;
 mod terminal_receipt_stamp;
@@ -616,6 +636,7 @@ fn bump_save_generation_for_write(
     }
     super::relay_recovery::circuit_evidence::carry_forward(existing.as_ref(), state)?;
     managed_submission::carry_forward(existing.as_ref(), state);
+    native_stop_pin::carry_forward(existing.as_ref(), state);
     state.carry_before_start_receipt_from(existing.as_ref())?;
     let existing_generation = existing
         .map(|existing| existing.save_generation)
