@@ -175,9 +175,8 @@ DEPLOY_LOCK_TIMEOUT_SECS="$(python3 "$SCRIPT_DIR/build_token.py" --validate-depl
 DEPLOY_MKDIR_LOCK_DIR=""
 CODESIGN_IDENTITY="${AGENTDESK_CODESIGN_IDENTITY:-Developer ID Application: Wonchang Oh (A7LJY7HNGA)}"
 ALLOW_ADHOC_RELEASE_SIGN="${AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN:-0}"
-CODESIGN_KEYCHAIN_PW_FILE="${AGENTDESK_CODESIGN_KEYCHAIN_PW_FILE:-}"
-CODESIGN_KEYCHAIN_NAME="${AGENTDESK_CODESIGN_KEYCHAIN_NAME:-agentdesk-codesign.keychain}"
-CODESIGN_KEYCHAIN_UNLOCKED=0
+CODESIGN_KEYCHAIN_OP_REF="${AGENTDESK_CODESIGN_KEYCHAIN_OP_REF:-}"
+CODESIGN_KEYCHAIN_NAME="${AGENTDESK_CODESIGN_KEYCHAIN_NAME:-$HOME/Library/Keychains/login.keychain-db}"
 RESOLVED_RELEASE_SIGNING_MODE=""
 DASHBOARD_SOURCE=""
 STAGED_BINARY=""
@@ -289,25 +288,25 @@ if [ "${AGENTDESK_DEPLOY_LOCK_HELD:-0}" != "1" ]; then
 fi
 
 _unlock_codesign_keychain_if_configured() {
-    [ "$CODESIGN_KEYCHAIN_UNLOCKED" = "1" ] && return 0
-    [ -n "$CODESIGN_KEYCHAIN_PW_FILE" ] || return 0
-    if [ ! -r "$CODESIGN_KEYCHAIN_PW_FILE" ]; then
-        echo "⚠ Codesign keychain pw file not readable: $CODESIGN_KEYCHAIN_PW_FILE — continuing without explicit unlock"
+    if security show-keychain-info "$CODESIGN_KEYCHAIN_NAME" >/dev/null 2>&1; then
         return 0
     fi
-    command -v security >/dev/null 2>&1 || return 0
-    local pw
-    if ! pw=$(cat "$CODESIGN_KEYCHAIN_PW_FILE"); then
-        echo "⚠ Failed to read codesign keychain pw file"
+    if [ -z "$CODESIGN_KEYCHAIN_OP_REF" ] || ! command -v agent-op >/dev/null 2>&1; then
+        echo "⚠ Codesign keychain unlock unavailable (host-local OP_REF or agent-op missing) — codesign may fail in non-GUI sessions"
         return 0
     fi
-    if security unlock-keychain -p "$pw" "$CODESIGN_KEYCHAIN_NAME" 2>/dev/null; then
+    if (
+        set +x
+        set -o pipefail
+        # security prefers /dev/tty; detach it while preserving the password pipe.
+        agent-op read "$CODESIGN_KEYCHAIN_OP_REF" |
+            python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+                security unlock-keychain "$CODESIGN_KEYCHAIN_NAME"
+    ) >/dev/null 2>&1; then
         echo "▸ Unlocked codesign keychain: $CODESIGN_KEYCHAIN_NAME"
-        CODESIGN_KEYCHAIN_UNLOCKED=1
     else
         echo "⚠ Failed to unlock codesign keychain $CODESIGN_KEYCHAIN_NAME — codesign may fail in non-GUI sessions"
     fi
-    unset pw
 }
 
 sign_binary_with_fallback() {
@@ -315,8 +314,6 @@ sign_binary_with_fallback() {
     local identity="${CODESIGN_IDENTITY:--}"
     local signature_details=""
     local current_authority=""
-
-    _unlock_codesign_keychain_if_configured
 
     if [ -z "$identity" ]; then
         if [ "$ALLOW_ADHOC_RELEASE_SIGN" = "1" ]; then
@@ -375,6 +372,7 @@ sign_binary_with_fallback() {
         codesign -f -s "$identity" --identifier "$BUNDLE_ID" "$target"
     else
         RESOLVED_RELEASE_SIGNING_MODE="developer-id"
+        _unlock_codesign_keychain_if_configured
         codesign -f -s "$identity" --options runtime --identifier "$BUNDLE_ID" "$target"
     fi
 
@@ -1619,7 +1617,6 @@ _deploy_peer_env_prelude() {
     for name in \
         AGENTDESK_CODESIGN_IDENTITY \
         AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN \
-        AGENTDESK_CODESIGN_KEYCHAIN_PW_FILE \
         AGENTDESK_CODESIGN_KEYCHAIN_NAME \
         AGENTDESK_DEPLOY_ALL_NODES \
         AGENTDESK_DEPLOY_DELAY_SECS \
@@ -2567,7 +2564,7 @@ export AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=$(printf '%q' "${AGENTDESK_RES
 export AGENTDESK_POST_DEPLOY_SMOKE_SCOPE=$(printf '%q' "$POST_DEPLOY_SMOKE_SCOPE")
 export AGENTDESK_CODESIGN_IDENTITY=$(printf '%q' "${AGENTDESK_CODESIGN_IDENTITY:-}")
 export AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN=$(printf '%q' "${AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN:-}")
-export AGENTDESK_CODESIGN_KEYCHAIN_PW_FILE=$(printf '%q' "${AGENTDESK_CODESIGN_KEYCHAIN_PW_FILE:-}")
+export AGENTDESK_CODESIGN_KEYCHAIN_OP_REF=$(printf '%q' "${AGENTDESK_CODESIGN_KEYCHAIN_OP_REF:-}")
 export AGENTDESK_CODESIGN_KEYCHAIN_NAME=$(printf '%q' "${AGENTDESK_CODESIGN_KEYCHAIN_NAME:-}")
 export AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR=$(printf '%q' "${AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR:-}")
 export AGENTDESK_DEPLOY_BINARY=$(printf '%q' "${AGENTDESK_DEPLOY_BINARY:-}")
