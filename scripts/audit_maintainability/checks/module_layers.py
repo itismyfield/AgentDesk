@@ -386,13 +386,17 @@ def _run(allowlist):
     from .module_layer_ratchet import compare, load_inputs
     try:
         accepted, moves = load_inputs(common.REPO_ROOT)
-        comparison = compare(accepted, baseline(result, load_mapping(common.REPO_ROOT), result["input_sha"], occurrences), moves)
+        sources = {row["id"]: {"source": row["source"], "path": row["path"]} for row in assessment["uncertainties"]}
+        comparison = compare(accepted, baseline(result, load_mapping(common.REPO_ROOT), result["input_sha"], occurrences),
+                             moves, sources)
     except (OSError, UnicodeError, ValueError, TypeError) as exc:
-        comparison = {"errors": [{"code": "invalid-input", "message": _reason(str(exc))}], "decreases": []}
+        comparison = {"errors": [{"code": "invalid-input", "message": _reason(str(exc))}], "warnings": [], "decreases": []}
     yield Finding("module_layers", "info", "src", None,
                   f"{len(result['nodes'])} modules, {len(result['edges'])} dependency edges; coverage incomplete; {len(comparison['decreases'])} debt reductions",
                   {"measurement": result, "reference_occurrences": occurrences,
                    "layer_analysis": assessment, "ratchet": comparison})
+    for warning in comparison["warnings"]:
+        yield Finding("module_layers", "warn", "src", None, warning["message"], warning)
     for error in comparison["errors"]:
         yield Finding("module_layers", "error", "src", None, error["message"], error)
 

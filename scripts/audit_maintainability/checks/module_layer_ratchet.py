@@ -1,4 +1,8 @@
-"""Compare individual layer debts; reductions never purchase unrelated growth."""
+"""Compare individual layer debts; reductions never purchase unrelated growth.
+
+Only layer-direction debt blocks. Coverage gaps (indeterminate edges, unresolved
+references, unclassified modules) grow with ordinary new code, so their growth is
+reported as warnings unless it hides accepted reverse debt."""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -11,6 +15,8 @@ from .module_layer_baseline import BASELINE, _id
 MOVES = "scripts/audit_maintainability/layer_moves.toml"
 SECTIONS = ("reverse_dependencies", "indeterminate_dependencies", "uncertainties")
 TOTALS = ("unclassified_modules", "indeterminate_edges", "indeterminate_occurrences")
+BLOCKING_SECTIONS = ("reverse_dependencies",)
+EDGE_KINDS = ("import", "path", "reexport", "macro")
 
 
 def load_inputs(repo):
@@ -108,21 +114,73 @@ def _normalized(accepted, candidate, manifest):
     return old, zeros, normalized
 
 
-def compare(accepted, candidate, moves):
-    errors, decreases = [], []
+def _path_targets(source, path):
+    """Module a crate/self/super-rooted written path names: the glob's module, or an item's owner.
+
+    Paths reached only through re-exports or aliases stay unknown (known limit, reported as warnings)."""
+    if not source or not path or "::crate" not in source:
+        return []
+    root, _, module = source.partition("::crate")
+    segments = [name for name in path.split("::") if name]
+    glob = segments[-1:] == ["*"]
+    names = segments[:-1] if glob else segments
+    base = [name for name in module.split("::") if name]
+    if names[:1] in (["crate"], ["$crate"]):
+        base, names = [], names[1:]
+    elif names[:1] in (["self"], ["super"]):
+        while names[:1] in (["self"], ["super"]):
+            if names.pop(0) == "super" and base:
+                base.pop()
+    else:
+        return []
+    node = lambda parts: root + "::crate" + "".join("::" + name for name in parts)
+    full = base + names
+    return [node(full)] if glob or not names else [node(full[:-1]), node(full)]
+
+
+def compare(accepted, candidate, moves, sources=None):
+    """`sources` maps uncertainty IDs to their measured {source, path}; records do not store them."""
+    errors, warnings, decreases = [], [], []
     try:
         old, zeros, current = _normalized(accepted, candidate, moves)
         unknown_ids = {row["id"] for row in candidate["indeterminate_dependencies"]}
         moved_reverse = {row["old_id"]: row["new_id"] for row in moves["moves"]
                          if row["section"] == "reverse_dependencies"}
+        # Accepted reverse debt (including zero-rules and moved IDs) must not resurface as an
+        # indeterminate edge under any reference kind, as an unresolved reference whose written
+        # crate/self/super path names its target, or as new unresolved references in a source
+        # whose reverse debt shrank in the same change.
+        accepted_reverse = {**zeros["reverse_dependencies"], **old["reverse_dependencies"]}
+        hidden_ids = accepted_reverse.keys() | {moved_reverse.get(i, i) for i in accepted_reverse}
+        shrunk = {i: row for i, row in old["reverse_dependencies"].items()
+                  if current["reverse_dependencies"].get(i, {"count": 0})["count"] < row["count"]}
+        shrunk_ids = shrunk.keys() | {moved_reverse.get(i, i) for i in shrunk}
+        shrunk_sources = {row["source"] for row in shrunk.values()}
+        shrunk_targets = {row["target"] for row in shrunk.values()}
+
+        def reaches(source, targets, identities):
+            return any(_id("edge", source, target, kind) in identities
+                       for target in targets for kind in EDGE_KINDS)
+
         for section in SECTIONS:
             for identity, row in sorted(current[section].items()):
                 previous = old[section].get(identity, {"count": 0})["count"]
                 if row["count"] > previous:
                     code = "zero-rule" if identity in zeros[section] else "increase" if previous else "new-id"
-                    errors.append({"code": code, "section": section, "id": identity,
-                                   "baseline_count": previous, "current_count": row["count"],
-                                   "message": f"{code}: {section} {identity} {previous} -> {row['count']}"})
+                    evidence = (sources or {}).get(row["id"], row)
+                    source = evidence.get("source")
+                    if section == "indeterminate_dependencies":
+                        targets = [row["target"]]
+                    else:
+                        targets = _path_targets(source, evidence.get("path"))
+                    blocking = (section in BLOCKING_SECTIONS
+                                or (source is not None and (reaches(source, targets, hidden_ids)
+                                                            or source in shrunk_sources
+                                                            or reaches(source, shrunk_targets, shrunk_ids))))
+                    (errors if blocking else warnings).append({
+                        "code": code, "section": section, "id": identity,
+                        "baseline_count": previous, "current_count": row["count"],
+                        "message": f"{code}: {section} {identity} {previous} -> {row['count']}"})
             for identity, row in sorted(old[section].items()):
                 if section == "reverse_dependencies" and moved_reverse.get(identity, identity) in unknown_ids:
                     continue
@@ -130,19 +188,31 @@ def compare(accepted, candidate, moves):
                 if count < row["count"]:
                     decreases.append({"section": section, "id": identity,
                                       "baseline_count": row["count"], "current_count": count})
+        # A shrinking reverse edge is not a reduction while an unresolved reference from the same
+        # source still names its target (for example a glob kept beside a removed named import).
+        for identity, row in sorted(shrunk.items()):
+            for uncertainty in current["uncertainties"].values():
+                evidence = (sources or {}).get(uncertainty["id"], uncertainty)
+                if (evidence.get("source") == row["source"]
+                        and row["target"] in _path_targets(row["source"], evidence.get("path"))):
+                    errors.append({"code": "hidden-reverse", "section": "reverse_dependencies", "id": identity,
+                                   "message": f"hidden-reverse: reverse_dependencies {identity} shrank while "
+                                              f"unresolved {evidence.get('path')} still names its target"})
+                    break
         for key in TOTALS:
             if candidate[key] > accepted[key]:
-                errors.append({"code": "total-increase", "section": key,
+                warnings.append({"code": "total-increase", "section": key,
                                "baseline_count": accepted[key], "current_count": candidate[key],
                                "message": f"{key} increased: {accepted[key]} -> {candidate[key]}"})
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
         errors.append({"code": "invalid-input", "section": "configuration", "message": str(exc)})
-    return {"errors": sorted(errors, key=lambda r: (r["section"], r.get("id", ""), r["code"])),
+    order = lambda r: (r["section"], r.get("id", ""), r["code"])
+    return {"errors": sorted(errors, key=order), "warnings": sorted(warnings, key=order),
             "decreases": sorted(decreases, key=lambda r: (r["section"], r["id"]))}
 
 
-def reduced_baseline(accepted, candidate, moves):
-    result = compare(accepted, candidate, moves)
+def reduced_baseline(accepted, candidate, moves, sources=None):
+    result = compare(accepted, candidate, moves, sources)
     if result["errors"]:
         raise ValueError("baseline reduction refused: " + "; ".join(r["message"] for r in result["errors"]))
     old, zeros, current = _normalized(accepted, candidate, moves)
@@ -151,10 +221,14 @@ def reduced_baseline(accepted, candidate, moves):
     for section in SECTIONS:
         output[section] = []
         for identity, row in sorted(old[section].items()):
-            count = current[section].get(identity, {"count": 0})["count"]
+            # Accepted counts are ceilings: reductions are recorded, warned growth is not absorbed.
+            count = min(row["count"], current[section].get(identity, {"count": 0})["count"])
             if count:
                 output[section].append({**row, "count": count})
             else:
                 output["zero_rules"].append({**row, "section": section, "count": 0})
     output["zero_rules"].sort(key=lambda r: (r["section"], r["id"]))
+    output["unclassified_modules"] = min(accepted["unclassified_modules"], candidate["unclassified_modules"])
+    output["indeterminate_edges"] = len(output["indeterminate_dependencies"])
+    output["indeterminate_occurrences"] = sum(r["count"] for r in output["indeterminate_dependencies"])
     return output
