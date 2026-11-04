@@ -4,6 +4,7 @@ from __future__ import annotations
 from copy import deepcopy
 import importlib
 import json
+import shutil
 from pathlib import Path
 import sys
 import subprocess
@@ -196,6 +197,32 @@ class ModuleLayerRatchetTest(unittest.TestCase):
         for entries, current in cases:
             with self.subTest(entries=entries):
                 self.assert_error(self.compare(self.snapshot([old_a, old_b]), self.snapshot(current), self.moves(*entries)))
+
+    def test_mapping_cannot_target_another_sections_positive_identifier(self):
+        reverse, indeterminate = self.edge("lower", count=1), self.edge("mixed", count=1)
+        accepted = self.snapshot([reverse], [indeterminate])
+        candidate = self.snapshot(indeterminate=[indeterminate])
+        moves = self.moves({"section": "reverse_dependencies", "old_id": reverse["id"],
+                            "new_id": indeterminate["id"]})
+        self.assert_error(self.compare(accepted, candidate, moves))
+
+    def test_mapping_destinations_must_be_unique_across_sections(self):
+        reverse, indeterminate, combined = (self.edge(name, count=1) for name in ("lower", "mixed", "combined"))
+        accepted = self.snapshot([reverse], [indeterminate])
+        candidate = self.snapshot(indeterminate=[combined])
+        moves = self.moves({"section": "reverse_dependencies", "old_id": reverse["id"], "new_id": combined["id"]},
+                           {"section": "indeterminate_dependencies", "old_id": indeterminate["id"],
+                            "new_id": combined["id"]})
+        self.assert_error(self.compare(accepted, candidate, moves))
+
+    def test_mapping_cannot_target_a_zero_rule_in_another_section(self):
+        resolved, indeterminate = self.edge("resolved", count=1), self.edge("mixed", count=1)
+        accepted = self.snapshot(indeterminate=[indeterminate])
+        accepted["zero_rules"] = [{**resolved, "section": "reverse_dependencies", "count": 0}]
+        candidate = self.snapshot(indeterminate=[resolved])
+        moves = self.moves({"section": "indeterminate_dependencies", "old_id": indeterminate["id"],
+                            "new_id": resolved["id"]})
+        self.assert_error(self.compare(accepted, candidate, moves))
 
     def test_mapped_reduction_retains_reviewed_identity_and_mapping(self):
         old, moved = self.edge("before", count=3), self.edge("after", count=1)
@@ -482,6 +509,81 @@ assembly = 1
                     self.assertEqual(updated["indeterminate_dependencies"], historical["indeterminate_dependencies"])
                     self.assertEqual(updated["input_sha"], git("rev-parse", "HEAD"))
                 self.assertFalse(accepted.with_name(accepted.name + ".lock").exists())
+
+    def test_cross_section_mapping_move_blocks_runner_and_preserves_accepted_file(self):
+        with TemporaryDirectory() as temporary:
+            repo = Path(temporary) / "repo"
+            scripts = repo / "scripts"
+            scripts.mkdir(parents=True)
+            for path in (ROOT / "scripts").glob("*.py"):
+                shutil.copy2(path, scripts / path.name)
+            shutil.copytree(ROOT / "scripts/audit_maintainability", scripts / "audit_maintainability",
+                            ignore=shutil.ignore_patterns("__pycache__", "baselines"))
+            (scripts / "ci").mkdir()
+            shutil.copy2(ROOT / "scripts/ci/rust_test_sources.py", scripts / "ci/rust_test_sources.py")
+            def git(*arguments):
+                return subprocess.run(["git", "-C", str(repo), *arguments], capture_output=True,
+                                      text=True, check=True).stdout.strip()
+            def put(relative, text):
+                path = repo / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+            git("init", "-q")
+            git("config", "user.name", "Fixture")
+            git("config", "user.email", "fixture@example.invalid")
+            put("Cargo.toml", '[package]\nname="fixture"\nversion="0.1.0"\nedition="2024"\n')
+            put("src/lib.rs", "mod lower; mod mixed; mod upper;\n")
+            put("src/lower.rs", "pub fn retained() { crate::upper::hit(); }\n")
+            put("src/mixed.rs", "pub fn removed() { crate::upper::hit(); }\n")
+            put("src/upper.rs", "pub fn hit() {}\n")
+            put("scripts/audit_maintainability/layers.toml", """schema_version = 1
+rules = [{prefix="",layer="assembly",reason="fixture assembly"},
+         {prefix="lower",layer="foundation",reason="fixture lower layer"},
+         {prefix="upper",layer="assembly",reason="fixture upper layer"}]
+unclassified = [{prefix="mixed",reason="fixture unclassified responsibility"}]
+[layers]
+foundation = 0
+assembly = 1
+""")
+            put("scripts/audit_maintainability/layer_moves.toml", "schema_version = 1\nmoves = []\n")
+            git("add", "src", "scripts", "Cargo.toml")
+            git("commit", "-qm", "fixture before move")
+            baseline = repo / self.provider.BASELINE
+            generator = [sys.executable, str(scripts / "audit_maintainability/checks/module_layer_baseline.py"),
+                         "--repo", str(repo), "--input-sha", "HEAD", "--output", str(baseline)]
+            created = subprocess.run(generator, cwd=repo, capture_output=True, text=True)
+            self.assertEqual(created.returncode, 0, created.stderr)
+            accepted = json.loads(baseline.read_bytes())
+            self.assertEqual(len(accepted["reverse_dependencies"]), 1)
+            self.assertEqual(len(accepted["indeterminate_dependencies"]), 1)
+            self.assertEqual(accepted["indeterminate_occurrences"], 1)
+            original = baseline.read_bytes()
+            runner = [sys.executable, str(scripts / "audit_maintainability.py"), "--check", "--format", "json"]
+            before = subprocess.run(runner, cwd=repo, capture_output=True, text=True)
+            self.assertEqual(before.returncode, 0, before.stderr)
+            reverse = accepted["reverse_dependencies"][0]
+            indeterminate = accepted["indeterminate_dependencies"][0]
+            put("src/mixed.rs", (repo / "src/lower.rs").read_text())
+            (repo / "src/lower.rs").unlink()
+            put("src/lib.rs", "mod mixed; mod upper;\n")
+            put("scripts/audit_maintainability/layer_moves.toml",
+                'schema_version=1\n[[moves]]\nsection="reverse_dependencies"\n'
+                f'old_id="{reverse["id"]}"\nnew_id="{indeterminate["id"]}"\n')
+            git("add", "src", "scripts/audit_maintainability/layer_moves.toml")
+            git("commit", "-qm", "move retained implementation over removed implementation")
+            moved = subprocess.run(runner, cwd=repo, capture_output=True, text=True)
+            refused_update = subprocess.run([*generator, "--update-reductions"], cwd=repo,
+                                            capture_output=True, text=True)
+            checks = json.loads(moved.stdout)["checks"]
+            with self.subTest(operation="runner"):
+                self.assertEqual(moved.returncode, 1, moved.stderr)
+                self.assertTrue(any(row["severity"] == "error" for row in checks["module_layers"]["findings"]))
+            with self.subTest(operation="update"):
+                self.assertNotEqual(refused_update.returncode, 0, refused_update.stderr)
+            with self.subTest(operation="accepted-bytes"):
+                self.assertEqual(baseline.read_bytes(), original)
+            self.assertFalse(any(row["severity"] == "error" for name, check in checks.items()
+                                 if name != "module_layers" for row in check["findings"]))
 
     def test_cli_reduces_committed_fixture_and_refuses_a_replacement_debt(self):
         with TemporaryDirectory() as temporary:

@@ -75,18 +75,18 @@ def _moves(manifest, tables, zeros):
     if manifest.get("schema_version") != 1 or not isinstance(manifest.get("moves"), list):
         raise ValueError("invalid movement mapping schema")
     result = {section: {} for section in SECTIONS}
-    targets = {section: set() for section in SECTIONS}
+    known = {identity for section in SECTIONS for identity in tables[section].keys() | zeros[section].keys()}
+    targets = set()
     for row in manifest["moves"]:
         section, old, new = row.get("section"), row.get("old_id"), row.get("new_id")
         if section not in SECTIONS or not all(isinstance(x, str) and re.fullmatch(r"[0-9a-f]{64}", x) for x in (old, new)):
             raise ValueError("mapping requires a section and old/new SHA256 identifiers")
-        known = tables[section].keys() | zeros[section].keys()
-        if old not in known:
+        if old not in tables[section] and old not in zeros[section]:
             raise ValueError("mapping old ID is absent from the accepted baseline")
-        if old == new or old in result[section] or new in targets[section] or new in known:
+        if old == new or old in result[section] or new in targets or new in known:
             raise ValueError("mapping is not a collision-free one-to-one movement")
         result[section][old] = new
-        targets[section].add(new)
+        targets.add(new)
     return result
 
 
