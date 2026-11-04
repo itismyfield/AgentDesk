@@ -201,10 +201,17 @@ struct AttachedOwner {
     fronts: Inbox,
     passes: std::sync::mpsc::Receiver<()>,
     wakes: Arc<std::sync::atomic::AtomicUsize>,
+    // Restore the prior registry after this fixture's runtime has stopped.
+    _registry_restore: RestoreObserverRegistry,
 }
 
 impl AttachedOwner {
     fn new(name: &str, channel: u64, transcript: &str) -> Self {
+        let registry_restore =
+            RestoreObserverRegistry(crate::engine::ops::turn_ops::health_registry());
+        let empty = Arc::new(crate::services::discord::health::HealthRegistry::new());
+        crate::engine::ops::turn_ops::set_global_health_registry(&empty);
+        drop(empty);
         let mut rig = rig(name, channel, "normal", view("", false), transcript);
         let entered = rig.runtime.enter();
         let shared = crate::services::discord::make_shared_data_for_tests();
@@ -262,6 +269,7 @@ impl AttachedOwner {
             fronts,
             passes,
             wakes,
+            _registry_restore: registry_restore,
         }
     }
 
