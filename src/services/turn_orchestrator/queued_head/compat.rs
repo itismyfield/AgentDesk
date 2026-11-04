@@ -15,13 +15,14 @@ impl SnapshotRead {
         let Self::ReadOnlyV2(v2) = self else {
             return false;
         };
-        // The bind's persisted `kind` tag names a queued one; an unserializable bind counts as held.
-        let bound = |at| serde_json::to_value(at).map_or(true, |at| at["kind"] != "queued");
+        let bound = |bind: &super::v2_types::AdmissionBind| {
+            !matches!(bind.at, super::v2_types::BindAt::Queued { .. })
+        };
         !v2.items.is_empty()
             || v2.head_injection.is_some()
             || !v2.retained_inputs.is_empty()
             || !v2.terminal_identities.is_empty()
-            || v2.admission_binds.iter().any(|bind| bound(&bind.at))
+            || v2.admission_binds.iter().any(bound)
     }
 }
 
