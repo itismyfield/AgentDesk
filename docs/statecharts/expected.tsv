@@ -19,6 +19,14 @@ input-single-path/InputOwnershipF7.cfg	InputOwnership	-
 input-single-path/InputOwnershipF7Main.cfg	InputOwnership	BusyArrivalInTurn
 input-single-path/InputOwnershipF7NoBinding.cfg	InputOwnership	BusyArrivalInTurn
 input-single-path/InputOwnershipF7NoWake.cfg	InputOwnership	BusyArrivalInTurn
+input-single-path/InputOwnershipF7Recovery.cfg	InputOwnership	-
+input-single-path/InputOwnershipF7RecoveryMain.cfg	InputOwnership	ResumeProgress
+input-single-path/InputOwnershipF7ShortTransition.cfg	InputOwnership	-
+input-single-path/InputOwnershipF7ShortTransitionMain.cfg	InputOwnership	-
+input-single-path/InputOwnershipF7Standby.cfg	InputOwnership	-
+input-single-path/InputOwnershipF7StandbyWake.cfg	InputOwnership	StandbyDoesNotInject
+input-single-path/InputOwnershipF7Transition.cfg	InputOwnership	-
+input-single-path/InputOwnershipF7TransitionMain.cfg	InputOwnership	ResumeProgress
 input-single-path/InputOwnershipFOutside.cfg	InputOwnership	SeenOnce
 input-single-path/InputOwnershipMain.cfg	InputOwnership	AnswerOnce,DraftToldOnce,NoRetryRequired,NoSilentLoss,NoSilentLossObserved,NoTimedRetry,StartNotDropped
 input-single-path/InputPath.cfg	InputPath	BusyInputLands,DraftSafe,HeldNotDropped,NoDeadlock,NoSilentLoss

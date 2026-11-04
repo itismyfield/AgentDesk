@@ -429,14 +429,113 @@ fn busy_arrival_before_row_handoff(merge: bool, missing: bool) {
     crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&rig.name);
 }
 
+#[derive(Clone)]
+struct SettlementProbe {
+    settled: std::sync::mpsc::Sender<()>,
+    created: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+static SETTLEMENT_PROBES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<u64, SettlementProbe>>,
+> = std::sync::OnceLock::new();
+
+pub(crate) fn observe_settlement(channel: u64, previous: Option<Owed>) -> Option<Owed> {
+    let probe = SETTLEMENT_PROBES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .get(&channel)
+        .cloned();
+    let Some(probe) = probe else {
+        return previous;
+    };
+    probe
+        .created
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    Some(Arc::new(move || {
+        let (probe, previous) = (probe.clone(), previous.clone());
+        Box::pin(async move {
+            if let Some(previous) = previous {
+                previous().await;
+            }
+            let _ = probe.settled.send(());
+        })
+    }))
+}
+
+#[test]
+fn active_reconcile_completion_resumes_the_busy_owner_once() {
+    busy_hold_case(
+        Some(crate::services::discord::queue_io::input_ingress::Hold::RestartRecovery),
+        Some("recovery"),
+    );
+}
+
+#[test]
+fn standby_reconcile_completion_never_resumes_the_busy_owner() {
+    busy_hold_case(
+        Some(crate::services::discord::queue_io::input_ingress::Hold::RestartRecovery),
+        Some("standby"),
+    );
+}
+
+#[test]
+fn resume_completion_resumes_the_busy_owner_once() {
+    busy_hold_case(
+        Some(crate::services::discord::queue_io::input_ingress::Hold::SessionSwitch),
+        Some("resume"),
+    );
+}
+
+#[test]
+fn clear_completion_resumes_the_busy_owner_once() {
+    busy_hold_case(
+        Some(crate::services::discord::queue_io::input_ingress::Hold::SessionSwitch),
+        Some("clear"),
+    );
+}
+
+fn finish_command_transition(
+    _completion: crate::services::discord::session_transition::SessionTransitionCompletion<'_>,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+    failed: bool,
+) -> Result<(), &'static str> {
+    if failed {
+        Err("transition failed")
+    } else {
+        Ok(())
+    }
+}
+
+#[test]
+fn short_intake_transition_waits_for_a_and_delivers_once() {
+    busy_hold_case(
+        Some(crate::services::discord::queue_io::input_ingress::Hold::SessionSwitch),
+        Some("short_intake"),
+    );
+}
+
 /// Exercises a runtime refusal through the real owner drive and reads the mock Discord posts.
 fn busy_hold_notice(hold: Option<crate::services::discord::queue_io::input_ingress::Hold>) {
+    busy_hold_case(hold, None);
+}
+
+fn busy_hold_case(
+    hold: Option<crate::services::discord::queue_io::input_ingress::Hold>,
+    resume: Option<&str>,
+) {
     use crate::services::discord::queue_io::input_ingress::Hold;
     use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
     let _root = crate::config::TestRuntimeRootGuard::new();
-    let channel = 7_272_810
-        + hold.map_or(7, |hold| Hold::ALL.iter().position(|h| *h == hold).unwrap()) as u64;
+    let channel = (match resume {
+        Some("short_intake") => 7_273_110,
+        Some("standby") => 7_273_010,
+        Some("clear") => 7_272_940,
+        Some(_) => 7_272_910,
+        None => 7_272_810,
+    }) + hold.map_or(7, |hold| Hold::ALL.iter().position(|h| *h == hold).unwrap())
+        as u64;
     let before = if hold == Some(Hold::Modal) {
         format!("Run this tool? allow / deny\n{}", view("", false))
     } else {
@@ -465,6 +564,35 @@ fn busy_hold_notice(hold: Option<crate::services::discord::queue_io::input_ingre
         .runtime
         .block_on(discord_mock::serenity_context(proxy, gateway));
     shared.http.cached_serenity_ctx.set(context).unwrap();
+    let (settled_probe, settled_events) = std::sync::mpsc::channel();
+    let created = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    if resume.is_some() {
+        let persistence = crate::services::discord::queue_dispatch::persistence_context(
+            &shared,
+            &ProviderKind::Claude,
+            id,
+        );
+        let (path, namespace) =
+            crate::services::turn_orchestrator::v2_queue(&persistence, id).unwrap();
+        rig.runtime.block_on(async {
+            rig.mailbox.v2_adopt(path, namespace).await.unwrap();
+            assert!(matches!(
+                admit(&rig.mailbox, &rig.original, rig.ticket.clone()).await,
+                crate::services::discord::queue_io::input_owner::admission::Admission::Accepted(_)
+            ));
+        });
+        SETTLEMENT_PROBES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(
+                channel,
+                SettlementProbe {
+                    settled: settled_probe,
+                    created: created.clone(),
+                },
+            );
+    }
     let mut item = rig.original.clone();
     if hold == Some(Hold::Uploads) {
         let persistence = crate::services::turn_orchestrator::QueuePersistenceContext::new(
@@ -500,7 +628,27 @@ fn busy_hold_notice(hold: Option<crate::services::discord::queue_io::input_ingre
         UserId::new(9),
         MessageId::new(1),
     ));
-    let idle: Handoff = Arc::new(|_| Box::pin(async { Err("unexpected idle start".into()) }));
+    let (idle_started, idle_inbox) = std::sync::mpsc::channel();
+    let idle_mailbox = rig.mailbox.clone();
+    let waits_for_boundary = resume == Some("short_intake");
+    let idle: Handoff = Arc::new(move |front| {
+        let (mailbox, started) = (idle_mailbox.clone(), idle_started.clone());
+        Box::pin(async move {
+            if !waits_for_boundary {
+                return Err("unexpected idle start".into());
+            }
+            mailbox
+                .restore_active_turn(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(front.1.author_id),
+                    MessageId::new(front.1.message_id),
+                )
+                .await;
+            let (settled, answer) = tokio::sync::oneshot::channel();
+            started.send((front, settled)).map_err(|e| e.to_string())?;
+            answer.await.map_err(|e| e.to_string())?
+        })
+    });
     let mut drive = owner_drive(
         (rig.mailbox.clone(), None),
         (ProviderKind::Claude, channel),
@@ -525,16 +673,33 @@ fn busy_hold_notice(hold: Option<crate::services::discord::queue_io::input_ingre
         });
     }
     let (settled, on_settled) = std::sync::mpsc::channel();
-    Arc::get_mut(&mut drive).unwrap().settled = Some(Arc::new(move || {
-        let settled = settled.clone();
-        Box::pin(async move {
-            let _ = settled.send(());
-        })
-    }));
-    let transition = (hold == Some(Hold::SessionSwitch)).then(|| {
-        rig.runtime
-            .block_on(shared.session_transition_lock(id).lock_owned())
+    if resume.is_none() {
+        Arc::get_mut(&mut drive).unwrap().settled = Some(Arc::new(move || {
+            let settled = settled.clone();
+            Box::pin(async move {
+                let _ = settled.send(());
+            })
+        }));
+    }
+    let mut completion = match resume {
+        Some("resume") => Some(shared.session_transition_completion(id)),
+        Some("clear") => Some(
+            crate::services::discord::session_transition::SessionTransitionCompletion::new(
+                &shared, id,
+            ),
+        ),
+        _ => None,
+    };
+    let mut intake_transition = (resume == Some("short_intake")).then(|| {
+        rig.runtime.block_on(crate::services::discord::router::turn_start::try_intake_runtime_transition_after_redirect(
+            &shared, id, (None, false, rig.f.root.path().display().to_string()),
+        )).unwrap()
     });
+    let mut transition = (hold == Some(Hold::SessionSwitch) && resume != Some("short_intake"))
+        .then(|| {
+            rig.runtime
+                .block_on(shared.session_transition_lock(id).lock_owned())
+        });
     let exercise = || {
         for _ in 0..2 {
             {
@@ -546,14 +711,20 @@ fn busy_hold_notice(hold: Option<crate::services::discord::queue_io::input_ingre
                 .expect("real drive settled");
         }
     };
-    if hold == Some(Hold::ScreenContention) {
+    if resume.is_some() {
+        rig.runtime.block_on(
+            crate::services::discord::router::message_handler::owner_recover(&shared, id),
+        );
+        settled_events
+            .recv_timeout(Duration::from_secs(20))
+            .expect("boot wake refusal settled");
+    } else if hold == Some(Hold::ScreenContention) {
         crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
             &rig.name, exercise,
         );
     } else {
         exercise();
     }
-    drop(transition);
     let texts = mock.written_texts();
     let notices: Vec<_> = texts
         .iter()
@@ -581,6 +752,172 @@ fn busy_hold_notice(hold: Option<crate::services::discord::queue_io::input_ingre
             "successful input owes no hold notice: {texts:?}"
         );
         assert_eq!(rig.events().iter().filter(|e| *e == "paste").count(), 1);
+    }
+    if let Some(resume) = resume {
+        assert!(rig.snapshot()["head_injection"].is_null());
+        assert!(
+            rig.snapshot()["retained_inputs"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let before = created.load(std::sync::atomic::Ordering::SeqCst);
+        match resume {
+            "recovery" => rig.runtime.block_on(
+                crate::services::discord::runtime_bootstrap::complete_active_reconcile(&shared),
+            ),
+            "standby" => {
+                let health = Arc::new(crate::services::discord::health::HealthRegistry::new());
+                rig.runtime.block_on(crate::services::discord::runtime_bootstrap::register_standby_and_settle_reconcile(&health, &ProviderKind::Claude, &shared));
+            }
+            "resume" | "clear" => {}
+            "short_intake" => rig.runtime.block_on(
+                intake_transition
+                    .take()
+                    .unwrap()
+                    .complete_mailbox_claim(async {}),
+            ),
+            _ => unreachable!(),
+        }
+        {
+            let _entered = rig.runtime.enter();
+            if matches!(resume, "resume" | "clear") {
+                let failed = resume == "resume";
+                assert_eq!(
+                    finish_command_transition(
+                        completion.take().unwrap(),
+                        transition.take().unwrap(),
+                        failed
+                    )
+                    .is_err(),
+                    failed
+                );
+            }
+            drop(transition);
+            drop(completion);
+        }
+        if resume == "short_intake" {
+            assert_eq!(
+                created.load(std::sync::atomic::Ordering::SeqCst),
+                before,
+                "short transition release adds no owner wake"
+            );
+            assert!(rig.events().is_empty());
+            assert_eq!(rig.snapshot()["items"].as_array().unwrap().len(), 1);
+            let session = uuid::Uuid::new_v4().to_string();
+            let elsewhere = tempfile::tempdir().unwrap();
+            rehydrate(&rig, &session);
+            let mut transcript = fs::OpenOptions::new()
+                .append(true)
+                .open(rig.transcript())
+                .unwrap();
+            writeln!(transcript, "{}", IDLE.trim_end()).unwrap();
+            rig.runtime.block_on(rig.mailbox.finish_turn(
+                crate::services::discord::queue_dispatch::persistence_context(
+                    &shared,
+                    &ProviderKind::Claude,
+                    id,
+                ),
+            ));
+            {
+                let _entered = rig.runtime.enter();
+                crate::services::discord::queue_io::input_owner::drive::wake(drive.clone());
+            }
+            let front = idle_inbox
+                .recv_timeout(Duration::from_secs(20))
+                .expect("B starts once at A's boundary");
+            std::thread::scope(|scope| {
+                let started = scope.spawn(|| {
+                    idle_turn(&rig, (session.as_str(), elsewhere.path()), front, |_| None)
+                });
+                let settled = settled_events.recv_timeout(Duration::from_secs(20));
+                writeln!(
+                    transcript,
+                    "{}\n{}",
+                    ASSISTANT.replace("{n}", "B"),
+                    IDLE.trim_end()
+                )
+                .unwrap();
+                assert_eq!(started.join().unwrap().0, Ok(()));
+                assert!(settled.is_ok(), "B's boundary input settled");
+            });
+            assert_eq!(rig.events().iter().filter(|e| *e == "paste").count(), 1);
+            assert!(rig.snapshot()["items"].as_array().unwrap().is_empty());
+            rig.runtime.block_on(rig.mailbox.finish_turn(
+                crate::services::discord::queue_dispatch::persistence_context(
+                    &shared,
+                    &ProviderKind::Claude,
+                    id,
+                ),
+            ));
+            {
+                let _entered = rig.runtime.enter();
+                crate::services::discord::queue_io::input_owner::drive::wake(drive.clone());
+            }
+            settled_events
+                .recv_timeout(Duration::from_secs(20))
+                .expect("repeat boundary settled");
+            assert!(idle_inbox.try_recv().is_err());
+            assert_eq!(rig.events().iter().filter(|e| *e == "paste").count(), 1);
+            assert_eq!(
+                mock.local_note_posts
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                1
+            );
+            crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&rig.name);
+        } else if resume == "standby" {
+            assert_eq!(
+                created.load(std::sync::atomic::Ordering::SeqCst),
+                before,
+                "standby mark must not even construct a drive"
+            );
+            assert_eq!(rig.events().iter().filter(|e| *e == "paste").count(), 0);
+            assert_eq!(rig.snapshot()["items"].as_array().unwrap().len(), 1);
+        } else {
+            settled_events
+                .recv_timeout(Duration::from_secs(20))
+                .expect("production completion must settle a busy paste without a manual wake");
+            assert!(
+                rig.runtime.block_on(rig.mailbox.has_active_turn()).unwrap(),
+                "A remains active"
+            );
+            assert_eq!(rig.events().iter().filter(|e| *e == "paste").count(), 1);
+            assert!(rig.snapshot()["items"].as_array().unwrap().is_empty());
+            assert_eq!(
+                mock.local_note_posts
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                1
+            );
+            rig.runtime.block_on(async {
+                rig.mailbox
+                    .finish_turn(
+                        crate::services::discord::queue_dispatch::persistence_context(
+                            &shared,
+                            &ProviderKind::Claude,
+                            id,
+                        ),
+                    )
+                    .await;
+                crate::services::discord::router::message_handler::owner_wake(&shared, id);
+            });
+            settled_events
+                .recv_timeout(Duration::from_secs(20))
+                .expect("A boundary settled");
+            assert_eq!(
+                rig.events().iter().filter(|e| *e == "paste").count(),
+                1,
+                "no repeat at A end"
+            );
+        }
+        SETTLEMENT_PROBES
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .remove(&channel);
+    } else {
+        drop(transition);
+        drop(completion);
     }
     assert!(mock.unhandled.lock().unwrap().is_empty());
     server.abort();

@@ -622,4 +622,60 @@ F7Next == F7BusyArrival \/ F7OwnerWakeHandBusy \/ F7HeldWaitsBoundary
 
 \* No real screen, upload or ownership hold exists: B must have been pasted before A ends.
 BusyArrivalInTurn == nat = "idle" => pastes = 1
+
+\* Recovery and transition refusals happen before effect::run: no held watch owns a retry.
+\* screen=cause is reconcile closed; screen=held is a transition lock. Only /resume and clear
+\* wake on release; other short transitions keep the existing end-of-A delivery contract.
+F7ResumeInit == Init /\ mode = "turn" /\ src = "discord" /\ mbx = "active"
+                /\ nat = "busy" /\ draft = "none" /\ obsOk /\ ~twin /\ ~twinPend
+                /\ screen = (IF Mut \in {"transition", "shortTransition"} THEN "held" ELSE "cause")
+
+\* queued_recovery.rs:48-52 -> owner_input::recover; or arrival during /resume.
+F7PreflightRefusal ==
+    /\ inp = "queued" /\ wake /\ screen # "ok"
+    /\ inp' = "held" /\ wake' = FALSE /\ claim' = "deferred" /\ notices' = 1
+    /\ UNCHANGED <<mode, src, mbx, nat, natOwner, pend, reader, obsOk, route, plain, sentInto, win, rcv, userRow, twin, pastes, lp, op, screen, draft, timer, byTimer, timed, heldBy, watch, aged, twinPend, envLeft, stale, old, acct, row, ep, leak, outside>>
+
+\* Active REST and gateway completions mark reconcile open, then wake adopted owners.
+F7ReconcileComplete ==
+    /\ claim = "deferred" /\ screen = "cause" /\ Mut # "standby"
+    /\ screen' = "ok" /\ claim' = "handed"
+    /\ wake' = (Fix = "f7r2")
+    /\ UNCHANGED <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain, sentInto, win, rcv, userRow, twin, pastes, lp, op, draft, notices, timer, byTimer, timed, heldBy, watch, aged, twinPend, envLeft, stale, old, acct, row, ep, leak, outside>>
+
+\* Standby runtime_bootstrap.rs:440-449 marks reconcile only, and cannot drive input.
+F7StandbyReconcile ==
+    /\ claim = "deferred" /\ screen = "cause" /\ Mut = "standby"
+    /\ screen' = "ok" /\ claim' = "handed" /\ wake' = (Fix = "standbyWake")
+    /\ UNCHANGED <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain, sentInto, win, rcv, userRow, twin, pastes, lp, op, draft, notices, timer, byTimer, timed, heldBy, watch, aged, twinPend, envLeft, stale, old, acct, row, ep, leak, outside>>
+
+\* session_resume.rs:340 and commands/control.rs:514: /resume and clear release their guard
+\* before their completion token wakes the owner. Other transition locks do not add a wake.
+F7TransitionRelease ==
+    /\ claim = "deferred" /\ screen = "held"
+    /\ screen' = "ok" /\ claim' = "handed" /\ wake' = (Fix = "f7r2" /\ Mut = "transition")
+    /\ UNCHANGED <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain, sentInto, win, rcv, userRow, twin, pastes, lp, op, draft, notices, timer, byTimer, timed, heldBy, watch, aged, twinPend, envLeft, stale, old, acct, row, ep, leak, outside>>
+
+\* The same existing drive re-evaluates the kept original, claims it and calls hand_busy once.
+F7ResumeHandBusy ==
+    /\ nat = "busy"
+    /\ claim = "handed" /\ inp = "held" /\ wake /\ screen = "ok"
+    /\ inp' = "sent" /\ pastes' = pastes + 1 /\ wake' = FALSE
+    /\ UNCHANGED <<mode, src, mbx, nat, natOwner, pend, reader, obsOk, route, plain, sentInto, win, rcv, userRow, twin, claim, lp, op, screen, draft, notices, timer, byTimer, timed, heldBy, watch, aged, twinPend, envLeft, stale, old, acct, row, ep, leak, outside>>
+
+\* Check the completion pass while A remains busy, before any unrelated turn-boundary wake.
+F7ResumeSettled ==
+    /\ claim = "handed" /\ ~wake
+    /\ (Mut # "shortTransition" \/ nat = "idle")
+    /\ claim' = "joined"
+    /\ UNCHANGED <<wake, mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain, sentInto, win, rcv, userRow, twin, pastes, lp, op, screen, draft, notices, timer, byTimer, timed, heldBy, watch, aged, twinPend, envLeft, stale, old, acct, row, ep, leak, outside>>
+F7ResumeDone == claim = "joined" /\ UNCHANGED vars
+F7ResumeNext == F7PreflightRefusal \/ F7ReconcileComplete \/ F7StandbyReconcile
+                \/ F7TransitionRelease \/ F7ResumeHandBusy \/ F7ResumeSettled \/ F7ResumeDone
+                \/ (Mut = "shortTransition" /\ claim = "handed" /\ F7HeldWaitsBoundary)
+                \/ (Mut = "shortTransition" /\ F7BoundaryDelivery)
+ResumeProgress == claim = "joined" /\ Mut # "standby" =>
+                  pastes = 1 /\ inp = (IF Mut = "shortTransition" THEN "answered" ELSE "sent")
+StandbyDoesNotInject == Mut = "standby" => pastes = 0
+
 =============================================================================

@@ -214,6 +214,8 @@ pub(in crate::services::discord) fn owner_drive(
         });
         settled
     });
+    #[cfg(test)]
+    let settled = tests::idle::observe_settlement(channel, settled);
     std::sync::Arc::new(Drive {
         mailbox,
         channel,

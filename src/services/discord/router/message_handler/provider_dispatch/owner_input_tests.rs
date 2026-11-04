@@ -1772,7 +1772,7 @@ mod not_sent;
 mod provenance;
 
 #[path = "owner_input_idle_tests.rs"]
-mod idle;
+pub(super) mod idle;
 
 /// One input admitted, granted and claimed on `channel`'s own owner, carried as the turn the drive's
 /// idle start hands over; the receiver hears that input's settlement.
