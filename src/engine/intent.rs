@@ -351,7 +351,7 @@ fn execute_activate_auto_queue(
 ) -> anyhow::Result<()> {
     let engine =
         engine.ok_or_else(|| anyhow::anyhow!("auto-queue activation intent requires engine"))?;
-    let body: crate::server::routes::auto_queue::ActivateBody = serde_json::from_value(body)?;
+    let body: crate::services::auto_queue::route::ActivateBody = serde_json::from_value(body)?;
     let pool = pg_pool.or_else(|| engine.pg_pool()).ok_or_else(|| {
         anyhow::anyhow!("postgres backend is required for auto-queue activation intent")
     })?;
@@ -361,7 +361,8 @@ fn execute_activate_auto_queue(
             let engine = engine.clone();
             let body = body;
             move |_bridge_pool| async move {
-                match crate::server::routes::auto_queue::activate_with_bridge_pg(engine, body).await
+                match crate::services::auto_queue::route::activate_with_bridge_pg(engine, body)
+                    .await
                 {
                     Ok(response) => Ok(response),
                     Err(error) => Ok(error.into_json_response()),

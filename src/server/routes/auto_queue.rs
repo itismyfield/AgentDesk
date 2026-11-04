@@ -16,9 +16,6 @@ pub use route::{
     ResetGlobalBody, StatusQuery, UpdateEntryBody, UpdateRunBody,
 };
 
-#[allow(unused_imports)]
-pub(crate) use route::{AutoQueueActivateDeps, activate_with_bridge_pg, activate_with_deps_pg};
-
 /// POST /api/queue/generate
 ///
 /// Bulk push of multiple issue numbers into a queue run. Single-call

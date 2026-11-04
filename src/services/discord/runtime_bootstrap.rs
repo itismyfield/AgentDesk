@@ -1085,7 +1085,7 @@ mod restart_lifecycle_characterization_tests {
             let shutdown_remaining = Arc::new(AtomicUsize::new(3));
             let shared = build_shared_with_injected_shutdown_remaining(&shutdown_remaining);
 
-            let root = crate::agentdesk_runtime_root().expect("runtime root override");
+            let root = crate::config::runtime_root().expect("runtime root override");
             std::fs::create_dir_all(&root).unwrap();
             let marker = root.join("restart_pending");
             std::fs::write(

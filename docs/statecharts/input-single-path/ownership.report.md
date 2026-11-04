@@ -213,5 +213,7 @@ Code: `a9d59259e5`. Paths added only for `cf` and `f`; `c` and the older columns
 | Config | Result |
 |---|---|
 | `CF` | `NoSilentLoss`, `NoSilentLossObserved`, `CarriedRowEnds` break: a person's terminal turn ends, the owner is woken, its start meets the carried row, and nothing closes it. Code-confirmed on adk-dash-cc 11-03: `pending_receipt:owed_inputs=75..78` from 04:51Z to 18:59Z, front refused at every wake. |
-| `F` | every rule holds (195,224 states). Mutant `leakKept` (the reader still counts the absorbed input) breaks the same three rules. |
+| `F` | every rule holds (14 rules and NoDeadlock, 195,224 states). Mutant `leakKept` (the reader still counts the absorbed input) breaks the same three rules. |
 | `FOutside` | `SeenOnce` breaks in `f` too: AgentDesk records no identity for an outside copy, so its own single paste is the second time the session sees the text. Kept as a documented gap; `NoDuplicate` (AgentDesk pastes at most once) holds. |
+
+The model folds the transcript reader into `leak`: which order an input's command and absorption rows come in, and how same-body inputs pair, are checked by the Rust reader tests (`tui_o/writer/input_facts/receipt_tests.rs`), not here.

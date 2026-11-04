@@ -252,7 +252,7 @@ fn register_exec_ops_with_runner<'js>(
         "__listRaw",
         Function::new(ctx.clone(), || -> String {
             let mut results = Vec::new();
-            if let Some(root) = crate::cli::agentdesk_runtime_root() {
+            if let Some(root) = crate::config::runtime_root() {
                 let inflight_dir = root.join("runtime/discord_inflight");
                 for provider in crate::services::provider::supported_provider_ids() {
                     let dir = inflight_dir.join(provider);
@@ -314,7 +314,7 @@ fn register_exec_ops_with_runner<'js>(
         Function::new(
             ctx.clone(),
             |provider: String, channel_id: String| -> String {
-                if let Some(root) = crate::cli::agentdesk_runtime_root() {
+                if let Some(root) = crate::config::runtime_root() {
                     let path = root
                         .join("runtime/discord_inflight")
                         .join(&provider)

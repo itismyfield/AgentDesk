@@ -23,15 +23,16 @@ To lower the baseline after a route refactor PR:
 Do not raise this baseline to admit new route SRP debt. Move SQL/domain work
 out of route files instead.
 
-## Service/Server Backflow
+## Server-Layer Backflow
 
-`service_server_backflow.json` records the current `src/services/**`
-references to `crate::server` or `super::server`. CI allows the existing
-server-layer backflow but fails when:
+`service_server_backflow.json` records production references to `crate::server`
+(including `super::server`, use groups, and crate-root glob paths) from modules
+outside the assembly layer (`server`, `cli`, `launch`, `bootstrap`). Test files
+and inline `#[cfg(test)]` items are not counted. `--check` fails when:
 
-- total service/server backflow findings increase above `total_count`
+- total server backflow findings increase above `total_count`
 - any file has more findings than its committed per-file `count`
-- a new file appears with a service/server backflow finding
+- a new file appears with a server backflow finding
 
 To lower the baseline after moving shared types/helpers out of `src/server`:
 
@@ -41,6 +42,11 @@ To lower the baseline after moving shared types/helpers out of `src/server`:
    the new lower current findings.
 4. Run `python3 scripts/audit_maintainability.py --check`.
 
-Do not raise this baseline to admit new backflow. Move shared DTOs, routing
-helpers, websocket emitters, or cluster helpers below `src/services` or pass
-server-owned dependencies into services.
+The same check also rejects any Rust reference (production or test) to the
+removed `agentdesk_runtime_root` alias. That rule has no baseline; call
+`crate::config::runtime_root()` directly.
+
+Do not raise this baseline to admit new backflow; a PR that raises it together
+with a new reference bypasses the gate, so reviewers reject any increase. Call
+the canonical service path instead of a route re-export, or pass server-owned
+dependencies in from the assembly layer.
