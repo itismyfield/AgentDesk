@@ -16,8 +16,8 @@ unchanged.
 | `ObserverDriveGrants` | `queue_io/input_owner/drive.rs:98-124,168-180`; `turn_orchestrator/queued_head/v2.rs:248-315` |
 | `ObserverIdleUnobserved` | `router/message_handler/provider_dispatch/owner_input.rs:686-687`: no observer refuses before reserve or keys |
 | `ObserverSubmits` | `owner_input.rs:706-710`: the observed owner handoff runs once |
-| `ObserverTurnReleases` | `turn_orchestrator/episode_identity.rs:303-320,428-437` releases the active token then marks the existing signal done; `turn_finished_signal.rs:26-44` latches completion; attachment captures/checks its latch at `rehydration.rs:378-396` |
-| `ObserverAttaches` | `tui_prompt_dedupe/runtime_binding.rs:59-112` publishes a changed, ready source; `tui_prompt_relay/rehydration.rs:316-354` resolves its channel/runtime after publication, and `wake_observed_source` at `rehydration.rs:358-422` schedules the existing kickoff for a waiting front |
+| `ObserverTurnReleases` | `turn_orchestrator/episode_identity.rs:303-320,428-437` releases the active token then marks the existing signal done; `turn_finished_signal.rs:26-44` latches completion; attachment captures/checks its latch at `rehydration.rs:388-405` |
+| `ObserverAttaches` | `tui_prompt_dedupe/runtime_binding.rs:59-112` publishes a changed, ready source; `tui_prompt_relay/rehydration.rs:316-364` resolves its channel/runtime after publication, and `wake_observed_source` at `rehydration.rs:367-431` schedules the existing kickoff for a waiting front |
 
 The wake is attached to the common `RuntimeBindingPublication` boundary, rather than only the
 rehydration pass. Its `Drop` compares `(runtime_kind, session_id, output_path)` and publishes the
@@ -61,8 +61,8 @@ two callbacks were added, both tests passed their same-key/one-Resolved assertio
 Repeating an already-resolved publication adds no wake.
 
 The callback waits for source authority, rechecks that the current source still equals the
-published one, and reads its channel mapping under that authority (`rehydration.rs:332-343`).
-The existing global `HealthRegistry` supplies that provider/channel's `SharedData` at line 348.
+published one, and reads its channel mapping under that authority (`rehydration.rs:342-352`).
+The existing global `HealthRegistry` supplies that provider/channel's `SharedData` at line 357.
 The shared `wake_observed_source` checks for a session ID and an existing transcript which does not
 report busy. It captures the existing `turn_finished` latch, checks for a pending owner front,
 and only then checks whether the mailbox holds a turn token. If held, it waits on that latch
@@ -71,7 +71,7 @@ local fallback only when no global registry is installed (`rehydration.rs:278-29
 so the common publication and wrapper do not both wake the same source edge. These paths add
 no persistent state, timer or retry loop.
 
-The refusal leaves a front claim outstanding. This does not block a later wake: `drive.rs:101`
+The refusal leaves a front claim outstanding. This does not block a later wake: `drive.rs:99`
 starts that pass with `stalled = false`, `v2.rs:248` still returns its unattempted front,
 and `grant_front`/`claim_turn` replace the old right. The `stalled && front_outstanding()` check
 stops the refused pass from immediately handing the same original again. No drive change is needed.
