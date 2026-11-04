@@ -714,9 +714,9 @@ fn take_owned(
         _ => None,
     };
     let declared = until_done.is_some();
-    // Only the Claude idle writer consults the first-key gate, so only there does a stop prove no key.
-    let gate =
-        matches!(route, target::Route::ClaudeIdle).then(|| turn.cancel.native_stop.receipt_sink());
+    // Only the Claude tmux writers consult the first-key gate, so only there does a stop prove no key.
+    let gate = matches!(route, target::Route::ClaudeIdle | target::Route::ClaudeBusy)
+        .then(|| turn.cancel.native_stop.receipt_sink());
     let result = run(turn, (route, declared), registration, front);
     reply(&result);
     let result = match (result, until_done) {
@@ -822,6 +822,7 @@ fn run(
                 timing: r.timing,
                 declared,
                 draft_notice: draft_notice(turn, &r.sources),
+                cancel: turn.cancel.clone(),
             }
             .leaf(),
         ),

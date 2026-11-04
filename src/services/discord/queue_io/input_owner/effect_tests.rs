@@ -169,6 +169,7 @@ fn an_owned_paste_beside_an_unparkable_draft_notices_its_original_once() {
             timing: &busy_inject::TIMING,
             declared: false,
             draft_notice: Some(Box::new(move || *counted.lock().unwrap() += 1)),
+            cancel: Arc::new(crate::services::provider::CancelToken::new()),
         }
         .leaf();
         let frame = busy_inject::frame("discord", "200", "ann", &nonce, "owned question");

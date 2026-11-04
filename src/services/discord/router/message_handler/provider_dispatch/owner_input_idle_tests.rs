@@ -13,6 +13,10 @@ use crate::services::discord::router::message_handler::provider_dispatch::{
 
 const ASSISTANT: &str = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"answer {n}"}]}}"#;
 
+fn fresh() -> Arc<CancelToken> {
+    Arc::new(CancelToken::new())
+}
+
 /// Each Enter the pane records gets its AI turn: an answer, then the turn's end.
 fn answers(rig: &Rig) -> std::thread::JoinHandle<()> {
     let (renderer, transcript) = (rig.renderer.clone(), rig.transcript());
@@ -53,6 +57,7 @@ fn rehydrate(rig: &Rig, session: &str) {
 fn idle_turn(
     rig: &Rig,
     (session, dir): (&str, &Path),
+    cancel: Arc<CancelToken>,
     (front, settled): (Front, Settled),
     driver: impl FnOnce(&Sender<StreamMessage>) -> Option<ClaudeLegacyProbe>,
 ) -> (Result<(), String>, Vec<StreamMessage>) {
@@ -73,7 +78,7 @@ fn idle_turn(
         working_dir: dir.to_str().unwrap(),
         system_prompt: None,
         allowed_tools: &[],
-        cancel: Arc::new(CancelToken::new()),
+        cancel,
         codex_observation: None,
         tmux_session_name: Some(&rig.name),
         teardown: None,
@@ -147,7 +152,7 @@ fn an_idle_pane_takes_each_queued_front_once_through_its_own_observer() {
         handed.push(front.1.text.clone());
         rehydrate(&rig, &session);
         let at = (session.as_str(), elsewhere.path());
-        let (result, sent) = idle_turn(&rig, at, (front, settled), |_| None);
+        let (result, sent) = idle_turn(&rig, at, fresh(), (front, settled), |_| None);
         assert_eq!(result, Ok(()), "{handed:?}");
         said.extend(sent.into_iter().filter_map(|m| match m {
             StreamMessage::Text { content } => Some(content),
@@ -317,7 +322,7 @@ fn a_pane_under_another_account_is_replaced_before_any_front_is_written() {
         let at = (session.as_str(), elsewhere.path());
         let first = handed.len() == 1;
         let driver = |sender: &Sender<StreamMessage>| first.then(|| relaunch(&rig, at, sender));
-        let (result, sent) = idle_turn(&rig, at, (front, settled), driver);
+        let (result, sent) = idle_turn(&rig, at, fresh(), (front, settled), driver);
         assert_eq!(result, Ok(()), "{handed:?}");
         assert!(
             CLAUDE_LEGACY_PROBE.lock().unwrap().is_none(),
@@ -350,3 +355,6 @@ fn a_pane_under_another_account_is_replaced_before_any_front_is_written() {
     assert_eq!(snapshot["retained_inputs"], json!([]), "{snapshot}");
     crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&rig.name);
 }
+
+#[path = "owner_input_busy_gate_tests.rs"]
+mod busy_gate;

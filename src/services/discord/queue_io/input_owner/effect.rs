@@ -175,6 +175,8 @@ pub(crate) struct BusyClaude {
     pub(crate) declared: bool,
     /// Tells the original once that a draft beside the pasted input may not be kept.
     pub(crate) draft_notice: Option<DraftNotice>,
+    /// The turn's token, whose first-key gate the paste consumes.
+    pub(crate) cancel: Arc<crate::services::provider::CancelToken>,
 }
 
 /// Raises the one notice an original owes when its paste met a draft C-s could not park.
@@ -201,11 +203,21 @@ impl BusyClaude {
             // Enter ends the transaction: the receipt is only recorded off this thread.
             let inject = || {
                 let declared = self.declared;
-                let report = busy_inject::inject_owned(&self.pane, &request, self.timing, declared);
-                busy_inject::collect_receipt(&request, &report, self.timing);
-                (report.outcome, report.draft_unproven)
+                let sink = crate::services::claude_tui::guarded_outcome::with_receipt_sink;
+                sink(Some(&self.cancel), || {
+                    let report =
+                        busy_inject::inject_owned(&self.pane, &request, self.timing, declared);
+                    busy_inject::collect_receipt(&request, &report, self.timing);
+                    (report.outcome, report.draft_unproven)
+                })
             };
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(inject));
+            // A stop that took the gate before the first key left nothing sent and nothing to resend.
+            if matches!(outcome, Ok((Outcome::NotSent(_), _)))
+                && self.cancel.native_stop.receipt_sink().stopped_before_key()
+            {
+                return Ok(Completion::WriteUncertain("stopped_before_key".into()));
+            }
             let outcome = outcome.map(|(outcome, unproven)| {
                 if unproven && let Some(notice) = notice {
                     tracing::info!(channel_id = self.channel, nonce = %self.nonce, "owned paste met an unparked draft");
