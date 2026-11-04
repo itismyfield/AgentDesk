@@ -31,8 +31,18 @@ pub(in crate::services::discord) use native_stop_pin::{
 #[path = "inflight/native_stop_busy_tests.rs"]
 mod native_stop_busy_tests;
 #[cfg(all(test, unix))]
+#[path = "inflight/native_stop_pin/retry_tests.rs"]
+mod native_stop_pin_retry_tests;
+#[cfg(test)]
+#[path = "inflight/native_stop_pin/serde_tests.rs"]
+mod native_stop_pin_serde_tests;
+#[cfg(all(test, unix))]
 #[path = "inflight/native_stop_pin/tests.rs"]
 mod native_stop_pin_tests;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use native_stop_pin::{
+    native_pin_observation_count, wait_native_pin_observations,
+};
 pub(crate) mod read_only_owner_snapshot;
 pub(in crate::services::discord) mod terminal_delivery_evidence_loss;
 mod terminal_receipt_stamp;
