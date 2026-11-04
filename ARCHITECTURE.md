@@ -1570,6 +1570,8 @@ src/
 │   │   │   │   ├── legacy_replay_coordinate.rs
 │   │   │   │   ├── serde_adapters.rs
 │   │   │   │   └── turn_kinds.rs
+│   │   │   ├── native_stop_pin/
+│   │   │   │   └── tests.rs
 │   │   │   ├── o_seed_observation/
 │   │   │   │   └── terminal_barrier_test.rs
 │   │   │   ├── rebind_reap/
@@ -1641,6 +1643,8 @@ src/
 │   │   │   ├── managed_submission.rs
 │   │   │   ├── managed_submission_tests.rs
 │   │   │   ├── model.rs
+│   │   │   ├── native_stop_busy_tests.rs
+│   │   │   ├── native_stop_pin.rs
 │   │   │   ├── o_seed_observation.rs
 │   │   │   ├── o_seed_observation_tests.rs
 │   │   │   ├── orphan_relay_reclaim.rs
@@ -1830,6 +1834,7 @@ src/
 │   │   │   │   ├── ingress.rs
 │   │   │   │   ├── ingress_tests.rs
 │   │   │   │   ├── mod.rs
+│   │   │   │   ├── native_receipt_tests.rs
 │   │   │   │   ├── notice.rs
 │   │   │   │   ├── notice_tests.rs
 │   │   │   │   ├── origin.rs
@@ -2124,6 +2129,7 @@ src/
 │   │   │   │   │   ├── owner_input_herdr_tests.rs
 │   │   │   │   │   ├── owner_input_idle_tests.rs
 │   │   │   │   │   ├── owner_input_not_sent_tests.rs
+│   │   │   │   │   ├── owner_input_parent_tests.rs
 │   │   │   │   │   ├── owner_input_rollback_tests.rs
 │   │   │   │   │   ├── owner_input_tests.rs
 │   │   │   │   │   ├── owner_provenance_tests.rs
@@ -2846,6 +2852,8 @@ src/
 │   │   │   │   ├── judged_stop_tests.rs
 │   │   │   │   ├── native_stop.rs
 │   │   │   │   ├── native_stop_contract_tests.rs
+│   │   │   │   ├── native_stop_identity_tests.rs
+│   │   │   │   ├── native_stop_ownership_tests.rs
 │   │   │   │   ├── pid_exit.rs
 │   │   │   │   ├── process_backend_cancel.rs
 │   │   │   │   ├── process_force_kill_tests.rs
