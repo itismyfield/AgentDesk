@@ -115,6 +115,23 @@ fn busy_arrival_before_row_handoff(merge: bool, missing: bool) {
     });
     let mut shared = crate::services::discord::make_shared_data_for_tests();
     Arc::get_mut(&mut shared).unwrap().mailboxes = rig._registry.clone();
+    let persistence = crate::services::turn_orchestrator::QueuePersistenceContext::new(
+        &ProviderKind::Claude,
+        &shared.token_hash,
+        None,
+    );
+    let queue = crate::services::turn_orchestrator::v2_queue(
+        &persistence,
+        poise::serenity_prelude::ChannelId::new(rig.channel),
+    )
+    .unwrap();
+    rig.runtime.block_on(async {
+        rig.mailbox.v2_adopt(queue.0, queue.1).await.unwrap();
+        assert!(matches!(
+            admit(&rig.mailbox, &rig.original, rig.ticket.clone()).await,
+            crate::services::discord::queue_io::input_owner::admission::Admission::Accepted(_)
+        ));
+    });
     shared
         .restart
         .reconcile_done
@@ -217,9 +234,10 @@ fn busy_arrival_before_row_handoff(merge: bool, missing: bool) {
                 None,
             ),
         );
+        let intake = rig.runtime.block_on(intake);
         assert!(
-            rig.runtime.block_on(intake).enqueued,
-            "B committed through the real ingress"
+            intake.enqueued,
+            "B committed through the real ingress: {intake:?}"
         );
         release_pass.send(()).unwrap();
         let busy_settled = on_settled.recv_timeout(Duration::from_secs(20));
@@ -492,11 +510,14 @@ fn busy_hold_notice(hold: Option<crate::services::discord::queue_io::input_ingre
         .iter()
         .filter(|t| t.ends_with("즉시주입 하지 못하고 메시지큐에 들어갔습니다"))
         .collect();
+    let posts = mock
+        .local_note_posts
+        .load(std::sync::atomic::Ordering::SeqCst);
     if let Some(hold) = hold {
-        assert_eq!(
-            notices,
-            [&hold.notice()],
-            "one notice after repeated real refusals: {texts:?}"
+        assert_eq!(posts, 1, "one POST after repeated real refusals: {texts:?}");
+        assert!(
+            texts.contains(&hold.notice()),
+            "the actual refusal is explained: {texts:?}"
         );
         assert!(
             rig.events().is_empty(),
@@ -505,6 +526,7 @@ fn busy_hold_notice(hold: Option<crate::services::discord::queue_io::input_ingre
         );
         assert_eq!(rig.snapshot()["items"].as_array().unwrap().len(), 1);
     } else {
+        assert_eq!(posts, 0);
         assert!(
             notices.is_empty(),
             "successful input owes no hold notice: {texts:?}"
