@@ -28,6 +28,7 @@ pub(crate) use cancel_effects::schedule_post_cancel_queue_drain;
 pub(crate) use cancel_effects::set_pre_purge_hook_for_test;
 #[cfg(all(test, unix))]
 pub(crate) use cancel_effects::set_pre_purge_probe_for_test;
+pub(crate) use cancel_effects::settle_v2_drops;
 
 #[derive(Clone)]
 pub struct QueueService {
