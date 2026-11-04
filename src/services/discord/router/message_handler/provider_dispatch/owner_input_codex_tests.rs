@@ -21,7 +21,7 @@ fn fixture(name: &str) -> String {
 
 /// A pane that draws the bottom of a captured busy, or idle, Codex screen with the cursor in its
 /// empty composer; a paste is recorded and drawn in the composer, and each Enter is recorded.
-fn codex_renderer(f: &Fixture, name: &str, idle: bool) -> std::path::PathBuf {
+pub(super) fn codex_renderer(f: &Fixture, name: &str, idle: bool) -> std::path::PathBuf {
     let root = f.root.path().join(name);
     fs::create_dir(&root).unwrap();
     // An idle pane is a captured idle Codex composer at 80 columns, drawn at the pane's bottom.
@@ -1022,4 +1022,124 @@ fn a_codex_start_only_refusal_keeps_custody_and_releases_buffer_and_ledger() {
     let after = rig.snapshot();
     assert_eq!(after["retained_inputs"], json!([]), "{after}");
     assert_eq!(after["items"], json!([]), "{after}");
+}
+
+/// A start claimed while its Codex pane was idle meets a native turn opened before its execution:
+/// that execution reads the same rollout, holds the start and writes nothing to the pane.
+#[test]
+fn a_start_claimed_before_a_native_codex_turn_opens_is_held_unwritten() {
+    use crate::services::discord::router::message_handler::provider_dispatch::StreamingTurn;
+    use crate::services::provider::CancelToken;
+    use crate::services::turn_host::TurnHost;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = codex_rig_on("oc-late-busy", 7_340_812, true);
+    let root = rig.f.root.path();
+    let (workspace, home) = (root.join("late-workspace"), root.join("codex-home"));
+    fs::create_dir(&workspace).unwrap();
+    let guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
+    let _home = guard("CODEX_HOME", &home);
+    let sid = uuid::Uuid::new_v4().to_string();
+    let rollout = home
+        .join("sessions/2026/11/04")
+        .join(format!("rollout-2026-11-04T00-00-00-{sid}.jsonl"));
+    fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+    let line = |value: serde_json::Value| format!("{value}\n");
+    let meta = serde_json::json!({"type":"session_meta","payload":{"id":sid,"cwd":workspace,
+        "source":"cli"}});
+    fs::write(&rollout, line(meta)).unwrap();
+    let binding = crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+        runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+        output_path: rollout.display().to_string(),
+        relay_output_path: None,
+        input_fifo_path: None,
+        session_id: Some(sid.clone()),
+        last_offset: 0,
+        relay_last_offset: None,
+    };
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(&rig.name, binding);
+    let claim = rig.claim(&rig.granted_front()).expect("granted front");
+    // The native turn opens after the claim and before the start's execution reads the pane.
+    let open = move |turn: &str, text: &str| {
+        let user = serde_json::json!({"type":"response_item","payload":{"type":"message",
+            "role":"user","content":[{"type":"input_text","text":text}]}});
+        let started = serde_json::json!({"type":"event_msg","payload":{"type":"task_started",
+            "turn_id":turn}});
+        line(started) + &line(user)
+    };
+    let append = {
+        let rollout = rollout.clone();
+        move |rows: String| {
+            let mut file = fs::OpenOptions::new().append(true).open(&rollout).unwrap();
+            std::io::Write::write_all(&mut file, rows.as_bytes()).unwrap();
+        }
+    };
+    append(open("native-turn", "native prompt"));
+    // A pasted start would open its own turn; it is answered so no read waits on it.
+    let (renderer, answers) = (rig.renderer.clone(), append.clone());
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopped = stop.clone();
+    let answering = std::thread::spawn(move || {
+        while !stopped.load(std::sync::atomic::Ordering::SeqCst) {
+            if let Ok(body) = fs::read_to_string(renderer.join("body")) {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                let done = serde_json::json!({"type":"event_msg","payload":{"type":"task_complete",
+                    "turn_id":"own-turn","last_agent_message":"own"}});
+                answers(open("own-turn", &body) + &line(done));
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    });
+    let (settled, _) = tokio::sync::oneshot::channel();
+    let owner = OwnerTurn {
+        mailbox: rig.mailbox.clone(),
+        claim,
+        settled,
+        origin: InputOrigin::HttpStart,
+    };
+    let (host, provider) = (TurnHost::Tmux, ProviderKind::Codex);
+    let turn = StreamingTurn {
+        pool: None,
+        shared: None,
+        provider: &provider,
+        prompt: PROMPT,
+        session_id: Some(&sid),
+        working_dir: workspace.to_str().unwrap(),
+        system_prompt: None,
+        allowed_tools: &[],
+        cancel: std::sync::Arc::new(CancelToken::new()),
+        codex_observation: None,
+        tmux_session_name: Some(&rig.name),
+        teardown: None,
+        host: &host,
+        channel_id: rig.channel,
+        model: None,
+        native_fast_mode: None,
+        effort: None,
+        codex_goals: None,
+        compact_percent: None,
+        compact_lower_bound_tokens: 0,
+        compact_token_limit: None,
+        cache_ttl_minutes: None,
+        dispatch_type: None,
+        force_fresh: false,
+        submission: None,
+    };
+    let result = {
+        let _entered = rig.runtime.enter();
+        execute_owned(turn, std::sync::mpsc::channel().0, owner)
+    };
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    answering.join().unwrap();
+    let held = (result, rig.events(), rig.buffered());
+    let expected = (
+        Err("NotSent(\"synthetic_waits_idle\")".to_string()),
+        Vec::<String>::new(),
+        false,
+    );
+    assert_eq!(held, expected);
+    let state = rig.snapshot();
+    assert_eq!(state["items"].as_array().unwrap().len(), 1, "{state}");
+    assert!(state["head_injection"].is_null(), "unattempted: {state}");
+    crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&rig.name);
 }

@@ -111,6 +111,7 @@ impl IntakeRig {
             .unwrap();
         let f = Fixture::after_shared_test_env_lock();
         let (mut env, mut config) = d1_fixture_config(&f, &[id]);
+        let codex = bot == ProviderKind::Codex && start;
         if bot == ProviderKind::Codex {
             let path = f.root.path().join("cg-d1-fixture.yaml");
             let mut yaml: serde_yaml::Value =
@@ -120,6 +121,10 @@ impl IntakeRig {
                 serde_yaml::from_str("bots: {codex: {token: test-token, provider: codex}}")
                     .unwrap();
             yaml["agents"][0]["channels"]["claude"]["provider"] = "claude".into();
+            if codex {
+                let channel = format!("{{codex: {{id: '{id}', runtime: tui, provider: codex}}}}");
+                yaml["agents"][0]["channels"] = serde_yaml::from_str(&channel).unwrap();
+            }
             fs::write(path, serde_yaml::to_string(&yaml).unwrap()).unwrap();
             config = serde_yaml::from_value(yaml).unwrap();
         }
@@ -137,6 +142,9 @@ impl IntakeRig {
         );
         crate::config::session_hosts::install(&config).unwrap();
         crate::services::tui_o::channel_policy::install(&config).unwrap();
+        if codex {
+            crate::services::provider_hosting::install_provider_hosting_config(&config);
+        }
         let hook = crate::services::claude_tui::hook_server::publish_hook_endpoint(
             "http://127.0.0.1:9".into(),
         );
@@ -162,13 +170,37 @@ impl IntakeRig {
             .unwrap();
         let channel = ChannelId::new(id);
         let label = format!("a1-rollback-{id}");
-        let name = ProviderKind::Claude.build_tmux_session_name(&label);
-        let renderer = renderer_with(&f, &name, "normal", view("", false), "", PROMPT);
-        let proof = d1_execution_proof(&name, id);
-        let sid = proof.context.expected_native_session_id.as_deref().unwrap();
+        let pane = if codex {
+            bot.clone()
+        } else {
+            ProviderKind::Claude
+        };
+        let name = pane.build_tmux_session_name(&label);
+        let (renderer, sid) = match codex {
+            true => (
+                super::super::codex_tests::codex_renderer(&f, &name, true),
+                codex_execution_proof(&name, id),
+            ),
+            false => {
+                let renderer = renderer_with(&f, &name, "normal", view("", false), "", PROMPT);
+                let proof = d1_execution_proof(&name, id);
+                let sid = proof.context.expected_native_session_id.clone().unwrap();
+                (renderer, sid)
+            }
+        };
+        let sid = sid.as_str();
         let workspace = f.root.path().join("workspace");
         fs::create_dir(&workspace).unwrap();
+        let home = f.root.path().join("codex-home");
+        if codex {
+            let guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
+            env.push(guard("CODEX_HOME", &home));
+        }
         let transcript = match start && origin.is_none() {
+            // The rollout the pane's Codex session writes, found by its id and workspace.
+            _ if codex => home
+                .join("sessions/2026/11/04")
+                .join(format!("rollout-2026-11-04T00-00-00-{sid}.jsonl")),
             // Known only through the pane's binding, as when no idle observer can be built.
             true => f
                 .root
@@ -182,14 +214,28 @@ impl IntakeRig {
             )
             .unwrap(),
         };
-        if busy {
+        if codex {
+            fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+            let meta =
+                json!({"type":"session_meta","payload":{"id":sid,"cwd":workspace,"source":"cli"}});
+            let native = if busy {
+                opening("native-turn", "native prompt")
+            } else {
+                String::new()
+            };
+            fs::write(&transcript, rollout_row(meta) + &native).unwrap();
+        } else if busy {
             fs::create_dir_all(transcript.parent().unwrap()).unwrap();
             fs::write(&transcript, BUSY).unwrap();
         }
+        let kind = match codex {
+            true => crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+            false => crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+        };
         crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
             &name,
             crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
-                runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+                runtime_kind: kind,
                 output_path: transcript.display().to_string(),
                 relay_output_path: None,
                 input_fifo_path: None,
@@ -855,8 +901,8 @@ async fn origin_receipts(pool: &sqlx::PgPool, origin: &str) -> Vec<String> {
     rows.await.unwrap()
 }
 
-/// A `turn/start` meeting a native busy turn on a stored tmux session waits unclaimed: nothing is
-/// written, retried or killed while that turn runs, and its idle alone wakes the input to run once.
+/// A `turn/start` meeting a native busy turn on a stored tmux session waits unclaimed through a
+/// failed pane read: nothing is written, retried or killed, and the turn's idle alone runs it once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_turn_start_waits_out_a_native_busy_turn_then_runs_as_its_own_pg() {
     if !creator_child(concat!(
@@ -954,6 +1000,29 @@ async fn a_turn_start_waits_out_a_native_busy_turn_then_runs_as_its_own_pg() {
     let state = rig.state().await;
     assert_eq!(state["items"].as_array().unwrap().len(), 1, "{state}");
     assert!(state["head_injection"].is_null(), "unclaimed: {state}");
+
+    // One read of the pane fails while the watch runs; a later read sees it again.
+    let tmux = rig._tmux.root.path();
+    let (shim, inner, fail) = (
+        tmux.join("tmux"),
+        tmux.join("tmux-inner"),
+        tmux.join("fail-read"),
+    );
+    fs::rename(&shim, &inner).unwrap();
+    let script = format!(
+        "#!/bin/sh\ncase \"$*\" in *list-panes*pane_dead*) [ ! -f '{fail}' ] || {{ rm '{fail}'; exit 1; }} ;; esac\nexec '{inner}' \"$@\"\n",
+        fail = fail.display(),
+        inner = inner.display()
+    );
+    fs::write(&shim, script).unwrap();
+    fs::set_permissions(&shim, fs::metadata(&inner).unwrap().permissions()).unwrap();
+    fs::write(&fail, "").unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while fail.exists() {
+        assert!(std::time::Instant::now() < deadline, "no pane read failed");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
 
     // The native turn ends; with no other wake, the input runs once as a turn of its own.
     let (completed, bridge) = tokio::sync::oneshot::channel();
@@ -1253,6 +1322,173 @@ async fn a_start_waiting_across_a_restart_runs_once_after_the_carried_row_closes
         "{}",
         rig.trace.text()
     );
+    drop(rig);
+    pool.close().await;
+    db.drop().await;
+}
+
+/// Stamps the markers and incarnation a spawned Codex pane `name` would carry; its session id.
+fn codex_execution_proof(name: &str, channel: u64) -> String {
+    use crate::services::tmux_common as tc;
+    use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
+    let proof = tc::session_temp_path(name, "proof");
+    fs::create_dir_all(std::path::Path::new(&proof).parent().unwrap()).unwrap();
+    tc::write_tmux_owner_marker(name).unwrap();
+    tc::host_marker::record_tmux_host_marker(name);
+    let kind = crate::services::agent_protocol::RuntimeHandoffKind::CodexTui;
+    tc::write_tmux_runtime_kind_marker(name, kind).unwrap();
+    let sid = uuid::Uuid::new_v4().to_string();
+    let prepared =
+        PreparedIncarnation::prepare("codex", name, Some(channel), Some(&sid), false).unwrap();
+    let stamped = discord::stamp_spawn_markers(name, Some(&prepared));
+    prepared.finish_spawn(stamped).unwrap();
+    sid
+}
+
+fn rollout_row(value: Value) -> String {
+    format!("{value}\n")
+}
+
+/// A Codex turn's opening records through its prompt.
+fn opening(turn: &str, text: &str) -> String {
+    rollout_row(json!({"type":"event_msg","payload":{"type":"task_started","turn_id":turn}}))
+        + &rollout_row(json!({"type":"turn_context","payload":{"turn_id":turn}}))
+        + &rollout_row(
+            json!({"type":"response_item","payload":{"type":"message","role":"user",
+            "content":[{"type":"input_text","text":text}]}}),
+        )
+}
+
+/// A Codex turn's answer and its `task_complete`.
+fn answer_for(turn: &str, text: &str) -> String {
+    rollout_row(
+        json!({"type":"response_item","payload":{"type":"message","role":"assistant",
+        "content":[{"type":"output_text","text":text}]}}),
+    ) + &rollout_row(json!({"type":"event_msg","payload":{"type":"task_complete",
+            "turn_id":turn,"last_agent_message":text}}))
+}
+
+/// A Codex `turn/start` meeting a native turn in its stored pane waits unclaimed, read from the
+/// rollout its execution tails; that turn's end alone runs it once as a turn of its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_codex_turn_start_waits_out_a_native_busy_turn_then_runs_as_its_own_pg() {
+    if !creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::",
+        "a_codex_turn_start_waits_out_a_native_busy_turn_then_runs_as_its_own_pg"
+    )) {
+        return;
+    }
+    use crate::services::agents::input_result::{InputResult, OriginChannel, lookup};
+    const ORIGIN: &str = "G-codex-native-busy";
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let codex = ProviderKind::Codex;
+    let rig = IntakeRig::build(
+        7_340_811,
+        true,
+        codex.clone(),
+        Some(pool.clone()),
+        true,
+        Some(ORIGIN),
+    );
+    let rig = rig.await;
+    let key = discord::adk_session::build_adk_session_key(&rig.shared, rig.channel, &codex, None);
+    let key = key.await.expect("channel session key");
+    discord::inflight::seed_session_row_keyed(&pool, &key, rig.channel.get(), None).await;
+    let append = |rows: &str| {
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&rig.transcript)
+            .unwrap();
+        std::io::Write::write_all(&mut file, rows.as_bytes()).unwrap();
+    };
+    let channels = [OriginChannel {
+        provider: "codex".into(),
+        channel_id: rig.channel.get(),
+    }];
+    let answer = || lookup(&pool, "agent", ORIGIN, &channels);
+    assert!(matches!(
+        answer().await,
+        Ok(Some(InputResult::Accepted { .. }))
+    ));
+    let name = codex.build_tmux_session_name(&format!("a1-rollback-{}", rig.channel.get()));
+    let live = || {
+        matches!(
+            crate::services::platform::tmux::pane_liveness(&name),
+            crate::services::platform::tmux::PaneLiveness::Live
+        )
+    };
+
+    let (drive, mut settled) = rig.drive();
+    crate::services::discord::queue_io::input_owner::drive::wake(drive);
+    let held = next_settle(&mut settled, &rig.trace).await;
+    let busy = (
+        held,
+        events(&rig.renderer),
+        live(),
+        rig.trace.text().contains("killing tmux session"),
+        origin_receipts(&pool, ORIGIN).await,
+        (rig.mock.written_texts().len(), rig.mock.deleted().len()),
+    );
+    let expected = (
+        Err("NotSent(\"synthetic_waits_idle\")".to_string()),
+        Vec::<String>::new(),
+        true,
+        false,
+        Vec::<String>::new(),
+        (0, 0),
+    );
+    assert_eq!(busy, expected, "{}", rig.trace.text());
+    assert!(matches!(
+        answer().await,
+        Ok(Some(InputResult::Accepted { .. }))
+    ));
+    let state = rig.state().await;
+    assert_eq!(state["items"].as_array().unwrap().len(), 1, "{state}");
+    assert!(state["head_injection"].is_null(), "unclaimed: {state}");
+
+    // The native turn ends; with no other wake, the input runs once as a turn of its own.
+    let (completed, bridge) = tokio::sync::oneshot::channel();
+    *discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
+        .lock()
+        .unwrap() = Some((rig.channel, completed));
+    append(&answer_for("native-turn", "native answer"));
+    let outbox = pool.clone();
+    let worker = tokio::spawn(async move {
+        loop {
+            let sent = "UPDATE message_outbox SET status = 'sent' WHERE status = 'pending'";
+            let _ = sqlx::query(sent).execute(&outbox).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    });
+    let ran = next_settle(&mut settled, &rig.trace).await;
+    assert_eq!(ran, Ok(()), "{}", rig.trace.text());
+    assert_eq!(events(&rig.renderer), ["paste", "Enter"]);
+    // Codex records the submitted prompt, answers it and ends the start's own turn.
+    let body = fs::read_to_string(rig.renderer.join("body")).unwrap();
+    append(&(opening("own-turn", &body) + &answer_for("own-turn", "own turn answer")));
+    tokio::time::timeout(Duration::from_secs(90), bridge)
+        .await
+        .unwrap_or_else(|_| panic!("{}", rig.trace.text()))
+        .unwrap();
+    let again = tokio::time::timeout(Duration::from_secs(6), settled.recv()).await;
+    worker.abort();
+    let after = (
+        events(&rig.renderer),
+        live(),
+        rig.trace.text().contains("killing tmux session"),
+        origin_receipts(&pool, ORIGIN).await,
+    );
+    let expected = (
+        vec!["paste".to_string(), "Enter".to_string()],
+        true,
+        false,
+        vec!["completed".to_string()],
+    );
+    assert_eq!(after, expected, "{}", rig.trace.text());
+    assert!(!matches!(again, Ok(Some(_))), "a second handoff: {again:?}");
+    assert!(rig.state().await["items"].as_array().unwrap().is_empty());
     drop(rig);
     pool.close().await;
     db.drop().await;
