@@ -163,13 +163,14 @@ fn boot_readopts_only_v2_queue_files_that_still_hold_an_input() {
         .enable_all()
         .build()
         .unwrap();
-    let shared = {
+    let (shared, previous) = {
         let _entered = runtime.enter();
-        crate::services::discord::make_shared_data_for_tests()
+        let make = crate::services::discord::make_shared_data_for_tests;
+        (make(), make())
     };
     let provider = shared.provider.clone();
     let now = chrono::Utc::now().timestamp_millis() as u64;
-    let (fresh, drained) = (6_813_301_u64, 6_813_302_u64);
+    let (fresh, drained, cleared) = (6_813_301_u64, 6_813_302_u64, 6_813_306_u64);
     let (pending, retained, settled) = (6_813_303_u64, 6_813_304_u64, 6_813_305_u64);
     let files = runtime.block_on(async {
         let mut files = Vec::new();
@@ -197,11 +198,30 @@ fn boot_readopts_only_v2_queue_files_that_still_hold_an_input() {
             attempted(&handle, Some(queued(channel, 1)), settle).await;
             files.push(path);
         }
+        // Admitted by ticket, then discarded by /clear in the previous run: a queued bind outlives
+        // its item.
+        let channel = ChannelId::new(cleared);
+        let persistence = super::super::queue_dispatch::persistence_context;
+        let persistence = persistence(&previous, &provider, channel);
+        let handle = previous.mailbox(channel);
+        handle
+            .v2_ensure_channel(&persistence, channel)
+            .await
+            .unwrap();
+        let ticket = "cleared-ticket".to_string();
+        let admitted = handle.v2_admit_ticket(queued(cleared, 1), ticket).await;
+        admitted.unwrap();
+        crate::services::discord::mailbox_clear_channel(&previous, &provider, channel).await;
+        files.push(
+            crate::services::turn_orchestrator::v2_queue(&persistence, channel)
+                .unwrap()
+                .0,
+        );
         files
     });
     let before: Vec<_> = files.iter().map(|f| std::fs::read(f).unwrap()).collect();
     // Each input-holding file keeps its input in one field alone, so none rides on a bind.
-    for bytes in before.iter().skip(2) {
+    for bytes in &before[2..5] {
         let json: serde_json::Value = serde_json::from_slice(bytes).unwrap();
         assert!(json.get("admission_binds").is_none(), "{json}");
     }
@@ -215,6 +235,13 @@ fn boot_readopts_only_v2_queue_files_that_still_hold_an_input() {
         drained_file.get("admission_binds").is_none(),
         "{drained_file}"
     );
+    let cleared_file: serde_json::Value = serde_json::from_slice(&before[5]).unwrap();
+    for field in ["items", "retained_inputs", "terminal_identities"] {
+        assert_eq!(cleared_file[field], serde_json::json!([]), "{cleared_file}");
+    }
+    assert!(cleared_file["head_injection"].is_null(), "{cleared_file}");
+    assert_eq!(cleared_file["admission_binds"][0]["at"]["kind"], "queued");
+    assert_eq!(cleared_file["admission_sequence"], 1, "{cleared_file}");
     let http = Arc::new(serenity::Http::new("Bot test-token"));
     runtime.block_on(async {
         restore_queued_and_inflight_work(&http, &shared, &provider).await;
@@ -233,8 +260,9 @@ fn boot_readopts_only_v2_queue_files_that_still_hold_an_input() {
             let owned = owned.v2_request(|slot| Ok(slot.is_some())).await;
             assert_eq!(owned, Ok(true), "channel {channel} is re-adopted");
         }
-        assert_eq!(std::fs::read(&files[0]).unwrap(), before[0]);
-        assert_eq!(std::fs::read(&files[1]).unwrap(), before[1]);
+        for skipped in [0, 1, 5] {
+            assert_eq!(std::fs::read(&files[skipped]).unwrap(), before[skipped]);
+        }
         // The next input adopts the kept file: its admission history carries over.
         let channel = ChannelId::new(drained);
         let context = super::super::queue_dispatch::persistence_context;
@@ -249,5 +277,31 @@ fn boot_readopts_only_v2_queue_files_that_still_hold_an_input() {
         assert_eq!(state["admission_sequence"], 1, "{state}");
         let receipts = state["admission_receipts"].as_array().map(Vec::len);
         assert_eq!(receipts, Some(1), "{state}");
+        // The cleared input's ticket stays spent, and a new ticket queues a new input.
+        let channel = ChannelId::new(cleared);
+        let persistence = context(&shared, &provider, channel);
+        let handle = shared.mailbox(channel);
+        handle
+            .v2_ensure_channel(&persistence, channel)
+            .await
+            .unwrap();
+        let again = "cleared-ticket".to_string();
+        handle
+            .v2_admit_ticket(queued(cleared, 1), again)
+            .await
+            .unwrap();
+        let state = handle.v2_request(|slot| slot.as_ref().ok_or("no owner")?.json());
+        let state = state.await.unwrap();
+        assert_eq!(state["items"], serde_json::json!([]), "{state}");
+        assert_eq!(state["admission_sequence"], 1, "{state}");
+        let next = "cleared-next".to_string();
+        handle
+            .v2_admit_ticket(queued(cleared, 2), next)
+            .await
+            .unwrap();
+        let state = handle.v2_request(|slot| slot.as_ref().ok_or("no owner")?.json());
+        let state = state.await.unwrap();
+        assert_eq!(state["items"].as_array().map(Vec::len), Some(1), "{state}");
+        assert_eq!(state["admission_sequence"], 2, "{state}");
     });
 }

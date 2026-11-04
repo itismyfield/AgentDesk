@@ -7,6 +7,25 @@ pub(crate) enum SnapshotRead {
     ReadOnlyV2(Box<SnapshotV2>),
 }
 
+impl SnapshotRead {
+    /// Whether a V2 file still holds an input its owner must recover: queued, attempted, retained or
+    /// settled, or a bind other than a queued one, which a cleared queue leaves without its item.
+    #[cfg(unix)]
+    pub(crate) fn v2_holds_input(&self) -> bool {
+        let Self::ReadOnlyV2(v2) = self else {
+            return false;
+        };
+        let bound = |bind: &super::v2_types::AdmissionBind| {
+            !matches!(bind.at, super::v2_types::BindAt::Queued { .. })
+        };
+        !v2.items.is_empty()
+            || v2.head_injection.is_some()
+            || !v2.retained_inputs.is_empty()
+            || !v2.terminal_identities.is_empty()
+            || v2.admission_binds.iter().any(bound)
+    }
+}
+
 pub(crate) fn inspect(content: &str) -> Result<SnapshotRead, String> {
     let value: serde_json::Value = serde_json::from_str(content).map_err(|e| e.to_string())?;
     if value.get("version").and_then(serde_json::Value::as_u64) == Some(2) {
