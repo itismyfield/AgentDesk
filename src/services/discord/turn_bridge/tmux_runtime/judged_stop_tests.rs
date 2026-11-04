@@ -931,3 +931,6 @@ mod native_contract;
 
 #[path = "native_stop_ownership_tests.rs"]
 pub(super) mod ownership;
+
+#[path = "native_stop_identity_tests.rs"]
+mod identity;

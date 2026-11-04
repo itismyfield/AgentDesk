@@ -852,7 +852,11 @@ fn preserve_stop_unconfirmed_native_api_reports_delivery_state() {
             let (shared, registry) = runtime().await;
             let channel = ChannelId::new(7_193_801 + n as u64 * 3);
             let session = format!("native-unconfirmed-api-recovery-{n}");
-            let (token, transcript) = generating_turn(&fx, &session);
+            // A token with no proof of its own input is the case the long tail stands for.
+            let (token, transcript) = match n {
+                3 => super::super::super::stop_host::tests::unpinned_generating_turn(&fx, &session),
+                _ => generating_turn(&fx, &session),
+            };
             if n == 3 {
                 eprintln!("NATIVE_TAIL_UNOBSERVED bytes=300000 same_recorded_input=true");
                 fx.pane(&running());

@@ -365,6 +365,7 @@ impl NativeStop {
                 }
                 stop.finished = true;
             } else if pinned.is_some()
+                && expected_identity.still_current()
                 && token.tmux_session_name().as_deref() == Some(session)
                 && let Some(attempt) = token.native_stop.attempt(key, terminal)
             {

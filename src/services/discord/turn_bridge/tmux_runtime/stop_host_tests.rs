@@ -669,15 +669,41 @@ pub(in super::super) fn herdr_target(
     StopTarget::from_session_target(provider, session, &resolved, host, Arc::new(Gate(gate)))
 }
 
-/// A Claude turn bound to `session` whose transcript shows it generating.
+/// A Claude turn bound to `session` whose transcript shows it generating its token's own input.
 pub(in super::super) fn generating_turn(
     fx: &Fixture,
     session: &str,
 ) -> (Arc<CancelToken>, std::path::PathBuf) {
+    let (token, transcript) = unpinned_generating_turn(fx, session);
+    let user = std::fs::read_to_string(&transcript).unwrap();
+    let end = user.find('\n').unwrap() as u64 + 1;
+    #[cfg(unix)]
+    if let Some(pin) = crate::services::claude_tui::input::UserReceipt::native_pin_before_tail(
+        session,
+        "go",
+        Some("fixture-sid"),
+        end,
+    ) {
+        token.native_stop.receipt_sink().adopt(pin);
+    }
+    (token, transcript)
+}
+
+/// The same generating turn whose token has no verified native input of its own.
+pub(in super::super) fn unpinned_generating_turn(
+    fx: &Fixture,
+    session: &str,
+) -> (Arc<CancelToken>, std::path::PathBuf) {
     let transcript = fx.dir.path().join(format!("{session}.jsonl"));
-    let user = serde_json::json!({"type": "user", "message": {"role": "user", "content": "go"}});
+    let user = serde_json::json!({"type": "user", "uuid": format!("{session}-go"),
+        "sessionId": "fixture-sid", "message": {"role": "user", "content": "go"}});
     let assistant = serde_json::json!({"type": "assistant", "message": {"content": []}});
     std::fs::write(&transcript, format!("{user}\n{assistant}\n")).unwrap();
+    std::fs::write(
+        crate::services::tmux_common::session_temp_path(session, "spawn_nonce"),
+        format!("{session}-pane"),
+    )
+    .unwrap();
     crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
         session,
         crate::services::tui_prompt_dedupe::TuiRuntimeBinding {

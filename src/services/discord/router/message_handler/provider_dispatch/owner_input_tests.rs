@@ -1955,3 +1955,6 @@ fn b2_dispatch_idle_receipt_uses_actual_turn_and_preserves_settle() {
 
 #[path = "owner_input_rollback_tests.rs"]
 mod rollback;
+
+#[path = "owner_input_parent_tests.rs"]
+mod parent;

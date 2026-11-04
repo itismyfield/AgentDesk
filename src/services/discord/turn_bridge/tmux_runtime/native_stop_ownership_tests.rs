@@ -182,8 +182,13 @@ fn a3_late_binding_rejudges_native_on_same_actor_once() {
         let shared = discord::make_shared_data_for_tests();
         let channel = ChannelId::new(7_212_400);
         let session = "ownership-late-bind";
-        let (_unused, _) = generating_turn(&fx, session);
+        let (pinned, _) = generating_turn(&fx, session);
         let token = Arc::new(CancelToken::new());
+        let pin = pinned.native_stop.receipt_sink().observed();
+        token
+            .native_stop
+            .receipt_sink()
+            .adopt(pin.unwrap().unwrap());
         start(&shared, channel, &token).await;
         native_inflight_row(channel, &token, session);
         let bound = token.clone();
