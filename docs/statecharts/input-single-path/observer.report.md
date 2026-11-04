@@ -32,16 +32,22 @@ A second boundary has no tuple change: a durable `Pending` names the exact same 
 before the file exists, then that file becomes readable and its record becomes `Resolved`.
 The held-binding restore branch in `tui_prompt_dedupe/pending.rs::restore_under_source_authority`
 (`pending.rs:605-628`) captures `pending_seq: Some`, persists the source as `Persisted::Logged`,
-and emits the observer-ready callback only after `pending_seq` becomes `None`. The hook's `runtime_binding/claude_source.rs::Candidate::judge`
-(`claude_source.rs:244-255`) emits at the corresponding `Verified`/`Committed::Appended` boundary
-when the proposal session and path equal the bound source. An unchanged verified record emits
-no additional readiness event. Both readiness edges enter the same publication callback
-and release-latch/pending-front kickoff path, rather than relying on a runtime-key change.
+and emits the observer-ready callback only after `pending_seq` becomes `None`. The hook's
+`runtime_binding/claude_source.rs::Candidate::judge` captures whether this exact source has a
+durable Pending before `record_verified`. Its callback requires that prior Pending, a successful
+`Committed::Appended`, no Pending afterwards, and proposal session/path equal to the bound source.
+An unchanged verified record emits no additional readiness event. A first verification pin with
+no prior Pending also emits no wake: the same source was already observable, so writing its first
+pin is bookkeeping rather than observer readiness. Both readiness edges enter the same publication
+callback and release-latch/pending-front kickoff path, rather than relying on a runtime-key change.
 
 `ObserverAttaches` abstracts the source becoming observable, including this same-key Pending →
 Resolved boundary. While only an unresolved/missing binding exists, `observer.attached` remains
-false; the eventual readable resolution is the one `ObserverAttaches` action. No additional model
-state is needed for a tuple which cannot yet build an observer. Two actual-owner tests drive
+false; the eventual readable resolution is the one `ObserverAttaches` action. A first pin of an
+already-observable source leaves `observer.attached` true and is not another `ObserverAttaches`
+action; it adds no attachment wake. No additional model state is needed for a tuple which cannot
+yet build an observer or for an audit pin which leaves observer availability unchanged.
+Two actual-owner tests drive
 that path through the real restore resolver and the live hook respectively:
 
 - `a_pending_observer_becoming_readable_wakes_after_the_refused_token_finishes`

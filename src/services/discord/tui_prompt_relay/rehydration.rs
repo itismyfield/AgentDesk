@@ -317,6 +317,15 @@ pub(crate) fn observer_binding_published(
     tmux: String,
     published: crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
 ) {
+    #[cfg(test)]
+    if let Some(published) = OBSERVER_PUBLICATION_FOR_TESTS
+        .lock()
+        .unwrap()
+        .get(&tmux)
+        .cloned()
+    {
+        published();
+    }
     let Some(registry) = crate::engine::ops::turn_ops::health_registry() else {
         return;
     };
@@ -430,6 +439,10 @@ pub(in crate::services::discord) static OBSERVER_KICKOFF_FOR_TESTS: std::sync::L
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) static OBSERVER_WAITING_FOR_TESTS: std::sync::LazyLock<
     std::sync::Mutex<HashMap<u64, ObserverKickoff>>,
+> = std::sync::LazyLock::new(Default::default);
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) static OBSERVER_PUBLICATION_FOR_TESTS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<String, ObserverKickoff>>,
 > = std::sync::LazyLock::new(Default::default);
 
 #[cfg(unix)]

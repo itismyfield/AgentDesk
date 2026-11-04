@@ -211,6 +211,9 @@ impl Candidate<'_> {
         after_check();
         // The path must still name the file the check read; a replaced one waits for the next check,
         // the bound source too, which keeps its binding and cursor meanwhile.
+        #[cfg(unix)]
+        let waiting = proposal
+            .is_some_and(|p| binding_events::pending_seq(p.channel_id, tmux, payload).is_some());
         let recorded = match (
             proposal,
             binding_events::codex::source_file_matches(&source),
@@ -244,9 +247,11 @@ impl Candidate<'_> {
             Some(Ok(committed)) => {
                 #[cfg(unix)]
                 if committed == Committed::Appended
+                    && waiting
                     && proposal.is_some_and(|p| {
                         p.session_id == self.bound.session_id.as_deref()
                             && p.path == self.bound.output_path
+                            && binding_events::pending_seq(p.channel_id, tmux, payload).is_none()
                     })
                 {
                     crate::services::discord::observer_binding_published(

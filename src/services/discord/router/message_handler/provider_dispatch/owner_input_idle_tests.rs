@@ -395,6 +395,10 @@ impl Drop for AttachedOwner {
             .lock()
             .unwrap()
             .remove(&self.rig.channel);
+        crate::services::discord::tui_prompt_relay::rehydration::OBSERVER_PUBLICATION_FOR_TESTS
+            .lock()
+            .unwrap()
+            .remove(&self.rig.name);
         crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&self.rig.name);
     }
 }
@@ -832,6 +836,147 @@ fn pending_observer_becomes_readable(via_hook: bool) {
             ..
         })
     ));
+}
+
+/// Pinning an already readable observer changes no readiness and adds no owner wake.
+#[test]
+fn a_verified_hook_adds_no_wake_for_an_already_readable_observer() {
+    use crate::services::tui_prompt_dedupe::binding_events::{BindingTarget, HookSignal};
+    use crate::services::tui_prompt_dedupe::{self as dedupe, binding_events};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct BindingLogScope(Option<std::path::PathBuf>, u64);
+    impl Drop for BindingLogScope {
+        fn drop(&mut self) {
+            binding_events::forget_channel_for_tests(self.1);
+            binding_events::set_test_root(self.0.as_deref());
+        }
+    }
+
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let channel = 7_676_609;
+    let _binding_log = BindingLogScope(binding_events::test_root(), channel);
+    binding_events::set_test_root(crate::config::runtime_root().as_deref());
+    let owner = AttachedOwner::new("oi-attach-first-pin", channel, IDLE);
+    let _trace = owner.rig.trace_driver();
+    let (session, path) = owner.launch_source();
+    fs::write(
+        owner.rig.transcript(),
+        format!("{{\"type\":\"mode\",\"sessionId\":\"{session}\"}}\n{IDLE}"),
+    )
+    .unwrap();
+    let command = uuid::Uuid::new_v4().to_string();
+    assert_ne!(
+        command, session,
+        "the stable launch alias differs from its continuation"
+    );
+    dedupe::register_tmux_channel(&owner.rig.name, channel);
+    dedupe::register_provider_session("claude", &command, &owner.rig.name);
+    let existing = TuiRuntimeBinding {
+        runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+        output_path: path.display().to_string(),
+        relay_output_path: None,
+        input_fifo_path: None,
+        session_id: Some(session.clone()),
+        last_offset: 12,
+        relay_last_offset: None,
+    };
+    // The source predates this hook and the drive's first wake.
+    dedupe::register_tmux_runtime_binding(&owner.rig.name, existing.clone());
+    let records = || binding_events::records_strict(channel).unwrap().unwrap();
+    let before = records();
+    assert!(
+        matches!(&before.last().unwrap().new, BindingTarget::Source(source)
+        if source.session_id == session && source.path == path)
+    );
+    assert!(
+        binding_events::pinned_source(channel, &owner.rig.name)
+            .unwrap()
+            .is_none()
+    );
+    assert!(binding_events::pending_seq(channel, &owner.rig.name, &session).is_none());
+    let front = owner
+        .rig
+        .mailbox
+        .v2_request(|slot| Ok(slot.as_ref().is_some_and(|owner| owner.front().is_some())));
+    assert!(owner.rig.runtime.block_on(front).unwrap());
+    let observed = {
+        let _entered = owner.rig.runtime.enter();
+        crate::services::claude_tui::hosting::owner_observer(
+            (&owner.rig.name, PROMPT, channel),
+            (None, owner.rig.f.root.path()),
+            std::sync::mpsc::channel().0,
+            Arc::new(CancelToken::new()),
+        )
+    };
+    assert!(
+        observed.is_some(),
+        "the provider's observer was already available"
+    );
+    drop(observed);
+
+    let publications = Arc::new(AtomicUsize::new(0));
+    let counted = publications.clone();
+    crate::services::discord::tui_prompt_relay::rehydration::OBSERVER_PUBLICATION_FOR_TESTS
+        .lock()
+        .unwrap()
+        .insert(
+            owner.rig.name.clone(),
+            Arc::new(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+    let hook = HookSignal::from_payload("stop", &json!({"transcript_path":path}));
+    let adopted = {
+        let _entered = owner.rig.runtime.enter();
+        dedupe::adopt_claude_continuation_explained(&command, &session, &hook).unwrap()
+    };
+    assert_eq!(
+        adopted,
+        (
+            Some((owner.rig.name.clone(), path.display().to_string())),
+            None
+        )
+    );
+    let after = records();
+    assert_eq!(
+        after.len(),
+        before.len() + 1,
+        "the first pin appended its Source"
+    );
+    assert!(
+        matches!(&after.last().unwrap().new, BindingTarget::Source(source)
+        if source.session_id == session && source.path == path)
+    );
+    assert!(
+        binding_events::pinned_source(channel, &owner.rig.name)
+            .unwrap()
+            .is_some()
+    );
+    assert!(binding_events::pending_seq(channel, &owner.rig.name, &session).is_none());
+    assert_eq!(
+        dedupe::runtime_binding_for_tmux_session(&owner.rig.name),
+        Some(existing),
+        "the source key and reader cursor are unchanged"
+    );
+    assert_eq!(
+        publications.load(Ordering::SeqCst),
+        0,
+        "pinning an existing observer emitted an extra readiness callback"
+    );
+    assert_eq!(owner.wakes(), 0);
+    assert_eq!(owner.keys(), (0, 0));
+
+    owner.rig.wake(&owner.drive);
+    assert_eq!(owner.serve(), Ok(()));
+    owner.settled();
+    assert_eq!(owner.keys(), (1, 1));
+    assert_eq!(
+        owner.wakes(),
+        0,
+        "only the explicit owner wake delivered the front"
+    );
+    owner.rig.delivered();
 }
 
 /// A boot re-adopts a channel's kept V2 queue and wakes its owner drive, which grants the kept front
