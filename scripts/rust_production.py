@@ -53,8 +53,8 @@ def _only_inner_attributes_before(code: str, end: int) -> bool:
     return True
 
 
-def production_lines(path: Path):
-    """Yield ``(lineno, stripped_code, is_production)`` for one Rust file."""
+def production_lines(path: Path, *, parameter_gates: set[int] | None = None, gate_start: int | None = None):
+    """Yield production-line metadata; optionally collect parameter cfg offsets for one gate."""
     state = StripState()
     raw_lines = path.read_text(encoding="utf-8").splitlines()
     code_lines = [strip_line(raw, state) for raw in raw_lines]
@@ -71,6 +71,8 @@ def production_lines(path: Path):
     )
     arm_matches = {}
     for match in all_matches:
+        if gate_start is not None and match.start() != gate_start:
+            continue
         arm_offset = match.attribute_end() - 1
         line_index = bisect_right(line_starts, arm_offset) - 1
         arm_matches[line_index + 1] = match
@@ -192,6 +194,8 @@ def production_lines(path: Path):
                 armed_parameter = closure_parameter_depth is not None
                 armed_parameter_known = closure_parameters_known
                 if armed_parameter:
+                    if parameter_gates is not None:
+                        parameter_gates.add(match.start())
                     parameter_mask_start = max(0, match.start() - line_starts[lineno - 1])
         if code.strip():
             previous_code = code.rstrip()

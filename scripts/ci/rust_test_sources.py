@@ -112,12 +112,12 @@ def rust_tokens(text, *, extended=False):
 def production_tokens(path, *, unreadable=None, diagnostic_path=None):
     """Return production tokens, or None when a file-level test gate excludes the file."""
     try:
-        from rust_production import _production_text
+        from rust_production import _production_text, production_lines
         from rust_lex import StripState, cfg_item_end, strip_line
         from rust_cfg import find_test_only_cfg_attributes
         from generate_inventory_docs import scan_balanced
     except ModuleNotFoundError:
-        from scripts.rust_production import _production_text
+        from scripts.rust_production import _production_text, production_lines
         from scripts.rust_lex import StripState, cfg_item_end, strip_line
         from scripts.rust_cfg import find_test_only_cfg_attributes
         from scripts.generate_inventory_docs import scan_balanced
@@ -156,6 +156,12 @@ def production_tokens(path, *, unreadable=None, diagnostic_path=None):
                 end -= 1  # Keep the enclosing module's closing delimiter.
             else:
                 end = cfg_item_end(code, start, scan_balanced)
+                if "|" in code[start:end].split("{", 1)[0]:
+                    parameter_gates = set()
+                    # Query this gate so another attribute on its line cannot replace its context.
+                    list(production_lines(path, parameter_gates=parameter_gates, gate_start=start))
+                    if start in parameter_gates:
+                        raise ValueError("closure parameter boundary is uncertain")
                 if code[end - 1:end] == "," and "<" in code[start:end]:
                     raise ValueError("generic field boundary is uncertain")
         except ValueError as exc:
@@ -377,7 +383,7 @@ def walk(root, repo_root, inventory=None, *, production=False):
                     child = next((c for c in candidates if c.is_file()), None)
                     if child is None:
                         inv.errors.append(f"{site} mod {name}: no file at "
-                                          f"{', '.join(str(c.relative_to(repo_root)) for c in candidates)}")
+                                          f"{', '.join(str(c.relative_to(repo_root)) if c.is_relative_to(repo_root) else str(c) for c in candidates)}")
                     else:
                         owns_dir = pending_path is not None or child.name == "mod.rs"
                         queue.append((child, names + (name,), child.parent if owns_dir else child.parent / child.stem,
