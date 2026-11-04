@@ -44,6 +44,8 @@ class DeadlineEntrypointsTest(unittest.TestCase):
             shutil.copy2(ROOT / "scripts" / filename, scripts / filename)
         shutil.copytree(ROOT / "scripts/audit_maintainability", scripts / "audit_maintainability",
                         ignore=shutil.ignore_patterns("__pycache__"))
+        (scripts / "ci").mkdir()
+        shutil.copy2(ROOT / "scripts/ci/rust_test_sources.py", scripts / "ci/rust_test_sources.py")
         tree = ast.parse((scripts / "generate_inventory_docs.py").read_text())
         purposes = next(ast.literal_eval(node.value) for node in tree.body
                         if isinstance(node, ast.Assign)
