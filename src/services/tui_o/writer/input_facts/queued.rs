@@ -26,8 +26,9 @@ enum Record {
     /// Every queued input pulled back to the prompt.
     WithdrawAll,
     Dequeue,
-    /// Taken into the running turn (`remove`, `absorbed_mid_turn`); its command follows.
-    Absorbed,
+    /// Taken into the running turn (`remove`, `absorbed_mid_turn`). Claude writes no dequeue for
+    /// it, and its `queued_command` row may or may not follow.
+    Absorbed(String),
     /// A human prompt command (`queued_command`, `prompt` mode, human origin).
     Human(String),
     /// Any other `queued_command`, such as a background task's notification drained mid-turn.
@@ -41,6 +42,8 @@ pub(super) struct QueuedInputs {
     inputs: Vec<(String, Stage)>,
     /// Removals whose own `dequeue` record is still to come; that dequeue takes no other input.
     removed: usize,
+    /// Absorbed bodies whose own `queued_command` row may still come in this turn; it runs nothing.
+    absorbed: Vec<String>,
 }
 
 impl QueuedInputs {
@@ -65,7 +68,13 @@ impl QueuedInputs {
         if provider != ShadowProvider::Claude {
             return;
         }
-        let record = classify(value);
+        let mut record = classify(value);
+        if let Some(Record::Human(body) | Record::Command(body)) = &record
+            && let Some(at) = self.absorbed.iter().position(|taken| taken == body)
+        {
+            self.absorbed.remove(at);
+            record = None;
+        }
         if mutant("bulk") && (opened || value["type"] == "attachment") {
             self.inputs.clear();
             return;
@@ -78,7 +87,10 @@ impl QueuedInputs {
                     self.inputs.remove(at);
                 }
             }
-            Some(Record::Absorbed) => self.removed += 1,
+            Some(Record::Absorbed(body)) => {
+                self.run(&body);
+                self.absorbed.push(body);
+            }
             Some(Record::WithdrawAll) => self.inputs.retain(|(_, stage)| *stage == Stage::Running),
             Some(Record::Dequeue) if self.removed > 0 && !mutant("dequeue_credit") => {
                 self.removed -= 1
@@ -108,6 +120,7 @@ impl QueuedInputs {
     /// The open turn closed: what it ran is settled.
     pub(super) fn closed(&mut self) {
         self.inputs.retain(|(_, stage)| *stage != Stage::Running);
+        self.absorbed.clear();
     }
 
     fn run(&mut self, body: &str) {
@@ -132,7 +145,9 @@ fn classify(value: &Value) -> Option<Record> {
     match value["type"].as_str()? {
         "queue-operation" => match value["operation"].as_str()? {
             "enqueue" => Some(Record::Enqueue(text("content")?)),
-            "remove" if value["reason"] == "absorbed_mid_turn" => Some(Record::Absorbed),
+            "remove" if value["reason"] == "absorbed_mid_turn" => {
+                Some(Record::Absorbed(text("content")?))
+            }
             "remove" => Some(Record::Withdraw(text("content")?)),
             "popAll" => Some(Record::WithdrawAll),
             "dequeue" => Some(Record::Dequeue),
