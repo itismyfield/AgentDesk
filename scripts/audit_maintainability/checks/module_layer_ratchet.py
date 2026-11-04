@@ -188,6 +188,17 @@ def compare(accepted, candidate, moves, sources=None):
                 if count < row["count"]:
                     decreases.append({"section": section, "id": identity,
                                       "baseline_count": row["count"], "current_count": count})
+        # A shrinking reverse edge is not a reduction while an unresolved reference from the same
+        # source still names its target (for example a glob kept beside a removed named import).
+        for identity, row in sorted(shrunk.items()):
+            for uncertainty in current["uncertainties"].values():
+                evidence = (sources or {}).get(uncertainty["id"], uncertainty)
+                if (evidence.get("source") == row["source"]
+                        and row["target"] in _path_targets(row["source"], evidence.get("path"))):
+                    errors.append({"code": "hidden-reverse", "section": "reverse_dependencies", "id": identity,
+                                   "message": f"hidden-reverse: reverse_dependencies {identity} shrank while "
+                                              f"unresolved {evidence.get('path')} still names its target"})
+                    break
         for key in TOTALS:
             if candidate[key] > accepted[key]:
                 warnings.append({"code": "total-increase", "section": key,

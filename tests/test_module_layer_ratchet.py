@@ -188,6 +188,13 @@ class ModuleLayerRatchetTest(unittest.TestCase):
         child = {glob["id"]: {"source": "src/lib.rs::crate::lower", "path": "crate::upper::utils::*"}}
         self.assert_warning_only(self.ratchet.compare(cleared, self.snapshot(uncertainties=[glob]), self.moves(), child),
                                  "uncertainties", glob["id"])
+        kept = self.uncertainty("kept", 1)
+        beside = {kept["id"]: {"source": "src/lib.rs::crate::lower", "path": "crate::upper::*"}}
+        accepted = self.snapshot([reverse], uncertainties=[kept])
+        dropped_named = self.snapshot(uncertainties=[kept])
+        self.assert_error(self.ratchet.compare(accepted, dropped_named, self.moves(), beside), "reverse_dependencies")
+        with self.assertRaises(ValueError):
+            self.ratchet.reduced_baseline(accepted, dropped_named, self.moves(), beside)
         item = {glob["id"]: {"source": "src/lib.rs::crate::lower", "path": "crate::upper::hit"}}
         self.assert_error(self.ratchet.compare(cleared, self.snapshot(uncertainties=[glob]), self.moves(), item),
                           "uncertainties", glob["id"])
@@ -728,6 +735,51 @@ assembly = 1
             reintroduced = subprocess.run([*command, "--update-reductions"], capture_output=True, text=True)
             self.assertNotEqual(reintroduced.returncode, 0, reintroduced.stdout)
             self.assertEqual(output.read_bytes(), zero_rule)
+
+    def test_cli_refuses_a_reduction_while_a_kept_glob_still_names_the_target(self):
+        with TemporaryDirectory() as temporary:
+            repo = Path(temporary) / "repo"
+            repo.mkdir()
+            def git(*arguments):
+                return subprocess.run(["git", "-C", str(repo), *arguments], capture_output=True,
+                                      text=True, check=True).stdout.strip()
+            def put(relative, text):
+                path = repo / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+            def commit(message):
+                git("add", "src", "scripts", "Cargo.toml")
+                git("commit", "-qm", message)
+            git("init", "-q")
+            git("config", "user.name", "Fixture")
+            git("config", "user.email", "fixture@example.invalid")
+            put("Cargo.toml", '[package]\nname="fixture"\nversion="0.1.0"\nedition="2024"\n')
+            put("src/lib.rs", "mod lower; mod upper;\n")
+            put("src/lower.rs", "use crate::upper::{call, *};\nfn run() { call(); }\n")
+            put("src/upper.rs", "pub fn call() {}\n")
+            put("scripts/audit_maintainability/layers.toml", """schema_version = 1
+rules = [{prefix="",layer="assembly",reason="fixture assembly"},
+         {prefix="lower",layer="foundation",reason="fixture lower layer"},
+         {prefix="upper",layer="assembly",reason="fixture upper layer"}]
+[layers]
+foundation = 0
+assembly = 1
+""")
+            put("scripts/audit_maintainability/layer_moves.toml", "schema_version = 1\nmoves = []\n")
+            commit("fixture")
+            output = Path(temporary) / "accepted.json"
+            command = [sys.executable, str(Path(self.provider.__file__).resolve()), "--repo", str(repo),
+                       "--input-sha", "HEAD", "--output", str(output)]
+            created = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(created.returncode, 0, created.stderr)
+            self.assertTrue(json.loads(output.read_bytes())["reverse_dependencies"])
+            original = output.read_bytes()
+            put("src/lower.rs", "use crate::upper::*;\nfn run() { call(); }\n")
+            commit("glob")
+            refused = subprocess.run([*command, "--update-reductions"], capture_output=True, text=True)
+            self.assertNotEqual(refused.returncode, 0, refused.stdout)
+            self.assertIn("hidden-reverse", refused.stderr)
+            self.assertEqual(output.read_bytes(), original)
 
     def test_cli_reduces_committed_fixture_and_refuses_a_replacement_debt(self):
         with TemporaryDirectory() as temporary:
