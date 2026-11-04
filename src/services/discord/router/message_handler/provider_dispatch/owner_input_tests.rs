@@ -1958,3 +1958,5 @@ mod rollback;
 
 #[path = "owner_input_parent_tests.rs"]
 mod parent;
+#[path = "owner_input_stop_gate_tests.rs"]
+mod stop_gate;
