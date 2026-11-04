@@ -13,6 +13,7 @@ Code versions modelled:
 | `cf` | main after C `a9d59259e5`, with slice F's paths | `InputOwnershipCF.cfg` |
 | `f` | main after slice F `40c556ae6c` | `InputOwnershipF.cfg`, `InputOwnershipFOutside.cfg` |
 | `f4` | `f` plus the carried close's queue wake | `InputOwnershipF4.cfg` |
+| `a2b` | `f4` plus #7340 S2-A2b `8b28712958`: a start waits out a native busy turn | `InputOwnershipA2b.cfg` |
 
 What the model covers:
 
@@ -219,3 +220,17 @@ Code: `a9d59259e5`. Paths added only for `cf` and `f`; `c` and the older columns
 | `FOutside` | `SeenOnce` breaks in `f` too: AgentDesk records no identity for an outside copy, so its own single paste is the second time the session sees the text. Kept as a documented gap; `NoDuplicate` (AgentDesk pastes at most once) holds. |
 
 The model folds the transcript reader into `leak`: which order an input's command and absorption rows come in, and how same-body inputs pair, are checked by the Rust reader tests (`tui_o/writer/input_facts/receipt_tests.rs`), not here.
+
+## #7340 S2-A2b: a start waits out a native busy turn (`a2b`)
+
+Code: `8b28712958` (A2b on main `6d7c1851e5`). Only `DriveStartWaits` and three rules are new; every other config keeps its state space and result.
+
+- `DriveStartWaits`: a start whose idle-mailbox drive meets a native busy turn pastes nothing and is held (`heldBy = native`) before any claim (`router/message_handler/provider_dispatch/owner_input.rs:426-500`, `516-531`). In `a2b` it replaces `DriveStartBusy`, which pasted the start into the running turn.
+- The wake: on a turn-mode channel the supervisor's idle transition wakes the owner (`RC`, `turn_presence/supervisor.rs:628`). On legacy the hold leaves a read of the same transcript with the held watch, and the owner marks the front held (`queued_head/v2.rs:357`), so the drive watches it (`input_owner/drive.rs:105`) and the turn's end wakes it once (`input_owner/held_watch.rs:58`).
+- `WatchSees` gains one conjunct: a watch of a native hold wakes only once the turn reads idle.
+- Rules: `NativeHeldResumes` (a held start is not left once all is quiet), `StartOwnTurn` (a start is never pasted into a running turn) and `StartOnce` (an answered start was pasted once).
+
+| Config | Result |
+|---|---|
+| `A2b` | every rule holds (17 rules and NoDeadlock, 129,692 states). Mutant `nativeNoWatch` (no read of the turn's end) breaks `NativeHeldResumes` and `NoSilentLoss` on legacy; `noBoundaryWake` breaks them on turn mode; `startPastes` (the f4 paste) breaks `StartOwnTurn`. |
+

@@ -8,6 +8,8 @@
    after C (a9d59259e5) with slice F's paths: a restart-carried row, an absorbed input the transcript
    reader never settles, and the same text handed to the session outside AgentDesk; "f" is main
    after F (40c556ae6c); "f4" adds the close's queue wake when the row had no restored episode.
+   "a2b" is f4 with #7340 S2-A2b: a start meeting a native busy turn waits unclaimed, woken by the
+   turn-mode idle transition or, on legacy, by a read of that turn's end.
    The channel is turn
    mode (the O writer answers every native turn) or legacy (the live relay, or a reader the
    input's own turn set up, answers).                                                        *)
@@ -15,7 +17,8 @@ EXTENDS Naturals
 
 CONSTANTS
     Fix,   \* "main": a1c; "a2d1": first A2+D; "a2d2", "a2d3", "a2d4": its repairs; "c": slice C;
-           \* "cf": main after C with F's paths; "f": main after F; "f4": its close wake
+           \* "cf": main after C with F's paths; "f": main after F; "f4": its close wake;
+           \* "a2b": f4 with a start waiting out a native busy turn
     Mut    \* one guard removed in the a2d4 model, "none" as written
 
 VARIABLES
@@ -71,9 +74,9 @@ drv == <<screen, draft, notices, timer, byTimer, timed, reader, src, twin, heldB
          twinPend, stale, old, acct>>
 
 \* Slice C's transitions; "cf", "f" and "f4" keep them.
-CX == Fix \in {"c", "cf", "f", "f4"}
+CX == Fix \in {"c", "cf", "f", "f4", "a2b"}
 \* Slice F's paths are in the model.
-F2 == Fix \in {"cf", "f", "f4"}
+F2 == Fix \in {"cf", "f", "f4", "a2b"}
 
 Init ==
     /\ mode \in {"turn", "legacy"}
@@ -92,7 +95,7 @@ Init ==
     /\ screen \in {"ok", "held", "cause"} \cup (IF CX THEN {"ledger"} ELSE {}) /\ draft \in {"none", "unproven"} /\ notices = 0
     /\ wake = (old = "none") /\ timer = FALSE /\ byTimer = FALSE /\ timed = FALSE
     /\ heldBy = "none" /\ watch = FALSE /\ aged = FALSE /\ twinPend \in BOOLEAN
-    /\ stale \in IF Fix \in {"a2d3", "a2d4", "c", "cf", "f", "f4"} THEN BOOLEAN ELSE {FALSE}
+    /\ stale \in IF Fix \in {"a2d3", "a2d4", "c", "cf", "f", "f4", "a2b"} THEN BOOLEAN ELSE {FALSE}
     \* A kept input's boot is checked on one plain channel: no twin, draft, held screen or old watch.
     /\ old # "none" => ~twin /\ ~twinPend /\ draft = "none" /\ screen = "ok" /\ ~stale
     \* A ledger refusal is checked on a busy turn-mode pane, whose turn end wakes the owner (RC).
@@ -112,11 +115,11 @@ Init ==
     /\ row = "carried" => mode = "turn" /\ mbx = "idle" /\ old = "none" /\ ~acct /\ screen = "ok"
                          /\ ~stale /\ ~twin /\ ~twinPend /\ draft = "none"
 
-A2D == Fix \in {"a2d1", "a2d2", "a2d3", "a2d4", "c", "cf", "f", "f4"}
-R2 == Fix \in {"a2d2", "a2d3", "a2d4", "c", "cf", "f", "f4"}
-R3 == Fix \in {"a2d3", "a2d4", "c", "cf", "f", "f4"}
+A2D == Fix \in {"a2d1", "a2d2", "a2d3", "a2d4", "c", "cf", "f", "f4", "a2b"}
+R2 == Fix \in {"a2d2", "a2d3", "a2d4", "c", "cf", "f", "f4", "a2b"}
+R3 == Fix \in {"a2d3", "a2d4", "c", "cf", "f", "f4", "a2b"}
 \* a2d4 keeps the watch through a failed read and ends a watch without touching a newer hold.
-R4 == Fix \in {"a2d4", "c", "cf", "f", "f4"}
+R4 == Fix \in {"a2d4", "c", "cf", "f", "f4", "a2b"}
 \* Slice C: on a turn-mode channel the presence supervisor reads the owner's V2 front and wakes the
 \* owner once at the idle transition (supervisor_tests). Legacy channels are not assumed woken.
 RC == CX /\ Mut # "noBoundaryWake"
@@ -181,7 +184,7 @@ DriveIdleBusyPane ==
 \* reader of the row the input takes set up before the paste.
 DriveStartBusy ==
     /\ Handoff /\ ~acct /\ src = "start" /\ mbx = "idle" /\ nat = "busy"
-    /\ row = "none"
+    /\ row = "none" /\ (Fix # "a2b" \/ Mut = "startPastes")
     /\ IF R2 /\ Mut # "startIdle"
        THEN OwnedPaste("busyStart", TRUE, TRUE) /\ mbx' = "active"
        ELSE IF obsOk
@@ -189,6 +192,19 @@ DriveStartBusy ==
             /\ heldBy' = "none" /\ UNCHANGED <<notices, timer, watch>>
        ELSE Stays("failed", "none") /\ UNCHANGED mbx
     /\ UNCHANGED <<mode, src, nat, natOwner, obsOk, rcv, userRow, twin, claim, lp, op, screen,
+                   draft, aged, twinPend, envLeft, stale, old, acct>>
+    /\ UNCHANGED fvars
+
+\* a2b: a start meeting a native busy turn waits unclaimed and pastes nothing. On a turn-mode
+\* channel the supervisor's idle transition wakes it (RC); on legacy the hold leaves a read of that
+\* turn's end with the held watch (owner_input.rs native_turn). Mutant nativeNoWatch leaves none.
+DriveStartWaits ==
+    /\ Handoff /\ ~acct /\ src = "start" /\ mbx = "idle" /\ nat = "busy"
+    /\ row = "none" /\ Fix = "a2b" /\ Mut # "startPastes"
+    /\ inp' = "held" /\ heldBy' = "native"
+    /\ watch' = (mode = "legacy" /\ Mut # "nativeNoWatch")
+    /\ UNCHANGED <<route, plain, pend, sentInto, pastes, win, notices, reader, timer>>
+    /\ UNCHANGED <<mode, src, mbx, nat, natOwner, obsOk, rcv, userRow, twin, claim, lp, op, screen,
                    draft, aged, twinPend, envLeft, stale, old, acct>>
     /\ UNCHANGED fvars
 
@@ -370,6 +386,7 @@ ScreenClears ==
 \* sees a load that works while the ledger still refuses.
 WatchSees ==
     /\ watch /\ inp = "held" /\ (screen \in {"ok", "ledger"} \/ Mut = "watchBlind")
+    /\ (heldBy = "native" => nat = "idle")
     /\ watch' = FALSE /\ wake' = TRUE /\ byTimer' = (~wake /\ screen # "ok")
     /\ UNCHANGED <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain,
                    sentInto, win, rcv, userRow, twin, claim, pastes, lp, op, screen, draft,
@@ -490,9 +507,9 @@ DriveMeetsRow ==
 \* archive either way; mutant closeNoKick drops that kick.
 CarriedCloses ==
     /\ row = "carried" /\ nat = "idle"
-    /\ (~leak \/ (Fix \in {"f", "f4"} /\ Mut # "leakKept"))
+    /\ (~leak \/ (Fix \in {"f", "f4", "a2b"} /\ Mut # "leakKept"))
     /\ row' = "none" /\ ep' = FALSE
-    /\ wake' = (wake \/ ep \/ (Fix = "f4" /\ Mut # "closeNoKick"))
+    /\ wake' = (wake \/ ep \/ (Fix \in {"f4", "a2b"} /\ Mut # "closeNoKick"))
     /\ UNCHANGED <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain, sentInto,
                    win, rcv, userRow, twin, claim, pastes, lp, op, screen, draft, notices, timer,
                    byTimer, timed, heldBy, watch, aged, twinPend, envLeft, stale, old, acct, leak,
@@ -523,7 +540,7 @@ Done ==
 \* A carried row refuses every start the idle-mailbox drives make (DriveMeetsRow).
 Next ==
     \/ DriveBusy \/ DriveFindsNothing
-    \/ DriveIdleBusyPane \/ DriveStartBusy \/ DriveIdle
+    \/ DriveIdleBusyPane \/ DriveStartBusy \/ DriveIdle \/ DriveStartWaits
     \/ RowOpensTurn \/ RowEnqueued \/ Absorb \/ WindowPasses
     \/ Observe \/ TimeHands \/ TurnEnds
     \/ HumanStartsTurn \/ MailboxReleases \/ ScreenClears \/ TimerFires
@@ -572,4 +589,10 @@ GoneWatchEnds == ~(nat = "idle" /\ ~wake /\ ~timer /\ mbx = "idle" /\ envLeft = 
 CarriedRowEnds == Quiet => row = "none"
 \* 15. The session sees the input's text once: AgentDesk's paste or the outside copy, not both.
 SeenOnce == pastes + (IF outside THEN 1 ELSE 0) <= 1
+\* 16. A start a native busy turn holds is not left waiting once all is quiet.
+NativeHeldResumes == ~(Quiet /\ inp = "held" /\ heldBy = "native")
+\* 17. A start runs as a turn of its own: it is never pasted into a running turn.
+StartOwnTurn == (src = "start" /\ pastes = 1) => sentInto = "idle"
+\* 18. An answered start was pasted exactly once.
+StartOnce == (src = "start" /\ inp = "answered") => pastes = 1
 =============================================================================
