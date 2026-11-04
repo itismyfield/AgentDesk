@@ -2648,7 +2648,16 @@ def _queue_v2_waiting(payload: Any) -> bool | None:
         return None
     return bool(payload["items"] or any(_retained_input_waiting(entry) for entry in payload["retained_inputs"])
                 or payload["head_injection"] is not None
-                or any(b["at"].get("kind") != "settled" for b in binds))
+                or any(b["at"].get("kind") != "settled" and not _bind_closed_by_retained(b["at"], payload["retained_inputs"])
+                       for b in binds))
+
+
+def _bind_closed_by_retained(at: dict, retained: list) -> bool:
+    """An attempt bind of an input that was retained and already re-sent notice has nothing left to run."""
+    return at.get("kind") == "attempt" and any(
+        isinstance(entry, dict) and not _retained_input_waiting(entry) and isinstance(entry.get("input"), dict)
+        and entry["input"].get("identity") == at.get("identity") and entry["input"].get("attempt") == at.get("attempt")
+        for entry in retained)
 
 
 def _runtime_payload_has_entries(payload: Any) -> bool:

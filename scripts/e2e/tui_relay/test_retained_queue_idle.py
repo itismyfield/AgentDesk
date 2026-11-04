@@ -76,6 +76,18 @@ class RetainedQueueIdle(unittest.TestCase):
                 self.assert_busy({**self.snapshot, key: value}, True)
         self.assert_busy({**self.snapshot, "admission_binds": [{"receipt": "r", "at": {"kind": "settled"}}]}, False)
 
+    def test_attempt_bind_of_the_completed_retained_input_is_idle(self):
+        at = {"kind": "attempt", "identity": self.retained["input"]["identity"],
+              "attempt": self.retained["input"]["attempt"]}
+        self.assert_busy({**self.snapshot, "admission_binds": [{"receipt": "r", "at": at}]}, False)
+        other = copy.deepcopy(at)
+        other["attempt"]["nonce"] = "other"
+        owed = {**self.retained, "notice": {"kind": "retained_retry_required", "enqueued": False}}
+        for snapshot in ({**self.snapshot, "admission_binds": [{"receipt": "r", "at": other}]},
+                         {**self.snapshot, "retained_inputs": [owed], "admission_binds": [{"receipt": "r", "at": at}]}):
+            with self.subTest(snapshot=snapshot["admission_binds"][0]["at"]["attempt"]["nonce"]):
+                self.assert_busy(snapshot, True)
+
     def test_unknown_dispositions_and_notice_shapes_stay_busy(self):
         for disposition in ("future", [], {}, 1):
             with self.subTest(disposition=disposition):
