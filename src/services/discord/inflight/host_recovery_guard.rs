@@ -12,7 +12,7 @@ use crate::services::provider::ProviderKind;
 use crate::services::session_host::{
     AutomaticEffect, ClearedHostSession, HostKind, HostLiveness, HostWitness,
     SessionTargetEvidence, SessionTargetEvidenceSource, SessionTargetInput, StateChange,
-    clear_legacy_session, resolve_session_target, session_record_witness,
+    TargetHost, clear_legacy_session, resolve_session_target, session_record_witness,
 };
 use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
 
@@ -158,16 +158,67 @@ pub(in crate::services::discord) fn teardown_for_lookup(
     observed: Option<HostLiveness>,
     caller: &str,
 ) -> KeyedTeardown {
+    resolve_lookup(
+        &lookup,
+        provider,
+        channel_id,
+        session_key,
+        tmux_name,
+        observed,
+        caller,
+    )
+    .0
+}
+
+/// Keeps the host kind before the teardown verdict erases the tmux/process distinction.
+pub(in crate::services::discord) async fn keyed_is_legacy_tmux(
+    pool: &PgPool,
+    provider: &ProviderKind,
+    channel_id: u64,
+    session_key: &str,
+    tmux_name: &str,
+) -> bool {
+    let lookup = load_hosted_execution_pg(pool, HostedLookupKey::SessionKey(session_key)).await;
+    resolve_lookup(
+        &lookup,
+        provider,
+        channel_id,
+        Some(session_key),
+        tmux_name,
+        None,
+        "restart_gate",
+    )
+    .1
+}
+
+fn resolve_lookup(
+    lookup: &HostedLookup,
+    provider: &ProviderKind,
+    channel_id: u64,
+    session_key: Option<&str>,
+    tmux_name: &str,
+    observed: Option<HostLiveness>,
+    caller: &str,
+) -> (KeyedTeardown, bool) {
     let mut evidence = SessionTargetEvidence {
         session_key: session_key.map(str::to_string),
         session_name: Some(tmux_name.to_string()),
-        session_record: session_record_witness(&lookup),
+        session_record: session_record_witness(lookup),
         inflight_locator: HostWitness::Absent,
         host_marker: marker_witness(read_host_kind_marker(tmux_name)),
         ..SessionTargetEvidence::unread()
     };
     // An inflight row that names another tmux session is not evidence about this one.
-    match super::load_inflight_state_read_only_result(provider, channel_id) {
+    let inflight = super::load_inflight_state_read_only_result(provider, channel_id);
+    // A present nameless turn cannot acquire a tmux target from its session key.
+    let has_tmux_target = match &inflight {
+        Ok(Some(row)) => row
+            .tmux_session_name
+            .as_deref()
+            .is_some_and(|name| !name.trim().is_empty()),
+        _ => true,
+    };
+    match inflight {
         Ok(Some(row))
             if row
                 .tmux_session_name
@@ -192,6 +243,14 @@ pub(in crate::services::discord) fn teardown_for_lookup(
         && observed != Some(HostLiveness::ProbeError);
     let input = SessionTargetInput::SessionKey(session_key.unwrap_or_default().to_string());
     let target = resolve_session_target(input, &KeyedEvidence(evidence));
+    let is_tmux = has_tmux_target
+        && matches!(
+            &target.host,
+            TargetHost::Known {
+                kind: HostKind::Tmux,
+                ..
+            }
+        );
     let change = StateChange::Automatic {
         effect: AutomaticEffect::Kill,
         observed,
@@ -210,7 +269,7 @@ pub(in crate::services::discord) fn teardown_for_lookup(
             .err()
             .map(|verdict| (format!("{verdict:?}"), row_missing, target.host.clone())),
     );
-    match result {
+    let verdict = match result {
         Ok(session) => KeyedTeardown::Cleared(session),
         Err(verdict) => {
             if changed {
@@ -230,7 +289,8 @@ pub(in crate::services::discord) fn teardown_for_lookup(
                 KeyedTeardown::Kept
             }
         }
-    }
+    };
+    (verdict, is_tmux)
 }
 
 #[cfg(test)]
