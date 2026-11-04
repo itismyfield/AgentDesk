@@ -185,6 +185,12 @@ class ModuleLayerRatchetTest(unittest.TestCase):
         relative = {glob["id"]: {"source": "src/lib.rs::crate::lower", "path": "super::upper::*"}}
         self.assert_error(self.ratchet.compare(cleared, self.snapshot(uncertainties=[glob]), self.moves(), relative),
                           "uncertainties", glob["id"])
+        child = {glob["id"]: {"source": "src/lib.rs::crate::lower", "path": "crate::upper::utils::*"}}
+        self.assert_warning_only(self.ratchet.compare(cleared, self.snapshot(uncertainties=[glob]), self.moves(), child),
+                                 "uncertainties", glob["id"])
+        item = {glob["id"]: {"source": "src/lib.rs::crate::lower", "path": "crate::upper::hit"}}
+        self.assert_error(self.ratchet.compare(cleared, self.snapshot(uncertainties=[glob]), self.moves(), item),
+                          "uncertainties", glob["id"])
 
     def test_changed_indeterminate_target_warns_even_with_equal_totals(self):
         old, replacement = self.edge("mixed", "old"), self.edge("mixed", "new")

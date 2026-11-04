@@ -115,11 +115,15 @@ def _normalized(accepted, candidate, manifest):
 
 
 def _path_targets(source, path):
-    """Module nodes a crate/self/super-rooted written path can name; other roots stay unknown."""
+    """Module a crate/self/super-rooted written path names: the glob's module, or an item's owner.
+
+    Paths reached only through re-exports or aliases stay unknown (known limit, reported as warnings)."""
     if not source or not path or "::crate" not in source:
         return []
     root, _, module = source.partition("::crate")
-    names = [name for name in path.split("::") if name and name != "*"]
+    segments = [name for name in path.split("::") if name]
+    glob = segments[-1:] == ["*"]
+    names = segments[:-1] if glob else segments
     base = [name for name in module.split("::") if name]
     if names[:1] in (["crate"], ["$crate"]):
         base, names = [], names[1:]
@@ -129,7 +133,9 @@ def _path_targets(source, path):
                 base.pop()
     else:
         return []
-    return [root + "::crate" + "".join("::" + name for name in base + names[:n]) for n in range(len(names) + 1)]
+    node = lambda parts: root + "::crate" + "".join("::" + name for name in parts)
+    full = base + names
+    return [node(full)] if glob or not names else [node(full[:-1]), node(full)]
 
 
 def compare(accepted, candidate, moves, sources=None):
@@ -140,8 +146,10 @@ def compare(accepted, candidate, moves, sources=None):
         unknown_ids = {row["id"] for row in candidate["indeterminate_dependencies"]}
         moved_reverse = {row["old_id"]: row["new_id"] for row in moves["moves"]
                          if row["section"] == "reverse_dependencies"}
-        # Accepted reverse debt (including zero-rules and moved IDs) must not resurface as
-        # indeterminate edges or unresolved references under any reference kind.
+        # Accepted reverse debt (including zero-rules and moved IDs) must not resurface as an
+        # indeterminate edge under any reference kind, as an unresolved reference whose written
+        # crate/self/super path names its target, or as new unresolved references in a source
+        # whose reverse debt shrank in the same change.
         accepted_reverse = {**zeros["reverse_dependencies"], **old["reverse_dependencies"]}
         hidden_ids = accepted_reverse.keys() | {moved_reverse.get(i, i) for i in accepted_reverse}
         shrunk = {i: row for i, row in old["reverse_dependencies"].items()
