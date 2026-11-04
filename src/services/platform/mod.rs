@@ -6,6 +6,8 @@
 pub mod binary_resolver;
 mod dump_tool;
 pub(crate) mod network;
+mod session_host_label;
+pub(crate) use session_host_label::session_host_label;
 pub mod shell;
 pub mod tmux;
 #[cfg(windows)]
