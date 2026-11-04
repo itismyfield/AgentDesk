@@ -111,9 +111,12 @@ async fn due_census_tick_collects_both_hosts_and_posts_one_verdict_pg() {
             .execute(&pool)
             .await
             .unwrap();
-        for (host, id) in HOSTS {
+        for (host, id) in [
+            ("mac-mini", "mac-mini-release"),
+            ("mac-book", "mac-book-release"),
+        ] {
             let mut data = observation(
-                host,
+                id,
                 if case == "wrong_host_body" && host == "mac-book" {
                     "body"
                 } else {
@@ -132,7 +135,7 @@ async fn due_census_tick_collects_both_hosts_and_posts_one_verdict_pg() {
                 }
             }
             if matches!(case, "wrong_host" | "wrong_host_body") && host == "mac-book" {
-                data["host"] = json!("mac-mini");
+                data["host"] = json!("mac-mini-release");
             }
             let path = root.path().join(format!("{host}.json"));
             std::fs::write(&path, json!({"legacy_body_census":data}).to_string()).unwrap();
@@ -322,6 +325,16 @@ async fn due_census_tick_collects_both_hosts_and_posts_one_verdict_pg() {
         let content = posts[0]["body"]["content"].as_str().unwrap();
         assert_eq!(content.lines().count(), 1, "{case}: {content}");
         assert!(content.contains(expected), "{case}: {content}");
+        if case == "valid" {
+            assert_eq!(
+                content,
+                "Legacy body census PASS | TUI turns mini=10/10 book=10/10 | restarts mini=1/1 book=1/1 | O ACK mini=1 book=1 | complete=true"
+            );
+            let hosts = result["hosts"].as_object().unwrap();
+            assert_eq!(hosts.len(), 2);
+            assert!(hosts.contains_key("mac-mini-release"));
+            assert!(hosts.contains_key("mac-book-release"));
+        }
         assert!(
             !content.contains("72h")
                 && !content.contains("fixture-")

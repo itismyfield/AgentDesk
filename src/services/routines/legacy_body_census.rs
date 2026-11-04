@@ -6,10 +6,7 @@ use super::store::RoutineStore;
 use crate::services::{legacy_body_census as census, session_forwarding};
 
 pub(super) const SCRIPT_REF: &str = "monitoring/legacy-body-census.js";
-const HOSTS: [(&str, &str); 2] = [
-    ("mac-mini", "mac-mini-release"),
-    ("mac-book", "mac-book-release"),
-];
+const HOSTS: [&str; 2] = ["mac-mini-release", "mac-book-release"];
 const HOST_TIMEOUT: Duration = Duration::from_secs(10);
 const TICK_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
@@ -18,8 +15,8 @@ pub(super) fn applies(script_ref: &str) -> bool {
     script_ref == SCRIPT_REF
 }
 
-fn failed(host: &str, reason: &str) -> Value {
-    json!({"host":host,"errors":[reason]})
+fn failed(id: &str, reason: &str) -> Value {
+    json!({"host":id,"errors":[reason]})
 }
 
 #[cfg(test)]
@@ -40,12 +37,12 @@ pub(super) async fn observation(store: &RoutineStore) -> Value {
         .unwrap_or((context, identity));
     let inputs = tokio::time::timeout(TICK_TIMEOUT, collect(store, &context))
         .await
-        .unwrap_or_else(|_| HOSTS.map(|(host, _)| failed(host, "TICK_TIMEOUT")));
+        .unwrap_or_else(|_| HOSTS.map(|id| failed(id, "TICK_TIMEOUT")));
     let now = chrono::Utc::now().timestamp_millis();
     #[cfg(test)]
     let now = TEST_INPUT.try_with(|(_, _, now)| *now).unwrap_or(now);
     let report = census::evaluate(
-        HOSTS.map(|(host, _)| host),
+        HOSTS,
         &inputs,
         now,
         identity["build_sha"].as_str().unwrap_or_default(),
@@ -68,7 +65,7 @@ async fn collect(
     )
     .await;
     let Ok(Ok(nodes)) = nodes else {
-        return HOSTS.map(|(host, _)| failed(host, "HOST_REGISTRY_UNAVAILABLE"));
+        return HOSTS.map(|id| failed(id, "HOST_REGISTRY_UNAVAILABLE"));
     };
     let (first, second) = tokio::join!(
         fetch(context, &nodes, HOSTS[0]),
@@ -80,7 +77,7 @@ async fn collect(
 async fn fetch(
     context: &session_forwarding::ForwardCallerContext,
     nodes: &[Value],
-    (host, id): (&str, &str),
+    id: &str,
 ) -> Value {
     let result = tokio::time::timeout(HOST_TIMEOUT, async {
         let mut matching = nodes.iter().filter(|node| node["instance_id"] == id);
@@ -137,7 +134,7 @@ async fn fetch(
             .get_mut("legacy_body_census")
             .map(Value::take)
             .ok_or("HOST_OBSERVATION_MISSING")?;
-        if observation["host"] != host
+        if observation["host"] != id
             && let Some(errors) = observation.get_mut("errors").and_then(Value::as_array_mut)
         {
             errors.push(json!("HOST_ENDPOINT_IDENTITY_MISMATCH"));
@@ -146,5 +143,5 @@ async fn fetch(
     })
     .await
     .unwrap_or(Err("HOST_TIMEOUT"));
-    result.unwrap_or_else(|reason| failed(host, reason))
+    result.unwrap_or_else(|reason| failed(id, reason))
 }

@@ -17,19 +17,26 @@ fn render(outcome: &RoutineRunOutcome) -> String {
         if report["hosts"][host]["status"] == "NO_TUI_BINDING" {
             return "N/A".to_owned();
         }
-        report["hosts"][host][field]
+        let value = &report["hosts"][host][field];
+        value
             .as_u64()
+            .or_else(|| {
+                // QuickJS returns floats; keep only exactly representable whole counts.
+                let number = value.as_f64()?;
+                ((0.0..=9_007_199_254_740_991.0).contains(&number) && number.fract() == 0.0)
+                    .then_some(number as u64)
+            })
             .map(|n| n.to_string())
             .unwrap_or_else(|| "?".into())
     };
     format!(
         "Legacy body census {verdict} | TUI turns mini={}/10 book={}/10 | restarts mini={}/1 book={}/1 | O ACK mini={} book={} | complete={}",
-        count("mac-mini", "tui_turns"),
-        count("mac-book", "tui_turns"),
-        count("mac-mini", "restarts"),
-        count("mac-book", "restarts"),
-        count("mac-mini", "o_ack"),
-        count("mac-book", "o_ack"),
+        count("mac-mini-release", "tui_turns"),
+        count("mac-book-release", "tui_turns"),
+        count("mac-mini-release", "restarts"),
+        count("mac-book-release", "restarts"),
+        count("mac-mini-release", "o_ack"),
+        count("mac-book-release", "o_ack"),
         report["complete"] == true
     )
 }
