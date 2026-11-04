@@ -7,6 +7,7 @@ on:
     paths:
       - "docs/statecharts/**"
       - "scripts/ci/statecharts_tlc.py"
+      - "scripts/ci/StatechartFairness.java"
       - "tests/test_statecharts_tlc.py"
       - ".github/workflows/statecharts-tlc.yml"
   schedule:

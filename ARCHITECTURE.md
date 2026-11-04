@@ -1571,6 +1571,8 @@ src/
 │   │   │   │   ├── serde_adapters.rs
 │   │   │   │   └── turn_kinds.rs
 │   │   │   ├── native_stop_pin/
+│   │   │   │   ├── retry_tests.rs
+│   │   │   │   ├── serde_tests.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── o_seed_observation/
 │   │   │   │   └── terminal_barrier_test.rs
@@ -2661,6 +2663,7 @@ src/
 │   │   │   │   ├── fenced_admission_tests.rs
 │   │   │   │   ├── herdr_synthetic_claim_window_tests.rs
 │   │   │   │   ├── herdr_synthetic_transition_tests.rs
+│   │   │   │   ├── native_pin_retry_tests.rs
 │   │   │   │   ├── o_tool_first_panel_tests.rs
 │   │   │   │   ├── pending_start_worker_claim_tests.rs
 │   │   │   │   ├── retired_pending_start_claim_tests.rs
@@ -3420,6 +3423,8 @@ src/
 │   │   │   ├── authority.rs
 │   │   │   ├── executor.rs
 │   │   │   └── target.rs
+│   │   ├── native_stop/
+│   │   │   └── persistence_tests.rs
 │   │   ├── session_prompt/
 │   │   │   └── tests.rs
 │   │   ├── cancel_token_claude_interrupt.rs

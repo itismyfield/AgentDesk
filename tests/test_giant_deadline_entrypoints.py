@@ -119,7 +119,18 @@ class DeadlineEntrypointsTest(unittest.TestCase):
         cls.git_at(cls.template, "config", "user.name", "Deadline Fixture")
         cls.git_at(cls.template, "config", "user.email", "fixture@example.invalid")
         cls.git_at(cls.template, "add", "-A")
-        cls.git_at(cls.template, "commit", "-qm", "fixture baseline")
+        cls.git_at(cls.template, "commit", "-qm", "fixture sources")
+        source_sha = cls.git_at(cls.template, "rev-parse", "HEAD")
+        result = cls.command_at(cls.template, [
+            sys.executable, "scripts/audit_maintainability/checks/module_layer_baseline.py",
+            "--input-sha", source_sha, "--output", "target/fixture-baseline.json",
+        ])
+        if result.returncode:
+            raise AssertionError(result.stdout + result.stderr)
+        baseline = "scripts/audit_maintainability/baselines/generated/module_layers.json"
+        shutil.copy2(cls.template / "target/fixture-baseline.json", cls.template / baseline)
+        cls.git_at(cls.template, "add", baseline)
+        cls.git_at(cls.template, "commit", "-qm", "fixture module-layer baseline")
         cls.base = cls.git_at(cls.template, "rev-parse", "HEAD")
 
     @classmethod
