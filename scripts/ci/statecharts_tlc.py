@@ -42,6 +42,9 @@ CFG_TOKEN = re.compile(
     r'(?P<comment>\\\*[^\n]*)|(?P<block>\(\*)|(?P<string>"(?:[^"\\\n]|\\[^\n])*")|(?P<quote>")'
     r"|(?P<word>[A-Za-z_][A-Za-z0-9_]*)|(?P<other>\S)"
 )
+# Characters refused outside comments: TLC 1.7.4 reads the rest of the file as the end at `;`, `?`,
+# a backtick, control characters and non-ASCII, so only printable ASCII without those is accepted.
+UNREADABLE = re.compile(r"[^\t\n\x20-\x3a\x3c-\x3e\x40-\x5f\x61-\x7e]")
 # Inside a block comment TLC sees neither strings nor line comments, only these marks.
 BLOCK_MARK = re.compile(r"\(\*|\*\)")
 TOOL_MESSAGE = re.compile(r"@!@!@STARTMSG (\d+):\d+ @!@!@\n(.*?)@!@!@ENDMSG \1 @!@!@", re.S)
@@ -80,13 +83,19 @@ def cfg_tokens(text: str) -> list[re.Match[str]]:
 
     TLC nests block comments, and both an unclosed comment and an unclosed string
     silently swallow the rest of the file, so rewriting such a config could drop
-    every rule it checks.
+    every rule it checks. A character TLC cannot lex and any backslash in a string
+    are refused too: TLC reads the rest of the file as the end at them.
     """
     tokens, pos = [], 0
     while match := CFG_TOKEN.search(text, pos):
+        comment = match.group("comment") or match.group("block")
+        if bad := UNREADABLE.search(text, pos, match.start() if comment else match.end()):
+            raise CheckError(f"character {bad.group()!r} outside a comment is not supported")
         pos = match.end()
         if match.group("quote"):
             raise CheckError("string not closed on its line")
+        if "\\" in (match.group("string") or ""):
+            raise CheckError("escaped string literals are not supported")
         if match.group("block"):
             mark = BLOCK_MARK.search(text, pos)
             if not mark:
@@ -96,6 +105,8 @@ def cfg_tokens(text: str) -> list[re.Match[str]]:
             pos = mark.end()
         elif not match.group("comment"):
             tokens.append(match)
+    if bad := UNREADABLE.search(text, pos):
+        raise CheckError(f"character {bad.group()!r} outside a comment is not supported")
     return tokens
 
 

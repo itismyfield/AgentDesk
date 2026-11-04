@@ -1,3 +1,6 @@
+// Windows has no directory fsync, so the queued V2 owner these tests adopt refuses every commit.
+#![cfg(unix)]
+
 use super::*;
 use crate::config::TestRuntimeRootGuard;
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, ChannelMailboxRegistry};
