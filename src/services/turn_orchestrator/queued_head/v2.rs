@@ -352,6 +352,17 @@ impl Owner {
         self.held.take() == Some(message)
     }
 
+    /// Holds the granted front unclaimed, as a refusal before any key does, so a read of its cause
+    /// wakes the drive; the grant is withdrawn.
+    pub(crate) fn hold_front(&mut self, front: &Front) -> Result<(), String> {
+        if !self.front().is_some_and(|now| is_front(&now, front)) {
+            return Err("not the owner's unattempted front".into());
+        }
+        self.front_grant = None;
+        self.held = Some(front.1.message_id);
+        Ok(())
+    }
+
     pub(crate) fn front_outstanding(&self) -> bool {
         self.front_grant.is_some() || self.front_claim.is_some()
     }
