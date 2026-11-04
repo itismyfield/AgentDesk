@@ -80,13 +80,26 @@ class RetainedQueueIdle(unittest.TestCase):
         at = {"kind": "attempt", "identity": self.retained["input"]["identity"],
               "attempt": self.retained["input"]["attempt"]}
         self.assert_busy({**self.snapshot, "admission_binds": [{"receipt": "r", "at": at}]}, False)
-        other = copy.deepcopy(at)
-        other["attempt"]["nonce"] = "other"
+        def changed(path, value):
+            bind = copy.deepcopy(at)
+            node = bind
+            for key in path[:-1]:
+                node = node[key]
+            node[path[-1]] = value
+            return bind
+        others = [changed(("attempt", "nonce"), "other"), changed(("identity", "primary"), 2),
+                  changed(("attempt", "provider"), "claude"), changed(("attempt", "target", "owner"), "other"),
+                  changed(("attempt", "source", "kind"), "other")]
+        for other in others:
+            with self.subTest(other=other):
+                self.assert_busy({**self.snapshot, "admission_binds": [{"receipt": "r", "at": other}]}, True)
         owed = {**self.retained, "notice": {"kind": "retained_retry_required", "enqueued": False}}
-        for snapshot in ({**self.snapshot, "admission_binds": [{"receipt": "r", "at": other}]},
-                         {**self.snapshot, "retained_inputs": [owed], "admission_binds": [{"receipt": "r", "at": at}]}):
-            with self.subTest(snapshot=snapshot["admission_binds"][0]["at"]["attempt"]["nonce"]):
-                self.assert_busy(snapshot, True)
+        self.assert_busy({**self.snapshot, "retained_inputs": [owed], "admission_binds": [{"receipt": "r", "at": at}]}, True)
+        blank = {**self.retained, "input": {}}
+        for bind in ({"kind": "attempt"}, {"kind": "attempt", "identity": None, "attempt": None},
+                     {"kind": "attempt", "identity": {}, "attempt": {}}):
+            with self.subTest(bind=bind):
+                self.assert_busy({**self.snapshot, "retained_inputs": [blank], "admission_binds": [{"receipt": "r", "at": bind}]}, True)
 
     def test_unknown_dispositions_and_notice_shapes_stay_busy(self):
         for disposition in ("future", [], {}, 1):

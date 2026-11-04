@@ -2654,9 +2654,13 @@ def _queue_v2_waiting(payload: Any) -> bool | None:
 
 def _bind_closed_by_retained(at: dict, retained: list) -> bool:
     """An attempt bind of an input that was retained and already re-sent notice has nothing left to run."""
-    return at.get("kind") == "attempt" and any(
+    identity, attempt = at.get("identity"), at.get("attempt")
+    if (at.get("kind") != "attempt" or not isinstance(identity, dict) or "primary" not in identity
+            or not isinstance(attempt, dict) or not attempt.get("nonce")):
+        return False
+    return any(
         isinstance(entry, dict) and not _retained_input_waiting(entry) and isinstance(entry.get("input"), dict)
-        and entry["input"].get("identity") == at.get("identity") and entry["input"].get("attempt") == at.get("attempt")
+        and entry["input"].get("identity") == identity and entry["input"].get("attempt") == attempt
         for entry in retained)
 
 
