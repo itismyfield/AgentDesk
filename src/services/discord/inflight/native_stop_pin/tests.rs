@@ -307,6 +307,10 @@ fn c2_c3_c4_actual_restart_rechecks_only_persisted_proof_pg() {
     .enumerate()
     {
         let (mut state, input) = writer_state(721_203_100 + index as u64, true, false, false);
+        if *change == "valid" {
+            record_native_busy_child(&state, &CancelToken::new(), "busy-c");
+            state = load_inflight_state(&ProviderKind::Claude, state.channel_id).unwrap();
+        }
         let end = input.get("range").unwrap_or(&input[2])[1].as_u64().unwrap();
         state.last_offset = end;
         std::fs::OpenOptions::new()
@@ -358,7 +362,10 @@ fn c2_c3_c4_actual_restart_rechecks_only_persisted_proof_pg() {
             _ => {}
         }
         rewrite_raw(&state, &encoded);
-        stored.push(encoded["native_stop_user_pin"].clone());
+        stored.push(serde_json::json!([
+            encoded["native_stop_user_pin"],
+            encoded["native_stop_busy_children"]
+        ]));
         cases.push((state, *change));
     }
     let rt = runtime();
@@ -403,7 +410,11 @@ fn c2_c3_c4_actual_restart_rechecks_only_persisted_proof_pg() {
         .await;
         let durable = |state: &InflightTurnState| {
             let row = load_inflight_state(&ProviderKind::Claude, state.channel_id).unwrap();
-            serde_json::to_value(row).unwrap()["native_stop_user_pin"].clone()
+            let row = serde_json::to_value(row).unwrap();
+            serde_json::json!([
+                row["native_stop_user_pin"],
+                row["native_stop_busy_children"]
+            ])
         };
         let mut tokens = Vec::new();
         for (index, (state, change)) in cases.iter().enumerate() {
@@ -423,6 +434,11 @@ fn c2_c3_c4_actual_restart_rechecks_only_persisted_proof_pg() {
                 sink.stop_pin(),
                 None,
                 "{change}: no binding yet, nothing to target"
+            );
+            assert_eq!(
+                token.native_stop.is_busy_child("busy-c"),
+                *change == "valid",
+                "{change}: restore returns only the episode's recorded busy input"
             );
             assert_eq!(
                 durable(state),

@@ -1,7 +1,9 @@
 //! A user stop's Escape targets only the token's own verified native input, judged at `!stop`.
+use super::super::super::NativeStop;
 use super::super::super::stop_host::tests::unpinned_generating_turn;
 use super::native_contract::running;
 use super::*;
+use crate::services::agent_protocol::RuntimeHandoffKind;
 use std::io::Write;
 
 fn append(path: &std::path::Path, line: serde_json::Value) {
@@ -210,6 +212,194 @@ fn rows_landing_while_the_stop_waits_on_the_composer_are_judged_again() {
             assert!(matches!(result, CommandStop::Native(_)), "{case}");
             assert_eq!(escapes(&fx), sent, "{case}");
             assert!(!token.cancelled.load(Ordering::Acquire), "{case}");
+            crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
+        }
+    });
+}
+
+fn tool_use(id: &str) -> serde_json::Value {
+    serde_json::json!({"type":"assistant","message":{"content":[
+        {"type":"tool_use","id":id,"name":"Bash","input":{"command":"sleep 60"}}]}})
+}
+
+/// An acknowledged Escape alone publishes no stop; the pinned turn's own end does.
+async fn stops_at_its_own_end(stop: &NativeStop, path: &std::path::Path, case: &str) {
+    let early = tokio::time::timeout(std::time::Duration::from_millis(200), stop.finish()).await;
+    assert!(
+        early.is_err(),
+        "{case}: an acknowledged Escape publishes nothing"
+    );
+    append(
+        path,
+        serde_json::json!({"type":"system","subtype":"turn_duration"}),
+    );
+    assert!(
+        stop.finish().await.token.is_some(),
+        "{case}: the turn's end publishes the stop"
+    );
+}
+
+/// Hook context beside a tool result belongs to the running turn, so its stop still escapes it;
+/// the same text alone or a later prompt opens another input and sends none.
+#[test]
+fn hook_context_beside_a_tool_result_keeps_the_turn_its_own() {
+    let fx = Fixture::new();
+    run(async {
+        let hook = "<system-reminder>hook additional context</system-reminder>";
+        let cases = [
+            ("beside-tool-result", 1),
+            ("alone", 0),
+            ("then-user-input", 0),
+        ];
+        for (n, (case, sent)) in cases.into_iter().enumerate() {
+            fx.serve(Server::Live);
+            fx.pane(&running());
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let channel = ChannelId::new(7_212_340 + n as u64);
+            let session = format!("native-identity-hook-{case}");
+            let (token, path) = generating_turn(&fx, &session);
+            start(&shared, channel, &token).await;
+            native_inflight_row(channel, &token, &session);
+            append(&path, tool_use("tool-h"));
+            let text = serde_json::json!({"type":"text","text":hook});
+            let content = match case {
+                "alone" => serde_json::json!([text]),
+                _ => {
+                    serde_json::json!([{"type":"tool_result","tool_use_id":"tool-h","content":"ok"}, text])
+                }
+            };
+            append(
+                &path,
+                serde_json::json!({"type":"user","uuid":"hooked","sessionId":"fixture-sid",
+                    "message":{"role":"user","content":content}}),
+            );
+            if case == "then-user-input" {
+                append(
+                    &path,
+                    serde_json::json!({"type":"user","uuid":"next","sessionId":"fixture-sid",
+                        "message":{"role":"user","content":"a later prompt"}}),
+                );
+            }
+            append(&path, tool_use("tool-i"));
+            let _ = fx.take_calls();
+            let result =
+                begin_user_stop(&shared, &ProviderKind::Claude, channel, true, "!stop").await;
+            let CommandStop::Native(stop) = result else {
+                panic!("{case}: a native stop");
+            };
+            assert_eq!(escapes(&fx), sent, "{case}");
+            assert!(!token.cancelled.load(Ordering::Acquire), "{case}");
+            assert!(mailbox_holds(&shared, channel, &token).await, "{case}");
+            assert_eq!(tombstone(channel), None, "{case}");
+            match sent {
+                1 => stops_at_its_own_end(&stop, &path, case).await,
+                _ => assert!(stop.finish().await.token.is_none(), "{case}"),
+            }
+            crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
+        }
+    });
+}
+
+fn bind_pane(session: &str, path: &std::path::Path) {
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+        session,
+        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            output_path: path.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: None,
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
+}
+
+/// A token recovered for a persisted turn keeps the busy inputs its episode handed in, whether the
+/// pane binding returns before or after restore; another episode's, session's or an unrecorded
+/// busy row still sends no Escape.
+#[test]
+fn a_recovered_turn_escapes_past_only_its_own_busy_inputs() {
+    let fx = Fixture::new();
+    run(async {
+        let cases = [
+            ("own", true, 1),
+            ("own", false, 1),
+            ("other-parent", true, 0),
+            ("other-source", true, 0),
+            ("no-parent", false, 0),
+        ];
+        for (n, (case, bound_first, sent)) in cases.into_iter().enumerate() {
+            fx.serve(Server::Live);
+            fx.pane(&running());
+            let channel = ChannelId::new(7_212_360 + n as u64);
+            let session = format!("native-identity-restart-{n}");
+            let (old, path) = generating_turn(&fx, &session);
+            let row_path = native_inflight_row(channel, &old, &session);
+            let load =
+                || inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get());
+            let mut row = load().unwrap();
+            row.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+            row.output_path = Some(path.display().to_string());
+            inflight::save_inflight_state(&row).unwrap();
+            // The live bridge persists the token's verified pin before any busy input.
+            inflight::bind_native_stop_pin(&row, &old);
+            append(&path, tool_use("tool-r"));
+            let row = load().unwrap();
+            let (attempt, source) = match case {
+                "other-source" => ("busy-elsewhere", "another-session"),
+                _ => ("busy-b", session.as_str()),
+            };
+            let frame = ledger(source, attempt, &path, "follow up");
+            if case != "no-parent" {
+                inflight::record_native_busy_child(&row, &old, attempt);
+            }
+            append(&path, queued("row-b", &frame));
+            append(&path, tool_use("tool-s"));
+            let mut raw = serde_json::to_value(load().unwrap()).unwrap();
+            assert!(
+                raw["native_stop_user_pin"].is_object(),
+                "{case}: the pin is durable"
+            );
+            if case == "other-parent" {
+                raw["native_stop_busy_children"]["turn_nonce"] = "another-turn".into();
+                std::fs::write(&row_path, raw.to_string()).unwrap();
+            }
+            drop(old);
+            // A restarted app: a fresh token for the persisted nonce, rehydrated from the row.
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let token = Arc::new(CancelToken::from_persisted_turn_nonce(
+                row.turn_nonce.clone(),
+            ));
+            token.bind_claude_tmux_session(&session);
+            start(&shared, channel, &token).await;
+            if !bound_first {
+                crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
+            }
+            let before = file_state(&row_path);
+            inflight::restore_native_stop_pin(&load().unwrap(), &token);
+            assert_eq!(
+                file_state(&row_path),
+                before,
+                "{case}: restore writes nothing durable"
+            );
+            if !bound_first {
+                bind_pane(&session, &path);
+            }
+            let _ = fx.take_calls();
+            let result =
+                begin_user_stop(&shared, &ProviderKind::Claude, channel, true, "!stop").await;
+            let CommandStop::Native(stop) = result else {
+                panic!("{case}: a native stop");
+            };
+            assert_eq!(escapes(&fx), sent, "{case} bound_first={bound_first}");
+            assert!(!token.cancelled.load(Ordering::Acquire), "{case}");
+            assert!(mailbox_holds(&shared, channel, &token).await, "{case}");
+            assert_eq!(tombstone(channel), None, "{case}");
+            match sent {
+                1 => stops_at_its_own_end(&stop, &path, case).await,
+                _ => assert!(stop.finish().await.token.is_none(), "{case}"),
+            }
             crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
         }
     });

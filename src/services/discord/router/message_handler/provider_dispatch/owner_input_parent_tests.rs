@@ -2,8 +2,8 @@
 use super::*;
 use poise::serenity_prelude::{MessageId, UserId};
 
-/// The attempt pasted into a running turn is recorded on the mailbox's token only when the
-/// inflight row carries that token's nonce; another row's turn gets nothing and the paste is kept.
+/// The attempt pasted into a running turn is recorded on the mailbox's token and its episode only
+/// when the inflight row carries that token's nonce; another row's turn gets nothing, paste kept.
 #[test]
 fn a_busy_front_names_its_attempt_only_to_the_token_whose_row_it_entered() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -52,6 +52,17 @@ fn a_busy_front_names_its_attempt_only_to_the_token_whose_row_it_entered() {
             active.native_stop.is_busy_child(&attempt),
             owns,
             "owns={owns}"
+        );
+        // A recovered token learns the attempt only from the episode that recorded it.
+        let durable = crate::services::discord::inflight::load_inflight_state_read_only(
+            &ProviderKind::Claude,
+            rig.channel,
+        );
+        let kept = &serde_json::to_value(durable).unwrap()["native_stop_busy_children"];
+        assert_eq!(
+            kept["attempts"] == json!([attempt]),
+            owns,
+            "owns={owns}: {kept}"
         );
     }
 }
