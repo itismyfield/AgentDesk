@@ -98,7 +98,7 @@ raw rc0=해당 검사 통과, safety12=선언된 invariant 반례, temporal13=li
 
 worker/standby/Unknown/Lost/복수 Gateway cfg의 조건부 AdmissionResumes0은 권한 없는 unmanaged 입력을 열었다는 뜻이 아니다. 그 경우 input liveness의 serving-runtime 전제가 거짓이며, managed permit의 정상 시작 경로는 계속 검사한다. 새 unmanaged 시작 금지는 별도 `NoUnauthorizedUnmanagedHost`와 `NoAmbiguousRecoveryStart` safety가 검사한다. 기존 claim 중복 방지는 hk=none이라는 생성 행동의 전제와 실제 생산 claim 시험으로 대조하며, 모델이 동시 host 두 개를 별도 개체로 탐색하는 것은 아니다.
 
-cfg는 INVARIANT와 SPECIFICATION만 갖는다. liveness는 각각 같은 cfg의 INVARIANT 줄만 제거하고 임시 PROPERTY 한 줄을 더한 복사본에서 실행했다. bounds나 Fix 값을 실행 때 바꾸지 않았다. `expected.tsv`는 예상 safety 위반 집합을 저장하는 기존 형식을 유지한다. BeforeGateway의 safety `-`는 temporal 통과를 뜻하지 않으며, 수리 전 AdmissionResumes13/수리 후0을 주석과 이 표에 분리했다. CI liveness 등록은 #7764 레인의 별도 범위로, 이 레인은 CI 검사기 소스를 바꾸지 않았다.
+위 r3의 40회 검증에서는 INVARIANT와 SPECIFICATION만 있던 cfg의 INVARIANT 줄을 제거하고 임시 PROPERTY를 한 줄 더한 복사본으로 liveness를 실행했다. bounds나 Fix 값은 바꾸지 않았다. 이후 main의 CI liveness 지원을 병합하면서 `ExecutionAuthority.cfg`와 `ExecutionAuthorityMain.cfg`에 `PROPERTY AdmissionResumes`가 등록됐다. 공식 검사기는 `expected.tsv`의 safety 열과 네 번째 liveness 열을 함께 검사하며, Main은 `SameUnmanagedReadmits`와 `AdmissionResumes`의 기존 반례를 모두 기대한다. BeforeGateway의 safety `-`는 temporal 통과를 뜻하지 않으며, 임시 PROPERTY에서 확인한 수리 전 AdmissionResumes13/수리 후0은 위 표의 역사적 증거로 유지한다. 상태·전이는 그대로이고, CI 검사기 변경은 main에서 가져왔다.
 
 전체 CI safety는 **27 cfg / 196.5초 / rc0**으로 예상 violation 집합과 일치했다. 최종 rc와 원시 로그는 레인 `model-r3.md`에 기록한다.
 
