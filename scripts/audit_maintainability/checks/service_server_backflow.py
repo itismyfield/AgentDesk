@@ -6,6 +6,7 @@ root call the canonical service paths instead of the route re-exports. Existing
 debt is tracked by a committed baseline; new or increased references fail
 ``--check``. Inline ``#[cfg(test)]`` items and test files are not production.
 The removed ``agentdesk_runtime_root`` alias is a zero rule over every Rust file.
+Public runtime-root forwarders in the CLI and crate root are also forbidden.
 """
 
 from __future__ import annotations
@@ -35,12 +36,22 @@ QUALIFIED = re.compile(_ROOT + r"(?P<server>server)\b")
 # A bare `server::` path reaches the module through a crate-root glob import or
 # a crate-root-relative path; no module outside `src/server` is named `server`.
 UNQUALIFIED = re.compile(r"(?<![\w:$])(?P<server>server)\s*::")
-# `use crate::{server, ..}` / `use super::{server as alias}` import the module.
-GROUP_OPEN = re.compile(_ROOT + r"\{")
-GROUP_MEMBER = re.compile(r"(?<![\w:$])(?P<server>server)\b")
+USE_TREE = re.compile(r"\b(?P<public>pub(?:\s*\([^)]*\))?\s+)?use\s+(?P<tree>[^;]+);")
+USE_TOKEN = re.compile(r"\$crate|(?:r#)?[A-Za-z_]\w*|::|[{},*]")
 PREFILTER = re.compile(r"\bserver\b")
 # Callers use `crate::config::runtime_root()`; the CLI alias must not return.
 REMOVED_ALIAS = re.compile(r"\bagentdesk_runtime_root\b")
+RUNTIME_ROOT = re.compile(r"\bruntime_root\b")
+ROOT_FILES = frozenset({"src/lib.rs", "src/main.rs"})
+PUBLIC_FORWARDER = re.compile(
+    r"\bpub(?:\s*\([^)]*\))?\s+(?:(?:const|async|unsafe)\s+)*"
+    r"fn\s+(?P<name>(?:r#)?[A-Za-z_]\w*)\s*\(\s*\)\s*"
+    r"(?:->[^{};]+)?\{(?P<body>[^{}]*)\}"
+)
+RUNTIME_CALL = re.compile(
+    r"\s*(?P<return>return\s+)?(?P<path>(?:(?:\$crate|(?:r#)?[A-Za-z_]\w*)\s*::\s*)*"
+    r"runtime_root)\s*\(\s*\)\s*(?P<semicolon>;?)\s*"
+)
 BACKFLOW_RULE = "service_server_backflow"
 ALIAS_RULE = "removed_runtime_root_alias"
 
@@ -53,33 +64,90 @@ def _is_assembly_file(rel: str) -> bool:
     return top in ASSEMBLY_MODULES
 
 
-def _group_member_offsets(text: str, open_end: int) -> Iterable[int]:
-    """Offsets of `server` tokens at the first nesting level of a use group."""
-    depth = 1
-    top_level = []
-    index = open_end
-    while index < len(text) and depth:
-        char = text[index]
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-        top_level.append(char if depth == 1 and char not in "{}" else " ")
-        index += 1
-    for match in GROUP_MEMBER.finditer("".join(top_level)):
-        yield open_end + match.start("server")
+def _use_paths(text: str, start: int, end: int) -> Iterable[list[tuple[str, int]]]:
+    """Read source paths, carrying group prefixes and skipping alias names."""
+    tokens = list(USE_TOKEN.finditer(text, start, end))
+    index = 0
+
+    def group(prefix: list[tuple[str, int]]) -> Iterable[list[tuple[str, int]]]:
+        nonlocal index
+        while index < len(tokens) and tokens[index][0] != "}":
+            path = list(prefix)
+            while index < len(tokens) and tokens[index][0] not in {"{", "}", ",", "as"}:
+                token = tokens[index]
+                if token[0] != "::":
+                    path.append((token[0].removeprefix("r#"), token.start()))
+                index += 1
+            if index < len(tokens) and tokens[index][0] == "{":
+                index += 1
+                yield from group(path)
+            else:
+                yield path
+                if index < len(tokens) and tokens[index][0] == "as":
+                    index += 2
+            if index < len(tokens) and tokens[index][0] == ",":
+                index += 1
+        if index < len(tokens):
+            index += 1
+
+    yield from group([])
 
 
-def _server_reference_offsets(text: str) -> list[tuple[int, str]]:
+def _at_file_scope(text: str, offset: int) -> bool:
+    prefix = text[:offset]
+    return prefix.count("{") == prefix.count("}")
+
+
+def _server_reference_offsets(text: str, is_root: bool = False) -> list[tuple[int, str]]:
     found: dict[int, str] = {}
     for match in QUALIFIED.finditer(text):
         found.setdefault(match.start("server"), f"{match.group('root')}::server")
     for match in UNQUALIFIED.finditer(text):
         found.setdefault(match.start("server"), "server")
-    for match in GROUP_OPEN.finditer(text):
-        for offset in _group_member_offsets(text, match.end()):
-            found.setdefault(offset, f"{match.group('root')}::{{server}}")
+    for match in USE_TREE.finditer(text):
+        for path in _use_paths(text, match.start("tree"), match.end("tree")):
+            names = [name for name, _ in path]
+            if names and names[0] in {"$crate", "crate", "super", "self"}:
+                index = 1
+                while index < len(names) and names[index] == "super":
+                    index += 1
+            elif is_root and _at_file_scope(text, match.start()):
+                index = 0
+            else:
+                continue
+            if index < len(names) and names[index] == "server":
+                found.setdefault(path[index][1], "::".join(names[:index + 1]))
     return sorted(found.items())
+
+
+def _is_runtime_root_path(names: list[str], root_scope: bool) -> bool:
+    return names in (
+        ["crate", "config", "runtime_root"], ["$crate", "config", "runtime_root"]
+    ) or (
+        root_scope and names in (
+            ["config", "runtime_root"], ["self", "config", "runtime_root"]
+        )
+    )
+
+
+def _runtime_root_forwarders(text: str, is_root: bool) -> Iterable[tuple[int, str]]:
+    for match in PUBLIC_FORWARDER.finditer(text):
+        name = match.group("name").removeprefix("r#")
+        if REMOVED_ALIAS.fullmatch(name):
+            continue
+        call = RUNTIME_CALL.fullmatch(match.group("body"))
+        if call is None or (call.group("semicolon") and not call.group("return")):
+            continue
+        names = re.sub(r"\s+", "", call.group("path")).replace("r#", "").split("::")
+        if _is_runtime_root_path(names, is_root and _at_file_scope(text, match.start())):
+            yield match.start("name"), name
+    for match in USE_TREE.finditer(text):
+        if not match.group("public") or REMOVED_ALIAS.search(match[0]):
+            continue
+        for path in _use_paths(text, match.start("tree"), match.end("tree")):
+            names = [name for name, _ in path]
+            if _is_runtime_root_path(names, is_root and _at_file_scope(text, match.start())):
+                yield path[-1][1], "::".join(names)
 
 
 def _removed_alias_findings() -> list[Finding]:
@@ -88,7 +156,13 @@ def _removed_alias_findings() -> list[Finding]:
     findings: list[Finding] = []
     for path in all_rust_files():
         raw = path.read_text(encoding="utf-8")
-        if not REMOVED_ALIAS.search(raw):
+        rel = rel_posix(path)
+        forwarding_scope = (
+            rel in ROOT_FILES or rel == "src/cli.rs" or rel.startswith("src/cli/")
+        ) and not common.is_test_rs(path)
+        if not REMOVED_ALIAS.search(raw) and not (
+            forwarding_scope and RUNTIME_ROOT.search(raw)
+        ):
             continue
         state = StripState()
         for lineno, line in enumerate(raw.splitlines(), start=1):
@@ -104,6 +178,22 @@ def _removed_alias_findings() -> list[Finding]:
                             "call `crate::config::runtime_root()` directly"
                         ),
                         extra={"reference": "agentdesk_runtime_root"},
+                    )
+                )
+        if forwarding_scope and RUNTIME_ROOT.search(raw):
+            text = _production_text(path)
+            for offset, reference in _runtime_root_forwarders(text, rel in ROOT_FILES):
+                findings.append(
+                    Finding(
+                        rule=ALIAS_RULE,
+                        severity="error",
+                        file=rel,
+                        line=line_of(text, offset),
+                        message=(
+                            f"public runtime_root forwarding alias `{reference}`; "
+                            "call `crate::config::runtime_root()` directly"
+                        ),
+                        extra={"reference": reference},
                     )
                 )
     return findings
@@ -122,7 +212,7 @@ def _run(allowlist: set[str]) -> Iterable[Finding]:
         if not PREFILTER.search(path.read_text(encoding="utf-8")):
             continue
         text = _production_text(path)
-        for offset, reference in _server_reference_offsets(text):
+        for offset, reference in _server_reference_offsets(text, is_root=rel in ROOT_FILES):
             findings.append(
                 Finding(
                     rule=BACKFLOW_RULE,
