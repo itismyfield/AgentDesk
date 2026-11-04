@@ -501,7 +501,7 @@ impl BootChannels {
     pub(crate) fn resume_execution(
         &self,
         channel: u64,
-        next: &Arc<super::ownership::execution::OwnerPermit>,
+        next: Option<&Arc<super::ownership::execution::OwnerPermit>>,
     ) -> bool {
         use super::ownership::execution::View;
         let _install = self
@@ -510,6 +510,16 @@ impl BootChannels {
             .unwrap_or_else(PoisonError::into_inner);
         let Some(old) = self.execution(channel) else {
             return false;
+        };
+        let Some(next) = next else {
+            if old.verified().is_some() {
+                return false;
+            }
+            self.execution
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&channel);
+            return true;
         };
         let Some(prior) = old.verified() else {
             return false;
