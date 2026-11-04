@@ -135,15 +135,18 @@ Command for a mutant: copy `InputPathClean.cfg`, change the constant, and run th
 
 ## Stop before the first key (#7754)
 
-Code: branch `feat/i7754-stop-gate` on main `75726b3b1`. `StopBeforeKey(k)` is a user stop while the drive holds an input in `reserved`, `direct` or `stash`, before `ArmAndKey`. The writer token's gate is NoKeyYet (`provider/native_stop.rs` `ReceiptSink`): the stop takes it under the cancel decision (`StopCancel::decide` -> `State::admit`), main cancels, and the writer's first-key check (`claude_tui/input/submission.rs` `run`, after the fence claim) ends `Cancelled{0}`. The claimed attempt yields no not-sent proof (`claude_tui/owner_input.rs` `capture_scope`), so the owner settles it WriteUncertain: the head is Unknown and never resent. The transition is enabled in every InputPath config, so the existing rules (DraftSafe, NoDuplicate and the rest) are checked again with it.
+Code: branch `feat/i7754-stop-gate` on main `75726b3b1` (r3). `StopBeforeKey(k)` is a user stop while the drive holds an input in `reserved`, `direct` or `stash`, before `ArmAndKey`. The writer token's gate is NoKeyYet (`provider/native_stop.rs` `ReceiptSink`): the stop takes it under the cancel decision (`StopCancel::decide` -> `State::admit`), main cancels, and the writer's first-key check (`claude_tui/input/submission.rs` `run`, after the fence claim) ends `Cancelled{0}`. The claimed attempt yields no not-sent proof (`claude_tui/owner_input.rs` `capture_scope`), so the owner settles it WriteUncertain: the head is Unknown and never resent. The transition is enabled in every InputPath config, so the existing rules (DraftSafe, NoDuplicate and the rest) are checked again with it.
 
 The drive's writer is either route the owner picks for the pane: `ClaudeIdle` (`submission::run`) or, when the pane's transcript is busy, `ClaudeBusy` (`busy_inject::inject_owned` -> `stash::submit`). Both consume the same gate before their first key, so the model's one writer stands for both. `busyNoGate` removes the gate from the busy writer only, read as a stop while `prov` is busy.
+
+After the stop the writer may still end on a refusal that records a not-sent proof: a failed buffer load (`stash::submit` -> `owner_input::load_failed`), a refused ready check (`owner_input::ready_payload`) or a hold (`preparation_held`). The leaf then records the stop (`owner_input::stop_took_gate`), so `capture_scope` builds no proof and the stop's Unknown settlement stands. `proofOverStop` lets the proof win instead.
 
 | Config | Constants | Distinct states | Rules that break | Path |
 |---|---|---|---|---|
 | `InputPathStopGate.cfg` | clean constants, `Mut = "none"` | 26,694 | none | - |
 | `InputPathStopNoGate.cfg` | `Mut = "noKeyGate"`: the writer never sees the gate and keys on | (stops at the first break) | StoppedBeforeKey | Arrive, DriveTakesFront, Prepare, StopBeforeKey, ArmAndKey, Paste: the stopped input is in the composer |
 | `InputPathStopBusyNoGate.cfg` | `Mut = "busyNoGate"`: the busy-pane writer never sees the gate | (stops at the first break) | StoppedBeforeKey | Arrive, DriveTakesFront, Prepare, StopBeforeKey, ArmAndKey, Paste with `prov = "busy"`: the stopped input is pasted into the running turn |
+| `InputPathStopProofOverStop.cfg` | `Mut = "proofOverStop"`: after the stop the writer ends on a refusal whose not-sent proof outranks the stop | (stops at the first break) | StoppedBeforeKey | Arrive, DriveTakesFront, StopBeforeKey (refused), DriveTakesFront, Prepare, ArmAndKey, Paste: the stopped input is kept as not sent and resent |
 | `InputPathStopNotSent.cfg` | `Mut = "cancelledNotSent"`: `Cancelled{0}` kept at the front as NotSent | (stops at the first break) | StoppedBeforeKey | Arrive, DriveTakesFront, StopBeforeKey, DriveTakesFront, Prepare, ArmAndKey, Paste: the stopped input is resent |
 
 `InputPath.cfg` and `InputPathClean.cfg` keep their rows in `expected.tsv` with the transition enabled.

@@ -198,13 +198,16 @@ Enter(k) ==
 \* key, ending Cancelled{0} as WriteUncertain -> Unknown, never a NotSent the drive resends.
 \* Mutants: the writer never sees the gate and keys on, or Cancelled{0} is held as NotSent.
 \* busyNoGate: only the busy-pane writer (prov busy, the ClaudeBusy route) skips the gate.
+\* refused: after the stop the writer ends on a refusal that records a not-sent proof (a failed
+\* buffer load, a refused ready check or a hold). proofOverStop lets that proof outrank the stop.
 StopBeforeKey(k) ==
     /\ drv[k] \in {"reserved", "direct", "stash"} /\ stopped = {}
     /\ stopped' = {cur[k]}
     /\ IF Mut = "noKeyGate" \/ (Mut = "busyNoGate" /\ prov = "busy")
        THEN UNCHANGED <<queue, head, drv, cur, wake, heldWait>>
        ELSE /\ drv' = [drv EXCEPT ![k] = "idle"] /\ cur' = [cur EXCEPT ![k] = 0] /\ wake' = TRUE
-            /\ IF Mut = "cancelledNotSent"
+            /\ \E refused \in BOOLEAN :
+               IF Mut = "cancelledNotSent" \/ (Mut = "proofOverStop" /\ refused)
                THEN /\ head' = "none" /\ heldWait' = FALSE /\ UNCHANGED queue
                ELSE /\ head' = "Unknown" /\ UNCHANGED <<queue, heldWait>>
     /\ UNCHANGED <<arrived, dl, retU, retNS, booting, restarts, comp, stash, prov, provQ, busySent,
