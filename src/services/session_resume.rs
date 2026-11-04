@@ -337,6 +337,10 @@ pub(crate) async fn perform_resume_rebind(
     } else {
         None
     };
+    let _completion = resume_runtime
+        .as_ref()
+        .zip(channel_id)
+        .map(|(shared, channel)| shared.session_transition_completion(channel));
     let _transition_guard = match resume_runtime.as_ref().zip(channel_id) {
         Some((shared, channel_id)) => Some(
             shared

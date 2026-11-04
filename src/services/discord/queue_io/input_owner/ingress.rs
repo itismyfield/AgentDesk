@@ -80,17 +80,17 @@ impl Intake {
 /// Why an arrival waits in the queue instead of joining the running input; only these notify.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Hold {
-    #[cfg(test)]
+    #[cfg(any(unix, test))]
     SessionSwitch,
     RestartRecovery,
     Uploads,
-    #[cfg(test)]
+    #[cfg(any(unix, test))]
     ScreenMissing,
-    #[cfg(test)]
+    #[cfg(any(unix, test))]
     Modal,
-    #[cfg(test)]
+    #[cfg(any(unix, test))]
     ScreenContention,
-    #[cfg(test)]
+    #[cfg(any(unix, test))]
     OwnerChange,
 }
 
@@ -108,17 +108,17 @@ impl Hold {
 
     fn reason(self) -> &'static str {
         match self {
-            #[cfg(test)]
+            #[cfg(any(unix, test))]
             Self::SessionSwitch => "세션 전환(/clear·/resume·헤드리스 시작) 처리",
             Self::RestartRecovery => "재시작 직후 복구 대기",
             Self::Uploads => "첨부 업로드 미완료·실패",
-            #[cfg(test)]
+            #[cfg(any(unix, test))]
             Self::ScreenMissing => "TUI 화면·대화 기록 확인 불가",
-            #[cfg(test)]
+            #[cfg(any(unix, test))]
             Self::Modal => "모달 창 표시",
-            #[cfg(test)]
+            #[cfg(any(unix, test))]
             Self::ScreenContention => "같은 화면 주입 충돌",
-            #[cfg(test)]
+            #[cfg(any(unix, test))]
             Self::OwnerChange => "턴 주인 변경 충돌",
         }
     }
@@ -129,16 +129,107 @@ impl Hold {
             self.reason()
         )
     }
+
+    /// Only a refusal proven to precede any content can owe a queue-hold notice.
+    #[cfg(unix)]
+    pub(crate) fn from_refusal(error: &str) -> Option<Self> {
+        if !error.starts_with("NotSent(") {
+            return None;
+        }
+        let error = error.to_ascii_lowercase();
+        Some(if error.contains("session_transition") {
+            Self::SessionSwitch
+        } else if error.contains("restart_recovery") {
+            Self::RestartRecovery
+        } else if error.contains("upload_materialization") {
+            Self::Uploads
+        } else if error.contains("modal") {
+            Self::Modal
+        } else if error.contains("lockcontended") || error.contains("physical writer busy") {
+            Self::ScreenContention
+        } else if error.contains("front_not_granted")
+            || error.contains("turnchanged")
+            || error.contains("turnunknown")
+            || error.contains("pane_moved")
+            || error.contains("owner_refused")
+            || error.contains("owner_front_not_admitted")
+        {
+            Self::OwnerChange
+        } else if error.contains("unobserved")
+            || error.contains("unavailable")
+            || error.contains("unread")
+            || error.contains("draft")
+            || error.contains("notbusy")
+            || error.contains("notsteerable")
+            || error.contains("copymode")
+            || error.contains("loadfailed")
+            || error.contains("ledgerfull")
+            || error.contains("ambiguousidenticalpending")
+        {
+            Self::ScreenMissing
+        } else {
+            return None;
+        })
+    }
 }
 
 /// The holds an ingress seam can see itself; the rest come from the owner's preparation.
-fn ingress_hold(shared: &SharedData, uploads_pending: bool) -> Option<Hold> {
+pub(crate) fn ingress_hold(shared: &SharedData, uploads_pending: bool) -> Option<Hold> {
     use std::sync::atomic::Ordering::Relaxed;
     let restart = &shared.restart;
     if !restart.reconcile_done.load(Relaxed) || restart.restart_pending.load(Relaxed) {
         return Some(Hold::RestartRecovery);
     }
     uploads_pending.then_some(Hold::Uploads)
+}
+
+/// A real handoff refused this front: notify each still-unattempted original in its merged unit.
+#[cfg(unix)]
+pub(crate) async fn handoff_held(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    front: &super::drive::Front,
+    hold: Hold,
+) {
+    let handle = shared.mailbox(channel);
+    let expected = (
+        front.0.clone(),
+        front.1.message_id,
+        front.1.queued_generation,
+    );
+    let followers = handle
+        .v2_request(move |slot| {
+            let owner = slot.as_ref().ok_or("V2 not adopted")?;
+            Ok(match owner.front() {
+                Some(current)
+                    if current.0 == expected.0
+                        && current.1.message_id == expected.1
+                        && current.1.queued_generation == expected.2 =>
+                {
+                    owner.followers()
+                }
+                _ => Vec::new(),
+            })
+        })
+        .await
+        .unwrap_or_default();
+    for item in std::iter::once(front.1.clone()).chain(followers) {
+        let ticket = if item.message_id == front.1.message_id {
+            front.0.as_deref().map(AdmissionTicket::stored)
+        } else {
+            Some(discord_ticket(
+                provider,
+                channel,
+                item.message_id,
+                &item.source_message_ids,
+            ))
+        };
+        if let Some(ticket) = ticket {
+            let original = Original::with_ticket(item, ticket);
+            held(shared, &handle, channel, &original, hold).await;
+        }
+    }
 }
 
 /// Notices a hold once per original and hold, and only while the queue durably holds the original
