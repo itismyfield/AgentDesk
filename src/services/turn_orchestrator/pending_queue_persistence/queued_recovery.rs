@@ -73,11 +73,23 @@ pub(crate) fn load_pending_queues_checked(
     recovery
 }
 
-/// Channels whose queue file the V2 owner wrote, for the boot recovery that re-adopts them.
+/// Channels whose V2 queue file still holds an input, for the boot recovery that re-adopts them.
+/// An input-free file stays on disk untouched, and the channel's next input adopts it on demand.
 #[cfg(unix)]
 pub(crate) fn v2_channels(provider: &ProviderKind, token_hash: &str) -> Vec<ChannelId> {
     let snapshots = read_catalog(provider, token_hash).snapshots.into_iter();
-    let v2 = snapshots.filter(|(_, snapshot)| matches!(snapshot, SnapshotRead::ReadOnlyV2(_)));
+    // A queued, attempted, retained or settled input, or a ticket bound to one, needs its owner;
+    // receipts and the admission sequence are history the untouched file keeps for that owner.
+    let v2 = snapshots.filter(|(_, snapshot)| match snapshot {
+        SnapshotRead::ReadOnlyV2(v2) => {
+            !(v2.items.is_empty()
+                && v2.head_injection.is_none()
+                && v2.retained_inputs.is_empty()
+                && v2.terminal_identities.is_empty()
+                && v2.admission_binds.is_empty())
+        }
+        SnapshotRead::Legacy(..) => false,
+    });
     v2.map(|(channel, _)| channel).collect()
 }
 
