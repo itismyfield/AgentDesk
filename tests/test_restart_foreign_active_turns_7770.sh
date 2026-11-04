@@ -2,6 +2,15 @@
 unset TMUX TMUX_PANE
 set -euo pipefail
 
+api_response=""
+if [ "$#" -gt 0 ]; then
+  if [ "$#" -ne 2 ] || [ "$1" != --api-response ] || [ ! -f "$2" ]; then
+    echo "Usage: $0 [--api-response <JSON file>]" >&2
+    exit 2
+  fi
+  api_response="$2"
+fi
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
 . "$REPO_ROOT/scripts/_defaults.sh"
@@ -56,6 +65,15 @@ expect_gate() {
     failures=$((failures + 1))
   fi
 }
+
+if [ -n "$api_response" ]; then
+  /bin/cat "$api_response" >"$fixture/api.json"
+  PROBE_MODE=live
+  expect_gate 'API direct process stays protected with only another tmux session present' 1
+  printf 'checks=%s failures=%s skip=0\n' "$checks" "$failures"
+  [ "$failures" -eq 0 ]
+  exit 0
+fi
 
 write_row dead
 expect_gate 'absent old local tmux needs no override' 0

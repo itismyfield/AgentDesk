@@ -209,7 +209,16 @@ fn resolve_lookup(
         ..SessionTargetEvidence::unread()
     };
     // An inflight row that names another tmux session is not evidence about this one.
-    match super::load_inflight_state_read_only_result(provider, channel_id) {
+    let inflight = super::load_inflight_state_read_only_result(provider, channel_id);
+    // A present nameless turn cannot acquire a tmux target from its session key.
+    let has_tmux_target = match &inflight {
+        Ok(Some(row)) => row
+            .tmux_session_name
+            .as_deref()
+            .is_some_and(|name| !name.trim().is_empty()),
+        _ => true,
+    };
+    match inflight {
         Ok(Some(row))
             if row
                 .tmux_session_name
@@ -234,13 +243,14 @@ fn resolve_lookup(
         && observed != Some(HostLiveness::ProbeError);
     let input = SessionTargetInput::SessionKey(session_key.unwrap_or_default().to_string());
     let target = resolve_session_target(input, &KeyedEvidence(evidence));
-    let is_tmux = matches!(
-        &target.host,
-        TargetHost::Known {
-            kind: HostKind::Tmux,
-            ..
-        }
-    );
+    let is_tmux = has_tmux_target
+        && matches!(
+            &target.host,
+            TargetHost::Known {
+                kind: HostKind::Tmux,
+                ..
+            }
+        );
     let change = StateChange::Automatic {
         effect: AutomaticEffect::Kill,
         observed,

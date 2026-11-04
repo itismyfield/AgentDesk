@@ -1217,9 +1217,96 @@ mod restart_gate_tests {
         raw["runtime_kind"] = json!("process_backend");
         std::fs::write(&path, raw.to_string()).unwrap();
         let before = std::fs::read(&path).unwrap();
+        let mut direct_rows = Vec::new();
+        for (offset, (provider, label)) in [
+            ("gemini", "gemini-direct"),
+            ("claude", "claude-fresh-direct"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let channel = 7_770_200 + offset as u64;
+            let name = format!("AgentDesk-{provider}-{label}-7770");
+            let key = format!("{provider}/hash/old-host:{name}");
+            Case::Stored(Stored::Legacy)
+                .seed(&pool, &key, &name, channel)
+                .await;
+            sqlx::query(
+                "UPDATE sessions SET status='turn_active', instance_id='test-node', provider=$2
+                 WHERE session_key=$1",
+            )
+            .bind(&key)
+            .bind(provider)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let mut direct = raw.clone();
+            direct["provider"] = json!(provider);
+            direct["channel_id"] = json!(channel);
+            direct["session_key"] = json!(key);
+            direct["tmux_session_name"] = Value::Null;
+            direct["runtime_kind"] = Value::Null;
+            direct.as_object_mut().unwrap().remove("host_locator");
+            direct["user_msg_id"] = json!(channel + 1);
+            direct["finalizer_turn_id"] = json!(channel + 1);
+            let direct_path = path
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join(provider)
+                .join(format!("{channel}.json"));
+            std::fs::create_dir_all(direct_path.parent().unwrap()).unwrap();
+            let bytes = serde_json::to_vec(&direct).unwrap();
+            std::fs::write(&direct_path, &bytes).unwrap();
+            assert!(crate::services::session_backend::process_session_pid(&name).is_none());
+            direct_rows.push((label, key, direct_path, bytes));
+        }
+        let default_before = get(&app, "/sessions").await;
         let opted: Value =
             serde_json::from_slice(&get(&app, "/sessions?restart_gate=1").await).unwrap();
         let rows = opted["sessions"].as_array().unwrap();
+        for (label, key, direct_path, bytes) in &direct_rows {
+            let row = rows.iter().find(|row| row["session_key"] == *key).unwrap();
+            assert_eq!(row["restart_gate_local_tmux"], false, "{label}: {row}");
+            assert_eq!(std::fs::read(direct_path).unwrap(), *bytes, "{label}");
+            let response = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(response.path(), json!({"sessions": [row]}).to_string()).unwrap();
+            let result = std::process::Command::new("/bin/bash")
+                .arg(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/test_restart_foreign_active_turns_7770.sh"
+                ))
+                .arg("--api-response")
+                .arg(response.path())
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{label}: shell must protect actual API row: {}{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            println!("{label}: {}", String::from_utf8_lossy(&result.stdout));
+            for empty_name in ["", "  "] {
+                let mut raw: Value = serde_json::from_slice(bytes).unwrap();
+                raw["tmux_session_name"] = json!(empty_name);
+                let empty_bytes = serde_json::to_vec(&raw).unwrap();
+                std::fs::write(direct_path, &empty_bytes).unwrap();
+                let opted: Value =
+                    serde_json::from_slice(&get(&app, "/sessions?restart_gate=1").await).unwrap();
+                let row = opted["sessions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|row| row["session_key"] == *key)
+                    .unwrap();
+                assert_eq!(row["restart_gate_local_tmux"], false, "{label}: empty name");
+                assert_eq!(std::fs::read(direct_path).unwrap(), empty_bytes, "{label}");
+            }
+            std::fs::write(direct_path, bytes).unwrap();
+        }
+        assert_eq!(get(&app, "/sessions").await, default_before);
         for (label, key, _, channel) in keys {
             let row = rows.iter().find(|row| row["session_key"] == key).unwrap();
             assert_eq!(row["channel_id"], channel.to_string(), "{label}");
