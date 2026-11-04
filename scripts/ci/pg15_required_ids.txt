@@ -18,4 +18,3 @@ services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_cens
 services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_counts_surviving_associated_dispatch_pg
 services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_ignores_unrelated_malformed_context_pg
 services::auto_queue::cancel_run::malformed_context_pg_tests::public_end_ignores_unrelated_malformed_context_pg
-services::discord::inflight::native_stop_pin_tests::actual_busy_input_restart_and_native_stop_keep_only_the_birth_episode_pg
