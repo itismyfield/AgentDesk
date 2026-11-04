@@ -348,6 +348,18 @@ pub(super) async fn stream_tui_idle_response_with_gateway(
     } else {
         None
     };
+    if provider == ProviderKind::Claude
+        && claim.row.full_response.is_empty()
+        && let Some(pin) = crate::services::claude_tui::input::UserReceipt::native_pin_before_tail(
+            tmux_session_name,
+            prompt_text,
+            claim.row.session_id.as_deref(),
+            start_offset,
+        )
+        && output_path.to_str() == Some(pin.output_path.as_str())
+    {
+        claim.actor.native_stop.receipt_sink().adopt(pin);
+    }
     let inflight_state = claim.row.clone();
     let bridge = TurnBridgeContext {
         provider: provider.clone(),

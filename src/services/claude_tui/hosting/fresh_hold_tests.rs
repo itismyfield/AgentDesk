@@ -106,3 +106,104 @@ fn a2_fresh_readiness_hold_never_kills_the_session_or_owner_marker() {
         crate::services::platform::tmux::SessionPresence::Present
     );
 }
+
+#[test]
+fn p2_actual_warm_session_died_then_recreate_fresh_reuses_token() {
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+    use crate::services::claude_tui::input::submission::tests::{ScriptedTmux, view};
+    use crate::services::tui_prompt_dedupe::{self, TuiRuntimeBinding};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let dir = tempfile::tempdir().unwrap();
+    let old = dir.path().join("old.jsonl");
+    let new = dir.path().join("recreated.jsonl");
+    let (session, sid, frame) = ("p2-warm-recreate", "warm-sid", "own");
+    std::fs::write(&old, "").unwrap();
+    let binding = |path: &std::path::Path| TuiRuntimeBinding {
+        runtime_kind: RuntimeHandoffKind::ClaudeTui,
+        output_path: path.display().to_string(),
+        relay_output_path: None,
+        input_fifo_path: None,
+        session_id: Some(sid.into()),
+        last_offset: 0,
+        relay_last_offset: None,
+    };
+    tui_prompt_dedupe::register_tmux_runtime_binding(session, binding(&old));
+    let tmux = ScriptedTmux::new(&view("", false));
+    tmux.set_dead(false);
+    tmux.die_on_enter();
+    // No bytes may arrive: any offset advance makes main suppress a recreate.
+    let _ready = crate::services::claude_tui::host_input::SpyGuard::install(
+        crate::services::claude_tui::host_input::SpyState {
+            captures: std::iter::repeat_n(
+                Some(
+                    include_str!("../../../../tests/fixtures/tui_input/claude-2.1.293-idle.txt")
+                        .into(),
+                ),
+                64,
+            )
+            .collect(),
+            ..Default::default()
+        },
+    );
+    let token = std::sync::Arc::new(CancelToken::new());
+    token.bind_claude_tmux_session(session);
+    let (sender, _receiver) = std::sync::mpsc::channel();
+    let outcome = crate::services::claude_tui::guarded_outcome::with_owner(None, || {
+        crate::services::claude_tui::hosting::try_claude_tui_warm_followup(
+            sid.into(),
+            old.clone(),
+            old.to_str().unwrap().into(),
+            true,
+            dir.path(),
+            frame,
+            sender.clone(),
+            Some(token.clone()),
+            &crate::services::claude_tui::hosting::FollowupHost::legacy_tmux(session),
+            None,
+        )
+    });
+    match outcome {
+        crate::services::claude_tui::hosting::ClaudeTuiWarmFollowupOutcome::Recreate(_) => {}
+        crate::services::claude_tui::hosting::ClaudeTuiWarmFollowupOutcome::Terminal(result) => {
+            panic!(
+                "must pass real warm SessionDied classification and retirement: {result:?}; sends={:?}",
+                tmux.sends()
+            )
+        }
+    }
+    std::fs::write(&new, "").unwrap();
+    std::fs::write(
+        crate::services::tmux_common::session_temp_path(session, "spawn_nonce"),
+        "recreated-pane",
+    )
+    .unwrap();
+    tui_prompt_dedupe::register_tmux_runtime_binding(session, binding(&new));
+    tmux.set_dead(false);
+    tmux.on_enter(&new, &format!("{}\n{{\"type\":\"system\",\"subtype\":\"stop_hook_summary\"}}",
+        serde_json::json!({"type":"user","uuid":"recreated-a","sessionId":sid,"message":{"role":"user","content":frame}})));
+    let owner = dir.path().join("owner");
+    let result = crate::services::claude_tui::guarded_outcome::with_owner(None, || {
+        run_claude_tui_fresh_turn_and_finalize(
+            &new,
+            new.to_str().unwrap(),
+            sender,
+            Some(token.clone()),
+            session,
+            Some(&TeardownClearance::Unkeyed),
+            sid,
+            None,
+            frame,
+            owner.to_str().unwrap(),
+        )
+    });
+    assert!(result.is_ok(), "fresh lifecycle succeeds: {result:?}");
+    let pin = token
+        .native_stop
+        .receipt_sink()
+        .observed()
+        .expect("new reader observed the recreated input")
+        .expect("new incarnation must not remain poisoned by the old submission");
+    let pin = serde_json::to_value(pin).unwrap();
+    assert_eq!(pin.get("uuid").unwrap_or(&pin[0]), "recreated-a");
+    tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+}
