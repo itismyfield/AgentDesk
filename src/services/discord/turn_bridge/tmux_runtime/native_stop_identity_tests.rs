@@ -194,6 +194,8 @@ fn rows_landing_while_the_stop_waits_on_the_composer_are_judged_again() {
                 })
                 .await
                 .expect("the stop reads the pane before waiting on the composer");
+                // The probe's own check ends well inside this, so the row lands under the wait.
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                 match case {
                     "own-busy-input" => {
                         let frame = ledger(&session, "busy-late", &path, "late follow up");
