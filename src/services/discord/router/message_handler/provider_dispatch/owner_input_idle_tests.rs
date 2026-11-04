@@ -483,12 +483,46 @@ fn an_existing_observer_and_an_empty_front_add_no_attachment_wake() {
     owner.settled();
     assert_eq!(owner.keys(), (1, 1));
     owner.rig.delivered();
+    let empty = owner
+        .rig
+        .runtime
+        .block_on(
+            owner
+                .rig
+                .mailbox
+                .v2_request(|slot| Ok(slot.as_ref().is_some_and(|owner| owner.front().is_none()))),
+        )
+        .unwrap();
+    assert!(empty, "the existing owner has no front after delivery");
 
     crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&owner.rig.name);
-    owner.launch_source();
-    assert!(owner.attach(), "an attachment checks the now-empty owner");
+    let (session, path) = owner.launch_source();
+    // The renderer logs a user but no AI completion; this new session has its own idle transcript.
+    fs::remove_file(&path).unwrap();
+    fs::write(&path, format!("{}\n{IDLE}", json!({"sessionId": &session}))).unwrap();
+    assert_eq!(
+        crate::services::tui_turn_state::observe_provider_jsonl_turn_state(
+            &ProviderKind::Claude,
+            &path,
+        ),
+        crate::services::tui_turn_state::TuiTurnState::Idle,
+    );
+    assert!(
+        owner.attach(),
+        "an attachment checks the now-empty idle owner"
+    );
+    let attached =
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&owner.rig.name)
+            .expect("the ready source was attached");
+    assert_eq!(attached.session_id.as_deref(), Some(session.as_str()));
+    assert_eq!(Path::new(&attached.output_path), path.as_path());
     assert_eq!(owner.wakes(), 0, "no front means no wake");
     assert!(owner.fronts.try_recv().is_err());
+    assert_eq!(
+        owner.keys(),
+        (1, 1),
+        "empty attachment sends no additional keys"
+    );
 }
 
 /// Attaching to a busy source waits for that turn's existing Idle transition.
