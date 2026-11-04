@@ -1351,8 +1351,10 @@ fn rollout_row(value: Value) -> String {
 
 /// A Codex turn's opening records through its prompt.
 fn opening(turn: &str, text: &str) -> String {
-    rollout_row(json!({"type":"event_msg","payload":{"type":"task_started","turn_id":turn}}))
-        + &rollout_row(json!({"type":"turn_context","payload":{"turn_id":turn}}))
+    rollout_row(
+        json!({"type":"event_msg","payload":{"type":"task_started","turn_id":turn,
+        "root_turn_id":turn}}),
+    ) + &rollout_row(json!({"type":"turn_context","payload":{"turn_id":turn}}))
         + &rollout_row(
             json!({"type":"response_item","payload":{"type":"message","role":"user",
             "content":[{"type":"input_text","text":text}]}}),
@@ -1368,6 +1370,14 @@ fn answer_for(turn: &str, text: &str) -> String {
             "turn_id":turn,"last_agent_message":text}}))
 }
 
+/// How the native Codex turn a waiting start meets ends.
+#[derive(Clone, Copy, PartialEq)]
+enum NativeEnd {
+    Complete,
+    Aborted,
+    ForeignAbort,
+}
+
 /// A Codex `turn/start` meeting a native turn in its stored pane waits unclaimed, read from the
 /// rollout its execution tails; that turn's end alone runs it once as a turn of its own.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1378,6 +1388,34 @@ async fn a_codex_turn_start_waits_out_a_native_busy_turn_then_runs_as_its_own_pg
     )) {
         return;
     }
+    codex_start_meets_native_turn(7_340_811, NativeEnd::Complete).await;
+}
+
+/// A person's Esc ends the native turn with its own `turn_aborted`: the start runs once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_codex_turn_start_runs_once_after_the_native_turn_is_aborted_pg() {
+    if !creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::",
+        "a_codex_turn_start_runs_once_after_the_native_turn_is_aborted_pg"
+    )) {
+        return;
+    }
+    codex_start_meets_native_turn(7_340_813, NativeEnd::Aborted).await;
+}
+
+/// Another turn's abort does not end the running native turn: the start stays waiting.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_codex_turn_start_keeps_waiting_through_another_turns_abort_pg() {
+    if !creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::",
+        "a_codex_turn_start_keeps_waiting_through_another_turns_abort_pg"
+    )) {
+        return;
+    }
+    codex_start_meets_native_turn(7_340_814, NativeEnd::ForeignAbort).await;
+}
+
+async fn codex_start_meets_native_turn(id: u64, end: NativeEnd) {
     use crate::services::agents::input_result::{InputResult, OriginChannel, lookup};
     const ORIGIN: &str = "G-codex-native-busy";
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -1385,7 +1423,7 @@ async fn a_codex_turn_start_waits_out_a_native_busy_turn_then_runs_as_its_own_pg
     let pool = db.connect_and_migrate().await;
     let codex = ProviderKind::Codex;
     let rig = IntakeRig::build(
-        7_340_811,
+        id,
         true,
         codex.clone(),
         Some(pool.clone()),
@@ -1448,12 +1486,44 @@ async fn a_codex_turn_start_waits_out_a_native_busy_turn_then_runs_as_its_own_pg
     assert_eq!(state["items"].as_array().unwrap().len(), 1, "{state}");
     assert!(state["head_injection"].is_null(), "unclaimed: {state}");
 
+    let abort = |turn: &str| {
+        rollout_row(
+            json!({"type":"event_msg","payload":{"type":"turn_aborted","turn_id":turn,
+            "reason":"interrupted"}}),
+        )
+    };
+    if end == NativeEnd::ForeignAbort {
+        // An abort naming another turn leaves the native turn running; the watch reads it again.
+        append(&abort("other-turn"));
+        let waited = tokio::time::timeout(Duration::from_secs(7), settled.recv()).await;
+        let still = (
+            events(&rig.renderer),
+            origin_receipts(&pool, ORIGIN).await,
+            (rig.mock.written_texts().len(), rig.mock.deleted().len()),
+        );
+        assert!(waited.is_err(), "handed during the native turn: {waited:?}");
+        assert_eq!(still, (Vec::<String>::new(), Vec::<String>::new(), (0, 0)));
+        assert!(matches!(
+            answer().await,
+            Ok(Some(InputResult::Accepted { .. }))
+        ));
+        let state = rig.state().await;
+        assert_eq!(state["items"].as_array().unwrap().len(), 1, "{state}");
+        assert!(state["head_injection"].is_null(), "unclaimed: {state}");
+        drop(rig);
+        pool.close().await;
+        db.drop().await;
+        return;
+    }
     // The native turn ends; with no other wake, the input runs once as a turn of its own.
     let (completed, bridge) = tokio::sync::oneshot::channel();
     *discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
         .lock()
         .unwrap() = Some((rig.channel, completed));
-    append(&answer_for("native-turn", "native answer"));
+    match end {
+        NativeEnd::Aborted => append(&abort("native-turn")),
+        _ => append(&answer_for("native-turn", "native answer")),
+    }
     let outbox = pool.clone();
     let worker = tokio::spawn(async move {
         loop {

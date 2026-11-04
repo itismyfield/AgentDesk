@@ -516,13 +516,26 @@ fn native_busy(
             Some(observe_claude_jsonl_turn_state(&path).is_busy())
         }
         ProviderKind::Codex => {
-            let observe = super::super::tui_followup::observe_codex_tui_rollout_state_for_cwd;
-            match observe(dir, Some(tmux), session_id) {
+            let observe = super::super::tui_followup::observe_codex_tui_rollout_with;
+            match observe(dir, Some(tmux), session_id, codex_turn_state) {
                 TuiTurnState::Unknown => None,
                 state => Some(state.is_busy()),
             }
         }
         _ => None,
+    }
+}
+
+/// A Codex rollout's state, where a latest turn ended under its own id, an Esc abort included,
+/// reads idle; another turn's or an unnamed end proves nothing.
+fn codex_turn_state(path: &std::path::Path) -> crate::services::tui_turn_state::TuiTurnState {
+    use crate::services::codex_tui::busy_inject::{TurnVerdict, read_turn};
+    use crate::services::tui_turn_state::TuiTurnState;
+    match crate::services::codex_tui::rollout_tail::observe_rollout_turn_state(path) {
+        state if state.is_busy() && read_turn(path) == Some(TurnVerdict::NotBusy) => {
+            TuiTurnState::Idle
+        }
+        state => state,
     }
 }
 
