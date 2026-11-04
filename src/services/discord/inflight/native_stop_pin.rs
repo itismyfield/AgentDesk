@@ -1,6 +1,9 @@
 //! Verified native input attached to its durable birth episode, without cancellation effects.
 use super::*;
-use crate::services::provider::{CancelToken, native_stop::NativeUserPin};
+use crate::services::provider::{
+    CancelToken,
+    native_stop::{NativeUserPin, PinSaveOutcome},
+};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,26 +188,42 @@ pub(in crate::services::discord) fn bind_native_stop_pin(
         .native_stop
         .receipt_sink()
         .on_pin(Arc::new(move |input| {
+            #[cfg(all(test, unix))]
+            let _observation = NativePinObservation(channel);
             if input.spawn_nonce.is_none() {
-                return false;
+                return PinSaveOutcome::Never;
             }
-            let Ok(mut locked) = episode_guard::lock_inflight_birth_episode(
+            let mut locked = match episode_guard::lock_inflight_birth_episode(
                 &ProviderKind::Claude,
                 channel,
                 &episode,
-            ) else {
-                return false;
+            ) {
+                Ok(locked) => locked,
+                Err(
+                    episode_guard::InflightEpisodeLockError::Missing
+                    | episode_guard::InflightEpisodeLockError::Io,
+                ) => return PinSaveOutcome::Retry,
+                Err(episode_guard::InflightEpisodeLockError::Mismatch) => {
+                    return PinSaveOutcome::Never;
+                }
             };
             let mut updated = locked.state().clone();
             let Some(pin) = VerifiedNativeUserPin::new(&updated, input.clone()) else {
-                return false;
+                return PinSaveOutcome::Never;
             };
             if let Some(existing) = &updated.native_stop_user_pin {
-                return *existing == pin;
+                return if *existing == pin {
+                    PinSaveOutcome::Saved
+                } else {
+                    PinSaveOutcome::Never
+                };
             }
             updated.native_stop_user_pin = Some(pin);
-            locked.persist_verified_under_guard(&updated, "native_input_pin")
-                == GuardedSaveOutcome::Saved
+            match locked.persist_verified_under_guard(&updated, "native_input_pin") {
+                GuardedSaveOutcome::Saved => PinSaveOutcome::Saved,
+                GuardedSaveOutcome::IoError => PinSaveOutcome::Retry,
+                _ => PinSaveOutcome::Never,
+            }
         }));
 }
 
@@ -220,4 +239,59 @@ pub(in crate::services::discord) fn restore_native_stop_pin(
     if restored.is_some_and(|pin| token.turn_nonce() == Some(pin.turn_nonce.as_str())) {
         bind_native_stop_pin(row, token);
     }
+}
+
+#[cfg(all(test, unix))]
+static NATIVE_PIN_OBSERVATIONS: (std::sync::Mutex<Vec<(u64, usize)>>, std::sync::Condvar) =
+    (std::sync::Mutex::new(Vec::new()), std::sync::Condvar::new());
+
+#[cfg(all(test, unix))]
+struct NativePinObservation(u64);
+
+#[cfg(all(test, unix))]
+impl Drop for NativePinObservation {
+    fn drop(&mut self) {
+        let (counts, changed) = &NATIVE_PIN_OBSERVATIONS;
+        let mut counts = counts.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some((_, count)) = counts.iter_mut().find(|(channel, _)| *channel == self.0) {
+            *count += 1;
+        } else {
+            counts.push((self.0, 1));
+        }
+        changed.notify_all();
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) fn native_pin_observation_count(channel: u64) -> usize {
+    NATIVE_PIN_OBSERVATIONS
+        .0
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .iter()
+        .find(|(id, _)| *id == channel)
+        .map_or(0, |(_, count)| *count)
+}
+
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) fn wait_native_pin_observations(
+    channel: u64,
+    expected: usize,
+    timeout: std::time::Duration,
+) -> bool {
+    let (counts, changed) = &NATIVE_PIN_OBSERVATIONS;
+    let counts = counts.lock().unwrap_or_else(|error| error.into_inner());
+    let (counts, _) = changed
+        .wait_timeout_while(counts, timeout, |counts| {
+            counts
+                .iter()
+                .find(|(id, _)| *id == channel)
+                .map_or(0, |(_, count)| *count)
+                < expected
+        })
+        .unwrap_or_else(|error| error.into_inner());
+    counts
+        .iter()
+        .find(|(id, _)| *id == channel)
+        .is_some_and(|(_, count)| *count >= expected)
 }

@@ -1,14 +1,15 @@
-# One row per TLC config under docs/statecharts: cfg path, module, rules expected to break.
-# Rules are comma-separated invariant names, plus NoDeadlock for a deadlock; "-" means every rule holds.
+# One row per TLC config: cfg path, module, safety rules expected to break, optional liveness properties expected to break.
+# Fields are tab-separated; rule lists are comma-separated; "-" or an omitted fourth field means none break.
+# Safety rules are invariant names, plus NoDeadlock for a deadlock. Liveness names come from PROPERTY/PROPERTIES.
 # scripts/ci/statecharts_tlc.py fails when a run breaks a rule not listed here or a listed rule holds.
 # ExecutionAuthorityDeployed: statechart exit=1 (SameUnmanagedReadmits); ExecutionAuthority: exit=0.
 # BeforeGateway safety holds but temporary PROPERTY AdmissionResumes fails (13); fix3 passes (0).
-execution-authority/ExecutionAuthority.cfg	ExecutionAuthority	-
+execution-authority/ExecutionAuthority.cfg	ExecutionAuthority	-	-
 execution-authority/ExecutionAuthorityAmbiguousGateway.cfg	ExecutionAuthority	-
 execution-authority/ExecutionAuthorityBeforeGateway.cfg	ExecutionAuthority	-
 execution-authority/ExecutionAuthorityDeployed.cfg	ExecutionAuthority	SameUnmanagedReadmits
 execution-authority/ExecutionAuthorityLost.cfg	ExecutionAuthority	-
-execution-authority/ExecutionAuthorityMain.cfg	ExecutionAuthority	SameUnmanagedReadmits
+execution-authority/ExecutionAuthorityMain.cfg	ExecutionAuthority	SameUnmanagedReadmits	AdmissionResumes
 execution-authority/ExecutionAuthorityNoWait.cfg	ExecutionAuthority	NoForeignPermitHost
 execution-authority/ExecutionAuthorityStandby.cfg	ExecutionAuthority	-
 execution-authority/ExecutionAuthorityUnknown.cfg	ExecutionAuthority	-
