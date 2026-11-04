@@ -1,6 +1,6 @@
 //! State for one token's cooperative native stop, separate from raw cancellation.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 
 #[derive(Default)]
@@ -41,7 +41,14 @@ pub(crate) struct ReceiptSink {
     persisted: AtomicBool,
     /// A durable pin restored unchecked; only a stop accepts it after rechecking the live pane.
     restored: Mutex<Option<NativeUserPin>>,
+    /// The fresh writer's first-key gate: ungated, no key yet, stopped before a key, or keyed.
+    first_key: AtomicU8,
 }
+
+const UNGATED: u8 = 0;
+const NO_KEY_YET: u8 = 1;
+const STOPPED_BEFORE_KEY: u8 = 2;
+const MAY_HAVE_WRITTEN: u8 = 3;
 #[derive(Default)]
 struct WriterReceipt {
     receipt: Option<crate::services::claude_tui::input::UserReceipt>,
@@ -151,6 +158,42 @@ impl ReceiptSink {
             .get()
             .filter(|pin| **pin == candidate)
             .cloned()
+    }
+    /// A fresh writer's token, before it is published: no payload key has gone yet.
+    pub(crate) fn arm_first_key(&self) {
+        let _ = self.gate(UNGATED, NO_KEY_YET);
+    }
+    /// The writer's first payload key; refused once a stop took the gate before it.
+    pub(crate) fn writer_first_key(&self) -> bool {
+        self.gate(NO_KEY_YET, MAY_HAVE_WRITTEN)
+            .is_none_or(|current| current != STOPPED_BEFORE_KEY)
+    }
+    /// A stop before the writer's first key takes the gate so the writer sends none; `None` for
+    /// a token no fresh writer armed, `Some(false)` once the writer may have written.
+    pub(crate) fn stop_before_key(&self) -> Option<bool> {
+        match self.gate(NO_KEY_YET, STOPPED_BEFORE_KEY) {
+            None | Some(STOPPED_BEFORE_KEY) => Some(true),
+            Some(MAY_HAVE_WRITTEN) => Some(false),
+            Some(_) => None,
+        }
+    }
+    /// Moves the gate from `from` to `to`; `Some(current)` when it held another state.
+    fn gate(&self, from: u8, to: u8) -> Option<u8> {
+        (self.first_key)
+            .compare_exchange(from, to, Ordering::AcqRel, Ordering::Acquire)
+            .err()
+    }
+    pub(crate) fn stopped_before_key(&self) -> bool {
+        self.first_key.load(Ordering::Acquire) == STOPPED_BEFORE_KEY
+    }
+    /// The writer's first key went or its input applied: the pane may hold this token's input.
+    pub(crate) fn may_have_written(&self) -> bool {
+        self.first_key.load(Ordering::Acquire) == MAY_HAVE_WRITTEN
+            || self.inner.lock().unwrap_or_else(|e| e.into_inner()).applied
+    }
+    /// A pin may still come: the writer may have written and no pin was taken or refused.
+    pub(crate) fn pin_pending(&self) -> bool {
+        self.may_have_written() && self.cached().is_none()
     }
     pub(crate) fn on_pin(&self, observer: PinObserver) {
         let _ = self.observer.set(observer);
@@ -321,6 +364,8 @@ impl State {
         {
             return Err(());
         }
+        // A cancel admitted before a fresh writer's first key leaves that writer no key to send.
+        self.input.stop_before_key();
         Ok(inner)
     }
 

@@ -101,6 +101,14 @@ pub(crate) fn with_receipt_sink<R>(cancel: Option<&CancelToken>, run: impl FnOnc
     );
     run()
 }
+/// The installed writer token's first payload key; refused once a stop took its gate first.
+pub(crate) fn first_key() -> bool {
+    RECEIPT_SINK.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .is_none_or(|sink| sink.writer_first_key())
+    })
+}
 struct Restore(Option<Scope>);
 impl Drop for Restore {
     fn drop(&mut self) {

@@ -227,6 +227,13 @@ impl NativeStop {
             stop.finished = true;
             return Some(stop);
         }
+        // A stop that takes a fresh writer's gate before its first key leaves the turn to main's
+        // cancel; the writer then sends no key.
+        if token.native_stop.receipt_sink().stop_before_key() == Some(true)
+            && token.native_stop.handoff_idle(Arc::new(|| true))
+        {
+            return None;
+        }
         if super::claude_stop_pane::mutant("native_always_none") {
             return None;
         }
@@ -320,7 +327,16 @@ impl NativeStop {
         }
         let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(session);
         // Escape targets only this token's verified input; the latest row only witnesses an idle pane.
-        let pinned = token.native_stop.receipt_sink().stop_pin();
+        let sink = token.native_stop.receipt_sink();
+        let pinned = match sink.stop_pin() {
+            None if sink.pin_pending() => pin_within_budget(&sink).await,
+            pinned => pinned,
+        };
+        // Input that may have reached the pane without a pin is neither escaped nor main-cancelled.
+        if pinned.is_none() && sink.may_have_written() {
+            stop.notify = token.native_stop.claim_notice();
+            return Some(stop);
+        }
         let identity = match &pinned {
             Some(pin) => (binding.as_ref())
                 .filter(|binding| binding.output_path == pin.output_path)
@@ -480,7 +496,7 @@ impl NativeStop {
         if !self.sent || self.finished {
             return empty();
         }
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + STOP_BUDGET;
         loop {
             if !self.current().await {
                 return empty();
@@ -513,6 +529,23 @@ impl NativeStop {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
     }
+}
+
+/// How long one stop waits for its own evidence: the writer's pin, or the turn's exit.
+const STOP_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A writer that may have written has the stop budget to pin its own input before the stop judges.
+async fn pin_within_budget(
+    sink: &crate::services::provider::native_stop::ReceiptSink,
+) -> Option<crate::services::provider::native_stop::NativeUserPin> {
+    let deadline = tokio::time::Instant::now() + STOP_BUDGET;
+    while sink.pin_pending() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        if let Some(pin) = sink.stop_pin() {
+            return Some(pin);
+        }
+    }
+    None
 }
 
 struct Completion(Arc<crate::services::provider::native_stop::Attempt>);
