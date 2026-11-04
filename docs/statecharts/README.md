@@ -36,14 +36,18 @@ An optional fourth field lists expected liveness violations; use comma-separated
 An unlisted violation or an expected violation that now holds fails the check.
 
 `PROPERTY` and `PROPERTIES` require `SPECIFICATION <name>` instead of `INIT`/`NEXT`.
-That specification must include the model's fairness assumptions; the checker validates the cfg entry, not the TLA+ formula.
+Before model checking, the same TLC jar interprets the selected Spec and must find at least one applied temporal assumption.
+Unused fairness definitions and comments do not count. This checks that an assumption is present, not that it is sufficient.
+`SYMMETRY` together with PROPERTY is refused because TLC can miss liveness violations with symmetry reduction.
+Invariant-only configs can still use symmetry.
 Safety rules run first, then each temporal property runs alone: TLC 1.7.4 reports a temporal violation without its name.
 A temporal run must report temporal checking and a clean finish or exit 13 with a temporal violation.
 Constant or state-only PROPERTY formulas that TLC optimizes away from temporal checking are refused; use INVARIANT for state predicates.
 ExecutionAuthorityMain expects `AdmissionResumes` to break, while ExecutionAuthority expects it to hold.
 
 Add a new model only with small constants that finish within the CI limits (5 minutes per config, 15 minutes per job).
-The 300-second config budget includes every safety rerun and every property; timeout always fails.
+The 300-second config budget includes the fairness precheck, every safety rerun and every property; timeout always fails.
+The precheck uses a Java 11+ source-file launcher and adds one JVM per config that declares PROPERTY.
 Measure the full checker and its per-config times before and after adding liveness.
 If a config exceeds that budget or the suite approaches 15 minutes, reduce its PR bounds and move the larger cfg
 to a separate nightly-only root with its own `expected.tsv` and explicit timeout/job budget.

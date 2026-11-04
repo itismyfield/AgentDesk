@@ -23,6 +23,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ROOT = REPO_ROOT / "docs/statecharts"
+FAIRNESS_HELPER = Path(__file__).with_name("StatechartFairness.java")
 DEADLOCK = "NoDeadlock"
 
 # tlc2.output.EC message codes and tlc2.TLC exit codes (tla2tools 1.7.4).
@@ -121,7 +122,7 @@ def parse_config(text: str) -> Config:
     invariants: list[str] = []
     properties: list[str] = []
     specifications: list[list[str]] = []
-    init_next = False
+    init_next, symmetry = False, False
     check_deadlock, seen_check_deadlock = True, False
     cut: list[tuple[int, int]] = []
     i = 0
@@ -145,6 +146,8 @@ def parse_config(text: str) -> Config:
             specifications.append([t.group("word") or "" for t in args])
         elif word in ("INIT", "NEXT"):
             init_next = True
+        elif word == "SYMMETRY":
+            symmetry = True
         elif word == "CHECK_DEADLOCK":
             if seen_check_deadlock:
                 raise CheckError("CHECK_DEADLOCK appears twice; TLC refuses that config")
@@ -161,6 +164,8 @@ def parse_config(text: str) -> Config:
     if properties and (len(specifications) != 1 or len(specifications[0]) != 1
                        or not specifications[0][0] or init_next):
         raise CheckError("liveness PROPERTY requires SPECIFICATION with fairness, without INIT/NEXT")
+    if properties and symmetry:
+        raise CheckError("SYMMETRY cannot be used with liveness PROPERTY")
     return Config(text, invariants, properties, check_deadlock, cut)
 
 
@@ -212,15 +217,14 @@ class Result:
         return out
 
 
-def run_tlc(java: str, jar: Path, workdir: Path, module: str, cfg_name: str, deadline: float) -> tuple[int, str]:
+def run_java(java: str, jar: Path, workdir: Path, cfg_name: str, arguments: list[str],
+             deadline: float) -> tuple[int, str]:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise CheckError("timed out")
     jtmp = workdir / f"{cfg_name}.tmp"
     jtmp.mkdir()
-    cmd = [java, "-XX:+UseParallelGC", f"-Djava.io.tmpdir={jtmp}", "-cp", str(jar), "tlc2.TLC",
-           "-tool", "-workers", "1", "-fp", "0", "-metadir", str(workdir / f"{cfg_name}.meta"),
-           "-config", cfg_name, f"{module}.tla"]
+    cmd = [java, "-XX:+UseParallelGC", f"-Djava.io.tmpdir={jtmp}", "-cp", str(jar), *arguments]
     proc = subprocess.Popen(cmd, cwd=workdir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, start_new_session=True)
     try:
@@ -230,6 +234,21 @@ def run_tlc(java: str, jar: Path, workdir: Path, module: str, cfg_name: str, dea
         proc.communicate()
         raise CheckError("timed out") from None
     return proc.returncode, output
+
+
+def run_tlc(java: str, jar: Path, workdir: Path, module: str, cfg_name: str, deadline: float) -> tuple[int, str]:
+    arguments = ["tlc2.TLC", "-tool", "-workers", "1", "-fp", "0",
+                 "-metadir", str(workdir / f"{cfg_name}.meta"), "-config", cfg_name, f"{module}.tla"]
+    return run_java(java, jar, workdir, cfg_name, arguments, deadline)
+
+
+def check_fairness(java: str, jar: Path, workdir: Path, module: str, cfg_name: str, deadline: float) -> None:
+    status, output = run_java(java, jar, workdir, cfg_name, [str(FAIRNESS_HELPER), module, cfg_name], deadline)
+    checked = re.findall(r"^STATECHART_FAIRNESS_OK assumptions=([1-9][0-9]*) properties=([1-9][0-9]*)$",
+                         output, re.M)
+    if status != EXIT_OK or len(checked) != 1:
+        tail = "\n".join(output.strip().splitlines()[-25:])
+        raise CheckError(f"fairness precheck failed (exit {status}):\n{tail}")
 
 
 def check_cfg(root: Path, cfg: str, module: str, expected: set[str], java: str, jar: Path,
@@ -247,6 +266,10 @@ def check_cfg(root: Path, cfg: str, module: str, expected: set[str], java: str, 
             workdir = Path(tmp)
             for spec in path.parent.glob("*.tla"):
                 shutil.copy(spec, workdir)
+            if config.properties:
+                name = "fairness.cfg"
+                (workdir / name).write_text(config.render([], False, config.properties), encoding="utf-8")
+                check_fairness(java, jar, workdir, module, name, deadline)
 
             def check_rules(invariants: list[str], check_deadlock: bool, property_name: str | None = None) -> str | None:
                 result.runs += 1

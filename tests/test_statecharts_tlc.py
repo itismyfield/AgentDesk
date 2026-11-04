@@ -1,6 +1,7 @@
 """statecharts_tlc counts only a clean TLC finish or one named rule breaking."""
 
 import importlib.util
+import os
 import sys
 import tempfile
 import unittest
@@ -82,6 +83,14 @@ class ClassifyTest(unittest.TestCase):
 
 
 class ConfigTest(unittest.TestCase):
+    def test_symmetry_is_refused_only_for_properties(self) -> None:
+        for rules in ("PROPERTY Live\nSYMMETRY Sym\n", "SYMMETRY Sym\nPROPERTIES Live Later\n"):
+            with self.subTest(rules), self.assertRaisesRegex(tlc.CheckError, "SYMMETRY"):
+                tlc.parse_config("SPECIFICATION Spec\n" + rules)
+        config = tlc.parse_config("SPECIFICATION Spec\nSYMMETRY Sym\nINVARIANT Safe\n")
+        self.assertEqual(config.rules(), ["Safe", "NoDeadlock"])
+        self.assertIn("SYMMETRY Sym", config.render(["Safe"], True))
+
     def test_property_keywords_and_render_keep_only_selected_rules(self) -> None:
         config = tlc.parse_config('SPECIFICATION Spec\nINVARIANT Safe\nPROPERTY Live\n'
                                   'PROPERTIES\n  Later\n  Last\nCHECK_DEADLOCK TRUE\n'
@@ -191,7 +200,8 @@ class CheckCfgTest(unittest.TestCase):
 
 class LivenessCfgTest(unittest.TestCase):
     def check(self, outputs: list, expected: set[str],
-              config: str = "SPECIFICATION Spec\nINVARIANT Known\nPROPERTY Live\n") -> tuple:
+              config: str = "SPECIFICATION Spec\nINVARIANT Known\nPROPERTY Live\n",
+              preflights: list | None = None) -> tuple:
         rendered = []
         deadlines = []
         with tempfile.TemporaryDirectory() as tmp:
@@ -207,9 +217,39 @@ class LivenessCfgTest(unittest.TestCase):
                     raise output
                 return output
 
-            with mock.patch.object(tlc, "run_tlc", side_effect=run) as runner:
+            def preflight(java, jar, workdir, module, name, deadline):
+                if preflights is not None:
+                    preflights.append((tlc.parse_config((workdir / name).read_text(encoding="utf-8")), deadline))
+
+            with mock.patch.object(tlc, "check_fairness", side_effect=preflight, create=True), \
+                    mock.patch.object(tlc, "run_tlc", side_effect=run) as runner:
                 result = tlc.check_cfg(root, "M.cfg", "M", expected, "java", root / "tla2tools.jar", 60)
         return result, rendered, deadlines, runner.call_count
+
+    def test_fairness_preflight_keeps_all_properties_and_shares_deadline(self) -> None:
+        preflights = []
+        result, _, deadlines, count = self.check(
+            [(0, SUCCESS), (13, TEMPORAL_BROKEN), (0, TEMPORAL_SUCCESS)], {"Live"},
+            "SPECIFICATION Spec\nINVARIANT Known\nPROPERTIES Live Later\n", preflights)
+        self.assertEqual(result.problems(), [])
+        self.assertEqual(count, 3)
+        self.assertEqual(len(preflights), 1)
+        config, deadline = preflights[0]
+        self.assertEqual(config.rules(), ["Live", "Later"])
+        self.assertEqual(set(deadlines), {deadline})
+
+    def test_symmetry_liveness_never_invokes_tlc_or_fairness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "M.tla").write_text("---- MODULE M ----\n====\n", encoding="utf-8")
+            (root / "M.cfg").write_text("SPECIFICATION Spec\nPROPERTY Live\nSYMMETRY Sym\n", encoding="utf-8")
+            with mock.patch.object(tlc, "check_fairness", create=True) as fairness, \
+                    mock.patch.object(tlc, "run_tlc", return_value=(0, SUCCESS)) as run:
+                result = tlc.check_cfg(root, "M.cfg", "M", set(), "java", root / "tla2tools.jar", 60)
+            self.assertIn("SYMMETRY", result.error or "")
+            self.assertEqual(result.runs, 0)
+            fairness.assert_not_called()
+            run.assert_not_called()
 
     def test_expected_liveness_violation_passes(self) -> None:
         result, rendered, _, count = self.check([(0, SUCCESS), (13, TEMPORAL_BROKEN)], {"Live"})
@@ -249,6 +289,86 @@ class LivenessCfgTest(unittest.TestCase):
         timeout, _, _, _ = self.check([(0, SUCCESS), tlc.CheckError("timed out")], set())
         self.assertIn("timed out", timeout.error or "")
         self.assertIn("limit 60 s per config", timeout.error or "")
+
+
+class FairnessCheckTest(unittest.TestCase):
+    def check(self, output: tuple[int, str] | Exception) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.object(tlc, "run_java", create=True) as run:
+                if isinstance(output, Exception):
+                    run.side_effect = output
+                else:
+                    run.return_value = output
+                tlc.check_fairness("java", root / "tla2tools.jar", root, "M", "fairness.cfg", 123.0)
+            self.assertEqual(run.call_count, 1)
+            self.assertEqual(run.call_args.args[-1], 123.0)
+
+    def test_preflight_requires_one_success_with_applied_assumptions_and_properties(self) -> None:
+        good = "STATECHART_FAIRNESS_OK assumptions=5 properties=1\n"
+        self.check((0, "SANY finished.\n" + good))
+        for output in ((1, good), (0, "SANY finished.\n"),
+                       (0, "STATECHART_FAIRNESS_OK assumptions=0 properties=1\n"),
+                       (0, "STATECHART_FAIRNESS_OK assumptions=5 properties=0\n"), (0, good + good)):
+            with self.subTest(output), self.assertRaises(tlc.CheckError):
+                self.check(output)
+
+    def test_preflight_timeout_is_an_error(self) -> None:
+        with self.assertRaisesRegex(tlc.CheckError, "timed out"):
+            self.check(tlc.CheckError("timed out"))
+
+
+@unittest.skipUnless(os.environ.get("TLA2TOOLS"), "set TLA2TOOLS to run real TLC regressions")
+class FairnessIntegrationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.jar = Path(os.environ["TLA2TOOLS"]).expanduser().resolve()
+        self.java = os.environ.get("JAVA", "java")
+
+    def test_unused_fairness_definition_does_not_satisfy_selected_specification(self) -> None:
+        source = SCRIPT_PATH.parents[2] / "docs/statecharts/execution-authority"
+        original = (source / "ExecutionAuthority.tla").read_text(encoding="utf-8")
+        spec = "Spec == Init /\\ [][Next]_vars /\\ Fairness"
+        self.assertEqual(original.count(spec), 1)
+        without_fairness = original.replace(spec, "Spec == Init /\\ [][Next]_vars")
+        self.assertIn("Fairness ==", without_fairness)
+        self.assertIn("WF_vars(TickObserves)", without_fairness)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "ExecutionAuthority.tla").write_text(without_fairness, encoding="utf-8")
+            cfg = "ExecutionAuthorityMain.cfg"
+            (root / cfg).write_bytes((source / cfg).read_bytes())
+            (root / "expected.tsv").write_text(
+                f"{cfg}\tExecutionAuthority\t-\tAdmissionResumes\n", encoding="utf-8")
+            module, expected = tlc.read_expected(root / "expected.tsv")[cfg]
+            with mock.patch.object(tlc, "run_tlc", wraps=tlc.run_tlc) as run:
+                result = tlc.check_cfg(root, cfg, module, expected, self.java, self.jar, 60)
+            self.assertIn("fairness", (result.error or "").lower())
+            self.assertTrue(result.problems())
+            self.assertEqual(result.broken, set())
+            self.assertEqual(result.runs, 0)
+            run.assert_not_called()
+
+    def test_review_model_without_symmetry_detects_live_violation(self) -> None:
+        model = r"""---- MODULE M ----
+EXTENDS TLC
+CONSTANTS a, b
+VARIABLE x
+Init == x \in {a, b}
+Next == x' \in {a, b}
+Spec == Init /\ [][Next]_x /\ WF_x(Next)
+Live == \E p \in {a, b}: <>[] (x = p)
+Sym == Permutations({a, b})
+====
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "M.tla").write_text(model, encoding="utf-8")
+            (root / "M.cfg").write_text("CONSTANTS a = a b = b\nSPECIFICATION Spec\nPROPERTY Live\n",
+                                        encoding="utf-8")
+            result = tlc.check_cfg(root, "M.cfg", "M", set(), self.java, self.jar, 60)
+            self.assertIsNone(result.error)
+            self.assertEqual(result.broken, {"Live"})
+            self.assertIn("Live: newly broken", result.problems()[0])
 
 
 class ExpectedTest(unittest.TestCase):
