@@ -120,16 +120,23 @@ def compare(accepted, candidate, moves):
         unknown_ids = {row["id"] for row in candidate["indeterminate_dependencies"]}
         moved_reverse = {row["old_id"]: row["new_id"] for row in moves["moves"]
                          if row["section"] == "reverse_dependencies"}
-        # Accepted reverse debt that resurfaces as indeterminate still blocks.
-        reverse_ids = old["reverse_dependencies"].keys() | zeros["reverse_dependencies"].keys()
-        hidden_reverse = reverse_ids | {moved_reverse.get(identity, identity) for identity in reverse_ids}
+        # Accepted reverse debt must not resurface as indeterminate or unresolved references,
+        # whatever the reference kind: match endpoints, and block coverage growth in a source
+        # module whose reverse debt shrank.
+        accepted_reverse = {**zeros["reverse_dependencies"], **old["reverse_dependencies"]}
+        hidden_reverse = accepted_reverse.keys() | {moved_reverse.get(i, i) for i in accepted_reverse}
+        reverse_ends = {(row["source"], row["target"]) for row in accepted_reverse.values()}
+        shrunk_sources = {row["source"] for identity, row in old["reverse_dependencies"].items()
+                          if current["reverse_dependencies"].get(identity, {"count": 0})["count"] < row["count"]}
         for section in SECTIONS:
             for identity, row in sorted(current[section].items()):
                 previous = old[section].get(identity, {"count": 0})["count"]
                 if row["count"] > previous:
                     code = "zero-rule" if identity in zeros[section] else "increase" if previous else "new-id"
-                    blocking = section in BLOCKING_SECTIONS or (
-                        section == "indeterminate_dependencies" and identity in hidden_reverse)
+                    blocking = (section in BLOCKING_SECTIONS or row.get("source") in shrunk_sources
+                                or (section == "indeterminate_dependencies"
+                                    and (identity in hidden_reverse
+                                         or (row["source"], row["target"]) in reverse_ends)))
                     (errors if blocking else warnings).append({
                         "code": code, "section": section, "id": identity,
                         "baseline_count": previous, "current_count": row["count"],

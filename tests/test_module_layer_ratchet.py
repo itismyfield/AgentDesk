@@ -38,8 +38,9 @@ class ModuleLayerRatchetTest(unittest.TestCase):
                 "target": target, "kind": kind, "count": count}
 
     @staticmethod
-    def uncertainty(label="unresolved", count=2):
-        return {"id": _id("uncertainty", label), "count": count}
+    def uncertainty(label="unresolved", count=2, source=None):
+        row = {"id": _id("uncertainty", label), "count": count}
+        return row if source is None else {**row, "source": "src/lib.rs::crate::" + source}
 
     @staticmethod
     def moves(*records):
@@ -126,6 +127,27 @@ class ModuleLayerRatchetTest(unittest.TestCase):
                 self.assert_error(result, "indeterminate_dependencies", indeterminate["id"])
                 self.assertFalse(any(row.get("section") == "reverse_dependencies" and row.get("id") == original["id"]
                                      for row in result["decreases"]), result)
+
+    def test_reverse_debt_turning_into_an_unresolved_glob_reference_is_error(self):
+        reverse = self.edge(count=1)
+        accepted = self.snapshot([reverse])
+        hidden = self.snapshot(uncertainties=[self.uncertainty("glob", 1, source="lower")])
+        self.assert_error(self.compare(accepted, hidden), "uncertainties")
+        with self.assertRaises(ValueError):
+            self.ratchet.reduced_baseline(accepted, hidden, self.moves())
+        unrelated = self.snapshot(uncertainties=[self.uncertainty("glob", 1, source="other")])
+        result = self.compare(accepted, unrelated)
+        self.assert_warning_only(result, "uncertainties")
+        self.assertTrue(any(row.get("id") == reverse["id"] for row in result["decreases"]), result)
+
+    def test_reverse_debt_changing_reference_kind_into_indeterminate_is_error(self):
+        for accepted_kind, current_kind in (("import", "path"), ("path", "import")):
+            with self.subTest(accepted=accepted_kind, current=current_kind):
+                reverse = self.edge(kind=accepted_kind)
+                kept = self.snapshot([reverse], indeterminate=[self.edge(kind=current_kind, count=1)])
+                self.assert_error(self.compare(self.snapshot([reverse]), kept), "indeterminate_dependencies")
+                moved = self.snapshot(indeterminate=[self.edge(kind=current_kind)])
+                self.assert_error(self.compare(self.snapshot([reverse]), moved), "indeterminate_dependencies")
 
     def test_changed_indeterminate_target_warns_even_with_equal_totals(self):
         old, replacement = self.edge("mixed", "old"), self.edge("mixed", "new")
