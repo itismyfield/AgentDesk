@@ -57,6 +57,10 @@ impl ScriptedTmux {
         let script = r#"#!/bin/sh
 d='@D@'
 echo "$*" >> "$d/argv"
+if [ "$2" = "$(cat "$d/hold" 2>/dev/null)" ] && [ ! -f "$d/held" ]; then
+  touch "$d/held"; n=0
+  while [ ! -f "$d/go" ] && [ $n -lt 1000 ]; do sleep 0.01; n=$((n + 1)); done
+fi
 case "$2" in
 display-message) for last do :; done; case "$last" in '#{pane_dead}'|'#{pane_in_mode}') echo 0 ;; *) echo 1 ;; esac ;;
 capture-pane) cat "$d/screen" ;;
@@ -89,6 +93,12 @@ exit 0
 
     pub(crate) fn show(&self, screen: &str) {
         fs::write(self.dir.path().join("screen"), screen).unwrap();
+    }
+
+    /// Holds the first `subcommand` call until `go` exists; `held` appears once it waits.
+    pub(crate) fn hold_first(&self, subcommand: &str) -> (PathBuf, PathBuf) {
+        fs::write(self.dir.path().join("hold"), subcommand).unwrap();
+        (self.dir.path().join("held"), self.dir.path().join("go"))
     }
 
     /// Fails the `n`-th payload write, counted from 0.
@@ -1109,3 +1119,28 @@ pub(crate) async fn owner_retry_leaf(
 
 #[path = "first_key_gate_tests.rs"]
 mod first_key_gate;
+
+/// A warm write under `token`'s receipt sink on a scripted idle pane; with `stop`, a stop decides
+/// while the writer reads the composer, after its cancel check. Returns the payload writes.
+pub(crate) fn gated_warm_write(token: &Arc<CancelToken>, stop: bool) -> Vec<String> {
+    use crate::services::provider::cancel_token_claude_interrupt::StopCancel;
+    let tmux = ScriptedTmux::new(&view("", false));
+    let stopper = stop.then(|| {
+        let (held, go) = tmux.hold_first("capture-pane");
+        let token = token.clone();
+        std::thread::spawn(move || {
+            wait("the writer reads the composer", || held.exists());
+            let decided = StopCancel::decide(Some(token), "!stop".into());
+            fs::write(go, "").unwrap();
+            matches!(decided, StopCancel::Published(_))
+        })
+    });
+    let sent = guarded_outcome::with_receipt_sink(Some(token), || {
+        super::super::send_warm_followup_owned("gated-warm", "gated question", None)
+    });
+    if let Some(stopper) = stopper {
+        assert!(stopper.join().unwrap(), "the stop published main's cancel");
+        assert!(sent.is_err(), "a stopped write reports no submit: {sent:?}");
+    }
+    tmux.sends()
+}

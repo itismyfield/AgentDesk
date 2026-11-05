@@ -1612,4 +1612,94 @@ mod tests {
     fn dispatch_send_deadline_is_below_reservation_ttl() {
         assert!((DISPATCH_SEND_DEADLINE_SECS as i64) < DISPATCH_DELIVERY_RESERVATION_TTL_SECS);
     }
+
+    /// Retention keeps the typed rows the guard reads: an old notify `sent` row still
+    /// blocks a resend, and a failed-only key still numbers its next attempt.
+    #[tokio::test]
+    async fn delivery_guard_and_attempts_answer_the_same_after_retention() {
+        let pg_db = create_test_pg_db().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let (sent, failed) = ("dispatch-retained-sent", "dispatch-retained-failed");
+        seed_dispatch(&pool, sent).await;
+        seed_dispatch(&pool, failed).await;
+        let mut rows = Vec::new();
+        for (dispatch, status, attempt, channel, message, age) in [
+            (sent, "sent", 1, "'chan-old'", "'msg-old'", 104),
+            (sent, "failed", 2, "'chan-old'", "NULL", 103),
+            (sent, "failed", 3, "'chan-old'", "NULL", 102),
+            (failed, "failed", 1, "NULL", "NULL", 104),
+            (failed, "failed", 2, "NULL", "NULL", 103),
+        ] {
+            rows.push(format!(
+                "('{dispatch}', 'dispatch:{dispatch}', 'dispatch:{dispatch}:notify', '{status}', \
+                 {attempt}, {channel}, {message}, NOW() - INTERVAL '{age} days', \
+                 NOW() - INTERVAL '{age} days')"
+            ));
+        }
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "UPDATE task_dispatches SET status = 'failed' WHERE id IN ('{sent}', '{failed}'); \
+             INSERT INTO dispatch_delivery_events (dispatch_id, correlation_id, \
+             semantic_event_id, status, attempt, target_channel_id, message_id, created_at, \
+             updated_at) VALUES {}",
+            rows.join(", ")
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let transport = RecordingDispatchTransport::new("chan-new", "msg-new");
+        let guard = || {
+            send_dispatch_with_delivery_guard(
+                Some(&pool),
+                "agent",
+                "title",
+                "card",
+                sent,
+                &transport,
+            )
+        };
+        let delivered = |result: DispatchNotifyDeliveryResult| {
+            (result.status, result.target_channel_id, result.message_id)
+        };
+        let before = delivered(guard().await.unwrap());
+        let report =
+            crate::services::maintenance::jobs::db_retention::db_retention_job(&pool, false)
+                .await
+                .unwrap();
+        let after = delivered(guard().await.unwrap());
+        let prior = (
+            "duplicate".to_string(),
+            Some("chan-old".to_string()),
+            Some("msg-old".to_string()),
+        );
+        assert_eq!((before, after), (prior.clone(), prior));
+        assert_eq!(transport.calls(), 0, "the kept sent row blocks both sends");
+        assert_eq!(
+            report
+                .summary()
+                .iter()
+                .find(|s| s.starts_with("dispatch_delivery_events:delete=")),
+            Some(&"dispatch_delivery_events:delete=2".to_string()),
+            "one superseded failed attempt of each dispatch goes"
+        );
+
+        assert!(
+            insert_reserved_dispatch_delivery_event_pg(&pool, failed, None, None)
+                .await
+                .unwrap()
+        );
+        let next: i32 = sqlx::query_scalar(
+            "SELECT attempt FROM dispatch_delivery_events WHERE dispatch_id = $1 AND status = 'reserved'",
+        )
+        .bind(failed)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            next, 3,
+            "the kept latest attempt still numbers the next one"
+        );
+        pool.close().await;
+        pg_db.drop().await;
+    }
 }

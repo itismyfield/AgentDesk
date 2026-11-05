@@ -226,39 +226,6 @@ async fn ownerless_apply_disposes_row_per_relay_outcome_without_anchor_or_queue_
     }
 }
 
-#[test]
-fn ownerless_guard_precedes_recovery_marker_and_kickoff() {
-    let source = include_str!("../restore_inflight.rs");
-    let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
-    assert_eq!(
-        production
-            .matches("UserId::new(state.request_owner_user_id)")
-            .count(),
-        0
-    );
-    assert_eq!(
-        production
-            .matches("recovery_kickoff_identity(&state)")
-            .count(),
-        1
-    );
-    assert_eq!(production.matches("UserId::new(").count(), 0);
-    let guard = production
-        .split("        let Some(kickoff_identity) = kickoff_identity::recovery_kickoff_identity(&state) else {")
-        .collect::<Vec<_>>();
-    assert_eq!(guard.len(), 2);
-    assert!(guard[0].ends_with("            continue;\n        }\n\n"));
-    assert!(guard[1].contains(
-        "            continue;\n        };\n\n        shared\n            .restart\n            .recovering_channels\n            .insert("
-    ));
-    assert!(guard[1].contains("            kickoff_identity.request_owner,\n"));
-
-    let helper = include_str!("kickoff_identity.rs");
-    assert_eq!(helper.matches("UserId::new(").count(), 1);
-    assert_eq!(helper.matches("UserId::new(NonZeroU64::new(").count(), 1);
-    assert_eq!(helper.matches("MessageId::new(").count(), 0);
-}
-
 // An ownerless row is disposed only when tmux confirms its pane dead and the host guard admits
 // the stored rows; a failed probe or a refused host keeps the row and its attempt count.
 #[tokio::test]

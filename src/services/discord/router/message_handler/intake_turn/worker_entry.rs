@@ -217,3 +217,6 @@ mod preserve_cancel_tests;
 
 #[cfg(all(test, unix))]
 mod goal_fresh_pg_tests;
+
+#[cfg(all(test, unix))]
+mod dispatch_guard_pg_tests;
