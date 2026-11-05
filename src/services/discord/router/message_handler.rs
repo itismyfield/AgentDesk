@@ -51,6 +51,8 @@ mod intake_turn;
 mod latency_spans;
 mod pre_admission_control;
 mod provider_dispatch;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use self::provider_dispatch::hand_busy;
 mod provider_isolation;
 mod tui_followup;
 mod turn_lifecycle;
