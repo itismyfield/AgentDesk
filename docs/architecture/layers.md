@@ -247,6 +247,36 @@ vocabulary다. 진행 중인 `fix/i7755-owned-input-stop`과 겹치는
 C2와 같은 동일 source의 정확한 판정 불가→역방향 편입 계약을 적용하며,
 기존 역방향 양수 record와 zero-rule 한도를 올리지 않는다. TSV는 생성기 입력이 아니다.
 
+### Cluster·Herdr 실행과 provider hosting
+
+`services::cluster`의 node 배치·용량·라우팅 정책은 application이다.
+SQL 저장·process registry·환경 및 config snapshot·machine 관측·relay 실행은
+더 긴 adapter prefix로 구분한다. intake worker의 Discord turn 실행과 fallback 안내는
+별도 discord 경계다. `intake_router_hook::model`, attachment uploads,
+stream frame·terminal resolution은 vocabulary 값 계약이며, 상위 실행 타입을 참조하는
+부분은 정확한 역방향 부채로 남긴다. owner_record의 PG/CAS 실행과
+`owner_record::fallback`의 입력 배치 정책(application)도 구분한다.
+
+`cluster::session_matcher`는 adapter다. rollout path를 만드는
+`src/services/cluster/session_matcher.rs:409`·:436이
+`src/services/tmux_common.rs:1131`의 `session_temp_path`를 거쳐
+같은 파일 :1068·:1076의 lazy 디렉터리 보장 I/O로 이어진다.
+주석의 순수 함수 표현이나 문자열 계산만으로 모듈 전체를 foundation으로 내리지 않는다.
+stream relay의 `source_read_proof`와 metadata·enqueue가 섞인 identity도 adapter다.
+
+`services::herdr_launch`의 PG/CAS·pane·launch evidence 실행, `herdr_admission`의
+stop-file·환경 관측, `provider_hosting`의 registry·driver 선택은 adapter다.
+`herdr_launch::policy`의 요청 값·permit future·grant store trait은 vocabulary이며,
+미도입 구현은 오류만 반환한다. provider_hosting의 같은 prefix 미분류 항목은 제거한다.
+
+편입 증거는 생성기의 `--report` 출력인
+[`module-layer-c4-admission.tsv`](module-layer-c4-admission.tsv)에 기록한다.
+진행 중 레인 ref를 시작과 최종 검증 때 대조하여 C4 대상과 겹치지 않음을 확인했다.
+C2·C3 known 층, owner_input의 기존 분류와 C6 보류, history 7개 보류는 유지한다.
+`services::tui_o::turn_mode`의 application 정교화는 후속으로 남기고 이번에는 적용하지 않는다.
+동일 source의 정확한 판정 불가→역방향 ID·count만 편입하며, 기존 역방향 양수 record와
+zero-rule의 한도를 올리지 않는다. TSV는 검토 증거이고 생성기 입력이 아니다.
+
 ## 검토된 모듈 이동의 old→new 대응
 
 이동 대응은 [`layer_moves.toml`](../../scripts/audit_maintainability/layer_moves.toml)에 적는다.
