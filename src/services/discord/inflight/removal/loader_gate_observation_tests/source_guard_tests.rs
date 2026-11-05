@@ -62,7 +62,7 @@ const ARMS: [(&str, &str); 3] = [
 const MARKS: [&str; 3] = [
     "if !unchanged {",
     "emit_loader_generation_gate_allowed(",
-    "crate::services::discord::inflight::row_removed::unlink(&path)",
+    "row_removed::unlink(",
 ];
 const UNLINK: &str = "row_removed::unlink(";
 const WITNESS: &str = "fn public_loader_observes_production_shaped_published_routes()";
@@ -190,13 +190,12 @@ fn reaper_gaps(owned: &Lexed, reaper: &str) -> Vec<String> {
     if marks.iter().any(Option::is_none) || !marks.is_sorted() {
         gaps.push(format!("reaper order {MARKS:?} broken: {marks:?}"));
     }
-    if owned.count(UNLINK)
-        + reaper.count(UNLINK)
-        + owned.count("fs::remove_file(")
-        + reaper.count("fs::remove_file(")
-        != 2
-    {
-        gaps.push(format!("loader and reaper must hold two {UNLINK}"));
+    let observed = owned.count(UNLINK) + reaper.count(UNLINK);
+    let direct = owned.count("fs::remove_file(") + reaper.count("fs::remove_file(");
+    if (direct, observed) != (2, 2) {
+        gaps.push(format!(
+            "loader/reaper unlink pairing {direct}/{observed}, want 2/2"
+        ));
     }
     gaps
 }
@@ -245,13 +244,13 @@ fn loader_gate_guard_rejects_commented_items_and_reordered_reaping() {
     let unlink_first = swap(
         REAPER,
         "if !unchanged {",
-        "if crate::services::discord::inflight::row_removed::unlink(&path).is_ok() {",
+        "if crate::services::discord::inflight::row_removed::unlink(",
     );
     assert!(!judge(&unlink_first, 2).is_empty());
     let observed_late = swap(
         REAPER,
         "emit_loader_generation_gate_allowed(provider, locked, allocation, &path);",
-        "if crate::services::discord::inflight::row_removed::unlink(&path).is_ok() {",
+        "if crate::services::discord::inflight::row_removed::unlink(",
     );
     assert!(!judge(&observed_late, 2).is_empty());
 }
@@ -290,7 +289,7 @@ fn loader_gate_guard_counts_coded_effects_but_not_commented_ones() {
     );
     assert_eq!(
         loader_gate_gaps(&bypass, SCOPED, REAPER),
-        [format!("loader and reaper must hold two {UNLINK}")],
+        ["loader/reaper unlink pairing 3/2, want 2/2"],
         "a direct unlink cannot bypass the physical-site count"
     );
     let preamble = "use super::*;\n";

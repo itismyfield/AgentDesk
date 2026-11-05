@@ -75,7 +75,7 @@ fn mismatch_io_protected_and_other_birth_keep_notification_pending() {
     let bytes = fs::read(&path).unwrap();
     fs::remove_file(&path).unwrap();
     fs::create_dir(&path).unwrap();
-    assert!(unlink(&path).is_err());
+    assert!(unlink(&path, || fs::remove_file(&path)).is_err());
     assert!(!observed.0.removed.load(Ordering::Acquire));
     fs::remove_dir(&path).unwrap();
     fs::write(&path, &bytes).unwrap();
@@ -95,7 +95,7 @@ async fn removal_before_wait_is_latched_and_duplicates_cannot_add_wakes() {
     let (path, row) = seed();
     let observed = watch(&ProviderKind::Claude, CHANNEL).unwrap().unwrap();
     let signal = observed.0.clone();
-    unlink(&path).unwrap();
+    unlink(&path, || fs::remove_file(&path)).unwrap();
     removed(&path, Some(InflightEpisodePin::from_state(&row)));
     assert!(signal.removed.load(Ordering::Acquire));
     observed.removed().await;

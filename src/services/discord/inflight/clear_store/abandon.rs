@@ -238,7 +238,8 @@ fn request_inflight_abandon_matching_in_root(
         "request_inflight_abandon_if_matches",
         &path,
     );
-    match crate::services::discord::inflight::row_removed::unlink(&path) {
+    match crate::services::discord::inflight::row_removed::unlink(&path, || fs::remove_file(&path))
+    {
         Ok(()) => GuardedClearOutcome::Cleared,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
         Err(error) => {

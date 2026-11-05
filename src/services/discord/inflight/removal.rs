@@ -372,7 +372,9 @@ pub(super) fn invalidate_stale_generation_in_root(
             "invalidate_stale_generation_boot",
             &path,
         );
-        if crate::services::discord::inflight::row_removed::unlink(&path).is_ok() {
+        if crate::services::discord::inflight::row_removed::unlink(&path, || fs::remove_file(&path))
+            .is_ok()
+        {
             // Only emit observability when called via the env wrapper —
             // raw `_in_root` calls are unit tests and we want to keep
             // them deterministic.

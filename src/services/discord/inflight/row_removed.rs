@@ -77,9 +77,12 @@ pub(super) fn removed(path: &Path, pin: Option<InflightEpisodePin>) {
         true
     });
 }
-pub(super) fn unlink(path: &Path) -> std::io::Result<()> {
+pub(super) fn unlink(
+    path: &Path,
+    remove: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
     let pin = capture(path);
-    fs::remove_file(path)?;
+    remove()?;
     sync_removed(path);
     removed(path, pin);
     Ok(())

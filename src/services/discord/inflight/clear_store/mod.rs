@@ -76,7 +76,8 @@ pub(crate) fn clear_inflight_state(provider: &ProviderKind, channel_id: u64) -> 
         return false;
     }
     log_inflight_remove_for_path(provider, channel_id, "clear_inflight_state", &path);
-    crate::services::discord::inflight::row_removed::unlink(&path).is_ok()
+    crate::services::discord::inflight::row_removed::unlink(&path, || fs::remove_file(&path))
+        .is_ok()
 }
 
 /// Outcome of an explicit-signal cleanup attempt that is guarded against
@@ -480,7 +481,8 @@ pub(in crate::services::discord) fn clear_inflight_state_if_matches_in_root(
         "clear_inflight_state_if_matches",
         &path,
     );
-    match crate::services::discord::inflight::row_removed::unlink(&path) {
+    match crate::services::discord::inflight::row_removed::unlink(&path, || fs::remove_file(&path))
+    {
         Ok(()) => GuardedClearOutcome::Cleared,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
         Err(error) => {
@@ -560,7 +562,8 @@ pub(in crate::services::discord) fn clear_inflight_state_if_matches_zero_owned_i
         "clear_inflight_state_if_matches_zero_owned",
         &path,
     );
-    match crate::services::discord::inflight::row_removed::unlink(&path) {
+    match crate::services::discord::inflight::row_removed::unlink(&path, || fs::remove_file(&path))
+    {
         Ok(()) => GuardedClearOutcome::Cleared,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
         Err(error) => {
@@ -598,7 +601,7 @@ pub(super) fn clear_inflight_state_if_matches_identity_generation_in_root(
 
 /// Removes a locked row's file; a peer's earlier removal is `Missing`.
 fn remove_row(path: &std::path::Path) -> std::io::Result<GuardedClearOutcome> {
-    match crate::services::discord::inflight::row_removed::unlink(path) {
+    match crate::services::discord::inflight::row_removed::unlink(path, || fs::remove_file(path)) {
         Ok(()) => Ok(GuardedClearOutcome::Cleared),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             Ok(GuardedClearOutcome::Missing)
@@ -647,7 +650,8 @@ pub(super) fn clear_lifecycle_inflight_state_if_matches_identity_after_death_evi
         "clear_lifecycle_inflight_state_if_matches_identity_after_death_evidence",
         &path,
     );
-    match crate::services::discord::inflight::row_removed::unlink(&path) {
+    match crate::services::discord::inflight::row_removed::unlink(&path, || fs::remove_file(&path))
+    {
         Ok(()) => GuardedClearOutcome::Cleared,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
         Err(error) => {
@@ -748,7 +752,9 @@ pub(super) fn clear_inflight_state_if_matches_identity_after_delivery_in_root(
         "clear_inflight_state_if_matches_identity_after_delivery",
         &path,
     );
-    let outcome = match crate::services::discord::inflight::row_removed::unlink(&path) {
+    let outcome = match crate::services::discord::inflight::row_removed::unlink(&path, || {
+        fs::remove_file(&path)
+    }) {
         Ok(()) => GuardedClearOutcome::Cleared,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
         Err(error) => {
@@ -814,7 +820,8 @@ pub(super) fn clear_inflight_state_if_matches_tmux_response_in_root(
         "clear_inflight_state_if_matches_tmux_response",
         &path,
     );
-    match crate::services::discord::inflight::row_removed::unlink(&path) {
+    match crate::services::discord::inflight::row_removed::unlink(&path, || fs::remove_file(&path))
+    {
         Ok(()) => GuardedClearOutcome::Cleared,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
         Err(error) => {
