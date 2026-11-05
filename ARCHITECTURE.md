@@ -2145,6 +2145,7 @@ src/
 │   │   │   │   ├── root_replaced_recovery_tests/
 │   │   │   │   │   ├── clear_tests.rs
 │   │   │   │   │   ├── legacy_clear_tests.rs
+│   │   │   │   │   ├── policy_tests.rs
 │   │   │   │   │   └── recheck_tests.rs
 │   │   │   │   ├── tui_followup/
 │   │   │   │   │   ├── busy_notice.rs

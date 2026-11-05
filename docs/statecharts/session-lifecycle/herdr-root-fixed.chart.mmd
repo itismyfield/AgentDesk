@@ -1,0 +1,52 @@
+---
+title: "Herdr root replacement: produce policy evidence before capturing the target"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Recovery
+    lg1: Complete
+  }
+  class lg0 blue
+  class lg1 teal
+  s0: Old execution and exact binding
+  s1: dcserver evidence lost
+  s2: New Herdr witness, pane inventory pending
+  s3: Herdr ready, old binding retained
+  s4: Read the exact old binding#59; no input
+  s5: RootReplaced candidate, policy preparation#59; no input
+  s6: Current startup evidence available#59; no input
+  s7: New target copies current evidence#59; no input
+  s8: Exact policy and end proof pass#59; no input
+  s9: Old row Retired, hold cleanup
+  s10: New execution Pending before create
+  s11: New pane recorded
+  s12: New execution Bound
+  s13: Input sent once to the new execution
+  [*] --> s0
+  s0 --> s1: dcserver restarts with empty process cache
+  s1 --> s2: Herdr starts with a different server witness
+  s2 --> s3: the pane inventory has a different root
+  s3 --> s4: restart reconciliation completes
+  s4 --> s5: reader compares the exact pane root
+  s5 --> s6: verify peer, config and server startup provenance
+  s6 --> s7: capture a new target after policy preparation
+  s7 --> s8: check policy, lone shell, originals and server witness
+  s8 --> s9: recheck current row, quiet and final proof, then CAS
+  s9 --> s10: reserve Pending on the retired row
+  s10 --> s11: create one physical pane with a current create permit
+  s11 --> s12: record evidence and bind the fresh execution
+  s12 --> s13: send the original input once
+  class s0 blue
+  class s1 blue
+  class s2 blue
+  class s3 blue
+  class s4 blue
+  class s5 blue
+  class s6 blue
+  class s7 blue
+  class s8 blue
+  class s9 blue
+  class s10 blue
+  class s11 blue
+  class s12 blue
+  class s13 teal

@@ -52,7 +52,10 @@ pub(crate) struct SocketHerdrLaunchHost {
     endpoints: Vec<(HerdrEndpoint, Arc<HerdrSocketTransport>)>,
     policy: ProofCache,
     sources: Vec<Arc<dyn PeerSource>>,
+    #[cfg(test)]
+    checker: Option<Arc<dyn super::policy::ConfigChecker>>,
     witnessed: Mutex<HashMap<HerdrLaunchEndpoint, ServerWitness>>,
+    prepared_existing: tokio::sync::Mutex<HashMap<HerdrLaunchEndpoint, PreparedPolicy>>,
     grants: Mutex<GrantCache>,
     grant_store: super::policy::grant_store::FileGrantStore,
     next_id: AtomicU64,
@@ -64,6 +67,12 @@ pub(crate) struct SocketHerdrLaunchHost {
 struct CachedGrant {
     grant: LaunchAdmissionGrant,
     remembered: bool,
+}
+
+struct PreparedPolicy {
+    witness: ServerWitness,
+    file: super::policy::file::FileToken,
+    result: Result<(), Unverified>,
 }
 
 #[derive(Default)]
@@ -206,7 +215,10 @@ impl SocketHerdrLaunchHost {
             endpoints,
             policy: ProofCache::default(),
             sources,
+            #[cfg(test)]
+            checker: None,
             witnessed: Mutex::default(),
+            prepared_existing: tokio::sync::Mutex::default(),
             grants: Mutex::new(grants),
             grant_store: super::policy::boot_grants::store(),
             next_id: AtomicU64::new(1),
@@ -251,7 +263,10 @@ impl SocketHerdrLaunchHost {
         Result<super::policy::NextRestartProof, Unverified>,
         serde_json::Value,
     ) {
-        let mut checked = self.policy.next_restart(source, &LocalChecker).await;
+        let checker: &dyn super::policy::ConfigChecker = &LocalChecker;
+        #[cfg(test)]
+        let checker = self.checker.as_deref().unwrap_or(checker);
+        let mut checked = self.policy.next_restart(source, checker).await;
         if let Ok(proof) = &checked {
             match self.witnessed.lock() {
                 Ok(mut witnessed) => _ = witnessed.insert(launch.clone(), proof.witness().clone()),
@@ -261,6 +276,90 @@ impl SocketHerdrLaunchHost {
         let socket = Path::new(&launch.socket_addr);
         let observation = super::policy::diagnostics::record(socket, &self.policy, &checked);
         (checked, observation)
+    }
+
+    /// Remember settled admission observations per server/config incarnation; strict targets
+    /// still decide whether the observation actually proved this server's startup policy.
+    pub(crate) async fn prepare_existing_policy(
+        &self,
+        launch: &HerdrLaunchEndpoint,
+        nonce: &str,
+    ) -> Result<(), Unverified> {
+        let (endpoint, transport) = self.endpoint(launch).ok_or(Unverified::Peer)?;
+        if endpoint.mode() != EndpointMode::UserDefault {
+            return Ok(());
+        }
+        let evidence = self.mutation_evidence(endpoint, nonce)?;
+        let transport = transport.clone();
+        let current = tokio::task::spawn_blocking(move || transport.server_witness())
+            .await
+            .map_err(|_| Unverified::Peer)?
+            .map_err(|_| Unverified::Peer)?;
+        match ExistingMutationPermit::issue(launch, nonce, current.clone(), &evidence) {
+            Ok(_) => return Ok(()),
+            Err(Unverified::Identity) => {}
+            Err(why) => return Err(why),
+        }
+        let source = self.source(launch).ok_or(Unverified::Peer)?;
+        let read = source.clone();
+        let witness = current.clone();
+        let file = tokio::task::spawn_blocking(move || {
+            let peer = read.snapshot()?;
+            if peer.witness != witness {
+                return Err(Unverified::Changed);
+            }
+            super::policy::file::read(&peer.config).map(|read| read.token)
+        })
+        .await
+        .map_err(|_| Unverified::Peer)??;
+        let mut prepared = self.prepared_existing.lock().await;
+        if let Some(old) = prepared.get(launch)
+            && old.witness == current
+            && old.file == file
+        {
+            return old.result;
+        }
+        let (checked, _) = self.observe_policy_from(launch, source).await;
+        let result = checked.map(|_| ());
+        // Observation I/O and races remain retryable on the next reader pass.
+        let remember = match result {
+            Ok(()) => true,
+            Err(
+                Unverified::Peer
+                | Unverified::File
+                | Unverified::Changed
+                | Unverified::Timeout
+                | Unverified::Identity
+                | Unverified::Cache,
+            ) => false,
+            Err(
+                Unverified::Unsupported
+                | Unverified::Ambiguous
+                | Unverified::ResumeEnabled
+                | Unverified::ConfigInvalid
+                | Unverified::Checker
+                | Unverified::Diagnostics,
+            ) => true,
+            #[cfg(target_os = "macos")]
+            Err(Unverified::ImageFilesystemUnsupported) => false,
+            #[cfg(target_os = "macos")]
+            Err(
+                Unverified::ImageChangedSinceStart
+                | Unverified::ImageTimeAmbiguous
+                | Unverified::ImageLayoutUnsupported,
+            ) => true,
+        };
+        if remember {
+            prepared.insert(
+                launch.clone(),
+                PreparedPolicy {
+                    witness: current,
+                    file,
+                    result,
+                },
+            );
+        }
+        result
     }
 
     fn source(&self, launch: &HerdrLaunchEndpoint) -> Option<Arc<dyn PeerSource>> {
@@ -345,6 +444,27 @@ impl SocketHerdrLaunchHost {
             }
             _ => GrantedServer::Kept,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_policy_source_for_test(mut self, source: Arc<dyn PeerSource>) -> Self {
+        self.sources = vec![source];
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_policy_checker_for_test(
+        mut self,
+        checker: Arc<dyn super::policy::ConfigChecker>,
+    ) -> Self {
+        self.checker = Some(checker);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_transport_for_test(mut self, transport: Arc<HerdrSocketTransport>) -> Self {
+        self.endpoints[0].1 = transport;
+        self
     }
 
     #[cfg(test)]
