@@ -73,7 +73,16 @@ impl IntakeRig {
     }
 
     async fn busy_with_screen(id: u64, screen: String) -> Self {
-        Self::build(id, true, ProviderKind::Claude, None, false, None, Some(screen)).await
+        Self::build(
+            id,
+            true,
+            ProviderKind::Claude,
+            None,
+            false,
+            None,
+            Some(screen),
+        )
+        .await
     }
 
     async fn with_storage(
