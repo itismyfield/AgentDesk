@@ -132,7 +132,7 @@ async fn start_channel_name(
         Some(ctx) => resolve_channel_category(&ctx.http, None, channel).await.0,
         None => None,
     };
-    let registered = super::super::super::adk_session::registered_channel_fallback_name;
+    let registered = crate::services::discord::adk_session::registered_channel_fallback_name;
     looked_up.or_else(|| registered(channel, &shared.provider))
 }
 
