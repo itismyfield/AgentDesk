@@ -389,10 +389,8 @@ mod tests {
             .unwrap_or_else(|err| panic!("read `{sql}`: {err}"))
     }
 
-    /// Ledger and link tables lose only aged rows no live reader can still pick: the
-    /// redrive key of an existing outbox row, an open run's entry transitions, a live
-    /// entry's latest and latest `skipped` transition, and the delivery rows the guard and
-    /// reconciler read all stay, and those readers answer as before.
+    /// Ledger tables lose only aged rows no live reader can still pick, and the redrive
+    /// and phase-gate readers answer as before.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn db_retention_keeps_ledger_rows_live_readers_still_use() {
         let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
