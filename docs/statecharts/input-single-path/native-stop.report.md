@@ -1,78 +1,80 @@
 # InputNativeStop — 외부 Claude 턴에 넣은 자기 입력의 중단
 
-코드 기준 SHA: `216858a711a6dfea5b18243e947199b461ea9b37` (#7812 착지 직후).
-`s1-2`에서는 busy submit의 빠진 native receipt 연결과 N1·N2 구현 계약을 모델링한다. 구현 시험 결과를 대신하지 않는다.
-`InputOwnership.tla`의 전이와 저장 수명은 바꾸지 않는다.
+코드 좌표 기준 SHA: `f332bd53918fcd3ac9867034f9323b42bf0d8cda`, 병합한 main `dc5c742e40079a724a557ed29378cba6c7dbd75f` (#7788 S2/#7824).
+모델의 fixed는 이 기준 코드에서 지적된 remove-only 흡수와 자동 compact summary 판독을 수리하는 계약이다. 구현 시험의 성공을 뜻하지 않는다.
+기존 Before 두 설정은 처음 설계한 receipt/N1/N2 연결을 각각 끄는 역사적 결함 설정이며, 새 두 Before는 기준 SHA에서 확인한 P1-1/P1-2 판독 결함을 분리한다. `InputOwnership.tla`는 이 변경에서 수정하지 않는다.
 
-| 설정 | `Connected` (N1/N2) | `RunningReceipt` | exit | 상태 / 전이 | 깨진 규칙 |
-|---|---:|---:|---:|---:|---|
-| `InputNativeStopBefore.cfg` | FALSE | TRUE | 1 | 109 / 222 | `OwnInputStops` |
-| `InputNativeStopRunningBefore.cfg` | TRUE | FALSE | 1 | 109 / 222 | `OwnInputStops` |
-| `InputNativeStop.cfg` | TRUE | TRUE | 0 | 109 / 222 | 없음 |
+| 설정 | `Connected` | `RunningReceipt` | `AbsorptionEvidence` | `CompactSummaryNeutral` | exit | 상태 / 전이 | 깨진 규칙 |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `InputNativeStop.cfg` | TRUE | TRUE | TRUE | TRUE | 0 | 433 / 1231 | 없음 |
+| `InputNativeStopBefore.cfg` | FALSE | TRUE | TRUE | TRUE | 1 | 433 / 1231 | `OwnInputStops` |
+| `InputNativeStopRunningBefore.cfg` | TRUE | FALSE | TRUE | TRUE | 1 | 433 / 1231 | `OwnInputStops` |
+| `InputNativeStopAbsorptionBefore.cfg` | TRUE | TRUE | FALSE | TRUE | 1 | 433 / 1231 | `NoForeignEscape`, `OwnInputStops` |
+| `InputNativeStopSummaryBefore.cfg` | TRUE | TRUE | TRUE | FALSE | 1 | 433 / 1231 | `OwnInputStops` |
 
-첫 Before는 running receipt 수리가 있는 상태에서 N1·N2 누락을 분리한다. RunningBefore는 N1·N2가 있는 상태에서 receipt 누락을 분리한다. 기준 SHA의 실제 busy 경로는 두 연결이 모두 없지만 각 누락의 최단 코드 반례는 다른 연결의 유무에 영향을 받지 않는다.
+## 차트와 그림의 범위
 
-N1·N2 수정 전 차트: [native-stop-before.chart.mmd](native-stop-before.chart.mmd) (11상태·29화살표).
-running receipt 수정 전 차트: [native-stop-running-before.chart.mmd](native-stop-running-before.chart.mmd) (11상태·28화살표).
-두 연결을 적용한 차트: [native-stop.chart.mmd](native-stop.chart.mmd) (10상태·28화살표).
-원장을 성공적으로 다시 읽은 `Restart` 16전이는 그림에서 생략하며 TLC는 모두 검사한다. 같은 표시 상태에 머무는 89전이도 그림에 표시하지 않는다. 생략 후에도 모든 표시 상태는 초기 상태에서 도달하고, 모델에 후속 전이가 있는 표시 상태에는 나가는 화살표가 있다.
+- [고친 설정](native-stop.chart.mmd): 13상태/54화살표.
+- [N1/N2 연결 누락](native-stop-before.chart.mmd): 14상태/56화살표.
+- [running receipt 연결 누락](native-stop-running-before.chart.mmd): 14상태/55화살표.
+- [Command 없는 absorption을 놓침](native-stop-absorption-before.chart.mmd): 15상태/57화살표.
+- [compact summary를 foreign user로 오판](native-stop-summary-before.chart.mmd): 14상태/56화살표.
 
-## 규칙과 범위
+TLC는 각 설정에서 같은 433상태/1231전이를 검사한다. view는 원장을 성공적으로 다시 읽은 `Restart` 66전이를 숨긴다. 같은 표시 상태에 머무는 624전이는 tool report에 원래 수가 남는다. 생략한 전이는 TLC 검사에는 포함된다.
+summary를 읽은 token-root를 별도 표시 상태로 나누어 반례의 3번째 단계를 숨기지 않는다. 외부 입력이 섞인 상태의 잘못된 전달은 정상 전달과 다른 표시 상태이며 `NoForeignEscape`의 `breaks` 표식을 보존한다. 각 그림의 모든 표시 상태는 시작 상태에서 도달하고, 종료 결과 상태를 제외하면 나가는 화살표가 남는다.
 
-- `NoForeignEscape`: O-off에서 token 없는 외부 턴에 흡수된 자기 입력의 증거가 없거나, 현재 root 뒤에 외부 입력이 섞이면 Escape 0이다. relay token과 running token의 NativeStop에도 외부 human 입력 섞임은 Escape 0이다. 이미 relay가 claim한 순수 외부 opener의 direct pin Escape 1은 기존 권한이므로 제외한다.
-- `OwnInputStops`: opener 뒤에 흡수된 자기 attempt의 durable 증거가 있거나, running 분기에서 자기 user root가 기록됐으며 외부 입력 섞임이 없으면, 중단 명령은 Escape 1이다. tokenless N2·claim 틈 N1·running receipt 연결을 함께 검사한다.
-- `EnqueueNotAuthority`: tokenless 상태에서 enqueue만 된 자기 입력은 중단 권한을 만들지 않는다. relay가 가진 기존 direct pin 권한을 enqueue가 만든 권한으로 취급하지 않는다.
-- `NoDeadlock`: 최종 결과 뒤에는 `Done` 자가 전이가 있다.
+## 규칙과 모델의 실제 사실
 
-`foreign`은 현재 opener 뒤의 구간 전체를 뜻한다. `OwnerPaste`나 `Absorb`는 이 값을 초기화하지 않으므로 opener와 A 사이·A 뒤·A와 같은 행의 외부 입력을 모두 섞임으로 추상화한다. opener 자체는 외부 입력이지만 섞임에는 포함하지 않는다.
-`attempt = absorbed`는 ledger에 등록된 동일 session의 Discord owner busy attempt와 transcript queued 행의 대응이다. enqueue만 있으면 `enqueued`이며 권한이 생기지 않는다.
-`OwnerPaste` 때 relay가 이미 있으면 기존 `hand_busy`처럼 `child`를 사전 등록한다. paste 뒤의 `RelayClaim`은 이 child를 만들지 않으므로 N1이 필요한 창과 기존 Escape 1 경로를 구별한다.
-`Restart`는 attempt와 transcript 상태를 보존하고 프로세스의 relay token과 child를 제거한다. 원장 읽기 성공과 Unread를 각각 선택하므로 성공 시 같은 판정, 실패 시 Escape 0을 모두 검사한다.
+- `NoForeignEscape`: token 없는 O-off에서 자기 입력 흡수 증거가 없거나 외부 입력이 섞이면 Escape 0이다. token NativeStop의 foreign 입력도 막는다. 이미 relay가 claim한 순수 외부 opener의 direct pin Escape 1은 기존 권한으로 유지한다.
+- `OwnInputStops`: 자기 입력이 실제로 흡수됐거나 running 분기에서 자기 root가 생겼고 foreign 입력이 없으면 Escape 1이다.
+- `EnqueueNotAuthority`: token 없는 상태에서 enqueue만으로 Escape 권한을 만들지 않는다.
+- `NoDeadlock`: 결과 뒤에는 `Done` 자가 전이가 있다.
 
-`OwnerPasteRunning`은 intake가 만들었던 token을 retained 상태로 두고, 실제 붙여넣은 frame과 일치하는 완전한 자기 user 행이 새 native root가 되는 성공 전이다. composer lock 안의 receipt 준비→Applied finish→native pin 관찰을 한 전이로 접는다. `RunningReceipt = FALSE`이면 user 행과 token은 있지만 pin이 없다. 새 user root가 생겼으므로 이전 root 앞 입력은 새 root 뒤의 섞임이 아니며 `foreign`을 초기화한다. 새 root 이후의 `ForeignInput`은 그대로 중단을 막는다.
-이 전이는 enqueue-only나 부분 전송을 성공으로 올리지 않는다. native user root pin은 queued child의 ledger 조회와 별개인 기존 검증 경로이며, 모델의 `readable`은 queued-row ledger 조회만 뜻한다.
+`OwnEvidence`와 `foreign`은 실제 입력 사실이며 판독기가 놓친 사실을 지우지 않는다. `ObservedOwn`/`ObservedForeign`과 summary 판정에서만 Before 상수를 사용한다. 따라서 고치기 위해 불변식을 약화하거나 remove-only/summary 상태를 검증 대상에서 빼지 않는다.
 
-## N1·N2 반례를 코드와 대조
+`OwnerPaste`는 자기 attempt를 enqueue한다. `AbsorbOnly`는 Command 행 없이 `remove(absorbed_mid_turn)`로 실제 흡수되어 `removed` 상태가 된다. 뒤에 오는 `Absorb`(Command)는 같은 입력을 `absorbed`로 바꿀 뿐 두 번째 입력을 만들지 않는다. Command가 먼저 온 뒤의 `AbsorbAfterCommand`도 같은 입력의 idempotent 사건이다. enqueue만 있으면 실제 OwnEvidence가 없다.
+`ForeignAbsorbOnly`는 실제 foreign를 세우고, 구판독(`AbsorptionEvidence=FALSE`)만 그 형식을 놓친다. `CompactSummary`는 같은 SID의 확인된 boolean summary로, 실제 foreign를 세우지 않는다. 일반 user/false/문자열 true/SID 불일치는 이 행동이 아닌 `ForeignInput`에 속한다.
 
-`OwnInputStops`: “자기 입력이 흡수됐고 섞임이 없으면 내 중단 명령이 전달된다.” 최단 반례는 4단계다.
+`foreign`는 현재 opener 뒤 전체를 뜻한다. owner paste/흡수가 이를 초기화하지 않아 opener와 자기 입력 사이·뒤·같은 행의 혼합을 모두 보수적으로 막는다. 새 자기 user root를 여는 `OwnerPasteRunning`만 이전 opener의 foreign를 초기화한다.
+`Restart`는 durable attempt/transcript 사실을 남기고 프로세스의 relay token/child를 제거한다. 원장 읽기 성공과 Unread를 각각 검사한다. running token의 재시작 pin 복원은 기존 NativeStop 범위이므로 Restart는 running 분기를 제외한다.
 
-| 단계 | 모델 / 관측 | 기준 SHA의 코드 근거 |
-|---|---|---|
-| 0 | 시작 전 | token 없는 O-off 외부 턴 경로를 선택한다. 초기 상태의 추상화다. |
-| 1 | `ExternalOpen`: 외부 Claude 턴 P 시작 | intake가 busy 진단을 읽고 owner 경로로 들어간다: `src/services/discord/router/message_handler/intake_turn.rs:1721`. |
-| 2 | `OwnerPaste`: Discord owner A를 enqueue | `defer_owned_front`가 token을 해제한다: `busy_retry.rs:49`–`:60`. 그 뒤 `intake_turn.rs:1767`의 `owner.into_busy_pane`로 A를 전달한다. token 수명 연장은 하지 않는다. |
-| 3 | `Absorb`: A의 queued 행이 P에 흡수 | `human_frame/history.rs:530`의 `RowOwner::Command`, `:597`의 `row_owner`, `:636`–`:638`의 행/attempt 대응이 durable 증거다. ledger 등록만으로 흡수를 가정하지 않는다. |
-| 4 | `Stop`: 자기 입력 중단 실패 | `judged_stop.rs:425`의 SessionStop 분기는 O-on만 선택하고, token 없는 O-off는 `:449`–`:450`에서 `NoActiveTurn`이 된다. Escape가 전달되지 않는다. |
+## 새 반례를 코드와 대조
 
-이는 코드로 확인한 T1 재현 후보이며 실제 Discord admission→drive→intake→fake Enter→`!stop` 시험으로 넘긴다. 모델 자체를 구현 시험 PASS로 세지 않는다.
+### 자기 remove-only: OwnInputStops 위반, 4단계
 
-relay가 3과 4 사이에 claim하면 기존 `claude_stop_identity.rs:162`–`:167`은 token에 사전 등록된 child만 허용한다. A는 token이 없을 때 paste됐으므로 child 등록이 없고 `Other`가 된다. N1은 durable ledger의 같은 session Discord busy attempt를 인정하여 이 T3 경로를 해소한다.
-기존 relay-claimed 순수 P의 direct pin은 owner A 없이도 Escape 1이다. 모델의 relay authority가 이 동작을 보존한다. `hand_busy`의 child 사전 등록은 `provider_dispatch/owner_input.rs:280`–`:291`에 있다.
-N2의 판정→전달 재검사는 `session_stop.rs:75`–`:99`와 같은 패턴이며, 실제 전달 경계는 `claude_stop_delivery.rs:442`, `:507`, `:549`이다. 모델의 `Stop`은 이 재검사를 포함한 한 단계로 추상화한다.
+0 시작 → 1 ExternalOpen → 2 OwnerPaste → 3 AbsorbOnly → 4 Stop(거부).
 
-## Running receipt 반례를 코드와 대조
+| 단계 | 코드 대조 (기준 SHA) |
+|---|---|
+| 1 | `owned_input_stop.rs:103–144`가 InputFacts의 열린 opener를 찾는다. |
+| 2 | `busy_inject.rs:559–589`가 durable frame 등록과 실제 paste/Enter를 수행한다. 등록만으로 흡수를 가정하지 않는다. |
+| 3 | 기존 `input_facts/queued.rs:31–32,207–210`은 Command가 없거나 앞/뒤에 오는 `absorbed_mid_turn` 형식을 지원한다. `:147–168`은 같은 입력의 absorption을 대응시킨다. |
+| 4 | 기준 `claude_stop_identity.rs:214–230`은 attachment/queued_command가 아닌 행을 Neutral로 둔다. `owned_input_rows():168–175`는 owns=false가 되고, `history.rs:551–590`의 기존 taken_rows도 user/Command+UUID만 읽으므로 remove를 row_owner에 그대로 넘기는 것으로 해결되지 않는다. |
 
-`OwnInputStops`: “token이 남은 running 분기에 자기 user 행이 기록됐으면 내 중단 명령이 그 root를 멈춘다.” 최단 반례는 3단계다.
+### 외부 remove-only: NoForeignEscape 위반, 4단계
 
-| 단계 | 모델 / 관측 | 기준 SHA의 코드 근거 |
-|---|---|---|
-| 0 | 시작 전 | intake는 자신의 token을 보유하고 뒤늦게 busy pane을 만나는 경로를 선택한다. |
-| 1 | `ExternalOpen`: 외부 Claude 턴 P가 실행 중 | `provider_dispatch/owner_input.rs`의 `execute_owned` running 분기다. 외부 provider 동작을 한 환경 단계로 접는다. |
-| 2 | `OwnerPasteRunning`: 자기 user 행은 기록되지만 pin 없음 | `queue_io/input_owner/effect.rs:204`–`:212`는 sink만 설치한다. `claude_tui/busy_inject.rs:569`–`:594`는 ledger 등록·stash submit만 하고 native receipt·typed finish를 부르지 않는다. 실제 T0 base RED가 Enter user 행은 존재하나 native pin이 없음을 확인했다(`report-s1-1.md`, `logs/base-t0.log`). |
-| 3 | `Stop`: 자기 입력 중단 실패 | `provider/native_stop.rs:79`–`:103`은 receipt와 Applied finish를 모두 받아야 하고, `:116`–`:137`은 applied 상태에서만 `try_pin_native_user`를 호출한다. 둘 중 빠진 연결을 기다리는 것으로 pin이 생기지 않는다. |
+0 시작 → 1 ExternalOpen → 2 OwnerPasteRunning → 3 ForeignAbsorbOnly → 4 Stop(잘못 전달).
 
-정상 참조 경로는 `claude_tui/input/submission.rs:149`의 composer lock 내 receipt, `:165`의 first-key, `:168`의 begin, `:175`–`:181`의 typed outcome, `:99`의 finish다. busy 경로의 first-key는 이미 `busy_inject/stash.rs:51`에 있으므로 모델이 별도 키 전이를 추가하지 않는다.
-수정 후 `RunningReceipt = TRUE`는 같은 함수·순서·frame을 busy submit에 연결한 계약이며 실제 T0 GREEN과 receipt 삭제 뮤턴트 RED로 확인한다. 이 문서는 실행 전인 시험의 성공을 주장하지 않는다.
+1–2는 검증된 자기 root pin/token을 추상화한다. 3은 같은 queue 형식의 외부 B 흡수다. 기준 `pinned_still_current():117–125`도 같은 later_row를 호출해 이를 Neutral로 놓치고 pin을 유지한다. tokenless N2도 정확한 A Command 뒤 B remove-only가 오면 `owned=true, clean=true`가 남는다(`:168–175`). 전달 직전 재검사는 같은 오판을 반복하므로 분류 자체를 수리해야 한다.
 
-## 생략한 범위와 실제 시험의 책임
+### 자동 summary: OwnInputStops 위반, 4단계
 
-- O-on tokenless SessionStop 정책은 범위 밖이며 기존 회귀 시험으로 고정한다.
-- running 전이는 완전한 자기 user 행이 기록되고 submit이 Applied가 된 경우만 다룬다. `NotSent`·부분 전송·실패의 typed finish 대응과 token 없는 TLS no-op은 코드 시험으로 확인한다.
-- running token의 재시작 pin 복원은 기존 NativeStop 수명 문제이므로 이 모델의 `Restart`에서는 제외한다. tokenless·relay claim 틈의 durable 재판정은 계속 검사한다.
-- 세부 JSON 파싱, 부분 행, source 파일 교체, session/opener 동일성, P 종료 뒤 Q 시작은 boolean보다 풍부한 실제 상태이므로 코드 시험에서 검증한다.
-- 판정과 Escape 사이의 경쟁, 반복 `!stop`과 transcript 종료 기록의 시점은 모델의 원자적 `Stop`이 증명하지 않는다. 실제 전달 직전 재검사 및 경쟁 시험이 필요하다.
-- 외부 입력의 위치를 하나의 `foreign` 값으로 접기 때문에, 같은 행 안의 혼합을 실제 parser가 검출하는지는 별도 시험으로 확인해야 한다.
-- mailbox·intake·bridge·watcher의 수명이나 응답 게시 소유권은 변경하거나 증명하지 않는다.
+0 시작 → 1 ExternalOpen → 2 OwnerPasteRunning → 3 CompactSummary → 4 Stop(거부).
+
+같은 SID의 true boolean summary 두 표기는 기존 `shadow/identity.rs:194–198` helper가 확인한다. 기준 later_row의 `:193–198` SID 검사를 통과한 뒤 `:211–212`가 meta가 아닌 user라는 이유로 Other를 반환한다. token은 `:117–125`에서 pin을 거절하고 N2는 `:168–172`에서 clean=false가 된다. 모델은 이 확인된 summary만 Neutral로 고치며 다른 human 입력 예외를 추가하지 않는다.
+
+## 기존 연결 반례
+
+`InputNativeStopBefore.cfg`는 ExternalOpen→OwnerPaste→Absorb→Stop에서 OwnInputStops를 깬다. 이는 처음 base `216858a711a6dfea5b18243e947199b461ea9b37`의 token 없는 O-off 분기와 claim 틈 N1 누락을 분리한 설정이다. 실제 T1/T3 base RED와 연결 좌표는 레인의 이전 보고서에 보존한다. 기준 f332에서는 N1/N2가 이미 있으므로 현재 결함이라고 다시 주장하지 않는다.
+`InputNativeStopRunningBefore.cfg`는 ExternalOpen→OwnerPasteRunning→Stop의 3단계 반례다. #7812의 BusyClaude sink만 있고 busy submit의 receipt/Applied finish가 빠졌던 연결을 끈다. 현재 busy receipt/first_key→begin→typed finish 연결 및 T0 base RED/수리 GREEN은 이전 구현 증거이며 이 모델 실행이 다시 시험한 것은 아니다.
+
+## 모델 밖에서 필요한 구현 시험
+
+- exact frame·attempt·file·offset·native SID와 동일 본문 여러 입력의 귀속은 boolean own보다 풍부하다. 모델은 같은 논리 입력의 Command/absorption을 두 번 세지 않는 계약만 접으며, 다른 attempt 소비 여부를 증명하지 않는다. 실제 Enter→실제 !stop 시험이 필요하다.
+- parser strict boolean, session 불일치, malformed/partial, ledger Unread와 source 파일 교체는 실제 판독기의 시험 대상이다. 여기서는 확인된 summary와 foreign 입력을 분리한다.
+- P1-3 durable structured-state fallback과 pane active/modal/draft 조건은 모델 범위 밖이며 진입점·전달 시험이 맡는다. 열린 턴이라는 이유만으로 Streaming을 가정하지 않는다.
+- Stop은 전달 직전 source/session/opener/open/own/clean 재검사를 한 단계로 접는다. close·foreign 경합과 종료 관측 뒤 반복 !stop은 실제 시험이 필요하다.
+- O-on SessionStop, mailbox/intake/bridge/watcher의 수명과 응답 게시 주체는 바꾸거나 증명하지 않는다.
 
 ## 재생 명령과 원시 증거
 
@@ -80,14 +82,12 @@ N2의 판정→전달 재검사는 `session_stop.rs:75`–`:99`와 같은 패턴
 export TLA2TOOLS=~/.local/share/tla2tools/tla2tools-1.7.4.jar
 export JAVA=/opt/homebrew/opt/openjdk/bin/java
 cd docs/statecharts/input-single-path
-~/.claude/skills/statechart/scripts/statechart InputNativeStop.tla \
-  --config InputNativeStopBefore.cfg --view native-stop.view.mjs --out /tmp/sc-native-before-s1-2-new
-~/.claude/skills/statechart/scripts/statechart InputNativeStop.tla \
-  --config InputNativeStopRunningBefore.cfg --view native-stop.view.mjs --out /tmp/sc-running-before-s1-2-new
-~/.claude/skills/statechart/scripts/statechart InputNativeStop.tla \
-  --config InputNativeStop.cfg --view native-stop.view.mjs --out /tmp/sc-native-fixed-s1-2-new
+for cfg in InputNativeStop.cfg InputNativeStopBefore.cfg InputNativeStopRunningBefore.cfg InputNativeStopAbsorptionBefore.cfg InputNativeStopSummaryBefore.cfg; do
+  ~/.claude/skills/statechart/scripts/statechart InputNativeStop.tla --config "$cfg" \
+    --view native-stop.view.mjs --out /tmp/sc-native-stop-new-run-"${cfg%.cfg}"
+done
 ```
 
-레인 원시 출력: `/Users/itismyfield/.adk/release/lane-runs/hl-20260925/i7755/sc-out/s1-2-{native-before,running-before,native-fixed}/` (`report.md`, `chart.mmd`, `tlc.out` 포함).
-요약 로그: 같은 레인의 `logs/s1-2-statechart-native-before.log`, `logs/s1-2-statechart-running-before.log`, `logs/s1-2-statechart-native-fixed.log`.
-세 cfg 모두 `docs/statecharts/expected.tsv`에 4컬럼으로 등록한다. 전체 checker는 모델 완료 후 한 번 실행하여 rc=0, 불일치 0, 68cfg, 183.1초를 기록했다. 원시 로그는 같은 레인의 `logs/s1-2-statecharts-all-final.log`다. 실행 명령은 `python3 scripts/ci/statecharts_tlc.py --java "$JAVA" --jar "$TLA2TOOLS"`이며 구현 레인의 최종 검증 증거에도 합친다.
+레인 `/Users/itismyfield/.adk/release/lane-runs/hl-20260925/i7755/` 아래 `sc-out/s1-6-{fixed,before,running-before,absorption-before,summary-before}/`에 tool chart/report/tlc 원문이 있다. 로그는 `logs/s1-6-statechart-<이름>.log`, 5cfg 수·rc·경로는 `s1-6-statechart-evidence.json`이다. 이 실행은 구현 시험의 GREEN을 대신하지 않는다.
+
+전체 checker는 새 cfg 2개를 포함해 **rc0 / 불일치0 / 85cfg / 201.5초**로 완료했다. 원시 로그는 `logs/s1-6-statecharts-all.log`다. 실행 명령은 `python3 scripts/ci/statecharts_tlc.py --java "$JAVA" --jar "$TLA2TOOLS"`이며 모든 cfg가 등록된 기대 위반 집합과 일치했다. 이후 main 병합이 모델/cfg/expected를 바꾸면 이 증거를 새 입력의 결과로 재사용하지 않는다.

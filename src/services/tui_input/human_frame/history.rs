@@ -565,16 +565,23 @@ fn taken_rows(path: &Path, file: [u64; 2], from: u64) -> Option<Vec<Taken>> {
         };
         line.clear();
         let text = match record["type"].as_str() {
-            Some("user") if record["isMeta"] != true => match &record["message"]["content"] {
-                serde_json::Value::String(text) => Some(text.clone()),
-                serde_json::Value::Array(blocks) => blocks
-                    .iter()
-                    .map(|block| (block["type"] == "text").then(|| block["text"].as_str()))
-                    .collect::<Option<Option<Vec<_>>>>()
-                    .flatten()
-                    .map(|texts| texts.join("\n")),
-                _ => None,
-            },
+            Some("user")
+                if record["isMeta"] != true
+                    && !crate::services::tui_o::shadow::identity::record_is_compact_summary(
+                        &record,
+                    ) =>
+            {
+                match &record["message"]["content"] {
+                    serde_json::Value::String(text) => Some(text.clone()),
+                    serde_json::Value::Array(blocks) => blocks
+                        .iter()
+                        .map(|block| (block["type"] == "text").then(|| block["text"].as_str()))
+                        .collect::<Option<Option<Vec<_>>>>()
+                        .flatten()
+                        .map(|texts| texts.join("\n")),
+                    _ => None,
+                }
+            }
             Some("attachment") if record["attachment"]["type"] == "queued_command" => {
                 record["attachment"]["prompt"].as_str().map(str::to_string)
             }
@@ -609,11 +616,21 @@ pub(crate) fn discord_owner_attempt(
     transcript: &Path,
     id: &str,
 ) -> Result<bool, String> {
+    Ok(discord_stop_entries(session, native_session, transcript)?
+        .iter()
+        .any(|entry| entry.id == id))
+}
+
+fn discord_stop_entries(
+    session: &str,
+    native_session: &str,
+    transcript: &Path,
+) -> Result<Vec<Entry>, String> {
     let raw = std::fs::read(path()?).map_err(|error| error.to_string())?;
     let value = compat::parse(&raw)?;
     if !compat::envelope(&value)? {
         return serde_json::from_value::<Store>(value)
-            .map(|_| false)
+            .map(|_| Vec::new())
             .map_err(|error| error.to_string());
     }
     let snapshot: compat::HistoryV2 =
@@ -633,6 +650,7 @@ pub(crate) fn discord_owner_attempt(
             serde_json::from_value(passive["entry"].clone()).map_err(|error| error.to_string())?;
         entries.push((entry, &passive["registration"]));
     }
+    let mut accepted = Vec::new();
     for (entry, registration) in entries {
         let key = &registration["key"];
         let identity = &key["identity"];
@@ -641,13 +659,12 @@ pub(crate) fn discord_owner_attempt(
                 .as_u64()
                 .is_some_and(crate::services::tui_input::input_key::is_discord_key)
         };
-        if entry.id != id
-            || entry.provider != "claude"
+        if entry.provider != "claude"
             || entry.session != session
             || entry.path != transcript
             || entry.file != file
             || entry.append.is_some()
-            || key["attempt"]["nonce"] != id
+            || key["attempt"]["nonce"].as_str() != Some(entry.id.as_str())
             || registration["frame"]["class_hash"].as_str() != Some(entry.class_hash.as_str())
             || !discord_key(&identity["primary"])
             || !identity["sources"].as_array().is_some_and(|sources| {
@@ -669,10 +686,79 @@ pub(crate) fn discord_owner_attempt(
             && source.file == file
             && source.offset == entry.offset
         {
-            return Ok(true);
+            accepted.push(entry);
         }
     }
-    Ok(false)
+    accepted.sort_by_key(|entry| entry.offset);
+    Ok(accepted)
+}
+
+/// Enqueue positions pair once with exact, source-bound Discord registrations, never body text alone.
+pub(crate) fn discord_enqueue_owners(
+    session: &str,
+    native_session: &str,
+    transcript: &Path,
+    opener_end: u64,
+    enqueues: &[(u64, String)],
+    reserved: &[String],
+) -> Result<Vec<RowOwner>, String> {
+    let entries: Vec<_> = discord_stop_entries(session, native_session, transcript)?
+        .into_iter()
+        .filter(|entry| entry.offset >= opener_end && !reserved.contains(&entry.id))
+        .collect();
+    let mut by_frame = std::collections::BTreeMap::<String, Vec<usize>>::new();
+    for (index, (_, body)) in enqueues.iter().enumerate() {
+        by_frame.entry(hash(body.trim())).or_default().push(index);
+    }
+    let mut registered = std::collections::BTreeMap::<&str, Vec<&Entry>>::new();
+    for entry in &entries {
+        registered
+            .entry(entry.class_hash.as_str())
+            .or_default()
+            .push(entry);
+    }
+    let mut owners = vec![RowOwner::None; enqueues.len()];
+    for (frame_hash, indexes) in by_frame {
+        let last = indexes
+            .iter()
+            .map(|index| enqueues[*index].0)
+            .max()
+            .unwrap_or(0);
+        let Some(registered) = registered.get(frame_hash.as_str()) else {
+            continue;
+        };
+        let candidates: Vec<_> = registered
+            .iter()
+            .copied()
+            .filter(|entry| entry.offset <= last)
+            .collect();
+        let Some(first) = candidates.first() else {
+            continue;
+        };
+        let queued: Vec<_> = indexes
+            .into_iter()
+            .filter(|index| enqueues[*index].0 >= first.offset)
+            .collect();
+        // Extra identical inputs or reservations make an absorption's owner unknowable.
+        if candidates.len() != queued.len()
+            || candidates
+                .windows(2)
+                .any(|pair| pair[0].offset == pair[1].offset)
+            || candidates
+                .iter()
+                .zip(&queued)
+                .any(|(entry, index)| entry.offset > enqueues[*index].0)
+        {
+            for index in queued {
+                owners[index] = RowOwner::Unread;
+            }
+            continue;
+        }
+        for (entry, index) in candidates.into_iter().zip(queued) {
+            owners[index] = RowOwner::Command(entry.id.clone());
+        }
+    }
+    Ok(owners)
 }
 
 fn owner_in(

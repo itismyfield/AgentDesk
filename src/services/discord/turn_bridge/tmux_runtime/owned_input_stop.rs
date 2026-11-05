@@ -59,6 +59,7 @@ pub(super) async fn interrupt(
     if matches!(target, StopTarget::Refused { .. }) {
         return CommandStop::Observed(false);
     }
+    let source = expected.binding.clone();
     let incarnation = SourceIncarnation::capture(&expected.session);
     let shared = shared.clone();
     let open = Arc::new(move || {
@@ -70,7 +71,7 @@ pub(super) async fn interrupt(
                 .flatten()
                 .is_some_and(|(now, owns, clean)| now == expected && owns && clean)
     });
-    let outcome = super::interrupt_owned_input_on(&target, reason, open).await;
+    let outcome = super::interrupt_owned_input_on(&target, reason, open, source).await;
     CommandStop::Observed(outcome.sent_keys)
 }
 

@@ -1,5 +1,5 @@
 ---
-title: "외부 Claude 턴에 흡수된 자기 입력의 중단 (216858a711)"
+title: "외부 Claude 턴에 흡수된 자기 입력의 중단 (f332bd5391)"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -16,9 +16,12 @@ stateDiagram-v2
   s5: 릴레이가 맡은 외부 턴
   s6: 실행 분기 자기 root 확인
   s7: 외부 입력 섞임
-  s8: 자기 입력 흡수
-  s9: 중단 전달
-  s10: 자기 입력 중단 실패
+  s8: 외부 입력 remove-only 흡수
+  s9: 내 입력 Command 확인
+  s10: 내 입력 remove-only 흡수
+  s11: 중단 전달
+  s12: 자동요약 뒤 자기 입력
+  s13: 자기 입력 중단 실패
   [*] --> s0
   s0 --> s1: 외부 턴 시작
   s1 --> s2: 재시작 후 원장 재조회
@@ -27,32 +30,59 @@ stateDiagram-v2
   s1 --> s5: 릴레이가 턴 인계
   s1 --> s6: 실행 분기에서 내 입력 제출
   s1 --> s7: 다른 입력 유입
+  s1 --> s8: 외부 입력 remove-only 흡수
   s2 --> s3: 내 중단 명령
   s2 --> s5: 릴레이가 턴 인계
-  s2 --> s6: 실행 분기에서 내 입력 제출
   s4 --> s2: 재시작 후 원장 재조회
   s4 --> s3: 내 중단 명령
-  s4 --> s8: Claude가 내 입력 흡수
+  s4 --> s9: 내 입력 Command 확인
+  s4 --> s10: 내 입력 remove-only 흡수
   s4 --> s5: 릴레이가 턴 인계
   s4 --> s7: 다른 입력 유입
-  s5 --> s2: 재시작 후 원장 재조회 or Claude가 내 입력 흡수
-  s5 --> s9: 내 중단 명령
+  s4 --> s8: 외부 입력 remove-only 흡수
+  s5 --> s2: 재시작 후 원장 재조회 or 내 입력 Command 확인 or 내 입력 remove-only 흡수
+  s5 --> s11: 내 중단 명령
   s5 --> s7: 다른 입력 유입
-  s6 --> s9: 내 중단 명령
+  s5 --> s8: 외부 입력 remove-only 흡수
+  s6 --> s11: 내 중단 명령
+  s6 --> s12: 자동 compact summary
   s6 --> s7: 다른 입력 유입
+  s6 --> s8: 외부 입력 remove-only 흡수
   s7 --> s6: 실행 분기에서 내 입력 제출
-  s7 --> s2: 재시작 후 원장 재조회 or Claude가 내 입력 흡수
+  s7 --> s2: 재시작 후 원장 재조회 or 내 입력 Command 확인 or 내 입력 remove-only 흡수
   s7 --> s3: 내 중단 명령
-  s8 --> s2: 재시작 후 원장 재조회
-  s8 --> s10: 내 중단 명령
-  s8 --> s5: 릴레이가 턴 인계
+  s8 --> s6: 실행 분기에서 내 입력 제출
   s8 --> s7: 다른 입력 유입
+  s8 --> s2: 재시작 후 원장 재조회 or 내 입력 Command 확인 or 내 입력 remove-only 흡수
+  s8 --> s3: 내 중단 명령
+  s2 --> s11: 내 중단 명령
+  s9 --> s2: 재시작 후 원장 재조회
+  s9 --> s13: 내 중단 명령
+  s9 --> s12: 자동 compact summary
+  s9 --> s5: 릴레이가 턴 인계
+  s9 --> s7: 다른 입력 유입
+  s9 --> s8: 외부 입력 remove-only 흡수
+  s10 --> s9: 내 입력 Command 확인
+  s10 --> s2: 재시작 후 원장 재조회
+  s10 --> s13: 내 중단 명령
+  s10 --> s12: 자동 compact summary
+  s10 --> s5: 릴레이가 턴 인계
+  s10 --> s7: 다른 입력 유입
+  s10 --> s8: 외부 입력 remove-only 흡수
+  s4 --> s12: 내 입력 Command 확인 or 내 입력 remove-only 흡수
+  s12 --> s11: 내 중단 명령
+  s12 --> s7: 다른 입력 유입
+  s12 --> s8: 외부 입력 remove-only 흡수
   s2 --> s7: 릴레이가 턴 인계
-  s5 --> s10: 내 중단 명령
+  s2 --> s8: 릴레이가 턴 인계
+  s12 --> s2: 재시작 후 원장 재조회
+  s12 --> s13: 내 중단 명령
+  s5 --> s13: 내 중단 명령
+  s5 --> s12: 자동 compact summary or 내 입력 Command 확인 or 내 입력 remove-only 흡수
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 bugPath
   class s1 bugPath
   class s4 bugPath
-  class s8 bugPath
-  class s10 breaks
-  class s10 bugPath
+  class s9 bugPath
+  class s13 breaks
+  class s13 bugPath

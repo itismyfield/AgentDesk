@@ -8,6 +8,7 @@ use super::interrupt_policy::{
 use super::process_table::{pane_foreground_is_provider_wrapper, write_line_to_wrapper_fifo};
 use super::tmux_runtime_paths;
 use crate::services::provider::{CancelToken, ProviderKind};
+use crate::services::tui_o::shadow::{ShadowProvider, SourceBinding};
 use crate::services::tui_turn_state::TuiTurnState;
 #[cfg(test)]
 use std::path::Path;
@@ -262,7 +263,7 @@ pub(super) async fn interrupt_claude_session(
         reason,
         observed_open,
         expected_identity,
-        false,
+        None,
     )
     .await
 }
@@ -271,15 +272,36 @@ pub(super) async fn interrupt_owned_claude_session(
     session: String,
     reason: &str,
     observed_open: Arc<dyn Fn() -> bool + Send + Sync>,
+    source: SourceBinding,
 ) -> ProviderTurnInterruptOutcome {
-    interrupt_observed_claude_session(None, Some(session), reason, Some(observed_open), None, true)
-        .await
+    interrupt_observed_claude_session(
+        None,
+        Some(session),
+        reason,
+        Some(observed_open),
+        None,
+        Some(source),
+    )
+    .await
 }
 
-fn owned_pane_evidence(pane: &str, owner_input: bool) -> (bool, bool, bool) {
-    let (ready, active, draft) = claude_tui_stop_pane_evidence(pane);
-    let foreground = owner_input && super::claude_stop_pane::foreground_tool_running(pane);
-    (ready && !foreground, active, draft)
+fn owned_source_turn_state(source: &SourceBinding) -> TuiTurnState {
+    let same_file = || {
+        std::fs::metadata(&source.source.path).is_ok_and(|metadata| {
+            crate::services::tui_o::shadow::capture::file_identity(&metadata)
+                == (source.source.dev, source.source.ino)
+        })
+    };
+    if source.provider != ShadowProvider::Claude || !same_file() {
+        return TuiTurnState::Unknown;
+    }
+    let state =
+        crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&source.source.path);
+    if same_file() {
+        state
+    } else {
+        TuiTurnState::Unknown
+    }
 }
 
 async fn interrupt_observed_claude_session(
@@ -288,7 +310,7 @@ async fn interrupt_observed_claude_session(
     reason: &str,
     observed_open: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     expected_identity: Option<ClaudeStopTurnIdentity>,
-    owner_input: bool,
+    owned_source: Option<SourceBinding>,
 ) -> ProviderTurnInterruptOutcome {
     // #3169: an anonymous internal PreserveSession teardown
     // (`turn_bridge_cancelled`, no user `cancel_source`) must NOT cancel the
@@ -342,6 +364,7 @@ async fn interrupt_observed_claude_session(
     let protected_delivery = expected_identity.is_some() || token.is_none();
     let session_for_probe = session_name.clone();
     let token_for_probe = token.cloned();
+    let source_for_probe = owned_source.clone();
     let probe_result = tokio::task::spawn_blocking(move || {
         let is_wrapper = pane_foreground_is_provider_wrapper(&session_for_probe);
         let delivery = claude_turn_interrupt_delivery(is_wrapper);
@@ -373,12 +396,13 @@ async fn interrupt_observed_claude_session(
             .map(|binding| binding.output_path.clone())
             .unwrap_or(default_output_path);
         let structured_state = if matches!(delivery, ClaudeTurnInterruptDelivery::TuiEscape) {
-            binding.as_ref().and_then(|binding| {
-                crate::services::tui_turn_state::runtime_binding_turn_state(
+            match binding.as_ref() {
+                Some(binding) => crate::services::tui_turn_state::runtime_binding_turn_state(
                     &ProviderKind::Claude,
                     binding,
-                )
-            })
+                ),
+                None => source_for_probe.as_ref().map(owned_source_turn_state),
+            }
         } else {
             Some(
                 crate::services::tui_turn_state::observe_claude_jsonl_turn_state(
@@ -395,7 +419,7 @@ async fn interrupt_observed_claude_session(
         let (pane_ready, pane_active, pane_has_draft) =
             pane.as_deref().map_or((false, false, false), |pane| {
                 if protected_delivery {
-                    owned_pane_evidence(pane, owner_input)
+                    claude_tui_stop_pane_evidence(pane)
                 } else {
                     super::claude_stop_pane::legacy_evidence(pane)
                 }
@@ -524,16 +548,17 @@ async fn interrupt_observed_claude_session(
             }
             let pane = crate::services::platform::tmux::capture_pane(&session_for_task, -160)
                 .ok_or("Claude stop pane unavailable before Escape")?;
-            let (ready, active, draft) = owned_pane_evidence(&pane, owner_input);
+            let (ready, active, draft) = claude_tui_stop_pane_evidence(&pane);
             let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(
                 &session_for_task,
             );
-            let structured = binding.as_ref().and_then(|binding| {
-                crate::services::tui_turn_state::runtime_binding_turn_state(
+            let structured = match binding.as_ref() {
+                Some(binding) => crate::services::tui_turn_state::runtime_binding_turn_state(
                     &ProviderKind::Claude,
                     binding,
-                )
-            });
+                ),
+                None => owned_source.as_ref().map(owned_source_turn_state),
+            };
             let observed = token_for_task.is_none()
                 && structured.is_none()
                 && active

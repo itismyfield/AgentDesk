@@ -5,6 +5,9 @@ use poise::serenity_prelude::{Message, MessageId, UserId};
 use std::io::Write;
 use std::sync::atomic::Ordering;
 
+#[path = "owner_input_owned_stop_format_tests.rs"]
+mod formats;
+
 fn isolated(name: &str) -> bool {
     creator_child(&format!(
         "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::owned_stop::{name}"
@@ -81,6 +84,11 @@ impl StopRig {
     }
 
     async fn paste(&self) {
+        let before = events(&self.intake.renderer).len();
+        let recorded = self.intake.renderer.join("queue-recorded");
+        if recorded.exists() {
+            fs::remove_file(recorded).unwrap();
+        }
         let (drive, mut settled) = self.intake.drive();
         crate::services::discord::queue_io::input_owner::drive::wake(drive);
         let result = tokio::time::timeout(Duration::from_secs(30), settled.recv())
@@ -88,7 +96,12 @@ impl StopRig {
             .unwrap_or_else(|_| panic!("{}", self.intake.trace.text()))
             .unwrap();
         assert_eq!(result, Ok(()), "{}", self.intake.trace.text());
-        assert_eq!(events(&self.intake.renderer), ["paste", "Enter"]);
+        assert_eq!(&events(&self.intake.renderer)[before..], ["paste", "Enter"]);
+        if self.intake.renderer.join("queue-mode").exists() {
+            wait("the pane finishes its absorption records", || {
+                self.intake.renderer.join("queue-recorded").exists()
+            });
+        }
         if self.intake.renderer.join("unabsorbed").exists() {
             wait("the pane records the enqueue", || {
                 fs::read_to_string(&self.intake.transcript)
@@ -137,8 +150,6 @@ impl StopRig {
     }
 
     async fn relay_claim(&self) -> Arc<CancelToken> {
-        let token = Arc::new(CancelToken::new());
-        token.bind_claude_tmux_session(&self.session);
         let pin = crate::services::claude_tui::input::UserReceipt::native_pin_before_tail(
             &self.session,
             "external parent",
@@ -147,6 +158,28 @@ impl StopRig {
         )
         .expect("the relay pins the external opener");
         assert!(pin.direct);
+        self.claim_pin(pin).await
+    }
+
+    async fn own_user_claim(&self) -> Arc<CancelToken> {
+        let body = fs::read_to_string(self.intake.renderer.join("body")).unwrap();
+        let pin = crate::services::claude_tui::input::UserReceipt::native_pin_before_tail(
+            &self.session,
+            &body,
+            Some(&self.sid),
+            fs::metadata(&self.intake.transcript).unwrap().len(),
+        )
+        .expect("the actual Enter's user row pins its owner's native root");
+        assert_eq!(pin.uuid, "owned-busy-row");
+        self.claim_pin(pin).await
+    }
+
+    async fn claim_pin(
+        &self,
+        pin: crate::services::provider::native_stop::NativeUserPin,
+    ) -> Arc<CancelToken> {
+        let token = Arc::new(CancelToken::new());
+        token.bind_claude_tmux_session(&self.session);
         token.native_stop.receipt_sink().adopt(pin);
         assert!(
             self.intake
@@ -496,20 +529,24 @@ async fn replay_stop(value: Value) {
         .collect();
     let queued = rows
         .iter()
-        .find(|row| row["uuid"] == "owned-busy-row")
+        .find(|row| row["uuid"] == "owned-busy-row" || row["uuid"] == "owned-busy-row-absorbed")
         .expect("the prior process's actual Enter left its busy input row");
-    let prompt = queued["attachment"]["prompt"].as_str().unwrap();
-    use crate::services::tui_input::human_frame::history::{self, RowOwner};
-    let RowOwner::Command(attempt) =
-        history::row_owner("claude", session, &[prompt.to_owned()], "owned-busy-row")
-    else {
-        panic!("restart must recover the queued input's command identity from its ledger");
-    };
-    assert!(
-        history::discord_owner_attempt(session, &source.session_id, &source.path, &attempt)
-            .unwrap(),
-        "the durable attempt still proves the Discord input's owner and source"
-    );
+    if queued["type"] != "queue-operation" {
+        let prompt = queued["attachment"]["prompt"].as_str().unwrap();
+        use crate::services::tui_input::human_frame::history::{self, RowOwner};
+        let RowOwner::Command(attempt) =
+            history::row_owner("claude", session, &[prompt.to_owned()], "owned-busy-row")
+        else {
+            panic!("restart recovers the busy command from its kept ledger");
+        };
+        assert!(
+            history::discord_owner_attempt(session, &source.session_id, &source.path, &attempt)
+                .unwrap()
+        );
+    } else {
+        assert_eq!(queued["operation"], "remove");
+        assert_eq!(queued["reason"], "absorbed_mid_turn");
+    }
     use crate::services::tui_o::shadow::{ShadowProvider, SourceBinding};
     use crate::services::tui_o::writer::input_facts::{InputFacts, TurnState};
     let mut facts = InputFacts::open(SourceBinding {
@@ -601,16 +638,22 @@ async fn a_restarted_process_stops_from_the_kept_transcript_and_ledger() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_restarted_spinner_turn_without_runtime_state_stays_unconfirmed() {
-    restarted_process(
-        "a_restarted_spinner_turn_without_runtime_state_stays_unconfirmed",
-        true,
-        0,
-    )
-    .await;
+async fn a_restarted_spinner_turn_uses_its_durable_source() {
+    restarted_process("a_restarted_spinner_turn_uses_its_durable_source", true, 1).await;
 }
 
 async fn restarted_process(name: &str, spinner: bool, expected: usize) {
+    restarted_variant(name, spinner, expected, None, None, false).await;
+}
+
+async fn restarted_variant(
+    name: &str,
+    spinner: bool,
+    expected: usize,
+    queue_mode: Option<&str>,
+    screen: Option<&str>,
+    submitted: bool,
+) {
     if let Ok(value) = std::env::var("ADK_I7755_STOP_REPLAY") {
         replay_stop(serde_json::from_str(&value).unwrap()).await;
         return;
@@ -632,6 +675,20 @@ async fn restarted_process(name: &str, spinner: bool, expected: usize) {
             )),
         )
         .unwrap();
+    }
+    if submitted {
+        let source = fs::read_to_string(&rig.intake.transcript).unwrap();
+        fs::write(
+            &rig.intake.transcript,
+            format!("{}\n", source.lines().next().unwrap()),
+        )
+        .unwrap();
+    }
+    if let Some(queue_mode) = queue_mode {
+        fs::write(rig.intake.renderer.join("queue-mode"), queue_mode).unwrap();
+    }
+    if let Some(screen) = screen {
+        fs::write(rig.intake.renderer.join("after"), screen).unwrap();
     }
     rig.paste().await;
     if logged_sources(rig.intake.channel, &rig.session).is_empty() {
@@ -772,6 +829,67 @@ async fn foreign_input_after_judgment_receives_no_escape() {
         "foreign_input_after_judgment_receives_no_escape",
         7_755_211,
         false,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restarted_remove_only_input_stops_from_durable_evidence() {
+    restarted_variant(
+        "a_restarted_remove_only_input_stops_from_durable_evidence",
+        true,
+        1,
+        Some("remove-only"),
+        None,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restarted_spinner_with_a_draft_receives_no_escape() {
+    let screen = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/tui_input/claude-2.1.293-thinking.txt"
+    ))
+    .replace("❯", "❯ unsubmitted draft");
+    restarted_variant(
+        "a_restarted_spinner_with_a_draft_receives_no_escape",
+        true,
+        0,
+        None,
+        Some(&screen),
+        false,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restarted_spinner_with_a_modal_receives_no_escape() {
+    let screen = "Do you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel\n";
+    assert!(
+        crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal(screen)
+    );
+    restarted_variant(
+        "a_restarted_spinner_with_a_modal_receives_no_escape",
+        true,
+        0,
+        None,
+        Some(screen),
+        false,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_open_but_submitted_durable_source_does_not_invent_streaming() {
+    restarted_variant(
+        "an_open_but_submitted_durable_source_does_not_invent_streaming",
+        true,
+        0,
+        None,
+        None,
+        true,
     )
     .await;
 }

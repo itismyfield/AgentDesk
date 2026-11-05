@@ -247,6 +247,16 @@ def record(content):
             row.pop('message', None)
             if isinstance(content,str) and content.startswith('foreign '): row['uuid'] += '-foreign'
         out.write(json.dumps(row)+'\n')
+def queue_record(operation, content, suffix, native_uuid=None):
+    row={'type':'queue-operation','operation':operation,'content':content}
+    if operation == 'remove': row['reason']='absorbed_mid_turn'
+    if (root/'native-sid').exists():
+        row.update(sessionId=(root/'native-sid').read_text(), uuid=(native_uuid or (root/'native-uuid').read_text())+'-'+suffix)
+    with transcript().open('a') as out: out.write(json.dumps(row)+'\n')
+def absorb_foreign(where):
+    content='foreign absorbed '+where
+    queue_record('enqueue',content,'foreign-'+where+'-enqueue')
+    queue_record('remove',content,'foreign-'+where+'-absorbed')
 render('before')
 (root/'ready').write_text('ready')
 if mode == 'fresh':
@@ -254,6 +264,7 @@ if mode == 'fresh':
     render('empty')
     (root/'composer-ready').write_text('ready')
 pending = b''
+held_queue = []
 while True:
     chunk = os.read(0, 65536)
     with (root/'received').open('ab') as out: out.write(chunk)
@@ -284,6 +295,29 @@ while True:
             if (root/'native-sid').exists(): row['sessionId']=(root/'native-sid').read_text()
             with transcript().open('a') as out: out.write(json.dumps(row)+'\n')
             pending=b''; render('after'); continue
+        if (root/'foreign-absorbed-before').exists(): absorb_foreign('before')
+        if (root/'queue-mode').exists():
+            queue_mode=(root/'queue-mode').read_text()
+            batch=[(body,(root/'native-uuid').read_text())]
+            if (root/'defer-two-enqueues').exists():
+                held_queue.extend(batch)
+                if len(held_queue) < 2:
+                    render('after'); pending=b''; continue
+                batch=held_queue[:]; held_queue.clear()
+            for item,native_uuid in batch:
+                queue_record('enqueue',item,'enqueue',native_uuid)
+                if (root/'duplicate-enqueue').exists(): queue_record('enqueue',item,'duplicate-enqueue',native_uuid)
+                if queue_mode == 'command-before': record(item)
+                queue_record('remove',item,'absorbed',native_uuid)
+                if queue_mode == 'command-after': record(item)
+                if (root/'duplicate-absorption').exists(): queue_record('remove',item,'duplicate-absorbed',native_uuid)
+            if (root/'foreign-absorbed-after').exists(): absorb_foreign('after')
+            (root/'queue-recorded').write_text('done')
+            render('after'); pending=b''; continue
+        if (root/'compact-before-command').exists():
+            row={'type':'user','isCompactSummary':True,'message':{'content':body}}
+            if (root/'native-sid').exists(): row.update(sessionId=(root/'native-sid').read_text(),uuid=(root/'native-uuid').read_text()+'-summary')
+            with transcript().open('a') as out: out.write(json.dumps(row)+'\n')
         if (root/'foreign-before').exists(): record('foreign before expected')
         if (root/'foreign-same').exists(): body += '\nforeign input on the same row'
         if mode == 'foreign': record('foreign before expected')
@@ -291,6 +325,7 @@ while True:
         elif mode == 'mixed': record([{'type':'text','text':body},{'type':'tool_result','content':'x'}])
         else: record(body)
         if (root/'foreign-after').exists(): record('foreign after expected')
+        if (root/'foreign-absorbed-after').exists(): absorb_foreign('after')
         if (root/'draft-stash').exists(): (root/'draft-stash').rename(root/'draft-bytes')
         if (root/'draft-stash-chip').exists(): (root/'draft-stash-chip').rename(root/'draft-chip')
         render('after'); pending=b''

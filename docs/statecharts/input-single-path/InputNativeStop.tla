@@ -1,57 +1,90 @@
 --------------------------- MODULE InputNativeStop ---------------------------
 EXTENDS TLC
-CONSTANTS Connected, RunningReceipt
-VARIABLES opened, attempt, child, foreign, relay, running, pinned, readable, restarted, result
-vars == <<opened, attempt, child, foreign, relay, running, pinned, readable, restarted, result>>
+CONSTANTS Connected, RunningReceipt, AbsorptionEvidence, CompactSummaryNeutral
+VARIABLES opened, attempt, child, foreign, foreignRemoval, summary,
+          relay, running, pinned, readable, restarted, result
+vars == <<opened, attempt, child, foreign, foreignRemoval, summary,
+          relay, running, pinned, readable, restarted, result>>
 
 Init ==
-    /\ opened = FALSE /\ attempt = "none" /\ child = FALSE /\ foreign = FALSE /\ relay = FALSE
+    /\ opened = FALSE /\ attempt = "none" /\ child = FALSE /\ foreign = FALSE
+    /\ foreignRemoval = FALSE /\ summary = FALSE /\ relay = FALSE
     /\ running = FALSE /\ pinned = FALSE /\ readable = TRUE /\ restarted = FALSE /\ result = "none"
 
 ExternalOpen ==
     /\ ~opened /\ result = "none" /\ opened' = TRUE
-    /\ UNCHANGED <<attempt, child, foreign, relay, running, pinned, readable, restarted, result>>
+    /\ UNCHANGED <<attempt, child, foreign, foreignRemoval, summary,
+                   relay, running, pinned, readable, restarted, result>>
 OwnerPaste ==
     /\ opened /\ result = "none" /\ attempt = "none"
     /\ attempt' = "enqueued" /\ child' = relay
-    /\ UNCHANGED <<opened, foreign, relay, running, pinned, readable, restarted, result>>
-\* The running dispatch retains its token; an exact own user row becomes its new root.
-\* Receipt setup, an Applied finish and native pin observation are one successful input step.
+    /\ UNCHANGED <<opened, foreign, foreignRemoval, summary,
+                   relay, running, pinned, readable, restarted, result>>
+\* An exact own user row opens a new root after receipt, Applied and native pin observation.
 OwnerPasteRunning ==
     /\ opened /\ result = "none" /\ attempt = "none" /\ ~relay
-    /\ attempt' = "root" /\ running' = TRUE /\ pinned' = RunningReceipt /\ foreign' = FALSE
+    /\ attempt' = "root" /\ running' = TRUE /\ pinned' = RunningReceipt
+    /\ foreign' = FALSE /\ foreignRemoval' = FALSE /\ summary' = FALSE
     /\ UNCHANGED <<opened, child, relay, readable, restarted, result>>
+\* The command may follow its own absorption; that second record consumes no other input.
 Absorb ==
-    /\ opened /\ result = "none" /\ attempt = "enqueued"
+    /\ opened /\ result = "none" /\ attempt \in {"enqueued", "removed"}
     /\ attempt' = "absorbed"
-    /\ UNCHANGED <<opened, child, foreign, relay, running, pinned, readable, restarted, result>>
+    /\ UNCHANGED <<opened, child, foreign, foreignRemoval, summary,
+                   relay, running, pinned, readable, restarted, result>>
+AbsorbOnly ==
+    /\ opened /\ result = "none" /\ attempt = "enqueued"
+    /\ attempt' = "removed"
+    /\ UNCHANGED <<opened, child, foreign, foreignRemoval, summary,
+                   relay, running, pinned, readable, restarted, result>>
+AbsorbAfterCommand ==
+    /\ opened /\ result = "none" /\ attempt = "absorbed" /\ UNCHANGED vars
 ForeignInput ==
-    /\ opened /\ result = "none" /\ ~foreign /\ foreign' = TRUE
-    /\ UNCHANGED <<opened, attempt, child, relay, running, pinned, readable, restarted, result>>
+    /\ opened /\ result = "none" /\ (~foreign \/ foreignRemoval)
+    /\ foreign' = TRUE /\ foreignRemoval' = FALSE
+    /\ UNCHANGED <<opened, attempt, child, summary,
+                   relay, running, pinned, readable, restarted, result>>
+ForeignAbsorbOnly ==
+    /\ opened /\ result = "none" /\ ~foreign
+    /\ foreign' = TRUE /\ foreignRemoval' = TRUE
+    /\ UNCHANGED <<opened, attempt, child, summary,
+                   relay, running, pinned, readable, restarted, result>>
+CompactSummary ==
+    /\ opened /\ result = "none" /\ ~summary /\ summary' = TRUE
+    /\ UNCHANGED <<opened, attempt, child, foreign, foreignRemoval,
+                   relay, running, pinned, readable, restarted, result>>
 RelayClaim ==
     /\ opened /\ result = "none" /\ ~relay /\ ~running /\ relay' = TRUE
-    /\ UNCHANGED <<opened, attempt, child, foreign, running, pinned, readable, restarted, result>>
+    /\ UNCHANGED <<opened, attempt, child, foreign, foreignRemoval, summary,
+                   running, pinned, readable, restarted, result>>
 Restart ==
     /\ opened /\ result = "none" /\ ~restarted /\ ~running
     /\ restarted' = TRUE /\ relay' = FALSE /\ child' = FALSE /\ readable' \in BOOLEAN
-    /\ UNCHANGED <<opened, attempt, foreign, running, pinned, result>>
+    /\ UNCHANGED <<opened, attempt, foreign, foreignRemoval, summary, running, pinned, result>>
 
-OwnEvidence == attempt = "root" \/ (attempt = "absorbed" /\ readable)
-\* A relay pin already authorizes its external opener; later owner rows need child evidence.
-\* A retained running token instead needs its own receipt-derived native user pin.
+OwnEvidence == attempt = "root" \/ (attempt \in {"absorbed", "removed"} /\ readable)
+ObservedOwn == OwnEvidence /\ (attempt # "removed" \/ AbsorptionEvidence)
+ObservedForeign == foreign /\ (~foreignRemoval \/ AbsorptionEvidence)
 Authority ==
-    /\ ~foreign
+    /\ ~ObservedForeign /\ (~summary \/ CompactSummaryNeutral)
     /\ IF running
           THEN pinned
           ELSE IF relay
-                  THEN attempt # "absorbed" \/ (readable /\ (child \/ Connected))
-                  ELSE Connected /\ OwnEvidence
+                  THEN IF attempt = "absorbed"
+                          THEN readable /\ (child \/ Connected)
+                          ELSE IF attempt = "removed" /\ AbsorptionEvidence
+                                  THEN readable /\ (child \/ Connected)
+                                  ELSE TRUE
+                  ELSE Connected /\ ObservedOwn
 Stop ==
     /\ opened /\ result = "none"
     /\ result' = IF Authority THEN "sent" ELSE "denied"
-    /\ UNCHANGED <<opened, attempt, child, foreign, relay, running, pinned, readable, restarted>>
+    /\ UNCHANGED <<opened, attempt, child, foreign, foreignRemoval, summary,
+                   relay, running, pinned, readable, restarted>>
 Done == result # "none" /\ UNCHANGED vars
-Next == ExternalOpen \/ OwnerPaste \/ OwnerPasteRunning \/ Absorb \/ ForeignInput \/ RelayClaim \/ Stop \/ Restart \/ Done
+Next == ExternalOpen \/ OwnerPaste \/ OwnerPasteRunning \/ Absorb \/ AbsorbOnly
+        \/ AbsorbAfterCommand \/ ForeignInput \/ ForeignAbsorbOnly \/ CompactSummary
+        \/ RelayClaim \/ Stop \/ Restart \/ Done
 
 NoForeignEscape ==
     (result # "none" /\ (foreign \/ (~relay /\ ~OwnEvidence))) => result = "denied"

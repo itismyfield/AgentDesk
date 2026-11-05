@@ -4,7 +4,7 @@ use crate::services::provider::CancelToken;
 use crate::services::provider::native_stop::NativeUserPin;
 use std::io::{BufRead, Seek};
 use std::path::Path;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ClaudeStopTurnIdentity {
@@ -17,13 +17,12 @@ pub(super) struct ClaudeStopTurnIdentity {
     pinned: Option<PinnedTurn>,
 }
 
-/// The token whose own native input the identity is, and how far its later rows were judged.
+/// The token whose own native input the identity is.
 #[derive(Clone)]
 struct PinnedTurn {
     token: Weak<CancelToken>,
     session: String,
     native_session: String,
-    judged: Arc<Mutex<u64>>,
 }
 
 impl PartialEq for PinnedTurn {
@@ -47,7 +46,7 @@ impl std::fmt::Debug for PinnedTurn {
 /// What a row after the pinned input says about whether the pinned turn is still the one running.
 enum Later {
     Neutral,
-    BusyChild,
+    BusyChild(String),
     Other,
     Undecided,
 }
@@ -70,7 +69,6 @@ impl ClaudeStopTurnIdentity {
                 token: Arc::downgrade(token),
                 session: pin.tmux_session.clone(),
                 native_session: pin.session_id.clone(),
-                judged: Arc::new(Mutex::new(pin.range.1)),
             }),
         }
     }
@@ -85,48 +83,24 @@ impl ClaudeStopTurnIdentity {
         }
     }
 
-    /// Reads only the rows past the last judged one, so a recheck under a lock stays small.
+    /// Rebuilds pairing from the root so an earlier enqueue survives every stop recheck.
     fn pinned_still_current(&self, pinned: &PinnedTurn) -> bool {
         let Some(token) = pinned.token.upgrade() else {
             return false;
         };
-        let mut judged = pinned.judged.lock().unwrap_or_else(|e| e.into_inner());
-        let Ok(mut file) = std::fs::File::open(&self.output_path) else {
+        let Ok(metadata) = std::fs::metadata(&self.output_path) else {
             return false;
         };
-        let Ok(metadata) = file.metadata() else {
-            return false;
-        };
-        if transcript_file_identity(&metadata) != self.file_identity
-            || metadata.len() < *judged
-            || file.seek(std::io::SeekFrom::Start(*judged)).is_err()
-        {
-            return false;
-        }
-        let mut reader = std::io::BufReader::new(file);
-        let (mut line, mut offset) = (Vec::new(), *judged);
-        loop {
-            line.clear();
-            match reader.read_until(b'\n', &mut line) {
-                Ok(0) => break,
-                Ok(_) if line.ends_with(b"\n") => {}
-                Ok(_) => return false,
-                Err(_) => return false,
-            }
-            let record = serde_json::from_slice(&line).unwrap_or(serde_json::Value::Null);
-            match later_row(
-                &record,
-                Some(&token),
-                &pinned.session,
-                &pinned.native_session,
-                Path::new(&self.output_path),
-            ) {
-                Later::Neutral | Later::BusyChild => offset += line.len() as u64,
-                Later::Other | Later::Undecided => return false,
-            }
-        }
-        *judged = offset;
-        true
+        input_rows(
+            Path::new(&self.output_path),
+            self.file_identity,
+            &pinned.session,
+            &pinned.native_session,
+            self.user_line_end,
+            metadata.len(),
+            Some(&token),
+        )
+        .is_ok_and(|(_, clean)| clean)
     }
 }
 
@@ -139,6 +113,42 @@ pub(super) fn owned_input_rows(
     opener_end: u64,
     end: u64,
 ) -> Result<(bool, bool), String> {
+    input_rows(
+        path,
+        source_file,
+        session,
+        native_session,
+        opener_end,
+        end,
+        None,
+    )
+}
+
+struct QueuedInput {
+    offset: u64,
+    body: String,
+    command: bool,
+    absorbed: bool,
+    withdrawn: bool,
+}
+
+impl QueuedInput {
+    fn ran(&self) -> bool {
+        self.command || self.absorbed
+    }
+}
+
+fn input_rows(
+    path: &Path,
+    source_file: (u64, u64),
+    session: &str,
+    native_session: &str,
+    opener_end: u64,
+    end: u64,
+    token: Option<&CancelToken>,
+) -> Result<(bool, bool), String> {
+    use crate::services::tui_input::human_frame::history::{self, RowOwner};
+    use crate::services::tui_o::writer::input_facts::{QueueRecord, classify_queued_record};
     let mut file = std::fs::File::open(path).map_err(|error| error.to_string())?;
     let metadata = file.metadata().map_err(|error| error.to_string())?;
     if transcript_file_identity(&metadata) != source_file
@@ -152,7 +162,9 @@ pub(super) fn owned_input_rows(
     let mut reader = std::io::BufReader::new(file);
     let (mut line, mut offset) = (Vec::new(), opener_end);
     let (mut owned, mut clean) = (false, true);
+    let (mut queued, mut reserved) = (Vec::<QueuedInput>::new(), Vec::new());
     while offset < end {
+        let start = offset;
         line.clear();
         let read = reader
             .read_until(b'\n', &mut line)
@@ -165,14 +177,133 @@ pub(super) fn owned_input_rows(
             continue;
         }
         let record = serde_json::from_slice(&line).map_err(|error| error.to_string())?;
-        match later_row(&record, None, session, native_session, path) {
+        let later = if let Some(boundary) = row_boundary(&record, native_session) {
+            boundary
+        } else {
+            match classify_queued_record(&record) {
+                Some(QueueRecord::Enqueue(body)) => {
+                    queued.push(QueuedInput {
+                        offset: start,
+                        body,
+                        command: false,
+                        absorbed: false,
+                        withdrawn: false,
+                    });
+                    Later::Neutral
+                }
+                Some(QueueRecord::Absorbed(body)) => {
+                    let at = queued
+                        .iter()
+                        .position(|input| {
+                            input.body == body
+                                && input.command
+                                && !input.absorbed
+                                && !input.withdrawn
+                        })
+                        .or_else(|| {
+                            queued.iter().position(|input| {
+                                input.body == body && !input.ran() && !input.withdrawn
+                            })
+                        });
+                    let Some(at) = at else {
+                        return Err("Claude absorption has no corresponding enqueue".into());
+                    };
+                    queued[at].absorbed = true;
+                    Later::Neutral
+                }
+                Some(QueueRecord::Human(body)) => queued_command(&mut queued, body)
+                    .unwrap_or_else(|| later_row(&record, token, session, native_session, path)),
+                Some(QueueRecord::Command(body))
+                    if record["attachment"]["commandMode"] == "prompt"
+                        && record["attachment"]["origin"]["kind"].as_str().is_none() =>
+                {
+                    queued_command(&mut queued, body)
+                        .unwrap_or_else(|| later_row(&record, token, session, native_session, path))
+                }
+                Some(QueueRecord::Withdraw(body) | QueueRecord::Delivered(body)) => {
+                    if let Some(input) = queued
+                        .iter_mut()
+                        .find(|input| input.body == body && !input.ran() && !input.withdrawn)
+                    {
+                        input.withdrawn = true;
+                    }
+                    Later::Neutral
+                }
+                Some(QueueRecord::WithdrawAll) => {
+                    for input in &mut queued {
+                        if !input.ran() {
+                            input.withdrawn = true;
+                        }
+                    }
+                    Later::Neutral
+                }
+                None if record["type"] == "queue-operation" => Later::Undecided,
+                _ => later_row(&record, token, session, native_session, path),
+            }
+        };
+        match later {
             Later::Neutral => {}
-            Later::BusyChild => owned = true,
+            Later::BusyChild(id) => {
+                owned = true;
+                reserved.push(id);
+            }
             Later::Other => clean = false,
             Later::Undecided => return Err("owned-input row ownership unreadable".into()),
         }
     }
+    if queued.iter().any(QueuedInput::ran) {
+        let enqueues: Vec<_> = queued
+            .iter()
+            .map(|input| (input.offset, input.body.clone()))
+            .collect();
+        let owners = history::discord_enqueue_owners(
+            session,
+            native_session,
+            path,
+            opener_end,
+            &enqueues,
+            &reserved,
+        )?;
+        for (input, owner) in queued.iter().zip(owners) {
+            if !input.ran() {
+                continue;
+            }
+            match owner {
+                RowOwner::Command(_) => owned = true,
+                RowOwner::Unread => return Err("Claude absorption owner is ambiguous".into()),
+                RowOwner::None | RowOwner::User(_) => clean = false,
+            }
+        }
+    }
     Ok((owned, clean))
+}
+
+fn queued_command(queued: &mut [QueuedInput], body: String) -> Option<Later> {
+    let at = queued
+        .iter()
+        .position(|input| {
+            input.body == body && input.absorbed && !input.command && !input.withdrawn
+        })
+        .or_else(|| {
+            queued
+                .iter()
+                .position(|input| input.body == body && !input.ran() && !input.withdrawn)
+        })?;
+    queued[at].command = true;
+    Some(Later::Neutral)
+}
+
+fn row_boundary(record: &serde_json::Value, native_session: &str) -> Option<Later> {
+    if record["isSidechain"] == true {
+        return Some(Later::Neutral);
+    }
+    if !record.is_object() || record["type"].as_str().is_none() {
+        return Some(Later::Undecided);
+    }
+    record
+        .get("sessionId")
+        .is_some_and(|id| id.as_str() != Some(native_session))
+        .then_some(Later::Other)
 }
 
 /// A later user opens another turn; only an exact registered busy command joins this one.
@@ -184,17 +315,13 @@ fn later_row(
     transcript: &Path,
 ) -> Later {
     use crate::services::tui_input::human_frame::history::{self, RowOwner};
-    if record["isSidechain"] == true {
-        return Later::Neutral;
+    if let Some(boundary) = row_boundary(record, native_session) {
+        return boundary;
     }
-    if !record.is_object() || record["type"].as_str().is_none() {
-        return Later::Undecided;
-    }
-    if record
-        .get("sessionId")
-        .is_some_and(|id| id.as_str() != Some(native_session))
+    if record["type"] == "user"
+        && crate::services::tui_o::shadow::identity::record_is_compact_summary(record)
     {
-        return Later::Other;
+        return Later::Neutral;
     }
     // A tool result's envelope may carry hook context beside it; that text is no new input.
     let blocks = record["message"]["content"]
@@ -232,11 +359,11 @@ fn later_row(
         RowOwner::Command(id) | RowOwner::User(id)
             if token.is_some_and(|token| token.native_stop.is_busy_child(&id)) =>
         {
-            Later::BusyChild
+            Later::BusyChild(id)
         }
         RowOwner::Command(id) => {
             match history::discord_owner_attempt(session, native_session, transcript, &id) {
-                Ok(true) => Later::BusyChild,
+                Ok(true) => Later::BusyChild(id),
                 Ok(false) => Later::Other,
                 Err(_) => Later::Undecided,
             }
