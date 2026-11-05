@@ -15,12 +15,16 @@ from audit_maintainability.checks import module_layer_baseline as snapshots
 
 
 class IndeterminateBaselineRecordsTest(unittest.TestCase):
-    def test_readme_activation_command_matches_canonical_input_sha(self):
-        canonical = json.loads((ROOT / snapshots.BASELINE).read_text("utf-8"))
+    def test_readme_activation_command_matches_documented_activation(self):
         readme = (ROOT / snapshots.BASELINE).with_name("README.md").read_text("utf-8")
-        match = re.search(r"--input-sha ([^\s`]+)", readme)
-        self.assertIsNotNone(match)
-        self.assertEqual(match.group(1), canonical["input_sha"])
+        document = (ROOT / "docs/architecture/layers.md").read_text("utf-8")
+        self.assertIn("## 최초 활성화 기록", document)
+        activation = document.split("## 최초 활성화 기록", 1)[1].split("\n## ", 1)[0]
+        command = re.search(r"--input-sha ([0-9a-f]{40})(?=\s|`)", readme)
+        documented = re.search(r"--input-sha ([0-9a-f]{40})(?=\s|`)", activation)
+        self.assertIsNotNone(command)
+        self.assertIsNotNone(documented)
+        self.assertEqual(command.group(1), documented.group(1))
 
     @staticmethod
     def _node(name):

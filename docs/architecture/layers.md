@@ -185,6 +185,14 @@ TSV는 ID·count와 두 endpoint의 규칙 prefix·사유를 제공해 규칙별
 K 같은 known 재분류는 먼저 `--update-reductions --reclassify <prefix>`로 반영하고
 새 accepted 매핑을 anchor로 미분류 편입을 진행한다. 실패하면 기준선 바이트는 보존된다.
 
+## 검토된 분류 기록
+
+`services::discord::tmux_error_detect`는 긴 prefix로 foundation에 분류한다.
+`src/services/discord/tmux_error_detect.rs:1`의 prompt 길이 판독과 :46의 provider 진단 분류,
+:61·:83의 인증·과부하 문자열 판독은 I/O 없이 문자열과 정적 진단 값만 다룬다.
+기존 known 층의 정교화이므로 `--update-reductions --reclassify services::discord::tmux_error_detect`로
+기록하고, 이후 미분류 편입의 이전 매핑은 이 갱신을 담은 commit으로 고정한다.
+
 ## 검토된 모듈 이동의 old→new 대응
 
 이동 대응은 [`layer_moves.toml`](../../scripts/audit_maintainability/layer_moves.toml)에 적는다.
