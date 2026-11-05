@@ -2138,6 +2138,7 @@ src/
 │   │   │   │   │   ├── owner_input_rollback_tests.rs
 │   │   │   │   │   ├── owner_input_tests.rs
 │   │   │   │   │   ├── owner_provenance_tests.rs
+│   │   │   │   │   ├── owner_start_failure_tests.rs
 │   │   │   │   │   ├── producer_error_test_support.rs
 │   │   │   │   │   └── replay_scope.rs
 │   │   │   │   ├── provider_isolation/
