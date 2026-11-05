@@ -41,7 +41,7 @@ stateDiagram-v2
   s5 --> s7: Claude exits in the session
   s5 --> s0: the answer is posted
   s5 --> s8: you stop the turn
-  s6 --> s2: recovery posts a notice and clears the row [session gone]
+  s6 --> s2: recovery posts a notice and clears the row [session gone or namespace socket confirmed missing]
   s6 --> s6: the recovery probe fails, so the row is left or watcher restore has nothing to do or a message arrives
   s2 --> s0: intake opens
   s7 --> s0: the watcher posts a died notice

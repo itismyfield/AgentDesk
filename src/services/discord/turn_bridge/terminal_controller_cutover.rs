@@ -4,6 +4,8 @@
 //! write-backs so `terminal_delivery.rs` remains below its production LoC cap.
 
 use super::*;
+use crate::services::discord::outbound::body_census::{BodyOffer, BodySource};
+use crate::services::tui_o::cutover::BodySite;
 use std::sync::Arc;
 
 use super::super::gateway::TurnGateway;
@@ -260,59 +262,64 @@ pub(super) async fn deliver_short_replace_via_controller(
                 return toc::DeliveryOutcome::Unknown { fell_back: false };
             }
         };
-    let outcome = toc::deliver_turn_output_with_origin(
-        gateway,
-        toc::TurnOutputCtx {
-            turn,
-            lease_key,
-            // No `Bridge` variant exists on `RelayOwnerKind`; `None` preserves the
-            // historical bridge-owned/default shape (observability only).
-            owner: RelayOwnerKind::None,
-            holder,
-            // Lease cell is keyed by `watcher_owner_channel_id` (acquired by the
-            // caller via `delivery_lease(watcher_owner_channel_id)`, mod.rs:6105).
-            lease: &**cell,
-            // EDIT TARGET = the bridge's delivery channel (codex r1 [High]): the
-            // controller POSTs `replace_message_with_outcome(ctx.channel_id, ..)`
-            // (controller:830), which legacy site 5 routes through `channel_id`
-            // (mod.rs:6180), NOT `watcher_owner_channel_id`. These can differ for
-            // a recovered/reused-watcher bridge (mod.rs:2207-2213).
-            channel_id,
-            placeholder_controller,
-            placeholder: toc::PlaceholderSlot::Active {
-                message_id: msg_id,
-                key: PlaceholderKey {
-                    provider: provider.clone(),
-                    // The placeholder card lives in the delivery `channel_id`.
+    let outcome = BodySource::inherited()
+        .observe(
+            BodySite::BridgeShortController,
+            BodyOffer::Body,
+            toc::deliver_turn_output_with_origin(
+                gateway,
+                toc::TurnOutputCtx {
+                    turn,
+                    lease_key,
+                    // No `Bridge` variant exists on `RelayOwnerKind`; `None` preserves the
+                    // historical bridge-owned/default shape (observability only).
+                    owner: RelayOwnerKind::None,
+                    holder,
+                    // Lease cell is keyed by `watcher_owner_channel_id` (acquired by the
+                    // caller via `delivery_lease(watcher_owner_channel_id)`, mod.rs:6105).
+                    lease: &**cell,
+                    // EDIT TARGET = the bridge's delivery channel (codex r1 [High]): the
+                    // controller POSTs `replace_message_with_outcome(ctx.channel_id, ..)`
+                    // (controller:830), which legacy site 5 routes through `channel_id`
+                    // (mod.rs:6180), NOT `watcher_owner_channel_id`. These can differ for
+                    // a recovered/reused-watcher bridge (mod.rs:2207-2213).
                     channel_id,
-                    message_id: msg_id,
+                    placeholder_controller,
+                    placeholder: toc::PlaceholderSlot::Active {
+                        message_id: msg_id,
+                        key: PlaceholderKey {
+                            provider: provider.clone(),
+                            // The placeholder card lives in the delivery `channel_id`.
+                            channel_id,
+                            message_id: msg_id,
+                        },
+                    },
+                    body: relay_text,
+                    send_range: (start, end),
+                    // `Replace { Active }` → non-terminal → `post_send_finalize` no-ops,
+                    // matching the legacy edit-in-place (no terminal transition).
+                    plan: toc::OutputPlan::Replace {
+                        lifecycle: PlaceholderLifecycle::Active,
+                    },
+                    // #2757: the bridge short-replace NEVER deletes the original on
+                    // edit-fail fallback (only the separate long-chunk site deletes).
+                    edit_fail_policy: toc::EditFailPlaceholderPolicy::PreserveAlways,
+                    // The bridge's distinguishing policy: a fallback edit failure does NOT
+                    // commit → leave the offset un-advanced (terminal_delivery.rs:143).
+                    fallback_commit_policy: toc::FallbackCommitPolicy::NoCommitOnFallback,
+                    // B2 (single-holder): a lost acquire is another holder's range → do
+                    // NOT re-send. Mirrors the legacy site-5 B2-skip arm.
+                    acquire_failure_mode: toc::AcquireFailureMode::Transient,
+                    advance: Some(&advance),
+                    heartbeat: Some(&heartbeat),
+                    body_claim,
                 },
-            },
-            body: relay_text,
-            send_range: (start, end),
-            // `Replace { Active }` → non-terminal → `post_send_finalize` no-ops,
-            // matching the legacy edit-in-place (no terminal transition).
-            plan: toc::OutputPlan::Replace {
-                lifecycle: PlaceholderLifecycle::Active,
-            },
-            // #2757: the bridge short-replace NEVER deletes the original on
-            // edit-fail fallback (only the separate long-chunk site deletes).
-            edit_fail_policy: toc::EditFailPlaceholderPolicy::PreserveAlways,
-            // The bridge's distinguishing policy: a fallback edit failure does NOT
-            // commit → leave the offset un-advanced (terminal_delivery.rs:143).
-            fallback_commit_policy: toc::FallbackCommitPolicy::NoCommitOnFallback,
-            // B2 (single-holder): a lost acquire is another holder's range → do
-            // NOT re-send. Mirrors the legacy site-5 B2-skip arm.
-            acquire_failure_mode: toc::AcquireFailureMode::Transient,
-            advance: Some(&advance),
-            heartbeat: Some(&heartbeat),
-            body_claim,
-        },
-        shared.pg_pool.as_ref(),
-        provider.as_str(),
-        output_origin.as_ref(),
-    )
-    .await;
+                shared.pg_pool.as_ref(),
+                provider.as_str(),
+                output_origin.as_ref(),
+            ),
+        )
+        .await;
     // #3089 B2a: shadow-mirror durable delivered frontier — flag-gated, observe-only,
     // Delivered-only (I2), OFF=no-op. Keyed by `watcher_owner_channel_id` (the
     // OFFSET-AUTHORITY channel where `advance_tmux_relay_confirmed_end` advanced
@@ -405,42 +412,47 @@ pub(super) async fn deliver_long_chunks_via_controller(
                 return toc::DeliveryOutcome::Unknown { fell_back: false };
             }
         };
-    let outcome = toc::deliver_turn_output_with_origin(
-        gateway,
-        toc::TurnOutputCtx {
-            turn,
-            lease_key,
-            owner: RelayOwnerKind::None,
-            holder,
-            lease: &**cell,
-            channel_id,
-            placeholder_controller,
-            placeholder: toc::PlaceholderSlot::Active {
-                message_id: msg_id,
-                key: PlaceholderKey {
-                    provider: provider.clone(),
+    let outcome = BodySource::inherited()
+        .observe(
+            BodySite::BridgeLongController,
+            BodyOffer::Body,
+            toc::deliver_turn_output_with_origin(
+                gateway,
+                toc::TurnOutputCtx {
+                    turn,
+                    lease_key,
+                    owner: RelayOwnerKind::None,
+                    holder,
+                    lease: &**cell,
                     channel_id,
-                    message_id: msg_id,
+                    placeholder_controller,
+                    placeholder: toc::PlaceholderSlot::Active {
+                        message_id: msg_id,
+                        key: PlaceholderKey {
+                            provider: provider.clone(),
+                            channel_id,
+                            message_id: msg_id,
+                        },
+                    },
+                    body: relay_text,
+                    send_range: (start, end),
+                    plan: toc::OutputPlan::SendNewChunks {
+                        chunk_count,
+                        delete_anchor: true,
+                    },
+                    edit_fail_policy: toc::EditFailPlaceholderPolicy::PreserveAlways,
+                    fallback_commit_policy: toc::FallbackCommitPolicy::NoCommitOnFallback,
+                    acquire_failure_mode: toc::AcquireFailureMode::Transient,
+                    advance: Some(&advance),
+                    heartbeat: Some(&heartbeat),
+                    body_claim,
                 },
-            },
-            body: relay_text,
-            send_range: (start, end),
-            plan: toc::OutputPlan::SendNewChunks {
-                chunk_count,
-                delete_anchor: true,
-            },
-            edit_fail_policy: toc::EditFailPlaceholderPolicy::PreserveAlways,
-            fallback_commit_policy: toc::FallbackCommitPolicy::NoCommitOnFallback,
-            acquire_failure_mode: toc::AcquireFailureMode::Transient,
-            advance: Some(&advance),
-            heartbeat: Some(&heartbeat),
-            body_claim,
-        },
-        shared.pg_pool.as_ref(),
-        provider.as_str(),
-        output_origin.as_ref(),
-    )
-    .await;
+                shared.pg_pool.as_ref(),
+                provider.as_str(),
+                output_origin.as_ref(),
+            ),
+        )
+        .await;
     if let toc::DeliveryOutcome::Delivered {
         new_chunks: Some(chunks),
         ..
@@ -1298,12 +1310,12 @@ mod tests {
         #[cfg(unix)]
         #[rustfmt::skip]
         fn flip(source: ExactJsonlSourceIdentity) -> Arc<dyn Fn() + Send + Sync> {
-            Arc::new(move || { let mut g2 = source.clone(); g2.generation_mtime_ns = stamp(&g2.tmux_session_name, 1_800_526_400); g2.turn_nonce = "g2".into(); g2.range = (0, 7); dr::record_current_pinned_delivery(&g2, 9_999).unwrap(); })
+            Arc::new(move || { assert_eq!(crate::services::discord::outbound::current_census().unwrap()["site"], "W10e"); let mut g2 = source.clone(); g2.generation_mtime_ns = stamp(&g2.tmux_session_name, 1_800_526_400); g2.turn_nonce = "g2".into(); g2.range = (0, 7); dr::record_current_pinned_delivery(&g2, 9_999).unwrap(); })
         }
         #[cfg(unix)]
         #[rustfmt::skip]
         fn pinned_transport<'a>(shared: &'a SharedData, gateway: &'a dyn TurnGateway, provider: &'a ProviderKind, owner: ChannelId) -> PinnedTerminalTransport<'a> {
-            PinnedTerminalTransport { source: (shared, gateway, provider), admitted: None, target: (owner, ch(), MessageId::new(MSG)), payload: (Some("AgentDesk-codex-5264-barrier"), "answer", (0, 64)), trace: (None, None, None), claim: None }
+            PinnedTerminalTransport { census: crate::services::discord::outbound::body_census::BodySource::inherited(), source: (shared, gateway, provider), admitted: None, target: (owner, ch(), MessageId::new(MSG)), payload: (Some("AgentDesk-codex-5264-barrier"), "answer", (0, 64)), trace: (None, None, None), claim: None }
         }
         #[cfg(unix)]
         #[rustfmt::skip]
@@ -1931,7 +1943,12 @@ mod tests {
         async fn bridge_short_replace_edited_original_advances() {
             let shared = make_shared_data_for_tests();
             let cell = Arc::new(DeliveryLeaseCell::new(ch()));
-            let gw = gateway(ReplaceLongMessageOutcome::EditedOriginal, true);
+            let mut gw = gateway(ReplaceLongMessageOutcome::EditedOriginal, true);
+            gw.hook = Some(Arc::new(|| {
+                let tag = crate::services::discord::outbound::current_census().unwrap();
+                assert_eq!(tag["site"], "W10b");
+                assert_eq!(tag["reason"], "NO_CLAIM");
+            }));
             let outcome = run(&gw, &shared, &cell).await;
             assert!(
                 matches!(outcome, toc::DeliveryOutcome::Delivered { .. }),
@@ -2154,7 +2171,12 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
             let _root = runtime_root_guard();
-            let gw = long_gateway(true, true);
+            let mut gw = long_gateway(true, true);
+            gw.hook = Some(Arc::new(|| {
+                let tag = crate::services::discord::outbound::current_census().unwrap();
+                assert_eq!(tag["site"], "W10c");
+                assert_eq!(tag["reason"], "NO_CLAIM");
+            }));
             let mut locals = Locals::default();
             let shared = run_long_apply(&gw, &mut locals).await;
             assert_eq!(gw.send_calls.load(Ordering::SeqCst), 1);

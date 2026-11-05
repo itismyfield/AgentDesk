@@ -158,7 +158,17 @@ pub(in crate::services::discord::outbound) async fn send_authorized_manual_messa
         .map(|image| image.borrowed());
     request.notification.headless_nonce_enabled = options.image_attachment.is_none()
         && headless_nonce::headless_discord_nonce_enabled(options.trusted_internal_outbox);
-    send_resolved_with_origin(client, dedup, request, options.output_origin.as_ref()).await
+    let request_source = request.notification.source;
+    let send = send_resolved_with_origin(client, dedup, request, options.output_origin.as_ref());
+    if options.trusted_internal_outbox {
+        let tag = crate::services::message_outbox::body_census::delivery_tag(
+            request_source,
+            options.body_census.clone(),
+        );
+        super::super::census_scope(Some(tag), send).await
+    } else {
+        send.await
+    }
 }
 
 #[cfg(test)]

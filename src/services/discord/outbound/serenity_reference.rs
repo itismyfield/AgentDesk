@@ -97,16 +97,22 @@ impl DiscordOutboundClient for SerenityReferenceOutboundClient {
     ) -> Result<String, DispatchMessagePostError> {
         let channel_id = parse_channel_id(target_channel)?;
         rate_limit_wait(&self.shared, channel_id).await;
-        channel_id
-            .send_message(
+        super::raw_output::request(
+            channel_id,
+            super::raw_output::Operation::Post,
+            channel_id.send_message(
                 &self.http,
                 serenity::CreateMessage::new()
                     .content(content)
                     .allowed_mentions(super::super::http::relay_allowed_mentions()),
-            )
-            .await
-            .map(|message| message.id.get().to_string())
-            .map_err(dispatch_post_error)
+            ),
+        )
+        .await
+        .inspect(|message| {
+            super::body_census::note_legacy_created(channel_id.get(), message.id.get())
+        })
+        .map(|message| message.id.get().to_string())
+        .map_err(dispatch_post_error)
     }
 
     async fn post_message_with_reference(
@@ -122,8 +128,10 @@ impl DiscordOutboundClient for SerenityReferenceOutboundClient {
             DispatchMessagePostError::new(DispatchMessagePostErrorKind::Other, error)
         })?;
         rate_limit_wait(&self.shared, channel_id).await;
-        channel_id
-            .send_message(
+        super::raw_output::request(
+            channel_id,
+            super::raw_output::Operation::Post,
+            channel_id.send_message(
                 &self.http,
                 serenity::CreateMessage::new()
                     .reference_message(
@@ -135,10 +143,14 @@ impl DiscordOutboundClient for SerenityReferenceOutboundClient {
                     )
                     .content(content)
                     .allowed_mentions(super::super::http::relay_allowed_mentions()),
-            )
-            .await
-            .map(|message| message.id.get().to_string())
-            .map_err(dispatch_post_error)
+            ),
+        )
+        .await
+        .inspect(|message| {
+            super::body_census::note_legacy_created(channel_id.get(), message.id.get())
+        })
+        .map(|message| message.id.get().to_string())
+        .map_err(dispatch_post_error)
     }
 
     async fn post_message_with_reference_and_nonce(
@@ -202,6 +214,48 @@ fn dispatch_post_error(error: serenity::Error) -> DispatchMessagePostError {
 mod tests {
     use super::referenced_lifecycle_notice_nonce;
     use poise::serenity_prelude::{ChannelId, MessageId};
+
+    #[tokio::test]
+    async fn common_reference_posts_are_observed_once() {
+        use super::*;
+        use crate::services::discord::outbound::raw_output::tests as fixture;
+        if fixture::isolated(
+            concat!(module_path!(), "::common_reference_posts_are_observed_once")
+                .trim_start_matches("agentdesk::"),
+        ) {
+            return;
+        }
+        let log = fixture::journal().await;
+        let mock = fixture::Mock::start(vec![
+            fixture::message(9001),
+            fixture::message(9002),
+            fixture::message(9003),
+        ])
+        .await;
+        let client = SerenityReferenceOutboundClient {
+            http: Arc::new(fixture::client(&mock)),
+            shared: crate::services::discord::make_shared_data_for_tests_with_storage(None),
+        };
+        crate::services::discord::outbound::census_scope(Some(serde_json::json!({"case":"reference","output_class":"LegacyBody","binding_mode":"TUI"})), async {
+            client.post_message(&fixture::CHANNEL.to_string(), "body").await.unwrap();
+            client.post_message_with_reference(&fixture::CHANNEL.to_string(), "body", &fixture::CHANNEL.to_string(), "8001").await.unwrap();
+            client.post_message_with_reference_and_nonce(&fixture::CHANNEL.to_string(), "body", &fixture::CHANNEL.to_string(), "8001", "nonce", true).await.unwrap();
+        }).await;
+        fixture::flushed().await;
+        let rows: Vec<serde_json::Value> = std::fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .map(|v| serde_json::from_str(v).unwrap())
+            .filter(|v: &serde_json::Value| v["kind"] == "target")
+            .collect();
+        assert_eq!(mock.requests().len(), 3);
+        assert_eq!(rows.len(), 6);
+        assert!(
+            rows.iter()
+                .filter(|r| r["phase"] == "result")
+                .all(|r| r["outcome"] == "confirmed")
+        );
+    }
 
     #[test]
     fn lifecycle_notice_nonce_is_stable_and_semantic_event_scoped() {

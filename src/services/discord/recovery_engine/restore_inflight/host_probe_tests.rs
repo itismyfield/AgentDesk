@@ -488,3 +488,157 @@ async fn a_restored_reader_hands_off_or_retries_only_on_a_confirmed_pane_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn absent_namespace_socket_boot_recovery_admits_input_once_pg() {
+    use crate::services::provider::CancelToken;
+    use poise::serenity_prelude::{MessageId, UserId};
+    use std::os::unix::fs::PermissionsExt;
+
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _legacy_output = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let fake = tempfile::tempdir().unwrap();
+    let socket = fake.path().join("missing.sock");
+    let binary = fake.path().join("tmux");
+    std::fs::write(&binary, format!(
+        "#!/bin/sh\necho \"$*\" >> '{}/calls'\necho 'error connecting to {} (No such file or directory)' >&2\nexit 1\n",
+        fake.path().display(), socket.display()
+    )).unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut paths = vec![fake.path().to_path_buf()];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let path = std::env::join_paths(paths).unwrap();
+    let _path = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "PATH",
+        std::path::Path::new(&path),
+    );
+    let _tmux = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "TMUX",
+        std::ffi::OsStr::new(&format!("{},4242,0", socket.display())),
+    );
+    assert!(
+        !socket.exists(),
+        "the namespace socket is physically absent"
+    );
+
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let shared = shared_on(&pool).await;
+    let provider = ProviderKind::Claude;
+    let channel = ChannelId::new(1_479_671_301_776_700_001);
+    let name = "fixture-absent-socket";
+    let key = channel_key(&shared, name);
+    seed(&pool, &key, name, channel.get(), Stored::Legacy).await;
+    busy_turn(&shared, channel, name).await;
+    assert!(inflight::load_inflight_state_read_only(&provider, channel.get()).is_some());
+    let mut foreign_rows = Vec::new();
+    for (offset, host, node) in [
+        (10, "Mac-mini", "mac-mini-release"),
+        (11, "win-desktop", "wsl-release"),
+    ] {
+        let id = channel.get() + offset;
+        let foreign_key = format!("claude/{}/{host}:fixture-foreign", shared.token_hash);
+        seed(&pool, &foreign_key, "fixture-foreign", id, Stored::Legacy).await;
+        sqlx::query("UPDATE sessions SET instance_id = $1 WHERE session_key = $2")
+            .bind(node)
+            .bind(&foreign_key)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut row = inflight::InflightTurnState::new(
+            provider.clone(),
+            id,
+            None,
+            7,
+            id + 1,
+            id + 2,
+            "foreign turn".into(),
+            None,
+            Some("fixture-foreign".into()),
+            None,
+            None,
+            0,
+        );
+        row.session_key = Some(foreign_key);
+        row.host_locator = Some(
+            serde_json::from_value(serde_json::json!({
+                "host_kind": "tmux", "host_session_id": "fixture-foreign", "execution_node": node,
+            }))
+            .unwrap(),
+        );
+        inflight::save_inflight_state_create_new(&row).unwrap();
+        foreign_rows.push(row);
+    }
+    let discord = o_cut_recorder::start(channel.get()).await;
+
+    restore_inflight_turns(&discord.http, &shared, &provider).await;
+
+    for old in foreign_rows {
+        let kept = inflight::load_inflight_state_read_only(&provider, old.channel_id)
+            .expect("mini and WSL inflight rows are protected");
+        assert_eq!(kept.user_msg_id, old.user_msg_id);
+        assert_eq!(kept.host_locator, old.host_locator);
+    }
+
+    let calls = std::fs::read_to_string(fake.path().join("calls")).unwrap();
+    assert!(
+        calls.contains("has-session"),
+        "boot must reach the real has-session command: {calls}"
+    );
+    assert!(
+        inflight::load_inflight_state_read_only(&provider, channel.get()).is_none(),
+        "boot must retire the old row on an absent namespace socket"
+    );
+    let input = MessageId::new(channel.get() + 20);
+    let mut admitted = 0;
+    for _ in 0..2 {
+        if crate::services::discord::mailbox_try_start_turn(
+            &shared,
+            channel,
+            Arc::new(CancelToken::new()),
+            UserId::new(7),
+            input,
+        )
+        .await
+        {
+            admitted += 1;
+        }
+    }
+    assert_eq!(
+        admitted, 1,
+        "the same input claims the channel exactly once"
+    );
+    let next = inflight::InflightTurnState::new(
+        provider.clone(),
+        channel.get(),
+        None,
+        7,
+        input.get(),
+        input.get() + 1,
+        "same input".into(),
+        None,
+        Some(name.into()),
+        None,
+        None,
+        0,
+    );
+    inflight::save_inflight_state_create_new(&next).unwrap();
+    assert!(matches!(
+        inflight::save_inflight_state_create_new(&next),
+        Err(inflight::CreateNewInflightError::AlreadyExists)
+    ));
+    assert_eq!(
+        inflight::load_inflight_state_read_only(&provider, channel.get())
+            .unwrap()
+            .user_msg_id,
+        input.get()
+    );
+    assert!(
+        !discord.contents().is_empty(),
+        "the existing recovery notice path ran"
+    );
+    pool.close().await;
+    db.drop().await;
+}

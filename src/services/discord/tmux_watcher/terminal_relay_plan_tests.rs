@@ -1175,6 +1175,26 @@ async fn i7441c3_large_ledger_unposted_body_remains_orphan_pg() {
     bounded_terminal_cases(&[10]).await;
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn i7441d5_split_delivery_keeps_proof_before_late_receipts_pg() {
+    bounded_terminal_cases(&[11, 12]).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441d5_late_local_receipts_precede_pending_shared_lookup_pg() {
+    bounded_terminal_cases(&[13]).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441d5_successful_post_is_evidence_when_get_is_unavailable_pg() {
+    bounded_terminal_cases(&[14]).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441d5_transformed_post_still_records_the_missing_body_pg() {
+    bounded_terminal_cases(&[15]).await;
+}
+
 async fn bounded_terminal_cases(cases: &[u8]) {
     use crate::services::discord::inflight::load_inflight_state;
     use crate::services::discord::outbound::o_delivery_evidence::tests::Fixture;
@@ -1191,13 +1211,23 @@ async fn bounded_terminal_cases(cases: &[u8]) {
     let pool = db.connect_and_migrate().await;
     let body = "background task finished. ".repeat(270);
     for &mode in cases {
-        let delivered = matches!(mode, 0 | 2 | 3 | 7 | 9);
+        let delivered = matches!(mode, 0 | 2 | 3 | 7 | 9 | 11 | 13 | 14);
         let prefix = if mode < 2 || mode == 3 {
             107_680_321
         } else {
             16384
         };
-        let mut f = Fixture::injected_with_prefix(744300 + u64::from(mode), &[&body], prefix).await;
+        let bodies: Vec<&str> = if mode >= 11 {
+            vec!["Working through the request.", &body]
+        } else {
+            vec![&body]
+        };
+        let mut f = if mode >= 14 {
+            Fixture::confirmed_with_prefix(744300 + u64::from(mode), &bodies, prefix, mode == 15)
+                .await
+        } else {
+            Fixture::injected_with_prefix(744300 + u64::from(mode), &bodies, prefix).await
+        };
         assert!(load_inflight_state(&ProviderKind::Claude, f.row.channel_id).is_none());
         use std::io::{Read, Seek, SeekFrom, Write};
         let path = f.source.path.clone();
@@ -1254,7 +1284,7 @@ async fn bounded_terminal_cases(cases: &[u8]) {
                 }
             }));
         }
-        if mode >= 9 {
+        if matches!(mode, 9 | 10) {
             let ledger = f
                 .root
                 .join("o_store")
@@ -1311,9 +1341,85 @@ async fn bounded_terminal_cases(cases: &[u8]) {
                 prepared.len()
             );
         }
+        if (11..=13).contains(&mode) {
+            let ledger = f
+                .root
+                .join("o_store")
+                .join(f.row.channel_id.to_string())
+                .join("ledger.jsonl");
+            let original = std::fs::read_to_string(&ledger).unwrap();
+            let mut posted = Vec::new();
+            let mut offset = 0;
+            for line in original.split_inclusive('\n') {
+                let value: serde_json::Value = serde_json::from_str(line).unwrap();
+                if value["entry"]["type"] == "posted" {
+                    posted.push(offset);
+                }
+                offset += line.len();
+            }
+            assert!(
+                posted.len() > 1,
+                "the writer must split this body across messages"
+            );
+            let end = if mode == 12 {
+                *posted.last().unwrap()
+            } else {
+                original.len()
+            };
+            let late = original[posted[1]..end].to_string();
+            std::fs::write(&ledger, &original[..posted[1]]).unwrap();
+            if mode == 12 {
+                f.port.messages.lock().unwrap().pop();
+            }
+            f.port.get_once.store(1, Ordering::SeqCst);
+            *f.port.on_get.lock().unwrap() = Some(Box::new(move || {
+                // The first exact GET takes its snapshot before the writer records later POSTs.
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(ledger)
+                    .unwrap()
+                    .write_all(late.as_bytes())
+                    .unwrap();
+            }));
+        }
+        if mode >= 14 {
+            assert!(f.port.messages.lock().unwrap().len() > 1);
+            f.port.get_once.store(2, Ordering::SeqCst);
+        }
         let (http, _http) = f.http().await;
+        if mode >= 14 {
+            let ledger = f
+                .root
+                .join("o_store")
+                .join(f.row.channel_id.to_string())
+                .join("ledger.jsonl");
+            let before = std::fs::read(&ledger).unwrap();
+            drop(f.writer);
+            let store = crate::services::tui_o::store::OStore::existing(&f.root).unwrap();
+            drop(
+                store
+                    .open_channel(&store.read_era().unwrap().unwrap(), f.row.channel_id)
+                    .unwrap()
+                    .unwrap(),
+            );
+            assert_eq!(std::fs::read(ledger).unwrap(), before);
+        }
+        let proof_pool = if mode == 13 {
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with(pool.connect_options().as_ref().clone())
+                .await
+                .unwrap()
+        } else {
+            pool.clone()
+        };
+        let pending_shared_read = if mode == 13 {
+            Some(proof_pool.acquire().await.unwrap())
+        } else {
+            None
+        };
         let shared =
-            crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+            crate::services::discord::make_shared_data_for_tests_with_storage(Some(proof_pool));
         let began = tokio::time::Instant::now();
         let proof = o_delivery_evidence::tail(
             &http,
@@ -1336,6 +1442,7 @@ async fn bounded_terminal_cases(cases: &[u8]) {
             },
         )
         .await;
+        drop(pending_shared_read);
         eprintln!(
             "C2_TAIL mode={mode} delivered={delivered} covered={} elapsed_us={} gets={}",
             proof.is_some(),
@@ -1388,8 +1495,10 @@ async fn bounded_terminal_cases(cases: &[u8]) {
                 vec![f.body.clone()]
             }
         );
-        if delivered {
+        if delivered && mode < 14 {
             assert!(f.get_calls.load(Ordering::SeqCst) > 0);
+        } else if mode == 14 {
+            assert_eq!(f.get_calls.load(Ordering::SeqCst), 0);
         }
     }
     pool.close().await;

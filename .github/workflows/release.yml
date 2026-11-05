@@ -91,6 +91,9 @@ jobs:
           retention-days: 7
 
   native:
+    permissions:
+      contents: read
+      actions: read
     needs: [validate, dashboard]
     strategy:
       fail-fast: false
@@ -136,11 +139,38 @@ jobs:
         with:
           name: release-dashboard
           path: dashboard/dist/
+      - name: Find current source CI evidence
+        id: census_ci
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run="$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci-main.yml/runs" \
+            -f head_sha="$GITHUB_SHA" -f per_page=1 \
+            --jq '.workflow_runs[0] | select(.status == "completed" and .conclusion == "success") | "\(.id) \(.run_attempt)"')" || exit 0
+          read -r run_id attempt <<< "$run"
+          if [[ "$run_id" =~ ^[0-9]+$ && "$attempt" = 1 ]]; then
+            echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+            echo "attempt=$attempt" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Download current source CI evidence
+        if: steps.census_ci.outputs.run_id != ''
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: legacy-body-census-test-evidence-${{ steps.census_ci.outputs.attempt }}
+          path: ${{ runner.temp }}/census-evidence
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.census_ci.outputs.run_id }}
       - name: Package native release with the shared build script
         shell: bash
         env:
           RELEASE_TARGET: ${{ matrix.target }}
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          AGENTDESK_CENSUS_EVIDENCE_DIR: ${{ runner.temp }}/census-evidence
+          AGENTDESK_CENSUS_CI_RUN_ID: ${{ steps.census_ci.outputs.run_id }}
+          AGENTDESK_CENSUS_CI_RUN_ATTEMPT: ${{ steps.census_ci.outputs.attempt }}
         run: |
           python -m unittest tests.test_package_release
           bash scripts/build-release.sh --target "$RELEASE_TARGET" --profile release-fast --prebuilt-dashboard

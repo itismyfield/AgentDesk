@@ -6,6 +6,7 @@ use crate::services::{
 };
 
 mod attachments;
+pub(crate) mod body_census;
 mod diagnostics;
 mod identity;
 use diagnostics::{warn_lifecycle_enqueue_failure, warn_outbox_enqueue_failure};
@@ -285,7 +286,7 @@ pub(crate) async fn enqueue_outbox_with_origin_on_tx(
     );
     let notice =
         session_notice::designation(&mut **tx, message, attachment.is_some(), false).await?;
-    sqlx::query_scalar::<_, i64>(
+    let (id, inserted) = sqlx::query_as::<_, (i64, bool)>(
         "INSERT INTO message_outbox
          (target, content, bot, source, reason_code, session_key, dedupe_key, dedupe_expires_at,
           attachment_filename, attachment_content_type, attachment_data, session_notice, output_origin)
@@ -294,7 +295,7 @@ pub(crate) async fn enqueue_outbox_with_origin_on_tx(
              WHERE dedupe_key IS NOT NULL AND status NOT IN ('failed', 'cancelled')
          DO UPDATE SET dedupe_expires_at = NULL
            WHERE (message_outbox.output_origin->'origin') IS NOT DISTINCT FROM (excluded.output_origin->'origin')
-         RETURNING id",
+         RETURNING id, (xmax = 0)",
     )
     .bind(message.target)
     .bind(message.content)
@@ -309,8 +310,12 @@ pub(crate) async fn enqueue_outbox_with_origin_on_tx(
     .bind(notice)
     .bind(encoded_output_origin(origin)?)
     .fetch_one(&mut **tx)
-    .await
-    .map_err(Into::into)
+    .await?;
+    if inserted {
+        let census = body_census::capture(message.source);
+        body_census::store(tx, id, census.as_ref()).await;
+    }
+    Ok(id)
 }
 
 /// Exact-identity enqueue for durable handoffs.
@@ -378,7 +383,8 @@ pub(crate) async fn enqueue_outbox_pg_with_exact_origin(
         false,
     )
     .await?;
-    let id = sqlx::query_scalar::<_, i64>(
+    let mut tx = pool.begin().await?;
+    let (id, inserted) = sqlx::query_as::<_, (i64, bool)>(
         "INSERT INTO message_outbox
          (target, content, bot, source, reason_code, session_key, dedupe_key, dedupe_expires_at,
           attachment_filename, attachment_content_type, attachment_data, session_notice, output_origin,
@@ -388,7 +394,7 @@ pub(crate) async fn enqueue_outbox_pg_with_exact_origin(
              WHERE dedupe_key IS NOT NULL AND status NOT IN ('failed', 'cancelled')
          DO UPDATE SET dedupe_key = EXCLUDED.dedupe_key
           WHERE (message_outbox.output_origin->'origin') IS NOT DISTINCT FROM (excluded.output_origin->'origin')
-         RETURNING id",
+         RETURNING id, (xmax = 0)",
     )
     .bind(message.target)
     .bind(message.content)
@@ -403,8 +409,13 @@ pub(crate) async fn enqueue_outbox_pg_with_exact_origin(
     .bind(notice)
     .bind(encoded_output_origin(origin)?)
     .bind(producer_turn_nonce)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
+    if inserted {
+        let census = body_census::capture(message.source);
+        body_census::store(&mut tx, id, census.as_ref()).await;
+    }
+    tx.commit().await?;
     Ok(OutboxEnqueueOutcome::Enqueued { id })
 }
 
@@ -556,7 +567,7 @@ async fn enqueue_outbox_pg_on_tx_with_ttl_origin(
     release_expired_outbox_dedupe_key_pg(tx, dedupe_key.as_deref()).await?;
     let notice =
         session_notice::designation(&mut **tx, message, attachment.is_some(), false).await?;
-    Ok(sqlx::query_scalar::<_, i64>(
+    let id = sqlx::query_scalar::<_, i64>(
         "INSERT INTO message_outbox
          (target, content, bot, source, reason_code, session_key, dedupe_key, dedupe_expires_at,
           attachment_filename, attachment_content_type, attachment_data, session_notice, output_origin,
@@ -586,7 +597,12 @@ async fn enqueue_outbox_pg_on_tx_with_ttl_origin(
     .bind(encoded_output_origin(origin)?)
     .bind(producer_turn_nonce)
     .fetch_optional(&mut **tx)
-    .await?)
+    .await?;
+    if let Some(id) = id {
+        let census = body_census::capture(message.source);
+        body_census::store(tx, id, census.as_ref()).await;
+    }
+    Ok(id)
 }
 
 #[cfg(test)]
@@ -675,6 +691,10 @@ pub(crate) async fn stage_outbox_pg_with_ttl_and_attachment(
     .bind(notice)
     .fetch_optional(&mut *tx)
     .await?;
+    if let Some(id) = inserted {
+        let census = body_census::capture(message.source);
+        body_census::store(&mut tx, id, census.as_ref()).await;
+    }
     let id = match inserted {
         Some(id) => id,
         None => {
@@ -852,7 +872,7 @@ async fn enqueue_plain_on_tx(
         explicit_completion,
     )
     .await?;
-    Ok(sqlx::query_scalar::<_, i64>(
+    let id = sqlx::query_scalar::<_, i64>(
         "INSERT INTO message_outbox
          (target, content, bot, source, reason_code, session_key, attachment_filename, attachment_content_type, attachment_data, session_notice)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -869,7 +889,10 @@ async fn enqueue_plain_on_tx(
     .bind(data)
     .bind(notice)
     .fetch_one(&mut **tx)
-    .await?)
+    .await?;
+    let census = body_census::capture(message.source);
+    body_census::store(tx, id, census.as_ref()).await;
+    Ok(id)
 }
 
 pub(crate) async fn enqueue_lifecycle_notification_pg(
@@ -940,6 +963,10 @@ pub(crate) async fn enqueue_lifecycle_notification_pg(
     .bind(notice)
     .fetch_optional(&mut *tx)
     .await?;
+    if let Some(id) = inserted {
+        let census = body_census::capture(LIFECYCLE_NOTIFIER_SOURCE);
+        body_census::store(&mut tx, id, census.as_ref()).await;
+    }
     tx.commit().await?;
 
     if inserted.is_none() {

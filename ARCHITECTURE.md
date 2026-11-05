@@ -1203,6 +1203,8 @@ src/
 │   ├── discord/
 │   │   ├── abandon_request_store/
 │   │   │   └── probe_contract_tests.rs
+│   │   ├── adk_session/
+│   │   │   └── host_label_tests.rs
 │   │   ├── agent_handoff/
 │   │   │   └── accepted_tests.rs
 │   │   ├── busy_followup_retry_store/
@@ -1718,6 +1720,7 @@ src/
 │   │   │   │   ├── fresh_send_tests.rs
 │   │   │   │   ├── raw_request_tests.rs
 │   │   │   │   └── transport.rs
+│   │   │   ├── body_census.rs
 │   │   │   ├── completed_turn_ledger.rs
 │   │   │   ├── confirmation.rs
 │   │   │   ├── decision.rs
@@ -1748,6 +1751,7 @@ src/
 │   │   │   ├── serenity_reference.rs
 │   │   │   ├── source_registry.rs
 │   │   │   ├── transport.rs
+│   │   │   ├── transport_observation_tests.rs
 │   │   │   └── turn_output_controller.rs
 │   │   ├── placeholder_controller/
 │   │   │   ├── queued_card_gate/
@@ -2743,6 +2747,7 @@ src/
 │   │   │   ├── headless_delivery/
 │   │   │   │   ├── durable_outbox.rs
 │   │   │   │   ├── intake_outbox_argument.rs
+│   │   │   │   ├── observation_tests.rs
 │   │   │   │   ├── outcome.rs
 │   │   │   │   └── production_seam_tests.rs
 │   │   │   ├── recovery_text/
@@ -3315,6 +3320,20 @@ src/
 │   │   ├── test_support.rs
 │   │   ├── token_store.rs
 │   │   └── transport_tests.rs
+│   ├── legacy_body_census/
+│   │   ├── cache.rs
+│   │   ├── collector.rs
+│   │   ├── entry_tests.rs
+│   │   ├── evaluation.rs
+│   │   ├── evidence.rs
+│   │   ├── history.rs
+│   │   ├── manifest.rs
+│   │   ├── mod.rs
+│   │   ├── review_tests.rs
+│   │   ├── transport.rs
+│   │   ├── window.rs
+│   │   ├── window_tests.rs
+│   │   └── writer.rs
 │   ├── maintenance/
 │   │   ├── jobs/
 │   │   │   ├── db_retention/
@@ -3348,6 +3367,7 @@ src/
 │   │   └── runtime_state.rs
 │   ├── message_outbox/
 │   │   ├── attachments.rs
+│   │   ├── body_census.rs
 │   │   ├── diagnostics.rs
 │   │   ├── identity.rs
 │   │   ├── identity_tests.rs
@@ -3390,6 +3410,8 @@ src/
 │   │   │   ├── resolution.rs
 │   │   │   ├── runtime_path.rs
 │   │   │   └── windows_codex.rs
+│   │   ├── session_host_label/
+│   │   │   └── tests.rs
 │   │   ├── tmux/
 │   │   │   ├── liveness/
 │   │   │   │   └── tests.rs
@@ -3404,6 +3426,7 @@ src/
 │   │   ├── dump_tool.rs
 │   │   ├── mod.rs
 │   │   ├── network.rs
+│   │   ├── session_host_label.rs
 │   │   ├── shell.rs
 │   │   ├── tmux.rs
 │   │   └── windows_job.rs
@@ -3496,6 +3519,7 @@ src/
 │   │   │   ├── reliability.rs
 │   │   │   └── start_deferral.rs
 │   │   ├── discord_log/
+│   │   │   ├── census.rs
 │   │   │   └── failure_alert.rs
 │   │   ├── loader/
 │   │   │   └── discovery.rs
@@ -3505,6 +3529,8 @@ src/
 │   │   ├── agent_executor.rs
 │   │   ├── discord_log.rs
 │   │   ├── fresh_session_reaper.rs
+│   │   ├── legacy_body_census.rs
+│   │   ├── legacy_body_census_tests.rs
 │   │   ├── loader.rs
 │   │   ├── migrated.rs
 │   │   ├── mod.rs
@@ -4329,6 +4355,7 @@ src/
 │   ├── pipeline_routes.rs
 │   ├── pr_summary.rs
 │   ├── process.rs
+│   ├── process_boot.rs
 │   ├── provider.rs
 │   ├── provider_auth.rs
 │   ├── provider_auth_profile.rs

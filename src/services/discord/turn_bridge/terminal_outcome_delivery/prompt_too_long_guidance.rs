@@ -32,6 +32,7 @@ mod tests {
     #[derive(Default)]
     struct CapturingPromptTooLongGateway {
         replacements: Mutex<Vec<String>>,
+        census: Mutex<Vec<serde_json::Value>>,
     }
 
     impl TurnGateway for CapturingPromptTooLongGateway {
@@ -60,6 +61,10 @@ mod tests {
         ) -> TestGatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
             let content = content.to_string();
             Box::pin(async move {
+                self.census.lock().unwrap().push(
+                    crate::services::discord::outbound::current_census()
+                        .unwrap_or(serde_json::Value::Null),
+                );
                 self.replacements
                     .lock()
                     .expect("replacements lock")
@@ -112,6 +117,17 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_prompt_too_long_replace_delivers_actionable_folded_guidance() {
+        use crate::services::discord::outbound::raw_output::tests as observation;
+        if observation::isolated(
+            concat!(
+                module_path!(),
+                "::terminal_prompt_too_long_replace_delivers_actionable_folded_guidance"
+            )
+            .trim_start_matches("agentdesk::"),
+        ) {
+            return;
+        }
+        let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
         let shared = crate::services::discord::make_shared_data_for_tests();
         let capturing_gateway = Arc::new(CapturingPromptTooLongGateway::default());
         let gateway: Arc<dyn TurnGateway> = capturing_gateway.clone();
@@ -182,17 +198,61 @@ mod tests {
         )
         .await;
 
-        let replacements = capturing_gateway
-            .replacements
-            .lock()
-            .expect("replacements lock");
-        assert_eq!(replacements.len(), 1);
-        let delivered = &replacements[0];
-        assert!(delivered.contains("<@4215> ⚠️ 현재 대화가 provider의 컨텍스트 한도를 넘었어요."));
-        assert!(delivered.contains("`/compact`"));
-        assert!(delivered.contains("요청을 짧게"));
-        assert!(delivered.contains("||**상세**\n```text\n__prompt too long__"));
-        assert!(delivered.contains(provider_detail));
-        assert!(!delivered.contains("다음 메시지를 보내면 자동으로 새 턴이 시작됩니다."));
+        {
+            let replacements = capturing_gateway
+                .replacements
+                .lock()
+                .expect("replacements lock");
+            assert_eq!(replacements.len(), 1);
+            let delivered = &replacements[0];
+            assert!(
+                delivered.contains("<@4215> ⚠️ 현재 대화가 provider의 컨텍스트 한도를 넘었어요.")
+            );
+            assert!(delivered.contains("`/compact`"));
+            assert!(delivered.contains("요청을 짧게"));
+            assert!(delivered.contains("||**상세**\n```text\n__prompt too long__"));
+            assert!(delivered.contains(provider_detail));
+            assert!(!delivered.contains("다음 메시지를 보내면 자동으로 새 턴이 시작됩니다."));
+        }
+        full_response = "partial assistant body".into();
+        handle_cancel_prompt_replace(
+            CancelPromptReplaceMessage::Cancelled,
+            CancelPromptReplaceContext {
+                shared_owned: &shared,
+                gateway: &gateway,
+                provider: &provider,
+                cancel_token: &cancel_token,
+                channel_id,
+                user_msg_id: None,
+                current_msg_id,
+                dispatch_id: &dispatch_id,
+                adk_session_key: &adk_session_key,
+                turn_id: &turn_id,
+                watcher_owner_channel_id: channel_id,
+                tmux_last_offset: None,
+                response_sent_offset: 0,
+                inflight_generation: 0,
+            },
+            CancelPromptReplaceState {
+                full_response: &mut full_response,
+                active_background_child_session_ids: &mut active_background_child_session_ids,
+                pending_long_running_open_after_state_save:
+                    &mut pending_long_running_open_after_state_save,
+                pending_long_running_retarget_after_state_save:
+                    &mut pending_long_running_retarget_after_state_save,
+                long_running_placeholder_active: &mut long_running_placeholder_active,
+                inflight_state: &mut inflight_state,
+                preserve_inflight_for_cleanup_retry: &mut preserve_inflight_for_cleanup_retry,
+                bridge_skip_holder_owns_inflight: &mut bridge_skip_holder_owns_inflight,
+                status_panel_terminal_committed: &mut status_panel_terminal_committed,
+            },
+        )
+        .await;
+        let observed = capturing_gateway.census.lock().unwrap();
+        assert_eq!(observed.len(), 2);
+        assert_eq!(observed[0]["site"], "W11");
+        assert_eq!(observed[0]["output_class"], "NonBody");
+        assert_eq!(observed[1]["site"], "W11");
+        assert_eq!(observed[1]["output_class"], "LegacyBody");
     }
 }

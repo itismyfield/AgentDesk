@@ -16,9 +16,10 @@ use cancel_lookup::legacy_session_key_matches_channel;
 #[cfg(unix)]
 pub(crate) use cancel_lookup::load_cancel_turn_hosted;
 pub(crate) use cancel_lookup::load_cancel_turn_session;
+pub(crate) use trusted_target::build_trusted_target;
 #[cfg(all(test, unix))]
 pub(crate) use trusted_target::loopback_seam;
-use trusted_target::{TrustedForwardTarget, TrustedTargetError, build_trusted_target};
+use trusted_target::{TrustedForwardTarget, TrustedTargetError};
 
 const FORWARDED_BY_HEADER: &str = "x-agentdesk-forwarded-by";
 const SESSION_OWNER_HEADER: &str = "x-agentdesk-session-owner";
@@ -588,7 +589,7 @@ fn cancel_forward_error(status: StatusCode, body: Value, channel_id: &str) -> Se
     .with_context("remote_response", body)
 }
 
-fn trusted_request(
+pub(crate) fn trusted_request(
     state: &ForwardCallerContext,
     target: &TrustedForwardTarget,
     method: reqwest::Method,

@@ -2,9 +2,20 @@
 # Fields are tab-separated; rule lists are comma-separated; "-" or an omitted fourth field means none break.
 # Safety rules are invariant names, plus NoDeadlock for a deadlock. Liveness names come from PROPERTY/PROPERTIES.
 # scripts/ci/statecharts_tlc.py fails when a run breaks a rule not listed here or a listed rule holds.
+# ExecutionAuthorityDeployed: statechart exit=1 (SameUnmanagedReadmits); ExecutionAuthority: exit=0.
+# BeforeGateway safety holds but temporary PROPERTY AdmissionResumes fails (13); fix3 passes (0).
 execution-authority/ExecutionAuthority.cfg	ExecutionAuthority	-	-
-execution-authority/ExecutionAuthorityMain.cfg	ExecutionAuthority	-	AdmissionResumes
+execution-authority/ExecutionAuthorityAmbiguousGateway.cfg	ExecutionAuthority	-
+execution-authority/ExecutionAuthorityBeforeGateway.cfg	ExecutionAuthority	-
+execution-authority/ExecutionAuthorityCustody.cfg	ExecutionAuthority	OutputDelayKeepsAdmission
+execution-authority/ExecutionAuthorityDeployed.cfg	ExecutionAuthority	SameUnmanagedReadmits
+execution-authority/ExecutionAuthorityLost.cfg	ExecutionAuthority	-
+execution-authority/ExecutionAuthorityMain.cfg	ExecutionAuthority	SameUnmanagedReadmits	AdmissionResumes
 execution-authority/ExecutionAuthorityNoWait.cfg	ExecutionAuthority	NoForeignPermitHost
+execution-authority/ExecutionAuthoritySnapshot.cfg	ExecutionAuthority	-
+execution-authority/ExecutionAuthorityStandby.cfg	ExecutionAuthority	-
+execution-authority/ExecutionAuthorityUnknown.cfg	ExecutionAuthority	-
+execution-authority/ExecutionAuthorityWorker.cfg	ExecutionAuthority	-
 host-migration/HostMigration.cfg	HostMigration	NoDeadlock,RecordMatchesProcesses
 host-migration/HostMigrationClean.cfg	HostMigration	-
 host-migration/HostMigrationIdOnly.cfg	HostMigration	NoDeadlock
@@ -22,3 +33,4 @@ input-single-path/InputPath.cfg	InputPath	BusyInputLands,DraftSafe,HeldNotDroppe
 input-single-path/InputPathClean.cfg	InputPath	-
 session-lifecycle/HerdrSession.cfg	HerdrSession	NoDeadlock,NoOrphanPane,PromptOnlyToAgent,RowMatchesPane
 session-lifecycle/TmuxSession.cfg	TmuxSession	NoDeadlock,RowNamesSession,RowOnlyWithTurn
+session-lifecycle/TmuxSocketBoot.cfg	TmuxSocketBoot	-

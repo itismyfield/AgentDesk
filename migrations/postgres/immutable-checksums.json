@@ -842,6 +842,11 @@
       "version": 172
     },
     {
+      "path": "migrations/postgres/0173_message_outbox_body_census.sql",
+      "sha256": "d46a1ce98c32002e93158039c0393fda8967d28086df956d74a87dc6a6746678",
+      "version": 173
+    },
+    {
       "path": "migrations/postgres/0174_task_dispatches_card_created_index.sql",
       "sha256": "0d8d7966d8d89f2f7924be57a3f9184b06386fa9dbddbbe77af08efbddf63ff8",
       "version": 174

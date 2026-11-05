@@ -325,3 +325,91 @@ fn recovery_takeover_keeps_different_completion_footer_target() {
     );
     super::super::footer_view_reconciler::completion_footer_forget_registered_target(channel_id);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn recovered_notices_record_bodies_without_counting_neutral_markers() {
+    use crate::services::discord::outbound::raw_output::tests as observation;
+    use crate::services::tui_o::repost::io::tests::Mock;
+    if observation::isolated(
+        concat!(
+            module_path!(),
+            "::recovered_notices_record_bodies_without_counting_neutral_markers"
+        )
+        .trim_start_matches("agentdesk::"),
+    ) {
+        return;
+    }
+    let journal = observation::journal().await;
+    let mut row = state_for_recovery(9904);
+    row.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+    let neutral = super::RECOVERY_NEUTRAL_NOTICE;
+    let partial = format!("saved answer\n\n{neutral}");
+    for (entry, text) in [
+        ("notice", "saved provider answer"),
+        ("notice", super::RECOVERED_WITHOUT_TEXT),
+        ("notice", neutral),
+        ("notice", partial.as_str()),
+        ("terminal", neutral),
+        ("worktree", "fixture worktree is unavailable"),
+    ] {
+        let mock = Mock::start(vec![observation::message(9904)]).await;
+        let http = Arc::new(observation::client(&mock));
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let outcome = match entry {
+            "worktree" => {
+                super::completion_delivery::observe_worktree_recovery_refusal(
+                    &row,
+                    super::relay_recovered_terminal_text_to_placeholder(
+                        &http,
+                        &shared,
+                        ChannelId::new(row.channel_id),
+                        Some(MessageId::new(row.current_msg_id)),
+                        &format!("❌ {text}\nmain workspace fallback blocked."),
+                        None,
+                    ),
+                )
+                .await
+            }
+            "terminal" => {
+                super::relay_recovered_terminal_text_to_placeholder(
+                    &http,
+                    &shared,
+                    ChannelId::new(row.channel_id),
+                    Some(MessageId::new(row.current_msg_id)),
+                    text,
+                    None,
+                )
+                .await
+            }
+            _ => {
+                super::relay_recovery_terminal_notice(
+                    &http,
+                    &shared,
+                    &ProviderKind::Claude,
+                    &row,
+                    text,
+                )
+                .await
+            }
+        };
+        assert_eq!(outcome, super::RecoveryRelayOutcome::Delivered, "{entry}");
+        assert_eq!(mock.requests().len(), 1, "{entry}");
+    }
+    observation::flushed().await;
+    let recorded: Vec<serde_json::Value> = std::fs::read_to_string(journal)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|row: &serde_json::Value| row["kind"] == "target")
+        .collect();
+    assert_eq!(
+        recorded.len(),
+        4,
+        "two real bodies, including a partial before a notice; registered notices are excluded"
+    );
+    for event in recorded {
+        assert_eq!(event["census"]["site"], "W30");
+        assert_eq!(event["census"]["reason"], "NO_CLAIM");
+        assert_eq!(event["census"]["binding_mode"], "TUI");
+    }
+}

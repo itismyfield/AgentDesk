@@ -331,6 +331,7 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
         rate_limit_wait(&self.shared, channel_id).await;
         super::outbound::raw_output::request(
             channel_id,
+            super::outbound::raw_output::Operation::Post,
             channel_id.send_message(
                 &self.http,
                 serenity::CreateMessage::new()
@@ -365,6 +366,7 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
         // target.
         super::outbound::raw_output::request(
             channel_id,
+            super::outbound::raw_output::Operation::Post,
             channel_id.send_message(
                 &self.http,
                 serenity::CreateMessage::new()
@@ -454,6 +456,7 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
         rate_limit_wait(&self.shared, channel_id).await;
         super::outbound::raw_output::request(
             channel_id,
+            super::outbound::raw_output::Operation::Edit,
             channel_id.edit_message(
                 &self.http,
                 message_id,
@@ -709,6 +712,7 @@ impl TurnGateway for DiscordGateway {
             rate_limit_wait(&self.shared, channel_id).await;
             super::outbound::raw_output::request(
                 channel_id,
+                super::outbound::raw_output::Operation::Delete,
                 channel_id.delete_message(&self.http, message_id),
             )
             .await

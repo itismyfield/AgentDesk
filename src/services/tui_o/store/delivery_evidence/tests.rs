@@ -79,6 +79,7 @@ fn large_notice_does_not_hide_body_receipt(notice_first: bool) {
         .append_ledger(LedgerEntry::Posted {
             serial: 0,
             msg_id: 200,
+            confirmation: None,
         })
         .unwrap();
     if !notice_first {
@@ -151,6 +152,7 @@ fn corrupt_large_notice_and_oversized_delivery_rows_stay_unavailable() {
         .append_ledger(LedgerEntry::Posted {
             serial: 0,
             msg_id: 200,
+            confirmation: None,
         })
         .unwrap();
     channel.append_ledger(large_notice(runtime.path())).unwrap();
@@ -277,6 +279,7 @@ fn growing_ledger_is_read_past_the_last_observation_with_the_full_answer() {
         base.extend(line(LedgerEntry::Posted {
             serial,
             msg_id: 1_000_000 + serial,
+            confirmation: None,
         }));
     }
     append(&base);

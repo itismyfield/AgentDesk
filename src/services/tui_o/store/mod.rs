@@ -700,6 +700,7 @@ mod tests {
             LedgerEntry::Posted {
                 serial: 0,
                 msg_id: 200,
+                confirmation: None,
             },
             prepared(1, 200),
             LedgerEntry::Excluded {
@@ -838,6 +839,7 @@ mod tests {
             .append_ledger(LedgerEntry::Posted {
                 serial: 0,
                 msg_id: 300,
+                confirmation: None,
             })
             .unwrap();
         let last = store.open_channel(&era, 7).unwrap().unwrap();

@@ -475,6 +475,9 @@ pub(super) async fn interrupt_claude_session(
         };
     };
 
+    #[cfg(all(test, unix))]
+    super::native_stop::after_identity_probe(&session_name);
+
     // Token stops retain their generation fence; session stops re-read O's bound parent turn.
     // Interactive Escape holds the composer lock before either delivery check.
     let session_for_task = session_name.clone();

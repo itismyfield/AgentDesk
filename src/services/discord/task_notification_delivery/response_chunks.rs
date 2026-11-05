@@ -12,9 +12,11 @@ use super::store::{
     mark_response_chunk_ambiguous, mark_response_chunk_posting, prepare_response_chunk,
 };
 use super::{ResponseDeliveryClaim, content_hash, response_chunk_nonce_for_generation};
+use crate::services::discord::outbound::body_census::{BodyOffer, BodySource};
 use crate::services::discord::{SharedData, rate_limit_wait};
-use crate::services::tui_o::channel_policy::LegacySend;
-use crate::services::tui_o::cutover::{BodyClaim, BodySend, IdentityError, claim_then_send_held};
+use crate::services::tui_o::cutover::{
+    BodyClaim, BodySend, BodySite, BodyTransport, IdentityError, claim_then_send_held_at,
+};
 
 /// Discord documents nonce reconciliation as only a recent-message contract.
 /// Stay strictly inside a conservative two-minute subset; the equality
@@ -127,6 +129,7 @@ impl ResponseChunkTransport for DiscordResponseChunkTransport<'_> {
     ) -> Result<u64, ResponseChunkPostError> {
         let channel = ChannelId::new(channel_id);
         rate_limit_wait(self.shared, channel).await;
+        BodySource::inherited().observe(BodySite::TaskResponse, BodyOffer::Body, async {
         match reference_message_id {
             Some(reference) => {
                 crate::services::discord::http::send_channel_message_with_required_reference_and_nonce(
@@ -155,6 +158,7 @@ impl ResponseChunkTransport for DiscordResponseChunkTransport<'_> {
             .map(|message| message.id.get())
             .map_err(classify_serenity_post_error),
         }
+        }).await
     }
 
     async fn history_page(
@@ -207,7 +211,8 @@ pub(in crate::services::discord) struct ClaimAtPost<'a, T> {
     body: BodyClaim<'a>,
     state: std::sync::Mutex<PostClaim>,
     /// The first post's claimed send, kept counted through the later chunks until this drops.
-    held: std::sync::Mutex<Option<LegacySend>>,
+    held: std::sync::Mutex<Option<Arc<BodyTransport>>>,
+    source: Option<(BodySource, BodySite)>,
 }
 
 #[derive(Clone, Copy)]
@@ -226,10 +231,20 @@ pub(in crate::services::discord) fn claim_at_post<'a, T: ResponseChunkTransport>
         body,
         state: std::sync::Mutex::new(PostClaim::Open),
         held: std::sync::Mutex::default(),
+        source: None,
     }
 }
 
 impl<T> ClaimAtPost<'_, T> {
+    pub(in crate::services::discord) fn observing(
+        mut self,
+        source: BodySource,
+        site: BodySite,
+    ) -> Self {
+        self.source = Some((source, site));
+        self
+    }
+
     /// The send's own result, unless O owned the channel or the identity was held at a post.
     pub(in crate::services::discord) fn settle<R>(
         &self,
@@ -266,43 +281,68 @@ impl<T: ResponseChunkTransport> ResponseChunkTransport for ClaimAtPost<'_, T> {
         reference_message_id: Option<u64>,
         nonce: &str,
     ) -> Result<u64, ResponseChunkPostError> {
-        let state = *self
-            .state
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        if let PostClaim::Refused(_) = state {
-            return Err(ResponseChunkPostError::Transient(
-                "O owns this channel's body".to_string(),
-            ));
-        }
-        let claim = matches!(state, PostClaim::Open).then_some(self.body);
-        let post = || {
-            self.inner
-                .post_chunk(channel_id, content, reference_message_id, nonce)
-        };
-        match claim_then_send_held(claim, post).await {
-            Ok((BodySend::Sent(posted), send)) => {
-                self.set(PostClaim::Claimed);
-                if send.is_some() {
-                    *self
-                        .held
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner()) = send;
-                }
-                posted
-            }
-            Ok((BodySend::OwnedByO, _)) => {
-                self.set(PostClaim::Refused(None));
-                Err(ResponseChunkPostError::Transient(
+        let site = self
+            .source
+            .as_ref()
+            .map_or(BodySite::TaskResponse, |(_, site)| *site);
+        let execute = async {
+            let state = *self
+                .state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if let PostClaim::Refused(_) = state {
+                return Err(ResponseChunkPostError::Transient(
                     "O owns this channel's body".to_string(),
-                ))
+                ));
             }
-            Err(error) => {
-                self.set(PostClaim::Refused(Some(error)));
-                Err(ResponseChunkPostError::Transient(format!(
-                    "TUI output identity held: {error}"
-                )))
+            let claim = matches!(state, PostClaim::Open).then_some(self.body);
+            let held = self
+                .held
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .clone();
+            let post = || async {
+                let next = self
+                    .inner
+                    .post_chunk(channel_id, content, reference_message_id, nonce);
+                if let Some(held) = held.as_ref() {
+                    held.run(next).await
+                } else {
+                    next.await
+                }
+            };
+            match claim_then_send_held_at(site, claim, post).await {
+                Ok((BodySend::Sent(posted), send)) => {
+                    self.set(PostClaim::Claimed);
+                    if claim.is_some() {
+                        *self
+                            .held
+                            .lock()
+                            .unwrap_or_else(|poison| poison.into_inner()) = Some(Arc::new(send));
+                    }
+                    posted
+                }
+                Ok((BodySend::OwnedByO, _)) => {
+                    self.set(PostClaim::Refused(None));
+                    Err(ResponseChunkPostError::Transient(
+                        "O owns this channel's body".to_string(),
+                    ))
+                }
+                Err(error) => {
+                    self.set(PostClaim::Refused(Some(error)));
+                    Err(ResponseChunkPostError::Transient(format!(
+                        "TUI output identity held: {error}"
+                    )))
+                }
             }
+        };
+        if let Some((source, site)) = self.source.as_ref() {
+            source
+                .clone()
+                .observe(*site, BodyOffer::Body, Box::pin(execute))
+                .await
+        } else {
+            execute.await
         }
     }
 
@@ -512,20 +552,25 @@ pub(in crate::services::discord) async fn send_task_response_chunks_with_card_re
             Err(ResponseChunkDeliveryError::UnknownReference { detail })
                 if repairs < MAX_CARD_REPAIRS_PER_SEND =>
             {
-                let replacement = super::replace_confirmed_missing_card(
-                    pool,
-                    clients,
-                    card_transport,
-                    event,
-                    claim.card_message_id(),
-                )
-                .await
-                .map_err(|error| match error {
-                    super::CardEnsureError::Permanent(error) => {
-                        ResponseChunkDeliveryError::Permanent(error)
-                    }
-                    error => ResponseChunkDeliveryError::Transient(error.to_string()),
-                })?;
+                let replacement = BodySource::inherited()
+                    .observe(
+                        BodySite::TaskResponse,
+                        BodyOffer::NonBody,
+                        super::replace_confirmed_missing_card(
+                            pool,
+                            clients,
+                            card_transport,
+                            event,
+                            claim.card_message_id(),
+                        ),
+                    )
+                    .await
+                    .map_err(|error| match error {
+                        super::CardEnsureError::Permanent(error) => {
+                            ResponseChunkDeliveryError::Permanent(error)
+                        }
+                        error => ResponseChunkDeliveryError::Transient(error.to_string()),
+                    })?;
                 claim = super::rebind_task_response_card(pool, &claim, replacement.message_id)
                     .await
                     .map_err(|error| {
