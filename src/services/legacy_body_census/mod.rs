@@ -269,13 +269,15 @@ pub(crate) fn detail_json() -> Value {
     if let Ok(value) = TEST_PROJECTION.try_with(|(cache, now)| cache.snapshot(*now)) {
         return value;
     }
-    JOURNAL.get().map_or_else(
+    let mut value = JOURNAL.get().map_or_else(
         || {
             json!({"schema_version":1,"policy_version":1,"status":"INCONCLUSIVE",
             "inventory_source":{"available":false},"errors":["JOURNAL_NOT_STARTED"]})
         },
         |journal| journal.0.projection.snapshot(now),
-    )
+    );
+    value["boot_id"] = json!(crate::services::process_boot::initialize().id);
+    value
 }
 
 #[cfg(test)]
