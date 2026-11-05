@@ -229,10 +229,14 @@ async fn turn_end_summary_spends_one_physical_post_and_consumes_every_response()
         );
     }
     drop(trap);
-    assert_eq!(
-        proxy_env(),
-        before_trap,
-        "the trap gives every proxy variable back its value from before it started"
+    // Names only: a proxy value can carry credentials.
+    let changed: Vec<&str> = (proxy_env().into_iter().zip(&before_trap))
+        .filter(|(now, was)| now != *was)
+        .map(|((key, _), _)| key)
+        .collect();
+    assert!(
+        changed.is_empty(),
+        "the trap must give these proxy variables back their earlier values: {changed:?}"
     );
 }
 
