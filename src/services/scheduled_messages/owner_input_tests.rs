@@ -147,3 +147,49 @@ async fn bootstrap_held_by_modal<T>(
     held.await.unwrap();
     during
 }
+
+#[tokio::test]
+async fn start_failure_retained_schedule_closes_without_fallback_pg() {
+    let _root = TestRuntimeRootGuard::new();
+    let (db, pool) = create_test_pool("smsg_owner_rejected", "start failure terminal close").await;
+    let message = insert_one_shot_agent_message(&pool, "rejected-agent", "fail").await;
+    sqlx::query("UPDATE agents SET provider='claude',discord_channel_cc='123456789' WHERE id='rejected-agent'").execute(&pool).await.unwrap();
+    let fire = claim_one(&pool, "owner-worker").await;
+    let registry = ChannelMailboxRegistry::default();
+    let handle = registry.handle(poise::serenity_prelude::ChannelId::new(123456789));
+    handle
+        .v2_adopt(
+            discord_pending_queue_root()
+                .unwrap()
+                .join("rejected-owner.json"),
+            "scheduled-owner".into(),
+        )
+        .await
+        .unwrap();
+    let generation = crate::services::discord::runtime_store::generation_path().unwrap();
+    std::fs::create_dir_all(generation.parent().unwrap()).unwrap();
+    std::fs::write(generation, "5").unwrap();
+    owner_input::OWNER.scope(handle.clone(),async {
+        assert!(matches!(start_agent_turn(&pool,&HealthRegistry::new(),&fire).await.unwrap(),AgentTurnStartDisposition::Accepted));
+        let running=db::list_running_agent_deliveries_pg(&pool,"owner-poller",LEASE_SECS,10).await.unwrap().pop().unwrap();
+        assert_eq!(handle.v2_request(|slot| {
+            let owner=slot.as_mut().ok_or("owner")?;let front=owner.front().ok_or("front")?;
+            owner.grant_front(&front)?;owner.claim_turn(front.1.message_id,&front).ok_or("claim")?;
+            let kind=serde_json::from_value(serde_json::json!("endpoint_not_local")).map_err(|e|e.to_string())?;
+            owner.start_failed(&front,owner.claim_number(),std::slice::from_ref(&front.1),None,kind,"typed refusal")
+        }).await.unwrap(),Some(true));
+        let mut stale=running.clone();stale.turn_id=Some("other-turn".into());
+        owner_input::close_start_rejected(&pool,&stale,"wrong turn").await.unwrap();
+        stale=running.clone();stale.claim_token="other-claim".into();
+        owner_input::close_start_rejected(&pool,&stale,"wrong claim").await.unwrap();
+        let status:String=sqlx::query_scalar("SELECT status FROM scheduled_message_deliveries WHERE id=$1").bind(&fire.delivery_id).fetch_one(&pool).await.unwrap();assert_eq!(status,"running");
+        let (done,mut completed)=tokio::sync::mpsc::unbounded_channel();
+        assert!(!owner_input::REJECTION_TEST.scope((pool.clone(),done),poll_agent_delivery(&pool,running)).await);
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(10),completed.recv()).await.unwrap().unwrap());
+        let state:(String,Option<i64>,String)=sqlx::query_as("SELECT status,fallback_outbox_id,error FROM scheduled_message_deliveries WHERE id=$1").bind(&fire.delivery_id).fetch_one(&pool).await.unwrap();
+        assert_eq!((&*state.0,state.1),("failed",None));assert!(state.2.starts_with("start_rejected: "));
+        let state:(String,Option<String>)=sqlx::query_as("SELECT status,in_flight_delivery_id FROM scheduled_messages WHERE id=$1").bind(&message.id).fetch_one(&pool).await.unwrap();assert_eq!(state,("failed".into(),None));
+    }).await;
+    pool.close().await;
+    db.drop().await;
+}

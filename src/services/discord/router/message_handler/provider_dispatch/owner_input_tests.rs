@@ -1691,6 +1691,7 @@ fn an_owner_idle_turn_binds_its_cancel_token_to_its_pane() {
             claim,
             settled,
             origin: InputOrigin::Discord,
+            refusal: Default::default(),
         };
         let mut bound = None;
         let _ = rig.with_turn(&provider, Some(&rig.name), |turn, sender| {
@@ -1812,6 +1813,7 @@ pub(in crate::services::discord) async fn claimed_owner_turn(
         claim,
         settled,
         origin: InputOrigin::Discord,
+        refusal: Default::default(),
     };
     (owner, answer)
 }
@@ -1962,6 +1964,10 @@ mod rollback;
 
 #[path = "owner_input_parent_tests.rs"]
 mod parent;
+
+#[path = "owner_start_failure_tests.rs"]
+mod start_failure;
+
 #[path = "owner_input_stop_gate_tests.rs"]
 mod stop_gate;
 

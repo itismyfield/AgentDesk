@@ -15,6 +15,7 @@ pub(crate) mod projection;
 mod retained;
 pub(crate) mod source_admission;
 mod sources;
+pub(crate) mod start_failure;
 pub(crate) use attempt::AttemptRef;
 pub(crate) use commit::Fault;
 #[cfg(test)]
@@ -40,6 +41,7 @@ pub(crate) struct Owner {
     /// Diagnostic identity and successful commit count for this adoption; neither authorizes writes.
     incarnation: uuid::Uuid,
     last_success_sequence: u64,
+    starts: start_failure::Starts,
 }
 
 /// The owner's unattempted front as the drive hands it on: its slot's ticket and the original.
@@ -84,6 +86,7 @@ impl Owner {
             claim_number: 0,
             incarnation: uuid::Uuid::new_v4(),
             last_success_sequence: 0,
+            starts: start_failure::Starts::default(),
         };
         // A restored bootstrap is possibly sent; missing deadline never proves NotSent.
         let mut restored = owner.snapshot.clone();
@@ -163,10 +166,12 @@ impl Owner {
         if !front_holds(&next.items, &head) {
             return Err("unit members differ from the queue front".into());
         }
+        let reset: Vec<_> = head.members().cloned().collect();
         next.head_injection = Some(head);
         next.bind_reserved();
         // A reserve that did not commit leaves the drive's right in place, so the drive stops.
         self.commit(next)?;
+        self.reset_start_failures(&reset);
         self.revoke_front();
         Ok(key)
     }
@@ -248,7 +253,7 @@ impl Owner {
     /// The unattempted queue front, named by the ticket bound to its slot; a migrated or partly
     /// admitted front has none and still runs, without settling any ticket.
     pub(crate) fn front(&self) -> Option<Front> {
-        if self.snapshot.head_injection.is_some() {
+        if self.snapshot.head_injection.is_some() || self.starts.closing.is_some() {
             return None;
         }
         let original = self.snapshot.items.first()?.clone();
@@ -282,7 +287,11 @@ impl Owner {
         let head = soft(head.clone(), now, instant);
         let merges =
             |item: &&PendingQueueItem| head.merges_with(&soft((*item).clone(), now, instant));
-        items.take_while(merges).cloned().collect()
+        items
+            .take_while(merges)
+            .take_while(|item| self.retry_member(self.snapshot.items.first().expect("front"), item))
+            .cloned()
+            .collect()
     }
 
     /// Lets one owner claim presenting exactly this front start a turn.
