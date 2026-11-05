@@ -1235,9 +1235,8 @@ async fn sequences(pool: &PgPool, run: Option<&str>) -> Vec<u64> {
     }
 }
 
-/// The weekly retention keeps each campaign's newest 5,000 rows of events and run/action
-/// history plus every row of the current run; the cursor readers keep answering from what is
-/// left, and the protection follows the run the campaign currently points at.
+/// Retention keeps each campaign's newest 5,000 event and history rows plus its current run's
+/// rows; the cursor readers answer from what is left, and protection follows the current run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retention_keeps_the_newest_campaign_rows_and_the_whole_current_run_pg() {
     let h = Harness::new().await;
