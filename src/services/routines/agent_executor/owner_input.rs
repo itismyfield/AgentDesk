@@ -301,6 +301,16 @@ pub(super) mod custody {
             return Err(anyhow!("routine owner run/turn mismatch"));
         }
         let handle = handle(executor, &input.provider, input.channel).await?;
+        if let Some(reason) = input
+            .start_rejection(&handle)
+            .await
+            .map_err(anyhow::Error::msg)?
+        {
+            store
+                .fail_agent_run(&run.run_id, &reason, run.result_json.clone(), None)
+                .await?;
+            return Ok(false);
+        }
         // The observer connects to the owner's exact attempt first; a failed projection is
         // repaired under the same ticket on the next poll.
         if let Some((attempt, source)) = input

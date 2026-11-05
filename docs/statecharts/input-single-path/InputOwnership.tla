@@ -712,7 +712,7 @@ ObserverExactlyOnce == observer.pastes <= 1
 ObserverRefusalHasNoKeys == (observer.rejected /\ observer.pending) => observer.pastes = 0
 ObserverAttachmentWakesOnce == observer.attachWakes <= 1
 ObserverNoExtraWake == (~observer.initialPending \/ observer.initialAttached) => observer.attachWakes = 0
-\* Checked separately with plain TLC: the CI invariant checker deliberately rejects PROPERTY.
+\* CI checks PROPERTY separately with SPECIFICATION and applied fairness assumptions.
 ObserverEventuallyDelivered == (observer.attached /\ observer.pending) ~> observer.pastes = 1
 
 \* A normal busy arrival while A's observer runs. The runtime binding exists, but Claude's
@@ -862,5 +862,262 @@ AutoHandoffHold ==
 AutoHoldDone == claim = "joined" /\ UNCHANGED vars
 AutoHoldNext == AutoIngressHold \/ AutoRecoveryCompletes \/ AutoHandoffHold \/ AutoHoldDone
 AutomaticHoldNoticeOnce == claim # "none" => notices = 1
+
+
+\* -------------------------------------------------------------------- StartFailure
+(* Fixed classification at the owner settlement boundary (code b0bab6ebf6):
+   | 결과 | 분류 |
+   | reserve commit 이후의 모든 결과 | EffectOwned |
+   | drive handoff 대기(owner_input.rs:167–193), claim 실패(:514–523), owner_front_not_admitted 전체, headless claim 실패(headless_turn.rs:214–224), 비allowlist HerdrRefusal, wrapper 안의 NotSent 결과 | SchedulingHeld — 횟수 미포함, 슬롯 미소비. 오늘 동작 그대로 |
+   | allowlist 4종(host_refusal.rs:28–37에서 typed 보존) | ConfirmedKind, 첫 실패에서 보관 |
+   | wrapper 생성 뒤 reserve 전의 비NotSent Err(Herdr gate 미확인, context I/O, tmux 생성 실패 등), panic, (Err(_), Ok(_)) 무응답 | StartFailedBeforeInput — 2회 예산 |
+   | Forwarded / ConsumedToHold / SkippedDuplicate | 다른 경로가 이미 소비했을 수 있으므로 KnownNotSent 보관 금지 |
+   Allowlist: ProviderUnsupported, EndpointNotLocal, actual ExecutorNotWired after switch-on,
+   HostedHerdrUnconfigured { state: Some(Pending | Bound) } after automatic Return.
+   Shared contract: preclaim NotSent("herdr_root_recovery_held") is SchedulingHeld; S2 owns
+   its single completion wake. Inside-start bound gate failure is StartFailedBeforeInput
+   regardless of its string. host_refusal currently erases the typed cause; live work preserves it.
+   Failure counts and claim_number live in one process. Restart resets them; retained custody
+   survives. Reserved -> NotStarted on adoption follows v2/sources.rs:81–84, not unsent proof.
+   The isolated slice reuses observer as its record; the older slices keep their own record. *)
+SF == observer
+SFInc(n, cap) == IF n < cap THEN n + 1 ELSE n
+SFPolicy == Fix # "StartFailureBefore" /\ Fix # "OpaqueNoWakeBefore"
+SFHeld == Fix \in {"HoldCountedBefore", "HoldThenDelivered"}
+SFResolved == SF.state["A"] \in {"delivered", "retained", "discarded", "elsewhere"}
+StartFailureInit ==
+    /\ mode = "turn"
+    /\ src = "discord"
+    /\ mbx = "idle"
+    /\ nat = "idle"
+    /\ natOwner = "none"
+    /\ inp = "queued"
+    /\ pend = FALSE
+    /\ reader = FALSE
+    /\ obsOk = TRUE
+    /\ route = "none"
+    /\ plain = FALSE
+    /\ sentInto = "idle"
+    /\ win = "open"
+    /\ rcv = "none"
+    /\ userRow = FALSE
+    /\ twin = FALSE
+    /\ claim = "none"
+    /\ pastes = 0
+    /\ lp = 0
+    /\ op = 0
+    /\ screen = "ok"
+    /\ draft = "none"
+    /\ notices = 0
+    /\ wake = TRUE
+    /\ timer = FALSE
+    /\ byTimer = FALSE
+    /\ timed = FALSE
+    /\ heldBy = "none"
+    /\ watch = FALSE
+    /\ aged = FALSE
+    /\ twinPend = FALSE
+    /\ envLeft = 0
+    /\ stale = FALSE
+    /\ old = "none"
+    /\ acct = FALSE
+    /\ row = "none"
+    /\ ep = FALSE
+    /\ leak = FALSE
+    /\ outside = FALSE
+    /\ observer = [state |-> [x \in {"A", "B"} |-> "queued"],
+        failures |-> [x \in {"A", "B"} |-> 0], starts |-> 0, totalStarts |-> 0,
+        placeholders |-> 0, deleted |-> 0, noticePosts |-> 0, noticeDue |-> FALSE,
+        payload |-> [x \in {"A", "B"} |-> 0], run |-> "none", reserve |-> FALSE,
+        token |-> FALSE, row |-> FALSE, closing |-> FALSE, wake |-> TRUE,
+        completion |-> FALSE, closeWakes |-> 0, closes |-> 0, claim |-> 0, issued |-> 0, callback |-> 0,
+        proof |-> FALSE, cause |-> TRUE, holds |-> 0, noise |-> 0,
+        restarted |-> FALSE, cleared |-> FALSE, stale |-> FALSE, effectHeld |-> FALSE, stopped |-> FALSE, rowClaim |-> 0, closingClaim |-> 0, unsafeGrant |-> FALSE,
+        storeReady |-> Mut # "rowClearDelayed"]
+
+\* drive.rs:96–123,168–180: wake gates every grant. The counter saturates for a finite
+\* state space; no guard suppresses the third start (the safety witness).
+SFDrive ==
+    /\ SF.wake /\ ~SF.closing /\ ~SF.token /\ SF.run = "none"
+    /\ ~(Fix = "OpaqueNoWakeEarlyClear" /\ SF.proof /\ SF.cause)
+    /\ \E x \in {"A", "B"} :
+        /\ SF.state[x] = "queued" /\ (x = "A" \/ SFResolved)
+        /\ observer' = [SF EXCEPT !.run = x, !.wake = FALSE, !.unsafeGrant = @ \/ (SF.row /\ SF.rowClaim = SF.closingClaim),
+            !.rowClaim = SFInc(SF.issued, 8), !.issued = SFInc(@, 8), !.claim = SFInc(SF.issued, 8),
+            !.callback = IF x = "A" THEN SFInc(SF.issued, 8) ELSE @, !.reserve = FALSE,
+            !.token = ~(x = "A" /\ Fix = "KnownPersistent"), !.row = ~(x = "A" /\ Fix = "KnownPersistent"),
+            !.starts = IF x = "A" /\ ~(SFHeld /\ SF.holds < 2) THEN SFInc(@, 3) ELSE @,
+            !.totalStarts = SFInc(@, 3),
+            !.placeholders = IF x = "A" /\ Fix = "KnownPersistent" THEN @ ELSE SFInc(@, 3)]
+    /\ UNCHANGED ObserverLegacy
+
+\* Failure and exact-claim validation belong to one actor commit. Historical before variants
+\* omit that commit; NotSent-only suppression also has no close wake.
+SFFail ==
+    /\ SF.run = "A" /\ ~SF.reserve /\ SF.cause /\ ~(SFHeld /\ SF.holds < 2)
+    /\ SF.claim > 0 /\ SF.callback = SF.claim
+    /\ LET n == SFInc(SF.failures["A"], 2)
+           retain == SFPolicy /\ (n = 2 \/ (Mut = "earlyRetain" /\ n >= 1) \/ Fix = "KnownPersistent")
+       IN observer' = [SF EXCEPT !.run = "none", !.proof = TRUE,
+            !.failures["A"] = IF SFPolicy THEN n ELSE @,
+            !.state["A"] = IF retain THEN "retained" ELSE @,
+            !.closingClaim = SF.rowClaim, !.claim = 0, !.closing = SFPolicy /\ SF.row,
+            !.wake = IF SFPolicy /\ ~SF.row THEN TRUE ELSE @,
+            !.closeWakes = IF SFPolicy /\ ~SF.row THEN SFInc(@, 3) ELSE @,
+            !.closes = SFInc(@, 3), !.noticeDue = retain,
+            !.noticePosts = IF Fix = "StartFailureBefore" THEN SFInc(@, 2) ELSE @,
+            !.completion = (Fix = "StartFailureBefore")]
+    /\ UNCHANGED ObserverLegacy
+
+\* Scheduling holds consume no failure and await their own existing event; S2 supplies the
+\* root-recovery completion wake. The negative config counts these holds as failures.
+SFHold ==
+    /\ SF.run = "A" /\ SFHeld /\ SF.holds < 2 /\ ~SF.reserve
+    /\ observer' = [SF EXCEPT !.run = "none", !.holds = @ + 1,
+         !.failures["A"] = IF Fix = "HoldCountedBefore" THEN SFInc(@, 2) ELSE @,
+         !.completion = TRUE, !.cause = (SF.holds < 1)]
+    /\ UNCHANGED ObserverLegacy
+
+\* reserve_claimed's commit transfers ownership and resets consecutive pre-input failures.
+SFReserve ==
+    /\ SF.run # "none" /\ ~SF.reserve
+    /\ (SF.run = "B" \/ ~SF.cause)
+    /\ observer' = [SF EXCEPT !.reserve = TRUE,
+         !.failures[SF.run] = IF Mut = "reserveResetLost" THEN @ ELSE 0]
+    /\ UNCHANGED ObserverLegacy
+SFDeliver ==
+    /\ SF.run # "none" /\ SF.reserve
+    /\ observer' = [SF EXCEPT !.state[SF.run] = "delivered", !.payload[SF.run] = SFInc(@, 2),
+         !.run = "none", !.reserve = FALSE, !.completion = TRUE, !.claim = 0]
+    /\ UNCHANGED ObserverLegacy
+SFEffectHold ==
+    /\ Fix = "CompletionRace" /\ SF.run = "A" /\ SF.reserve /\ ~SF.effectHeld
+    /\ observer' = [SF EXCEPT !.run = "none", !.reserve = FALSE, !.effectHeld = TRUE,
+         !.completion = TRUE, !.claim = 0, !.starts = 0, !.cause = TRUE]
+    /\ UNCHANGED ObserverLegacy
+
+\* episode_identity.rs:320 signals token release before episode.rs:129–145 removes the row.
+SFRelease ==
+    /\ SF.run = "none" /\ SF.token
+    /\ observer' = [SF EXCEPT !.token = FALSE,
+         !.deleted = IF SFPolicy THEN SF.placeholders ELSE @]
+    /\ UNCHANGED ObserverLegacy
+\* A policy unlink may precede token release; only the comparison mutant wakes on row alone.
+SFRowClear ==
+    /\ SF.row /\ SF.run = "none" /\ SF.storeReady
+    /\ LET exact == SF.closing /\ SF.rowClaim = SF.closingClaim /\ Mut = "rowWake"
+       IN observer' = [SF EXCEPT !.row = FALSE,
+            !.closing = IF exact THEN FALSE ELSE @, !.wake = @ \/ exact,
+            !.closeWakes = IF exact THEN SFInc(@, 3) ELSE @]
+    /\ UNCHANGED ObserverLegacy
+\* The real busy handoff can spend an early wake without starting a producer.
+SFEarlyWakeConsumed ==
+    /\ SF.wake /\ SF.token /\ ~SF.row /\ ~SF.closing /\ SF.run = "none"
+    /\ observer' = [SF EXCEPT !.wake = FALSE]
+    /\ UNCHANGED ObserverLegacy
+SFCompletion ==
+    /\ SF.completion /\ ~SF.token /\ ~SF.row /\ SF.run = "none"
+    /\ observer' = [SF EXCEPT !.wake = TRUE, !.completion = FALSE]
+    /\ UNCHANGED ObserverLegacy
+\* Both facts refer to the captured failed episode; whichever arrives last enables one close.
+SFClosingComplete ==
+    /\ SF.closing /\ ~SF.token /\ ~SF.row /\ SF.rowClaim = SF.closingClaim
+    /\ observer' = [SF EXCEPT !.closing = FALSE, !.wake = TRUE, !.closeWakes = SFInc(@, 3)]
+    /\ UNCHANGED ObserverLegacy
+SFTokenWakeBefore ==
+    /\ Mut = "tokenWake" /\ SF.closing /\ ~SF.token /\ SF.row
+    /\ observer' = [SF EXCEPT !.closing = FALSE, !.wake = TRUE, !.closeWakes = SFInc(@, 3)]
+    /\ UNCHANGED ObserverLegacy
+SFLaterSettle ==
+    /\ ~SF.storeReady /\ SF.closing /\ SF.row /\ ~SF.token
+    /\ observer' = [SF EXCEPT !.storeReady = TRUE]
+    /\ UNCHANGED ObserverLegacy
+SFNotice ==
+    /\ SF.noticeDue
+    /\ observer' = [SF EXCEPT !.noticeDue = FALSE, !.noticePosts = SFInc(@, 2)]
+    /\ UNCHANGED ObserverLegacy
+
+\* Silent recovery supplies no wake. EarlyClear must clear before retry; LateClear must
+\* wait for retention. CompletionRace explores either order and duplicate existing events.
+SFCauseClears ==
+    /\ SF.cause /\ SF.proof
+    /\ Fix \in {"OpaqueNoWakeBefore", "OpaqueNoWakeEarlyClear", "OpaqueNoWakeLateClear", "CompletionRace", "RestartClear"}
+    /\ (Fix # "OpaqueNoWakeLateClear" \/ SF.state["A"] = "retained")
+    /\ observer' = [SF EXCEPT !.cause = FALSE]
+    /\ UNCHANGED ObserverLegacy
+SFDuplicateCompletion ==
+    /\ Fix = "CompletionRace" /\ SF.noise < 2 /\ SF.proof
+    /\ observer' = [SF EXCEPT !.noise = @ + 1, !.wake = TRUE]
+    /\ UNCHANGED ObserverLegacy
+SFConsumedElsewhere ==
+    /\ Fix = "CompletionRace" /\ SF.run = "A" /\ ~SF.reserve /\ ~SF.proof
+    /\ observer' = [SF EXCEPT !.state["A"] = "elsewhere", !.run = "none", !.completion = TRUE]
+    /\ UNCHANGED ObserverLegacy
+
+\* Runtime claim/count lifetime ends at restart. Restore discards Reserved heads, making
+\* them NotStarted rather than proving them unsent. Retained originals remain retained.
+SFRestart ==
+    /\ Fix = "RestartClear" /\ ~SF.restarted
+    /\ observer' = [SF EXCEPT !.restarted = TRUE, !.claim = 0, !.issued = 0, !.callback = 0,
+         !.failures = [x \in {"A", "B"} |-> 0], !.starts = 0,
+         !.run = "none", !.reserve = FALSE, !.token = FALSE, !.row = FALSE,
+         !.closing = FALSE, !.wake = TRUE, !.completion = FALSE]
+    /\ UNCHANGED ObserverLegacy
+SFClear ==
+    /\ Fix = "RestartClear" /\ ~SF.cleared /\ SF.state["A"] = "queued"
+    /\ observer' = [SF EXCEPT !.cleared = TRUE, !.state["A"] = "discarded",
+         !.run = "none", !.claim = 0, !.reserve = FALSE, !.closing = TRUE, !.closingClaim = SF.rowClaim,
+         !.closes = SFInc(@, 3)]
+    /\ UNCHANGED ObserverLegacy
+
+\* A user stop/cancel is not a start failure. Its existing completion may wake the same
+\* preserved front, with no failure counted and no start charged to this failure chain.
+SFUserStop ==
+    /\ Fix = "RestartClear" /\ SF.run = "A" /\ ~SF.reserve /\ ~SF.stopped
+    /\ observer' = [SF EXCEPT !.stopped = TRUE, !.run = "none", !.claim = 0,
+         !.completion = TRUE, !.starts = IF @ > 0 THEN @ - 1 ELSE 0]
+    /\ UNCHANGED ObserverLegacy
+
+SFStaleCallback ==
+    /\ Fix = "RestartClear" /\ SF.cleared /\ ~SF.stale
+    /\ LET exact == SF.claim > 0 /\ SF.callback = SF.claim /\ SF.run = "A"
+                     /\ SF.state["A"] = "queued" /\ ~SF.reserve
+       IN observer' = [SF EXCEPT !.stale = TRUE,
+            !.failures["A"] = IF exact THEN SFInc(@, 2) ELSE @,
+            !.state["A"] = IF exact THEN "retained" ELSE @]
+    /\ UNCHANGED ObserverLegacy
+SFNext == SFDrive \/ SFFail \/ SFHold \/ SFReserve \/ SFDeliver \/ SFEffectHold
+    \/ SFRelease \/ SFRowClear \/ SFEarlyWakeConsumed \/ SFCompletion \/ SFClosingComplete \/ SFTokenWakeBefore \/ SFLaterSettle \/ SFNotice \/ SFCauseClears
+    \/ SFDuplicateCompletion \/ SFConsumedElsewhere \/ SFRestart \/ SFClear \/ SFUserStop \/ SFStaleCallback
+SFSpec == StartFailureInit /\ [][SFNext]_vars
+    /\ WF_vars(SFDrive) /\ WF_vars(SFFail) /\ WF_vars(SFHold) /\ WF_vars(SFReserve)
+    /\ WF_vars(SFDeliver) /\ WF_vars(SFRelease) /\ WF_vars(SFCompletion)
+    /\ WF_vars(SFRowClear) /\ WF_vars(SFClosingComplete) /\ WF_vars(SFLaterSettle) /\ WF_vars(SFNotice) /\ WF_vars(SFCauseClears)
+
+ClosingWakesOnce == SF.closeWakes <= SF.closes
+StartAttemptsBounded == SF.starts <= 2
+KnownPersistentFirstFailureRetains == Fix = "KnownPersistent" /\ SF.proof => SF.state["A"] = "retained"
+SelfCompletionRetryBudget == SF.failures["A"] = 2 => SF.state["A"] = "retained"
+\* The adopted runtime-count policy replaces the old durable-budget rule: only retention survives.
+RetryBudgetSurvivesAdoption == SF.state["A"] = "retained" => ~(SF.run = "A" /\ SF.reserve)
+StartFailureNoticeOnce == SF.noticePosts <= 1
+RetainedProvenUnsent == SF.state["A"] = "retained" => SF.proof /\ SF.payload["A"] = 0
+PayloadOnce == \A x \in {"A", "B"} : SF.payload[x] <= 1
+NoSilentLossCustody == \A x \in {"A", "B"} : SF.state[x] \in {"queued", "retained", "delivered", "discarded", "elsewhere"}
+RetainedNeverAutoRequeued == SF.proof /\ SF.noticePosts = 1 /\ SFPolicy => SF.state["A"] = "retained"
+ExactFailureSettlement == SF.failures["B"] = 0 /\ (SF.cleared => SF.state["A"] = "discarded")
+NoStartDuringExactCleanup == ~SF.unsafeGrant /\ (SF.closing => SF.run = "none")
+RecoveryCreditPreserved == SF.closing \/ SF.wake \/ SF.completion \/ SF.token \/ SF.run # "none" \/ SFResolved \/ SFHeld
+HoldNeverCounted == SFHeld => SF.failures["A"] = 0
+NoKnownNotSentWithoutBeforeInput == SF.state["A"] = "retained" => SF.proof /\ SF.holds = 0
+FirstOpaqueFailureKept == SFPolicy /\ Fix # "KnownPersistent" /\ SF.failures["A"] = 1 =>
+    SF.state["A"] # "retained" /\ ~SF.noticeDue /\ SF.noticePosts = 0
+ReserveResetsFailures == SF.reserve => SF.failures[SF.run] = 0
+FailureEventuallyResolved == (SF.proof /\ SF.state["A"] = "queued") ~> SFResolved
+RetainedEventuallyInformed == (SF.state["A"] = "retained") ~> (SF.noticePosts = 1)
+OtherOriginalProgress == SFResolved ~> (SF.payload["B"] = 1)
+RecoveredWithinRetryDelivered == (SF.state["A"] = "queued" /\ [](~SF.cause /\ ~SF.cleared)) ~> (SF.payload["A"] = 1)
+RetainedWakesB == (SF.state["A"] = "retained" /\ ~SF.token) ~> (SF.payload["B"] = 1)
+EarlyClearDelivers == (Fix = "OpaqueNoWakeEarlyClear") => <> (SF.payload["A"] = 1)
 
 =============================================================================
