@@ -63,29 +63,31 @@ const KANBAN_AUDIT: &str = "created_at < NOW() - ($1::INT || ' days')::INTERVAL 
          WHERE card_id IS NOT NULL AND to_status IS NOT NULL \
          ORDER BY card_id, to_status, created_at DESC NULLS LAST, id DESC)";
 
-// Keeps each card's true negatives at its top round and its latest false negative, the rows a
-// reopen reclassifies and backfills.
+// Keeps every carded true negative with a round (each reopen turns the top round into false
+// negatives, so a lower round becomes the next one) and each card's latest false negative.
 const REVIEW_TUNING: &str = "created_at < NOW() - ($1::INT || ' days')::INTERVAL \
      AND id NOT IN ( \
-         SELECT id FROM (SELECT id, review_round, \
-                 MAX(review_round) OVER (PARTITION BY card_id) AS top_round \
-             FROM review_tuning_outcomes \
-             WHERE card_id IS NOT NULL AND outcome = 'true_negative') tn \
-         WHERE review_round = top_round \
+         SELECT id FROM review_tuning_outcomes \
+         WHERE card_id IS NOT NULL AND outcome = 'true_negative' AND review_round IS NOT NULL \
          UNION ALL \
          SELECT * FROM (SELECT DISTINCT ON (card_id) id FROM review_tuning_outcomes \
              WHERE card_id IS NOT NULL AND outcome = 'false_negative' \
              ORDER BY card_id, id DESC) fn)";
 
-// Keeps an in-flight review's items, and a carded item unless its dispatch still names that
-// card for the rework lookup to fall back on.
+// The rework lookup reads any one item of a dispatch (unordered) and falls back to the
+// dispatch's card, so items go only from a finished dispatch whose every carded item names it.
 const REVIEW_DECISION: &str = "decided_at < NOW() - ($1::INT || ' days')::INTERVAL \
      AND NOT EXISTS (SELECT 1 FROM task_dispatches td \
          WHERE td.id = review_decisions.dispatch_id AND td.status IN ('pending', 'dispatched')) \
      AND (kanban_card_id IS NULL \
           OR EXISTS (SELECT 1 FROM task_dispatches td \
               WHERE td.id = review_decisions.dispatch_id \
-                AND td.kanban_card_id = review_decisions.kanban_card_id))";
+                AND td.kanban_card_id = review_decisions.kanban_card_id)) \
+     AND NOT EXISTS (SELECT 1 FROM review_decisions o \
+         LEFT JOIN task_dispatches od ON od.id = o.dispatch_id \
+         WHERE o.dispatch_id = review_decisions.dispatch_id \
+           AND o.kanban_card_id IS NOT NULL \
+           AND o.kanban_card_id IS DISTINCT FROM od.kanban_card_id)";
 
 // Keeps each channel's newest events by `seq` (unique per channel) up to the count recovery
 // reloads; the literal below must match that count.
@@ -753,10 +755,10 @@ mod tests {
         db.drop().await;
     }
 
-    /// Audit, tuning and checkpoint rows go only when the resume, reopen and recovery readers
-    /// no longer pick them, and those readers answer as before.
+    /// Audit, tuning and checkpoint rows go only when no reader can pick them; the resume and
+    /// recovery readers answer as before (the reopen reader is checked in `tuning_aggregate`).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn db_retention_keeps_rows_the_resume_reopen_and_recovery_readers_use() {
+    async fn db_retention_keeps_rows_the_resume_and_recovery_readers_use() {
         let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
             "agentdesk_db_retention_record_caps_r2c",
             "db_retention audit tuning checkpoint rows",
@@ -822,17 +824,7 @@ mod tests {
                 .expect("checkpoint events");
                 events.push(loaded.into_iter().map(|e| e.id).collect::<Vec<_>>());
             }
-            // The reopen reclassifies exactly the true negatives at the card's top round.
-            let reopened: Vec<String> = sqlx::query_scalar(
-                "SELECT verdict FROM review_tuning_outcomes \
-                 WHERE card_id = 't1' AND outcome = 'true_negative' AND review_round = \
-                     (SELECT MAX(review_round) FROM review_tuning_outcomes \
-                      WHERE card_id = 't1' AND outcome = 'true_negative') ORDER BY 1",
-            )
-            .fetch_all(&pool)
-            .await
-            .expect("reopen targets");
-            (prior, events, reopened)
+            (prior, events)
         };
         let before = readers(pool.clone()).await;
         assert_eq!(
@@ -843,7 +835,7 @@ mod tests {
         let live = db_retention_job(&pool, false).await.expect("live pass");
         for (table, deleted) in [
             ("kanban_audit_logs", 3),
-            ("review_tuning_outcomes", 5),
+            ("review_tuning_outcomes", 4),
             ("agent_recovery_checkpoint_events", 3),
         ] {
             assert_eq!(
@@ -874,18 +866,7 @@ mod tests {
                 "SELECT verdict FROM review_tuning_outcomes ORDER BY 1"
             )
             .await,
-            ["fn-new", "recent", "tn-r2a", "tn-r2b"].map(String::from)
-        );
-
-        crate::kanban::correct_tn_to_fn_on_reopen(Some(&pool), "t1");
-        assert_eq!(
-            keys(
-                &pool,
-                "SELECT verdict FROM review_tuning_outcomes WHERE outcome = 'false_negative' ORDER BY 1"
-            )
-            .await,
-            ["fn-new", "tn-r2a", "tn-r2b"].map(String::from),
-            "the reopen still turns the top-round true negatives into false negatives"
+            ["fn-new", "recent", "tn-r1", "tn-r2a", "tn-r2b"].map(String::from)
         );
 
         pool.close().await;

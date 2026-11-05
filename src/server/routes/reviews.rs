@@ -755,13 +755,18 @@ mod decision_retention_pg_tests {
         )
         .await;
         let pool = db.connect_and_migrate().await;
-        // `decision` carries the row label; `d-gone*` have no dispatch row.
+        // `decision` carries the row label; `d-gone*` and `d-mix-gone` have no dispatch row. Each
+        // `d-mix-*` dispatch has an item the unordered lookup reads first and a `card-a` item.
         sqlx::raw_sql(
-            "INSERT INTO kanban_cards (id, title, status) VALUES ('card-r', 'r', 'review');
+            "INSERT INTO kanban_cards (id, title, status) VALUES
+                 ('card-r', 'r', 'review'), ('card-a', 'a', 'review'), ('card-b', 'b', 'review');
              INSERT INTO task_dispatches (id, status, dispatch_type, kanban_card_id) VALUES
                  ('d-open', 'pending', 'review', 'card-r'),
                  ('d-done', 'failed', 'review', 'card-r'),
-                 ('d-other', 'failed', 'review', NULL);
+                 ('d-other', 'failed', 'review', NULL),
+                 ('d-mix-b', 'failed', 'review', 'card-b'),
+                 ('d-mix-null', 'failed', 'review', 'card-b'),
+                 ('d-mix-nocard', 'failed', 'review', NULL);
              INSERT INTO review_decisions (kanban_card_id, dispatch_id, decision, decided_at) VALUES
                  ('card-r', 'd-open', 'open-aged', NOW() - INTERVAL '100 days'),
                  ('card-r', 'd-done', 'done-carded', NOW() - INTERVAL '100 days'),
@@ -770,7 +775,15 @@ mod decision_retention_pg_tests {
                  ('card-r', 'd-done', 'done-null-time', NULL),
                  ('card-r', 'd-other', 'other-carded', NOW() - INTERVAL '100 days'),
                  ('card-r', 'd-gone', 'gone-carded', NOW() - INTERVAL '100 days'),
-                 (NULL, 'd-gone2', 'gone-no-card', NOW() - INTERVAL '100 days')",
+                 (NULL, 'd-gone2', 'gone-no-card', NOW() - INTERVAL '100 days'),
+                 ('card-b', 'd-mix-b', 'mix-b-first', NOW() - INTERVAL '100 days'),
+                 ('card-a', 'd-mix-b', 'mix-b-other', NOW() - INTERVAL '100 days'),
+                 (NULL, 'd-mix-null', 'mix-null-first', NOW() - INTERVAL '100 days'),
+                 ('card-a', 'd-mix-null', 'mix-null-other', NOW() - INTERVAL '100 days'),
+                 (NULL, 'd-mix-gone', 'mix-gone-first', NOW() - INTERVAL '100 days'),
+                 ('card-a', 'd-mix-gone', 'mix-gone-other', NOW() - INTERVAL '100 days'),
+                 (NULL, 'd-mix-nocard', 'mix-nocard-first', NOW() - INTERVAL '100 days'),
+                 ('card-a', 'd-mix-nocard', 'mix-nocard-other', NOW() - INTERVAL '100 days')",
         )
         .execute(&pool)
         .await
@@ -778,7 +791,17 @@ mod decision_retention_pg_tests {
 
         let readers = |pool: sqlx::PgPool| async move {
             let mut cards = Vec::new();
-            for dispatch in ["d-open", "d-done", "d-other", "d-gone", "d-gone2"] {
+            for dispatch in [
+                "d-open",
+                "d-done",
+                "d-other",
+                "d-gone",
+                "d-gone2",
+                "d-mix-b",
+                "d-mix-null",
+                "d-mix-gone",
+                "d-mix-nocard",
+            ] {
                 cards.push(resolve_review_card_id_pg(&pool, dispatch).await.unwrap());
             }
             let none: &[DecisionItem] = &[];
@@ -786,10 +809,21 @@ mod decision_retention_pg_tests {
             (cards, open_items)
         };
         let before = readers(pool.clone()).await;
-        let card = Some("card-r".to_string());
+        let (r, b) = (Some("card-r".to_string()), Some("card-b".to_string()));
         assert_eq!(
             before.0,
-            vec![card.clone(), card.clone(), card.clone(), card, None]
+            vec![
+                r.clone(),
+                r.clone(),
+                r.clone(),
+                r,
+                None,
+                b.clone(),
+                b,
+                None,
+                None
+            ],
+            "the first-read item (or the dispatch's card) decides each lookup"
         );
 
         let report =
@@ -818,10 +852,19 @@ mod decision_retention_pg_tests {
                 "done-fresh",
                 "done-null-time",
                 "gone-carded",
+                "mix-b-first",
+                "mix-b-other",
+                "mix-gone-first",
+                "mix-gone-other",
+                "mix-nocard-first",
+                "mix-nocard-other",
+                "mix-null-first",
+                "mix-null-other",
                 "open-aged",
-                "other-carded"
+                "other-carded",
             ]
-            .map(String::from)
+            .map(String::from),
+            "a dispatch with any item naming another card keeps all its items"
         );
 
         pool.close().await;
