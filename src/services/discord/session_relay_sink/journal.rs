@@ -1,6 +1,8 @@
 use super::RelaySinkError;
 use crate::services::discord::SharedData;
 use crate::services::discord::outbound::DiscordTransportReceipt;
+use crate::services::discord::outbound::body_census::{BodyOffer, BodySource};
+use crate::services::tui_o::cutover::BodySite;
 use poise::serenity_prelude::{ChannelId, MessageId};
 use serde_json::Value;
 #[cfg(test)]
@@ -95,15 +97,25 @@ pub(super) async fn send_long_chunks_with_anchor_receipt(
     shared: &Arc<SharedData>,
 ) -> Result<(Vec<MessageId>, Option<DiscordTransportReceipt>), RelaySinkError> {
     if let Some(gateway) = gateway {
-        return gateway
-            .send_long_message_with_rollback(channel, anchor, text)
+        return BodySource::inherited()
+            .observe(
+                BodySite::SessionChunks,
+                BodyOffer::Body,
+                Box::pin(gateway.send_long_message_with_rollback(channel, anchor, text)),
+            )
             .await
             .map(|message_ids| (message_ids, None))
             .map_err(RelaySinkError::Transient);
     }
-    let receipts =
-        super::super::formatting::send_long_message_raw_with_rollback_returning_receipts(
-            http, channel, anchor, text, shared,
+    let receipts = BodySource::inherited()
+        .observe(
+            BodySite::SessionChunks,
+            BodyOffer::Body,
+            Box::pin(
+                super::super::formatting::send_long_message_raw_with_rollback_returning_receipts(
+                    http, channel, anchor, text, shared,
+                ),
+            ),
         )
         .await
         .map_err(|error| RelaySinkError::Transient(error.to_string()))?;

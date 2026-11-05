@@ -193,26 +193,28 @@ async fn a_task_response_posts_nothing_on_a_channel_o_committed() {
 }
 
 /// A chunk sink that notes the channel's Legacy sends as each post lands; history is empty.
-struct Counting {
+struct Counting<'a> {
+    inner: DiscordResponseChunkTransport<'a>,
     candidate: crate::services::tui_o::channel_policy::Candidate,
     seen: std::sync::Mutex<Vec<(u64, u64)>>,
 }
 
-impl ResponseChunkTransport for Counting {
+impl ResponseChunkTransport for Counting<'_> {
     async fn bot_user_id(&self) -> Result<u64, String> {
         Ok(BOT)
     }
 
     async fn post_chunk(
         &self,
-        _channel_id: u64,
-        _content: &str,
-        _reference_message_id: Option<u64>,
-        _nonce: &str,
+        channel_id: u64,
+        content: &str,
+        reference_message_id: Option<u64>,
+        nonce: &str,
     ) -> Result<u64, ResponseChunkPostError> {
-        let mut seen = self.seen.lock().unwrap();
-        seen.push(self.candidate.sends());
-        Ok(910_000 + seen.len() as u64)
+        self.seen.lock().unwrap().push(self.candidate.sends());
+        self.inner
+            .post_chunk(channel_id, content, reference_message_id, nonce)
+            .await
     }
 
     async fn history_page(
@@ -229,27 +231,107 @@ impl ResponseChunkTransport for Counting {
 /// the transport drops, so no adoption lands between two chunks of one Legacy body.
 #[tokio::test]
 async fn a_task_response_stays_counted_across_its_chunks_until_the_transport_drops() {
-    let channel = 4_325_427;
-    let _candidates = test_override::force_candidates(&[(channel, ClaudeTui)]);
-    let candidate = test_override::with_channels(|boot| boot?.candidate(channel).cloned());
-    let candidate = candidate.unwrap();
-    let claim = owned(channel).await;
-    let sink = Counting {
-        candidate: candidate.clone(),
-        seen: Default::default(),
-    };
-    let body = "ADK-S1-chunked-response line\n".repeat(200);
-    let transport = claim_at_post(&sink, BodyClaim::new(channel, Some(ClaudeTui)));
-    let sent = send_task_response_chunks(None, &transport, &claim, &body).await;
-    assert!(matches!(transport.settle(sent), Ok(BodySend::Sent(Ok(_)))));
-    let seen = sink.seen.lock().unwrap().clone();
-    assert!(seen.len() > 1, "a multi-chunk body: {seen:?}");
-    assert!(seen.iter().all(|&sends| sends == (1, 0)), "{seen:?}");
-    assert_eq!(
-        candidate.sends(),
-        (1, 0),
-        "still counted after the last chunk"
-    );
-    drop(transport);
-    assert_eq!(candidate.sends(), (1, 1));
+    use crate::services::discord::outbound::{census_scope, raw_output::tests as recording};
+    use serde_json::{Value, json};
+    if recording::isolated(
+        concat!(
+            module_path!(),
+            "::a_task_response_stays_counted_across_its_chunks_until_the_transport_drops"
+        )
+        .trim_start_matches("agentdesk::"),
+    ) {
+        return;
+    }
+    let log = recording::journal().await;
+    for (index, case) in ["whole_response", "later_posts_outlive_the_source_scope"]
+        .into_iter()
+        .enumerate()
+    {
+        let channel = 4_325_427 + index as u64;
+        let _candidates = test_override::force_candidates(&[(channel, ClaudeTui)]);
+        let candidate =
+            test_override::with_channels(|boot| boot?.candidate(channel).cloned()).unwrap();
+        let claim = owned(channel).await;
+        let replies = (0..16)
+            .map(|n| {
+                recording::reply("200 OK", &[], &json!({
+            "id":(910000+n).to_string(), "channel_id":channel.to_string(), "content":"answer",
+            "author":{"id":BOT.to_string(),"username":"bot","discriminator":"0001","avatar":null},
+            "timestamp":"2026-11-02T00:00:00+00:00", "edited_timestamp":null,
+            "tts":false,"mention_everyone":false,"mentions":[],"mention_roles":[],
+            "attachments":[],"embeds":[],"pinned":false,"type":0
+        }).to_string())
+            })
+            .collect();
+        let mock = recording::Mock::start(replies).await;
+        let http = recording::client(&mock);
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let sink = Counting {
+            inner: DiscordResponseChunkTransport::new(&http, &shared),
+            candidate: candidate.clone(),
+            seen: Default::default(),
+        };
+        let transport = claim_at_post(&sink, BodyClaim::new(channel, Some(ClaudeTui)));
+        let tag = json!({"case":case,"site":"W21","output_class":"LegacyBody","binding_mode":"TUI", "actual_runtime":"claude_tui","body_owner":"Legacy"});
+        let blocker = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log.with_file_name("writer.lock"))
+            .unwrap();
+        blocker.lock().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            if index == 0 {
+                let body = "ADK-S1-chunked-response line\n".repeat(200);
+                let sent = census_scope(
+                    Some(tag.clone()),
+                    send_task_response_chunks(None, &transport, &claim, &body),
+                )
+                .await;
+                assert!(matches!(transport.settle(sent), Ok(BodySend::Sent(Ok(_)))));
+            } else {
+                census_scope(
+                    Some(tag),
+                    transport.post_chunk(channel, "first", None, "first"),
+                )
+                .await
+                .unwrap();
+                transport
+                    .post_chunk(channel, "second", None, "second")
+                    .await
+                    .unwrap();
+            }
+        })
+        .await
+        .expect("actual chunk POSTs cannot wait for the journal writer");
+        blocker.unlock().unwrap();
+        let seen = sink.seen.lock().unwrap().clone();
+        assert!(seen.len() > 1, "a multi-chunk body: {seen:?}");
+        assert!(seen.iter().all(|&sends| sends == (1, 0)), "{seen:?}");
+        assert_eq!(mock.requests().len(), seen.len());
+        assert_eq!(
+            candidate.sends(),
+            (1, 0),
+            "still counted after the last chunk"
+        );
+        recording::flushed().await;
+        let rows: Vec<Value> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|row| row["kind"] == "target" && row["channel"] == channel)
+            .collect();
+        assert_eq!(
+            rows.len(),
+            2 * seen.len(),
+            "every actual first/later POST is observed: {case}"
+        );
+        assert!(
+            rows.iter().all(|r| r["census"]["case"] == case
+                && r["census"]["binding_mode"] == "TUI"
+                && r["census"]["site"] == "W21"),
+            "original source remains through later posts: {rows:?}"
+        );
+        drop(transport);
+        assert_eq!(candidate.sends(), (1, 1));
+    }
 }

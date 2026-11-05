@@ -66,6 +66,7 @@ async fn d4b_two_hosted_channels_repost_by_default_with_wire_controls_pg() {
             .append_ledger(LedgerEntry::Posted {
                 serial: 0,
                 msg_id: 900,
+                confirmation: None,
             })
             .unwrap();
         drop(ledger);

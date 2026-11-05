@@ -18,7 +18,7 @@ pub(super) async fn restore_worker_queues(shared: &Arc<SharedData>, provider: &P
     };
     let stale_cards = restore_queued_and_inflight_work(&http, shared, provider).await;
     delete_stale_queued_placeholder_cards(&http, shared, &stale_cards).await;
-    mark_reconcile_complete(shared);
+    complete_active_reconcile(shared).await;
     spawn_turn_completion_idle_queue_listener(shared.clone(), provider.clone());
     spawns::run_bot_spawn_queue_exit_clear_retry(shared);
 }

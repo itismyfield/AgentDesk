@@ -921,6 +921,7 @@ pub fn handle_dcserver(token: Option<String>) {
     unsafe {
         std::env::remove_var("CLAUDECODE");
     }
+    crate::services::legacy_body_census::start();
 
     let rt = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,

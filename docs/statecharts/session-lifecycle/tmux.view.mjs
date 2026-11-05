@@ -50,6 +50,7 @@ const labels = {
   RestoreReattach: "recovery reattaches [session live]",
   RestoreRetry: "recovery retries the turn [pane dead]",
   RestoreMissing: "recovery posts a notice and clears the row [session gone]",
+  RestoreMissingSocket: "recovery confirms the namespace socket is missing and clears the row",
   RestoreDefer: "the recovery probe fails, so the row is left",
   RestoreNoRow: "recovery finds no row",
   WatchersAdopt: "watcher restore adopts the live session",

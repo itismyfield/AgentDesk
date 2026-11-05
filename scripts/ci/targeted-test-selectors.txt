@@ -51,6 +51,10 @@ services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::hold_detail_
 [High-risk recovery: Local model durable queue wake regression]
 services::discord::tui_prompt_relay::local_model_queue_wake_e2e
 
+[High-risk recovery: Input observer attachment regressions]
+services::discord::router::message_handler::provider_dispatch::owner_input::tests::idle::
+services::discord::runtime_bootstrap::shared_data::tests::
+
 [High-risk recovery: Transition-busy requeue spin regressions]
 services::discord::router::message_handler::intake_turn::race_loss::
 =services::discord::queue_io::presleep_tests::race_loss_recheck_fences_on_transition_without_parking_a_waiter_5170
@@ -86,6 +90,12 @@ services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests
 services::session_forwarding
 
 [Fast targeted tests: Terminal delivery evidence regressions]
+=services::tui_o::store::ledger::tests::i7441d5_post_confirmation_preserves_both_ledger_format_directions
+=services::discord::outbound::o_delivery_evidence::tests::i7441d5_durable_post_confirmation_rejects_foreign_or_changed_identity
+=services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests::i7441d5_late_local_receipts_precede_pending_shared_lookup_pg
+=services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests::i7441d5_split_delivery_keeps_proof_before_late_receipts_pg
+=services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests::i7441d5_successful_post_is_evidence_when_get_is_unavailable_pg
+=services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests::i7441d5_transformed_post_still_records_the_missing_body_pg
 inflight::terminal_delivery_evidence_loss::tests
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests
 watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row

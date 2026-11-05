@@ -140,6 +140,10 @@ RestoreMissing ==
     /\ row' = "none" /\ restored' = "rows"
     /\ UNCHANGED <<srv, sess, exitKind, turn, msg, delivered, crashes, deaths, probeFails>>
 
+\* A missing namespace socket is also confirmed absence, after reported-path and lstat checks
+\* (platform/tmux/session_inventory.rs). Transport errors still use RestoreDefer.
+RestoreMissingSocket == RestoreMissing
+
 \* The probe fails, or the host guard keeps the row: leave row and report as stored
 \* (recovery_engine/tmux_probe.rs:86-108, 224-237; restore_inflight.rs:1548-1549).
 RestoreDefer ==
@@ -188,7 +192,7 @@ OpenIntake ==
 Next ==
     \/ UserSends \/ ClaimTurn \/ PlanWarm \/ PlanCold \/ FollowupDelivered \/ FollowupFails
     \/ Recreate \/ ProviderExits \/ TurnEnds \/ TurnDiesMidway \/ StopKill \/ StopClear
-    \/ Crash \/ Boot \/ RestoreReattach \/ RestoreRetry \/ RestoreMissing \/ RestoreDefer
+    \/ Crash \/ Boot \/ RestoreReattach \/ RestoreRetry \/ RestoreMissing \/ RestoreMissingSocket \/ RestoreDefer
     \/ RestoreNoRow \/ WatchersAdopt \/ WatchersKillDead \/ WatchersNothing \/ WatchersProbeFails
     \/ OpenIntake
 

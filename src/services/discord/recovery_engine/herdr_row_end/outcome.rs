@@ -39,7 +39,7 @@ pub(super) enum Settle {
 }
 
 /// Says neither that the turn finished nor that it was cut off.
-pub(super) const NEUTRAL_NOTICE: &str = "ℹ️ 이전 실행은 종료됐거나 입력 가능한 상태지만, 이전 요청의 완료 여부는 확인하지 못했습니다. 요청을 자동으로 다시 실행하지는 않았습니다.";
+pub(super) use super::super::completion_delivery::RECOVERY_NEUTRAL_NOTICE as NEUTRAL_NOTICE;
 
 /// `idle` is I's evidence, else E's; `o_owned` is the row channel's output owner read now.
 pub(super) fn settle(

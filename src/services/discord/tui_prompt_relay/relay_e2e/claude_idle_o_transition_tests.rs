@@ -652,6 +652,7 @@ fn only_posted_or_legitimate_excluded_anchor_and_all_pieces_count() {
                     "Posted" => Some(LedgerEntry::Posted {
                         serial: 0,
                         msg_id: 101,
+                        confirmation: None,
                     }),
                     _ => None,
                 };
@@ -881,6 +882,7 @@ fn multipart_anchor_needs_every_piece_posted() {
                 .append_ledger(LedgerEntry::Posted {
                     serial: i as u64,
                     msg_id: 101 + i as u64,
+                    confirmation: None,
                 })
                 .unwrap();
         }
@@ -908,6 +910,7 @@ fn multipart_anchor_needs_every_piece_posted() {
             .append_ledger(LedgerEntry::Posted {
                 serial,
                 msg_id: 101 + serial,
+                confirmation: None,
             })
             .unwrap();
         e.capture().unwrap();

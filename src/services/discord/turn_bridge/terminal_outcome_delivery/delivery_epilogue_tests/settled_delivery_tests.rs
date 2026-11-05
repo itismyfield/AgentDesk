@@ -40,6 +40,8 @@ async fn i7441_no_range_completion_uses_captured_input_when_current_row_changes(
 
 fn use_headless_gateway(driver: &mut TerminalDeliveryDriver) {
     driver.gateway = Arc::new(DriverGateway {
+        #[cfg(unix)]
+        published_census: driver.published_census.clone(),
         chain_locally: true,
         direct: false,
         marker: driver.marker.clone(),

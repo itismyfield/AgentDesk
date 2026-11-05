@@ -145,6 +145,7 @@ pub(in crate::services::discord) fn owner_drive(
     (mailbox, pool): (ChannelMailboxHandle, Option<sqlx::PgPool>),
     (provider, channel): (ProviderKind, u64),
     idle: Handoff,
+    runtime: Option<Shared>,
 ) -> std::sync::Arc<Drive> {
     let (busy, owed) = (
         mailbox.clone(),
@@ -152,18 +153,52 @@ pub(in crate::services::discord) fn owner_drive(
     );
     let drains = pool.clone();
     let handoff: Handoff = std::sync::Arc::new(move |front| {
-        let (mailbox, pool, provider, idle) =
-            (busy.clone(), pool.clone(), provider.clone(), idle.clone());
+        let (mailbox, pool, provider, idle, runtime) = (
+            busy.clone(),
+            pool.clone(),
+            provider.clone(),
+            idle.clone(),
+            runtime.clone(),
+        );
         Box::pin(async move {
-            match mailbox.has_active_turn().await {
+            use crate::services::discord::queue_io::input_ingress as ingress;
+            let original = front.clone();
+            let synthetic = synthetic(&mailbox, &front).await;
+            let result = match mailbox.has_active_turn().await {
                 // A routine, scheduled or HTTP start completes only on its own turn.
-                Ok(true) if synthetic(&mailbox, &front).await => {
-                    Err("NotSent(\"synthetic_waits_idle\")".into())
+                Ok(true) if synthetic => Err("NotSent(\"synthetic_waits_idle\")".into()),
+                Ok(true) => {
+                    let transition = runtime.as_ref().map(|shared| {
+                        shared
+                            .session_transition_lock(ChannelId::new(channel))
+                            .try_lock_owned()
+                    });
+                    if let Some(hold) = runtime
+                        .as_ref()
+                        .and_then(|shared| ingress::ingress_hold(shared, false))
+                    {
+                        let reason = match hold {
+                            ingress::Hold::RestartRecovery => "restart_recovery",
+                            _ => "upload_materialization_failed",
+                        };
+                        Err(effect::unsent(reason.into()))
+                    } else if matches!(transition, Some(Err(_))) {
+                        Err(effect::unsent("session_transition_busy".into()))
+                    } else {
+                        hand_busy((mailbox, pool), provider.clone(), (channel, front)).await
+                    }
                 }
-                Ok(true) => hand_busy((mailbox, pool), provider, (channel, front)).await,
                 Ok(false) => idle(front).await,
                 Err(unreachable) => Err(format!("{unreachable:?}")),
+            };
+            if !synthetic
+                && let (Some(shared), Err(error)) = (&runtime, &result)
+                && let Some(hold) = ingress::Hold::from_refusal(error)
+            {
+                ingress::handoff_held(shared, &provider, ChannelId::new(channel), &original, hold)
+                    .await;
             }
+            result
         })
     });
     let settled: Option<Owed> = drains.map(|pool| {
@@ -179,6 +214,8 @@ pub(in crate::services::discord) fn owner_drive(
         });
         settled
     });
+    #[cfg(test)]
+    let settled = tests::idle::observe_settlement(channel, settled);
     std::sync::Arc::new(Drive {
         mailbox,
         channel,
@@ -208,10 +245,35 @@ pub(in crate::services::discord) async fn hand_busy(
     let session = row.tmux_session_name.clone().ok_or_else(unobserved)?;
     let key = row.session_key.as_deref();
     let host = crate::services::turn_host::for_turn(pool.as_ref(), &provider, channel, key).await;
-    let live = (row.output_path.as_deref()).map(|path| (path, row.session_id.as_deref()));
+    // Claude's prelaunch row has no transcript until its observer hands it back. Its live pane
+    // already has the binding that the idle observer used before submitting the first input.
+    let binding = (provider == ProviderKind::Claude
+        && matches!(&host, TurnHost::Tmux)
+        && row.output_path.is_none())
+    .then(|| crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&session))
+    .flatten()
+    .filter(|binding| {
+        binding.runtime_kind == crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui
+    });
+    let output = row
+        .output_path
+        .as_deref()
+        .or_else(|| binding.as_ref().map(|binding| binding.output_path.as_str()));
+    let native = binding
+        .as_ref()
+        .and_then(|binding| binding.session_id.as_deref())
+        .or(row.session_id.as_deref());
+    let live = output.map(|path| (path, native));
     let at = (&host, session.as_str(), live);
     let kind = (provider.as_str(), InputOrigin::Discord, true);
-    let owner = Registration::observed(mailbox.clone(), kind, at, &front.1, None)?;
+    let owner =
+        Registration::observed(mailbox.clone(), kind, at, &front.1, None).map_err(|error| {
+            if effect::surely_unsent(&error) {
+                error
+            } else {
+                effect::unsent(format!("busy_source_unavailable: {error}"))
+            }
+        })?;
     if owner.phase != target::Phase::Busy {
         return Err(unobserved());
     }
@@ -358,11 +420,24 @@ fn drive(shared: &Shared, channel: ChannelId) -> std::sync::Arc<Drive> {
         Box::pin(start_idle(std::sync::Arc::clone(&starts), channel, front))
     });
     let at = (shared.mailbox(channel), shared.pg_pool.clone());
-    owner_drive(at, (shared.provider.clone(), channel.get()), idle)
+    owner_drive(
+        at,
+        (shared.provider.clone(), channel.get()),
+        idle,
+        Some(shared.clone()),
+    )
 }
 
 /// Wakes the channel's owner drive.
 pub(in crate::services::discord) fn wake(shared: &Shared, channel: ChannelId) {
+    #[cfg(test)]
+    crate::services::discord::queue_io::cancel_backstop_test_support::record_owner_wake(channel);
+    #[cfg(test)]
+    if crate::services::discord::queue_io::cancel_backstop_test_support::run_owner_wake_for_tests(
+        channel,
+    ) {
+        return;
+    }
     crate::services::discord::queue_io::input_owner::drive::wake(drive(shared, channel));
 }
 

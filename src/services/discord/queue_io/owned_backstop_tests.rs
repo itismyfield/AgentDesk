@@ -27,6 +27,20 @@ async fn granted(mailbox: &crate::services::turn_orchestrator::ChannelMailboxHan
     read.await.unwrap()
 }
 
+/// The actual wake entry counts each call, including calls made outside a scheduler branch.
+#[tokio::test(flavor = "current_thread")]
+async fn each_actual_owner_wake_entry_is_counted() {
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let channel = ChannelId::new(7_676_207);
+    let before = cancel_backstop_test_support::owner_wakes(channel);
+    crate::services::discord::router::message_handler::owner_wake(&shared, channel);
+    crate::services::discord::router::message_handler::owner_wake(&shared, channel);
+    assert_eq!(
+        cancel_backstop_test_support::owner_wakes(channel) - before,
+        2
+    );
+}
+
 /// An early deferred kick fires nothing at an owned queue, a later schedule is one owner wake, and
 /// for 3 to 60 seconds no backstop kicks it, while an unowned channel's schedule still kicks.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -35,6 +49,7 @@ async fn no_backstop_schedules_or_fires_a_kick_at_an_owned_queue() {
     let shared = crate::services::discord::make_shared_data_for_tests();
     let (owned, plain) = (ChannelId::new(7_676_201), ChannelId::new(7_676_202));
     let provider = ProviderKind::Claude;
+    let completion = cancel_backstop_test_support::KickoffCompletion::install(owned);
     let (owned_kicks, hook) = kicks(owned);
     schedule_deferred_idle_queue_kickoff(shared.clone(), provider.clone(), owned, "before_owner");
     tokio::task::yield_now().await;
@@ -68,6 +83,9 @@ async fn no_backstop_schedules_or_fires_a_kick_at_an_owned_queue() {
         owned,
         "owned",
     );
+    completion
+        .processed(0, std::time::Duration::from_secs(55))
+        .await;
     for _ in 0..64 {
         tokio::task::yield_now().await;
     }
@@ -75,6 +93,8 @@ async fn no_backstop_schedules_or_fires_a_kick_at_an_owned_queue() {
         granted(&mailbox).await,
         "a schedule is one direct owner wake"
     );
+    let wakes = cancel_backstop_test_support::owner_wakes(owned);
+    assert_eq!(wakes, 1, "and only one actual owner wake");
     assert!(!arm_slow_idle_queue_backstop_if_queue_nonempty(&shared, &provider, owned, "o").await);
     let outcome = IdleQueueKickoffChannelOutcome::default();
     let armed = arm_event_backstop_after_no_start_if_queue_nonempty(
@@ -100,6 +120,7 @@ async fn a_schedule_coalesced_after_the_owner_took_the_channel_wakes_it() {
     let shared = crate::services::discord::make_shared_data_for_tests();
     let owned = ChannelId::new(7_676_203);
     let provider = ProviderKind::Claude;
+    let completion = cancel_backstop_test_support::KickoffCompletion::install(owned);
     let (owned_kicks, _hook) = kicks(owned);
     schedule_deferred_idle_queue_kickoff(shared.clone(), provider.clone(), owned, "before_owner");
     tokio::task::yield_now().await;
@@ -119,6 +140,9 @@ async fn a_schedule_coalesced_after_the_owner_took_the_channel_wakes_it() {
     schedule_deferred_idle_queue_kickoff(shared.clone(), provider, owned, "after_owner");
     assert!(!granted(&mailbox).await, "coalesced into the waiting task");
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    completion
+        .processed(0, std::time::Duration::from_secs(55))
+        .await;
     for _ in 0..64 {
         tokio::task::yield_now().await;
     }
@@ -127,6 +151,7 @@ async fn a_schedule_coalesced_after_the_owner_took_the_channel_wakes_it() {
         "the coalesced schedule woke the owner"
     );
     assert_eq!(owned_kicks.load(Ordering::SeqCst), 0);
+    assert_eq!(cancel_backstop_test_support::owner_wakes(owned), 1);
 }
 
 /// While the slow cycle's kick runs, V1 drains, the owner takes the channel and a new event's
@@ -136,6 +161,7 @@ async fn a_schedule_coalesced_during_the_slow_cycles_kick_wakes_the_new_owner() 
     let _root = crate::services::discord::relay_recovery::tests::isolated_agentdesk_root();
     let shared = crate::services::discord::make_shared_data_for_tests();
     let channel = ChannelId::new(7_676_204);
+    let completion = cancel_backstop_test_support::KickoffCompletion::install(channel);
     let provider = ProviderKind::Claude;
     let persistence = crate::services::discord::queue_dispatch::persistence_context;
     let queued =
@@ -182,6 +208,12 @@ async fn a_schedule_coalesced_during_the_slow_cycles_kick_wakes_the_new_owner() 
     assert!(armed.await, "the unowned backlog arms the slow cycle");
     let cycle = DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY + std::time::Duration::from_secs(1);
     tokio::time::sleep(cycle).await;
+    completion
+        .backstop_cycles(1, std::time::Duration::from_secs(55))
+        .await;
+    completion
+        .processed(0, std::time::Duration::from_secs(55))
+        .await;
     for _ in 0..64 {
         tokio::task::yield_now().await;
     }
@@ -195,6 +227,7 @@ async fn a_schedule_coalesced_during_the_slow_cycles_kick_wakes_the_new_owner() 
         granted(&mailbox).await,
         "the coalesced schedule woke the owner"
     );
+    assert_eq!(cancel_backstop_test_support::owner_wakes(channel), 1);
 }
 
 /// A schedule coalesced after the slow cycle's owner check answered "not owned", as the owner
@@ -204,6 +237,7 @@ async fn a_schedule_coalesced_while_the_owner_check_answers_wakes_the_owner_once
     let _root = crate::services::discord::relay_recovery::tests::isolated_agentdesk_root();
     let shared = crate::services::discord::make_shared_data_for_tests();
     let channel = ChannelId::new(7_676_205);
+    let completion = cancel_backstop_test_support::KickoffCompletion::install(channel);
     let provider = ProviderKind::Claude;
     let persistence = crate::services::discord::queue_dispatch::persistence_context;
     let queued =
@@ -247,6 +281,12 @@ async fn a_schedule_coalesced_while_the_owner_check_answers_wakes_the_owner_once
     assert!(armed.await, "the unowned backlog arms the slow cycle");
     let cycle = DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY + std::time::Duration::from_secs(1);
     tokio::time::sleep(cycle).await;
+    completion
+        .backstop_cycles(1, std::time::Duration::from_secs(55))
+        .await;
+    completion
+        .processed(0, std::time::Duration::from_secs(55))
+        .await;
     for _ in 0..64 {
         tokio::task::yield_now().await;
     }
@@ -260,10 +300,84 @@ async fn a_schedule_coalesced_while_the_owner_check_answers_wakes_the_owner_once
         granted(&shared.mailbox(channel)).await,
         "the coalesced schedule woke the owner"
     );
-    let wakes = OWNER_WAKES_FOR_TESTS.get(&channel).map(|n| *n);
-    assert_eq!(wakes, Some(1), "one schedule is one owner wake");
+    let wakes = cancel_backstop_test_support::owner_wakes(channel);
+    assert_eq!(wakes, 1, "one schedule is one actual owner wake");
     assert!(
         !shared.restart.deferred_hook_channels.contains_key(&channel),
         "the slot was released with nothing left"
     );
+}
+
+/// Finishing the first kick cannot acknowledge a request that arrived during that kick.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_coalesced_request_is_acknowledged_only_after_its_own_evaluation() {
+    let _root = crate::services::discord::relay_recovery::tests::isolated_agentdesk_root();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let channel = ChannelId::new(7_676_206);
+    let provider = ProviderKind::Claude;
+    let waiting =
+        crate::services::turn_orchestrator::ChannelMailboxRegistry::queued_for_test(76_762_060);
+    let context =
+        crate::services::discord::queue_dispatch::persistence_context(&shared, &provider, channel);
+    shared
+        .mailbox(channel)
+        .replace_queue(vec![waiting], context)
+        .await;
+    let completion = cancel_backstop_test_support::KickoffCompletion::install(channel);
+    let (entered, mut entries) = tokio::sync::mpsc::unbounded_channel();
+    let (first, first_release) = tokio::sync::oneshot::channel();
+    let (second, second_release) = tokio::sync::oneshot::channel();
+    let releases = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from([
+        first_release,
+        second_release,
+    ])));
+    let hook = Arc::new(move |_: Arc<SharedData>, _, at, _| {
+        let (entered, releases) = (entered.clone(), releases.clone());
+        Box::pin(async move {
+            if at != channel {
+                return None;
+            }
+            let release = releases
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("only two kicks");
+            entered.send(()).unwrap();
+            release.await.unwrap();
+            Some(IdleQueueKickoffChannelOutcome::default())
+        }) as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
+    });
+    let _hook = super::super::set_idle_queue_kick_hook_for_tests(hook);
+    schedule_deferred_idle_queue_kickoff_immediate(
+        shared.clone(),
+        provider.clone(),
+        channel,
+        "first",
+    );
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(55), entries.recv())
+            .await
+            .unwrap(),
+        Some(())
+    );
+    assert_eq!(completion.pending_requests(), 1);
+    schedule_deferred_idle_queue_kickoff_immediate(shared, provider, channel, "coalesced");
+    assert_eq!(completion.pending_requests(), 2);
+    first.send(()).unwrap();
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(55), entries.recv())
+            .await
+            .unwrap(),
+        Some(())
+    );
+    assert_eq!(
+        completion.pending_requests(),
+        1,
+        "the second kick is still running"
+    );
+    second.send(()).unwrap();
+    completion
+        .processed(0, std::time::Duration::from_secs(55))
+        .await;
+    assert_eq!(completion.pending_requests(), 0);
 }

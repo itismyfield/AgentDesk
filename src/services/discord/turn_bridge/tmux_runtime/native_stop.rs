@@ -523,6 +523,48 @@ impl Drop for Completion {
 }
 
 #[cfg(all(test, unix))]
+static AFTER_IDENTITY_PROBE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<()>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(all(test, unix))]
+struct IdentityProbeRegistration(String);
+
+#[cfg(all(test, unix))]
+impl Drop for IdentityProbeRegistration {
+    fn drop(&mut self) {
+        AFTER_IDENTITY_PROBE.lock().unwrap().remove(&self.0);
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(super) fn identity_probe_rendezvous(session: &str) -> impl std::future::Future<Output = ()> {
+    let (signal, observed) = tokio::sync::oneshot::channel();
+    assert!(
+        AFTER_IDENTITY_PROBE
+            .lock()
+            .unwrap()
+            .insert(session.to_owned(), signal)
+            .is_none()
+    );
+    let registration = IdentityProbeRegistration(session.to_owned());
+    async move {
+        let _registration = registration;
+        observed
+            .await
+            .expect("the stop finished its identity probe");
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(super) fn after_identity_probe(session: &str) {
+    let signal = AFTER_IDENTITY_PROBE.lock().unwrap().remove(session);
+    if let Some(signal) = signal {
+        let _ = signal.send(());
+    }
+}
+
+#[cfg(all(test, unix))]
 type OwnerProbe = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 
 #[cfg(all(test, unix))]

@@ -47,7 +47,7 @@ pub(super) async fn collect(
     if !parsed.namespaced
         || parsed.provider_from_key.as_deref() != Some(provider.as_str())
         || parsed.token_hash.as_deref() != Some(token_hash)
-        || parsed.host != crate::services::platform::hostname_short()
+        || parsed.host != crate::services::platform::session_host_label()
     {
         return Err("canonical primary namespace mismatch".into());
     }

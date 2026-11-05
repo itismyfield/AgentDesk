@@ -159,6 +159,7 @@ async fn d4act3_backlog_append_failure_blocks_ready_repost_and_retries_after_reo
         LedgerEntry::Posted {
             serial: 2,
             msg_id: 900,
+            confirmation: None,
         },
     );
     let ready =

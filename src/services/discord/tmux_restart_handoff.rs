@@ -308,16 +308,32 @@ pub(super) async fn start_restart_handoff_from_state(
                 .then(|| crate::services::tui_o::cutover::BodyClaim::new(channel_id.get(), kind));
             let replace = || {
                 let text = &stale_text;
-                super::formatting::replace_long_message_raw(
-                    http,
-                    channel_id,
-                    current_msg_id,
-                    text,
-                    shared,
+                crate::services::discord::outbound::body_census::BodySource::inherited().observe(
+                    crate::services::tui_o::cutover::BodySite::RestartHandoff,
+                    crate::services::discord::outbound::body_census::BodyOffer::Recovered,
+                    super::formatting::replace_long_message_raw(
+                        http,
+                        channel_id,
+                        current_msg_id,
+                        text,
+                        shared,
+                    ),
                 )
             };
             let relay_ok = matches!(
-                crate::services::tui_o::cutover::claim_then_send(claim, replace).await,
+                crate::services::discord::outbound::body_census::BodySource::from_state(&state)
+                    .observe(
+                        crate::services::tui_o::cutover::BodySite::RestartHandoff,
+                        crate::services::discord::outbound::body_census::BodyOffer::recovered(
+                            !o_owns_body && !best_response.trim().is_empty()
+                        ),
+                        crate::services::tui_o::cutover::claim_then_send_at(
+                            crate::services::tui_o::cutover::BodySite::RestartHandoff,
+                            claim,
+                            replace
+                        )
+                    )
+                    .await,
                 Ok(crate::services::tui_o::cutover::BodySend::Sent(Ok(_)))
             );
             if !relay_ok {
@@ -719,6 +735,17 @@ mod o_cut_tests {
     /// restart marker; flag off or an unlisted destination still carries the saved body.
     #[tokio::test(flavor = "current_thread")]
     async fn o_delegated_restart_handoff_keeps_only_the_marker() {
+        use crate::services::discord::outbound::raw_output::tests as observation;
+        if observation::isolated(
+            concat!(
+                module_path!(),
+                "::o_delegated_restart_handoff_keeps_only_the_marker"
+            )
+            .trim_start_matches("agentdesk::"),
+        ) {
+            return;
+        }
+        let journal = observation::journal().await;
         let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
         with_isolated_runtime_root(|| async move {
             let shared = crate::services::discord::make_shared_data_for_tests();
@@ -775,6 +802,23 @@ mod o_cut_tests {
             );
         })
         .await;
+        observation::flushed().await;
+        let recorded: Vec<serde_json::Value> = std::fs::read_to_string(journal)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .filter(|row: &serde_json::Value| row["kind"] == "target")
+            .collect();
+        assert_eq!(
+            recorded.len(),
+            4,
+            "the two saved bodies count; the O marker does not"
+        );
+        for event in recorded {
+            assert_ne!(event["channel"], 9_425_022u64);
+            assert_eq!(event["census"]["site"], "W34");
+            assert_eq!(event["census"]["output_class"], "RecoveredLegacyBody");
+        }
     }
 
     /// A cleanup that posts no notice leaves a pending adoption; the notice that carries the saved

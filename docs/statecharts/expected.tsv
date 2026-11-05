@@ -5,32 +5,62 @@
 # ExecutionAuthorityDeployed: statechart exit=1 (SameUnmanagedReadmits); ExecutionAuthority: exit=0.
 # BeforeGateway safety holds but temporary PROPERTY AdmissionResumes fails (13); fix3 passes (0).
 execution-authority/ExecutionAuthority.cfg	ExecutionAuthority	-	-
-execution-authority/ExecutionAuthorityAmbiguousGateway.cfg	ExecutionAuthority	-
-execution-authority/ExecutionAuthorityBeforeGateway.cfg	ExecutionAuthority	-
-execution-authority/ExecutionAuthorityDeployed.cfg	ExecutionAuthority	SameUnmanagedReadmits
-execution-authority/ExecutionAuthorityLost.cfg	ExecutionAuthority	-
+execution-authority/ExecutionAuthorityAmbiguousGateway.cfg	ExecutionAuthority	-	-
+execution-authority/ExecutionAuthorityBeforeGateway.cfg	ExecutionAuthority	-	-
+execution-authority/ExecutionAuthorityCustody.cfg	ExecutionAuthority	OutputDelayKeepsAdmission	-
+execution-authority/ExecutionAuthorityDeployed.cfg	ExecutionAuthority	SameUnmanagedReadmits	-
+execution-authority/ExecutionAuthorityLost.cfg	ExecutionAuthority	-	-
 execution-authority/ExecutionAuthorityMain.cfg	ExecutionAuthority	SameUnmanagedReadmits	AdmissionResumes
-execution-authority/ExecutionAuthorityNoWait.cfg	ExecutionAuthority	NoForeignPermitHost
-execution-authority/ExecutionAuthorityStandby.cfg	ExecutionAuthority	-
-execution-authority/ExecutionAuthorityUnknown.cfg	ExecutionAuthority	-
-execution-authority/ExecutionAuthorityWorker.cfg	ExecutionAuthority	-
-host-migration/HostMigration.cfg	HostMigration	NoDeadlock,RecordMatchesProcesses
-host-migration/HostMigrationClean.cfg	HostMigration	-
-host-migration/HostMigrationIdOnly.cfg	HostMigration	NoDeadlock
-input-single-path/InputOwnership.cfg	InputOwnership	HeldResumes,NoSilentLoss,NoSilentLossObserved
-input-single-path/InputOwnershipA2d1.cfg	InputOwnership	AnswerOnce,DraftToldOnce,NoSilentLoss,NoTimedRetry,StartNotDropped
-input-single-path/InputOwnershipA2d2.cfg	InputOwnership	AnswerOnce,HeldResumes,NoSilentLoss,NoSilentLossObserved
-input-single-path/InputOwnershipA2d3.cfg	InputOwnership	HeldResumes,NoSilentLoss,NoSilentLossObserved
-input-single-path/InputOwnershipC.cfg	InputOwnership	-
-input-single-path/InputOwnershipCF.cfg	InputOwnership	CarriedRowEnds,NoSilentLoss,NoSilentLossObserved
-input-single-path/InputOwnershipF.cfg	InputOwnership	NoSilentLoss,NoSilentLossObserved
-input-single-path/InputOwnershipF4.cfg	InputOwnership	-
-input-single-path/InputOwnershipFOutside.cfg	InputOwnership	SeenOnce
-input-single-path/InputOwnershipMain.cfg	InputOwnership	AnswerOnce,DraftToldOnce,NoRetryRequired,NoSilentLoss,NoSilentLossObserved,NoTimedRetry,StartNotDropped
-input-single-path/InputPath.cfg	InputPath	BusyInputLands,DraftSafe,HeldNotDropped,NoDeadlock,NoSilentLoss
-input-single-path/InputPathClean.cfg	InputPath	-
+execution-authority/ExecutionAuthorityNoWait.cfg	ExecutionAuthority	NoForeignPermitHost	-
+execution-authority/ExecutionAuthoritySnapshot.cfg	ExecutionAuthority	-	-
+execution-authority/ExecutionAuthorityStandby.cfg	ExecutionAuthority	-	-
+execution-authority/ExecutionAuthorityUnknown.cfg	ExecutionAuthority	-	-
+execution-authority/ExecutionAuthorityWorker.cfg	ExecutionAuthority	-	-
+host-migration/HostMigration.cfg	HostMigration	NoDeadlock,RecordMatchesProcesses	-
+host-migration/HostMigrationClean.cfg	HostMigration	-	-
+host-migration/HostMigrationIdOnly.cfg	HostMigration	NoDeadlock	-
+input-single-path/InputOwnership.cfg	InputOwnership	HeldResumes,NoSilentLoss,NoSilentLossObserved	-
+input-single-path/InputOwnershipA2d1.cfg	InputOwnership	AnswerOnce,DraftToldOnce,NoSilentLoss,NoTimedRetry,StartNotDropped	-
+input-single-path/InputOwnershipA2d2.cfg	InputOwnership	AnswerOnce,HeldResumes,NoSilentLoss,NoSilentLossObserved	-
+input-single-path/InputOwnershipA2d3.cfg	InputOwnership	HeldResumes,NoSilentLoss,NoSilentLossObserved	-
+input-single-path/InputOwnershipAutoHold.cfg	InputOwnership	-	-
+input-single-path/InputOwnershipAutoHoldBefore.cfg	InputOwnership	AutomaticHoldNoticeOnce	-
+input-single-path/InputOwnershipAutoHoldReasonKey.cfg	InputOwnership	AutomaticHoldNoticeOnce	-
+input-single-path/InputOwnershipC.cfg	InputOwnership	-	-
+input-single-path/InputOwnershipCF.cfg	InputOwnership	CarriedRowEnds,NoSilentLoss,NoSilentLossObserved	-
+input-single-path/InputOwnershipF.cfg	InputOwnership	NoSilentLoss,NoSilentLossObserved	-
+input-single-path/InputOwnershipF4.cfg	InputOwnership	NoSilentLoss,NoSilentLossObserved	-
+input-single-path/InputOwnershipF5.cfg	InputOwnership	-	-
+input-single-path/InputOwnershipF6.cfg	InputOwnership	-	-
+input-single-path/InputOwnershipF6Before.cfg	InputOwnership	ObserverResumes	-
+input-single-path/InputOwnershipF6DoubleWake.cfg	InputOwnership	ObserverAttachmentWakesOnce	-
+input-single-path/InputOwnershipF6InitiallyAttached.cfg	InputOwnership	-	-
+input-single-path/InputOwnershipF6NoFront.cfg	InputOwnership	-	-
+input-single-path/InputOwnershipF6NoWake.cfg	InputOwnership	ObserverResumes	-
+input-single-path/InputOwnershipF7.cfg	InputOwnership	-	-
+input-single-path/InputOwnershipF7Main.cfg	InputOwnership	BusyArrivalInTurn	-
+input-single-path/InputOwnershipF7NoBinding.cfg	InputOwnership	BusyArrivalInTurn	-
+input-single-path/InputOwnershipF7NoWake.cfg	InputOwnership	BusyArrivalInTurn	-
+input-single-path/InputOwnershipF7Recovery.cfg	InputOwnership	-	-
+input-single-path/InputOwnershipF7RecoveryMain.cfg	InputOwnership	ResumeProgress	-
+input-single-path/InputOwnershipF7ShortTransition.cfg	InputOwnership	-	-
+input-single-path/InputOwnershipF7ShortTransitionMain.cfg	InputOwnership	-	-
+input-single-path/InputOwnershipF7Standby.cfg	InputOwnership	-	-
+input-single-path/InputOwnershipF7StandbyWake.cfg	InputOwnership	StandbyDoesNotInject	-
+input-single-path/InputOwnershipF7Transition.cfg	InputOwnership	-	-
+input-single-path/InputOwnershipF7TransitionMain.cfg	InputOwnership	ResumeProgress	-
+input-single-path/InputOwnershipFOutside.cfg	InputOwnership	SeenOnce	-
+input-single-path/InputOwnershipHeadlessMarked.cfg	InputOwnershipAdmission	-	-
+input-single-path/InputOwnershipHeadlessMarkedMutant.cfg	InputOwnershipAdmission	HeadlessSettlesMarked	-
+input-single-path/InputOwnershipIdleMerge.cfg	InputOwnershipAdmission	-	-
+input-single-path/InputOwnershipMain.cfg	InputOwnership	AnswerOnce,DraftToldOnce,NoRetryRequired,NoSilentLoss,NoSilentLossObserved,NoTimedRetry,StartNotDropped	-
+input-single-path/InputOwnershipOwnerBusyMarked.cfg	InputOwnershipAdmission	-	-
+input-single-path/InputOwnershipOwnerBusyMarkedMutant.cfg	InputOwnershipAdmission	OwnerBusyKeepsMarked	-
+input-single-path/InputPath.cfg	InputPath	BusyInputLands,DraftSafe,HeldNotDropped,NoDeadlock,NoSilentLoss	-
+input-single-path/InputPathClean.cfg	InputPath	-	-
 session-lifecycle/HerdrRootBefore.cfg	HerdrRootRecovery	-	ReplacedInputProgress
 session-lifecycle/HerdrRootFixed.cfg	HerdrRootRecovery	-	-
 session-lifecycle/HerdrSameRoot.cfg	HerdrRootRecovery	-	-
-session-lifecycle/HerdrSession.cfg	HerdrSession	NoDeadlock,NoOrphanPane,PromptOnlyToAgent,RowMatchesPane
-session-lifecycle/TmuxSession.cfg	TmuxSession	NoDeadlock,RowNamesSession,RowOnlyWithTurn
+session-lifecycle/HerdrSession.cfg	HerdrSession	NoDeadlock,NoOrphanPane,PromptOnlyToAgent,RowMatchesPane	-
+session-lifecycle/TmuxSession.cfg	TmuxSession	NoDeadlock,RowNamesSession,RowOnlyWithTurn	-
+session-lifecycle/TmuxSocketBoot.cfg	TmuxSocketBoot	-	-
