@@ -210,7 +210,7 @@ async fn queued_then_started_swaps_queue_marker_for_new_hourglass_without_residu
     let ops = reconciler.ops();
     assert_eq!(
         ops.iter().map(|op| (op.emoji, op.add)).collect::<Vec<_>>(),
-        vec![('📬', true), ('📬', false), ('⏳', true)],
+        vec![('🔜', true), ('🔜', false), ('⏳', true)],
         "queued promotion must remove the queue marker and add a fresh pending hourglass"
     );
 }
@@ -243,8 +243,8 @@ async fn queued_states_are_marker_only() {
     let _root = scoped_runtime_root();
 
     for (index, state, emoji) in [
-        (0, TurnViewState::Queued, '📬'),
-        (1, TurnViewState::QueuedMerged, '➕'),
+        (0, TurnViewState::Queued, '🔜'),
+        (1, TurnViewState::QueuedMerged, '🔜'),
         (2, TurnViewState::QueuedReconcile, '🔄'),
     ] {
         let reconciler = TurnViewReconciler::default();
@@ -279,10 +279,10 @@ async fn requeue_renotification_of_queued_target_is_coalesced_noop() {
     let reconciler = note_sequence(&[TurnViewState::Queued, TurnViewState::Queued]).await;
 
     let ops = reconciler.ops();
-    assert_eq!(ops.iter().filter(|op| op.emoji == '📬').count(), 1);
+    assert_eq!(ops.iter().filter(|op| op.emoji == '🔜').count(), 1);
     assert_eq!(
         snapshot_reactions(&reconciler, target()),
-        vec![expected('📬', "intake-a")]
+        vec![expected('🔜', "intake-a")]
     );
 }
 
@@ -292,8 +292,8 @@ async fn queue_cancel_removes_mailbox_marker() {
     let reconciler = note_sequence(&[TurnViewState::Queued, TurnViewState::None]).await;
 
     let ops = reconciler.ops();
-    assert!(ops.iter().any(|op| op.add && op.emoji == '📬'));
-    assert!(ops.iter().any(|op| !op.add && op.emoji == '📬'));
+    assert!(ops.iter().any(|op| op.add && op.emoji == '🔜'));
+    assert!(ops.iter().any(|op| !op.add && op.emoji == '🔜'));
     assert_eq!(snapshot_reactions(&reconciler, target()), Vec::new());
 }
 
@@ -302,7 +302,8 @@ async fn regression_4109_pre_migration_untracked_queue_markers_still_remove_reac
     let _root = scoped_runtime_root();
     let shared = crate::services::discord::make_shared_data_for_tests();
 
-    for (index, emoji) in ['➕', '🔄'].into_iter().enumerate() {
+    // A plus without a legacy queue record is an absorption receipt and stays intact.
+    for (index, emoji) in ['📬', '📥', '🔄', '➕'].into_iter().enumerate() {
         let reconciler = TurnViewReconciler::default();
         let target = target_with(
             100_000_000_000_131 + index as u64,
@@ -322,15 +323,17 @@ async fn regression_4109_pre_migration_untracked_queue_markers_still_remove_reac
             .await;
 
         assert!(delivered);
-        assert_eq!(
-            reconciler.ops(),
+        let expected_ops = if emoji == '➕' {
+            Vec::new()
+        } else {
             vec![TestReactionOp {
                 target,
                 emoji,
                 add: false,
                 identity: "fallback-caller".to_string(),
             }]
-        );
+        };
+        assert_eq!(reconciler.ops(), expected_ops);
         assert!(!persisted_exists(target));
         assert!(!reconciler.targets.contains_key(&target));
         assert_eq!(reconciler.target_lock_count(target), 0);
@@ -376,10 +379,10 @@ async fn regression_4248_start_rollback_to_queued_removes_hourglass_and_cancel_c
     let ops = reconciler.ops();
     assert_eq!(ops.len(), 3);
     assert!(!ops[1].add && ops[1].emoji == '⏳');
-    assert!(ops[2].add && ops[2].emoji == '📬');
+    assert!(ops[2].add && ops[2].emoji == '🔜');
     assert_eq!(
         snapshot_reactions(&reconciler, target),
-        vec![expected('📬', "intake-a")]
+        vec![expected('🔜', "intake-a")]
     );
     assert_eq!(
         reconciler
@@ -397,7 +400,7 @@ async fn regression_4248_start_rollback_to_queued_removes_hourglass_and_cancel_c
             target,
             owner,
             TurnViewIdentity::Test("ignored-cancel"),
-            '📬',
+            '🔜',
             "test_queue_exit_after_rollback",
         )
         .await;
@@ -654,7 +657,7 @@ async fn regression_4049_stale_clear_after_newer_rollback_keeps_queued_marker() 
 
     assert_eq!(
         snapshot_reactions(&reconciler, target),
-        vec![expected('📬', "intake-a")]
+        vec![expected('🔜', "intake-a")]
     );
     let current = reconciler
         .targets
@@ -685,7 +688,7 @@ async fn regression_4049_stale_clear_after_newer_rollback_keeps_queued_marker() 
     );
     assert_eq!(
         snapshot_reactions(&reconciler, target),
-        vec![expected('📬', "intake-a")],
+        vec![expected('🔜', "intake-a")],
         "stale attempt1 clear must not remove the newer queued state"
     );
     let current = reconciler
@@ -722,12 +725,12 @@ async fn persisted_v1_queued_state_is_invalidated_for_reapplication() {
 
     assert_eq!(
         snapshot_reactions(&reconciler, target),
-        vec![expected('📬', "intake-a")],
+        vec![expected('🔜', "intake-a")],
         "v1 queued records must be re-applied under the marker-only contract"
     );
-    let text = std::fs::read_to_string(persisted_path(target)).expect("rewritten v3 state");
-    let rewritten: PersistedTargetState = serde_json::from_str(&text).expect("parse v3 state");
-    assert_eq!(rewritten.version, QUEUED_MARKER_ONLY_STATE_VERSION);
+    let text = std::fs::read_to_string(persisted_path(target)).expect("rewritten v4 state");
+    let rewritten: PersistedTargetState = serde_json::from_str(&text).expect("parse v4 state");
+    assert_eq!(rewritten.version, QUEUE_SOON_STATE_VERSION);
 }
 
 #[tokio::test]
@@ -996,7 +999,7 @@ async fn regression_4049_late_queued_after_started_and_cancel_are_noops() {
             target,
             owner,
             TurnViewIdentity::Test("ignored-cancel"),
-            '📬',
+            '🔜',
             "test",
         )
         .await;
@@ -1049,7 +1052,7 @@ async fn queued_cancel_ignores_nonmatching_generation() {
             target,
             stale_cancel_owner,
             TurnViewIdentity::Test("ignored-cancel"),
-            '📬',
+            '🔜',
             "test",
         )
         .await;
@@ -1057,7 +1060,7 @@ async fn queued_cancel_ignores_nonmatching_generation() {
     assert_eq!(reconciler.ops().len(), ops_after_queue);
     assert_eq!(
         snapshot_reactions(&reconciler, target),
-        vec![expected('📬', "intake-a")]
+        vec![expected('🔜', "intake-a")]
     );
     assert!(persisted_exists(target));
     assert_eq!(
@@ -1375,8 +1378,8 @@ async fn regression_4049_late_queued_after_terminal_eviction_is_noop() {
     assert!(
         !snapshot_reactions(&reconciler, target)
             .iter()
-            .any(|(emoji, _)| *emoji == '📬'),
-        "late queued notification must not re-add mailbox next to the terminal reaction"
+            .any(|(emoji, _)| *emoji == '🔜'),
+        "late queued notification must not re-add a queue marker next to the terminal reaction"
     );
     assert!(
         !persisted_exists(target),
@@ -1592,7 +1595,7 @@ async fn failed_queue_marker_apply_leaves_no_persisted_state() {
             .iter()
             .map(|op| (op.emoji, op.add))
             .collect::<Vec<_>>(),
-        vec![('📬', true)]
+        vec![('🔜', true)]
     );
     assert!(!persisted_exists(target));
 }
@@ -1814,4 +1817,328 @@ fn persisted_unknown_applied_value_deletes_file_and_loads_cold() {
     );
     assert!(!persisted_exists(target));
     assert!(!reconciler.targets.contains_key(&target));
+}
+
+fn reg_7832_seed_reactions(
+    reconciler: &TurnViewReconciler,
+    target: TurnViewTarget,
+    identity: &str,
+    reactions: &[char],
+) {
+    reconciler
+        .ops
+        .lock()
+        .expect("turn view test op lock")
+        .extend(reactions.iter().map(|&emoji| TestReactionOp {
+            target,
+            emoji,
+            add: true,
+            identity: identity.to_string(),
+        }));
+}
+
+#[tokio::test]
+async fn reg_7832_observed_busy_injection_keeps_plus_through_idle() {
+    use crate::services::discord::turn_presence::supervisor::{self, tests::LiveSupervisor};
+    use crate::services::tui_o::turn_mode::TestConfirmation;
+
+    let _root = scoped_runtime_root();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let target = target_with(100_000_000_078_320, 100_000_000_078_321);
+    let _confirmation = TestConfirmation::new(target.channel_id.get());
+    let _supervisor = LiveSupervisor::new(
+        shared.clone(),
+        shared.provider.clone(),
+        target.channel_id.get(),
+    );
+    assert!(supervisor::observes(
+        &shared.provider,
+        target.channel_id.get()
+    ));
+    let reconciler = &shared.turn_view_reconciler;
+    assert!(
+        reconciler
+            .note_queue_marker_added(
+                &shared,
+                target,
+                owner(7832, "observed-injection"),
+                TurnViewIdentity::Test("injected"),
+                queue_reactions::QUEUE_STANDALONE_PENDING_REACTION,
+                "reg_7832_queue",
+            )
+            .await
+    );
+    reconciler
+        .note_confirmed_injection(
+            &shared,
+            &shared.provider,
+            target,
+            TurnViewIdentity::Test("injected"),
+        )
+        .await;
+    assert_eq!(
+        snapshot_reactions(reconciler, target),
+        vec![expected('➕', "injected")],
+        "a confirmed input must replace its queue marker without starting another turn"
+    );
+    assert!(
+        reconciler
+            .ops()
+            .iter()
+            .all(|op| !op.add || op.emoji != '⏳')
+    );
+    assert_eq!(reconciler.pending_injected_count(target.channel_id), 1);
+
+    reconciler.clear_busy_injected(shared.clone(), target.channel_id);
+    tokio::time::timeout(time::Duration::from_secs(2), async {
+        while !reconciler
+            .ops()
+            .iter()
+            .any(|op| op.target == target && op.emoji == '✅' && op.add)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the observed idle completion must run");
+    assert_eq!(
+        snapshot_reactions(reconciler, target),
+        vec![expected('➕', "injected"), expected('✅', "injected")]
+    );
+    assert!(
+        reconciler.ops().iter().all(|op| op.add || op.emoji != '➕'),
+        "idle must preserve the absorption receipt"
+    );
+}
+
+#[tokio::test]
+async fn reg_7832_unobserved_busy_injection_keeps_plus_without_hourglass() {
+    let _root = scoped_runtime_root();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let target = target_with(100_000_000_078_330, 100_000_000_078_331);
+    assert!(!super::super::turn_presence::supervisor::observes(
+        &shared.provider,
+        target.channel_id.get()
+    ));
+    let reconciler = &shared.turn_view_reconciler;
+    assert!(
+        reconciler
+            .note_queue_marker_added(
+                &shared,
+                target,
+                owner(7832, "unobserved-injection"),
+                TurnViewIdentity::Test("injected"),
+                queue_reactions::QUEUE_STANDALONE_PENDING_REACTION,
+                "reg_7832_queue",
+            )
+            .await
+    );
+    reconciler
+        .note_confirmed_injection(
+            &shared,
+            &shared.provider,
+            target,
+            TurnViewIdentity::Test("injected"),
+        )
+        .await;
+    assert_eq!(
+        snapshot_reactions(reconciler, target),
+        vec![expected('➕', "injected")]
+    );
+    assert!(
+        reconciler
+            .ops()
+            .iter()
+            .all(|op| !op.add || op.emoji != '⏳')
+    );
+    assert_eq!(reconciler.pending_injected_count(target.channel_id), 0);
+    reconciler.clear_busy_injected(shared.clone(), target.channel_id);
+    tokio::task::yield_now().await;
+    assert_eq!(
+        snapshot_reactions(reconciler, target),
+        vec![expected('➕', "injected")]
+    );
+}
+
+#[tokio::test]
+async fn reg_7832_restart_and_dispatch_drain_preserve_absorption_plus() {
+    use crate::services::turn_orchestrator::SourceMessageQueuedGeneration;
+
+    let _root = scoped_runtime_root();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let target = target_with(100_000_000_078_340, 100_000_000_078_341);
+    shared
+        .turn_view_reconciler
+        .note_confirmed_injection(
+            &shared,
+            &shared.provider,
+            target,
+            TurnViewIdentity::Test("injected"),
+        )
+        .await;
+    assert_eq!(
+        snapshot_reactions(&shared.turn_view_reconciler, target),
+        vec![expected('➕', "injected")]
+    );
+
+    let mut restarted = crate::services::discord::make_shared_data_for_tests();
+    Arc::get_mut(&mut restarted)
+        .expect("new runtime has a unique owner")
+        .turn_view_reconciler = TurnViewReconciler {
+        ops: shared.turn_view_reconciler.ops.clone(),
+        ..TurnViewReconciler::default()
+    };
+    let http = Arc::new(serenity::http::Http::new("test-token"));
+    let sources = [SourceMessageQueuedGeneration::new(target.message_id, 7832)];
+    super::super::queue_marker::drain_dispatched_queue_markers(
+        &restarted,
+        &http,
+        target.channel_id,
+        MessageId::new(target.message_id.get() + 1),
+        &sources,
+    )
+    .await;
+    restarted
+        .turn_view_reconciler
+        .note_queue_marker_removed(
+            &restarted,
+            target,
+            owner(7832, "late-drain"),
+            TurnViewIdentity::Test("injected"),
+            '➕',
+            "reg_7832_late_legacy_drain",
+        )
+        .await;
+    assert_eq!(
+        snapshot_reactions(&restarted.turn_view_reconciler, target),
+        vec![expected('➕', "injected")],
+        "a new runtime must not interpret an untracked absorption receipt as an old queue marker"
+    );
+}
+
+#[tokio::test]
+async fn reg_7832_unknown_and_cold_terminal_cleanup_preserve_plus_and_clear_old_mailboxes() {
+    let _root = scoped_runtime_root();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    for (index, desired) in [TurnViewState::None, TurnViewState::Completed]
+        .into_iter()
+        .enumerate()
+    {
+        let reconciler = TurnViewReconciler::default();
+        let target = target_with(100_000_000_078_350, 100_000_000_078_351 + index as u64);
+        reg_7832_seed_reactions(&reconciler, target, "injected", &['➕', '📬', '📥', '🔜']);
+        assert!(
+            reconciler
+                .note_state(
+                    &shared,
+                    target,
+                    owner(7832, "cold-cleanup"),
+                    TurnViewIdentity::Test("injected"),
+                    desired,
+                    "reg_7832_cold_cleanup",
+                )
+                .await
+        );
+        let mut expected = vec![expected('➕', "injected")];
+        if desired == TurnViewState::Completed {
+            expected.push(self::expected('✅', "injected"));
+        }
+        assert_eq!(snapshot_reactions(&reconciler, target), expected);
+    }
+}
+
+#[tokio::test]
+async fn reg_7832_persisted_legacy_merged_versions_remove_old_plus() {
+    let _root = scoped_runtime_root();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    for version in [1, 2, 3] {
+        let target = target_with(
+            100_000_000_078_360,
+            100_000_000_078_360 + u64::from(version),
+        );
+        let mut record = persisted_record_with_version(
+            &shared,
+            target,
+            shared.provider.as_str(),
+            "queued_merged",
+            version,
+        );
+        record.identity_label = "legacy-intake".to_string();
+        write_persisted(&record, target);
+        let reconciler = TurnViewReconciler::default();
+        let old_markers = if version == 2 {
+            &['➕', '⏳'][..]
+        } else {
+            &['➕'][..]
+        };
+        reg_7832_seed_reactions(&reconciler, target, "legacy-intake", old_markers);
+        assert!(
+            reconciler
+                .note_queue_marker_removed(
+                    &shared,
+                    target,
+                    TurnViewOwner::new(record.owner_generation, record.owner_turn_id),
+                    TurnViewIdentity::Test("caller"),
+                    '➕',
+                    "reg_7832_legacy_merged_drain",
+                )
+                .await
+        );
+        assert!(
+            snapshot_reactions(&reconciler, target).is_empty(),
+            "version {version}"
+        );
+        assert!(!persisted_exists(target), "version {version}");
+    }
+}
+
+#[tokio::test]
+async fn reg_7832_waiting_input_uses_soon_then_turn_start_uses_hourglass() {
+    for header in ["📬 **메시지 대기 중**", "🔜 **메시지 대기 중**"] {
+        let content = format!(
+            "{header}\n{}",
+            super::super::formatting::PLACEHOLDER_PROBE_MARKER
+        );
+        assert!(super::super::placeholder_sweeper::is_message_still_placeholder(&content));
+    }
+    let _root = scoped_runtime_root();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let target = target_with(100_000_000_078_370, 100_000_000_078_371);
+    let http = Arc::new(serenity::http::Http::new("test-token"));
+    assert!(
+        note_intake_queue_marker_added_current(
+            &shared,
+            &http,
+            target.channel_id,
+            target.message_id,
+            queue_reactions::QUEUE_STANDALONE_PENDING_REACTION,
+            "reg_7832_waiting",
+        )
+        .await
+    );
+    assert_eq!(
+        snapshot_reactions(&shared.turn_view_reconciler, target),
+        vec![expected('🔜', target.kind.identity_label())]
+    );
+    assert!(
+        note_intake_turn_started_current(
+            &shared,
+            &http,
+            target.channel_id,
+            target.message_id,
+            "reg_7832_started",
+        )
+        .await
+    );
+    assert_eq!(
+        snapshot_reactions(&shared.turn_view_reconciler, target),
+        vec![expected('⏳', target.kind.identity_label())]
+    );
+    assert!(
+        shared
+            .turn_view_reconciler
+            .ops()
+            .iter()
+            .all(|op| !op.add || !['➕', '📬', '📥'].contains(&op.emoji))
+    );
 }

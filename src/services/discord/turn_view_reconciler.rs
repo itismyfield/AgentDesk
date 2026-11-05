@@ -32,13 +32,14 @@ mod resolution;
 mod store;
 pub(in crate::services::discord) use orphan_sweep::sweep_orphan_tui_anchor_reactions;
 
-const TURN_VIEW_REACTIONS: [char; 7] = ['📬', '➕', '🔄', '⏳', '✅', '⚠', '🛑'];
+const TURN_VIEW_REACTIONS: [char; 8] = ['🔜', '📬', '📥', '🔄', '⏳', '✅', '⚠', '🛑'];
 const QUEUE_EXIT_FEEDBACK_REACTIONS: [char; 3] = ['🚫', '⌛', '⏏'];
 /// Marks on a message a busy turn's pane took or may have taken; never tracked as turn view state.
-const INJECTION_REACTIONS: [char; 3] = ['⏳', '📥', '❓'];
+const INJECTION_REACTIONS: [char; 3] = ['⏳', '➕', '❓'];
 const PERSISTED_STATE_VERSION: u32 = 1;
 const LEGACY_QUEUED_HOURGLASS_STATE_VERSION: u32 = 2;
 const QUEUED_MARKER_ONLY_STATE_VERSION: u32 = 3;
+const QUEUE_SOON_STATE_VERSION: u32 = 4;
 const RECENTLY_FINALIZED_TARGET_MAX: usize = 1024;
 const RECENTLY_FINALIZED_TARGET_TTL: time::Duration = time::Duration::from_secs(10 * 60);
 
@@ -125,7 +126,6 @@ impl TurnViewState {
     fn from_queue_marker_emoji(emoji: char) -> Option<Self> {
         match emoji {
             queue_reactions::QUEUE_STANDALONE_PENDING_REACTION => Some(Self::Queued),
-            queue_reactions::QUEUE_MERGED_PENDING_REACTION => Some(Self::QueuedMerged),
             queue_reactions::QUEUE_RECONCILE_PENDING_REACTION => Some(Self::QueuedReconcile),
             _ => None,
         }
@@ -748,7 +748,8 @@ impl TurnViewReconciler {
         emoji: char,
         source: &'static str,
     ) -> TurnViewDelivery {
-        let Some(expected_state) = TurnViewState::from_queue_marker_emoji(emoji) else {
+        let expected_state = TurnViewState::from_queue_marker_emoji(emoji);
+        if expected_state.is_none() && !['📬', '📥', '➕'].contains(&emoji) {
             tracing::warn!(
                 channel_id = target.channel_id.get(),
                 message = target.message_id.get(),
@@ -758,7 +759,7 @@ impl TurnViewReconciler {
                 "turn view queue marker clear ignored for unsupported emoji"
             );
             return TurnViewDelivery::Delivered;
-        };
+        }
         if !super::reaction_lifecycle::is_real_discord_message_id(target.message_id) {
             tracing::debug!(
                 channel_id = target.channel_id.get(),
@@ -779,6 +780,52 @@ impl TurnViewReconciler {
             .map(|entry| entry.clone())
             .or_else(|| self.load_persisted_target(target, shared, source));
 
+        if let Some(current) = current.as_ref()
+            && current.owner == owner
+            && !current.legacy_queue_reactions.is_empty()
+            && (expected_state.is_some() || current.legacy_queue_reactions.contains(&emoji))
+        {
+            let delivery = self
+                .remove_legacy_queue_reactions(
+                    shared,
+                    target,
+                    &current.legacy_queue_reactions,
+                    &current.identity,
+                    source,
+                )
+                .await;
+            if delivery.delivered() || matches!(delivery, TurnViewDelivery::FailedPermanent) {
+                self.discard_target_locked(target, source, &target_lock);
+            }
+            return delivery;
+        }
+        if emoji == '➕' {
+            // Only a persisted legacy queue record can identify a removable plus.
+            if let Some(current) = current {
+                self.targets.insert(target, current);
+            } else {
+                self.finish_target_locked(target, source, &target_lock, true);
+            }
+            return TurnViewDelivery::Delivered;
+        }
+        if matches!(emoji, '📬' | '📥') {
+            let resolved_identity = current
+                .as_ref()
+                .map(|entry| entry.identity.clone())
+                .or_else(|| self.resolve_identity(shared, target.kind, identity, source));
+            let Some(resolved_identity) = resolved_identity else {
+                return TurnViewDelivery::Failed;
+            };
+            let delivery = self
+                .apply_reaction(shared, target, emoji, false, &resolved_identity, source)
+                .await;
+            if let Some(current) = current {
+                self.targets.insert(target, current);
+            } else {
+                self.finish_target_locked(target, source, &target_lock, true);
+            }
+            return delivery;
+        }
         let Some(current) = current else {
             tracing::debug!(
                 channel_id = target.channel_id.get(),
@@ -800,22 +847,10 @@ impl TurnViewReconciler {
             return delivery;
         };
 
-        if current.applied != expected_state {
-            if current.owner == owner && current.legacy_queue_reactions.contains(&emoji) {
-                let delivery = self
-                    .remove_legacy_queue_reactions(
-                        shared,
-                        target,
-                        &current.legacy_queue_reactions,
-                        &current.identity,
-                        source,
-                    )
-                    .await;
-                if delivery.delivered() || matches!(delivery, TurnViewDelivery::FailedPermanent) {
-                    self.discard_target_locked(target, source, &target_lock);
-                }
-                return delivery;
-            }
+        if Some(current.applied) != expected_state
+            && !(emoji == queue_reactions::QUEUE_STANDALONE_PENDING_REACTION
+                && current.applied == TurnViewState::QueuedMerged)
+        {
             tracing::debug!(
                 channel_id = target.channel_id.get(),
                 message = target.message_id.get(),

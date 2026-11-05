@@ -466,7 +466,7 @@ mod duplicate_repair_interleaving_tests {
         assert_eq!(
             repaired,
             Some(PendingReactionRepair {
-                emoji: '📬',
+                emoji: '🔜',
                 delivered: true,
             })
         );
@@ -481,7 +481,7 @@ mod duplicate_repair_interleaving_tests {
         .await;
 
         assert!(
-            !reaction_is_present(&shared, message_id, '📬'),
+            !reaction_is_present(&shared, message_id, '🔜'),
             "a G+1 duplicate repair must remain removable by the queue entry's stored generation G"
         );
     }
@@ -551,7 +551,7 @@ mod duplicate_repair_interleaving_tests {
             })
         );
         assert!(reaction_is_present(&shared, message_id, '🔄'));
-        assert!(!reaction_is_present(&shared, message_id, '📬'));
+        assert!(!reaction_is_present(&shared, message_id, '🔜'));
         assert!(!reaction_is_present(&shared, message_id, '➕'));
     }
 }
@@ -1034,7 +1034,7 @@ pub(super) async fn render_visible_queued_ack(
                 channel_id,
                 user_msg_id,
                 ReactionControlReplyReason::QueuedCardPostFailed,
-                "📬 큐에 추가됨 — 카드 표시는 실패했지만 메시지는 큐잉되었습니다.",
+                "🔜 큐에 추가됨 — 카드 표시는 실패했지만 메시지는 큐잉되었습니다.",
             )
             .await;
             return false;

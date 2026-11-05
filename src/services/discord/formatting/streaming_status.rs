@@ -481,7 +481,7 @@ fn monitor_handoff_header(
 ) -> String {
     let background_label = monitor_handoff_uses_background_label(reason);
     match status {
-        MonitorHandoffStatus::Queued => "📬 **메시지 대기 중**".to_string(),
+        MonitorHandoffStatus::Queued => "🔜 **메시지 대기 중**".to_string(),
         MonitorHandoffStatus::Active if background_label => "🔄 **백그라운드 처리 중**".to_string(),
         MonitorHandoffStatus::Active => "🔄 **응답 처리 중**".to_string(),
         MonitorHandoffStatus::Stalled if background_label => "⚠ **백그라운드 정체**".to_string(),

@@ -1,17 +1,16 @@
-pub(in crate::services::discord) const QUEUE_STANDALONE_PENDING_REACTION: char = '📬';
-pub(in crate::services::discord) const QUEUE_MERGED_PENDING_REACTION: char = '➕';
+pub(in crate::services::discord) const QUEUE_STANDALONE_PENDING_REACTION: char = '🔜';
+pub(in crate::services::discord) const QUEUE_MERGED_PENDING_REACTION: char = '🔜';
 pub(in crate::services::discord) const QUEUE_RECONCILE_PENDING_REACTION: char = '🔄';
 
-pub(in crate::services::discord) const QUEUE_PENDING_REACTION_EMOJIS: [char; 3] = [
+pub(in crate::services::discord) const QUEUE_PENDING_REACTION_EMOJIS: [char; 4] = [
     QUEUE_STANDALONE_PENDING_REACTION,
-    QUEUE_MERGED_PENDING_REACTION,
     QUEUE_RECONCILE_PENDING_REACTION,
+    '📬',
+    '📥',
 ];
 
-pub(in crate::services::discord) const QUEUE_STANDALONE_DRAIN_REACTION_EMOJIS: [char; 2] = [
-    QUEUE_STANDALONE_PENDING_REACTION,
-    QUEUE_RECONCILE_PENDING_REACTION,
-];
+pub(in crate::services::discord) const QUEUE_STANDALONE_DRAIN_REACTION_EMOJIS: [char; 4] =
+    QUEUE_PENDING_REACTION_EMOJIS;
 
 pub(in crate::services::discord) fn drain_reactions_for_queue_exit(
     is_standalone: bool,

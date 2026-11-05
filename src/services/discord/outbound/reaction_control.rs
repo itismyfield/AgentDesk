@@ -39,7 +39,7 @@ pub(in crate::services::discord) async fn ensure_queue_reaction_or_fallback_http
             shared,
             message_id,
             ReactionControlReplyReason::QueueReactionFailed,
-            "📬 큐에 추가됨 — 리액션 표시는 실패했지만 메시지는 큐잉되었습니다.",
+            "🔜 큐에 추가됨 — 리액션 표시는 실패했지만 메시지는 큐잉되었습니다.",
         )
         .await;
     }

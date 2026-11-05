@@ -32,10 +32,7 @@ async fn rest(State(state): State<RestState>, request: Request<Body>) -> Respons
     if let Some((_, marker)) = path.split_once("/reactions/") {
         let marker = marker.trim_end_matches("/@me").to_string();
         if method == Method::PUT {
-            if matches!(marker.as_str(), "⏳" | "📥")
-                || marker.eq_ignore_ascii_case("%E2%8F%B3")
-                || marker.eq_ignore_ascii_case("%F0%9F%93%A5")
-            {
+            if marker == "➕" || marker.eq_ignore_ascii_case("%E2%9E%95") {
                 state.injected_puts.fetch_add(1, Ordering::SeqCst);
             }
             state.markers.lock().unwrap().insert(marker);
@@ -117,7 +114,7 @@ impl Transport {
             .lock()
             .unwrap()
             .iter()
-            .any(|marker| marker.eq_ignore_ascii_case("%F0%9F%93%AC") || marker == "📬")
+            .any(|marker| marker.eq_ignore_ascii_case("%F0%9F%94%9C") || marker == "🔜")
     }
 
     fn notice_count(&self) -> usize {
@@ -285,7 +282,7 @@ async fn catch_up_live_entry(reserved: bool) {
         &transport.ctx.http,
         channel,
         message_id,
-        '📬',
+        '🔜',
         generation,
         "catch_up_fixture",
     )
@@ -374,7 +371,7 @@ async fn catch_up_live_entry(reserved: bool) {
         &transport.ctx.http,
         channel,
         message_id,
-        '📬',
+        '🔜',
         generation,
         "intake_gate_queue_pending",
     )
@@ -630,7 +627,7 @@ async fn catch_up_mended_head_clears_pending_marker_without_another_paste_pg() {
         &transport.ctx.http,
         channel,
         message,
-        '📬',
+        '🔜',
         generation,
         "catch_up_fixture",
     )
@@ -699,7 +696,7 @@ async fn catch_up_mended_head_clears_pending_marker_without_another_paste_pg() {
         &transport.ctx.http,
         channel,
         message,
-        '📬',
+        '🔜',
         generation,
         "intake_gate_queue_pending",
     )
@@ -726,7 +723,7 @@ async fn confirmed_source_blocks_late_pending_rest_marker() {
         &transport.ctx.http,
         channel,
         control,
-        '📬',
+        '🔜',
         generation,
         "catch_up_fixture",
     )
@@ -740,7 +737,7 @@ async fn confirmed_source_blocks_late_pending_rest_marker() {
         &transport.ctx.http,
         channel,
         control,
-        '📬',
+        '🔜',
         generation,
         "catch_up_fixture",
     )
@@ -759,7 +756,7 @@ async fn confirmed_source_blocks_late_pending_rest_marker() {
             &transport.ctx.http,
             channel,
             message,
-            '📬',
+            '🔜',
             generation,
             "intake_gate_queue_pending"
         )

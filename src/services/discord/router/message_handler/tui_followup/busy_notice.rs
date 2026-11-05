@@ -36,7 +36,7 @@ mod tests {
         ] {
             assert_eq!(
                 claude_tui_busy_followup_refusal_notice(Some(reason)),
-                "📬 이 메시지는 이미 처리 중이라 추가 적재하지 않았습니다. 현재 결과를 기다려 주세요."
+                "🔜 이 메시지는 이미 처리 중이라 추가 적재하지 않았습니다. 현재 결과를 기다려 주세요."
             );
         }
         for reason in [E::ActorUnreachable, E::MailboxClosed] {
@@ -47,11 +47,11 @@ mod tests {
         }
         assert_eq!(
             claude_tui_busy_followup_refusal_notice(Some(E::SourceIdAlreadyQueued)),
-            "📬 이 메시지는 이미 큐에 들어가 있어 추가 적재하지 않았습니다. 큐 결과를 기다려 주세요."
+            "🔜 이 메시지는 이미 큐에 들어가 있어 추가 적재하지 않았습니다. 큐 결과를 기다려 주세요."
         );
         assert_eq!(
             claude_tui_busy_followup_refusal_notice(Some(E::LastItemDedup)),
-            "📬 방금 동일한 메시지가 큐에 적재되어 중복으로 무시했습니다. 큐 결과를 기다려 주세요."
+            "🔜 방금 동일한 메시지가 큐에 적재되어 중복으로 무시했습니다. 큐 결과를 기다려 주세요."
         );
         assert_eq!(
             claude_tui_busy_followup_refusal_notice(None),

@@ -1793,24 +1793,33 @@ async fn queued_busy_injection_marks_committed_source(observed: bool) {
         .iter()
         .filter(|(method, _, _)| *method == Method::PUT)
         .collect();
-    let expected = if observed {
-        "%E2%8F%B3/@ME"
-    } else {
-        "%F0%9F%93%A5/@ME"
-    };
+    let expected = "%E2%9E%95/@ME";
     assert_eq!(
         puts,
         [&(Method::PUT, message.get(), expected.into())],
         "committed queued injection must PUT its live-path marker"
     );
-    assert_eq!(
-        &reactions[..reactions.len() - 1],
-        [
-            (Method::DELETE, message.get(), "%F0%9F%93%AC/@ME".into()),
-            (Method::DELETE, message.get(), "%E2%9E%95/@ME".into()),
-            (Method::DELETE, message.get(), "%F0%9F%94%84/@ME".into()),
-        ],
+    let before_receipt = &reactions[..reactions.len() - 1];
+    assert!(
+        before_receipt
+            .iter()
+            .all(|(method, id, _)| { *method == Method::DELETE && *id == message.get() }),
         "queue markers are removed before the injected marker is added"
+    );
+    assert_eq!(
+        before_receipt
+            .iter()
+            .map(|(_, _, emoji)| emoji.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        [
+            "%F0%9F%94%9C/@ME",
+            "%F0%9F%94%84/@ME",
+            "%F0%9F%93%AC/@ME",
+            "%F0%9F%93%A5/@ME",
+        ]
+        .into_iter()
+        .collect(),
+        "new and legacy waiting markers clear without deleting the injection receipt"
     );
     assert_eq!(
         fixture
@@ -1850,16 +1859,13 @@ async fn queued_busy_injection_marks_committed_source(observed: bool) {
         .await
         .unwrap_or_else(|_| {
             panic!(
-                "idle must replace the queued injection hourglass with a checkmark: {}",
+                "idle must complete the queued injection while preserving its receipt: {}",
                 presence.state()
             )
         });
         assert_eq!(
             &fixture.reactions.lock().unwrap()[reactions.len()..],
-            [
-                (Method::DELETE, message.get(), "%E2%8F%B3/@ME".into()),
-                (Method::PUT, message.get(), "%E2%9C%85/@ME".into()),
-            ]
+            [(Method::PUT, message.get(), "%E2%9C%85/@ME".into())]
         );
         assert_eq!(
             fixture

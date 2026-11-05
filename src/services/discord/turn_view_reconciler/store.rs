@@ -255,6 +255,7 @@ impl TurnViewReconciler {
             PERSISTED_STATE_VERSION
                 | LEGACY_QUEUED_HOURGLASS_STATE_VERSION
                 | QUEUED_MARKER_ONLY_STATE_VERSION
+                | QUEUE_SOON_STATE_VERSION
         ) || record.provider != shared.provider.as_str()
             || TurnViewTargetKind::from_str(&record.kind) != Some(target.kind)
             || record.channel_id != target.channel_id.get()
@@ -288,16 +289,19 @@ impl TurnViewReconciler {
             return None;
         }
         let identity = self.resolve_persisted_identity(&record, shared, source)?;
-        let legacy_queue_reactions = match record.version {
-            PERSISTED_STATE_VERSION if recorded_applied.is_queue_marker() => {
-                vec![reaction_set::for_state(recorded_applied)[0]]
+        // Old display versions retain their original letters after the pending marker changes.
+        let mut legacy_queue_reactions = Vec::new();
+        if record.version <= QUEUED_MARKER_ONLY_STATE_VERSION && recorded_applied.is_queue_marker()
+        {
+            legacy_queue_reactions.push(match recorded_applied {
+                TurnViewState::Queued => '📬',
+                TurnViewState::QueuedMerged => '➕',
+                _ => '🔄',
+            });
+            if record.version == LEGACY_QUEUED_HOURGLASS_STATE_VERSION {
+                legacy_queue_reactions.push('⏳');
             }
-            LEGACY_QUEUED_HOURGLASS_STATE_VERSION if recorded_applied.is_queue_marker() => vec![
-                reaction_set::for_state(recorded_applied)[0],
-                reaction_set::for_state(TurnViewState::Pending)[0],
-            ],
-            _ => Vec::new(),
-        };
+        }
         let applied = if legacy_queue_reactions.is_empty() {
             recorded_applied
         } else {
@@ -330,13 +334,20 @@ impl TurnViewReconciler {
         let applied_state = applied
             .legacy_queue_reactions
             .iter()
-            .find_map(|emoji| TurnViewState::from_queue_marker_emoji(*emoji))
+            .find_map(|emoji| match emoji {
+                '📬' => Some(TurnViewState::Queued),
+                '➕' => Some(TurnViewState::QueuedMerged),
+                '🔄' => Some(TurnViewState::QueuedReconcile),
+                _ => None,
+            })
             .unwrap_or(applied.applied);
         let record = PersistedTargetState {
-            version: if applied.applied.is_queue_marker()
-                || !applied.legacy_queue_reactions.is_empty()
-            {
+            version: if applied.legacy_queue_reactions.contains(&'⏳') {
+                LEGACY_QUEUED_HOURGLASS_STATE_VERSION
+            } else if !applied.legacy_queue_reactions.is_empty() {
                 QUEUED_MARKER_ONLY_STATE_VERSION
+            } else if applied.applied.is_queue_marker() {
+                QUEUE_SOON_STATE_VERSION
             } else {
                 PERSISTED_STATE_VERSION
             },
