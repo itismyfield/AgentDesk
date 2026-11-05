@@ -2499,10 +2499,15 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/discord/router/intake_gate.rs`
 - `src/services/discord/router/message_handler/headless_turn.rs`
 - `src/services/discord/router/message_handler/intake_turn.rs`
+- `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs`
 - `src/services/discord/standby_relay.rs`
 - `src/services/discord/tmux_watcher.rs`
+- `src/services/discord/tmux_watcher/streaming_status_tick.rs`
+- `src/services/discord/tui_prompt_relay/rehydration.rs`
 - `src/services/discord/turn_bridge/completion_postlude.rs`
 - `src/services/discord/turn_bridge/terminal_controller_cutover.rs`
+- `src/services/discord/turn_bridge/terminal_outcome_delivery.rs`
+- `src/services/discord/turn_presence/activity.rs`
 - `src/services/dispatches/discord_delivery/orchestration.rs`
 - `src/services/dispatches/outbox_route.rs`
 - `src/services/gemini.rs`

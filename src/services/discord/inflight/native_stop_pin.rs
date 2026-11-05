@@ -295,3 +295,204 @@ pub(in crate::services::discord) fn wait_native_pin_observations(
         .find(|(id, _)| *id == channel)
         .is_some_and(|(_, count)| *count >= expected)
 }
+
+/// A busy writer's original source and pane, retained until its own native user row appears.
+#[cfg(unix)]
+pub(in crate::services::discord) struct BusyNativeInput {
+    session: String,
+    nonce: String,
+    frame: String,
+    transcript: std::path::PathBuf,
+    session_id: String,
+    source_file: (u64, u64),
+    source_offset: u64,
+    pane: crate::services::claude_tui::input::PaneIdentity,
+    submitted: Arc<std::sync::atomic::AtomicBool>,
+    token: Arc<CancelToken>,
+}
+
+#[cfg(unix)]
+impl BusyNativeInput {
+    pub(in crate::services::discord) fn capture(
+        session: &str,
+        nonce: &str,
+        frame: &str,
+        transcript: &std::path::Path,
+        source: &serde_json::Value,
+        submitted: Arc<std::sync::atomic::AtomicBool>,
+        token: Arc<CancelToken>,
+    ) -> Option<Self> {
+        if source["kind"] != "existing"
+            || source["transcript"].as_str()? != transcript.to_str()?
+            || session.is_empty()
+            || nonce.is_empty()
+        {
+            return None;
+        }
+        let session_id = source["session_id"].as_str()?.to_owned();
+        if session_id.is_empty() {
+            return None;
+        }
+        Some(Self {
+            session: session.into(),
+            nonce: nonce.into(),
+            frame: frame.into(),
+            transcript: transcript.into(),
+            session_id,
+            source_file: (source["file"][0].as_u64()?, source["file"][1].as_u64()?),
+            source_offset: source["offset"].as_u64()?,
+            pane: crate::services::claude_tui::input::PaneIdentity::capture(session)?,
+            submitted,
+            token,
+        })
+    }
+
+    pub(in crate::services::discord) fn adopt(&self, offset: u64) {
+        if self.submitted.load(std::sync::atomic::Ordering::Acquire)
+            && let Some(pin) = self.verify(offset)
+        {
+            self.token.native_stop.receipt_sink().adopt(pin);
+        }
+    }
+
+    fn verify(&self, offset: u64) -> Option<NativeUserPin> {
+        use crate::services::claude_tui::input::{PaneIdentity, UserReceipt};
+        use crate::services::tui_input::human_frame::history::{self, RowOwner};
+        use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+        const MAX_ROW: u64 = 128 * 1024;
+        if offset < self.source_offset || PaneIdentity::capture(&self.session)? != self.pane {
+            return None;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&self.transcript)
+            .ok()?;
+        let metadata = file.metadata().ok()?;
+        if !metadata.is_file()
+            || (metadata.dev(), metadata.ino()) != self.source_file
+            || offset >= metadata.len()
+        {
+            return None;
+        }
+        file.seek(SeekFrom::Start(offset)).ok()?;
+        let mut raw = Vec::new();
+        BufReader::new(file.take(MAX_ROW + 1))
+            .read_until(b'\n', &mut raw)
+            .ok()?;
+        if raw.len() as u64 > MAX_ROW || raw.last() != Some(&b'\n') {
+            return None;
+        }
+        let end = offset.checked_add(raw.len() as u64)?;
+        let record: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+        if record["type"] != "user"
+            || record["isMeta"] == true
+            || record["isSidechain"] == true
+            || record["isCompactSummary"] == true
+            || record["sessionId"] != self.session_id
+        {
+            return None;
+        }
+        let mut pin = UserReceipt::native_pin_before_tail(
+            &self.session,
+            &self.frame,
+            Some(&self.session_id),
+            end,
+        )?;
+        if pin.uuid != record["uuid"].as_str()?
+            || pin.range != (offset, end)
+            || pin.source_file != self.source_file
+            || pin.session_id != self.session_id
+            || std::path::Path::new(&pin.output_path) != self.transcript
+            || pin.tmux_session != self.session
+            || PaneIdentity::capture(&self.session)? != self.pane
+            || !matches!(
+                history::row_owner("claude", &self.session, std::slice::from_ref(&self.frame), &pin.uuid),
+                RowOwner::User(nonce) if nonce == self.nonce
+            )
+        {
+            return None;
+        }
+        pin.direct = false;
+        Some(pin)
+    }
+}
+
+#[cfg(all(test, unix))]
+#[path = "native_stop_pin/busy_input_tests.rs"]
+mod busy_input_tests;
+
+/// Verifies the persisted input in its historical transcript without consulting the current pane.
+pub(in crate::services::discord) fn historical_input_verified(row: &InflightTurnState) -> bool {
+    let Some(pin) = row
+        .native_stop_user_pin
+        .as_ref()
+        .filter(|pin| pin.matches_owner(row))
+    else {
+        return false;
+    };
+    #[cfg(not(unix))]
+    {
+        let _ = pin;
+        false
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
+        let verify = || -> Option<()> {
+            let input = &pin.input;
+            let length = input.range.1.checked_sub(input.range.0)?;
+            if input.uuid.trim().is_empty()
+                || input.session_id.trim().is_empty()
+                || pin.turn_nonce.trim().is_empty()
+                || input
+                    .spawn_nonce
+                    .as_deref()
+                    .is_none_or(|nonce| nonce.trim().is_empty())
+                || input.range.0 < input.receipt_start
+                || length == 0
+                || length > 16 * 1024 * 1024
+            {
+                return None;
+            }
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(&input.output_path)
+                .ok()?;
+            let before = file.metadata().ok()?;
+            if !before.is_file()
+                || before.ino() != input.source_file.1
+                || before.len() < input.range.1
+            {
+                return None;
+            }
+            let mut raw = vec![0; usize::try_from(length).ok()?];
+            file.read_exact_at(&mut raw, input.range.0).ok()?;
+            if !raw.ends_with(b"\n") || blake3::hash(&raw).to_hex().as_str() != input.row_digest {
+                return None;
+            }
+            let record: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+            let (_, uuid) = crate::services::tui_prompt_dedupe::extract_claude_transcript_user_prompt_with_entry_id(&record)?;
+            if uuid.as_deref() != Some(input.uuid.as_str())
+                || record["sessionId"].as_str() != Some(input.session_id.as_str())
+                || record["isSidechain"] == true
+            {
+                return None;
+            }
+            let current = std::fs::symlink_metadata(&input.output_path).ok()?;
+            (current.is_file()
+                && current.dev() == before.dev()
+                && current.ino() == before.ino()
+                && current.len() >= input.range.1)
+                .then_some(())
+        };
+        verify().is_some()
+    }
+}
+
+#[cfg(all(test, unix))]
+#[path = "native_stop_pin/historical_tests.rs"]
+mod historical_tests;

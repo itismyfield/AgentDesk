@@ -603,6 +603,7 @@ pub(crate) fn busy_owner_observer(
     transcript: &std::path::Path,
     sender: Sender<StreamMessage>,
     cancel: std::sync::Arc<CancelToken>,
+    on_native_user: Box<dyn FnOnce(u64) + Send>,
 ) -> Option<Box<dyn FnOnce() -> Result<(), String> + Send>> {
     use std::sync::atomic::Ordering;
     cancel.bind_claude_tmux_session(tmux);
@@ -619,7 +620,10 @@ pub(crate) fn busy_owner_observer(
             }
             let taken = crate::services::tui_input::human_frame::history::attempt_row;
             match taken("claude", &tmux, &nonce) {
-                Some((offset, true)) => break offset,
+                Some((offset, true)) => {
+                    on_native_user(offset);
+                    break offset;
+                }
                 // A queued command joins the running turn, whose owner posts its answer.
                 Some((_, false)) => return Ok(()),
                 None => {}

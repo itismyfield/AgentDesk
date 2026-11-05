@@ -183,6 +183,7 @@ impl HerdrOwner {
             clock: Arc::new(|| 10_000),
             timing: &crate::services::claude_tui::busy_inject::TIMING,
             until_done: None,
+            native_pin_submitted: None,
         };
         created(
             registration,
