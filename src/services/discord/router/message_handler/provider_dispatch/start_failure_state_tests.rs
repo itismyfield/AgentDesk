@@ -261,3 +261,75 @@ fn only_typed_confirmed_refusals_enter_first_failure_allowlist() {
     );
     assert!(confirmed(&HerdrRefusal::OWriterNotReady).is_none());
 }
+
+#[tokio::test]
+async fn start_failure_guard_preserves_effect_owned_error_settlement_before_completion() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let mailbox = shared.mailbox(ChannelId::new(7787953));
+    let queue = crate::services::discord::runtime_store::discord_pending_queue_root()
+        .unwrap()
+        .join("claude")
+        .join(&shared.token_hash)
+        .join("7787953.json");
+    mailbox
+        .v2_adopt(queue, shared.token_hash.clone())
+        .await
+        .unwrap();
+    let item: PendingQueueItem = serde_json::from_value(json!({
+        "author_id":7,"message_id":7787003,"channel_id":7787953,
+        "queued_generation":1,"text":"effect owned original"
+    }))
+    .unwrap();
+    mailbox
+        .v2_admit_ticket(item, "settled-before-completion".into())
+        .await
+        .unwrap();
+    let front = mailbox
+        .v2_request(|slot| {
+            let owner = slot.as_mut().ok_or("owner")?;
+            let front = owner.front().ok_or("front")?;
+            owner.grant_front(&front)?;
+            Ok(front)
+        })
+        .await
+        .unwrap();
+    let claim = claim_turn(&mailbox, 7787003, &front)
+        .await
+        .unwrap()
+        .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let reply = Failure::claimed(&mailbox, &claim).guard_reply(Arc::new(move |result| {
+        tx.send(result.clone()).unwrap();
+    }));
+    let error = Err("NotSent(text cannot override reserve)".to_string());
+    let before = reply.clone();
+    let first = error.clone();
+    tokio::task::spawn_blocking(move || before(&first))
+        .await
+        .unwrap();
+    assert!(
+        rx.try_recv().is_err(),
+        "pre-input error waits for the failure commit"
+    );
+    mailbox.v2_request(move |slot| {
+        let attempt = serde_json::from_value(json!({
+            "nonce":"effect-owned","provider":"claude",
+            "target":{"host":"tmux","owner":"fixture","root":"fixture","execution_nonce":"born"},
+            "source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}
+        })).map_err(|e| e.to_string())?;
+        let payload = serde_json::from_value(json!({
+            "frame":"exact frame","digest":"digest","attribution":{},"followers":[]
+        })).map_err(|e| e.to_string())?;
+        slot.as_mut().ok_or("owner")?.reserve_claimed((claim.front(), claim.number()), attempt, payload).map(drop)
+    }).await.unwrap();
+    let expected = error.clone();
+    tokio::task::spawn_blocking(move || reply(&error))
+        .await
+        .unwrap();
+    assert_eq!(
+        rx.try_recv()
+            .expect("EffectOwned settles without an AI completion event"),
+        expected
+    );
+}

@@ -843,7 +843,7 @@ fn observer(
 
 /// The drive's answer for one front: its local settlement, never its AI completion.
 pub(super) type Settled = tokio::sync::oneshot::Sender<Result<(), String>>;
-type Reply = std::sync::Arc<dyn Fn(&Result<(), String>) + Send + Sync>;
+pub(super) type Reply = std::sync::Arc<dyn Fn(&Result<(), String>) + Send + Sync>;
 
 fn reply_once(settled: Option<Settled>) -> Reply {
     let slot = Mutex::new(settled);
@@ -901,12 +901,7 @@ pub(super) fn execute_front(
     let watch =
         crate::services::discord::inflight::row_removed::watch(turn.provider, turn.channel_id);
     let context = turn.clone();
-    let success = reply.clone();
-    let inside: Reply = std::sync::Arc::new(move |result| {
-        if result.is_ok() {
-            success(result);
-        }
-    });
+    let inside = failure.guard_reply(reply.clone());
     let result = match take_owned(&turn, Some(claim), owner, inside) {
         Some(Taken::Done(result)) => result,
         Some(Taken::Launch(guard)) => guard.finish(super::drive(turn, sender)),

@@ -47,6 +47,28 @@ impl Failure {
     pub(super) fn owner(owner: &OwnerTurn) -> Self {
         Self::claimed(owner.mailbox(), owner.claim())
     }
+    pub(super) fn guard_reply(
+        &self,
+        reply: super::owner_input::Reply,
+    ) -> super::owner_input::Reply {
+        let (mailbox, front, number) = (self.mailbox.clone(), self.front.clone(), self.number);
+        Arc::new(move |result| {
+            let front = front.clone();
+            // Only an unreserved exact claim waits for the failure commit; EffectOwned settles now.
+            let before_input = result.is_err()
+                && tokio::runtime::Handle::current()
+                    .block_on(mailbox.v2_request(move |slot| {
+                        Ok(slot.as_ref().is_some_and(|owner| {
+                            owner.claim_number() == number
+                                && owner.claimed(front.1.message_id, &front)
+                        }))
+                    }))
+                    .unwrap_or(true);
+            if !before_input {
+                reply(result);
+            }
+        })
+    }
     pub(super) async fn commit(
         self,
         kind: Kind,
