@@ -64,7 +64,7 @@ impl IntakeRig {
     }
 
     async fn with_bot(id: u64, busy: bool, bot: ProviderKind) -> Self {
-        Self::build(id, busy, bot, None, false).await
+        Self::build(id, busy, bot, None, false, None).await
     }
 
     async fn with_storage(
@@ -73,12 +73,25 @@ impl IntakeRig {
         bot: ProviderKind,
         pool: Option<sqlx::PgPool>,
     ) -> Self {
-        Self::build(id, busy, bot, pool, false).await
+        Self::build(id, busy, bot, pool, false, None).await
     }
 
     /// A busy pane whose front a `turn/start` admitted with its headless provenance.
     async fn turn_start(id: u64) -> Self {
-        Self::build(id, true, ProviderKind::Claude, None, true).await
+        Self::build(id, true, ProviderKind::Claude, None, true, None).await
+    }
+
+    /// A `turn/start` naming `origin` on a stored channel whose pane's transcript its observer finds.
+    async fn turn_start_stored(id: u64, pool: sqlx::PgPool, origin: &str) -> Self {
+        Self::build(
+            id,
+            true,
+            ProviderKind::Claude,
+            Some(pool),
+            true,
+            Some(origin),
+        )
+        .await
     }
 
     async fn build(
@@ -87,6 +100,7 @@ impl IntakeRig {
         bot: ProviderKind,
         pool: Option<sqlx::PgPool>,
         start: bool,
+        origin: Option<&str>,
     ) -> Self {
         let trace = Trace::default();
         tracing_subscriber::fmt()
@@ -154,7 +168,7 @@ impl IntakeRig {
         let sid = proof.context.expected_native_session_id.as_deref().unwrap();
         let workspace = f.root.path().join("workspace");
         fs::create_dir(&workspace).unwrap();
-        let transcript = match start {
+        let transcript = match start && origin.is_none() {
             // Known only through the pane's binding, as when no idle observer can be built.
             true => f
                 .root
@@ -221,7 +235,7 @@ impl IntakeRig {
                 let provenance = start::HeadlessProvenance {
                     owner: (7, "imessage"),
                     source: Some("imessage"),
-                    metadata: None,
+                    metadata: origin.map(|o| json!({"human_input": {"origin_id": o}})),
                     channel_hint: None,
                     label: None,
                     dm: None,
@@ -403,17 +417,16 @@ async fn owned_front_on_a_busy_pane_is_pasted_once_without_completion() {
     drop(drive);
 }
 
-/// A `turn/start` into a busy pane with no idle observer is pasted once and answered once by its
-/// reader, even when its row comes after a long turn and the relay reads it past 10 s.
+/// A `turn/start` behind a busy native turn waits unclaimed, with the pane's transcript known only
+/// through its binding and no database: no key, no post, and its original stays first in line.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_turn_start_into_a_busy_pane_is_pasted_once_and_answered_once() {
+async fn a_turn_start_into_a_busy_pane_waits_unclaimed() {
     if !creator_child(concat!(
         "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::",
-        "a_turn_start_into_a_busy_pane_is_pasted_once_and_answered_once"
+        "a_turn_start_into_a_busy_pane_waits_unclaimed"
     )) {
         return;
     }
-    const ANSWER: &str = "turn start answer 7676";
     let _root = crate::config::TestRuntimeRootGuard::new();
     let rig = IntakeRig::turn_start(7_676_106).await;
     let (drive, mut settled) = rig.drive();
@@ -422,75 +435,31 @@ async fn a_turn_start_into_a_busy_pane_is_pasted_once_and_answered_once() {
         .await
         .unwrap_or_else(|_| panic!("{}", rig.trace.text()))
         .unwrap();
-    assert_eq!(result, Ok(()), "{}", rig.trace.text());
-    assert_eq!(events(&rig.renderer), ["paste", "Enter"]);
-    let frame = fs::read_to_string(rig.renderer.join("body")).unwrap();
-    assert!(frame.ends_with(PROMPT), "{frame:?}");
-    crate::services::tui_prompt_dedupe::Instant::advance(Duration::from_secs(11));
-    // Claude ends the running turn, then opens one for the queued input and answers it.
-    let rows = [
-        json!({"type":"system","subtype":"turn_duration"}),
-        json!({"type":"user","uuid":"turn-start-row","message":{"role":"user","content":frame}}),
-        json!({"type":"assistant","uuid":"turn-start-answer","message":{"id":"turn-start-answer",
-            "role":"assistant","content":[{"type":"text","text":ANSWER}],"stop_reason":"end_turn"}}),
-        json!({"type":"system","subtype":"turn_duration"}),
-    ];
-    let mut file = fs::OpenOptions::new()
-        .append(true)
-        .open(&rig.transcript)
-        .unwrap();
-    for row in rows {
-        std::io::Write::write_all(&mut file, format!("{row}\n").as_bytes()).unwrap();
-    }
-    let answered = || {
-        let texts = rig.mock.written_texts();
-        texts.iter().filter(|text| text.contains(ANSWER)).count()
-    };
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    while answered() == 0 {
-        assert!(std::time::Instant::now() < deadline, "{}", rig.trace.text());
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    // The legacy relay reads the input's row, then again on a rescan.
-    let mut relayed = crate::services::tui_prompt_dedupe::subscribe_observed_prompts();
-    let session =
-        ProviderKind::Claude.build_tmux_session_name(&format!("a1-rollback-{}", 7_676_106));
-    for _ in 0..2 {
-        let observe = crate::services::tui_prompt_dedupe::observe_prompt_by_tmux_with_row_ids_at;
-        observe(
-            "claude",
-            &session,
-            &frame,
-            Some("turn-start-row"),
-            None,
-            chrono::Utc::now(),
-        );
-    }
-    let mut legacy = 0;
-    while let Ok(event) = relayed.try_recv() {
-        legacy += usize::from(event.prompt == frame);
-    }
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    // The mock lists a POST both as posted and as the message it minted: one answer, listed twice.
-    assert_eq!(answered(), 2, "{:?}", rig.mock.written_texts());
-    assert_eq!(legacy, 0, "the relay also answered the caller's turn");
-    assert_eq!(events(&rig.renderer), ["paste", "Enter"]);
-    assert!(
-        !rig.trace.text().contains("idle_unobserved"),
+    assert_eq!(
+        result,
+        Err("NotSent(\"synthetic_waits_idle\")".into()),
         "{}",
         rig.trace.text()
     );
-    assert_eq!(rig.state().await["items"], json!([]));
+    assert!(
+        events(&rig.renderer).is_empty(),
+        "{:?}",
+        events(&rig.renderer)
+    );
+    let state = rig.state().await;
+    assert_eq!(state["items"].as_array().unwrap().len(), 1, "{state}");
+    assert!(state["head_injection"].is_null(), "unclaimed: {state}");
+    assert_eq!(rig.mock.written_texts(), Vec::<String>::new());
     drop(drive);
 }
 
-/// A `turn/start` the running native turn takes as a queued command joins that turn at the relay,
-/// whose stream carries the answer; the caller settles once and its reader posts no body.
+/// A start held behind a running native turn is not handed while that turn runs; the turn's end
+/// hands it once as a turn of its own, and the running turn's answer is never posted for it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_turn_start_absorbed_into_a_running_turn_posts_no_second_body() {
+async fn a_turn_start_held_behind_a_running_turn_runs_once_after_it_ends() {
     if !creator_child(concat!(
         "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::",
-        "a_turn_start_absorbed_into_a_running_turn_posts_no_second_body"
+        "a_turn_start_held_behind_a_running_turn_runs_once_after_it_ends"
     )) {
         return;
     }
@@ -499,18 +468,18 @@ async fn a_turn_start_absorbed_into_a_running_turn_posts_no_second_body() {
     let rig = IntakeRig::turn_start(7_676_107).await;
     let (drive, mut settled) = rig.drive();
     crate::services::discord::queue_io::input_owner::drive::wake(drive.clone());
-    let result = tokio::time::timeout(Duration::from_secs(30), settled.recv())
-        .await
-        .unwrap_or_else(|_| panic!("{}", rig.trace.text()))
-        .unwrap();
-    assert_eq!(result, Ok(()), "{}", rig.trace.text());
-    assert_eq!(events(&rig.renderer), ["paste", "Enter"]);
-    let frame = fs::read_to_string(rig.renderer.join("body")).unwrap();
-    // The running turn takes the input as a queued command and answers within itself.
+    let result = next_settle(&mut settled, &rig.trace).await;
+    assert_eq!(result, Err("NotSent(\"synthetic_waits_idle\")".into()));
+    let mut relayed = crate::services::tui_prompt_dedupe::subscribe_observed_prompts();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(
+        settled.try_recv().is_err(),
+        "the held start was handed mid-turn"
+    );
+    assert!(events(&rig.renderer).is_empty());
+    // The native turn answers its own prompt and ends.
     let rows = [
-        json!({"type":"attachment","uuid":"absorbed-row","attachment":{"type":"queued_command",
-            "prompt":frame,"commandMode":"prompt"}}),
-        json!({"type":"assistant","uuid":"absorbed-answer","message":{"id":"absorbed-answer",
+        json!({"type":"assistant","uuid":"native-answer","message":{"id":"native-answer",
             "role":"assistant","content":[{"type":"text","text":ANSWER}],"stop_reason":"end_turn"}}),
         json!({"type":"system","subtype":"turn_duration"}),
     ];
@@ -521,41 +490,18 @@ async fn a_turn_start_absorbed_into_a_running_turn_posts_no_second_body() {
     for row in rows {
         std::io::Write::write_all(&mut file, format!("{row}\n").as_bytes()).unwrap();
     }
-    // The legacy relay reads the absorbed row as joining the running turn, opening none of its own.
-    let mut relayed = crate::services::tui_prompt_dedupe::subscribe_observed_prompts();
-    let session =
-        ProviderKind::Claude.build_tmux_session_name(&format!("a1-rollback-{}", 7_676_107));
-    let observe = crate::services::tui_prompt_dedupe::observe_prompt_by_tmux_with_row_ids_at;
-    let joined = observe(
-        "claude",
-        &session,
-        &frame,
-        Some("absorbed-row"),
-        None,
-        chrono::Utc::now(),
-    );
-    assert_eq!(
-        joined,
-        crate::services::tui_prompt_dedupe::PromptObservation::InjectedSteer
-    );
-    // The reader's own turn settles; a body it took would be posted well within this wait.
-    tokio::time::sleep(Duration::from_secs(40)).await;
-    let mut legacy = 0;
-    while let Ok(event) = relayed.try_recv() {
-        legacy += usize::from(event.prompt == frame);
-    }
-    assert_eq!(
-        legacy, 0,
-        "the relay opened a turn of its own for the absorbed input"
-    );
-    assert!(
-        settled.try_recv().is_err(),
-        "the caller settled more than once"
-    );
-    let posted = rig.mock.written_texts();
-    // No second body, and no failure notice for a turn that ended as its input joined another.
-    assert_eq!(posted, Vec::<String>::new(), "{}", rig.trace.text());
+    let ran = next_settle(&mut settled, &rig.trace).await;
+    assert_eq!(ran, Ok(()), "{}", rig.trace.text());
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(settled.try_recv().is_err(), "the start was handed twice");
     assert_eq!(events(&rig.renderer), ["paste", "Enter"]);
+    let mut opened = 0;
+    while let Ok(event) = relayed.try_recv() {
+        opened += usize::from(event.prompt.contains(PROMPT));
+    }
+    assert!(opened <= 1, "the relay opened {opened} turns for the start");
+    assert!(!rig.mock.written_texts().iter().any(|t| t.contains(ANSWER)));
+    assert!(rig.state().await["items"].as_array().unwrap().is_empty());
     drop(drive);
 }
 
@@ -895,6 +841,442 @@ async fn terminal_waiting_status_keeps_a_successor_active_pg() {
         );
     }
     server.abort();
+    pool.close().await;
+    db.drop().await;
+}
+
+/// The turn receipts that name `origin`, by outcome.
+async fn origin_receipts(pool: &sqlx::PgPool, origin: &str) -> Vec<String> {
+    let sql = "SELECT terminal_outcome FROM turns
+               WHERE consumed_origin_ids @> ARRAY[$1]::TEXT[] AND terminal_outcome IS NOT NULL";
+    let rows = sqlx::query_scalar::<_, String>(sql)
+        .bind(origin)
+        .fetch_all(pool);
+    rows.await.unwrap()
+}
+
+/// A `turn/start` meeting a native busy turn on a stored tmux session waits unclaimed through a
+/// failed pane read: nothing is written, retried or killed, and the turn's idle alone runs it once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_turn_start_waits_out_a_native_busy_turn_then_runs_as_its_own_pg() {
+    if !creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::",
+        "a_turn_start_waits_out_a_native_busy_turn_then_runs_as_its_own_pg"
+    )) {
+        return;
+    }
+    use crate::services::agents::input_result::{InputResult, OriginChannel, lookup};
+    const ORIGIN: &str = "G-native-busy";
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let rig = IntakeRig::turn_start_stored(7_340_801, pool.clone(), ORIGIN).await;
+    // The pane is a stored tmux session the host guard lets an automatic reset clear.
+    let key = discord::adk_session::build_adk_session_key(
+        &rig.shared,
+        rig.channel,
+        &ProviderKind::Claude,
+        None,
+    );
+    let key = key.await.expect("channel session key");
+    discord::inflight::seed_session_row_keyed(&pool, &key, rig.channel.get(), None).await;
+    // What Enter submits lands in the same native transcript the observer reads.
+    let native = rig.renderer.join("transcript");
+    fs::write(&native, BUSY).unwrap();
+    fs::remove_file(&rig.transcript).unwrap();
+    fs::hard_link(&native, &rig.transcript).unwrap();
+    let append = |row: Value| {
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&rig.transcript)
+            .unwrap();
+        std::io::Write::write_all(&mut file, format!("{row}\n").as_bytes()).unwrap();
+    };
+    let channels = [OriginChannel {
+        provider: "claude".into(),
+        channel_id: rig.channel.get(),
+    }];
+    let answer = || lookup(&pool, "agent", ORIGIN, &channels);
+    assert!(matches!(
+        answer().await,
+        Ok(Some(InputResult::Accepted { .. }))
+    ));
+    let name =
+        ProviderKind::Claude.build_tmux_session_name(&format!("a1-rollback-{}", rig.channel.get()));
+    let live = || {
+        matches!(
+            crate::services::platform::tmux::pane_liveness(&name),
+            crate::services::platform::tmux::PaneLiveness::Live
+        )
+    };
+
+    let (completed, bridge) = tokio::sync::oneshot::channel();
+    *discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
+        .lock()
+        .unwrap() = Some((rig.channel, completed));
+    let (drive, mut settled) = rig.drive();
+    crate::services::discord::queue_io::input_owner::drive::wake(drive);
+    let held = tokio::time::timeout(Duration::from_secs(30), settled.recv())
+        .await
+        .unwrap_or_else(|_| panic!("{}", rig.trace.text()))
+        .unwrap();
+    if held.is_ok() {
+        // The native turn takes a pasted input as a queued command and has not ended yet.
+        let frame = fs::read_to_string(rig.renderer.join("body")).unwrap_or_default();
+        append(
+            json!({"type":"attachment","uuid":"absorbed-row","attachment":
+            {"type":"queued_command","prompt":frame,"commandMode":"prompt"}}),
+        );
+        let _ = tokio::time::timeout(Duration::from_secs(60), bridge).await;
+    }
+    let busy = (
+        held,
+        events(&rig.renderer),
+        live(),
+        rig.trace.text().contains("killing tmux session"),
+        origin_receipts(&pool, ORIGIN).await,
+        // A claimed start opens a headless turn, whose placeholder is posted and removed.
+        (rig.mock.written_texts().len(), rig.mock.deleted().len()),
+    );
+    let expected = (
+        Err("NotSent(\"synthetic_waits_idle\")".to_string()),
+        Vec::<String>::new(),
+        true,
+        false,
+        Vec::<String>::new(),
+        (0, 0),
+    );
+    assert_eq!(busy, expected, "{}", rig.trace.text());
+    assert!(matches!(
+        answer().await,
+        Ok(Some(InputResult::Accepted { .. }))
+    ));
+    let state = rig.state().await;
+    assert_eq!(state["items"].as_array().unwrap().len(), 1, "{state}");
+    assert!(state["head_injection"].is_null(), "unclaimed: {state}");
+
+    // One read of the pane fails while the watch runs; a later read sees it again.
+    let tmux = rig._tmux.root.path();
+    let (shim, inner, fail) = (
+        tmux.join("tmux"),
+        tmux.join("tmux-inner"),
+        tmux.join("fail-read"),
+    );
+    fs::rename(&shim, &inner).unwrap();
+    let script = format!(
+        "#!/bin/sh\ncase \"$*\" in *list-panes*pane_dead*) [ ! -f '{fail}' ] || {{ rm '{fail}'; exit 1; }} ;; esac\nexec '{inner}' \"$@\"\n",
+        fail = fail.display(),
+        inner = inner.display()
+    );
+    fs::write(&shim, script).unwrap();
+    fs::set_permissions(&shim, fs::metadata(&inner).unwrap().permissions()).unwrap();
+    fs::write(&fail, "").unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while fail.exists() {
+        assert!(std::time::Instant::now() < deadline, "no pane read failed");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // The native turn ends; with no other wake, the input runs once as a turn of its own.
+    let (completed, bridge) = tokio::sync::oneshot::channel();
+    *discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
+        .lock()
+        .unwrap() = Some((rig.channel, completed));
+    append(json!({"type":"system","subtype":"turn_duration"}));
+    // Stands in for the outbox worker: each queued headless body is delivered.
+    let outbox = pool.clone();
+    let worker = tokio::spawn(async move {
+        loop {
+            let sent = "UPDATE message_outbox SET status = 'sent' WHERE status = 'pending'";
+            let _ = sqlx::query(sent).execute(&outbox).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    });
+    let ran = tokio::time::timeout(Duration::from_secs(30), settled.recv())
+        .await
+        .unwrap_or_else(|_| panic!("{}", rig.trace.text()))
+        .unwrap();
+    assert_eq!(ran, Ok(()), "{}", rig.trace.text());
+    wait("the start's own user row", || {
+        fs::read_to_string(&rig.transcript)
+            .unwrap()
+            .lines()
+            .any(|line| {
+                serde_json::from_str::<Value>(line).is_ok_and(|row| {
+                    row["type"] == "user"
+                        && row["message"]["content"]
+                            .as_str()
+                            .is_some_and(|s| s.contains(PROMPT))
+                })
+            })
+    });
+    append(
+        json!({"type":"assistant","uuid":"own-answer","apiBlockIndex":0,"message":
+        {"id":"own-answer","role":"assistant","content":[{"type":"text","text":"own turn answer"}],
+        "stop_reason":"end_turn"}}),
+    );
+    append(json!({"type":"system","subtype":"turn_duration"}));
+    tokio::time::timeout(Duration::from_secs(90), bridge)
+        .await
+        .unwrap_or_else(|_| panic!("{}", rig.trace.text()))
+        .unwrap();
+    // Nothing hands the input on a second time once its own turn has ended.
+    let again = tokio::time::timeout(Duration::from_secs(6), settled.recv()).await;
+    worker.abort();
+    let enters = events(&rig.renderer)
+        .iter()
+        .filter(|e| *e == "Enter")
+        .count();
+    let after = (
+        enters,
+        live(),
+        rig.trace.text().contains("killing tmux session"),
+        origin_receipts(&pool, ORIGIN).await,
+    );
+    let sql = "SELECT turn_id || ' ' || coalesce(terminal_outcome, '-') || ' ' ||
+               array_to_string(consumed_origin_ids, ',') FROM turns";
+    let rows: Vec<String> = sqlx::query_scalar(sql).fetch_all(&pool).await.unwrap();
+    assert_eq!(
+        after,
+        (1, true, false, vec!["completed".to_string()]),
+        "{rows:?}\n{}",
+        rig.trace.text()
+    );
+    // The drive ended with its queue empty: no second result, only its closed channel.
+    assert!(!matches!(again, Ok(Some(_))), "a second handoff: {again:?}");
+    assert!(rig.state().await["items"].as_array().unwrap().is_empty());
+    drop(rig);
+    pool.close().await;
+    db.drop().await;
+}
+
+/// A start the provider never received leaves no turn row; the clear that later removes it commits
+/// one cancelled receipt at its removal instant with no session, and owes nothing after.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unsent_start_cleared_later_leaves_only_its_removal_receipt_pg() {
+    if !creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::",
+        "an_unsent_start_cleared_later_leaves_only_its_removal_receipt_pg"
+    )) {
+        return;
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let (claude, origin) = (ProviderKind::Claude, Some("G-unsent"));
+    let rig = IntakeRig::build(
+        7_340_802,
+        false,
+        claude.clone(),
+        Some(pool.clone()),
+        true,
+        origin,
+    );
+    let rig = rig.await;
+    let (completed, bridge) = tokio::sync::oneshot::channel();
+    *discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
+        .lock()
+        .unwrap() = Some((rig.channel, completed));
+    let (drive, mut settled) = rig.drive();
+    crate::services::discord::queue_io::input_owner::drive::wake(drive);
+    let result = tokio::time::timeout(Duration::from_secs(30), settled.recv())
+        .await
+        .unwrap_or_else(|_| panic!("{}", rig.trace.text()))
+        .unwrap();
+    assert_eq!(
+        result,
+        Err("NotSent(\"idle_unobserved\")".into()),
+        "{}",
+        rig.trace.text()
+    );
+    tokio::time::timeout(Duration::from_secs(30), bridge)
+        .await
+        .unwrap_or_else(|_| panic!("{}", rig.trace.text()))
+        .unwrap();
+    let rows = "SELECT turn_id, session_id, started_at, finished_at, terminal_outcome,
+                    terminal_confirmed_at FROM turns WHERE channel_id = $1";
+    type Row = (
+        String,
+        Option<String>,
+        chrono::DateTime<chrono::Utc>,
+        chrono::DateTime<chrono::Utc>,
+        Option<String>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    );
+    let read = || sqlx::query_as::<_, Row>(rows).bind(rig.channel.to_string());
+    let analytics = read().fetch_all(&pool).await.unwrap();
+    assert_eq!(analytics, [], "an unsent attempt is no turn");
+    assert_eq!(rig.state().await["items"].as_array().unwrap().len(), 1);
+
+    let persistence = discord::queue_persistence_context(&rig.shared, &claude, rig.channel);
+    let cleared = rig.mailbox.clear(persistence).await;
+    assert_eq!(cleared.discarded_message_ids.len(), 1);
+    let drops = owed_drops(&rig.mailbox).await;
+    let [removed] = drops.as_slice() else {
+        panic!("one owed drop: {drops:?}");
+    };
+    discord::settle_v2_drops(Some(&pool), &rig.mailbox, "claude", rig.channel).await;
+    let at = chrono::DateTime::from_timestamp_millis(removed.at_ms as i64).unwrap();
+    let turn = format!("discord:{}:9100095826424066539", rig.channel);
+    let receipt = (turn, None, at, at, Some("cancelled".into()), Some(at));
+    assert_eq!(read().fetch_all(&pool).await.unwrap(), [receipt]);
+    assert!(owed_drops(&rig.mailbox).await.is_empty());
+    drop(rig);
+    pool.close().await;
+    db.drop().await;
+}
+
+async fn owed_drops(
+    mailbox: &ChannelMailboxHandle,
+) -> Vec<crate::services::turn_orchestrator::OwedDrop> {
+    let read = mailbox.v2_request(|slot| Ok(slot.as_ref().ok_or("no owner")?.owed_drops()));
+    read.await.unwrap()
+}
+
+async fn next_settle(
+    settled: &mut tokio::sync::mpsc::UnboundedReceiver<Result<(), String>>,
+    trace: &Trace,
+) -> Result<(), String> {
+    let recv = tokio::time::timeout(Duration::from_secs(30), settled.recv());
+    recv.await
+        .unwrap_or_else(|_| panic!("{}", trace.text()))
+        .unwrap()
+}
+
+/// A start waiting across a restart stays queued: boot recovery hands it again, the earlier process's
+/// carried row keeps it unpasted, and that row's close (archive and one kick) runs it once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_waiting_across_a_restart_runs_once_after_the_carried_row_closes_pg() {
+    if !creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::",
+        "a_start_waiting_across_a_restart_runs_once_after_the_carried_row_closes_pg"
+    )) {
+        return;
+    }
+    use crate::services::discord::inflight;
+    const ORIGIN: &str = "G-restart-carried";
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let rig = IntakeRig::turn_start_stored(7_340_803, pool.clone(), ORIGIN).await;
+    let (shared, channel) = (rig.shared.clone(), rig.channel);
+    let key =
+        discord::adk_session::build_adk_session_key(&shared, channel, &ProviderKind::Claude, None);
+    let key = key.await.expect("channel session key");
+    discord::inflight::seed_session_row_keyed(&pool, &key, channel.get(), None).await;
+    // The carried turn has ended in the transcript; its row from the earlier process still stands.
+    let native = rig.renderer.join("transcript");
+    fs::write(&native, IDLE).unwrap();
+    fs::remove_file(&rig.transcript).unwrap();
+    fs::hard_link(&native, &rig.transcript).unwrap();
+    let name =
+        ProviderKind::Claude.build_tmux_session_name(&format!("a1-rollback-{}", channel.get()));
+    let mut row = inflight::InflightTurnState::new(
+        ProviderKind::Claude,
+        channel.get(),
+        None,
+        7,
+        9_100_095_826_424_000_803,
+        9_100_095_826_424_000_804,
+        "carried".into(),
+        None,
+        Some(name.clone()),
+        Some(rig.transcript.display().to_string()),
+        None,
+        0,
+    );
+    row.born_generation = shared.restart.current_generation.saturating_sub(1);
+    row.restart_mode = Some(discord::InflightRestartMode::DrainRestart);
+    row.restart_generation = Some(shared.restart.current_generation);
+    inflight::save_inflight_state(&row).unwrap();
+
+    // The restarted process recovers the owner's queue and wakes its drive.
+    discord::router::message_handler::owner_recover(&shared, channel).await;
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let waiting = (
+        events(&rig.renderer),
+        origin_receipts(&pool, ORIGIN).await,
+        rig.state().await["items"].as_array().unwrap().len(),
+    );
+    assert_eq!(waiting, (vec![], vec![], 1), "{}", rig.trace.text());
+
+    // The close archives the row and kicks the queue once, as carried_turn_close does.
+    let outbox = pool.clone();
+    let worker = tokio::spawn(async move {
+        loop {
+            let sent = "UPDATE message_outbox SET status = 'sent' WHERE status = 'pending'";
+            let _ = sqlx::query(sent).execute(&outbox).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    });
+    let (completed, bridge) = tokio::sync::oneshot::channel();
+    *discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
+        .lock()
+        .unwrap() = Some((channel, completed));
+    let file = inflight::inflight_state_path(
+        &inflight::inflight_runtime_root().unwrap(),
+        &ProviderKind::Claude,
+        channel.get(),
+    );
+    let archive = file.parent().unwrap().join("archive");
+    fs::create_dir_all(&archive).unwrap();
+    fs::rename(
+        &file,
+        archive.join(format!("{}.json.carried", channel.get())),
+    )
+    .unwrap();
+    discord::schedule_deferred_idle_queue_kickoff_immediate(
+        shared.clone(),
+        ProviderKind::Claude,
+        channel,
+        "carried_turn_closed",
+    );
+    wait("the start's own user row", || {
+        fs::read_to_string(&rig.transcript)
+            .unwrap()
+            .lines()
+            .any(|line| {
+                serde_json::from_str::<Value>(line).is_ok_and(|row| {
+                    row["type"] == "user"
+                        && row["message"]["content"]
+                            .as_str()
+                            .is_some_and(|s| s.contains(PROMPT))
+                })
+            })
+    });
+    let mut native = fs::OpenOptions::new()
+        .append(true)
+        .open(&rig.transcript)
+        .unwrap();
+    let answer = json!({"type":"assistant","uuid":"restart-answer","apiBlockIndex":0,"message":
+        {"id":"restart-answer","role":"assistant","content":[{"type":"text","text":"after restart"}],
+        "stop_reason":"end_turn"}});
+    std::io::Write::write_all(&mut native, format!("{answer}\n").as_bytes()).unwrap();
+    let end = json!({"type":"system","subtype":"turn_duration"});
+    std::io::Write::write_all(&mut native, format!("{end}\n").as_bytes()).unwrap();
+    tokio::time::timeout(Duration::from_secs(90), bridge)
+        .await
+        .unwrap_or_else(|_| panic!("{}", rig.trace.text()))
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    worker.abort();
+    let enters = events(&rig.renderer)
+        .iter()
+        .filter(|e| *e == "Enter")
+        .count();
+    let ran = (
+        enters,
+        origin_receipts(&pool, ORIGIN).await,
+        rig.state().await["items"].as_array().unwrap().len(),
+    );
+    assert_eq!(
+        ran,
+        (1, vec!["completed".to_string()], 0),
+        "{}",
+        rig.trace.text()
+    );
+    drop(rig);
     pool.close().await;
     db.drop().await;
 }

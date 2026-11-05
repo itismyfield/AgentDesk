@@ -22,9 +22,24 @@ pub(crate) async fn drain(
             Ok((namespace.to_string(), owed))
         })
         .await?;
+    let told = tell(pool, handle, provider, channel, &namespace, &owed).await;
+    // A told proven-unsent input, or a removal still owed, gets its receipt even when a notice failed.
+    let channel_id = poise::serenity_prelude::ChannelId::new(channel);
+    crate::services::discord::settle_v2_drops(Some(pool), handle, provider, channel_id).await;
+    told.map(|()| owed.len())
+}
+
+async fn tell(
+    pool: &sqlx::PgPool,
+    handle: &ChannelMailboxHandle,
+    provider: &str,
+    channel: u64,
+    namespace: &str,
+    owed: &[Value],
+) -> Result<(), String> {
     let notice = crate::services::discord::queue_io::retained_notice::enqueue;
-    for entry in &owed {
-        notice(pool, provider, channel, &namespace, entry).await?;
+    for entry in owed {
+        notice(pool, provider, channel, namespace, entry).await?;
         if entry["input"]["attempt"].is_null() {
             continue;
         }
@@ -37,7 +52,7 @@ pub(crate) async fn drain(
             })
             .await?;
     }
-    Ok(owed.len())
+    Ok(())
 }
 
 #[cfg(all(test, unix))]
