@@ -307,11 +307,24 @@ pub fn start(path: PathBuf, enabled: bool) -> Option<ConfigHotReloadGuard> {
 pub(crate) struct TestLiveGuard {
     previous: Option<Arc<Config>>,
     _lock: Option<crate::config::test_env_lock::SharedTestEnvLockGuard>,
+    before_restore: Option<Box<dyn FnOnce() + Send + Sync>>,
+}
+
+#[cfg(test)]
+impl TestLiveGuard {
+    pub(crate) fn on_before_restore(&mut self, observer: impl FnOnce() + Send + Sync + 'static) {
+        assert!(self.before_restore.is_none());
+        self.before_restore = Some(Box::new(observer));
+    }
 }
 
 #[cfg(test)]
 impl Drop for TestLiveGuard {
     fn drop(&mut self) {
+        crate::config::test_env_lock::assert_shared_test_env_lock_held();
+        if let Some(observer) = self.before_restore.take() {
+            observer();
+        }
         let lock = LIVE.get_or_init(|| RwLock::new(None));
         *lock
             .write()
@@ -330,6 +343,7 @@ pub(crate) fn test_live_guard(
     TestLiveGuard {
         previous,
         _lock: Some(lock),
+        before_restore: None,
     }
 }
 
@@ -340,6 +354,7 @@ pub(crate) fn test_live_guard_after_shared_test_env_lock() -> TestLiveGuard {
     TestLiveGuard {
         previous: current(),
         _lock: None,
+        before_restore: None,
     }
 }
 
