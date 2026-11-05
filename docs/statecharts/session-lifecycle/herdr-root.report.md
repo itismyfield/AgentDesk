@@ -24,34 +24,34 @@
 
 ## 수정 전 반례의 코드 대조
 
-아래 단계 번호는 `herdr-root-before.chart.mmd`를 만든 statechart report의 0–17과 같다. 경로 좌표는 모두 위 base SHA다. 접두사 `D`는 `src/services/discord`, `H`는 `src/services/session_host`다.
+아래 단계 번호는 `herdr-root-before.chart.mmd`를 만든 statechart report의 0–17과 같다. 경로 좌표는 모두 위 base SHA다.
 
 | 단계 | 모델 행동과 결과 | 코드/관측 대조 |
 |---:|---|---|
-| 0 | N1 Bound, W0 grant, R0 expected | `H/herdr/policy/permit.rs:146–154`: endpoint/nonce exact grant는 과거 witness를 보존 |
-| 1 | dcserver 재시작, process cache 비움 | `H/herdr/launch_host.rs:204–210`: durable grant 복원과 별개로 ProofCache·witnessed 새 생성 |
-| 2 | herdr 서버 W0→W1 | `H/herdr_gate.rs:905–915`: gate는 socket의 현재 server witness를 읽음; 관측 보고의 reboot 교체와 대응 |
-| 3 | pane root R0→R1, old process 종료 | `H/herdr_gate/root_replaced.rs:38–56`: 다른 root의 lone shell 및 원래 프로세스 부재를 개별 확인 |
-| 4 | reconcile 완료 | `D/herdr_terminate/root_replaced.rs:345–350`: reconcile 완료 전에는 보류 |
-| 5 | reader가 RootReplaced candidate 유지 | `D/recovery_engine/herdr_reader.rs:304–324`: exact candidate 또는 앞 pass candidate를 보존 |
-| 6 | installed owner 경로에 producer 없음 | `D/queue_dispatch/kickoff.rs:120–124`: owner 설치 시 기존 server-replaced 요청 경로 전에 반환; base `recover_inner:375–378`은 관측 없이 target 생성 |
-| 7 | startup 없음·old grant W0를 새 target에 복사 | `H/herdr/launch_host.rs:300–317`: target evidence를 값으로 획득; `D/herdr_terminate/root_replaced.rs:378–384` target으로 첫 증명 |
-| 8 | `PolicyUnverified(Identity)` Held | `H/herdr/policy/permit.rs:176–185`: startup/grant 어느 것도 W1이 아니면 Identity; `D/herdr_terminate/root_replaced.rs:389`에서 Held |
-| 9 | 정상 입력 Q 수락, custody 보존 | `D/router/message_handler/provider_dispatch/owner_input.rs:440–447`: 기존 front를 claim 경로로 전달 |
+| 0 | N1 Bound, W0 grant, R0 expected | `src/services/session_host/herdr/policy/permit.rs:146–154`: endpoint/nonce exact grant는 과거 witness를 보존 |
+| 1 | dcserver 재시작, process cache 비움 | `src/services/session_host/herdr/launch_host.rs:204–210`: durable grant 복원과 별개로 ProofCache·witnessed 새 생성 |
+| 2 | herdr 서버 W0→W1 | `src/services/session_host/herdr_gate.rs:905–915`: gate는 socket의 현재 server witness를 읽음; 관측 보고의 reboot 교체와 대응 |
+| 3 | pane root R0→R1, old process 종료 | `src/services/session_host/herdr_gate/root_replaced.rs:38–56`: 다른 root의 lone shell 및 원래 프로세스 부재를 개별 확인 |
+| 4 | reconcile 완료 | `src/services/discord/herdr_terminate/root_replaced.rs:345–350`: reconcile 완료 전에는 보류 |
+| 5 | reader가 RootReplaced candidate 유지 | `src/services/discord/recovery_engine/herdr_reader.rs:304–324`: exact candidate 또는 앞 pass candidate를 보존 |
+| 6 | installed owner 경로에 producer 없음 | `src/services/discord/queue_dispatch/kickoff.rs:120–124`: owner 설치 시 기존 server-replaced 요청 경로 전에 반환; base `recover_inner:375–378`은 관측 없이 target 생성 |
+| 7 | startup 없음·old grant W0를 새 target에 복사 | `src/services/session_host/herdr/launch_host.rs:300–317`: target evidence를 값으로 획득; `src/services/discord/herdr_terminate/root_replaced.rs:378–384` target으로 첫 증명 |
+| 8 | `PolicyUnverified(Identity)` Held | `src/services/session_host/herdr/policy/permit.rs:176–185`: startup/grant 어느 것도 W1이 아니면 Identity; `src/services/discord/herdr_terminate/root_replaced.rs:389`에서 Held |
+| 9 | 정상 입력 Q 수락, custody 보존 | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:440–447`: 기존 front를 claim 경로로 전달 |
 | 10 | 옛 binding으로 시작하려고 먼저 claim | 같은 `owner_input.rs:447–448`: 기존 경로의 claim 선행 |
-| 11 | pane 확인 실패 후 입력 보류·inflight 유지 | `H/herdr_gate.rs:973–980`: pane unconfirmed→PaneUnverified; 관측 보고 23:21:27–23:28의 inflight 생성·보존과 대응 |
-| 12 | 다음 reader pass가 candidate 재시도 | `D/recovery_engine/herdr_reader.rs:306–311,326–332`: 매 pass 기존 candidate로 recover |
+| 11 | pane 확인 실패 후 입력 보류·inflight 유지 | `src/services/session_host/herdr_gate.rs:973–980`: pane unconfirmed→PaneUnverified; 관측 보고 23:21:27–23:28의 inflight 생성·보존과 대응 |
+| 12 | 다음 reader pass가 candidate 재시도 | `src/services/discord/recovery_engine/herdr_reader.rs:306–311,326–332`: 매 pass 기존 candidate로 recover |
 | 13 | exact RootReplaced 재관측 | 같은 `herdr_reader.rs:304–324`; row/nonce가 바뀌지 않음 |
 | 14 | producer 누락 재현 | 단계 6과 동일; installed owner가 계속 producer를 우회 |
 | 15 | 새 target에도 W1 startup 없음 | 단계 7과 동일; 관측을 하지 않았으므로 cache를 다시 읽어도 없음 |
 | 16 | strict policy가 다시 Held | 단계 8과 동일; quiet 검사 전에 Identity에서 거절 |
 | 17 | candidate를 남기고 다음 pass 반복 | `herdr_reader.rs:326–332`: 성공 Retired만 결과에서 제거. 이후 13–17 lasso |
 
-따라서 최초 장벽은 입력/inflight가 생기기 전 단계 8의 정책 admission이다. 이후 current-generation inflight는 추가 quiet 장벽이 된다(`D/herdr_terminate/root_replaced.rs:249–253`). 기존 restarted-inflight 처리의 guard는 이전 generation을 요구하므로(`D/recovery_engine/herdr_row_end.rs:53–73`) 이를 무조건 퇴역시키는 추상화는 두지 않았다.
+따라서 최초 장벽은 입력/inflight가 생기기 전 단계 8의 정책 admission이다. 이후 current-generation inflight는 추가 quiet 장벽이 된다(`src/services/discord/herdr_terminate/root_replaced.rs:249–253`). 기존 restarted-inflight 처리의 guard는 이전 generation을 요구하므로(`src/services/discord/recovery_engine/herdr_row_end.rs:53–73`) 이를 무조건 퇴역시키는 추상화는 두지 않았다.
 
 ## S1 전이와 잔여 반례
 
-GREEN은 기존 권한이 없을 때 생산 경로를 호출하고 startup 조건을 충족한 증거를 만든 뒤 `CaptureTarget`에서 새 snapshot을 얻는다. 이어 첫 strict proof → local/current·quiet·같은 witness의 final proof → CAS → old hold cleanup → Pending → physical create 1 → evidence/bind → Q effect 1이다. immutable N1 grant는 그대로 W0다. 실제 guard는 `D/herdr_terminate/root_replaced.rs:401–425`와 `H/herdr_gate/root_replaced.rs:23–27,54–56`에 대응한다.
+GREEN은 기존 권한이 없을 때 생산 경로를 호출하고 startup 조건을 충족한 증거를 만든 뒤 `CaptureTarget`에서 새 snapshot을 얻는다. 이어 첫 strict proof → local/current·quiet·같은 witness의 final proof → CAS → old hold cleanup → Pending → physical create 1 → evidence/bind → Q effect 1이다. immutable N1 grant는 그대로 W0다. 실제 guard는 `src/services/discord/herdr_terminate/root_replaced.rs:401–425`와 `src/services/session_host/herdr_gate/root_replaced.rs:23–27,54–56`에 대응한다.
 
 추가 scratch 대조는 다음과 같다(저장소 cfg 수를 늘리지 않음).
 
