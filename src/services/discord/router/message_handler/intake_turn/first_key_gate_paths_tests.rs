@@ -14,6 +14,31 @@ fn assert_gate(case: &str, token: &Arc<CancelToken>, stop: bool, sends: &[String
     }
 }
 
+/// Runs `entry` with its provider held before its terminal, so the turn and its token stay live;
+/// returns once the provider entered, with the sender that releases it.
+async fn held_start<T>(
+    channel: ChannelId,
+    entry: impl std::future::Future<Output = T>,
+) -> (T, std::sync::mpsc::Sender<()>) {
+    let (entered, was_entered) = tokio::sync::oneshot::channel();
+    let (release_provider, release) = std::sync::mpsc::channel();
+    *INPUT_EFFECT_PROBE.lock().unwrap() = Some(InputEffectProbe {
+        channel: channel.get(),
+        entered,
+        release,
+        terminal_before_release: false,
+    });
+    let output = tokio::time::timeout(Duration::from_secs(60), entry)
+        .await
+        .unwrap();
+    let entered = tokio::time::timeout(Duration::from_secs(30), was_entered).await;
+    assert!(
+        matches!(entered, Ok(Ok(_))),
+        "the retry reached its provider"
+    );
+    (output, release_provider)
+}
+
 /// A routine start's claim hands its writer the armed token it registered.
 #[tokio::test(flavor = "current_thread")]
 async fn a_routine_starts_token_gates_its_writers_first_key() {
@@ -100,10 +125,9 @@ fn an_exact_retrys_token_gates_its_writers_first_key_pg() {
                 crate::services::discord::gateway::TurnGateway::schedule_exact_retry_with_history(
                     &gateway, channel, retry,
                 );
-            let (handoff, started) = start(channel, handoff).await;
+            let (handoff, release) = held_start(channel, handoff).await;
             assert_eq!(handoff, ExactHandoff::Started);
-            let (_, release) = started.expect("the retry reached its provider");
-            // The provider is held here, so the mailbox still holds the retry's own token.
+            // The provider is held before its terminal, so the mailbox still holds the retry's token.
             let snapshot = crate::services::discord::mailbox_snapshot(&host.shared, channel).await;
             let token = snapshot
                 .cancel_token
