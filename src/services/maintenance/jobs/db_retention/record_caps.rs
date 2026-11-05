@@ -56,26 +56,26 @@ const DELIVERY_EVENT: &str = "status = 'failed' \
            AND (n.updated_at, n.id) > (dispatch_delivery_events.updated_at, \
                                        dispatch_delivery_events.id))";
 
-// Keeps each card's latest row into each status, which the rework resume reads.
+// Keeps each card's latest row into each status (NULL times never count as newer), which the
+// rework resume reads; the kept set is computed once so the pass stays one scan.
 const KANBAN_AUDIT: &str = "created_at < NOW() - ($1::INT || ' days')::INTERVAL \
-     AND (card_id IS NULL OR to_status IS NULL \
-          OR EXISTS (SELECT 1 FROM kanban_audit_logs n \
-              WHERE n.card_id = kanban_audit_logs.card_id \
-                AND n.to_status = kanban_audit_logs.to_status \
-                AND (n.created_at, n.id) > (kanban_audit_logs.created_at, kanban_audit_logs.id)))";
+     AND id NOT IN (SELECT DISTINCT ON (card_id, to_status) id FROM kanban_audit_logs \
+         WHERE card_id IS NOT NULL AND to_status IS NOT NULL \
+         ORDER BY card_id, to_status, created_at DESC NULLS LAST, id DESC)";
 
 // Keeps each card's true negatives at its top round and its latest false negative, the rows a
 // reopen reclassifies and backfills.
 const REVIEW_TUNING: &str = "created_at < NOW() - ($1::INT || ' days')::INTERVAL \
-     AND NOT (card_id IS NOT NULL AND ( \
-         (outcome = 'true_negative' AND COALESCE(review_round = ( \
-              SELECT MAX(n.review_round) FROM review_tuning_outcomes n \
-              WHERE n.card_id = review_tuning_outcomes.card_id \
-                AND n.outcome = 'true_negative'), FALSE)) \
-         OR (outcome = 'false_negative' AND NOT EXISTS ( \
-              SELECT 1 FROM review_tuning_outcomes n \
-              WHERE n.card_id = review_tuning_outcomes.card_id \
-                AND n.outcome = 'false_negative' AND n.id > review_tuning_outcomes.id))))";
+     AND id NOT IN ( \
+         SELECT id FROM (SELECT id, review_round, \
+                 MAX(review_round) OVER (PARTITION BY card_id) AS top_round \
+             FROM review_tuning_outcomes \
+             WHERE card_id IS NOT NULL AND outcome = 'true_negative') tn \
+         WHERE review_round = top_round \
+         UNION ALL \
+         SELECT * FROM (SELECT DISTINCT ON (card_id) id FROM review_tuning_outcomes \
+             WHERE card_id IS NOT NULL AND outcome = 'false_negative' \
+             ORDER BY card_id, id DESC) fn)";
 
 // Keeps an in-flight review's items, and a carded item unless its dispatch still names that
 // card for the rework lookup to fall back on.
@@ -87,12 +87,12 @@ const REVIEW_DECISION: &str = "decided_at < NOW() - ($1::INT || ' days')::INTERV
               WHERE td.id = review_decisions.dispatch_id \
                 AND td.kanban_card_id = review_decisions.kanban_card_id))";
 
-// Keeps each channel's newest events up to the count recovery reloads (`seq` is unique per
-// channel); the literal below must match that count.
+// Keeps each channel's newest events by `seq` (unique per channel) up to the count recovery
+// reloads; the literal below must match that count.
 const CHECKPOINT_EVENT: &str = "at < NOW() - ($1::INT || ' days')::INTERVAL \
-     AND (SELECT COUNT(*) FROM agent_recovery_checkpoint_events n \
-          WHERE n.channel_id = agent_recovery_checkpoint_events.channel_id \
-            AND n.seq > agent_recovery_checkpoint_events.seq) >= 8";
+     AND id NOT IN (SELECT id FROM (SELECT id, \
+             ROW_NUMBER() OVER (PARTITION BY channel_id ORDER BY seq DESC) AS newest \
+         FROM agent_recovery_checkpoint_events) ranked WHERE newest <= 8)";
 const _: () = assert!(crate::services::agent_recovery::checkpoint::DEFAULT_READ_EVENT_LIMIT == 8);
 
 // `(table, aged-row predicate with the window days as $1, days)`; NULL times are kept.
