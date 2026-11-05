@@ -3338,7 +3338,8 @@ src/
 │   │   ├── jobs/
 │   │   │   ├── db_retention/
 │   │   │   │   ├── image_retention.rs
-│   │   │   │   └── queue_and_dispatch.rs
+│   │   │   │   ├── queue_and_dispatch.rs
+│   │   │   │   └── record_caps.rs
 │   │   │   ├── db_retention.rs
 │   │   │   ├── hang_dump_cleanup.rs
 │   │   │   ├── memento_consolidation.rs
