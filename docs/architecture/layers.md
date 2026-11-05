@@ -193,6 +193,14 @@ K 같은 known 재분류는 먼저 `--update-reductions --reclassify <prefix>`�
 기존 known 층의 정교화이므로 `--update-reductions --reclassify services::discord::tmux_error_detect`로
 기록하고, 이후 미분류 편입의 이전 매핑은 이 갱신을 담은 commit으로 고정한다.
 
+`services::tmux_common` 본체와 `host_marker`·`session_markers`는 adapter다.
+본체는 pane capture(`src/services/tmux_common.rs:539`), lazy 디렉터리 보장(:1061),
+source authority 아래 파일 정리(:1183), JSONL 기록(:1315)을 실행한다.
+`claude_footer`는 문자열과 task count만 판독하므로 foundation override를 함께 둔다.
+두 규칙으로 논리 모듈 4개를 분류하고, `services`의 상위 미분류 규칙은 유지한다.
+같은 source에서 K commit의 매핑을 이전 매핑으로 고정해 `--admit-classification`으로
+기록한다. 새 역방향 편입은 0 ID·0회이며 기존 역방향 130 ID·316회 한도는 유지한다.
+
 ## 검토된 모듈 이동의 old→new 대응
 
 이동 대응은 [`layer_moves.toml`](../../scripts/audit_maintainability/layer_moves.toml)에 적는다.
