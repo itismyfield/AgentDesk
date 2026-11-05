@@ -20,11 +20,11 @@ pub(super) fn spawn(shared: &Arc<SharedData>, provider: &ProviderKind) {
                 if let Err(error) = cleanup::advance_pending(&pool, provider.as_str()).await {
                     tracing::warn!(%error,"stored owner transition remains pending");
                 }
-                super::owner_execution::refresh(&provider, Some(&pool)).await;
-                if let Some(config) = crate::config_live_reload::current() {
-                    let tui_o = crate::services::tui_o::channel_policy::tui_o_of(&config);
-                    super::o_writer_host::spawn_execution(&shared, &provider, Some(tui_o));
-                }
+                let config = crate::config_live_reload::current();
+                let tui_o = config
+                    .as_ref()
+                    .map(|config| crate::services::tui_o::channel_policy::tui_o_of(config));
+                refresh_writers(&shared, &provider, tui_o).await;
                 let configured = crate::services::tui_o::cutover::boot_snapshot()
                     .and_then(|s| s.configured_id().map(str::to_owned));
                 let Ok(local) =
@@ -76,6 +76,18 @@ pub(super) fn spawn(shared: &Arc<SharedData>, provider: &ProviderKind) {
             }
         },
     );
+}
+
+pub(super) async fn refresh_writers(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    config: Option<&crate::services::tui_o::shadow::tap::TuiOConfig>,
+) {
+    super::owner_execution::refresh(provider, shared.pg_pool.as_ref()).await;
+    super::o_writer_host::resume_gateway(shared, provider, config).await;
+    if config.is_some() {
+        super::o_writer_host::spawn_execution(shared, provider, config);
+    }
 }
 
 /// This runtime vouches only for itself: control is this loop, REST is its own prepared client.

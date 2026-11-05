@@ -370,6 +370,26 @@ pub(crate) async fn row_refusal(
     session_key_refusal(pool, provider.as_ref(), channel, session_key, tmux_name).await
 }
 
+/// Read-only tmux classification; a process admitted by the teardown guard is still not tmux.
+pub(crate) async fn row_is_legacy_tmux(
+    pool: &PgPool,
+    provider: Option<&str>,
+    channel_id: Option<&str>,
+    session_key: &str,
+    tmux_name: &str,
+) -> bool {
+    if crate::services::session_backend::process_session_pid(tmux_name).is_some() {
+        return false;
+    }
+    let Some(provider) = provider.and_then(ProviderKind::from_str) else {
+        return false;
+    };
+    let channel = channel_id
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    super::inflight::keyed_is_legacy_tmux(pool, &provider, channel, session_key, tmux_name).await
+}
+
 /// What a diagnostic of a stored row shows in place of the tmux observations its host check
 /// refuses; `None` keeps main's tmux readings.
 pub(crate) async fn row_unsupported(

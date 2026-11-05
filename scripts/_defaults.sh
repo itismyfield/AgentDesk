@@ -1805,15 +1805,17 @@ _foreign_active_turns_or_empty() {
   local exempt_csv="$2"
   local origin
   origin="$(_health_origin_header "$port")"
-  curl -fsS --max-time 5 -H "$origin" "http://${ADK_DEFAULT_LOOPBACK}:${port}/api/sessions" 2>/dev/null \
+  curl -fsS --max-time 5 -H "$origin" "http://${ADK_DEFAULT_LOOPBACK}:${port}/api/sessions?restart_gate=1" 2>/dev/null \
     | python3 -c '
-import json, os, sys
+import json, os, subprocess, sys
 try:
     data = json.loads(sys.stdin.read())
 except Exception:
     sys.exit(0)
 items = data.get("sessions") if isinstance(data, dict) else data
 exempt = {c.strip() for c in os.environ.get("EXEMPT_CSV", "").split(",") if c.strip()}
+tmux_sessions = None
+tmux_probed = False
 for s in items or []:
     status = str(s.get("status", "")).lower()
     if status not in {"turn_active", "turn_busy", "active"}:
@@ -1824,6 +1826,22 @@ for s in items or []:
         continue
     if any(cid and cid in key for cid in exempt):
         continue
+    # Only API-confirmed local tmux rows may be disproven by a local snapshot.
+    owner = s.get("owner")
+    if s.get("restart_gate_local_tmux") is True and isinstance(owner, dict) and owner.get("is_local") is True:
+        if not tmux_probed:
+            tmux_probed = True
+            try:
+                probe_env = {k: v for k, v in os.environ.items() if k not in {"TMUX", "TMUX_PANE"}}
+                probe = subprocess.run(["tmux", "-u", "list-sessions", "-F", "#{session_name}"],
+                                       capture_output=True, text=True, timeout=5, env=probe_env)
+                if probe.returncode == 0:
+                    tmux_sessions = set(probe.stdout.splitlines())
+            except (OSError, UnicodeError, subprocess.TimeoutExpired):
+                pass
+        name = key.rpartition(":")[2] if ":" in key else ""
+        if name and tmux_sessions is not None and name not in tmux_sessions:
+            continue
     print(key or chan or "<unknown>")
 ' 2>/dev/null \
     || true

@@ -1,5 +1,6 @@
 use super::super::gateway::{GatewayFuture, TurnGateway};
 use super::*;
+use crate::services::discord::outbound::body_census::forward;
 use crate::services::discord::schedule_deferred_idle_queue_kickoff;
 use crate::services::turn_orchestrator::Intervention;
 
@@ -27,14 +28,14 @@ impl TurnGateway for TuiDirectBridgeGateway {
         channel_id: ChannelId,
         content: &'a str,
     ) -> GatewayFuture<'a, Result<MessageId, String>> {
-        Box::pin(
+        Box::pin(forward(
             super::super::outbound::confirmation::send_terminal_notice_http_once(
                 &self.http,
                 &self.shared,
                 channel_id,
                 content,
             ),
-        )
+        ))
     }
 
     fn send_message<'a>(
@@ -43,12 +44,12 @@ impl TurnGateway for TuiDirectBridgeGateway {
         content: &'a str,
     ) -> GatewayFuture<'a, Result<MessageId, String>> {
         Box::pin(async move {
-            super::super::gateway::send_outbound_message(
+            forward(super::super::gateway::send_outbound_message(
                 self.http.clone(),
                 self.shared.clone(),
                 channel_id,
                 content,
-            )
+            ))
             .await
         })
     }
@@ -60,13 +61,13 @@ impl TurnGateway for TuiDirectBridgeGateway {
         content: &'a str,
     ) -> GatewayFuture<'a, Result<(), String>> {
         Box::pin(async move {
-            super::super::gateway::edit_outbound_message(
+            forward(super::super::gateway::edit_outbound_message(
                 self.http.clone(),
                 self.shared.clone(),
                 channel_id,
                 message_id,
                 content,
-            )
+            ))
             .await
         })
     }
@@ -78,12 +79,14 @@ impl TurnGateway for TuiDirectBridgeGateway {
         content: &'a str,
     ) -> GatewayFuture<'a, Result<Vec<MessageId>, String>> {
         Box::pin(async move {
-            super::super::formatting::send_long_message_raw_with_rollback(
-                &self.http,
-                channel_id,
-                rollback_anchor_msg_id,
-                content,
-                &self.shared,
+            forward(
+                super::super::formatting::send_long_message_raw_with_rollback(
+                    &self.http,
+                    channel_id,
+                    rollback_anchor_msg_id,
+                    content,
+                    &self.shared,
+                ),
             )
             .await
             .map_err(|error| {
@@ -106,6 +109,7 @@ impl TurnGateway for TuiDirectBridgeGateway {
             super::super::rate_limit_wait(&self.shared, channel_id).await;
             super::super::outbound::raw_output::request(
                 channel_id,
+                super::super::outbound::raw_output::Operation::Delete,
                 channel_id.delete_message(&self.http, message_id),
             )
             .await
@@ -121,15 +125,17 @@ impl TurnGateway for TuiDirectBridgeGateway {
     ) -> GatewayFuture<'a, Result<super::super::formatting::ReplaceLongMessageOutcome, String>>
     {
         Box::pin(async move {
-            super::super::formatting::replace_long_message_raw_with_outcome(
-                &self.http,
-                channel_id,
-                message_id,
-                content,
-                &self.shared,
-                // #3805 P1: bridge gateway returns the outcome only; the last-chunk
-                // footer anchor is consumed exclusively by the tmux watcher.
-                &mut None,
+            forward(
+                super::super::formatting::replace_long_message_raw_with_outcome(
+                    &self.http,
+                    channel_id,
+                    message_id,
+                    content,
+                    &self.shared,
+                    // #3805 P1: bridge gateway returns the outcome only; the last-chunk
+                    // footer anchor is consumed exclusively by the tmux watcher.
+                    &mut None,
+                ),
             )
             .await
             .map_err(|error| {

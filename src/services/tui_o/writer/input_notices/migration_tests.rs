@@ -392,6 +392,7 @@ async fn posted_legacy_notice_is_never_reclassified_as_debt_on_the_next_poll_or_
         .record(LedgerEntry::Posted {
             serial: 0,
             msg_id: 40,
+            confirmation: None,
         })
         .unwrap();
     assert!(

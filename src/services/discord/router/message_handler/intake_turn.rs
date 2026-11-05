@@ -2035,8 +2035,8 @@ pub(super) async fn handle_text_message(
             }
         };
         inflight_create_log::record_turn_start_origin(&provider, channel_id, &inflight_state).await;
-        let row = save_intake_inflight(codex_seed.as_ref(), &mut inflight_state);
-        let admitted = super::foreign_row::admit(shared, &provider, &inflight_state, &cancel_token, row).await;
+        let create = |state: &mut InflightTurnState| save_intake_inflight(codex_seed.as_ref(), state);
+        let admitted = super::foreign_row::admit(shared, &provider, &mut inflight_state, &cancel_token, create).await;
         if !matches!(admitted, Ok(true)) {
             // The recovery read guard is released before the delete waits on Discord.
             drop(original_registration);

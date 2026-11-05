@@ -62,6 +62,25 @@ pub(crate) fn claude_home() -> Option<PathBuf> {
     view(|v| v.home.clone())
 }
 
+/// The real single-pane pass under the owner test's known live pane and account home.
+pub(in crate::services::discord) fn rehydrate_owner_pane_for_tests(
+    shared: &Arc<SharedData>,
+    tmux: &str,
+    channel: u64,
+    home: &Path,
+) -> Option<tokio::task::JoinHandle<()>> {
+    VIEW.with_borrow_mut(|v| {
+        *v = Some(View {
+            tmux: tmux.into(),
+            channel,
+            home: home.into(),
+            peers: Vec::new(),
+        })
+    });
+    let _reset = Reset;
+    super::rehydrate_claude_tui_pane(shared, tmux)
+}
+
 fn outer_failure(alias: bool, header: bool) {
     let (root, _env) = crate::services::tui_prompt_dedupe::binding_context::tests::fixture();
     let ingress = Ingress::new();

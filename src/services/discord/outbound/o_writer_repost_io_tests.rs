@@ -10,7 +10,7 @@ use tokio::net::{TcpListener, TcpStream};
 use super::*;
 use crate::services::tui_o::repost::send::{DispatchReport, RepostIds, hand_over, send_within};
 
-const CHANNEL: u64 = 63250101;
+pub(crate) const CHANNEL: u64 = 63250101;
 const MARKER: &str = "o:63250101:claude:msg_01:body:0";
 
 /// Each request the mock answered: its path and body.
@@ -26,7 +26,7 @@ impl RepostHttp {
     }
 }
 
-enum Reply {
+pub(crate) enum Reply {
     Raw(String),
     /// Closes the connection without answering.
     Drop,
@@ -34,7 +34,7 @@ enum Reply {
     Stall,
 }
 
-fn reply(status: &str, headers: &[(&str, &str)], body: &str) -> Reply {
+pub(crate) fn reply(status: &str, headers: &[(&str, &str)], body: &str) -> Reply {
     let mut raw = format!(
         "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n",
         body.len()
@@ -57,7 +57,7 @@ fn created(footer: Option<&str>) -> Reply {
     created_with(footer, &[])
 }
 
-fn route_429(retry_after: &str) -> Reply {
+pub(crate) fn route_429(retry_after: &str) -> Reply {
     reply(
         "429 Too Many Requests",
         &[
@@ -70,14 +70,14 @@ fn route_429(retry_after: &str) -> Reply {
     )
 }
 
-struct Mock {
-    base: String,
+pub(crate) struct Mock {
+    pub(crate) base: String,
     seen: Seen,
     probes: Arc<AtomicUsize>,
 }
 
 impl Mock {
-    async fn start(replies: Vec<Reply>) -> Self {
+    pub(crate) async fn start(replies: Vec<Reply>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let seen: Seen = Arc::default();
@@ -107,7 +107,7 @@ impl Mock {
                     Reply::Drop => drop(socket),
                     Reply::Stall => {
                         tokio::spawn(async move {
-                            tokio::time::sleep(Duration::from_secs(30)).await;
+                            std::future::pending::<()>().await;
                             drop(socket);
                         });
                     }
@@ -117,11 +117,11 @@ impl Mock {
         Self { base, seen, probes }
     }
 
-    fn requests(&self) -> Vec<(String, Vec<u8>)> {
+    pub(crate) fn requests(&self) -> Vec<(String, Vec<u8>)> {
         self.seen.lock().unwrap().clone()
     }
 
-    fn port(&self) -> RepostHttp {
+    pub(crate) fn port(&self) -> RepostHttp {
         RepostHttp::at(
             Arc::new(serenity::Http::new("test-token")),
             self.base.clone(),
@@ -161,11 +161,14 @@ fn envelope() -> RepostEnvelope {
     RepostEnvelope::additional(CHANNEL, "본문 ```code```".into(), ids)
 }
 
-fn always() -> Arc<dyn Fn() -> bool + Send + Sync> {
+pub(crate) fn always() -> Arc<dyn Fn() -> bool + Send + Sync> {
     Arc::new(|| true)
 }
 
-async fn dispatch(port: &RepostHttp, live: Arc<dyn Fn() -> bool + Send + Sync>) -> DispatchReport {
+pub(crate) async fn dispatch(
+    port: &RepostHttp,
+    live: Arc<dyn Fn() -> bool + Send + Sync>,
+) -> DispatchReport {
     send_within(port, &envelope(), live, Duration::from_secs(10)).await
 }
 
@@ -767,7 +770,11 @@ mod settle_over_http {
             };
             recorded.append_ledger(prepared).unwrap();
             recorded
-                .append_ledger(LedgerEntry::Posted { serial, msg_id })
+                .append_ledger(LedgerEntry::Posted {
+                    serial,
+                    msg_id,
+                    confirmation: None,
+                })
                 .unwrap();
         }
         drop(recorded);

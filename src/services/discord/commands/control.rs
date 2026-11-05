@@ -511,6 +511,8 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
 ) -> anyhow::Result<ClearReport> {
     let mut report = ClearReport::default();
     // A pane effect holding the transition is waited out for the usual window, then overtaken.
+    let _completion =
+        super::super::session_transition::SessionTransitionCompletion::new(shared, channel_id);
     let transition = shared.session_transition_lock(channel_id);
     let wait = super::super::session_transition::SESSION_TRANSITION_LOCK_WAIT_TIMEOUT;
     let transition_guard = tokio::time::timeout(wait, transition.lock_owned()).await;

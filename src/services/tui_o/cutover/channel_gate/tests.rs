@@ -103,3 +103,153 @@ async fn a_claimed_legacy_send_stays_counted_until_its_transport_is_done() {
         "O's channel reserves no Legacy send"
     );
 }
+
+#[test]
+fn claim_reason_follows_gate_returns_without_changing_ownership() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    let observed = |channel| {
+        test_override::with_channels(|snapshot| {
+            decide_with_snapshot(snapshot, channel, Use::Body, None, || Some(ClaudeTui)).unwrap()
+        })
+    };
+    {
+        let _empty = test_override::force_channels(&[]);
+        let answer = observed(0);
+        assert!(!answer.owned);
+        assert!(format!("{answer:?}").contains("reason: EmptySelection"));
+    }
+    {
+        let _owned = test_override::force_channels(&[(701, ClaudeTui)]);
+        let answer = observed(702);
+        assert!(!answer.owned);
+        assert!(format!("{answer:?}").contains("reason: NonMember"));
+        let answer = observed(701);
+        assert!(answer.owned);
+        assert!(format!("{answer:?}").contains("reason: OwnedByO"));
+    }
+    let _foreign = test_override::force_foreign(&[(701, ClaudeTui)], "other-node");
+    let answer = observed(701);
+    assert!(!answer.owned);
+    assert!(format!("{answer:?}").contains("reason: NoCandidate"));
+}
+
+#[test]
+fn claim_reason_distinguishes_adoption_transition_and_existing_states() {
+    use crate::services::tui_o::channel_policy::{Adoption, Candidate};
+    for (state, reason) in [
+        (Adoption::Pending, "PendingReleased"),
+        (Adoption::Released, "Released"),
+        (Adoption::Deferred, "Deferred"),
+        (Adoption::Committed, "OwnedByO"),
+        (Adoption::Held, "OwnedHeld"),
+    ] {
+        let candidate = Candidate::new(state);
+        let answer = candidate.claim_body(703);
+        assert_eq!(answer.owned, state.owned());
+        assert!(
+            format!("{answer:?}").contains(&format!("reason: {reason}")),
+            "{state:?}"
+        );
+        assert_eq!(candidate.sends(), (u64::from(!state.owned()), 0));
+        assert_eq!(
+            candidate.peek(),
+            if state == Adoption::Pending {
+                Adoption::Released
+            } else {
+                state
+            }
+        );
+        drop(answer);
+        assert_eq!(
+            candidate.sends(),
+            (u64::from(!state.owned()), u64::from(!state.owned()))
+        );
+        if !state.owned() {
+            let second = candidate.claim_body(703);
+            let expected = if state == Adoption::Deferred {
+                "Deferred"
+            } else {
+                "Released"
+            };
+            assert!(format!("{second:?}").contains(&format!("reason: {expected}")));
+        }
+    }
+}
+
+#[test]
+fn claim_reason_is_fixed_while_the_existing_adoption_lock_excludes_activation() {
+    use crate::services::tui_o::channel_policy::{Adoption, Candidate};
+    use crate::services::tui_o::writer::activation::test_hook::{self, Step};
+    use std::sync::{Arc, Barrier, mpsc};
+    let candidate = Candidate::new(Adoption::Pending);
+    let barrier = Arc::new(Barrier::new(2));
+    let (arrived, waiting) = mpsc::channel();
+    let paused = barrier.clone();
+    test_hook::set(9_765_102, Step::BeforeLegacyStarted, move || {
+        arrived.send(()).unwrap();
+        paused.wait();
+        Ok(())
+    });
+    let claiming = candidate.clone();
+    let worker = std::thread::spawn(move || claiming.claim_body(9_765_102));
+    waiting
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    assert!(candidate.locked_for_test());
+    let activating = candidate.clone();
+    let activation = std::thread::spawn(move || activating.confirm_store());
+    barrier.wait();
+    let answer = worker.join().unwrap();
+    assert_eq!(answer.reason, ClaimReason::PendingReleased);
+    assert!(!activation.join().unwrap());
+    assert_eq!(candidate.sends(), (1, 0));
+    drop(answer);
+    assert_eq!(candidate.sends(), (1, 1));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn site_api_keeps_identity_errors_owned_suppression_and_no_claim_independence() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::{ClaudeTui, CodexTui};
+    let ran = std::cell::Cell::new(0);
+    assert!(matches!(
+        claim_then_send_at(BodySite::StandbyRelay, None, || async {
+            ran.set(ran.get() + 1)
+        })
+        .await,
+        Ok(BodySend::Sent(()))
+    ));
+    let _boot = test_override::force_channels(&[(9_765_103, ClaudeTui)]);
+    let claim = |kind| Some(BodyClaim::new(9_765_103, kind));
+    assert!(matches!(
+        claim_then_send_at(BodySite::StandbyRelay, claim(Some(ClaudeTui)), || async {
+            ran.set(ran.get() + 1)
+        })
+        .await,
+        Ok(BodySend::OwnedByO)
+    ));
+    assert!(matches!(
+        claim_then_send_at(BodySite::StandbyRelay, claim(None), || async {
+            ran.set(ran.get() + 1)
+        })
+        .await,
+        Err(IdentityError::UnknownKind)
+    ));
+    assert!(matches!(
+        claim_then_send_at(BodySite::StandbyRelay, claim(Some(CodexTui)), || async {
+            ran.set(ran.get() + 1)
+        })
+        .await,
+        Err(IdentityError::KindMismatch { .. })
+    ));
+    assert_eq!(ran.get(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_unobserved_held_context_leaves_later_ambient_metadata_intact() {
+    let (_, context) = claim_then_send_held_at(BodySite::StandbyRelay, None, || async {})
+        .await
+        .unwrap();
+    let tag = Some(serde_json::json!({"site":"W30", "reason":"RELEASED"}));
+    let actual = census_scope(tag.clone(), context.run(async { current_census() })).await;
+    assert_eq!(actual, tag);
+}

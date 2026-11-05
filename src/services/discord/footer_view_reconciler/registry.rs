@@ -1,3 +1,5 @@
+use crate::services::discord::outbound::current_census;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
@@ -14,6 +16,8 @@ struct RegisteredCompletionFooter {
     owner: CompletionFooterOwner,
     provider: ProviderKind,
     base_body: String,
+    census: Option<Value>,
+    legacy_body_confirmed: bool,
     last_completion_block: Option<String>,
     last_committed_text: Option<String>,
     registered_at_unix: i64,
@@ -66,6 +70,9 @@ pub(in crate::services::discord) struct CompletionFooterEdit {
     // #3391: identities of terminal task/subagent slots in `text`; evicted by
     // slot identity (not line string) once this edit is delivered.
     pub(in crate::services::discord) delivered_terminal_ids: Vec<TerminalSlotId>,
+    pub(super) census: Option<Value>,
+    pub(super) carries_body: bool,
+    pub(super) legacy_body_confirmed: bool,
 }
 
 fn completion_footer_registry() -> &'static Mutex<HashMap<u64, RegisteredCompletionFooter>> {
@@ -198,6 +205,14 @@ pub(in crate::services::discord) fn register_completion_footer_target_for_owner(
                 "completion footer edit target registered"
             );
         }
+        let previous_same = previous
+            .as_ref()
+            .filter(|target| target.message_id == message_id);
+        let census = previous_same
+            .map(|target| target.census.clone())
+            .unwrap_or_else(current_census);
+        let legacy_body_confirmed = previous_same
+            .is_some_and(|target| target.legacy_body_confirmed && target.base_body == base_body);
         guard.insert(
             channel_id.get(),
             RegisteredCompletionFooter {
@@ -205,6 +220,8 @@ pub(in crate::services::discord) fn register_completion_footer_target_for_owner(
                 owner,
                 provider: provider.clone(),
                 base_body,
+                census,
+                legacy_body_confirmed,
                 last_completion_block: completion_block.map(str::to_string),
                 last_committed_text,
                 registered_at_unix,
@@ -409,6 +426,9 @@ pub(in crate::services::discord) fn completion_footer_edit_for_registered_target
     }
     Some(CompletionFooterEdit {
         message_id: target.message_id,
+        census: target.census.clone(),
+        carries_body: !target.base_body.trim().is_empty(),
+        legacy_body_confirmed: target.legacy_body_confirmed,
         text,
         remove_after_edit,
         owner: target.owner,
@@ -458,14 +478,36 @@ pub(in crate::services::discord) fn completion_footer_record_committed_text_resu
     committed_text: &str,
     completion_block: Option<&str>,
 ) -> bool {
-    completion_footer_record_edit_result_with_block(
+    let recorded = completion_footer_record_edit_result_with_block(
         channel_id,
         remove_after_edit,
         edited,
         completion_block,
         Some(committed_text),
         Some((message_id, owner)),
-    )
+    );
+    if edited && recorded {
+        let mut guard = completion_footer_registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(target) = guard.get_mut(&channel_id.get())
+            && target.message_id == message_id
+            && target.owner == owner
+        {
+            // Only a confirmed initial Legacy edit establishes historical body provenance.
+            target.legacy_body_confirmed =
+                crate::services::discord::outbound::body_census::created_by_legacy(
+                    channel_id.get(),
+                    message_id.get(),
+                ) && target.census.as_ref().is_some_and(|tag| {
+                    tag["body_owner"] == "Legacy"
+                        && matches!(tag["binding_mode"].as_str(), Some("TUI" | "NON_TUI"))
+                }) && !target.base_body.trim().is_empty()
+                    && smp::completion_footer_base_body(committed_text, &target.provider)
+                        == target.base_body;
+        }
+    }
+    recorded
 }
 
 pub(in crate::services::discord) fn completion_footer_record_edit_result_for_edit(
@@ -559,6 +601,9 @@ fn supersede_edit_from_registered_target(
     let text = smp::compose_completion_footer_text(&target.base_body, completion_block.as_deref());
     CompletionFooterEdit {
         message_id: target.message_id,
+        census: target.census.clone(),
+        carries_body: !target.base_body.trim().is_empty(),
+        legacy_body_confirmed: target.legacy_body_confirmed,
         text,
         remove_after_edit: true,
         owner: target.owner,

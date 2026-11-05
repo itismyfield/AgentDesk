@@ -20,6 +20,10 @@ pub(crate) use crate::services::git::{
 ///
 /// Equivalent to `hostname -s` on Unix. Falls back to "localhost" on failure.
 pub fn hostname_short() -> String {
+    #[cfg(test)]
+    if let Some(host) = TEST_HOSTNAME.with(|slot| slot.borrow().clone()) {
+        return host;
+    }
     static HOSTNAME: OnceLock<String> = OnceLock::new();
     #[cfg(unix)]
     let read = health_hostname_short;
@@ -205,4 +209,22 @@ mod hostname_tests {
         let expected = std::env::var("COMPUTERNAME").expect("Windows defines COMPUTERNAME");
         assert!(hostname_short().eq_ignore_ascii_case(&expected));
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_HOSTNAME: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_hostname_for_test<R>(hostname: &str, run: impl FnOnce() -> R) -> R {
+    struct Reset(Option<String>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_HOSTNAME.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let short = parse_short_hostname(true, hostname.as_bytes()).unwrap();
+    let _reset = Reset(TEST_HOSTNAME.with(|slot| slot.replace(Some(short))));
+    run()
 }

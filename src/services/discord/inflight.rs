@@ -10,13 +10,14 @@ pub(in crate::services::discord) mod budget;
 mod destructive_commit;
 mod finalizer_identity;
 mod host_locator;
+pub(in crate::services::discord) use host_locator::PersistedHostLocator;
 mod host_recovery_guard;
 #[cfg(test)]
 pub(in crate::services::discord) use host_recovery_guard::keyed_tests::{
     seed_session_row, seed_session_row_hashed, seed_session_row_keyed,
 };
 pub(in crate::services::discord) use host_recovery_guard::{
-    KeyedTeardown, clear_channel_session, keyed_teardown, teardown_for_lookup,
+    KeyedTeardown, clear_channel_session, keyed_is_legacy_tmux, keyed_teardown, teardown_for_lookup,
 };
 #[cfg(unix)]
 pub(in crate::services::discord) use host_recovery_guard::{marker_witness, with_inflight_row};
@@ -4468,6 +4469,81 @@ mod stall_recovery_tests {
     pub(super) fn stale_override_test_mutex() -> &'static std::sync::Mutex<()> {
         static M: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         M.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    #[test]
+    fn stale_preservation_log_does_not_claim_unconfirmed_tmux_alive() {
+        #[derive(Clone, Default)]
+        struct Logs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Logs {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                super::set_test_tmux_alive_override(None);
+            }
+        }
+        let _guard = stale_override_test_mutex()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _reset = Reset;
+        super::set_test_tmux_alive_override(Some(&[]));
+        let _root = crate::config::TestRuntimeRootGuard::with_isolated_config();
+        crate::logging::test_capture::pin_callsite_interest();
+        for mode in [None, Some(InflightRestartMode::DrainRestart)] {
+            let mut state = InflightTurnState::new(
+                ProviderKind::Codex,
+                7770,
+                None,
+                7,
+                42,
+                43,
+                "hello".into(),
+                None,
+                Some("AgentDesk-codex-unconfirmed-7770".into()),
+                None,
+                None,
+                0,
+            );
+            state.runtime_kind_unknown_on_disk = true;
+            state.restart_mode = mode;
+            state.restart_generation = Some(7);
+            let logs = Logs::default();
+            let writer = logs.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::INFO)
+                .with_writer(move || writer.clone())
+                .finish();
+            let result = tracing::subscriber::with_default(subscriber, || {
+                super::stale_removal_reason(&state, super::DRAIN_RESTART_MAX_AGE_SECS + 1, 7)
+            });
+            assert!(
+                result.is_none(),
+                "unconfirmed host must be preserved: {mode:?}"
+            );
+            let text = String::from_utf8(logs.0.lock().unwrap_or_else(|p| p.into_inner()).clone())
+                .unwrap();
+            assert!(
+                text.contains("inflight stale-age"),
+                "missing log for {mode:?}: {text}"
+            );
+            assert!(
+                !text.contains("still alive"),
+                "unconfirmed tmux cannot be claimed alive: {text}"
+            );
+        }
     }
 
     /// 2026-05-26 adk-cdx incident regression: a DrainRestart inflight whose

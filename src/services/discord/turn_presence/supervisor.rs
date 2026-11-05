@@ -120,6 +120,51 @@ pub(in crate::services::discord) fn spawn(shared: Arc<SharedData>, provider: Pro
     });
 }
 
+/// An attachment's Busy read joins the existing stamped presence publication and effects.
+#[cfg(unix)]
+pub(in crate::services::discord) async fn observe_source_busy(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: u64,
+    tmux: &str,
+    binding: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+    #[cfg(test)] root: Option<std::path::PathBuf>,
+) -> Option<bool> {
+    if !observes(provider, channel) {
+        return None;
+    }
+    let presence = lock(&PRESENCE).get(&channel)?.clone();
+    let effects = Arc::new(LiveEffects {
+        shared: shared.clone(),
+        provider: provider.clone(),
+    });
+    let waiting = effects.mailbox(channel).await;
+    let mut actions = Vec::new();
+    let busy = super::activity::with_busy_source(
+        provider,
+        channel,
+        tmux,
+        binding,
+        #[cfg(test)]
+        root,
+        |reading| {
+            actions = apply(
+                &mut lock(&presence),
+                channel,
+                Instant::now(),
+                reading,
+                waiting,
+                effects.agent_id(channel),
+            );
+        },
+    )?;
+    let supervisor = Supervisor::new(effects);
+    for action in actions {
+        supervisor.act(channel, &presence, action).await;
+    }
+    Some(busy)
+}
+
 /// The turn endpoint's `turn_presence` block, or `None` outside turn mode.
 pub(crate) fn status(channel: u64) -> Option<serde_json::Value> {
     if !crate::services::tui_o::turn_mode::transcript_turns(channel) {
@@ -704,22 +749,23 @@ fn held_notice(reason: &str) -> String {
     crate::services::discord::session_notice::subtext("⚠️", &text)
 }
 
-/// The mailbox token and the oldest waiting input: an input owner's unattempted front, else queue
-/// head, reservation, then the on-disk pending marker a failed requeue left. Read only.
+/// The mailbox token and the oldest waiting input, read without minting a mailbox: an owner's
+/// unattempted front, else queue head, reservation, then the on-disk marker a failed requeue left.
 async fn waiting_input(
     shared: &SharedData,
     provider: &ProviderKind,
     channel: ChannelId,
 ) -> (bool, Option<u64>, bool) {
-    let mailbox = shared.mailbox(channel);
-    let owner = mailbox.v2_request(|slot| {
-        Ok(slot
-            .as_ref()
-            .map(|owner| owner.front().map(|front| front.1.message_id)))
-    });
-    if let Ok(Some(front)) = owner.await {
-        let token = super::super::mailbox_snapshot(shared, channel).await;
-        return (token.cancel_token.is_some(), front, true);
+    if let Some(mailbox) = shared.mailbox_peek(channel) {
+        let owner = mailbox.v2_request(|slot| {
+            Ok(slot
+                .as_ref()
+                .map(|owner| owner.front().map(|front| front.1.message_id)))
+        });
+        if let Ok(Some(front)) = owner.await {
+            let token = super::super::mailbox_snapshot(shared, channel).await;
+            return (token.cancel_token.is_some(), front, true);
+        }
     }
     let snapshot = super::super::mailbox_snapshot(shared, channel).await;
     let head = snapshot.intervention_queue.first().map(|i| i.message_id);

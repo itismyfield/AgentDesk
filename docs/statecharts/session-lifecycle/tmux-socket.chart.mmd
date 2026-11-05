@@ -1,0 +1,12 @@
+---
+title: "Boot recovery with a namespace-checked tmux socket observation"
+---
+stateDiagram-v2
+  [*] --> Down: retained inflight row, one pending input
+  Down --> Boot: restart with intake closed
+  Boot --> Cleared: local namespace path + lstat ENOENT
+  Boot --> Held: other host or live session or uncertain probe
+  Cleared --> Open: recovery and watcher passes finish
+  Held --> Protected: intake opens, row remains protected
+  Open --> Admitted: same input claims once
+  Admitted --> Admitted: duplicate create refused

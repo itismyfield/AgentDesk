@@ -715,6 +715,7 @@ async fn a_blocked_record_or_a_ledger_violation_stops_the_channel_before_any_pos
         .append_ledger(LedgerEntry::Posted {
             serial: 9,
             msg_id: 5,
+            confirmation: None,
         })
         .unwrap();
     let mut reopened = harness.writer();

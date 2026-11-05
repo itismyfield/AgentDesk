@@ -118,6 +118,10 @@ pub(crate) fn classify_has_session_output(output: &Output) -> SessionPresence {
     {
         SessionPresence::Missing
     } else {
+        #[cfg(unix)]
+        if session_inventory::missing_socket(output) {
+            return SessionPresence::Missing;
+        }
         SessionPresence::ProbeFailed
     }
 }
@@ -1339,6 +1343,64 @@ mod timeout_tests {
         unsafe { std::env::set_var("FAKE_TMUX_MODE", "present") };
         assert_eq!(session_presence("agentdesk-test"), SessionPresence::Present);
         unsafe { std::env::remove_var("FAKE_TMUX_MODE") };
+    }
+
+    #[test]
+    fn missing_socket_presence_requires_namespace_and_lstat() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let socket = temp.path().join("missing.sock");
+        write_fake_tmux(
+            temp.path(),
+            "echo \"error connecting to $FAKE_REPORTED_SOCKET ($FAKE_SOCKET_ERROR)\" >&2; exit 1",
+        );
+        let _path = PathOverride::prepend(temp.path());
+        let set = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock;
+        let _namespace = set(
+            "TMUX",
+            std::ffi::OsStr::new(&format!("{},4242,0", socket.display())),
+        );
+        let _reported = set("FAKE_REPORTED_SOCKET", socket.as_os_str());
+        let _error = set(
+            "FAKE_SOCKET_ERROR",
+            std::ffi::OsStr::new("No such file or directory"),
+        );
+        assert!(!socket.exists());
+        assert_eq!(
+            session_presence("fixture-session"),
+            SessionPresence::Missing
+        );
+
+        let _different = set(
+            "FAKE_REPORTED_SOCKET",
+            temp.path().join("other.sock").as_os_str(),
+        );
+        assert_eq!(
+            session_presence("fixture-session"),
+            SessionPresence::ProbeFailed
+        );
+        drop(_different);
+        let _denied = set(
+            "FAKE_SOCKET_ERROR",
+            std::ffi::OsStr::new("Permission denied"),
+        );
+        assert_eq!(
+            session_presence("fixture-session"),
+            SessionPresence::ProbeFailed
+        );
+        drop(_denied);
+        let _socket = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        assert_eq!(
+            session_presence("fixture-session"),
+            SessionPresence::ProbeFailed
+        );
+        write_fake_tmux(
+            temp.path(),
+            "echo \"can't find session: fixture-session\" >&2; exit 1",
+        );
+        assert_eq!(
+            session_presence("fixture-session"),
+            SessionPresence::Missing
+        );
     }
 
     /// Witness for the shared authority join in

@@ -137,6 +137,8 @@ async fn a_watcher_task_response_that_sends_no_body_leaves_a_pending_adoption() 
             BODY,
             false,
             WatcherTaskResponseLocals {
+                census_source:
+                    crate::services::discord::outbound::body_census::BodySource::inherited(),
                 placeholder_msg_id: &mut placeholder,
                 placeholder_from_restored_inflight: &mut restored,
                 last_edit_text: &mut last_edit,
@@ -170,5 +172,142 @@ async fn a_watcher_task_response_that_sends_no_body_leaves_a_pending_adoption() 
         assert!(!shown.iter().any(|c| c.contains(BODY)), "{case}: {shown:?}");
         check.assert_settled();
         assert_eq!(check.adoption(), Adoption::Pending, "{case}");
+    }
+
+    use crate::services::discord::outbound::{census_scope, raw_output::tests as recording};
+    use serde_json::{Value, json};
+    let log = recording::journal().await;
+    for (index, chunks) in [false, true].into_iter().enumerate() {
+        let channel = 4_325_415 + index as u64;
+        let session = format!("AgentDesk-claude-census-task-{channel}");
+        let jsonl = temp.path().join(format!("census-task-{channel}.jsonl"));
+        let _tui = test_override::bind_claude_tui_session(&session, &jsonl.to_string_lossy());
+        let _candidate = test_override::force_candidates(&[(channel, ClaudeTui)]);
+        let body = if chunks {
+            "watcher response line\n".repeat(100)
+        } else {
+            "watcher answer".into()
+        };
+        let context = task_delivery::TaskNotificationContext::from_stream_json(&json!({
+            "type":"system", "subtype":"task_notification", "task_id":format!("census-{channel}"),
+            "status":"completed", "summary":"notice-watcher", "task_notification_kind":"background"
+        }), &crate::services::session_backend::StreamLineState::new()).unwrap();
+        let turn_key = task_delivery::durable_response_turn_key(
+            channel,
+            "claude",
+            &session,
+            channel + 1,
+            "2026-11-04T00:00:00Z",
+            Some(0),
+            4300,
+            &body,
+        );
+        let mut row = crate::services::discord::inflight::InflightTurnState::new(
+            ProviderKind::Claude,
+            channel,
+            None,
+            1,
+            channel + 1,
+            0,
+            "prompt".into(),
+            None,
+            Some(session.clone()),
+            Some(jsonl.to_string_lossy().into_owned()),
+            None,
+            0,
+        );
+        row.runtime_kind = Some(ClaudeTui);
+        crate::services::discord::inflight::save_inflight_state(&row).unwrap();
+        let mock = recording::Mock::start((0..32).map(|n| recording::reply("200 OK", &[], &json!({
+            "id":(930000+n).to_string(),"username":"bot","discriminator":"0001","avatar":null,"bot":true,
+            "channel_id":channel.to_string(),"content":"answer", "author":{"id":"42","username":"bot","discriminator":"0001","avatar":null},
+            "timestamp":"2026-11-04T00:00:00+00:00","edited_timestamp":null,"tts":false,"mention_everyone":false,
+            "mentions":[],"mention_roles":[],"attachments":[],"embeds":[],"pinned":false,"type":0
+        }).to_string())).collect()).await;
+        let http = Arc::new(recording::client(&mock));
+        let (mut placeholder, mut restored, mut last_edit) = (None, false, String::new());
+        let (mut retry, mut visible, mut present, mut response_claim) = (false, false, false, None);
+        let blocker = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log.with_file_name("writer.lock"))
+            .unwrap();
+        blocker.lock().unwrap();
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            census_scope(
+                Some(json!({
+                    "output_class":"LegacyBody", "body_owner":"Legacy"
+                })),
+                Box::pin(apply_watcher_task_response(
+                    &http,
+                    &shared,
+                    &ProviderKind::Claude,
+                    ChannelId::new(channel),
+                    &session,
+                    TaskNotificationKind::Background,
+                    Some(&context),
+                    &turn_key,
+                    Some("2026-11-04T00:00:00Z"),
+                    Some(0),
+                    4300,
+                    &body,
+                    false,
+                    WatcherTaskResponseLocals {
+                        census_source:
+                            crate::services::discord::outbound::body_census::BodySource::from_state(
+                                &row,
+                            ),
+                        placeholder_msg_id: &mut placeholder,
+                        placeholder_from_restored_inflight: &mut restored,
+                        last_edit_text: &mut last_edit,
+                        retry_terminal_delivery_from_offset: &mut retry,
+                        tui_direct_anchor_terminal_body_visible: &mut visible,
+                        tui_direct_anchor_or_lease_present_for_lifecycle: &mut present,
+                        task_response_claim: &mut response_claim,
+                    },
+                )),
+            ),
+        )
+        .await
+        .expect("watcher task card and body must not await the journal writer");
+        blocker.unlock().unwrap();
+        assert!(
+            outcome.direct_send_delivered && !retry,
+            "watcher task response must be delivered"
+        );
+        recording::flushed().await;
+        let wire: Vec<_> = mock
+            .requests()
+            .into_iter()
+            .filter(|(_, body)| !body.is_empty())
+            .collect();
+        assert_eq!(
+            wire.iter()
+                .filter(|(_, body)| String::from_utf8_lossy(body).contains("notice-watcher"))
+                .count(),
+            1,
+            "one notice card"
+        );
+        let body_wire = wire.len() - 1;
+        assert!(body_wire >= if chunks { 2 } else { 1 });
+        let rows: Vec<Value> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|r| r["kind"] == "target" && r["channel"] == channel)
+            .collect();
+        assert_eq!(
+            rows.len(),
+            2 * body_wire,
+            "only body POSTs, including later chunks, are counted: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| r["census"]["site"] == "W01g"
+                && r["census"]["binding_mode"] == "TUI"
+                && r["census"]["output_class"] == "LegacyBody"),
+            "actual saved source and W01g must survive every POST: {rows:?}"
+        );
+        crate::services::discord::inflight::clear_inflight_state(&ProviderKind::Claude, channel);
     }
 }

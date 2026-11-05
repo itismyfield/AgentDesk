@@ -167,6 +167,7 @@ async fn legacy_tool_result_retries_and_refusals_are_excluded_across_restart() {
             "posted" => Some(LedgerEntry::Posted {
                 serial: 0,
                 msg_id: 999,
+                confirmation: None,
             }),
             "rejected" | "approved" => Some(LedgerEntry::Rejected {
                 serial: 0,
