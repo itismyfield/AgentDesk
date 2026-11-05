@@ -2,6 +2,7 @@
 
 코드 좌표 기준 SHA: `f332bd53918fcd3ac9867034f9323b42bf0d8cda`, 병합한 main `dc5c742e40079a724a557ed29378cba6c7dbd75f` (#7788 S2/#7824).
 모델의 fixed는 이 기준 코드에서 지적된 remove-only 흡수와 자동 compact summary 판독을 수리하는 계약이다. 구현 시험의 성공을 뜻하지 않는다.
+후속 전체 검증은 `caf61e3801f5cdc8091c0268be94b66333eb4830`(병합한 main `d79d8f6a60e703fc685424103b5d9715d7840455`, #7827) 트리에서 수행했다. 위 f332 SHA는 원래 반례의 코드 좌표 기준이며, 이번 main 병합에서 이 모델·cfg·view·차트의 내용은 바꾸지 않았다.
 기존 Before 두 설정은 처음 설계한 receipt/N1/N2 연결을 각각 끄는 역사적 결함 설정이며, 새 두 Before는 기준 SHA에서 확인한 P1-1/P1-2 판독 결함을 분리한다. `InputOwnership.tla`는 이 변경에서 수정하지 않는다.
 
 | 설정 | `Connected` | `RunningReceipt` | `AbsorptionEvidence` | `CompactSummaryNeutral` | exit | 상태 / 전이 | 깨진 규칙 |
@@ -91,3 +92,7 @@ done
 레인 `/Users/itismyfield/.adk/release/lane-runs/hl-20260925/i7755/` 아래 `sc-out/s1-6-{fixed,before,running-before,absorption-before,summary-before}/`에 tool chart/report/tlc 원문이 있다. 로그는 `logs/s1-6-statechart-<이름>.log`, 5cfg 수·rc·경로는 `s1-6-statechart-evidence.json`이다. 이 실행은 구현 시험의 GREEN을 대신하지 않는다.
 
 전체 checker는 새 cfg 2개를 포함해 **rc0 / 불일치0 / 85cfg / 201.5초**로 완료했다. 원시 로그는 `logs/s1-6-statecharts-all.log`다. 실행 명령은 `python3 scripts/ci/statecharts_tlc.py --java "$JAVA" --jar "$TLA2TOOLS"`이며 모든 cfg가 등록된 기대 위반 집합과 일치했다. 이후 main 병합이 모델/cfg/expected를 바꾸면 이 증거를 새 입력의 결과로 재사용하지 않는다.
+
+## #7827 병합 뒤 전체 재검사
+
+main이 `InputOwnershipConsumedWaiting`의 7cfg와 기대 행을 추가했으므로 이전 85cfg 결과를 대신 사용하지 않고 전체 checker를 다시 실행했다. 결과는 **rc0 / 불일치0 / 92cfg / 259.6초**다. 원시 로그는 레인 `logs/s1-6-statecharts-after-main.log`, HEAD/main·명령·모델 입력 SHA는 `s1-6-statechart-after-main-evidence.json`에 있다. `InputNativeStop` 5cfg의 기대 위반 집합도 그대로 일치했다. 이는 parent의 최종 Rust 시험·clippy를 대신하지 않는다.

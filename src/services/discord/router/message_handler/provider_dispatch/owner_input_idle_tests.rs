@@ -2685,6 +2685,7 @@ pub(crate) fn claimed_root_recovery_launch(
         clock: Arc::new(|| chrono::Utc::now().timestamp_millis().max(0) as u64),
         timing: &busy_inject::TIMING,
         until_done: None,
+        native_pin_submitted: None,
     };
     created(
         registration,

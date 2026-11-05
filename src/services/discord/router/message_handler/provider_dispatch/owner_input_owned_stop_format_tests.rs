@@ -381,12 +381,14 @@ async fn a_summary_repeating_the_frame_does_not_consume_the_attempt() {
     rig.paste().await;
     use crate::services::tui_input::human_frame::history::{self, RowOwner};
     let body = fs::read_to_string(rig.intake.renderer.join("body")).unwrap();
+    let owner = history::row_owner("claude", &rig.session, &[body], "owned-busy-row");
+    eprintln!(
+        "SUMMARY_BEFORE_WORK_STATE={:?} OWNER={owner:?}",
+        crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&rig.intake.transcript)
+    );
     assert!(
-        matches!(
-            history::row_owner("claude", &rig.session, &[body], "owned-busy-row"),
-            RowOwner::Command(_)
-        ),
-        "the summary cannot take the real command's exact attempt"
+        matches!(owner, RowOwner::Command(_)),
+        "the summary cannot take the real command's exact attempt: {owner:?}"
     );
     append(
         &rig.intake.transcript,
