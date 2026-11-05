@@ -1967,18 +1967,19 @@ async fn reg_7832_restart_and_dispatch_drain_preserve_absorption_plus() {
     let _root = scoped_runtime_root();
     let shared = crate::services::discord::make_shared_data_for_tests();
     let target = target_with(100_000_000_078_340, 100_000_000_078_341);
+    let http = Arc::new(serenity::http::Http::new("test-token"));
     shared
         .turn_view_reconciler
         .note_confirmed_injection(
             &shared,
             &shared.provider,
             target,
-            TurnViewIdentity::Test("injected"),
+            TurnViewIdentity::IntakeHttp(http.clone()),
         )
         .await;
     assert_eq!(
         snapshot_reactions(&shared.turn_view_reconciler, target),
-        vec![expected('➕', "injected")]
+        vec![expected('➕', target.kind.identity_label())]
     );
 
     let mut restarted = crate::services::discord::make_shared_data_for_tests();
@@ -1988,7 +1989,6 @@ async fn reg_7832_restart_and_dispatch_drain_preserve_absorption_plus() {
         ops: shared.turn_view_reconciler.ops.clone(),
         ..TurnViewReconciler::default()
     };
-    let http = Arc::new(serenity::http::Http::new("test-token"));
     let sources = [SourceMessageQueuedGeneration::new(target.message_id, 7832)];
     super::super::queue_marker::drain_dispatched_queue_markers(
         &restarted,
@@ -1998,22 +1998,289 @@ async fn reg_7832_restart_and_dispatch_drain_preserve_absorption_plus() {
         &sources,
     )
     .await;
+    assert!(
+        restarted
+            .turn_view_reconciler
+            .ops()
+            .iter()
+            .all(|op| op.target != target || op.emoji != '➕' || op.add),
+        "dispatch drain must not send any deletion of this absorption receipt"
+    );
     restarted
         .turn_view_reconciler
         .note_queue_marker_removed(
             &restarted,
             target,
             owner(7832, "late-drain"),
-            TurnViewIdentity::Test("injected"),
+            TurnViewIdentity::IntakeHttp(http.clone()),
             '➕',
             "reg_7832_late_legacy_drain",
         )
         .await;
     assert_eq!(
         snapshot_reactions(&restarted.turn_view_reconciler, target),
-        vec![expected('➕', "injected")],
+        vec![expected('➕', target.kind.identity_label())],
         "a new runtime must not interpret an untracked absorption receipt as an old queue marker"
     );
+}
+
+#[tokio::test]
+async fn reg_7832_cleanup_retry_restores_observed_receipt_and_idle_completion() {
+    use crate::services::discord::turn_presence::supervisor::{self, tests::LiveSupervisor};
+    use crate::services::tui_o::turn_mode::TestConfirmation;
+
+    let _root = scoped_runtime_root();
+    let mut shared = crate::services::discord::make_shared_data_for_tests();
+    Arc::get_mut(&mut shared).unwrap().turn_view_reconciler =
+        TurnViewReconciler::with_test_deliveries(vec![TurnViewDelivery::Failed]);
+    let target = target_with(100_000_000_078_380, 100_000_000_078_381);
+    let _confirmation = TestConfirmation::new(target.channel_id.get());
+    let _supervisor = LiveSupervisor::new(
+        shared.clone(),
+        shared.provider.clone(),
+        target.channel_id.get(),
+    );
+    assert!(supervisor::observes(
+        &shared.provider,
+        target.channel_id.get()
+    ));
+    let http = Arc::new(serenity::http::Http::new("test-token"));
+    let reconciler = &shared.turn_view_reconciler;
+    reconciler
+        .note_confirmed_injection(
+            &shared,
+            &shared.provider,
+            target,
+            TurnViewIdentity::IntakeHttp(http),
+        )
+        .await;
+
+    let ops = reconciler.ops();
+    assert_eq!(
+        ops.iter()
+            .filter(|op| op.target == target && op.emoji == '🔜' && !op.add)
+            .count(),
+        2,
+        "a transient first cleanup failure must be retried"
+    );
+    assert_eq!(
+        ops.iter()
+            .filter(|op| op.target == target && op.emoji == '➕' && op.add)
+            .count(),
+        1
+    );
+    assert_eq!(reconciler.pending_injected_count(target.channel_id), 1);
+    assert_eq!(
+        snapshot_reactions(reconciler, target),
+        vec![expected('➕', target.kind.identity_label())]
+    );
+
+    reconciler.clear_busy_injected(shared.clone(), target.channel_id);
+    tokio::time::timeout(time::Duration::from_secs(2), async {
+        while !reconciler
+            .ops()
+            .iter()
+            .any(|op| op.target == target && op.emoji == '✅' && op.add)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the retried receipt must remain eligible for idle completion");
+    assert_eq!(
+        snapshot_reactions(reconciler, target),
+        vec![
+            expected('➕', target.kind.identity_label()),
+            expected('✅', target.kind.identity_label())
+        ]
+    );
+}
+
+#[tokio::test]
+async fn reg_7832_legacy_plus_cleanup_retries_before_receipt_and_dispatch_drain() {
+    use crate::services::turn_orchestrator::SourceMessageQueuedGeneration;
+
+    let _root = scoped_runtime_root();
+    let mut shared = crate::services::discord::make_shared_data_for_tests();
+    Arc::get_mut(&mut shared).unwrap().turn_view_reconciler =
+        TurnViewReconciler::with_test_deliveries(vec![TurnViewDelivery::Failed]);
+    let target = target_with(100_000_000_078_390, 100_000_000_078_391);
+    let record = persisted_record_with_version(
+        &shared,
+        target,
+        shared.provider.as_str(),
+        "queued_merged",
+        3,
+    );
+    write_persisted(&record, target);
+    let http = Arc::new(serenity::http::Http::new("test-token"));
+    let reconciler = &shared.turn_view_reconciler;
+    reg_7832_seed_reactions(reconciler, target, target.kind.identity_label(), &['➕']);
+    let before = reconciler.ops().len();
+    reconciler
+        .note_confirmed_injection(
+            &shared,
+            &shared.provider,
+            target,
+            TurnViewIdentity::IntakeHttp(http.clone()),
+        )
+        .await;
+    let ops = reconciler.ops();
+    let plus_ops: Vec<_> = ops[before..]
+        .iter()
+        .filter(|op| op.target == target && op.emoji == '➕')
+        .map(|op| (op.add, op.identity.as_str()))
+        .collect();
+    assert_eq!(
+        plus_ops,
+        [
+            (false, target.kind.identity_label()),
+            (false, target.kind.identity_label()),
+            (true, target.kind.identity_label())
+        ],
+        "the failed legacy removal must retain its proof for another DELETE before the new receipt"
+    );
+    assert!(!persisted_exists(target));
+    assert_eq!(
+        snapshot_reactions(reconciler, target),
+        vec![expected('➕', target.kind.identity_label())]
+    );
+
+    let before_drain = ops.len();
+    let sources = [SourceMessageQueuedGeneration::new(
+        target.message_id,
+        record.owner_generation,
+    )];
+    super::super::queue_marker::drain_dispatched_queue_markers(
+        &shared,
+        &http,
+        target.channel_id,
+        MessageId::new(target.message_id.get() + 1),
+        &sources,
+    )
+    .await;
+    assert!(
+        reconciler.ops()[before_drain..]
+            .iter()
+            .all(|op| op.target != target || op.emoji != '➕' || op.add),
+        "a later same-identity drain must not delete the new absorption receipt"
+    );
+    assert_eq!(
+        snapshot_reactions(reconciler, target),
+        vec![expected('➕', target.kind.identity_label())]
+    );
+}
+
+#[tokio::test]
+async fn reg_7832_cleanup_retry_limit_preserves_legacy_proof_for_later_confirmation() {
+    use crate::services::discord::turn_presence::supervisor::{self, tests::LiveSupervisor};
+    use crate::services::tui_o::turn_mode::TestConfirmation;
+
+    let _root = scoped_runtime_root();
+    let mut shared = crate::services::discord::make_shared_data_for_tests();
+    Arc::get_mut(&mut shared).unwrap().turn_view_reconciler =
+        TurnViewReconciler::with_test_deliveries(vec![
+            TurnViewDelivery::Failed,
+            TurnViewDelivery::Failed,
+        ]);
+    let target = target_with(100_000_000_078_400, 100_000_000_078_401);
+    let _confirmation = TestConfirmation::new(target.channel_id.get());
+    let _supervisor = LiveSupervisor::new(
+        shared.clone(),
+        shared.provider.clone(),
+        target.channel_id.get(),
+    );
+    assert!(supervisor::observes(
+        &shared.provider,
+        target.channel_id.get()
+    ));
+    let record = persisted_record_with_version(
+        &shared,
+        target,
+        shared.provider.as_str(),
+        "queued_merged",
+        3,
+    );
+    write_persisted(&record, target);
+    let http = Arc::new(serenity::http::Http::new("test-token"));
+    let reconciler = &shared.turn_view_reconciler;
+    reconciler
+        .note_confirmed_injection(
+            &shared,
+            &shared.provider,
+            target,
+            TurnViewIdentity::IntakeHttp(http.clone()),
+        )
+        .await;
+    let failed = reconciler.ops();
+    assert_eq!(
+        failed.len(),
+        2,
+        "cleanup must stop after two transient failures"
+    );
+    assert!(failed.iter().all(|op| op.emoji == '➕' && !op.add));
+    assert!(persisted_exists(target));
+    assert_eq!(reconciler.pending_injected_count(target.channel_id), 0);
+
+    reconciler
+        .note_confirmed_injection(
+            &shared,
+            &shared.provider,
+            target,
+            TurnViewIdentity::IntakeHttp(http),
+        )
+        .await;
+    assert!(!persisted_exists(target));
+    assert_eq!(reconciler.pending_injected_count(target.channel_id), 1);
+    assert_eq!(
+        snapshot_reactions(reconciler, target),
+        vec![expected('➕', target.kind.identity_label())]
+    );
+    let succeeded = reconciler.ops();
+    assert_eq!(
+        succeeded[failed.len()..]
+            .iter()
+            .filter(|op| op.emoji == '➕')
+            .map(|op| op.add)
+            .collect::<Vec<_>>(),
+        [false, true],
+        "a fresh confirmation must remove the retained legacy marker before adding its receipt"
+    );
+}
+
+#[tokio::test]
+async fn reg_7832_permanent_cleanup_failure_is_not_retried_or_registered() {
+    use crate::services::discord::turn_presence::supervisor::{self, tests::LiveSupervisor};
+    use crate::services::tui_o::turn_mode::TestConfirmation;
+
+    let _root = scoped_runtime_root();
+    let mut shared = crate::services::discord::make_shared_data_for_tests();
+    Arc::get_mut(&mut shared).unwrap().turn_view_reconciler =
+        TurnViewReconciler::with_test_deliveries(vec![TurnViewDelivery::FailedPermanent]);
+    let target = target_with(100_000_000_078_410, 100_000_000_078_411);
+    let _confirmation = TestConfirmation::new(target.channel_id.get());
+    let _supervisor = LiveSupervisor::new(
+        shared.clone(),
+        shared.provider.clone(),
+        target.channel_id.get(),
+    );
+    assert!(supervisor::observes(
+        &shared.provider,
+        target.channel_id.get()
+    ));
+    let reconciler = &shared.turn_view_reconciler;
+    reconciler
+        .note_confirmed_injection(
+            &shared,
+            &shared.provider,
+            target,
+            TurnViewIdentity::IntakeHttp(Arc::new(serenity::http::Http::new("test-token"))),
+        )
+        .await;
+    assert_eq!(reconciler.ops().len(), 1);
+    assert_eq!(reconciler.ops()[0].emoji, '🔜');
+    assert!(!reconciler.ops()[0].add);
+    assert_eq!(reconciler.pending_injected_count(target.channel_id), 0);
 }
 
 #[tokio::test]

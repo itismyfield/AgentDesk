@@ -1012,6 +1012,7 @@ fn idle_turn(
     let claim = rig.claim(&front).expect("granted front");
     let owner = OwnerTurn {
         mailbox: rig.mailbox.clone(),
+        runtime: None,
         claim,
         settled,
         origin: InputOrigin::Discord,
@@ -2655,6 +2656,7 @@ pub(crate) fn claimed_root_recovery_launch(
 ) -> scope::LaunchHook {
     let OwnerTurn {
         mailbox,
+        runtime: _,
         claim,
         settled,
         origin,

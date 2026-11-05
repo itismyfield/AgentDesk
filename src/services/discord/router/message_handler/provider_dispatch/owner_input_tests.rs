@@ -1370,7 +1370,7 @@ fn a_busy_front_is_written_into_the_pane_its_running_turn_names() {
     let rig = rig("hb-busy", 7_272_521, "normal", view("", false), BUSY);
     let hand = |front: Front| {
         let owner = (rig.mailbox.clone(), None);
-        let handed = hand_busy(owner, ProviderKind::Claude, (rig.channel, front));
+        let handed = hand_busy(owner, ProviderKind::Claude, (rig.channel, front), None);
         rig.runtime.block_on(handed)
     };
     let unobserved = Err("NotSent(\"busy_turn_unobserved\")".to_string());
@@ -1409,7 +1409,7 @@ fn a_busy_front_carries_its_uploads_and_reply_into_the_pane() {
     running_row(&rig, &rig.name);
     let hand = |front: Front| {
         let owner = (rig.mailbox.clone(), None);
-        let handed = hand_busy(owner, ProviderKind::Claude, (rig.channel, front));
+        let handed = hand_busy(owner, ProviderKind::Claude, (rig.channel, front), None);
         rig.runtime.block_on(handed)
     };
     assert_eq!(hand(rig.granted_front()), Ok(()));
@@ -1458,7 +1458,7 @@ fn consecutive_input_goes_into_a_busy_turn_as_one_prompt() {
     running_row(rig, &rig.name);
     let hand = |front: Front| {
         let owner = (rig.mailbox.clone(), None);
-        let handed = hand_busy(owner, ProviderKind::Claude, (rig.channel, front));
+        let handed = hand_busy(owner, ProviderKind::Claude, (rig.channel, front), None);
         rig.runtime.block_on(handed)
     };
     assert_eq!(hand(rig.granted_front()), Ok(()));
@@ -1688,6 +1688,7 @@ fn an_owner_idle_turn_binds_its_cancel_token_to_its_pane() {
         let mailbox = rig.mailbox.clone();
         let owner = OwnerTurn {
             mailbox,
+            runtime: None,
             claim,
             settled,
             origin: InputOrigin::Discord,
@@ -1809,6 +1810,7 @@ pub(in crate::services::discord) async fn claimed_owner_turn(
     let (settled, answer) = tokio::sync::oneshot::channel();
     let owner = OwnerTurn {
         mailbox,
+        runtime: None,
         claim,
         settled,
         origin: InputOrigin::Discord,
