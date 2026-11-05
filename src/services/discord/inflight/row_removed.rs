@@ -91,6 +91,8 @@ pub(super) fn unlink(
 ) -> std::io::Result<()> {
     #[cfg(unix)]
     let pin = capture(path);
+    #[cfg(not(unix))]
+    let _ = path;
     remove()?;
     #[cfg(unix)]
     {
