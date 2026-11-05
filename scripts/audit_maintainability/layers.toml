@@ -188,6 +188,7 @@ rules = [
   { prefix = "utils::api", root = "src/lib.rs", layer = "assembly", reason = "HTTP 상태 코드와 JSON 오류 응답을 구성하는 facade다.", evidence = ["src/utils/api.rs:1", "src/utils/api.rs:18"] },
   { prefix = "utils::secret_file", root = "src/lib.rs", layer = "adapter", reason = "비밀 파일과 부모 디렉터리의 생성·권한·I/O 보호를 실행한다.", evidence = ["src/utils/secret_file.rs:17", "src/utils/secret_file.rs:22", "src/utils/secret_file/private_directory.rs:1"] },
   { prefix = "utils::wip_detect", root = "src/lib.rs", layer = "adapter", reason = "workspace git process로 미커밋 파일을 검사한다.", evidence = ["src/utils/wip_detect.rs:8", "src/utils/wip_detect.rs:20"] },
+  { prefix = "services::tui_o::turn_mode", root = "src/lib.rs", layer = "application", reason = "선택 채널의 turn 전환을 retire 성공 뒤에만 확정하는 업무 정책이며 실행은 호출자가 제공한다.", evidence = ["src/services/tui_o/turn_mode.rs:94"] },
 ]
 
 unclassified = [

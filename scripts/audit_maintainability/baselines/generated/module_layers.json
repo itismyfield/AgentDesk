@@ -2,7 +2,7 @@
   "configuration_errors":[],
   "count_unit_version":1,
   "edge_count_unit":"static reference occurrences",
-  "generation_command":"python3 scripts/audit_maintainability/checks/module_layer_baseline.py --input-sha 79fabb0710f1975606a22cfe53c77be19836ca94 --output scripts/audit_maintainability/baselines/generated/module_layers.json --update-reductions",
+  "generation_command":"python3 scripts/audit_maintainability/checks/module_layer_baseline.py --input-sha b013e3e26ab271ac478e1ce7168f4f1cdceae9cb --output scripts/audit_maintainability/baselines/generated/module_layers.json --update-reductions --reclassify services::tui_o::turn_mode",
   "indeterminate_dependencies":[
     {"count":1,"id":"001620dfdc6b0012b85cc8dc9706a8fcae27f886f7b268992054eb9605d4ca64","kind":"reexport","source":"src/lib.rs::crate::services::turn_orchestrator","target":"src/lib.rs::crate::services::turn_orchestrator::inbound_order"},
     {"count":1,"id":"0020319838593d7e6ac0d570b2e8c5eb8ef0448391aff790f315f6fd2b82710e","kind":"import","source":"src/lib.rs::crate::services::claude_compact_trigger","target":"src/lib.rs::crate::services::provider"},
@@ -2427,8 +2427,8 @@
   ],
   "indeterminate_edges":2420,
   "indeterminate_occurrences":5812,
-  "input_sha":"79fabb0710f1975606a22cfe53c77be19836ca94",
-  "mapping_sha256":"e903c471b9311a6c394e859544e6d7f9b3800918ab11ae75daafb46713e425d8",
+  "input_sha":"b013e3e26ab271ac478e1ce7168f4f1cdceae9cb",
+  "mapping_sha256":"0794a5370cd94a8343bfcfa2350c066e85d5b00125e8ed4845195bd83f0945ab",
   "reverse_dependencies":[
     {"count":2,"id":"0035d7ca439517230bc6306b0881fc487fe95b44c2852a7e74379cb98436987d","kind":"path","source":"src/lib.rs::crate::config","target":"src/lib.rs::crate::config::session_hosts"},
     {"count":3,"id":"004548ea3340d4f2db928565ed126a4a242f7421b1c3421bba76cf7df27c3fc4","kind":"import","source":"src/lib.rs::crate::services::auto_queue","target":"src/lib.rs::crate::error"},
