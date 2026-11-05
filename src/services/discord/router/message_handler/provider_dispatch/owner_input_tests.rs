@@ -1960,3 +1960,6 @@ mod rollback;
 
 #[path = "owner_input_parent_tests.rs"]
 mod parent;
+
+#[path = "owner_start_failure_tests.rs"]
+mod start_failure;
