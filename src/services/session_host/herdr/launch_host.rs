@@ -278,7 +278,7 @@ impl SocketHerdrLaunchHost {
         (checked, observation)
     }
 
-    /// Prepare missing admission evidence once per server/config incarnation; strict targets
+    /// Remember settled admission observations per server/config incarnation; strict targets
     /// still decide whether the observation actually proved this server's startup policy.
     pub(crate) async fn prepare_existing_policy(
         &self,
@@ -321,14 +321,44 @@ impl SocketHerdrLaunchHost {
         }
         let (checked, _) = self.observe_policy_from(launch, source).await;
         let result = checked.map(|_| ());
-        prepared.insert(
-            launch.clone(),
-            PreparedPolicy {
-                witness: current,
-                file,
-                result,
-            },
-        );
+        // Observation I/O and races remain retryable on the next reader pass.
+        let remember = match result {
+            Ok(()) => true,
+            Err(
+                Unverified::Peer
+                | Unverified::File
+                | Unverified::Changed
+                | Unverified::Timeout
+                | Unverified::Identity
+                | Unverified::Cache,
+            ) => false,
+            Err(
+                Unverified::Unsupported
+                | Unverified::Ambiguous
+                | Unverified::ResumeEnabled
+                | Unverified::ConfigInvalid
+                | Unverified::Checker
+                | Unverified::Diagnostics,
+            ) => true,
+            #[cfg(target_os = "macos")]
+            Err(Unverified::ImageFilesystemUnsupported) => false,
+            #[cfg(target_os = "macos")]
+            Err(
+                Unverified::ImageChangedSinceStart
+                | Unverified::ImageTimeAmbiguous
+                | Unverified::ImageLayoutUnsupported,
+            ) => true,
+        };
+        if remember {
+            prepared.insert(
+                launch.clone(),
+                PreparedPolicy {
+                    witness: current,
+                    file,
+                    result,
+                },
+            );
+        }
         result
     }
 

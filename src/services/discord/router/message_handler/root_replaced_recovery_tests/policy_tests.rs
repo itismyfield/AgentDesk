@@ -13,12 +13,16 @@ struct Source {
     peer: PeerSnapshot,
     failure: Mutex<Option<Unverified>>,
     reads: AtomicUsize,
+    fail_once_at: AtomicUsize,
     _config: tempfile::NamedTempFile,
 }
 
 impl PeerSource for Source {
     fn snapshot(&self) -> Result<PeerSnapshot, Unverified> {
-        self.reads.fetch_add(1, Ordering::SeqCst);
+        let read = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.fail_once_at.load(Ordering::SeqCst) == read {
+            return Err(Unverified::Peer);
+        }
         match *self.failure.lock().unwrap() {
             Some(why) => Err(why),
             None => Ok(self.peer.clone()),
@@ -138,6 +142,7 @@ impl PolicyCase {
             },
             failure: Mutex::new(None),
             reads: AtomicUsize::new(0),
+            fail_once_at: AtomicUsize::new(0),
             _config: policy,
         });
         let checker = Arc::new(CountChecker {
@@ -342,6 +347,40 @@ fn rr_policy_peer_read_failure_is_not_replaced_by_missing_proof_pg() {
     case.pass();
     case.assert_bound("Peer", &before);
     assert_eq!(case.checker.calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn rr_policy_transient_producer_peer_failure_retries_on_next_reader_pass_pg() {
+    let case = PolicyCase::new("rr-policy-transient-peer", Some(8), false, false, false);
+    case.source.fail_once_at.store(2, Ordering::SeqCst);
+    let before = case.case.effects();
+    case.pass();
+    case.assert_bound("Peer", &before);
+    assert_eq!(
+        case.source.reads.load(Ordering::SeqCst),
+        2,
+        "preflight succeeds before the producer's first snapshot fails once"
+    );
+    assert_eq!(case.checker.calls.load(Ordering::SeqCst), 0);
+    assert!(case.evidence().startup.is_none());
+
+    case.pass();
+    assert_eq!(
+        case.case.fx.row(),
+        Some(HostedState::Retired),
+        "the next reader pass retries a transient producer failure"
+    );
+    assert_eq!(case.result(), recovery::Recovery::Retired);
+    assert_eq!(case.case.cleanups(), 1);
+    assert!(!case.case.hold_path().exists());
+    assert_eq!(case.case.effects(), before);
+    assert_eq!(case.checker.calls.load(Ordering::SeqCst), 1);
+    let evidence = case.evidence();
+    assert!(evidence.startup.is_some());
+    assert_eq!(
+        evidence.grant.map(|g| g.encode().unwrap()),
+        case.original_grant,
+    );
 }
 
 #[test]
