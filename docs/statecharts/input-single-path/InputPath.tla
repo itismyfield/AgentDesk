@@ -44,12 +44,14 @@ VARIABLES
     consumed,   \* times each input reached a turn
     order,      \* inputs in the order they reached a turn
     harm,       \* none, mixed (draft sent with an input), lost (draft overwritten)
-    legacyLeft
+    legacyLeft,
+    stopped     \* inputs a user stop took before the drive's first key (the token's NoKeyYet gate)
 
 vars == <<arrived, queue, head, dl, retU, retNS, drv, cur, wake, heldWait, booting, restarts,
           comp, stash, humanLeft, modal, modalLeft, prov, provQ, stopLeft, busySent, fate,
-          consumed, order, harm, legacyLeft>>
-envVars == <<humanLeft, modal, modalLeft, stopLeft, legacyLeft>>
+          consumed, order, harm, legacyLeft, stopped>>
+\* stopped rides along with the environment: only StopBeforeKey changes it.
+envVars == <<humanLeft, modal, modalLeft, stopLeft, legacyLeft, stopped>>
 
 Init ==
     /\ arrived = 0 /\ queue = <<>> /\ head = "none" /\ dl = "pending"
@@ -59,7 +61,7 @@ Init ==
     /\ comp = {} /\ stash = {} /\ humanLeft = 1 /\ modal = FALSE /\ modalLeft = 1
     /\ prov \in {"idle", "busy"} /\ provQ = <<>> /\ stopLeft = 1
     /\ busySent = {} /\ fate = [i \in Ids |-> "none"] /\ consumed = [i \in Ids |-> 0]
-    /\ order = <<>> /\ harm = "none" /\ legacyLeft = 1
+    /\ order = <<>> /\ harm = "none" /\ legacyLeft = 1 /\ stopped = {}
 
 AllIdle == \A k \in 1..2 : drv[k] = "idle"
 Keying == \E k \in 1..2 : drv[k] \in {"direct", "stash", "keyed", "pasted"}
@@ -191,6 +193,26 @@ Enter(k) ==
     /\ drv' = [drv EXCEPT ![k] = "idle"] /\ cur' = [cur EXCEPT ![k] = 0] /\ wake' = TRUE
     /\ UNCHANGED <<arrived, dl, retU, retNS, heldWait, booting, restarts, envVars>>
 
+\* A user stop while the drive holds an input before its first key (reserved, direct or stash).
+\* The writer's token is NoKeyYet: the stop takes the gate, main cancels and the writer sends no
+\* key, ending Cancelled{0} as WriteUncertain -> Unknown, never a NotSent the drive resends.
+\* Mutants: the writer never sees the gate and keys on, or Cancelled{0} is held as NotSent.
+\* busyNoGate: only the busy-pane writer (prov busy, the ClaudeBusy route) skips the gate.
+\* refused: after the stop the writer ends on a refusal that records a not-sent proof (a failed
+\* buffer load, a refused ready check or a hold). proofOverStop lets that proof outrank the stop.
+StopBeforeKey(k) ==
+    /\ drv[k] \in {"reserved", "direct", "stash"} /\ stopped = {}
+    /\ stopped' = {cur[k]}
+    /\ IF Mut = "noKeyGate" \/ (Mut = "busyNoGate" /\ prov = "busy")
+       THEN UNCHANGED <<queue, head, drv, cur, wake, heldWait>>
+       ELSE /\ drv' = [drv EXCEPT ![k] = "idle"] /\ cur' = [cur EXCEPT ![k] = 0] /\ wake' = TRUE
+            /\ \E refused \in BOOLEAN :
+               IF Mut = "cancelledNotSent" \/ (Mut = "proofOverStop" /\ refused)
+               THEN /\ head' = "none" /\ heldWait' = FALSE /\ UNCHANGED queue
+               ELSE /\ head' = "Unknown" /\ UNCHANGED <<queue, heldWait>>
+    /\ UNCHANGED <<arrived, dl, retU, retNS, booting, restarts, comp, stash, prov, provQ, busySent,
+                   fate, consumed, order, harm, humanLeft, modal, modalLeft, stopLeft, legacyLeft>>
+
 \* ------------------------------------------------------------- deadline, backstop, restart
 DeadlinePasses ==
     /\ head \in {"MayHaveSent", "Unknown"} /\ dl = "pending" /\ AllIdle
@@ -261,7 +283,7 @@ Stop ==
     /\ wake' = IF Mut = "noCompletionWake" THEN wake ELSE TRUE
     /\ UNCHANGED <<arrived, queue, head, dl, retU, retNS, drv, cur, heldWait, booting, restarts,
                    stash, humanLeft, modal, modalLeft, legacyLeft, busySent, fate, consumed,
-                   order, harm>>
+                   order, harm, stopped>>
 
 \* The human types a draft. Not while a drive task is between its read and its Enter: no pane is
 \* read after a key (stash.rs:1), so that race is outside this model.
@@ -270,14 +292,14 @@ HumanTypes ==
     /\ humanLeft' = humanLeft - 1 /\ comp' = comp \cup {0}
     /\ UNCHANGED <<arrived, queue, head, dl, retU, retNS, drv, cur, wake, heldWait, booting,
                    restarts, stash, modal, modalLeft, prov, provQ, stopLeft, busySent, fate,
-                   consumed, order, harm, legacyLeft>>
+                   consumed, order, harm, legacyLeft, stopped>>
 
 ModalOpens ==
     /\ modalLeft > 0 /\ ~modal /\ ~Keying
     /\ modalLeft' = modalLeft - 1 /\ modal' = TRUE
     /\ UNCHANGED <<arrived, queue, head, dl, retU, retNS, drv, cur, wake, heldWait, booting,
                    restarts, comp, stash, humanLeft, prov, provQ, stopLeft, busySent, fate,
-                   consumed, order, harm, legacyLeft>>
+                   consumed, order, harm, legacyLeft, stopped>>
 
 \* With HeldWakes the hold's own wake fires when the modal closes or the next read succeeds.
 ModalCloses ==
@@ -285,7 +307,7 @@ ModalCloses ==
     /\ IF HeldWakes /\ heldWait THEN heldWait' = FALSE /\ wake' = TRUE ELSE UNCHANGED <<heldWait, wake>>
     /\ UNCHANGED <<arrived, queue, head, dl, retU, retNS, drv, cur, booting, restarts, comp, stash,
                    humanLeft, modalLeft, prov, provQ, stopLeft, busySent, fate, consumed, order,
-                   harm, legacyLeft>>
+                   harm, legacyLeft, stopped>>
 
 HoldRetries ==
     /\ HeldWakes /\ heldWait /\ ~modal
@@ -302,7 +324,7 @@ LegacyStarts ==
         /\ Consume({i}, "idle")
     /\ UNCHANGED <<arrived, queue, head, dl, retU, retNS, drv, cur, wake, heldWait, booting,
                    restarts, comp, stash, humanLeft, modal, modalLeft, prov, provQ, stopLeft,
-                   busySent, harm>>
+                   busySent, harm, stopped>>
 
 Quiet == queue = <<>> /\ head = "none" /\ AllIdle /\ prov = "idle" /\ provQ = <<>> /\ ~booting
 
@@ -313,7 +335,7 @@ Done ==
 Next ==
     \/ Arrive \/ DriveFindsNothing
     \/ \E k \in 1..2 : DriveTakesFront(k) \/ Prepare(k) \/ ArmAndKey(k) \/ Paste(k)
-                        \/ WriteUncertain(k) \/ Enter(k)
+                        \/ WriteUncertain(k) \/ Enter(k) \/ StopBeforeKey(k)
     \/ DeadlinePasses \/ Backstop \/ Restart \/ Boot
     \/ Absorb \/ TurnEnds \/ Stop
     \/ HumanTypes \/ ModalOpens \/ ModalCloses \/ HoldRetries \/ LegacyStarts
@@ -336,4 +358,6 @@ Fifo == \A p, q \in 1..Len(order) : p < q => order[p] < order[q]
 HeldNotDropped == retNS = {}
 \* 7. An input sent while Claude was busy reached this turn or the next one.
 BusyInputLands == Quiet => \A i \in busySent : fate[i] \in {"this", "next"}
+\* 8. An input a stop took before its first key never reaches the pane or Claude.
+StoppedBeforeKey == \A i \in stopped : consumed[i] = 0 /\ i \notin comp \cup stash \cup busySent
 =============================================================================

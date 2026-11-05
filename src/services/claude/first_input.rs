@@ -30,6 +30,14 @@ pub(crate) fn submit(
             tmux_session_name,
         )
     })
+    .inspect_err(|_| stopped_before_key(cancel_token))
+}
+
+/// A stop that took this token's first-key gate outranks the refusal that ended the submit.
+fn stopped_before_key(cancel_token: Option<&CancelToken>) {
+    if cancel_token.is_some_and(|token| token.native_stop.receipt_sink().stopped_before_key()) {
+        crate::services::claude_tui::owner_input::stop_took_gate();
+    }
 }
 
 /// The first prompt of an execution the caller just created, for the input owner's effect; the
