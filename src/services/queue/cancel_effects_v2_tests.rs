@@ -120,3 +120,88 @@ async fn a_forced_cancel_settles_each_removed_origin_at_its_removal_instant_pg()
     pool.close().await;
     db.drop().await;
 }
+
+/// A stop settles the attempted head before the forced purge captures, or after: the head is never
+/// resent, only the untried input drops and is owed once, and an outdated capture purges nothing.
+#[tokio::test(flavor = "current_thread")]
+async fn a_stop_settle_on_either_side_of_the_purge_capture_resends_nothing() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    for (n, settle_first) in [true, false].into_iter().enumerate() {
+        let (provider, channel) = (ProviderKind::Claude, ChannelId::new(7_795_201 + n as u64));
+        let handle = ChannelMailboxRegistry::default().handle(channel);
+        let persistence = QueuePersistenceContext::new(&provider, "", None);
+        let (path, namespace) = v2_queue(&persistence, channel).unwrap();
+        handle.v2_adopt(path, namespace).await.unwrap();
+        let stopped = 8_000_000_000_000_795_001 + 10 * n as u64;
+        let untried = stopped + 1;
+        for (id, origin) in [(stopped, "G-stopped"), (untried, "G-untried")] {
+            let context = serde_json::json!({"metadata":{"human_input":{"origin_id":origin}}});
+            let ticket = format!("t-{id}");
+            let admitted =
+                handle.v2_admit_ticket_with_context(item(id, channel.get()), ticket, context);
+            admitted.await.unwrap();
+        }
+        handle.v2_arm_head_for_tests("stopped").await.unwrap();
+        // The stop's settlement of a write that may have landed: the head turns Unknown.
+        let settle = |handle: ChannelMailboxHandle| async move {
+            handle
+                .v2_request(|slot| {
+                    let owner = slot.as_mut().ok_or("no owner")?;
+                    let key = owner.active_attempt()?;
+                    owner.settle(&key, false, 1)
+                })
+                .await
+        };
+        let target = TurnLifecycleTarget {
+            provider: Some(provider),
+            channel_id: Some(channel),
+            tmux_name: String::new(),
+        };
+        let purged = if settle_first {
+            let stopper = handle.clone();
+            let probe: Box<dyn FnOnce() -> futures::future::BoxFuture<'static, ()> + Send> =
+                Box::new(move || Box::pin(async move { settle(stopper).await.unwrap() }));
+            set_pre_purge_probe_for_test(channel, probe);
+            force_purge_channel_mailbox(None, &target, None).await
+        } else {
+            let expected = handle
+                .try_capture_v2()
+                .await
+                .unwrap()
+                .expect("a V2 capture");
+            settle(handle.clone()).await.unwrap();
+            let stale = handle.try_purge_queue_if_unchanged(persistence.clone(), expected);
+            let stale = stale.await.unwrap();
+            assert!(
+                stale.failed.is_some() && stale.receipt.is_empty(),
+                "a capture the stop outdated purges nothing"
+            );
+            force_purge_channel_mailbox(None, &target, None).await
+        };
+        let case = if settle_first {
+            "settle first"
+        } else {
+            "capture first"
+        };
+        assert_eq!(purged.map(|counts| counts.drained), Some(1), "{case}");
+        let owed = handle.v2_request(|slot| Ok(slot.as_ref().ok_or("no owner")?.owed_drops()));
+        let owed: Vec<u64> = (owed.await.unwrap().into_iter())
+            .map(|o| o.message_id)
+            .collect();
+        assert_eq!(
+            owed,
+            [untried],
+            "{case}: the untried input is owed once, the head never"
+        );
+        let front = handle.v2_request(|slot| Ok(slot.as_ref().ok_or("no owner")?.front()));
+        assert!(
+            front.await.unwrap().is_none(),
+            "{case}: the stopped head is never resent"
+        );
+        let head = handle.v2_request(|slot| slot.as_ref().ok_or("no owner")?.active_attempt());
+        assert!(
+            head.await.is_ok(),
+            "{case}: the stopped head stays in custody"
+        );
+    }
+}
