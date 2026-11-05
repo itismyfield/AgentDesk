@@ -2103,7 +2103,9 @@ src/
 │   │   │   │   │   ├── session_preparation/
 │   │   │   │   │   │   └── restore_tests.rs
 │   │   │   │   │   ├── worker_entry/
-│   │   │   │   │   │   └── custody_pg_tests.rs
+│   │   │   │   │   │   ├── custody_pg_tests.rs
+│   │   │   │   │   │   ├── goal_fresh_pg_tests.rs
+│   │   │   │   │   │   └── preserve_cancel_tests.rs
 │   │   │   │   │   ├── adk_thread.rs
 │   │   │   │   │   ├── claim_bootstrap.rs
 │   │   │   │   │   ├── context.rs
