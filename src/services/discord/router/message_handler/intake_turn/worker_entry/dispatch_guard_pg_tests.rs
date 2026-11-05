@@ -28,18 +28,12 @@ struct Host {
     database: TestPostgresDb,
     _workspace: tempfile::TempDir,
     _env: Vec<crate::config::TestEnvVarGuard>,
+    _rest: crate::services::discord::shared_state::test_rest::Guard,
     _root: crate::config::TestRuntimeRootGuard,
 }
 
 impl Host {
     async fn new(channels: &[ChannelId]) -> Self {
-        let database = TestPostgresDb::create().await;
-        let pool = database.connect_and_migrate().await;
-        sqlx::query("INSERT INTO task_dispatches (id, status) VALUES ($1, 'cancelled')")
-            .bind(DISPATCH)
-            .execute(&pool)
-            .await
-            .unwrap();
         let root = crate::config::TestRuntimeRootGuard::new();
         let runtime_root = runtime_store::agentdesk_root().unwrap();
         let config_path = crate::runtime_layout::config_file_path(&runtime_root);
@@ -56,10 +50,26 @@ impl Host {
         let boot = serde_json::from_value(serde_json::json!({"server": {}, "agents": [],
             "providers": {"claude": {"runtime": "pipe"}}}))
         .unwrap();
+        // The test-env lock the root guard holds comes before the database lifecycle lock.
+        let database = TestPostgresDb::create().await;
+        let pool = database.connect_and_migrate().await;
+        sqlx::query("INSERT INTO task_dispatches (id, status) VALUES ($1, 'cancelled')")
+            .bind(DISPATCH)
+            .execute(&pool)
+            .await
+            .unwrap();
         crate::services::tui_o::channel_policy::install(&boot).unwrap();
         crate::services::provider_hosting::install_provider_hosting_config(&boot);
         let next = AtomicU64::new(1_479_734_480_200_001);
         let discord = MockDiscord::start_with(Arc::new(move |method: &Method, path: &str| {
+            // No card owns the dispatch and no thread can be opened, so the turn stays on its channel.
+            if path.starts_with("/api/internal/") {
+                return Some((404, serde_json::json!({"error": "not found"})));
+            }
+            if path.ends_with("/threads") {
+                let refused = serde_json::json!({"message": "Missing Permissions", "code": 50013});
+                return Some((403, refused));
+            }
             let rest = path.strip_prefix("/api/v10/channels/")?;
             let (channel, rest) = rest.split_once('/')?;
             let channel: u64 = channel.parse().ok()?;
@@ -78,6 +88,9 @@ impl Host {
         own.provider = ProviderKind::Claude;
         own.api_port = discord.port;
         shared.settings.write().await.provider = ProviderKind::Claude;
+        // Reactions go out over HTTP to the mock instead of the in-memory test log.
+        shared.turn_view_reconciler.enable_test_http_reactions();
+        let rest = crate::services::discord::shared_state::test_rest::install(discord.http.clone());
         let workspace = tempfile::tempdir().unwrap();
         for &channel in channels {
             crate::services::discord::host_defer_gate::tests::map_channel(&shared, channel, "")
@@ -94,6 +107,7 @@ impl Host {
             database,
             _workspace: workspace,
             _env: env,
+            _rest: rest,
             _root: root,
         }
     }
