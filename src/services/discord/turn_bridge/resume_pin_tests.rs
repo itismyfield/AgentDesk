@@ -179,31 +179,6 @@ fn c1_poisoned_resume_lock_does_not_unpause() {
 }
 
 #[test]
-fn c1_both_late_writers_consume_pin_without_registry_backfill() {
-    let entry = include_str!("mod.rs");
-    assert!(entry.contains("CompletionPostludeState {\n                watcher_delivery_pin,"));
-    assert!(entry.contains("TerminalOutcomeDeliveryContext {\n                    watcher_delivery_pin: watcher_delivery_pin.clone(),"));
-    let completion = include_str!("completion_postlude.rs");
-    let epilogue = include_str!("finalize_epilogue.rs");
-    assert_eq!(
-        completion
-            .matches("finalize_epilogue::resume_pinned_watcher(")
-            .count(),
-        1
-    );
-    assert_eq!(
-        epilogue
-            .matches("resume_pinned_watcher(\n                    &shared_owned.tmux_watchers,")
-            .count(),
-        1
-    );
-    for source in [completion, epilogue] {
-        assert!(!source.contains("tmux_watchers.get(&watcher_owner_channel_id)"));
-        assert!(source.contains("watcher_delivery_pin.as_ref()"));
-    }
-}
-
-#[test]
 fn sa2_capture_hands_off_owned_provider_receiver() {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()

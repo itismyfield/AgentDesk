@@ -2456,7 +2456,6 @@ src/
 │   │   │   │   ├── footer_retirement_raw_tests.rs
 │   │   │   │   ├── legacy_state.rs
 │   │   │   │   ├── native_collector_tests.rs
-│   │   │   │   ├── source_guard_tests.rs
 │   │   │   │   └── types.rs
 │   │   │   ├── supervisor_relay/
 │   │   │   │   └── supervisor_frame_source.rs
@@ -2733,7 +2732,6 @@ src/
 │   │   ├── turn_bridge/
 │   │   │   ├── bridge_entry_persist/
 │   │   │   │   ├── tests/
-│   │   │   │   │   ├── source_guard_tests.rs
 │   │   │   │   │   └── turn_mode_entry_tests.rs
 │   │   │   │   └── identity_and_owner.rs
 │   │   │   ├── completion_guard/
@@ -2809,7 +2807,6 @@ src/
 │   │   │   │   ├── body_footer_rollover_tests.rs
 │   │   │   │   ├── footer_retirement_raw_history_tests.rs
 │   │   │   │   ├── guarded_persist.rs
-│   │   │   │   ├── guarded_persist_source_guard_tests.rs
 │   │   │   │   ├── guarded_persist_tests.rs
 │   │   │   │   ├── lock_liveness_tests.rs
 │   │   │   │   ├── o_adoption_tests.rs
@@ -2820,8 +2817,6 @@ src/
 │   │   │   │   ├── rollover_guard.rs
 │   │   │   │   └── runtime.rs
 │   │   │   ├── terminal_controller_cutover/
-│   │   │   │   ├── tests/
-│   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   └── o_body.rs
 │   │   │   ├── terminal_outcome_delivery/
 │   │   │   │   ├── delivery_epilogue_tests/
@@ -2869,7 +2864,6 @@ src/
 │   │   │   │   ├── codex_stop_delivery_tests.rs
 │   │   │   │   ├── codex_stop_idle_evidence.rs
 │   │   │   │   ├── codex_stop_idle_evidence_tests.rs
-│   │   │   │   ├── codex_stop_source_guard_tests.rs
 │   │   │   │   ├── herdr_http_cancel_tests.rs
 │   │   │   │   ├── herdr_stop_pane_tests.rs
 │   │   │   │   ├── interrupt_policy.rs

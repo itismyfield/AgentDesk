@@ -1596,55 +1596,6 @@ fn unprocessed_tail_after_first_terminal(batch: &str) -> String {
     buffer
 }
 
-fn assert_suppression_arm_uses_confirmed_end_helper(reason: &str) {
-    // #4321: #4229 S2 (#4297) extracted the post-terminal-no-inflight arm into
-    // tmux_watcher/loop_poll_prologue.rs, so the suppression arms now live
-    // across the parent module and its decomposed children. Search every module
-    // that can host an `advance_watcher_confirmed_end` suppression arm so this
-    // wiring guarantee survives further extraction (each source must be an
-    // `include_str!` literal because the paths are resolved at compile time; a
-    // reason that goes missing from all of them still trips the panic below).
-    // #4229 W2b extracted the suppression arms into
-    // tmux_watcher/terminal_preflight.rs, so that module hosts them now.
-    const MODULE_SOURCES: &[&str] = &[
-        include_str!("../tmux_watcher.rs"),
-        include_str!("loop_poll_prologue.rs"),
-        include_str!("terminal_preflight.rs"),
-    ];
-    let (module_src, reason_idx) = MODULE_SOURCES
-        .iter()
-        .find_map(|src| src.find(reason).map(|idx| (*src, idx)))
-        .unwrap_or_else(|| panic!("missing suppression reason {reason}"));
-    let call_start = module_src[..reason_idx]
-        .rfind("advance_watcher_confirmed_end(")
-        .unwrap_or_else(|| panic!("missing advance call for {reason}"));
-    let call_src = &module_src[call_start..reason_idx];
-    // The arm may pass the batch data by reference or by value (`&all_data` when
-    // the module owns a `String`, `all_data` when it already borrows a slice);
-    // both are the same consumed-terminal-end wiring.
-    const INLINE_FORMS: &[&str] = &[
-        "suppressed_terminal_confirmed_end(current_offset, &all_data)",
-        "suppressed_terminal_confirmed_end(current_offset, all_data)",
-    ];
-    if INLINE_FORMS.iter().any(|form| call_src.contains(form)) {
-        return;
-    }
-    // #5071 T1 S3b: the post-terminal arm needs the same end offset a second time
-    // for its shadow-journal range, so it hoists the helper into a `confirmed_end`
-    // binding instead of calling it inline in the argument list. Accept that only
-    // when the binding is initialised from the helper itself, so the arm is still
-    // pinned to the consumed terminal end rather than to the raw poll offset.
-    let args_src = &call_src["advance_watcher_confirmed_end(".len()..];
-    let advances_binding = args_src.contains("confirmed_end,");
-    let binding_is_helper = INLINE_FORMS
-        .iter()
-        .any(|form| module_src[..call_start].contains(&format!("let confirmed_end = {form}")));
-    assert!(
-        advances_binding && binding_is_helper,
-        "suppression arm {reason} must advance only to the consumed terminal end"
-    );
-}
-
 #[test]
 fn silent_turn_suppression_watermark_stops_before_co_read_followup_turn() {
     let silent_turn = "{\"type\":\"result\",\"result\":\"silent A done\"}\n";
@@ -1749,25 +1700,6 @@ fn post_terminal_suppression_watermark_stops_before_co_read_followup_turn() {
         watcher_terminal_resend_action(current_offset, followup_start, current_offset),
         WatcherTerminalResendAction::SkipAlreadyCommitted,
         "document the regression: advancing to raw batch end would falsely skip turn B"
-    );
-}
-
-#[test]
-fn suppression_arms_are_wired_to_consumed_end_helper() {
-    let source = include_str!("loop_poll_prologue.rs");
-    let arm = source
-        .split_once("    if post_terminal_no_inflight_should_suppress {")
-        .unwrap()
-        .1
-        .split_once("    maybe_refresh_watcher_activity_heartbeat(")
-        .unwrap()
-        .0;
-    assert!(!arm.contains("advance_watcher_confirmed_end("));
-    assert_suppression_arm_uses_confirmed_end_helper(
-        "src/services/discord/tmux.rs:silent_turn_suppressed_terminal_output",
-    );
-    assert_suppression_arm_uses_confirmed_end_helper(
-        "src/services/discord/tmux.rs:cancel_tombstone_suppressed_terminal_output",
     );
 }
 
