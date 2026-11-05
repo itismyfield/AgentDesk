@@ -1124,7 +1124,7 @@ async fn phase_gate_run_phase_uses_legacy_default_on_pg_tx(
 ) -> Result<bool, String> {
     sqlx::query_scalar::<_, bool>(
         "SELECT COALESCE(
-             BOOL_AND(NULLIF(BTRIM(phase_gate_kind, E' \t\n\r\\f\\v'), '') IS NULL),
+             BOOL_AND(NULLIF(BTRIM(phase_gate_kind, E' \t\n\r\\f\\x0b'), '') IS NULL),
              FALSE
          )
          FROM auto_queue_entries
