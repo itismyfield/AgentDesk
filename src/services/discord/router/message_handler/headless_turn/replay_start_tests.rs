@@ -1205,9 +1205,8 @@ fn a_scheduled_snapshot_headless_start_marks_its_row_isolated_pg() {
     });
 }
 
-/// A fresh headless start records its durable context boundary before it clears the provider
-/// session: when the boundary write does not land, the start fails before the clear and before
-/// any native start, and the channel keeps its provider session.
+/// A fresh headless start whose durable context boundary does not land fails before it clears
+/// the provider session or starts anything native, so the channel keeps its session.
 #[test]
 fn fresh_headless_start_keeps_the_session_when_its_boundary_does_not_land_pg() {
     let name = concat!(
