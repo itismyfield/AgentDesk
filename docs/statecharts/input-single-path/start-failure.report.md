@@ -1,9 +1,10 @@
 # Owner start failure slice
 
-Code SHA: `b0bab6ebf693502f86c0b2e2c0307033fa411c29`; production unchanged.
+Historical RED code SHA: `b0bab6ebf693502f86c0b2e2c0307033fa411c29`.
+Live comparison checkpoint: `0fd788f660d61c9fdd0f46ad7825ccc7c51ff633`; two-fact repair follows below.
 `InputOwnership.tla` / `SFSpec` isolates this policy in the `observer` record; older slices keep their transitions.
-The fixed classification is in its StartFailure comment and the fixture header. `host_refusal.rs:28–37`
-currently erases typed causes; preserving them belongs to the live slice.
+The fixed classification is in its StartFailure comment and the fixture header. The historical typed-cause erasure at `host_refusal.rs:28–37` is covered by the live
+Discord and headless entrypoint fixtures.
 
 | cfg | Expected break | Interpretation |
 |---|---|---|
@@ -21,16 +22,18 @@ currently erases typed causes; preserving them belongs to the live slice.
 | RowClearDelayed | none | Failed removal keeps closing; an existing later settle removes the row |
 | EarlyRetainBefore | FirstOpaqueFailureKept, EarlyClearDelivers | Opaque first failure incorrectly retained |
 | ReserveResetBefore | ReserveResetsFailures | Reserve incorrectly carries prior failures |
+| PolicyRowOnlyBefore | RecoveryCreditPreserved, FailureEventuallyResolved | Early policy unlink loses its wake while the exact token remains active |
+| PolicyEarlyRemove | none | Independent row/token events; the last fact clears closing and wakes once |
 
 `FirstOpaqueFailureKept` independently forbids retention or notice after one opaque failure.
 `EarlyClearDelivers` requires A's payload even if a bad policy removed it from the queue.
 `ReserveResetsFailures` checks the reserve state directly, before an effect-held result can hide it.
 The two negative configs inject only those faults; the unmutated policy transitions stay the same.
-Full checker: 74 configs, rc=0, expected/actual mismatches=0 (215.8 s).
+Full checker: 83 configs, rc=0, expected/actual mismatches=0 (265.2 s).
 Isolated traces reproduce EarlyClearDelivers exit 13, FirstOpaqueFailureKept exit 12 and
 ReserveResetsFailures exit 12; repository model bytes remain unchanged during those runs.
 
-GREEN checks the proposed policy, not unchanged production behavior. Code-confirmed replay:
+Historical RED replay at the historical SHA above:
 ingress admits A/B (`input_owner/ingress.rs:400–468`); wake grants A (`drive.rs:96–123,168–180`,
 `v2.rs:300–313`); wrapper fails before reserve (`owner_input.rs:510–571,702–735`). The bound refusal
 is now `provider_dispatch.rs:728–749`, through `claude/herdr_turn.rs:286–287` before its hook.
@@ -42,10 +45,11 @@ emits no completion; quiet recovery supplies no wake. Existing holds are uncount
 
 Token release and row deletion are separate actions. `episode_identity.rs:302–320` marks the token
 latch before `turn_finalizer/episode.rs:129–145` removes the row. `TokenWakeBefore` preserves that
-counterexample. The policy instead clears closing and issues one wake only when the removed row
-matches the captured failed row. The independent `unsafeGrant` witness records a grant while that
+counterexample. The policy instead clears closing and issues one wake only after the removed row
+matches the captured failed row and that episode's exact token has released. The independent `unsafeGrant` witness records a grant while that
 failed row remains, even if a bad wake already cleared closing. No row guard hides that witness.
-Normal completion waits for row settlement. Known refusals without a wrapper wake directly.
+Normal completion releases the token first and waits for row settlement. Policy removal
+can reverse those events; its row proof waits for the existing exact token-finished latch. Known refusals without a wrapper wake directly.
 
 `RowClearDelayed` begins with an unavailable store; after token release, closing prevents grants.
 A finite recovery followed by an existing later settle is fair, then exact removal wakes once.
@@ -65,18 +69,19 @@ Preclaim `NotSent("herdr_root_recovery_held")` is SchedulingHeld, uncounted, wit
 Inside-start bound-gate failure is StartFailedBeforeInput regardless of string. S0 emulates only S2's frame.
 The fixture uses real ingress/drive/intake/producer/bridge/listener, separate POST/delete/payload counts,
 an immediate third-start witness, and payload/closed signals rather than sleeps. `live=true` activates
-its future oracle; PG outbox delivery is wired in the live slice.
+its live oracle; A notices and B summary are counted separately. A blocked outbox
+does not hold the drive while cleanup and B payload delivery complete.
 
 ## Physical row removal contract
 
-Paths below are relative to `src/services/discord/` at the code SHA above. Fresh birth pins must
+Paths below are relative to `src/services/discord/` at the live comparison checkpoint. Fresh birth pins must
 be captured under the existing row lock and notified only after actual unlink/active rename succeeds.
 No actor response is awaited while holding that lock. Missing, mismatch, failed I/O, unknown identity
 and duplicate notifications cannot release another closing pin or create another wake.
 
 | Physical point | Existing path / authority |
 |---|---|
-| `inflight.rs:574` | Policy API `remove_inflight_row_for_policy_op`; public JS `src/engine/ops/exec_ops.rs:313–379` |
+| `inflight.rs:575` | Policy API `remove_inflight_row_for_policy_op`; public JS `src/engine/ops/exec_ops.rs:313–379` |
 | `inflight/circuit_removal.rs:74` | Checked delete with circuit handoff |
 | `inflight/rebind_reap.rs:311` | Abandoned rebind reap |
 | `inflight/rebind_reap.rs:386` | Other-provider abandoned rebind reap |
@@ -84,13 +89,13 @@ and duplicate notifications cannot release another closing pin or create another
 | `inflight/removal/boot_reaper.rs:218` | Locked boot verdict for stale/provider-mismatch/malformed rows |
 | `inflight/clear_store/mod.rs:79` | Ordinary receipt-protected clear |
 | `inflight/clear_store/mod.rs:321` | Guarded active-path archive rename |
-| `inflight/clear_store/mod.rs:481` | User-message-guarded clear |
-| `inflight/clear_store/mod.rs:561` | Zero-owned clear |
-| `inflight/clear_store/mod.rs:599` | Exact snapshot / path-less Herdr remove_row |
-| `inflight/clear_store/mod.rs:648` | Lifecycle death-evidence clear |
-| `inflight/clear_store/mod.rs:749` | After-delivery clear |
-| `inflight/clear_store/mod.rs:815` | Tmux-response test seam (no current live caller) |
-| `inflight/clear_store/abandon.rs:242` | Exact placeholder-abandon cleanup |
+| `inflight/clear_store/mod.rs:483` | User-message-guarded clear |
+| `inflight/clear_store/mod.rs:563` | Zero-owned clear |
+| `inflight/clear_store/mod.rs:601` | Exact snapshot / path-less Herdr remove_row |
+| `inflight/clear_store/mod.rs:650` | Lifecycle death-evidence clear |
+| `inflight/clear_store/mod.rs:751` | After-delivery clear |
+| `inflight/clear_store/mod.rs:817` | Tmux-response test seam (no current live caller) |
+| `inflight/clear_store/abandon.rs:241` | Exact placeholder-abandon cleanup |
 | `inflight/clear_store/identity.rs:119` | Exact finalizer CAS, marked-row late settle and other captured clears |
 
 Correction to the initial lane table: the policy API is **not** restricted to malformed, zero-owned
@@ -99,3 +104,18 @@ lock and discard handoff. It belongs to the notification funnel. Its existing pu
 user_msg_id=7 (`exec_ops.rs:671–768`); the live test must add matching closing / wake-once assertions.
 The scoped-restore unlink (`inflight/removal/scoped_restore.rs:76`) is behind `#[cfg(test)]`
 (`:3`); it is not a seventeenth production removal point and adds no live cleanup authority.
+
+## Two-fact completion
+
+Live code comparison SHA: `0fd788f660d61c9fdd0f46ad7825ccc7c51ff633` plus tested tree
+`9d2193bccc293168fd483639a41462e8c6b38fb4`. The public policy API can remove A while its token is
+active. Its early wake enters the existing busy handoff without a row and is lost before NotSent
+finishes. The real barrier fixture confirms that ordering; SFRowClear now permits it and
+SFEarlyWakeConsumed represents that pass. SFRelease and physical row unlink remain separate.
+SFClosingComplete clears closing and wakes once only after both facts for the captured episode.
+
+PolicyRowOnlyBefore expects RecoveryCreditPreserved and FailureEventuallyResolved to break.
+PolicyEarlyRemove checks the adopted two-fact completion with the same safety/liveness rules.
+TokenWakeBefore still rejects a token-only close while the row remains. NoStartDuringExactCleanup
+is unchanged. Release fairness assumes the existing token-finished event eventually arrives;
+a token that never releases keeps closing held without a new timeout or retry service.

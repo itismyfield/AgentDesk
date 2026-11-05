@@ -13,10 +13,13 @@ flowchart TD
     K -->|no| A["keep A at front"]
     T --> N["outbox notice independently"]
     T --> E0{"wrapper row exists?"}
-    E0 -->|yes| X["NotSent bridge; delete placeholder; release token"]
+    E0 -->|yes| X["NotSent bridge; delete placeholder"]
     E0 -->|no| W
     A --> X
-    X --> R0["exact row removal; delayed store keeps closing"]
-    R0 --> W["matching identity: clear closing; wake once"]
+    C --> R0["existing remover: exact row deletion, either order"]
+    X --> T0["exact token released"]
+    R0 --> C0{"both facts for failed episode"}
+    T0 --> C0
+    C0 --> W["clear closing; wake once"]
     W --> D
     D -->|A retained| B["claim B; deliver B"]

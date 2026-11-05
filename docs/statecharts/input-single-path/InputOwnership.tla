@@ -1002,22 +1002,26 @@ SFRelease ==
     /\ observer' = [SF EXCEPT !.token = FALSE,
          !.deleted = IF SFPolicy THEN SF.placeholders ELSE @]
     /\ UNCHANGED ObserverLegacy
-\* The exact row removal is the sole closing wake. Failure to remove leaves closing set;
-\* the existing later settle can remove it once the store recovers, without a new timer.
+\* A policy unlink may precede token release; only the comparison mutant wakes on row alone.
 SFRowClear ==
-    /\ SF.row /\ ~SF.token /\ SF.run = "none" /\ SF.storeReady
-    /\ LET exact == SF.closing /\ SF.rowClaim = SF.closingClaim
+    /\ SF.row /\ SF.run = "none" /\ SF.storeReady
+    /\ LET exact == SF.closing /\ SF.rowClaim = SF.closingClaim /\ Mut = "rowWake"
        IN observer' = [SF EXCEPT !.row = FALSE,
             !.closing = IF exact THEN FALSE ELSE @, !.wake = @ \/ exact,
             !.closeWakes = IF exact THEN SFInc(@, 3) ELSE @]
+    /\ UNCHANGED ObserverLegacy
+\* The real busy handoff can spend an early wake without starting a producer.
+SFEarlyWakeConsumed ==
+    /\ SF.wake /\ SF.token /\ ~SF.row /\ ~SF.closing /\ SF.run = "none"
+    /\ observer' = [SF EXCEPT !.wake = FALSE]
     /\ UNCHANGED ObserverLegacy
 SFCompletion ==
     /\ SF.completion /\ ~SF.token /\ ~SF.row /\ SF.run = "none"
     /\ observer' = [SF EXCEPT !.wake = TRUE, !.completion = FALSE]
     /\ UNCHANGED ObserverLegacy
-\* KnownPersistent has no wrapper row. Clear without a wrapper also owes an immediate wake.
-SFNoRowClose ==
-    /\ SF.closing /\ ~SF.token /\ ~SF.row
+\* Both facts refer to the captured failed episode; whichever arrives last enables one close.
+SFClosingComplete ==
+    /\ SF.closing /\ ~SF.token /\ ~SF.row /\ SF.rowClaim = SF.closingClaim
     /\ observer' = [SF EXCEPT !.closing = FALSE, !.wake = TRUE, !.closeWakes = SFInc(@, 3)]
     /\ UNCHANGED ObserverLegacy
 SFTokenWakeBefore ==
@@ -1083,12 +1087,12 @@ SFStaleCallback ==
             !.state["A"] = IF exact THEN "retained" ELSE @]
     /\ UNCHANGED ObserverLegacy
 SFNext == SFDrive \/ SFFail \/ SFHold \/ SFReserve \/ SFDeliver \/ SFEffectHold
-    \/ SFRelease \/ SFRowClear \/ SFCompletion \/ SFNoRowClose \/ SFTokenWakeBefore \/ SFLaterSettle \/ SFNotice \/ SFCauseClears
+    \/ SFRelease \/ SFRowClear \/ SFEarlyWakeConsumed \/ SFCompletion \/ SFClosingComplete \/ SFTokenWakeBefore \/ SFLaterSettle \/ SFNotice \/ SFCauseClears
     \/ SFDuplicateCompletion \/ SFConsumedElsewhere \/ SFRestart \/ SFClear \/ SFUserStop \/ SFStaleCallback
 SFSpec == StartFailureInit /\ [][SFNext]_vars
     /\ WF_vars(SFDrive) /\ WF_vars(SFFail) /\ WF_vars(SFHold) /\ WF_vars(SFReserve)
     /\ WF_vars(SFDeliver) /\ WF_vars(SFRelease) /\ WF_vars(SFCompletion)
-    /\ WF_vars(SFRowClear) /\ WF_vars(SFNoRowClose) /\ WF_vars(SFLaterSettle) /\ WF_vars(SFNotice) /\ WF_vars(SFCauseClears)
+    /\ WF_vars(SFRowClear) /\ WF_vars(SFClosingComplete) /\ WF_vars(SFLaterSettle) /\ WF_vars(SFNotice) /\ WF_vars(SFCauseClears)
 
 ClosingWakesOnce == SF.closeWakes <= SF.closes
 StartAttemptsBounded == SF.starts <= 2

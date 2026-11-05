@@ -148,7 +148,7 @@ impl Owner {
         self.held = None;
         Ok(Some(retain))
     }
-    pub(crate) fn start_row_removed(&mut self, pin: &serde_json::Value) -> bool {
+    pub(crate) fn start_cleanup_completed(&mut self, pin: &serde_json::Value) -> bool {
         if !self
             .starts
             .closing
@@ -174,3 +174,7 @@ impl Owner {
         self.commit(next)
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "start_failure_tests.rs"]
+mod tests;

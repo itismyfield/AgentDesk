@@ -85,3 +85,5 @@ input-single-path/InputOwnershipRowClearDelayed.cfg	InputOwnership	-	-
 input-single-path/InputOwnershipTokenWakeBefore.cfg	InputOwnership	NoStartDuringExactCleanup	-
 input-single-path/InputOwnershipEarlyRetainBefore.cfg	InputOwnership	FirstOpaqueFailureKept	EarlyClearDelivers
 input-single-path/InputOwnershipReserveResetBefore.cfg	InputOwnership	ReserveResetsFailures	-
+input-single-path/InputOwnershipPolicyEarlyRemove.cfg	InputOwnership	-	-
+input-single-path/InputOwnershipPolicyRowOnlyBefore.cfg	InputOwnership	RecoveryCreditPreserved	FailureEventuallyResolved

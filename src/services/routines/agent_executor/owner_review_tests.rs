@@ -429,3 +429,58 @@ async fn owner_observer_ignores_a_held_attempts_completion_and_completes_its_ret
     pool.close().await;
     db.drop().await;
 }
+
+#[tokio::test]
+async fn start_failure_retained_routine_closes_without_retry_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (db, pool, store, executor, run, handle) = accepted_fixture().await;
+    let retained = handle
+        .v2_request(|slot| {
+            let owner = slot.as_mut().ok_or("owner")?;
+            let front = owner.front().ok_or("front")?;
+            owner.grant_front(&front)?;
+            owner
+                .claim_turn(front.1.message_id, &front)
+                .ok_or("claim")?;
+            let kind =
+                serde_json::from_value(json!("endpoint_not_local")).map_err(|e| e.to_string())?;
+            owner.start_failed(
+                &front,
+                owner.claim_number(),
+                std::slice::from_ref(&front.1),
+                None,
+                kind,
+                "typed refusal",
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(retained, Some(true));
+    let poll = || {
+        OWNER.scope(
+            handle.clone(),
+            STARTS.scope(
+                RefCell::new(VecDeque::new()),
+                executor.poll_agent_runs(&store, 10, false),
+            ),
+        )
+    };
+    assert!(poll().await.unwrap().is_empty());
+    assert!(poll().await.unwrap().is_empty());
+    let state: (String, i32, Option<DateTime<Utc>>, String) = sqlx::query_as(
+        "SELECT status,retry_count,next_retry_at,error FROM routine_runs WHERE id=$1",
+    )
+    .bind(&run.run_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((&*state.0, state.1, state.2), ("failed", 0, None));
+    assert!(state.3.starts_with("start_rejected: "));
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM routine_runs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    pool.close().await;
+    db.drop().await;
+}

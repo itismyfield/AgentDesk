@@ -117,11 +117,24 @@ pub(super) async fn may_observe(
         .await
         .map_err(anyhow::Error::msg)?
     {
+        #[cfg(test)]
+        let test = REJECTION_TEST.try_with(Clone::clone).ok();
+        #[cfg(test)]
+        let pool = match &test {
+            Some((pool, _)) => pool.clone(),
+            None => input.runtime_pool().await.map_err(anyhow::Error::msg)?,
+        };
+        #[cfg(not(test))]
         let pool = input.runtime_pool().await.map_err(anyhow::Error::msg)?;
         let delivery = delivery.clone();
         // The poller's transaction already holds this row; close after it releases its locks.
         tokio::spawn(async move {
-            if let Err(error) = close_start_rejected(&pool, &delivery, &reason).await {
+            let result = close_start_rejected(&pool, &delivery, &reason).await;
+            #[cfg(test)]
+            if let Some((_, done)) = test {
+                let _ = done.send(result.is_ok());
+            }
+            if let Err(error) = result {
                 tracing::warn!(delivery_id=%delivery.delivery_id,%error,"owner rejection terminal close remains owed");
             }
         });
@@ -327,7 +340,7 @@ pub(super) async fn bind_observer(
     Ok(updated.rows_affected() == 1)
 }
 
-async fn close_start_rejected(
+pub(super) async fn close_start_rejected(
     pool: &PgPool,
     delivery: &RunningAgentDelivery,
     reason: &str,
@@ -373,3 +386,6 @@ async fn close_start_rejected(
     tx.commit().await?;
     Ok(())
 }
+
+#[cfg(test)]
+tokio::task_local! { pub(super) static REJECTION_TEST: (PgPool,tokio::sync::mpsc::UnboundedSender<bool>); }

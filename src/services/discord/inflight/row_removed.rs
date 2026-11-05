@@ -84,3 +84,7 @@ pub(super) fn unlink(path: &Path) -> std::io::Result<()> {
     removed(path, pin);
     Ok(())
 }
+
+#[cfg(all(test, unix))]
+#[path = "row_removed_tests.rs"]
+mod tests;

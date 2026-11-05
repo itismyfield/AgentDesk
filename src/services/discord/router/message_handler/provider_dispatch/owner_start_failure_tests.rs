@@ -16,6 +16,7 @@ const B: u64 = 7_787_002;
 #[derive(Debug)]
 enum Signal {
     Wake,
+    Pass,
     ThirdStart,
     Payload(u64, String),
     Closed(u64),
@@ -26,6 +27,7 @@ impl Drop for WakeScope {
     fn drop(&mut self) {
         counted::set_owner_wake_for_tests(self.0, None);
         *dispatch::CLAUDE_LEGACY_PROBE.lock().unwrap() = None;
+        *dispatch::start_failure::FACTS.lock().unwrap() = None;
     }
 }
 
@@ -53,7 +55,14 @@ fn request(channel: ChannelId, message: u64) -> crate::services::discord::Intake
 
 /// `live` enables the acceptance oracle when the production policy lands. Both modes use the
 /// same ingress, owner drive, intake, producer, bridge and completion listener.
-async fn fixture(failure: &'static str, held: bool, live: bool, recover: bool) {
+async fn fixture(
+    failure: &'static str,
+    held: bool,
+    live: bool,
+    recover: bool,
+    policy_early: bool,
+    confirmed: u8,
+) {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
@@ -150,27 +159,46 @@ async fn fixture(failure: &'static str, held: bool, live: bool, recover: bool) {
                         hook(scope::Lineage::Created, target, source, None, submit)
                     }),
                 ));
-                let (finished, bridge) = tokio::sync::oneshot::channel();
-                *crate::services::discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
+                if confirmed == 0 || id != A {
+                    let (finished, bridge) = tokio::sync::oneshot::channel();
+                    *crate::services::discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
                     .lock()
                     .unwrap() = Some((channel, finished));
-                tokio::spawn(async move {
-                    tokio::time::timeout(BUDGET, bridge)
-                        .await
-                        .expect("bridge release deadline")
-                        .expect("real bridge completed");
-                    let _ = signals.send(Signal::Closed(id));
+                    tokio::spawn(async move {
+                        tokio::time::timeout(BUDGET, bridge)
+                            .await
+                            .expect("bridge release deadline")
+                            .expect("real bridge completed");
+                        let _ = signals.send(Signal::Closed(id));
+                    });
+                }
+                let _hosts = (confirmed > 0 && id == A).then(|| {
+                    crate::config::session_hosts::force_for_test(
+                        Some("fixture-local"),
+                        &[(channel.get(), "fixture-remote")],
+                    )
                 });
                 start_idle(shared, channel, front).await
             })
         })
     };
-    let drive = owner_drive(
+    let mut drive = owner_drive(
         (mailbox.clone(), Some(pool.clone())),
         (ProviderKind::Claude, channel.get()),
         idle,
         Some(shared.clone()),
     );
+    let settled = drive.settled.clone();
+    let pass = signals.clone();
+    Arc::get_mut(&mut drive).unwrap().settled = Some(Arc::new(move || {
+        let (settled, pass) = (settled.clone(), pass.clone());
+        Box::pin(async move {
+            if let Some(settled) = settled {
+                settled().await;
+            }
+            let _ = pass.send(Signal::Pass);
+        })
+    }));
     let wake = signals.clone();
     assert!(
         counted::set_owner_wake_for_tests(
@@ -193,6 +221,18 @@ async fn fixture(failure: &'static str, held: bool, live: bool, recover: bool) {
     );
     completion.listener_ready(BUDGET).await;
     for id in [A, B] {
+        if confirmed == 2 && id == A {
+            let original: PendingQueueItem = serde_json::from_value(json!({"author_id":A,"message_id":A,"channel_id":channel.get(),"queued_generation":1,"text":"입력 A — 원문 보존","has_reply_boundary":true})).unwrap();
+            let admitted = crate::services::discord::queue_io::input_owner::admission::admit_with_context(
+                &mailbox, &original, crate::services::discord::queue_io::input_owner::admission::AdmissionTicket::new(),
+                json!({"origin":"headless","request_owner":A,"request_owner_name":"fixture","source":"fixture","is_dm":false,"synthetic_label":"fixture-headless"})
+            ).await;
+            assert!(matches!(
+                admitted,
+                crate::services::discord::queue_io::input_owner::admission::Admission::Accepted(_)
+            ));
+            continue;
+        }
         let admitted = input_ingress::intake(
             &shared,
             &ProviderKind::Claude,
@@ -210,7 +250,122 @@ async fn fixture(failure: &'static str, held: bool, live: bool, recover: bool) {
             "only ingress wakes precede the first drive"
         );
     }
+    let (facts, mut observed_facts) = mpsc::unbounded_channel();
+    if policy_early {
+        *dispatch::start_failure::FACTS.lock().unwrap() = Some((channel.get(), facts));
+    }
+    let (bridge_entered, bridge_release) = if policy_early {
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (release, gate) = tokio::sync::oneshot::channel();
+        *dispatch::start_failure::BRIDGE_GATE.lock().unwrap() =
+            Some((channel.get(), entered, gate));
+        (Some(waiting), Some(release))
+    } else {
+        (None, None)
+    };
+    let (commit_entered, commit_release) = if policy_early {
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (release, gate) = tokio::sync::oneshot::channel();
+        *dispatch::start_failure::COMMIT_GATE.lock().unwrap() =
+            Some((channel.get(), entered, gate));
+        (Some(waiting), Some(release))
+    } else {
+        (None, None)
+    };
+    let mut notice_lock = if std::env::var_os("I7787_NOTICE_BLOCKED").is_some() {
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE message_outbox IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        Some(tx)
+    } else {
+        None
+    };
     crate::services::discord::queue_io::input_owner::drive::wake(drive.clone());
+    if let (Some(entered), Some(release)) = (commit_entered, commit_release) {
+        tokio::time::timeout(BUDGET, entered)
+            .await
+            .unwrap()
+            .unwrap();
+        let before = mailbox
+            .v2_request(|slot| {
+                let owner = slot.as_ref().ok_or("owner")?;
+                Ok(json!({"snapshot":owner.json()?,"front_blocked":owner.front().is_none()}))
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            before["front_blocked"], true,
+            "actor closing committed before removal"
+        );
+        assert!(mailbox.has_active_turn().await.unwrap());
+        let rt = rquickjs::Runtime::new().unwrap();
+        let ctx = rquickjs::Context::full(&rt).unwrap();
+        let removed: String = ctx.with(|ctx| {
+            crate::engine::ops::register_globals_with_supervisor_and_pg(
+                &ctx,
+                None,
+                crate::supervisor::BridgeHandle::new(),
+            )
+            .unwrap();
+            ctx.eval(format!(
+                "JSON.stringify(agentdesk.inflight.remove('claude','{}'))",
+                channel.get()
+            ))
+            .unwrap()
+        });
+        assert_eq!(serde_json::from_str::<Value>(&removed).unwrap()["ok"], true);
+        loop {
+            let (_, fact) = tokio::time::timeout(BUDGET, observed_facts.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if fact == "row_removed" {
+                break;
+            }
+        }
+        assert!(mailbox.has_active_turn().await.unwrap());
+        release.send(()).unwrap();
+        tokio::time::timeout(BUDGET, bridge_entered.unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        loop {
+            let event = tokio::time::timeout(BUDGET, received.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if matches!(event, Signal::Pass) {
+                break;
+            }
+            assert!(
+                !matches!(event, Signal::Wake),
+                "row alone must not wake the drive"
+            );
+            println!("POLICY_EARLY_PENDING {event:?}");
+        }
+        assert!(mailbox.has_active_turn().await.unwrap());
+        let blocked = mailbox
+            .v2_request(|slot| Ok(slot.as_ref().ok_or("owner")?.front().is_none()))
+            .await
+            .unwrap();
+        assert!(blocked, "row deletion alone cannot clear closing");
+        while let Ok(event) = received.try_recv() {
+            assert!(
+                !matches!(event, Signal::Wake),
+                "no wake before exact token release"
+            );
+        }
+        println!(
+            "POLICY_EARLY_ROW_REMOVAL token_active=true actor_committed=true wake_pass_finished=true state={}",
+            mailbox
+                .v2_request(|slot| slot.as_ref().ok_or("owner")?.json())
+                .await
+                .unwrap()
+        );
+        bridge_release.unwrap().send(()).unwrap();
+    }
     let mut payloads = Vec::new();
     let mut closes = 0;
     let mut closed_ids = Vec::new();
@@ -219,6 +374,7 @@ async fn fixture(failure: &'static str, held: bool, live: bool, recover: bool) {
         while let Some(signal) = received.recv().await {
             println!("START_FAILURE_SIGNAL {signal:?}");
             match signal {
+                Signal::Pass => {}
                 Signal::Wake => {
                     if !third {
                         crate::services::discord::queue_io::input_owner::drive::wake(drive.clone());
@@ -230,7 +386,15 @@ async fn fixture(failure: &'static str, held: bool, live: bool, recover: bool) {
                         break;
                     }
                 }
-                Signal::Payload(id, frame) => payloads.push((id, frame)),
+                Signal::Payload(id, frame) => {
+                    payloads.push((id, frame));
+                    if id == B {
+                        if let Some(tx) = notice_lock.take() {
+                            println!("B_PAYLOAD_WHILE_NOTICE_OUTBOX_LOCKED");
+                            tx.rollback().await.unwrap();
+                        }
+                    }
+                }
                 Signal::Closed(id) => {
                     closes += 1;
                     closed_ids.push(id);
@@ -266,9 +430,14 @@ async fn fixture(failure: &'static str, held: bool, live: bool, recover: bool) {
     )
     .is_some();
     let drain = crate::services::discord::queue_io::input_owner::notice::drain;
-    drain(&pool, &mailbox, "claude", channel.get())
-        .await
-        .unwrap();
+    crate::services::discord::queue_io::input_owner::notice::drain_synchronously_for_tests(
+        &pool,
+        &mailbox,
+        "claude",
+        channel.get(),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         drain(&pool, &mailbox, "claude", channel.get())
             .await
@@ -311,18 +480,26 @@ async fn fixture(failure: &'static str, held: bool, live: bool, recover: bool) {
     println!("START_FAILURE_EVIDENCE {evidence}");
     if live {
         assert!(!third, "third A start is forbidden: {evidence}");
-        assert_eq!(starts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            starts.load(Ordering::SeqCst),
+            if confirmed > 0 { 1 } else { 2 }
+        );
         assert_eq!(
             notices,
             usize::from(!recover),
             "A retention is separate from placeholders and B output"
         );
         assert_eq!(error_cards, 0, "start failures use the NotSent arm");
-        assert_eq!(closed_ids.iter().filter(|id| **id == A).count(), 2);
+        assert_eq!(
+            closed_ids.iter().filter(|id| **id == A).count(),
+            if confirmed > 0 { 0 } else { 2 }
+        );
         assert_eq!(closed_ids.iter().filter(|id| **id == B).count(), 1);
         assert_eq!(
             deletes,
-            if recover {
+            if confirmed > 0 {
+                0
+            } else if recover {
                 1
             } else {
                 starts.load(Ordering::SeqCst)
@@ -400,6 +577,8 @@ async fn start_failure_repeated_retains_once_and_delivers_b_pg() {
         false,
         true,
         false,
+        false,
+        0,
     )
     .await;
 }
@@ -415,7 +594,15 @@ async fn start_failure_s2_not_sent_frame_deletes_placeholder_without_notice() {
     ) {
         return;
     }
-    fixture("NotSent(\"herdr_root_recovery_held\")", true, false, false).await;
+    fixture(
+        "NotSent(\"herdr_root_recovery_held\")",
+        true,
+        false,
+        false,
+        false,
+        0,
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -429,5 +616,63 @@ async fn start_failure_recovers_before_retry_without_a_notice_pg() {
     ) {
         return;
     }
-    fixture("opaque context I/O", false, true, true).await;
+    fixture("opaque context I/O", false, true, true, false, 0).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_failure_policy_removal_before_token_release_keeps_progress_pg() {
+    if !isolated(
+        concat!(
+            module_path!(),
+            "::start_failure_policy_removal_before_token_release_keeps_progress_pg"
+        )
+        .trim_start_matches("agentdesk::"),
+    ) {
+        return;
+    }
+    fixture("opaque before input", false, true, false, true, 0).await;
+}
+
+#[tokio::test]
+async fn start_failure_discord_preserves_typed_confirmed_refusal_pg() {
+    if !isolated(
+        concat!(
+            module_path!(),
+            "::start_failure_discord_preserves_typed_confirmed_refusal_pg"
+        )
+        .trim_start_matches("agentdesk::"),
+    ) {
+        return;
+    }
+    fixture("unused typed refusal", false, true, false, false, 1).await;
+}
+#[tokio::test]
+async fn start_failure_headless_preserves_typed_confirmed_refusal_pg() {
+    if !isolated(
+        concat!(
+            module_path!(),
+            "::start_failure_headless_preserves_typed_confirmed_refusal_pg"
+        )
+        .trim_start_matches("agentdesk::"),
+    ) {
+        return;
+    }
+    fixture("unused typed refusal", false, true, false, false, 2).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_failure_blocked_notice_does_not_block_b_pg() {
+    if !isolated(
+        concat!(
+            module_path!(),
+            "::start_failure_blocked_notice_does_not_block_b_pg"
+        )
+        .trim_start_matches("agentdesk::"),
+    ) {
+        return;
+    }
+    unsafe {
+        std::env::set_var("I7787_NOTICE_BLOCKED", "1");
+    }
+    fixture("opaque before input", false, true, false, false, 0).await;
 }

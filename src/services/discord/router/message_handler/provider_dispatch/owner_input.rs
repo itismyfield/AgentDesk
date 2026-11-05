@@ -688,7 +688,14 @@ async fn start_idle(
         && let Some(kind) = super::start_failure::confirmed(&refusal)
     {
         if failed
-            .commit(kind, refusal.to_string(), None, Some(shared.clone()))
+            .commit(
+                kind,
+                refusal.to_string(),
+                None,
+                Some(shared.clone()),
+                channel,
+                None,
+            )
             .await?
             .is_some()
         {
