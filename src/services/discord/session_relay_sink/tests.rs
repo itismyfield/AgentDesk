@@ -2369,7 +2369,8 @@ async fn deliver_placeholder_terminal_through_sink(
         "{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":{text}}}]}}}}\n\
          {{\"type\":\"result\",\"result\":{text}}}\n"
     );
-    let terminal = terminal_frame_offset(&binding, &payload, 1, 256, 702, started_at, Some(0));
+    let mut terminal = terminal_frame_offset(&binding, &payload, 1, 256, 702, started_at, Some(0));
+    terminal.relay_generation_mtime_ns = Some(dr::current_generation_mtime_ns(&session));
     let outcome = sink.deliver(&terminal).await;
     let calls = gateway.replace_calls.load(Ordering::SeqCst);
     (outcome, shared, session, calls)
