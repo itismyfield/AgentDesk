@@ -2,13 +2,17 @@
 use super::*;
 use crate::services::claude_tui::submission_fence::IdleStashContext;
 use crate::services::provider::cancel_token_claude_interrupt::StopCancel;
-use std::sync::Mutex;
+use std::sync::{
+    Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 /// The managed attempt; its fence claim is the writer's last step before its first key.
 struct Attempt {
     session: String,
     channel: u64,
     stop: Option<Arc<CancelToken>>,
+    starts: AtomicUsize,
     outcomes: Mutex<Vec<InputRun>>,
 }
 impl SubmissionFence for Attempt {
@@ -37,7 +41,9 @@ impl SubmissionFence for Attempt {
     }
 }
 impl guarded_outcome::Owner for Attempt {
-    fn started(&self) {}
+    fn started(&self) {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+    }
     fn finished(&self, run: &InputRun) {
         self.outcomes.lock().unwrap().push(run.clone());
     }
@@ -82,6 +88,7 @@ fn a_fresh_writer_sends_no_key_once_a_stop_took_its_gate() {
             session: name.clone(),
             channel: 7_754_400 + n as u64,
             stop: (case == "stop-before-first-key").then(|| token.clone()),
+            starts: AtomicUsize::new(0),
             outcomes: Mutex::new(Vec::new()),
         });
         // A stop while the pane is still starting reaches the same cancel decision.
@@ -113,6 +120,11 @@ fn a_fresh_writer_sends_no_key_once_a_stop_took_its_gate() {
                 "{case}: the stop published main's cancel"
             );
         }
+        assert_eq!(
+            attempt.starts.load(Ordering::SeqCst),
+            usize::from(case == "writer-first"),
+            "{case}: only the writer that takes the first-key gate starts its owner"
+        );
         let keys = || {
             std::thread::sleep(Duration::from_millis(300));
             events(&root)

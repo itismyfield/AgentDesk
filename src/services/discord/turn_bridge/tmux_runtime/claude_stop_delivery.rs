@@ -256,6 +256,40 @@ pub(super) async fn interrupt_claude_session(
     observed_open: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     expected_identity: Option<ClaudeStopTurnIdentity>,
 ) -> ProviderTurnInterruptOutcome {
+    interrupt_observed_claude_session(
+        token,
+        tmux_session,
+        reason,
+        observed_open,
+        expected_identity,
+        false,
+    )
+    .await
+}
+
+pub(super) async fn interrupt_owned_claude_session(
+    session: String,
+    reason: &str,
+    observed_open: Arc<dyn Fn() -> bool + Send + Sync>,
+) -> ProviderTurnInterruptOutcome {
+    interrupt_observed_claude_session(None, Some(session), reason, Some(observed_open), None, true)
+        .await
+}
+
+fn owned_pane_evidence(pane: &str, owner_input: bool) -> (bool, bool, bool) {
+    let (ready, active, draft) = claude_tui_stop_pane_evidence(pane);
+    let foreground = owner_input && super::claude_stop_pane::foreground_tool_running(pane);
+    (ready && !foreground, active, draft)
+}
+
+async fn interrupt_observed_claude_session(
+    token: Option<&Arc<CancelToken>>,
+    tmux_session: Option<String>,
+    reason: &str,
+    observed_open: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    expected_identity: Option<ClaudeStopTurnIdentity>,
+    owner_input: bool,
+) -> ProviderTurnInterruptOutcome {
     // #3169: an anonymous internal PreserveSession teardown
     // (`turn_bridge_cancelled`, no user `cancel_source`) must NOT cancel the
     // live claude turn — leave it running for the watcher to reconcile, exactly
@@ -361,7 +395,7 @@ pub(super) async fn interrupt_claude_session(
         let (pane_ready, pane_active, pane_has_draft) =
             pane.as_deref().map_or((false, false, false), |pane| {
                 if protected_delivery {
-                    claude_tui_stop_pane_evidence(pane)
+                    owned_pane_evidence(pane, owner_input)
                 } else {
                     super::claude_stop_pane::legacy_evidence(pane)
                 }
@@ -490,7 +524,7 @@ pub(super) async fn interrupt_claude_session(
             }
             let pane = crate::services::platform::tmux::capture_pane(&session_for_task, -160)
                 .ok_or("Claude stop pane unavailable before Escape")?;
-            let (ready, active, draft) = claude_tui_stop_pane_evidence(&pane);
+            let (ready, active, draft) = owned_pane_evidence(&pane, owner_input);
             let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(
                 &session_for_task,
             );

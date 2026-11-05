@@ -421,6 +421,13 @@ async fn begin_stop(
     }
     #[cfg(not(unix))]
     let _ = reason;
+    if matches!(judgement, Ok(None))
+        && *provider == ProviderKind::Claude
+        && !crate::services::tui_o::turn_mode::transcript_turns(channel.get())
+        && let Some(reason) = reason
+    {
+        return super::owned_input_stop::interrupt(shared, channel, reason).await;
+    }
     // A confirmed channel's Discord turn still holds its mailbox token and keeps the channel stop.
     if matches!(judgement, Ok(None))
         && crate::services::tui_o::turn_mode::transcript_turns(channel.get())

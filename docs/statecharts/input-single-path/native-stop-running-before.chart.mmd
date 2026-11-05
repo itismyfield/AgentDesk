@@ -1,0 +1,56 @@
+---
+title: "외부 Claude 턴에 흡수된 자기 입력의 중단 (216858a711)"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks OwnInputStops
+    lg1: Path to the OwnInputStops bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: 시작 전
+  s1: 외부 턴 실행
+  s2: 원장 확인 불가
+  s3: 중단 없음
+  s4: 자기 입력 대기
+  s5: 릴레이가 맡은 외부 턴
+  s6: 실행 분기 자기 root 미확인
+  s7: 외부 입력 섞임
+  s8: 자기 입력 흡수
+  s9: 중단 전달
+  s10: 자기 입력 중단 실패
+  [*] --> s0
+  s0 --> s1: 외부 턴 시작
+  s1 --> s2: 재시작 후 원장 재조회
+  s1 --> s3: 내 중단 명령
+  s1 --> s4: 내 입력 붙여넣기
+  s1 --> s5: 릴레이가 턴 인계
+  s1 --> s6: 실행 분기에서 내 입력 제출
+  s1 --> s7: 다른 입력 유입
+  s2 --> s3: 내 중단 명령
+  s2 --> s5: 릴레이가 턴 인계
+  s2 --> s6: 실행 분기에서 내 입력 제출
+  s4 --> s2: 재시작 후 원장 재조회
+  s4 --> s3: 내 중단 명령
+  s4 --> s8: Claude가 내 입력 흡수
+  s4 --> s5: 릴레이가 턴 인계
+  s4 --> s7: 다른 입력 유입
+  s5 --> s2: 재시작 후 원장 재조회 or Claude가 내 입력 흡수
+  s5 --> s9: 내 중단 명령
+  s5 --> s7: 다른 입력 유입
+  s6 --> s10: 내 중단 명령
+  s6 --> s7: 다른 입력 유입
+  s7 --> s6: 실행 분기에서 내 입력 제출
+  s7 --> s2: 재시작 후 원장 재조회 or Claude가 내 입력 흡수
+  s7 --> s3: 내 중단 명령
+  s8 --> s2: 재시작 후 원장 재조회
+  s8 --> s9: 내 중단 명령
+  s8 --> s5: 릴레이가 턴 인계
+  s8 --> s7: 다른 입력 유입
+  s2 --> s7: 릴레이가 턴 인계
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s6 bugPath
+  class s10 breaks
+  class s10 bugPath

@@ -21,6 +21,7 @@ pub(in crate::services::discord) use native_stop::NativeStop;
 mod codex_stop_delivery;
 mod interrupt_policy;
 mod judged_stop;
+mod owned_input_stop;
 mod pid_exit;
 mod process_backend_cancel;
 mod process_table;
@@ -151,6 +152,24 @@ async fn interrupt_session_on(
     reason: &str,
     observed_open: Arc<dyn Fn() -> bool + Send + Sync>,
 ) -> ProviderTurnInterruptOutcome {
+    interrupt_observed_session_on(target, provider, reason, observed_open, false).await
+}
+
+async fn interrupt_owned_input_on(
+    target: &StopTarget,
+    reason: &str,
+    observed_open: Arc<dyn Fn() -> bool + Send + Sync>,
+) -> ProviderTurnInterruptOutcome {
+    interrupt_observed_session_on(target, &ProviderKind::Claude, reason, observed_open, true).await
+}
+
+async fn interrupt_observed_session_on(
+    target: &StopTarget,
+    provider: &ProviderKind,
+    reason: &str,
+    observed_open: Arc<dyn Fn() -> bool + Send + Sync>,
+    owner_input: bool,
+) -> ProviderTurnInterruptOutcome {
     let Some(name) = target.legacy_name() else {
         return stop_host::not_sent();
     };
@@ -158,6 +177,14 @@ async fn interrupt_session_on(
         return stop_host::not_sent();
     }
     if matches!(provider, ProviderKind::Claude) {
+        if owner_input {
+            return claude_stop_delivery::interrupt_owned_claude_session(
+                name.as_str().to_string(),
+                reason,
+                observed_open,
+            )
+            .await;
+        }
         return claude_stop_delivery::interrupt_claude_session(
             None,
             Some(name.as_str().to_string()),

@@ -602,6 +602,79 @@ pub(crate) fn row_owner(provider: &str, session: &str, prompts: &[String], row: 
     owner_in(&store, (provider, session), &hashes, row)
 }
 
+/// A queue-owned Discord registration remains proof after its display fields are compacted.
+pub(crate) fn discord_owner_attempt(
+    session: &str,
+    native_session: &str,
+    transcript: &Path,
+    id: &str,
+) -> Result<bool, String> {
+    let raw = std::fs::read(path()?).map_err(|error| error.to_string())?;
+    let value = compat::parse(&raw)?;
+    if !compat::envelope(&value)? {
+        return serde_json::from_value::<Store>(value)
+            .map(|_| false)
+            .map_err(|error| error.to_string());
+    }
+    let snapshot: compat::HistoryV2 =
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+    let file = file_id(&std::fs::metadata(transcript).map_err(|error| error.to_string())?);
+    let mut entries: Vec<_> = snapshot
+        .live
+        .into_iter()
+        .zip(value["live"].as_array().into_iter().flatten())
+        .map(|(entry, bound)| (entry, &bound["registration"]))
+        .collect();
+    for passive in &snapshot.passive {
+        if passive["state"] == "abandoned" || passive["entry"].is_null() {
+            continue;
+        }
+        let entry: Entry =
+            serde_json::from_value(passive["entry"].clone()).map_err(|error| error.to_string())?;
+        entries.push((entry, &passive["registration"]));
+    }
+    for (entry, registration) in entries {
+        let key = &registration["key"];
+        let identity = &key["identity"];
+        let discord_key = |value: &serde_json::Value| {
+            value
+                .as_u64()
+                .is_some_and(crate::services::tui_input::input_key::is_discord_key)
+        };
+        if entry.id != id
+            || entry.provider != "claude"
+            || entry.session != session
+            || entry.path != transcript
+            || entry.file != file
+            || entry.append.is_some()
+            || key["attempt"]["nonce"] != id
+            || registration["frame"]["class_hash"].as_str() != Some(entry.class_hash.as_str())
+            || !discord_key(&identity["primary"])
+            || !identity["sources"].as_array().is_some_and(|sources| {
+                !sources.is_empty()
+                    && sources
+                        .iter()
+                        .all(|source| discord_key(&source["message_id"]))
+            })
+        {
+            continue;
+        }
+        let source: v2::Source = serde_json::from_value(registration["source"].clone())
+            .map_err(|error| error.to_string())?;
+        source.validate(key)?;
+        if source.provider == "claude"
+            && source.target["owner"] == session
+            && source.session_id == native_session
+            && source.transcript == transcript
+            && source.file == file
+            && source.offset == entry.offset
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn owner_in(
     store: &Store,
     (provider, session): (&str, &str),

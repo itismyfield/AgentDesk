@@ -19,6 +19,9 @@ execution-authority/ExecutionAuthorityWorker.cfg	ExecutionAuthority	-	-
 host-migration/HostMigration.cfg	HostMigration	NoDeadlock,RecordMatchesProcesses	-
 host-migration/HostMigrationClean.cfg	HostMigration	-	-
 host-migration/HostMigrationIdOnly.cfg	HostMigration	NoDeadlock	-
+input-single-path/InputNativeStop.cfg	InputNativeStop	-	-
+input-single-path/InputNativeStopBefore.cfg	InputNativeStop	OwnInputStops	-
+input-single-path/InputNativeStopRunningBefore.cfg	InputNativeStop	OwnInputStops	-
 input-single-path/InputOwnership.cfg	InputOwnership	HeldResumes,NoSilentLoss,NoSilentLossObserved	-
 input-single-path/InputOwnershipA2d1.cfg	InputOwnership	AnswerOnce,DraftToldOnce,NoSilentLoss,NoTimedRetry,StartNotDropped	-
 input-single-path/InputOwnershipA2d2.cfg	InputOwnership	AnswerOnce,HeldResumes,NoSilentLoss,NoSilentLossObserved	-

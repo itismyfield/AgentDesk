@@ -234,11 +234,18 @@ def render(name):
     os.write(1, ('\x1b[?2004h\x1b[2J\x1b[32;1H' + (root/name).read_text().replace('\n','\r\n')).encode())
 def event(name):
     with (root/'events').open('a') as out: out.write(name+'\n')
+def transcript():
+    return pathlib.Path((root/'record-path').read_text()) if (root/'record-path').exists() else root/'transcript'
 def record(content):
-    with (root/'transcript').open('a') as out:
+    with transcript().open('a') as out:
         row = {'type':'user','message':{'content':content}}
         if (root/'native-sid').exists():
             row.update(sessionId=(root/'native-sid').read_text(), uuid=(root/'native-uuid').read_text())
+        if (root/'queued-row').exists():
+            row.update(type='attachment', attachment={'type':'queued_command','prompt':content,
+                'commandMode':'prompt','origin':{'kind':'human'},'humanTurn':True})
+            row.pop('message', None)
+            if isinstance(content,str) and content.startswith('foreign '): row['uuid'] += '-foreign'
         out.write(json.dumps(row)+'\n')
 render('before')
 (root/'ready').write_text('ready')
@@ -272,10 +279,18 @@ while True:
         if mode == 'swallow' and not (root/'swallowed').exists():
             (root/'swallowed').write_text('1'); pending=b''; continue
         body=(root/'body').read_text()
+        if (root/'unabsorbed').exists():
+            row={'type':'queue-operation','operation':'enqueue','content':body}
+            if (root/'native-sid').exists(): row['sessionId']=(root/'native-sid').read_text()
+            with transcript().open('a') as out: out.write(json.dumps(row)+'\n')
+            pending=b''; render('after'); continue
+        if (root/'foreign-before').exists(): record('foreign before expected')
+        if (root/'foreign-same').exists(): body += '\nforeign input on the same row'
         if mode == 'foreign': record('foreign before expected')
         if mode == 'wrapped': record('\n\n<pasted_content id="a17f">\n'+body+'\n</pasted_content id="a17f">\n')
         elif mode == 'mixed': record([{'type':'text','text':body},{'type':'tool_result','content':'x'}])
         else: record(body)
+        if (root/'foreign-after').exists(): record('foreign after expected')
         if (root/'draft-stash').exists(): (root/'draft-stash').rename(root/'draft-bytes')
         if (root/'draft-stash-chip').exists(): (root/'draft-stash-chip').rename(root/'draft-chip')
         render('after'); pending=b''
