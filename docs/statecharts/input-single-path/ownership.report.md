@@ -271,7 +271,7 @@ Mutants on `f5`: `nativeNoWatch` breaks `NoSilentLoss` and `NativeHeldResumes`; 
 
 ## #7772: an unreadable pane holds a start, and a start held after its claim is watched (`a7772`)
 
-Code: this PR on main `MAINSHA`. Only `a7772` reaches the new transitions; every other config keeps its state space and result (`A2b`: 130,292 states, as before).
+Code: this PR on main `fba8d4699`. Only `a7772` reaches the new transitions; every other config keeps its state space and result (`A2b`: 130,292 states, as before).
 
 | Code entry (file:line) | Model value range |
 |---|---|
@@ -287,15 +287,16 @@ Code: this PR on main `MAINSHA`. Only `a7772` reaches the new transitions; every
 |---|---|---|
 | `A2b` | every rule holds, 130,292 states | unchanged |
 | `A2bReadGone` | `NativeHeldResumes`, `NoSilentLoss` break | unchanged |
-| `A2bLive` | not a repository cfg (run by hand: holds) | `NativeHeldRuns` holds, A2BLIVE states |
+| `A2bLive` | not a repository cfg (run by hand: holds) | `NativeHeldRuns` holds, 130,292 states |
 | `A2bReadGoneLive` | not a repository cfg (run by hand: violated) | `NativeHeldRuns` violated |
-| `A7772` | — | every rule holds, A7772 states |
-| `A7772Live` | — | `NativeHeldRuns` holds, A7772LIVE states |
+| `A7772` | — | every rule holds (19 rules and NoDeadlock), 471,844 states |
+| `A7772Live` | — | `NativeHeldRuns` holds, 471,844 states |
 | `A7772EarlyUnknownGoes` | — | `EarlyClaimHasIdleProof` breaks |
 | `A7772LateUnknownIdle` | — | `StartOwnTurn` breaks |
 | `A7772LateNoWatch` / `A7772LateNoWatchLive` | — | `NativeHeldResumes`, `NoSilentLoss`, `NoSilentLossObserved` break / `NativeHeldRuns` violated |
 | `A7772LateNoUnwindWait` / `A7772LateNoUnwindWaitLive` | — | `NativeHeldResumes`, `NoSilentLoss`, `NoSilentLossObserved` break / `NativeHeldRuns` violated |
 
+- `InputOwnershipConsumedWaiting` extends this model and now keeps `nr`, `prov` and `seen` unchanged in every step (`CWFixed`); its seven configs reach the same states and results as on main.
 - Out of scope: Codex. `start_target` reads only Claude panes, and the late read runs only for Claude (`owner_input.rs:574-576`, `:795-797`); Codex keeps main's path until slice C adds its reader.
 - Out of scope: Herdr panes; `start_waits` sends a Herdr rest to the event path (`owner_input.rs:544-549`) and the model has one Claude tmux channel.
 - Out of scope: InputPath (#7795) and the native stop (#7755); neither changes when a start is read or held.
