@@ -358,6 +358,37 @@ M1 accepted에 없으므로 accepted count는 기본값 0이며, 기존 zero-rul
 `src/services/routines/legacy_body_census.rs:61`이다. accepted에 없던 ID의 exact 편입도
 TSV에 드러내며 기존 역방향 양수·zero 한도와 나머지 경고 증가를 흡수하지 않는다.
 
+### 나머지 서비스 가족
+
+C7은 C6의 매핑·accepted를 기준으로 남은 167개 모듈을 규칙 96개로 분류한다.
+관측·git·인증 profile·메시지 outbox·memory transport·process boot의 실제
+파일·PG·HTTP·process·cache 실행은 adapter다. dispatch·calendar·SLO·입력 readiness,
+종료 warrant·review 상태·memory scope 선택과 outbox 복구 정책은 application이다.
+manual steer·task completion·분석 DTO·remote profile의 값 계약은 vocabulary이고,
+문자열·identity·marker·증거/관측 window의 계산 leaf는 foundation으로 구분한다.
+실제 entropy를 획득하는 manual steer action handle과 시계·파일을 읽는 summary quota는
+adapter override를 둔다. foundation이라는 이유로 즉시 추출 가능하다고 선언하지 않는다.
+
+review decision·dispatched session·onboarding의 HTTP 최종 응답 조립은 assembly다.
+kanban 서비스와 공개 façade는 application이며, 일반 인증 helper의 HTTP 값만으로
+handler라고 분류하지 않는다. imsg admission은 외부 직렬화 callback을 사용하며
+승자만 전달하고 admission 결과를 정착시키는 application 정책이다.
+Discord issue 카드와 outbox session 안내 표현은 discord로 구분한다.
+부모와 필요한 leaf 규칙을 이번 편입에 함께 넣었고 기존 known 층은 바꾸지 않았다.
+
+편입 증거는 [`module-layer-c7-admission.tsv`](module-layer-c7-admission.tsv)에 둔다.
+신규 역방향은 126 ID·258회, `accepted_indeterminate_count` 합계는 243,
+`grown_since_accepted` 합계는 15다. 증가한 10행은 모두 C6 accepted의 양수·zero에
+없던 ID다. #7783의 census 관측에서 도입됐으며 같은 현재 source의 이전 매핑에서는
+판정 불가 15회, 새 매핑에서는 정확히 역방향 15회다. 기존 역방향·zero 한도를
+올리지 않고 나머지 판정 불가·uncertainty 증가도 기준선에 흡수하지 않는다.
+
+시작과 최종 시점에 진행 중 ref의 source diff를 다시 대조한다. C7의 직접 겹침은
+없으며, C2~C6 분류와 history 7개·C6 보류 15개는 유지한다. 최신 main의
+queued_head V2 start_failure도 상위 미분류 규칙을 상속한다. 따라서 남은 미분류는
+services namespace 1개와 위 보류 23개를 합친 24개다. 새 병합 뒤에는 C4 착지 계약에
+따라 검토된 canonical을 보존하고 일반 감소 갱신·감사를 수행한다.
+
 ## 검토된 모듈 이동의 old→new 대응
 
 이동 대응은 [`layer_moves.toml`](../../scripts/audit_maintainability/layer_moves.toml)에 적는다.
