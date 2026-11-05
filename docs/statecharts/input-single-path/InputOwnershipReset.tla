@@ -11,7 +11,7 @@ allVars == <<vars, resetVars>>
 ResetInit ==
     /\ AdmissionInit
     /\ diskSequence = 1 /\ ownerSequence = 1 /\ thirdPartyWrites = 0
-    /\ ~resetDone /\ liveAdmission = "waiting" /\ catchUpAdmission = "waiting"
+    /\ resetDone = FALSE /\ liveAdmission = "waiting" /\ catchUpAdmission = "waiting"
     /\ committedTickets = 0 /\ originals = 0
 
 \* The raw writer replaces V2 with []; owner API writes advance both, Herdr preserves both.
