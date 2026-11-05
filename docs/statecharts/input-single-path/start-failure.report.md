@@ -19,6 +19,16 @@ currently erases typed causes; preserving them belongs to the live slice.
 | RestartClear | none | Process count reset, reserved adoption, clear, stale callback, user stop |
 | HoldThenDelivered | none | Two uncounted holds, one delivery |
 | RowClearDelayed | none | Failed removal keeps closing; an existing later settle removes the row |
+| EarlyRetainBefore | FirstOpaqueFailureKept, EarlyClearDelivers | Opaque first failure incorrectly retained |
+| ReserveResetBefore | ReserveResetsFailures | Reserve incorrectly carries prior failures |
+
+`FirstOpaqueFailureKept` independently forbids retention or notice after one opaque failure.
+`EarlyClearDelivers` requires A's payload even if a bad policy removed it from the queue.
+`ReserveResetsFailures` checks the reserve state directly, before an effect-held result can hide it.
+The two negative configs inject only those faults; the unmutated policy transitions stay the same.
+Full checker: 74 configs, rc=0, expected/actual mismatches=0 (215.8 s).
+Isolated traces reproduce EarlyClearDelivers exit 13, FirstOpaqueFailureKept exit 12 and
+ReserveResetsFailures exit 12; repository model bytes remain unchanged during those runs.
 
 GREEN checks the proposed policy, not unchanged production behavior. Code-confirmed replay:
 ingress admits A/B (`input_owner/ingress.rs:400–468`); wake grants A (`drive.rs:96–123,168–180`,
@@ -56,3 +66,36 @@ Inside-start bound-gate failure is StartFailedBeforeInput regardless of string. 
 The fixture uses real ingress/drive/intake/producer/bridge/listener, separate POST/delete/payload counts,
 an immediate third-start witness, and payload/closed signals rather than sleeps. `live=true` activates
 its future oracle; PG outbox delivery is wired in the live slice.
+
+## Physical row removal contract
+
+Paths below are relative to `src/services/discord/` at the code SHA above. Fresh birth pins must
+be captured under the existing row lock and notified only after actual unlink/active rename succeeds.
+No actor response is awaited while holding that lock. Missing, mismatch, failed I/O, unknown identity
+and duplicate notifications cannot release another closing pin or create another wake.
+
+| Physical point | Existing path / authority |
+|---|---|
+| `inflight.rs:574` | Policy API `remove_inflight_row_for_policy_op`; public JS `src/engine/ops/exec_ops.rs:313–379` |
+| `inflight/circuit_removal.rs:74` | Checked delete with circuit handoff |
+| `inflight/rebind_reap.rs:311` | Abandoned rebind reap |
+| `inflight/rebind_reap.rs:386` | Other-provider abandoned rebind reap |
+| `inflight/removal.rs:375` | Existing stale-generation invalidation |
+| `inflight/removal/boot_reaper.rs:218` | Locked boot verdict for stale/provider-mismatch/malformed rows |
+| `inflight/clear_store/mod.rs:79` | Ordinary receipt-protected clear |
+| `inflight/clear_store/mod.rs:321` | Guarded active-path archive rename |
+| `inflight/clear_store/mod.rs:481` | User-message-guarded clear |
+| `inflight/clear_store/mod.rs:561` | Zero-owned clear |
+| `inflight/clear_store/mod.rs:599` | Exact snapshot / path-less Herdr remove_row |
+| `inflight/clear_store/mod.rs:648` | Delivered-state clear |
+| `inflight/clear_store/mod.rs:749` | Tmux-response clear |
+| `inflight/clear_store/mod.rs:815` | Lifecycle-guarded clear |
+| `inflight/clear_store/abandon.rs:242` | Exact placeholder-abandon cleanup |
+| `inflight/clear_store/identity.rs:119` | Exact finalizer CAS, marked-row late settle and other captured clears |
+
+Correction to the initial lane table: the policy API is **not** restricted to malformed, zero-owned
+or old-generation rows. It can remove a normal nonzero A, subject to its existing receipt protection,
+lock and discard handoff. It belongs to the notification funnel. Its existing public JS test uses
+user_msg_id=7 (`exec_ops.rs:671–768`); the live test must add matching closing / wake-once assertions.
+The scoped-restore unlink (`inflight/removal/scoped_restore.rs:76`) is behind `#[cfg(test)]`
+(`:3`); it is not a seventeenth production removal point and adds no live cleanup authority.

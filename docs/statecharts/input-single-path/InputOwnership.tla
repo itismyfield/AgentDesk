@@ -915,7 +915,7 @@ SFFail ==
     /\ SF.run = "A" /\ ~SF.reserve /\ SF.cause /\ ~(SFHeld /\ SF.holds < 2)
     /\ SF.claim > 0 /\ SF.callback = SF.claim
     /\ LET n == SFInc(SF.failures["A"], 2)
-           retain == SFPolicy /\ (n = 2 \/ Fix = "KnownPersistent")
+           retain == SFPolicy /\ (n = 2 \/ (Mut = "earlyRetain" /\ n >= 1) \/ Fix = "KnownPersistent")
        IN observer' = [SF EXCEPT !.run = "none", !.proof = TRUE,
             !.failures["A"] = IF SFPolicy THEN n ELSE @,
             !.state["A"] = IF retain THEN "retained" ELSE @,
@@ -940,7 +940,8 @@ SFHold ==
 SFReserve ==
     /\ SF.run # "none" /\ ~SF.reserve
     /\ (SF.run = "B" \/ ~SF.cause)
-    /\ observer' = [SF EXCEPT !.reserve = TRUE, !.failures[SF.run] = 0]
+    /\ observer' = [SF EXCEPT !.reserve = TRUE,
+         !.failures[SF.run] = IF Mut = "reserveResetLost" THEN @ ELSE 0]
     /\ UNCHANGED ObserverLegacy
 SFDeliver ==
     /\ SF.run # "none" /\ SF.reserve
@@ -1063,10 +1064,14 @@ NoStartDuringExactCleanup == ~SF.unsafeGrant /\ (SF.closing => SF.run = "none")
 RecoveryCreditPreserved == SF.closing \/ SF.wake \/ SF.completion \/ SF.token \/ SF.run # "none" \/ SFResolved \/ SFHeld
 HoldNeverCounted == SFHeld => SF.failures["A"] = 0
 NoKnownNotSentWithoutBeforeInput == SF.state["A"] = "retained" => SF.proof /\ SF.holds = 0
+FirstOpaqueFailureKept == SFPolicy /\ Fix # "KnownPersistent" /\ SF.failures["A"] = 1 =>
+    SF.state["A"] # "retained" /\ ~SF.noticeDue /\ SF.noticePosts = 0
+ReserveResetsFailures == SF.reserve => SF.failures[SF.run] = 0
 FailureEventuallyResolved == (SF.proof /\ SF.state["A"] = "queued") ~> SFResolved
 RetainedEventuallyInformed == (SF.state["A"] = "retained") ~> (SF.noticePosts = 1)
 OtherOriginalProgress == SFResolved ~> (SF.payload["B"] = 1)
 RecoveredWithinRetryDelivered == (SF.state["A"] = "queued" /\ [](~SF.cause /\ ~SF.cleared)) ~> (SF.payload["A"] = 1)
 RetainedWakesB == (SF.state["A"] = "retained" /\ ~SF.token) ~> (SF.payload["B"] = 1)
+EarlyClearDelivers == (Fix = "OpaqueNoWakeEarlyClear") => <> (SF.payload["A"] = 1)
 
 =============================================================================
