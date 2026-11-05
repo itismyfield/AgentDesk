@@ -6,9 +6,8 @@ const PERMISSION_MODE: &str =
     "{\"type\":\"permission-mode\",\"permissionMode\":\"bypassPermissions\"}\n";
 const START_WAITS: &str = "NotSent(\"synthetic_waits_idle\")";
 
-/// The rig's tmux behind a script: a pane capture shows `screen` while that file exists, each
-/// `list-panes` liveness read is counted, the read `park-at` names waits for `release`, and once
-/// `fail-after` pane cwd reads were made the next liveness read fails, once.
+/// The rig's tmux behind a script: a capture shows `screen` if it exists, liveness reads are
+/// counted, read `park-at` waits for `release`, and one read fails after `fail-after` cwd reads.
 struct Shim {
     dir: std::path::PathBuf,
 }
