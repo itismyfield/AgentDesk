@@ -1,7 +1,7 @@
 # Owner start failure slice
 
 Historical RED code SHA: `b0bab6ebf693502f86c0b2e2c0307033fa411c29`.
-Live repair code SHA: `2709cab16` (merged by `d134d99b9fcaf4f4cae375919b0df058667a5f28`); two-fact contract follows below.
+Live repair code SHA: `5742a64d54e0f92c7740dcd4c767baf06f00dde2`; two-fact contract follows below.
 `InputOwnership.tla` / `SFSpec` isolates this policy in the `observer` record; older slices keep their transitions.
 The fixed classification is in its StartFailure comment and the fixture header. The historical typed-cause erasure at `host_refusal.rs:28–37` is covered by the live
 Discord and headless entrypoint fixtures.
