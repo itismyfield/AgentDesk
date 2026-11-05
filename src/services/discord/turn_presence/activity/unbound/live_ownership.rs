@@ -189,23 +189,61 @@ impl OwnerInputs {
     /// Whether every runtime's watcher owner and routine receipt for `name` was read and names no
     /// channel but `target`; a conflicting claim or an unread source leaves the owner unresolved.
     pub(super) fn admits(&self, name: &str, target: u64) -> bool {
+        self.admission_guard(name, target).is_ok()
+    }
+
+    pub(super) fn admission_guard(&self, name: &str, target: u64) -> Result<(), &'static str> {
         let watchers = &self.evidence.watchers;
         let own =
             |owner: Option<&Option<u64>>| owner.is_some_and(|o| o.is_none_or(|o| o == target));
-        let Ok(routines) = &self.evidence.routines else {
-            return false;
-        };
-        // A name no registered runtime keyed was never queried, which is not an empty receipt.
+        let routines = self
+            .evidence
+            .routines
+            .as_ref()
+            .map_err(|_| "routine_read")?;
         let mut receipts = routines.for_name(name).peekable();
-        receipts.peek().is_some()
-            && receipts.all(|r| !r.invalid() && r.channels().iter().all(|c| *c == target))
-            && own(watchers.local.get(name))
-            && !watchers.registered.is_empty()
-            && watchers
+        if receipts.peek().is_none() {
+            return Err("routine_name_unqueried");
+        }
+        for receipt in receipts {
+            if receipt.invalid() {
+                return Err("routine_invalid");
+            }
+            if receipt.channels().iter().any(|c| *c != target) {
+                return Err("routine_foreign");
+            }
+        }
+        if !own(watchers.local.get(name)) {
+            return Err("local_claim");
+        }
+        if watchers.registered.is_empty()
+            || !watchers
                 .registered
                 .iter()
                 .all(|owners| own(owners.get(name)))
-            && matches!(self.nonces.get(name), Some(Ok(_)))
+        {
+            return Err("registered_claim");
+        }
+        if !matches!(self.nonces.get(name), Some(Ok(_))) {
+            return Err("nonce_read");
+        }
+        Ok(())
+    }
+
+    pub(super) fn changed_field(&self, other: &Self) -> Option<&'static str> {
+        if !self.membership.same(&other.membership) {
+            Some("owner.membership")
+        } else if self.epoch != other.epoch {
+            Some("owner.epoch")
+        } else if self.evidence != other.evidence {
+            Some("owner.evidence")
+        } else if self.completed_scheduled != other.completed_scheduled {
+            Some("owner.scheduled")
+        } else if self.nonces != other.nonces {
+            Some("spawn_nonce")
+        } else {
+            None
+        }
     }
 
     pub(super) fn local_conflict(&self, name: &str) -> bool {
@@ -253,17 +291,27 @@ impl OwnerInputs {
     }
 
     pub(super) fn files_current(&self) -> bool {
+        self.files_changed_field().is_none()
+    }
+
+    pub(super) fn files_changed_field(&self) -> Option<&'static str> {
         let scheduled_current = match &self.completed_scheduled {
             Ok(proofs) => self
                 .ports
                 .scoped(|| proofs.iter().all(completed_scheduled::Proof::current)),
             Err(_) => true,
         };
-        scheduled_current
-            && self
-                .nonces
-                .iter()
-                .all(|(name, observed)| nonce(name) == *observed)
+        if !scheduled_current {
+            Some("owner.scheduled")
+        } else if self
+            .nonces
+            .iter()
+            .any(|(name, observed)| nonce(name) != *observed)
+        {
+            Some("spawn_nonce")
+        } else {
+            None
+        }
     }
 
     pub(super) fn nonces_valid<'a>(&self, mut names: impl Iterator<Item = &'a str>) -> bool {

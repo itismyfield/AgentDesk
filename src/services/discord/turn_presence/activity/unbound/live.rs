@@ -248,6 +248,21 @@ impl Files {
             && self.recovered == other.recovered
     }
 
+    fn context_changed(&self, other: &Self) -> Option<&'static str> {
+        let checks = [
+            (self.fallback == other.fallback, "fallback"),
+            (self.bindings == other.bindings, "binding.events"),
+            (self.metadata == other.metadata, "binding.metadata"),
+            (self.candidates == other.candidates, "candidates"),
+            (self.seq == other.seq, "binding.seq"),
+            (self.traces == other.traces, "local_trace"),
+            (self.recovered == other.recovered, "recovered"),
+        ];
+        checks
+            .into_iter()
+            .find_map(|(same, field)| (!same).then_some(field))
+    }
+
     fn binding_only(&self) -> bool {
         matches!(self.row, Ok(None))
             && self.candidates.as_ref().is_ok_and(|candidates| {
@@ -277,12 +292,45 @@ impl Files {
         Ok(())
     }
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CoreExecutionBasis {
+    present: bool,
+    channel_name: Option<String>,
+    session_id: Option<String>,
+    cleared: bool,
+}
+impl CoreExecutionBasis {
+    fn from_session(
+        session: Option<&crate::services::discord::session_runtime::DiscordSession>,
+    ) -> Self {
+        Self {
+            present: session.is_some(),
+            channel_name: session.and_then(|s| s.channel_name.clone()),
+            session_id: session.and_then(|s| s.session_id.clone()),
+            cleared: session.is_some_and(|s| s.cleared),
+        }
+    }
+    fn changed(&self, other: &Self) -> Option<&'static str> {
+        if self.present != other.present {
+            Some("core.present")
+        } else if self.channel_name != other.channel_name {
+            Some("core.channel_name")
+        } else if self.session_id != other.session_id {
+            Some("core.session_id")
+        } else if self.cleared != other.cleared {
+            Some("core.cleared")
+        } else {
+            None
+        }
+    }
+}
 #[derive(Clone)]
 struct Snapshot {
     shared: Weak<SharedData>,
     provider: ProviderKind,
     channel: ChannelId,
     basis: Option<String>,
+    core_basis: CoreExecutionBasis,
     runtime_root: Option<std::path::PathBuf>,
     config: Arc<Config>,
     files: Files,
@@ -303,13 +351,11 @@ impl Snapshot {
     ) -> Result<Self, String> {
         let config = crate::config_live_reload::current().ok_or("host config unavailable")?;
         let runtime_root = crate::config::runtime_root();
-        let basis = shared
-            .core
-            .lock()
-            .await
-            .sessions
-            .get(&channel)
-            .and_then(|s| s.channel_name.clone());
+        let core_basis = {
+            let core = shared.core.lock().await;
+            CoreExecutionBasis::from_session(core.sessions.get(&channel))
+        };
+        let basis = core_basis.channel_name.clone();
         let (worker_ports, worker_provider, worker_basis) =
             (ports.clone(), provider.clone(), basis.clone());
         let mut files = tokio::task::spawn_blocking(move || {
@@ -391,6 +437,7 @@ impl Snapshot {
             provider: provider.clone(),
             channel,
             basis,
+            core_basis,
             runtime_root,
             config,
             files,
@@ -461,6 +508,56 @@ impl Snapshot {
                 (None, None) => true,
                 _ => false,
             }
+    }
+    fn same_inflight_inputs(
+        &self,
+        other: &Self,
+        phase: &'static str,
+    ) -> Result<inflight_identity::Kind, inflight_diagnostics::Rejection> {
+        use inflight_diagnostics::Rejection;
+        let changed = |field| Rejection::InputsChanged { phase, field };
+        let checks = [
+            (
+                self.provider == other.provider
+                    && self.channel == other.channel
+                    && Weak::ptr_eq(&self.shared, &other.shared),
+                "namespace",
+            ),
+            (self.runtime_root == other.runtime_root, "runtime_root"),
+            (Arc::ptr_eq(&self.config, &other.config), "config"),
+            (self.exact == other.exact, "db.exact"),
+            (self.canonical == other.canonical, "db.canonical"),
+            (
+                self.legacy_absence == other.legacy_absence,
+                "db.legacy_absence",
+            ),
+            (
+                self.canonical_target == other.canonical_target,
+                "db.canonical_target",
+            ),
+        ];
+        if let Some(field) = checks
+            .into_iter()
+            .find_map(|(same, field)| (!same).then_some(field))
+        {
+            return Err(changed(field));
+        }
+        if let Some(field) = self
+            .core_basis
+            .changed(&other.core_basis)
+            .or_else(|| self.files.context_changed(&other.files))
+        {
+            return Err(changed(field));
+        }
+        match (&self.ownership, &other.ownership) {
+            (Some(a), Some(b)) => {
+                if let Some(field) = a.changed_field(b) {
+                    return Err(changed(field));
+                }
+            }
+            _ => return Err(changed("owner.membership")),
+        }
+        inflight_identity::compare(&self.files, &other.files, phase)
     }
     fn verdict(&self, shared: &SharedData, inventory: &Inventory) -> Verdict {
         let mut candidates = self.files.candidates.clone();
@@ -563,47 +660,124 @@ impl Snapshot {
                 .as_ref()
                 .is_none_or(ownership::OwnerInputs::current)
     }
-    async fn revalidate(&self, namespace: &Observation) -> bool {
-        let Some(shared) = self.shared.upgrade() else {
-            return false;
+    fn inflight_memory_current(&self) -> Result<(), inflight_diagnostics::Rejection> {
+        use inflight_diagnostics::Rejection;
+        let reject = |field| Rejection::Superseded {
+            phase: "publication_fence",
+            field,
         };
-        if !self.memory_current() {
-            return false;
+        let shared = self.shared.upgrade().ok_or_else(|| reject("runtime"))?;
+        if shared
+            .tmux_watchers
+            .channel_binding(&self.channel)
+            .is_some()
+        {
+            return Err(reject("watcher_installed"));
         }
-        let Ok((before, fresh, next)) =
-            Self::collect_pair(&shared, &self.provider, self.channel, self.ports.clone()).await
-        else {
-            return false;
+        if crate::config::runtime_root() != self.runtime_root {
+            return Err(reject("runtime_root"));
+        }
+        let core = shared.core.try_lock().map_err(|_| reject("core_busy"))?;
+        if let Some(field) = self.core_basis.changed(&CoreExecutionBasis::from_session(
+            core.sessions.get(&self.channel),
+        )) {
+            return Err(reject(field));
+        }
+        drop(core);
+        if !crate::config_live_reload::current()
+            .is_some_and(|config| Arc::ptr_eq(&config, &self.config))
+        {
+            return Err(reject("config"));
+        }
+        if *self.files.seq_watch.borrow() != self.files.seq {
+            return Err(reject("binding.seq"));
+        }
+        let owners = self
+            .ownership
+            .as_ref()
+            .ok_or_else(|| reject("owner.membership"))?;
+        owners
+            .with_current(|| ())
+            .map_err(|field| Rejection::collected("publication_fence", field))?;
+        if let Some(field) = owners.files_changed_field() {
+            return Err(reject(field));
+        }
+        Ok(())
+    }
+    async fn revalidate(&self, namespace: &Observation) -> bool {
+        self.revalidate_with(namespace, inflight_identity::Comparison::Strict)
+            .await
+            .is_ok()
+    }
+    async fn revalidate_inflight(
+        &self,
+        namespace: &Observation,
+    ) -> Result<(inflight_identity::Kind, Vec<&'static str>), inflight_diagnostics::Rejection> {
+        let files = self
+            .revalidate_with(namespace, inflight_identity::Comparison::Inflight)
+            .await?;
+        let kind = inflight_identity::compare(&self.files, &files, "publication_files")?;
+        Ok((kind, inflight_identity::ignored(&self.files, &files)))
+    }
+    async fn revalidate_with(
+        &self,
+        namespace: &Observation,
+        comparison: inflight_identity::Comparison,
+    ) -> Result<Files, inflight_diagnostics::Rejection> {
+        use inflight_diagnostics::Rejection;
+        let fence = || Rejection::Superseded {
+            phase: "publication_fence",
+            field: "memory",
         };
-        if !before.same_inputs(&next)
-            || !self.same_inputs(&next)
-            || !namespace.same_namespace(&fresh)
+        let shared = self.shared.upgrade().ok_or_else(fence)?;
+        comparison.memory(self)?;
+        let (before, fresh, next) =
+            Self::collect_pair(&shared, &self.provider, self.channel, self.ports.clone())
+                .await
+                .map_err(|error| Rejection::collected("publication_pair", &error))?;
+        comparison.snapshots(&before, &next, "publication_pair")?;
+        comparison.snapshots(self, &next, "publication_pinned")?;
+        if !namespace.same_namespace(&fresh)
             || namespace.inventory != fresh.inventory
             || !fresh.current()
         {
-            return false;
+            return Err(Rejection::InputsChanged {
+                phase: "publication_pair",
+                field: "inventory.namespace",
+            });
+        }
+        #[cfg(test)]
+        if matches!(comparison, inflight_identity::Comparison::Inflight) {
+            review_tests::after_files(self.channel.get()).await;
         }
         // Re-read files after the last DB/inventory await; final publication has no await.
-        let Ok(mut files) = Files::collect(
+        let mut files = Files::collect(
             &self.provider,
             self.channel.get(),
             self.basis.as_deref(),
             &self.ports,
-        ) else {
-            return false;
-        };
-        // Reattach the pinned target after rereading original candidates; no DB await follows.
+        )
+        .map_err(|_| Rejection::ReadFailed {
+            phase: "publication_files",
+            field: "files",
+        })?;
         if let Some(name) = &self.files.recovered {
-            if files.recover(name).is_err() {
-                return false;
-            }
+            files.recover(name).map_err(|_| Rejection::InputsChanged {
+                phase: "publication_files",
+                field: "recovered",
+            })?;
         }
         if let Some(Ok(proof)) = &self.legacy_absence {
-            if files.include_legacy(proof).is_err() {
-                return false;
-            }
+            files
+                .include_legacy(proof)
+                .map_err(|_| Rejection::InputsChanged {
+                    phase: "publication_files",
+                    field: "legacy",
+                })?;
         }
-        self.files.same(&files) && self.memory_current()
+        comparison.files(&self.files, &files, "publication_files")?;
+        comparison.memory(self)?;
+        Ok(files)
     }
     fn notice(
         &self,
@@ -757,6 +931,10 @@ mod canonical_target;
 mod completed_scheduled;
 #[path = "inflight_bound.rs"]
 pub(in crate::services::discord::turn_presence::activity) mod inflight_bound;
+#[path = "inflight_diagnostics.rs"]
+mod inflight_diagnostics;
+#[path = "inflight_identity.rs"]
+mod inflight_identity;
 #[path = "legacy_divergence.rs"]
 mod legacy_divergence;
 #[path = "live_ownership.rs"]

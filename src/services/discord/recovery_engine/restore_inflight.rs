@@ -1923,6 +1923,21 @@ pub(in crate::services::discord) async fn restore_inflight_states(
 
             let finish_mailbox_on_completion =
                 reregister_active_turn_from_inflight(shared, &state).await;
+            if !finish_mailbox_on_completion
+                && super::runtime::readopt_marker_eligible_real_user(&state)
+                && crate::services::tui_o::cutover::boot_ownership()
+                    .into_iter()
+                    .any(|(channel, _, owner)| {
+                        channel == state.channel_id
+                            && owner.is_some_and(|owner| owner.peek().owned())
+                    })
+            {
+                let _ = inflight::consume_stale_restart_marker_if_identity_unchanged(
+                    provider,
+                    &state,
+                    shared.restart.current_generation,
+                );
+            }
             restore_admitted_native_stop_pin(shared, &state).await;
 
             // #4380 backstop: `reregister_active_turn_from_inflight` stamps
@@ -1933,7 +1948,9 @@ pub(in crate::services::discord) async fn restore_inflight_states(
             // so the loss is observable/recoverable instead of a silent wedge. No-op
             // on the normal path (marker present).
             #[cfg(unix)]
-            super::guard_readopt_relay_resume_or_dead_letter(shared, provider, channel_id);
+            if finish_mailbox_on_completion || state.restart_mode.is_none() {
+                super::guard_readopt_relay_resume_or_dead_letter(shared, provider, channel_id);
+            }
 
             let output_path = match restore_codex_rollout_output_path(provider, &state, output_path)
             {

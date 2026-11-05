@@ -972,3 +972,6 @@ impl HealthRegistry {
 #[cfg(test)]
 #[path = "health/registry_tests.rs"]
 mod tests;
+
+#[cfg(all(test, unix))]
+pub(crate) use recovery::before_carried_archive_for_tests;

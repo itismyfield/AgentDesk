@@ -306,12 +306,25 @@ pub fn start(path: PathBuf, enabled: bool) -> Option<ConfigHotReloadGuard> {
 #[cfg(test)]
 pub(crate) struct TestLiveGuard {
     previous: Option<Arc<Config>>,
-    _lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
+    _lock: Option<crate::config::test_env_lock::SharedTestEnvLockGuard>,
+    before_restore: Option<Box<dyn FnOnce() + Send + Sync>>,
+}
+
+#[cfg(test)]
+impl TestLiveGuard {
+    pub(crate) fn on_before_restore(&mut self, observer: impl FnOnce() + Send + Sync + 'static) {
+        assert!(self.before_restore.is_none());
+        self.before_restore = Some(Box::new(observer));
+    }
 }
 
 #[cfg(test)]
 impl Drop for TestLiveGuard {
     fn drop(&mut self) {
+        crate::config::test_env_lock::assert_shared_test_env_lock_held();
+        if let Some(observer) = self.before_restore.take() {
+            observer();
+        }
         let lock = LIVE.get_or_init(|| RwLock::new(None));
         *lock
             .write()
@@ -329,7 +342,19 @@ pub(crate) fn test_live_guard(
     let previous = current();
     TestLiveGuard {
         previous,
-        _lock: lock,
+        _lock: Some(lock),
+        before_restore: None,
+    }
+}
+
+/// Capture LIVE while an enclosing fixture keeps the environment lock.
+#[cfg(test)]
+pub(crate) fn test_live_guard_after_shared_test_env_lock() -> TestLiveGuard {
+    crate::config::test_env_lock::assert_shared_test_env_lock_held();
+    TestLiveGuard {
+        previous: current(),
+        _lock: None,
+        before_restore: None,
     }
 }
 
@@ -340,6 +365,22 @@ mod late_live_reload_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guard_after_shared_lock_panics_without_lock() {
+        let panic = std::panic::catch_unwind(|| {
+            let _guard = test_live_guard_after_shared_test_env_lock();
+        })
+        .expect_err("the helper requires the shared environment lock");
+        let message = panic
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| panic.downcast_ref::<String>().map(String::as_str));
+        assert_eq!(
+            message,
+            Some("an *_after_shared_test_env_lock helper needs acquire_shared_test_env_lock first")
+        );
+    }
 
     /// Serializes tests that mutate/read the process-global [`LIVE`] snapshot so
     /// they do not race each other under the parallel test runner.
