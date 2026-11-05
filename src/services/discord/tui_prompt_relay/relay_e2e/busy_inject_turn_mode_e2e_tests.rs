@@ -227,7 +227,14 @@ impl Drop for OwnerWakePause {
 }
 
 /// The scripted pane also answers the owner's liveness and physical identity reads.
-fn owner_tmux(pane: &InjectPane) -> crate::config::TestEnvVarGuard {
+fn owner_tmux(
+    pane: &InjectPane,
+    _env: &crate::config_live_reload::TestLiveGuard,
+) -> crate::config::TestEnvVarGuard {
+    assert!(
+        crate::config::shared_test_env_lock().try_lock().is_err(),
+        "the borrowed harness must own the shared env lock before PATH mutation"
+    );
     let path = pane.path("tmux");
     let script = std::fs::read_to_string(&path).unwrap();
     let owner_reads = r##"for owner_format do :; done
@@ -410,7 +417,7 @@ fn owner_marks(shared: &crate::services::discord::SharedData, message: u64) -> V
 async fn owner_busy_receipts(active: bool, observed: bool) {
     let busy = owner_fixture().await;
     let rt = &busy.rt;
-    let _path = owner_tmux(&busy.pane);
+    let _path = owner_tmux(&busy.pane, &rt.h._env_lock);
     assert!(
         crate::services::claude_tui::hook_server::current_hook_endpoint().is_none(),
         "the isolated owner fixture starts without a hook endpoint"
@@ -632,7 +639,7 @@ async fn reg_7832_owner_native_busy_observed_marks_front_and_follower_pg() {
 async fn owner_refused_receipt(case: &'static str) {
     let busy = owner_fixture().await;
     let rt = &busy.rt;
-    let _path = owner_tmux(&busy.pane);
+    let _path = owner_tmux(&busy.pane, &rt.h._env_lock);
     owner_install(rt, &busy.pane, true).await;
     match case {
         "held" => busy.pane.menu(),
