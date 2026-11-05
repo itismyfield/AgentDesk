@@ -112,6 +112,34 @@ pub(super) async fn may_observe(
         anyhow::bail!("scheduled owner delivery/turn mismatch");
     }
     let handle = owner(&input.provider, input.channel).await?;
+    if let Some(reason) = input
+        .start_rejection(&handle)
+        .await
+        .map_err(anyhow::Error::msg)?
+    {
+        #[cfg(test)]
+        let test = REJECTION_TEST.try_with(Clone::clone).ok();
+        #[cfg(test)]
+        let pool = match &test {
+            Some((pool, _)) => pool.clone(),
+            None => input.runtime_pool().await.map_err(anyhow::Error::msg)?,
+        };
+        #[cfg(not(test))]
+        let pool = input.runtime_pool().await.map_err(anyhow::Error::msg)?;
+        let delivery = delivery.clone();
+        // The poller's transaction already holds this row; close after it releases its locks.
+        tokio::spawn(async move {
+            let result = close_start_rejected(&pool, &delivery, &reason).await;
+            #[cfg(test)]
+            if let Some((_, done)) = test {
+                let _ = done.send(result.is_ok());
+            }
+            if let Err(error) = result {
+                tracing::warn!(delivery_id=%delivery.delivery_id,%error,"owner rejection terminal close remains owed");
+            }
+        });
+        return Ok(false);
+    }
     // The observer connects to the owner's exact attempt first; a failed projection is
     // repaired under the same ticket on the next poll.
     if let Some((attempt, source)) = input
@@ -311,3 +339,53 @@ pub(super) async fn bind_observer(
     tx.commit().await?;
     Ok(updated.rows_affected() == 1)
 }
+
+pub(super) async fn close_start_rejected(
+    pool: &PgPool,
+    delivery: &RunningAgentDelivery,
+    reason: &str,
+) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+    if !db::lock_active_delivery_tx(
+        &mut tx,
+        &delivery.scheduled_message_id,
+        &delivery.delivery_id,
+        &delivery.claim_token,
+    )
+    .await?
+    {
+        return Ok(());
+    }
+    let exact: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM scheduled_message_deliveries WHERE id=$1 AND claim_token=$2 AND turn_id=$3 AND status='running')")
+        .bind(&delivery.delivery_id).bind(&delivery.claim_token).bind(&delivery.turn_id).fetch_one(&mut *tx).await?;
+    if exact {
+        let (next, forced) = compute_resume(
+            delivery.schedule.as_deref(),
+            &delivery.timezone,
+            delivery.scheduled_at,
+            delivery.expires_at,
+            Utc::now(),
+        );
+        let terminal = forced.unwrap_or(db::STATUS_FAILED);
+        let next = forced.is_none().then_some(next).flatten();
+        db::finish_locked_delivery_and_finalize_parent_tx(
+            &mut tx,
+            &delivery.delivery_id,
+            &delivery.claim_token,
+            db::DELIVERY_FAILED,
+            Some(reason),
+            None,
+            None,
+            &delivery.scheduled_message_id,
+            false,
+            terminal,
+            next,
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+#[cfg(test)]
+tokio::task_local! { pub(super) static REJECTION_TEST: (PgPool,tokio::sync::mpsc::UnboundedSender<bool>); }

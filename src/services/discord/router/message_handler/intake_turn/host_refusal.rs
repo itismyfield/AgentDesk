@@ -3,11 +3,12 @@ use super::*;
 /// Refuses a turn on a Herdr-configured channel before it resets, reconciles or clears anything;
 /// `Err` when its input has no session to go back to, so the caller fails the request instead.
 /// A queued drain's refusal hands its uploads back so the queue owner restores the whole input.
-pub(super) async fn admitted_uploads(
+pub(super) async fn admitted_owner_uploads(
     http: &Arc<serenity::http::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     (channel_id, original_channel_id, queued_drain): (ChannelId, ChannelId, bool),
+    owner: Option<&super::super::OwnerTurn>,
     (uploads, was_cleared): (
         crate::services::cluster::attachment_transfer::uploads::PendingUploads,
         Option<bool>,
@@ -24,6 +25,12 @@ pub(super) async fn admitted_uploads(
     let Some(refusal) = judged.await else {
         return Ok(Some(uploads));
     };
+    #[cfg(unix)]
+    if let Some(owner) = owner {
+        owner.refused(refusal.clone());
+    }
+    #[cfg(not(unix))]
+    let _ = owner;
     tracing::warn!(channel_id = channel_id.get(), "{refusal}");
     if queued_drain {
         // Only the clear flag a redirect took goes back here; each retry stays silent.
@@ -55,4 +62,17 @@ pub(super) async fn admitted_uploads(
         return Err(refusal.to_string().into());
     }
     Ok(None)
+}
+
+pub(super) async fn admitted_uploads(
+    http: &Arc<serenity::http::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    target: (ChannelId, ChannelId, bool),
+    input: (
+        crate::services::cluster::attachment_transfer::uploads::PendingUploads,
+        Option<bool>,
+    ),
+) -> Result<Option<crate::services::cluster::attachment_transfer::uploads::PendingUploads>, Error> {
+    admitted_owner_uploads(http, shared, provider, target, None, input).await
 }

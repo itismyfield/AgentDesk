@@ -283,8 +283,10 @@ fn bound_source(
     ports: &dyn HerdrTurnPorts,
     record: &HostedExecution,
 ) -> Result<Attached, String> {
-    let target = gate(record)?;
-    ports.confirm_bound(&turn.owner, record, &target)?;
+    let target = gate(record).inspect_err(|_| OWNER_BOUND_FAILURE.with(|flag| flag.set(true)))?;
+    ports
+        .confirm_bound(&turn.owner, record, &target)
+        .inspect_err(|_| OWNER_BOUND_FAILURE.with(|flag| flag.set(true)))?;
     let logical = &turn.owner.logical_key;
     if let Some(awaited) = awaited_clear(turn.channel_id, logical, &record.execution_nonce) {
         return cleared_source(turn, record, target, awaited);
@@ -984,3 +986,8 @@ mod coldstop_input_tests;
 mod boot_host_tests;
 
 pub(crate) mod composer;
+
+thread_local! { static OWNER_BOUND_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+pub(crate) fn take_owner_bound_failure() -> bool {
+    OWNER_BOUND_FAILURE.with(|flag| flag.replace(false))
+}
