@@ -299,7 +299,8 @@ async fn start_failure_guard_preserves_effect_owned_error_settlement_before_comp
         .unwrap()
         .unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let reply = Failure::claimed(&mailbox, &claim).guard_reply(Arc::new(move |result| {
+    let failure = Failure::claimed(&mailbox, &claim);
+    let reply = failure.guard_reply(Arc::new(move |result| {
         tx.send(result.clone()).unwrap();
     }));
     let error = Err("NotSent(text cannot override reserve)".to_string());
@@ -331,5 +332,20 @@ async fn start_failure_guard_preserves_effect_owned_error_settlement_before_comp
         rx.try_recv()
             .expect("EffectOwned settles without an AI completion event"),
         expected
+    );
+    assert_eq!(
+        failure
+            .commit(
+                Kind::ExecutorNotWired,
+                "NotSent(typed text cannot override reserve)".into(),
+                None,
+                None,
+                ChannelId::new(7787953),
+                Some(Arc::new(CancelToken::new())),
+            )
+            .await
+            .unwrap(),
+        None,
+        "reserve precedes even missing or mismatched wrapper proof"
     );
 }

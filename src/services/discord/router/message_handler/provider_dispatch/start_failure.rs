@@ -78,37 +78,42 @@ impl Failure {
         channel: poise::serenity_prelude::ChannelId,
         token: Option<Arc<CancelToken>>,
     ) -> Result<Option<bool>, String> {
-        if token.is_some() && watch.is_none() {
-            return Err("wrapper failure lacks its fresh row identity".into());
-        }
-        if let Some(watch) = &watch {
-            let token = token.as_ref().ok_or("wrapper failure lacks its token")?;
-            let pin = watch.key();
-            if pin["anchor"] != self.front.1.message_id
-                || pin["channel"] != channel.get()
-                || shared
-                    .as_ref()
-                    .is_some_and(|shared| pin["provider"] != shared.provider.as_str())
-                || pin["nonce"].as_str() != token.turn_nonce()
-            {
-                return Err("failure row does not name the producer episode".into());
-            }
-        }
         let pin = watch.as_ref().map(row_removed::Watch::key);
+        let provider = shared
+            .as_ref()
+            .map(|shared| shared.provider.as_str().to_string());
+        let proof_token = token.clone();
         let mailbox = self.mailbox.clone();
         let decision = mailbox
             .v2_request(move |slot| {
                 let kind =
                     serde_json::from_value(serde_json::to_value(kind).map_err(|e| e.to_string())?)
                         .map_err(|e| e.to_string())?;
-                slot.as_mut().ok_or("missing owner")?.start_failed(
-                    &self.front,
-                    self.number,
-                    &self.members,
-                    pin,
-                    kind,
-                    &detail,
-                )
+                let owner = slot.as_mut().ok_or("missing owner")?;
+                // A reserve owns every result, even when no failed-wrapper row proof can be read.
+                if owner.claim_number() != self.number
+                    || !owner.claimed(self.front.1.message_id, &self.front)
+                {
+                    return Ok(None);
+                }
+                if proof_token.is_some() && pin.is_none() {
+                    return Err("wrapper failure lacks its fresh row identity".into());
+                }
+                if let Some(pin) = &pin {
+                    let token = proof_token
+                        .as_ref()
+                        .ok_or("wrapper failure lacks its token")?;
+                    if pin["anchor"] != self.front.1.message_id
+                        || pin["channel"] != channel.get()
+                        || provider
+                            .as_deref()
+                            .is_some_and(|provider| pin["provider"] != provider)
+                        || pin["nonce"].as_str() != token.turn_nonce()
+                    {
+                        return Err("failure row does not name the producer episode".into());
+                    }
+                }
+                owner.start_failed(&self.front, self.number, &self.members, pin, kind, &detail)
             })
             .await?;
         if decision.is_some() {
