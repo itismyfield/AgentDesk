@@ -7,6 +7,7 @@
 EXTENDS Naturals
 
 CONSTANTS
+    ReadMode,   \* "custody" | "snapshot": execution observation only
     Fix,        \* "main" | "fix1" | "fix2" | "fix3" | "nowait"
     Role,       \* local runtime: "gateway" | "worker" | "standby"
     Lease,      \* provider lease observation: "owned" | "unknown" | "lost"
@@ -29,9 +30,10 @@ VARIABLES
     ho, hg,   \* a permit host's owner and gate; hg = 0 for the lease gate
     pc,       \* "idle" | "wait": refresh waits for the host to retire before installing
     pend,     \* the observation the waiting refresh will install
-    fails, changes, boot, output, misclassified, recovered_gateway
+    fails, changes, boot, output, misclassified, recovered_gateway,
+    postAdm, postChg, postFail \* admission and environmental counters at raw start
 
-vars == <<pg, vk, error, vo, vg, gs, ng, hk, ho, hg, pc, pend, fails, changes, boot, output, misclassified, recovered_gateway>>
+vars == <<pg, vk, error, vo, vg, gs, ng, hk, ho, hg, pc, pend, fails, changes, boot, output, misclassified, recovered_gateway, postAdm, postChg, postFail>>
 
 \* gateway abstracts the current registered SharedData, active lifecycle and allowed channel.
 \* Lease is the start-decision sample; a later loss keeps existing hosts under the same gate.
@@ -47,6 +49,7 @@ Init ==
     /\ hk = "none" /\ ho = "-" /\ hg = 0
     /\ boot = "restart" /\ output = "pending" /\ misclassified = FALSE
     /\ recovered_gateway = FALSE
+    /\ postAdm = FALSE /\ postChg = 0 /\ postFail = 0
 
 \* gateway spawn and worker/standby spawn_execution converge at start_managed.
 \* The parts' provider lease gate is used only without a permit; Some(Ok) replaces it.
@@ -54,26 +57,34 @@ StartWriter ==
     /\ boot = "prepared" /\ vk # "err"
     /\ (vk = "ok" \/ CanStartUnmanaged)
     /\ hk' = "claim" /\ ho' = vo /\ hg' = vg /\ boot' = "running"
-    /\ UNCHANGED <<pg, vk, error, vo, vg, gs, ng, pc, pend, fails, changes, output, misclassified, recovered_gateway>>
+    /\ UNCHANGED <<pg, vk, error, vo, vg, gs, ng, pc, pend, fails, changes, output, misclassified, recovered_gateway, postAdm, postChg, postFail>>
 
 \* boot_ownership removes a held channel before start_managed can even claim it.
 StartWriterSkipsHeld ==
     /\ boot = "prepared"
     /\ (vk = "err" \/ (vk = "none" /\ ~CanStartUnmanaged))
     /\ boot' = "running"
-    /\ UNCHANGED <<pg, vk, error, vo, vg, gs, ng, hk, ho, hg, pc, pend, fails, changes, output, misclassified, recovered_gateway>>
+    /\ UNCHANGED <<pg, vk, error, vo, vg, gs, ng, hk, ho, hg, pc, pend, fails, changes, output, misclassified, recovered_gateway, postAdm, postChg, postFail>>
+
+\* Live input is admitted: no held view (cutover claim_for_placement) and a host whose gate is
+\* owned accepts it (host.rs accepts).
+Admitted ==
+    /\ vk \in {"none", "ok"}
+    /\ \/ hk = "lease"
+       \/ hk = "permit" /\ gs[hg] = "owned"
 
 \* The first Discord effect acquires a transaction custody lock even on an unmanaged channel.
 FirstPostBegins ==
     /\ boot = "running" /\ output = "pending"
     /\ hk \in {"lease", "permit"}
-    /\ IF hg = 0 THEN TRUE ELSE gs[hg] = "owned"
+    /\ IF hg = 0 THEN pg = "none" ELSE gs[hg] = "owned" /\ pg = ho
     /\ output' = "held"
+    /\ postAdm' = Admitted /\ postChg' = changes /\ postFail' = fails
     /\ UNCHANGED <<pg, vk, error, vo, vg, gs, ng, hk, ho, hg, pc, pend, fails, changes, boot, misclassified, recovered_gateway>>
 
 FirstPostCompletes ==
     /\ output = "held" /\ output' = "done"
-    /\ UNCHANGED <<pg, vk, error, vo, vg, gs, ng, hk, ho, hg, pc, pend, fails, changes, boot, misclassified, recovered_gateway>>
+    /\ UNCHANGED <<pg, vk, error, vo, vg, gs, ng, hk, ho, hg, pc, pend, fails, changes, boot, misclassified, recovered_gateway, postAdm, postChg, postFail>>
 
 Verified == vk = "ok" \/ (vk = "err" /\ vg # 0)
 
@@ -82,33 +93,36 @@ Verified == vk = "ok" \/ (vk = "err" /\ vg # 0)
 Install(obs) ==
     /\ error' = "none"
     /\ IF obs = "none"
-       THEN /\ vk' = "none" /\ vo' = "-" /\ vg' = 0 /\ UNCHANGED <<gs, ng, recovered_gateway>>
+       THEN /\ vk' = "none" /\ vo' = "-" /\ vg' = 0 /\ UNCHANGED <<gs, ng, recovered_gateway, postAdm, postChg, postFail>>
        ELSE /\ ng' = ng + 1 /\ vk' = "ok" /\ vo' = obs /\ vg' = ng + 1
             /\ gs' = [gs EXCEPT ![ng + 1] = "owned"]
 
 Prepare ==
     /\ boot = "restart"
     /\ Install(pg) /\ boot' = "prepared"
-    /\ UNCHANGED <<pg, hk, ho, hg, pc, pend, fails, changes, output, misclassified, recovered_gateway>>
+    /\ UNCHANGED <<pg, hk, ho, hg, pc, pend, fails, changes, output, misclassified, recovered_gateway, postAdm, postChg, postFail>>
 
 \* The first prepare read can time out before there is a writer or an output effect.
 PrepareFails ==
     /\ boot = "restart" /\ fails < MaxFail
     /\ fails' = fails + 1 /\ boot' = "prepared"
     /\ vk' = "err" /\ error' = "temporary" /\ vo' = "-" /\ vg' = 0
-    /\ UNCHANGED <<pg, gs, ng, hk, ho, hg, pc, pend, changes, output, misclassified, recovered_gateway>>
+    /\ UNCHANGED <<pg, gs, ng, hk, ho, hg, pc, pend, changes, output, misclassified, recovered_gateway, postAdm, postChg, postFail>>
 
 \* A failed read: suspend_execution(temporary). A verified permit is kept and its gate made
 \* uncertain; with no prior permit the view is held with nothing retained
 \* (channel_policy.rs suspend_execution).
 TickFails ==
-    /\ boot = "running" /\ pc = "idle" /\ fails < MaxFail /\ output = "held"
-    /\ fails' = fails + 1 /\ error' = "temporary"
+    /\ boot = "running" /\ pc = "idle" /\ fails < MaxFail
+    /\ (ReadMode = "snapshot" \/ output = "held")
+    \* Custody contention is the bug, not an independent environment failure exemption.
+    /\ fails' = IF ReadMode = "custody" THEN fails ELSE fails + 1
+    /\ error' = "temporary"
     /\ IF Verified
        THEN /\ gs' = [gs EXCEPT ![vg] = IF @ = "closed" THEN @ ELSE "uncertain"]
-            /\ vk' = "err" /\ UNCHANGED <<vo, vg, recovered_gateway>>
+            /\ vk' = "err" /\ UNCHANGED <<vo, vg, recovered_gateway, postAdm, postChg, postFail>>
        ELSE /\ vk' = "err" /\ vo' = "-" /\ vg' = 0 /\ UNCHANGED gs
-    /\ UNCHANGED <<pg, ng, hk, ho, hg, pc, pend, changes, boot, output, misclassified, recovered_gateway>>
+    /\ UNCHANGED <<pg, ng, hk, ho, hg, pc, pend, changes, boot, output, misclassified, recovered_gateway, postAdm, postChg, postFail>>
 
 \* resume_execution: the same tuple brings back the verified permit unless its gate was closed.
 Resumable(obs) == Verified /\ obs = vo /\ gs[vg] # "closed"
@@ -122,14 +136,15 @@ SkipWait ==
     \/ Fix \in {"fix1", "fix2", "fix3"} /\ hk = "lease"
 
 TickObserves ==
-    /\ boot = "running" /\ pc = "idle" /\ output # "held"
+    /\ boot = "running" /\ pc = "idle"
+    /\ (ReadMode = "snapshot" \/ output # "held")
     /\ misclassified' = (misclassified \/ (vk # "none" /\ pg = "none" /\ ~Verified /\ Fix \notin {"fix2", "fix3"}))
     /\ LET obs == pg IN
        IF obs # "none" /\ Resumable(obs)
        THEN /\ vk' = "ok" /\ error' = "none" /\ gs' = [gs EXCEPT ![vg] = "owned"]
-            /\ UNCHANGED <<vo, vg, ng, pc, pend, recovered_gateway>>
+            /\ UNCHANGED <<vo, vg, ng, pc, pend, recovered_gateway, postAdm, postChg, postFail>>
        ELSE IF Fix \in {"fix2", "fix3"} /\ obs = "none" /\ ~Verified
-       THEN /\ Install(obs) /\ UNCHANGED <<pc, pend, recovered_gateway>>
+       THEN /\ Install(obs) /\ UNCHANGED <<pc, pend, recovered_gateway, postAdm, postChg, postFail>>
        ELSE IF vk # "none"
        \* "execution identity changed": the verified gate closes, then wait for the host.
        THEN LET closed == IF Verified THEN [gs EXCEPT ![vg] = "closed"] ELSE gs IN
@@ -140,46 +155,46 @@ TickObserves ==
                          /\ UNCHANGED ng
                     ELSE /\ ng' = ng + 1 /\ vk' = "ok" /\ vo' = obs /\ vg' = ng + 1
                          /\ gs' = [closed EXCEPT ![ng + 1] = "owned"]
-                 /\ UNCHANGED <<pc, pend, recovered_gateway>>
+                 /\ UNCHANGED <<pc, pend, recovered_gateway, postAdm, postChg, postFail>>
             ELSE /\ vk' = "err" /\ error' = "changed" /\ vo' = "-" /\ vg' = 0 /\ gs' = closed
                  /\ pc' = "wait" /\ pend' = obs /\ UNCHANGED ng
-       ELSE /\ Install(obs) /\ UNCHANGED <<pc, pend, recovered_gateway>>
-    /\ UNCHANGED <<pg, hk, ho, hg, fails, changes, boot, output, recovered_gateway>>
+       ELSE /\ Install(obs) /\ UNCHANGED <<pc, pend, recovered_gateway, postAdm, postChg, postFail>>
+    /\ UNCHANGED <<pg, hk, ho, hg, fails, changes, boot, output, recovered_gateway, postAdm, postChg, postFail>>
 
 \* The bounded 3 s wait sees the claim released and installs.
 WaitDone ==
     /\ pc = "wait" /\ hk = "none"
     /\ Install(pend) /\ pc' = "idle" /\ pend' = "none"
-    /\ UNCHANGED <<pg, hk, ho, hg, fails, changes, boot, output, misclassified, recovered_gateway>>
+    /\ UNCHANGED <<pg, hk, ho, hg, fails, changes, boot, output, misclassified, recovered_gateway, postAdm, postChg, postFail>>
 
 \* The wait times out with the host still claiming the channel: `continue`, view stays held.
 WaitTimeout ==
     /\ pc = "wait" /\ hk # "none"
     /\ pc' = "idle" /\ pend' = "none"
-    /\ UNCHANGED <<pg, vk, error, vo, vg, gs, ng, hk, ho, hg, fails, changes, boot, output, misclassified, recovered_gateway>>
+    /\ UNCHANGED <<pg, vk, error, vo, vg, gs, ng, hk, ho, hg, fails, changes, boot, output, misclassified, recovered_gateway, postAdm, postChg, postFail>>
 
 \* claim() precedes track(). During this gap hosted_under returns false although a claim exists.
 TrackWriter ==
     /\ hk = "claim" /\ hk' = IF hg = 0 THEN "lease" ELSE "permit"
-    /\ UNCHANGED <<pg, vk, error, vo, vg, gs, ng, ho, hg, pc, pend, fails, changes, boot, output, misclassified, recovered_gateway>>
+    /\ UNCHANGED <<pg, vk, error, vo, vg, gs, ng, ho, hg, pc, pend, fails, changes, boot, output, misclassified, recovered_gateway, postAdm, postChg, postFail>>
 
 \* An abnormal actor join marks the claim unsettled; its Drop removes Live but keeps hosted.
 \* This is a real extra event, NOT an observed fact in the supplied operational sample.
 HostAbnormalExit ==
     /\ hk \in {"lease", "permit"} /\ hk' = "stale"
-    /\ UNCHANGED <<pg, vk, error, vo, vg, gs, ng, ho, hg, pc, pend, fails, changes, boot, output, misclassified, recovered_gateway>>
+    /\ UNCHANGED <<pg, vk, error, vo, vg, gs, ng, ho, hg, pc, pend, fails, changes, boot, output, misclassified, recovered_gateway, postAdm, postChg, postFail>>
 
 \* A permit host retires once its execution gate is closed (host.rs execution_retired select).
 HostRetires ==
     /\ hk = "permit" /\ gs[hg] = "closed"
     /\ hk' = "none" /\ ho' = "-" /\ hg' = 0
-    /\ UNCHANGED <<pg, vk, error, vo, vg, gs, ng, pc, pend, fails, changes, boot, output, misclassified, recovered_gateway>>
+    /\ UNCHANGED <<pg, vk, error, vo, vg, gs, ng, pc, pend, fails, changes, boot, output, misclassified, recovered_gateway, postAdm, postChg, postFail>>
 
 \* spawn_execution after each refresh: a channel with a verified view gets a permit host.
 SpawnExecution ==
     /\ boot = "running" /\ hk = "none" /\ vk = "ok"
     /\ hk' = "permit" /\ ho' = vo /\ hg' = vg
-    /\ UNCHANGED <<pg, vk, error, vo, vg, gs, ng, pc, pend, fails, changes, boot, output, misclassified, recovered_gateway>>
+    /\ UNCHANGED <<pg, vk, error, vo, vg, gs, ng, pc, pend, fails, changes, boot, output, misclassified, recovered_gateway, postAdm, postChg, postFail>>
 
 \* Only a current gateway with an owned lease retries a skipped unmanaged start.
 \* vk=none after boot implies prepare/read succeeded; Err observations never enter this action.
@@ -188,14 +203,14 @@ ResumeGatewayWriter ==
     /\ hk = "none" /\ vk = "none" /\ CanRecoverUnmanaged
     /\ hk' = "claim" /\ ho' = "-" /\ hg' = 0
     /\ recovered_gateway' = TRUE
-    /\ UNCHANGED <<pg, vk, error, vo, vg, gs, ng, pc, pend, fails, changes, boot, output, misclassified>>
+    /\ UNCHANGED <<pg, vk, error, vo, vg, gs, ng, pc, pend, fails, changes, boot, output, misclassified, postAdm, postChg, postFail>>
 
 \* PG owner rows change. A managed channel never becomes unmanaged: its routed rows remain.
 PgChanges ==
-    /\ boot = "running" /\ changes < MaxChange
+    /\ boot = "running" /\ changes < MaxChange /\ output # "held"
     /\ pg' \in IF pg = "none" THEN Owners ELSE Owners \ {pg}
     /\ changes' = changes + 1
-    /\ UNCHANGED <<vk, error, vo, vg, gs, ng, hk, ho, hg, pc, pend, fails, boot, output, misclassified, recovered_gateway>>
+    /\ UNCHANGED <<vk, error, vo, vg, gs, ng, hk, ho, hg, pc, pend, fails, boot, output, misclassified, recovered_gateway, postAdm, postChg, postFail>>
 
 Next ==
     \/ TickFails \/ TickObserves \/ WaitDone \/ WaitTimeout
@@ -214,6 +229,8 @@ Fairness ==
 Spec == Init /\ [][Next]_vars /\ Fairness
 
 TypeOK ==
+    /\ ReadMode \in {"custody", "snapshot"}
+    /\ postAdm \in BOOLEAN /\ postChg \in 0..MaxChange /\ postFail \in 0..MaxFail
     /\ Role \in {"gateway", "worker", "standby"}
     /\ Lease \in {"owned", "unknown", "lost"}
     /\ UniqueGateway \in BOOLEAN /\ recovered_gateway \in BOOLEAN
@@ -224,12 +241,12 @@ TypeOK ==
     /\ output \in {"pending", "held", "done"}
     /\ misclassified \in BOOLEAN
 
-\* Live input is admitted: no held view (cutover claim_for_placement) and a host whose gate is
-\* owned accepts it (host.rs accepts).
-Admitted ==
-    /\ vk \in {"none", "ok"}
-    /\ \/ hk = "lease"
-       \/ hk = "permit" /\ gs[hg] = "owned"
+\* Output alone must not close admission; real failures, changes and dead hosts are separate.
+OutputDelayKeepsAdmission ==
+    (output = "held" /\ postAdm /\ changes = postChg /\ fails = postFail /\ hk # "stale") => Admitted
+
+\* The output EffectGuard and owner mutations retain the same exclusive custody lock.
+OutputSerializesOwner == output = "held" => changes = postChg
 
 \* Safety: another owner's permit is installed only after the old permit host stopped.
 NoForeignPermitHost ==
