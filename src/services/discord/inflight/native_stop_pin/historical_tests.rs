@@ -63,7 +63,8 @@ fn historical_input_accepts_pin_coordinates_across_device_renumbering() {
 #[test]
 fn historical_input_requires_complete_matching_native_identity() {
     let (_directory, row) = fixture();
-    let cases: [(&str, fn(&mut InflightTurnState)); 12] = [
+    type RowMutation = fn(&mut InflightTurnState);
+    let cases: [(&str, RowMutation); 12] = [
         ("missing pin", |row| row.native_stop_user_pin = None),
         ("successor owner", |row| row.user_msg_id += 1),
         ("missing turn nonce", |row| row.turn_nonce = None),

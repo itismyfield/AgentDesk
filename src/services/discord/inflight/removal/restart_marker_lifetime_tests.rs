@@ -52,7 +52,8 @@ fn refused_readoption_consumes_only_a_previous_unreadopted_marker() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let _generation = GenerationReset;
     set_process_generation_for_tests(Some(5));
-    let cases: [(&str, fn(&mut InflightTurnState)); 9] = [
+    type RowMutation = fn(&mut InflightTurnState);
+    let cases: [(&str, RowMutation); 9] = [
         ("current generation", |state| {
             state.restart_generation = Some(5)
         }),
