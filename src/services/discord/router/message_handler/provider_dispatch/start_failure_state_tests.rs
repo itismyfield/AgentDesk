@@ -99,7 +99,7 @@ async fn scenario(token_first: bool) {
             .commit(
                 Kind::Opaque,
                 "unreadable row".into(),
-                None,
+                Ok(None),
                 Some(shared.clone()),
                 channel,
                 Some(token.clone())
@@ -114,7 +114,7 @@ async fn scenario(token_first: bool) {
             .commit(
                 Kind::Opaque,
                 "failure".into(),
-                Some(watch),
+                Ok(Some(watch)),
                 Some(shared.clone()),
                 channel,
                 Some(token.clone())
@@ -299,8 +299,11 @@ async fn start_failure_guard_preserves_effect_owned_error_settlement_before_comp
         .unwrap()
         .unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let failure = Failure::claimed(&mailbox, &claim);
-    let reply = failure.guard_reply(Arc::new(move |result| {
+    let failures = [
+        Failure::claimed(&mailbox, &claim),
+        Failure::claimed(&mailbox, &claim),
+    ];
+    let reply = failures[0].guard_reply(Arc::new(move |result| {
         tx.send(result.clone()).unwrap();
     }));
     let error = Err("NotSent(text cannot override reserve)".to_string());
@@ -333,19 +336,27 @@ async fn start_failure_guard_preserves_effect_owned_error_settlement_before_comp
             .expect("EffectOwned settles without an AI completion event"),
         expected
     );
+    let mut decisions = Vec::new();
+    for (failure, watch) in failures
+        .into_iter()
+        .zip([Ok(None), Err("read denied".into())])
+    {
+        decisions.push(
+            failure
+                .commit(
+                    Kind::ExecutorNotWired,
+                    "NotSent(typed text cannot override reserve)".into(),
+                    watch,
+                    None,
+                    ChannelId::new(7787953),
+                    Some(Arc::new(CancelToken::new())),
+                )
+                .await,
+        );
+    }
     assert_eq!(
-        failure
-            .commit(
-                Kind::ExecutorNotWired,
-                "NotSent(typed text cannot override reserve)".into(),
-                None,
-                None,
-                ChannelId::new(7787953),
-                Some(Arc::new(CancelToken::new())),
-            )
-            .await
-            .unwrap(),
-        None,
-        "reserve precedes even missing or mismatched wrapper proof"
+        decisions,
+        vec![Ok(None), Ok(None)],
+        "reserve precedes missing, mismatched and unreadable wrapper proof"
     );
 }

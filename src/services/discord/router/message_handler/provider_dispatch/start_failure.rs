@@ -73,11 +73,15 @@ impl Failure {
         self,
         kind: Kind,
         detail: String,
-        watch: Option<row_removed::Watch>,
+        watch: Result<Option<row_removed::Watch>, String>,
         shared: Option<Shared>,
         channel: poise::serenity_prelude::ChannelId,
         token: Option<Arc<CancelToken>>,
     ) -> Result<Option<bool>, String> {
+        let (watch, unreadable) = match watch {
+            Ok(watch) => (watch, None),
+            Err(error) => (None, Some(error)),
+        };
         let pin = watch.as_ref().map(row_removed::Watch::key);
         let provider = shared
             .as_ref()
@@ -95,6 +99,9 @@ impl Failure {
                     || !owner.claimed(self.front.1.message_id, &self.front)
                 {
                     return Ok(None);
+                }
+                if let Some(error) = unreadable {
+                    return Err(format!("failure row cannot be captured: {error}"));
                 }
                 if proof_token.is_some() && pin.is_none() {
                     return Err("wrapper failure lacks its fresh row identity".into());
@@ -202,10 +209,6 @@ impl Failure {
         {
             return Err(error);
         }
-        let watch = match watch {
-            Ok(watch) => watch,
-            Err(_) => return Err("NotSent(\"start_failure_row_unreadable\")".into()),
-        };
         let kind = match turn.host {
             TurnHost::Refused(refusal) => match confirmed(refusal) {
                 Some(kind) => kind,

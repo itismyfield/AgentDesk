@@ -712,7 +712,7 @@ async fn start_idle(
             .commit(
                 kind,
                 refusal.to_string(),
-                None,
+                Ok(None),
                 Some(shared.clone()),
                 channel,
                 None,
