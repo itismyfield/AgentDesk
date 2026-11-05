@@ -164,17 +164,18 @@ async fn a_stop_settle_on_either_side_of_the_purge_capture_resends_nothing() {
             set_pre_purge_probe_for_test(channel, probe);
             force_purge_channel_mailbox(None, &target, None).await
         } else {
-            let expected = handle
-                .try_capture_v2()
-                .await
-                .unwrap()
-                .expect("a V2 capture");
-            settle(handle.clone()).await.unwrap();
-            let stale = handle.try_purge_queue_if_unchanged(persistence.clone(), expected);
-            let stale = stale.await.unwrap();
+            // The stop settles between this purge's own capture and its checked purge.
+            let stopper = handle.clone();
+            let settled = move || async move { settle(stopper).await.unwrap() };
+            let stale = purge_v2(&handle, persistence.clone(), settled).await;
             assert!(
-                stale.failed.is_some() && stale.receipt.is_empty(),
-                "a capture the stop outdated purges nothing"
+                matches!(stale, Some(None)),
+                "a capture the stop outdated purges nothing and reports no purge: {stale:?}"
+            );
+            let owed = handle.v2_request(|slot| Ok(slot.as_ref().ok_or("no owner")?.owed_drops()));
+            assert!(
+                owed.await.unwrap().is_empty(),
+                "the refused purge owes nothing"
             );
             force_purge_channel_mailbox(None, &target, None).await
         };
