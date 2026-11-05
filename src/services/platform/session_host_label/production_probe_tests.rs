@@ -49,8 +49,7 @@ mod services {
         pub mod runtime_store {
             pub fn fsync_parent_dir(path: &std::path::Path) -> std::io::Result<()> {
                 assert!(path.starts_with(crate::config::runtime_root().unwrap()));
-                #[cfg(not(windows))]
-                std::fs::File::open(path.parent().unwrap())?.sync_all()?;
+                assert!(path.is_file());
                 Ok(())
             }
         }
