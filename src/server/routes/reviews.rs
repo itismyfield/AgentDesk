@@ -740,3 +740,91 @@ mod recovery_commit_validation_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod decision_retention_pg_tests {
+    use super::{DecisionItem, resolve_review_card_id_pg, update_decisions_pg};
+
+    /// Retention drops aged decision items only where the rework card lookup and an
+    /// in-flight review's item list answer the same without them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retention_keeps_decisions_the_review_lookups_still_read() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_review_decision_retention",
+            "review decision retention",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        // `decision` carries the row label; `d-gone*` have no dispatch row.
+        sqlx::raw_sql(
+            "INSERT INTO kanban_cards (id, title, status) VALUES ('card-r', 'r', 'review');
+             INSERT INTO task_dispatches (id, status, dispatch_type, kanban_card_id) VALUES
+                 ('d-open', 'pending', 'review', 'card-r'),
+                 ('d-done', 'failed', 'review', 'card-r'),
+                 ('d-other', 'failed', 'review', NULL);
+             INSERT INTO review_decisions (kanban_card_id, dispatch_id, decision, decided_at) VALUES
+                 ('card-r', 'd-open', 'open-aged', NOW() - INTERVAL '100 days'),
+                 ('card-r', 'd-done', 'done-carded', NOW() - INTERVAL '100 days'),
+                 (NULL, 'd-done', 'done-no-card', NOW() - INTERVAL '100 days'),
+                 (NULL, 'd-done', 'done-fresh', NOW() - INTERVAL '10 days'),
+                 ('card-r', 'd-done', 'done-null-time', NULL),
+                 ('card-r', 'd-other', 'other-carded', NOW() - INTERVAL '100 days'),
+                 ('card-r', 'd-gone', 'gone-carded', NOW() - INTERVAL '100 days'),
+                 (NULL, 'd-gone2', 'gone-no-card', NOW() - INTERVAL '100 days')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed review decisions");
+
+        let readers = |pool: sqlx::PgPool| async move {
+            let mut cards = Vec::new();
+            for dispatch in ["d-open", "d-done", "d-other", "d-gone", "d-gone2"] {
+                cards.push(resolve_review_card_id_pg(&pool, dispatch).await.unwrap());
+            }
+            let none: &[DecisionItem] = &[];
+            let open_items = update_decisions_pg(&pool, "d-open", none).await.unwrap();
+            (cards, open_items)
+        };
+        let before = readers(pool.clone()).await;
+        let card = Some("card-r".to_string());
+        assert_eq!(
+            before.0,
+            vec![card.clone(), card.clone(), card.clone(), card, None]
+        );
+
+        let report =
+            crate::services::maintenance::jobs::db_retention::db_retention_job(&pool, false)
+                .await
+                .unwrap();
+        assert!(
+            report
+                .summary()
+                .contains(&"review_decisions:delete=3".to_string()),
+            "the aged items the lookups no longer need go"
+        );
+        assert_eq!(
+            readers(pool.clone()).await,
+            before,
+            "the lookups answer as before"
+        );
+        let left: Vec<String> =
+            sqlx::query_scalar("SELECT decision FROM review_decisions ORDER BY 1")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            left,
+            [
+                "done-fresh",
+                "done-null-time",
+                "gone-carded",
+                "open-aged",
+                "other-carded"
+            ]
+            .map(String::from)
+        );
+
+        pool.close().await;
+        db.drop().await;
+    }
+}
