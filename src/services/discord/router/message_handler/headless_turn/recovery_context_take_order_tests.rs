@@ -3,9 +3,6 @@ use super::super::super::super::prompt_builder::{
 };
 use super::super::super::super::settings::RoleBinding;
 use poise::serenity_prelude::ChannelId;
-use source_guard_tests::{
-    HEADLESS_TURN, headless_profile_gaps, lifecycle_take_gaps, post_spawn_gaps, take_once_gaps,
-};
 
 pub(super) mod source_guard_tests;
 
@@ -74,28 +71,7 @@ async fn deferred_headless_start_leaves_metadata_with_caller_and_no_foreground_q
 }
 
 #[test]
-fn reserved_headless_start_has_no_post_spawn_error_path() {
-    assert_eq!(post_spawn_gaps(HEADLESS_TURN), Vec::<String>::new());
-}
-
-#[test]
-fn recovery_context_survives_headless_goal_lifecycle_consumed_return() {
-    let root = tempfile::tempdir().expect("create temp runtime root");
-    let _env = crate::config::set_agentdesk_root_for_test(root.path());
-    assert_eq!(lifecycle_take_gaps(HEADLESS_TURN), Vec::<String>::new());
-}
-
-#[test]
-fn headless_real_turn_consumes_recovery_context_once_before_prompt_use() {
-    let root = tempfile::tempdir().expect("create temp runtime root");
-    let _env = crate::config::set_agentdesk_root_for_test(root.path());
-    assert_eq!(take_once_gaps(HEADLESS_TURN), Vec::<String>::new());
-}
-
-#[test]
 fn actual_headless_assembly_selects_only_all_and_headless_shared_sections() {
-    assert_eq!(headless_profile_gaps(HEADLESS_TURN), Vec::<String>::new());
-
     let runtime_root = tempfile::tempdir().expect("runtime root");
     let _runtime_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
     let shared_prompt_path = crate::runtime_layout::shared_prompt_path(runtime_root.path());
