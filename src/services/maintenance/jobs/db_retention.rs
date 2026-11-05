@@ -75,8 +75,8 @@ const DISPATCH_RETENTION_DAYS: i32 = 90;
 const TURN_LIFECYCLE_RETENTION_DAYS: i32 = 30; // operational telemetry, several rows per turn
 const SKILL_USAGE_RETENTION_DAYS: i32 = 90; // dashboard analytics
 const TURNS_RETENTION_DAYS: i32 = 90; // token/cost analytics, archived before delete
-// The archive ages on the original `created_at`, so it keeps each transcript 90 more days
-// after the hot table drops it.
+// Archive rows go 180 days after the original `created_at`; how long a row stays after
+// archiving depends on when the weekly job runs.
 const TRANSCRIPT_ARCHIVE_RETENTION_DAYS: i32 = TRANSCRIPT_RETENTION_DAYS + 90;
 const RUNTIME_DECISIONS_RETENTION_DAYS: i32 = 90; // supervisor audit log
 const SLO_AGGREGATES_RETENTION_DAYS: i32 = 90; // SLO trend history
