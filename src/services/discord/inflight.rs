@@ -71,6 +71,7 @@ mod circuit_evidence_tests;
 mod circuit_removal;
 mod episode_guard;
 mod managed_submission;
+pub(in crate::services::discord) mod row_removed;
 mod store;
 pub(super) use circuit_removal::InflightDeleteRequest;
 use circuit_removal::handoff_before_discard_locked;
@@ -571,7 +572,7 @@ pub(crate) fn remove_inflight_row_for_policy_op(path: &Path) -> PolicyOpRemoveOu
     }
     #[cfg(test)]
     policy_op_unlink_hook::before(path);
-    match fs::remove_file(path).map(|()| sync_removed(path)) {
+    match crate::services::discord::inflight::row_removed::unlink(path) {
         Ok(()) => Outcome::Removed,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Outcome::Missing,
         Err(error) => Outcome::Io(error.to_string()),

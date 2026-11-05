@@ -87,9 +87,9 @@ and duplicate notifications cannot release another closing pin or create another
 | `inflight/clear_store/mod.rs:481` | User-message-guarded clear |
 | `inflight/clear_store/mod.rs:561` | Zero-owned clear |
 | `inflight/clear_store/mod.rs:599` | Exact snapshot / path-less Herdr remove_row |
-| `inflight/clear_store/mod.rs:648` | Delivered-state clear |
-| `inflight/clear_store/mod.rs:749` | Tmux-response clear |
-| `inflight/clear_store/mod.rs:815` | Lifecycle-guarded clear |
+| `inflight/clear_store/mod.rs:648` | Lifecycle death-evidence clear |
+| `inflight/clear_store/mod.rs:749` | After-delivery clear |
+| `inflight/clear_store/mod.rs:815` | Tmux-response test seam (no current live caller) |
 | `inflight/clear_store/abandon.rs:242` | Exact placeholder-abandon cleanup |
 | `inflight/clear_store/identity.rs:119` | Exact finalizer CAS, marked-row late settle and other captured clears |
 

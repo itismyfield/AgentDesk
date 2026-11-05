@@ -251,7 +251,7 @@ pub(super) async fn handle_text_message(
             feature_key(shared, &early_provider, channel_id, early_thread_parent.as_ref()).await;
         let inbound = (channel_id, channel_id, _queued_drain);
         let input = (preloaded_uploads, None);
-        let admitted = host_refusal::admitted_uploads(http, shared, &settings_provider, inbound, input);
+        let admitted = host_refusal::admitted_owner_uploads(http, shared, &settings_provider, inbound, owner.as_ref(), input);
         let Some(preloaded_uploads) = admitted.await? else {
             return Ok(IntakeExecution::Executed);
         };

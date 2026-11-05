@@ -375,7 +375,7 @@ impl Owner {
         let held = binds.iter().any(|bind| match &bind.at {
             BindAt::Queued { index, item } => snapshot.queued_digest(*index).as_ref() == Some(item),
             BindAt::Opaque => (snapshot.retained_inputs.iter()).any(|r| {
-                matches!(r.disposition, Some(RetainedDisposition::OpaqueUnsent))
+                (matches!(r.disposition, Some(RetainedDisposition::OpaqueUnsent)) || r.input.attempt.is_none() && matches!(&r.reason, RetainedReason::Rejected { reason, .. } if reason.starts_with("start_rejected: ")))
                     && ticket.receipt(&r.input.original) == receipt
             }),
             _ => false,
@@ -668,6 +668,7 @@ impl Owner {
                     },
                     reason: RetainedReason::Rejected {
                         reason: "opaque_unsent".into(),
+                        start_failure: None,
                     },
                     disposition: Some(RetainedDisposition::OpaqueUnsent),
                     notice: NoticeIntent {

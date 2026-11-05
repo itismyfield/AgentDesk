@@ -53,8 +53,10 @@ fn request(channel: ChannelId, message: u64) -> crate::services::discord::Intake
 
 /// `live` enables the acceptance oracle when the production policy lands. Both modes use the
 /// same ingress, owner drive, intake, producer, bridge and completion listener.
-async fn fixture(failure: &'static str, held: bool, live: bool) {
+async fn fixture(failure: &'static str, held: bool, live: bool, recover: bool) {
     let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
     let root = crate::config::runtime_root().unwrap();
     let _tmux = crate::services::tui_prompt_dedupe::binding_context::tests::fake_tmux(&root);
     fs::write(
@@ -115,16 +117,25 @@ async fn fixture(failure: &'static str, held: bool, live: bool) {
             let (shared, starts, signals) = (shared.clone(), starts.clone(), signals.clone());
             Box::pin(async move {
                 let id = front.1.message_id;
-                if id == A && starts.fetch_add(1, Ordering::SeqCst) == 2 {
+                let ordinal = if id == A {
+                    starts.fetch_add(1, Ordering::SeqCst) + 1
+                } else {
+                    0
+                };
+                if id == A && ordinal == 3 {
                     signals.send(Signal::ThirdStart).unwrap();
                     return Err("fixture third A start witness".into());
+                }
+                if id == B || (recover && ordinal > 1) {
+                    *dispatch::CLAUDE_LEGACY_DONE.lock().unwrap() =
+                        Some((channel.get(), format!("fixture completed {id}")));
                 }
                 let payload = signals.clone();
                 *dispatch::CLAUDE_LEGACY_PROBE.lock().unwrap() = Some((
                     channel.get(),
                     Box::new(move || {
                         println!("START_FAILURE_PRODUCER id={id} before_hook=true");
-                        if id == A {
+                        if id == A && !(recover && ordinal > 1) {
                             return Err(failure.into());
                         }
                         let hook = scope::launch_hook().ok_or("missing first-prompt hook")?;
@@ -155,7 +166,7 @@ async fn fixture(failure: &'static str, held: bool, live: bool) {
         })
     };
     let drive = owner_drive(
-        (mailbox.clone(), None),
+        (mailbox.clone(), Some(pool.clone())),
         (ProviderKind::Claude, channel.get()),
         idle,
         Some(shared.clone()),
@@ -202,6 +213,7 @@ async fn fixture(failure: &'static str, held: bool, live: bool) {
     crate::services::discord::queue_io::input_owner::drive::wake(drive.clone());
     let mut payloads = Vec::new();
     let mut closes = 0;
+    let mut closed_ids = Vec::new();
     let mut third = false;
     tokio::time::timeout(BUDGET, async {
         while let Some(signal) = received.recv().await {
@@ -221,6 +233,7 @@ async fn fixture(failure: &'static str, held: bool, live: bool) {
                 Signal::Payload(id, frame) => payloads.push((id, frame)),
                 Signal::Closed(id) => {
                     closes += 1;
+                    closed_ids.push(id);
                     if held || id == B || (third && closes >= 2) {
                         break;
                     }
@@ -252,6 +265,21 @@ async fn fixture(failure: &'static str, held: bool, live: bool) {
         channel.get(),
     )
     .is_some();
+    let drain = crate::services::discord::queue_io::input_owner::notice::drain;
+    drain(&pool, &mailbox, "claude", channel.get())
+        .await
+        .unwrap();
+    assert_eq!(
+        drain(&pool, &mailbox, "claude", channel.get())
+            .await
+            .unwrap(),
+        0
+    );
+    let owed: Vec<String> = sqlx::query_scalar("SELECT content FROM message_outbox WHERE source='retained_input_notice' AND target=$1 ORDER BY id")
+        .bind(format!("channel:{}",channel.get())).fetch_all(&pool).await.unwrap();
+    for content in &owed {
+        channel.say(&api.http, content).await.unwrap();
+    }
     let writes = api.take();
     let posts: Vec<_> = writes
         .iter()
@@ -263,32 +291,60 @@ async fn fixture(failure: &'static str, held: bool, live: bool) {
             w.contains("\"content\":\"...\"") || w.contains("\"content\":\"⠋ 계속 처리 중\"")
         })
         .count();
-    let notices = posts.len() - placeholders;
+    let notices = posts
+        .iter()
+        .filter(|w| w.contains("이 입력은 전달되지 않은 것을 확인해 원문을 보관했습니다"))
+        .count();
+    let b_summaries = posts
+        .iter()
+        .filter(|w| w.contains("fixture completed") || w.contains("✅"))
+        .count();
+    let error_cards = writes
+        .iter()
+        .filter(|w| w.contains("provider가 응답을 완료하지") || w.contains("오류 ·"))
+        .count();
     let deletes = writes.iter().filter(|w| w.starts_with("DELETE ")).count();
     let evidence = json!({"starts_a":starts.load(Ordering::SeqCst),"third":third,"closed":closes,
         "placeholder_posts":placeholders,"placeholder_deletes":deletes,"notice_posts":notices,
-        "inflight":row,"mailbox_active":occupied,"payloads":payloads,"snapshot":snapshot,"rest":writes});
+        "inflight":row,"mailbox_active":occupied,"payloads":payloads,"snapshot":snapshot,"rest":writes,
+        "closed_ids":closed_ids,"b_success_posts":b_summaries,"generic_error_cards":error_cards,"outbox_notices":owed.len()});
     println!("START_FAILURE_EVIDENCE {evidence}");
     if live {
         assert!(!third, "third A start is forbidden: {evidence}");
         assert_eq!(starts.load(Ordering::SeqCst), 2);
-        assert_eq!(notices, 1, "placeholder POSTs are separate");
+        assert_eq!(
+            notices,
+            usize::from(!recover),
+            "A retention is separate from placeholders and B output"
+        );
+        assert_eq!(error_cards, 0, "start failures use the NotSent arm");
+        assert_eq!(closed_ids.iter().filter(|id| **id == A).count(), 2);
+        assert_eq!(closed_ids.iter().filter(|id| **id == B).count(), 1);
         assert_eq!(
             deletes,
-            starts.load(Ordering::SeqCst),
+            if recover {
+                1
+            } else {
+                starts.load(Ordering::SeqCst)
+            },
             "each failed A placeholder is deleted"
         );
-        assert!(payloads.iter().all(|(id, _)| *id != A));
-        let retained = &snapshot["retained_inputs"][0];
-        assert!(retained["input"]["attempt"].is_null());
-        assert_eq!(retained["input"]["original"]["message_id"], A);
-        assert!(
-            retained["reason"]["reason"]
-                .as_str()
-                .unwrap()
-                .starts_with("start_rejected: ")
-        );
-        assert_eq!(snapshot["retained_inputs"].as_array().unwrap().len(), 1);
+        if recover {
+            assert_eq!(payloads.iter().filter(|(id, _)| *id == A).count(), 1);
+            assert!(snapshot["retained_inputs"].as_array().unwrap().is_empty());
+        } else {
+            assert!(payloads.iter().all(|(id, _)| *id != A));
+            let retained = &snapshot["retained_inputs"][0];
+            assert!(retained["input"]["attempt"].is_null());
+            assert_eq!(retained["input"]["original"]["message_id"], A);
+            assert!(
+                retained["reason"]["reason"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("start_rejected: ")
+            );
+            assert_eq!(snapshot["retained_inputs"].as_array().unwrap().len(), 1);
+        }
         assert_eq!(payloads.iter().filter(|(id, _)| *id == B).count(), 1);
         assert!(!occupied && !row);
     } else if held {
@@ -307,6 +363,8 @@ async fn fixture(failure: &'static str, held: bool, live: bool) {
     }
     shared.mailboxes.remove_fixture_for_test(channel);
     server.abort();
+    pool.close().await;
+    db.drop().await;
 }
 
 fn isolated(test: &str) -> bool {
@@ -327,11 +385,11 @@ fn isolated(test: &str) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn start_failure_before_records_third_a_start_from_real_completion() {
+async fn start_failure_repeated_retains_once_and_delivers_b_pg() {
     if !isolated(
         concat!(
             module_path!(),
-            "::start_failure_before_records_third_a_start_from_real_completion"
+            "::start_failure_repeated_retains_once_and_delivers_b_pg"
         )
         .trim_start_matches("agentdesk::"),
     ) {
@@ -340,6 +398,7 @@ async fn start_failure_before_records_third_a_start_from_real_completion() {
     fixture(
         "herdr turn: bound execution not confirmed: Herdr(Unknown(ProbeFailed))",
         false,
+        true,
         false,
     )
     .await;
@@ -356,5 +415,19 @@ async fn start_failure_s2_not_sent_frame_deletes_placeholder_without_notice() {
     ) {
         return;
     }
-    fixture("NotSent(\"herdr_root_recovery_held\")", true, false).await;
+    fixture("NotSent(\"herdr_root_recovery_held\")", true, false, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_failure_recovers_before_retry_without_a_notice_pg() {
+    if !isolated(
+        concat!(
+            module_path!(),
+            "::start_failure_recovers_before_retry_without_a_notice_pg"
+        )
+        .trim_start_matches("agentdesk::"),
+    ) {
+        return;
+    }
+    fixture("opaque context I/O", false, true, true).await;
 }

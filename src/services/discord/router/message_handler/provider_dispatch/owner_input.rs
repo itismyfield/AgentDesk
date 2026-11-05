@@ -193,6 +193,7 @@ pub(in crate::services::discord) fn owner_drive(
             };
             if !synthetic
                 && let (Some(shared), Err(error)) = (&runtime, &result)
+                && error != "NotSent(\"owner_start_failed\")"
                 && let Some(hold) = ingress::Hold::from_refusal(error)
             {
                 ingress::handoff_held(shared, &provider, ChannelId::new(channel), &original, hold)
@@ -369,9 +370,23 @@ pub(in crate::services::discord) struct OwnerTurn {
     settled: Settled,
     /// Where the front came from, read from the provenance its admission kept.
     origin: InputOrigin,
+    refusal: std::sync::Arc<Mutex<Option<crate::services::turn_host::HerdrRefusal>>>,
 }
 
 impl OwnerTurn {
+    pub(super) fn mailbox(&self) -> &ChannelMailboxHandle {
+        &self.mailbox
+    }
+    pub(super) fn claim(&self) -> &FrontClaim {
+        &self.claim
+    }
+    pub(in crate::services::discord) fn refused(
+        &self,
+        refusal: crate::services::turn_host::HerdrRefusal,
+    ) {
+        *self.refusal.lock().unwrap_or_else(|e| e.into_inner()) = Some(refusal);
+    }
+
     pub(in crate::services::discord) fn front(&self) -> &Front {
         self.claim.front()
     }
@@ -394,6 +409,7 @@ impl OwnerTurn {
             claim,
             settled,
             origin,
+            ..
         } = self;
         let for_turn = crate::services::turn_host::for_turn;
         let host = for_turn(pool.as_ref(), &provider, channel, key.as_deref()).await;
@@ -627,11 +643,14 @@ async fn start_idle(
         Some(Some("headless")) => InputOrigin::HttpStart,
         Some(_) => InputOrigin::Routine,
     };
+    let failed = super::start_failure::Failure::claimed(&mailbox, &claim);
+    let refusal = std::sync::Arc::new(Mutex::new(None));
     let owner = OwnerTurn {
         mailbox,
         claim,
         settled,
         origin,
+        refusal: refusal.clone(),
     };
     let now = (std::time::SystemTime::now(), std::time::Instant::now());
     let restore = crate::services::turn_orchestrator::pending_queue_item_to_intervention;
@@ -664,6 +683,18 @@ async fn start_idle(
             started.map(drop).map_err(|error| error.to_string())
         }
     };
+    let typed = refusal.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(refusal) = typed
+        && let Some(kind) = super::start_failure::confirmed(&refusal)
+    {
+        if failed
+            .commit(kind, refusal.to_string(), None, Some(shared.clone()))
+            .await?
+            .is_some()
+        {
+            return Err("NotSent(\"owner_start_failed\")".into());
+        }
+    }
     match (answer.await, started) {
         (Ok(settlement), _) => settlement,
         (Err(_), Err(error)) => Err(format!("NotSent({error:?})")),
@@ -684,6 +715,7 @@ pub(super) fn execute_owned(
         claim,
         settled,
         origin,
+        ..
     } = owner;
     let session = turn.tmux_session_name.unwrap_or_default();
     let live = matches!(turn.host, TurnHost::Tmux)
@@ -825,11 +857,22 @@ pub(super) fn execute_front(
     settled: Settled,
 ) -> Result<(), String> {
     let reply = reply_once(Some(settled));
-    let result = match take_owned(&turn, Some(claim), owner, reply.clone()) {
+    let failure = super::start_failure::Failure::claimed(&owner.mailbox, &claim);
+    let watch =
+        crate::services::discord::inflight::row_removed::watch(turn.provider, turn.channel_id);
+    let context = turn.clone();
+    let success = reply.clone();
+    let inside: Reply = std::sync::Arc::new(move |result| {
+        if result.is_ok() {
+            success(result);
+        }
+    });
+    let result = match take_owned(&turn, Some(claim), owner, inside) {
         Some(Taken::Done(result)) => result,
         Some(Taken::Launch(guard)) => guard.finish(super::drive(turn, sender)),
         None => Err("NotSent(\"not_owned\")".into()),
     };
+    let result = failure.finish(&context, watch, result);
     reply(&result);
     result
 }

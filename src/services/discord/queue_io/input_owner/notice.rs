@@ -41,6 +41,15 @@ async fn tell(
     for entry in owed {
         notice(pool, provider, channel, namespace, entry).await?;
         if entry["input"]["attempt"].is_null() {
+            let identity = serde_json::from_value(entry["input"]["identity"].clone())
+                .map_err(|e| e.to_string())?;
+            handle
+                .v2_request(move |slot| {
+                    slot.as_mut()
+                        .ok_or("no input owner")?
+                        .attemptless_notice_enqueued(identity)
+                })
+                .await?;
             continue;
         }
         let key =
