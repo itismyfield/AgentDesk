@@ -21,6 +21,9 @@ input-single-path/InputOwnership.cfg	InputOwnership	HeldResumes,NoSilentLoss,NoS
 input-single-path/InputOwnershipA2d1.cfg	InputOwnership	AnswerOnce,DraftToldOnce,NoSilentLoss,NoTimedRetry,StartNotDropped	-
 input-single-path/InputOwnershipA2d2.cfg	InputOwnership	AnswerOnce,HeldResumes,NoSilentLoss,NoSilentLossObserved	-
 input-single-path/InputOwnershipA2d3.cfg	InputOwnership	HeldResumes,NoSilentLoss,NoSilentLossObserved	-
+input-single-path/InputOwnershipAutoHold.cfg	InputOwnership	-	-
+input-single-path/InputOwnershipAutoHoldBefore.cfg	InputOwnership	AutomaticHoldNoticeOnce	-
+input-single-path/InputOwnershipAutoHoldReasonKey.cfg	InputOwnership	AutomaticHoldNoticeOnce	-
 input-single-path/InputOwnershipC.cfg	InputOwnership	-	-
 input-single-path/InputOwnershipCF.cfg	InputOwnership	CarriedRowEnds,NoSilentLoss,NoSilentLossObserved	-
 input-single-path/InputOwnershipF.cfg	InputOwnership	NoSilentLoss,NoSilentLossObserved	-

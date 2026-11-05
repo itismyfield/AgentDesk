@@ -14,6 +14,13 @@ tokio::task_local! { static EXISTING_RETRY: bool; }
 // A test adopts only inside this scope; any other test keeps the channel unadopted.
 #[cfg(test)]
 tokio::task_local! { pub(crate) static ADOPTS: bool; }
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static BEFORE_INGRESS_HOLD: std::cell::RefCell<Option<(
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>>;
+}
 
 /// Whether a local TUI channel's seams adopt its queue: always in production.
 fn adopts() -> bool {
@@ -227,19 +234,41 @@ pub(crate) async fn handoff_held(
         };
         if let Some(ticket) = ticket {
             let original = Original::with_ticket(item, ticket);
-            held(shared, &handle, channel, &original, hold).await;
+            held_once(shared, &handle, channel, &original, hold).await;
         }
     }
 }
 
-/// Notices a hold once per original and hold, and only while the queue durably holds the original
-/// unattempted; an immediate unit or a Pending admission never notices.
+/// Keeps the direct per-reason test contract on the same notice algorithm.
+#[cfg(test)]
 pub(crate) async fn held(
     shared: &SharedData,
     handle: &ChannelMailboxHandle,
     channel: ChannelId,
     original: &Original,
     hold: Hold,
+) -> bool {
+    held_with_scope(shared, handle, channel, original, hold, false).await
+}
+
+async fn held_once(
+    shared: &SharedData,
+    handle: &ChannelMailboxHandle,
+    channel: ChannelId,
+    original: &Original,
+    hold: Hold,
+) -> bool {
+    held_with_scope(shared, handle, channel, original, hold, true).await
+}
+
+/// Automatic holds retain the first reason; direct reason checks share the same atomic choice.
+async fn held_with_scope(
+    shared: &SharedData,
+    handle: &ChannelMailboxHandle,
+    channel: ChannelId,
+    original: &Original,
+    hold: Hold,
+    once_per_original: bool,
 ) -> bool {
     use super::admission::TurnBind;
     static NOTICED: std::sync::Mutex<Vec<(String, Hold)>> = std::sync::Mutex::new(Vec::new());
@@ -250,7 +279,10 @@ pub(crate) async fn held(
     let key = (original.ticket.as_str().to_string(), hold);
     {
         let mut noticed = NOTICED.lock().unwrap_or_else(|e| e.into_inner());
-        if noticed.contains(&key) {
+        if noticed
+            .iter()
+            .any(|(ticket, prior)| ticket == &key.0 && (once_per_original || *prior == hold))
+        {
             return false;
         }
         noticed.push(key);
@@ -416,7 +448,14 @@ async fn admit_raw(
     };
     let (intake, first) = original.admit_first(&handle).await;
     if first && let Some(hold) = ingress_hold(shared, uploads_pending) {
-        held(shared, &handle, channel, &original, hold).await;
+        #[cfg(test)]
+        if let Ok(Some((entered, release))) =
+            BEFORE_INGRESS_HOLD.try_with(|pause| pause.borrow_mut().take())
+        {
+            let _ = entered.send(());
+            let _ = release.await;
+        }
+        held_once(shared, &handle, channel, &original, hold).await;
     }
     #[cfg(unix)]
     if intake == Intake::Accepted {

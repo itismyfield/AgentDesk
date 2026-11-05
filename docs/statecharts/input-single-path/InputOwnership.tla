@@ -777,4 +777,48 @@ F7ResumeNext == F7PreflightRefusal \/ F7ReconcileComplete \/ F7StandbyReconcile
 ResumeProgress == claim = "joined" /\ Mut # "standby" =>
                   pastes = 1 /\ inp = (IF Mut = "shortTransition" THEN "answered" ELSE "sent")
 StandbyDoesNotInject == Mut = "standby" => pastes = 0
+
+\* Only automatic ingress/handoff calls share a notice by original. Direct held(reason)
+\* calls keep their separate per-reason contract. All notice sends here have HTTP available.
+AutoHoldFrame == <<mode, src, mbx, nat, natOwner, pend, reader, obsOk, route, plain, sentInto,
+                   win, rcv, userRow, twin, pastes, lp, op, draft, timer, byTimer, timed, watch,
+                   aged, twinPend, envLeft, stale, old, acct, row, ep, leak, outside, observer>>
+AutoHoldInit ==
+    /\ Init /\ mode = "turn" /\ src = "discord" /\ mbx = "idle" /\ nat = "idle"
+    /\ natOwner = "none" /\ old = "none" /\ ~obsOk /\ ~twin /\ ~twinPend
+    /\ screen = "cause" /\ draft = "none" /\ ~stale /\ ~acct
+    /\ row = "none" /\ ~ep /\ ~leak
+
+\* ingress::held_once publishes a recovery reason selected before its exact-turn await;
+\* a concurrent handoff can publish first. claim records which of these two calls ran.
+AutoIngressHold ==
+    /\ claim \in {"none", "handed"} /\ inp \in {"queued", "held"}
+    /\ claim' = IF claim = "none" THEN "deferred" ELSE "joined"
+    /\ notices' = notices + (IF Fix = "autoHoldOnce" /\ Mut # "autoHoldReasonKey"
+                              /\ notices > 0 THEN 0 ELSE 1)
+    /\ heldBy' = IF notices = 0 THEN "recovery" ELSE heldBy
+    /\ UNCHANGED <<inp, wake, screen>> /\ UNCHANGED AutoHoldFrame
+
+\* complete_active_reconcile opens recovery and issues the existing owner wake. screen
+\* tracks this barrier only in this slice; the transcript still lacks an idle observer.
+AutoRecoveryCompletes ==
+    /\ screen = "cause"
+    /\ screen' = "ok" /\ wake' = TRUE
+    /\ UNCHANGED <<inp, notices, heldBy, claim>> /\ UNCHANGED AutoHoldFrame
+
+\* idle_unobserved maps to ScreenMissing. The notice decision and record are one mutex
+\* action, so the repaired automatic path keeps whichever reason won first.
+AutoHandoffHold ==
+    /\ screen = "ok" /\ wake /\ ~obsOk /\ claim \in {"none", "deferred"}
+    /\ claim' = IF claim = "none" THEN "handed" ELSE "joined"
+    /\ inp' = "held" /\ wake' = FALSE
+    /\ notices' = notices + (IF Fix = "autoHoldOnce" /\ Mut # "autoHoldReasonKey"
+                              /\ notices > 0 THEN 0 ELSE 1)
+    /\ heldBy' = IF notices = 0 THEN "missingSource" ELSE heldBy
+    /\ UNCHANGED screen /\ UNCHANGED AutoHoldFrame
+
+AutoHoldDone == claim = "joined" /\ UNCHANGED vars
+AutoHoldNext == AutoIngressHold \/ AutoRecoveryCompletes \/ AutoHandoffHold \/ AutoHoldDone
+AutomaticHoldNoticeOnce == claim # "none" => notices = 1
+
 =============================================================================
