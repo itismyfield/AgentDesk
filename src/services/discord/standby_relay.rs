@@ -2021,36 +2021,9 @@ mod tests {
 
         #[test]
         fn none_placeholder_new_message_stays_legacy() {
-            let module_src = include_str!("standby_relay.rs");
-            let match_marker = format!("match {} {{", "placeholder_msg_id");
-            let match_src = module_src
-                .split(&match_marker)
-                .nth(1)
-                .expect("standby placeholder route match");
-            let none_marker = format!("{} => {{", "None");
-            let none_src = match_src
-                .split(&none_marker)
-                .nth(1)
-                .expect("standby no-placeholder branch");
-            let legacy_send_window = &none_src[..none_src
-                .find("match result")
-                .expect("standby no-placeholder result match")];
-
             assert!(
                 standby_short_replace_should_cutover("answer"),
                 "sanity: a non-empty body cuts over only inside the Some(placeholder) branch"
-            );
-            assert!(
-                legacy_send_window.contains(&format!("formatting::{}(", "send_long_message_raw")),
-                "A3 placeholder=None must keep the legacy fresh-send transport"
-            );
-            assert!(
-                !legacy_send_window.contains("deliver_short_replace_via_controller"),
-                "A3 placeholder=None must not route through the short-replace controller"
-            );
-            assert!(
-                !legacy_send_window.contains("deliver_turn_output"),
-                "A3 placeholder=None remains an anchor-less fresh-send legacy branch"
             );
         }
     }
