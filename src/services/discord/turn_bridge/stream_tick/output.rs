@@ -1,4 +1,6 @@
 use super::*;
+use crate::services::discord::outbound::body_census::{BodyOffer, BodySource};
+use crate::services::tui_o::cutover::{BodySite, claim_then_send_at};
 use std::ops::ControlFlow;
 
 // Edit the authorized status panel before the footer and response phases run.
@@ -27,7 +29,12 @@ pub(super) async fn refresh_status_panel(
         .placeholder_live_events
         .panel_cache_invalidation_epoch(channel_id, status_msg_id.get());
     if panel_cache_invalidation_epoch.is_some() || panel_text != *tick.last_status_panel_text {
-        match TurnGateway::edit_message(gateway.as_ref(), channel_id, status_msg_id, &panel_text)
+        match BodySource::inherited()
+            .observe(
+                BodySite::BridgeStreaming,
+                BodyOffer::NonBody,
+                TurnGateway::edit_message(gateway.as_ref(), channel_id, status_msg_id, &panel_text),
+            )
             .await
         {
             Ok(()) => {
@@ -149,16 +156,17 @@ pub(super) async fn run_rollover_loop(
             tick.inflight_state.current_msg_len,
         );
 
-        match guarded_bridge_rollover_edit(
-            gateway.as_ref(),
-            &provider,
-            channel_id,
-            *tick.current_msg_id,
-            raw_current_portion,
-            &plan.frozen_chunk,
-            Some(body_claim),
-        )
-        .await
+        match BodySource::from_state(tick.inflight_state)
+            .scope(guarded_bridge_rollover_edit(
+                gateway.as_ref(),
+                &provider,
+                channel_id,
+                *tick.current_msg_id,
+                raw_current_portion,
+                &plan.frozen_chunk,
+                Some(body_claim),
+            ))
+            .await
         {
             Ok(GuardedRolloverEditOutcome::Clean) => {
                 if !runtime::authorize_tick_mutation!(
@@ -177,7 +185,13 @@ pub(super) async fn run_rollover_loop(
                 }
                 let visible_anchor =
                     crate::services::discord::footer_retirement::visible_anchor(&status_block);
-                match TurnGateway::send_message(gateway.as_ref(), channel_id, visible_anchor).await
+                match BodySource::inherited()
+                    .observe(
+                        BodySite::BridgeStreaming,
+                        BodyOffer::NonBody,
+                        TurnGateway::send_message(gateway.as_ref(), channel_id, visible_anchor),
+                    )
+                    .await
                 {
                     Ok(next_msg_id) => {
                         let next_response_sent_offset = *tick.response_sent_offset + raw_split_at;
@@ -280,13 +294,21 @@ pub(super) async fn run_rollover_loop(
                                 tick.inflight_state.current_msg_len,
                             )
                         {
-                            let _ = TurnGateway::edit_message(
-                                gateway.as_ref(),
-                                channel_id,
-                                *tick.current_msg_id,
-                                &plan.display_snapshot,
-                            )
-                            .await;
+                            let _ = BodySource::from_state(tick.inflight_state)
+                                .reason(
+                                    crate::services::tui_o::channel_policy::ClaimReason::NoClaim,
+                                )
+                                .observe(
+                                    BodySite::BridgeRolloverRestore,
+                                    BodyOffer::Body,
+                                    TurnGateway::edit_message(
+                                        gateway.as_ref(),
+                                        channel_id,
+                                        *tick.current_msg_id,
+                                        &plan.display_snapshot,
+                                    ),
+                                )
+                                .await;
                             *tick.last_edit_text = plan.display_snapshot;
                         }
                         break;
@@ -422,11 +444,17 @@ pub(super) async fn refresh_streaming_response(
     {
         let edit = || {
             let text = &stable_display_text;
-            TurnGateway::edit_message(gateway.as_ref(), channel_id, *tick.current_msg_id, text)
+            BodySource::inherited().observe(
+                BodySite::BridgeStreaming,
+                BodyOffer::body(!raw_current_portion.trim().is_empty()),
+                TurnGateway::edit_message(gateway.as_ref(), channel_id, *tick.current_msg_id, text),
+            )
         };
         let claim = (!raw_current_portion.trim().is_empty()).then_some(body_claim);
         let edit_ok = matches!(
-            claim_then_send(claim, edit).await,
+            BodySource::from_state(tick.inflight_state)
+                .scope(claim_then_send_at(BodySite::BridgeStreaming, claim, edit))
+                .await,
             Ok(BodySend::Sent(Ok(())))
         );
         *tick.last_status_edit = tokio::time::Instant::now();

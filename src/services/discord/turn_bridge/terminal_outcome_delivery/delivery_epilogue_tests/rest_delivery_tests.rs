@@ -21,6 +21,8 @@ async fn rest_worker_terminal_edits_once_without_a_headless_duplicate() {
     let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
     driver.gateway = Arc::new(DriverGateway {
+        #[cfg(unix)]
+        published_census: driver.published_census.clone(),
         chain_locally: false,
         direct: true,
         marker: driver.marker.clone(),

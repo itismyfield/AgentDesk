@@ -1,9 +1,11 @@
+use crate::services::discord::outbound::{census_scope, current_census};
+use serde_json::{Value, json};
 use std::time::Instant;
 
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::tui_o::{
     alarm::AlarmRouter,
-    channel_policy::{self, BodyClaimed, BootChannels, LegacySend},
+    channel_policy::{self, BodyClaimed, BootChannels, ClaimReason, LegacySend},
     writer::WriterAlarm,
 };
 
@@ -193,20 +195,158 @@ pub(crate) async fn claim_then_send_held<T, F: std::future::Future<Output = T>>(
     claim: Option<BodyClaim<'_>>,
     send: impl FnOnce() -> F,
 ) -> Result<(BodySend<T>, Option<LegacySend>), IdentityError> {
-    let mut reserved = None;
-    if let Some(claim) = claim {
-        let claimed = claim.claim()?;
-        #[cfg(test)]
-        CLAIMS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push((claim.channel_id, claimed.owned));
-        if claimed.owned {
-            return Ok((BodySend::OwnedByO, None));
-        }
-        reserved = claimed.send;
+    let claimed = reserve_body(claim)?;
+    if claimed.owned {
+        return Ok((BodySend::OwnedByO, None));
     }
-    Ok((BodySend::Sent(send().await), reserved))
+    Ok((BodySend::Sent(send().await), claimed.send))
+}
+
+#[derive(Clone, Copy, serde::Serialize)]
+pub(crate) enum BodySite {
+    #[serde(rename = "W01")]
+    WatcherTerminal,
+    #[serde(rename = "W01a")]
+    WatcherDirectFallback,
+    #[serde(rename = "W01b")]
+    WatcherReplace,
+    #[serde(rename = "W01c")]
+    WatcherPostFallback,
+    #[serde(rename = "W01d")]
+    WatcherShortController,
+    #[serde(rename = "W01e")]
+    WatcherLongController,
+    #[serde(rename = "W01f")]
+    WatcherLongChunks,
+    #[serde(rename = "W02")]
+    WatcherStreaming,
+    #[serde(rename = "W02b")]
+    WatcherProviderGuard,
+    #[serde(rename = "FOOTER-INITIAL")]
+    FooterInitial,
+    #[serde(rename = "FOOTER-STRIP")]
+    FooterStrip,
+    #[serde(rename = "FOOTER-REFRESH")]
+    FooterRefresh,
+    #[serde(rename = "W06")]
+    StandbyRelay,
+    #[serde(rename = "W10")]
+    BridgeTerminal,
+    #[serde(rename = "W10b")]
+    BridgeShortController,
+    #[serde(rename = "W10c")]
+    BridgeLongController,
+    #[serde(rename = "W10d")]
+    BridgeLongChunks,
+    #[serde(rename = "W10e")]
+    BridgePinnedTerminal,
+    #[serde(rename = "W11")]
+    BridgeCancelled,
+    #[serde(rename = "W13")]
+    BridgeForeignTerminal,
+    #[serde(rename = "W14")]
+    BridgeStreaming,
+    #[serde(rename = "W14a")]
+    BridgeRollover,
+    #[serde(rename = "W14b")]
+    BridgeRolloverRestore,
+    #[serde(rename = "W14c")]
+    BridgeBlockedRollover,
+    #[serde(rename = "W17")]
+    BridgeHeadless,
+    #[serde(rename = "W19")]
+    OutputController,
+    #[serde(rename = "W30")]
+    RecoveryNotice,
+    #[serde(rename = "W30a")]
+    RecoveryController,
+    #[serde(rename = "W31")]
+    RecoveredTerminal,
+    #[serde(rename = "W32")]
+    RecoveryChunks,
+    #[serde(rename = "W33")]
+    HealthRecovery,
+    #[serde(rename = "W34")]
+    RestartHandoff,
+    #[serde(rename = "W35")]
+    RestartAnchor,
+    #[serde(rename = "W20")]
+    SessionSink,
+    #[serde(rename = "W20a")]
+    SessionShortController,
+    #[serde(rename = "W20b")]
+    SessionChunks,
+    #[serde(rename = "W20d")]
+    SessionTaskResponse,
+    #[serde(rename = "W21")]
+    TaskResponse,
+    #[serde(rename = "W01g")]
+    WatcherTaskResponse,
+}
+
+/// Observation remains separate from a Legacy send guard, including unclaimed transports.
+pub(crate) struct BodyTransport {
+    _send: Option<LegacySend>,
+    tag: Option<Value>,
+}
+
+impl BodyTransport {
+    fn inherited(site: BodySite, send: Option<LegacySend>, reason: ClaimReason) -> Self {
+        let mut tag = current_census();
+        if let Some(object) = tag.as_mut().and_then(Value::as_object_mut) {
+            if !object.contains_key("site") {
+                object.insert("site".into(), json!(site));
+            }
+            if !object.contains_key("reason") {
+                object.insert("reason".into(), json!(reason));
+            }
+        }
+        Self { _send: send, tag }
+    }
+
+    pub(crate) async fn run<T>(&self, next: impl std::future::Future<Output = T>) -> T {
+        if self.tag.is_some() {
+            census_scope(self.tag.clone(), next).await
+        } else {
+            next.await
+        }
+    }
+}
+
+pub(crate) async fn claim_then_send_at<T, F: std::future::Future<Output = T>>(
+    site: BodySite,
+    claim: Option<BodyClaim<'_>>,
+    send: impl FnOnce() -> F,
+) -> Result<BodySend<T>, IdentityError> {
+    let (sent, _context) = claim_then_send_held_at(site, claim, send).await?;
+    Ok(sent)
+}
+
+pub(crate) async fn claim_then_send_held_at<T, F: std::future::Future<Output = T>>(
+    site: BodySite,
+    claim: Option<BodyClaim<'_>>,
+    send: impl FnOnce() -> F,
+) -> Result<(BodySend<T>, BodyTransport), IdentityError> {
+    let claimed = reserve_body(claim)?;
+    let context = BodyTransport::inherited(site, claimed.send, claimed.reason);
+    if claimed.owned {
+        return Ok((BodySend::OwnedByO, context));
+    }
+    let sent = context.run(async { send().await }).await;
+    Ok((BodySend::Sent(sent), context))
+}
+
+fn reserve_body(claim: Option<BodyClaim<'_>>) -> Result<BodyClaimed, IdentityError> {
+    let Some(claim) = claim else {
+        return Ok(legacy(ClaimReason::NoClaim));
+    };
+    let claimed = claim.claim()?;
+    #[cfg(test)]
+    CLAIMS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push((claim.channel_id, claimed.owned));
+    Ok(claimed)
 }
 
 /// Test builds: every body claim this process judged, with whether O took the body.
@@ -261,16 +401,17 @@ impl IdentityError {
             detail: self.to_string(),
         };
         AlarmRouter::for_process(None, None).raise_at(channel_id, &alarm, Instant::now());
-        tracing::error!(channel_id, error = %self, "tui_o output identity held");
+        tracing::error!(channel_id, reason = ?ClaimReason::IdentityHeld, error = %self, "tui_o output identity held");
         self
     }
 }
 
 /// Legacy's answer for a channel with no adoption to count its send against.
-fn legacy() -> BodyClaimed {
+fn legacy(reason: ClaimReason) -> BodyClaimed {
     BodyClaimed {
         owned: false,
         send: None,
+        reason,
     }
 }
 
@@ -284,14 +425,14 @@ fn decide_with_snapshot(
     let snapshot = snapshot.ok_or(IdentityError::MissingSnapshot)?;
     // A verified empty list is O off: Legacy before any destination or kind is resolved.
     if snapshot.channels().is_empty() {
-        return Ok(legacy());
+        return Ok(legacy(ClaimReason::EmptySelection));
     }
     if channel_id == 0 {
         return Err(IdentityError::UnknownChannel);
     }
     // Membership comes before runtime lookup so unrelated Legacy channels stay independent.
     if !snapshot.channels().contains(&channel_id) {
-        return Ok(legacy());
+        return Ok(legacy(ClaimReason::NonMember));
     }
     let kind = resolve_kind().ok_or(IdentityError::UnknownKind)?;
     let expected = snapshot.kind(channel_id);
@@ -302,26 +443,45 @@ fn decide_with_snapshot(
         });
     }
     let selected = channel_policy::owns_output(snapshot.channels(), channel_id, Some(kind));
-    if snapshot.execution(channel_id).is_some() {
+    if let Some(execution) = snapshot.execution(channel_id) {
         return Ok(BodyClaimed {
             owned: selected,
             send: None,
+            reason: if !selected {
+                ClaimReason::Unselected
+            } else if execution.permit.is_err() {
+                ClaimReason::OwnedHeld
+            } else {
+                ClaimReason::OwnedByO
+            },
         });
     }
     let candidate = snapshot.candidate(channel_id);
     // The body and its host share both state and sends.
     let Some(candidate) = candidate.filter(|_| selected) else {
-        return Ok(legacy());
+        return Ok(legacy(if selected {
+            ClaimReason::NoCandidate
+        } else {
+            ClaimReason::Unselected
+        }));
     };
     Ok(match usage {
         Use::Body => match origin {
             Some(origin) => candidate.claim_body_from(channel_id, origin),
             None => candidate.claim_body(channel_id),
         },
-        Use::Peek => BodyClaimed {
-            owned: candidate.peek().owned(),
-            send: None,
-        },
+        Use::Peek => {
+            let state = candidate.peek();
+            BodyClaimed {
+                owned: state.owned(),
+                send: None,
+                reason: if state == channel_policy::Adoption::Pending {
+                    ClaimReason::NoCandidate
+                } else {
+                    state.claim_reason()
+                },
+            }
+        }
     })
 }
 

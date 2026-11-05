@@ -23,6 +23,17 @@ type Writes = Arc<Mutex<Vec<(Method, (u64, u64))>>>;
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_stale_leak_resend_stays_counted_through_its_edit_and_continuations() {
+    use crate::services::discord::outbound::raw_output::tests as observation;
+    if observation::isolated(
+        concat!(
+            module_path!(),
+            "::a_stale_leak_resend_stays_counted_through_its_edit_and_continuations"
+        )
+        .trim_start_matches("agentdesk::"),
+    ) {
+        return;
+    }
+    let journal = observation::journal().await;
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let root = tempfile::tempdir().unwrap();
     let _root =
@@ -103,4 +114,17 @@ async fn a_stale_leak_resend_stays_counted_through_its_edit_and_continuations() 
         "one Legacy send counted at every write: {writes:?}"
     );
     assert_eq!(candidate.sends(), (1, 1), "done once the pass returns");
+    observation::flushed().await;
+    let recorded: Vec<serde_json::Value> = std::fs::read_to_string(journal)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|row: &serde_json::Value| row["kind"] == "target")
+        .collect();
+    assert_eq!(recorded.len(), writes.len() * 2);
+    for event in recorded {
+        assert_eq!(event["census"]["site"], "W33");
+        assert_eq!(event["census"]["reason"], "PENDING_RELEASED");
+        assert_eq!(event["census"]["binding_mode"], "TUI");
+    }
 }
