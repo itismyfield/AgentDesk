@@ -186,21 +186,6 @@ pub(in crate::services::discord) fn forge(
     forged
 }
 
-/// Swaps the first as-written `first` with the first as-written `second` after it.
-pub(in crate::services::discord) fn swap(source: &str, first: &str, second: &str) -> String {
-    let lexed = Lexed::new(source);
-    let a = lexed.find(first).expect("first swap operand");
-    let b = lexed
-        .find_after(a + first.len(), second)
-        .expect("second swap operand follows the first");
-    format!(
-        "{}{second}{}{first}{}",
-        &source[..a],
-        &source[a + first.len()..b],
-        &source[b + second.len()..]
-    )
-}
-
 #[test]
 fn as_written_matching_skips_prose_and_quoted_copies() {
     let source = "// call(\n/* call( */ let s = \"call(\";\n\
