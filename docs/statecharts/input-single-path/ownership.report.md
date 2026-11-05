@@ -242,7 +242,7 @@ Code: `8b28712958` (A2b on main `6d7c1851e5`). Only `DriveStartWaits` and three 
 Code: r3, kept in r5 (`owner_input.rs:559-581`). The watch's probe of a native hold reads the pane's liveness first. A dead or absent pane is `Gone` and ends the watch (`held_watch.rs:38-44`). A tmux read that fails (`liveness.rs:59-77`, `ProbeError`) is now `Unknown`, which keeps the watch for the next 2 s look. r2b mapped every non-`Live` answer to `Gone`, so one failed read ended the watch, and nothing woke the held start after its turn ended.
 
 - `NativeWatchMisreads` (Fix `a2b`): a read of a native-held pane fails. The watch is kept; mutant `nativeReadGone` (r2b) ends it.
-- `NativeHeldRuns` (liveness, under `LiveSpec == Spec /\ WF_vars(Next)`): a native-held start is handed again unless its pane is gone. `WF_vars(Next)` is weak fairness of `Next` as a whole, not of each action: a run whose reads keep failing or whose native turn never ends is outside what the property proves. The repository cfgs carry invariants only; this property is run outside CI with a `PROPERTY` config, and moving it into a checked cfg is #7772.
+- `NativeHeldRuns` (liveness, under `LiveSpec == Spec /\ WF_vars(Next)`): a native-held start is handed again unless its pane is gone. `WF_vars(Next)` is weak fairness of `Next` as a whole, not of each action: a run whose reads keep failing or whose native turn never ends is outside what the property proves. `A2bLive` and `A2bReadGoneLive` now check it in CI (#7772).
 - Only a failed pane read is projected. A Claude transcript that is resolved but unreadable reads as not busy (in `native_turn`, `observe_claude_jsonl_turn_state(...).is_busy()` is false, so the probe returns `Screen::Ready`, `owner_input.rs:566-575`), so its watch wakes the drive rather than keeping the hold; the model leaves that read out.
 - Out of scope: the model has one Claude tmux channel; Herdr panes are not modelled.
 - Out of scope: Codex. This PR keeps Codex on main's path, so a Codex start into a native busy turn is the existing defect; its native-busy gate and turn-end read moved to #7772.
@@ -268,3 +268,36 @@ The r2b counterexample: a person's turn runs, the start is held with a watch (`D
 | `A2bReadGone` | `NativeHeldResumes`, `NoSilentLoss` break | violated, 131,460 states |
 
 Mutants on `f5`: `nativeNoWatch` breaks `NoSilentLoss` and `NativeHeldResumes`; `noBoundaryWake` breaks `NoSilentLoss`, `NoSilentLossObserved`, `NativeHeldResumes` and `HeldResumes`; `startPastes` breaks `StartOwnTurn`.
+
+## #7772: an unreadable pane holds a start, and a start held after its claim is watched (`a7772`)
+
+Code: this PR on main `MAINSHA`. Only `a7772` reaches the new transitions; every other config keeps its state space and result (`A2b`: 130,292 states, as before).
+
+| Code entry (file:line) | Model value range |
+|---|---|
+| `owner_input.rs:614-644` `native_read`: a dead, absent or other-account pane is `Gone`; a failed liveness read or an unresolved transcript is `Unknown`; Claude `Idle` is `Ready`, `Streaming`/`UserSubmitted` is `Blocked`; a classifier `Unknown` is `Ready` only if the composer passes the final send check | `nr \in {"ok","unknown","spent"}` (`ReadBreaks`, `ReadRecovers`); `View` is `"unknown"` while `nr = "unknown"`, else `nat` |
+| `owner_input.rs:540-566` `start_waits`, `:595-602` `native_wait`, `:672-680` the early hold (`held_watch::arm` + `hold_front`) | `DriveStartWaits`: legacy holds on `View \in {"busy","unknown"}`; turn mode holds on `nat = "busy"` (the activity read, `:550-554`); mutant `earlyUnknownGoes` lets `unknown` through |
+| `owner_input.rs:685-690` the claim after `Go` | `DriveStartClaims`: `inp' = "claimed"`, `seen' = View` (legacy) or `nat` (turn mode); rule `EarlyClaimHasIdleProof` |
+| `owner_input.rs:795-821` the late read before `Registration` | `DriveStartRuns` on `View = "idle"` (mutant `lateUnknownIdle` also on `unknown`); `DriveStartLateHolds` otherwise: `heldBy' = "native"`, `watch' = TRUE` (mutant `lateNoWatch`: no watch, as main), `prov' = "mailbox"` |
+| `owner_input.rs:737-742`, `:750-761` the producer side of the late hold (`hold_start` after `NotSent("synthetic_waits_idle")`) | the same `DriveStartLateHolds` step: the owner marks the front held, so the drive watches it |
+| `owner_input.rs:859-878` `late_probe`: `Ready` only with no active mailbox turn and no inflight row carrying the attempt's own nonce; a lookup error is `Unknown` | `prov \in {"mailbox","row","none"}` (`AttemptReleases`, `AttemptRowClears`); `WatchSees` wakes a native hold only once `prov = "none"` (mutant `lateNoUnwindWait`: before); `DriveMeetsUnwind` spends a wake that meets the unwind |
+| `headless_turn.rs:527-533`, `:548-553` the fresh and snapshot binding clear, deferred by `:554-565` to after the late read | not modelled: it only decides which transcript the late read resolves (see the out-of-scope lines) |
+
+| Config | Before (main) | After |
+|---|---|---|
+| `A2b` | every rule holds, 130,292 states | unchanged |
+| `A2bReadGone` | `NativeHeldResumes`, `NoSilentLoss` break | unchanged |
+| `A2bLive` | not a repository cfg (run by hand: holds) | `NativeHeldRuns` holds, A2BLIVE states |
+| `A2bReadGoneLive` | not a repository cfg (run by hand: violated) | `NativeHeldRuns` violated |
+| `A7772` | — | every rule holds, A7772 states |
+| `A7772Live` | — | `NativeHeldRuns` holds, A7772LIVE states |
+| `A7772EarlyUnknownGoes` | — | `EarlyClaimHasIdleProof` breaks |
+| `A7772LateUnknownIdle` | — | `StartOwnTurn` breaks |
+| `A7772LateNoWatch` / `A7772LateNoWatchLive` | — | `NativeHeldResumes`, `NoSilentLoss`, `NoSilentLossObserved` break / `NativeHeldRuns` violated |
+| `A7772LateNoUnwindWait` / `A7772LateNoUnwindWaitLive` | — | `NativeHeldResumes`, `NoSilentLoss`, `NoSilentLossObserved` break / `NativeHeldRuns` violated |
+
+- Out of scope: Codex. `start_target` reads only Claude panes, and the late read runs only for Claude (`owner_input.rs:574-576`, `:795-797`); Codex keeps main's path until slice C adds its reader.
+- Out of scope: Herdr panes; `start_waits` sends a Herdr rest to the event path (`owner_input.rs:544-549`) and the model has one Claude tmux channel.
+- Out of scope: InputPath (#7795) and the native stop (#7755); neither changes when a start is read or held.
+- Out of scope: which transcript a read resolves (binding, session path, cwd); the model sees only its result, `nr`. The deferred fresh/snapshot clear is checked by `an_unsent_start_cleared_later_leaves_only_its_removal_receipt_pg`.
+- Out of scope: a read that never recovers (`Unknown` for ever); `Quiet` waits for `nr # "unknown"`, as it waits for a screen that never clears.

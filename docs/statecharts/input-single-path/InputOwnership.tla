@@ -146,7 +146,7 @@ R4 == Fix \in {"a2d4", "c", "cf", "f", "f4", "f5", "a2b", "a7772"}
 \* Slice C: on a turn-mode channel the presence supervisor reads the owner's V2 front and wakes the
 \* owner once at the idle transition (supervisor_tests). Legacy channels are not assumed woken.
 RC == CX /\ Mut # "noBoundaryWake"
-\* #7772: a start's read of its pane, which an unknown read hides (owner_input.rs native_read).
+\* A start's read of its pane, which an unknown read hides (owner_input.rs native_read).
 A77 == Fix = "a7772"
 View == IF nr = "unknown" THEN "unknown" ELSE nat
 Waiting == inp \in {"queued", "held"}
@@ -689,8 +689,8 @@ Next ==
     \/ DriveMeetsRow \/ CarriedCloses \/ HandedOutside
 
 Spec == Init /\ [][Next]_vars
-\* Liveness, checked outside CI: weak fairness of Next as a whole, not of each action; runs whose
-\* reads keep failing or whose native turn never ends are outside what it proves.
+\* Liveness, checked by the *Live cfgs: weak fairness of Next as a whole, not of each action; runs
+\* whose reads keep failing or whose native turn never ends are outside what it proves.
 LiveSpec == Spec /\ WF_vars(Next)
 
 \* ------------------------------------------------------------------------------------ rules
