@@ -484,8 +484,8 @@ mod retention_pg_tests {
             DispatchPostgresTestDb::create("agentdesk_tuning_retention_pruned", "pruned").await;
         let base = base_db.connect_and_migrate().await;
         let pruned = pruned_db.connect_and_migrate().await;
-        // A past cycle's higher rounds and a recent cycle's round 1 on one card, an aged
-        // true positive retention may drop, and recent samples so guidance is produced.
+        // Older cycles' higher review rounds and the latest cycle's first one on one card, an
+        // aged true positive retention may drop, and recent samples so guidance is produced.
         for pool in [&base, &pruned] {
             sqlx::raw_sql(
                 "INSERT INTO review_tuning_outcomes (card_id, review_round, verdict, outcome, created_at)
