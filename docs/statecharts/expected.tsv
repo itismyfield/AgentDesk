@@ -58,8 +58,16 @@ input-single-path/InputOwnershipOwnerBusyMarked.cfg	InputOwnershipAdmission	-	-
 input-single-path/InputOwnershipOwnerBusyMarkedMutant.cfg	InputOwnershipAdmission	OwnerBusyKeepsMarked	-
 input-single-path/InputPath.cfg	InputPath	BusyInputLands,DraftSafe,HeldNotDropped,NoDeadlock,NoSilentLoss	-
 input-single-path/InputPathClean.cfg	InputPath	-	-
+session-lifecycle/HerdrPreclaimBefore.cfg	HerdrRootRecovery	-	ReplacedInputProgress
+session-lifecycle/HerdrPreclaimFixed.cfg	HerdrRootRecovery	-	-
+session-lifecycle/HerdrPreclaimNonlocal.cfg	HerdrRootRecovery	-	-
+session-lifecycle/HerdrPreclaimPending.cfg	HerdrRootRecovery	-	-
+session-lifecycle/HerdrPreclaimRetired.cfg	HerdrRootRecovery	-	-
+session-lifecycle/HerdrPreclaimSameRoot.cfg	HerdrRootRecovery	-	-
 session-lifecycle/HerdrRootBefore.cfg	HerdrRootRecovery	-	ReplacedInputProgress
 session-lifecycle/HerdrRootFixed.cfg	HerdrRootRecovery	-	-
+session-lifecycle/HerdrRootWakeBefore.cfg	HerdrRootRecovery	-	ReplacedInputProgress
+session-lifecycle/HerdrRootWakeFixed.cfg	HerdrRootRecovery	-	-
 session-lifecycle/HerdrSameRoot.cfg	HerdrRootRecovery	-	-
 session-lifecycle/HerdrSession.cfg	HerdrSession	NoDeadlock,NoOrphanPane,PromptOnlyToAgent,RowMatchesPane	-
 session-lifecycle/TmuxSession.cfg	TmuxSession	NoDeadlock,RowNamesSession,RowOnlyWithTurn	-

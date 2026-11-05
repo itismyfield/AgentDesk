@@ -946,6 +946,8 @@ mod legacy_clear_tests;
 mod policy_tests;
 #[path = "root_replaced_recovery_tests/recheck_tests.rs"]
 mod recheck_tests;
+#[path = "root_replaced_recovery_tests/wake_tests.rs"]
+mod wake_tests;
 
 #[test]
 fn rr_retired_cache_skips_completed_cleanup_and_unknown_or_failed_fsync_retries_pg() {

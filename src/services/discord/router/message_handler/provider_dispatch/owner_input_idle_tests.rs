@@ -2475,3 +2475,91 @@ async fn synthetic_starts_wait_busy_and_owe_no_human_hold_notice() {
         );
     }
 }
+pub(crate) type RootRecoveryLaunch = Box<dyn FnOnce(OwnerTurn, &str) -> Result<(), String>>;
+
+thread_local! {
+    static ROOT_RECOVERY_LAUNCH: std::cell::RefCell<Option<(ChannelId, RootRecoveryLaunch)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) struct RootRecoveryLaunchGuard;
+
+impl Drop for RootRecoveryLaunchGuard {
+    fn drop(&mut self) {
+        ROOT_RECOVERY_LAUNCH.with(|slot| slot.borrow_mut().take());
+    }
+}
+
+pub(crate) fn install_root_recovery_launch(
+    channel: ChannelId,
+    launch: RootRecoveryLaunch,
+) -> RootRecoveryLaunchGuard {
+    ROOT_RECOVERY_LAUNCH.with(|slot| {
+        assert!(slot.replace(Some((channel, launch))).is_none());
+    });
+    RootRecoveryLaunchGuard
+}
+
+pub(crate) fn root_recovery_launch(
+    channel: ChannelId,
+    owner: OwnerTurn,
+    text: &str,
+) -> Result<OwnerTurn, Result<(), String>> {
+    let launch = ROOT_RECOVERY_LAUNCH.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        slot.as_ref()
+            .is_some_and(|(wanted, _)| *wanted == channel)
+            .then(|| slot.take().unwrap().1)
+    });
+    match launch {
+        Some(launch) => Err(launch(owner, text)),
+        None => Ok(owner),
+    }
+}
+
+/// Carries the real turn claim into the normal launch hook and its input settlement.
+pub(crate) fn claimed_root_recovery_launch(
+    owner: OwnerTurn,
+    text: &str,
+    expected_origin: InputOrigin,
+) -> scope::LaunchHook {
+    let OwnerTurn {
+        mailbox,
+        claim,
+        settled,
+        origin,
+    } = owner;
+    assert_eq!(
+        origin, expected_origin,
+        "the real idle claim keeps its input origin"
+    );
+    let original = &claim.front().1;
+    let sources = match original.source_message_ids.as_slice() {
+        [] => vec![original.message_id.to_string()],
+        ids => ids.iter().map(u64::to_string).collect(),
+    };
+    let registration = Registration {
+        mailbox,
+        execution: Execution::LocalTui,
+        origin,
+        phase: target::Phase::Absent,
+        attempt: json!({"nonce":busy_inject::fresh_nonce(),"provider":"claude",
+            "target":null,"source":{"kind":"pre_source","expected_session_id":null,
+                "expected_transcript":null,"binding_watermark":null}}),
+        sources,
+        transcript: std::path::PathBuf::new(),
+        program: "tmux".into(),
+        herdr: None,
+        author: original.author_id.to_string(),
+        name: "recovery fixture".into(),
+        clock: Arc::new(|| chrono::Utc::now().timestamp_millis().max(0) as u64),
+        timing: &busy_inject::TIMING,
+        until_done: None,
+    };
+    created(
+        registration,
+        text.into(),
+        scope::Lineage::Created,
+        (Some(claim), reply_once(Some(settled))),
+    )
+}

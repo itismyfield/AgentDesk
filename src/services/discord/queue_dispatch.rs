@@ -220,11 +220,26 @@ pub(super) async fn mailbox_take_next_automatic_intervention(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> MailboxTakeNextSoftOutcome {
-    // A prior process's Herdr row would refuse the start: keep the queue and ask for the row's end.
+    // Recover a known replaced root before dequeue; prior-process inflight stays with its owner.
     #[cfg(unix)]
-    if super::recovery_engine::herdr_row_end::owner::hold_queue(shared, provider, channel_id).await
     {
-        return MailboxTakeNextSoftOutcome::default();
+        use super::herdr_terminate::root_replaced::preclaim;
+        use super::recovery_engine::herdr_row_end::owner;
+        let exact_live = match preclaim::before_idle(shared, provider, channel_id).await {
+            Ok(exact_live) => exact_live,
+            Err(_) => return MailboxTakeNextSoftOutcome::default(),
+        };
+        if (!exact_live
+            || owner::restarted_herdr_hold(
+                provider,
+                channel_id.get(),
+                shared.restart.current_generation,
+            )
+            .is_some())
+            && owner::hold_queue(shared, provider, channel_id).await
+        {
+            return MailboxTakeNextSoftOutcome::default();
+        }
     }
     // A turn-mode direct turn holds no token; a busy or unreadable transcript keeps the queue whole.
     if crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {

@@ -519,6 +519,12 @@ async fn start_idle(
         None => Ok(None),
     };
     let kept = kept.map_err(effect::unsent)?;
+    crate::services::discord::herdr_terminate::root_replaced::preclaim::before_idle(
+        &shared,
+        &shared.provider,
+        channel,
+    )
+    .await?;
     let claim = claim_turn(&mailbox, front.1.message_id, &front).await?;
     let claim = claim.ok_or("NotSent(\"front_not_granted\")")?;
     let (settled, answer) = tokio::sync::oneshot::channel();
@@ -543,6 +549,11 @@ async fn start_idle(
             .pending_uploads
             .extend(item.pending_uploads.iter().cloned());
     }
+    #[cfg(test)]
+    let owner = match tests::idle::root_recovery_launch(channel, owner, &intervention.text) {
+        Ok(owner) => owner,
+        Err(result) => return result,
+    };
     let owner_name = crate::services::discord::queue_dispatch::kickoff::queued_owner_name;
     let name = owner_name(deps.http, intervention.author_id).await;
     let at = (shared.provider.clone(), channel);
@@ -570,6 +581,20 @@ async fn start_idle(
         (Err(_), Ok(_)) => Err("NotSent(\"turn_not_started\")".into()),
     }
 }
+
+#[cfg(test)]
+pub(in crate::services::discord) async fn start_idle_for_test(
+    shared: Shared,
+    channel: ChannelId,
+    front: Front,
+) -> Result<(), String> {
+    start_idle(shared, channel, front).await
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) use tests::idle::{
+    claimed_root_recovery_launch, install_root_recovery_launch,
+};
 
 /// An owner front's turn, registered from this turn's own host and pane: a running Claude pane
 /// takes it through the busy entry, an idle pane's AI turn is read on this turn's sender.
