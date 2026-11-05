@@ -112,8 +112,14 @@ impl Host {
         }
     }
 
-    /// The claimed request through the real worker entry, as a router hands it over.
-    async fn start(&self, channel: ChannelId, message: MessageId, preserve_on_cancel: bool) {
+    /// The claimed request through the real worker entry, as a router hands it over; its result
+    /// tells a worker whether the input is settled.
+    async fn start(
+        &self,
+        channel: ChannelId,
+        message: MessageId,
+        preserve_on_cancel: bool,
+    ) -> IntakeExecution {
         let request = IntakeRequest {
             intake_outbox_id: None,
             channel_id: channel,
@@ -138,7 +144,7 @@ impl Host {
         tokio::time::timeout(WAIT, entry)
             .await
             .expect("intake returns")
-            .expect("the start returns without an error");
+            .expect("the start returns without an error")
     }
 
     /// Requests that put the cancelled-exit reaction on `message`.
@@ -203,7 +209,11 @@ async fn dispatch_guard_rows() {
         .lock()
         .unwrap() = Some((dropped.get(), 0));
     let message = MessageId::new(dropped.get() + 1);
-    host.start(dropped, message, false).await;
+    assert_eq!(
+        host.start(dropped, message, false).await,
+        IntakeExecution::Executed,
+        "a start dropped at the guard is settled, not held for replay"
+    );
     assert_eq!(
         host.exit_reactions(dropped, message),
         1,
@@ -237,7 +247,11 @@ async fn dispatch_guard_rows() {
     *crate::services::discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
         .lock()
         .unwrap() = Some((kept, completed));
-    host.start(kept, message, true).await;
+    assert_eq!(
+        host.start(kept, message, true).await,
+        IntakeExecution::Executed,
+        "the preserved start ran"
+    );
     assert_eq!(
         host.exit_reactions(kept, message),
         0,
