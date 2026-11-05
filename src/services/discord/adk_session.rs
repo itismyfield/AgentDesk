@@ -136,7 +136,7 @@ pub(in crate::services::discord) fn build_namespaced_session_key(
     provider: &ProviderKind,
     tmux_name: &str,
 ) -> String {
-    let hostname = crate::services::platform::hostname_short();
+    let hostname = crate::services::platform::session_host_label();
     format!(
         "{}/{}/{}:{}",
         provider.as_str(),
@@ -147,7 +147,7 @@ pub(in crate::services::discord) fn build_namespaced_session_key(
 }
 
 pub(in crate::services::discord) fn build_legacy_session_key(tmux_name: &str) -> String {
-    let hostname = crate::services::platform::hostname_short();
+    let hostname = crate::services::platform::session_host_label();
     format!("{}:{}", hostname, tmux_name)
 }
 
@@ -1066,3 +1066,7 @@ pub(super) async fn backfill_completed_panel_usage_and_maybe_inject_compact(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "adk_session/host_label_tests.rs"]
+mod host_label_tests;

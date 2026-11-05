@@ -231,14 +231,14 @@ impl State {
         self.input.observe()
     }
 
-    /// Every bridge holds its own lifetime guard, including overlapping recovered bridges.
+    /// Busy inputs stay with their running token until completion or drop.
     pub(crate) fn register_busy_child(&self, attempt: &str) {
-        const KEPT: usize = 64;
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if inner.completed {
+            return;
+        }
         let mut busy = self.busy.lock().unwrap_or_else(|e| e.into_inner());
         if !busy.iter().any(|kept| kept == attempt) {
-            if busy.len() >= KEPT {
-                busy.remove(0);
-            }
             busy.push(attempt.to_string());
         }
     }
@@ -248,6 +248,7 @@ impl State {
         busy.iter().any(|kept| kept == attempt)
     }
 
+    /// Every bridge holds its own lifetime guard, including overlapping recovered bridges.
     pub(crate) fn register_bridge(&self) -> Arc<()> {
         let guard = Arc::new(());
         let mut bridges = self
@@ -330,10 +331,9 @@ impl State {
     }
 
     pub(crate) fn completed(&self) {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .completed = true;
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.completed = true;
+        *self.busy.lock().unwrap_or_else(|e| e.into_inner()) = Vec::new();
     }
 
     pub(crate) fn admit(&self) -> Result<MutexGuard<'_, Inner>, ()> {
@@ -393,5 +393,31 @@ pub(crate) fn mutant(name: &str) -> bool {
     {
         let _ = name;
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::provider::CancelToken;
+
+    #[test]
+    fn busy_children_end_with_their_token() {
+        let token = Arc::new(CancelToken::new());
+        token.native_stop.register_busy_child("before-completion");
+        assert!(token.native_stop.is_busy_child("before-completion"));
+        token.native_stop.completed();
+        assert!(!token.native_stop.is_busy_child("before-completion"));
+        token.native_stop.register_busy_child("after-completion");
+        assert!(!token.native_stop.is_busy_child("after-completion"));
+
+        let token = Arc::new(CancelToken::new());
+        token.native_stop.register_busy_child("before-drop");
+        assert!(token.native_stop.is_busy_child("before-drop"));
+        let weak = Arc::downgrade(&token);
+        drop(token);
+        assert!(weak.upgrade().is_none());
+        let successor = CancelToken::new();
+        assert!(!successor.native_stop.is_busy_child("before-drop"));
     }
 }

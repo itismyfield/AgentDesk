@@ -6,7 +6,7 @@ use agent_read::{list_agents_pg, load_agent_pg};
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
 use serde::Deserialize;
@@ -951,8 +951,14 @@ pub(super) async fn delete_agent(
     ))
 }
 
+#[derive(Deserialize)]
+pub(super) struct ListSessionsQuery {
+    restart_gate: Option<String>,
+}
+
 pub(super) async fn list_sessions(
     State(state): State<AppState>,
+    Query(query): Query<ListSessionsQuery>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
         return Err(AppError::new(
@@ -962,7 +968,7 @@ pub(super) async fn list_sessions(
         ));
     };
     let rows = match sqlx::query(
-        "SELECT id, session_key, instance_id, agent_id, provider, status, active_dispatch_id,
+        "SELECT id, session_key, instance_id, agent_id, provider, status, active_dispatch_id, channel_id,
                 model, tokens, cwd, to_char(last_heartbeat, 'YYYY-MM-DD HH24:MI:SS') AS last_heartbeat
          FROM sessions
          WHERE status IN ('connected', 'turn_active', 'awaiting_bg', 'awaiting_user', 'idle', 'working')
@@ -1016,6 +1022,33 @@ pub(super) async fn list_sessions(
         local_instance_id,
         &worker_nodes,
     );
+    if query.restart_gate.as_deref() == Some("1") {
+        for (session, row) in sessions.iter_mut().zip(&rows) {
+            let channel = row
+                .try_get::<Option<String>, _>("channel_id")
+                .ok()
+                .flatten();
+            let key = session["session_key"].as_str().unwrap_or_default();
+            let name = crate::services::discord::session_identity::tmux_name_from_session_key(key);
+            let local_tmux = if session["owner"]["is_local"] == true
+                && session["status"] == "turn_active"
+                && let Some(name) = name
+            {
+                crate::services::discord::admin_host_guard::row_is_legacy_tmux(
+                    pool,
+                    session["provider"].as_str(),
+                    channel.as_deref(),
+                    key,
+                    &name,
+                )
+                .await
+            } else {
+                false
+            };
+            session["channel_id"] = json!(channel);
+            session["restart_gate_local_tmux"] = json!(local_tmux);
+        }
+    }
 
     Ok((StatusCode::OK, Json(json!({ "sessions": sessions }))))
 }
@@ -1034,6 +1067,267 @@ pub(super) async fn list_policies(State(state): State<AppState>) -> Json<serde_j
         })
         .collect();
     Json(json!({ "policies": items }))
+}
+
+#[cfg(all(test, unix))]
+mod restart_gate_tests {
+    use super::*;
+    use crate::services::discord::host_defer_gate::tests::{Case, ScriptedTmux, postgres};
+    use crate::services::discord::host_teardown_gate::test_support::{
+        Stored, busy_turn, inflight_needing_backfill, shared_on,
+    };
+    use axum::{
+        Router,
+        body::{Body, to_bytes},
+        http::Request,
+    };
+    use tower::ServiceExt;
+
+    struct ProcessRegistration(String);
+    impl Drop for ProcessRegistration {
+        fn drop(&mut self) {
+            crate::services::session_backend::remove_process_session(&self.0);
+        }
+    }
+
+    async fn get(app: &Router, uri: &str) -> Vec<u8> {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap()
+            .to_vec()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn restart_gate_projection_preserves_default_bytes_and_non_tmux_rows_pg() {
+        let _root = crate::config::TestRuntimeRootGuard::with_isolated_config();
+        let tmux = ScriptedTmux::install();
+        let (db, pool) = postgres().await;
+        let config = crate::config::Config::default();
+        let engine = crate::engine::PolicyEngine::new(&config).unwrap();
+        let broadcast_tx = crate::eventbus::new_broadcast();
+        let batch_buffer = crate::eventbus::spawn_batch_flusher(broadcast_tx.clone());
+        let state = AppState {
+            pg_pool: Some(pool.clone()),
+            engine,
+            config: std::sync::Arc::new(config),
+            broadcast_tx,
+            batch_buffer,
+            health_registry: None,
+            cluster_instance_id: Some("test-node".into()),
+        };
+        let app = super::super::domains::runtime::router(state.clone()).with_state(state);
+        let key = "old-host:AgentDesk-claude-default-7770";
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO sessions (session_key, instance_id, provider, status, tokens, cwd, last_heartbeat)
+             VALUES ($1, 'test-node', 'claude', 'turn_active', 7, '/tmp/i7770', NULL) RETURNING id"
+        ).bind(key).fetch_one(&pool).await.unwrap();
+        let expected = json!({"sessions": [{
+            "id": id, "session_key": key, "instance_id": "test-node", "agent_id": null,
+            "provider": "claude", "status": "turn_active", "active_dispatch_id": null,
+            "model": null, "tokens": 7, "cwd": "/tmp/i7770", "last_heartbeat": null,
+            "owner": {"instance_id": "test-node", "scope": "local", "is_local": true,
+                      "node_status": null, "api_base_url": null, "routable": false, "reason": null}
+        }]});
+        let default_bytes = get(&app, "/sessions").await;
+        assert_eq!(default_bytes, serde_json::to_vec(&expected).unwrap());
+        for uri in ["/sessions?restart_gate=0", "/sessions?restart_gate=true"] {
+            assert_eq!(get(&app, uri).await, default_bytes);
+        }
+        let mut opted: Value =
+            serde_json::from_slice(&get(&app, "/sessions?restart_gate=1").await).unwrap();
+        assert_eq!(opted["sessions"][0]["restart_gate_local_tmux"], true);
+        assert!(opted["sessions"][0]["channel_id"].is_null());
+        let row = opted["sessions"][0].as_object_mut().unwrap();
+        row.remove("restart_gate_local_tmux");
+        row.remove("channel_id");
+        assert_eq!(opted, expected);
+
+        let mut keys = Vec::new();
+        for (offset, (label, stored, marker)) in [
+            ("tmux", Stored::Legacy, None),
+            ("herdr", Stored::Hosted, None),
+            ("future", Stored::Future, None),
+            ("process-marker", Stored::Legacy, Some("process")),
+            ("unknown-marker", Stored::Legacy, Some("future")),
+            ("process-runtime", Stored::Legacy, None),
+            ("process-registry", Stored::Legacy, None),
+            ("remote", Stored::Legacy, None),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let channel = 7_770_100 + offset as u64;
+            let name = format!("AgentDesk-claude-{label}-7770");
+            let key = format!("claude/hash/old-host:{name}");
+            Case::Stored(stored).seed(&pool, &key, &name, channel).await;
+            let node = if label == "remote" {
+                "remote-node"
+            } else {
+                "test-node"
+            };
+            sqlx::query(
+                "UPDATE sessions SET status='turn_active', instance_id=$2 WHERE session_key=$1",
+            )
+            .bind(&key)
+            .bind(node)
+            .execute(&pool)
+            .await
+            .unwrap();
+            if let Some(marker) = marker {
+                std::fs::write(
+                    crate::services::tmux_common::session_temp_path(&name, "host_kind"),
+                    marker,
+                )
+                .unwrap();
+            }
+            keys.push((label, key, name, channel));
+        }
+        let (_, _, registry_name, _) = keys
+            .iter()
+            .find(|(label, ..)| *label == "process-registry")
+            .unwrap();
+        let alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        crate::services::session_backend::insert_process_session(
+            registry_name,
+            crate::services::session_backend::SessionHandle::TestProcess {
+                pid: 424_242,
+                alive: alive.clone(),
+            },
+        );
+        let _registration = ProcessRegistration(registry_name.clone());
+        let (_, _, name, channel) = keys
+            .iter()
+            .find(|(label, ..)| *label == "process-runtime")
+            .unwrap();
+        let shared = shared_on(&pool).await;
+        let _token = busy_turn(
+            &shared,
+            poise::serenity_prelude::ChannelId::new(*channel),
+            name,
+        )
+        .await;
+        let path = inflight_needing_backfill(poise::serenity_prelude::ChannelId::new(*channel));
+        let mut raw: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        raw["runtime_kind"] = json!("process_backend");
+        std::fs::write(&path, raw.to_string()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let mut direct_rows = Vec::new();
+        for (offset, (provider, label)) in [
+            ("gemini", "gemini-direct"),
+            ("claude", "claude-fresh-direct"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let channel = 7_770_200 + offset as u64;
+            let name = format!("AgentDesk-{provider}-{label}-7770");
+            let key = format!("{provider}/hash/old-host:{name}");
+            Case::Stored(Stored::Legacy)
+                .seed(&pool, &key, &name, channel)
+                .await;
+            sqlx::query(
+                "UPDATE sessions SET status='turn_active', instance_id='test-node', provider=$2
+                 WHERE session_key=$1",
+            )
+            .bind(&key)
+            .bind(provider)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let mut direct = raw.clone();
+            direct["provider"] = json!(provider);
+            direct["channel_id"] = json!(channel);
+            direct["session_key"] = json!(key);
+            direct["tmux_session_name"] = Value::Null;
+            direct["runtime_kind"] = Value::Null;
+            direct.as_object_mut().unwrap().remove("host_locator");
+            direct["user_msg_id"] = json!(channel + 1);
+            direct["finalizer_turn_id"] = json!(channel + 1);
+            let direct_path = path
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join(provider)
+                .join(format!("{channel}.json"));
+            std::fs::create_dir_all(direct_path.parent().unwrap()).unwrap();
+            let bytes = serde_json::to_vec(&direct).unwrap();
+            std::fs::write(&direct_path, &bytes).unwrap();
+            assert!(crate::services::session_backend::process_session_pid(&name).is_none());
+            direct_rows.push((label, key, direct_path, bytes));
+        }
+        let default_before = get(&app, "/sessions").await;
+        let opted: Value =
+            serde_json::from_slice(&get(&app, "/sessions?restart_gate=1").await).unwrap();
+        let rows = opted["sessions"].as_array().unwrap();
+        for (label, key, direct_path, bytes) in &direct_rows {
+            let row = rows.iter().find(|row| row["session_key"] == *key).unwrap();
+            assert_eq!(row["restart_gate_local_tmux"], false, "{label}: {row}");
+            assert_eq!(std::fs::read(direct_path).unwrap(), *bytes, "{label}");
+            let response = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(response.path(), json!({"sessions": [row]}).to_string()).unwrap();
+            let result = std::process::Command::new("/bin/bash")
+                .arg(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/test_restart_foreign_active_turns_7770.sh"
+                ))
+                .arg("--api-response")
+                .arg(response.path())
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{label}: shell must protect actual API row: {}{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            println!("{label}: {}", String::from_utf8_lossy(&result.stdout));
+            for empty_name in ["", "  "] {
+                let mut raw: Value = serde_json::from_slice(bytes).unwrap();
+                raw["tmux_session_name"] = json!(empty_name);
+                let empty_bytes = serde_json::to_vec(&raw).unwrap();
+                std::fs::write(direct_path, &empty_bytes).unwrap();
+                let opted: Value =
+                    serde_json::from_slice(&get(&app, "/sessions?restart_gate=1").await).unwrap();
+                let row = opted["sessions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|row| row["session_key"] == *key)
+                    .unwrap();
+                assert_eq!(row["restart_gate_local_tmux"], false, "{label}: empty name");
+                assert_eq!(std::fs::read(direct_path).unwrap(), empty_bytes, "{label}");
+            }
+            std::fs::write(direct_path, bytes).unwrap();
+        }
+        assert_eq!(get(&app, "/sessions").await, default_before);
+        for (label, key, _, channel) in keys {
+            let row = rows.iter().find(|row| row["session_key"] == key).unwrap();
+            assert_eq!(row["channel_id"], channel.to_string(), "{label}");
+            assert_eq!(
+                row["restart_gate_local_tmux"],
+                label == "tmux",
+                "{label}: {row}"
+            );
+        }
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            before,
+            "read-only projection must not backfill"
+        );
+        assert!(alive.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(
+            tmux.take_calls().is_empty(),
+            "host projection must not probe or change tmux"
+        );
+        db.drop().await;
+    }
 }
 
 #[cfg(test)]

@@ -327,37 +327,53 @@ fn classify_output(
         }
         return Inventory::Sessions(names.into_iter().map(str::to_owned).collect());
     }
-    if output.status.code() != Some(1) || !output.stdout.is_empty() {
-        return fail();
-    }
-    let Ok(stderr) = std::str::from_utf8(&output.stderr) else {
-        return fail();
+    classify_socket_failure(output, context, check)
+        .map(Inventory::Empty)
+        .unwrap_or_else(fail)
+}
+
+/// All has-session callers inherit the runtime command's socket selectors.
+/// Recheck that namespace and the filesystem before treating ENOENT as absence.
+pub(super) fn missing_socket(output: &Output) -> bool {
+    let Ok(command) = tmux_command() else {
+        return false;
     };
+    let context = Namespace::capture(&command, None);
+    matches!(
+        classify_socket_failure(output, &context, filesystem),
+        Some(EmptyReason::MissingSocket(_))
+    )
+}
+
+fn classify_socket_failure(
+    output: &Output,
+    context: &Namespace,
+    check: impl FnOnce(&Path) -> SocketState,
+) -> Option<EmptyReason> {
+    if !context.current() || output.status.code() != Some(1) || !output.stdout.is_empty() {
+        return None;
+    }
+    let stderr = std::str::from_utf8(&output.stderr).ok()?;
     let line = stderr.strip_suffix('\n').unwrap_or(stderr);
     if line.contains(['\n', '\r']) {
-        return fail();
+        return None;
     }
     let missing = line
         .strip_prefix("error connecting to ")
         .and_then(|s| s.strip_suffix(" (No such file or directory)"));
     let no_server = line.strip_prefix("no server running on ");
-    let Some(reported) = missing.or(no_server) else {
-        return fail();
-    };
-    let path = PathBuf::from(reported);
+    let path = PathBuf::from(missing.or(no_server)?);
     if !context.matches(&path) {
-        return fail();
+        return None;
     }
     let state = check(&path);
     if !context.current() {
-        return fail();
+        return None;
     }
     match (missing.is_some(), state) {
-        (true, SocketState::Missing) => Inventory::Empty(EmptyReason::MissingSocket(path)),
-        (false, SocketState::Missing | SocketState::Stale) => {
-            Inventory::Empty(EmptyReason::NoServer(path))
-        }
-        _ => fail(),
+        (true, SocketState::Missing) => Some(EmptyReason::MissingSocket(path)),
+        (false, SocketState::Missing | SocketState::Stale) => Some(EmptyReason::NoServer(path)),
+        _ => None,
     }
 }
 

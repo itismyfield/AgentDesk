@@ -943,6 +943,7 @@ async fn d4act2_gateway_repost_host_stop_and_rollback_quiescence_pg() {
             LedgerEntry::Posted {
                 serial: 1,
                 msg_id: 900,
+                confirmation: None,
             },
         ] {
             ledger.append_ledger(entry).unwrap();

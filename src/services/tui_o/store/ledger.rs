@@ -9,6 +9,7 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::rotation::BoundaryEvidence;
 use super::{StoreError, damage};
@@ -64,6 +65,8 @@ pub enum LedgerEntry {
     Posted {
         serial: u64,
         msg_id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        confirmation: Option<Box<PostConfirmation>>,
     },
     Rejected {
         serial: u64,
@@ -105,6 +108,47 @@ pub enum LedgerEntry {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         evidence: Option<Box<BoundaryEvidence>>,
     },
+}
+
+/// The exact POST response, bound to the Prepared piece in the same durable Posted line.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostConfirmation {
+    version: u8,
+    serial: u64,
+    unit_key: UnitKey,
+    piece_index: u32,
+    msg_id: u64,
+    bot_id: u64,
+    payload_sha256: String,
+}
+
+impl PostConfirmation {
+    pub(crate) fn new(serial: u64, piece: &PieceRecord, msg_id: u64, bot_id: u64) -> Self {
+        Self {
+            version: 1,
+            serial,
+            unit_key: piece.unit_key.clone(),
+            piece_index: piece.piece_index,
+            msg_id,
+            bot_id,
+            payload_sha256: hex::encode(Sha256::digest(piece.payload.as_bytes())),
+        }
+    }
+
+    pub(crate) fn matches(&self, serial: u64, piece: &PieceRecord, bot_id: u64) -> bool {
+        self.bot_id == bot_id && self.matches_piece(serial, piece)
+    }
+
+    pub(crate) fn matches_piece(&self, serial: u64, piece: &PieceRecord) -> bool {
+        self.version == 1
+            && self.serial == serial
+            && self.unit_key == piece.unit_key
+            && self.piece_index == piece.piece_index
+            && self.msg_id != 0
+            && piece.outcome == Some(PieceOutcome::Posted(self.msg_id))
+            && self.bot_id != 0
+            && self.payload_sha256 == hex::encode(Sha256::digest(piece.payload.as_bytes()))
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -543,7 +587,7 @@ impl LedgerState {
                 }
                 self.pieces.insert(serial, piece);
             }
-            LedgerEntry::Posted { serial, msg_id } => {
+            LedgerEntry::Posted { serial, msg_id, .. } => {
                 if msg_id > self.anchor {
                     self.anchor = msg_id;
                 } else if !self.reordered_post(msg_id) {
@@ -811,6 +855,60 @@ mod tests {
     use crate::services::tui_o::shadow::{ShadowProvider, UnitKind};
 
     #[test]
+    fn i7441d5_post_confirmation_preserves_both_ledger_format_directions() {
+        #[derive(Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum OldEntry {
+            Posted { serial: u64, msg_id: u64 },
+        }
+        #[derive(Deserialize)]
+        struct OldLine {
+            at: DateTime<Utc>,
+            entry: OldEntry,
+        }
+        let at = Utc::now();
+        let prepared = prepared(0, 10);
+        let mut state = LedgerState::starting_at(10);
+        state.apply(at, prepared);
+        let confirmation = PostConfirmation::new(0, state.piece(0).unwrap(), 20, 42);
+        let new = line(
+            at,
+            &LedgerEntry::Posted {
+                serial: 0,
+                msg_id: 20,
+                confirmation: Some(Box::new(confirmation)),
+            },
+        )
+        .unwrap();
+        let old: OldLine =
+            serde_json::from_slice(&new).expect("the old Posted reader ignores the added field");
+        assert_eq!(old.at, at);
+        assert!(matches!(
+            old.entry,
+            OldEntry::Posted {
+                serial: 0,
+                msg_id: 20
+            }
+        ));
+        let legacy =
+            serde_json::json!({"at": at, "entry": {"type": "posted", "serial": 0, "msg_id": 20}});
+        let new: LedgerLine = serde_json::from_value(legacy).unwrap();
+        assert!(matches!(
+            new.entry,
+            LedgerEntry::Posted {
+                confirmation: None,
+                ..
+            }
+        ));
+        let legacy = line(at, &new.entry).unwrap();
+        assert!(
+            !std::str::from_utf8(&legacy)
+                .unwrap()
+                .contains("confirmation")
+        );
+    }
+
+    #[test]
     fn exact_evidence_ledger_replays_without_changing_legacy_frontier() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ledger.jsonl");
@@ -870,6 +968,7 @@ mod tests {
             Posted {
                 serial: 0,
                 msg_id: 20,
+                confirmation: None,
             },
             prepared(1, 20),
             Ambiguous {
@@ -889,10 +988,12 @@ mod tests {
                 Posted {
                     serial: 0,
                     msg_id: 20,
+                    confirmation: None,
                 },
                 Posted {
                     serial: 0,
                     msg_id: 21,
+                    confirmation: None,
                 },
             ],
             vec![
@@ -900,6 +1001,7 @@ mod tests {
                 Posted {
                     serial: 0,
                     msg_id: 9,
+                    confirmation: None,
                 },
             ],
             vec![prepared(0, 10), prepared(1, 10)],
@@ -923,11 +1025,13 @@ mod tests {
             Posted {
                 serial: 0,
                 msg_id: first,
+                confirmation: None,
             },
             prepared(1, first),
             Posted {
                 serial: 1,
                 msg_id: reordered,
+                confirmation: None,
             },
             prepared(2, first),
         ]);
@@ -939,16 +1043,19 @@ mod tests {
                 Posted {
                     serial: 0,
                     msg_id: first,
+                    confirmation: None,
                 },
                 prepared(1, first),
                 Posted {
                     serial: 1,
                     msg_id: reordered,
+                    confirmation: None,
                 },
                 prepared(2, first),
                 Posted {
                     serial: 2,
                     msg_id: behind,
+                    confirmation: None,
                 },
             ]);
             assert!(state.violation().is_some(), "no violation for {behind}");
@@ -976,6 +1083,7 @@ mod tests {
             Posted {
                 serial: 0,
                 msg_id: 20,
+                confirmation: None,
             },
             prepared(1, 20),
         );

@@ -58,3 +58,4 @@ input-single-path/InputPath.cfg	InputPath	BusyInputLands,DraftSafe,HeldNotDroppe
 input-single-path/InputPathClean.cfg	InputPath	-	-
 session-lifecycle/HerdrSession.cfg	HerdrSession	NoDeadlock,NoOrphanPane,PromptOnlyToAgent,RowMatchesPane	-
 session-lifecycle/TmuxSession.cfg	TmuxSession	NoDeadlock,RowNamesSession,RowOnlyWithTurn	-
+session-lifecycle/TmuxSocketBoot.cfg	TmuxSocketBoot	-	-

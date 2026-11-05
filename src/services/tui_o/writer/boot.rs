@@ -111,8 +111,9 @@ impl Trace {
     #[cfg(test)]
     pub(super) fn before_record(&self, entry: &crate::services::tui_o::store::ledger::LedgerEntry) {
         if super::replay::mutant("posted_before_append")
-            && let crate::services::tui_o::store::ledger::LedgerEntry::Posted { serial, msg_id } =
-                entry
+            && let crate::services::tui_o::store::ledger::LedgerEntry::Posted {
+                serial, msg_id, ..
+            } = entry
         {
             self.first_posted(*serial, *msg_id, 0);
         }
