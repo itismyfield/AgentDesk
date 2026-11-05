@@ -1,9 +1,11 @@
 use super::*;
+#[cfg(unix)]
 use std::sync::{
     Arc, Mutex, OnceLock, Weak,
     atomic::{AtomicBool, Ordering},
 };
 
+#[cfg(unix)]
 struct Observed {
     path: std::path::PathBuf,
     pin: InflightEpisodePin,
@@ -11,11 +13,14 @@ struct Observed {
     removed: AtomicBool,
     ready: tokio::sync::Notify,
 }
+#[cfg(unix)]
 fn watches() -> &'static Mutex<Vec<Weak<Observed>>> {
     static WATCHES: OnceLock<Mutex<Vec<Weak<Observed>>>> = OnceLock::new();
     WATCHES.get_or_init(Default::default)
 }
+#[cfg(unix)]
 pub(in crate::services::discord) struct Watch(Arc<Observed>);
+#[cfg(unix)]
 impl Watch {
     pub(in crate::services::discord) fn key(&self) -> serde_json::Value {
         self.0.key.clone()
@@ -30,6 +35,7 @@ impl Watch {
     }
 }
 // Registration and capture share the existing row lock, so a deletion cannot slip between them.
+#[cfg(unix)]
 pub(in crate::services::discord) fn watch(
     provider: &ProviderKind,
     channel: u64,
@@ -56,11 +62,13 @@ pub(in crate::services::discord) fn watch(
     Ok(Some(Watch(observed)))
 }
 // Callers retain their existing guards; an unreadable identity never authorizes a closing wake.
+#[cfg(unix)]
 pub(super) fn capture(path: &Path) -> Option<InflightEpisodePin> {
     let bytes = fs::read_to_string(path).ok()?;
     let row = parse_inflight_state_content(&bytes).ok()?;
     Some(InflightEpisodePin::from_state(&row))
 }
+#[cfg(unix)]
 pub(super) fn removed(path: &Path, pin: Option<InflightEpisodePin>) {
     let Some(pin) = pin else { return };
     let mut watches = watches().lock().unwrap_or_else(|e| e.into_inner());
@@ -81,10 +89,14 @@ pub(super) fn unlink(
     path: &Path,
     remove: impl FnOnce() -> std::io::Result<()>,
 ) -> std::io::Result<()> {
+    #[cfg(unix)]
     let pin = capture(path);
     remove()?;
-    sync_removed(path);
-    removed(path, pin);
+    #[cfg(unix)]
+    {
+        sync_removed(path);
+        removed(path, pin);
+    }
     Ok(())
 }
 

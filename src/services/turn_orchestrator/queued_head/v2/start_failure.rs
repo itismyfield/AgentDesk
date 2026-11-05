@@ -50,6 +50,7 @@ impl Owner {
             || self.starts.failures.contains_key(&self.start_key(member))
     }
     // The snapshot publish and runtime rights change in one actor turn, before bridge teardown.
+    #[cfg(unix)]
     pub(crate) fn start_failed(
         &mut self,
         front: &Front,
@@ -148,6 +149,7 @@ impl Owner {
         self.held = None;
         Ok(Some(retain))
     }
+    #[cfg(unix)]
     pub(crate) fn start_cleanup_completed(&mut self, pin: &serde_json::Value) -> bool {
         if !self
             .starts

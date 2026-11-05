@@ -319,10 +319,12 @@ pub(super) fn archive_inflight_state_if_matches_identity_generation_in_root(
         "archive_inflight_state_if_matches_identity_generation",
         &path,
     );
+    #[cfg(unix)]
     let removed_pin = super::row_removed::capture(&path);
     match fs::rename(&path, &archive_path) {
         Ok(()) => {
             sync_moved(root.parent().unwrap_or(root), &path, &archive_path);
+            #[cfg(unix)]
             super::row_removed::removed(&path, removed_pin);
             GuardedClearOutcome::Cleared
         }
