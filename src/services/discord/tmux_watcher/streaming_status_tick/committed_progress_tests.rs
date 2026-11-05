@@ -308,7 +308,7 @@ async fn run_tick(
     fx: &Fixture,
     delivered: bool,
 ) -> StreamingStatusTickOutcome {
-    run_tick_body(locals, rec, shared, fx, delivered, TRAILING_BODY).await
+    run_tick_body(locals, rec, shared, fx, delivered, TRAILING_BODY, WatcherToolState::new()).await
 }
 
 #[rustfmt::skip]
@@ -319,11 +319,11 @@ async fn run_tick_body(
     fx: &Fixture,
     delivered: bool,
     body: &str,
+    tools: WatcherToolState,
 ) -> StreamingStatusTickOutcome {
     locals.last = tokio::time::Instant::now()
         - crate::services::discord::status_update_interval()
         - Duration::from_millis(1);
-    let tools = WatcherToolState::new();
     let delivered_flag = Arc::new(AtomicBool::new(delivered));
     let full = body.to_string();
     let ctx = StreamingStatusTickContext {
@@ -434,7 +434,16 @@ fn legacy_tick_observes_actual_progress() {
             &fx.provider,
             fx.channel.get(),
         );
-        run_tick_body(&mut locals, &rec, &shared, &fx, false, TRAILING_BODY).await;
+        run_tick_body(
+            &mut locals,
+            &rec,
+            &shared,
+            &fx,
+            false,
+            TRAILING_BODY,
+            WatcherToolState::new(),
+        )
+        .await;
         let seen = observation.raw_process_snapshot();
         assert!(
             seen.writable_inflight_load_calls > 0,
@@ -497,7 +506,16 @@ fn legacy_tick_with_legacy_ownership_emits_long_body() {
             &fx.provider,
             fx.channel.get(),
         );
-        run_tick_body(&mut locals, &rec, &shared, &fx, false, &body).await;
+        run_tick_body(
+            &mut locals,
+            &rec,
+            &shared,
+            &fx,
+            false,
+            &body,
+            WatcherToolState::new(),
+        )
+        .await;
         assert!(
             rec.total() > 0,
             "the same Legacy transport fixture emits real HTTP"
@@ -729,7 +747,16 @@ fn o_delegated_rollover_tick_writes_no_body() {
                     crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
                 )])
             });
-            run_tick_body(&mut locals, &rec, &shared, &fx, false, &body).await;
+            run_tick_body(
+                &mut locals,
+                &rec,
+                &shared,
+                &fx,
+                false,
+                &body,
+                WatcherToolState::new(),
+            )
+            .await;
             let body_writes = rec
                 .bodies
                 .lock()
@@ -789,7 +816,16 @@ fn only_a_status_tick_that_writes_a_body_ends_a_pending_adoption() {
             let rec = recorder(fx.channel, true).await;
             rec.check.set(check.clone()).unwrap();
             let mut locals = tick_locals(&fx, Some(PLACEHOLDER_MSG));
-            run_tick_body(&mut locals, &rec, &shared, &fx, false, body).await;
+            run_tick_body(
+                &mut locals,
+                &rec,
+                &shared,
+                &fx,
+                false,
+                body,
+                WatcherToolState::new(),
+            )
+            .await;
             check.assert_settled();
             assert_eq!(check.adoption(), expected, "{body:?}");
             let shown = rec.bodies.lock().unwrap().clone();
@@ -802,7 +838,16 @@ fn only_a_status_tick_that_writes_a_body_ends_a_pending_adoption() {
         let _bound = test_override::bind_claude_tui_session(&fx.tmux, &fx.output_path);
         let rec = recorder(fx.channel, true).await;
         let mut locals = tick_locals(&fx, Some(PLACEHOLDER_MSG));
-        run_tick_body(&mut locals, &rec, &shared, &fx, false, BODY).await;
+        run_tick_body(
+            &mut locals,
+            &rec,
+            &shared,
+            &fx,
+            false,
+            BODY,
+            WatcherToolState::new(),
+        )
+        .await;
         let shown_before = rec.bodies.lock().unwrap().len();
         assert!(shown_before > 0, "the first tick shows the body with O off");
         let _pending = test_override::force_candidates(&[(
@@ -811,7 +856,16 @@ fn only_a_status_tick_that_writes_a_body_ends_a_pending_adoption() {
         )]);
         let check = BodyCheck::watch(fx.channel.get(), BODY);
         locals.spin = 0;
-        run_tick_body(&mut locals, &rec, &shared, &fx, false, BODY).await;
+        run_tick_body(
+            &mut locals,
+            &rec,
+            &shared,
+            &fx,
+            false,
+            BODY,
+            WatcherToolState::new(),
+        )
+        .await;
         assert_eq!(
             rec.bodies.lock().unwrap().len(),
             shown_before,
@@ -869,6 +923,40 @@ fn active_silent_progress_is_durable() {
             String::from_utf8_lossy(&fx.row_bytes()).contains(TRAILING_BODY),
             "silent turns still persist parsed progress"
         );
+    });
+}
+
+/// A tick that holds on a running tool and skips the Discord edit still leaves the
+/// tool evidence on disk, so recovery after a restart sees the tool hold.
+#[test]
+fn tool_hold_tick_without_discord_edit_persists_tool_evidence() {
+    const TOOL_LINE: &str = "⚙ Bash: `ls`";
+    let (_lock, guard) = isolate_root();
+    capture_warns(async {
+        let fx = seed_row(guard.root.path(), 14, false, true);
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let rec = recorder(fx.channel, true).await;
+        let mut locals = tick_locals(&fx, None);
+        let mut tools = WatcherToolState::new();
+        tools.current_tool_line = Some(TOOL_LINE.to_string());
+        tools.any_tool_used = true;
+        assert_eq!(
+            run_tick_body(&mut locals, &rec, &shared, &fx, false, TRAILING_BODY, tools).await,
+            CONTINUE
+        );
+        assert_eq!(
+            rec.total(),
+            0,
+            "the tool-hold tick edits nothing on Discord"
+        );
+        let row = crate::services::discord::inflight::load_inflight_state_read_only(
+            &fx.provider,
+            fx.channel.get(),
+        )
+        .expect("row on disk");
+        assert_eq!(row.current_tool_line.as_deref(), Some(TOOL_LINE));
+        assert!(row.any_tool_used, "the durable row records the tool hold");
+        assert_eq!(row.full_response, TRAILING_BODY);
     });
 }
 

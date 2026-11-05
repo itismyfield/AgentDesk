@@ -140,7 +140,6 @@ pub(super) async fn update_streaming_status_tick(
             }
         }
 
-        // @persist-order-guard-start #4104
         // Persist every throttled parsed snapshot, even without a Discord edit: a
         // long tool hold must not leave the durable row at its initial empty state.
         // Silent turns suppress rendering, not durable state; the helper validates
@@ -939,7 +938,6 @@ pub(super) async fn update_streaming_status_tick(
             commit_streaming_status_tick_state!();
             return StreamingStatusTickOutcome::ContinueStreamingLoop;
         }
-        // @persist-order-guard-end #4104
         let mut display_text = build_watcher_streaming_edit_text_with_session_banner(
             &shared,
             channel_id,

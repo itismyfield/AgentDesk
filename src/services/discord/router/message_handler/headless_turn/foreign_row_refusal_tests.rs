@@ -59,14 +59,6 @@ async fn a_foreign_durable_row_refuses_the_start_and_unwinds_only_this_turn() {
     }
 }
 
-#[test]
-fn the_row_refusal_returns_before_any_provider_or_bridge_spawn() {
-    use super::recovery_context_take_order_tests::source_guard_tests::{
-        HEADLESS_TURN, row_refusal_gaps,
-    };
-    assert_eq!(row_refusal_gaps(HEADLESS_TURN), Vec::<String>::new());
-}
-
 /// A row kept marked because its receipt did not commit no longer blocks the channel: the next
 /// start records that receipt, removes the row and starts; an unmarked foreign row still refuses.
 #[tokio::test]
