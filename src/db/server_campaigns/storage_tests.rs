@@ -1050,6 +1050,10 @@ async fn later_branch_migrations_upgrade_a_main_database_already_at_0161_pg() {
                 "!table:channel_recovery_custody",
             ],
         ),
+        (187, &["index:idx_kanban_audit_logs_created_at"]),
+        (188, &["index:idx_review_tuning_outcomes_created_at"]),
+        (189, &["index:idx_review_decisions_decided_at"]),
+        (190, &["index:idx_arce_at"]),
     ];
     assert_eq!(
         expected

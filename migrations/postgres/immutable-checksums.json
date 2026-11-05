@@ -910,6 +910,26 @@
       "path": "migrations/postgres/0186_drop_unused_tables.sql",
       "sha256": "a6287c965ef5f69536fbb2465b6b320a505c8b783d0acd5d10cf0c493493f637",
       "version": 186
+    },
+    {
+      "path": "migrations/postgres/0187_kanban_audit_logs_created_at_index.sql",
+      "sha256": "53b78d322c298730f96eecc3dcb2c3682bf8e3cecf30c85d9f90d72495429209",
+      "version": 187
+    },
+    {
+      "path": "migrations/postgres/0188_review_tuning_outcomes_created_at_index.sql",
+      "sha256": "687c04b9008d8076d3a12a07a4677cb334e5aef12dae9b8e8788d9386eec44bb",
+      "version": 188
+    },
+    {
+      "path": "migrations/postgres/0189_review_decisions_decided_at_index.sql",
+      "sha256": "27dd146ebdb2871a777d0c078cdb12cc5a4ce199ad37adc5b4b6c32ffd2856d2",
+      "version": 189
+    },
+    {
+      "path": "migrations/postgres/0190_agent_recovery_checkpoint_events_at_index.sql",
+      "sha256": "3eee965fa397a016036ab12ac2512896908d0210b2d7b76ccbbfde9daba9b5f1",
+      "version": 190
     }
   ],
   "version": 1

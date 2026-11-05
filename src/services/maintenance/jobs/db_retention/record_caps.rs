@@ -56,9 +56,48 @@ const DELIVERY_EVENT: &str = "status = 'failed' \
            AND (n.updated_at, n.id) > (dispatch_delivery_events.updated_at, \
                                        dispatch_delivery_events.id))";
 
+// Keeps each card's latest row into each status, which the rework resume reads.
+const KANBAN_AUDIT: &str = "created_at < NOW() - ($1::INT || ' days')::INTERVAL \
+     AND (card_id IS NULL OR to_status IS NULL \
+          OR EXISTS (SELECT 1 FROM kanban_audit_logs n \
+              WHERE n.card_id = kanban_audit_logs.card_id \
+                AND n.to_status = kanban_audit_logs.to_status \
+                AND (n.created_at, n.id) > (kanban_audit_logs.created_at, kanban_audit_logs.id)))";
+
+// Keeps each card's true negatives at its top round and its latest false negative, the rows a
+// reopen reclassifies and backfills.
+const REVIEW_TUNING: &str = "created_at < NOW() - ($1::INT || ' days')::INTERVAL \
+     AND NOT (card_id IS NOT NULL AND ( \
+         (outcome = 'true_negative' AND COALESCE(review_round = ( \
+              SELECT MAX(n.review_round) FROM review_tuning_outcomes n \
+              WHERE n.card_id = review_tuning_outcomes.card_id \
+                AND n.outcome = 'true_negative'), FALSE)) \
+         OR (outcome = 'false_negative' AND NOT EXISTS ( \
+              SELECT 1 FROM review_tuning_outcomes n \
+              WHERE n.card_id = review_tuning_outcomes.card_id \
+                AND n.outcome = 'false_negative' AND n.id > review_tuning_outcomes.id))))";
+
+// Keeps an in-flight review's items, and a carded item unless its dispatch still names that
+// card for the rework lookup to fall back on.
+const REVIEW_DECISION: &str = "decided_at < NOW() - ($1::INT || ' days')::INTERVAL \
+     AND NOT EXISTS (SELECT 1 FROM task_dispatches td \
+         WHERE td.id = review_decisions.dispatch_id AND td.status IN ('pending', 'dispatched')) \
+     AND (kanban_card_id IS NULL \
+          OR EXISTS (SELECT 1 FROM task_dispatches td \
+              WHERE td.id = review_decisions.dispatch_id \
+                AND td.kanban_card_id = review_decisions.kanban_card_id))";
+
+// Keeps each channel's newest events up to the count recovery reloads (`seq` is unique per
+// channel); the literal below must match that count.
+const CHECKPOINT_EVENT: &str = "at < NOW() - ($1::INT || ' days')::INTERVAL \
+     AND (SELECT COUNT(*) FROM agent_recovery_checkpoint_events n \
+          WHERE n.channel_id = agent_recovery_checkpoint_events.channel_id \
+            AND n.seq > agent_recovery_checkpoint_events.seq) >= 8";
+const _: () = assert!(crate::services::agent_recovery::checkpoint::DEFAULT_READ_EVENT_LIMIT == 8);
+
 // `(table, aged-row predicate with the window days as $1, days)`; NULL times are kept.
 // Runs after the archive copies, so a row archived this pass gets its archive window.
-const CAPS: [(&str, &str, i32); 13] = [
+const CAPS: [(&str, &str, i32); 17] = [
     (
         "session_transcripts_archive",
         CREATED_AT,
@@ -115,6 +154,26 @@ const CAPS: [(&str, &str, i32); 13] = [
         "dispatch_delivery_events",
         DELIVERY_EVENT,
         DELIVERY_EVENT_RETENTION_DAYS,
+    ),
+    (
+        "kanban_audit_logs",
+        KANBAN_AUDIT,
+        AUDIT_RECORD_RETENTION_DAYS,
+    ),
+    (
+        "review_tuning_outcomes",
+        REVIEW_TUNING,
+        REVIEW_TUNING_RETENTION_DAYS,
+    ),
+    (
+        "review_decisions",
+        REVIEW_DECISION,
+        REVIEW_DECISION_RETENTION_DAYS,
+    ),
+    (
+        "agent_recovery_checkpoint_events",
+        CHECKPOINT_EVENT,
+        CHECKPOINT_EVENT_RETENTION_DAYS,
     ),
 ];
 

@@ -87,6 +87,9 @@ const DISPATCH_EVENT_RETENTION_DAYS: i32 = 90; // status-transition log of any d
 const REDRIVE_AUDIT_RETENTION_DAYS: i32 = 90; // outbox redrive idempotency ledger
 const ENTRY_TRANSITION_RETENTION_DAYS: i32 = 90; // auto-queue entry status transitions
 const DELIVERY_EVENT_RETENTION_DAYS: i32 = 90; // dispatch delivery attempts
+const REVIEW_TUNING_RETENTION_DAYS: i32 = 90; // review tuning outcomes (the aggregate reads 30 days)
+const REVIEW_DECISION_RETENTION_DAYS: i32 = 90; // review decision items, on `decided_at`
+const CHECKPOINT_EVENT_RETENTION_DAYS: i32 = 90; // agent recovery checkpoint WAL, on `at`
 // `find_origin_receipt` looks up archived turns with no age bound, so keep them well past
 // the 90-day hot window.
 const TURNS_ARCHIVE_RETENTION_DAYS: i32 = 365;
