@@ -1,7 +1,7 @@
 # Owner start failure slice
 
 Historical RED code SHA: `b0bab6ebf693502f86c0b2e2c0307033fa411c29`.
-Live repair code SHA: `87e72ff34b94462f08f81ee18ff170b18d6a72aa`; two-fact contract follows below.
+Live repair code SHA: `c84cc7159712203f31acea670c71209ab7fba765`; two-fact contract follows below.
 `InputOwnership.tla` / `SFSpec` isolates this policy in the `observer` record; older slices keep their transitions.
 The fixed classification is in its StartFailure comment and the fixture header. The historical typed-cause erasure at `host_refusal.rs:28–37` is covered by the live
 Discord and headless entrypoint fixtures.
@@ -29,7 +29,7 @@ Discord and headless entrypoint fixtures.
 `EarlyClearDelivers` requires A's payload even if a bad policy removed it from the queue.
 `ReserveResetsFailures` checks the reserve state directly, before an effect-held result can hide it.
 The two negative configs inject only those faults; the unmutated policy transitions stay the same.
-The full checker covers 96 configurations after the S2 and presence-model merges.
+The full checker covers 103 configurations after the S2 and presence-model merges.
 The expected failures and properties are pinned in `expected.tsv`.
 Isolated traces reproduce EarlyClearDelivers exit 13, FirstOpaqueFailureKept exit 12 and
 ReserveResetsFailures exit 12; repository model bytes remain unchanged during those runs.
@@ -56,6 +56,8 @@ can reverse those events; its row proof waits for the existing exact token-finis
 A finite recovery followed by an existing later settle is fair, then exact removal wakes once.
 No new timer is modeled. Permanent store failure is not assumed to make progress. Fairness of
 SFDrive applies only to its wake-gated action. Notice delivery does not gate row cleanup or B.
+Reply settlement waits for the failure commit only while the exact unreserved claim remains.
+After reserve, EffectOwned errors settle immediately, before the AI completion observer.
 Counters saturate at start 3, notice 2 and payload 2, with no third-start guard. `starts` excludes
 holds/stops and resets at an effect-held boundary; `totalStarts` counts all entries. Reserve resets
 failures. Recovery liveness requires a cause that stays cleared and no user clear. Runtime counts
@@ -84,11 +86,11 @@ and duplicate notifications cannot release another closing pin or create another
 
 | Physical point | Existing path / authority |
 |---|---|
-| `inflight.rs:575` | Policy API `remove_inflight_row_for_policy_op`; public JS `src/engine/ops/exec_ops.rs:313–379` |
+| `inflight.rs:578` | Policy API `remove_inflight_row_for_policy_op`; public JS `src/engine/ops/exec_ops.rs:313–379` |
 | `inflight/circuit_removal.rs:74` | Checked delete with circuit handoff |
 | `inflight/rebind_reap.rs:311` | Abandoned rebind reap |
 | `inflight/rebind_reap.rs:387` | Other-provider abandoned rebind reap |
-| `inflight/removal.rs:375` | Existing stale-generation invalidation |
+| `inflight/removal.rs:377` | Existing stale-generation invalidation |
 | `inflight/removal/boot_reaper.rs:218` | Locked boot verdict for stale/provider-mismatch/malformed rows |
 | `inflight/clear_store/mod.rs:79` | Ordinary receipt-protected clear |
 | `inflight/clear_store/mod.rs:324` | Guarded active-path archive rename |
