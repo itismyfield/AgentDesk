@@ -2659,6 +2659,7 @@ pub(crate) fn claimed_root_recovery_launch(
         claim,
         settled,
         origin,
+        ..
     } = owner;
     assert_eq!(
         origin, expected_origin,
