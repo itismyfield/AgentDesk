@@ -48,6 +48,8 @@ mod relay_decisions;
 #[path = "tmux/turn_lifecycle.rs"]
 mod turn_lifecycle;
 
+#[cfg(test)]
+pub(in crate::services::discord) use self::active_bridge_turn_guard_tests::restored_watcher_should_yield;
 pub(in crate::services::discord) use self::relay_decisions::sniff_background_agent_pending_for_completion;
 #[cfg(test)]
 use self::relay_decisions::watcher_should_yield_to_inflight_state;
@@ -1257,6 +1259,20 @@ mod active_bridge_turn_guard_tests {
     use crate::services::provider::ProviderKind;
     use std::ffi::OsString;
     use std::path::Path;
+
+    pub(in crate::services::discord) fn restored_watcher_should_yield(
+        state: &InflightTurnState,
+        tmux_session_name: &str,
+        data_start_offset: u64,
+        current_offset: u64,
+    ) -> bool {
+        watcher_should_yield_to_inflight_state(
+            Some(state),
+            tmux_session_name,
+            data_start_offset,
+            current_offset,
+        )
+    }
 
     struct EnvGuard {
         key: &'static str,

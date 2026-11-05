@@ -1,0 +1,146 @@
+---
+title: "A consumed input survives a restart while the next input waits"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Waiting
+    lg1: Progress
+  }
+  class lg0 pink
+  class lg1 blue
+  s0: A waits beside a busy Claude turn [legacy output ownership#59; O cannot close]
+  s1: A waits beside a busy Claude turn [unknown output ownership#59; O cannot close]
+  s2: A pasted once, consumption not yet proven [legacy output ownership#59; O cannot close]
+  s3: A pasted once, consumption not yet proven [unknown output ownership#59; O cannot close]
+  s4: A consumed, durable row still waiting [legacy output ownership#59; O cannot close]
+  s5: A consumed, durable row still waiting [unknown output ownership#59; O cannot close]
+  s6: Shutdown marks A for the next process [legacy output ownership#59; O cannot close]
+  s7: Shutdown marks A for the next process [unknown output ownership#59; O cannot close]
+  s8: New runtime restores the live pane [legacy output ownership#59; O cannot close]
+  s9: New runtime restores the live pane [unknown output ownership#59; O cannot close]
+  s10: A re-adoption refused#59; old marker remains [legacy output ownership#59; O cannot close]
+  s11: A re-adoption refused#59; old marker remains [unknown output ownership#59; O cannot close]
+  s12: Another shutdown refreshes A's marker [legacy output ownership#59; O cannot close]
+  s13: Another shutdown refreshes A's marker [unknown output ownership#59; O cannot close]
+  s14: A ended#59; a later native turn may start [legacy output ownership#59; O cannot close]
+  s15: A ended#59; a later native turn may start [unknown output ownership#59; O cannot close]
+  s16: A ended#59; unrelated input-notice debt stays at twenty [legacy output ownership#59; O cannot close]
+  s17: A ended#59; unrelated input-notice debt stays at twenty [unknown output ownership#59; O cannot close]
+  s18: B waits behind A's row while Claude is busy#59; owner wake available#59; one restart remains [legacy output ownership#59; O cannot close]
+  s19: B waits behind A's row while Claude is busy#59; owner wake available#59; one restart remains [unknown output ownership#59; O cannot close]
+  s20: B claims the mailbox#59; A's closer preserves that claim [legacy output ownership#59; O cannot close]
+  s21: B claims the mailbox#59; A's closer preserves that claim [unknown output ownership#59; O cannot close]
+  s22: B waits behind A's row while Claude is busy#59; no owner wake remains#59; one restart remains [legacy output ownership#59; O cannot close]
+  s23: B waits behind A's row while Claude is busy#59; no owner wake remains#59; one restart remains [unknown output ownership#59; O cannot close]
+  s24: B waits behind A's row even while Claude is idle#59; owner wake available#59; one restart remains [legacy output ownership#59; O cannot close]
+  s25: B waits behind A's row while Claude is busy#59; owner wake available#59; restart bound reached [legacy output ownership#59; O cannot close]
+  s26: B waits behind A's row even while Claude is idle#59; owner wake available#59; one restart remains [unknown output ownership#59; O cannot close]
+  s27: B waits behind A's row while Claude is busy#59; owner wake available#59; restart bound reached [unknown output ownership#59; O cannot close]
+  s28: B waits behind A's row even while Claude is idle#59; no owner wake remains#59; one restart remains [legacy output ownership#59; O cannot close]
+  s29: B waits behind A's row while Claude is busy#59; no owner wake remains#59; restart bound reached [legacy output ownership#59; O cannot close]
+  s30: B waits behind A's row even while Claude is idle#59; no owner wake remains#59; one restart remains [unknown output ownership#59; O cannot close]
+  s31: B waits behind A's row while Claude is busy#59; no owner wake remains#59; restart bound reached [unknown output ownership#59; O cannot close]
+  s32: B waits behind A's row even while Claude is idle#59; owner wake available#59; restart bound reached [legacy output ownership#59; O cannot close]
+  s33: B waits behind A's row even while Claude is idle#59; owner wake available#59; restart bound reached [unknown output ownership#59; O cannot close]
+  s34: B waits behind A's row even while Claude is idle#59; no owner wake remains#59; restart bound reached [legacy output ownership#59; O cannot close]
+  s35: B waits behind A's row even while Claude is idle#59; no owner wake remains#59; restart bound reached [unknown output ownership#59; O cannot close]
+  [*] --> s0
+  [*] --> s1
+  s0 --> s2: the owner pastes A once
+  s1 --> s3: the owner pastes A once
+  s2 --> s4: the exact native row settles A's input identity
+  s3 --> s5: the exact native row settles A's input identity
+  s4 --> s6: planned shutdown refreshes the restart marker
+  s5 --> s7: planned shutdown refreshes the restart marker
+  s6 --> s8: a new runtime settles boot
+  s7 --> s9: a new runtime settles boot
+  s8 --> s10: the live pane is restored and adoption is decided
+  s9 --> s11: the live pane is restored and adoption is decided
+  s10 --> s12: planned shutdown refreshes the restart marker
+  s10 --> s14: A's canonical terminator is written
+  s11 --> s13: planned shutdown refreshes the restart marker
+  s11 --> s15: A's canonical terminator is written
+  s12 --> s8: a new runtime settles boot
+  s13 --> s9: a new runtime settles boot
+  s14 --> s12: planned shutdown refreshes the restart marker
+  s14 --> s16: a later native turn starts
+  s15 --> s13: planned shutdown refreshes the restart marker
+  s15 --> s17: a later native turn starts
+  s16 --> s12: planned shutdown refreshes the restart marker
+  s16 --> s18: turn/start admits B to the waiting queue
+  s17 --> s13: planned shutdown refreshes the restart marker
+  s17 --> s19: turn/start admits B to the waiting queue
+  s8 --> s14: the live pane is restored and adoption is decided
+  s9 --> s15: the live pane is restored and adoption is decided
+  s18 --> s20: the waiting input claims its own mailbox token before create
+  s18 --> s12: planned shutdown refreshes the restart marker
+  s19 --> s21: the waiting input claims its own mailbox token before create
+  s19 --> s13: planned shutdown refreshes the restart marker
+  s20 --> s22: B's create collides with A#59; B releases its claim and keeps its front
+  s21 --> s23: B's create collides with A#59; B releases its claim and keeps its front
+  s8 --> s16: the live pane is restored and adoption is decided
+  s9 --> s17: the live pane is restored and adoption is decided
+  s22 --> s12: planned shutdown refreshes the restart marker
+  s22 --> s24: the later native turn becomes idle
+  s23 --> s13: planned shutdown refreshes the restart marker
+  s23 --> s26: the later native turn becomes idle
+  s8 --> s25: the live pane is restored and adoption is decided
+  s9 --> s27: the live pane is restored and adoption is decided
+  s16 --> s25: turn/start admits B to the waiting queue
+  s17 --> s27: turn/start admits B to the waiting queue
+  s24 --> s20: the waiting input claims its own mailbox token before create
+  s24 --> s12: planned shutdown refreshes the restart marker
+  s25 --> s20: the waiting input claims its own mailbox token before create
+  s26 --> s21: the waiting input claims its own mailbox token before create
+  s26 --> s13: planned shutdown refreshes the restart marker
+  s27 --> s21: the waiting input claims its own mailbox token before create
+  s8 --> s29: the live pane is restored and adoption is decided
+  s9 --> s31: the live pane is restored and adoption is decided
+  s20 --> s28: B's create collides with A#59; B releases its claim and keeps its front
+  s20 --> s29: B's create collides with A#59; B releases its claim and keeps its front
+  s21 --> s30: B's create collides with A#59; B releases its claim and keeps its front
+  s21 --> s31: B's create collides with A#59; B releases its claim and keeps its front
+  s28 --> s12: planned shutdown refreshes the restart marker
+  s29 --> s32: the later native turn becomes idle
+  s30 --> s13: planned shutdown refreshes the restart marker
+  s31 --> s33: the later native turn becomes idle
+  s8 --> s32: the live pane is restored and adoption is decided
+  s9 --> s33: the live pane is restored and adoption is decided
+  s32 --> s20: the waiting input claims its own mailbox token before create
+  s33 --> s21: the waiting input claims its own mailbox token before create
+  s8 --> s34: the live pane is restored and adoption is decided
+  s9 --> s35: the live pane is restored and adoption is decided
+  s20 --> s34: B's create collides with A#59; B releases its claim and keeps its front
+  s21 --> s35: B's create collides with A#59; B releases its claim and keeps its front
+  class s0 blue
+  class s1 blue
+  class s2 blue
+  class s3 blue
+  class s4 blue
+  class s5 blue
+  class s6 blue
+  class s7 blue
+  class s10 blue
+  class s11 blue
+  class s14 blue
+  class s15 blue
+  class s16 blue
+  class s17 blue
+  class s18 pink
+  class s19 pink
+  class s20 pink
+  class s21 pink
+  class s22 pink
+  class s23 pink
+  class s24 pink
+  class s25 pink
+  class s26 pink
+  class s27 pink
+  class s28 pink
+  class s29 pink
+  class s30 pink
+  class s31 pink
+  class s32 pink
+  class s33 pink
+  class s34 pink
+  class s35 pink

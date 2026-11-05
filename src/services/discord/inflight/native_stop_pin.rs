@@ -295,3 +295,76 @@ pub(in crate::services::discord) fn wait_native_pin_observations(
         .find(|(id, _)| *id == channel)
         .is_some_and(|(_, count)| *count >= expected)
 }
+
+/// Verifies the persisted input in its historical transcript without consulting the current pane.
+pub(in crate::services::discord) fn historical_input_verified(row: &InflightTurnState) -> bool {
+    let Some(pin) = row
+        .native_stop_user_pin
+        .as_ref()
+        .filter(|pin| pin.matches_owner(row))
+    else {
+        return false;
+    };
+    #[cfg(not(unix))]
+    {
+        let _ = pin;
+        false
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
+        let verify = || -> Option<()> {
+            let input = &pin.input;
+            let length = input.range.1.checked_sub(input.range.0)?;
+            if input.uuid.trim().is_empty()
+                || input.session_id.trim().is_empty()
+                || pin.turn_nonce.trim().is_empty()
+                || input
+                    .spawn_nonce
+                    .as_deref()
+                    .is_none_or(|nonce| nonce.trim().is_empty())
+                || input.range.0 < input.receipt_start
+                || length == 0
+                || length > 16 * 1024 * 1024
+            {
+                return None;
+            }
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(&input.output_path)
+                .ok()?;
+            let before = file.metadata().ok()?;
+            if !before.is_file()
+                || before.ino() != input.source_file.1
+                || before.len() < input.range.1
+            {
+                return None;
+            }
+            let mut raw = vec![0; usize::try_from(length).ok()?];
+            file.read_exact_at(&mut raw, input.range.0).ok()?;
+            if !raw.ends_with(b"\n") || blake3::hash(&raw).to_hex().as_str() != input.row_digest {
+                return None;
+            }
+            let record: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+            let (_, uuid) = crate::services::tui_prompt_dedupe::extract_claude_transcript_user_prompt_with_entry_id(&record)?;
+            if uuid.as_deref() != Some(input.uuid.as_str())
+                || record["sessionId"].as_str() != Some(input.session_id.as_str())
+                || record["isSidechain"] == true
+            {
+                return None;
+            }
+            let current = std::fs::symlink_metadata(&input.output_path).ok()?;
+            (current.is_file()
+                && current.dev() == before.dev()
+                && current.ino() == before.ino()
+                && current.len() >= input.range.1)
+                .then_some(())
+        };
+        verify().is_some()
+    }
+}
+
+#[cfg(all(test, unix))]
+#[path = "native_stop_pin/historical_tests.rs"]
+mod historical_tests;

@@ -49,6 +49,8 @@ mod session_gc;
 mod shared_data;
 mod shutdown;
 mod spawns;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use spawns::carried_restart_marked;
 #[cfg(test)]
 pub(in crate::services::discord) use spawns::{
     ORPHAN_RETRY_CADENCE_FOR_TESTS, run_bot_spawn_execution_runtime_tasks,

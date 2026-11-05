@@ -1,0 +1,100 @@
+---
+title: "A consumed input survives a restart while the next input waits"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Done
+    lg1: Waiting
+    lg2: Progress
+  }
+  class lg0 teal
+  class lg1 pink
+  class lg2 blue
+  s0: A waits beside a busy Claude turn
+  s1: A pasted once, consumption not yet proven
+  s2: A consumed, durable row still waiting
+  s3: Shutdown marks A for the next process
+  s4: New runtime restores the live pane
+  s5: A re-adopted#59; its live owner must finish it
+  s6: A re-adoption refused#59; marker consumed
+  s7: Another shutdown refreshes A's marker
+  s8: A ended#59; a later native turn may start
+  s9: A ended#59; unrelated input-notice debt stays at twenty
+  s10: B waits behind A's row while Claude is busy#59; owner wake available#59; one restart remains
+  s11: B claims the mailbox#59; A's closer preserves that claim
+  s12: A row closed#59; the existing kickoff wakes B
+  s13: B waits behind A's row while Claude is busy#59; no owner wake remains#59; one restart remains
+  s14: B waits behind A's row even while Claude is idle#59; owner wake available#59; one restart remains
+  s15: B waits behind A's row while Claude is busy#59; owner wake available#59; restart bound reached
+  s16: B started once#59; a late A result leaves B intact
+  s17: B waits behind A's row even while Claude is idle#59; owner wake available#59; restart bound reached
+  s18: B waits behind A's row even while Claude is idle#59; no owner wake remains#59; one restart remains
+  s19: B waits behind A's row while Claude is busy#59; no owner wake remains#59; restart bound reached
+  s20: Idle health pass holds A's transition lock
+  s21: B waits behind A's row even while Claude is idle#59; no owner wake remains#59; restart bound reached
+  s22: A's receipt committed#59; archive checks its captured identity
+  [*] --> s0
+  s0 --> s1: the owner pastes A once
+  s1 --> s2: the exact native row settles A's input identity
+  s2 --> s3: planned shutdown refreshes the restart marker
+  s3 --> s4: a new runtime settles boot
+  s4 --> s5: the live pane is restored and adoption is decided
+  s4 --> s6: the live pane is restored and adoption is decided
+  s5 --> s7: planned shutdown refreshes the restart marker
+  s6 --> s7: planned shutdown refreshes the restart marker
+  s6 --> s8: A's canonical terminator is written
+  s7 --> s4: a new runtime settles boot
+  s8 --> s7: planned shutdown refreshes the restart marker
+  s8 --> s9: a later native turn starts
+  s5 --> s8: A's adopted owner finishes its own episode
+  s9 --> s7: planned shutdown refreshes the restart marker
+  s9 --> s10: turn/start admits B to the waiting queue
+  s4 --> s8: the live pane is restored and adoption is decided
+  s8 --> s12: a later native turn starts
+  s10 --> s11: the waiting input claims its own mailbox token before create
+  s10 --> s7: planned shutdown refreshes the restart marker
+  s11 --> s13: B's create collides with A#59; B releases its claim and keeps its front
+  s4 --> s9: the live pane is restored and adoption is decided
+  s13 --> s7: planned shutdown refreshes the restart marker
+  s13 --> s14: the later native turn becomes idle
+  s4 --> s15: the live pane is restored and adoption is decided
+  s5 --> s12: A's adopted owner finishes its own episode
+  s9 --> s15: turn/start admits B to the waiting queue
+  s4 --> s17: the live pane is restored and adoption is decided
+  s12 --> s16: the owner starts B on an eligible idle edge
+  s14 --> s11: the waiting input claims its own mailbox token before create
+  s14 --> s7: planned shutdown refreshes the restart marker
+  s15 --> s11: the waiting input claims its own mailbox token before create
+  s4 --> s19: the live pane is restored and adoption is decided
+  s11 --> s18: B's create collides with A#59; B releases its claim and keeps its front
+  s11 --> s19: B's create collides with A#59; B releases its claim and keeps its front
+  s14 --> s20: the idle health pass locks A using its own evidence
+  s17 --> s11: the waiting input claims its own mailbox token before create
+  s18 --> s7: planned shutdown refreshes the restart marker
+  s11 --> s21: B's create collides with A#59; B releases its claim and keeps its front
+  s19 --> s17: the later native turn becomes idle
+  s20 --> s22: A's receipt commits before archive
+  s18 --> s20: the idle health pass locks A using its own evidence
+  s22 --> s12: A's identity CAS archives only A
+  s4 --> s21: the live pane is restored and adoption is decided
+  s21 --> s20: the idle health pass locks A using its own evidence
+  s17 --> s20: the idle health pass locks A using its own evidence
+  class s0 blue
+  class s1 blue
+  class s2 blue
+  class s3 blue
+  class s6 blue
+  class s8 blue
+  class s9 blue
+  class s10 pink
+  class s11 pink
+  class s13 pink
+  class s14 pink
+  class s15 pink
+  class s16 teal
+  class s17 pink
+  class s18 pink
+  class s19 pink
+  class s20 pink
+  class s21 pink
+  class s22 pink

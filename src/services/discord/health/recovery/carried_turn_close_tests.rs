@@ -151,6 +151,7 @@ mod cases {
     /// episode, a confirmed turn-mode transcript, and O's owed read.
     struct Fixture {
         shared: Arc<SharedData>,
+        pool: sqlx::PgPool,
         registry: HealthRegistry,
         channel: ChannelId,
         path: std::path::PathBuf,
@@ -185,7 +186,9 @@ mod cases {
             let runtime = crate::config::TestRuntimeRootGuard::new();
             let root = tempfile::tempdir().unwrap();
             let binding = discord::health::BindingRoot::enter(root.path());
-            let shared = discord::make_shared_data_for_tests();
+            let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+            let pool = db.connect_and_migrate().await;
+            let shared = discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
             let path = root.path().join(format!("{channel}.jsonl"));
             let rows: Vec<&str> = options.transcript.iter().map(String::as_str).collect();
             std::fs::write(&path, "").unwrap();
@@ -256,11 +259,13 @@ mod cases {
                 .await;
             let o = Arc::new(Mutex::new(OAnswer::default()));
             host_o(channel, &path, o.clone());
+            keep.push(Box::new(db));
             keep.push(Box::new(binding));
             keep.push(Box::new(root));
             keep.push(Box::new(runtime));
             Self {
                 shared,
+                pool,
                 registry,
                 channel: ChannelId::new(channel),
                 path,
@@ -284,17 +289,23 @@ mod cases {
                 && snapshot.active_user_message_id == Some(MessageId::new(self.user_msg_id))
         }
 
-        fn archived(&self) -> bool {
+        fn archive_count(&self) -> usize {
             let dir = inflight::inflight_runtime_root().unwrap().join("archive");
-            std::fs::read_dir(dir).is_ok_and(|entries| {
-                entries.flatten().any(|entry| {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    name.starts_with(&format!(
-                        "{}.json.turn-mode-carried-turn",
-                        self.channel.get()
-                    ))
-                })
+            std::fs::read_dir(dir).map_or(0, |entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| {
+                        entry.file_name().to_string_lossy().starts_with(&format!(
+                            "{}.json.turn-mode-carried-turn",
+                            self.channel.get()
+                        ))
+                    })
+                    .count()
             })
+        }
+
+        fn archived(&self) -> bool {
+            self.archive_count() != 0
         }
 
         async fn assert_kept(&self, case: &str) {
@@ -730,6 +741,38 @@ mod cases {
         });
         fx.pass().await;
         fx.assert_kept("grew under the lock").await;
+        let receipts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE turn_id=$1")
+            .bind(format!("discord:{}:{}", fx.channel.get(), fx.user_msg_id))
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            receipts, 0,
+            "stale native evidence must not commit a receipt"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn native_growth_after_receipt_commit_keeps_the_row_and_episode_pg() {
+        let fx = Fixture::new(7_807_343, 9_100_095_491_915_388_023, Options::default()).await;
+        let path = fx.path.clone();
+        on("receipt", fx.channel.get(), move || {
+            append(&path, &[&user("after-receipt")])
+        });
+        fx.pass().await;
+        fx.assert_kept("native turn opened after receipt commit")
+            .await;
+        assert_eq!(fx.archive_count(), 0);
+        let outcome: String =
+            sqlx::query_scalar("SELECT terminal_outcome FROM turns WHERE turn_id=$1")
+                .bind(format!("discord:{}:{}", fx.channel.get(), fx.user_msg_id))
+                .fetch_one(&fx.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            outcome, "completed",
+            "a committed receipt alone cannot archive"
+        );
     }
 
     /// A row rewritten just before the archive keeps both the row and the episode.
@@ -745,7 +788,7 @@ mod cases {
     /// O still owing anything, or behind the native end, keeps the turn.
     #[tokio::test(flavor = "current_thread")]
     async fn o_debt_or_capture_behind_end_keeps_carried_turn() {
-        let cases: [(u64, OAnswer); 4] = [
+        let cases: [(u64, OAnswer); 6] = [
             (
                 7_533_361,
                 OAnswer {
@@ -757,6 +800,8 @@ mod cases {
                 7_533_362,
                 OAnswer {
                     debt: Undelivered {
+                        owed: 20,
+                        notice_owed: 20,
                         posting: 1,
                         ..Undelivered::default()
                     },
@@ -783,6 +828,29 @@ mod cases {
                     behind: 0,
                 },
             ),
+            (
+                7_807_365,
+                OAnswer {
+                    debt: Undelivered {
+                        owed: 21,
+                        notice_owed: 20,
+                        ..Undelivered::default()
+                    },
+                    behind: 0,
+                },
+            ),
+            (
+                7_807_366,
+                OAnswer {
+                    debt: Undelivered {
+                        owed: 20,
+                        notice_owed: 20,
+                        prepared: 1,
+                        ..Undelivered::default()
+                    },
+                    behind: 0,
+                },
+            ),
         ];
         for (channel, answer) in cases {
             let fx = Fixture::new(channel, 9_100_095_491_915_388_041, Options::default()).await;
@@ -793,6 +861,114 @@ mod cases {
             fx.pass().await;
             fx.assert_closed("O drained").await;
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unadopted_managed_carried_row_without_native_pin_is_kept_pg() {
+        let fx = Fixture::new(7_807_371, 9_100_095_491_915_388_050, Options::default()).await;
+        let mut row = fx.row().unwrap();
+        row.managed_submission = Some(
+            serde_json::from_value(serde_json::json!({ "protocol": 1, "phase": "waiting" }))
+                .unwrap(),
+        );
+        row.readopted_from_inflight = false;
+        row.native_stop_user_pin = None;
+        let path = inflight::inflight_state_path(
+            &inflight::inflight_runtime_root().unwrap(),
+            &PROVIDER,
+            fx.channel.get(),
+        );
+        std::fs::write(path, serde_json::to_vec(&row).unwrap()).unwrap();
+        fx.pass().await;
+        fx.assert_kept("unadopted managed input has no verified native pin")
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn input_notice_debt_alone_closes_and_archives_the_carried_row_once_pg() {
+        let fx = Fixture::new(7_807_367, 9_100_095_491_915_388_047, Options::default()).await;
+        fx.o.lock().unwrap().debt = Undelivered {
+            owed: 20,
+            notice_owed: 20,
+            ..Undelivered::default()
+        };
+        fx.pass().await;
+        fx.assert_closed("only input notices remain").await;
+        assert_eq!(fx.archive_count(), 1);
+        assert_eq!(events(fx.channel.get()), ["complete"]);
+        fx.pass().await;
+        assert_eq!(fx.archive_count(), 1, "A is archived exactly once");
+        assert_eq!(events(fx.channel.get()), ["complete"]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn receipt_commit_failure_keeps_a_carried_row_with_or_without_origins_pg() {
+        for (channel, origins) in [(7_807_368, false), (7_807_369, true)] {
+            let fx = Fixture::new(channel, 9_100_095_491_915_388_048, Options::default()).await;
+            if origins {
+                let mut row = fx.row().unwrap();
+                row.input_origin_ids = vec![format!("carried-origin-{channel}")];
+                inflight::save_inflight_state(&row).unwrap();
+            }
+            fx.pool.close().await;
+            fx.pass().await;
+            fx.assert_kept(&format!("PG commit unavailable, origins={origins}"))
+                .await;
+            assert_eq!(fx.archive_count(), 0);
+            let stamp = fx
+                .row()
+                .unwrap()
+                .terminal_receipt
+                .expect("completion mark retained");
+            assert_eq!(stamp.outcome, crate::db::turns::TerminalOutcome::Completed);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn completed_receipt_is_visible_on_an_independent_connection_before_archive_pg() {
+        let fx = Fixture::new(7_807_370, 9_100_095_491_915_388_049, Options::default()).await;
+        let options = fx.pool.connect_options().as_ref().clone();
+        let turn = format!("discord:{}:{}", fx.channel.get(), fx.user_msg_id);
+        let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = observed.clone();
+        on("archive", fx.channel.get(), move || {
+            // The hook blocks its caller; a fresh runtime and connection keep its PG read live.
+            let outcome = std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async move {
+                    let pool = sqlx::postgres::PgPoolOptions::new()
+                        .max_connections(1)
+                        .acquire_timeout(Duration::from_secs(5))
+                        .connect_with(options)
+                        .await
+                        .unwrap();
+                    let outcome: Option<String> =
+                        sqlx::query_scalar("SELECT terminal_outcome FROM turns WHERE turn_id=$1")
+                            .bind(turn)
+                            .fetch_optional(&pool)
+                            .await
+                            .unwrap();
+                    pool.close().await;
+                    outcome
+                })
+            })
+            .join()
+            .unwrap();
+            assert_eq!(
+                outcome.as_deref(),
+                Some("completed"),
+                "PG commit precedes archive"
+            );
+            seen.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        fx.pass().await;
+        assert!(observed.load(std::sync::atomic::Ordering::SeqCst));
+        fx.assert_closed("independently committed before archive")
+            .await;
+        assert_eq!(fx.archive_count(), 1);
     }
 
     /// An interrupted native end settles the episode as cancelled, never completed.
@@ -1020,7 +1196,6 @@ mod cases {
                 );
             discord::spawn_turn_completion_idle_queue_listener(fx.shared.clone(), PROVIDER);
             completion.listener_ready(Duration::from_secs(10)).await;
-            tokio::time::pause();
             fx.pass().await;
             fx.assert_closed(&format!("episode={episode}")).await;
             completion
@@ -1040,7 +1215,6 @@ mod cases {
                 1,
                 "episode={episode}: a closed turn kicks no more"
             );
-            tokio::time::resume();
         }
     }
 }
