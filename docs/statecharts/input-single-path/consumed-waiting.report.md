@@ -1,166 +1,170 @@
 # Consumed waiting row after a refused re-adoption (#7807)
 
-Code baseline: `b0bab6ebf693502f86c0b2e2c0307033fa411c29`.
-The After column models the coordinator's impl-5 contract, including the retained current
-native-idle gate and main's unconditional shutdown marker refresh. Model checking verifies
-that contract; the implementation lane's entry-point
-tests separately check its wiring into production.
+Model contract: coordinator impl-7 (`resume-impl-7.md`), based on merged lane head
+`0f27c5335a602ed315dc8287a2b5828cb7302d0d`, main base
+`b2b5a672ad7c68102f869cff481532c82f00bb71`.
+The original lasso describes code baseline `b0bab6ebf693502f86c0b2e2c0307033fa411c29`;
+the two new RED cases isolate the defects reviewed at `bfd3c269211da84b0db70ddb988a205e8d6f8623`.
+After verifies the approved contract. The implementation lane's actual intake/restart/health
+RED/GREEN tests separately establish its production wiring; model PASS is not that evidence.
 
-This is a sibling extension of `InputOwnership.tla`, whose slice F already models the carried
-row, mailbox episode, original input, native busy/idle state and owner wake. Its dedicated
-`CWNext` splits A's terminal from the later native turn N instead of using the original
-`TurnEnds`, which releases the mailbox and native turn together. Historical configs are unchanged.
+This sibling extends `InputOwnership.tla`'s carried-row slice F but uses `CWNext`, splitting
+A's completion from the later native turn N. Historical models and configs are unchanged.
 
 ## Results
 
-| Check | Before (O-owned) | After (O-owned) | NonO/Unknown |
+| Config | Statechart exit | Distinct states | Expected result |
 |---|---|---|---|
-| Statechart command | exit 1, expected temporal lasso | exit 0 | exit 0 |
-| Plain TLC | exit 13, temporal violation | exit 0, temporal check completed | exit 0, safety only |
-| Distinct states | 65 | 159 | 74 |
-| `PendingBEventuallyStarts` (`PendingB ~> BStarted`) | breaks | holds | outside this config's scope |
-| `NoDuplicateStart`, `SuccessorUntouched`, `NoAReplay` | hold | hold | hold |
-| `NoDuplicateAnswer` | holds | holds | holds |
-| `InputNoticeDebtIndependent` | input-notice debt stays 20 | input-notice debt stays 20 | input-notice debt stays 20 |
-| `RefusedMarkerConsumed` | repair implication inactive | holds | O-only implication inactive |
-| `RefusedMarkerPreservedOutsideO` | nonO implication inactive | nonO implication inactive | holds for legacy and Unknown |
-| `FreshShutdownMarker` | holds | holds | holds |
-| `ReceiptBeforeArchive`, `NoCloseUnderBClaim`, `NoDeadlock` | hold | hold | hold |
+| [Before](consumed-waiting-before.chart.mmd) | 1 | 68 | `PendingBEventuallyStarts` lasso: channel debt includes notice20 |
+| [PinSupplyBefore](consumed-waiting-pin-supply-before.chart.mmd) | 1 | 68 | Same liveness lasso despite the repaired P gate: old observer supplies no pin |
+| [OutcomeBefore](consumed-waiting-outcome-before.chart.mmd) | 1 | 100 | `OrphanAReceiptCompleted` breaks when N's cancellation becomes A's receipt |
+| [After](consumed-waiting-after.chart.mmd) | 0 | 162 | O-owned B eventually starts exactly once; orphan A is Completed |
+| [AfterStamped](consumed-waiting-after-stamped.chart.mmd) | 0 | 162 | A's own Cancelled stamp is honored in refused and successful-adoption cases |
+| [InvalidPin](consumed-waiting-invalid-pin.chart.mmd) | 0 | 204 | Other-attempt, other-session and unsettled-write evidence cannot pin or close A |
+| [NonO](consumed-waiting-nono.chart.mmd) | 0 | 80 | Legacy/Unknown refused markers remain; O cannot close their rows |
 
-The repository's `scripts/ci/statecharts_tlc.py` checked the original, complete
-`docs/statecharts` tree with no `--root` override: **exit 0, 63 configs, 130.3 seconds,
-zero mismatches**. It performs an applied-fairness precheck and
-separate plain-TLC safety and temporal runs for each config with a PROPERTY. The manifest
-retains Before's expected liveness failure and After's passing expectation, and adds the
-safety-only NonO config. This full run replaces the earlier impl-3 target-only check; its
-raw log and exact source hashes are recorded below.
+`NoDuplicateStart`, `NoAReplay`, `SuccessorUntouched`, `NoDuplicateAnswer`,
+`InputNoticeDebtIndependent`, `RefusedMarkerConsumed`, `RefusedMarkerPreservedOutsideO`,
+`FreshShutdownMarker`, `ReceiptBeforeArchive`, `NoCloseUnderBClaim`, `PinEvidenceVerified`,
+`ObserverFollowsEffect`, `NoCloseWithoutPin`, `OwnStampRespected` and deadlock checks hold
+in all seven configs. `OrphanAReceiptCompleted` holds except in its intentional RED case.
+`PendingBEventuallyStarts` remains the original unconditional `PendingB ~> BStarted`
+formula: After, AfterStamped and OutcomeBefore pass it; Before and PinSupplyBefore break it.
+NonO and InvalidPin deliberately assert safety only, without promising B progress for rows
+which this O repair cannot safely retire.
 
-The generated [Before chart](consumed-waiting-before.chart.mmd) has 18 visible states and
-34 arrows; [After](consumed-waiting-after.chart.mmd) has 23 states and 45 arrows. Neither view
-hides a state-changing action. Same-label steps are omitted by the renderer (23 Before,
-88 After); the After view additionally hides 24 terminal self-stutters (`CWDone`). The
-[NonO/Unknown chart](consumed-waiting-nono.chart.mmd) has 36 states and 66 arrows, separated by
-observed ownership; it omits eight same-label steps and no state-changing action by name.
+The official whole-repository checker checked the original `docs/statecharts` directory,
+with no `--root` override or target-only filter: **exit 0, 74 configs, 138.0 seconds,
+zero mismatches**. It applies a fairness precheck and checks each PROPERTY separately with
+plain TLC. The seven target configs required 13 plain-TLC runs, all matching the manifest;
+the source hashes remained identical to the frozen inputs throughout the complete check.
 
-## Before lasso and code replay
+## Pin supply and proof boundaries
 
-The statechart report's counterexample has 17 transitions. Its final state stutters forever:
-B is still pending, A's durable row remains, the mailbox is empty, the native turn is idle,
-A output debt is zero and unrelated input-notice debt is twenty.
+The old model conflated terminal input settlement with the existence of a historical native
+pin. Impl-7 makes the production ordering explicit:
 
-| Steps | Model action and observation | Baseline production coordinate |
+1. `OwnerPastesA` begins the real busy effect once.
+2. `BusyEffectReturns` observes the actual run result. Only success arms this attempt;
+   WriteUncertain leaves `writeSettled=FALSE`.
+3. `SettleBusySubmission` records that attempt's Submitted or WriteUncertain history terminal.
+4. `ObserveBusyReceipt` represents the existing answer observer finding an actual native user
+   row. `ObserverFollowsEffect` checks that both effect return and history settlement precede it.
+5. `SupplyBusyPin` represents the new callback decision. Only an armed, matching native user
+   persists a pin through A's existing birth-episode callback. The old callback setting, a
+   different attempt/session, or an unsettled write leaves `pinVerified=FALSE`.
+
+The observer still runs for WriteUncertain. A pin is never inferred just from Submitted,
+terminal history membership, or a receipt-sink wrapper. The matching predicate abstracts the
+approved checks: observed range start, original session/path/file, captured pane identity,
+exact attempt nonce's `RowOwner::User`, and the existing UUID/range/source/digest validation.
+Those byte-level checks and real I/O remain implementation-test responsibilities.
+
+This positive scenario begins planned shutdown after the observer's user-row decision and
+pin hook have run, as the R1 test does. It does not assume that every attempt obtains a pin:
+PinSupplyBefore and InvalidPin complete that same sequence without one and preserve A.
+A crash before the asynchronous observer decision is outside the B-progress scenario; it is
+not silently modeled as a successful save. Failed pin I/O likewise requires the production
+negative tests. Neither case justifies dropping historical I verification.
+
+## Orphan A outcome
+
+`receiptOutcome`, A's `ownStamp`, and N's `nAborted` are independent state. The current native
+idle boundary decides when the closer may run; its last aborted bit does not identify A's
+outcome. In the no-episode, refused-adoption path, an existing A stamp wins, otherwise the
+repaired contract commits Completed. OutcomeBefore changes only that outcome policy back to
+N's bit and produces a Cancelled receipt for normally completed A.
+
+`FinishReadoptedA` remains the separate normal-owner path for successful adoption and respects
+A's own stamp. AfterStamped checks explicit Cancelled preservation through both adoption
+outcomes. The model does not claim to replace the production `interrupted_close_cancels`
+regression or finalizer-event tests. No historical T scanner is introduced; current native
+idle is still required at close and archive.
+
+## Counterexamples and code replay
+
+The original Before and PinSupplyBefore lassos have 20 transitions and end with B pending,
+A's row present, an empty mailbox, current native idle, output debt zero and input-notice debt
+20. Both traverse actual busy return, Submitted settlement and the native-user observer.
+Before retains the channel sum; PinSupplyBefore has the repaired P gate but lacks the pin.
+
+| Path steps | Model action | Fixed-source correspondence |
 |---|---|---|
-| 1 | `OwnerPastesA`: busy owner paste starts A once | `router/message_handler/provider_dispatch/owner_input.rs:576` (`execute_owned`) |
-| 2 | `ConsumeA`: A's exact input identity settles, while its waiting row remains | `router/message_handler/provider_dispatch/owner_input.rs:647` busy observer; `turn_orchestrator/queued_head/v2.rs:376` keeps a settled identity held during adoption |
-| 3 | `ShutdownRestamps`: planned shutdown writes A's restart marker | `runtime_bootstrap/spawns.rs:179` → `inflight.rs:785`, writes at 803–805 |
-| 4–5 | `SettleBoot`, `RestoreAlive`: live pane remains, A's mailbox claim is refused; successful-only marker update is not called | `recovery_engine/restore_inflight.rs:1924`; `recovery_engine/runtime.rs:325`, `:341` |
-| 6–8 | Another shutdown refreshes the old marker; another boot and refused adoption retain it | `inflight.rs:803`; same restore/claim branch |
-| 9–11 | A terminates, N starts, and O captures/delivers A output; input-notice work remains | native boundary predicate `tui_turn_state/completion_scan.rs:207`; channel aggregate `health/recovery/carried_turn_close.rs:376` |
-| 12 | B is admitted while N remains busy | owner queue ingress; `discord/queue_io/input_owner/drive.rs:100`–112 retains the admitted front |
-| 13–14 | B takes its own temporary claim; row create collides with A; B releases that claim and keeps its front | `router/message_handler/foreign_row.rs:44` → `:53` for headless; intake `:70` → `:80` |
-| 15 | N becomes idle and the existing boundary wake gives B another pass | `discord/turn_presence/supervisor.rs:644`–673 owner boundary wake |
-| 16–17 | B claims and collides once more, then retains its front with no remaining wake | the same `foreign_row` admission and unwind paths |
-| lasso | Existing health ticks keep A because the aggregate O debt includes twenty input-notice items | `health/recovery/carried_turn_close.rs:366`–403 |
+| 1 | `OwnerPastesA` | Original `owner_input.rs:576` (`execute_owned`) creates/pastes the busy attempt |
+| 2–3 | `BusyEffectReturns`, `SettleBusySubmission` | Reviewed `queue_io/input_owner/effect.rs:201–205` returns from `inject_owned` and collects attempt history |
+| 4–5 | `ObserveBusyReceipt`, `SupplyBusyPin` | Existing `hosting/warm_followup.rs::busy_owner_observer` actual-user branch; impl-7 adds only its approved callback and the arm/source guard |
+| 6–8 | `ShutdownRestamps`, `SettleBoot`, `RestoreAlive` | Original `inflight.rs:803–805` refreshes the marker; `restore_inflight.rs:1924` re-registers; refused adoption does not own A |
+| 9–11 | Second shutdown, boot and restore | Same existing lifecycle, with current-generation shutdown refresh preserved |
+| 12–14 | A ends, N starts, output is captured/delivered | Original native boundary predicate `completion_scan.rs:207`; O gate `carried_turn_close.rs:376` |
+| 15–17 | B is admitted, claims, collides, and releases its own claim | Original `foreign_row.rs:44–53` headless / `:70–80` intake; queue front stays pending |
+| 18–20 | N ends, B retries once and collides again | Existing owner boundary wake and foreign-admission unwind |
+| lasso | `HealthKeepsA` | Before's aggregate gate includes notice20; reviewed closer `:171–175` refuses a missing historical pin even after P passes |
 
-These code reads confirm the modeled branch sequence. They do not replace the implementation
-lane's runtime-entry RED/GREEN test. The operational row and O-store observations are recorded
-in that lane's implementation report rather than being inferred from this model.
+The OutcomeBefore safety path has 17 transitions. Steps 1–8 supply a real pin, mark shutdown,
+restore the live pane and refuse adoption. Steps 9–15 complete normal A, capture its output,
+start N, admit/refuse B and interrupt N. Step 16 takes the existing health transition lock;
+step 17 commits Cancelled for A using N's bit. This is the reviewed
+`carried_turn_close.rs:220,398–410` chain. It is an outcome defect even though B subsequently
+starts; the separate liveness property holds in that RED config.
 
-## After behavior and retained guards
+These coordinates describe the original and fixed-review snapshots, not mutable production
+files during implementation. Source-level runtime entry tests provide the final wiring proof.
 
-`RestoreAlive` consumes a prior-generation marker after refused adoption only when the
-observed output owner is O. It does not require a separate O confirmation and does not claim
-that A was readopted. Successful adoption follows its existing marker consumption and normal
-owner completion (`FinishReadoptedA`). `ShutdownRestamps` always writes the current generation
-in both Before and After; `FreshShutdownMarker` checks this for every shutdown, including the
-second restart and nonO/Unknown rows. The model does not introduce a no-restamp exception or
-accelerate stale-row reaping. The positive model assumes marker writes succeed; failed marker
-I/O remains an implementation-test concern.
+## Retained behavior and fairness
 
-`OutputOwners={"owned"}` leaves both existing O configs' unconditional B liveness formula
-unchanged. The separate NonO config observes `{"legacy", "unknown"}` and checks preservation
-safety without claiming `PendingB ~> BStarted`. O neither captures their output nor closes
-their rows in this model, and refused markers remain present after either boot. Legacy relay
-completion and a later ownership-resolution event are outside this bounded safety config;
-their absence is not presented as a liveness failure of the O repair. Existing input-delivery
-uncertainty (`unconfirmed`) is independent of output ownership and remains a close guard.
+- O-only refused marker consumption never calls a refused row readopted. NonO/Unknown retain
+  their marker. Every shutdown, in every config, refreshes the current generation;
+  `FreshShutdownMarker` rules out the rejected restamp-skip policy.
+- Input-notice debt stays at 20 in every config. Repaired P counts only A output debt. Source
+  capture, current native idle, input-delivery, episode, transition-lock and archive identity
+  conditions remain represented; B's claimed token prevents A's closer from running.
+- Foreign admission never calls the closer. It releases B's claim and retains the queue front.
+  An idle health tick commits A's receipt before archive, preserves the captured identity,
+  and the existing kickoff wakes B. A late A result leaves B's row and token intact.
+- Weak fairness lets each continuously enabled owner, observer, boot, source-capture, health,
+  PG commit, archive and kickoff action execute. The environment eventually ends N after B's
+  arrival and first foreign conflict. There are only two shutdown/boot cycles and two owner
+  attempts before close; no timer or new retry loop is modeled.
+- Legacy delivery/progress, PG failures and long-failure stale cleanup, restart-report branch
+  wiring, pin byte parsing/I/O failures, transcript replacement, arbitrary crashes before the
+  observer, repeated later native turns, explicit Cancel/clear/stop, and multiple successors
+  are outside this bounded model. Their production guards and entry tests remain necessary.
 
-`ForeignAdmission` contains no closer. B first holds its own `BClaim`; the closer cannot run
-under that claim (`NoCloseUnderBClaim`). A conflict releases B's claim and preserves its front.
-Once N becomes idle, the existing health pass can take the transition lock, commit A's receipt,
-recheck A's row/episode/native-idle/delivery guards and archive A by captured identity. The
-existing kickoff then wakes the owner, and B starts once. A late A callback leaves B's row
-and token untouched.
+## Charts and evidence
 
-The repaired P gate counts only `odebt.aOutput`. `odebt.inputNotice=20` stays constant because
-its separately owned ledger does not represent unfinished A output. Before retains the
-channel-wide sum. The model retains A's consumed/terminal/captured evidence and all current
-native-idle, mailbox episode, transition-lock, input-delivery and row-CAS conditions; it does
-not model a foreign-admission closer or removal of `native_end`.
+The generated charts retain every state-changing action by name. Before and PinSupplyBefore
+draw 21 states/37 arrows and omit 23 same-label steps each. After and AfterStamped draw
+26/48, omit 88 same-label steps and hide only 24 terminal `CWDone` stutters. OutcomeBefore
+draws 25/44, omits 43 same-label steps and hides 16 terminal stutters. InvalidPin draws 23/39
+and NonO 42/72. The renderer's raw report lists their same-label omissions.
 
-## Fairness and bounds
+Raw evidence directory:
+`/Users/itismyfield/.adk/release/lane-runs/hl-20260925/i7807/logs/impl7-model/`.
 
-- Weak fairness lets the existing owner, boot/restore, source capture, health pass, receipt
-  commit, archive and kickoff execute once continuously enabled.
-- The environment eventually ends N (`WF(NativeIdle)`), after B has arrived during N's busy
-  interval and its first foreign conflict has released the claim. It does not promise progress
-  while Claude remains busy forever, or across an unbounded series of later native turns.
-- Only two shutdown/boot cycles are explored. B has at most the arrival wake and N's one idle
-  edge before close; once A closes, the existing kickoff supplies B's successful wake. There is
-  no new timer or fixed retry loop.
-- Source proof parsing, PG/I/O failures, transcript replacement, unconfirmed-injection races,
-  non-O delivery/progress, explicit Cancel/clear/stop, and more than one queued successor are outside
-  this bounded scenario. Production guards are represented by their predicates; the lane's
-  negative evidence, race and successor tests must exercise their rejection paths.
+- `source/`: exact model/base/config/view snapshot for all seven target checks.
+- `chart-<Config>/`, `.log` and `.rc`: each statechart output, TLC logs, report and exit code.
+- `source-sha256.json`: source head, merged base and hashes of all original repository
+  TLA/config files, manifest and checker inputs frozen before the full check.
+- `statecharts-help.log`, `statecharts-full.log`, `.rc`: supported CLI and complete official run.
+- `evidence.json`: final execution counts, environment, source-equality check and full result.
 
-## Reproduce and evidence
+Model source SHA256:
+`02987b885758f9f5d2615d5c0b0ac73502991cd108e4e1d2dcab69ed0e1bae76`.
+TLC 1.7.4 JAR: `/Users/itismyfield/.local/share/tla2tools/tla2tools-1.7.4.jar`, SHA256
+`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`.
 
-From `docs/statecharts/input-single-path`, with a new output directory:
-
-```sh
-export TLA2TOOLS="$HOME/.local/share/tla2tools/tla2tools-1.7.4.jar"
-export JAVA=/opt/homebrew/opt/openjdk/bin/java
-~/.codex/skills/statechart/scripts/statechart InputOwnershipConsumedWaiting.tla \
-  --config InputOwnershipConsumedWaitingBefore.cfg --view consumed-waiting.view.mjs \
-  --out /tmp/i7807-before-new
-~/.codex/skills/statechart/scripts/statechart InputOwnershipConsumedWaiting.tla \
-  --config InputOwnershipConsumedWaitingAfter.cfg --view consumed-waiting.view.mjs \
-  --out /tmp/i7807-after-new
-~/.codex/skills/statechart/scripts/statechart InputOwnershipConsumedWaiting.tla \
-  --config InputOwnershipConsumedWaitingNonO.cfg --view consumed-waiting.view.mjs \
-  --out /tmp/i7807-nono-new
-"$JAVA" -XX:+UseParallelGC -Xmx512m -cp "$TLA2TOOLS" tlc2.TLC -workers 1 \
-  -metadir /tmp/i7807-plain-new -config InputOwnershipConsumedWaitingAfter.cfg \
-  InputOwnershipConsumedWaiting.tla
-```
-
-From the repository root, check the complete original manifest:
+Reproduce a target from `docs/statecharts/input-single-path` with a fresh output directory:
 
 ```sh
 unset TMUX TMUX_PANE
 export TLA2TOOLS="$HOME/.local/share/tla2tools/tla2tools-1.7.4.jar"
 export JAVA=/opt/homebrew/opt/openjdk/bin/java
-python3 scripts/ci/statecharts_tlc.py
+~/.codex/skills/statechart/scripts/statechart InputOwnershipConsumedWaiting.tla \
+  --config InputOwnershipConsumedWaitingAfter.cfg --view consumed-waiting.view.mjs \
+  --out /tmp/i7807-impl7-after-new
 ```
 
-Raw impl-5 evidence is under
-`/Users/itismyfield/.adk/release/lane-runs/hl-20260925/i7807/logs-impl5/`:
-
-- `model-source/`: exact model, its base module, three configs and view used for the charts.
-- `model-before/`, `model-after/`, `model-nono/`: original chart, report and `tlc.out`;
-  Before additionally includes its property-specific lasso trace. Wrapper logs and exit-code
-  files use the same basename.
-- `plain-before.log`, `plain-after.log`, `plain-nono.log` and matching `.rc` files:
-  direct plain-TLC runs of these three configs.
-- `statecharts-help.log`: official command's supported arguments.
-- `statecharts-full.log` and `.rc`: complete repository manifest check, without an isolated
-  root or a target-only filter.
-- `evidence.json`: command, environment, exit codes and SHA256 of verification inputs.
-
-TLC 1.7.4 JAR SHA256:
-`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`.
-Model source SHA256:
-`23c519ffd318a1556ef28c9d9869fbf66bfc67def112fd54a0c0d3db03b98472`.
-Runs used `/bin/zsh`, one TLC worker, Java's Parallel GC and a 512 MiB heap for plain TLC.
-Each verification shell began by unsetting `TMUX` and `TMUX_PANE`. No cargo, PG or production
-store access was involved in this subtask.
+From the repository root, using the same environment, run
+`python3 scripts/ci/statecharts_tlc.py` without a root override. Verification uses `/bin/zsh`,
+one TLC worker and Java Parallel GC. No cargo, PG, production store, or commit action belongs
+to this model subtask.

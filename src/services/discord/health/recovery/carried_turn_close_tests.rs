@@ -15,6 +15,15 @@ thread_local! {
     static WITHHOLD: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
 
+#[cfg(unix)]
+pub(super) fn on_archive(channel: u64, hook: impl FnOnce() + 'static) {
+    HOOKS.with(|hooks| {
+        hooks
+            .borrow_mut()
+            .insert(("archive", channel), Box::new(hook))
+    });
+}
+
 /// Whether this pass's finalize for `channel` is withheld once, as a finalizer that never ran.
 pub(super) fn withhold_finalize(channel: u64) -> bool {
     WITHHOLD.with(|withhold| {
@@ -982,6 +991,13 @@ mod cases {
         fx.pass().await;
         fx.assert_closed("interrupted").await;
         assert_eq!(events(fx.channel.get()), ["cancel"]);
+        let receipt: String =
+            sqlx::query_scalar("SELECT terminal_outcome FROM turns WHERE turn_id=$1")
+                .bind(format!("discord:{}:{}", fx.channel, fx.user_msg_id))
+                .fetch_one(&fx.pool)
+                .await
+                .unwrap();
+        assert_eq!(receipt, "cancelled");
     }
 
     /// A pane with no turn evidence reads Idle, but not `closed`: nothing ended, nothing closes.

@@ -2,7 +2,8 @@
 \* The F ownership model, narrowed to consumed A, its restart, later native N and waiting B.
 \* A's input-notice debt has its own ledger; it never proves unfinished A output.
 EXTENDS InputOwnership
-CONSTANTS RepairConsumedWaiting, ReadoptOutcomes, OutputOwners
+CONSTANTS RepairConsumedWaiting, ReadoptOutcomes, OutputOwners,
+          RepairBusyPinSupply, RepairOrphanOutcome, PinSources, NativeEnds, AStamps
 VARIABLE cw
 
 cwvars == <<vars, cw>>
@@ -15,13 +16,19 @@ CWInit ==
     /\ mode = "turn" /\ src = "start" /\ mbx = "idle" /\ nat = "busy"
     /\ old = "none" /\ obsOk /\ ~twin /\ ~twinPend /\ screen = "ok"
     /\ draft = "none" /\ ~stale /\ ~acct /\ row = "none" /\ ~ep /\ ~leak
-    /\ \E owner \in OutputOwners :
+    /\ \E owner \in OutputOwners, source \in PinSources,
+          ending \in NativeEnds, stamp \in AStamps :
          cw = [phase |-> "initial", outputOwner |-> owner,
               generation |-> 0, marker |-> FALSE, markerGeneration |-> 0,
               readopt |-> "pending", token |-> "none", aStarts |-> 0, consumed |-> FALSE,
               terminal |-> FALSE, captured |-> FALSE, nStarted |-> FALSE,
               pendingB |-> FALSE, refusedB |-> FALSE, lateClose |-> FALSE,
               lock |-> "free", close |-> "idle", receipt |-> FALSE,
+              receiptOutcome |-> "none", ownStamp |-> stamp,
+              nativeSource |-> source, nativeReceipt |-> FALSE, writeSettled |-> FALSE,
+              effectReturned |-> FALSE, historySettled |-> FALSE,
+              pinSupplier |-> RepairBusyPinSupply, pinAttempted |-> FALSE, pinVerified |-> FALSE,
+              nextNativeEnd |-> ending, nAborted |-> FALSE,
               unconfirmed |-> FALSE, attemptsB |-> 0,
               odebt |-> [aOutput |-> 1, inputNotice |-> 20]]
 
@@ -31,15 +38,32 @@ OwnerPastesA ==
     /\ row' = "carried" /\ mbx' = "active"
     /\ cw' = [cw EXCEPT !.phase = "pasted", !.token = "A", !.aStarts = 1]
     /\ UNCHANGED <<ep, nat, inp, wake, pastes, op, CWFixed>>
-ConsumeA ==
+\* The real busy effect returns before history settlement and the existing answer observer.
+BusyEffectReturns ==
     /\ cw.phase = "pasted"
-    /\ cw' = [cw EXCEPT !.phase = "consumed", !.consumed = TRUE, !.token = "none"]
+    /\ cw' = [cw EXCEPT !.phase = "returned", !.effectReturned = TRUE,
+                         !.writeSettled = (cw.nativeSource # "unsettled")]
+    /\ UNCHANGED <<row, ep, mbx, nat, inp, wake, pastes, op, CWFixed>>
+SettleBusySubmission ==
+    /\ cw.phase = "returned"
+    /\ cw' = [cw EXCEPT !.phase = "consumed", !.historySettled = TRUE,
+                         !.consumed = cw.writeSettled, !.token = "none"]
     /\ mbx' = "idle"
     /\ UNCHANGED <<row, ep, nat, inp, wake, pastes, op, CWFixed>>
+ObserveBusyReceipt ==
+    /\ cw.phase = "consumed"
+    /\ cw' = [cw EXCEPT !.phase = "observed", !.nativeReceipt = TRUE]
+    /\ UNCHANGED <<row, ep, mbx, nat, inp, wake, pastes, op, CWFixed>>
+\* The observer keeps watching even after an uncertain write; only an armed matching input pins.
+SupplyBusyPin ==
+    /\ cw.phase = "observed"
+    /\ cw' = [cw EXCEPT !.phase = "settled", !.pinAttempted = TRUE,
+              !.pinVerified = (RepairBusyPinSupply /\ cw.nativeSource = "matching" /\ cw.writeSettled)]
+    /\ UNCHANGED <<row, ep, mbx, nat, inp, wake, pastes, op, CWFixed>>
 
 \* Every shutdown refreshes the marker, including rows outside O's ownership.
 ShutdownRestamps ==
-    /\ cw.phase \in {"consumed", "running"} /\ row = "carried" /\ cw.generation < 2
+    /\ cw.phase \in {"settled", "running"} /\ row = "carried" /\ cw.generation < 2
     /\ cw.close = "idle" /\ cw.token # "BClaim"
     /\ cw' = [cw EXCEPT !.phase = "down", !.marker = TRUE,
               !.markerGeneration = cw.generation]
@@ -86,13 +110,15 @@ FinishReadoptedA ==
     /\ cw.phase = "running" /\ row = "carried" /\ ep /\ cw.readopt = "ok"
     /\ cw.terminal /\ cw.captured /\ nat = "idle"
     /\ row' = "none" /\ ep' = FALSE /\ mbx' = "idle" /\ wake' = TRUE
-    /\ cw' = [cw EXCEPT !.token = "none"]
+    /\ cw' = [cw EXCEPT !.token = "none", !.receipt = TRUE,
+                         !.receiptOutcome = IF cw.ownStamp = "none" THEN "completed" ELSE cw.ownStamp]
     /\ UNCHANGED <<nat, inp, pastes, op, CWFixed>>
 
 CloseProof ==
     /\ cw.phase = "running" /\ cw.outputOwner = "owned"
     /\ row = "carried" /\ ~ep /\ cw.token = "none"
     /\ cw.nStarted /\ cw.consumed /\ cw.terminal /\ cw.captured /\ nat = "idle"
+    /\ (~RepairConsumedWaiting \/ cw.pinVerified)
     /\ cw.refusedB /\ cw.lock = "free" /\ ~cw.unconfirmed
     /\ IF RepairConsumedWaiting
        THEN cw.odebt.aOutput = 0
@@ -105,7 +131,10 @@ CloseATick ==
     /\ UNCHANGED <<row, ep, mbx, nat, inp, wake, pastes, op, CWFixed>>
 CommitReceiptA ==
     /\ cw.close = "locked" /\ row = "carried" /\ cw.token = "none"
-    /\ cw' = [cw EXCEPT !.receipt = TRUE, !.close = "committed"]
+    /\ cw' = [cw EXCEPT !.receipt = TRUE, !.close = "committed",
+              !.receiptOutcome = IF cw.ownStamp # "none" THEN cw.ownStamp
+                                 ELSE IF RepairOrphanOutcome THEN "completed"
+                                 ELSE IF cw.nAborted THEN "cancelled" ELSE "completed"]
     /\ UNCHANGED <<row, ep, mbx, nat, inp, wake, pastes, op, CWFixed>>
 ArchiveA ==
     /\ cw.close = "committed" /\ cw.receipt /\ row = "carried"
@@ -142,7 +171,8 @@ NativeIdle ==
     /\ cw.phase = "running" /\ cw.nStarted /\ nat = "busy"
     /\ cw.pendingB /\ (cw.refusedB \/ cw.readopt = "ok")
     /\ nat' = "idle" /\ wake' = (wake \/ cw.pendingB)
-    /\ UNCHANGED <<cw, row, ep, mbx, inp, pastes, op, CWFixed>>
+    /\ cw' = [cw EXCEPT !.nAborted = (cw.nextNativeEnd = "aborted")]
+    /\ UNCHANGED <<row, ep, mbx, inp, pastes, op, CWFixed>>
 StartB ==
     /\ cw.phase = "running" /\ cw.pendingB /\ row = "none" /\ mbx = "idle"
     /\ nat = "idle" /\ wake /\ pastes = 0 /\ cw.lock = "free"
@@ -163,13 +193,17 @@ HealthKeepsA ==
     /\ UNCHANGED cwvars
 CWDone == cw.phase = "done" /\ UNCHANGED cwvars
 
-CWNext == OwnerPastesA \/ ConsumeA \/ ShutdownRestamps \/ SettleBoot \/ RestoreAlive
+CWNext == OwnerPastesA \/ BusyEffectReturns \/ SettleBusySubmission
+          \/ ObserveBusyReceipt \/ SupplyBusyPin
+          \/ ShutdownRestamps \/ SettleBoot \/ RestoreAlive
           \/ EndA \/ NativeStartsN \/ CaptureAndDeliverA \/ FinishReadoptedA
           \/ CloseATick \/ CommitReceiptA \/ ArchiveA \/ KickoffB
           \/ AdmitB \/ ClaimB \/ ForeignAdmission \/ NativeIdle
           \/ StartB \/ LateCloseA \/ HealthKeepsA \/ CWDone
 CWSpec == CWInit /\ [][CWNext]_cwvars
-          /\ WF_cwvars(OwnerPastesA) /\ WF_cwvars(ConsumeA) /\ WF_cwvars(ShutdownRestamps)
+          /\ WF_cwvars(OwnerPastesA) /\ WF_cwvars(BusyEffectReturns)
+          /\ WF_cwvars(SettleBusySubmission) /\ WF_cwvars(ObserveBusyReceipt)
+          /\ WF_cwvars(SupplyBusyPin) /\ WF_cwvars(ShutdownRestamps)
           /\ WF_cwvars(SettleBoot) /\ WF_cwvars(RestoreAlive) /\ WF_cwvars(EndA)
           /\ WF_cwvars(NativeStartsN) /\ WF_cwvars(CaptureAndDeliverA)
           /\ WF_cwvars(FinishReadoptedA) /\ WF_cwvars(CloseATick) /\ WF_cwvars(AdmitB)
@@ -193,4 +227,11 @@ RefusedMarkerPreservedOutsideO == (cw.outputOwner # "owned" /\ cw.phase = "runni
 FreshShutdownMarker == cw.phase = "down" => cw.marker /\ cw.markerGeneration = cw.generation
 ReceiptBeforeArchive == cw.close \in {"archived", "done"} => cw.receipt
 NoCloseUnderBClaim == cw.token = "BClaim" => row = "carried" /\ cw.close = "idle"
+PinEvidenceVerified == cw.pinVerified => cw.nativeReceipt /\ cw.writeSettled /\ cw.consumed
+                                        /\ cw.nativeSource = "matching"
+ObserverFollowsEffect == cw.nativeReceipt => cw.effectReturned /\ cw.historySettled
+NoCloseWithoutPin == (RepairConsumedWaiting /\ cw.close # "idle") => cw.pinVerified
+OrphanAReceiptCompleted == (cw.receipt /\ cw.readopt = "refused" /\ cw.ownStamp = "none")
+                           => cw.receiptOutcome = "completed"
+OwnStampRespected == (cw.receipt /\ cw.ownStamp # "none") => cw.receiptOutcome = cw.ownStamp
 =============================================================================

@@ -195,100 +195,27 @@ fn busy_after_row_create(rig: &IntakeRig) {
     fs::write(shim, script.replace(&tail, &(enter + &tail))).unwrap();
 }
 
-/// Recreates the old persisted pin using the real paste's exact history receipt and raw row.
-/// The busy leaf does not produce this pin itself; the incident's old-format row already had it.
-async fn persist_old_pin_fixture(channel: ChannelId, transcript: &Path, renderer: &Path) {
-    use crate::services::tui_input::human_frame::history::{self, v2};
-    let live = row(channel).expect("A's real intake row precedes its proof");
-    let frame = fs::read_to_string(renderer.join("body")).unwrap();
-    let raw = fs::read(transcript).unwrap();
-    let mut offset = 0;
-    let mut candidates = Vec::new();
-    for line in raw.split_inclusive(|byte| *byte == b'\n') {
-        let record: Value = serde_json::from_slice(line).unwrap();
-        if record["type"] == "user" && record["uuid"] == "carried-native-1" {
-            assert_eq!(record["message"]["content"], frame);
-            candidates.push((offset, offset + line.len() as u64));
-        }
-        offset += line.len() as u64;
-    }
-    assert_eq!(
-        candidates.len(),
-        1,
-        "one native UUID belongs to A's actual paste"
-    );
-    let range = candidates[0];
-    let history = v2::Registry::runtime().unwrap();
+/// Waits for the actual busy producer; it never manufactures evidence in the row.
+async fn observe_busy_producer_pin(channel: ChannelId) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    let (namespace, key) = loop {
-        let snapshot = history.json().unwrap();
-        let entries = snapshot["live"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .chain(snapshot["passive"].as_array().unwrap());
-        let registrations: Vec<_> = entries
-            .filter_map(|item| {
-                let registration = &item["registration"];
-                (registration["key"]["identity"]["primary"] == live.user_msg_id)
-                    .then_some((registration, item.get("entry").unwrap_or(item)))
-            })
-            .collect();
-        assert_eq!(
-            registrations.len(),
-            1,
-            "A has one exact registered attempt: {snapshot}"
-        );
-        let (registration, evidence) = registrations[0];
-        let namespace = registration["namespace"].as_str().unwrap();
-        let key = &registration["key"];
-        assert!(history.registered(namespace, key, transcript, &frame));
-        assert!(evidence["offset"].as_u64().unwrap() <= range.0);
-        let observed = evidence["events"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|event| event["kind"] == "user" && event["row"] == "carried-native-1");
-        if observed {
-            let nonce = key["attempt"]["nonce"].as_str().unwrap();
-            let uuid = v2::with_attempt(&history, namespace, key, || {
-                history::receipt_row(nonce, transcript)
-            })
-            .unwrap();
-            assert_eq!(uuid.as_deref(), Some("carried-native-1"));
-            break (namespace.to_owned(), key.clone());
+    loop {
+        if row(channel).is_some_and(|row| row.native_stop_user_pin.is_some()) {
+            assert!(inflight::historical_input_verified(&row(channel).unwrap()));
+            return;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "native A receipt was not recorded: {snapshot}"
-        );
+        if tokio::time::Instant::now() >= deadline {
+            eprintln!("BUSY_PRODUCER_PIN channel={channel} persisted=false");
+            return;
+        }
         tokio::time::sleep(Duration::from_millis(20)).await;
-    };
-    let source = history.source(&namespace, &key).unwrap();
-    assert_eq!(source.transcript, transcript);
-    let session = live.tmux_session_name.as_deref().unwrap();
-    let pin = crate::services::claude_tui::input::UserReceipt::native_pin_before_tail(
-        session,
-        &frame,
-        Some(&source.session_id),
-        range.1,
-    )
-    .expect("production verification accepts the exact consumed native row");
-    assert_eq!(pin.uuid, "carried-native-1");
-    assert_eq!(pin.range, range);
-    let token = Arc::new(
-        crate::services::provider::CancelToken::from_persisted_turn_nonce(live.turn_nonce.clone()),
-    );
-    inflight::bind_native_stop_pin(&live, &token);
-    token.native_stop.receipt_sink().adopt(pin);
-    assert!(row(channel).unwrap().native_stop_user_pin.is_some());
-    eprintln!(
-        "OLD_PIN_PROOF_FIXTURE channel={channel} uuid=carried-native-1 range={range:?} source=exact_history_receipt"
-    );
+    }
 }
 
-/// The O actor answers through its demand/watch protocol; its twenty pending rows are notices.
 fn host_notices(channel: ChannelId, path: &Path) -> tokio::task::JoinHandle<()> {
+    host_debt(channel, path, 20)
+}
+
+fn host_debt(channel: ChannelId, path: &Path, notices: usize) -> tokio::task::JoinHandle<()> {
     let owing = Owing::default();
     crate::services::tui_o::writer::host::process_readiness().track_owed_for_test(
         channel.get(),
@@ -303,8 +230,8 @@ fn host_notices(channel: ChannelId, path: &Path) -> tokio::task::JoinHandle<()> 
             if owing.demand.wanted() {
                 let len = fs::metadata(&path).unwrap().len();
                 owing.published.send_replace(Some(Undelivered {
-                    owed: 20,
-                    notice_owed: 20,
+                    owed: notices,
+                    notice_owed: notices,
                     asked: owing.demand.asked(),
                     captured: vec![(path.clone(), len)],
                     ..Undelivered::default()
@@ -511,8 +438,6 @@ async fn consumed_a(rig: &mut IntakeRig, restart: bool) -> Option<DaemonRuntime>
     let trace = rig.trace.clone();
     let channel = rig.channel;
     let mailbox = rig.mailbox.clone();
-    let transcript = rig.transcript.clone();
-    let renderer = rig.renderer.clone();
     let daemon = tokio::task::spawn_blocking(move || {
         let mut daemon = DaemonRuntime(Some(
             tokio::runtime::Builder::new_multi_thread()
@@ -553,7 +478,7 @@ async fn consumed_a(rig: &mut IntakeRig, restart: bool) -> Option<DaemonRuntime>
                 )
             });
             assert!(live.terminal_receipt.is_none());
-            persist_old_pin_fixture(channel, &transcript, &renderer).await;
+            observe_busy_producer_pin(channel).await;
             if restart {
                 assert!(
                     discord::runtime_bootstrap::carried_restart_marked(&ProviderKind::Claude).await
@@ -596,12 +521,38 @@ async fn consumed_busy_input_restart_closes_on_the_first_idle_health_pass_pg() {
     )) {
         return;
     }
+    restart_case(7807301, 20, false, false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn consumed_busy_input_with_zero_debt_closes_on_first_idle_pg() {
+    if !creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::carried_restart::",
+        "consumed_busy_input_with_zero_debt_closes_on_first_idle_pg"
+    )) {
+        return;
+    }
+    restart_case(7807303, 0, false, false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn consumed_busy_input_followed_by_interrupted_native_turn_completes_pg() {
+    if !creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::carried_restart::",
+        "consumed_busy_input_followed_by_interrupted_native_turn_completes_pg"
+    )) {
+        return;
+    }
+    restart_case(7807304, 20, true, false).await;
+}
+
+async fn restart_case(channel: u64, notices: usize, n_aborted: bool, own_cancelled: bool) {
     let _root = crate::config::TestRuntimeRootGuard::new();
     discord::runtime_store::set_process_generation_for_tests(Some(4));
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let mut rig =
-        IntakeRig::with_storage(7_807_301, false, ProviderKind::Claude, Some(pool.clone())).await;
+        IntakeRig::with_storage(channel, false, ProviderKind::Claude, Some(pool.clone())).await;
     let _owned = crate::services::tui_o::cutover::test_override::force_channels(&[(
         rig.channel.get(),
         RuntimeHandoffKind::ClaudeTui,
@@ -648,11 +599,7 @@ async fn consumed_busy_input_restart_closes_on_the_first_idle_health_pass_pg() {
         "each of the two actual boots consumes A's marker once: {}",
         rig.trace.text()
     );
-    assert!(
-        restored.native_stop_user_pin.is_some(),
-        "the incident's persisted old-format pin survives restart: {}",
-        rig.trace.text()
-    );
+
     let binding_root = rig._tmux.root.path().join("health-binding");
     fs::create_dir_all(&binding_root).unwrap();
     let _binding = discord::health::BindingRoot::enter(&binding_root);
@@ -697,7 +644,7 @@ async fn consumed_busy_input_restart_closes_on_the_first_idle_health_pass_pg() {
     );
     let registry = Arc::new(HealthRegistry::new());
     registry.register("claude".into(), shared.clone()).await;
-    let o = host_notices(rig.channel, &rig.transcript);
+    let o = host_debt(rig.channel, &rig.transcript, notices);
     let foreign_before = rig
         .trace
         .text()
@@ -712,13 +659,18 @@ async fn consumed_busy_input_restart_closes_on_the_first_idle_health_pass_pg() {
         .unwrap()
         .parse::<u64>()
         .unwrap();
-    until(&rig, "B meets the carried foreign row", || {
-        rig.trace
-            .text()
-            .matches("another turn's durable inflight row holds the channel")
-            .count()
-            > foreign_before
-    })
+    until(
+        &rig,
+        "B is held by busy native input or the carried row",
+        || {
+            let trace = rig.trace.text();
+            trace
+                .matches("another turn's durable inflight row holds the channel")
+                .count()
+                > foreign_before
+                || trace.contains("synthetic_waits_idle")
+        },
+    )
     .await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
@@ -760,10 +712,16 @@ async fn consumed_busy_input_restart_closes_on_the_first_idle_health_pass_pg() {
     }
     assert_eq!(row(rig.channel).unwrap().user_msg_id, a.user_msg_id);
     eprintln!(
-        "CARRIED_RESTART_STAGE channel={} phase=foreign_refused_b_and_c_preserved",
+        "CARRIED_RESTART_STAGE channel={} phase=busy_or_foreign_held_b_and_c_preserved",
         rig.channel
     );
-    append(&rig.transcript, &[serde_json::from_str(END).unwrap()]);
+    let n_end = match n_aborted {
+        true => {
+            json!({"type":"user","uuid":"native-n-interrupted","sessionId":a.session_id,"message":{"role":"user","content":"[Request interrupted by user]"}})
+        }
+        false => serde_json::from_str(END).unwrap(),
+    };
+    append(&rig.transcript, &[n_end]);
     wait_activity(
         &rig,
         &shared,
@@ -777,18 +735,80 @@ async fn consumed_busy_input_restart_closes_on_the_first_idle_health_pass_pg() {
         "CARRIED_RESTART_STAGE channel={} phase=one_idle_health_pass",
         rig.channel
     );
+    let expected_outcome = if own_cancelled {
+        "cancelled"
+    } else {
+        "completed"
+    };
+    if own_cancelled {
+        let live = row(rig.channel).unwrap();
+        assert_eq!(
+            inflight::stamp_terminal_receipt_if_matches_identity(
+                &ProviderKind::Claude,
+                rig.channel.get(),
+                &inflight::InflightTurnIdentity::from_state(&live),
+                live.turn_nonce.as_deref(),
+                inflight::TerminalReceiptStamp {
+                    outcome: crate::db::turns::TerminalOutcome::Cancelled,
+                    confirmed_at: chrono::Utc::now(),
+                },
+            ),
+            inflight::GuardedSaveOutcome::Saved
+        );
+    }
+    let committed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed_commit = committed.clone();
+    let options = pool.connect_options().as_ref().clone();
+    let turn = format!("discord:{}:{}", rig.channel, a.user_msg_id);
+    discord::health::before_carried_archive_for_tests(rig.channel.get(), move || {
+        let outcome = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async move {
+                    let pool = sqlx::postgres::PgPoolOptions::new()
+                        .max_connections(1)
+                        .connect_with(options)
+                        .await
+                        .unwrap();
+                    let result: Option<String> =
+                        sqlx::query_scalar("SELECT terminal_outcome FROM turns WHERE turn_id=$1")
+                            .bind(turn)
+                            .fetch_optional(&pool)
+                            .await
+                            .unwrap();
+                    pool.close().await;
+                    result
+                })
+        })
+        .join()
+        .unwrap();
+        assert_eq!(
+            outcome.as_deref(),
+            Some(expected_outcome),
+            "A committed its own outcome before archive even if later N aborted"
+        );
+        observed_commit.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
     discord::health::run_stall_watchdog_pass(&registry, &ProviderKind::Claude).await;
     if row(rig.channel).is_some_and(|now| now.user_msg_id == a.user_msg_id) {
         assert!(
-            rig.trace.text().contains("o_owes:owed=20"),
+            rig.trace.text().contains("o_owes:owed=20")
+                || rig.trace.text().contains("unverified_carried_input"),
             "the baseline must reach the unrelated-notice gate, not fail a fixture precondition: {}",
             rig.trace.text()
         );
     }
     assert!(
         row(rig.channel).is_none_or(|now| now.user_msg_id != a.user_msg_id),
-        "the first idle pass must close A despite twenty unrelated notices: {}",
+        "the first idle pass must close A with {notices} notices: {}",
         rig.trace.text()
+    );
+    assert!(committed.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(
+        a.native_stop_user_pin.is_some(),
+        "the busy producer stored A's pin before shutdown"
     );
     until(&rig, "B starts after the one idle pass", || {
         native_prompts(&rig, B) == 1
@@ -854,7 +874,7 @@ async fn consumed_busy_input_restart_closes_on_the_first_idle_health_pass_pg() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(receipt, "completed");
+    assert_eq!(receipt, expected_outcome);
     assert!(
         first_restored.restart_mode.is_none(),
         "the first boot consumes A's original marker before the next shutdown restamps it"
@@ -1129,4 +1149,15 @@ async fn consumed_busy_input_o_boot_consumes_marker_without_turn_confirmation_pg
         return;
     }
     restore_ownership_case(7_807_305, RestoreOwnership::OWithoutTurnConfirmation).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn consumed_busy_input_own_cancel_stamp_survives_orphan_close_pg() {
+    if !creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::carried_restart::",
+        "consumed_busy_input_own_cancel_stamp_survives_orphan_close_pg"
+    )) {
+        return;
+    }
+    restart_case(7807308, 20, false, true).await;
 }

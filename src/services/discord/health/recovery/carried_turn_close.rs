@@ -217,7 +217,9 @@ async fn try_close(
     tests::pause("locked", channel.get()).await;
     unchanged_under_lock(shared, provider, channel, &end, &before).await?;
     if let Carried::Row(row) = &carried {
-        commit_receipt(shared, provider, row, end.aborted).await?;
+        let orphan_input =
+            row.managed_submission.is_some() && !row.readopted_from_inflight && !target_episode;
+        commit_receipt(shared, provider, row, end.aborted && !orphan_input).await?;
         #[cfg(test)]
         tests::pause("receipt", channel.get()).await;
         unchanged_under_lock(shared, provider, channel, &end, &before).await?;
@@ -475,3 +477,8 @@ fn same_source(left: &Path, right: &Path) -> bool {
 #[cfg(test)]
 #[path = "carried_turn_close_tests.rs"]
 mod tests;
+
+#[cfg(all(test, unix))]
+pub(crate) fn before_carried_archive_for_tests(channel: u64, hook: impl FnOnce() + 'static) {
+    tests::on_archive(channel, hook);
+}

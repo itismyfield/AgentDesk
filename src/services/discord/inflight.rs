@@ -25,6 +25,8 @@ pub(in crate::services::discord) use host_recovery_guard::{marker_witness, with_
 mod invariant_test_capture;
 mod model;
 mod native_stop_pin;
+#[cfg(unix)]
+pub(in crate::services::discord) use native_stop_pin::BusyNativeInput;
 pub(in crate::services::discord) use native_stop_pin::{
     bind_native_stop_pin, historical_input_verified, record_native_busy_child,
     restore_native_stop_pin,
