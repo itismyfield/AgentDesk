@@ -80,6 +80,13 @@ const TURNS_RETENTION_DAYS: i32 = 90; // token/cost analytics, archived before d
 const TRANSCRIPT_ARCHIVE_RETENTION_DAYS: i32 = TRANSCRIPT_RETENTION_DAYS + 90;
 const RUNTIME_DECISIONS_RETENTION_DAYS: i32 = 90; // supervisor audit log
 const SLO_AGGREGATES_RETENTION_DAYS: i32 = 90; // SLO trend history
+const AUDIT_RECORD_RETENTION_DAYS: i32 = 180; // audit, recovery-audit and termination logs
+const API_FRICTION_EVENT_RETENTION_DAYS: i32 = 90; // repeat-pattern detection window
+const MEMENTO_FEEDBACK_STATS_RETENTION_DAYS: i32 = 90; // feedback totals window
+const DISPATCH_EVENT_RETENTION_DAYS: i32 = 90; // status-transition log of any dispatch
+// `find_origin_receipt` looks up archived turns with no age bound, so keep them well past
+// the 90-day hot window.
+const TURNS_ARCHIVE_RETENTION_DAYS: i32 = 365;
 // Applies to both the snapshot's age and its referencing definitions' terminal age.
 const CONTEXT_SNAPSHOT_RETENTION_DAYS: i32 = 30;
 const INTAKE_OUTBOX_DONE_RETENTION_DAYS: i32 = 7;
@@ -99,13 +106,13 @@ pub async fn db_retention_job(pool: &PgPool, dry_run: bool) -> Result<RetentionR
 
     // `agent_quality_event` is owned by the hourly observability retention sweep.
     retain_session_transcripts(pool, dry_run, &mut report).await?;
-    record_caps::retain(pool, dry_run, &mut report).await?;
     retain_message_outbox(pool, dry_run, &mut report).await?;
     queue_and_dispatch::retain_auto_queue_entries(pool, dry_run, &mut report).await?;
     queue_and_dispatch::retain_task_dispatches(pool, dry_run, &mut report).await?;
     retain_turn_lifecycle_events(pool, dry_run, &mut report).await?;
     retain_skill_usage(pool, dry_run, &mut report).await?;
     retain_turns(pool, dry_run, &mut report).await?;
+    record_caps::retain(pool, dry_run, &mut report).await?;
     image_retention::retain(pool, dry_run, &mut report).await?;
     count_intake_outbox_candidates_bounded(
         pool,

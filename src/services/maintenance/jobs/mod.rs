@@ -9,7 +9,7 @@
 //! whitelist under `~/.adk/release/worktrees/`, #3231, so manual dev worktrees
 //! are never touched); `storage.tmp_pipeline_sweep` (daily, `/private/tmp`
 //! `adk-`/`agentdesk-` dirs); `storage.hang_dump_cleanup` (weekly);
-//! `storage.db_retention` (weekly, 7/30/90/180d); `memory.memento_consolidation`
+//! `storage.db_retention` (weekly, 7/30/90/180/365d); `memory.memento_consolidation`
 //! (weekly, #1089). `storage.cancel_tombstone_prune` lives in
 //! `server::maintenance` instead.
 

@@ -64,6 +64,13 @@ Each row is a (vector × action × job) tuple. If a vector is not in this table,
 | PG `session_transcripts_archive`          | 180 days in total after the original `created_at`; time kept after archiving depends on when the weekly job runs | `DELETE` (on `created_at`) | `storage.db_retention` | Weekly   |
 | PG `runtime_decisions` (supervisor audit log) | 90 days                                  | `DELETE` (on `created_at`)                                   | `storage.db_retention`            | Weekly   |
 | PG `slo_aggregates`                       | 90 days                                     | `DELETE` (on `created_at`)                                   | `storage.db_retention`            | Weekly   |
+| PG `turns_archive`                        | 365 days (on `finished_at`); the origin-receipt lookup (`GET /api/agents/{id}/input-result`) has no age bound, so older origins answer 404 | `DELETE` (on `finished_at`) | `storage.db_retention` | Weekly   |
+| PG `audit_logs`                           | 180 days                                    | `DELETE` (on `timestamp`) | `storage.db_retention` | Weekly   |
+| PG `recovery_audit_records`               | 180 days                                    | `DELETE` (on `created_at`) | `storage.db_retention` | Weekly   |
+| PG `session_termination_events`           | 180 days                                    | `DELETE` (on `created_at`) | `storage.db_retention` | Weekly   |
+| PG `api_friction_events`                  | 90 days; repeat-pattern detection now counts events in this 90-day window instead of all time | `DELETE` (on `created_at`) | `storage.db_retention` | Weekly   |
+| PG `memento_feedback_turn_stats`          | 90 days (on `stat_date`, a `YYYY-MM-DD` string); the stats feedback totals now cover this 90-day window instead of all time | `DELETE` | `storage.db_retention` | Weekly   |
+| PG `dispatch_events`                      | 90 days, any dispatch status                | `DELETE` (on `created_at`) | `storage.db_retention` | Weekly   |
 | PG `task_dispatches` (status='completed') | 90 days                                     | `DELETE`, adding the deleted rows to `task_dispatches_monthly_aggregate` in the same statement | `storage.db_retention` | Weekly   |
 | PG `turn_lifecycle_events`                | 30 days                                     | `DELETE` (on `created_at`)                                   | `storage.db_retention`            | Weekly   |
 | PG `skill_usage`                          | 90 days                                     | `DELETE` (on `used_at`)                                      | `storage.db_retention`            | Weekly   |
