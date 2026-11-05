@@ -291,3 +291,42 @@ fn claude_tui_stop_escapes_only_a_pane_showing_live_turn_chrome() {
         }
     });
 }
+
+#[test]
+fn claude_tui_session_stop_keeps_cacheless_foreground_prompt_ready() {
+    let fx = Fixture::new();
+    let pane = capture!("tool-running")
+        .lines()
+        .filter(|line| !line.contains("Tomfoolering"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let session = "AgentDesk-claude-cacheless-session-stop";
+    fx.pane(&pane);
+    assert!(
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(session).is_none()
+    );
+    let (ready, active, _) = claude_tui_stop_pane_evidence(&pane);
+    assert_eq!(
+        classify_tui_interrupt_phase(None, ready, active),
+        PromptReady
+    );
+    run(async {
+        let outcome = interrupt_claude_session(
+            None,
+            Some(session.into()),
+            "!stop",
+            Some(Arc::new(|| true)),
+            None,
+        )
+        .await;
+        assert!(
+            !outcome.sent_keys,
+            "the existing session entry keeps its PromptReady policy"
+        );
+        assert!(
+            !fx.take_calls()
+                .iter()
+                .any(|call| call.starts_with("send-keys") && call.ends_with("Escape"))
+        );
+    });
+}

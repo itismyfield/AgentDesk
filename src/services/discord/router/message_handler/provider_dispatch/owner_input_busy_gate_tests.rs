@@ -2,6 +2,269 @@
 use super::*;
 use crate::services::provider::cancel_token_claude_interrupt::StopCancel;
 
+#[test]
+fn a_running_owner_dispatch_records_its_user_row_as_the_native_root() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig(
+        "oi-running-native-root",
+        7_755_000,
+        "normal",
+        view("", false),
+        BUSY,
+    );
+    let session = uuid::Uuid::new_v4().to_string();
+    let elsewhere = tempfile::tempdir().unwrap();
+    rehydrate(&rig, &session);
+    fs::write(rig.renderer.join("native-sid"), &session).unwrap();
+    fs::write(rig.renderer.join("native-uuid"), "running-owned-user").unwrap();
+    let cancel = fresh();
+    let observer = cancel.clone();
+    let renderer = rig.renderer.clone();
+    let reader = std::thread::spawn(move || {
+        struct CancelAtExit(Arc<CancelToken>);
+        impl Drop for CancelAtExit {
+            fn drop(&mut self) {
+                self.0
+                    .cancelled
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+        let _cancel = CancelAtExit(observer.clone());
+        wait("the running paste's Enter", || {
+            events(&renderer).iter().any(|e| e == "Enter")
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(4);
+        loop {
+            if let Some(pin) = observer.native_stop.observe_native_input() {
+                return Some(pin);
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+    let (settled, _) = tokio::sync::oneshot::channel();
+    let (result, _) = idle_turn(
+        &rig,
+        (session.as_str(), elsewhere.path()),
+        cancel.clone(),
+        (rig.granted_front(), settled),
+        |_| None,
+    );
+    let pin = reader
+        .join()
+        .expect("the running paste observer exits after cancelling its fixture turn")
+        .expect("BusyClaude must capture a native root for the user row recorded after Enter")
+        .expect("the running paste's native user root must validate");
+    assert_eq!(result, Ok(()));
+    assert_eq!(pin.uuid, "running-owned-user");
+    assert_eq!(pin.session_id, session);
+    assert!(!pin.direct, "the running branch pins the owner's user root");
+    assert_eq!(rig.events(), ["paste", "Enter"]);
+    crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&rig.name);
+}
+
+fn raw_busy_paste(rig: &Rig) -> busy_inject::Report {
+    let transcript = rig.transcript();
+    let request = busy_inject::Request {
+        session: &rig.name,
+        transcript: &transcript,
+        source: "discord",
+        author: AUTHOR,
+        name: NAME,
+        nonce: &rig.nonce,
+        text: PROMPT,
+    };
+    busy_inject::inject_owned(
+        &busy_inject::Pane::with_program(&rig.name, rig.program.clone()),
+        &request,
+        &OWNER_TIMING,
+        false,
+    )
+}
+
+#[derive(Default)]
+struct BusyCallbacks {
+    starts: std::sync::atomic::AtomicUsize,
+    finishes: std::sync::Mutex<Vec<crate::services::claude_tui::host_input::InputRun>>,
+}
+
+impl crate::services::claude_tui::guarded_outcome::Owner for BusyCallbacks {
+    fn started(&self) {
+        self.starts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn finished(&self, run: &crate::services::claude_tui::host_input::InputRun) {
+        self.finishes.lock().unwrap().push(run.clone());
+    }
+}
+
+#[test]
+fn a_busy_paste_stopped_before_its_first_key_never_starts_its_owner() {
+    use crate::services::claude_tui::{guarded_outcome, host_input::InputRun};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig(
+        "oi-busy-stop-before-begin",
+        7_755_004,
+        "normal",
+        view("", false),
+        BUSY,
+    );
+    rehydrate(&rig, "stopped-before-begin-session");
+    let token = fresh();
+    let sink = token.native_stop.receipt_sink();
+    sink.arm_first_key();
+    assert_eq!(sink.stop_before_key(), Some(true));
+    let callbacks = Arc::new(BusyCallbacks::default());
+    let report = guarded_outcome::with_receipt_sink(Some(&token), || {
+        guarded_outcome::with_owner(Some(callbacks.clone()), || raw_busy_paste(&rig))
+    });
+    assert_eq!(
+        report.outcome,
+        busy_inject::Outcome::NotSent(busy_inject::Veto::LockContended)
+    );
+    assert!(rig.events().is_empty(), "the stopped writer sends no key");
+    assert_eq!(
+        callbacks.starts.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert!(matches!(
+        callbacks.finishes.lock().unwrap().as_slice(),
+        [InputRun::Refused(_)]
+    ));
+    assert!(!sink.may_have_written());
+    assert!(!sink.retains_receipt());
+    crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&rig.name);
+}
+
+#[test]
+fn failed_busy_stash_paste_and_enter_finish_as_indeterminate() {
+    use crate::services::claude_tui::{guarded_outcome, host_input::InputRun};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    for (n, (failure, pattern)) in [
+        (busy_inject::WriteFailure::Stash, "*send-keys*C-s*"),
+        (busy_inject::WriteFailure::Paste, "*paste-buffer*"),
+        (busy_inject::WriteFailure::Enter, "*send-keys*Enter*"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let stash = failure == busy_inject::WriteFailure::Stash;
+        let rig = rig(
+            &format!("oi-busy-typed-failure-{n}"),
+            7_755_010 + n as u64,
+            "normal",
+            view(if stash { "person draft" } else { "" }, false),
+            BUSY,
+        );
+        rehydrate(&rig, &format!("typed-failure-session-{n}"));
+        let source = fs::read_to_string(&rig.program).unwrap();
+        fs::write(
+            &rig.program,
+            source.replacen(
+                "#!/bin/sh\n",
+                &format!("#!/bin/sh\ncase \"$*\" in {pattern}) exit 1 ;; esac\n"),
+                1,
+            ),
+        )
+        .unwrap();
+        let token = fresh();
+        token.native_stop.receipt_sink().arm_first_key();
+        let callbacks = Arc::new(BusyCallbacks::default());
+        let report = guarded_outcome::with_receipt_sink(Some(&token), || {
+            guarded_outcome::with_owner(Some(callbacks.clone()), || raw_busy_paste(&rig))
+        });
+        assert_eq!(report.outcome, busy_inject::Outcome::Failed(failure));
+        assert_eq!(
+            callbacks.starts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "{failure:?}"
+        );
+        assert!(
+            matches!(
+                callbacks.finishes.lock().unwrap().as_slice(),
+                [InputRun::Indeterminate { .. }]
+            ),
+            "{failure:?}: write failure keeps its uncertainty"
+        );
+        assert!(
+            !token.native_stop.receipt_sink().retains_receipt(),
+            "{failure:?}"
+        );
+        assert_eq!(
+            rig.events(),
+            if failure == busy_inject::WriteFailure::Enter {
+                vec!["paste".to_string()]
+            } else {
+                vec![]
+            },
+            "{failure:?}"
+        );
+        crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&rig.name);
+    }
+}
+
+#[test]
+fn a_busy_paste_without_a_receipt_sink_does_not_touch_an_enclosing_token() {
+    use crate::services::claude_tui::guarded_outcome;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig(
+        "oi-busy-no-sink",
+        7_755_002,
+        "normal",
+        view("", false),
+        BUSY,
+    );
+    rehydrate(&rig, "no-sink-session");
+    let unrelated = fresh();
+    let report = guarded_outcome::with_receipt_sink(Some(&unrelated), || {
+        guarded_outcome::with_receipt_sink(None, || raw_busy_paste(&rig))
+    });
+    assert_eq!(report.outcome, busy_inject::Outcome::Injected);
+    assert_eq!(rig.events(), ["paste", "Enter"]);
+    assert!(!unrelated.native_stop.receipt_sink().retains_receipt());
+    assert_eq!(unrelated.native_stop.receipt_sink().observed(), None);
+    crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&rig.name);
+}
+
+#[test]
+fn a_failed_busy_write_never_applies_or_retains_a_native_receipt() {
+    use crate::services::claude_tui::{guarded_outcome, host_input::InputRun};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig(
+        "oi-busy-failed-receipt",
+        7_755_003,
+        "normal",
+        view("", false),
+        BUSY,
+    );
+    rehydrate(&rig, "failed-receipt-session");
+    rig.mark("fail-load", "");
+    let token = fresh();
+    let (report, finished) = guarded_outcome::with_receipt_sink(Some(&token), || {
+        guarded_outcome::capture(|| raw_busy_paste(&rig))
+    });
+    assert_eq!(
+        report.outcome,
+        busy_inject::Outcome::NotSent(busy_inject::Veto::LoadFailed)
+    );
+    assert!(
+        !matches!(finished, Some(InputRun::Applied)),
+        "failed writes never report Applied"
+    );
+    assert!(!token.native_stop.receipt_sink().retains_receipt());
+    assert!(
+        token
+            .native_stop
+            .observe_native_input()
+            .is_none_or(|pin| pin.is_err())
+    );
+    assert!(rig.events().is_empty());
+    crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&rig.name);
+}
+
 /// Holds the pane's first `step` call until `go` exists, once, and says when it is held.
 fn hold_first(rig: &Rig, step: &str) -> (std::path::PathBuf, std::path::PathBuf, String) {
     hold_first_then(rig, step, ":")

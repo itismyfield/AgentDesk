@@ -343,7 +343,7 @@ impl NativeStop {
         let identity = match &pinned {
             Some(pin) => (binding.as_ref())
                 .filter(|binding| binding.output_path == pin.output_path)
-                .map(|_| ClaudeStopTurnIdentity::pinned(pin, token)),
+                .map(|_| ClaudeStopTurnIdentity::pinned(pin, token, channel.get(), &row_before)),
             None => (binding.as_ref())
                 .and_then(|binding| ClaudeStopTurnIdentity::capture(&binding.output_path)),
         };
