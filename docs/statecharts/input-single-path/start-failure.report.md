@@ -1,7 +1,7 @@
 # Owner start failure slice
 
 Historical RED code SHA: `b0bab6ebf693502f86c0b2e2c0307033fa411c29`.
-Live comparison checkpoint: `0fd788f660d61c9fdd0f46ad7825ccc7c51ff633`; two-fact repair follows below.
+Live repair code SHA: `2709cab16` (merged by `d134d99b9fcaf4f4cae375919b0df058667a5f28`); two-fact contract follows below.
 `InputOwnership.tla` / `SFSpec` isolates this policy in the `observer` record; older slices keep their transitions.
 The fixed classification is in its StartFailure comment and the fixture header. The historical typed-cause erasure at `host_refusal.rs:28–37` is covered by the live
 Discord and headless entrypoint fixtures.
@@ -29,7 +29,7 @@ Discord and headless entrypoint fixtures.
 `EarlyClearDelivers` requires A's payload even if a bad policy removed it from the queue.
 `ReserveResetsFailures` checks the reserve state directly, before an effect-held result can hide it.
 The two negative configs inject only those faults; the unmutated policy transitions stay the same.
-Full checker: 83 configs, rc=0, expected/actual mismatches=0 (265.2 s).
+Full checker: 83 configs, rc=0, expected/actual mismatches=0 (265.4 s, after merging main `3ae403d5ecfe8565a1d508ceff5679066ecf4ff1`).
 Isolated traces reproduce EarlyClearDelivers exit 13, FirstOpaqueFailureKept exit 12 and
 ReserveResetsFailures exit 12; repository model bytes remain unchanged during those runs.
 

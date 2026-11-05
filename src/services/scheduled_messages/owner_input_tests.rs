@@ -188,7 +188,7 @@ async fn start_failure_retained_schedule_closes_without_fallback_pg() {
         assert!(tokio::time::timeout(std::time::Duration::from_secs(10),completed.recv()).await.unwrap().unwrap());
         let state:(String,Option<i64>,String)=sqlx::query_as("SELECT status,fallback_outbox_id,error FROM scheduled_message_deliveries WHERE id=$1").bind(&fire.delivery_id).fetch_one(&pool).await.unwrap();
         assert_eq!((&*state.0,state.1),("failed",None));assert!(state.2.starts_with("start_rejected: "));
-        let state:(String,Option<String>)=sqlx::query_as("SELECT status,inflight_delivery_id FROM scheduled_messages WHERE id=$1").bind(&message.id).fetch_one(&pool).await.unwrap();assert_eq!(state,("failed".into(),None));
+        let state:(String,Option<String>)=sqlx::query_as("SELECT status,in_flight_delivery_id FROM scheduled_messages WHERE id=$1").bind(&message.id).fetch_one(&pool).await.unwrap();assert_eq!(state,("failed".into(),None));
     }).await;
     pool.close().await;
     db.drop().await;

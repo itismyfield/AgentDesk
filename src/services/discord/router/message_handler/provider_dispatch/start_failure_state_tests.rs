@@ -94,6 +94,21 @@ async fn scenario(token_first: bool) {
     let (facts, mut observed) = tokio::sync::mpsc::unbounded_channel();
     *FACTS.lock().unwrap() = Some((channel.get(), facts));
     let _scope = Scope(channel);
+    assert!(
+        Failure::claimed(&mailbox, &claim)
+            .commit(
+                Kind::Opaque,
+                "unreadable row".into(),
+                None,
+                Some(shared.clone()),
+                channel,
+                Some(token.clone())
+            )
+            .await
+            .is_err(),
+        "a wrapper without fresh row proof cannot count or wake"
+    );
+    assert_eq!(wakes.load(Ordering::SeqCst), 0);
     assert_eq!(
         Failure::claimed(&mailbox, &claim)
             .commit(

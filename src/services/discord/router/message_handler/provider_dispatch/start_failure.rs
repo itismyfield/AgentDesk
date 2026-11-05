@@ -56,6 +56,9 @@ impl Failure {
         channel: poise::serenity_prelude::ChannelId,
         token: Option<Arc<CancelToken>>,
     ) -> Result<Option<bool>, String> {
+        if token.is_some() && watch.is_none() {
+            return Err("wrapper failure lacks its fresh row identity".into());
+        }
         if let Some(watch) = &watch {
             let token = token.as_ref().ok_or("wrapper failure lacks its token")?;
             let pin = watch.key();

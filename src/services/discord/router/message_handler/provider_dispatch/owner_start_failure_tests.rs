@@ -6,7 +6,7 @@ use crate::services::discord::queue_io::input_ingress;
 use crate::services::discord::router::message_handler::provider_dispatch as dispatch;
 use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::mpsc;
 
 const BUDGET: Duration = Duration::from_secs(30);
@@ -115,15 +115,18 @@ async fn fixture(
         .join(format!("{channel}.json"));
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     mailbox
-        .v2_adopt(path, shared.token_hash.clone())
+        .v2_adopt(path.clone(), shared.token_hash.clone())
         .await
         .unwrap();
     let (signals, mut received) = mpsc::unbounded_channel();
     let starts = Arc::new(AtomicUsize::new(0));
+    let cause_cleared = Arc::new(AtomicBool::new(false));
     let idle: Handoff = {
+        let cause_cleared = cause_cleared.clone();
         let (shared, starts, signals) = (shared.clone(), starts.clone(), signals.clone());
         Arc::new(move |front| {
             let (shared, starts, signals) = (shared.clone(), starts.clone(), signals.clone());
+            let cause_cleared = cause_cleared.clone();
             Box::pin(async move {
                 let id = front.1.message_id;
                 let ordinal = if id == A {
@@ -135,7 +138,8 @@ async fn fixture(
                     signals.send(Signal::ThirdStart).unwrap();
                     return Err("fixture third A start witness".into());
                 }
-                if id == B || (recover && ordinal > 1) {
+                let recovered = (recover && ordinal > 1) || cause_cleared.load(Ordering::SeqCst);
+                if id == B || recovered {
                     *dispatch::CLAUDE_LEGACY_DONE.lock().unwrap() =
                         Some((channel.get(), format!("fixture completed {id}")));
                 }
@@ -144,7 +148,7 @@ async fn fixture(
                     channel.get(),
                     Box::new(move || {
                         println!("START_FAILURE_PRODUCER id={id} before_hook=true");
-                        if id == A && !(recover && ordinal > 1) {
+                        if id == A && !recovered {
                             return Err(failure.into());
                         }
                         let hook = scope::launch_hook().ok_or("missing first-prompt hook")?;
@@ -381,6 +385,10 @@ async fn fixture(
                     }
                 }
                 Signal::ThirdStart => {
+                    assert!(
+                        !live,
+                        "third A start: failure budget did not retain the original"
+                    );
                     third = true;
                     if closes >= 2 {
                         break;
@@ -418,6 +426,43 @@ async fn fixture(
                 "holds emit no QueueEligible edge"
             );
         }
+    }
+    if live && !recover && confirmed == 0 {
+        cause_cleared.store(true, Ordering::SeqCst);
+        crate::services::discord::queue_io::input_owner::recovery::recover(
+            &mailbox,
+            (path, shared.token_hash.clone()),
+            crate::services::tui_input::human_frame::history::v2::Registry::runtime().unwrap(),
+            None,
+            (
+                "claude",
+                channel.get(),
+                chrono::Utc::now().timestamp_millis() as u64,
+            ),
+        )
+        .await
+        .unwrap();
+        while received.try_recv().is_ok() {}
+        crate::services::discord::queue_io::input_owner::drive::wake(drive.clone());
+        tokio::time::timeout(BUDGET, async {
+            while let Some(event) = received.recv().await {
+                match event {
+                    Signal::Pass => break,
+                    Signal::ThirdStart | Signal::Payload(A, _) => {
+                        panic!("retained A replayed after recovery")
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("post-retention recovery pass");
+        assert_eq!(
+            starts.load(Ordering::SeqCst),
+            2,
+            "cause recovery never requeues retained A"
+        );
+        println!("RETENTION_CAUSE_CLEARED recovery_pass=true auto_restarts=0");
     }
     let snapshot = mailbox
         .v2_request(|slot| slot.as_ref().ok_or("missing owner")?.json())
