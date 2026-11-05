@@ -44,6 +44,8 @@ pub async fn current_batch_phase_pg(
     // (orphan reference). Without `c.id IS NOT NULL` the LEFT JOIN yields
     // a NULL row that COALESCE turns into the 'unknown' bucket — which the
     // NOT IN check treats as still-active, locking the phase forever.
+
+    // Among skipped transitions at one `created_at` the larger id is latest, as retention keeps.
     sqlx::query_scalar::<_, Option<i64>>(
         "SELECT MIN(COALESCE(e.batch_phase, 0))::BIGINT
          FROM auto_queue_entries e
@@ -62,7 +64,7 @@ pub async fn current_batch_phase_pg(
                            FROM auto_queue_entry_transitions t
                            WHERE t.entry_id = e.id
                              AND t.to_status = 'skipped'
-                           ORDER BY t.created_at DESC
+                           ORDER BY t.created_at DESC, t.id DESC
                            LIMIT 1
                        ), '') != 'manual_skip'
                    )

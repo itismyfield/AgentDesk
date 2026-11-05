@@ -82,6 +82,11 @@ input-single-path/InputPathStopGate.cfg	InputPath	-	-
 input-single-path/InputPathStopNoGate.cfg	InputPath	StoppedBeforeKey	-
 input-single-path/InputPathStopNotSent.cfg	InputPath	StoppedBeforeKey	-
 input-single-path/InputPathStopProofOverStop.cfg	InputPath	StoppedBeforeKey	-
+input-single-path/InputPathStopGateLive.cfg	InputPath	-	-
+input-single-path/InputPathStopNoGateLive.cfg	InputPath	-	StoppedLeaves
+input-single-path/InputPathStopNotSentLive.cfg	InputPath	-	StoppedLeaves
+input-single-path/InputPathStopBusyNoGateLive.cfg	InputPath	-	StoppedLeaves
+input-single-path/InputPathStopProofOverStopLive.cfg	InputPath	-	StoppedLeaves
 session-lifecycle/HerdrPreclaimBefore.cfg	HerdrRootRecovery	-	ReplacedInputProgress
 session-lifecycle/HerdrPreclaimFixed.cfg	HerdrRootRecovery	-	-
 session-lifecycle/HerdrPreclaimNonlocal.cfg	HerdrRootRecovery	-	-
