@@ -11,7 +11,7 @@ use crate::services::turn_orchestrator::{Intervention, InterventionMode};
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
 struct IntakeGate {
-    previous: crate::config::Config,
+    _live: crate::config_live_reload::TestLiveGuard,
     trace: crate::services::platform::tmux::session_inventory::tests::ChannelProbeTrace,
     _namespace: crate::services::platform::tmux::session_inventory::tests::ChannelNamespace,
     _confirmed: crate::services::tui_o::turn_mode::TestConfirmation,
@@ -21,11 +21,8 @@ impl IntakeGate {
     fn configure(case: &Case) -> Self {
         crate::config::test_env_lock::assert_shared_test_env_lock_held();
         let root = crate::config::runtime_root().unwrap();
-        let previous = crate::config_live_reload::current()
-            .map(|config| (*config).clone())
-            .unwrap_or_default();
         let gate = Self {
-            previous,
+            _live: crate::config_live_reload::test_live_guard_after_shared_test_env_lock(),
             trace:
                 crate::services::platform::tmux::session_inventory::tests::ChannelProbeTrace::new(
                     CHANNEL,
@@ -98,12 +95,6 @@ impl IntakeGate {
             .await;
         });
         gate
-    }
-}
-
-impl Drop for IntakeGate {
-    fn drop(&mut self) {
-        crate::config_live_reload::install(self.previous.clone());
     }
 }
 

@@ -306,7 +306,7 @@ pub fn start(path: PathBuf, enabled: bool) -> Option<ConfigHotReloadGuard> {
 #[cfg(test)]
 pub(crate) struct TestLiveGuard {
     previous: Option<Arc<Config>>,
-    _lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
+    _lock: Option<crate::config::test_env_lock::SharedTestEnvLockGuard>,
 }
 
 #[cfg(test)]
@@ -329,7 +329,17 @@ pub(crate) fn test_live_guard(
     let previous = current();
     TestLiveGuard {
         previous,
-        _lock: lock,
+        _lock: Some(lock),
+    }
+}
+
+/// Capture LIVE while an enclosing fixture keeps the environment lock.
+#[cfg(test)]
+pub(crate) fn test_live_guard_after_shared_test_env_lock() -> TestLiveGuard {
+    crate::config::test_env_lock::assert_shared_test_env_lock_held();
+    TestLiveGuard {
+        previous: current(),
+        _lock: None,
     }
 }
 
@@ -340,6 +350,14 @@ mod late_live_reload_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[should_panic(
+        expected = "an *_after_shared_test_env_lock helper needs acquire_shared_test_env_lock first"
+    )]
+    fn guard_after_shared_lock_panics_without_lock() {
+        test_live_guard_after_shared_test_env_lock();
+    }
 
     /// Serializes tests that mutate/read the process-global [`LIVE`] snapshot so
     /// they do not race each other under the parallel test runner.
