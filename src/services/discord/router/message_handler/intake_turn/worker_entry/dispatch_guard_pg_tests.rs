@@ -238,6 +238,11 @@ async fn dispatch_guard_rows() {
         .lock()
         .unwrap() = Some((kept, completed));
     host.start(kept, message, true).await;
+    assert_eq!(
+        host.exit_reactions(kept, message),
+        0,
+        "the guard let the preserved input through"
+    );
     tokio::time::timeout(WAIT, entered)
         .await
         .expect("the preserved start reaches the provider")
@@ -254,7 +259,6 @@ async fn dispatch_guard_rows() {
         "the preserved input's answer reached Discord: {:?}",
         host.sent_contents(kept)
     );
-    assert_eq!(host.exit_reactions(kept, message), 0);
 
     for channel in [dropped, kept] {
         host.shared.mailboxes.remove_fixture_for_test(channel);
