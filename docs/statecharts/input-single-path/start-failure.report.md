@@ -1,7 +1,7 @@
 # Owner start failure slice
 
 Historical RED code SHA: `b0bab6ebf693502f86c0b2e2c0307033fa411c29`.
-Live repair code SHA: `180494601965e4cb3d0040b3556d5583bd329cab`; two-fact contract follows below.
+Live repair code SHA: `298e987bd161e3600cfd95f89df74b496eaded62`; two-fact contract follows below.
 `InputOwnership.tla` / `SFSpec` isolates this policy in the `observer` record; older slices keep their transitions.
 The fixed classification is in its StartFailure comment and the fixture header. The historical typed-cause erasure at `host_refusal.rs:28–37` is covered by the live
 Discord and headless entrypoint fixtures.
@@ -58,7 +58,7 @@ No new timer is modeled. Permanent store failure is not assumed to make progress
 SFDrive applies only to its wake-gated action. Notice delivery does not gate row cleanup or B.
 Reply settlement waits for the failure commit only while the exact unreserved claim remains.
 After reserve, EffectOwned errors settle immediately, before the AI completion observer.
-The actor also checks that ownership before validating wrapper row proof; a busy effect can own
+The actor also checks that ownership before validating missing, mismatched or unreadable wrapper row proof; a busy effect can own
 its result while the row still identifies the earlier input.
 Counters saturate at start 3, notice 2 and payload 2, with no third-start guard. `starts` excludes
 holds/stops and resets at an effect-held boundary; `totalStarts` counts all entries. Reserve resets
