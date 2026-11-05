@@ -1,0 +1,49 @@
+---
+title: "Same input waits for Herdr root recovery before claim"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Recovering
+    lg1: Complete
+  }
+  class lg0 blue
+  class lg1 teal
+  s0: Old execution and exact binding
+  s1: dcserver process evidence lost
+  s2: New server witness, old row retained
+  s3: Herdr ready before reconciliation
+  s4: Reconciled, exact row retained
+  s5: Original queued before claim
+  s6: Original awaits preclaim recovery without inflight
+  s7: Old row Retired, cleanup pending
+  s8: Recovery complete, original ready
+  s9: New execution Pending before create
+  s10: One new physical pane recorded
+  s11: New execution Bound
+  s12: Original sent once to the new pane
+  [*] --> s0
+  s0 --> s1: dcserver restarts
+  s1 --> s2: Herdr restarts with a new witness
+  s2 --> s3: the old root is replaced by a lone shell
+  s3 --> s4: restart reconciliation completes
+  s4 --> s5: accept the original input
+  s5 --> s6: existing evidence triggers fresh preclaim recovery
+  s6 --> s7: strict proof and quiet permit exact retirement
+  s7 --> s8: finish old hold cleanup
+  s8 --> s9: reserve Pending for the same input
+  s9 --> s10: create one physical pane
+  s10 --> s11: record evidence and bind
+  s11 --> s12: send the original once
+  class s0 blue
+  class s1 blue
+  class s2 blue
+  class s3 blue
+  class s4 blue
+  class s5 blue
+  class s6 blue
+  class s7 blue
+  class s8 blue
+  class s9 blue
+  class s10 blue
+  class s11 blue
+  class s12 teal

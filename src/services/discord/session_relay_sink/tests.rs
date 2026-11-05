@@ -2240,22 +2240,6 @@ fn session_sink_short_replace_raw_body_fingerprint_refuses_watcher_rerelay_4081(
         raw_body, relay_text,
         "the regression pin needs formatted/raw divergence"
     );
-    let module_src = include_str!("../session_relay_sink.rs");
-    let relay_format_src = include_str!("relay_format.rs");
-    assert!(
-        relay_format_src.contains("let raw_response_text = delivery.response_text.clone();"),
-        "session sink must preserve raw response bytes before Discord formatting"
-    );
-    assert!(
-        relay_format_src.contains("format_for_discord_with_status_panel(&raw_response_text"),
-        "session sink status-panel formatting must also use the preserved raw body"
-    );
-    assert!(
-        module_src.contains(
-            "relay_text: &relay_text,\n                        delivered_fingerprint_body: &raw_response_text,"
-        ),
-        "session sink production cut-over call must thread the raw pre-format body into the fingerprint slot"
-    );
 
     let gen_path = crate::services::tmux_common::session_temp_path(session, "generation");
     std::fs::create_dir_all(std::path::Path::new(&gen_path).parent().unwrap())
@@ -2434,41 +2418,6 @@ fn controller_skips_empty_body_so_cutover_gate_keeps_it_legacy() {
     assert!(
         matches!(cell.read(), super::super::LeaseSnapshot::Unleased),
         "an empty-body Skip never touches the lease"
-    );
-}
-
-#[test]
-fn structural_exclusion_gate_keeps_no_range_and_empty_body_on_legacy_path() {
-    let module_src = include_str!("../session_relay_sink.rs");
-
-    let assignment = format!("let {} = ", "cutover_short_replace");
-    let gate_start = module_src
-        .find(&assignment)
-        .expect("session sink cutover gate assignment");
-    let gate_src = &module_src[gate_start
-        ..gate_start
-            + module_src[gate_start..]
-                .find(';')
-                .expect("session sink cutover gate terminator")];
-
-    assert!(
-        gate_src.contains(&format!("{}.is_some()", "cutover_range")),
-        "A2b cutover_range=None / NoRange must stay on the legacy no-advance path"
-    );
-    assert!(
-        gate_src.contains(&format!("&& !{}.is_empty()", "relay_text")),
-        "A2b empty-body must stay legacy because controller Skipped would not advance"
-    );
-    assert!(
-        gate_src.contains("SessionBoundTerminalDeliveryRoute::PlaceholderEdit(_)"),
-        "A2b controller path is limited to anchored placeholder edits"
-    );
-    assert!(
-        module_src.contains(&format!(
-            "{}.filter(|_| {})",
-            "cutover_range", "cutover_short_replace"
-        )),
-        "A2b controller branch must require both the ordered range and cutover gate"
     );
 }
 

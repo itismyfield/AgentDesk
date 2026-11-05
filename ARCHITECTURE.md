@@ -1539,6 +1539,8 @@ src/
 │   │   │   ├── unpaired_active_token.rs
 │   │   │   └── watcher_respawn.rs
 │   │   ├── herdr_terminate/
+│   │   │   ├── root_replaced/
+│   │   │   │   └── preclaim.rs
 │   │   │   ├── http_force.rs
 │   │   │   ├── http_force_e08_tests.rs
 │   │   │   ├── http_force_forward_tests.rs
@@ -1572,6 +1574,7 @@ src/
 │   │   │   │   ├── circuit_evidence.rs
 │   │   │   │   ├── identity.rs
 │   │   │   │   ├── legacy_replay_coordinate.rs
+│   │   │   │   ├── presence_identity.rs
 │   │   │   │   ├── serde_adapters.rs
 │   │   │   │   └── turn_kinds.rs
 │   │   │   ├── native_stop_pin/
@@ -2148,7 +2151,9 @@ src/
 │   │   │   │   │   ├── clear_tests.rs
 │   │   │   │   │   ├── legacy_clear_tests.rs
 │   │   │   │   │   ├── policy_tests.rs
-│   │   │   │   │   └── recheck_tests.rs
+│   │   │   │   │   ├── preclaim_tests.rs
+│   │   │   │   │   ├── recheck_tests.rs
+│   │   │   │   │   └── wake_tests.rs
 │   │   │   │   ├── tui_followup/
 │   │   │   │   │   ├── busy_notice.rs
 │   │   │   │   │   ├── busy_refusal_reply_tests.rs
@@ -2986,6 +2991,9 @@ src/
 │   │   │   │   │   ├── hold_leaf_log_tests.rs
 │   │   │   │   │   ├── inflight_bound.rs
 │   │   │   │   │   ├── inflight_bound_tests.rs
+│   │   │   │   │   ├── inflight_diagnostics.rs
+│   │   │   │   │   ├── inflight_identity.rs
+│   │   │   │   │   ├── inflight_identity_tests.rs
 │   │   │   │   │   ├── legacy_divergence.rs
 │   │   │   │   │   ├── legacy_divergence_entry_tests.rs
 │   │   │   │   │   ├── legacy_divergence_tests.rs
@@ -3342,7 +3350,8 @@ src/
 │   │   ├── jobs/
 │   │   │   ├── db_retention/
 │   │   │   │   ├── image_retention.rs
-│   │   │   │   └── queue_and_dispatch.rs
+│   │   │   │   ├── queue_and_dispatch.rs
+│   │   │   │   └── record_caps.rs
 │   │   │   ├── db_retention.rs
 │   │   │   ├── hang_dump_cleanup.rs
 │   │   │   ├── memento_consolidation.rs
