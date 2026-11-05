@@ -110,4 +110,6 @@ fn load_label(path: &Path, current: &str) -> io::Result<String> {
 }
 
 #[cfg(test)]
+mod production_probe_tests;
+#[cfg(test)]
 mod tests;
