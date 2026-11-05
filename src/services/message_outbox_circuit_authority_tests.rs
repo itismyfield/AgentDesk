@@ -477,17 +477,17 @@ async fn resume_activation_maps_deliverable_terminal_and_unknown_states_pg() {
         ("cancelled", ResumeActivation::RevokedOrFenced),
         ("unexpected_status", ResumeActivation::Unknown),
     ] {
-        sqlx::query(
-            "UPDATE message_outbox
-             SET status=$2,
-                 cancelled_at=CASE WHEN $2='cancelled' THEN NOW() ELSE cancelled_at END
-             WHERE id=$1",
+        crate::db::status_check_migration_tests::execute_with_status_check_lifted(
+            &pool,
+            "message_outbox",
+            &format!(
+                "UPDATE message_outbox
+                 SET status='{status}',
+                     cancelled_at=CASE WHEN '{status}'='cancelled' THEN NOW() ELSE cancelled_at END
+                 WHERE id={id}"
+            ),
         )
-        .bind(id)
-        .bind(status)
-        .execute(&pool)
-        .await
-        .unwrap();
+        .await;
         assert_eq!(activate_fenced_by_id(&pool, id).await.unwrap(), expected);
     }
     assert_eq!(

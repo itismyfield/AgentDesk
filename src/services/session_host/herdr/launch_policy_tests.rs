@@ -335,3 +335,282 @@ fn policy_boot_restore_errors_are_endpoint_scoped_and_cache_poison_remains_close
         "endpoint_restore_errors_probe_zero_contract"
     );
 }
+
+struct CountChecker {
+    calls: std::sync::atomic::AtomicUsize,
+    result: Result<(), Unverified>,
+}
+
+#[async_trait::async_trait]
+impl ConfigChecker for CountChecker {
+    async fn check(&self, _: &PeerSnapshot) -> Result<(), Unverified> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.result
+    }
+}
+
+struct PreparingSource {
+    peer: PeerSnapshot,
+    failure: AtomicBool,
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl PeerSource for PreparingSource {
+    fn snapshot(&self) -> Result<PeerSnapshot, Unverified> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        if self.failure.load(Ordering::SeqCst) {
+            Err(Unverified::Peer)
+        } else {
+            Ok(self.peer.clone())
+        }
+    }
+}
+
+struct ExistingPolicyCase {
+    home: tempfile::TempDir,
+    host: SocketHerdrLaunchHost,
+    source: Arc<PreparingSource>,
+    checker: Arc<CountChecker>,
+}
+
+impl ExistingPolicyCase {
+    fn new(server: &Server, result: Result<(), Unverified>) -> Self {
+        let (home, cwd) = workdir();
+        let config = config(&cwd);
+        let checker_path = cwd.join("checker");
+        std::fs::write(&checker_path, b"checker-image").unwrap();
+        let source = Arc::new(PreparingSource {
+            peer: PeerSnapshot {
+                witness: ServerWitness {
+                    socket: server.path.clone(),
+                    pid: 7,
+                    start: start_of(7).identity,
+                },
+                started: SystemTime::UNIX_EPOCH,
+                home: cwd,
+                config,
+                checker: checker_path.clone(),
+                image: file::image(&checker_path).unwrap(),
+                socket_dir: file::directory_identity(server.path.parent().unwrap()).unwrap(),
+            },
+            failure: AtomicBool::new(false),
+            reads: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let checker = Arc::new(CountChecker {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            result,
+        });
+        let mut host = launch_host(server)
+            .with_prepared_for_test(Ok(Vec::new()))
+            .with_policy_source_for_test(source.clone())
+            .with_policy_checker_for_test(checker.clone());
+        host.endpoints[0].0 = host.endpoints[0]
+            .0
+            .clone()
+            .with_mode(EndpointMode::UserDefault);
+        Self {
+            home,
+            host,
+            source,
+            checker,
+        }
+    }
+
+    fn rewrite_config(&self, text: &[u8]) {
+        std::fs::write(self.home.path().join("config.toml"), text).unwrap();
+    }
+
+    fn checks(&self) -> usize {
+        self.checker.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[tokio::test]
+async fn prepare_existing_policy_remembers_failed_check_for_postdated_config() {
+    let server = serve(created("/tmp".into()));
+    let case = ExistingPolicyCase::new(&server, Err(Unverified::Checker));
+    for _ in 0..3 {
+        assert_eq!(
+            case.host
+                .prepare_existing_policy(&launch_endpoint(&server), "old-nonce")
+                .await,
+            Err(Unverified::Checker),
+            "same failed observation remains unverified"
+        );
+    }
+    assert_eq!(
+        case.checks(),
+        1,
+        "one checker call for one witness/file token"
+    );
+    assert!(
+        case.host
+            .mutation_evidence(&case.host.endpoints[0].0, "old-nonce")
+            .unwrap()
+            .startup
+            .is_none(),
+        "a failed observation cannot produce startup evidence"
+    );
+}
+
+#[tokio::test]
+async fn prepare_existing_policy_retries_when_config_token_changes() {
+    let server = serve(created("/tmp".into()));
+    let case = ExistingPolicyCase::new(&server, Err(Unverified::Checker));
+    assert_eq!(
+        case.host
+            .prepare_existing_policy(&launch_endpoint(&server), "old-nonce")
+            .await,
+        Err(Unverified::Checker)
+    );
+    case.rewrite_config(b"[session]\nresume_agents_on_restore=false\n# changed token\n");
+    assert_eq!(
+        case.host
+            .prepare_existing_policy(&launch_endpoint(&server), "old-nonce")
+            .await,
+        Err(Unverified::Checker)
+    );
+    assert_eq!(
+        case.checks(),
+        2,
+        "a new file token permits a new observation"
+    );
+}
+
+#[tokio::test]
+async fn prepare_existing_policy_does_not_promote_postdated_next_restart_proof() {
+    let server = serve(created("/tmp".into()));
+    let case = ExistingPolicyCase::new(&server, Ok(()));
+    assert_eq!(
+        case.host
+            .prepare_existing_policy(&launch_endpoint(&server), "old-nonce")
+            .await,
+        Ok(())
+    );
+    let evidence = case
+        .host
+        .mutation_evidence(&case.host.endpoints[0].0, "old-nonce")
+        .unwrap();
+    assert_eq!(case.checks(), 1, "the current config was checked");
+    assert!(
+        evidence.startup.is_none(),
+        "a postdated file proves no startup policy"
+    );
+    assert!(matches!(
+        super::super::ExistingMutationPermit::issue(
+            &launch_endpoint(&server),
+            "old-nonce",
+            case.source.peer.witness.clone(),
+            &evidence,
+        ),
+        Err(Unverified::Identity)
+    ));
+}
+
+#[tokio::test]
+async fn prepare_existing_policy_keeps_exact_grant_after_config_becomes_invalid() {
+    let server = serve(created("/tmp".into()));
+    let mut case = ExistingPolicyCase::new(&server, Err(Unverified::Checker));
+    let endpoint = launch_endpoint(&server);
+    let grant = crate::services::session_host::policy::permit::grant_for_test(
+        &endpoint,
+        "old-nonce",
+        case.source.peer.witness.clone(),
+    );
+    case.host = case.host.with_prepared_for_test(Ok(vec![grant.clone()]));
+    case.rewrite_config(b"invalid config");
+    assert_eq!(
+        case.host
+            .prepare_existing_policy(&endpoint, "old-nonce")
+            .await,
+        Ok(())
+    );
+    assert_eq!(
+        case.checks(),
+        0,
+        "historical permission needs no config checker"
+    );
+    assert_eq!(
+        case.host
+            .mutation_evidence(&case.host.endpoints[0].0, "old-nonce")
+            .unwrap()
+            .grant,
+        Some(grant),
+        "the exact admitted grant remains unchanged"
+    );
+}
+
+#[tokio::test]
+async fn prepare_existing_policy_skips_legacy_endpoints_without_peer_reads() {
+    let server = serve(created("/tmp".into()));
+    let mut case = ExistingPolicyCase::new(&server, Err(Unverified::Checker));
+    case.host.endpoints[0].0 = case.host.endpoints[0]
+        .0
+        .clone()
+        .with_mode(EndpointMode::LegacyDedicated);
+    case.source.failure.store(true, Ordering::SeqCst);
+    assert_eq!(
+        case.host
+            .prepare_existing_policy(&launch_endpoint(&server), "old-nonce")
+            .await,
+        Ok(())
+    );
+    assert_eq!(case.checks(), 0, "legacy policy is not observed");
+    assert_eq!(
+        case.source.reads.load(Ordering::SeqCst),
+        0,
+        "legacy mode returns before source reads"
+    );
+}
+
+#[tokio::test]
+async fn prepare_existing_policy_preserves_peer_read_failure() {
+    let server = serve(created("/tmp".into()));
+    let case = ExistingPolicyCase::new(&server, Ok(()));
+    case.source.failure.store(true, Ordering::SeqCst);
+    assert_eq!(
+        case.host
+            .prepare_existing_policy(&launch_endpoint(&server), "old-nonce")
+            .await,
+        Err(Unverified::Peer)
+    );
+    assert_eq!(
+        case.checks(),
+        0,
+        "an unreadable peer cannot reach the checker"
+    );
+}
+
+#[tokio::test]
+async fn prepare_existing_policy_preserves_restore_and_poisoned_cache_errors() {
+    let server = serve(created("/tmp".into()));
+    for failure in ["restore", "grants", "witnessed", "proof"] {
+        let mut case = ExistingPolicyCase::new(&server, Ok(()));
+        match failure {
+            "restore" => {
+                case.host = case.host.with_prepared_for_test(Err(Unverified::Cache));
+            }
+            "grants" => case.host.poison_grants_for_test(),
+            "witnessed" => case.host.poison_witnessed_for_test(),
+            _ => {
+                case.host.seed_witness_for_test(
+                    &case.host.endpoints[0].0,
+                    case.source.peer.witness.clone(),
+                );
+                case.host.poison_proof_for_test();
+            }
+        }
+        assert_eq!(
+            case.host
+                .prepare_existing_policy(&launch_endpoint(&server), "old-nonce")
+                .await,
+            Err(Unverified::Cache),
+            "cache failure is not missing proof: {failure}"
+        );
+        assert_eq!(
+            case.checks(),
+            0,
+            "cache errors cannot trigger new observations: {failure}"
+        );
+    }
+}

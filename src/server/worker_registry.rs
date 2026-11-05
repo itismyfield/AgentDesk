@@ -33,7 +33,7 @@ pub(crate) use self::status::{leader_only_worker_status_json, rate_limit_sync_ac
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BootStepId {
     RefreshMemoryHealth,
-    DrainStartupHooks,
+    RecordServerBoot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,9 +52,9 @@ const BOOT_ONLY_STEPS: [BootStepSpec; 2] = [
         order: 10,
     },
     BootStepSpec {
-        id: BootStepId::DrainStartupHooks,
-        name: "drain_startup_hooks",
-        responsibility: "Resume deferred startup hooks persisted before the previous shutdown",
+        id: BootStepId::RecordServerBoot,
+        name: "record_server_boot",
+        responsibility: "Stamp kv_meta server_boot_at for orphan recovery and policy boot checks",
         order: 20,
     },
 ];

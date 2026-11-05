@@ -1,0 +1,115 @@
+---
+title: "Herdr root replacement: produce policy evidence before capturing the target"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Recovery
+    lg1: Held
+    lg2: Path to the ReplacedInputProgress bug
+    lg3: Repeats forever, so ReplacedInputProgress breaks
+  }
+  class lg0 blue
+  class lg1 pink
+  class lg2 bugPath
+  class lg3 repeats
+  s0: Old execution and exact binding
+  s1: dcserver evidence lost
+  s2: New Herdr witness, pane inventory pending
+  s3: Herdr ready, old binding retained
+  s4: Read the exact old binding#59; no input
+  s5: RootReplaced candidate, policy preparation#59; no input
+  s6: Current startup evidence absent#59; no input
+  s7: New target copies current evidence#59; no input
+  s8: Held: current server policy unverified#59; no input
+  s9: Held: current server policy unverified#59; input queued
+  s10: Held: current server policy unverified#59; old binding claimed
+  s11: Read the exact old binding#59; input queued
+  s12: Held: current server policy unverified#59; input held, inflight retained
+  s13: Read the exact old binding#59; old binding claimed
+  s14: RootReplaced candidate, policy preparation#59; input queued
+  s15: Current startup evidence absent#59; input queued
+  s16: Read the exact old binding#59; input held, inflight retained
+  s17: RootReplaced candidate, policy preparation#59; old binding claimed
+  s18: Current startup evidence absent#59; old binding claimed
+  s19: RootReplaced candidate, policy preparation#59; input held, inflight retained
+  s20: New target copies current evidence#59; input queued
+  s21: Current startup evidence absent#59; input held, inflight retained
+  s22: New target copies current evidence#59; old binding claimed
+  s23: New target copies current evidence#59; input held, inflight retained
+  [*] --> s0
+  s0 --> s1: dcserver restarts with empty process cache
+  s1 --> s2: Herdr starts with a different server witness
+  s2 --> s3: the pane inventory has a different root
+  s3 --> s4: restart reconciliation completes
+  s4 --> s5: reader compares the exact pane root
+  s5 --> s6: installed owner has no policy producer
+  s6 --> s7: capture a new target after policy preparation
+  s7 --> s8: check policy, lone shell, originals and server witness
+  s8 --> s9: accept the original input
+  s8 --> s4: next reader pass retries the retained candidate
+  s9 --> s10: claim a turn against the old binding
+  s9 --> s11: next reader pass retries the retained candidate
+  s4 --> s11: accept the original input
+  s10 --> s12: old pane check refuses input and retains custody
+  s10 --> s13: next reader pass retries the retained candidate
+  s11 --> s13: claim a turn against the old binding
+  s11 --> s14: reader compares the exact pane root
+  s12 --> s16: next reader pass retries the retained candidate
+  s13 --> s16: old pane check refuses input and retains custody
+  s13 --> s17: reader compares the exact pane root
+  s14 --> s15: installed owner has no policy producer
+  s14 --> s17: claim a turn against the old binding
+  s15 --> s18: claim a turn against the old binding
+  s15 --> s20: capture a new target after policy preparation
+  s16 --> s19: reader compares the exact pane root
+  s17 --> s18: installed owner has no policy producer
+  s17 --> s19: old pane check refuses input and retains custody
+  s18 --> s21: old pane check refuses input and retains custody
+  s18 --> s22: capture a new target after policy preparation
+  s19 --> s21: installed owner has no policy producer
+  s20 --> s9: check policy, lone shell, originals and server witness
+  s20 --> s22: claim a turn against the old binding
+  s21 --> s23: capture a new target after policy preparation
+  s22 --> s10: check policy, lone shell, originals and server witness
+  s22 --> s23: old pane check refuses input and retains custody
+  s23 --> s12: check policy, lone shell, originals and server witness
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 blue
+  class s2 bugPath
+  class s3 blue
+  class s3 bugPath
+  class s4 blue
+  class s4 bugPath
+  class s5 blue
+  class s5 bugPath
+  class s6 blue
+  class s6 bugPath
+  class s7 blue
+  class s7 bugPath
+  class s8 pink
+  class s8 bugPath
+  class s9 pink
+  class s10 pink
+  class s11 blue
+  class s11 bugPath
+  class s12 pink
+  class s12 repeats
+  class s13 blue
+  class s13 bugPath
+  class s14 blue
+  class s15 blue
+  class s16 blue
+  class s16 repeats
+  class s17 blue
+  class s18 blue
+  class s19 blue
+  class s19 repeats
+  class s20 blue
+  class s21 blue
+  class s21 repeats
+  class s22 blue
+  class s23 blue
+  class s23 repeats

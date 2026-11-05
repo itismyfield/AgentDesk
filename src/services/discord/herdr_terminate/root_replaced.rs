@@ -145,6 +145,15 @@ fn report(row: &HostedObservation, result: Recovery) -> Recovery {
     });
     result
 }
+#[cfg(test)]
+pub(crate) fn result_for_test(row: &HostedObservation) -> Option<Recovery> {
+    cache(|entries| {
+        entries
+            .get(&row.session_id())
+            .filter(|entry| entry.row == *row)
+            .map(|entry| entry.result.clone())
+    })
+}
 fn local(
     shared: &SharedData,
     record: &HostedExecution,
@@ -374,6 +383,24 @@ async fn recover_inner(
     }
     if record.state != HostedState::Bound {
         return held("execution is not Bound".into());
+    }
+    #[cfg(unix)]
+    if let Some(host) = herdr_endpoints().launch_host() {
+        let Some(at) = record.location.as_ref() else {
+            return held("local Bound location unavailable".into());
+        };
+        let launch = crate::services::herdr_launch::HerdrLaunchEndpoint {
+            execution_node: at.execution_node.clone(),
+            config_key: at.endpoint_config_key.clone(),
+            socket_addr: at.socket_addr.clone(),
+            herdr_session: at.named_session.clone(),
+        };
+        if let Err(why) = host
+            .prepare_existing_policy(&launch, &record.execution_nonce)
+            .await
+        {
+            return held(format!("policy preparation: {why:?}"));
+        }
     }
     let Some(target) = herdr_endpoints().target(record) else {
         return held("registered target unavailable".into());
