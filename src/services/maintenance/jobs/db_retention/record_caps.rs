@@ -402,33 +402,45 @@ mod tests {
         let day = |n: i32| format!("NOW() - INTERVAL '{n} days'");
 
         // Redrive: a real redrive writes the key, then the outbox row fails again.
-        exec(
+        let outbox_id = crate::services::message_outbox::enqueue_outbox_pg_returning_id_with_ttl(
             &pool,
-            "INSERT INTO message_outbox (id, target, content, bot, source, status, reason_code, \
-             session_key, retry_count, error, dedupe_key, dedupe_expires_at) \
-             VALUES (20, 'channel:20', 'notice', 'notify', 'catch_up_too_old', 'failed', \
-                     'catch_up_too_old', 'session:20', 5, 'terminal failure', 'once-key', \
-                     NOW() - INTERVAL '1 minute')",
-        )
-        .await;
-        let first = crate::services::message_outbox_recovery::redrive_failed_rows(
-            &pool,
-            &[20],
-            "stable-key",
-            "incident",
-            false,
+            crate::services::message_outbox::OutboxMessage {
+                target: "channel:20",
+                content: "notice",
+                bot: "notify",
+                source: "catch_up_too_old",
+                reason_code: Some("catch_up_too_old"),
+                session_key: Some("session:20"),
+            },
+            0,
         )
         .await
-        .expect("first redrive");
+        .expect("enqueue outbox row")
+        .expect("outbox row inserted");
+        let fail = format!(
+            "UPDATE message_outbox SET status = 'failed', retry_count = 5, \
+             error = 'terminal failure' WHERE id = {outbox_id}"
+        );
+        exec(&pool, &fail).await;
+        let redrive = || {
+            crate::services::message_outbox_recovery::redrive_failed_rows(
+                &pool,
+                std::slice::from_ref(&outbox_id),
+                "stable-key",
+                "incident",
+                false,
+            )
+        };
+        let first = redrive().await.expect("first redrive");
         assert_eq!(first[0].outcome, "redriven");
         exec(
             &pool,
             &format!(
-                "UPDATE message_outbox SET status = 'failed', retry_count = 5 WHERE id = 20; \
+                "{fail}; \
                  UPDATE message_outbox_redrive_audit SET requested_at = {}; \
                  INSERT INTO message_outbox_redrive_audit \
                      (message_outbox_id, idempotency_key, reason, requested_at) \
-                 VALUES (999, 'gone-old', 'x', {}), (998, 'gone-new', 'x', {})",
+                 VALUES (999999, 'gone-old', 'x', {}), (999998, 'gone-new', 'x', {})",
                 day(100),
                 day(91),
                 day(89)
@@ -572,17 +584,10 @@ mod tests {
         );
 
         // The readers answer as before the pass.
-        let replay = crate::services::message_outbox_recovery::redrive_failed_rows(
-            &pool,
-            &[20],
-            "stable-key",
-            "incident",
-            false,
-        )
-        .await
-        .expect("same-key replay");
+        let replay = redrive().await.expect("same-key replay");
         assert_eq!(replay[0].outcome, "idempotent_replay");
-        let outbox: String = sqlx::query_scalar("SELECT status FROM message_outbox WHERE id = 20")
+        let outbox: String = sqlx::query_scalar("SELECT status FROM message_outbox WHERE id = $1")
+            .bind(outbox_id)
             .fetch_one(&pool)
             .await
             .expect("outbox status");
