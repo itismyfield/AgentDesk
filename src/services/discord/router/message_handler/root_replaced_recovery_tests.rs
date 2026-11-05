@@ -10,6 +10,21 @@ use crate::services::session_host::herdr_socket_rig_tests::{PROVIDER, SHELL};
 use crate::services::turn_orchestrator::{Intervention, InterventionMode};
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
+#[test]
+fn rr_intake_live_guard_restores_snapshot_under_the_runtime_root_lock() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let previous = crate::config_live_reload::current();
+    {
+        let _live = crate::config_live_reload::test_live_guard_after_shared_test_env_lock();
+        crate::config_live_reload::install(crate::config::Config::default());
+    }
+    let restored = crate::config_live_reload::current();
+    assert_eq!(restored.is_some(), previous.is_some());
+    if let (Some(previous), Some(restored)) = (previous, restored) {
+        assert!(Arc::ptr_eq(&previous, &restored));
+    }
+}
+
 struct IntakeGate {
     _live: crate::config_live_reload::TestLiveGuard,
     trace: crate::services::platform::tmux::session_inventory::tests::ChannelProbeTrace,
