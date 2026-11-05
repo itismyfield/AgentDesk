@@ -22,6 +22,8 @@ host-migration/HostMigrationIdOnly.cfg	HostMigration	NoDeadlock	-
 input-single-path/InputNativeStop.cfg	InputNativeStop	-	-
 input-single-path/InputNativeStopAbsorptionBefore.cfg	InputNativeStop	NoForeignEscape,OwnInputStops	-
 input-single-path/InputNativeStopBefore.cfg	InputNativeStop	OwnInputStops	-
+input-single-path/InputNativeStopEpisodeBefore.cfg	InputNativeStop	NoForeignEscape,NoOtherEpisodeEscape,NoOtherParentEscape	-
+input-single-path/InputNativeStopRestoredBefore.cfg	InputNativeStop	NoUnprovenRestoredChildEscape	-
 input-single-path/InputNativeStopRunningBefore.cfg	InputNativeStop	OwnInputStops	-
 input-single-path/InputNativeStopSummaryBefore.cfg	InputNativeStop	OwnInputStops	-
 input-single-path/InputOwnership.cfg	InputOwnership	HeldResumes,NoSilentLoss,NoSilentLossObserved	-

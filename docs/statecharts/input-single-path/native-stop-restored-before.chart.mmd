@@ -1,0 +1,99 @@
+---
+title: "복원 token의 child 근거와 자기 입력 중단 (bda08f189c)"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks NoUnprovenRestoredChildEscape
+    lg1: Path to the NoUnprovenRestoredChildEscape bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: 시작 전
+  s1: 외부 턴 실행
+  s2: 원장 확인 불가
+  s3: 중단 없음
+  s4: 자기 입력 대기
+  s5: 릴레이가 맡은 외부 턴
+  s6: 실행 분기 자기 root 확인
+  s7: 외부 입력 섞임
+  s8: 외부 입력 remove-only 흡수
+  s9: 내 입력 Command 확인
+  s10: 내 입력 remove-only 흡수
+  s11: 중단 전달
+  s12: 복원 token: child 근거 없이 ledger만 남음
+  s13: 자동요약 뒤 자기 입력
+  s14: 다른 episode child: 복원 거부#183;원장 확인
+  s15: 다른 parent child: 복원 거부#183;원장 확인
+  s16: 근거 없는 복원 token 중단 전달
+  s17: 다른 episode의 중단 차단
+  s18: 다른 parent의 중단 차단
+  [*] --> s0
+  s0 --> s1: 외부 턴 시작
+  s1 --> s2: 재시작 후 원장 재조회
+  s1 --> s3: 내 중단 명령
+  s1 --> s4: 내 입력 붙여넣기
+  s1 --> s5: 릴레이가 턴 인계
+  s1 --> s6: 실행 분기에서 내 입력 제출
+  s1 --> s7: 다른 입력 유입
+  s1 --> s8: 외부 입력 remove-only 흡수
+  s2 --> s3: 내 중단 명령
+  s2 --> s5: 릴레이가 턴 인계
+  s4 --> s2: 재시작 후 원장 재조회
+  s4 --> s3: 내 중단 명령
+  s4 --> s9: 내 입력 Command 확인
+  s4 --> s10: 내 입력 remove-only 흡수
+  s4 --> s5: 릴레이가 턴 인계
+  s4 --> s7: 다른 입력 유입
+  s4 --> s8: 외부 입력 remove-only 흡수
+  s5 --> s2: 재시작 후 원장 재조회 or 내 입력 Command 확인 or 내 입력 remove-only 흡수
+  s5 --> s11: 내 중단 명령
+  s5 --> s12: child 근거 없이 token 복원
+  s5 --> s7: 다른 입력 유입
+  s5 --> s8: 외부 입력 remove-only 흡수
+  s5 --> s14: 다른 episode child 복원 거부#183;원장 확인
+  s5 --> s15: 다른 parent child 복원 거부#183;원장 확인
+  s6 --> s11: 내 중단 명령
+  s6 --> s13: 자동 compact summary
+  s6 --> s7: 다른 입력 유입
+  s6 --> s8: 외부 입력 remove-only 흡수
+  s6 --> s14: 다른 episode child 복원 거부#183;원장 확인
+  s6 --> s15: 다른 parent child 복원 거부#183;원장 확인
+  s7 --> s6: 실행 분기에서 내 입력 제출
+  s7 --> s2: 재시작 후 원장 재조회 or 내 입력 Command 확인 or 내 입력 remove-only 흡수
+  s7 --> s3: 내 중단 명령
+  s8 --> s6: 실행 분기에서 내 입력 제출
+  s8 --> s7: 다른 입력 유입
+  s8 --> s2: 재시작 후 원장 재조회 or 내 입력 Command 확인 or 내 입력 remove-only 흡수
+  s8 --> s3: 내 중단 명령
+  s2 --> s11: 내 중단 명령
+  s9 --> s2: 재시작 후 원장 재조회
+  s9 --> s11: 내 중단 명령
+  s9 --> s13: 자동 compact summary
+  s9 --> s5: 릴레이가 턴 인계
+  s9 --> s7: 다른 입력 유입
+  s9 --> s8: 외부 입력 remove-only 흡수
+  s10 --> s9: 내 입력 Command 확인
+  s10 --> s2: 재시작 후 원장 재조회
+  s10 --> s11: 내 중단 명령
+  s10 --> s13: 자동 compact summary
+  s10 --> s5: 릴레이가 턴 인계
+  s10 --> s7: 다른 입력 유입
+  s10 --> s8: 외부 입력 remove-only 흡수
+  s4 --> s13: 내 입력 Command 확인 or 내 입력 remove-only 흡수
+  s12 --> s16: 내 중단 명령
+  s13 --> s11: 내 중단 명령
+  s13 --> s7: 다른 입력 유입
+  s13 --> s8: 외부 입력 remove-only 흡수
+  s2 --> s7: 릴레이가 턴 인계
+  s2 --> s8: 릴레이가 턴 인계
+  s14 --> s17: 내 중단 명령
+  s15 --> s18: 내 중단 명령
+  s13 --> s2: 재시작 후 원장 재조회
+  s5 --> s13: 자동 compact summary or 내 입력 Command 확인 or 내 입력 remove-only 흡수
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s5 bugPath
+  class s12 bugPath
+  class s16 breaks
+  class s16 bugPath

@@ -313,6 +313,131 @@ async fn owner_busy_absorbed_before_relay_claim_remains_a_child() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restored_root_without_durable_children_refuses_an_absorbed_owner_input() {
+    if !isolated("a_restored_root_without_durable_children_refuses_an_absorbed_owner_input") {
+        return;
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _mode = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let rig = StopRig::new(7_755_150, None).await;
+    rig.paste().await;
+    let live = rig.relay_claim().await;
+    let body = fs::read_to_string(rig.intake.renderer.join("body")).unwrap();
+    let history = crate::services::tui_input::human_frame::history::row_owner(
+        "claude",
+        &rig.session,
+        &[body],
+        "owned-busy-row",
+    );
+    let crate::services::tui_input::human_frame::history::RowOwner::Command(attempt) = history
+    else {
+        panic!("the actual Enter's absorbed command belongs to its admission attempt");
+    };
+    assert!(!live.native_stop.is_busy_child(&attempt));
+    let row =
+        inflight::load_inflight_state_read_only(&ProviderKind::Claude, rig.intake.channel.get())
+            .unwrap();
+    inflight::bind_native_stop_pin(&row, &live);
+    let persisted =
+        inflight::load_inflight_state_read_only(&ProviderKind::Claude, rig.intake.channel.get())
+            .unwrap();
+    assert!(persisted.native_stop_user_pin.is_some());
+    assert!(persisted.native_stop_busy_children.is_none());
+    let encoded = serde_json::to_value(&persisted).unwrap();
+    assert_eq!(
+        encoded["native_stop_user_pin"]["input"]["uuid"],
+        "external-opener"
+    );
+    assert!(encoded["native_stop_busy_children"].is_null());
+
+    let shared = discord::make_shared_data_for_tests();
+    discord::host_defer_gate::tests::map_channel(
+        &shared,
+        rig.intake.channel,
+        "a1-rollback-7755150",
+    )
+    .await;
+    shared.settings.write().await.owner_user_id = Some(7);
+    shared
+        .http
+        .cached_serenity_ctx
+        .set(
+            rig.intake
+                .shared
+                .http
+                .cached_serenity_ctx
+                .get()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+    let recovered = Arc::new(CancelToken::from_persisted_turn_nonce(
+        persisted.turn_nonce.clone(),
+    ));
+    assert!(!Arc::ptr_eq(&live, &recovered));
+    assert_eq!(recovered.turn_nonce(), persisted.turn_nonce.as_deref());
+    crate::services::discord::turn_bridge::bind_cancel_token_tmux_runtime(
+        &ProviderKind::Claude,
+        &recovered,
+        &rig.session,
+        "recovery kickoff",
+    );
+    inflight::restore_native_stop_pin(&persisted, &recovered);
+    assert!(recovered.native_stop.receipt_sink().observed().is_none());
+    assert!(!recovered.native_stop.is_busy_child(&attempt));
+    let mailbox = shared.mailbox(rig.intake.channel);
+    assert!(
+        mailbox
+            .try_start_turn(
+                recovered.clone(),
+                UserId::new(persisted.request_owner_user_id),
+                MessageId::new(persisted.user_msg_id),
+            )
+            .await
+    );
+    eprintln!(
+        "H1_RESTORED_PROOF actual_busy_enter=true root_persisted=true children=none new_token=true pin_candidate_unobserved=true"
+    );
+    command(&shared, rig.intake.channel).await;
+    assert_eq!(
+        rig.escapes(),
+        0,
+        "a restored root cannot borrow an absorbed attempt absent from its durable children"
+    );
+    assert!(!recovered.cancelled.load(Ordering::Acquire));
+    assert!(!live.cancelled.load(Ordering::Acquire));
+    assert!(
+        rig.intake
+            .mock
+            .written_texts()
+            .iter()
+            .any(|text| text.contains("중단 미확인")),
+        "the refused restored stop uses the existing unconfirmed reply"
+    );
+    assert!(mailbox.has_active_turn().await.unwrap());
+    assert!(
+        mailbox
+            .cancel_token()
+            .await
+            .unwrap()
+            .is_some_and(|token| Arc::ptr_eq(&token, &recovered))
+    );
+    assert_eq!(
+        crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&rig.intake.transcript),
+        crate::services::tui_turn_state::TuiTurnState::Streaming,
+        "a refused stop leaves the same native turn running"
+    );
+    assert!(recovered.native_stop.receipt_sink().observed().is_some());
+    command(&shared, rig.intake.channel).await;
+    assert_eq!(
+        rig.escapes(),
+        0,
+        "a second stop keeps the restored child policy"
+    );
+    assert!(mailbox.has_active_turn().await.unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn relay_claimed_external_turn_keeps_its_existing_stop_authority() {
     if !isolated("relay_claimed_external_turn_keeps_its_existing_stop_authority") {
         return;

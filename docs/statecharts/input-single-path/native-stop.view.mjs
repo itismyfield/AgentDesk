@@ -1,5 +1,16 @@
-export const title = "외부 Claude 턴에 흡수된 자기 입력의 중단 (f332bd5391)";
+export const title = "복원 token의 child 근거와 자기 입력 중단 (bda08f189c)";
 export const state = (v) => {
+  if (v.restoredToken && v.ledgerChild && !v.child) {
+    if (v.result === "sent") return "근거 없는 복원 token 중단 전달";
+    if (v.result === "denied") return "근거 없는 복원 token 중단 차단";
+    return "복원 token: child 근거 없이 ledger만 남음";
+  }
+  if (v.birthChild !== "unbound") {
+    const relation = v.birthChild === "episode" ? "다른 episode" : "다른 parent";
+    if (v.result === "sent") return `${relation}에도 중단 전달`;
+    if (v.result === "denied") return `${relation}의 중단 차단`;
+    return `${relation} child: 복원 거부·원장 확인`;
+  }
   if (v.result === "sent") return v.foreign ? "외부 입력에도 중단 전달" : "중단 전달";
   if (v.result === "denied") return (v.attempt === "root" || ["absorbed", "removed"].includes(v.attempt) && v.readable) && !v.foreign ? "자기 입력 중단 실패" : "중단 없음";
   if (!v.opened) return "시작 전";
@@ -13,4 +24,4 @@ export const state = (v) => {
   if (v.attempt === "enqueued") return "자기 입력 대기";
   return "외부 턴 실행";
 };
-export const step = (action, from, to) => action === "Restart" && to.readable ? null : ({ExternalOpen: "외부 턴 시작", OwnerPaste: "내 입력 붙여넣기", OwnerPasteRunning: "실행 분기에서 내 입력 제출", Absorb: "내 입력 Command 확인", AbsorbOnly: "내 입력 remove-only 흡수", AbsorbAfterCommand: "같은 입력의 remove 확인", ForeignAbsorbOnly: "외부 입력 remove-only 흡수", CompactSummary: "자동 compact summary", ForeignInput: "다른 입력 유입", RelayClaim: "릴레이가 턴 인계", Stop: "내 중단 명령", Restart: "재시작 후 원장 재조회", Done: "종료"})[action] ?? action;
+export const step = (action, from, to) => action === "Restart" && to.readable ? null : ({ExternalOpen: "외부 턴 시작", OwnerPaste: "내 입력 붙여넣기", OwnerPasteRunning: "실행 분기에서 내 입력 제출", Absorb: "내 입력 Command 확인", AbsorbOnly: "내 입력 remove-only 흡수", AbsorbAfterCommand: "같은 입력의 remove 확인", ForeignAbsorbOnly: "외부 입력 remove-only 흡수", CompactSummary: "자동 compact summary", ForeignInput: "다른 입력 유입", RelayClaim: "릴레이가 턴 인계", OtherEpisodeChild: "다른 episode child 복원 거부·원장 확인", OtherParentChild: "다른 parent child 복원 거부·원장 확인", RestoreUnprovenChild: "child 근거 없이 token 복원", Stop: "내 중단 명령", Restart: "재시작 후 원장 재조회", Done: "종료"})[action] ?? action;
