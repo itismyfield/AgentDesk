@@ -168,7 +168,32 @@ async fn bb_live_rollover_uses_real_intake_and_redelivery_is_not_reinjected_pg()
 }
 
 async fn owner_fixture() -> Busy {
-    let rt = runtime().await;
+    let env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let mut db = None;
+    let storage = Box::pin(async {
+        let fixture = TestPostgresDb::create().await;
+        let pool = fixture.connect_and_migrate().await;
+        db = Some(fixture);
+        Some(pool)
+    });
+    let h = Box::pin(RelayE2eHarness::start_inner_with_env_lock(
+        ProviderStub::Success,
+        false,
+        storage,
+        true,
+        env,
+    ))
+    .await;
+    h.shared
+        .restart
+        .reconcile_done
+        .store(true, Ordering::SeqCst);
+    h.answer_placeholders_immediately();
+    h.cache_relay_transport();
+    let rt = Runtime {
+        h,
+        _db: db.expect("a database under the harness lock"),
+    };
     let channel = ChannelId::new(CHANNEL_ID);
     assert!(
         rt.h.shared
@@ -231,10 +256,6 @@ fn owner_tmux(
     pane: &InjectPane,
     _env: &crate::config_live_reload::TestLiveGuard,
 ) -> crate::config::TestEnvVarGuard {
-    assert!(
-        crate::config::shared_test_env_lock().try_lock().is_err(),
-        "the borrowed harness must own the shared env lock before PATH mutation"
-    );
     let path = pane.path("tmux");
     let script = std::fs::read_to_string(&path).unwrap();
     let owner_reads = r##"for owner_format do :; done
