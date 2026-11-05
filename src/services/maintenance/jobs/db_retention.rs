@@ -84,6 +84,9 @@ const AUDIT_RECORD_RETENTION_DAYS: i32 = 180; // audit, recovery-audit and termi
 const API_FRICTION_EVENT_RETENTION_DAYS: i32 = 90; // repeat-pattern detection window
 const MEMENTO_FEEDBACK_STATS_RETENTION_DAYS: i32 = 90; // feedback totals window
 const DISPATCH_EVENT_RETENTION_DAYS: i32 = 90; // status-transition log of any dispatch
+const REDRIVE_AUDIT_RETENTION_DAYS: i32 = 90; // outbox redrive idempotency ledger
+const ENTRY_TRANSITION_RETENTION_DAYS: i32 = 90; // auto-queue entry status transitions
+const DELIVERY_EVENT_RETENTION_DAYS: i32 = 90; // dispatch delivery attempts
 // `find_origin_receipt` looks up archived turns with no age bound, so keep them well past
 // the 90-day hot window.
 const TURNS_ARCHIVE_RETENTION_DAYS: i32 = 365;
