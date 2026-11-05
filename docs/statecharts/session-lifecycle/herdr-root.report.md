@@ -77,3 +77,7 @@ python3 scripts/ci/statecharts_tlc.py
 ```
 
 jar SHA256은 `936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`이다. 원시 로그는 `/Users/itismyfield/.adk/release/lane-runs/hl-20260925/i7788/logs/impl-state-*`에 있다. `impl-state-final-exits.json`은 frontend Before=1/Fixed=0, 직접 TLC Before=13/Fixed=0/SameRoot=0을 구분한다. `impl-state-environment.json`은 최종 모델·jar SHA와 TMUX 해제 환경이며, `impl-state-suite-final.log`는 전체 기대값 대조이고, `impl-state-variants.json`은 추가 scratch 대조의 exit 결과다. 각 chart-verified 디렉터리에 사용한 TLC 원문과 생성 report가 있다. 기본 PATH의 Java stub에는 runtime이 없어 Homebrew Java의 절대 경로를 사용했다. PG·cargo·운영 herdr 연결은 하지 않았다.
+
+## S2 확장
+
+S2의 첫 pass 전 입력과 완료 wake는 `docs/statecharts/session-lifecycle/herdr-root-s2.report.md`에 별도로 기록한다. 이 문서의 기존 S1 세 설정은 새 PreclaimEnabled/WakeEnabled를 FALSE로 두어 과거 기대 위반 집합을 유지한다. S2에서 claim 권리와 실제 start를 분리하면서 Before 상태 수는 28→33으로 바뀌었고 Fixed/SameRoot는 16/7로 유지된다.

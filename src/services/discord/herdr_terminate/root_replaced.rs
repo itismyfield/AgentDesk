@@ -1,4 +1,7 @@
 //! Retires only a proved-ended replaced-root execution; never writes or closes a pane.
+#[cfg(unix)]
+pub(in crate::services::discord) mod preclaim;
+
 use super::*;
 use crate::db::dispatched_session_canonical_identity::{
     CanonicalSessionIdentity, SessionIdentityKind,
@@ -19,7 +22,7 @@ pub(crate) enum Recovery {
     RetiredCleanupPending(String),
     Retired,
 }
-/// An exact RootReplaced refusal for one complete Bound observation; Missing cannot construct it.
+/// An exact Bound observation eligible for a replaced-root proof, never an end authority.
 #[derive(Clone, Debug)]
 pub(crate) struct RootReplacedCandidate(HostedObservation);
 impl RootReplacedCandidate {
@@ -86,7 +89,9 @@ pub(crate) fn prune(rows: &[HostedObservation]) {
             entry
                 .candidates
                 .retain(|candidate| rows.iter().any(|row| candidate.matches(row)));
-            rows.contains(&entry.row) || !entry.candidates.is_empty()
+            rows.contains(&entry.row)
+                || rows.iter().any(|row| unfinished(entry, row))
+                || !entry.candidates.is_empty()
         })
     });
 }
@@ -117,6 +122,38 @@ pub(in crate::services::discord) fn candidate_for(
             })
             .cloned()
     })
+}
+/// Whether this process saw unfinished recovery for this same, now retired execution.
+#[cfg(unix)]
+pub(in crate::services::discord) fn incomplete_for(row: &HostedObservation) -> bool {
+    cache(|entries| {
+        entries
+            .get(&row.session_id())
+            .is_some_and(|entry| unfinished(entry, row))
+    })
+}
+fn unfinished(entry: &Cached, row: &HostedObservation) -> bool {
+    if entry.row.session_id() != row.session_id()
+        || !matches!(
+            entry.result,
+            Recovery::Held(_) | Recovery::RetiredCleanupPending(_)
+        )
+    {
+        return false;
+    }
+    let (HostedRecord::Known(previous), HostedRecord::Known(current)) =
+        (&entry.row.record, &row.record)
+    else {
+        return false;
+    };
+    if current.state != HostedState::Retired
+        || !matches!(previous.state, HostedState::Bound | HostedState::Retired)
+    {
+        return false;
+    }
+    let mut previous = previous.clone();
+    previous.state = HostedState::Retired;
+    previous == *current
 }
 fn report(row: &HostedObservation, result: Recovery) -> Recovery {
     cache(|entries| {

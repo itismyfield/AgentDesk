@@ -1,7 +1,7 @@
 //! The production restart reader of a Herdr pane and the restart pass over this node's Herdr rows.
 //! Every reading goes through the pane's gated target on one server; nothing here writes a pane.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use sqlx::PgPool;
 use tokio::runtime::Handle;
@@ -266,9 +266,24 @@ fn reconnect_pass(
         }
     };
     resolve_unplaced_rows(&runtime, shared, pool, &node, codex);
+    // Pruning drops old Bound observations once their rows are Retired.
+    let incomplete: BTreeSet<_> = rows
+        .iter()
+        .filter(|row| root_replaced::incomplete_for(row))
+        .map(HostedObservation::session_id)
+        .collect();
     root_replaced::prune(&rows);
     let before = with_pass(|pass| pass.results.clone());
     let mut after = BTreeMap::new();
+    let mut completed = BTreeMap::new();
+    let mut complete = |record: &HostedExecution| {
+        if let (Some(provider), Ok(channel)) = (
+            ProviderKind::from_str(&record.owner.provider),
+            record.owner.channel_id.parse::<u64>(),
+        ) {
+            completed.insert(channel, provider);
+        }
+    };
     for row in rows.iter().filter(|row| codex_row(&row.record) == codex) {
         let record = match &row.record {
             HostedRecord::Known(record) => record,
@@ -295,8 +310,12 @@ fn reconnect_pass(
         };
         if record.state == HostedState::Retired {
             if runtime.block_on(root_replaced::recover_retired(shared, pool, row, None))
-                != Recovery::Retired
+                == Recovery::Retired
             {
+                if incomplete.contains(&row.session_id()) {
+                    complete(record);
+                }
+            } else {
                 after.insert(row.session_id(), fresh((Reconnect::Withheld, None)));
             }
             continue;
@@ -327,6 +346,7 @@ fn reconnect_pass(
             && runtime.block_on(root_replaced::recover(shared, pool, candidate, None))
                 == Recovery::Retired
         {
+            complete(record);
             continue;
         }
         after.insert(row.session_id(), result);
@@ -338,6 +358,14 @@ fn reconnect_pass(
             .retain(|id, result| result.read_by_codex != codex && listed(id));
         pass.results.extend(after);
     });
+    for (channel, provider) in completed {
+        crate::services::discord::schedule_deferred_idle_queue_kickoff_immediate(
+            shared.clone(),
+            provider,
+            crate::services::discord::ChannelId::new(channel),
+            "herdr_root_replaced",
+        );
+    }
 }
 
 /// Resolves this bot's Pending rows of the pass's provider whose launch recorded no pane, each
