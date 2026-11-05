@@ -231,21 +231,49 @@ impl Reading {
             return stamp.publish(watch, publish).await;
         }
         #[cfg(unix)]
-        if let Some(admission) = &self.admission
-            && !admission.current().await
-        {
-            return None;
-        }
+        let approval = if let Some(admission) = &self.admission {
+            match admission.current().await {
+                Ok(proof) => Some(proof),
+                Err(error) => {
+                    admission.report(Err(error));
+                    return None;
+                }
+            }
+        } else {
+            None
+        };
         let (Some(stamp), Some(watch)) = (&self.stamp, &self.watch) else {
             return Some(publish());
         };
         if !stamp.notice.current() {
+            #[cfg(unix)]
+            if let Some(admission) = &self.admission {
+                admission.superseded("notice_changed");
+            }
             return None;
         }
         let guard = lock(watch);
         let current = guard.key.as_ref() == Some(&stamp.key)
             && (guard.generation, guard.revision) == (stamp.generation, stamp.revision);
-        current.then(publish)
+        if !current {
+            #[cfg(unix)]
+            if let Some(admission) = &self.admission {
+                let field = if guard.key.as_ref() != Some(&stamp.key) {
+                    "watch_key"
+                } else if guard.generation != stamp.generation {
+                    "watch_generation"
+                } else {
+                    "watch_revision"
+                };
+                admission.superseded(field);
+            }
+            return None;
+        }
+        #[cfg(unix)]
+        if let (Some(admission), Some(proof)) = (&self.admission, approval) {
+            admission.report(Ok(proof));
+        }
+        Some(publish())
     }
 }
 

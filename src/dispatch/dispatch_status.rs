@@ -259,7 +259,7 @@ async fn phase_gate_dispatch_uses_legacy_default_on_pg_tx(
              WHERE td.id = $1
              GROUP BY pg.run_id, pg.phase
              HAVING COUNT(*) > 0
-                AND BOOL_AND(NULLIF(BTRIM(e.phase_gate_kind, E' \t\n\r\\f\\v'), '') IS NULL)
+                AND BOOL_AND(NULLIF(BTRIM(e.phase_gate_kind, E' \t\n\r\\f\\x0b'), '') IS NULL)
          )",
     )
     .bind(dispatch_id)
@@ -1868,7 +1868,7 @@ mod auto_queue_phase_gate_finalize_wrapper_tests {
                 &pool,
                 "run-whitespace-legacy",
                 "dsp-whitespace-legacy",
-                Some(" \t\n\r"),
+                Some(" \t\n\r\u{000c}\u{000b}"),
             )
             .await;
 
@@ -1969,59 +1969,62 @@ mod auto_queue_phase_gate_finalize_wrapper_tests {
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn finalize_and_patch_reject_nonblank_legacy_provenance() {
-            let pg_db = TestPostgresDb::create().await;
-            let pool = pg_db.connect_and_migrate().await;
-            TestPostgresDb::emulate_pre_0100_deploy_gate_rows(&pool).await;
-            seed_legacy_gate_dispatch(
-                &pool,
-                "run-nonblank-legacy",
-                "dsp-nonblank-legacy",
-                Some("deploy-gate"),
-            )
-            .await;
+            for kind in ["deploy-gate", "v", "vv"] {
+                let pg_db = TestPostgresDb::create().await;
+                let pool = pg_db.connect_and_migrate().await;
+                TestPostgresDb::emulate_pre_0100_deploy_gate_rows(&pool).await;
+                seed_legacy_gate_dispatch(
+                    &pool,
+                    "run-nonblank-legacy",
+                    "dsp-nonblank-legacy",
+                    Some(kind),
+                )
+                .await;
 
-            assert!(
-                maybe_inject_phase_gate_verdict_pg(
+                assert!(
+                    maybe_inject_phase_gate_verdict_pg(
+                        &pool,
+                        "dsp-nonblank-legacy",
+                        &json!({"checks": passing_checks()}),
+                    )
+                    .await
+                    .is_none(),
+                    "{kind:?} is a declaration, not blank provenance"
+                );
+                set_dispatch_status_on_pg_async(
                     &pool,
                     "dsp-nonblank-legacy",
-                    &json!({"checks": passing_checks()}),
+                    "completed",
+                    Some(&json!({"checks": passing_checks()})),
+                    "test_patch",
+                    Some(&["dispatched"]),
+                    true,
                 )
                 .await
-                .is_none()
-            );
-            set_dispatch_status_on_pg_async(
-                &pool,
-                "dsp-nonblank-legacy",
-                "completed",
-                Some(&json!({"checks": passing_checks()})),
-                "test_patch",
-                Some(&["dispatched"]),
-                true,
-            )
-            .await
-            .expect("complete nonblank PATCH dispatch"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
-            let result = sqlx::query_scalar::<_, Option<String>>(
-                "SELECT result::TEXT FROM task_dispatches WHERE id = $1",
-            )
-            .bind("dsp-nonblank-legacy")
-            .fetch_one(&pool)
-            .await
-            .expect("load nonblank PATCH result") // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
-            .expect("nonblank PATCH result exists"); // agentdesk-audit: allow-unwrap — completion writes the supplied result
-            let result: Value =
-                serde_json::from_str(&result).expect("decode nonblank PATCH result"); // agentdesk-audit: allow-unwrap — persisted result must remain valid JSON
-            assert!(result.get("verdict").is_none());
-            let gate_status = sqlx::query_scalar::<_, String>(
-                "SELECT status FROM auto_queue_phase_gates
-             WHERE run_id = 'run-nonblank-legacy' AND phase = 0",
-            )
-            .fetch_one(&pool)
-            .await
-            .expect("load failed nonblank gate"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
-            assert_eq!(gate_status, "failed");
+                .expect("complete nonblank PATCH dispatch"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
+                let result = sqlx::query_scalar::<_, Option<String>>(
+                    "SELECT result::TEXT FROM task_dispatches WHERE id = $1",
+                )
+                .bind("dsp-nonblank-legacy")
+                .fetch_one(&pool)
+                .await
+                .expect("load nonblank PATCH result") // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
+                .expect("nonblank PATCH result exists"); // agentdesk-audit: allow-unwrap — completion writes the supplied result
+                let result: Value =
+                    serde_json::from_str(&result).expect("decode nonblank PATCH result"); // agentdesk-audit: allow-unwrap — persisted result must remain valid JSON
+                assert!(result.get("verdict").is_none());
+                let gate_status = sqlx::query_scalar::<_, String>(
+                    "SELECT status FROM auto_queue_phase_gates
+                 WHERE run_id = 'run-nonblank-legacy' AND phase = 0",
+                )
+                .fetch_one(&pool)
+                .await
+                .expect("load failed nonblank gate"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
+                assert_eq!(gate_status, "failed", "{kind:?}");
 
-            pool.close().await;
-            pg_db.drop().await;
+                pool.close().await;
+                pg_db.drop().await;
+            }
         }
     }
 

@@ -643,7 +643,9 @@ pub(super) async fn run_completion_postlude(
 
     // No user message (user_msg_id == 0) → no analytics row to key
     // (`discord:<channel>:0` is the bogus form); skip the persist.
+    // An input that never reached the provider ran no turn, so it leaves no analytics row.
     if shared_owned.pg_pool.is_some()
+        && !input_not_submitted
         && let Some(user_msg_id) = user_msg_id
     {
         persist_turn_analytics_row_with_handles(
