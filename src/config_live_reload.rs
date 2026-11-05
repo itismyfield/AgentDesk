@@ -352,11 +352,19 @@ mod tests {
     use super::*;
 
     #[test]
-    #[should_panic(
-        expected = "an *_after_shared_test_env_lock helper needs acquire_shared_test_env_lock first"
-    )]
     fn guard_after_shared_lock_panics_without_lock() {
-        test_live_guard_after_shared_test_env_lock();
+        let panic = std::panic::catch_unwind(|| {
+            let _guard = test_live_guard_after_shared_test_env_lock();
+        })
+        .expect_err("the helper requires the shared environment lock");
+        let message = panic
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| panic.downcast_ref::<String>().map(String::as_str));
+        assert_eq!(
+            message,
+            Some("an *_after_shared_test_env_lock helper needs acquire_shared_test_env_lock first")
+        );
     }
 
     /// Serializes tests that mutate/read the process-global [`LIVE`] snapshot so
