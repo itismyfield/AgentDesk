@@ -60,7 +60,7 @@ fn a_live_codex_turn_ends_once_only_after_its_provider_is_gone_pg() {
         );
         assert_eq!(fx.row(), Some(HostedState::Bound));
         fx.rig.provider_seen(&context_of(&nonce), false);
-        live.pass(Duration::from_secs(15));
+        live.pass_and_wait_for_end(Duration::from_secs(15));
         let ended = (
             live.texts(),
             live.row().is_none(),

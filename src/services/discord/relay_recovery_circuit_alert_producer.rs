@@ -278,11 +278,12 @@ mod tests {
             StageHeldOutcome::Staged { id } => id,
             other => panic!("unexpected stage: {other:?}"),
         };
-        sqlx::query("UPDATE message_outbox SET status='unexpected_status' WHERE id=$1")
-            .bind(id)
-            .execute(&pool)
-            .await
-            .unwrap();
+        crate::db::status_check_migration_tests::execute_with_status_check_lifted(
+            &pool,
+            "message_outbox",
+            &format!("UPDATE message_outbox SET status='unexpected_status' WHERE id={id}"),
+        )
+        .await;
         assert!(activate(Some(&pool), id).await.unwrap());
         let status: String = sqlx::query_scalar("SELECT status FROM message_outbox WHERE id=$1")
             .bind(id)

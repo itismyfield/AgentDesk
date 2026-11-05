@@ -845,6 +845,71 @@
       "path": "migrations/postgres/0173_message_outbox_body_census.sql",
       "sha256": "d46a1ce98c32002e93158039c0393fda8967d28086df956d74a87dc6a6746678",
       "version": 173
+    },
+    {
+      "path": "migrations/postgres/0174_task_dispatches_card_created_index.sql",
+      "sha256": "0d8d7966d8d89f2f7924be57a3f9184b06386fa9dbddbbe77af08efbddf63ff8",
+      "version": 174
+    },
+    {
+      "path": "migrations/postgres/0175_auto_queue_entries_card_index.sql",
+      "sha256": "90bccf492fab6b1c16b0d795643028e43a8c088a078dab1f8f081fa6cc32ee41",
+      "version": 175
+    },
+    {
+      "path": "migrations/postgres/0176_drop_delivery_journal_obligation_order.sql",
+      "sha256": "6bd189a41f9e06577f96c4c2d675412eadb6dcdc0322e5e577685ba3eb6452b8",
+      "version": 176
+    },
+    {
+      "path": "migrations/postgres/0177_drop_kakao_calendar_operations_target.sql",
+      "sha256": "57c7cfacb230faea7abdcd53c30d78f47134398b015735be1c1633d5d7c77ab1",
+      "version": 177
+    },
+    {
+      "path": "migrations/postgres/0178_drop_idx_arce_channel_seq_desc.sql",
+      "sha256": "5cf0c6958ab1b6cc936cf5eabf57933fe3b699131f02dfbd4ea8b1df1205bbcf",
+      "version": 178
+    },
+    {
+      "path": "migrations/postgres/0179_drop_iso_watermark.sql",
+      "sha256": "60f21c158ff64c949f55936b431457f3a11360a277b32b5a56507538a09cca4a",
+      "version": 179
+    },
+    {
+      "path": "migrations/postgres/0180_drop_idx_aq_entry_dispatch_history_entry.sql",
+      "sha256": "95072b09bea6f71645bad2a97837675c109b143e639bc1a3456d3d3074d7a492",
+      "version": 180
+    },
+    {
+      "path": "migrations/postgres/0181_drop_idx_aci_card_id.sql",
+      "sha256": "ceb6ab38ee023cd98e9b6878fc34311dc99629341a3ff68be8f7fca48a6e3e73",
+      "version": 181
+    },
+    {
+      "path": "migrations/postgres/0182_drop_idx_turn_lifecycle_events_turn_id.sql",
+      "sha256": "2251b4e41e1f1ac81a687377cf8f709d02c724034193cfc8f78a9a49f2be405c",
+      "version": 182
+    },
+    {
+      "path": "migrations/postgres/0183_drop_idx_aq_phase_gates_run_phase.sql",
+      "sha256": "17d4da0b5eb41f3fb2704b9e0b83e2f035b91ceebee6442648d3df2909ab8edf",
+      "version": 183
+    },
+    {
+      "path": "migrations/postgres/0184_core_status_checks.sql",
+      "sha256": "a0c11382c3683b9ed0bea70b2ecb3a3241931ea53b412e579a5d9a79080ffb3e",
+      "version": 184
+    },
+    {
+      "path": "migrations/postgres/0185_deploy_gate_check_vertical_tab.sql",
+      "sha256": "ad02276643158d38e7bf3917db2717892a50c5a1112a2a28ab5b800b4b60f520",
+      "version": 185
+    },
+    {
+      "path": "migrations/postgres/0186_drop_unused_tables.sql",
+      "sha256": "a6287c965ef5f69536fbb2465b6b320a505c8b783d0acd5d10cf0c493493f637",
+      "version": 186
     }
   ],
   "version": 1
