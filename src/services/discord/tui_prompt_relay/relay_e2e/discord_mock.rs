@@ -157,6 +157,11 @@ impl DiscordMockState {
         named.insert(channel, name.to_string());
     }
 
+    /// Answers a channel `GET` for `channel` without a name again.
+    pub(in crate::services::discord) fn unname_channel(&self, channel: u64) {
+        self.named.lock().expect("named channels").remove(&channel);
+    }
+
     /// Answers `thread` as a guild thread under `parent`.
     pub(in crate::services::discord) fn add_thread(&self, thread: u64, parent: u64) {
         self.threads.lock().expect("threads").insert(thread, parent);

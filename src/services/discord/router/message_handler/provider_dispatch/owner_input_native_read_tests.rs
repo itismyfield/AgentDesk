@@ -24,6 +24,7 @@ impl Shim {
              case \"$*\" in *capture-pane*) [ -f \"$d/screen\" ] && {{ cat \"$d/screen\"; exit 0; }} ;; esac\n\
              case \"$*\" in *list-panes*pane_dead*)\n\
                n=$(cat \"$d/reads\" 2>/dev/null || echo 0); n=$((n+1)); echo \"$n\" > \"$d/reads\"\n\
+               [ \"$(cat \"$d/fail-at\" 2>/dev/null)\" = \"$n\" ] && {{ echo 'probe failed' >&2; exit 1; }}\n\
                if [ \"$(cat \"$d/park-at\" 2>/dev/null)\" = \"$n\" ]; then\n\
                  : > \"$d/parked\"; while [ ! -f \"$d/release\" ]; do sleep 0.02; done\n\
                fi ;;\n\
@@ -49,6 +50,11 @@ impl Shim {
     /// The pane's second liveness read, the first after the early one, waits for `release`.
     fn park_second_read(&self) {
         fs::write(self.dir.join("park-at"), "2").unwrap();
+    }
+
+    /// The first liveness read after the late one fails once, as a tmux probe error.
+    fn fail_third_read(&self) {
+        fs::write(self.dir.join("fail-at"), "3").unwrap();
     }
 
     async fn parked(&self) {
@@ -77,6 +83,12 @@ enum Read {
     Armed,
     /// Session markers over an idle composer read idle.
     ReadyTail,
+    /// Idle at both reads; a later read of the pane's liveness fails once.
+    ReadAgain,
+    /// As `Early`, for a start naming no pane: its session has no name, and Discord names it.
+    Nameless,
+    /// As `Nameless`, with only the channel's registered name to go by.
+    Registered,
 }
 
 async fn start_meets(id: u64, case: Read) {
@@ -86,6 +98,7 @@ async fn start_meets(id: u64, case: Read) {
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let rig = IntakeRig::turn_start_stored(id, pool.clone(), ORIGIN).await;
+    let early = matches!(case, Read::Early | Read::Nameless | Read::Registered);
     let key = discord::adk_session::build_adk_session_key(
         &rig.shared,
         rig.channel,
@@ -94,11 +107,25 @@ async fn start_meets(id: u64, case: Read) {
     );
     let key = key.await.expect("channel session key");
     discord::inflight::seed_session_row_keyed(&pool, &key, rig.channel.get(), None).await;
+    if matches!(case, Read::Nameless | Read::Registered) {
+        let mut core = rig.shared.core.lock().await;
+        core.sessions.get_mut(&rig.channel).unwrap().channel_name = None;
+    }
+    if case == Read::Registered {
+        rig.mock.unname_channel(id);
+        let config = rig._tmux.root.path().join("cg-d1-fixture.yaml");
+        let yaml = fs::read_to_string(&config).unwrap();
+        let bound = format!("claude: {{id: '{id}', runtime: tui}}");
+        let named = format!("claude: {{id: '{id}', name: 'a1-rollback-{id}', runtime: tui}}");
+        assert!(yaml.contains(&bound));
+        fs::write(&config, yaml.replace(&bound, &named)).unwrap();
+    }
     let native = rig.renderer.join("transcript");
     let initial = match case {
         Read::Armed => BUSY.to_string(),
-        Read::Early | Read::ReadyTail => format!("{IDLE}{PERMISSION_MODE}"),
-        Read::Late | Read::LateBusy => IDLE.to_string(),
+        _ if early => format!("{IDLE}{PERMISSION_MODE}"),
+        Read::ReadyTail => format!("{IDLE}{PERMISSION_MODE}"),
+        _ => IDLE.to_string(),
     };
     fs::write(&native, initial).unwrap();
     fs::remove_file(&rig.transcript).unwrap();
@@ -112,9 +139,10 @@ async fn start_meets(id: u64, case: Read) {
     };
     let shim = Shim::install(&rig);
     match case {
-        Read::Early => shim.composer_busy(),
+        _ if early => shim.composer_busy(),
         Read::Late | Read::LateBusy => shim.park_second_read(),
-        Read::Armed | Read::ReadyTail => {}
+        Read::ReadAgain => shim.fail_third_read(),
+        _ => {}
     }
     let channels = [OriginChannel {
         provider: "claude".into(),
@@ -128,7 +156,7 @@ async fn start_meets(id: u64, case: Read) {
     let name = ProviderKind::Claude.build_tmux_session_name(&format!("a1-rollback-{id}"));
     let headless = format!("[session-strategy] channel={id}");
     let (drive, mut settled) = rig.drive();
-    if case == Read::ReadyTail {
+    if matches!(case, Read::ReadyTail | Read::ReadAgain) {
         let (completed, bridge) = tokio::sync::oneshot::channel();
         *discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
             .lock()
@@ -172,7 +200,7 @@ async fn start_meets(id: u64, case: Read) {
         Vec::<String>::new(),
     );
     assert_eq!(busy, expected, "{}", rig.trace.text());
-    if matches!(case, Read::Early | Read::Armed) {
+    if early || case == Read::Armed {
         // Held before its claim: no headless turn began and nothing was posted.
         let started = rig.trace.text().contains(&headless);
         let posted = (rig.mock.written_texts().len(), rig.mock.deleted().len());
@@ -267,47 +295,94 @@ async fn runs_once(
     assert!(rig.state().await["items"].as_array().unwrap().is_empty());
 }
 
-macro_rules! native_read_pg {
-    ($name:ident, $id:expr, $case:expr) => {
-        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-        async fn $name() {
-            if !creator_child(concat!(
-                "services::discord::router::message_handler::provider_dispatch::owner_input::tests::",
-                "rollback::native_read::",
-                stringify!($name)
-            )) {
-                return;
-            }
-            start_meets($id, $case).await;
-        }
-    };
+/// Runs `start_meets` in its own child process, as its tmux and Postgres fixtures need.
+async fn native_read_pg(name: &str, id: u64, case: Read) {
+    let test =
+        "services::discord::router::message_handler::provider_dispatch::owner_input::tests::";
+    if creator_child(&format!("{test}rollback::native_read::{name}")) {
+        start_meets(id, case).await;
+    }
 }
 
-native_read_pg!(
-    a_start_waits_unclaimed_while_its_pane_reads_unknown_pg,
-    7_772_101,
-    Read::Early
-);
-native_read_pg!(
-    a_claimed_start_waits_unsent_when_its_late_read_is_unknown_pg,
-    7_772_102,
-    Read::Late
-);
-native_read_pg!(
-    a_start_held_late_by_a_native_turn_runs_once_after_it_ends_pg,
-    7_772_103,
-    Read::LateBusy
-);
-native_read_pg!(
-    an_armed_watch_keeps_a_start_while_its_pane_reads_unknown_pg,
-    7_772_104,
-    Read::Armed
-);
-native_read_pg!(
-    session_markers_over_an_idle_composer_let_a_start_run_pg,
-    7_772_105,
-    Read::ReadyTail
-);
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_waits_unclaimed_while_its_pane_reads_unknown_pg() {
+    native_read_pg(
+        "a_start_waits_unclaimed_while_its_pane_reads_unknown_pg",
+        7_772_101,
+        Read::Early,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_claimed_start_waits_unsent_when_its_late_read_is_unknown_pg() {
+    native_read_pg(
+        "a_claimed_start_waits_unsent_when_its_late_read_is_unknown_pg",
+        7_772_102,
+        Read::Late,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_held_late_by_a_native_turn_runs_once_after_it_ends_pg() {
+    native_read_pg(
+        "a_start_held_late_by_a_native_turn_runs_once_after_it_ends_pg",
+        7_772_103,
+        Read::LateBusy,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_armed_watch_keeps_a_start_while_its_pane_reads_unknown_pg() {
+    native_read_pg(
+        "an_armed_watch_keeps_a_start_while_its_pane_reads_unknown_pg",
+        7_772_104,
+        Read::Armed,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_markers_over_an_idle_composer_let_a_start_run_pg() {
+    native_read_pg(
+        "session_markers_over_an_idle_composer_let_a_start_run_pg",
+        7_772_105,
+        Read::ReadyTail,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_idle_late_read_is_registered_without_reading_the_pane_again_pg() {
+    native_read_pg(
+        "an_idle_late_read_is_registered_without_reading_the_pane_again_pg",
+        7_772_107,
+        Read::ReadAgain,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_naming_no_pane_waits_on_the_pane_discord_names_pg() {
+    native_read_pg(
+        "a_start_naming_no_pane_waits_on_the_pane_discord_names_pg",
+        7_772_108,
+        Read::Nameless,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_naming_no_pane_waits_on_its_registered_pane_pg() {
+    native_read_pg(
+        "a_start_naming_no_pane_waits_on_its_registered_pane_pg",
+        7_772_109,
+        Read::Registered,
+    )
+    .await;
+}
 
 /// The late hold's read wakes the drive only after the held attempt's own unwind: while the
 /// channel's mailbox still holds a turn, or that attempt's inflight row is left, it reads unknown.
