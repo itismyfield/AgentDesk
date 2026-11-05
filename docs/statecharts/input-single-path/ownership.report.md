@@ -228,7 +228,7 @@ The model folds the transcript reader into `leak`: which order an input's comman
 
 Code: `8b28712958` (A2b on main `6d7c1851e5`). Only `DriveStartWaits` and three rules are new; every other config keeps its state space and result.
 
-- `DriveStartWaits`: a start whose idle-mailbox drive meets a native busy turn pastes nothing and is held (`heldBy = native`) before any claim (`router/message_handler/provider_dispatch/owner_input.rs:426-500`, `516-531`). In `a2b` it replaces `DriveStartBusy`, which pasted the start into the running turn.
+- `DriveStartWaits`: a start whose idle-mailbox drive meets a native busy turn pastes nothing and is held (`heldBy = native`) before any claim (`router/message_handler/provider_dispatch/owner_input.rs:530-582`, `609-620`). In `a2b` it replaces `DriveStartBusy`, which pasted the start into the running turn.
 - The wake: on a turn-mode channel the supervisor's idle transition wakes the owner (`RC`, `turn_presence/supervisor.rs:628`). On legacy the hold leaves a read of the same transcript with the held watch, and the owner marks the front held (`queued_head/v2.rs:357`), so the drive watches it (`input_owner/drive.rs:105`) and the turn's end wakes it once (`input_owner/held_watch.rs:58`).
 - `WatchSees` gains one conjunct: a watch of a native hold wakes only once the turn reads idle.
 - Rules: `NativeHeldResumes` (a held start is not left once all is quiet), `StartOwnTurn` (a start is never pasted into a running turn) and `StartOnce` (an answered start was pasted once).
@@ -239,11 +239,11 @@ Code: `8b28712958` (A2b on main `6d7c1851e5`). Only `DriveStartWaits` and three 
 
 ### r3: a failed read of the native-held pane (`NativeWatchMisreads`)
 
-Code: r3, kept in r5 (`owner_input.rs:484-502`). The watch's probe of a native hold reads the pane's liveness first. A dead or absent pane is `Gone` and ends the watch (`held_watch.rs:38-44`). A tmux read that fails (`liveness.rs:59-77`, `ProbeError`) is now `Unknown`, which keeps the watch for the next 2 s look. r2b mapped every non-`Live` answer to `Gone`, so one failed read ended the watch, and nothing woke the held start after its turn ended.
+Code: r3, kept in r5 (`owner_input.rs:559-581`). The watch's probe of a native hold reads the pane's liveness first. A dead or absent pane is `Gone` and ends the watch (`held_watch.rs:38-44`). A tmux read that fails (`liveness.rs:59-77`, `ProbeError`) is now `Unknown`, which keeps the watch for the next 2 s look. r2b mapped every non-`Live` answer to `Gone`, so one failed read ended the watch, and nothing woke the held start after its turn ended.
 
 - `NativeWatchMisreads` (Fix `a2b`): a read of a native-held pane fails. The watch is kept; mutant `nativeReadGone` (r2b) ends it.
 - `NativeHeldRuns` (liveness, under `LiveSpec == Spec /\ WF_vars(Next)`): a native-held start is handed again unless its pane is gone. `WF_vars(Next)` is weak fairness of `Next` as a whole, not of each action: a run whose reads keep failing or whose native turn never ends is outside what the property proves. The repository cfgs carry invariants only; this property is run outside CI with a `PROPERTY` config, and moving it into a checked cfg is #7772.
-- Only a failed pane read is projected. A Claude transcript that is resolved but unreadable reads as not busy (in `native_turn`, `observe_claude_jsonl_turn_state(...).is_busy()` is false, so the probe returns `Screen::Ready`, `owner_input.rs:491-500`), so its watch wakes the drive rather than keeping the hold; the model leaves that read out.
+- Only a failed pane read is projected. A Claude transcript that is resolved but unreadable reads as not busy (in `native_turn`, `observe_claude_jsonl_turn_state(...).is_busy()` is false, so the probe returns `Screen::Ready`, `owner_input.rs:566-575`), so its watch wakes the drive rather than keeping the hold; the model leaves that read out.
 - Out of scope: the model has one Claude tmux channel; Herdr panes are not modelled.
 - Out of scope: Codex. This PR keeps Codex on main's path, so a Codex start into a native busy turn is the existing defect; its native-busy gate and turn-end read moved to #7772.
 
@@ -259,7 +259,7 @@ The r2b counterexample: a person's turn runs, the start is held with a watch (`D
 
 `a2b` is now `f5` plus the start wait: every `f5` transition (the marked row, its retry, `HeadlessSettlesMarked`) applies to it, and both A2b configs also check `HeadlessSettlesMarked`.
 
-- A start held by `DriveStartWaits` runs no admission, so a marked row stays (`start_waits` reads the row without settling it, `owner_input.rs:436-450`); the start's later idle admission records and removes it (`settle_marked_row`, `foreign_row.rs:45,72`), as `DriveIdle` does on `f5`.
+- A start held by `DriveStartWaits` runs no admission, so a marked row stays (`start_waits` reads the row without settling it, `owner_input.rs:511-525`); the start's later idle admission records and removes it (`settle_marked_row`, `foreign_row.rs:45,72`), as `DriveIdle` does on `f5`.
 - The F6 observer, F7 busy-arrival, F7 recovery/transition and automatic-hold slices keep their own `Init`/`Next` and constants; `a2b` adds nothing to them.
 
 | Config | Invariants | `NativeHeldRuns` |
