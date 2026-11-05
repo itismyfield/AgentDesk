@@ -316,6 +316,48 @@ supervisor 복구 정책, utils의 계산·파일 실행·HTTP 응답 경계도 
 `services` 상위 미분류, owner_input의 기존 분류와 C6 보류, history 7개 보류와
 C2·C3·C4 known 층은 유지한다. `tui_o::turn_mode` application 정교화는 C6에서 다룬다.
 
+### Turn·recovery·session과 routine/scheduling
+
+`services::tui_o::turn_mode`는 retire가 성공한 채널만 turn 전환을 확정하는
+application 정책이다(`src/services/tui_o/turn_mode.rs:94`). 기존 known 재분류이므로
+먼저 `--update-reductions --reclassify services::tui_o::turn_mode`로 M1에 기록했다.
+M1은 역방향 281 ID·629회와 미분류 295개, 기존 positive·zero 기록을 그대로 유지한다.
+이후 unknown 편입은 C5 매핑 대신 M1의 매핑·accepted를 비교 기준으로 사용한다.
+
+turn orchestrator·lifecycle·host 선택·취소 queue 보존의 업무 정책은 application이다.
+pending queue 파일 저장, mailbox snapshot·signal transport·wall-clock 관측과
+legacy/V2 snapshot 복원은 긴 adapter prefix로 구분한다. snapshot 복원의 generation 0
+경로는 runtime_store의 boot 미할당 fallback에서 디스크 counter를 읽으므로
+순수 parser로 선언하지 않는다. reply 결과 DTO는 vocabulary, 관측된 stop result의
+표현·거절 사유·queue depth 계산은 foundation이다.
+
+recovery 상태·takeover·owner 복귀와 routine/예약 실행 조립은 application이다.
+checkpoint·durable PG/process 실행, routine loader·store·provider 전송·파일 탐색은
+adapter이고, routine Discord 로그는 discord다. context/action의 값 계약은 vocabulary,
+받은 binding/checkpoint의 fallback plan 구성과 shared scheduling 계산은 foundation이다.
+scheduled timing의 종결·재시도 정책은 application을 상속한다. session forwarding은
+route handler를 조립하지 않는 transport adapter, HTTP resume handler는 assembly이며
+transcript catalog 탐색은 adapter override로 둔다.
+
+진행 중 입력 실패 레인과 겹친 routines/예약 owner_input 및 queued_head V2 경계는
+그 후손을 포함한 15개 논리 모듈을 각각 명시적 미분류로 유지한다. 그 아래 새 known
+규칙을 두지 않는다. Claude owner_input은 live owner/writer lease/payload callback의
+adapter로 분류하며, 기존 Discord·Codex owner_input 분류와 history 7개 보류는 유지한다.
+C2 hook_server adapter, C3 exact_episode application 및 C4·C5 분류도 유지한다.
+
+M1 뒤 논리 모듈 105개를 규칙 42개로 편입한 증거는
+[`module-layer-c6-admission.tsv`](module-layer-c6-admission.tsv)에 기록한다.
+새 역방향은 97 ID·240회, `accepted_indeterminate_count` 합계 239,
+`grown_since_accepted` 합계 1이다. 증가한 path ID
+`8dd9c815ca11f5f0c4ce3cc88b0fc72f548711a70a4a13cfdf006f62c63a2e42`는
+`routines::legacy_body_census` → `cluster::node_registry`의 1회 참조다.
+M1 accepted에 없으므로 accepted count는 기본값 0이며, 기존 zero-rule도 없다.
+같은 source의 이전 매핑에서는 판정 불가 1회이고 새 매핑에서 역방향 1회가 된다.
+이전 source에 있던 참조의 도입은 #7783 commit
+`bfa5c7171c223e7ad3c09f299ee72f749c17f582`의
+`src/services/routines/legacy_body_census.rs:61`이다. accepted에 없던 ID의 exact 편입도
+TSV에 드러내며 기존 역방향 양수·zero 한도와 나머지 경고 증가를 흡수하지 않는다.
+
 ## 검토된 모듈 이동의 old→new 대응
 
 이동 대응은 [`layer_moves.toml`](../../scripts/audit_maintainability/layer_moves.toml)에 적는다.
