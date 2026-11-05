@@ -124,6 +124,15 @@ impl Drop for Recorder {
 async fn turn_end_summary_spends_one_physical_post_and_consumes_every_response() {
     let _isolation = Isolation::new();
     let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let proxy_env = || {
+        let keys = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"];
+        let keys = keys
+            .into_iter()
+            .chain(["ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"]);
+        keys.map(|key| (key, std::env::var_os(key)))
+            .collect::<Vec<_>>()
+    };
+    let before_trap = proxy_env();
     let trap = EgressTrap::start().await;
     // Premise: the notice client routes a non-loopback host through the trap. `.invalid` never
     // resolves, so even a client that ignored the trap could not reach a server.
@@ -219,6 +228,12 @@ async fn turn_end_summary_spends_one_physical_post_and_consumes_every_response()
             "no request may leave the loopback recorder for {reply:?} direct={direct}"
         );
     }
+    drop(trap);
+    assert_eq!(
+        proxy_env(),
+        before_trap,
+        "the trap gives every proxy variable back its value from before it started"
+    );
 }
 
 /// `turn_end_summary::tests::Isolation`, taken here so this file owns the environment lock
