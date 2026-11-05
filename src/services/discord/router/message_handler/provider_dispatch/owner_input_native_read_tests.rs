@@ -7,7 +7,8 @@ const PERMISSION_MODE: &str =
 const START_WAITS: &str = "NotSent(\"synthetic_waits_idle\")";
 
 /// The rig's tmux behind a script: a pane capture shows `screen` while that file exists, each
-/// `list-panes` liveness read is counted, and the read `park-at` names waits for `release`.
+/// `list-panes` liveness read is counted, the read `park-at` names waits for `release`, and once
+/// `fail-after` pane cwd reads were made the next liveness read fails, once.
 struct Shim {
     dir: std::path::PathBuf,
 }
@@ -22,9 +23,15 @@ impl Shim {
         let script = format!(
             "#!/bin/sh\nd='{dir}'\n\
              case \"$*\" in *capture-pane*) [ -f \"$d/screen\" ] && {{ cat \"$d/screen\"; exit 0; }} ;; esac\n\
+             case \"$*\" in *pane_current_path*)\n\
+               c=$(cat \"$d/cwds\" 2>/dev/null || echo 0); echo $((c+1)) > \"$d/cwds\" ;;\n\
+             esac\n\
              case \"$*\" in *list-panes*pane_dead*)\n\
                n=$(cat \"$d/reads\" 2>/dev/null || echo 0); n=$((n+1)); echo \"$n\" > \"$d/reads\"\n\
-               [ \"$(cat \"$d/fail-at\" 2>/dev/null)\" = \"$n\" ] && {{ echo 'probe failed' >&2; exit 1; }}\n\
+               if [ -f \"$d/fail-after\" ] && [ ! -f \"$d/failed\" ] && \
+                  [ \"$(cat \"$d/cwds\" 2>/dev/null || echo 0)\" -ge \"$(cat \"$d/fail-after\")\" ]; then\n\
+                 : > \"$d/failed\"; echo 'probe failed' >&2; exit 1\n\
+               fi\n\
                if [ \"$(cat \"$d/park-at\" 2>/dev/null)\" = \"$n\" ]; then\n\
                  : > \"$d/parked\"; while [ ! -f \"$d/release\" ]; do sleep 0.02; done\n\
                fi ;;\n\
@@ -52,9 +59,10 @@ impl Shim {
         fs::write(self.dir.join("park-at"), "2").unwrap();
     }
 
-    /// The first liveness read after the late one fails once, as a tmux probe error.
-    fn fail_third_read(&self) {
-        fs::write(self.dir.join("fail-at"), "3").unwrap();
+    /// The first liveness read after the late read resolved its transcript fails once, as a tmux
+    /// probe error; the early and the late read each resolve it through the pane's cwd.
+    fn fail_after_late_read(&self) {
+        fs::write(self.dir.join("fail-after"), "2").unwrap();
     }
 
     async fn parked(&self) {
@@ -141,7 +149,7 @@ async fn start_meets(id: u64, case: Read) {
     match case {
         _ if early => shim.composer_busy(),
         Read::Late | Read::LateBusy => shim.park_second_read(),
-        Read::ReadAgain => shim.fail_third_read(),
+        Read::ReadAgain => shim.fail_after_late_read(),
         _ => {}
     }
     let channels = [OriginChannel {
@@ -163,6 +171,9 @@ async fn start_meets(id: u64, case: Read) {
             .unwrap() = Some((rig.channel, completed));
         crate::services::discord::queue_io::input_owner::drive::wake(drive);
         runs_once(&rig, &pool, ORIGIN, &mut settled, bridge, append).await;
+        if case == Read::ReadAgain {
+            assert!(shim.dir.join("failed").exists(), "no liveness read failed");
+        }
         drop(rig);
         pool.close().await;
         db.drop().await;
