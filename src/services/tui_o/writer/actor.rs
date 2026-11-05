@@ -59,6 +59,8 @@ pub type Unsettled = watch::Sender<Option<usize>>;
 pub struct Undelivered {
     /// Derived items and pending local retries not delivered yet.
     pub owed: usize,
+    /// Input notices included in `owed`, counting queued work and durable evidence once.
+    pub notice_owed: usize,
     /// A `Prepared` piece without a recorded result.
     pub prepared: usize,
     /// Announced units whose sealing record is still to come.
@@ -792,8 +794,18 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         let channel = self.writer.channel();
         let notice = (self.notice).get_or_insert_with(|| self.bindings.subscribe(channel));
         let latest = *notice.borrow();
+        let notice_extra = self.notice_debt_extra();
+        let notice_owed = notice_extra
+            + self
+                .owed
+                .iter()
+                .filter(|item| {
+                    matches!(item, Derived::Piece(piece)
+                    if piece.unit_key.kind == crate::services::tui_o::shadow::UnitKind::InputNotice)
+                })
+                .count();
         let (owed, unsealed) = (
-            self.owed.len() + usize::from(self.writer.has_local_retry()) + self.notice_debt_extra(),
+            self.owed.len() + usize::from(self.writer.has_local_retry()) + notice_extra,
             usize::from(self.deriver.has_unsealed()),
         );
         let store = self.writer.store();
@@ -818,6 +830,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         let waiting = links.filter(|link| matches!(link.boundary, Boundary::Pending { .. }));
         Some(Undelivered {
             owed,
+            notice_owed,
             prepared,
             unsealed,
             uncaptured,

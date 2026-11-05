@@ -317,6 +317,7 @@ impl Rig {
             timing: &OWNER_TIMING,
             // The rig's AI turn ends as soon as it is read.
             until_done: Some(Box::new(|| Ok(()))),
+            native_pin_submitted: None,
         }
     }
 
@@ -1027,6 +1028,7 @@ fn prepared_before_launch(rig: &Rig) -> Registration {
         clock: Arc::new(|| 10_000),
         timing: &OWNER_TIMING,
         until_done: None,
+        native_pin_submitted: None,
     }
 }
 
@@ -1962,3 +1964,115 @@ mod rollback;
 mod parent;
 #[path = "owner_input_stop_gate_tests.rs"]
 mod stop_gate;
+
+type BusySubmissionObservation = (Result<(), String>, bool, Vec<bool>, Vec<String>);
+
+/// Runs the actual pump/leaf/settlement and records the write flag at answer-observer entry.
+fn actual_busy_submission_guard(
+    name: &str,
+    channel: u64,
+    fail_pattern: Option<&str>,
+) -> BusySubmissionObservation {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let rig = rig(name, channel, "normal", view("", false), BUSY);
+    if let Some(pattern) = fail_pattern {
+        let tail = format!(
+            "'{}' \"$@\"; rc=$?",
+            rig.f.root.path().join("tmux").display()
+        );
+        let script = fs::read_to_string(&rig.program).unwrap();
+        assert_eq!(script.matches(&tail).count(), 1);
+        let refused = format!("case \"$*\" in *{pattern}*) exit 1 ;; esac\n{tail}");
+        fs::write(&rig.program, script.replacen(&tail, &refused, 1)).unwrap();
+    }
+    let submitted = Arc::new(AtomicBool::new(false));
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let (flag, reads) = (submitted.clone(), observed.clone());
+    let transcript = rig.transcript();
+    let mut owner = rig.registration(
+        &ProviderKind::Claude,
+        target::Phase::Busy,
+        &transcript,
+        Execution::LocalTui,
+    );
+    owner.native_pin_submitted = Some(submitted.clone());
+    owner.until_done = Some(Box::new(move || {
+        reads.lock().unwrap().push(flag.load(Ordering::Acquire));
+        Ok(())
+    }));
+    let claim = rig.claim(&rig.granted_front()).unwrap();
+    let (settled, answer) = tokio::sync::oneshot::channel();
+    let result = rig.with_turn(&ProviderKind::Claude, Some(&rig.name), |turn, sender| {
+        execute_front(turn, sender, claim, owner, settled)
+    });
+    assert_eq!(
+        rig.runtime.block_on(answer).unwrap(),
+        result,
+        "the actual drive hears its local write settlement"
+    );
+    if result.is_ok() {
+        rig.delivered();
+    } else {
+        rig.uncertain();
+    }
+    let reads = observed.lock().unwrap().clone();
+    (
+        result,
+        submitted.load(Ordering::Acquire),
+        reads,
+        rig.events(),
+    )
+}
+
+#[test]
+fn busy_native_pin_uncertain_writes_still_observe_answers_without_arming() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    for (name, channel, pattern, detail, events) in [
+        (
+            "pin-paste-uncertain",
+            7_807_701,
+            "paste-buffer",
+            "paste_failed",
+            vec![],
+        ),
+        (
+            "pin-enter-uncertain",
+            7_807_702,
+            "send-keys*Enter",
+            "enter_failed",
+            vec!["paste"],
+        ),
+    ] {
+        let (result, armed, observed, actual_events) =
+            actual_busy_submission_guard(name, channel, Some(pattern));
+        assert_eq!(result, Err(format!("WriteUncertain({detail:?})")), "{name}");
+        assert!(
+            !armed,
+            "{name}: a possibly written input is not Submitted proof"
+        );
+        assert_eq!(
+            observed,
+            [false],
+            "{name}: the original answer observer still runs once with adoption disarmed"
+        );
+        assert_eq!(
+            actual_events, events,
+            "{name}: no retry after a possibly applied write"
+        );
+    }
+}
+
+#[test]
+fn busy_native_pin_submitted_write_arms_before_its_answer_observer() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (result, armed, observed, events) =
+        actual_busy_submission_guard("pin-submitted", 7_807_703, None);
+    assert_eq!(result, Ok(()));
+    assert!(armed);
+    assert_eq!(
+        observed,
+        [true],
+        "the same actual path arms only its successful local settlement"
+    );
+    assert_eq!(events, ["paste", "Enter"]);
+}

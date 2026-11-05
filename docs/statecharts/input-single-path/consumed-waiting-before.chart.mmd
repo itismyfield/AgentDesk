@@ -1,0 +1,109 @@
+---
+title: "A consumed input survives a restart while the next input waits"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Waiting
+    lg1: Progress
+    lg2: Path to the PendingBEventuallyStarts bug
+    lg3: Repeats forever, so PendingBEventuallyStarts breaks
+  }
+  class lg0 pink
+  class lg1 blue
+  class lg2 bugPath
+  class lg3 repeats
+  s0: A waits beside a busy Claude turn
+  s1: A pasted once#59; the real busy effect has not returned
+  s2: The actual busy write succeeded#59; Submitted settlement is next
+  s3: Submitted is settled#59; the answer observer awaits the actual user row
+  s4: The existing observer found an actual native user row
+  s5: The old observer supplies no pin for A
+  s6: Shutdown marks A for the next process
+  s7: New runtime restores the live pane
+  s8: A re-adoption refused#59; old marker remains
+  s9: Another shutdown refreshes A's marker
+  s10: A ended#59; a later native turn may start
+  s11: A ended#59; unrelated input-notice debt stays at twenty
+  s12: B waits behind A's row while Claude is busy#59; owner wake available#59; one restart remains
+  s13: B claims the mailbox#59; A's closer preserves that claim
+  s14: B waits behind A's row while Claude is busy#59; no owner wake remains#59; one restart remains
+  s15: B waits behind A's row even while Claude is idle#59; owner wake available#59; one restart remains
+  s16: B waits behind A's row while Claude is busy#59; owner wake available#59; restart bound reached
+  s17: B waits behind A's row even while Claude is idle#59; no owner wake remains#59; one restart remains
+  s18: B waits behind A's row while Claude is busy#59; no owner wake remains#59; restart bound reached
+  s19: B waits behind A's row even while Claude is idle#59; owner wake available#59; restart bound reached
+  s20: B waits behind A's row even while Claude is idle#59; no owner wake remains#59; restart bound reached
+  [*] --> s0
+  s0 --> s1: the owner pastes A once
+  s1 --> s2: the actual busy effect returns and arms only a successful attempt
+  s2 --> s3: the attempt's Submitted or WriteUncertain terminal settles
+  s3 --> s4: the unchanged answer observer confirms an actual native user row
+  s4 --> s5: only an armed matching native user is saved through A's birth episode
+  s5 --> s6: planned shutdown refreshes the restart marker
+  s6 --> s7: a new runtime settles boot
+  s7 --> s8: the live pane is restored and adoption is decided
+  s8 --> s9: planned shutdown refreshes the restart marker
+  s8 --> s10: A's canonical terminator is written
+  s9 --> s7: a new runtime settles boot
+  s10 --> s9: planned shutdown refreshes the restart marker
+  s10 --> s11: a later native turn starts
+  s11 --> s9: planned shutdown refreshes the restart marker
+  s11 --> s12: turn/start admits B to the waiting queue
+  s7 --> s10: the live pane is restored and adoption is decided
+  s12 --> s13: the waiting input claims its own mailbox token before create
+  s12 --> s9: planned shutdown refreshes the restart marker
+  s13 --> s14: B's create collides with A#59; B releases its claim and keeps its front
+  s7 --> s11: the live pane is restored and adoption is decided
+  s14 --> s9: planned shutdown refreshes the restart marker
+  s14 --> s15: the later native turn ends#59; its result belongs to N
+  s7 --> s16: the live pane is restored and adoption is decided
+  s11 --> s16: turn/start admits B to the waiting queue
+  s11 --> s11: O captures and delivers A's output#59; input-notice debt remains
+  s15 --> s13: the waiting input claims its own mailbox token before create
+  s15 --> s9: planned shutdown refreshes the restart marker
+  s16 --> s13: the waiting input claims its own mailbox token before create
+  s7 --> s18: the live pane is restored and adoption is decided
+  s13 --> s17: B's create collides with A#59; B releases its claim and keeps its front
+  s13 --> s18: B's create collides with A#59; B releases its claim and keeps its front
+  s17 --> s9: planned shutdown refreshes the restart marker
+  s18 --> s19: the later native turn ends#59; its result belongs to N
+  s7 --> s19: the live pane is restored and adoption is decided
+  s19 --> s13: the waiting input claims its own mailbox token before create
+  s7 --> s20: the live pane is restored and adoption is decided
+  s13 --> s20: B's create collides with A#59; B releases its claim and keeps its front
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 blue
+  class s2 bugPath
+  class s3 blue
+  class s3 bugPath
+  class s4 blue
+  class s4 bugPath
+  class s5 blue
+  class s5 bugPath
+  class s6 blue
+  class s6 bugPath
+  class s7 bugPath
+  class s8 blue
+  class s8 bugPath
+  class s9 bugPath
+  class s10 blue
+  class s10 bugPath
+  class s11 blue
+  class s11 bugPath
+  class s12 pink
+  class s13 pink
+  class s13 bugPath
+  class s14 pink
+  class s15 pink
+  class s16 pink
+  class s16 bugPath
+  class s17 pink
+  class s18 pink
+  class s18 bugPath
+  class s19 pink
+  class s19 bugPath
+  class s20 pink
+  class s20 repeats

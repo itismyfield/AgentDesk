@@ -6,6 +6,11 @@
 
 use super::*;
 
+#[cfg(unix)]
+pub(in crate::services::discord) async fn carried_restart_marked(provider: &ProviderKind) -> bool {
+    super::deferred_restart_marked(provider).await
+}
+
 #[tokio::test]
 async fn deferred_marking_backfills_old_rows_and_marks_siblings() {
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();

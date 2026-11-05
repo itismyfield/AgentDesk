@@ -168,6 +168,12 @@ async fn try_close(
             {
                 return Err(kept("current_generation"));
             }
+            if row.managed_submission.is_some()
+                && !row.readopted_from_inflight
+                && !inflight::historical_input_verified(&row)
+            {
+                return Err(kept("unverified_carried_input"));
+            }
             Carried::Row(Box::new(row))
         }
         (None, Some(target)) => Carried::Archived(Box::new(target)),
@@ -209,14 +215,14 @@ async fn try_close(
     };
     #[cfg(test)]
     tests::pause("locked", channel.get()).await;
-    if !still_closed(shared, provider, channel, &end).await {
-        return Err(kept("native_moved_under_lock"));
-    }
-    if input_delivered_since(provider, channel, &end) && !mutant("delivery") {
-        return Err(kept("unconfirmed_injection_since_growth"));
-    }
-    if episode(shared, channel).await != before {
-        return Err(kept("episode_changed_under_lock"));
+    unchanged_under_lock(shared, provider, channel, &end, &before).await?;
+    if let Carried::Row(row) = &carried {
+        let orphan_input =
+            row.managed_submission.is_some() && !row.readopted_from_inflight && !target_episode;
+        commit_receipt(shared, provider, row, end.aborted && !orphan_input).await?;
+        #[cfg(test)]
+        tests::pause("receipt", channel.get()).await;
+        unchanged_under_lock(shared, provider, channel, &end, &before).await?;
     }
     let target = match carried {
         Carried::Row(row) => {
@@ -362,6 +368,61 @@ fn input_delivered_since(
         .is_some_and(|delivered| delivered >= end.grew_at)
 }
 
+async fn unchanged_under_lock(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    end: &ClosedBoundary,
+    before: &Episode,
+) -> Result<(), Kept> {
+    if !still_closed(shared, provider, channel, end).await {
+        return Err(kept("native_moved_under_lock"));
+    }
+    if input_delivered_since(provider, channel, end) && !mutant("delivery") {
+        return Err(kept("unconfirmed_injection_since_growth"));
+    }
+    if episode(shared, channel).await != *before {
+        return Err(kept("episode_changed_under_lock"));
+    }
+    Ok(())
+}
+
+/// A named input's receipt must really commit before its only durable row can be archived.
+async fn commit_receipt(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    row: &InflightTurnState,
+    aborted: bool,
+) -> Result<(), Kept> {
+    if row.user_msg_id == 0 {
+        return Ok(());
+    }
+    let stamp = row
+        .terminal_receipt
+        .unwrap_or(inflight::TerminalReceiptStamp {
+            outcome: if aborted {
+                crate::db::turns::TerminalOutcome::Cancelled
+            } else {
+                crate::db::turns::TerminalOutcome::Completed
+            },
+            confirmed_at: chrono::Utc::now(),
+        });
+    if let Some(pool) = shared.pg_pool.as_ref()
+        && row.provider_kind().as_ref() == Some(provider)
+        && discord::receipt_settle::record(Some(pool), row, stamp.outcome, stamp.confirmed_at).await
+    {
+        return Ok(());
+    }
+    let _ = inflight::stamp_terminal_receipt_if_matches_identity(
+        provider,
+        row.channel_id,
+        &inflight::InflightTurnIdentity::from_state(row),
+        row.turn_nonce.as_deref(),
+        stamp,
+    );
+    Err(kept("receipt_not_committed"))
+}
+
 /// O, asked after the native end was read, owes nothing and captured that source through it.
 async fn o_delivered_through(channel: ChannelId, end: &ClosedBoundary) -> Result<(), String> {
     let readiness = crate::services::tui_o::writer::host::process_readiness();
@@ -373,7 +434,7 @@ async fn o_delivered_through(channel: ChannelId, end: &ClosedBoundary) -> Result
         return Err(format!("o_unanswered:hosted={hosted}"));
     };
     let drained = mutant("debt")
-        || (owed.owed == 0
+        || (owed.owed == owed.notice_owed
             && owed.prepared == 0
             && owed.unsealed == 0
             && owed.uncaptured == 0
@@ -383,14 +444,15 @@ async fn o_delivered_through(channel: ChannelId, end: &ClosedBoundary) -> Result
     if !drained {
         return Err(format!(
             "o_owes:owed={} prepared={} unsealed={} uncaptured={} binding_pending={} \
-             verified_work={} posting={}",
+             verified_work={} posting={} notice_owed={}",
             owed.owed,
             owed.prepared,
             owed.unsealed,
             owed.uncaptured,
             owed.binding_pending,
             owed.verified_work,
-            owed.posting
+            owed.posting,
+            owed.notice_owed
         ));
     }
     let source = owed
@@ -415,3 +477,8 @@ fn same_source(left: &Path, right: &Path) -> bool {
 #[cfg(test)]
 #[path = "carried_turn_close_tests.rs"]
 mod tests;
+
+#[cfg(all(test, unix))]
+pub(crate) fn before_carried_archive_for_tests(channel: u64, hook: impl FnOnce() + 'static) {
+    tests::on_archive(channel, hook);
+}

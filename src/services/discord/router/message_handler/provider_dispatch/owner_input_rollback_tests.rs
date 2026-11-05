@@ -8,6 +8,8 @@ use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
 use crate::services::discord::{self as discord, SharedData, turn_completion_events};
 use poise::serenity_prelude::ChannelId;
 
+#[path = "owner_input_carried_restart_tests.rs"]
+mod carried_restart;
 #[path = "owner_input_owned_stop_tests.rs"]
 mod owned_stop;
 
