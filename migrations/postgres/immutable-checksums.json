@@ -840,6 +840,11 @@
       "path": "migrations/postgres/0172_drop_agents_xp.sql",
       "sha256": "847aab3d0d9d56d8a4e7ae99bfed99c6283daf06d02d81da7e65e5cefdc3f36d",
       "version": 172
+    },
+    {
+      "path": "migrations/postgres/0173_message_outbox_body_census.sql",
+      "sha256": "d46a1ce98c32002e93158039c0393fda8967d28086df956d74a87dc6a6746678",
+      "version": 173
     }
   ],
   "version": 1

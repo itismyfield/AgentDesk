@@ -297,10 +297,10 @@ jobs:
         run: |
           set -euo pipefail
           NEXTEST_DIR="$RUNNER_TEMP/nextest"
-          mkdir -p "$NEXTEST_DIR"
+          mkdir -p "$NEXTEST_DIR" "$RUNNER_TEMP/nextest-census"
           cargo nextest archive --lib --archive-file "$NEXTEST_DIR/lib-tests.tar.zst"
           cargo nextest list --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" \
-            --ignore-default-filter --message-format json > "$NEXTEST_DIR/universe.json"
+            --extract-to "$RUNNER_TEMP/nextest-census" --ignore-default-filter --message-format json > "$NEXTEST_DIR/universe.json"
           python3 scripts/check_relay_authority_contract.py --nextest-list "$NEXTEST_DIR/universe.json"
           python3 scripts/ci/rust_test_sources.py compare --platform linux --list "$NEXTEST_DIR/universe.json" \
             --json-out "$NEXTEST_DIR/compare.json"
@@ -425,6 +425,7 @@ jobs:
           pattern: nextest-worker-*
           path: ${{ runner.temp }}/nextest-artifacts
       - name: Audit worker results
+        id: audit
         shell: bash
         env:
           BASH_ENV: /dev/null
@@ -439,6 +440,15 @@ jobs:
             --json-out "$RUNNER_TEMP/verdict.json" --summary-out "$RUNNER_TEMP/summary.md" || status=$?
           cat "$RUNNER_TEMP/summary.md" >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
+      - name: Upload census execution evidence
+        if: ${{ steps.audit.outputs.census_evidence_dir != '' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: legacy-body-census-test-evidence-${{ github.run_attempt }}
+          path: ${{ steps.audit.outputs.census_evidence_dir }}
+          if-no-files-found: warn
+          retention-days: 7
 
   postgres_full:
     name: PostgreSQL full tests

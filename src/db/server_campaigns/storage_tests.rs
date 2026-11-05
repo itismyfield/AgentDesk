@@ -903,7 +903,7 @@ async fn later_branch_migrations_upgrade_a_main_database_already_at_0161_pg() {
     }
     // Each later file leaves (or, with `!`, drops) at least one object of its own,
     // so a partial apply cannot pass.
-    let expected: [(i64, &[&str]); 10] = [
+    let expected: [(i64, &[&str]); 11] = [
         (
             163,
             &["table:channel_home_preferences", "constraint:chp_mode_home"],
@@ -969,6 +969,7 @@ async fn later_branch_migrations_upgrade_a_main_database_already_at_0161_pg() {
         ),
         (171, &["column:message_outbox.producer_turn_nonce"]),
         (172, &["!column:agents.xp"]),
+        (173, &["column:message_outbox.body_census"]),
     ];
     assert_eq!(
         expected

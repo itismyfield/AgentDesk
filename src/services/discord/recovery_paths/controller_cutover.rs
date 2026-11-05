@@ -195,52 +195,57 @@ where
         shared.restart.current_generation,
     );
     let no_lease = toc::NoLease;
-    let delivery = toc::deliver_turn_output(
-        gateway,
-        toc::TurnOutputCtx {
-            turn,
-            lease_key: None,
-            // No `Recovery` owner variant exists and the enum lives in a frozen
-            // baseline; `StandbyRelay` is cosmetic on the markerless path (no
-            // owner-scoped routing fires), so it is reused as the closest
-            // transport-only relay owner.
-            owner: RelayOwnerKind::StandbyRelay,
-            // Cosmetic on the markerless path (acquire always fails ⇒ no marker).
-            holder: super::super::LeaseHolder::Sink,
-            lease: &no_lease,
-            channel_id,
-            placeholder_controller: &shared.ui.placeholder_controller,
-            placeholder: toc::PlaceholderSlot::Active {
-                message_id: placeholder,
-                key: PlaceholderKey {
-                    provider: provider.clone(),
+    let delivery = super::super::outbound::body_census::BodySource::inherited()
+        .observe(
+            crate::services::tui_o::cutover::BodySite::RecoveryController,
+            super::super::outbound::body_census::BodyOffer::Recovered,
+            toc::deliver_turn_output(
+                gateway,
+                toc::TurnOutputCtx {
+                    turn,
+                    lease_key: None,
+                    // No `Recovery` owner variant exists and the enum lives in a frozen
+                    // baseline; `StandbyRelay` is cosmetic on the markerless path (no
+                    // owner-scoped routing fires), so it is reused as the closest
+                    // transport-only relay owner.
+                    owner: RelayOwnerKind::StandbyRelay,
+                    // Cosmetic on the markerless path (acquire always fails ⇒ no marker).
+                    holder: super::super::LeaseHolder::Sink,
+                    lease: &no_lease,
                     channel_id,
-                    message_id: placeholder,
+                    placeholder_controller: &shared.ui.placeholder_controller,
+                    placeholder: toc::PlaceholderSlot::Active {
+                        message_id: placeholder,
+                        key: PlaceholderKey {
+                            provider: provider.clone(),
+                            channel_id,
+                            message_id: placeholder,
+                        },
+                    },
+                    body,
+                    // Recovery has no offsets and never commits (NoLease) — inert range.
+                    send_range: (0, 0),
+                    // `Replace { Active }` → non-terminal → `post_send_finalize` no-ops,
+                    // matching the legacy edit-in-place `replace_long_message_raw`.
+                    plan: toc::OutputPlan::Replace {
+                        lifecycle: PlaceholderLifecycle::Active,
+                    },
+                    // #2757: never delete the original on edit-fail fallback (legacy
+                    // recovery `replace_long_message_raw` never deletes).
+                    edit_fail_policy: toc::EditFailPlaceholderPolicy::PreserveAlways,
+                    // Legacy maps `SentFallbackAfterEditFailure` → `Ok(())` → Delivered.
+                    fallback_commit_policy: toc::FallbackCommitPolicy::CommitOnFallback,
+                    // Transport-only: a (failed) acquire still POSTs, markerless.
+                    acquire_failure_mode: toc::AcquireFailureMode::ProceedMarkerless,
+                    // No offset authority → unconditional advance (A1 semantics).
+                    advance: None,
+                    // No heartbeat (no lease to renew).
+                    heartbeat: None,
+                    body_claim,
                 },
-            },
-            body,
-            // Recovery has no offsets and never commits (NoLease) — inert range.
-            send_range: (0, 0),
-            // `Replace { Active }` → non-terminal → `post_send_finalize` no-ops,
-            // matching the legacy edit-in-place `replace_long_message_raw`.
-            plan: toc::OutputPlan::Replace {
-                lifecycle: PlaceholderLifecycle::Active,
-            },
-            // #2757: never delete the original on edit-fail fallback (legacy
-            // recovery `replace_long_message_raw` never deletes).
-            edit_fail_policy: toc::EditFailPlaceholderPolicy::PreserveAlways,
-            // Legacy maps `SentFallbackAfterEditFailure` → `Ok(())` → Delivered.
-            fallback_commit_policy: toc::FallbackCommitPolicy::CommitOnFallback,
-            // Transport-only: a (failed) acquire still POSTs, markerless.
-            acquire_failure_mode: toc::AcquireFailureMode::ProceedMarkerless,
-            // No offset authority → unconditional advance (A1 semantics).
-            advance: None,
-            // No heartbeat (no lease to renew).
-            heartbeat: None,
-            body_claim,
-        },
-    )
-    .await;
+            ),
+        )
+        .await;
 
     match delivery {
         // Confirmed POST (EditedOriginal OR #2757 CommitOnFallback fallback): the
