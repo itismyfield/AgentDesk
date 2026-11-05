@@ -2417,3 +2417,7 @@ fn held_dispatch_is_not_inherited_by_an_active_start_pg() {
 
 #[path = "system_prompt_tests.rs"]
 mod system_prompt_tests;
+
+#[cfg(unix)]
+#[path = "first_key_gate_paths_tests.rs"]
+mod first_key_gate_paths;
