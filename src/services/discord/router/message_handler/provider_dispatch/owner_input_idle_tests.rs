@@ -2477,6 +2477,91 @@ async fn synthetic_starts_wait_busy_and_owe_no_human_hold_notice() {
 }
 pub(crate) type RootRecoveryLaunch = Box<dyn FnOnce(OwnerTurn, &str) -> Result<(), String>>;
 
+pub(crate) enum RootRecoveryDriveEvent {
+    Handoff(u64, Result<(), String>),
+    Launch {
+        owner: Box<OwnerTurn>,
+        text: String,
+        reply: std::sync::mpsc::SyncSender<Result<(), String>>,
+    },
+}
+
+static ROOT_RECOVERY_DRIVE_PROBES: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<ChannelId, Sender<RootRecoveryDriveEvent>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+pub(crate) struct RootRecoveryDriveProbe {
+    channel: ChannelId,
+    created: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl RootRecoveryDriveProbe {
+    pub(crate) fn created(&self) -> usize {
+        self.created.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Drop for RootRecoveryDriveProbe {
+    fn drop(&mut self) {
+        ROOT_RECOVERY_DRIVE_PROBES
+            .lock()
+            .unwrap()
+            .remove(&self.channel);
+        SETTLEMENT_PROBES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .remove(&self.channel.get());
+    }
+}
+
+pub(crate) fn install_root_recovery_drive_probe(
+    channel: ChannelId,
+) -> (
+    RootRecoveryDriveProbe,
+    std::sync::mpsc::Receiver<RootRecoveryDriveEvent>,
+) {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let (settled, _) = std::sync::mpsc::channel();
+    let created = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    assert!(
+        SETTLEMENT_PROBES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(
+                channel.get(),
+                SettlementProbe {
+                    settled,
+                    created: created.clone(),
+                },
+            )
+            .is_none()
+    );
+    assert!(
+        ROOT_RECOVERY_DRIVE_PROBES
+            .lock()
+            .unwrap()
+            .insert(channel, sender)
+            .is_none()
+    );
+    (RootRecoveryDriveProbe { channel, created }, receiver)
+}
+
+pub(crate) fn observe_root_recovery_handoff(
+    channel: u64,
+    message: u64,
+    result: &Result<(), String>,
+) {
+    if let Some(sender) = ROOT_RECOVERY_DRIVE_PROBES
+        .lock()
+        .unwrap()
+        .get(&ChannelId::new(channel))
+    {
+        let _ = sender.send(RootRecoveryDriveEvent::Handoff(message, result.clone()));
+    }
+}
+
 thread_local! {
     static ROOT_RECOVERY_LAUNCH: std::cell::RefCell<Option<(ChannelId, RootRecoveryLaunch)>> =
         const { std::cell::RefCell::new(None) };
@@ -2505,6 +2590,27 @@ pub(crate) fn root_recovery_launch(
     owner: OwnerTurn,
     text: &str,
 ) -> Result<OwnerTurn, Result<(), String>> {
+    let probe = ROOT_RECOVERY_DRIVE_PROBES
+        .lock()
+        .unwrap()
+        .get(&channel)
+        .cloned();
+    if let Some(probe) = probe {
+        let (reply, result) = std::sync::mpsc::sync_channel(1);
+        if probe
+            .send(RootRecoveryDriveEvent::Launch {
+                owner: Box::new(owner),
+                text: text.into(),
+                reply,
+            })
+            .is_err()
+        {
+            return Err(Err("recovery launch observer closed".into()));
+        }
+        return Err(tokio::task::block_in_place(|| {
+            result.recv().unwrap_or_else(|error| Err(error.to_string()))
+        }));
+    }
     let launch = ROOT_RECOVERY_LAUNCH.with(|slot| {
         let mut slot = slot.borrow_mut();
         slot.as_ref()

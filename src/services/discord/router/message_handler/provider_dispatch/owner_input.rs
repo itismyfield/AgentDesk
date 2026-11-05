@@ -198,6 +198,8 @@ pub(in crate::services::discord) fn owner_drive(
                 ingress::handoff_held(shared, &provider, ChannelId::new(channel), &original, hold)
                     .await;
             }
+            #[cfg(test)]
+            tests::idle::observe_root_recovery_handoff(channel, original.1.message_id, &result);
             result
         })
     });
@@ -441,6 +443,11 @@ pub(in crate::services::discord) fn wake(shared: &Shared, channel: ChannelId) {
     crate::services::discord::queue_io::input_owner::drive::wake(drive(shared, channel));
 }
 
+#[cfg(test)]
+pub(in crate::services::discord) fn wake_drive_for_test(shared: &Shared, channel: ChannelId) {
+    crate::services::discord::queue_io::input_owner::drive::wake(drive(shared, channel));
+}
+
 /// A headless start on a target the owner takes: its reservation's original is admitted under
 /// that turn's ticket, then the drive wakes; `None` leaves the start to its legacy path.
 pub(in crate::services::discord) async fn admit_start(
@@ -593,7 +600,8 @@ pub(in crate::services::discord) async fn start_idle_for_test(
 
 #[cfg(test)]
 pub(in crate::services::discord) use tests::idle::{
-    claimed_root_recovery_launch, install_root_recovery_launch,
+    RootRecoveryDriveEvent, claimed_root_recovery_launch, install_root_recovery_drive_probe,
+    install_root_recovery_launch,
 };
 
 /// An owner front's turn, registered from this turn's own host and pane: a running Claude pane

@@ -1,7 +1,7 @@
 use super::*;
 use crate::services::discord::queue_io::cancel_backstop_test_support as wakes;
 use crate::services::discord::queue_io::input_owner::admission::{
-    Admission, TurnBind, admit_with_context, exact_turn,
+    Admission, AdmissionTicket, TurnBind, admit_with_context, exact_turn,
 };
 use crate::services::discord::queue_io::input_owner::drive::{Front, Handoff};
 use crate::services::discord::queue_io::input_owner::ingress;
@@ -869,4 +869,228 @@ fn rr_preclaim_legacy_queue_held_preserves_the_original_before_any_take_pg() {
         if why.contains("PolicyUnverified(Identity)")),
         "the pre-dequeue path itself recorded the policy hold"
     );
+}
+
+#[test]
+fn rr_wake_reader_completion_restarts_the_same_held_ingress_through_the_live_drive_pg() {
+    use crate::services::discord::queue_io::cancel_backstop_test_support::KickoffCompletion;
+    use owner::RootRecoveryDriveEvent;
+
+    let case = Case::launched("rr-wake-live-drive");
+    let _intake = IntakeGate::configure(&case);
+    let channel = ChannelId::new(CHANNEL);
+    let shared = case.shared.clone();
+    let endpoint = crate::config::session_hosts::herdr_endpoint(CHANNEL).unwrap();
+    let row = case
+        .fx
+        .rt
+        .block_on(
+            crate::services::discord::recovery_engine::herdr_server_replaced::canonical_row(
+                &case.fx.pool,
+                TOKEN,
+                &ProviderKind::Claude,
+                channel,
+            ),
+        )
+        .unwrap();
+    let candidate = {
+        let _registry = case.fx.rig.registry_as_on_this_thread(
+            &endpoint.execution_node,
+            &endpoint.key,
+            &endpoint.socket_path,
+            &endpoint.herdr_session,
+        );
+        crate::services::discord::recovery_engine::herdr_reader::prepare_root_replaced_candidate(
+            &row,
+        )
+        .unwrap()
+        .observe()
+        .unwrap()
+        .expect("the live probe sees the replaced root before the input arrives")
+    };
+    let install_registry = case.fx.rig.thread_installer(
+        &endpoint.execution_node,
+        &endpoint.key,
+        &endpoint.socket_path,
+        &endpoint.herdr_session,
+    );
+    let config = (*crate::config_live_reload::current().unwrap()).clone();
+    let log_root = crate::services::tui_prompt_dedupe::binding_events::test_root();
+    // Worker-local fixtures represent the same process-wide registry and candidate cache.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .on_thread_start(move || {
+            std::mem::forget(crate::config::session_hosts::force_config_for_test(&config));
+            install_registry();
+            recovery::remember_candidate(&candidate);
+            crate::services::tui_prompt_dedupe::binding_events::set_test_root(log_root.as_deref());
+        })
+        .build()
+        .unwrap();
+    let (probe, events) = owner::install_root_recovery_drive_probe(channel);
+    let completion = KickoffCompletion::install(channel);
+    let effects = case.effects();
+    case.fx.rig.exists(PROVIDER, true);
+
+    // Keep the queue's actor on the fixture runtime while the drive's launch crosses threads.
+    let (_, _http) = case
+        .fx
+        .rt
+        .block_on(crate::services::discord::shared_state::test_rest::recording_mock(960, CHANNEL));
+    let capture = WakeCapture::install(channel);
+    let mailbox = case.fx.rt.block_on(ingress::ADOPTS.scope(true, async {
+        shared
+            .http
+            .cached_bot_token
+            .set("root-wake-live-drive-test".into())
+            .unwrap();
+        assert_eq!(
+            ingress::adopt(&shared, &ProviderKind::Claude, channel).await,
+            Ok(true)
+        );
+        let outcome = ingress::enqueue(&shared, &ProviderKind::Claude, channel, &queued_input())
+            .await
+            .unwrap();
+        assert!(outcome.enqueued);
+        assert!(outcome.persistence_error.is_none());
+        shared.mailbox(channel)
+    }));
+    drop(capture);
+    let wakes_before_completion = wakes::owner_wakes(channel);
+    {
+        let _runtime = runtime.enter();
+        owner::wake_drive_for_test(&shared, channel);
+    }
+    let first = events.recv_timeout(Duration::from_secs(5)).ok();
+    assert!(
+        matches!(first, Some(RootRecoveryDriveEvent::Handoff(message, ref result))
+            if message == queued_input().message_id.get()
+                && result == &Err("NotSent(\"herdr_root_recovery_held\")".into())),
+        "the actual driver first leaves the original Held at the preclaim guard"
+    );
+    assert_eq!(
+        probe.created(),
+        1,
+        "the first real drive was constructed once"
+    );
+    let original = case.fx.rt.block_on(async {
+        mailbox
+            .v2_request(|slot| {
+                let owner = slot.as_ref().ok_or("owner absent")?;
+                let front = owner.front().ok_or("Held original absent")?;
+                assert_eq!(owner.claim_number(), 0, "Held has not consumed a claim");
+                assert!(!owner.claimed(front.1.message_id, &front));
+                assert_eq!(owner.json()?["items"].as_array().unwrap().len(), 1);
+                Ok(front)
+            })
+            .await
+            .unwrap()
+    });
+    assert_eq!(case.fx.row(), Some(HostedState::Bound));
+    assert_eq!(case.effects(), effects, "Held has no physical effects");
+
+    case.fx.rig.exists(PROVIDER, false);
+    let reader = shared.clone();
+    runtime
+        .block_on(runtime.spawn(async move {
+            tokio::task::block_in_place(|| {
+                reconnect_restarted_herdr_with_shared(&reader, &ProviderKind::Claude);
+            });
+        }))
+        .unwrap();
+    case.fx
+        .rt
+        .block_on(completion.processed(0, Duration::from_secs(5)));
+    assert_eq!(
+        wakes::owner_wakes(channel),
+        wakes_before_completion + 1,
+        "the reader's completion supplies the only retry wake"
+    );
+    assert_eq!(
+        probe.created(),
+        2,
+        "the completion wake must construct the production owner drive"
+    );
+    let resumed = events.recv_timeout(Duration::from_secs(5)).ok();
+    assert!(
+        matches!(resumed, Some(RootRecoveryDriveEvent::Launch { .. })),
+        "reader completion must reach the production drive and reclaim the same Held input"
+    );
+    let Some(RootRecoveryDriveEvent::Launch { owner, text, reply }) = resumed else {
+        unreachable!()
+    };
+    assert_eq!(owner.front().0, original.0, "the ticket is unchanged");
+    assert_eq!(
+        serde_json::to_value(&owner.front().1).unwrap(),
+        serde_json::to_value(&original.1).unwrap(),
+        "the entire original survives the Held interval"
+    );
+    assert_eq!(text, original.1.text);
+    assert_eq!(case.fx.row(), Some(HostedState::Retired));
+    let claimed = case.fx.rt.block_on(mailbox.v2_request(|slot| {
+        let owner = slot.as_ref().ok_or("owner absent")?;
+        let front = owner.front().ok_or("reclaimed original absent")?;
+        Ok(owner.claim_number() > 0 && owner.claimed(front.1.message_id, &front))
+    }));
+    assert_eq!(
+        claimed,
+        Ok(true),
+        "the resumed drive owns the original claim"
+    );
+    let launch = owner::claimed_root_recovery_launch(*owner, &text, InputOrigin::Discord);
+    let creates = {
+        let _runtime = case.fx.rt.enter();
+        claimed_turn(&case, &text, launch, None)
+    };
+    assert_eq!(creates, 1, "the resumed original creates exactly one pane");
+    reply.send(Ok(())).unwrap();
+    let settled = events.recv_timeout(Duration::from_secs(5)).ok();
+    assert!(
+        matches!(settled, Some(RootRecoveryDriveEvent::Handoff(message, Ok(())))
+            if message == original.1.message_id),
+        "the production drive receives the original's successful settlement"
+    );
+    case.fx.rt.block_on(async {
+        let ticket = AdmissionTicket::stored(original.0.as_deref().unwrap());
+        assert!(matches!(
+            exact_turn(&mailbox, &ticket, &original.1).await,
+            Ok(TurnBind::Settled(_))
+        ));
+        let state = mailbox
+            .v2_request(|slot| slot.as_ref().ok_or("owner absent")?.json())
+            .await
+            .unwrap();
+        assert_eq!(state["items"], json!([]));
+        assert!(state["head_injection"].is_null());
+        assert_eq!(state["retained_inputs"], json!([]));
+    });
+    let effects = case.effects();
+    let after = shared.clone();
+    runtime
+        .block_on(runtime.spawn(async move {
+            tokio::task::block_in_place(|| {
+                reconnect_restarted_herdr_with_shared(&after, &ProviderKind::Claude);
+            });
+        }))
+        .unwrap();
+    case.fx
+        .rt
+        .block_on(completion.processed(0, Duration::from_secs(5)));
+    assert_eq!(wakes::owner_wakes(channel), wakes_before_completion + 1);
+    assert_eq!(
+        probe.created(),
+        2,
+        "a repeat pass constructs no extra drive"
+    );
+    assert!(
+        events.try_recv().is_err(),
+        "the settled input is never reclaimed"
+    );
+    assert_eq!(
+        case.effects(),
+        effects,
+        "a repeat reader pass has no new effects"
+    );
+    assert_eq!(case.fx.rig.sends().len(), 4, "one recovered submit total");
 }
