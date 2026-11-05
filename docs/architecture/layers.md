@@ -282,6 +282,40 @@ C3 squash 결과는 검토한 C3 accepted의 매핑·부채 records·zero-rule�
 새 병합 source anchor에서 `--update-reductions`와 일반 `--check`를 실행하며, 과거 C3 매핑으로 C4 편입을 다시 승인하지 않는다.
 C5·C6도 이전 조각의 실제 squash와 검토한 accepted를 대조하는 같은 착지 절차를 적용한다.
 
+### Config·runtime·core와 model/org 저장 경계
+
+`config` 본체와 `runtime_layout`, live reload·credential·eventbus·logging은
+파일·환경·process snapshot 실행을 소유하는 adapter다. 기존 config 값 계약 세 규칙과
+`runtime_layout::paths` foundation은 유지한다. config DTO는 vocabulary,
+받은 snapshot의 구조·경로 계산은 foundation, reload·runtime profile·hosting 검증과
+migration 허용 정책은 application으로 구분한다. `config_path::selection`은 실제
+`Path::is_file`을 수행하므로 adapter를 상속한다. approval snapshot과 consent hold의
+실제 파일·저장 실행에는 긴 adapter override를 둔다.
+
+`config::session_hosts`는 platform·provider/TUI 적격성과 restart 필요성 정책의
+application 경계다(`src/config/session_hosts.rs:180`, :264, :296).
+실행 핸들을 보유하는 `services::agent_protocol`과 provider model catalog·org loader·
+Discord runtime store는 adapter다. GitHub process 실행과 sync/triage 업무,
+supervisor 복구 정책, utils의 계산·파일 실행·HTTP 응답 경계도 구분한다.
+`ui::ai_screen`은 DTO 외 문자열 정제를 수행하므로 foundation override를 함께 두며,
+`manual_intervention`의 개입 필요 판정은 application으로 둔다.
+
+이 조각은 논리 모듈 70개를 규칙 43개로 분류한다. 편입 60 ID·127회의 증거는
+[`module-layer-c5-admission.tsv`](module-layer-c5-admission.tsv)에 기록한다.
+`accepted_indeterminate_count` 합계는 126, `grown_since_accepted` 합계는 1이다.
+증가한 path ID `97f26d5fe215da0ee672dc095e808ee5c3f3517771e3a353d6bb3e3dcd72605c`는
+`session_host::herdr::launch_host` → `config::session_hosts`이며 accepted 판정 불가 한도는
+3회다. 같은 source anchor의 이전 매핑에서는 현재 판정 불가 4회이고, 새 매핑에서
+역방향 4회로 바뀐다. 기존 역방향 양수 record·zero-rule에는 없으며 편입 count는
+현재 판정 불가 exact count와 같다. 원인은 #7808 commit
+`b0bab6ebf693502f86c0b2e2c0307033fa411c29`이 추가한
+`src/services/session_host/herdr/launch_host.rs:289`의 `EndpointMode::UserDefault` 참조다.
+기존 역방향 양수 record·zero-rule 한도는 올리지 않고, 나머지 경고 증가도 흡수하지 않는다.
+
+진행 중 ref와 C5 대상의 겹침은 시작과 최종 검증 때 다시 대조한다.
+`services` 상위 미분류, owner_input의 기존 분류와 C6 보류, history 7개 보류와
+C2·C3·C4 known 층은 유지한다. `tui_o::turn_mode` application 정교화는 C6에서 다룬다.
+
 ## 검토된 모듈 이동의 old→new 대응
 
 이동 대응은 [`layer_moves.toml`](../../scripts/audit_maintainability/layer_moves.toml)에 적는다.
