@@ -387,3 +387,6 @@ pub(in crate::services::discord) async fn entry_aborted(
         record_or_stamp(shared.pg_pool.as_ref(), &row, TerminalOutcome::Failed).await;
     }
 }
+
+/// Removed inputs' owed receipts settle in the queue layer that also settles a forced purge.
+pub(crate) use crate::services::queue::settle_v2_drops;

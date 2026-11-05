@@ -96,6 +96,7 @@ mod restart_mode;
 mod scheduled_turn;
 // Execution receipts of every row-removing ending, and settlement of rows kept marked.
 mod receipt_settle;
+pub(crate) use receipt_settle::settle_v2_drops;
 // #1074: session identity parsing SSoT (legacy + namespaced session_key forms).
 pub(crate) mod restart_report;
 mod router;

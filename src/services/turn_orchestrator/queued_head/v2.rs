@@ -1,4 +1,4 @@
-//! V2 owner foundation, reachable through the mailbox only in tests until admission is wired.
+//! The V2 input owner the mailbox actor holds for a channel's queue file.
 use super::v2_types::*;
 use super::{HeadPhase, PendingQueueItem, QueueIdentity};
 #[cfg(test)]
@@ -10,6 +10,7 @@ mod attempt;
 mod commit;
 pub(crate) mod control;
 mod migration;
+pub(crate) mod origin;
 pub(crate) mod projection;
 mod retained;
 pub(crate) mod source_admission;
@@ -67,6 +68,7 @@ impl Owner {
                 retained_inputs: vec![],
                 terminal_identities: vec![],
                 namespace: Some(namespace),
+                owed_drop_receipts: Vec::new(),
             },
         };
         let mut owner = Self {
@@ -348,6 +350,17 @@ impl Owner {
     /// Whether the last handoff of `message` was held to wait for a real wake; read once.
     pub(crate) fn take_held(&mut self, message: u64) -> bool {
         self.held.take() == Some(message)
+    }
+
+    /// Holds the granted front unclaimed, as a refusal before any key does, so a read of its cause
+    /// wakes the drive; the grant is withdrawn.
+    pub(crate) fn hold_front(&mut self, front: &Front) -> Result<(), String> {
+        if !self.front().is_some_and(|now| is_front(&now, front)) {
+            return Err("not the owner's unattempted front".into());
+        }
+        self.front_grant = None;
+        self.held = Some(front.1.message_id);
+        Ok(())
     }
 
     pub(crate) fn front_outstanding(&self) -> bool {

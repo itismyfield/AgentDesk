@@ -499,6 +499,88 @@ pub(in crate::services::discord) async fn recover(shared: &Shared, channel: Chan
     }
 }
 
+/// Why a start waits unclaimed: a later event wakes it, or a read of its pane's native turn does.
+enum Wait {
+    Go,
+    Event,
+    Watch(crate::services::discord::queue_io::input_owner::held_watch::ScreenProbe),
+}
+
+/// Whether a start must wait for its pane's idle: a turn AgentDesk did not start holds the channel,
+/// or the channel pane the start would take runs a native Claude turn.
+async fn start_waits(shared: &Shared, channel: ChannelId, context: &Value) -> Wait {
+    use crate::services::discord::inflight::{TurnSource, load_inflight_state_read_only};
+    use crate::services::discord::turn_presence::activity::{Activity, activity_now};
+    let (provider, id) = (&shared.provider, channel.get());
+    let rest = crate::services::discord::recovery_engine::herdr_row_end::owner::holds_rest;
+    let row = load_inflight_state_read_only(provider, id)
+        .is_some_and(|row| row.turn_source != TurnSource::Managed);
+    if row || rest(provider, id) {
+        return Wait::Event;
+    }
+    if crate::services::tui_o::turn_mode::transcript_turns(id) {
+        let busy = activity_now(shared, provider, channel).await.activity != Activity::Idle;
+        return if busy { Wait::Event } else { Wait::Go };
+    }
+    native_turn(shared, channel, context).await
+}
+
+/// The channel's own Claude pane running a turn now, read as the start's execution reads it, with
+/// a read of that turn's end; a labelled or process start takes another pane or none.
+async fn native_turn(shared: &Shared, channel: ChannelId, context: &Value) -> Wait {
+    use busy_inject::Screen;
+    let named = |value: &Value, key: &str| value[key].as_str().is_some_and(|s| !s.is_empty());
+    let metadata = &context["metadata"];
+    let snapshot = "scheduled_snapshot_session_label";
+    let elsewhere = named(context, "synthetic_label")
+        || named(context, snapshot)
+        || named(metadata, snapshot)
+        || metadata["execution_mode"] == "process";
+    if elsewhere || shared.provider != ProviderKind::Claude {
+        return Wait::Go;
+    }
+    let (dir, session_id, name) = {
+        let core = shared.core.lock().await;
+        let Some(session) = core.sessions.get(&channel) else {
+            return Wait::Go;
+        };
+        let name = session.channel_name.clone();
+        (
+            session.current_path.clone(),
+            session.session_id.clone(),
+            name,
+        )
+    };
+    let hint = context["channel_name_hint"].as_str().map(str::to_string);
+    let Some(name) = name.or(hint) else {
+        return Wait::Go;
+    };
+    let tmux = shared.provider.build_tmux_session_name(&name);
+    let read = move || {
+        match crate::services::platform::tmux::pane_liveness(&tmux) {
+            PaneLiveness::Live => {}
+            PaneLiveness::DeadOrAbsent => return Screen::Gone,
+            // A pane that could not be read is not gone; the watch reads it again.
+            PaneLiveness::ProbeError => return Screen::Unknown,
+        }
+        let resolve = super::super::tui_followup::claude_followup_transcript;
+        match resolve(dir.as_deref(), session_id.as_deref(), Some(&tmux)) {
+            Some(path)
+                if crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&path)
+                    .is_busy() =>
+            {
+                Screen::Blocked
+            }
+            Some(_) => Screen::Ready,
+            None => Screen::Unknown,
+        }
+    };
+    match read() {
+        Screen::Blocked => Wait::Watch(Box::new(read)),
+        _ => Wait::Go,
+    }
+}
+
 /// An idle channel's front: the owner claims it, then a queued start presenting that claim runs
 /// it; the drive hears the input's settlement, never the AI turn's.
 async fn start_idle(
@@ -519,6 +601,24 @@ async fn start_idle(
         None => Ok(None),
     };
     let kept = kept.map_err(effect::unsent)?;
+    // A start waits unclaimed behind a turn it did not start; that turn's idle wakes the owner.
+    let wait = match &kept {
+        Some(context) => start_waits(&shared, channel, context).await,
+        None => Wait::Go,
+    };
+    if let Wait::Watch(read) = wait {
+        crate::services::discord::queue_io::input_owner::held_watch::arm(channel.get(), read);
+        let held = front.clone();
+        let held = mailbox
+            .v2_request(move |slot| slot.as_mut().ok_or("V2 not adopted")?.hold_front(&held));
+        if let Err(error) = held.await {
+            tracing::warn!(channel_id = channel.get(), %error, "start hold unwatched");
+        }
+        return Err("NotSent(\"synthetic_waits_idle\")".into());
+    }
+    if let Wait::Event = wait {
+        return Err("NotSent(\"synthetic_waits_idle\")".into());
+    }
     let claim = claim_turn(&mailbox, front.1.message_id, &front).await?;
     let claim = claim.ok_or("NotSent(\"front_not_granted\")")?;
     let (settled, answer) = tokio::sync::oneshot::channel();

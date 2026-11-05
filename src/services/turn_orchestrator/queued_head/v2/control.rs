@@ -2,6 +2,7 @@
 //! The match has no wildcard, so a new arm cannot compile until it is classified.
 use super::Ticket;
 use super::*;
+use crate::db::turns::TerminalOutcome;
 use crate::services::turn_orchestrator::{
     CancelQueuedMessageResult, ChannelMailboxMsg as M, ChannelMailboxState, ClearChannelResult,
     EnqueueInterventionResult, EnqueueRefusalReason, HasPendingSoftQueueResult,
@@ -219,6 +220,11 @@ fn cancel(owner: &mut Owner, message_id: MessageId) -> CancelQueuedMessageResult
             if at + first == 0 {
                 owner.revoke_front();
             }
+            next.owe_queued(
+                [at + first],
+                TerminalOutcome::Cancelled,
+                super::origin::now_ms(),
+            );
             let item = next.items.remove(at + first);
             next.unbind_item(at + first);
             match owner.commit(next) {
@@ -244,6 +250,8 @@ fn cancel(owner: &mut Owner, message_id: MessageId) -> CancelQueuedMessageResult
 fn clear(owner: &mut Owner) -> ClearChannelResult {
     let mut next = requeued(owner, |_| true);
     let first = untried(owner);
+    let at = super::origin::now_ms();
+    next.owe_queued(first..next.items.len(), TerminalOutcome::Cancelled, at);
     let discarded: Vec<PendingQueueItem> = next.items.drain(first..).collect();
     if first == 0 && !discarded.is_empty() {
         owner.revoke_front();

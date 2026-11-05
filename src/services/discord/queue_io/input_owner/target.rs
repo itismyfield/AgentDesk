@@ -75,6 +75,10 @@ pub(crate) fn route(
     if execution == Execution::RemoteTui {
         return Some(Route::Held("remote_placement"));
     }
+    // A start completes only on its own turn, so it never joins a turn already running.
+    if origin != InputOrigin::Discord && phase == Phase::Busy {
+        return Some(Route::Held("synthetic_waits_idle"));
+    }
     Some(match (provider, host, phase) {
         ("claude" | "codex", "tmux" | "herdr", Phase::Absent) => Route::Cold,
         ("claude", "tmux", Phase::Busy) => Route::ClaudeBusy,
@@ -164,5 +168,26 @@ mod tests {
             ),
             None
         );
+    }
+    /// A start or routine waits on any busy pane; only a Discord front joins a running turn.
+    #[test]
+    fn a_synthetic_origin_is_held_on_every_busy_pane() {
+        for origin in [InputOrigin::HttpStart, InputOrigin::Routine] {
+            for (provider, host) in [
+                ("claude", "tmux"),
+                ("claude", "herdr"),
+                ("codex", "tmux"),
+                ("codex", "herdr"),
+            ] {
+                let held = route(Execution::LocalTui, origin, provider, host, Phase::Busy);
+                assert_eq!(
+                    held,
+                    Some(Route::Held("synthetic_waits_idle")),
+                    "{origin:?}"
+                );
+                let idle = route(Execution::LocalTui, origin, provider, host, Phase::Idle);
+                assert!(!matches!(idle, Some(Route::Held(_))), "{origin:?} {idle:?}");
+            }
+        }
     }
 }
