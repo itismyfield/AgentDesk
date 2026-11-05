@@ -277,6 +277,11 @@ C2·C3 known 층, owner_input의 기존 분류와 C6 보류, history 7개 보류
 동일 source의 정확한 판정 불가→역방향 ID·count만 편입하며, 기존 역방향 양수 record와
 zero-rule의 한도를 올리지 않는다. TSV는 검토 증거이고 생성기 입력이 아니다.
 
+C3 squash 결과는 검토한 C3 accepted의 매핑·부채 records·zero-rule과 대조하고 provenance 차이는 별도로 기록한다.
+동일하면 검토된 C4 canonical과 C3·C4 기록을 보존하여 충돌을 풀고, 다르면 `DESIGN_DELTA`로 멈춘다.
+새 병합 source anchor에서 `--update-reductions`와 일반 `--check`를 실행하며, 과거 C3 매핑으로 C4 편입을 다시 승인하지 않는다.
+C5·C6도 이전 조각의 실제 squash와 검토한 accepted를 대조하는 같은 착지 절차를 적용한다.
+
 ## 검토된 모듈 이동의 old→new 대응
 
 이동 대응은 [`layer_moves.toml`](../../scripts/audit_maintainability/layer_moves.toml)에 적는다.
