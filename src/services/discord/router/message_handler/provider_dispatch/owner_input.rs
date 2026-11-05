@@ -55,18 +55,31 @@ impl Registration {
     /// Absent, whatever `busy`.
     pub(super) fn observed(
         mailbox: ChannelMailboxHandle,
+        kind: (&str, InputOrigin, bool),
+        at: (&TurnHost, &str, Option<(&str, Option<&str>)>),
+        original: &PendingQueueItem,
+        until_done: Option<UntilDone>,
+    ) -> Result<Self, String> {
+        Self::read_as(mailbox, kind, at, original, (until_done, None))
+    }
+
+    /// As `observed`; a tmux pane whose liveness its caller already read is registered as read.
+    fn read_as(
+        mailbox: ChannelMailboxHandle,
         (provider, origin, busy): (&str, InputOrigin, bool),
         (host, session, live): (&TurnHost, &str, Option<(&str, Option<&str>)>),
         original: &PendingQueueItem,
-        until_done: Option<UntilDone>,
+        (until_done, read): (Option<UntilDone>, Option<bool>),
     ) -> Result<Self, String> {
         let herdr = match host {
             TurnHost::Herdr(plan) => bound_herdr(plan),
             _ => None,
         };
         // A pane kept after its process exited is no live execution; an unknown answer refuses.
-        let alive = match host {
-            TurnHost::Tmux => match crate::services::platform::tmux::pane_liveness(session) {
+        let alive = match (host, read) {
+            (TurnHost::Tmux, Some(alive)) => alive,
+            (TurnHost::Tmux, None) => match crate::services::platform::tmux::pane_liveness(session)
+            {
                 PaneLiveness::Live => !other_account(provider, session),
                 PaneLiveness::DeadOrAbsent => false,
                 PaneLiveness::ProbeError => return Err("NotSent(\"pane_unobserved\")".into()),
@@ -795,6 +808,8 @@ pub(super) fn execute_owned(
     let synthetic = origin != InputOrigin::Discord
         && matches!(turn.host, TurnHost::Tmux)
         && *turn.provider == ProviderKind::Claude;
+    // Its idle or gone read is the pane it registers; no later read can turn it unobserved.
+    let mut read = None;
     if synthetic {
         let target = NativeTarget {
             tmux: session.to_string(),
@@ -802,7 +817,9 @@ pub(super) fn execute_owned(
             session_id: (turn.session_id.filter(|_| late.own_pane)).map(str::to_string),
             own_pane: late.own_pane,
         };
-        if let Screen::Blocked | Screen::Unknown = native_read(turn.provider, &target) {
+        let screen = native_read(turn.provider, &target);
+        read = Some(screen == Screen::Ready);
+        if let Screen::Blocked | Screen::Unknown = screen {
             let nonce = turn.cancel.turn_nonce().map(str::to_string);
             let at = (turn.channel_id, nonce);
             let probe = late_probe(turn.provider.clone(), target, mailbox.clone(), at);
@@ -819,9 +836,11 @@ pub(super) fn execute_owned(
     {
         crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(tmux);
     }
-    let live = matches!(turn.host, TurnHost::Tmux)
-        && pane_liveness(session) == PaneLiveness::Live
-        && !other_account(turn.provider.as_str(), session);
+    let live = read.unwrap_or_else(|| {
+        matches!(turn.host, TurnHost::Tmux)
+            && pane_liveness(session) == PaneLiveness::Live
+            && !other_account(turn.provider.as_str(), session)
+    });
     let running = (live && !synthetic)
         .then(|| running_transcript(&turn, session))
         .flatten();
@@ -842,7 +861,8 @@ pub(super) fn execute_owned(
             let observer = live.then(|| observer(&turn, &sender)).flatten();
             let kind = (turn.provider.as_str(), origin, false);
             let at = (turn.host, session, None);
-            Registration::observed(mailbox, kind, at, &claim.front().1, observer)
+            let front = &claim.front().1;
+            Registration::read_as(mailbox, kind, at, front, (observer, read))
         }
     };
     match registered {

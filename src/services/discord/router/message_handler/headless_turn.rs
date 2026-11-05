@@ -198,7 +198,7 @@ async fn start_reserved_headless_turn_admitted(
             (request_owner.get(), request_owner_name),
             (source, metadata.as_ref()),
             (
-                channel_name_hint.as_deref(),
+                resolved_channel_name_for_session.as_deref(),
                 tmux_session_label.as_deref(),
                 is_dm_hint,
             ),

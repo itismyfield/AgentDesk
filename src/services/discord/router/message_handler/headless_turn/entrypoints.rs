@@ -105,17 +105,35 @@ pub(in crate::services::discord) async fn owner_start_pane(
     let context = owner_start_context(shared, context).await;
     let metadata = Some(context["metadata"].clone()).filter(|m| !m.is_null());
     let hint = context["channel_name_hint"].as_str().map(str::to_owned);
-    let channel_name = {
-        let data = shared.core.lock().await;
-        let session = data.sessions.get(&channel);
-        session.and_then(|session| session.channel_name.clone())
-    }
-    .or(hint);
+    let channel_name = start_channel_name(shared, channel, hint).await;
     let label = context["synthetic_label"].as_str();
     let named = channel_name.as_deref();
     let pane = routine_tmux_session_name(&shared.provider, metadata.as_ref(), label, named)?;
     let own = named.is_some_and(|name| shared.provider.build_tmux_session_name(name) == pane);
     Some((pane, own))
+}
+
+/// The channel name a headless start names its pane by: the session's, else its hint, else the
+/// name Discord gives the channel, else its registered fallback.
+async fn start_channel_name(
+    shared: &Arc<SharedData>,
+    channel: ChannelId,
+    hint: Option<String>,
+) -> Option<String> {
+    let named = {
+        let data = shared.core.lock().await;
+        let session = data.sessions.get(&channel);
+        session.and_then(|session| session.channel_name.clone())
+    };
+    if let Some(name) = named.or(hint) {
+        return Some(name);
+    }
+    let looked_up = match shared.http.cached_serenity_ctx.get() {
+        Some(ctx) => resolve_channel_category(&ctx.http, None, channel).await.0,
+        None => None,
+    };
+    let registered = super::super::super::adk_session::registered_channel_fallback_name;
+    looked_up.or_else(|| registered(channel, &shared.provider))
 }
 
 pub(in crate::services::discord) async fn start_headless_turn(
