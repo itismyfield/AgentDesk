@@ -35,8 +35,9 @@ const CONNECTIONS: [(&str, &str); 2] = [
     ),
 ];
 const READS: [&str; 2] = ["fn classify_inflight_row(", "mod boot_reaper;"];
-const EFFECTS: [&str; 7] = [
+const EFFECTS: [&str; 8] = [
     "fs::remove_file",
+    "row_removed::unlink",
     "fs::rename",
     "fs::write",
     "atomic_write",
@@ -61,9 +62,9 @@ const ARMS: [(&str, &str); 3] = [
 const MARKS: [&str; 3] = [
     "if !unchanged {",
     "emit_loader_generation_gate_allowed(",
-    "fs::remove_file(&path)",
+    "crate::services::discord::inflight::row_removed::unlink(&path)",
 ];
-const UNLINK: &str = "fs::remove_file(";
+const UNLINK: &str = "row_removed::unlink(";
 const WITNESS: &str = "fn public_loader_observes_production_shaped_published_routes()";
 const WITNESS_MUTEX: &str = "super::super::stall_recovery_tests::stale_override_test_mutex()";
 
@@ -189,7 +190,12 @@ fn reaper_gaps(owned: &Lexed, reaper: &str) -> Vec<String> {
     if marks.iter().any(Option::is_none) || !marks.is_sorted() {
         gaps.push(format!("reaper order {MARKS:?} broken: {marks:?}"));
     }
-    if owned.count(UNLINK) + reaper.count(UNLINK) != 2 {
+    if owned.count(UNLINK)
+        + reaper.count(UNLINK)
+        + owned.count("fs::remove_file(")
+        + reaper.count("fs::remove_file(")
+        != 2
+    {
         gaps.push(format!("loader and reaper must hold two {UNLINK}"));
     }
     gaps
@@ -239,13 +245,13 @@ fn loader_gate_guard_rejects_commented_items_and_reordered_reaping() {
     let unlink_first = swap(
         REAPER,
         "if !unchanged {",
-        "if fs::remove_file(&path).is_ok() {",
+        "if crate::services::discord::inflight::row_removed::unlink(&path).is_ok() {",
     );
     assert!(!judge(&unlink_first, 2).is_empty());
     let observed_late = swap(
         REAPER,
         "emit_loader_generation_gate_allowed(provider, locked, allocation, &path);",
-        "if fs::remove_file(&path).is_ok() {",
+        "if crate::services::discord::inflight::row_removed::unlink(&path).is_ok() {",
     );
     assert!(!judge(&observed_late, 2).is_empty());
 }
@@ -267,6 +273,25 @@ fn loader_gate_guard_counts_coded_effects_but_not_commented_ones() {
     assert_eq!(
         loader_gate_gaps(&coded, SCOPED, REAPER),
         ["read path has fs::rename"]
+    );
+    let helper_coded = REMOVAL.replacen(
+        anchor,
+        &format!("{anchor}\nuse super::row_removed::unlink as _;"),
+        1,
+    );
+    assert_eq!(
+        loader_gate_gaps(&helper_coded, SCOPED, REAPER),
+        ["read path has row_removed::unlink"]
+    );
+    let bypass = REMOVAL.replacen(
+        "use super::*;",
+        "use super::*;\nfn bypass() { fs::remove_file(\"x\"); }",
+        1,
+    );
+    assert_eq!(
+        loader_gate_gaps(&bypass, SCOPED, REAPER),
+        [format!("loader and reaper must hold two {UNLINK}")],
+        "a direct unlink cannot bypass the physical-site count"
     );
     let preamble = "use super::*;\n";
     let scoped_prose = SCOPED.replacen(preamble, &format!("{preamble}// fs::write\n"), 1);

@@ -29,7 +29,7 @@ Discord and headless entrypoint fixtures.
 `EarlyClearDelivers` requires A's payload even if a bad policy removed it from the queue.
 `ReserveResetsFailures` checks the reserve state directly, before an effect-held result can hide it.
 The two negative configs inject only those faults; the unmutated policy transitions stay the same.
-Full checker: 83 configs, rc=0, expected/actual mismatches=0 (265.4 s, after merging main `3ae403d5ecfe8565a1d508ceff5679066ecf4ff1`).
+Full checker: 83 configs, rc=0, expected/actual mismatches=0 (261.5 s, after merging main `b4907b41dc68ecc4bda30e5f7aec73ffee2670a9`).
 Isolated traces reproduce EarlyClearDelivers exit 13, FirstOpaqueFailureKept exit 12 and
 ReserveResetsFailures exit 12; repository model bytes remain unchanged during those runs.
 
