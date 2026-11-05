@@ -174,8 +174,8 @@ mod tests {
                 "fingerprint",
                 format!(
                     "INSERT INTO api_friction_events \
-                     (fingerprint, endpoint, friction_type, summary, payload_json, created_at) \
-                     VALUES ($1, '/x', 'test', 'test', '{{}}'::jsonb, {AGE})"
+                     (id, fingerprint, endpoint, friction_type, summary, payload_json, created_at) \
+                     VALUES ($1, $1, '/x', 'test', 'test', '{{}}'::jsonb, {AGE})"
                 ),
                 90,
             ),
