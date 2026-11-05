@@ -161,6 +161,10 @@ fn run(
         if authority.claim(session).is_err() {
             return refused(Refusal::SubmissionFence);
         }
+        // A stop that took the writer token's gate first leaves the pane without a key.
+        if !guarded_outcome::first_key() {
+            return InputRun::Cancelled { confirmed: 0 };
+        }
         guarded_outcome::begin();
         crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
             "claude",

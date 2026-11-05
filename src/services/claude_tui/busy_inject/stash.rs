@@ -47,6 +47,10 @@ pub(in crate::services::claude_tui) fn submit(
                 return Outcome::NotSent(Veto::LockContended);
             }
         }
+        // A stop that took the writer token's first-key gate leaves the pane without a key.
+        if !super::super::guarded_outcome::first_key() {
+            return Outcome::NotSent(Veto::LockContended);
+        }
         if stash {
             owner_input::keyed();
             if pane

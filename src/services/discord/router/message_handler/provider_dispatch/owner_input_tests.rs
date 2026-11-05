@@ -1963,3 +1963,6 @@ mod parent;
 
 #[path = "owner_start_failure_tests.rs"]
 mod start_failure;
+
+#[path = "owner_input_stop_gate_tests.rs"]
+mod stop_gate;

@@ -994,6 +994,7 @@ pub(super) async fn handle_text_message(
         // because the async gap between check and insert allows interleaving.
         // If another message won the race, queue ourselves and clean up.
         let cancel_token = Arc::new(CancelToken::new());
+        cancel_token.native_stop.receipt_sink().arm_first_key();
         let started = intake_runtime_transition
             .complete_mailbox_claim(try_start_turn_with_stale_busy_heal(
                 shared,

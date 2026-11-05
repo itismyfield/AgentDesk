@@ -948,6 +948,7 @@ src/
 │   │   │   ├── draft_hold.rs
 │   │   │   ├── draft_hold_session_tests.rs
 │   │   │   ├── final_ready_tests.rs
+│   │   │   ├── first_key_gate_tests.rs
 │   │   │   ├── hold_lifecycle_tests.rs
 │   │   │   ├── literal_chunks.rs
 │   │   │   ├── preparation_hold.rs
@@ -1294,6 +1295,7 @@ src/
 │   │   │   │   ├── codex_verified_clear_tests.rs
 │   │   │   │   ├── consent_clear_tests.rs
 │   │   │   │   ├── herdr_recovery.rs
+│   │   │   │   ├── herdr_recovery_tests.rs
 │   │   │   │   ├── herdr_report_tests.rs
 │   │   │   │   ├── managed_reset.rs
 │   │   │   │   ├── native.rs
@@ -1844,6 +1846,7 @@ src/
 │   │   │   │   ├── notice.rs
 │   │   │   │   ├── notice_tests.rs
 │   │   │   │   ├── origin.rs
+│   │   │   │   ├── owed_drop_tests.rs
 │   │   │   │   ├── pump.rs
 │   │   │   │   ├── pump_tests.rs
 │   │   │   │   ├── recovery.rs
@@ -2104,7 +2107,9 @@ src/
 │   │   │   │   │   ├── session_preparation/
 │   │   │   │   │   │   └── restore_tests.rs
 │   │   │   │   │   ├── worker_entry/
-│   │   │   │   │   │   └── custody_pg_tests.rs
+│   │   │   │   │   │   ├── custody_pg_tests.rs
+│   │   │   │   │   │   ├── goal_fresh_pg_tests.rs
+│   │   │   │   │   │   └── preserve_cancel_tests.rs
 │   │   │   │   │   ├── adk_thread.rs
 │   │   │   │   │   ├── claim_bootstrap.rs
 │   │   │   │   │   ├── context.rs
@@ -2130,12 +2135,14 @@ src/
 │   │   │   │   │   └── worker_entry.rs
 │   │   │   │   ├── provider_dispatch/
 │   │   │   │   │   ├── owner_input.rs
+│   │   │   │   │   ├── owner_input_busy_gate_tests.rs
 │   │   │   │   │   ├── owner_input_codex_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_tests.rs
 │   │   │   │   │   ├── owner_input_idle_tests.rs
 │   │   │   │   │   ├── owner_input_not_sent_tests.rs
 │   │   │   │   │   ├── owner_input_parent_tests.rs
 │   │   │   │   │   ├── owner_input_rollback_tests.rs
+│   │   │   │   │   ├── owner_input_stop_gate_tests.rs
 │   │   │   │   │   ├── owner_input_tests.rs
 │   │   │   │   │   ├── owner_provenance_tests.rs
 │   │   │   │   │   ├── owner_start_failure_tests.rs
@@ -2861,6 +2868,7 @@ src/
 │   │   │   │   ├── judged_stop_tests.rs
 │   │   │   │   ├── native_stop.rs
 │   │   │   │   ├── native_stop_contract_tests.rs
+│   │   │   │   ├── native_stop_gate_tests.rs
 │   │   │   │   ├── native_stop_identity_tests.rs
 │   │   │   │   ├── native_stop_ownership_tests.rs
 │   │   │   │   ├── pid_exit.rs
@@ -3340,7 +3348,8 @@ src/
 │   │   ├── jobs/
 │   │   │   ├── db_retention/
 │   │   │   │   ├── image_retention.rs
-│   │   │   │   └── queue_and_dispatch.rs
+│   │   │   │   ├── queue_and_dispatch.rs
+│   │   │   │   └── record_caps.rs
 │   │   │   ├── db_retention.rs
 │   │   │   ├── hang_dump_cleanup.rs
 │   │   │   ├── memento_consolidation.rs
@@ -4235,6 +4244,8 @@ src/
 │   │   │   │   ├── control_tests.rs
 │   │   │   │   ├── migration.rs
 │   │   │   │   ├── migration_tests.rs
+│   │   │   │   ├── origin.rs
+│   │   │   │   ├── origin_tests.rs
 │   │   │   │   ├── owner_tests.rs
 │   │   │   │   ├── projection.rs
 │   │   │   │   ├── projection_tests.rs

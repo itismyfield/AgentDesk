@@ -1056,3 +1056,6 @@ pub(crate) async fn owner_retry_leaf(
     assert!(ticket.lock().unwrap().is_some(), "B's real submit ticket");
     (identity, vec![received])
 }
+
+#[path = "first_key_gate_tests.rs"]
+mod first_key_gate;

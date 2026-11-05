@@ -24,8 +24,9 @@ HTTP extractor·AppState·응답 변환을 소유한 `auto_queue::route`는 asse
 그 아래 `fsm`과 업무 command는 application으로 다시 구분한다.
 이름이 `pipeline_routes`여도 HTTP extractor 없이 저장·검증·locking 업무를
 수행하므로 application이다. TUI O repost 아래 `#[path]`로 연결된 DB repository는
-논리 위치와 무관하게 adapter다. 설정 DTO·live loader가 혼재한 `config`,
-파일 동작과 Discord 운영 hook이 혼재한 `runtime_store` 등은 미분류로 남긴다.
+논리 위치와 무관하게 adapter다. 혼재 모듈도 본체의 책임을 검토하고,
+책임이 다른 하위 모듈은 긴 prefix로 구분한다. 아직 검토하지 않았거나
+책임을 정하지 못한 모듈은 사유와 함께 미분류로 남긴다.
 `services::discord::restart_mode`의 enum·정적 변환은 vocabulary이고,
 `cli::restart_terminal_proof`의 nonce·경로·파일 증거 판정은 foundation이다.
 두 leaf는 부모의 Discord/최종 조립 책임보다 긴 prefix 규칙으로 분류한다.
@@ -41,14 +42,15 @@ python3 scripts/audit_maintainability.py --format json
 python3 scripts/audit_maintainability.py --check
 ```
 
-`module_layers`는 baseline에 없는 부채와 기존 부채의 증가를 `error`로 보고한다.
+`module_layers`는 baseline에 없는 역방향 부채와 기존 역방향 부채의 증가를 `error`로 보고한다.
+판정 불가·불확실성·미분류 합계의 증가는 기본 `warning`이며 역방향 부채를 숨기면 `error`다.
 `--check`는 이 error가 있으면 실패한다. 다른 감사 검사의 severity는 바꾸지 않는다.
 `checks.module_layers.findings[0].extra.measurement`는 0A의 node·edge·coverage 계약을
 그대로 유지한다. `extra.layer_analysis`가 별도의 분류·층별 edge 집계·역방향 의존·
 판정 불가·SCC·분류 coverage를 제공한다. 0A coverage의 `classification`은 소스
 분석기의 기존 값이고, 층 분류 현황은 `layer_analysis`에서 확인한다.
 두 결과가 모두 불완전성을 표시하며 미해석 참조를 외부 잡음이라는 이유만으로
-제거하지 않는다. `--check`의 성공은 부채가 늘지 않았다는 뜻이며, 판정 불가가
+제거하지 않는다. `--check`의 성공은 차단하는 역방향 부채가 늘지 않았다는 뜻이며, 판정 불가가
 남은 경계의 의존이 모두 해석됐다는 뜻은 아니다.
 
 ## 차단 규칙과 실패 해석
@@ -56,16 +58,23 @@ python3 scripts/audit_maintainability.py --check
 | 현재 측정과 baseline 비교 | 판정 | 확인할 내용 |
 |---|---|---|
 | 새 역방향 ID 또는 기존 ID의 발생 수 증가 | error | 보고된 source·target·kind와 참조 증거를 확인하고 증가를 제거한다. |
-| 새 판정 불가 ID 또는 기존 ID의 발생 수 증가 | error | 분류·해석 실패를 확인한다. 기존 known 부채가 판정 불가로 옮겨 가도 감소로 인정하지 않는다. |
-| 미분류 모듈 수·판정 불가 edge/발생 수 증가 | error | 미분류 endpoint와 변경된 층 규칙을 확인한다. |
-| 새 uncertainty ID 또는 기존 ID의 발생 수 증가 | error | 미해석·cfg·읽기·모듈 오류의 증거를 확인한다. |
+| 새 판정 불가 ID 또는 기존 ID의 발생 수 증가 | warning | 미분류 endpoint를 확인한다. 기존 역방향 부채를 숨기거나 역방향 부채가 줄어든 source에서 늘면 error다. |
+| 미분류 모듈 수·판정 불가 edge/발생 수 증가 | warning | 미분류 endpoint와 변경된 층 규칙을 확인한다. |
+| 새 uncertainty ID 또는 기존 ID의 발생 수 증가 | warning | 미해석·cfg·읽기·모듈 오류를 확인한다. 역방향 부채를 숨기는 참조나 역방향 부채가 줄어든 source의 증가는 error다. |
 | baseline·이동 mapping의 누락/잘못된 형식, 측정 예외·설정 오류 | error | 입력과 측정 실패를 고친다. 현재값으로 baseline을 다시 만들어 숨기지 않는다. |
 | 기존 ID의 발생 수 감소 또는 해소 | info | 감소를 검토한 뒤 아래 명령으로 정본에 반영한다. |
 | baseline 안의 기존 부채 유지 | info | 기존 판정 불가와 coverage의 불완전성은 그대로 남는다. |
 
 모든 ID는 독립적으로 비교한다. 한 ID가 줄어든 양으로 다른 ID의 신규·증가를
 상쇄하지 않는다. 해소된 ID는 갱신 시 `zero_rules`에 0으로 고정하며, 다시 나타나면
-error다. 단순 합계가 같아도 판정 불가 edge의 대상이 바뀌면 새 ID로 차단한다.
+해당 section의 판정 규칙을 따른다. 단순 합계가 같아도 판정 불가 edge의 대상이 바뀌면
+새 ID로 경고한다. 역방향 양수·zero-rule이 판정 불가나 미해석 참조로 숨겨지는 경로는 error다.
+
+| baseline section | 기본 증가 판정 | 예외 |
+|---|---|---|
+| `reverse_dependencies` | error | 신규·증가·zero-rule 재등장을 차단한다. |
+| `indeterminate_dependencies` | warning | 기존 역방향 부채를 숨기거나 역방향 부채가 줄어든 source에서 늘면 error다. |
+| `uncertainties` | warning | 기존 역방향 부채를 숨기거나 역방향 부채가 줄어든 source에서 늘면 error다. |
 
 ## baseline 생성과 식별자
 
@@ -138,11 +147,43 @@ python3 scripts/audit_maintainability/checks/module_layer_baseline.py \
   --update-reductions
 ```
 
-이 명령은 기존 정본과 비교해 감소·삭제만 반영한다. 신규·증가가 하나라도 섞이거나
-불확실성이 새로 생기거나 늘어도 쓰기를 거부한다. 설정·측정 오류도 쓰기를 막는다.
+이 명령은 기존 정본과 비교해 ID별 `min(accepted, current)`로 감소·삭제만 반영한다.
+warning 증가는 흡수하지 않고, 미분류 모듈 합계도 두 값의 최솟값을 유지한다.
+역방향 신규·증가와 숨김, 설정·측정 오류는 쓰기를 막는다.
+매핑이 달라져 역방향에서 사라졌지만 현재 그래프에 같은 source·target·kind가
+남아 있으면 거절한다. 검토된 known 재분류만 `--reclassify <prefix>`로 명시한다.
+prefix는 source 또는 target의 논리 모듈 namespace 경계에 일치해야 하며 생성 명령에도 기록된다.
 삭제된 부채는 zero-rule로 남긴다.
 동시 갱신은 exclusive lock 획득에 실패하면 거부하고, 허용된 변경만 같은 디렉터리의
 임시 파일에서 atomic replace로 반영한다. 일반 생성기의 덮어쓰기 거부는 유지한다.
+
+## 분류 편입
+
+분류 편입은 `--admit-classification`으로만 한다. 허용 범위는 같은 source anchor에서 "판정 불가 → 층 역방향"으로 바뀐 정확한 ID와 그 count다. 기존 역방향 양수 records의 한도 인상과 zero-rule의 한도 인상은 금지한다. 편입 PR 본문에는 보고서 TSV의 `accepted_indeterminate_count`와 `grown_since_accepted` 합계를 적는다.
+
+```sh
+python3 scripts/audit_maintainability/checks/module_layer_baseline.py \
+  --input-sha <source-commit> --admit-classification \
+  --previous-mapping-rev <previous-mapping-commit> \
+  --dry-run --report target/classification.tsv > target/classification-baseline.json
+```
+
+이전 매핑의 의미 기반 해시는 accepted 기준선의 `mapping_sha256`과 같아야 한다.
+현재 `src/**`·`Cargo.toml`은 input SHA와 같아야 하며 이전 known 층과 층 rank는 불변이다.
+같은 그래프의 이전 투영 비교가 error 0이어야 한다. `--reclassify`도 이 known 불변 검사를 면제하지 않는다.
+편입 집합은 투영 후 역방향 ID에서 투영 전 역방향 ID를 뺀 정확한 차집합이다.
+각 ID·count는 이전 투영의 판정 불가 record와 같아야 하며 이동 mapping의 old/new와 충돌할 수 없다.
+기존 판정 불가 양수 record는 zero-rule로 바꾸고 정확한 역방향 record를 추가한 뒤
+일반 감소 갱신을 적용한다. 별도 manifest는 두지 않는다.
+
+TSV는 ID·count와 두 endpoint의 규칙 prefix·사유를 제공해 규칙별 비용을 합산할 수 있다.
+`accepted_indeterminate_count`는 accepted에 없으면 0이고, `grown_since_accepted`는
+`max(0, current count - accepted_indeterminate_count)`다. 현재 count를 편입하되 과거 경고 증가량을 드러낸다.
+`--dry-run`은 기준선을 바꾸지 않고 예상 JSON을 stdout에 쓴다. 이 옵션을 빼면 검증한 결과를 atomic replace한다.
+편입 ID가 없으면 일반 감소 갱신과 동일한 바이트·생성 명령을 사용한다.
+성공 뒤 accepted 매핑 해시가 바뀌므로 같은 이전 매핑으로 재실행하면 거절한다.
+K 같은 known 재분류는 먼저 `--update-reductions --reclassify <prefix>`로 반영하고
+새 accepted 매핑을 anchor로 미분류 편입을 진행한다. 실패하면 기준선 바이트는 보존된다.
 
 ## 검토된 모듈 이동의 old→new 대응
 

@@ -103,6 +103,14 @@ fn message_turn_id(execution_id: &str) -> Option<&str> {
 
 fn result_body(agent_id: &str, origin_id: &str, result: InputResult) -> Value {
     let (channel_id, execution_id, terminal) = match result {
+        // Admitted and waiting: no execution has taken the input yet.
+        InputResult::Accepted { channel_id } => {
+            return json!({
+                "ok": true, "contract": CONTRACT, "origin_id": origin_id, "agent_id": agent_id,
+                "channel_id": channel_id.to_string(), "consumption": "accepted",
+                "execution_id": null, "turn_id": null, "terminal": null,
+            });
+        }
         InputResult::Running {
             channel_id,
             execution_id,

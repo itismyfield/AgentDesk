@@ -810,7 +810,7 @@ if run_check cargo "Agent maintenance freshness tests"; then
 fi
 
 if run_check cargo "Maintainability audit tests"; then
-"$PYTHON" -m unittest tests.test_audit_maintainability tests.test_module_layer_baseline_records tests.test_module_layer_measurement tests.test_module_layer_ratchet
+"$PYTHON" -m unittest tests.test_audit_maintainability tests.test_module_layer_baseline_records tests.test_module_layer_measurement tests.test_module_layer_ratchet tests.test_module_layer_classification
 fi
 
 if run_check cargo "Maintainability audit"; then
