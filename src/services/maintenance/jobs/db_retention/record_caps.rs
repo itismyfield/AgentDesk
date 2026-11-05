@@ -7,9 +7,8 @@ const CREATED_AT: &str = "created_at < NOW() - ($1::INT || ' days')::INTERVAL";
 // `stat_date` is a zero-padded `YYYY-MM-DD` string, so text order is date order.
 const STAT_DATE: &str = "stat_date < to_char(CURRENT_DATE - $1::INT, 'YYYY-MM-DD')";
 
-// `(table, aged-row predicate binding the window as $1, window days)`. Rows whose time
-// column is NULL are kept. Runs after the archive copies, so a row archived in this pass
-// is judged by its archive window.
+// `(table, aged-row predicate with the window days as $1, days)`; NULL times are kept.
+// Runs after the archive copies, so a row archived this pass gets its archive window.
 const CAPS: [(&str, &str, i32); 10] = [
     (
         "session_transcripts_archive",
