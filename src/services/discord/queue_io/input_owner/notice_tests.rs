@@ -50,8 +50,8 @@ async fn attempt(handle: &ChannelMailboxHandle, nonce: &str, submitted: Option<b
         .unwrap();
 }
 
-async fn posts(pool: &sqlx::PgPool) -> Vec<(String, String)> {
-    sqlx::query_as("SELECT content, COALESCE(reason_code, '') FROM message_outbox WHERE target = $1 ORDER BY id")
+async fn posts(pool: &sqlx::PgPool) -> Vec<(String, String, String)> {
+    sqlx::query_as("SELECT content, COALESCE(reason_code, ''), source FROM message_outbox WHERE target = $1 ORDER BY id")
         .bind(format!("channel:{CHANNEL}"))
         .fetch_all(pool)
         .await
@@ -96,15 +96,51 @@ async fn owed_notices_post_once_by_kind_and_a_local_submit_owes_none_pg() {
         posted[1].0.contains("필요한 새 부분을 따로 보내 주세요"),
         "{posted:?}"
     );
+    assert!(posted.iter().all(|post| post.2 == "retained_input_notice"));
+    let snapshot = handle
+        .v2_request(|slot| slot.as_ref().ok_or("no owner")?.json())
+        .await
+        .unwrap();
+    let opaque_unsent = snapshot["retained_inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["disposition"] == "opaque_unsent")
+        .expect("the overlapping attemptless original is retained");
+    assert!(opaque_unsent["input"]["attempt"].is_null());
+    assert_eq!(opaque_unsent["notice"]["enqueued"], true);
     assert_eq!(
         drain(&pool, &handle, "claude", CHANNEL).await.unwrap(),
-        1,
-        "the attemptless entry stays owed"
+        0,
+        "both retained originals have acknowledged notices"
     );
-    assert_eq!(posts(&pool).await, posted, "but the outbox keeps one post");
+    assert_eq!(
+        posts(&pool).await,
+        posted,
+        "no outbox row changes or additions"
+    );
 
     let restarted = ChannelMailboxRegistry::default();
     let handle = restarted.handle(ChannelId::new(CHANNEL));
+    handle
+        .v2_adopt(file.clone(), "notice".into())
+        .await
+        .unwrap();
+    let restored = handle
+        .v2_request(|slot| slot.as_ref().ok_or("no owner")?.json())
+        .await
+        .unwrap();
+    let restored_opaque = restored["retained_inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["input"]["identity"] == opaque_unsent["input"]["identity"])
+        .expect("the same retained original survives adoption");
+    assert_eq!(restored_opaque["notice"]["enqueued"], true);
+    assert_eq!(
+        restored_opaque, opaque_unsent,
+        "adoption preserves the receipt"
+    );
     std::fs::write(dir.path().join("blocker"), "a file, not a directory").unwrap();
     let broken = Registry::at(dir.path().join("blocker").join("history.json"));
     let recovered = super::super::recovery::recover(
@@ -116,10 +152,12 @@ async fn owed_notices_post_once_by_kind_and_a_local_submit_owes_none_pg() {
     );
     assert_eq!(
         recovered.await,
-        Ok(1),
-        "a failed projection holds no notice"
+        Ok(0),
+        "recovery preserves acknowledged notices despite the failed projection"
     );
     assert_eq!(posts(&pool).await, posted, "a restart posts nothing twice");
+    pool.close().await;
+    db.drop().await;
 }
 
 /// A restart settles an armed head whose window passed while nothing ticked: the original is
@@ -332,7 +370,7 @@ async fn told_retained_inputs_stay_and_an_untold_one_is_handed_on_once_pg() {
     assert_eq!(notified, Ok(0));
     assert_eq!(
         posts(&pool).await,
-        Vec::<(String, String)>::new(),
+        Vec::<(String, String, String)>::new(),
         "no ask, no correction"
     );
     pool.close().await;
