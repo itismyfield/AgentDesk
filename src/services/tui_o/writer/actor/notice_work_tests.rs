@@ -10,6 +10,7 @@ use crate::services::tui_o::writer::{
     PostOutcome, SeenMessage,
     binding::ChannelBindingLog,
     input_notices::{Projection, admission::tests::bind},
+    pieces::PieceWork,
 };
 use sha2::{Digest, Sha256};
 use std::{future::Future, io::Write, sync::Mutex};
@@ -227,6 +228,55 @@ fn notice_ledger(runtime: &std::path::Path) -> std::path::PathBuf {
         .join("o_store")
         .join(CHANNEL.to_string())
         .join("ledger.jsonl")
+}
+
+#[test]
+fn undelivered_reports_notice_debt_once_across_queue_and_evidence() {
+    let _guard = crate::config::TestRuntimeRootGuard::new();
+    let runtime = tempfile::tempdir().unwrap();
+    let (o, evidence, _binding) = rerender_fixture(runtime.path());
+    let mut actor = host(&o, Arc::new(Port::default()), Alarms::default(), u64::MAX);
+    actor
+        .writer
+        .record(LedgerEntry::InputNotice {
+            entry: Box::new(NoticeEntry::Materialized {
+                evidence: Box::new(evidence.clone()),
+            }),
+        })
+        .unwrap();
+    let snapshot = actor.undelivered(1).unwrap();
+    assert_eq!((snapshot.owed, snapshot.notice_owed), (1, 1));
+
+    let mut piece = PieceWork {
+        output_origin: None,
+        unit_key: evidence.unit_key.unwrap(),
+        index: 0,
+        payload: evidence.payload.unwrap(),
+        notice_origin: evidence.origin,
+    };
+    actor.owed.push_back(Derived::Piece(piece.clone()));
+    let snapshot = actor.undelivered(2).unwrap();
+    assert_eq!(
+        (snapshot.owed, snapshot.notice_owed),
+        (1, 1),
+        "queued evidence must not be counted again as extra notice debt"
+    );
+
+    piece.unit_key.native_key = "queued-only-notice".into();
+    piece.notice_origin = None;
+    actor.owed.push_back(Derived::Piece(piece.clone()));
+    let snapshot = actor.undelivered(3).unwrap();
+    assert_eq!((snapshot.owed, snapshot.notice_owed), (2, 2));
+
+    piece.unit_key.kind = crate::services::tui_o::shadow::UnitKind::Body;
+    piece.unit_key.native_key = "pending-answer".into();
+    actor.owed.push_back(Derived::Piece(piece));
+    let snapshot = actor.undelivered(4).unwrap();
+    assert_eq!(
+        (snapshot.owed, snapshot.notice_owed),
+        (3, 2),
+        "unfinished output remains separate from notice debt"
+    );
 }
 
 #[test]
@@ -455,7 +505,8 @@ async fn same_source_over_cap_reclaims_raw_and_keeps_debt_after_actor_recreation
             std::fs::metadata(&path).unwrap().len()
         );
         assert_eq!(actor.notice_debt_extra(), 2);
-        assert_eq!(actor.undelivered(9).unwrap().owed, 2);
+        let snapshot = actor.undelivered(9).unwrap();
+        assert_eq!((snapshot.owed, snapshot.notice_owed), (2, 2));
         // Migration debt stays audited but is no delivery work that stalls a turn or holds a source.
         assert_eq!(actor.progress().debt, 0);
         assert_eq!(actor.obligations().unwrap().owed, 0);

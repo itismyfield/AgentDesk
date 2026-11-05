@@ -614,3 +614,5 @@ pub(super) fn run_bot_spawn_queue_exit_clear_retry(shared: &Arc<SharedData>) {
 #[cfg(test)]
 #[path = "spawns_tests.rs"]
 mod tests;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use tests::carried_restart_marked;

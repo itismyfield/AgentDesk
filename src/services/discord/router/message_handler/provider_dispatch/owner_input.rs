@@ -42,6 +42,8 @@ pub(super) struct Registration {
     timing: &'static busy_inject::Timing,
     /// The provider's observer of the AI turn an idle submit starts; returns once that turn ends.
     until_done: Option<UntilDone>,
+    /// Only a successfully settled write may attach its native input to this birth episode.
+    native_pin_submitted: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Reads an idle submit's AI turn to its end on the turn's sender and returns its outcome.
@@ -112,6 +114,7 @@ impl Registration {
             clock: std::sync::Arc::new(|| chrono::Utc::now().timestamp_millis().max(0) as u64),
             timing: &busy_inject::TIMING,
             until_done,
+            native_pin_submitted: None,
         })
     }
 }
@@ -831,7 +834,7 @@ pub(super) fn execute_owned(
                 Some((transcript.as_str(), turn.session_id)),
             );
             Registration::observed(mailbox, kind, at, &claim.front().1, None).map(|mut owner| {
-                owner.until_done = busy_observer(&turn, &sender, &owner);
+                owner.until_done = busy_observer(&turn, &sender, &mut owner);
                 owner
             })
         }
@@ -889,7 +892,7 @@ fn running_transcript(turn: &StreamingTurn<'_>, session: &str) -> Option<String>
 fn busy_observer(
     turn: &StreamingTurn<'_>,
     sender: &std::sync::mpsc::Sender<crate::services::agent_protocol::StreamMessage>,
-    owner: &Registration,
+    owner: &mut Registration,
 ) -> Option<UntilDone> {
     let nonce = owner.attempt["nonce"].as_str()?;
     let frame = busy_inject::frame("discord", &owner.author, &owner.name, nonce, turn.prompt);
@@ -900,8 +903,30 @@ fn busy_observer(
         turn.channel_id,
     );
     let cancel = std::sync::Arc::clone(&turn.cancel);
+    let submitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    owner.native_pin_submitted = Some(submitted.clone());
+    let proof = crate::services::discord::inflight::BusyNativeInput::capture(
+        at.0,
+        nonce,
+        &frame,
+        &owner.transcript,
+        &owner.attempt["source"],
+        submitted,
+        cancel.clone(),
+    );
+    let on_native_user = Box::new(move |offset| {
+        if let Some(proof) = proof {
+            proof.adopt(offset);
+        }
+    });
     let observe = crate::services::claude_tui::hosting::busy_owner_observer;
-    observe(at, &owner.transcript, sender.clone(), cancel)
+    observe(
+        at,
+        &owner.transcript,
+        sender.clone(),
+        cancel,
+        on_native_user,
+    )
 }
 
 /// The provider's own observer of the AI turn an idle submit starts, set up before that submit.
@@ -1048,7 +1073,13 @@ fn take_owned(
     // Only the Claude tmux writers consult the first-key gate, so only there does a stop prove no key.
     let gate = matches!(route, target::Route::ClaudeIdle | target::Route::ClaudeBusy)
         .then(|| turn.cancel.native_stop.receipt_sink());
+    let native_pin_submitted = registration.native_pin_submitted.clone();
     let result = run(turn, (route, declared), registration, front);
+    if result.is_ok()
+        && let Some(submitted) = native_pin_submitted
+    {
+        submitted.store(true, std::sync::atomic::Ordering::Release);
+    }
     reply(&result);
     let result = match (result, until_done) {
         (Ok(()), Some(until_done)) => until_done(),
