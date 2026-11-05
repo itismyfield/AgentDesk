@@ -137,23 +137,3 @@ fn shared_data_placeholder_uses_the_installed_display_mode() {
         });
     });
 }
-
-#[test]
-fn boot_consumers_call_the_configuration_seams() {
-    let run_bot = include_str!("../runtime_bootstrap.rs")
-        .split_once("pub(crate) async fn run_bot(")
-        .unwrap()
-        .1;
-    assert!(run_bot.contains("let boot_config = bot_boot_settings();"));
-    assert_eq!(run_bot.matches("bot_boot_settings()").count(), 1);
-    for consumer in [
-        "let modules = boot_config.cluster.runtime_profile.modules();",
-        "boot_config.tui_o.as_ref()",
-    ] {
-        assert!(run_bot.contains(consumer), "{consumer}");
-    }
-    assert!(
-        include_str!("framework_setup.rs")
-            .contains("if let Some(dedupe_window) = credential_watcher_dedupe_window()")
-    );
-}

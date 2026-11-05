@@ -360,4 +360,12 @@ HeldNotDropped == retNS = {}
 BusyInputLands == Quiet => \A i \in busySent : fate[i] \in {"this", "next"}
 \* 8. An input a stop took before its first key never reaches the pane or Claude.
 StoppedBeforeKey == \A i \in stopped : consumed[i] = 0 /\ i \notin comp \cup stash \cup busySent
+
+\* ---------------------------------------------------------------------------- liveness
+\* Weak fairness on every step: a drive, deadline, backstop or boot that stays enabled runs.
+LiveSpec == Spec /\ WF_vars(Next)
+\* 9. An input a stop took before its first key leaves the line, retained unconfirmed.
+StoppedLeaves == \A i \in Ids : (i \in stopped) ~> (i \in retU \/ consumed[i] = 1)
+\* 10. After that stop the line unblocks: no head is held and every drive is idle.
+StopUnblocks == (stopped # {}) ~> (head = "none" /\ AllIdle)
 =============================================================================

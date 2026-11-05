@@ -1539,6 +1539,8 @@ src/
 │   │   │   ├── unpaired_active_token.rs
 │   │   │   └── watcher_respawn.rs
 │   │   ├── herdr_terminate/
+│   │   │   ├── root_replaced/
+│   │   │   │   └── preclaim.rs
 │   │   │   ├── http_force.rs
 │   │   │   ├── http_force_e08_tests.rs
 │   │   │   ├── http_force_forward_tests.rs
@@ -1572,9 +1574,12 @@ src/
 │   │   │   │   ├── circuit_evidence.rs
 │   │   │   │   ├── identity.rs
 │   │   │   │   ├── legacy_replay_coordinate.rs
+│   │   │   │   ├── presence_identity.rs
 │   │   │   │   ├── serde_adapters.rs
 │   │   │   │   └── turn_kinds.rs
 │   │   │   ├── native_stop_pin/
+│   │   │   │   ├── busy_input_tests.rs
+│   │   │   │   ├── historical_tests.rs
 │   │   │   │   ├── retry_tests.rs
 │   │   │   │   ├── serde_tests.rs
 │   │   │   │   └── tests.rs
@@ -1585,14 +1590,13 @@ src/
 │   │   │   ├── removal/
 │   │   │   │   ├── custody_notice/
 │   │   │   │   │   └── retention.rs
-│   │   │   │   ├── loader_gate_observation_tests/
-│   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   ├── boot_custody.rs
 │   │   │   │   ├── boot_custody_tests.rs
 │   │   │   │   ├── boot_reaper.rs
 │   │   │   │   ├── custody_notice.rs
 │   │   │   │   ├── custody_notice_tests.rs
 │   │   │   │   ├── input_fence_reaper_tests.rs
+│   │   │   │   ├── restart_marker_lifetime_tests.rs
 │   │   │   │   ├── restore_failure.rs
 │   │   │   │   └── scoped_restore.rs
 │   │   │   ├── save_store/
@@ -2097,17 +2101,15 @@ src/
 │   │   │   │   │   │   ├── mailbox_reaction_tests.rs
 │   │   │   │   │   │   ├── queued_intake_cause.rs
 │   │   │   │   │   │   └── requeue_tests.rs
-│   │   │   │   │   ├── recovery_context_take_order_tests/
-│   │   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   │   ├── replay_start/
 │   │   │   │   │   │   └── common.rs
 │   │   │   │   │   ├── retry_prompt/
-│   │   │   │   │   │   ├── tests.rs
-│   │   │   │   │   │   └── wiring_tests.rs
+│   │   │   │   │   │   └── tests.rs
 │   │   │   │   │   ├── session_preparation/
 │   │   │   │   │   │   └── restore_tests.rs
 │   │   │   │   │   ├── worker_entry/
 │   │   │   │   │   │   ├── custody_pg_tests.rs
+│   │   │   │   │   │   ├── dispatch_guard_pg_tests.rs
 │   │   │   │   │   │   ├── goal_fresh_pg_tests.rs
 │   │   │   │   │   │   └── preserve_cancel_tests.rs
 │   │   │   │   │   ├── adk_thread.rs
@@ -2115,9 +2117,9 @@ src/
 │   │   │   │   │   ├── context.rs
 │   │   │   │   │   ├── dispatch_runtime.rs
 │   │   │   │   │   ├── feature_settings.rs
+│   │   │   │   │   ├── first_key_gate_paths_tests.rs
 │   │   │   │   │   ├── host_refusal.rs
 │   │   │   │   │   ├── inflight_create_log.rs
-│   │   │   │   │   ├── input_effect_tests.rs
 │   │   │   │   │   ├── intake_dispatch.rs
 │   │   │   │   │   ├── placeholder_handoff.rs
 │   │   │   │   │   ├── race_loss.rs
@@ -2136,6 +2138,7 @@ src/
 │   │   │   │   ├── provider_dispatch/
 │   │   │   │   │   ├── owner_input.rs
 │   │   │   │   │   ├── owner_input_busy_gate_tests.rs
+│   │   │   │   │   ├── owner_input_carried_restart_tests.rs
 │   │   │   │   │   ├── owner_input_codex_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_tests.rs
 │   │   │   │   │   ├── owner_input_idle_tests.rs
@@ -2153,7 +2156,9 @@ src/
 │   │   │   │   │   ├── clear_tests.rs
 │   │   │   │   │   ├── legacy_clear_tests.rs
 │   │   │   │   │   ├── policy_tests.rs
-│   │   │   │   │   └── recheck_tests.rs
+│   │   │   │   │   ├── preclaim_tests.rs
+│   │   │   │   │   ├── recheck_tests.rs
+│   │   │   │   │   └── wake_tests.rs
 │   │   │   │   ├── tui_followup/
 │   │   │   │   │   ├── busy_notice.rs
 │   │   │   │   │   ├── busy_refusal_reply_tests.rs
@@ -2991,6 +2996,9 @@ src/
 │   │   │   │   │   ├── hold_leaf_log_tests.rs
 │   │   │   │   │   ├── inflight_bound.rs
 │   │   │   │   │   ├── inflight_bound_tests.rs
+│   │   │   │   │   ├── inflight_diagnostics.rs
+│   │   │   │   │   ├── inflight_identity.rs
+│   │   │   │   │   ├── inflight_identity_tests.rs
 │   │   │   │   │   ├── legacy_divergence.rs
 │   │   │   │   │   ├── legacy_divergence_entry_tests.rs
 │   │   │   │   │   ├── legacy_divergence_tests.rs

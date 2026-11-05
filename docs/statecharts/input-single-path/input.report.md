@@ -151,6 +151,25 @@ After the stop the writer may still end on a refusal that records a not-sent pro
 
 `InputPath.cfg` and `InputPathClean.cfg` keep their rows in `expected.tsv` with the transition enabled.
 
+## Stop liveness (#7795)
+
+`LiveSpec` adds weak fairness on `Next` to `Spec`. Two properties ride on the stop-before-key configs:
+
+- `StoppedLeaves`: an input a stop took before its first key eventually leaves the line, retained unconfirmed, or has reached Claude once.
+- `StopUnblocks`: after that stop the head is released and every drive is idle.
+
+The `*Live` configs reuse the stop configs' constants and check only these two properties; the safety rules stay with the configs above.
+
+| Config | Constants | Properties that break |
+|---|---|---|
+| `InputPathStopGateLive.cfg` | clean constants, `Mut = "none"` | none |
+| `InputPathStopNoGateLive.cfg` | `Mut = "noKeyGate"` | StoppedLeaves |
+| `InputPathStopNotSentLive.cfg` | `Mut = "cancelledNotSent"` | StoppedLeaves |
+| `InputPathStopBusyNoGateLive.cfg` | `Mut = "busyNoGate"` | StoppedLeaves |
+| `InputPathStopProofOverStopLive.cfg` | `Mut = "proofOverStop"` | StoppedLeaves |
+
+In each mutant the stopped input stays in line, and the drive can take and hold it again forever while the pane reads as unread; `StopUnblocks` still holds because the head is released.
+
 ## Counterexamples replayed against the code and the 4f design
 
 | ID | Rule, path | Replay | Verdict |

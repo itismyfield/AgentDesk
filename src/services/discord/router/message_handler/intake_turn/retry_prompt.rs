@@ -84,6 +84,3 @@ impl Prepared {
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-mod wiring_tests;

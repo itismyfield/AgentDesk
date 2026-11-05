@@ -1,0 +1,52 @@
+---
+title: "Same input waits for Herdr root recovery before claim"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Recovering
+    lg1: Held
+    lg2: Path to the ReplacedInputProgress bug
+    lg3: Repeats forever, so ReplacedInputProgress breaks
+  }
+  class lg0 blue
+  class lg1 pink
+  class lg2 bugPath
+  class lg3 repeats
+  s0: Old execution and exact binding
+  s1: dcserver process evidence lost
+  s2: New server witness, old row retained
+  s3: Herdr ready before reconciliation
+  s4: Reconciled, exact row retained
+  s5: Original queued before claim
+  s6: Front claim granted, dispatch not started
+  s7: Old-binding dispatch persisted current inflight
+  s8: Held: current-generation inflight blocks quiet
+  [*] --> s0
+  s0 --> s1: dcserver restarts
+  s1 --> s2: Herdr restarts with a new witness
+  s2 --> s3: the old root is replaced by a lone shell
+  s3 --> s4: restart reconciliation completes
+  s4 --> s5: accept the original input
+  s5 --> s6: spend the front grant without inflight
+  s6 --> s7: start the old binding and persist inflight
+  s7 --> s8: pane gate refuses and retains inflight
+  s8 --> s8: reader retains exact replacement evidence or produce current startup evidence or capture a new target after observation or verify policy, original processes and lone shell or current inflight prevents retirement or next reader pass retries the retained candidate
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 blue
+  class s2 bugPath
+  class s3 blue
+  class s3 bugPath
+  class s4 blue
+  class s4 bugPath
+  class s5 blue
+  class s5 bugPath
+  class s6 blue
+  class s6 bugPath
+  class s7 blue
+  class s7 bugPath
+  class s8 pink
+  class s8 bugPath
+  class s8 repeats

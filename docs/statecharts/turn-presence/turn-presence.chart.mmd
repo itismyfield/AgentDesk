@@ -1,0 +1,17 @@
+stateDiagram-v2
+    [*] --> CollectBefore
+    CollectBefore --> Down: crash discards memory proof
+    Down --> CollectBefore: boot and fresh process identity
+    CollectBefore --> CollectAfter: progress or identity change
+    CollectAfter --> Admit: stable projection and fences
+    CollectAfter --> CollectBefore: changed inputs, one retry
+    CollectAfter --> Unbound: guard/read fault or second failure
+    Unbound --> Unknown: present inflight blocks absence
+    Unknown --> Notice: continuous Unknown reaches grace
+    Unknown --> CollectBefore: next read
+    Admit --> ReadOpen
+    ReadOpen --> PublicationPair
+    PublicationPair --> FinalFiles: fresh and pinned projection agree
+    FinalFiles --> Publish: same identity and fences
+    FinalFiles --> CollectBefore: changed identity or read failure
+    Publish --> CollectBefore: next read

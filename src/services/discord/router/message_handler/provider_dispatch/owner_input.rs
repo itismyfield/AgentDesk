@@ -41,6 +41,8 @@ pub(super) struct Registration {
     timing: &'static busy_inject::Timing,
     /// The provider's observer of the AI turn an idle submit starts; returns once that turn ends.
     until_done: Option<UntilDone>,
+    /// Only a successfully settled write may attach its native input to this birth episode.
+    native_pin_submitted: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Reads an idle submit's AI turn to its end on the turn's sender and returns its outcome.
@@ -111,6 +113,7 @@ impl Registration {
             clock: std::sync::Arc::new(|| chrono::Utc::now().timestamp_millis().max(0) as u64),
             timing: &busy_inject::TIMING,
             until_done,
+            native_pin_submitted: None,
         })
     }
 }
@@ -198,6 +201,8 @@ pub(in crate::services::discord) fn owner_drive(
                 ingress::handoff_held(shared, &provider, ChannelId::new(channel), &original, hold)
                     .await;
             }
+            #[cfg(test)]
+            tests::idle::observe_root_recovery_handoff(channel, original.1.message_id, &result);
             result
         })
     });
@@ -441,6 +446,11 @@ pub(in crate::services::discord) fn wake(shared: &Shared, channel: ChannelId) {
     crate::services::discord::queue_io::input_owner::drive::wake(drive(shared, channel));
 }
 
+#[cfg(test)]
+pub(in crate::services::discord) fn wake_drive_for_test(shared: &Shared, channel: ChannelId) {
+    crate::services::discord::queue_io::input_owner::drive::wake(drive(shared, channel));
+}
+
 /// A headless start on a target the owner takes: its reservation's original is admitted under
 /// that turn's ticket, then the drive wakes; `None` leaves the start to its legacy path.
 pub(in crate::services::discord) async fn admit_start(
@@ -601,6 +611,12 @@ async fn start_idle(
         None => Ok(None),
     };
     let kept = kept.map_err(effect::unsent)?;
+    crate::services::discord::herdr_terminate::root_replaced::preclaim::before_idle(
+        &shared,
+        &shared.provider,
+        channel,
+    )
+    .await?;
     // A start waits unclaimed behind a turn it did not start; that turn's idle wakes the owner.
     let wait = match &kept {
         Some(context) => start_waits(&shared, channel, context).await,
@@ -643,6 +659,11 @@ async fn start_idle(
             .pending_uploads
             .extend(item.pending_uploads.iter().cloned());
     }
+    #[cfg(test)]
+    let owner = match tests::idle::root_recovery_launch(channel, owner, &intervention.text) {
+        Ok(owner) => owner,
+        Err(result) => return result,
+    };
     let owner_name = crate::services::discord::queue_dispatch::kickoff::queued_owner_name;
     let name = owner_name(deps.http, intervention.author_id).await;
     let at = (shared.provider.clone(), channel);
@@ -670,6 +691,21 @@ async fn start_idle(
         (Err(_), Ok(_)) => Err("NotSent(\"turn_not_started\")".into()),
     }
 }
+
+#[cfg(test)]
+pub(in crate::services::discord) async fn start_idle_for_test(
+    shared: Shared,
+    channel: ChannelId,
+    front: Front,
+) -> Result<(), String> {
+    start_idle(shared, channel, front).await
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) use tests::idle::{
+    RootRecoveryDriveEvent, claimed_root_recovery_launch, install_root_recovery_drive_probe,
+    install_root_recovery_launch,
+};
 
 /// An owner front's turn, registered from this turn's own host and pane: a running Claude pane
 /// takes it through the busy entry, an idle pane's AI turn is read on this turn's sender.
@@ -699,7 +735,7 @@ pub(super) fn execute_owned(
                 Some((transcript.as_str(), turn.session_id)),
             );
             Registration::observed(mailbox, kind, at, &claim.front().1, None).map(|mut owner| {
-                owner.until_done = busy_observer(&turn, &sender, &owner);
+                owner.until_done = busy_observer(&turn, &sender, &mut owner);
                 owner
             })
         }
@@ -733,7 +769,7 @@ fn running_transcript(turn: &StreamingTurn<'_>, session: &str) -> Option<String>
 fn busy_observer(
     turn: &StreamingTurn<'_>,
     sender: &std::sync::mpsc::Sender<crate::services::agent_protocol::StreamMessage>,
-    owner: &Registration,
+    owner: &mut Registration,
 ) -> Option<UntilDone> {
     let nonce = owner.attempt["nonce"].as_str()?;
     let frame = busy_inject::frame("discord", &owner.author, &owner.name, nonce, turn.prompt);
@@ -744,8 +780,30 @@ fn busy_observer(
         turn.channel_id,
     );
     let cancel = std::sync::Arc::clone(&turn.cancel);
+    let submitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    owner.native_pin_submitted = Some(submitted.clone());
+    let proof = crate::services::discord::inflight::BusyNativeInput::capture(
+        at.0,
+        nonce,
+        &frame,
+        &owner.transcript,
+        &owner.attempt["source"],
+        submitted,
+        cancel.clone(),
+    );
+    let on_native_user = Box::new(move |offset| {
+        if let Some(proof) = proof {
+            proof.adopt(offset);
+        }
+    });
     let observe = crate::services::claude_tui::hosting::busy_owner_observer;
-    observe(at, &owner.transcript, sender.clone(), cancel)
+    observe(
+        at,
+        &owner.transcript,
+        sender.clone(),
+        cancel,
+        on_native_user,
+    )
 }
 
 /// The provider's own observer of the AI turn an idle submit starts, set up before that submit.
@@ -892,7 +950,13 @@ fn take_owned(
     // Only the Claude tmux writers consult the first-key gate, so only there does a stop prove no key.
     let gate = matches!(route, target::Route::ClaudeIdle | target::Route::ClaudeBusy)
         .then(|| turn.cancel.native_stop.receipt_sink());
+    let native_pin_submitted = registration.native_pin_submitted.clone();
     let result = run(turn, (route, declared), registration, front);
+    if result.is_ok()
+        && let Some(submitted) = native_pin_submitted
+    {
+        submitted.store(true, std::sync::atomic::Ordering::Release);
+    }
     reply(&result);
     let result = match (result, until_done) {
         (Ok(()), Some(until_done)) => until_done(),
