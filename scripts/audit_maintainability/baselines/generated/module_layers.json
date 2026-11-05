@@ -2,7 +2,7 @@
   "configuration_errors":[],
   "count_unit_version":1,
   "edge_count_unit":"static reference occurrences",
-  "generation_command":"python3 scripts/audit_maintainability/checks/module_layer_baseline.py --input-sha 5add40230fa426646eaa5aa803f727e2a753a7eb --output scripts/audit_maintainability/baselines/generated/module_layers.json --admit-classification --previous-mapping-rev 65e7a7a47b44e1c9f7e047b6b2c18a16b3497111",
+  "generation_command":"python3 scripts/audit_maintainability/checks/module_layer_baseline.py --input-sha d933775de0958332a54170ec167ea79c2af4333a --output scripts/audit_maintainability/baselines/generated/module_layers.json --update-reductions",
   "indeterminate_dependencies":[
     {"count":1,"id":"00514c150d5ed2e4470cdacf16d00dafa285f46d3a822d5b65701584934d4509","kind":"path","source":"src/lib.rs::crate::services::scheduled_messages::owner_input","target":"src/lib.rs::crate::services::scheduled_messages"},
     {"count":1,"id":"020e4a63748eeae5fda5c444a36b53b13f0d305ac9f47c2e6e19946b55df49ea","kind":"path","source":"src/lib.rs::crate::services::discord::queue_io::input_owner::ingress","target":"src/lib.rs::crate::services::turn_orchestrator::queued_head::v2::source_admission"},
@@ -156,7 +156,7 @@
   ],
   "indeterminate_edges":149,
   "indeterminate_occurrences":392,
-  "input_sha":"5add40230fa426646eaa5aa803f727e2a753a7eb",
+  "input_sha":"d933775de0958332a54170ec167ea79c2af4333a",
   "mapping_sha256":"903bff6e2ea9ab6bd9e4501b2bc83c527aa9acda151b2dd4f331a7e583471fef",
   "reverse_dependencies":[
     {"count":2,"id":"0035d7ca439517230bc6306b0881fc487fe95b44c2852a7e74379cb98436987d","kind":"path","source":"src/lib.rs::crate::config","target":"src/lib.rs::crate::config::session_hosts"},
