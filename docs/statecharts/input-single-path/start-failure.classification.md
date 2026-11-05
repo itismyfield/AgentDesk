@@ -12,4 +12,4 @@ Allowlist: ProviderUnsupported, EndpointNotLocal, actual ExecutorNotWired after 
 HostedHerdrUnconfigured { state: Some(Pending | Bound) } after automatic Return.
 Preclaim NotSent("herdr_root_recovery_held") is SchedulingHeld; S2 owns its completion wake.
 Inside-start Herdr bound-gate failure is StartFailedBeforeInput regardless of its string.
-The S2 case below emulates only its NotSent frame, not its unlanded preclaim implementation.
+The S2 case below emulates only its NotSent frame, not the preclaim recovery itself; its live integration is covered by S2 tests.

@@ -951,8 +951,8 @@ SFDrive ==
             !.placeholders = IF x = "A" /\ Fix = "KnownPersistent" THEN @ ELSE SFInc(@, 3)]
     /\ UNCHANGED ObserverLegacy
 
-\* Failure and exact-claim validation belong to one actor commit. The production failure
-\* path still returns without this commit; NotSent-only suppression also has no close wake.
+\* Failure and exact-claim validation belong to one actor commit. Historical before variants
+\* omit that commit; NotSent-only suppression also has no close wake.
 SFFail ==
     /\ SF.run = "A" /\ ~SF.reserve /\ SF.cause /\ ~(SFHeld /\ SF.holds < 2)
     /\ SF.claim > 0 /\ SF.callback = SF.claim

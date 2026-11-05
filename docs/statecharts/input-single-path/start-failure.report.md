@@ -1,7 +1,7 @@
 # Owner start failure slice
 
 Historical RED code SHA: `b0bab6ebf693502f86c0b2e2c0307033fa411c29`.
-Live repair code SHA: `fc9dd7f8e61f9b0d3dff6f5e8ec70da1146eaa6a`; two-fact contract follows below.
+Live repair code SHA: `87e72ff34b94462f08f81ee18ff170b18d6a72aa`; two-fact contract follows below.
 `InputOwnership.tla` / `SFSpec` isolates this policy in the `observer` record; older slices keep their transitions.
 The fixed classification is in its StartFailure comment and the fixture header. The historical typed-cause erasure at `host_refusal.rs:28–37` is covered by the live
 Discord and headless entrypoint fixtures.
@@ -29,7 +29,8 @@ Discord and headless entrypoint fixtures.
 `EarlyClearDelivers` requires A's payload even if a bad policy removed it from the queue.
 `ReserveResetsFailures` checks the reserve state directly, before an effect-held result can hide it.
 The two negative configs inject only those faults; the unmutated policy transitions stay the same.
-Full checker: 83 configs, rc=0, expected/actual mismatches=0.
+The full checker covers 96 configurations after the S2 and presence-model merges.
+The expected failures and properties are pinned in `expected.tsv`.
 Isolated traces reproduce EarlyClearDelivers exit 13, FirstOpaqueFailureKept exit 12 and
 ReserveResetsFailures exit 12; repository model bytes remain unchanged during those runs.
 
@@ -66,7 +67,7 @@ Live contract: use `Rejected { reason: "start_rejected: …" }` with `input.atte
 excluded from replay (`v2/retained.rs:236–248,305–311`). Keys are receipt, else `sources::identity`.
 Skip `handoff_held`, ACK attemptless notice, close routine/scheduled runs; HTTP projection is follow-up.
 Preclaim `NotSent("herdr_root_recovery_held")` is SchedulingHeld, uncounted, with its wake owned by S2.
-Inside-start bound-gate failure is StartFailedBeforeInput regardless of string. S0 emulates only S2's frame.
+Inside-start bound-gate failure is StartFailedBeforeInput regardless of string. The frame fixture checks its bridge behavior; the merged S2 integration tests cover live preclaim recovery.
 The fixture uses real ingress/drive/intake/producer/bridge/listener, separate POST/delete/payload counts,
 an immediate third-start witness, and payload/closed signals rather than sleeps. `live=true` activates
 its live oracle; A notices and B summary are counted separately. A blocked outbox
