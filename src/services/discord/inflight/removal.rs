@@ -5,6 +5,8 @@ use super::store::InflightStateFileLock;
 use super::*;
 use std::collections::HashMap;
 use std::path::Path;
+#[cfg(test)]
+mod restart_marker_lifetime_tests;
 mod restore_failure;
 use restore_failure::RestoreFailure;
 
