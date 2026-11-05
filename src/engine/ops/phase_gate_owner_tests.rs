@@ -361,7 +361,7 @@ async fn policy_phase_gate_legacy_provenance_bridge_pg() {
         1,
         "actual hook accepts proven legacy provenance"
     );
-    sqlx::query("UPDATE auto_queue_entries SET phase_gate_kind=E' \\t\\n\\r\\f\\v'")
+    sqlx::query("UPDATE auto_queue_entries SET phase_gate_kind=E' \\t\\n\\r\\f\\x0b'")
         .execute(&pool)
         .await
         .unwrap();

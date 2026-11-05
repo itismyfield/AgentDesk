@@ -259,7 +259,7 @@ async fn phase_gate_dispatch_uses_legacy_default_on_pg_tx(
              WHERE td.id = $1
              GROUP BY pg.run_id, pg.phase
              HAVING COUNT(*) > 0
-                AND BOOL_AND(NULLIF(BTRIM(e.phase_gate_kind, E' \t\n\r\\f\\v'), '') IS NULL)
+                AND BOOL_AND(NULLIF(BTRIM(e.phase_gate_kind, E' \t\n\r\\f\\x0b'), '') IS NULL)
          )",
     )
     .bind(dispatch_id)
