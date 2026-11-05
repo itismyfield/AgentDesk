@@ -1572,6 +1572,7 @@ src/
 │   │   │   │   ├── circuit_evidence.rs
 │   │   │   │   ├── identity.rs
 │   │   │   │   ├── legacy_replay_coordinate.rs
+│   │   │   │   ├── presence_identity.rs
 │   │   │   │   ├── serde_adapters.rs
 │   │   │   │   └── turn_kinds.rs
 │   │   │   ├── native_stop_pin/
@@ -2991,6 +2992,9 @@ src/
 │   │   │   │   │   ├── hold_leaf_log_tests.rs
 │   │   │   │   │   ├── inflight_bound.rs
 │   │   │   │   │   ├── inflight_bound_tests.rs
+│   │   │   │   │   ├── inflight_diagnostics.rs
+│   │   │   │   │   ├── inflight_identity.rs
+│   │   │   │   │   ├── inflight_identity_tests.rs
 │   │   │   │   │   ├── legacy_divergence.rs
 │   │   │   │   │   ├── legacy_divergence_entry_tests.rs
 │   │   │   │   │   ├── legacy_divergence_tests.rs
