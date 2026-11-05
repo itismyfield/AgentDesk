@@ -212,6 +212,27 @@ async fn owned(shared: &Arc<SharedData>, context: Value) -> Result<(), String> {
     std::fs::write(generation, "5").unwrap();
     let turn = format!("discord:{}:9100000000000757002", OWNED.get());
     let (original, ticket) = routine::synthetic_original(&turn, OWNED.get(), PROMPT, 1)?;
+    // The pane the start takes reads idle, as a live pane with its transcript does.
+    let pane = crate::services::discord::router::message_handler::headless_turn::owner_start_pane;
+    let (tmux, _) = pane(shared, OWNED, &context).await.expect("a tmux pane");
+    let transcript = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        transcript.path(),
+        "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
+    )
+    .unwrap();
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+        &tmux,
+        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+            output_path: transcript.path().display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: None,
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
     let admitted = admission::admit_with_context(&kept_by, &original, ticket, context).await;
     let admitted = match admitted {
         admission::Admission::Accepted(_) => Ok(()),
@@ -226,7 +247,9 @@ async fn owned(shared: &Arc<SharedData>, context: Value) -> Result<(), String> {
         let front = owner.front().ok_or("no front")?;
         owner.grant_front(&front).map(|()| front)
     });
-    start_idle(Arc::clone(shared), OWNED, granted.await?).await
+    let started = start_idle(Arc::clone(shared), OWNED, granted.await?).await;
+    drop(transcript);
+    started
 }
 
 /// A real provider CLI must not start if a regression reaches the launch.
