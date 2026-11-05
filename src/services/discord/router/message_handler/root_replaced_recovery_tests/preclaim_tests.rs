@@ -423,10 +423,10 @@ fn rr_preclaim_retired_without_location_runs_the_ingress_original_once_pg() {
     retired.state = HostedState::Retired;
     retired.location = None;
     case.fx.store(&retired);
-    let case = owner_input(case, |case| case, None, Input::Discord);
-    assert_eq!(case.fx.row(), Some(HostedState::Bound));
+    let fixture = owner_input((_intake, case), |fixture| &fixture.1, None, Input::Discord);
+    assert_eq!(fixture.1.fx.row(), Some(HostedState::Bound));
     assert_eq!(
-        case.cleanups(),
+        fixture.1.cleanups(),
         0,
         "Retired goes through its existing fresh launch cleanup"
     );
@@ -442,9 +442,89 @@ fn rr_preclaim_retired_from_another_endpoint_runs_the_ingress_original_once_pg()
     retired.state = HostedState::Retired;
     retired.location.as_mut().unwrap().endpoint_config_key = "prior-endpoint".into();
     case.fx.store(&retired);
-    let case = owner_input(case, |case| case, None, Input::Discord);
-    assert_eq!(case.fx.row(), Some(HostedState::Bound));
-    assert_eq!(case.cleanups(), 0);
+    let fixture = owner_input((_intake, case), |fixture| &fixture.1, None, Input::Discord);
+    assert_eq!(fixture.1.fx.row(), Some(HostedState::Bound));
+    assert_eq!(fixture.1.cleanups(), 0);
+}
+
+fn assert_isolated_intake_teardown(force_panic: bool) {
+    const CHILD: &str = "ADK_TEST_INTAKE_TEARDOWN_CHILD";
+    let thread = std::thread::current();
+    let name = thread.name().expect("named libtest worker");
+    if std::env::var(CHILD).ok().as_deref() != Some(name) {
+        let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env(CHILD, name)
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "teardown failed: {stdout}\n{stderr}"
+        );
+        assert!(stdout.contains("1 passed; 0 failed; 0 ignored"), "{stdout}");
+        return;
+    }
+
+    let previous = crate::config_live_reload::current();
+    let updates = crate::config_live_reload::subscribe();
+    let case = Case::launched("rr-intake-teardown");
+    let mut _intake = IntakeGate::configure(&case);
+    let restored = Arc::new(AtomicUsize::new(0));
+    let seen = restored.clone();
+    _intake._live.on_before_restore(move || {
+        crate::config::test_env_lock::assert_shared_test_env_lock_held();
+        assert_eq!(seen.fetch_add(1, Ordering::SeqCst), 0);
+    });
+    let HostedRecord::Known(mut retired) = case.fx.record() else {
+        unreachable!()
+    };
+    retired.state = HostedState::Retired;
+    retired.location = None;
+    case.fx.store(&retired);
+    let fixture = (_intake, case);
+    let case_of: fn(&(IntakeGate, Case)) -> &Case = if force_panic {
+        |_| panic!("forced owner input teardown")
+    } else {
+        |fixture| &fixture.1
+    };
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let fixture = owner_input(fixture, case_of, None, Input::Discord);
+        drop(fixture);
+    }));
+    if force_panic {
+        let panic = outcome.expect_err("forced teardown must unwind owner_input");
+        let message = panic
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| panic.downcast_ref::<String>().map(String::as_str));
+        assert_eq!(message, Some("forced owner input teardown"));
+    } else {
+        assert!(outcome.is_ok(), "normal owner input must finish");
+    }
+    assert_eq!(restored.load(Ordering::SeqCst), 1, "restore was observed");
+    let current = crate::config_live_reload::current();
+    let watched = updates.borrow();
+    assert_eq!(current.is_some(), previous.is_some());
+    assert_eq!(watched.is_some(), previous.is_some());
+    if let (Some(previous), Some(current), Some(watched)) = (previous, current, watched.as_ref()) {
+        assert!(Arc::ptr_eq(&previous, &current));
+        assert!(Arc::ptr_eq(&previous, watched));
+    }
+}
+
+#[test]
+fn rr_preclaim_intake_teardown_restores_under_lock_pg() {
+    assert_isolated_intake_teardown(false);
+}
+
+#[test]
+fn rr_preclaim_intake_panic_restores_under_lock_pg() {
+    assert_isolated_intake_teardown(true);
 }
 
 #[test]
