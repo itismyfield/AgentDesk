@@ -198,6 +198,8 @@ pub(in crate::services::discord) fn owner_drive(
                 ingress::handoff_held(shared, &provider, ChannelId::new(channel), &original, hold)
                     .await;
             }
+            #[cfg(test)]
+            tests::idle::observe_root_recovery_handoff(channel, original.1.message_id, &result);
             result
         })
     });
@@ -441,6 +443,11 @@ pub(in crate::services::discord) fn wake(shared: &Shared, channel: ChannelId) {
     crate::services::discord::queue_io::input_owner::drive::wake(drive(shared, channel));
 }
 
+#[cfg(test)]
+pub(in crate::services::discord) fn wake_drive_for_test(shared: &Shared, channel: ChannelId) {
+    crate::services::discord::queue_io::input_owner::drive::wake(drive(shared, channel));
+}
+
 /// A headless start on a target the owner takes: its reservation's original is admitted under
 /// that turn's ticket, then the drive wakes; `None` leaves the start to its legacy path.
 pub(in crate::services::discord) async fn admit_start(
@@ -601,6 +608,12 @@ async fn start_idle(
         None => Ok(None),
     };
     let kept = kept.map_err(effect::unsent)?;
+    crate::services::discord::herdr_terminate::root_replaced::preclaim::before_idle(
+        &shared,
+        &shared.provider,
+        channel,
+    )
+    .await?;
     // A start waits unclaimed behind a turn it did not start; that turn's idle wakes the owner.
     let wait = match &kept {
         Some(context) => start_waits(&shared, channel, context).await,
@@ -643,6 +656,11 @@ async fn start_idle(
             .pending_uploads
             .extend(item.pending_uploads.iter().cloned());
     }
+    #[cfg(test)]
+    let owner = match tests::idle::root_recovery_launch(channel, owner, &intervention.text) {
+        Ok(owner) => owner,
+        Err(result) => return result,
+    };
     let owner_name = crate::services::discord::queue_dispatch::kickoff::queued_owner_name;
     let name = owner_name(deps.http, intervention.author_id).await;
     let at = (shared.provider.clone(), channel);
@@ -670,6 +688,21 @@ async fn start_idle(
         (Err(_), Ok(_)) => Err("NotSent(\"turn_not_started\")".into()),
     }
 }
+
+#[cfg(test)]
+pub(in crate::services::discord) async fn start_idle_for_test(
+    shared: Shared,
+    channel: ChannelId,
+    front: Front,
+) -> Result<(), String> {
+    start_idle(shared, channel, front).await
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) use tests::idle::{
+    RootRecoveryDriveEvent, claimed_root_recovery_launch, install_root_recovery_drive_probe,
+    install_root_recovery_launch,
+};
 
 /// An owner front's turn, registered from this turn's own host and pane: a running Claude pane
 /// takes it through the busy entry, an idle pane's AI turn is read on this turn's sender.

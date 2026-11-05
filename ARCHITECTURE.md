@@ -1539,6 +1539,8 @@ src/
 │   │   │   ├── unpaired_active_token.rs
 │   │   │   └── watcher_respawn.rs
 │   │   ├── herdr_terminate/
+│   │   │   ├── root_replaced/
+│   │   │   │   └── preclaim.rs
 │   │   │   ├── http_force.rs
 │   │   │   ├── http_force_e08_tests.rs
 │   │   │   ├── http_force_forward_tests.rs
@@ -2154,7 +2156,9 @@ src/
 │   │   │   │   │   ├── clear_tests.rs
 │   │   │   │   │   ├── legacy_clear_tests.rs
 │   │   │   │   │   ├── policy_tests.rs
-│   │   │   │   │   └── recheck_tests.rs
+│   │   │   │   │   ├── preclaim_tests.rs
+│   │   │   │   │   ├── recheck_tests.rs
+│   │   │   │   │   └── wake_tests.rs
 │   │   │   │   ├── tui_followup/
 │   │   │   │   │   ├── busy_notice.rs
 │   │   │   │   │   ├── busy_refusal_reply_tests.rs

@@ -466,3 +466,6 @@ fn rr_policy_legacy_dedicated_retires_without_policy_observation_pg() {
     assert_eq!(case.source.reads.load(Ordering::SeqCst), 0);
     assert_eq!(case.case.effects(), before);
 }
+
+#[path = "preclaim_tests.rs"]
+mod preclaim;
