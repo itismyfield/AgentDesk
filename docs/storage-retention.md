@@ -61,6 +61,9 @@ Each row is a (vector × action × job) tuple. If a vector is not in this table,
 | PG `auto_queue_entries` (`done`/`skipped`/`failed`/`user_cancelled`, run `completed`/`cancelled`) | 30 days (on `completed_at`) | `DELETE`                       | `storage.db_retention`            | Weekly   |
 | PG `agent_quality_event`                  | 90 days                                     | `DELETE`, adding the deleted `turn_*` events to `turn_analytics_monthly_aggregate` in the same statement | observability retention sweep | Hourly   |
 | PG `session_transcripts`                  | 90 days                                     | Copy to archive table, then `DELETE`                         | `storage.db_retention`            | Weekly   |
+| PG `session_transcripts_archive`          | 180 days on the original `created_at` (90 days after the hot table drops the row) | `DELETE` (on `created_at`) | `storage.db_retention` | Weekly   |
+| PG `runtime_decisions` (supervisor audit log) | 90 days                                  | `DELETE` (on `created_at`)                                   | `storage.db_retention`            | Weekly   |
+| PG `slo_aggregates`                       | 90 days                                     | `DELETE` (on `created_at`)                                   | `storage.db_retention`            | Weekly   |
 | PG `task_dispatches` (status='completed') | 90 days                                     | `DELETE`, adding the deleted rows to `task_dispatches_monthly_aggregate` in the same statement | `storage.db_retention` | Weekly   |
 | PG `turn_lifecycle_events`                | 30 days                                     | `DELETE` (on `created_at`)                                   | `storage.db_retention`            | Weekly   |
 | PG `skill_usage`                          | 90 days                                     | `DELETE` (on `used_at`)                                      | `storage.db_retention`            | Weekly   |

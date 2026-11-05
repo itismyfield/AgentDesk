@@ -8,6 +8,7 @@
 
 mod image_retention;
 mod queue_and_dispatch;
+mod record_caps;
 use anyhow::Result;
 use serde::Serialize;
 use sqlx::{PgPool, Row};
@@ -74,6 +75,11 @@ const DISPATCH_RETENTION_DAYS: i32 = 90;
 const TURN_LIFECYCLE_RETENTION_DAYS: i32 = 30; // operational telemetry, several rows per turn
 const SKILL_USAGE_RETENTION_DAYS: i32 = 90; // dashboard analytics
 const TURNS_RETENTION_DAYS: i32 = 90; // token/cost analytics, archived before delete
+// The archive ages on the original `created_at`, so it keeps each transcript 90 more days
+// after the hot table drops it.
+const TRANSCRIPT_ARCHIVE_RETENTION_DAYS: i32 = TRANSCRIPT_RETENTION_DAYS + 90;
+const RUNTIME_DECISIONS_RETENTION_DAYS: i32 = 90; // supervisor audit log
+const SLO_AGGREGATES_RETENTION_DAYS: i32 = 90; // SLO trend history
 // Applies to both the snapshot's age and its referencing definitions' terminal age.
 const CONTEXT_SNAPSHOT_RETENTION_DAYS: i32 = 30;
 const INTAKE_OUTBOX_DONE_RETENTION_DAYS: i32 = 7;
@@ -93,6 +99,7 @@ pub async fn db_retention_job(pool: &PgPool, dry_run: bool) -> Result<RetentionR
 
     // `agent_quality_event` is owned by the hourly observability retention sweep.
     retain_session_transcripts(pool, dry_run, &mut report).await?;
+    record_caps::retain(pool, dry_run, &mut report).await?;
     retain_message_outbox(pool, dry_run, &mut report).await?;
     queue_and_dispatch::retain_auto_queue_entries(pool, dry_run, &mut report).await?;
     queue_and_dispatch::retain_task_dispatches(pool, dry_run, &mut report).await?;
