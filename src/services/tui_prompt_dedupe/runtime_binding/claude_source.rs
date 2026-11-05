@@ -22,7 +22,7 @@ pub(crate) enum Record {
     /// A source the Claude check verified; recorded as this identity if the path still names it.
     Verified(SourceId),
     /// A restored exact path whose transcript is not verified yet: published, nothing logged.
-    AwaitFirstRecord,
+    AwaitFirst,
     /// A logged source the path must still name; anything else publishes nothing.
     Exact(SourceId),
 }
@@ -62,7 +62,7 @@ impl Record {
             }
             // A file replaced since the check is judged against the pin, or left for the next check.
             Self::Verified(_) => binding_events::judge_moved(proposal).map(persisted),
-            Self::AwaitFirstRecord => Ok(Persisted::AwaitingExact),
+            Self::AwaitFirst => Ok(Persisted::AwaitingExact),
             Self::Exact(source) if binding_events::codex::source_file_matches(source) => {
                 binding_events::record_verified(proposal, source).map(|committed| match committed {
                     Committed::Appended | Committed::Unchanged => Persisted::Logged,
@@ -78,7 +78,7 @@ impl Record {
     pub(crate) fn unlogged(&self) -> Persisted {
         match self {
             Self::Stat => Persisted::Logged,
-            Self::Verified(_) | Self::AwaitFirstRecord => Persisted::AwaitingExact,
+            Self::Verified(_) | Self::AwaitFirst => Persisted::AwaitingExact,
             Self::Exact(_) => Persisted::Recheck,
         }
     }
@@ -211,6 +211,9 @@ impl Candidate<'_> {
         after_check();
         // The path must still name the file the check read; a replaced one waits for the next check,
         // the bound source too, which keeps its binding and cursor meanwhile.
+        #[cfg(unix)]
+        let waiting = proposal
+            .is_some_and(|p| binding_events::pending_seq(p.channel_id, tmux, payload).is_some());
         let recorded = match (
             proposal,
             binding_events::codex::source_file_matches(&source),
@@ -241,7 +244,23 @@ impl Candidate<'_> {
                 false
             }
             Some(Ok(Committed::Stale)) => wait(failure),
-            Some(Ok(_)) => {
+            Some(Ok(committed)) => {
+                #[cfg(unix)]
+                if committed == Committed::Appended
+                    && waiting
+                    && proposal.is_some_and(|p| {
+                        p.session_id == self.bound.session_id.as_deref()
+                            && p.path == self.bound.output_path
+                            && binding_events::pending_seq(p.channel_id, tmux, payload).is_none()
+                    })
+                {
+                    crate::services::discord::observer_binding_published(
+                        tmux.to_owned(),
+                        self.bound.clone(),
+                    );
+                }
+                #[cfg(not(unix))]
+                let _ = committed;
                 // A re-pin after the pin is what reclaims, so only the gate above can supersede.
                 if let (true, Some(p)) = (reclaimable, proposal) {
                     self.log_reclaim(p, &source);

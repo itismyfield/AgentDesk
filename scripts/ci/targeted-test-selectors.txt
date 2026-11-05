@@ -51,6 +51,10 @@ services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::hold_detail_
 [High-risk recovery: Local model durable queue wake regression]
 services::discord::tui_prompt_relay::local_model_queue_wake_e2e
 
+[High-risk recovery: Input observer attachment regressions]
+services::discord::router::message_handler::provider_dispatch::owner_input::tests::idle::
+services::discord::runtime_bootstrap::shared_data::tests::
+
 [High-risk recovery: Transition-busy requeue spin regressions]
 services::discord::router::message_handler::intake_turn::race_loss::
 =services::discord::queue_io::presleep_tests::race_loss_recheck_fences_on_transition_without_parking_a_waiter_5170

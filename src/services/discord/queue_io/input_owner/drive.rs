@@ -100,6 +100,9 @@ async fn run(lane: Arc<Lane>, drive: Arc<Drive>) {
         while let Some(front) = grant(&drive, stalled).await {
             let message = front.1.message_id;
             let result = (drive.handoff)(front).await;
+            if let Err(error) = &result {
+                tracing::info!(channel_id = drive.channel, %error, "owner front not delivered");
+            }
             // A front refused before any key for a reason a later look may clear waits for a real
             // wake: a turn boundary, new input, or its pane's screen recovering. Never by time.
             if result.is_err() && held(&drive, message).await {
@@ -107,9 +110,6 @@ async fn run(lane: Arc<Lane>, drive: Arc<Drive>) {
                 break;
             }
             stalled = result.is_err();
-            if let Err(error) = result {
-                tracing::info!(channel_id = drive.channel, %error, "owner front not delivered");
-            }
         }
         if let Some(settled) = &drive.settled {
             settled().await;

@@ -31,6 +31,17 @@ pub(in crate::services::discord) async fn restore_queued_and_inflight_for_tests(
     queued_recovery::restore_queued_and_inflight_work(http, shared, provider).await
 }
 
+/// Opens intake only after this active runtime restored its queues and inflight work.
+pub(in crate::services::discord) async fn complete_active_reconcile(shared: &Arc<SharedData>) {
+    mark_reconcile_complete(shared);
+    #[cfg(unix)]
+    for channel in
+        crate::services::turn_orchestrator::v2_channels(&shared.provider, &shared.token_hash)
+    {
+        super::session_transition::wake_installed_owner(shared, channel).await;
+    }
+}
+
 mod recovery_flush;
 mod relay_dlq_redelivery;
 mod restored_state;
@@ -439,7 +450,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
 // INITIALIZATION/SPAWN ORDER IS LOAD-BEARING — do not reorder. ──
 
 /// Registers a standby and settles the reconcile it skips; promotion remains a fenced restart.
-async fn register_standby_and_settle_reconcile(
+pub(in crate::services::discord) async fn register_standby_and_settle_reconcile(
     health_registry: &Arc<health::HealthRegistry>,
     provider: &ProviderKind,
     shared: &Arc<SharedData>,

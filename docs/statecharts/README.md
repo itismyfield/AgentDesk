@@ -65,6 +65,14 @@ Wire that root into the scheduled workflow before moving it; do not omit a confi
 | `execution-authority` (#7731) | `b66f40ba19` | main: one transient PG read failure (or an owner change) on a channel hosted under the gateway lease holds live input forever, because the refresh waits for a host that never retires | fixed by #7731 (`fix1`); the `nowait` mutant breaks the permit-host fence |
 | `execution-authority` observation (#7768) | `6249d8796f` | custody read closes admission during a held output; snapshot read preserves it | `ExecutionAuthorityCustody` expects the counterexample; `ExecutionAuthoritySnapshot` passes; see [report](execution-authority/snapshot.report.md) |
 | `input-single-path` ownership, slice F (#7676) | `a9d59259e5` | main after C: a restart-carried row whose transcript has an input absorbed mid-turn without a `queued_command` row never closes, so every owner start is refused for good (CF); an outside copy of a waiting input is seen twice (FOutside) | F plan: settle an absorbed input at its `remove` record and drop its dequeue credit; the outside copy stays a documented gap |
+| `input-single-path` F7 recovery and transition release (#7676) | `1c19e5058f` + F7 repair | `F7RecoveryMain` and `F7TransitionMain`: a refused input is not woken after active reconcile or /resume·clear release; `F7StandbyWake`: standby alone injects | fixed recovery wakes adopted owners; /resume·clear completion releases the guard before waking. `F7ShortTransition` and `F7ShortTransitionMain` keep short intake/Herdr/O-writer locks unchanged: the original is delivered once after A ends, with no loss. |
+
+F7 transition-release configs cover only `/resume` and the common clear function (`/clear` and `!clear`).
+They require one busy paste after those operations release their guard. Other short transition locks
+may defer an input until the running turn A ends; their configs require one delivery after that
+existing boundary wake. Every F7 fixed config checks duplicate delivery, and the short-transition
+configs also check that the original is not silently lost. Recovery completion is an active-runtime
+event; standby marking reconcile complete never wakes an owner.
 
 The #7768 execution observation pair uses `ReadMode = custody | snapshot` on the #7731 `fix3` baseline.
 `ExecutionAuthorityCustody` expects `OutputDelayKeepsAdmission` to break: an output holds custody,

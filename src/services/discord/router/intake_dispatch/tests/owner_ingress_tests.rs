@@ -71,10 +71,35 @@ fn said(bodies: &Bodies) -> Vec<(String, u64)> {
         .collect()
 }
 
+// reserve/write/submitted supply this fixture's pump and leaf. Keep a runtime drive from
+// racing that manual writer, and restore the previous wake hook with the handle's scope.
+struct ManualOwner {
+    handle: ChannelMailboxHandle,
+    channel: ChannelId,
+    previous_wake: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl std::ops::Deref for ManualOwner {
+    type Target = ChannelMailboxHandle;
+
+    fn deref(&self) -> &Self::Target {
+        &self.handle
+    }
+}
+
+impl Drop for ManualOwner {
+    fn drop(&mut self) {
+        crate::services::discord::queue_io::cancel_backstop_test_support::set_owner_wake_for_tests(
+            self.channel,
+            self.previous_wake.take(),
+        );
+    }
+}
+
 async fn adopt(
     shared: &Arc<crate::services::discord::SharedData>,
     channel: ChannelId,
-) -> (ChannelMailboxHandle, std::path::PathBuf) {
+) -> (ManualOwner, std::path::PathBuf) {
     let path = crate::services::discord::runtime_store::discord_pending_queue_root()
         .unwrap()
         .join("claude")
@@ -85,7 +110,19 @@ async fn adopt(
         .v2_adopt(path.clone(), shared.token_hash.clone())
         .await
         .unwrap();
-    (handle, path)
+    let previous_wake =
+        crate::services::discord::queue_io::cancel_backstop_test_support::set_owner_wake_for_tests(
+            channel,
+            Some(Arc::new(|| {})),
+        );
+    (
+        ManualOwner {
+            handle,
+            channel,
+            previous_wake,
+        },
+        path,
+    )
 }
 
 fn live(channel: ChannelId, message: u64, text: &str) -> IntakeSubmission {
@@ -595,4 +632,119 @@ async fn live_pending_keeps_the_checkpoint() {
         1,
         "the re-entry is admitted once"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn automatic_ingress_and_handoff_keep_the_first_hold_reason() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    seed_generation();
+    for (offset, order) in ["ingress", "handoff", "racing"].into_iter().enumerate() {
+        let channel = ChannelId::new(7_272_420 + offset as u64);
+        let message = channel.get() * 1_000 + 1;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let http = Arc::new(serenity::Http::new("Bot intake-dispatch-test"));
+        let deps = deps(&http, &shared);
+        let (handle, _) = adopt(&shared, channel).await;
+        let (bodies, _rest) = notices(channel.get()).await;
+        shared.restart.reconcile_done.store(false, Relaxed);
+        let (entered, admission_done) = tokio::sync::oneshot::channel();
+        let (release, notice_ready) = tokio::sync::oneshot::channel();
+        let (completed, ingress_done) = tokio::sync::oneshot::channel();
+        let dispatch = async {
+            let result = input_ingress::BEFORE_INGRESS_HOLD
+                .scope(
+                    std::cell::RefCell::new(Some((entered, notice_ready))),
+                    dispatch_text_intake(&deps, live(channel, message, "overlapping holds")),
+                )
+                .await;
+            let _ = completed.send(result);
+        };
+        let overlap = async {
+            admission_done
+                .await
+                .expect("the ingress committed its original");
+            let front = handle
+                .v2_request(|slot| {
+                    let owner = slot.as_mut().ok_or("no owner")?;
+                    let front = owner.front().ok_or("no front")?;
+                    owner.grant_front(&front)?;
+                    Ok(front)
+                })
+                .await
+                .unwrap();
+            match order {
+                "ingress" => {
+                    release.send(()).unwrap();
+                    ingress_done.await.unwrap().unwrap();
+                    input_ingress::handoff_held(
+                        &shared,
+                        &ProviderKind::Claude,
+                        channel,
+                        &front,
+                        Hold::ScreenMissing,
+                    )
+                    .await;
+                }
+                "handoff" => {
+                    input_ingress::handoff_held(
+                        &shared,
+                        &ProviderKind::Claude,
+                        channel,
+                        &front,
+                        Hold::ScreenMissing,
+                    )
+                    .await;
+                    release.send(()).unwrap();
+                    ingress_done.await.unwrap().unwrap();
+                }
+                _ => {
+                    release.send(()).unwrap();
+                    let ((), done) = tokio::join!(
+                        input_ingress::handoff_held(
+                            &shared,
+                            &ProviderKind::Claude,
+                            channel,
+                            &front,
+                            Hold::ScreenMissing,
+                        ),
+                        ingress_done,
+                    );
+                    done.unwrap().unwrap();
+                }
+            }
+            let announced = said(&bodies);
+            assert_eq!(announced.len(), 1, "{order}: one automatic hold notice");
+            assert_eq!(announced[0].1, message);
+            let expected = match order {
+                "ingress" => Some(Hold::RestartRecovery.notice()),
+                "handoff" => Some(Hold::ScreenMissing.notice()),
+                _ => None,
+            };
+            if let Some(expected) = expected {
+                assert_eq!(announced[0].0, expected, "{order}: first reason stays");
+            } else {
+                assert!(
+                    [Hold::RestartRecovery.notice(), Hold::ScreenMissing.notice()]
+                        .contains(&announced[0].0)
+                );
+            }
+            input_ingress::handoff_held(
+                &shared,
+                &ProviderKind::Claude,
+                channel,
+                &front,
+                Hold::ScreenMissing,
+            )
+            .await;
+            dispatch_text_intake(&deps, live(channel, message, "overlapping holds"))
+                .await
+                .unwrap();
+            assert_eq!(said(&bodies), announced, "{order}: repeats add no notice");
+            let queued = items(&handle).await;
+            assert_eq!(queued.len(), 1, "{order}: the original remains queued");
+            assert_eq!(turn(&handle, channel, &queued[0]).await, TurnBind::NotArmed);
+            assert!(head_members(&handle).await.is_empty());
+        };
+        tokio::join!(dispatch, overlap);
+    }
 }
