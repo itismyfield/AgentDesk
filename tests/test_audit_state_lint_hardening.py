@@ -140,5 +140,75 @@ class MigrationIntegerAuditTests(unittest.TestCase):
         self.assertIn("use BIGINT", findings[0])
 
 
+class SqlVersionDependentEscapeAuditTests(unittest.TestCase):
+    CLEAN_RUST = 'fn noop() {}\n'
+    CLEAN_SQL = "SELECT 1;\n"
+
+    def audit(self, rust: str, sql: str, sql_name: str = "0999_fixture.sql") -> list[str]:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "src").mkdir()
+            (root / "src" / "fixture.rs").write_text(rust, encoding="utf-8")
+            (root / "migrations" / "postgres").mkdir(parents=True)
+            (root / "migrations" / "postgres" / sql_name).write_text(sql, encoding="utf-8")
+            findings, scanned = AUDIT.audit_sql_version_dependent_escapes(root)
+        self.assertEqual(scanned, 2)
+        return findings
+
+    def test_vertical_tab_escape_in_e_string_fails_until_written_as_hex(self) -> None:
+        cases = [
+            ("rust string", 'fn q() {\n    query("SELECT BTRIM(k, E\' \\t\\\\f\\\\v\')");\n}\n', None, "src/fixture.rs:2"),
+            ("rust raw string", 'const Q: &str = r#"\nWHERE k = E\'\\v\'"#;\n', None, "src/fixture.rs:2"),
+            ("rust hex backslash", 'const Q: &str = "e\'\\x5cv\'";\n', None, "src/fixture.rs:1"),
+            ("migration", None, "-- trims\nSELECT btrim(k, E' \\t\\v');\n", "0999_fixture.sql:2"),
+            ("dollar-quoted body", None, "DO $$ BEGIN PERFORM E'\\v'; END $$;\n", "0999_fixture.sql:1"),
+        ]
+        for name, rust, sql, location in cases:
+            with self.subTest(name):
+                findings = self.audit(rust or self.CLEAN_RUST, sql or self.CLEAN_SQL)
+                self.assertEqual(len(findings), 1, findings)
+                self.assertIn(location, findings[0])
+                fixed_rust = (rust or self.CLEAN_RUST).replace("\\v", "\\x0b").replace("\\x5cv", "\\x0b")
+                fixed_sql = (sql or self.CLEAN_SQL).replace("\\v", "\\x0b")
+                self.assertEqual(self.audit(fixed_rust, fixed_sql), [])
+
+    def test_vertical_tab_outside_e_string_literals_is_not_flagged(self) -> None:
+        cases = [
+            ("rust comments", '// query("E\'\\\\v\'")\n/// "E\'\\\\v\'"\n/* "E\'\\\\v\'" */\nfn noop() {}\n', self.CLEAN_SQL),
+            ("sql comment in rust string", 'const Q: &str = "-- E\'\\\\v\'\\nSELECT 1";\n', self.CLEAN_SQL),
+            ("non-sql rust string", 'const P: &str = "C:\\\\vendor";\nconst T: &str = "ONE\'\\\\v\'";\n', self.CLEAN_SQL),
+            ("escaped backslash", 'const Q: &str = "E\'\\\\\\\\v\'";\n', self.CLEAN_SQL),
+            ("sql comments", self.CLEAN_RUST, "-- E'\\v'\n/* E'\\v' /* nested */ */\nSELECT 1;\n"),
+            ("standard string", self.CLEAN_RUST, "SELECT '\\v', \"E'\\v\";\n"),
+        ]
+        for name, rust, sql in cases:
+            with self.subTest(name):
+                self.assertEqual(self.audit(rust, sql), [])
+
+    def test_only_the_immutable_deploy_gate_migration_is_exempt(self) -> None:
+        sql = "SELECT btrim(k, E'\\v');\n"
+        self.assertEqual(self.audit(self.CLEAN_RUST, sql, "0100_block_untrusted_deploy_gate.sql"), [])
+        self.assertEqual(len(self.audit(self.CLEAN_RUST, sql, "0186_fixture.sql")), 1)
+
+    def test_current_tree_scans_runtime_sql_and_migrations_without_findings(self) -> None:
+        findings, scanned = AUDIT.audit_sql_version_dependent_escapes(REPO_ROOT)
+        rust, migrations = AUDIT.sql_escape_targets(REPO_ROOT)
+
+        self.assertEqual(findings, [])
+        self.assertIn(REPO_ROOT / "src" / "dispatch" / "dispatch_status.rs", rust)
+        self.assertIn(
+            REPO_ROOT / "migrations" / "postgres" / "0100_block_untrusted_deploy_gate.sql",
+            migrations,
+        )
+        self.assertEqual(scanned, len(rust) + len(migrations))
+
+    def test_empty_root_fails_instead_of_passing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            findings, scanned = AUDIT.audit_sql_version_dependent_escapes(Path(directory))
+
+        self.assertEqual(scanned, 0)
+        self.assertEqual(len(findings), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

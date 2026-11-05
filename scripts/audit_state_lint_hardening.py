@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Ratchet checks for #2872 state/lint hardening.
 
-The guard is intentionally diff-based: it blocks newly introduced hazards in
-selected production modules without forcing the branch to clean up every legacy
-instance at once.
+The unwrap and integer guards are diff-based: they block newly introduced
+hazards in selected production modules without forcing the branch to clean up
+every legacy instance at once. The SQL escape guard scans the whole tree because
+the only legacy instance is an exempt immutable migration.
 """
 
 from __future__ import annotations
@@ -407,15 +408,223 @@ def audit_migration_integers(lines: list[AddedLine]) -> list[str]:
     return findings
 
 
+
+# PostgreSQL 17 reads E'\v' as U+000B; 16 and older read it as the letter v.
+# Probing every printable ASCII `E'\c'` on 16 and 17 found no other difference.
+SQL_VERSION_DEPENDENT_ESCAPES = {"v": "U+000B on PostgreSQL 17, letter v on 16 and older; write \\x0b"}
+SQL_ESCAPE_EXEMPT_PATHS = frozenset({"migrations/postgres/0100_block_untrusted_deploy_gate.sql"})
+SQL_ESCAPE_RUST_ROOTS = ("src", "tests")
+SQL_ESCAPE_MIGRATION_DIR = "migrations/postgres"
+# A source that cannot yield a backslash before `v` in its SQL text needs no lexing.
+SQL_ESCAPE_PREFILTER_RE = re.compile(r"\\(?:v|x5[cC]|u\{0*5[cC]\})")
+RUST_STRING_OPEN_RE = re.compile(r'(?:b|c)?r(#*)"|(?:b|c)?"')
+RUST_NUMERIC_ESCAPE_RE = re.compile(r"x([0-9a-fA-F]{2})|u\{([0-9a-fA-F_]{1,6})\}")
+RUST_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", "0": "\0", "'": "'", '"': '"'}
+
+
+def sql_version_dependent_escapes(sql: str) -> list[tuple[int, str]]:
+    """Return (offset, escape letter) for version-dependent escapes inside E'' literals.
+
+    Comments, standard strings and quoted identifiers are skipped; dollar-quoted
+    bodies are scanned as SQL because PL/pgSQL re-lexes them with the core scanner.
+    """
+    found: list[tuple[int, str]] = []
+    idx = 0
+    length = len(sql)
+    while idx < length:
+        ch = sql[idx]
+        if sql.startswith("--", idx):
+            end = sql.find("\n", idx)
+            idx = length if end < 0 else end
+            continue
+        if sql.startswith("/*", idx):
+            depth = 1
+            idx += 2
+            while idx < length and depth:
+                if sql.startswith("/*", idx):
+                    depth += 1
+                    idx += 2
+                elif sql.startswith("*/", idx):
+                    depth -= 1
+                    idx += 2
+                else:
+                    idx += 1
+            continue
+        if ch == '"':
+            end = idx + 1
+            while end < length:
+                if sql[end] == '"':
+                    if sql.startswith('""', end):
+                        end += 2
+                        continue
+                    break
+                end += 1
+            idx = end + 1
+            continue
+        if ch == "'":
+            escaped = idx > 0 and sql[idx - 1] in "Ee" and (
+                idx < 2 or not (sql[idx - 2].isalnum() or sql[idx - 2] in "_$")
+            )
+            idx += 1
+            while idx < length:
+                if escaped and sql[idx] == "\\":
+                    if idx + 1 < length and sql[idx + 1] in SQL_VERSION_DEPENDENT_ESCAPES:
+                        found.append((idx, sql[idx + 1]))
+                    idx += 2
+                    continue
+                if sql[idx] == "'":
+                    if sql.startswith("''", idx):
+                        idx += 2
+                        continue
+                    break
+                idx += 1
+            idx += 1
+            continue
+        idx += 1
+    return found
+
+
+def rust_string_literals(source: str) -> list[tuple[str, list[int]]]:
+    """Return each Rust string literal's decoded text with a source line per character."""
+
+    literals: list[tuple[str, list[int]]] = []
+    idx = 0
+    line = 1
+    length = len(source)
+
+    def advance(count: int) -> None:
+        nonlocal idx, line
+        line += source.count("\n", idx, idx + count)
+        idx += count
+
+    while idx < length:
+        if source.startswith("//", idx):
+            end = source.find("\n", idx)
+            advance((length if end < 0 else end) - idx)
+            continue
+        if source.startswith("/*", idx):
+            depth = 1
+            advance(2)
+            while idx < length and depth:
+                if source.startswith("/*", idx):
+                    depth += 1
+                    advance(2)
+                elif source.startswith("*/", idx):
+                    depth -= 1
+                    advance(2)
+                else:
+                    advance(1)
+            continue
+        if source[idx] == "'":
+            char_literal = CHAR_LITERAL_RE.match(source, idx)
+            advance(char_literal.end() - idx if char_literal else 1)
+            continue
+        opener = None
+        if idx == 0 or not (source[idx - 1].isalnum() or source[idx - 1] == "_"):
+            opener = RUST_STRING_OPEN_RE.match(source, idx)
+        if opener is None:
+            advance(1)
+            continue
+        text: list[str] = []
+        lines: list[int] = []
+        advance(opener.end() - idx)
+        if opener.group(1) is not None:
+            closer = '"' + opener.group(1)
+            end = source.find(closer, idx)
+            end = length if end < 0 else end
+            for ch in source[idx:end]:
+                text.append(ch)
+                lines.append(line)
+                if ch == "\n":
+                    line += 1
+            idx = end
+            advance(min(len(closer), length - idx))
+        else:
+            while idx < length and source[idx] != '"':
+                if source[idx] != "\\" or idx + 1 >= length:
+                    text.append(source[idx])
+                    lines.append(line)
+                    advance(1)
+                    continue
+                start_line = line
+                kind = source[idx + 1]
+                if kind == "\n":
+                    advance(2)
+                    while idx < length and source[idx] in " \t\r\n":
+                        advance(1)
+                    continue
+                hex_match = RUST_NUMERIC_ESCAPE_RE.match(source, idx + 1)
+                if hex_match:
+                    digits = (hex_match.group(1) or hex_match.group(2)).replace("_", "")
+                    text.append(chr(int(digits, 16)))
+                    advance(hex_match.end() - idx)
+                else:
+                    text.append(RUST_ESCAPES.get(kind, kind))
+                    advance(2)
+                lines.append(start_line)
+            advance(1)
+        literals.append(("".join(text), lines))
+    return literals
+
+
+def sql_escape_targets(root: Path) -> tuple[list[Path], list[Path]]:
+    rust = sorted(
+        path
+        for base in SQL_ESCAPE_RUST_ROOTS
+        if (root / base).is_dir()
+        for path in (root / base).rglob("*.rs")
+    )
+    migrations = sorted((root / SQL_ESCAPE_MIGRATION_DIR).glob("*.sql"))
+    return rust, migrations
+
+
+def audit_sql_version_dependent_escapes(root: Path) -> tuple[list[str], int]:
+    """Scan runtime Rust SQL and PostgreSQL migrations; return findings and files scanned."""
+
+    rust, migrations = sql_escape_targets(root)
+    findings: list[str] = []
+    if not rust or not migrations:
+        return [
+            f"SQL escape audit found {len(rust)} Rust and {len(migrations)} migration files under {root}; "
+            "run it from the repository root"
+        ], 0
+
+    def report(rel: str, line_no: int, letter: str) -> None:
+        findings.append(
+            f"{rel}:{line_no}: E'' literal uses \\{letter}, which reads as "
+            f"{SQL_VERSION_DEPENDENT_ESCAPES[letter]}"
+        )
+
+    for path in migrations:
+        rel = path.relative_to(root).as_posix()
+        if rel in SQL_ESCAPE_EXEMPT_PATHS:
+            continue
+        sql = path.read_text(encoding="utf-8", errors="replace")
+        if not SQL_ESCAPE_PREFILTER_RE.search(sql):
+            continue
+        for offset, letter in sql_version_dependent_escapes(sql):
+            report(rel, sql.count("\n", 0, offset) + 1, letter)
+    for path in rust:
+        source = path.read_text(encoding="utf-8", errors="replace")
+        if not SQL_ESCAPE_PREFILTER_RE.search(source):
+            continue
+        rel = path.relative_to(root).as_posix()
+        for text, lines in rust_string_literals(source):
+            for offset, letter in sql_version_dependent_escapes(text):
+                report(rel, lines[offset], letter)
+    return findings, len(rust) + len(migrations)
+
+
 def main() -> int:
     lines = collect_added_lines()
-    findings = audit_unwrap_panic(lines) + audit_migration_integers(lines)
+    sql_findings, sql_files = audit_sql_version_dependent_escapes(Path("."))
+    findings = audit_unwrap_panic(lines) + audit_migration_integers(lines) + sql_findings
     if findings:
         print("State/lint hardening audit failed:")
         for finding in findings:
             print(f"  - {finding}")
         return 1
-    print("State/lint hardening audit passed")
+    print(f"State/lint hardening audit passed (SQL escapes: {sql_files} files scanned)")
     return 0
 
 
