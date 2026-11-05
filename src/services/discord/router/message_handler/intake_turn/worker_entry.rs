@@ -214,3 +214,6 @@ mod custody_pg_tests;
 
 #[cfg(all(test, unix))]
 mod preserve_cancel_tests;
+
+#[cfg(all(test, unix))]
+mod goal_fresh_pg_tests;
