@@ -22,7 +22,7 @@ fn isolated(name: &str) -> bool {
     let root = tempfile::tempdir().unwrap();
     let qualified = format!("{}::{name}", module_path!().split_once("::").unwrap().1);
     let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", &qualified, "--nocapture", "--test-threads=1"])
+        .args(["--exact", &qualified, "--nocapture"])
         .env(CHILD, "1")
         .env("AGENTDESK_RECOVERY_ANCHOR_REPOST", "1")
         .env("AGENTDESK_ROOT_DIR", root.path())
@@ -104,6 +104,8 @@ async fn o_delegated_anchor_repost_is_skipped() {
     if !isolated("o_delegated_anchor_repost_is_skipped") {
         return;
     }
+    use crate::services::discord::outbound::raw_output::tests as observation;
+    let journal = observation::journal().await;
     let shared = crate::services::discord::make_shared_data_for_tests();
     let codex = Some(RuntimeHandoffKind::CodexTui);
     // (case, destination, listed channel, recorded kind, expected outcome, Legacy reposts)
@@ -154,6 +156,19 @@ async fn o_delegated_anchor_repost_is_skipped() {
             u32::from(reposts),
             "{name}: only a Legacy repost spends an attempt"
         );
+    }
+    observation::flushed().await;
+    let recorded: Vec<serde_json::Value> = std::fs::read_to_string(journal)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|row: &serde_json::Value| row["kind"] == "target")
+        .collect();
+    assert_eq!(recorded.len(), 2, "only the unlisted destination reposts");
+    for event in recorded {
+        assert_eq!(event["channel"], 9_435_120u64);
+        assert_eq!(event["census"]["site"], "W35");
+        assert_eq!(event["census"]["output_class"], "RecoveredLegacyBody");
     }
 }
 

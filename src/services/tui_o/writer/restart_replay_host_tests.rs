@@ -58,6 +58,7 @@ fn fixture_records(settled: usize, open: Option<bool>) -> (Harness, SourceId, Pi
             entries.push(LedgerEntry::Posted {
                 serial: index as u64,
                 msg_id: 1000 + index as u64,
+                confirmation: None,
             });
             harness.port.say(BOT, &text);
         } else if is_open {
@@ -408,6 +409,7 @@ async fn restart_replay_partial_unit_preserves_fresh_indices_and_blocked_work() 
         .append_ledger(LedgerEntry::Posted {
             serial: 0,
             msg_id: 101,
+            confirmation: None,
         })
         .unwrap();
     let mut items = VecDeque::from([Derived::Piece(first.clone())]);

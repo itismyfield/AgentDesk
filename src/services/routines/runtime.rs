@@ -190,6 +190,11 @@ pub async fn execute_claimed_script_run(
             Vec::new()
         }
     };
+    let observations = if super::legacy_body_census::applies(&claimed.script_ref) {
+        vec![super::legacy_body_census::observation(store).await]
+    } else {
+        observations
+    };
     let observation_count = observations.len();
     let observations = if observations.is_empty() {
         None

@@ -117,7 +117,10 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
             .await;
 
             // #122: Reconcile phase complete — open intake
-            mark_reconcile_complete(&shared_for_restart_reports);
+            crate::services::discord::runtime_bootstrap::complete_active_reconcile(
+                &shared_for_restart_reports,
+            )
+            .await;
             let ts = chrono::Local::now().format("%H:%M:%S");
             // #5462 S5 §7.2-4: every provider bot prints this line, so untagged
             // it cannot say WHICH intake opened — and the reconcile-window

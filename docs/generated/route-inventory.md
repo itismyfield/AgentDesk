@@ -214,7 +214,7 @@
 | `GET` | `/api/pipeline/stages` | `pipeline::get_stages` | `src/server/routes/pipeline.rs:92` | `src/server/routes/domains/ops.rs:105` |
 | `PUT` | `/api/pipeline/stages` | `pipeline::put_stages` | `src/server/routes/pipeline.rs:112` | `src/server/routes/domains/ops.rs:105` |
 | `POST` | `/api/pm-decision` | `kanban::pm_decision` | `src/server/routes/kanban.rs:1262` | `src/server/routes/domains/kanban.rs:60` |
-| `GET` | `/api/policies` | `agents_crud::list_policies` | `src/server/routes/agents_crud.rs:1022` | `src/server/routes/domains/agents.rs:46` |
+| `GET` | `/api/policies` | `agents_crud::list_policies` | `src/server/routes/agents_crud.rs:1055` | `src/server/routes/domains/agents.rs:46` |
 | `GET` | `/api/prompt-manifest/retention` | `prompt_manifest_retention::get_retention_status` | `src/server/routes/prompt_manifest_retention.rs:36` | `src/server/routes/domains/ops.rs:159` |
 | `GET` | `/api/provider-auth-profiles` | `provider_auth_profiles::list_provider_auth_profiles` | `src/server/routes/provider_auth_profiles.rs:58` | `src/server/routes/domains/integrations.rs:50` |
 | `POST` | `/api/provider-auth-profiles/{provider}/login-complete` | `provider_auth_profiles::login_complete` | `src/server/routes/provider_auth_profiles.rs:238` | `src/server/routes/domains/integrations.rs:58` |
@@ -281,7 +281,7 @@
 | `PUT` | `/api/server-campaigns/{id}/definition` | `server_campaigns::edit` | `src/server/routes/server_campaigns/mod.rs:134` | `src/server/routes/domains/admin.rs:35` |
 | `GET` | `/api/server-campaigns/{id}/events` | `server_campaigns::events` | `src/server/routes/server_campaigns/mod.rs:179` | `src/server/routes/domains/admin.rs:43` |
 | `GET` | `/api/session-termination-events` | `termination_events::list_termination_events` | `src/server/routes/termination_events.rs:23` | `src/server/routes/domains/runtime.rs:101` |
-| `GET` | `/api/sessions` | `agents_crud::list_sessions` | `src/server/routes/agents_crud.rs:953` | `src/server/routes/domains/runtime.rs:144` |
+| `GET` | `/api/sessions` | `agents_crud::list_sessions` | `src/server/routes/agents_crud.rs:958` | `src/server/routes/domains/runtime.rs:144` |
 | `GET` | `/api/sessions/{id}/output` | `dispatched_sessions::tmux_output` | `src/server/routes/dispatched_sessions.rs:100` | `src/server/routes/domains/runtime.rs:97` |
 | `GET` | `/api/sessions/{id}/tmux-output` | `dispatched_sessions::tmux_output` | `src/server/routes/dispatched_sessions.rs:100` | `src/server/routes/domains/runtime.rs:93` |
 | `POST` | `/api/sessions/{session_key}/force-kill` | `dispatched_sessions::force_kill_session` | `src/server/routes/dispatched_sessions.rs:116` | `src/server/routes/domains/runtime.rs:77` |

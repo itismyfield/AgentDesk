@@ -7,13 +7,16 @@ use poise::serenity_prelude::{self as serenity, ChannelId, MessageId};
 use super::super::{formatting, recovery_paths};
 use super::RecoveryRelayOutcome;
 use crate::services::discord::inflight::{opt_channel_id, opt_message_id};
+use crate::services::discord::outbound::body_census::{BodyOffer, BodySource};
 use crate::services::discord::outbound::{delivery_frontier_probe, delivery_record};
 use crate::services::discord::{
     DELIVERY_LEASE_DEADLINE_MS, DeliveryLeaseCell, DeliveryLeaseHeartbeat, DeliveryLeaseKey,
     LeaseHolder, LeaseOutcome, SharedData, inflight, lease_now_ms,
 };
 use crate::services::provider::ProviderKind;
-use crate::services::tui_o::cutover::{BodyClaim, BodySend, IdentityError, claim_then_send};
+use crate::services::tui_o::cutover::{
+    BodyClaim, BodySend, BodySite, IdentityError, claim_then_send_at,
+};
 
 #[path = "terminal_text_idempotency/anchor_identity.rs"]
 mod anchor_identity;
@@ -92,6 +95,7 @@ impl PendingRecoveryAnchor {
 
 #[derive(Clone)]
 pub(in crate::services::discord) struct RecoveryDeliveryContext {
+    pub(super) census: BodySource,
     provider: ProviderKind,
     channel_id: ChannelId,
     record_channel_id: ChannelId,
@@ -244,6 +248,7 @@ impl RecoveryDeliveryContext {
         let record_channel_id =
             opt_channel_id(state.delivery_record_owner_channel_id()).unwrap_or(channel_id);
         Self {
+            census: BodySource::from_state(state),
             provider: provider.clone(),
             channel_id,
             record_channel_id,
@@ -537,17 +542,29 @@ pub(in crate::services::discord) async fn replace_anchored_terminal_text(
     shared: &Arc<SharedData>,
     recovery_context: Option<&RecoveryDeliveryContext>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let outcome = formatting::replace_long_message_raw_with_outcome(
-        http,
-        channel_id,
-        placeholder,
-        text,
-        shared,
-        &mut None,
-    )
-    .await?;
-    record_anchored_fallback_replacement(recovery_context, shared, channel_id, &outcome, text);
-    formatting::replace_long_message_outcome_to_result(outcome)
+    recovery_context
+        .map(|context| context.census.clone())
+        .unwrap_or_else(BodySource::inherited)
+        .observe(BodySite::RecoveryChunks, BodyOffer::Recovered, async {
+            let outcome = formatting::replace_long_message_raw_with_outcome(
+                http,
+                channel_id,
+                placeholder,
+                text,
+                shared,
+                &mut None,
+            )
+            .await?;
+            record_anchored_fallback_replacement(
+                recovery_context,
+                shared,
+                channel_id,
+                &outcome,
+                text,
+            );
+            formatting::replace_long_message_outcome_to_result(outcome)
+        })
+        .await
 }
 
 fn record_anchored_fallback_replacement(
@@ -590,8 +607,17 @@ pub(in crate::services::discord) async fn relay_no_anchor_terminal_text(
             channel_id = channel_id.get(),
             "recovery no-anchor delivery has no D1 idempotency context; falling back to legacy fresh send"
         );
-        let send = || formatting::send_long_message_raw(http, channel_id, text, shared);
-        let BodySend::Sent(sent) = claim_then_send(claim, send).await? else {
+        let send = || {
+            BodySource::inherited().observe(
+                BodySite::RecoveryChunks,
+                BodyOffer::Recovered,
+                formatting::send_long_message_raw(http, channel_id, text, shared),
+            )
+        };
+        let BodySend::Sent(sent) = BodySource::inherited()
+            .scope(claim_then_send_at(BodySite::RecoveryChunks, claim, send))
+            .await?
+        else {
             return Ok(BodySend::OwnedByO);
         };
         let outcome = match sent {
@@ -616,11 +642,20 @@ pub(in crate::services::discord) async fn relay_no_anchor_terminal_text(
         return Ok(BodySend::Sent(RecoveryRelayOutcome::TransientFailure));
     };
     let send = || {
-        formatting::send_long_message_raw_with_reference_returning_message_ids(
-            http, channel_id, text, shared, None,
+        BodySource::inherited().observe(
+            BodySite::RecoveryChunks,
+            BodyOffer::Recovered,
+            formatting::send_long_message_raw_with_reference_returning_message_ids(
+                http, channel_id, text, shared, None,
+            ),
         )
     };
-    let result = match claim_then_send(claim, send).await {
+    let result = match context
+        .census
+        .clone()
+        .scope(claim_then_send_at(BodySite::RecoveryChunks, claim, send))
+        .await
+    {
         Ok(BodySend::Sent(result)) => result,
         refused => {
             // Nothing was posted: free the range without recording an outcome.

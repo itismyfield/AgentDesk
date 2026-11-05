@@ -9,13 +9,16 @@ use super::{
 };
 use crate::services::cluster::stream_relay::RelaySinkError;
 use crate::services::discord::inflight::RelayOwnerKind;
+use crate::services::discord::outbound::body_census::{BodyOffer, BodySource};
 use crate::services::discord::outbound::turn_output_controller as toc;
 use crate::services::discord::placeholder_controller::{PlaceholderKey, PlaceholderLifecycle};
 use crate::services::provider::ProviderKind;
+use crate::services::tui_o::cutover::BodySite;
 
 /// Every input one cut-over short-replace delivery needs. Bundled so the entry
 /// point stays within the argument-count ratchet instead of carrying an `allow`.
 pub(super) struct SinkShortReplaceCtx<'a> {
+    pub(super) census_source: BodySource,
     pub(super) shared: &'a Arc<crate::services::discord::SharedData>,
     pub(super) provider: &'a ProviderKind,
     pub(super) channel: ChannelId,
@@ -40,6 +43,7 @@ pub(super) async fn deliver_short_replace_via_controller<
     ctx: SinkShortReplaceCtx<'_>,
 ) -> Result<SessionRelayDeliveryOutcome, RelaySinkError> {
     let SinkShortReplaceCtx {
+        census_source,
         shared,
         provider,
         channel,
@@ -81,42 +85,47 @@ pub(super) async fn deliver_short_replace_via_controller<
             .unwrap_or_else(|error| error.into_inner()) = Some(mutation);
         true
     };
-    let outcome = toc::deliver_turn_output(
-        gateway,
-        toc::TurnOutputCtx {
-            turn: crate::services::discord::turn_finalizer::TurnKey::new(
-                channel,
-                delivery.frame_turn_user_msg_id,
-                shared.restart.current_generation,
-            ),
-            lease_key: Some(sink_lease_key),
-            owner: RelayOwnerKind::SessionBoundRelay,
-            holder: crate::services::discord::LeaseHolder::Sink,
-            lease: &*cell,
-            channel_id: channel,
-            placeholder_controller: &shared.ui.placeholder_controller,
-            placeholder: toc::PlaceholderSlot::Active {
-                message_id: msg_id,
-                key: PlaceholderKey {
-                    provider: provider.clone(),
+    let outcome = census_source
+        .observe(
+            BodySite::SessionShortController,
+            BodyOffer::Body,
+            Box::pin(toc::deliver_turn_output(
+                gateway,
+                toc::TurnOutputCtx {
+                    turn: crate::services::discord::turn_finalizer::TurnKey::new(
+                        channel,
+                        delivery.frame_turn_user_msg_id,
+                        shared.restart.current_generation,
+                    ),
+                    lease_key: Some(sink_lease_key),
+                    owner: RelayOwnerKind::SessionBoundRelay,
+                    holder: crate::services::discord::LeaseHolder::Sink,
+                    lease: &*cell,
                     channel_id: channel,
-                    message_id: msg_id,
+                    placeholder_controller: &shared.ui.placeholder_controller,
+                    placeholder: toc::PlaceholderSlot::Active {
+                        message_id: msg_id,
+                        key: PlaceholderKey {
+                            provider: provider.clone(),
+                            channel_id: channel,
+                            message_id: msg_id,
+                        },
+                    },
+                    body: relay_text,
+                    send_range: (start, end),
+                    plan: toc::OutputPlan::Replace {
+                        lifecycle: PlaceholderLifecycle::Active,
+                    },
+                    edit_fail_policy: toc::EditFailPlaceholderPolicy::PreserveAlways,
+                    fallback_commit_policy: toc::FallbackCommitPolicy::CommitOnFallback,
+                    acquire_failure_mode: toc::AcquireFailureMode::Transient,
+                    advance: Some(&advance),
+                    heartbeat: Some(&heartbeat),
+                    body_claim,
                 },
-            },
-            body: relay_text,
-            send_range: (start, end),
-            plan: toc::OutputPlan::Replace {
-                lifecycle: PlaceholderLifecycle::Active,
-            },
-            edit_fail_policy: toc::EditFailPlaceholderPolicy::PreserveAlways,
-            fallback_commit_policy: toc::FallbackCommitPolicy::CommitOnFallback,
-            acquire_failure_mode: toc::AcquireFailureMode::Transient,
-            advance: Some(&advance),
-            heartbeat: Some(&heartbeat),
-            body_claim,
-        },
-    )
-    .await;
+            )),
+        )
+        .await;
 
     match outcome {
         toc::DeliveryOutcome::Delivered { replace_kind, .. } => {

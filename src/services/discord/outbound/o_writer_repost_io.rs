@@ -216,65 +216,80 @@ impl BoundedTransport for RepostHttp {
                     return WireOutcome::Withheld(error.to_string());
                 }
             };
-            hold.run(async move {
-                let body = match body {
-                    Ok(body) => body,
-                    Err(error) => {
-                        return WireOutcome::Unsent(format!("unencodable message: {error}"));
-                    }
-                };
-                let Some(limiter) = http.ratelimiter.as_ref() else {
-                    return WireOutcome::Unsent("no shared rate limiter".into());
-                };
-                let route = Route::ChannelMessages { channel_id };
-                let request = Request::new(route, LightMethod::Post).body(Some(body));
-                // Serenity's global 429 lock is private, so only route buckets are shared with Legacy.
-                let bucket = Arc::clone(
-                    limiter
-                        .routes()
-                        .write()
-                        .await
-                        .entry(route.ratelimiting_bucket())
-                        .or_default(),
-                );
-                loop {
-                    bucket.lock().await.pre_hook(&request, &no_callback).await;
-                    let built = match request
-                        .clone()
-                        .build(&client, http.token(), base.as_deref())
-                    {
-                        Ok(builder) => builder.build().map_err(|error| error.to_string()),
-                        Err(error) => Err(error.to_string()),
-                    };
-                    let built = match built {
-                        Ok(built) => built,
+            crate::services::discord::outbound::census_scope(
+                None,
+                hold.run(async move {
+                    let started_at = chrono::Utc::now().timestamp_millis();
+                    let body = match body {
+                        Ok(body) => body,
                         Err(error) => {
-                            return WireOutcome::Unsent(format!("unbuildable request: {error}"));
+                            return WireOutcome::Unsent(format!("unencodable message: {error}"));
                         }
                     };
-                    if let Err(reason) = guard.begin() {
-                        return WireOutcome::Unsent(reason);
-                    }
-                    let response = match client.execute(built).await {
-                        Ok(response) => response,
-                        Err(error) => return WireOutcome::Uncertain(error.to_string()),
+                    let Some(limiter) = http.ratelimiter.as_ref() else {
+                        return WireOutcome::Unsent("no shared rate limiter".into());
                     };
-                    if response.status() != StatusCode::TOO_MANY_REQUESTS {
-                        // Bookkeeping only: a malformed rate header never sends the request again.
-                        if hookable(&response) {
-                            let mut hook = bucket.lock().await;
-                            let _ = hook
-                                .post_hook(&response, &request, &no_callback, false)
-                                .await;
+                    let route = Route::ChannelMessages { channel_id };
+                    let request = Request::new(route, LightMethod::Post).body(Some(body));
+                    // Serenity's global 429 lock is private, so only route buckets are shared with Legacy.
+                    let bucket = Arc::clone(
+                        limiter
+                            .routes()
+                            .write()
+                            .await
+                            .entry(route.ratelimiting_bucket())
+                            .or_default(),
+                    );
+                    loop {
+                        bucket.lock().await.pre_hook(&request, &no_callback).await;
+                        let built =
+                            match request
+                                .clone()
+                                .build(&client, http.token(), base.as_deref())
+                            {
+                                Ok(builder) => builder.build().map_err(|error| error.to_string()),
+                                Err(error) => Err(error.to_string()),
+                            };
+                        let built = match built {
+                            Ok(built) => built,
+                            Err(error) => {
+                                return WireOutcome::Unsent(format!(
+                                    "unbuildable request: {error}"
+                                ));
+                            }
+                        };
+                        if let Err(reason) = guard.begin() {
+                            return WireOutcome::Unsent(reason);
                         }
-                        return settle(response).await;
+                        let response = match client.execute(built).await {
+                            Ok(response) => response,
+                            Err(error) => return WireOutcome::Uncertain(error.to_string()),
+                        };
+                        if response.status() != StatusCode::TOO_MANY_REQUESTS {
+                            // Bookkeeping only: a malformed rate header never sends the request again.
+                            if hookable(&response) {
+                                let mut hook = bucket.lock().await;
+                                let _ = hook
+                                    .post_hook(&response, &request, &no_callback, false)
+                                    .await;
+                            }
+                            let outcome = settle(response).await;
+                            if let WireOutcome::Created(created) = &outcome {
+                                crate::services::legacy_body_census::transport::record_o_created(
+                                    channel_id.get(),
+                                    created.id,
+                                    Some(started_at),
+                                );
+                            }
+                            return outcome;
+                        }
+                        guard.throttled();
+                        if !wait_out(&response, &bucket, &request).await {
+                            return WireOutcome::Throttled;
+                        }
                     }
-                    guard.throttled();
-                    if !wait_out(&response, &bucket, &request).await {
-                        return WireOutcome::Throttled;
-                    }
-                }
-            })
+                }),
+            )
             .await
             .unwrap_or_else(WireOutcome::Unsent)
         }
@@ -424,4 +439,4 @@ impl ProbeRead for RepostHttp {
 
 #[cfg(test)]
 #[path = "o_writer_repost_io_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -1,3 +1,5 @@
+use crate::services::discord::outbound::body_census::{BodyOffer, BodySource};
+use crate::services::tui_o::cutover::BodySite;
 use std::sync::Arc;
 
 use super::*;
@@ -10,7 +12,7 @@ use crate::services::discord::tmux::WatcherDeliveryTarget;
 use crate::services::discord::turn_finalizer::TurnKey;
 use crate::services::discord::{DeliveryLeaseCell, LeaseHolder, SharedData, lease_now_ms};
 use crate::services::provider::ProviderKind;
-use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send};
+use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send_at};
 
 use super::controller_heartbeat::WatcherPostHeartbeat;
 
@@ -297,39 +299,47 @@ pub(in crate::services::discord::tmux::tmux_watcher) async fn deliver_long_chunk
             .unwrap_or_else(|error| error.into_inner()) = Some(mutation);
         true
     };
-    let outcome = toc::deliver_turn_output(
-        gateway,
-        toc::TurnOutputCtx {
-            turn,
-            lease_key,
-            owner: RelayOwnerKind::Watcher,
-            holder,
-            lease: &**cell,
-            channel_id,
-            placeholder_controller: &shared.ui.placeholder_controller,
-            placeholder: toc::PlaceholderSlot::Active {
-                message_id: msg_id,
-                key: PlaceholderKey {
-                    provider: provider.clone(),
+    let outcome = BodySource::inherited()
+        .observe(
+            BodySite::WatcherLongController,
+            BodyOffer::Body,
+            toc::deliver_turn_output(
+                gateway,
+                toc::TurnOutputCtx {
+                    turn,
+                    lease_key,
+                    owner: RelayOwnerKind::Watcher,
+                    holder,
+                    lease: &**cell,
                     channel_id,
-                    message_id: msg_id,
+                    placeholder_controller: &shared.ui.placeholder_controller,
+                    placeholder: toc::PlaceholderSlot::Active {
+                        message_id: msg_id,
+                        key: PlaceholderKey {
+                            provider: provider.clone(),
+                            channel_id,
+                            message_id: msg_id,
+                        },
+                    },
+                    body: relay_text,
+                    send_range: (start, end),
+                    plan: toc::OutputPlan::SendNewChunks {
+                        chunk_count: crate::services::discord::formatting::split_message(
+                            relay_text,
+                        )
+                        .len(),
+                        delete_anchor: true,
+                    },
+                    edit_fail_policy: toc::EditFailPlaceholderPolicy::PreserveAlways,
+                    fallback_commit_policy: toc::FallbackCommitPolicy::CommitOnFallback,
+                    acquire_failure_mode: toc::AcquireFailureMode::Transient,
+                    advance: Some(&advance),
+                    heartbeat: Some(&heartbeat),
+                    body_claim,
                 },
-            },
-            body: relay_text,
-            send_range: (start, end),
-            plan: toc::OutputPlan::SendNewChunks {
-                chunk_count: crate::services::discord::formatting::split_message(relay_text).len(),
-                delete_anchor: true,
-            },
-            edit_fail_policy: toc::EditFailPlaceholderPolicy::PreserveAlways,
-            fallback_commit_policy: toc::FallbackCommitPolicy::CommitOnFallback,
-            acquire_failure_mode: toc::AcquireFailureMode::Transient,
-            advance: Some(&advance),
-            heartbeat: Some(&heartbeat),
-            body_claim,
-        },
-    )
-    .await;
+            ),
+        )
+        .await;
     if let toc::DeliveryOutcome::Delivered {
         new_chunks: Some(chunks),
         ..
@@ -424,25 +434,26 @@ pub(in crate::services::discord::tmux::tmux_watcher) async fn apply_watcher_long
         provider.clone(),
         None,
     );
-    let outcome = deliver_long_chunks_via_controller(
-        &gateway,
-        shared,
-        provider,
-        channel_id,
-        tmux_session_name,
-        msg_id,
-        relay_text,
-        delivered_body,
-        cell,
-        turn,
-        lease_key,
-        instance_id,
-        source_authority,
-        range.0,
-        range.1,
-        body_claim,
-    )
-    .await;
+    let outcome = watcher_body_source(inflight_before_relay, source_authority)
+        .scope(deliver_long_chunks_via_controller(
+            &gateway,
+            shared,
+            provider,
+            channel_id,
+            tmux_session_name,
+            msg_id,
+            relay_text,
+            delivered_body,
+            cell,
+            turn,
+            lease_key,
+            instance_id,
+            source_authority,
+            range.0,
+            range.1,
+            body_claim,
+        ))
+        .await;
     if let WatcherLongChunksResult::Outcome(outcome) = outcome {
         apply_watcher_long_chunks_result(
             outcome,
@@ -479,11 +490,20 @@ pub(in crate::services::discord) async fn apply_watcher_long_chunks_legacy(
     locals: WatcherLongChunksLocals<'_>,
 ) {
     let send = || {
-        crate::services::discord::formatting::send_long_message_raw_with_rollback_returning_receipts(
+        BodySource::inherited().observe(BodySite::WatcherLongChunks, BodyOffer::Body, crate::services::discord::formatting::send_long_message_raw_with_rollback_returning_receipts(
             http, channel_id, msg_id, relay_text, shared,
-        )
+        ))
     };
-    let Ok(BodySend::Sent(sent)) = claim_then_send(body_claim, send).await else {
+    let Ok(BodySend::Sent(sent)) = inflight_before_relay
+        .map(BodySource::from_state)
+        .unwrap_or_else(BodySource::inherited)
+        .scope(claim_then_send_at(
+            BodySite::WatcherLongChunks,
+            body_claim,
+            send,
+        ))
+        .await
+    else {
         // Nothing was sent: O owns the channel or its identity is held.
         *locals.relay_ok = false;
         return;

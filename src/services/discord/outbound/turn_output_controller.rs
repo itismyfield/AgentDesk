@@ -44,7 +44,7 @@ use super::super::{
     LeaseSnapshot, lease_now_ms,
 };
 use super::decision::LengthPolicyDecision;
-use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send};
+use crate::services::tui_o::cutover::{BodyClaim, BodySend, BodySite, claim_then_send_at};
 use transport::{TransportResult, drive_non_fresh_transport, post_send_finalize};
 
 mod fresh_send;
@@ -847,7 +847,8 @@ async fn deliver_turn_output_inner<L: DeliveryLease + ?Sized>(
     // Any post-send work (placeholder terminal transition, fallback cleanup,
     // release) happens AFTER the inline commit below (I1).
     let send = || drive_transport(gateway, &ctx, chunk_count, fallback_revalidation);
-    let transport = match claim_then_send(ctx.body_claim, send).await {
+    let transport = match claim_then_send_at(BodySite::OutputController, ctx.body_claim, send).await
+    {
         Ok(BodySend::Sent(transport)) => transport,
         Ok(BodySend::OwnedByO) | Err(_) => TransportResult::Transient,
     };

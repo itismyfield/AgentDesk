@@ -657,3 +657,69 @@ pub(super) fn spawn_execution(
         drop(handle.into_detached());
     }
 }
+
+/// Retries missing unmanaged hosts only for this runtime's current gateway authority.
+pub(super) async fn resume_gateway(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    config: Option<&TuiOConfig>,
+) {
+    let Some(shadow) = shadow_of(provider) else {
+        return;
+    };
+    let serving = || {
+        !shared
+            .restart
+            .shutting_down
+            .load(std::sync::atomic::Ordering::Acquire)
+            && !shared
+                .restart
+                .restart_pending
+                .load(std::sync::atomic::Ordering::Acquire)
+    };
+    if &shared.provider != provider || !serving() {
+        return;
+    }
+    let Some(registry) = shared.health_registry.upgrade() else {
+        return;
+    };
+    let gate = crate::services::tui_o::ownership::gate(provider.as_str());
+    let observed = gate.current();
+    if !matches!(
+        observed,
+        crate::services::tui_o::ownership::GatewayOwnership::Owned { .. }
+    ) {
+        return;
+    }
+    let allowed = shared.settings.read().await.allowed_channel_ids.clone();
+    let entries = registry.provider_entries_snapshot().await;
+    let mut gateways = entries.iter().filter(|entry| {
+        entry.role == health::ProviderRuntimeRole::Gateway
+            && entry.name.eq_ignore_ascii_case(provider.as_str())
+    });
+    // The provider gate cannot identify a lease among multiple gateway runtimes.
+    if !gateways
+        .next()
+        .is_some_and(|entry| Arc::ptr_eq(&entry.shared, shared))
+        || gateways.next().is_some()
+    {
+        return;
+    }
+    let Some(snapshot) = crate::services::tui_o::cutover::boot_snapshot() else {
+        return;
+    };
+    let owned = crate::services::tui_o::cutover::boot_ownership()
+        .into_iter()
+        .filter(|(channel, _, _)| {
+            snapshot.execution(*channel).is_none()
+                && (allowed.is_empty() || allowed.contains(channel))
+        })
+        .collect();
+    // Reject changes during sampling; the host follows this gate after the sample.
+    if !serving() || gate.current() != observed {
+        return;
+    }
+    for handle in host::start_managed(shadow, true, owned, || parts(shared, provider, config)) {
+        drop(handle.into_detached());
+    }
+}

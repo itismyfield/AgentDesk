@@ -107,8 +107,17 @@ impl DiscordPort for GatewayPort {
             let message = CreateMessage::new()
                 .content(content)
                 .allowed_mentions(super::super::http::relay_allowed_mentions());
-            match ChannelId::new(channel).send_message(&*http, message).await {
-                Ok(message) => PostOutcome::Created(seen(message)),
+            match super::census_scope(None, ChannelId::new(channel).send_message(&*http, message))
+                .await
+            {
+                Ok(message) => {
+                    crate::services::legacy_body_census::transport::record_o_created(
+                        channel,
+                        message.id.get(),
+                        None,
+                    );
+                    PostOutcome::Created(seen(message))
+                }
                 Err(error) => refusal(http_status(&error)).map_or_else(
                     || PostOutcome::Uncertain(error.to_string()),
                     PostOutcome::Refused,

@@ -888,10 +888,17 @@ pub(crate) async fn retire_stale_pending_route_for_local(
 ) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
     let advisory_key = OwnerIdentity::new(provider, channel_id).advisory_key();
+    let custody_wait = std::time::Instant::now();
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(advisory_key)
         .execute(&mut *tx)
         .await?;
+    tracing::debug!(
+        provider,
+        channel_id,
+        custody_wait_ms = custody_wait.elapsed().as_millis(),
+        "stale route retirement custody acquired"
+    );
     let result = sqlx::query(
         "UPDATE intake_outbox
             SET status = $4, completed_at = NOW(),

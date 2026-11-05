@@ -39,9 +39,13 @@ pub(crate) async fn post_serenity_message_with_nonce(
         );
     }
     crate::services::discord::rate_limit_wait(shared, channel_id).await;
-    super::raw_output::request(channel_id, channel_id.send_message(http, message))
-        .await
-        .map(|message| message.id.get().to_string())
+    super::raw_output::request(
+        channel_id,
+        super::raw_output::Operation::Post,
+        channel_id.send_message(http, message),
+    )
+    .await
+    .map(|message| message.id.get().to_string())
 }
 
 /// Short stable fingerprint for outbound idempotency keys. Parts are separated
@@ -351,14 +355,26 @@ impl DiscordOutboundClient for HttpOutboundClient {
         target_channel: &str,
         content: &str,
     ) -> Result<String, DispatchMessagePostError> {
-        crate::services::dispatches::discord_delivery::post_raw_message_once(
-            &self.client,
-            &self.token,
-            &self.discord_api_base,
+        super::raw_output::request_for_channel(
             target_channel,
-            content,
+            super::raw_output::Operation::Post,
+            crate::services::dispatches::discord_delivery::post_raw_message_once(
+                &self.client,
+                &self.token,
+                &self.discord_api_base,
+                target_channel,
+                content,
+            ),
         )
         .await
+        .inspect(|id| {
+            if let (Ok(channel), Ok(message)) = (
+                target_channel.parse::<std::num::NonZeroU64>(),
+                id.parse::<std::num::NonZeroU64>(),
+            ) {
+                super::body_census::note_legacy_created(channel.get(), message.get());
+            }
+        })
     }
 
     async fn edit_message(
@@ -367,13 +383,17 @@ impl DiscordOutboundClient for HttpOutboundClient {
         message_id: &str,
         content: &str,
     ) -> Result<String, DispatchMessagePostError> {
-        crate::services::dispatches::discord_delivery::edit_raw_message_once(
-            &self.client,
-            &self.token,
-            &self.discord_api_base,
+        super::raw_output::request_for_channel(
             target_channel,
-            message_id,
-            content,
+            super::raw_output::Operation::Edit,
+            crate::services::dispatches::discord_delivery::edit_raw_message_once(
+                &self.client,
+                &self.token,
+                &self.discord_api_base,
+                target_channel,
+                message_id,
+                content,
+            ),
         )
         .await
     }

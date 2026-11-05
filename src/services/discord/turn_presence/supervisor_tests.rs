@@ -671,6 +671,56 @@ async fn an_owned_front_wakes_its_owner_once_at_the_idle_transition_and_never_by
     assert_eq!(fake.kick_secs(), Vec::<u64>::new());
 }
 
+/// The live presence read of a channel without a mailbox mints none: it reports no input, or the
+/// on-disk marker's input; a channel whose owner holds a front still reports that front.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn the_live_presence_read_never_mints_a_mailbox_for_an_absent_channel() {
+    use crate::services::discord::queue_io::input_owner::admission::{AdmissionTicket, admit};
+    let _root = crate::services::discord::relay_recovery::tests::isolated_agentdesk_root();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let (bare, marked, owned) = (6_200_031_u64, 6_200_032_u64, 6_200_033_u64);
+    let marker = crate::services::discord::relay_recovery::tests::orphan_token_finish::queued(41);
+    let save = crate::services::turn_orchestrator::save_channel_pending_dispatch_marker;
+    let provider = ProviderKind::Claude;
+    save(
+        &provider,
+        &shared.token_hash,
+        ChannelId::new(marked),
+        &marker,
+        None,
+    )
+    .unwrap();
+    let mailbox = shared.mailbox(ChannelId::new(owned));
+    let dir = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap();
+    let file = dir.join(format!("claude/presence-read/{owned}.json"));
+    mailbox
+        .v2_adopt(file, "presence-read".into())
+        .await
+        .unwrap();
+    let original =
+        serde_json::from_value(serde_json::json!({"author_id":7,"message_id":62_000_331,
+        "channel_id":owned,"source_message_ids":[62_000_331],"queued_generation":1,"text":"owned"}))
+        .unwrap();
+    let _ = admit(&mailbox, &original, AdmissionTicket::new()).await;
+    let effects = LiveEffects {
+        shared: shared.clone(),
+        provider,
+    };
+    let mut observed = Vec::new();
+    for channel in [bare, marked, owned] {
+        let read = effects.mailbox(channel).await;
+        let present = shared.mailbox_peek(ChannelId::new(channel)).is_some();
+        observed.push((channel, read, present));
+    }
+    let expected = [
+        (bare, (false, None, false), false),
+        (marked, (false, Some(41), false), false),
+        (owned, (false, Some(62_000_331), true), true),
+    ];
+    assert_eq!(observed, expected, "(channel, read, registry entry)");
+}
+
 /// The live effects' owner wake reaches the channel's owner drive, which grants the queued front
 /// and hands it to the idle start.
 #[cfg(unix)]

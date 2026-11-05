@@ -63,20 +63,41 @@ fn writer_state(
     successor: bool,
     unlearned_source: bool,
 ) -> (InflightTurnState, serde_json::Value) {
+    writer_state_with_busy(channel, late_callback, successor, unlearned_source, None)
+}
+
+fn writer_state_with_busy(
+    channel: u64,
+    late_callback: bool,
+    successor: bool,
+    unlearned_source: bool,
+    busy: Option<(
+        &crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture,
+        &str,
+    )>,
+) -> (InflightTurnState, serde_json::Value) {
     let dir = crate::config::runtime_root()
         .unwrap()
         .join(format!("c-native-{channel}"));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("native.jsonl");
-    let session = format!("AgentDesk-claude-c-native-{channel}");
+    let session = match busy {
+        Some(_) => format!("native-stop-restart-{channel}"),
+        None => format!("AgentDesk-claude-c-native-{channel}"),
+    };
     let line = |uuid: &str| {
         serde_json::json!({"type":"user","uuid":uuid,"sessionId":"persisted-sid","message":{"role":"user","content":"own"}}).to_string() + "\n"
     };
     let past = line("same-text-past");
     std::fs::write(&path, &past).unwrap();
+    let spawn_nonce = if busy.is_some() {
+        uuid::Uuid::new_v4().simple().to_string()
+    } else {
+        "live-pane-incarnation".into()
+    };
     std::fs::write(
         crate::services::tmux_common::session_temp_path(&session, "spawn_nonce"),
-        "live-pane-incarnation",
+        spawn_nonce,
     )
     .unwrap();
     std::fs::write(
@@ -192,6 +213,11 @@ fn writer_state(
             .unwrap()
             .unwrap();
         let pin = serde_json::to_value(pin).unwrap();
+        drop(_ready);
+        drop(tmux);
+        if let Some((fixture, case)) = busy {
+            hand_busy_children(fixture, &shared, &state, &token, &pin, case).await;
+        }
         if late_callback {
             stream = Some(spawn_bridge(shared, state.clone(), token));
         }
@@ -277,6 +303,344 @@ fn rewrite_raw(state: &InflightTurnState, encoded: &serde_json::Value) {
     let root = super::inflight_runtime_root().unwrap();
     let path = inflight_state_path(&root, &ProviderKind::Claude, state.channel_id);
     std::fs::write(path, serde_json::to_vec(encoded).unwrap()).unwrap();
+}
+
+fn append(path: &std::path::Path, row: serde_json::Value) {
+    use std::io::Write;
+    writeln!(
+        std::fs::OpenOptions::new().append(true).open(path).unwrap(),
+        "{row}"
+    )
+    .unwrap();
+}
+
+fn tool(id: &str) -> serde_json::Value {
+    serde_json::json!({"type":"assistant","sessionId":"persisted-sid","message":{"content":[
+        {"type":"tool_use","id":id,"name":"Bash","input":{"command":"long-running"}}]}})
+}
+
+async fn hand_busy_children(
+    fixture: &crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture,
+    shared: &Arc<discord::SharedData>,
+    state: &InflightTurnState,
+    token: &Arc<CancelToken>,
+    pin: &serde_json::Value,
+    case: &str,
+) {
+    use crate::services::discord::queue_io::input_owner::admission::{
+        Admission, AdmissionTicket, TurnBind, admit, exact_turn,
+    };
+    use crate::services::turn_orchestrator::PendingQueueItem;
+    use poise::serenity_prelude::UserId;
+    let session = state.tmux_session_name.as_deref().unwrap();
+    let path = std::path::Path::new(state.output_path.as_deref().unwrap());
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_len(pin["range"][1].as_u64().unwrap())
+        .unwrap();
+    append(path, tool("root-a-tool"));
+    let renderer = crate::services::claude_tui::input::submission::tests::renderer_with(
+        fixture,
+        session,
+        "normal",
+        view("", false),
+        "",
+        "",
+    );
+    std::fs::remove_file(renderer.join("transcript")).unwrap();
+    std::os::unix::fs::symlink(path, renderer.join("transcript")).unwrap();
+    std::fs::write(renderer.join("native-sid"), "persisted-sid").unwrap();
+    std::fs::write(
+        renderer.join("after"),
+        include_str!("../../../../../tests/fixtures/tui_input/claude-2.1.293-tool-running.txt"),
+    )
+    .unwrap();
+    let source = std::fs::read_to_string(fixture.root.path().join("idle-renderer.py")).unwrap();
+    let queued = source.replace(
+        "row = {'type':'user','message':{'content':content}}",
+        "row = {'type':'attachment','attachment':{'type':'queued_command','prompt':content,'commandMode':'prompt','origin':{'kind':'human'},'humanTurn':True}}",
+    );
+    let script = renderer.join("queued-renderer.py");
+    std::fs::write(&script, queued).unwrap();
+    std::fs::remove_file(renderer.join("ready")).unwrap();
+    let command = format!("python3 '{}' '{}'", script.display(), renderer.display());
+    fixture.tmux(&[
+        "respawn-pane",
+        "-k",
+        "-t",
+        &format!("={session}:"),
+        &command,
+    ]);
+    crate::services::claude_tui::input::submission::tests::wait("queued-renderer-started", || {
+        renderer.join("ready").exists()
+    });
+    let nonce = std::fs::read_to_string(crate::services::tmux_common::session_temp_path(
+        session,
+        "spawn_nonce",
+    ))
+    .unwrap();
+    let context = serde_json::json!({"schema":1,"provider":"claude","created_at":chrono::Utc::now(),
+        "execution_nonce":nonce,"tmux_session":session,"channel_id":state.channel_id,
+        "owner_runtime_root":crate::services::tmux_common::current_tmux_owner_marker(),
+        "host":"native-stop-busy-fixture","expected_native_session_id":null,
+        "launch_mode":"fresh","provider_root":null});
+    crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation::create(
+        serde_json::from_value(context).unwrap(),
+    )
+    .unwrap();
+    let channel = ChannelId::new(state.channel_id);
+    let mailbox = shared.mailbox(channel);
+    assert!(
+        mailbox
+            .try_start_turn(
+                token.clone(),
+                UserId::new(7),
+                MessageId::new(state.user_msg_id)
+            )
+            .await
+    );
+    let owner_dir = discord::runtime_store::discord_pending_queue_root()
+        .unwrap()
+        .join("claude/native-stop-busy");
+    std::fs::create_dir_all(&owner_dir).unwrap();
+    let owner_path = owner_dir.join(format!("{}.json", state.channel_id));
+    mailbox
+        .v2_adopt(owner_path, "native-busy".into())
+        .await
+        .unwrap();
+    for (index, child) in ["busy-b", "busy-c"].into_iter().enumerate() {
+        let row_id = format!("{case}-{child}");
+        std::fs::write(renderer.join("native-uuid"), &row_id).unwrap();
+        let id = state.user_msg_id + 100 + index as u64;
+        let item: PendingQueueItem = serde_json::from_value(serde_json::json!({"author_id":7,
+            "message_id":id,"channel_id":state.channel_id,"source_message_ids":[id],
+            "queued_generation":1,"text":format!("{case} {child}")}))
+        .unwrap();
+        let ticket = AdmissionTicket::new();
+        assert!(matches!(
+            admit(&mailbox, &item, ticket.clone()).await,
+            Admission::Accepted(_)
+        ));
+        let front = mailbox
+            .v2_request(|slot| {
+                let owner = slot.as_mut().ok_or("no owner")?;
+                let front = owner.front().ok_or("no front")?;
+                owner.grant_front(&front)?;
+                Ok(front)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            discord::router::message_handler::hand_busy(
+                (mailbox.clone(), None),
+                ProviderKind::Claude,
+                (state.channel_id, front),
+            )
+            .await,
+            Ok(()),
+            "{case}: {child} reached the real busy input entry"
+        );
+        let body = std::fs::read_to_string(renderer.join("body")).unwrap();
+        assert!(body.contains(child));
+        let transcript = std::fs::read_to_string(path).unwrap();
+        let submitted: serde_json::Value =
+            serde_json::from_str(transcript.lines().last().unwrap()).unwrap();
+        assert_eq!(submitted["uuid"], row_id);
+        assert_eq!(submitted["attachment"]["type"], "queued_command");
+        let TurnBind::Settled(turn) = exact_turn(&mailbox, &ticket, &item).await.unwrap() else {
+            panic!("{case}: {child} settled under its actual input attempt");
+        };
+        if case == "valid" && child == "busy-c" {
+            std::fs::write(
+                fixture.root.path().join("foreign-busy.json"),
+                serde_json::to_vec(
+                    &serde_json::json!({"attempt":turn.attempt,"frame":body,"uuid":row_id}),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        append(path, tool(&format!("{child}-tool")));
+    }
+    let durable = load_inflight_state(&ProviderKind::Claude, state.channel_id).unwrap();
+    if case == "other-source" {
+        let foreign: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(fixture.root.path().join("foreign-busy.json")).unwrap(),
+        )
+        .unwrap();
+        let attempt = foreign["attempt"].as_str().unwrap();
+        let frame = foreign["frame"].as_str().unwrap();
+        record_native_busy_child(&durable, token, attempt);
+        append(
+            path,
+            serde_json::json!({"type":"attachment","uuid":foreign["uuid"],
+            "attachment":{"type":"queued_command","prompt":frame,"commandMode":"prompt","origin":{"kind":"human"}}}),
+        );
+        append(path, tool("foreign-tool"));
+    }
+}
+
+#[test]
+fn actual_busy_input_restart_and_native_stop_keep_only_the_birth_episode_pg() {
+    use crate::services::discord::host_teardown_gate::test_support::{
+        Stored, channel_key, seed, shared_on,
+    };
+    use crate::services::discord::turn_bridge::{CommandStop, begin_user_stop};
+    use crate::services::session_host::test_support::{
+        InjectedLivenessGuard, InjectedPresenceGuard,
+    };
+    use crate::services::session_host::{HostLiveness, HostPresence, HostSessionRef};
+    use crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let fixture = Fixture::after_shared_test_env_lock();
+    let shim = fixture.root.path().join("tmux");
+    let script = std::fs::read_to_string(&shim).unwrap().replacen("#!/bin/sh\n", &format!(
+        "#!/bin/sh\nfor last do :; done\ncase \"$*\" in *send-keys*) [ \"$last\" != Escape ] || echo Escape >> '{}/native-stop-keys' ;; esac\n",
+        fixture.root.path().display(),
+    ), 1);
+    std::fs::write(shim, script).unwrap();
+    let cases = [
+        "valid",
+        "valid-o",
+        "other-episode",
+        "other-source",
+        "other-parent",
+    ];
+    let selected = [(721_203_801, RuntimeHandoffKind::ClaudeTui)];
+    let _o = crate::services::tui_o::cutover::test_override::force_channels(&selected);
+    let mut states = Vec::new();
+    for (index, case) in cases.into_iter().enumerate() {
+        let channel = 721_203_800 + index as u64;
+        let (mut state, _) =
+            writer_state_with_busy(channel, false, false, false, Some((&fixture, case)));
+        state.last_offset = std::fs::metadata(state.output_path.as_ref().unwrap())
+            .unwrap()
+            .len();
+        save_inflight_state(&state).unwrap();
+        if matches!(case, "other-episode" | "other-parent") {
+            let mut encoded = serde_json::to_value(&state).unwrap();
+            if let Some(children) = encoded
+                .get_mut("native_stop_busy_children")
+                .filter(|children| children.is_object())
+            {
+                if case == "other-episode" {
+                    children["turn_nonce"] = "another-episode".into();
+                } else {
+                    children["user_msg_id"] = (state.user_msg_id + 1).into();
+                }
+            }
+            rewrite_raw(&state, &encoded);
+        }
+        tui_prompt_dedupe::clear_tmux_runtime_binding(state.tmux_session_name.as_deref().unwrap());
+        states.push((state, case));
+    }
+    let rt = runtime();
+    let recovered = rt.block_on(Box::pin(async {
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let mut shared = shared_on(&pool).await;
+        Arc::get_mut(&mut shared)
+            .unwrap()
+            .restart
+            .current_generation = 42;
+        let mut guards = Vec::new();
+        for (state, _) in &states {
+            let session = state.tmux_session_name.as_deref().unwrap();
+            seed(
+                &pool,
+                &channel_key(&shared, session),
+                session,
+                state.channel_id,
+                Stored::Legacy,
+            )
+            .await;
+            guards.push((
+                InjectedLivenessGuard::set(HostSessionRef::tmux(session), HostLiveness::Live),
+                InjectedPresenceGuard::set(HostSessionRef::tmux(session), HostPresence::Present),
+            ));
+        }
+        let recorder =
+            discord::recovery_engine::o_cut_recorder::start(states[0].0.channel_id).await;
+        discord::recovery_engine::restore_inflight_turns(
+            &recorder.http,
+            &shared,
+            &ProviderKind::Claude,
+        )
+        .await;
+        for (state, case) in &states {
+            let channel = ChannelId::new(state.channel_id);
+            let session = state.tmux_session_name.as_deref().unwrap();
+            let path = std::path::Path::new(state.output_path.as_deref().unwrap());
+            assert_eq!(
+                crate::services::tui_o::cutover::o_owns_tui_output_for_channel(
+                    state.channel_id,
+                    Some(RuntimeHandoffKind::ClaudeTui),
+                ),
+                Ok(*case == "valid-o"),
+                "{case}: exercise the configured output owner"
+            );
+            let token = discord::mailbox_snapshot(&shared, channel)
+                .await
+                .cancel_token
+                .expect("the actual restart admitted the live episode");
+            assert_eq!(token.turn_nonce(), state.turn_nonce.as_deref());
+            tui_prompt_dedupe::register_tmux_runtime_binding(
+                session,
+                TuiRuntimeBinding {
+                    runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                    output_path: path.display().to_string(),
+                    relay_output_path: None,
+                    input_fifo_path: None,
+                    session_id: Some("persisted-sid".into()),
+                    last_offset: 0,
+                    relay_last_offset: None,
+                },
+            );
+            let before = std::fs::read_to_string(fixture.root.path().join("native-stop-keys"))
+                .unwrap_or_default();
+            let result =
+                begin_user_stop(&shared, &ProviderKind::Claude, channel, true, "!stop").await;
+            let CommandStop::Native(stop) = result else {
+                panic!("{case}: a native stop");
+            };
+            let after = std::fs::read_to_string(fixture.root.path().join("native-stop-keys"))
+                .unwrap_or_default();
+            let sent = usize::from(case.starts_with("valid"));
+            assert_eq!(
+                after.lines().count() - before.lines().count(),
+                sent,
+                "{case}"
+            );
+            assert!(!token.cancelled.load(std::sync::atomic::Ordering::Acquire));
+            if sent == 1 {
+                append(
+                    path,
+                    serde_json::json!({"type":"system","subtype":"turn_duration"}),
+                );
+                let finished = stop.finish().await;
+                assert!(
+                    finished
+                        .token
+                        .as_ref()
+                        .is_some_and(|finished| Arc::ptr_eq(finished, &token)),
+                    "{case}: finish publishes only the recovered token"
+                );
+            } else {
+                assert!(stop.finish().await.token.is_none(), "{case}");
+            }
+            tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+        }
+        pool.close().await;
+        db.drop().await;
+        Arc::downgrade(&shared)
+    }));
+    drop(rt);
+    assert!(
+        recovered.upgrade().is_none(),
+        "the recovered runtime releases its watchers"
+    );
 }
 
 #[test]

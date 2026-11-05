@@ -389,6 +389,7 @@ if run_check guards "TUI O writer census: Legacy send sites and cutover gates"; 
 # per-file count; the script docstring declares its lexical limits.
 "$PYTHON" scripts/check_tui_o_writer_census.py
 "$PYTHON" -m unittest tests.test_check_tui_o_writer_census
+"$PYTHON" -m unittest tests.test_tui_o_body_probes_7651
 "$PYTHON" -m unittest tests.test_terminal_notice_census
 "$PYTHON" -m unittest tests.test_retired_panel_boot_wiring
 fi
@@ -533,6 +534,7 @@ if run_check guards "TUI relay e2e harness unit tests (#5065/#5997)"; then
   scripts.e2e.tui_relay.test_post_deploy_relay_continuity \
   scripts.e2e.tui_relay.test_post_deploy_turn_smoke \
   scripts.e2e.tui_relay.test_retained_queue_idle \
+  scripts.e2e.tui_relay.test_cleared_queued_bind_idle \
   scripts.e2e.tui_relay.test_midturn_kill
 "$PYTHON" -m unittest tests.test_e2e_scenario_lane_wiring
 fi

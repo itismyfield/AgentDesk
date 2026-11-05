@@ -12,8 +12,9 @@ Code versions modelled:
 | `c` | slice C, its tested transitions only | `InputOwnershipC.cfg` |
 | `cf` | main after C `a9d59259e5`, with slice F's paths | `InputOwnershipCF.cfg` |
 | `f` | main after slice F `40c556ae6c` | `InputOwnershipF.cfg`, `InputOwnershipFOutside.cfg` |
-| `f4` | `f` plus the carried close's queue wake | `InputOwnershipF4.cfg` |
-| `a2b` | `f4` plus #7340 S2-A2b `8b28712958`: a start waits out a native busy turn | `InputOwnershipA2b.cfg`; r2b's read failure (Mut `nativeReadGone`): `InputOwnershipA2bReadGone.cfg` |
+| `f4` | `f` plus the carried close's queue wake `501692a3d7` | `InputOwnershipF4.cfg` |
+| `f5` | `f4` plus an intake start's create retried once past a marked row it removed | `InputOwnershipF5.cfg` |
+| `a2b` | `f5` plus #7340 S2-A2b: a start waits out a native busy turn | `InputOwnershipA2b.cfg`; r2b's read failure (Mut `nativeReadGone`): `InputOwnershipA2bReadGone.cfg` |
 
 What the model covers:
 
@@ -202,7 +203,7 @@ Left out of the model:
 - A screen or cause that never clears (Quiet waits for it).
 - A gone pane before `c`: it has no screen that would submit. In `c` its front waits, unwatched, for a new event.
 
-## Slice F: a carried row that never closes (`cf`, `f`, `f4`)
+## Slice F: a carried row that never closes (`cf`, `f`, `f4`, `f5`)
 
 Code: `a9d59259e5`. Paths added only for `cf` and `f`; `c` and the older columns keep their state space (C: 48,830 states, unchanged).
 
@@ -210,13 +211,15 @@ Code: `a9d59259e5`. Paths added only for `cf` and `f`; `c` and the older columns
 - `DriveMeetsRow`: every owner start on an idle mailbox creates a row, meets the carried one and is refused (`router/message_handler/foreign_row.rs:63-81`); the front keeps its place (`input_owner/drive.rs:100-112`).
 - `CarriedCloses`: the carried-turn close archives the row once the transcript reads the native turn closed (`health/recovery/carried_turn_close.rs:197-288`). With a restored episode (`ep`) its finalizer releases the mailbox and the QueueEligible listener wakes the owner (`queue_io/backstop.rs:636`, `queue_dispatch/kickoff.rs:120`). Without one, `f` runs no finalizer and nothing wakes the front `foreign_row` refused; `f4` schedules one kickoff after the archive either way.
 - `leak`: the transcript holds an input Claude absorbed mid-turn with no `queued_command` row. `tui_o/writer/input_facts/queued.rs:81` keeps that body owed and gives a dequeue credit no dequeue repays, so `closed_boundary.rs:47` answers `pending_receipt` for ever.
+- `row = marked` (from `f4`): a finished turn's row kept, stamped, because its origin receipt failed to record (`receipt_settle.rs:94-143`); checked with the receipt store healthy again. The next start's admission records and removes it (`settle_marked_row`). A headless start then retries its create (`foreign_row.rs` `admit_headless`); up to `f4` an intake start drops itself anyway (`admit`: requeue refused by the V2 owner, no new wake), `f5` retries the create once. The ordinary Discord owner busy shortcut creates no row, so it neither holds nor settles a marked row. A headless start, including an owner front with preserved admission context, still clears it before provider input even when the native pane is busy. `CarriedRowEnds` reads only carried rows; `HeadlessSettlesMarked` separately checks that headless admission cleared a marked row.
 - `HandedOutside`: a person types the text at the terminal, or another session sends it over its own socket.
 
 | Config | Result |
 |---|---|
 | `CF` | `NoSilentLoss`, `NoSilentLossObserved`, `CarriedRowEnds` break: a person's terminal turn ends, the owner is woken, its start meets the carried row, and nothing closes it. Code-confirmed on adk-dash-cc 11-03: `pending_receipt:owed_inputs=75..78` from 04:51Z to 18:59Z, front refused at every wake. |
 | `F` | `NoSilentLoss` and `NoSilentLossObserved` break: the boot wake meets the carried row, the close archives it with no episode, and the front is never woken again. Seen on adk-dash-cc 11-04 00:57Z: close with `episode_released=false`, then no owner wake for 4 queued inputs. Mutant `leakKept` (the reader still counts the absorbed input) also breaks `CarriedRowEnds`. |
-| `F4` | every rule holds (14 rules and NoDeadlock, 195,288 states). Mutant `closeNoKick` (no kick after an episode-less archive) breaks `NoSilentLoss`. |
+| `F4` | `NoSilentLoss` and `NoSilentLossObserved` break on a marked row: the wake's start removes the row, drops itself, and nothing wakes the front again. Without a marked row (the F4 change itself) every rule held, 195,288 states; mutant `closeNoKick` breaks `NoSilentLoss`. |
+| `F5` | every original rule and `NoDeadlock` hold. The merged F5/F6 model also checks `HeadlessSettlesMarked`; its busy headless path uses `RowClear` and clears the previous row, while the ordinary owner busy shortcut leaves it. The targeted probes and current safety/temporal matrix are in [admission.report.md](admission.report.md). Mutant `noRetry` models the intake start dropping itself after the settle. |
 | `FOutside` | `SeenOnce` breaks in `f` too: AgentDesk records no identity for an outside copy, so its own single paste is the second time the session sees the text. Kept as a documented gap; `NoDuplicate` (AgentDesk pastes at most once) holds. |
 
 The model folds the transcript reader into `leak`: which order an input's command and absorption rows come in, and how same-body inputs pair, are checked by the Rust reader tests (`tui_o/writer/input_facts/receipt_tests.rs`), not here.
@@ -239,7 +242,7 @@ Code: `8b28712958` (A2b on main `6d7c1851e5`). Only `DriveStartWaits` and three 
 Code: r3, kept in r5 (`owner_input.rs:484-502`). The watch's probe of a native hold reads the pane's liveness first. A dead or absent pane is `Gone` and ends the watch (`held_watch.rs:38-44`). A tmux read that fails (`liveness.rs:59-77`, `ProbeError`) is now `Unknown`, which keeps the watch for the next 2 s look. r2b mapped every non-`Live` answer to `Gone`, so one failed read ended the watch, and nothing woke the held start after its turn ended.
 
 - `NativeWatchMisreads` (Fix `a2b`): a read of a native-held pane fails. The watch is kept; mutant `nativeReadGone` (r2b) ends it.
-- `NativeHeldRuns` (liveness, under `LiveSpec == Spec /\ WF_vars(Next)`): a native-held start is handed again unless its pane is gone. `WF_vars(Next)` is weak fairness of `Next` as a whole, not of each action: a run whose reads keep failing or whose native turn never ends is outside what the property proves. CI's checker reads invariants only, so this property is run outside CI with a `PROPERTY` config.
+- `NativeHeldRuns` (liveness, under `LiveSpec == Spec /\ WF_vars(Next)`): a native-held start is handed again unless its pane is gone. `WF_vars(Next)` is weak fairness of `Next` as a whole, not of each action: a run whose reads keep failing or whose native turn never ends is outside what the property proves. The repository cfgs carry invariants only; this property is run outside CI with a `PROPERTY` config, and moving it into a checked cfg is #7772.
 - Only a failed pane read is projected. A Claude transcript that is resolved but unreadable reads as not busy (in `native_turn`, `observe_claude_jsonl_turn_state(...).is_busy()` is false, so the probe returns `Screen::Ready`, `owner_input.rs:491-500`), so its watch wakes the drive rather than keeping the hold; the model leaves that read out.
 - Out of scope: the model has one Claude tmux channel; Herdr panes are not modelled.
 - Out of scope: Codex. This PR keeps Codex on main's path, so a Codex start into a native busy turn is the existing defect; its native-busy gate and turn-end read moved to #7772.
@@ -251,3 +254,17 @@ Code: r3, kept in r5 (`owner_input.rs:484-502`). The watch's probe of a native h
 | `A2bReadGone` (r2b) | `NativeHeldResumes`, `NoSilentLoss` break | violated, 130,860 states |
 
 The r2b counterexample: a person's turn runs, the start is held with a watch (`DriveStartWaits`), the turn ends, one read fails and ends the watch (`NativeWatchMisreads`), and the start is left held once all is quiet.
+
+### On `f5` (after #7797)
+
+`a2b` is now `f5` plus the start wait: every `f5` transition (the marked row, its retry, `HeadlessSettlesMarked`) applies to it, and both A2b configs also check `HeadlessSettlesMarked`.
+
+- A start held by `DriveStartWaits` runs no admission, so a marked row stays (`start_waits` reads the row without settling it, `owner_input.rs:436-450`); the start's later idle admission records and removes it (`settle_marked_row`, `foreign_row.rs:45,72`), as `DriveIdle` does on `f5`.
+- The F6 observer, F7 busy-arrival, F7 recovery/transition and automatic-hold slices keep their own `Init`/`Next` and constants; `a2b` adds nothing to them.
+
+| Config | Invariants | `NativeHeldRuns` |
+|---|---|---|
+| `A2b` | every rule holds (18 rules and NoDeadlock), 130,292 states | holds, 130,292 states |
+| `A2bReadGone` | `NativeHeldResumes`, `NoSilentLoss` break | violated, 131,460 states |
+
+Mutants on `f5`: `nativeNoWatch` breaks `NoSilentLoss` and `NativeHeldResumes`; `noBoundaryWake` breaks `NoSilentLoss`, `NoSilentLossObserved`, `NativeHeldResumes` and `HeldResumes`; `startPastes` breaks `StartOwnTurn`.

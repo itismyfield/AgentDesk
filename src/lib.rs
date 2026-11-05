@@ -253,6 +253,7 @@ mod high_risk_recovery;
 use anyhow::{Context, Result};
 
 pub fn run_from_args() -> Result<()> {
+    services::process_boot::initialize();
     // A failure-marker handoff restarts this executable as a short-lived writer.
     // Dispatch it before Clap so no public/hidden CLI surface is needed and the
     // writer can outlive the one-shot hook relay process that launched it.

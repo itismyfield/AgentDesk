@@ -48,8 +48,11 @@ references passed as values (`.is_some_and(helper)`) are counted as gates.
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import json
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 PRIMITIVE_ROOT = "src/services/discord/"
@@ -89,7 +92,7 @@ RAW_CLAIM_RE = re.compile(_RAW_CLAIM)
 TUI_O_ROOT = "src/services/tui_o/"
 TUI_O_RAW_CLAIM_RE = re.compile(rf"{_RAW_CLAIM}|\.\s*{_CLAIM_METHOD}\s*\(|::\s*{_CLAIM_METHOD}\b")
 GATE_RES = {
-    "claim": re.compile(rf"{_RAW_CLAIM}|\bclaim_then_(?:direct_)?send(?:_held)?\b|\bclaim_at_post\b"),
+    "claim": re.compile(rf"{_RAW_CLAIM}|\bclaim_then_(?:direct_)?send(?:_held)?(?:_at)?\b|\bclaim_at_post\b"),
     "peek": re.compile(rf"\b(?:peek_{_OWNS}(?:_quiet)?|bridge_o_body_peek_decision)\b"),
 }
 FLAG_RE = re.compile(r"\bO_TUI_WRITER\b")
@@ -497,6 +500,7 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
     ),
     "src/services/tui_o/cutover/channel_gate.rs": (
         "claim_then_send:claim",
+        "claim_then_send_at:claim",
         "decide_with_snapshot:claim",
         "decide_with_snapshot:claim",
     ),
@@ -504,7 +508,7 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
 # Functions where a raw claim may stand outside `claim_then_send`, keyed by file.
 RAW_CLAIM_SITES: dict[str, tuple[str, ...]] = {
     # The helper's own claim, and the adoption transition it reaches.
-    "src/services/tui_o/cutover/channel_gate.rs": ("claim_then_send_held", "decide_with_snapshot"),
+    "src/services/tui_o/cutover/channel_gate.rs": ("reserve_body", "decide_with_snapshot"),
     # The caller-location wrapper forwards to the same locked body claim and origin log.
     "src/services/tui_o/channel_policy/adoption.rs": ("claim_body",),
     # Re-exports; a placement releases a pending adoption by design, with no body.
@@ -642,6 +646,282 @@ def _admission_order_problems(rel: str, text: str) -> list[str]:
     return problems
 
 
+
+# The transport inventory is independent of the unchanged body census.
+TRANSPORT_PROBES = {
+    'RAW:outbound/transport.rs:post_message:1': {'id': 'RAW:outbound/transport.rs:post_message:1', 'path': 'src/services/discord/outbound/transport.rs', 'entrypoint': 'post_message', 'occurrence': 1, 'op': 'POST', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'RAW:outbound/transport.rs:edit_message:1': {'id': 'RAW:outbound/transport.rs:edit_message:1', 'path': 'src/services/discord/outbound/transport.rs', 'entrypoint': 'edit_message', 'occurrence': 1, 'op': 'EDIT', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'RAW:outbound/serenity_reference.rs:post_message:1': {'id': 'RAW:outbound/serenity_reference.rs:post_message:1', 'path': 'src/services/discord/outbound/serenity_reference.rs', 'entrypoint': 'post_message', 'occurrence': 1, 'op': 'POST', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'RAW:outbound/serenity_reference.rs:post_message_with_reference:1': {'id': 'RAW:outbound/serenity_reference.rs:post_message_with_reference:1', 'path': 'src/services/discord/outbound/serenity_reference.rs', 'entrypoint': 'post_message_with_reference', 'occurrence': 1, 'op': 'POST', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'RAW:http.rs:dispatch_channel_message:1': {'id': 'RAW:http.rs:dispatch_channel_message:1', 'path': 'src/services/discord/http.rs', 'entrypoint': 'dispatch_channel_message', 'occurrence': 1, 'op': 'POST', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'RAW:http.rs:send_channel_message_with_nonce:1': {'id': 'RAW:http.rs:send_channel_message_with_nonce:1', 'path': 'src/services/discord/http.rs', 'entrypoint': 'send_channel_message_with_nonce', 'occurrence': 1, 'op': 'POST', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'RAW:http.rs:send_channel_message_with_reference:1': {'id': 'RAW:http.rs:send_channel_message_with_reference:1', 'path': 'src/services/discord/http.rs', 'entrypoint': 'send_channel_message_with_reference', 'occurrence': 1, 'op': 'POST', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'RAW:http.rs:send_channel_message_with_reference_and_nonce:1': {'id': 'RAW:http.rs:send_channel_message_with_reference_and_nonce:1', 'path': 'src/services/discord/http.rs', 'entrypoint': 'send_channel_message_with_reference_and_nonce', 'occurrence': 1, 'op': 'POST', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'RAW:http.rs:dispatch_channel_edit:1': {'id': 'RAW:http.rs:dispatch_channel_edit:1', 'path': 'src/services/discord/http.rs', 'entrypoint': 'dispatch_channel_edit', 'occurrence': 1, 'op': 'EDIT', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'RAW:http.rs:delete_channel_message:1': {'id': 'RAW:http.rs:delete_channel_message:1', 'path': 'src/services/discord/http.rs', 'entrypoint': 'delete_channel_message', 'occurrence': 1, 'op': 'DELETE', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'RAW:gateway.rs:post_message:1': {'id': 'RAW:gateway.rs:post_message:1', 'path': 'src/services/discord/gateway.rs', 'entrypoint': 'post_message', 'occurrence': 1, 'op': 'POST', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'RAW:gateway.rs:post_message_with_reference:1': {'id': 'RAW:gateway.rs:post_message_with_reference:1', 'path': 'src/services/discord/gateway.rs', 'entrypoint': 'post_message_with_reference', 'occurrence': 1, 'op': 'POST', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'RAW:gateway.rs:edit_message:1': {'id': 'RAW:gateway.rs:edit_message:1', 'path': 'src/services/discord/gateway.rs', 'entrypoint': 'edit_message', 'occurrence': 1, 'op': 'EDIT', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'RAW:gateway.rs:delete_message:1': {'id': 'RAW:gateway.rs:delete_message:1', 'path': 'src/services/discord/gateway.rs', 'entrypoint': 'delete_message', 'occurrence': 1, 'op': 'DELETE', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'RAW:tui_prompt_relay/bridge_gateway.rs:delete_message:1': {'id': 'RAW:tui_prompt_relay/bridge_gateway.rs:delete_message:1', 'path': 'src/services/discord/tui_prompt_relay/bridge_gateway.rs', 'entrypoint': 'delete_message', 'occurrence': 1, 'op': 'DELETE', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'RAW:outbound/transport.rs:post_serenity_message_with_nonce:1': {'id': 'RAW:outbound/transport.rs:post_serenity_message_with_nonce:1', 'path': 'src/services/discord/outbound/transport.rs', 'entrypoint': 'post_serenity_message_with_nonce', 'occurrence': 1, 'op': 'POST', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
+    'O_GATEWAY_CREATED_ACK': {'id': 'O_GATEWAY_CREATED_ACK', 'path': 'src/services/discord/outbound/o_writer_io.rs', 'entrypoint': 'post/post_origin', 'op': 'POST', 'guard': 'O_CREATED_ACK_ONCE'},
+    'O_REPOST_CREATED_ACK': {'id': 'O_REPOST_CREATED_ACK', 'path': 'src/services/discord/outbound/o_writer_repost_io.rs', 'entrypoint': 'create', 'op': 'POST', 'guard': 'O_CREATED_ACK_ONCE'},
+}
+
+CLAIM_PROBES = {'CLAIM_GATE_REASON': {'id': 'CLAIM_GATE_REASON', 'path': 'src/services/tui_o/cutover/channel_gate.rs', 'entrypoint': 'decide_with_snapshot', 'guard': 'CLAIM_REASON_AT_DECISION'}, 'CLAIM_ADOPTION_REASON': {'id': 'CLAIM_ADOPTION_REASON', 'path': 'src/services/tui_o/channel_policy/adoption.rs', 'entrypoint': 'claim_body_from', 'guard': 'CLAIM_REASON_UNDER_STATE_LOCK'}, 'CLAIM_SITE_NONE_HELD': {'id': 'CLAIM_SITE_NONE_HELD', 'path': 'src/services/tui_o/cutover/channel_gate.rs', 'entrypoint': 'claim_then_send_at/claim_then_send_held_at', 'consumer_path': 'src/services/discord/standby_relay.rs', 'consumer_function': 'run_standby_relay', 'site': 'W06', 'guard': 'SITE_NONE_HELD_INHERITED_ONLY'}}
+
+
+def _claim_guard_problems(root: Path) -> list[str]:
+    try:
+        rows = json.loads((root / "scripts/tui_o_body_probes.json").read_bytes())["claim_probes"]
+        active = {row["id"] for row in rows if row["status"] == "VERIFIED"}
+    except (OSError, KeyError, TypeError, ValueError):
+        return []  # Manifest parsing reports missing or malformed data.
+    if not active:
+        return []
+    classifier = _load_classifier()
+    gate_path = "src/services/tui_o/cutover/channel_gate.rs"
+    adoption_path = "src/services/tui_o/channel_policy/adoption.rs"
+    paths = {gate_path, adoption_path, "src/services/discord/standby_relay.rs"}
+    texts = {path: classifier._production_text(root / path) if (root / path).is_file() else "" for path in paths}
+
+    def body(path, name):
+        text = texts[path]
+        spans = [(start, end) for fn, start, end in _fn_bodies(text) if fn == name]
+        return re.sub(r"\s+", "", text[spans[0][0] + 1:spans[0][1]]) if len(spans) == 1 else ""
+
+    problems = []
+    decide = body(gate_path, "decide_with_snapshot")
+    if "CLAIM_GATE_REASON" in active and not all(token in decide for token in (
+        "ifsnapshot.channels().is_empty(){returnOk(legacy(ClaimReason::EmptySelection));}",
+        "if!snapshot.channels().contains(&channel_id){returnOk(legacy(ClaimReason::NonMember));}",
+        "ifselected{ClaimReason::NoCandidate}else{ClaimReason::Unselected}",
+        "execution.permit.is_err(){ClaimReason::OwnedHeld}",
+        "Some(origin)=>candidate.claim_body_from(channel_id,origin)",
+    )):
+        problems.append("claim guard: gate reasons no longer follow the actual decision branches")
+    take = body(adoption_path, "take")
+    claim = body(adoption_path, "claim_body_from")
+    reason = body(adoption_path, "claim_reason")
+    locked = all(token in take for token in (
+        "letmutstate=self.lock();letreason=state.claim_reason();",
+        "if*state==Adoption::Pending{*state=Adoption::Released;", "(state,reason)",
+    )) and all(token in claim for token in (
+        "let(state,reason)=self.take(channel);letowned=state.owned();",
+        "self.sends.started.fetch_add(1,Ordering::SeqCst)",
+        "drop(state);BodyClaimed{owned,send,reason,}",
+    )) and all(f"Self::{state}=>ClaimReason::{value}" in reason for state, value in (
+        ("Pending", "PendingReleased"), ("Released", "Released"), ("Deferred", "Deferred"),
+        ("Committed", "OwnedByO"), ("Held", "OwnedHeld"),
+    ))
+    if "CLAIM_ADOPTION_REASON" in active and not locked:
+        problems.append("claim guard: reason/send must be decided under the same adoption lock")
+    inherited = body(gate_path, "inherited")
+    reserved = body(gate_path, "reserve_body")
+    held = body(gate_path, "claim_then_send_held_at")
+    scoped = "letmuttag=current_census();" in inherited and "tag.as_mut().and_then(Value::as_object_mut)" in inherited
+    scoped = scoped and "!object.contains_key(" in inherited and "json!(site)" in inherited and "json!(reason)" in inherited
+    scoped = scoped and "Self{_send:send,tag}" in inherited and not any(token in inherited for token in ("tag=None", "send.is_some()", "send.is_none()", "Some(json!"))
+    scoped = scoped and all(token in reserved for token in (
+        "letSome(claim)=claimelse{returnOk(legacy(ClaimReason::NoClaim));};", "letclaimed=claim.claim()?;",
+    ))
+    scoped = scoped and all(token in held for token in (
+        "letclaimed=reserve_body(claim)?;", "BodyTransport::inherited(site,claimed.send,claimed.reason)",
+        "context.run(async{send().await}).await",
+    ))
+    scoped = scoped and "ifself.tag.is_some(){census_scope(self.tag.clone(),next).await}else{next.await}" in body(gate_path, "run")
+    scoped = scoped and "claim_then_send_held_at(site,claim,send).await?" in body(gate_path, "claim_then_send_at")
+    legacy = body(gate_path, "claim_then_send_held")
+    scoped = scoped and "reserve_body(claim)?" in legacy and "BodySend::Sent(send().await)" in legacy and "census_scope" not in legacy
+    scoped = scoped and "claim_then_send_at(BodySite::StandbyRelay,claim,send).await" in body("src/services/discord/standby_relay.rs", "run_standby_relay")
+    scoped = scoped and not re.search(r"\b(?:tokio|task_supervisor|thread)\s*::\s*spawn|\bspawn_blocking\s*\(", texts[gate_path])
+    if "CLAIM_SITE_NONE_HELD" in active and not scoped:
+        problems.append("claim guard: site/None/held must preserve inherited metadata across the full transport")
+    return problems
+
+TRANSPORT_REQUESTS = {(row["path"], row["entrypoint"], row["occurrence"]): row["op"] for row in TRANSPORT_PROBES.values() if "occurrence" in row}
+
+RAW_REQUEST_RE = re.compile(r"\braw_output\s*::\s*request(?:_for_channel)?\s*\(")
+RAW_OPERATION_RE = re.compile(
+    r"\s*\w+\s*,\s*(?:\w+\s*::\s*)*Operation\s*::\s*(Post|Edit|Delete)\s*,"
+)
+
+
+def _transport_requests(rel: str, text: str) -> tuple[dict, list[str]]:
+    if "raw_output" not in text:
+        return {}, []
+    matches = list(RAW_REQUEST_RE.finditer(text))
+    if not matches:
+        return {}, []
+    bodies = _fn_bodies(text)
+    measured, occurrences, problems = {}, Counter(), []
+    for match in matches:
+        owners = [span for span in bodies if span[1] < match.start() < span[2]]
+        owner = max(owners, key=lambda span: span[1])[0] if owners else "<module>"
+        occurrences[owner] += 1
+        slot = (rel, owner, occurrences[owner])
+        op = RAW_OPERATION_RE.match(text, match.end())
+        measured[slot] = op[1].upper() if op else "UNKNOWN"
+        if TRANSPORT_REQUESTS.get(slot) != measured[slot]:
+            problems.append(f"transport request: {slot} op={measured[slot]}, expected {TRANSPORT_REQUESTS.get(slot)}")
+    return measured, problems
+
+
+def _transport_guard_problems(root: Path, texts: dict[str, str], ack_sites: dict) -> list[str]:
+    try:
+        rows = json.loads((root / "scripts/tui_o_body_probes.json").read_bytes())["transport_probes"]
+        active = {row["id"] for row in rows if row["status"] == "VERIFIED"}
+    except (OSError, KeyError, TypeError, ValueError):
+        return []  # The manifest parser reports malformed or missing inventories.
+    problems = []
+    if active & {"O_GATEWAY_CREATED_ACK", "O_REPOST_CREATED_ACK"} and ack_sites != {
+        "src/services/discord/outbound/o_writer_io.rs": ["post:ack"],
+        "src/services/discord/outbound/o_writer_repost_io.rs": ["create:ack"],
+    }:
+        problems.append("transport guard: O ACK callers moved outside the two Created ports")
+
+    def body(path, name):
+        text = texts.get(path, "")
+        spans = [(start, end) for fn, start, end in _fn_bodies(text) if fn == name]
+        return text[spans[0][0] + 1:spans[0][1]] if len(spans) == 1 else ""
+
+    raw_path = "src/services/discord/outbound/raw_output.rs"
+    request = body(raw_path, "request")
+    owner = body(raw_path, "scope")
+    census = body(raw_path, "census_scope")
+    compact = lambda value: re.sub(r"\s+", "", value)
+    raw_ok = all(token in compact(request) for token in (
+        "op!=Operation::Delete", "context.scope.as_ref()", "context.artifact.as_ref()",
+        "guard.run(async{letresult=raw.await;", "Some(outcome(&result))",
+    )) and request.count("raw.await") == 2 and len(re.findall(r"transport\s*::\s*record\s*\(", request)) == 4
+    raw_ok = raw_ok and all("CONTEXT.try_with(Clone::clone).unwrap_or_default()" in compact(value) for value in (owner, census))
+    raw_ok = raw_ok and not re.search(r"context\s*\.\s*census\s*=", owner)
+    raw_ok = raw_ok and "context.census=tag;" in compact(census)
+    raw_ok = raw_ok and not re.search(r"context\s*\.\s*(?:scope|artifact|body)\s*=", census)
+    if any(key.startswith("RAW:") for key in active) and not raw_ok:
+        problems.append("transport guard: raw outcome/operation/owner-census composition drifted")
+    if active & {"RAW:outbound/transport.rs:post_message:1", "RAW:outbound/transport.rs:edit_message:1"}:
+        adapter = compact(body(raw_path, "request_for_channel"))
+        adapter_ok = all(token in adapter for token in (
+            "channel.parse::<std::num::NonZeroU64>()",
+            "request(ChannelId::new(id.get()),op,raw).await",
+            "observation_unknown(", "raw.await",
+        )) and adapter.count("raw.await") == 1 and adapter.count("request(") == 1
+        adapter_ok = adapter_ok and not re.search(r"transport\s*::\s*record\s*\(", adapter)
+        if not adapter_ok:
+            problems.append("transport guard: string channel adapter must delegate once or invalidate an unknown destination")
+    ack_path = "src/services/legacy_body_census/transport.rs"
+    ack = compact(body(ack_path, "record_o_created"))
+    ack_ok = all(token in ack for token in ("ifstarted_at_ms.is_some_and(|started|created_at_ms<=started){return;}", "ifid>bucket.latest_id{", "saturating_add(1)"))
+    if "O_GATEWAY_CREATED_ACK" in active:
+        path = "src/services/discord/outbound/o_writer_io.rs"
+        post, origin = compact(body(path, "post")), compact(body(path, "post_origin"))
+        ok = True
+        ok = ok and re.search(r"Ok\(message\)=>\{crate::services::legacy_body_census::transport::record_o_created\(channel,message.id.get\(\),None,?\);PostOutcome::Created\(seen\(message\)\)\}", post)
+        ok = ok and post.count("record_o_created(") == 1 and "self.post(channel,content.clone())" in origin and "record_o_created(" not in origin
+        ok = ok and "super::census_scope(None,ChannelId::new(channel).send_message" in post
+        if not (ok and ack_ok):
+            problems.append("transport guard: O gateway ACK must follow its sole Created response")
+    if "O_REPOST_CREATED_ACK" in active:
+        create = compact(body("src/services/discord/outbound/o_writer_repost_io.rs", "create"))
+        ok = "letstarted_at=chrono::Utc::now().timestamp_millis();" in create
+        ok = ok and re.search(r"letoutcome=settle\(response\).await;ifletWireOutcome::Created\(created\)=&outcome\{crate::services::legacy_body_census::transport::record_o_created\(channel_id.get\(\),created.id,Some\(started_at\),?\);\}returnoutcome;", create)
+        ok = ok and create.count("record_o_created(") == 1 and "outbound::census_scope(None,hold.run(asyncmove{" in create
+        if not (ok and ack_ok):
+            problems.append("transport guard: O repost ACK must follow its sole Created response")
+    return problems
+
+
+def _future_scope_args(text: str, opening: int):
+    """Argument spans in classifier-stripped text; ambiguous syntax never certifies a scope."""
+    stack, start, args = [")"], opening + 1, []
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    for at in range(opening + 1, len(text)):
+        char = text[at]
+        if char in pairs:
+            stack.append(pairs[char])
+        elif char in ")]}":
+            if not stack or stack.pop() != char:
+                return []
+            if not stack:
+                if text[start:at].strip():
+                    args.append((start, at))
+                return args
+        elif char == "," and len(stack) == 1:
+            args.append((start, at))
+            start = at + 1
+    return []
+
+
+def _body_future_guard(row: dict, text: str) -> tuple[bool, int]:
+    spans = [(start, end) for name, start, end in _fn_bodies(text) if name == row["function"]]
+    primitive = re.compile(PRIMITIVES[row["primitive"]])
+    if (row["path"] == "src/services/discord/task_notification_delivery/response_chunks.rs"
+            and row["function"] == "post_chunk"):
+        spans = [(start, end) for start, end in spans
+                 if primitive.search(text, start + 1, end)]
+    if len(spans) != 1:
+        return False, 0
+    start, end = spans[0]
+    calls = list(primitive.finditer(text, start + 1, end))
+    occurrence = int(row["id"].rsplit(":", 1)[1])
+    if not 0 < occurrence <= len(calls):
+        return False, 0
+    call = calls[occurrence - 1]
+    for scope in re.finditer(r"\.\s*observe\s*\(|\bforward\s*\(", text[start + 1:end]):
+        opening = start + 1 + scope.end() - 1
+        args = _future_scope_args(text, opening)
+        inherited = scope.group().lstrip().startswith("forward")
+        if len(args) != (1 if inherited else 3):
+            continue
+        future_start, future_end = args[-1]
+        if not future_start <= call.start() < call.end() <= future_end:
+            continue
+        # A future is polled inside the scope. An awaited argument ran before it.
+        future = text[future_start:future_end]
+        awaited = re.search(r"\.\s*await\b", future)
+        async_block = re.match(r"\s*async(?:\s+move)?\s*\{", future)
+        if bool(awaited) != bool(async_block):
+            continue
+        if inherited:
+            if row.get("guard") == "INHERITED_FUTURE" and row.get("site") == "INHERITED":
+                return True, text.count("\n", 0, call.start()) + 1
+            continue
+        site = re.sub(r"\s+", "", text[args[0][0]:args[0][1]])
+        offer = re.sub(r",(?=\))", "", re.sub(r"\s+", "", text[args[1][0]:args[1][1]]))
+        if (row.get("guard") == "BODY_FUTURE_SCOPE"
+                and site.endswith("BodySite::" + row.get("site_variant", "<missing>"))
+                and offer.endswith("BodyOffer::" + row.get("offer", "<missing>"))):
+            return True, text.count("\n", 0, call.start()) + 1
+    return False, text.count("\n", 0, call.start()) + 1
+
+
+def _body_guard_problems(root: Path) -> list[str]:
+    try:
+        rows = json.loads((root / "scripts/tui_o_body_probes.json").read_bytes())["probes"]
+    except (OSError, KeyError, TypeError, ValueError):
+        return []
+    classifier, texts, problems = _load_classifier(), {}, []
+    for row in rows:
+        if row["status"] != "VERIFIED" and "guard" not in row:
+            continue
+        path = row["path"]
+        if path not in texts:
+            texts[path] = classifier._production_text(root / path) if (root / path).is_file() else ""
+        if not _body_future_guard(row, texts[path])[0]:
+            problems.append(f"body guard: {row['id']} primitive is not inside its declared transport future")
+    if texts:
+        helper = classifier._production_text(root / "src/services/discord/outbound/body_census.rs")
+        compact = re.sub(r"\s+", "", helper)
+        if ("census_scope(Some(tag),next).await" not in compact
+                or "census_scope(current_census(),next).await" not in compact
+                or ".extend(outer)" not in compact
+                or re.search(r"\b(?:try_record|record|append|try_append|spawn|spawn_blocking)\s*\(", helper)):
+            problems.append("body guard: metadata scopes must preserve the outer tag without I/O or counters")
+    return problems
+
+
 def measure(root: Path, pinned_test_only_files=None):
     classifier = _load_classifier()
     if pinned_test_only_files is None:
@@ -655,12 +935,24 @@ def measure(root: Path, pinned_test_only_files=None):
     marks: dict[str, list[str]] = {}
     admission_problems: list[str] = []
     seen: set[str] = set()
+    transport_enabled = (root / "scripts/tui_o_body_probes.json").is_file()
+    transport_sites, transport_texts, ack_sites = {}, {}, {}
     for path in files:
         if path in skips:
             continue
         rel = path.relative_to(root).as_posix()
         text = classifier._production_text(path)
         seen.add(rel)
+        if transport_enabled:
+            sites, errors = _transport_requests(rel, text)
+            transport_sites.update(sites)
+            admission_problems.extend(errors)
+            if "record_o_created" in text and (sites := _gate_sites(text, {"ack": re.compile(r"\brecord_o_created\s*\(")})):
+                ack_sites[rel] = sites
+            if rel in {row["path"] for row in TRANSPORT_PROBES.values()} or rel in {
+                "src/services/discord/outbound/raw_output.rs", "src/services/legacy_body_census/transport.rs",
+            }:
+                transport_texts[rel] = text
         admission_problems.extend(_admission_order_problems(rel, text))
         if sites := _gate_sites(text, TURN_MARK_RES):
             marks[rel] = sites
@@ -677,6 +969,12 @@ def measure(root: Path, pinned_test_only_files=None):
             flags[rel] = n
     for rel in sorted(set(TURN_ADMISSION_ORDER) - seen):
         admission_problems.append(f"turn admission: missing production file {rel}")
+    if transport_enabled:
+        for slot in sorted(set(TRANSPORT_REQUESTS) - set(transport_sites)):
+            admission_problems.append(f"transport request: missing {slot}")
+        admission_problems.extend(_transport_guard_problems(root, transport_texts, ack_sites))
+        admission_problems.extend(_claim_guard_problems(root))
+        admission_problems.extend(_body_guard_problems(root))
     return primitives, gates, flags, raw, marks, admission_problems
 
 
@@ -778,12 +1076,143 @@ def flip_readiness(root: Path) -> tuple[bool, str]:
     return True, f"flip_ready=true: {len(names)} funnel tests over {len(FLIP_READY_TESTS)} rows"
 
 
+def _evidence_test_ids(data):
+    linked = set()
+    for group in ("probes", "transport_probes", "claim_probes"):
+        for row in data[group]:
+            ids = row["verified_by"]
+            if (not isinstance(ids, list) or not ids
+                    or any(not isinstance(name, str) or "::" not in name for name in ids)
+                    or len(ids) != len(set(ids))):
+                raise ValueError("manifest_invalid")
+            if ("recording_test" in row
+                    and not any(name.rsplit("::", 1)[-1] == row["recording_test"] for name in ids)):
+                raise ValueError("manifest_invalid")
+            linked.update(ids)
+    if not linked:
+        raise ValueError("manifest_invalid")
+    return linked
+
+
+def _evidence_linked(data, digest, proof, identity):
+    def hex_hash(value, length):
+        return isinstance(value, str) and re.fullmatch("[0-9a-f]{%d}" % length, value) is not None
+
+    try:
+        if (type(proof["schema_version"]) is not int or proof["schema_version"] != 1
+                or type(proof["policy_version"]) is not int or proof["policy_version"] != 1
+                or not hex_hash(identity["build_sha"], 40) or not hex_hash(identity["dependency_hash"], 64)
+                or proof["build_sha"] != identity["build_sha"]
+                or proof["dependency_hash"] != identity["dependency_hash"]
+                or proof["census_hash"] != digest or not hex_hash(identity["binary_sha256"], 64)
+                or proof["binary_sha256"] != identity["binary_sha256"]):
+            return False
+        required = proof["required_test_ids"]
+        if (not isinstance(required, list)
+                or any(not isinstance(name, str) or not name for name in required)
+                or len(set(required)) != len(required)):
+            return False
+        expected = identity["required_test_ids"]
+        if (not isinstance(expected, list)
+                or any(not isinstance(name, str) or not name for name in expected)
+                or len(set(expected)) != len(expected) or set(required) != set(expected)):
+            return False
+        planned, executed = set(required), set()
+        if not _evidence_test_ids(data) <= planned or not isinstance(proof["tests"], list):
+            return False
+        for test in proof["tests"]:
+            if (test["id"] not in planned or test["id"] in executed
+                    or any(type(test[key]) is not int or test[key] != count
+                           for key, count in (("executed", 1), ("failed", 0), ("skipped", 0)))
+                    or test["binary_sha256"] != proof["binary_sha256"]):
+                return False
+            executed.add(test["id"])
+        return executed == planned
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def body_probe_snapshot(root: Path, evidence=None, identity=None) -> dict:
+    """Read the same bytes embedded by Rust; incomplete or malformed data cannot certify coverage."""
+    try:
+        raw = (root / "scripts/tui_o_body_probes.json").read_bytes()
+    except OSError:
+        return dict(coverage=False, instrumentation_complete=False, census_hash=None, pending=0, error="manifest_unreadable")
+    digest = hashlib.sha256(raw).hexdigest()
+
+    def require(condition):
+        if not condition:
+            raise ValueError("manifest_invalid")
+
+    try:
+        data = json.loads(raw)
+        require(type(data["schema_version"]) is int and data["schema_version"] == 1)
+        rows = data["probes"]
+        require(isinstance(rows, list) and bool(rows))
+        seen, measured = set(), Counter()
+        pending = 0
+        for row in rows:
+            for key in ("id", "path", "function", "primitive"):
+                require(isinstance(row[key], str) and bool(row[key]))
+            require(row["id"] not in seen)
+            seen.add(row["id"])
+            require(type(row["line"]) is int and row["line"] > 0)
+            require(row["op"] in ("POST", "EDIT", "POST_OR_EDIT"))
+            require(row["classification"] in ("BODY_CAPABLE", "NONBODY"))
+            status = row["status"]
+            require(status == "VERIFIED" or status in {
+                "PENDING_0a3", "PENDING_0b1", "PENDING_0b2", "PENDING_0c1", "PENDING_0c2",
+            })
+            pending += status != "VERIFIED"
+            measured[(row["path"], row["primitive"])] += 1
+        expected = Counter({
+            (PRIMITIVE_ROOT + path, primitive): count
+            for path, census in CENSUS.items()
+            if census[1] == "CUT_D" or census[1].startswith("COV:")
+            or path in ("footer_view_reconciler/mod.rs", "turn_bridge/headless_delivery.rs")
+            for primitive, count in EXPECTED_PRIMITIVES[path].items()
+        })
+        require(measured == expected)
+        transport = data["transport_probes"]
+        require(isinstance(transport, list) and len(transport) == len(TRANSPORT_PROBES))
+        transport_ids = set()
+        for row in transport:
+            expected = TRANSPORT_PROBES.get(row["id"])
+            require(expected is not None and set(row) == set(expected) | {"status", "verified_by"})
+            require({key: row[key] for key in expected} == expected)
+            require("occurrence" not in row or type(row["occurrence"]) is int)
+            require(row["id"] not in transport_ids)
+            transport_ids.add(row["id"])
+            require(row["status"] in {"PENDING_0a3", "PENDING_0b2", "VERIFIED"})
+            pending += row["status"] != "VERIFIED"
+        claims = data["claim_probes"]
+        require(isinstance(claims, list) and len(claims) == len(CLAIM_PROBES))
+        claim_ids = set()
+        for row in claims:
+            expected = CLAIM_PROBES.get(row["id"])
+            require(expected is not None and set(row) == set(expected) | {"status", "verified_by"})
+            require({key: row[key] for key in expected} == expected)
+            require(row["id"] not in claim_ids and row["id"] not in seen and row["id"] not in transport_ids)
+            claim_ids.add(row["id"])
+            require(row["status"] in {"PENDING_0a2", "VERIFIED"})
+            pending += row["status"] != "VERIFIED"
+        evidence_linked = _evidence_linked(data, digest, evidence, identity)
+        return dict(coverage=pending == 0 and evidence_linked, instrumentation_complete=pending == 0,
+                    evidence_linked=evidence_linked, evidence_error=("execution_evidence_missing" if evidence is None else
+                    None if evidence_linked else "execution_evidence_invalid_or_unlinked"),
+                    census_hash=digest, pending=pending, error=None)
+    except (AssertionError, KeyError, TypeError, ValueError):
+        return dict(coverage=False, instrumentation_complete=False, census_hash=digest, pending=0, error="manifest_invalid")
+
+
 def check(root: Path, pinned_test_only_files=None) -> tuple[bool, str]:
     try:
         primitives, gates, flags, raw, marks, admission_problems = measure(root, pinned_test_only_files)
     except RuntimeError as exc:
         return False, str(exc)
     problems = problems_for(primitives, gates, flags, raw, marks, admission_problems)
+    if error := body_probe_snapshot(root)["error"]:
+        problems.append(f"body probes: {error}")
     sites = sum(sum(m.values()) for m in primitives.values())
     deferred = sorted(rel for rel, row in CENSUS.items() if DEFER_RE.fullmatch(row[1]))
     if problems:
@@ -806,9 +1235,12 @@ def main(argv: list[str] | None = None) -> int:
     print(message, file=sys.stdout if ok else sys.stderr)
     ready, verdict = flip_readiness(root)
     print(verdict)
+    body = body_probe_snapshot(root)
+    print(f"body_probe_coverage={str(body['coverage']).lower()} pending={body['pending']} "
+          f"census_hash={body['census_hash']}")
     if not ok:
         return 1
-    return 1 if "--require-flip-ready" in args and not ready else 0
+    return 1 if "--require-flip-ready" in args and (not ready or not body["coverage"]) else 0
 
 
 if __name__ == "__main__":

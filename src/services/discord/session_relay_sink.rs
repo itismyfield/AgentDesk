@@ -21,6 +21,10 @@ use super::health::HealthRegistry;
 use super::inflight::{self, InflightTurnState, RelayOwnerKind, TurnSource};
 use super::outbound::delivery_record as dr;
 use super::outbound::turn_output_controller as toc;
+use super::outbound::{
+    body_census::{BodyOffer, BodySource},
+    current_census,
+};
 use super::replace_outcome_policy::edit_fail_fallback_disposition;
 use super::{DeliveryLeaseCell, DeliveryLeaseHeartbeat, LeaseHolder, task_supervisor, tmux};
 use crate::services::cluster::stream_relay::{
@@ -78,7 +82,7 @@ use self::task_notification_context::ensure_card_and_route;
 use self::terminal_handoff::SessionRelayDeliveryOutcome;
 use self::turn_parser::{SessionRelayDelivery, SessionRelayParser};
 use super::task_notification_delivery::{ResponseDeliveryClaim, ResponseDeliveryClaimOutcome};
-use crate::services::tui_o::cutover::{IdentityError, claim_then_send};
+use crate::services::tui_o::cutover::{BodySite, IdentityError, claim_then_send_at};
 
 static SESSION_BOUND_DISCORD_DELIVERY_ENABLED: AtomicBool = AtomicBool::new(false);
 const IDLE_JSONL_RELAY_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -284,6 +288,10 @@ impl SessionBoundDiscordRelaySink {
         }
         let provider = delivery.provider.clone();
         let inflight = super::inflight::load_inflight_state(&provider, channel_id);
+        let census_source = inflight
+            .as_ref()
+            .map(BodySource::from_state)
+            .unwrap_or_else(|| BodySource::captured(current_census()));
         // #3041 P1-3 (Part a, B1 — frame-carried): this pre-POST `inflight` is for the
         // route + trace ONLY; the advance gate re-loads FRESH after the POST
         // (`advance_after_confirmed_post`, codex P1-3 issue 3) so a turn cleared/replaced
@@ -551,6 +559,7 @@ impl SessionBoundDiscordRelaySink {
                 return short_controller::deliver_short_replace_via_controller(
                     controller_gateway,
                     short_controller::SinkShortReplaceCtx {
+                        census_source: census_source.clone(),
                         shared: &shared,
                         provider: &provider,
                         channel,
@@ -580,8 +589,19 @@ impl SessionBoundDiscordRelaySink {
                         &shared,
                     )
                 };
-                let (message_ids, _chunk_anchor_receipt) =
-                    claimed_body_send(claim_then_send(Some(body_claim), send).await)??;
+                let (message_ids, _chunk_anchor_receipt) = claimed_body_send(
+                    census_source
+                        .clone()
+                        .observe(
+                            BodySite::SessionChunks,
+                            BodyOffer::Body,
+                            Box::pin(async {
+                                claim_then_send_at(BodySite::SessionChunks, Some(body_claim), send)
+                                    .await
+                            }),
+                        )
+                        .await,
+                )??;
                 if let Some(gateway) = gateway {
                     let _ = gateway.delete_message(channel, msg_id).await;
                 } else {
@@ -632,19 +652,39 @@ impl SessionBoundDiscordRelaySink {
             let anchor = &mut last_chunk_anchor;
             let replace = move || async move {
                 if let Some(gateway) = gateway {
-                    gateway
-                        .replace_message_with_outcome(channel, msg_id, text)
+                    BodySource::inherited()
+                        .observe(
+                            BodySite::SessionSink,
+                            BodyOffer::Body,
+                            Box::pin(gateway.replace_message_with_outcome(channel, msg_id, text)),
+                        )
                         .await
                 } else {
-                    formatting::replace_long_message_raw_with_outcome(
-                        http_ref, channel, msg_id, text, shared_ref, anchor,
-                    )
-                    .await
-                    .map_err(|error| error.to_string())
+                    BodySource::inherited()
+                        .observe(
+                            BodySite::SessionSink,
+                            BodyOffer::Body,
+                            Box::pin(formatting::replace_long_message_raw_with_outcome(
+                                http_ref, channel, msg_id, text, shared_ref, anchor,
+                            )),
+                        )
+                        .await
+                        .map_err(|error| error.to_string())
                 }
             };
-            let replace_outcome =
-                claimed_body_send(claim_then_send(Some(body_claim), replace).await)?;
+            let replace_outcome = claimed_body_send(
+                census_source
+                    .clone()
+                    .observe(
+                        BodySite::SessionSink,
+                        BodyOffer::Body,
+                        Box::pin(async {
+                            claim_then_send_at(BodySite::SessionSink, Some(body_claim), replace)
+                                .await
+                        }),
+                    )
+                    .await,
+            )?;
             match replace_outcome {
                 Ok(ReplaceLongMessageOutcome::EditedOriginal) => {
                     self.delivered_total.fetch_add(1, Ordering::AcqRel);
@@ -769,6 +809,7 @@ impl SessionBoundDiscordRelaySink {
                 sink_lease_guard.as_ref(),
                 sink_delivery_ctx,
                 body_claim,
+                census_source,
             )
             .await
         }
