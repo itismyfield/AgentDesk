@@ -19,7 +19,7 @@ const ENTRY_TRANSITION: &str = "created_at < NOW() - ($1::INT || ' days')::INTER
          SELECT 1 FROM auto_queue_entries e \
          LEFT JOIN auto_queue_runs r ON r.id = e.run_id \
          WHERE e.id = auto_queue_entry_transitions.entry_id \
-           AND (r.id IS NULL OR r.status NOT IN ('completed', 'cancelled') \
+           AND (r.id IS NULL OR r.status IS NULL OR r.status NOT IN ('completed', 'cancelled') \
                 OR NOT EXISTS (SELECT 1 FROM auto_queue_entry_transitions n \
                     WHERE n.entry_id = e.id \
                       AND (n.created_at, n.id) > (auto_queue_entry_transitions.created_at, \
@@ -598,6 +598,96 @@ mod tests {
                 .expect("phase gate"),
             Some(1),
             "the manual_skip entry still does not hold phase 0 open"
+        );
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// A finished run's skipped entry keeps the transition the phase gate reads when two
+    /// skips share a timestamp, and runs of unknown status keep every transition.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn db_retention_keeps_the_phase_gate_skip_on_ties_and_null_runs() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_db_retention_record_caps_ties",
+            "db_retention transition ties and null runs",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        // Run `tie-a` writes the manual skip first (smaller id), `tie-b` writes it last.
+        exec(
+            &pool,
+            "INSERT INTO agents (id, name, provider, discord_channel_id) \
+                 VALUES ('agent-t', 'Agent', 'claude', '998'); \
+             INSERT INTO auto_queue_runs (id, repo, agent_id, status) \
+                 VALUES ('tie-a', 'repo', 'agent-t', 'completed'), \
+                        ('tie-b', 'repo', 'agent-t', 'completed'), \
+                        ('run-null', 'repo', 'agent-t', NULL); \
+             INSERT INTO kanban_cards (id, title, status, assigned_agent_id) \
+                 VALUES ('card-a', 'a', 'in_progress', 'agent-t'), \
+                        ('card-b', 'b', 'in_progress', 'agent-t'); \
+             INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, \
+                 priority_rank, thread_group, batch_phase) \
+                 VALUES ('e-a', 'tie-a', 'card-a', 'agent-t', 'skipped', 0, 0, 0), \
+                        ('e-a-next', 'tie-a', NULL, 'agent-t', 'pending', 0, 0, 1), \
+                        ('e-b', 'tie-b', 'card-b', 'agent-t', 'skipped', 0, 0, 0), \
+                        ('e-b-next', 'tie-b', NULL, 'agent-t', 'pending', 0, 0, 1), \
+                        ('e-null', 'run-null', NULL, 'agent-t', 'done', 0, 0, 0), \
+                        ('e-norun', NULL, NULL, 'agent-t', 'done', 0, 0, 0); \
+             INSERT INTO auto_queue_entry_transitions \
+                 (entry_id, from_status, to_status, trigger_source, created_at) VALUES \
+                 ('e-a', 'a-old', 'dispatched', 'auto', NOW() - INTERVAL '110 days'), \
+                 ('e-a', 'a-manual', 'skipped', 'manual_skip', NOW() - INTERVAL '100 days'), \
+                 ('e-a', 'a-auto', 'skipped', 'auto', NOW() - INTERVAL '100 days'), \
+                 ('e-a', 'a-null', 'pending', 'auto', NULL), \
+                 ('e-b', 'b-old', 'dispatched', 'auto', NOW() - INTERVAL '110 days'), \
+                 ('e-b', 'b-auto', 'skipped', 'auto', NOW() - INTERVAL '100 days'), \
+                 ('e-b', 'b-manual', 'skipped', 'manual_skip', NOW() - INTERVAL '100 days'), \
+                 ('e-null', 'null-1', 'dispatched', 'auto', NOW() - INTERVAL '110 days'), \
+                 ('e-null', 'null-2', 'done', 'auto', NOW() - INTERVAL '100 days'), \
+                 ('e-norun', 'norun-1', 'dispatched', 'auto', NOW() - INTERVAL '110 days'), \
+                 ('e-norun', 'norun-2', 'done', 'auto', NOW() - INTERVAL '100 days')",
+        )
+        .await;
+        // The two `100 days` values above are one statement's `NOW()`, so they tie exactly.
+        let phases = |pool: PgPool| async move {
+            let mut out = Vec::new();
+            for run in ["tie-a", "tie-b"] {
+                out.push(
+                    crate::db::auto_queue::current_batch_phase_pg(&pool, run)
+                        .await
+                        .expect("phase gate"),
+                );
+            }
+            out
+        };
+        // `tie-a`'s latest skip is the automatic one, so its entry holds phase 0.
+        assert_eq!(phases(pool.clone()).await, vec![Some(0), Some(1)]);
+
+        let report = db_retention_job(&pool, false).await.expect("live pass");
+        assert_eq!(
+            report
+                .get("auto_queue_entry_transitions", "delete")
+                .map(|t| t.rows_affected),
+            Some(4),
+            "the old dispatch rows and the losing tied skips go"
+        );
+        assert_eq!(
+            keys(
+                &pool,
+                "SELECT from_status FROM auto_queue_entry_transitions ORDER BY 1"
+            )
+            .await,
+            [
+                "a-auto", "a-null", "b-manual", "norun-1", "norun-2", "null-1", "null-2"
+            ]
+            .map(String::from),
+            "tied skips keep the larger id; unknown-status and run-less entries keep all"
+        );
+        assert_eq!(
+            phases(pool.clone()).await,
+            vec![Some(0), Some(1)],
+            "the phase gate answers as before the pass"
         );
 
         pool.close().await;
