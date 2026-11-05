@@ -301,5 +301,10 @@ impl EgressTrap {
 impl Drop for EgressTrap {
     fn drop(&mut self) {
         self.server.abort();
+        // Newest first: on Windows `HTTPS_PROXY` and `https_proxy` are one variable, and only
+        // the oldest guard holds the value from before the trap.
+        while let Some(guard) = self._env.pop() {
+            drop(guard);
+        }
     }
 }
