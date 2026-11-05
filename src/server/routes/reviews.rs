@@ -830,16 +830,16 @@ mod decision_retention_pg_tests {
             crate::services::maintenance::jobs::db_retention::db_retention_job(&pool, false)
                 .await
                 .unwrap();
+        assert_eq!(
+            readers(pool.clone()).await,
+            before,
+            "the lookups answer as before"
+        );
         assert!(
             report
                 .summary()
                 .contains(&"review_decisions:delete=3".to_string()),
             "the aged items the lookups no longer need go"
-        );
-        assert_eq!(
-            readers(pool.clone()).await,
-            before,
-            "the lookups answer as before"
         );
         let left: Vec<String> =
             sqlx::query_scalar("SELECT decision FROM review_decisions ORDER BY 1")

@@ -79,10 +79,6 @@ const REVIEW_TUNING: &str = "created_at < NOW() - ($1::INT || ' days')::INTERVAL
 const REVIEW_DECISION: &str = "decided_at < NOW() - ($1::INT || ' days')::INTERVAL \
      AND NOT EXISTS (SELECT 1 FROM task_dispatches td \
          WHERE td.id = review_decisions.dispatch_id AND td.status IN ('pending', 'dispatched')) \
-     AND (kanban_card_id IS NULL \
-          OR EXISTS (SELECT 1 FROM task_dispatches td \
-              WHERE td.id = review_decisions.dispatch_id \
-                AND td.kanban_card_id = review_decisions.kanban_card_id)) \
      AND NOT EXISTS (SELECT 1 FROM review_decisions o \
          LEFT JOIN task_dispatches od ON od.id = o.dispatch_id \
          WHERE o.dispatch_id = review_decisions.dispatch_id \

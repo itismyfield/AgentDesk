@@ -474,73 +474,78 @@ mod retention_pg_tests {
     use super::aggregate_review_tuning_core_pg;
     use crate::dispatch::test_support::DispatchPostgresTestDb;
 
+    type Totals = (i64, i64, i64, i64, i64, usize);
+
+    /// Seeds one card's history, optionally runs the retention pass, then reopens the card
+    /// twice; returns the recent row's outcomes, the 30-day aggregate and the rows deleted.
+    async fn reopen_twice(name: &str, prune: bool) -> (Vec<String>, Totals, Option<i64>) {
+        let db = DispatchPostgresTestDb::create(name, "review tuning retention").await;
+        let pool = db.connect_and_migrate().await;
+        // Older cycles' higher review rounds and the latest cycle's first one on one card, an
+        // aged true positive retention may drop, and recent samples so guidance is produced.
+        sqlx::raw_sql(
+            "INSERT INTO review_tuning_outcomes (card_id, review_round, verdict, outcome, created_at)
+             VALUES ('t9', 3, 'old-r3', 'true_negative', NOW() - INTERVAL '110 days'),
+                    ('t9', 2, 'old-r2', 'true_negative', NOW() - INTERVAL '100 days'),
+                    ('t9', 1, 'recent-r1', 'true_negative', NOW() - INTERVAL '10 days'),
+                    ('t9', 1, 'old-tp', 'true_positive', NOW() - INTERVAL '100 days'),
+                    ('c2', 1, 'tp-1', 'true_positive', NOW() - INTERVAL '5 days'),
+                    ('c3', 1, 'tp-2', 'true_positive', NOW() - INTERVAL '5 days'),
+                    ('c4', 1, 'fp-1', 'false_positive', NOW() - INTERVAL '5 days'),
+                    ('c5', 1, 'tp-3', 'true_positive', NOW() - INTERVAL '5 days')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed tuning outcomes");
+        let deleted = if prune {
+            let report =
+                crate::services::maintenance::jobs::db_retention::db_retention_job(&pool, false)
+                    .await
+                    .expect("retention pass");
+            report
+                .get("review_tuning_outcomes", "delete")
+                .map(|t| t.rows_affected)
+        } else {
+            None
+        };
+        let mut recent = Vec::new();
+        for _ in 0..2 {
+            crate::kanban::correct_tn_to_fn_on_reopen(Some(&pool), "t9");
+            recent.push(
+                sqlx::query_scalar::<_, String>(
+                    "SELECT outcome FROM review_tuning_outcomes WHERE verdict = 'recent-r1'",
+                )
+                .fetch_one(&pool)
+                .await
+                .expect("recent outcome"),
+            );
+        }
+        let totals = aggregate_review_tuning_core_pg(&pool).await;
+        pool.close().await;
+        db.drop().await;
+        (recent, totals, deleted)
+    }
+
     /// Retention keeps every true negative a later reopen can still pick, so two reopens in a
     /// row and the 30-day aggregate match a database that was never pruned.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn repeated_reopens_match_an_unpruned_database_after_retention() {
-        let base_db =
-            DispatchPostgresTestDb::create("agentdesk_tuning_retention_base", "unpruned").await;
-        let pruned_db =
-            DispatchPostgresTestDb::create("agentdesk_tuning_retention_pruned", "pruned").await;
-        let base = base_db.connect_and_migrate().await;
-        let pruned = pruned_db.connect_and_migrate().await;
-        // Older cycles' higher review rounds and the latest cycle's first one on one card, an
-        // aged true positive retention may drop, and recent samples so guidance is produced.
-        for pool in [&base, &pruned] {
-            sqlx::raw_sql(
-                "INSERT INTO review_tuning_outcomes (card_id, review_round, verdict, outcome, created_at)
-                 VALUES ('t9', 3, 'old-r3', 'true_negative', NOW() - INTERVAL '110 days'),
-                        ('t9', 2, 'old-r2', 'true_negative', NOW() - INTERVAL '100 days'),
-                        ('t9', 1, 'recent-r1', 'true_negative', NOW() - INTERVAL '10 days'),
-                        ('t9', 1, 'old-tp', 'true_positive', NOW() - INTERVAL '100 days'),
-                        ('c2', 1, 'tp-1', 'true_positive', NOW() - INTERVAL '5 days'),
-                        ('c3', 1, 'tp-2', 'true_positive', NOW() - INTERVAL '5 days'),
-                        ('c4', 1, 'fp-1', 'false_positive', NOW() - INTERVAL '5 days'),
-                        ('c5', 1, 'tp-3', 'true_positive', NOW() - INTERVAL '5 days')",
-            )
-            .execute(pool)
-            .await
-            .expect("seed tuning outcomes");
-        }
-        let report =
-            crate::services::maintenance::jobs::db_retention::db_retention_job(&pruned, false)
-                .await
-                .expect("retention pass");
-
-        let recent = |pool: sqlx::PgPool| async move {
-            sqlx::query_scalar::<_, String>(
-                "SELECT outcome FROM review_tuning_outcomes WHERE verdict = 'recent-r1'",
-            )
-            .fetch_one(&pool)
-            .await
-            .expect("recent outcome")
-        };
-        for reopen in 1..=2 {
-            crate::kanban::correct_tn_to_fn_on_reopen(Some(&base), "t9");
-            crate::kanban::correct_tn_to_fn_on_reopen(Some(&pruned), "t9");
-            let unpruned = recent(base.clone()).await;
-            assert_eq!(
-                recent(pruned.clone()).await,
-                unpruned,
-                "reopen {reopen} reclassifies the same rows"
-            );
-            assert_eq!(unpruned, "true_negative", "the older rounds go first");
-        }
+        let unpruned = reopen_twice("agentdesk_tuning_retention_base", false).await;
         assert_eq!(
-            aggregate_review_tuning_core_pg(&pruned).await,
-            aggregate_review_tuning_core_pg(&base).await,
-            "the 30-day aggregate matches"
+            unpruned.0,
+            ["true_negative", "true_negative"].map(String::from),
+            "the older rounds are reclassified first"
         );
-        assert!(
-            report
-                .summary()
-                .contains(&"review_tuning_outcomes:delete=1".to_string()),
-            "the aged true positive was actually deleted"
+        let pruned = reopen_twice("agentdesk_tuning_retention_pruned", true).await;
+        assert_eq!(
+            pruned.0, unpruned.0,
+            "each reopen reclassifies the same rows"
         );
-
-        base.close().await;
-        pruned.close().await;
-        base_db.drop().await;
-        pruned_db.drop().await;
+        assert_eq!(pruned.1, unpruned.1, "the 30-day aggregate matches");
+        assert_eq!(
+            pruned.2,
+            Some(1),
+            "the pass actually deleted the aged true positive"
+        );
     }
 }
