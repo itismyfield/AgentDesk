@@ -25,8 +25,11 @@ pub(in crate::services::discord) use host_recovery_guard::{marker_witness, with_
 mod invariant_test_capture;
 mod model;
 mod native_stop_pin;
+#[cfg(unix)]
+pub(in crate::services::discord) use native_stop_pin::BusyNativeInput;
 pub(in crate::services::discord) use native_stop_pin::{
-    bind_native_stop_pin, record_native_busy_child, restore_native_stop_pin,
+    bind_native_stop_pin, historical_input_verified, record_native_busy_child,
+    restore_native_stop_pin,
 };
 #[cfg(all(test, unix))]
 #[path = "inflight/native_stop_busy_tests.rs"]
@@ -811,6 +814,79 @@ fn set_inflight_restart_mode_under_lock(
         Ok(json) if store::publish_row(path, &json).is_ok() => Marked,
         _ => Failed,
     }
+}
+
+/// Consumes a refused readoption's old marker without claiming the row or refreshing its age.
+pub(in crate::services::discord) fn consume_stale_restart_marker_if_identity_unchanged(
+    provider: &ProviderKind,
+    expected: &InflightTurnState,
+    current_generation: u64,
+) -> GuardedSaveOutcome {
+    use GuardedSaveOutcome::*;
+    let identity = InflightTurnIdentity::from_state(expected);
+    if identity.is_unnameable() {
+        return Unnameable;
+    }
+    let Some(root) = inflight_runtime_root() else {
+        return IoError;
+    };
+    let path = inflight_state_path(&root, provider, expected.channel_id);
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return IoError;
+    };
+    let data = match fs::read_to_string(&path) {
+        Ok(data) => data,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return RowAbsent,
+        Err(_) => return IoError,
+    };
+    let Ok(mut state) = serde_json::from_str::<InflightTurnState>(&data) else {
+        return IoError;
+    };
+    if !identity.matches_state(&state)
+        || state.turn_nonce != expected.turn_nonce
+        || state.born_generation != expected.born_generation
+        || state.channel_id != expected.channel_id
+        || state.provider != expected.provider
+        || state.request_owner_user_id != expected.request_owner_user_id
+    {
+        return SuccessorOwned;
+    }
+    let marker_generation = state.restart_generation.unwrap_or(state.born_generation);
+    if state.provider != provider.as_str()
+        || state.user_msg_id == 0
+        || state.request_owner_user_id == 0
+        || state.request_owner_user_id
+            == super::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID
+        || state.rebind_origin
+        || expected.rebind_origin
+        || state.readopted_from_inflight
+        || expected.readopted_from_inflight
+        || state.restart_mode.is_none()
+        || state.restart_mode != expected.restart_mode
+        || state.restart_generation != expected.restart_generation
+        || marker_generation == 0
+        || marker_generation >= current_generation
+        || receipt_protected_path(&path)
+    {
+        return AuthorityPinned;
+    }
+    state.clear_restart_mode();
+    if bump_save_generation_for_write(&path, &mut state).is_err() {
+        return IoError;
+    }
+    let Ok(json) = serde_json::to_string_pretty(&state) else {
+        return IoError;
+    };
+    if store::publish_row(&path, &json).is_err() {
+        return IoError;
+    }
+    tracing::info!(
+        provider = provider.as_str(),
+        channel_id = state.channel_id,
+        user_msg_id = state.user_msg_id,
+        "restart marker consumed: readoption refused"
+    );
+    Saved
 }
 
 /// Load a single inflight state by provider + channel_id (returns None if missing).
