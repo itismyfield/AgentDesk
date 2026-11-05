@@ -1376,3 +1376,6 @@ async fn a_marked_row_is_settled_and_the_owned_front_submitted_on_one_wake_pg() 
     pool.close().await;
     db.drop().await;
 }
+
+#[path = "owner_input_native_read_tests.rs"]
+mod native_read;
