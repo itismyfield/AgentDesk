@@ -306,20 +306,52 @@ async fn fixture(
         assert!(mailbox.has_active_turn().await.unwrap());
         let rt = rquickjs::Runtime::new().unwrap();
         let ctx = rquickjs::Context::full(&rt).unwrap();
-        let removed: String = ctx.with(|ctx| {
-            crate::engine::ops::register_globals_with_supervisor_and_pg(
-                &ctx,
-                None,
-                crate::supervisor::BridgeHandle::new(),
-            )
-            .unwrap();
-            ctx.eval(format!(
-                "JSON.stringify(agentdesk.inflight.remove('claude','{}'))",
-                channel.get()
-            ))
+        let remove = || {
+            ctx.with(|ctx| {
+                crate::engine::ops::register_globals_with_supervisor_and_pg(
+                    &ctx,
+                    None,
+                    crate::supervisor::BridgeHandle::new(),
+                )
+                .unwrap();
+                ctx.eval(format!(
+                    "JSON.stringify(agentdesk.inflight.remove('claude','{}'))",
+                    channel.get()
+                ))
+                .unwrap()
+            })
+        };
+        let mut removed: String = remove();
+        for _ in 0..4 {
+            let result = serde_json::from_str::<Value>(&removed).unwrap();
+            println!("POLICY_REMOVE_RESULT {result}");
+            if result["ok"] == true {
+                break;
+            }
+            assert_eq!(result["reason"], "Busy", "policy removal refused: {result}");
+            assert!(
+                observed_facts.try_recv().is_err(),
+                "Busy supplies no cleanup fact"
+            );
+            let path = crate::services::discord::runtime_store::discord_inflight_root()
+                .unwrap()
+                .join("claude")
+                .join(format!("{channel}.json"));
+            tokio::task::spawn_blocking(move || {
+                let lock = crate::services::discord::inflight::lock_inflight_state_path(&path)?;
+                drop(lock);
+                Ok::<(), String>(())
+            })
+            .await
             .unwrap()
-        });
-        assert_eq!(serde_json::from_str::<Value>(&removed).unwrap()["ok"], true);
+            .unwrap();
+            removed = remove();
+        }
+        assert_eq!(
+            serde_json::from_str::<Value>(&removed).unwrap()["ok"],
+            true,
+            "policy removal never succeeded: {removed}"
+        );
         loop {
             let (_, fact) = tokio::time::timeout(BUDGET, observed_facts.recv())
                 .await
