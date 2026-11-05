@@ -946,8 +946,6 @@ mod input_fence_reaper_tests;
 mod loader_gate_observation_tests {
     use super::*;
 
-    mod source_guard_tests;
-
     fn row(channel_id: u64, born_generation: u64, tmux: Option<&str>) -> InflightTurnState {
         let mut state = InflightTurnState::new(
             ProviderKind::Claude,
@@ -1209,17 +1207,6 @@ mod loader_gate_observation_tests {
         for (index, (route, generation, stale, _, _)) in route_cases().into_iter().enumerate() {
             assert_public_loader_pair(&inflight_root, index, allocation(generation, route), stale);
         }
-    }
-
-    /// Lexical tripwire only: aliases or helper extraction can evade it. The
-    /// route-complete execution test above is the semantic proof.
-    #[test]
-    fn observation_labels_and_allocation_only_evaluation_api_are_exact() {
-        use source_guard_tests::{REAPER, REMOVAL, SCOPED, loader_gate_gaps};
-        assert_eq!(
-            loader_gate_gaps(REMOVAL, SCOPED, REAPER),
-            Vec::<String>::new()
-        );
     }
 }
 

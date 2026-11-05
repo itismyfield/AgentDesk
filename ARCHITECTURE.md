@@ -1590,8 +1590,6 @@ src/
 │   │   │   ├── removal/
 │   │   │   │   ├── custody_notice/
 │   │   │   │   │   └── retention.rs
-│   │   │   │   ├── loader_gate_observation_tests/
-│   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   ├── boot_custody.rs
 │   │   │   │   ├── boot_custody_tests.rs
 │   │   │   │   ├── boot_reaper.rs
@@ -2105,17 +2103,15 @@ src/
 │   │   │   │   │   │   ├── mailbox_reaction_tests.rs
 │   │   │   │   │   │   ├── queued_intake_cause.rs
 │   │   │   │   │   │   └── requeue_tests.rs
-│   │   │   │   │   ├── recovery_context_take_order_tests/
-│   │   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   │   ├── replay_start/
 │   │   │   │   │   │   └── common.rs
 │   │   │   │   │   ├── retry_prompt/
-│   │   │   │   │   │   ├── tests.rs
-│   │   │   │   │   │   └── wiring_tests.rs
+│   │   │   │   │   │   └── tests.rs
 │   │   │   │   │   ├── session_preparation/
 │   │   │   │   │   │   └── restore_tests.rs
 │   │   │   │   │   ├── worker_entry/
 │   │   │   │   │   │   ├── custody_pg_tests.rs
+│   │   │   │   │   │   ├── dispatch_guard_pg_tests.rs
 │   │   │   │   │   │   ├── goal_fresh_pg_tests.rs
 │   │   │   │   │   │   └── preserve_cancel_tests.rs
 │   │   │   │   │   ├── adk_thread.rs
@@ -2126,7 +2122,6 @@ src/
 │   │   │   │   │   ├── first_key_gate_paths_tests.rs
 │   │   │   │   │   ├── host_refusal.rs
 │   │   │   │   │   ├── inflight_create_log.rs
-│   │   │   │   │   ├── input_effect_tests.rs
 │   │   │   │   │   ├── intake_dispatch.rs
 │   │   │   │   │   ├── placeholder_handoff.rs
 │   │   │   │   │   ├── race_loss.rs

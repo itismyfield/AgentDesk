@@ -116,7 +116,7 @@ Non-leader nodes skip Discord gateway startup when the gateway lease
 is held elsewhere
 (`src/services/discord/runtime_bootstrap.rs:810`).
 `cached_serenity_ctx` is only populated after a real gateway client
-starts (`runtime_bootstrap.rs:1137`). But `handle_text_message`
+starts (`runtime_bootstrap/framework_setup.rs:51`). But `handle_text_message`
 expects a live `serenity::Context` and later constructs a
 `DiscordGateway` around it (`router/message_handler/intake_turn.rs`,
 `handle_text_message`).
