@@ -23,6 +23,14 @@ struct StopRig {
 
 impl StopRig {
     async fn new(id: u64, marker: Option<&str>) -> Self {
+        Self::build(id, marker, false).await
+    }
+
+    async fn idle(id: u64) -> Self {
+        Self::build(id, None, true).await
+    }
+
+    async fn build(id: u64, marker: Option<&str>, idle: bool) -> Self {
         let running = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/tui_input/claude-2.1.293-tool-running.txt"
@@ -31,7 +39,11 @@ impl StopRig {
         .filter(|line| !line.contains("Tomfoolering"))
         .collect::<Vec<_>>()
         .join("\n");
-        let intake = IntakeRig::busy_with_screen(id, running.clone()).await;
+        let intake = if idle {
+            IntakeRig::new(id, false).await
+        } else {
+            IntakeRig::busy_with_screen(id, running.clone()).await
+        };
         let session = ProviderKind::Claude.build_tmux_session_name(&format!("a1-rollback-{id}"));
         let binding =
             crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&session).unwrap();
@@ -40,19 +52,26 @@ impl StopRig {
             "message":{"role":"user","content":"external parent"}});
         let opener = format!("{opener}\n");
         let opener_end = opener.len() as u64;
-        fs::write(&intake.transcript, opener).unwrap();
-        append(
-            &intake.transcript,
-            json!({"type":"assistant","uuid":"external-assistant",
-            "message":{"id":"external-assistant","content":[
-            {"type":"tool_use","id":"external-tool","name":"Bash","input":{"command":"sleep 60"}}]},"apiBlockIndex":0}),
-        );
+        fs::create_dir_all(intake.transcript.parent().unwrap()).unwrap();
+        if idle {
+            fs::write(&intake.transcript, IDLE).unwrap();
+        } else {
+            fs::write(&intake.transcript, opener).unwrap();
+            append(
+                &intake.transcript,
+                json!({"type":"assistant","uuid":"external-assistant",
+                "message":{"id":"external-assistant","content":[
+                {"type":"tool_use","id":"external-tool","name":"Bash","input":{"command":"sleep 60"}}]},"apiBlockIndex":0}),
+            );
+        }
         fs::write(
             intake.renderer.join("record-path"),
             intake.transcript.display().to_string(),
         )
         .unwrap();
-        fs::write(intake.renderer.join("queued-row"), "").unwrap();
+        if !idle {
+            fs::write(intake.renderer.join("queued-row"), "").unwrap();
+        }
         fs::write(intake.renderer.join("native-sid"), &sid).unwrap();
         fs::write(intake.renderer.join("native-uuid"), "owned-busy-row").unwrap();
         if let Some(marker) = marker {
@@ -312,15 +331,44 @@ async fn owner_busy_absorbed_before_relay_claim_remains_a_child() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_restored_root_without_durable_children_refuses_an_absorbed_owner_input() {
-    if !isolated("a_restored_root_without_durable_children_refuses_an_absorbed_owner_input") {
+async fn restored_child_without_birth(name: &str, id: u64, queue_mode: Option<&str>) {
+    if !isolated(name) {
         return;
     }
     let _root = crate::config::TestRuntimeRootGuard::new();
     let _mode = crate::services::tui_o::cutover::test_override::force_channels(&[]);
-    let rig = StopRig::new(7_755_150, None).await;
+    let rig = StopRig::new(id, None).await;
+    if let Some(mode) = queue_mode {
+        fs::write(rig.intake.renderer.join("queue-mode"), mode).unwrap();
+    }
     rig.paste().await;
+    if queue_mode.is_some() {
+        let body = fs::read_to_string(rig.intake.renderer.join("body")).unwrap();
+        let rows: Vec<Value> = fs::read_to_string(&rig.intake.transcript)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let enqueue = rows
+            .iter()
+            .position(|row| row["operation"] == "enqueue" && row["content"] == body)
+            .unwrap();
+        let removed = rows
+            .iter()
+            .position(|row| row["operation"] == "remove" && row["content"] == body)
+            .unwrap();
+        let command = rows
+            .iter()
+            .position(|row| {
+                row["attachment"]["type"] == "queued_command" && row["attachment"]["prompt"] == body
+            })
+            .unwrap();
+        assert_eq!(rows[removed]["reason"], "absorbed_mid_turn");
+        assert!(
+            enqueue < removed && removed < command,
+            "the actual Enter records enqueue, absorption, then its paired Command"
+        );
+    }
     let live = rig.relay_claim().await;
     let body = fs::read_to_string(rig.intake.renderer.join("body")).unwrap();
     let history = crate::services::tui_input::human_frame::history::row_owner(
@@ -354,7 +402,7 @@ async fn a_restored_root_without_durable_children_refuses_an_absorbed_owner_inpu
     discord::host_defer_gate::tests::map_channel(
         &shared,
         rig.intake.channel,
-        "a1-rollback-7755150",
+        &format!("a1-rollback-{id}"),
     )
     .await;
     shared.settings.write().await.owner_user_id = Some(7);
@@ -402,7 +450,12 @@ async fn a_restored_root_without_durable_children_refuses_an_absorbed_owner_inpu
     assert_eq!(
         rig.escapes(),
         0,
-        "a restored root cannot borrow an absorbed attempt absent from its durable children"
+        "{}",
+        if queue_mode.is_some() {
+            "a queue-paired restored child without persisted birth receives no Escape"
+        } else {
+            "a restored root cannot borrow an absorbed attempt absent from its durable children"
+        }
     );
     assert!(!recovered.cancelled.load(Ordering::Acquire));
     assert!(!live.cancelled.load(Ordering::Acquire));
@@ -435,6 +488,158 @@ async fn a_restored_root_without_durable_children_refuses_an_absorbed_owner_inpu
         "a second stop keeps the restored child policy"
     );
     assert!(mailbox.has_active_turn().await.unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restored_root_without_durable_children_refuses_an_absorbed_owner_input() {
+    restored_child_without_birth(
+        "a_restored_root_without_durable_children_refuses_an_absorbed_owner_input",
+        7_755_150,
+        None,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restored_root_without_durable_children_refuses_a_queue_paired_owner_input() {
+    restored_child_without_birth(
+        "a_restored_root_without_durable_children_refuses_a_queue_paired_owner_input",
+        7_755_153,
+        Some("command-after"),
+    )
+    .await;
+}
+
+async fn live_root_before_runtime_ready(name: &str, id: u64, conflicting_source: bool) {
+    if !isolated(name) {
+        return;
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _mode = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let rig = StopRig::idle(id).await;
+    let (seed, _) = crate::services::discord::router::message_handler::provider_isolation::prelaunch_inflight_runtime_seed(
+        &ProviderKind::Claude,
+        Some(&rig.session),
+        Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui),
+    );
+    assert!(
+        seed.1.is_none(),
+        "production Claude prelaunch leaves its durable source unfilled"
+    );
+    let (completed, bridge) = tokio::sync::oneshot::channel();
+    *discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
+        .lock()
+        .unwrap() = Some((rig.intake.channel, completed));
+    let (drive, mut settled) = rig.intake.drive();
+    crate::services::discord::queue_io::input_owner::drive::wake(drive);
+    let submitted = tokio::time::timeout(Duration::from_secs(30), settled.recv())
+        .await
+        .unwrap_or_else(|_| panic!("{}", rig.intake.trace.text()))
+        .unwrap();
+    assert_eq!(submitted, Ok(()), "{}", rig.intake.trace.text());
+    assert_eq!(events(&rig.intake.renderer), ["paste", "Enter"]);
+    wait("the idle submit writes its actual native user", || {
+        fs::read_to_string(&rig.intake.transcript)
+            .unwrap()
+            .contains("owned-busy-row")
+    });
+    let token = rig
+        .intake
+        .mailbox
+        .cancel_token()
+        .await
+        .unwrap()
+        .expect("the actual idle intake keeps its live token");
+    let sink = token.native_stop.receipt_sink();
+    assert!(!sink.has_restored_input());
+    wait(
+        "the idle receipt persists its native root through the bridge callback",
+        || {
+            sink.observe().is_some_and(|pin| pin.is_ok())
+                && inflight::load_inflight_state_read_only(&ProviderKind::Claude, id)
+                    .is_some_and(|row| row.native_stop_user_pin.is_some())
+        },
+    );
+    let pin = sink.observed().unwrap().unwrap();
+    assert_eq!(pin.uuid, "owned-busy-row");
+    assert!(crate::services::claude_tui::input::revalidate_native_pin(
+        &pin
+    ));
+    let mut row = inflight::load_inflight_state_read_only(&ProviderKind::Claude, id).unwrap();
+    assert_eq!(row.turn_nonce.as_deref(), token.turn_nonce());
+    assert_eq!(
+        row.runtime_kind,
+        Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui)
+    );
+    assert!(row.native_stop_user_pin.is_some());
+    assert_eq!(
+        serde_json::to_value(&row).unwrap()["native_stop_user_pin"]["input"],
+        serde_json::to_value(&pin).unwrap(),
+        "the bridge callback persisted this exact accepted root"
+    );
+    assert!(
+        row.output_path.is_none(),
+        "RuntimeReady has not filled the prelaunch source"
+    );
+    append(
+        &rig.intake.transcript,
+        json!({"type":"assistant","uuid":"idle-active-tool","sessionId":rig.sid,"apiBlockIndex":0,
+        "message":{"id":"idle-active-tool","role":"assistant","content":[{"type":"tool_use","id":"idle-tool","name":"Bash","input":{"command":"sleep 60"}}]}}),
+    );
+    assert_eq!(
+        crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&rig.intake.transcript),
+        crate::services::tui_turn_state::TuiTurnState::Streaming
+    );
+    if conflicting_source {
+        row.output_path = Some(
+            rig.intake
+                .renderer
+                .join("different-transcript.jsonl")
+                .display()
+                .to_string(),
+        );
+        inflight::save_inflight_state(&row).unwrap();
+    }
+    rig.command().await;
+    let escapes = rig.escapes();
+    let raw_cancelled = token.cancelled.load(Ordering::Acquire);
+    append(
+        &rig.intake.transcript,
+        json!({"type":"system","subtype":"turn_duration"}),
+    );
+    tokio::time::timeout(Duration::from_secs(30), bridge)
+        .await
+        .unwrap_or_else(|_| panic!("{}", rig.intake.trace.text()))
+        .unwrap();
+    assert_eq!(
+        escapes,
+        usize::from(!conflicting_source),
+        "a fresh accepted root stops before RuntimeReady unless its durable source conflicts"
+    );
+    assert!(
+        !raw_cancelled,
+        "native stop never raw cancels the live owner"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_live_root_before_runtime_ready_stops_with_an_unfilled_durable_source() {
+    live_root_before_runtime_ready(
+        "a_live_root_before_runtime_ready_stops_with_an_unfilled_durable_source",
+        7_755_151,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_live_root_before_runtime_ready_refuses_a_conflicting_durable_source() {
+    live_root_before_runtime_ready(
+        "a_live_root_before_runtime_ready_refuses_a_conflicting_durable_source",
+        7_755_152,
+        true,
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

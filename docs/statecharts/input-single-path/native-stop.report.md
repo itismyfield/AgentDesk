@@ -1,32 +1,36 @@
-# InputNativeStop — 외부 Claude 턴에 넣은 자기 입력의 중단
+# InputNativeStop — 외부 입력 소유와 pre-RuntimeReady live root의 중단
+
+현재 source 미기입 회귀의 코드 좌표 기준 SHA는 `cbcad30ec3739d543c5da0e1d932f0acef9e87d4`다. `InputNativeStopSourceBefore.cfg`가 fresh live root의 미기입 source를 불일치로 오판하는 현재 코드를 분리한다. fixed는 source 미기입을 허용하되 확인된 충돌과 restored token의 근거 요구는 유지하는 수리 계약이며 Rust 시험 PASS를 뜻하지 않는다.
 
 이전 P1 판독 결함의 코드 좌표 기준 SHA: `f332bd53918fcd3ac9867034f9323b42bf0d8cda`, 병합한 main `dc5c742e40079a724a557ed29378cba6c7dbd75f` (#7788 S2/#7824).
 최초 fixed는 이 기준 코드에서 지적된 remove-only 흡수와 자동 compact summary 판독을 수리하는 계약이다. 구현 시험의 성공을 뜻하지 않는다.
 후속 전체 검증은 `caf61e3801f5cdc8091c0268be94b66333eb4830`(병합한 main `d79d8f6a60e703fc685424103b5d9715d7840455`, #7827) 트리에서 수행했다. 위 f332 SHA는 원래 반례의 코드 좌표 기준이며, 그 main 병합 시점에는 이 모델·cfg·view·차트의 내용은 바꾸지 않았다.
 기존 Before 두 설정은 처음 설계한 receipt/N1/N2 연결을 각각 끄는 역사적 결함 설정이며, absorption/summary Before는 기준 SHA에서 확인한 P1-1/P1-2 판독 결함을 분리한다. 이번 birth-child 판독의 기준 SHA는 `bda08f189c775de190d5be53a053f9ba31d94fd0`이다. EpisodeBefore는 이 SHA의 복구 child 거부를 durable ledger가 우회하는 CI 반례를 분리한다. RestoredBefore는 결정2의 restored token에 persisted child 근거가 없는 H1/H2 거절을 분리한다. 실행 당시 git HEAD와 working Rust SHA는 레인 `s1-9-model-work.json`에 기록했다. 모델은 수리 계약을 검사하며 해당 Rust 스냅샷의 구현 시험 성공을 뜻하지 않는다. `InputOwnership.tla`는 이 변경에서 수정하지 않는다.
 
-| 설정 | `Connected` | `RunningReceipt` | `AbsorptionEvidence` | `CompactSummaryNeutral` | `EpisodeChecked` | `RestoredChecked` | exit | 상태 / 전이 | 깨진 규칙 |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| `InputNativeStop.cfg` | TRUE | TRUE | TRUE | TRUE | TRUE | TRUE | 0 | 443 / 1246 | 없음 |
-| `InputNativeStopBefore.cfg` | FALSE | TRUE | TRUE | TRUE | TRUE | TRUE | 1 | 443 / 1246 | `OwnInputStops` |
-| `InputNativeStopRunningBefore.cfg` | TRUE | FALSE | TRUE | TRUE | TRUE | TRUE | 1 | 443 / 1246 | `OwnInputStops` |
-| `InputNativeStopAbsorptionBefore.cfg` | TRUE | TRUE | FALSE | TRUE | TRUE | TRUE | 1 | 443 / 1246 | `NoForeignEscape`, `OwnInputStops` |
-| `InputNativeStopSummaryBefore.cfg` | TRUE | TRUE | TRUE | FALSE | TRUE | TRUE | 1 | 443 / 1246 | `OwnInputStops` |
-| `InputNativeStopEpisodeBefore.cfg` | TRUE | TRUE | TRUE | TRUE | FALSE | TRUE | 1 | 443 / 1246 | `NoForeignEscape`, `NoOtherEpisodeEscape`, `NoOtherParentEscape` |
-| `InputNativeStopRestoredBefore.cfg` | TRUE | TRUE | TRUE | TRUE | TRUE | FALSE | 1 | 443 / 1246 | `NoUnprovenRestoredChildEscape` |
+| 설정 | `Connected` | `RunningReceipt` | `AbsorptionEvidence` | `CompactSummaryNeutral` | `EpisodeChecked` | `RestoredChecked` | `FreshSourceAllowed` | exit | 상태 / 전이 | 깨진 규칙 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `InputNativeStop.cfg` | TRUE | TRUE | TRUE | TRUE | TRUE | TRUE | TRUE | 0 | 449 / 1270 | 없음 |
+| `InputNativeStopBefore.cfg` | FALSE | TRUE | TRUE | TRUE | TRUE | TRUE | TRUE | 1 | 449 / 1270 | `OwnInputStops` |
+| `InputNativeStopRunningBefore.cfg` | TRUE | FALSE | TRUE | TRUE | TRUE | TRUE | TRUE | 1 | 449 / 1270 | `OwnInputStops` |
+| `InputNativeStopAbsorptionBefore.cfg` | TRUE | TRUE | FALSE | TRUE | TRUE | TRUE | TRUE | 1 | 449 / 1270 | `NoForeignEscape`, `OwnInputStops` |
+| `InputNativeStopSummaryBefore.cfg` | TRUE | TRUE | TRUE | FALSE | TRUE | TRUE | TRUE | 1 | 449 / 1270 | `OwnInputStops` |
+| `InputNativeStopEpisodeBefore.cfg` | TRUE | TRUE | TRUE | TRUE | FALSE | TRUE | TRUE | 1 | 449 / 1270 | `NoForeignEscape`, `NoOtherEpisodeEscape`, `NoOtherParentEscape` |
+| `InputNativeStopRestoredBefore.cfg` | TRUE | TRUE | TRUE | TRUE | TRUE | FALSE | TRUE | 1 | 449 / 1270 | `NoUnprovenRestoredChildEscape` |
+| `InputNativeStopSourceBefore.cfg` | TRUE | TRUE | TRUE | TRUE | TRUE | TRUE | FALSE | 1 | 449 / 1270 | `LiveUnboundSourceStops`, `OwnInputStops` |
 
 ## 차트와 그림의 범위
 
-- [고친 설정](native-stop.chart.mmd): 19상태/62화살표.
-- [N1/N2 연결 누락](native-stop-before.chart.mmd): 20상태/64화살표.
-- [running receipt 연결 누락](native-stop-running-before.chart.mmd): 20상태/63화살표.
-- [Command 없는 absorption을 놓침](native-stop-absorption-before.chart.mmd): 21상태/65화살표.
-- [compact summary를 foreign user로 오판](native-stop-summary-before.chart.mmd): 20상태/64화살표.
-- [다른 birth child를 ledger가 다시 승인](native-stop-episode-before.chart.mmd): 19상태/62화살표.
-- [restored token이 child 근거 없는 ledger를 승인](native-stop-restored-before.chart.mmd): 19상태/62화살표.
+- [고친 설정](native-stop.chart.mmd): 21상태/67화살표.
+- [N1/N2 연결 누락](native-stop-before.chart.mmd): 22상태/69화살표.
+- [running receipt 연결 누락](native-stop-running-before.chart.mmd): 22상태/68화살표.
+- [Command 없는 absorption을 놓침](native-stop-absorption-before.chart.mmd): 23상태/70화살표.
+- [compact summary를 foreign user로 오판](native-stop-summary-before.chart.mmd): 22상태/69화살표.
+- [다른 birth child를 ledger가 다시 승인](native-stop-episode-before.chart.mmd): 21상태/67화살표.
+- [restored token이 child 근거 없는 ledger를 승인](native-stop-restored-before.chart.mmd): 21상태/67화살표.
+- [미기입 source 때문에 live 자기 root를 거절](native-stop-source-before.chart.mmd): 21상태/67화살표.
 
-TLC는 각 설정에서 같은 443상태/1246전이를 검사한다. view는 원장을 성공적으로 다시 읽은 `Restart` 66전이를 숨긴다. 같은 표시 상태에 머무는 629전이는 tool report에 원래 수가 남는다. 생략한 전이는 TLC 검사에는 포함된다.
-summary를 읽은 token-root, 다른 episode/parent child, 근거 없는 restored child와 전달/차단 결과를 별도 표시 상태로 나누어 반례 단계를 숨기지 않는다. 서로 다른 규칙을 깨는 상태를 합치지 않으며 `mayBreak`로 약화하지 않는다. 각 그림의 모든 표시 상태는 시작 상태에서 도달하고, 새 child 판단 상태에는 Stop 화살표가 남는다.
+TLC는 각 설정에서 같은 449상태/1270전이를 검사한다. view는 원장을 성공적으로 다시 읽은 `Restart` 66전이를 숨긴다. 같은 표시 상태에 머무는 632전이는 tool report에 원래 수가 남는다. 생략한 전이는 TLC 검사에는 포함된다.
+summary를 읽은 token-root, 다른 episode/parent child, 근거 없는 restored child, source 미기입 live root와 각각의 전달/차단 결과를 별도 표시 상태로 나누어 반례 단계를 숨기지 않는다. 서로 다른 규칙을 깨는 상태를 합치지 않으며 `mayBreak`로 약화하지 않는다. 각 그림의 모든 표시 상태는 시작 상태에서 도달하고 새 판단 상태에는 Stop 화살표가 남는다.
 
 ## 규칙과 모델의 실제 사실
 
@@ -34,6 +38,7 @@ summary를 읽은 token-root, 다른 episode/parent child, 근거 없는 restore
 - `OwnInputStops`: 자기 입력이 실제로 흡수됐거나 running 분기에서 자기 root가 생겼고 foreign 입력이 없으면 Escape 1이다.
 - `NoOtherEpisodeEscape` / `NoOtherParentEscape`: 현재 birth 범위가 확인된 token에서 다른 `turn_nonce` / `user_msg_id`의 child가 있으면 Escape 0이다. native pin 자체를 birth 증거로 삼지 않는다.
 - `NoUnprovenRestoredChildEscape`: restored token에서 persisted child 근거 없이 ledger A만 남은 입력은 Escape 0이다. 실제로 H1이어도 H2와 durable 상태가 같으면 거절하는 결정2를 명시한다.
+- `LiveUnboundSourceStops`: live accepted root pin이 있고 restored가 아니며 durable output path만 아직 미기입이면, 같은 birth/exact input/current source인 순수 자기 턴의 stop은 Escape 1이다.
 - `EnqueueNotAuthority`: token 없는 상태에서 enqueue만으로 Escape 권한을 만들지 않는다.
 - `NoDeadlock`: 결과 뒤에는 `Done` 자가 전이가 있다.
 
@@ -115,6 +120,24 @@ RestoredBefore shortest path는 4단계다.
 
 live claim-gap 경로 `ExternalOpen → OwnerPaste → Absorb → RelayClaim → Stop`은 restoredToken이 FALSE라 기존 N1을 유지한다. tokenless 경로 `ExternalOpen → OwnerPaste → Absorb → Restart(readable) → Stop`도 relay가 없고 restoredToken이 FALSE라 N2를 유지한다. 새 모델은 이 양성 흐름을 삭제하거나 `OwnInputStops`·`NoForeignEscape`·`EnqueueNotAuthority`를 약화하지 않았다. O-on 전달 정책과 실제 source/attempt/parent 비교는 계속 구현 시험의 범위다.
 
+## RuntimeReady 이전 live root의 source 미기입
+
+기준 `cbcad30ec3739d543c5da0e1d932f0acef9e87d4`의 root query는 `matches_source()`를 fresh에도 강제한다. 하지만 production prelaunch seed는 ClaudeTui의 `output_path=None`을 정상 값으로 두고, receipt의 accepted pin은 RuntimeReady보다 먼저 같은 birth에 저장될 수 있다. 이 미기입 상태와 이미 기입된 source의 충돌은 다른 사실이다.
+
+`LiveRootBeforeRuntimeReady`는 production prelaunch/정상 idle submit/receipt observer가 이 상태에 도달한 snapshot을 접는다. `running=TRUE`, `pinned=TRUE`, `restoredToken=FALSE`, `sourceMissing=TRUE`이며 `attempt=root`는 같은 exact input의 accepted root다. 여기서 sourceMissing은 output_path만 아직 None이고 이미 알려진 tmux/session/native source는 accepted pin과 일치한다는 전제를 뜻한다. source 충돌을 무시하거나 open만으로 Streaming을 만드는 행동은 아니다.
+
+기존 443상태는 sourceMissing=FALSE로 그대로 남고, 이 유계 snapshot의 6상태/24전이만 추가했다. snapshot 뒤에는 Stop만 허용해 RuntimeReady 직전의 판독 경계에 집중한다. Before는 `FreshSourceAllowed=FALSE`이므로 정상 own root를 거절해 기존 `OwnInputStops`와 새 `LiveUnboundSourceStops`를 함께 깬다. fixed는 TRUE로 허용한다. 기존 여섯 안전 불변식의 식은 byte 단위로 그대로이며 기존7cfg의 위반 집합도 바꾸지 않는다. 다른 source 문자열·same-birth 세부 비교·실제 live pin 재검증·RuntimeReady와의 경합은 구현 시험이 맡는다.
+
+SourceBefore의 두 위반은 같은 3단계 shortest path다.
+
+| 단계 | 모델 사실 | 기준 CBC 코드 대조 |
+|---|---|---|
+| 1 | ExternalOpen | 기존 Claude 세션이 있다. prelaunch는 `router/message_handler/provider_isolation.rs:153–164`에서 ClaudeTui의 transcript path를 미기입으로 두며, intake는 `intake_turn.rs:1933–1953`에서 그 seed와 token birth를 저장한다. |
+| 2 | LiveRootBeforeRuntimeReady | 실제 정상 submit receipt가 live root를 얻는다. `turn_bridge/mod.rs:243–249`의 observer와 `inflight/native_stop_pin.rs:21–32,208–247`은 `matches_owner`인 같은 birth의 accepted pin을 source 기입 이전에도 저장한다. |
+| 3 | Stop(denied) | `native_stop_pin.rs:44–53,97–100`의 `matches_source`는 output_path Some을 요구하고 `claude_stop_identity.rs:115–122`가 restored 판독 전 Err로 거절한다. `pinned_still_current(:179–185)`가 false가 되어 `tmux_runtime/native_stop.rs:386–419`에서 Escape0·미확인으로 끝난다. fixed는 fresh의 미기입만 분리해 live accepted pin/current source 검증을 유지하면서 Escape1을 허용한다. |
+
+이 경로는 반례를 코드와 대조한 정적 매핑이다. 실제 idle submit→pin callback→실제 `!stop`의 수정 전 RED/후 GREEN, source 충돌·복원 H1의 거절 및 guard mutant는 parent 레인의 진입점 시험 증거로 별도 확인한다.
+
 ## 모델 밖에서 필요한 구현 시험
 
 - exact frame·attempt·file·offset·native SID와 동일 본문 여러 입력의 귀속은 boolean own보다 풍부하다. 모델은 같은 논리 입력의 Command/absorption을 두 번 세지 않는 계약만 접으며, 다른 attempt 소비 여부를 증명하지 않는다. 실제 Enter→실제 !stop 시험이 필요하다.
@@ -129,7 +152,7 @@ live claim-gap 경로 `ExternalOpen → OwnerPaste → Absorb → RelayClaim →
 export TLA2TOOLS=~/.local/share/tla2tools/tla2tools-1.7.4.jar
 export JAVA=/opt/homebrew/opt/openjdk/bin/java
 cd docs/statecharts/input-single-path
-for cfg in InputNativeStop.cfg InputNativeStopBefore.cfg InputNativeStopRunningBefore.cfg InputNativeStopAbsorptionBefore.cfg InputNativeStopSummaryBefore.cfg InputNativeStopEpisodeBefore.cfg InputNativeStopRestoredBefore.cfg; do
+for cfg in InputNativeStop.cfg InputNativeStopBefore.cfg InputNativeStopRunningBefore.cfg InputNativeStopAbsorptionBefore.cfg InputNativeStopSummaryBefore.cfg InputNativeStopEpisodeBefore.cfg InputNativeStopRestoredBefore.cfg InputNativeStopSourceBefore.cfg; do
   ~/.claude/skills/statechart/scripts/statechart InputNativeStop.tla --config "$cfg" \
     --view native-stop.view.mjs --out /tmp/sc-native-stop-new-run-"${cfg%.cfg}"
 done
@@ -156,3 +179,11 @@ main이 `InputOwnershipConsumedWaiting`의 7cfg와 기대 행을 추가했으므
 s1-7의 93cfg 원시 증거는 그대로 보존했다. 이번 7cfg의 입력 SHA·git HEAD·working Rust 전체 SHA는 레인 `s1-9-model-work.json`/`s1-9-statechart-evidence.json`, 각 tool chart/report/TLC 원문은 `sc-out/s1-9-{fixed,before,running-before,absorption-before,summary-before,episode-before,restored-before}/`에 있다. 로그는 `logs/s1-9-statechart-<이름>.log`다. fixed rc0, Before 여섯 cfg는 위 표의 기대 위반으로 rc1이다. 기존 6cfg의 위반 집합은 그대로다. 모든 차트의 표시 상태 도달 가능성과 새 child 상태의 Stop 화살표, mayBreak 없음도 확인했다.
 
 working Rust SHA는 모델 실행 시 함께 관측한 worktree의 코드 스냅샷이며 Rust 컴파일·시험 PASS를 의미하지 않는다. 모델의 기준 코드 좌표는 bda이고 root의 생산 수리와 독립적으로 결정2 계약을 검사했다. 전체 checker는 **rc0 / 불일치0 / 94cfg / 224.0초**다. 원시 로그는 `logs/s1-9-statecharts-all.log`, 명령·전체 TLA/cfg/expected 입력 SHA는 `s1-9-statecharts-all-evidence.json`이다. s1-7의 93cfg 결과를 새 모델 PASS로 재사용하지 않고 새 cfg까지 전수 실행했다. `s1-9-model-work.json`에는 실행 시작/종료의 working Rust SHA와 그 사이 바뀐 파일도 따로 기록했다. 생산 Rust 수리는 root가 병행했지만 모델/TLA 입력은 실행 내내 같은 SHA였다.
+
+## s1-10 live source 미기입 검증
+
+현재 코드 기준 CBC의 SourceBefore를 포함한 8cfg를 새 입력 SHA로 모두 실행했다. fixed rc0, 기존7cfg의 기대 위반 집합은 그대로이며 SourceBefore만 `OwnInputStops`·`LiveUnboundSourceStops` 위반으로 rc1이다. 각449상태/1270전이, 차트 표시 상태의 도달성과 `mayBreak` 없음도 확인했다. 기존6안전불변식 식의 byte 동일과 `InputOwnership.tla` 변경0은 레인 `s1-10-statechart-evidence.json`에 따로 기록했다.
+
+원시 chart/report/TLC는 `sc-out/s1-10-{fixed,before,running-before,absorption-before,summary-before,episode-before,restored-before,source-before}/`, 로그는 `logs/s1-10-statechart-<이름>.log`다. `run-statecharts-s1-10.py`는 같은 명령과 별도 새 출력 폴더로 재생하는 레인 runner다. cfg·TLA·view SHA와 실제 위반 집합은 `s1-10-statechart-evidence.json`에 있다.
+
+전체 checker는 **rc0 / 불일치0 / 95cfg / 218.7초**다. 원시 로그는 `logs/s1-10-statecharts-all.log`, 전체 TLA/cfg/expected 입력 SHA와 전후 동일 증거는 `s1-10-statecharts-all-evidence.json`이다. 모델 작업시간은 `s1-10-model-work.json`에 기록했으며 30분 상한 이내다. 새8cfg를 포함해 전수 실행했으며 s1-9의94cfg 결과를 새 PASS로 재사용하지 않았다. 이후 main 병합이 모델 입력을 바꾸면 그 입력에 대해 다시 실행해야 한다. production 코드는 root가 병행 수리하므로 이 checker는 해당 Rust 스냅샷의 빌드·시험 성공 증거가 아니다.

@@ -96,6 +96,21 @@ impl InflightTurnState {
     ) -> Result<(bool, Option<Vec<String>>), &'static str> {
         let root = match &self.native_stop_user_pin {
             Some(pin) if pin.matches_source(self) && pin.input == *input => true,
+            // A live receipt may precede RuntimeReady; that root still needs live source proof.
+            Some(pin)
+                if pin.matches_owner(self)
+                    && pin.input == *input
+                    && self.runtime_kind
+                        == Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui)
+                    && self.output_path.is_none()
+                    && self.tmux_session_name.as_deref() == Some(input.tmux_session.as_str())
+                    && self
+                        .session_id
+                        .as_deref()
+                        .is_none_or(|sid| sid == input.session_id) =>
+            {
+                false
+            }
             Some(_) => return Err("native root birth or source changed"),
             None => false,
         };

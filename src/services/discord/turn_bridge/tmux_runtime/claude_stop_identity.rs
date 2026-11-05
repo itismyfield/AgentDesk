@@ -118,8 +118,13 @@ impl PinnedTurn {
             _ => return Err("native birth no longer matches the stopped turn".into()),
         };
         let restored = token.native_stop.receipt_sink().has_restored_input();
-        if restored && !root {
-            return Err("restored native root has no current birth proof".into());
+        if !root {
+            if restored {
+                return Err("restored native root has no current birth proof".into());
+            }
+            if !crate::services::claude_tui::input::revalidate_native_pin(&self.pin) {
+                return Err("native root has no current live source proof".into());
+            }
         }
         Ok(ChildAuthority {
             token,
