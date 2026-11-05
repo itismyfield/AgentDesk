@@ -775,7 +775,7 @@ mod tests {
                     (NULL, 'x', 'done', 'no-card', NOW() - INTERVAL '200 days'), \
                     ('k2', 'old', 'done', 'k2-aged', NOW() - INTERVAL '200 days'), \
                     ('k2', 'null', 'done', 'k2-null-time', NULL), \
-                    ('k1', 'c', 'pending_decision', 'in-window', NOW() - INTERVAL '170 days'); \
+                    ('k3', 'c', 'pending_decision', 'in-window', NOW() - INTERVAL '170 days'); \
              INSERT INTO review_tuning_outcomes \
                  (card_id, review_round, verdict, outcome, created_at) \
              VALUES ('t1', 1, 'tn-r1', 'true_negative', NOW() - INTERVAL '100 days'), \
