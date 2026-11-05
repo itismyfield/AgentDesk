@@ -145,6 +145,15 @@ fn report(row: &HostedObservation, result: Recovery) -> Recovery {
     });
     result
 }
+#[cfg(test)]
+pub(crate) fn result_for_test(row: &HostedObservation) -> Option<Recovery> {
+    cache(|entries| {
+        entries
+            .get(&row.session_id())
+            .filter(|entry| entry.row == *row)
+            .map(|entry| entry.result.clone())
+    })
+}
 fn local(
     shared: &SharedData,
     record: &HostedExecution,

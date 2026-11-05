@@ -52,6 +52,8 @@ pub(crate) struct SocketHerdrLaunchHost {
     endpoints: Vec<(HerdrEndpoint, Arc<HerdrSocketTransport>)>,
     policy: ProofCache,
     sources: Vec<Arc<dyn PeerSource>>,
+    #[cfg(test)]
+    checker: Option<Arc<dyn super::policy::ConfigChecker>>,
     witnessed: Mutex<HashMap<HerdrLaunchEndpoint, ServerWitness>>,
     grants: Mutex<GrantCache>,
     grant_store: super::policy::grant_store::FileGrantStore,
@@ -206,6 +208,8 @@ impl SocketHerdrLaunchHost {
             endpoints,
             policy: ProofCache::default(),
             sources,
+            #[cfg(test)]
+            checker: None,
             witnessed: Mutex::default(),
             grants: Mutex::new(grants),
             grant_store: super::policy::boot_grants::store(),
@@ -251,7 +255,10 @@ impl SocketHerdrLaunchHost {
         Result<super::policy::NextRestartProof, Unverified>,
         serde_json::Value,
     ) {
-        let mut checked = self.policy.next_restart(source, &LocalChecker).await;
+        let checker: &dyn super::policy::ConfigChecker = &LocalChecker;
+        #[cfg(test)]
+        let checker = self.checker.as_deref().unwrap_or(checker);
+        let mut checked = self.policy.next_restart(source, checker).await;
         if let Ok(proof) = &checked {
             match self.witnessed.lock() {
                 Ok(mut witnessed) => _ = witnessed.insert(launch.clone(), proof.witness().clone()),
@@ -345,6 +352,27 @@ impl SocketHerdrLaunchHost {
             }
             _ => GrantedServer::Kept,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_policy_source_for_test(mut self, source: Arc<dyn PeerSource>) -> Self {
+        self.sources = vec![source];
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_policy_checker_for_test(
+        mut self,
+        checker: Arc<dyn super::policy::ConfigChecker>,
+    ) -> Self {
+        self.checker = Some(checker);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_transport_for_test(mut self, transport: Arc<HerdrSocketTransport>) -> Self {
+        self.endpoints[0].1 = transport;
+        self
     }
 
     #[cfg(test)]

@@ -672,6 +672,38 @@ impl ProcessOs for SharedRigOs {
     }
 }
 impl HerdrRig {
+    /// Keeps one policy cache across reader passes, with only peer/process I/O scripted.
+    pub(crate) fn policy_registry_on_this_thread(
+        &self,
+        endpoint: HerdrEndpoint,
+        prepare: impl FnOnce(super::SocketHerdrLaunchHost) -> super::SocketHerdrLaunchHost,
+    ) -> ForcedRegistry {
+        let config = HerdrSocketConfig::default();
+        let servers = self.servers.clone();
+        let transport = Arc::new(
+            HerdrSocketTransport::new(&endpoint, config, LineJsonFraming).with_peer_reader(
+                Box::new(move |_| {
+                    let mut servers = servers.lock().unwrap();
+                    let pid = match servers.len() {
+                        1 => servers[0],
+                        _ => servers.pop_front().unwrap(),
+                    };
+                    Ok((pid, start(1_000)))
+                }),
+            ),
+        );
+        let host = prepare(
+            super::SocketHerdrLaunchHost::new(vec![endpoint.clone()], config)
+                .with_transport_for_test(transport.clone()),
+        );
+        let os: Arc<dyn ProcessOs> = self.os.clone();
+        herdr_registry::force_for_test(
+            HerdrRegistry::with_transport(endpoint, transport)
+                .with_launch_host(host)
+                .with_reads((off_where_dialled, os)),
+        )
+    }
+
     /// As thread_installer, retaining the production launch/create/evidence adapter over this socket.
     pub(crate) fn thread_installer_with_launch(
         &self,

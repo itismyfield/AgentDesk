@@ -29,5 +29,8 @@ input-single-path/InputOwnershipFOutside.cfg	InputOwnership	SeenOnce
 input-single-path/InputOwnershipMain.cfg	InputOwnership	AnswerOnce,DraftToldOnce,NoRetryRequired,NoSilentLoss,NoSilentLossObserved,NoTimedRetry,StartNotDropped
 input-single-path/InputPath.cfg	InputPath	BusyInputLands,DraftSafe,HeldNotDropped,NoDeadlock,NoSilentLoss
 input-single-path/InputPathClean.cfg	InputPath	-
+session-lifecycle/HerdrRootBefore.cfg	HerdrRootRecovery	-	ReplacedInputProgress
+session-lifecycle/HerdrRootFixed.cfg	HerdrRootRecovery	-	-
+session-lifecycle/HerdrSameRoot.cfg	HerdrRootRecovery	-	-
 session-lifecycle/HerdrSession.cfg	HerdrSession	NoDeadlock,NoOrphanPane,PromptOnlyToAgent,RowMatchesPane
 session-lifecycle/TmuxSession.cfg	TmuxSession	NoDeadlock,RowNamesSession,RowOnlyWithTurn
