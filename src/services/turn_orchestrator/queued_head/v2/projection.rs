@@ -170,6 +170,11 @@ impl ChannelMailboxState {
         }
         let mut next = owner.snapshot.clone();
         let first = (next.head_injection.as_ref()).map_or(0, |head| head.members().count());
+        let (at, cancelled) = (
+            super::origin::now_ms(),
+            crate::db::turns::TerminalOutcome::Cancelled,
+        );
+        next.owe_queued(first.min(next.items.len())..next.items.len(), cancelled, at);
         let drained: Vec<PendingQueueItem> =
             next.items.drain(first.min(next.items.len())..).collect();
         if first == 0 && !drained.is_empty() {

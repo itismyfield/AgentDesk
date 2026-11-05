@@ -1205,5 +1205,92 @@ fn a_scheduled_snapshot_headless_start_marks_its_row_isolated_pg() {
     });
 }
 
+/// A fresh headless start whose durable context boundary does not land fails before it clears
+/// the provider session or starts anything native, so the channel keeps its session.
+#[test]
+fn fresh_headless_start_keeps_the_session_when_its_boundary_does_not_land_pg() {
+    let name = concat!(
+        module_path!(),
+        "::fresh_headless_start_keeps_the_session_when_its_boundary_does_not_land_pg"
+    );
+    if !child(name) {
+        return;
+    }
+    intake_replay_rt().block_on(async {
+        let channel = ChannelId::new(7_330_491);
+        let host = Host::new(&[channel]).await;
+        let provider_session = || async {
+            let core = host.shared.core.lock().await;
+            core.sessions[&channel].session_id.clone()
+        };
+        let boundaries = || async {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM channel_session_clear_boundaries WHERE channel_id = $1",
+            )
+            .bind(channel.get().to_string())
+            .fetch_one(&host.pool)
+            .await
+            .unwrap()
+        };
+        host.shared
+            .core
+            .lock()
+            .await
+            .sessions
+            .get_mut(&channel)
+            .unwrap()
+            .session_id = Some("kept-provider-session".into());
+        for statement in [
+            "CREATE FUNCTION reject_fresh_boundary() RETURNS trigger AS $$
+             BEGIN RAISE EXCEPTION 'injected fresh boundary failure'; END; $$ LANGUAGE plpgsql",
+            "CREATE TRIGGER reject_fresh_boundary BEFORE INSERT OR UPDATE
+             ON channel_session_clear_boundaries
+             FOR EACH ROW EXECUTE FUNCTION reject_fresh_boundary()",
+        ] {
+            sqlx::query(statement).execute(&host.pool).await.unwrap();
+        }
+        let reservation = health::reserve_headless_agent_turn(channel);
+        let metadata = Host::direct_metadata(&reservation);
+        match host
+            .start(channel, "api", Some(metadata), reservation)
+            .await
+        {
+            Err(HeadlessTurnStartError::Internal(message)) => assert!(
+                message.contains("fresh-session context boundary"),
+                "{message}"
+            ),
+            other => panic!("a fresh start without its boundary must fail: {other:?}"),
+        }
+        assert_eq!(host.starts(), 0, "no native start without the boundary");
+        assert_eq!(
+            provider_session().await.as_deref(),
+            Some("kept-provider-session"),
+            "the provider session is not cleared before its boundary lands"
+        );
+        assert_eq!(boundaries().await, 0);
+
+        // Positive control: once the store takes the boundary, the same start clears and runs.
+        sqlx::query("DROP TRIGGER reject_fresh_boundary ON channel_session_clear_boundaries")
+            .execute(&host.pool)
+            .await
+            .unwrap();
+        let reservation = health::reserve_headless_agent_turn(channel);
+        let metadata = Host::direct_metadata(&reservation);
+        let started = host
+            .start(channel, "api", Some(metadata), reservation)
+            .await;
+        assert!(started.is_ok(), "{started:?}");
+        assert_eq!(boundaries().await, 1);
+        assert_ne!(
+            provider_session().await.as_deref(),
+            Some("kept-provider-session"),
+            "the landed boundary let the fresh start clear the old session"
+        );
+        host.native_started(1).await;
+        host.settled(channel).await;
+        host.close().await;
+    });
+}
+
 #[path = "replay_start_origin_tests.rs"]
 mod origin_tests;

@@ -124,6 +124,15 @@ impl Drop for Recorder {
 async fn turn_end_summary_spends_one_physical_post_and_consumes_every_response() {
     let _isolation = Isolation::new();
     let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let proxy_env = || {
+        let keys = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"];
+        let keys = keys
+            .into_iter()
+            .chain(["ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"]);
+        keys.map(|key| (key, std::env::var_os(key)))
+            .collect::<Vec<_>>()
+    };
+    let before_trap = proxy_env();
     let trap = EgressTrap::start().await;
     // Premise: the notice client routes a non-loopback host through the trap. `.invalid` never
     // resolves, so even a client that ignored the trap could not reach a server.
@@ -219,6 +228,16 @@ async fn turn_end_summary_spends_one_physical_post_and_consumes_every_response()
             "no request may leave the loopback recorder for {reply:?} direct={direct}"
         );
     }
+    drop(trap);
+    // Names only: a proxy value can carry credentials.
+    let changed: Vec<&str> = (proxy_env().into_iter().zip(&before_trap))
+        .filter(|(now, was)| now != *was)
+        .map(|((key, _), _)| key)
+        .collect();
+    assert!(
+        changed.is_empty(),
+        "the trap must give these proxy variables back their earlier values: {changed:?}"
+    );
 }
 
 /// `turn_end_summary::tests::Isolation`, taken here so this file owns the environment lock
@@ -301,5 +320,10 @@ impl EgressTrap {
 impl Drop for EgressTrap {
     fn drop(&mut self) {
         self.server.abort();
+        // Newest first: on Windows `HTTPS_PROXY` and `https_proxy` are one variable, and only
+        // the oldest guard holds the value from before the trap.
+        while let Some(guard) = self._env.pop() {
+            drop(guard);
+        }
     }
 }

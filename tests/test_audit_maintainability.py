@@ -1512,6 +1512,21 @@ class HarnessCli(unittest.TestCase):
 
 
 class ModuleLayersCheck(unittest.TestCase):
+    def test_all_module_layer_suites_are_registered_in_ci(self):
+        script = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text("utf-8")
+        invocation = next(line for line in script.splitlines()
+                          if '-m unittest tests.test_audit_maintainability ' in line)
+        selected = set(invocation.split())
+        for path in (REPO_ROOT / "tests").glob("test_module_layer_*.py"):
+            self.assertIn("tests." + path.stem, selected, path.name)
+
+    def test_documented_section_severities_match_comparator(self):
+        from audit_maintainability.checks.module_layer_ratchet import BLOCKING_SECTIONS, SECTIONS
+        document = (REPO_ROOT / "docs/architecture/layers.md").read_text("utf-8")
+        for section in SECTIONS:
+            severity = "error" if section in BLOCKING_SECTIONS else "warning"
+            self.assertIn(f"| `{section}` | {severity} |", document)
+
     def setUp(self) -> None:
         self.layers = importlib.import_module("audit_maintainability.checks.module_layers")
 

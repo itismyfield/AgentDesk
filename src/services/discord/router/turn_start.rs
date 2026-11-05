@@ -227,6 +227,7 @@ pub(in crate::services::discord) async fn claim_reserved_headless_turn(
         HeadlessTurnStartError::Conflict(error)
     })?;
     let cancel_token = Arc::new(CancelToken::new());
+    cancel_token.native_stop.receipt_sink().arm_first_key();
     let (token, message) = (cancel_token.clone(), reservation.user_msg_id);
     let claim = async move {
         match reservation.admission {

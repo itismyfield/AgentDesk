@@ -244,3 +244,198 @@ fn inspect_refuses_unauthorized_users_before_answering() {
         }
     });
 }
+
+/// A cancelled or failed receipt for an input removed before it ran is no turn, while a run
+/// turn that ended failed and a row with no terminal yet stay the latest turn.
+#[tokio::test(flavor = "current_thread")]
+async fn latest_turn_skips_removed_input_receipts_only_pg() {
+    use crate::db::turns::{TerminalOutcome, TurnReceipt, record_turn_receipt};
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let channel = "7340701";
+    let at = |minute: u32| {
+        let text = format!("2026-11-04T01:{minute:02}:00Z");
+        DateTime::parse_from_rfc3339(&text)
+            .unwrap()
+            .with_timezone(&Utc)
+    };
+    let row = "INSERT INTO turns (turn_id, channel_id, provider, session_id, started_at,
+                   finished_at, terminal_outcome, terminal_confirmed_at)
+               VALUES ($1, $2, 'claude', $3, $4, $5, $6, CASE WHEN $6::TEXT IS NULL THEN NULL ELSE $5 END)";
+    let insert = |turn: &'static str,
+                  session: Option<&'static str>,
+                  (start, end): (u32, u32),
+                  outcome: Option<&'static str>| {
+        let query = sqlx::query(row).bind(turn).bind(channel).bind(session);
+        query
+            .bind(at(start))
+            .bind(at(end))
+            .bind(outcome)
+            .execute(&pool)
+    };
+    insert("ran-failed", Some("native"), (1, 2), Some("failed"))
+        .await
+        .unwrap();
+    let origins = vec!["G-removed".to_string()];
+    for (turn, minute, outcome) in [
+        ("removed-cancelled", 3, TerminalOutcome::Cancelled),
+        ("removed-failed", 4, TerminalOutcome::Failed),
+    ] {
+        let receipt = TurnReceipt {
+            turn_id: turn,
+            channel_id: channel,
+            agent_id: None,
+            provider: "claude",
+            session_key: None,
+            started_at: None,
+            consumed_origin_ids: &origins,
+            outcome,
+            confirmed_at: at(minute),
+        };
+        record_turn_receipt(&pool, &receipt).await.unwrap();
+    }
+    let latest = super::query::load_latest_turn(&pool, channel)
+        .await
+        .unwrap();
+    assert_eq!(
+        latest.map(|turn| turn.turn_id).as_deref(),
+        Some("ran-failed")
+    );
+
+    insert("no-terminal", None, (5, 5), None).await.unwrap();
+    let latest = super::query::load_latest_turn(&pool, channel)
+        .await
+        .unwrap();
+    assert_eq!(
+        latest.map(|turn| turn.turn_id).as_deref(),
+        Some("no-terminal")
+    );
+    pool.close().await;
+    db.drop().await;
+}
+
+/// A row an earlier build left for an attempt the provider never received takes the shape of the
+/// receipt that removes its input, so the earlier run turn stays the latest; terminals stay first.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn an_earlier_builds_unsent_row_becomes_its_removal_receipt_pg() {
+    use crate::services::turn_orchestrator::{
+        ChannelMailboxRegistry, PendingQueueItem, QueuePersistenceContext, v2_queue,
+    };
+    use poise::serenity_prelude::ChannelId;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let channel = ChannelId::new(7_340_702);
+    let at = |minute: u32| format!("2026-01-01T01:{minute:02}:00Z");
+    let (unsent, ran_failed, receipted) = (7_340_712_u64, 7_340_713_u64, 7_340_714_u64);
+    let turn = |message: u64| format!("discord:{channel}:{message}");
+    let row = "INSERT INTO turns (turn_id, channel_id, provider, session_id, started_at,
+                   finished_at, terminal_outcome, terminal_confirmed_at)
+               VALUES ($1, $2, 'claude', $3, $4::TEXT::TIMESTAMPTZ, $5::TEXT::TIMESTAMPTZ, $6,
+                   CASE WHEN $6::TEXT IS NULL THEN NULL ELSE $5::TEXT::TIMESTAMPTZ END)";
+    for (id, session, (start, end), outcome) in [
+        ("ran".to_string(), Some("native"), (5, 6), Some("completed")),
+        (turn(ran_failed), Some("native"), (1, 2), Some("failed")),
+        (turn(receipted), None, (3, 3), Some("cancelled")),
+    ] {
+        let query = sqlx::query(row).bind(id).bind(channel.to_string());
+        let query = query
+            .bind(session)
+            .bind(at(start))
+            .bind(at(end))
+            .bind(outcome);
+        query.execute(&pool).await.unwrap();
+    }
+    // The analytics row an earlier build wrote for the unsent attempt, through its own writer.
+    let analytics = crate::db::turns::PersistTurnOwned {
+        turn_id: turn(unsent),
+        session_key: None,
+        thread_id: None,
+        thread_title: None,
+        channel_id: channel.to_string(),
+        agent_id: None,
+        provider: Some("claude".into()),
+        session_id: Some("native".into()),
+        dispatch_id: None,
+        started_at: Some(at(7)),
+        finished_at: Some(at(8)),
+        duration_ms: Some(60_000),
+        token_usage: Default::default(),
+    };
+    crate::db::turns::upsert_turn_owned_db(Some(&pool), &analytics)
+        .await
+        .unwrap();
+    let before = turn_rows(&pool, channel).await;
+
+    let persistence = QueuePersistenceContext::new(&ProviderKind::Claude, "upgrade", None);
+    let (path, namespace) = v2_queue(&persistence, channel).unwrap();
+    let registry = ChannelMailboxRegistry::default();
+    let handle = registry.handle(channel);
+    handle.v2_adopt(path, namespace).await.unwrap();
+    for id in [unsent, ran_failed, receipted] {
+        let original: PendingQueueItem = serde_json::from_value(serde_json::json!({
+            "author_id": 1, "message_id": id, "source_message_ids": [id],
+            "channel_id": channel.get(), "queued_generation": 5, "text": "input"}))
+        .unwrap();
+        let context = serde_json::json!({"origin": "headless",
+            "metadata": {"human_input": {"origin_id": format!("G-{id}")}}});
+        let admitted = handle.v2_admit_ticket_with_context(original, format!("t-{id}"), context);
+        admitted.await.unwrap();
+    }
+    assert_eq!(
+        handle.clear(persistence).await.discarded_message_ids.len(),
+        3
+    );
+    let owed = handle.v2_request(|slot| Ok(slot.as_ref().ok_or("no owner")?.owed_drops()));
+    let owed = owed.await.unwrap();
+    crate::services::discord::settle_v2_drops(Some(&pool), &handle, "claude", channel).await;
+    let left = handle.v2_request(|slot| Ok(slot.as_ref().ok_or("no owner")?.owed_drops()));
+    assert!(left.await.unwrap().is_empty());
+
+    let removed = owed.iter().find(|o| o.message_id == unsent).unwrap();
+    let at_ms = DateTime::<Utc>::from_timestamp_millis(removed.at_ms as i64).unwrap();
+    let mut expected = before.clone();
+    for row in expected.iter_mut().filter(|row| row.0 == turn(unsent)) {
+        *row = (
+            row.0.clone(),
+            None,
+            at_ms,
+            at_ms,
+            Some("cancelled".into()),
+            Some(at_ms),
+        );
+    }
+    assert_eq!(
+        turn_rows(&pool, channel).await,
+        expected,
+        "before {before:?}"
+    );
+    let latest = super::query::load_latest_turn(&pool, &channel.to_string())
+        .await
+        .unwrap();
+    assert_eq!(latest.map(|turn| turn.turn_id).as_deref(), Some("ran"));
+    pool.close().await;
+    db.drop().await;
+}
+
+/// Each row for `channel`: turn, session, started, finished, terminal, confirmed.
+type TurnRow = (
+    String,
+    Option<String>,
+    DateTime<Utc>,
+    DateTime<Utc>,
+    Option<String>,
+    Option<DateTime<Utc>>,
+);
+async fn turn_rows(
+    pool: &sqlx::PgPool,
+    channel: poise::serenity_prelude::ChannelId,
+) -> Vec<TurnRow> {
+    let sql = "SELECT turn_id, session_id, started_at, finished_at, terminal_outcome,
+                   terminal_confirmed_at FROM turns WHERE channel_id = $1 ORDER BY turn_id";
+    let rows = sqlx::query_as(sql)
+        .bind(channel.to_string())
+        .fetch_all(pool);
+    rows.await.unwrap()
+}
