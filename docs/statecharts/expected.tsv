@@ -58,6 +58,11 @@ input-single-path/InputOwnershipOwnerBusyMarked.cfg	InputOwnershipAdmission	-	-
 input-single-path/InputOwnershipOwnerBusyMarkedMutant.cfg	InputOwnershipAdmission	OwnerBusyKeepsMarked	-
 input-single-path/InputPath.cfg	InputPath	BusyInputLands,DraftSafe,HeldNotDropped,NoDeadlock,NoSilentLoss	-
 input-single-path/InputPathClean.cfg	InputPath	-	-
+input-single-path/InputPathStopGate.cfg	InputPath	-	-
+input-single-path/InputPathStopNoGate.cfg	InputPath	StoppedBeforeKey	-
+input-single-path/InputPathStopNotSent.cfg	InputPath	StoppedBeforeKey	-
+input-single-path/InputPathStopBusyNoGate.cfg	InputPath	StoppedBeforeKey	-
+input-single-path/InputPathStopProofOverStop.cfg	InputPath	StoppedBeforeKey	-
 session-lifecycle/HerdrRootBefore.cfg	HerdrRootRecovery	-	ReplacedInputProgress
 session-lifecycle/HerdrRootFixed.cfg	HerdrRootRecovery	-	-
 session-lifecycle/HerdrSameRoot.cfg	HerdrRootRecovery	-	-

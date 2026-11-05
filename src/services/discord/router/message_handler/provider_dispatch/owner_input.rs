@@ -789,12 +789,19 @@ fn take_owned(
         _ => None,
     };
     let declared = until_done.is_some();
+    // Only the Claude tmux writers consult the first-key gate, so only there does a stop prove no key.
+    let gate = matches!(route, target::Route::ClaudeIdle | target::Route::ClaudeBusy)
+        .then(|| turn.cancel.native_stop.receipt_sink());
     let result = run(turn, (route, declared), registration, front);
     reply(&result);
     let result = match (result, until_done) {
         (Ok(()), Some(until_done)) => until_done(),
-        // A write that may have landed starts an AI turn, so the capacity is held to its end too.
-        (Err(error), Some(until_done)) if !effect::surely_unsent(&error) => {
+        // A write that may have landed starts an AI turn, so the capacity is held to its end too;
+        // a stop that took the Claude writer's gate before its first key started none.
+        (Err(error), Some(until_done))
+            if !effect::surely_unsent(&error)
+                && !gate.as_ref().is_some_and(|gate| gate.stopped_before_key()) =>
+        {
             until_done().and(Err(error))
         }
         (result, _) => result,
@@ -890,6 +897,7 @@ fn run(
                 timing: r.timing,
                 declared,
                 draft_notice: draft_notice(turn, &r.sources),
+                cancel: turn.cancel.clone(),
             }
             .leaf(),
         ),

@@ -948,6 +948,7 @@ src/
 │   │   │   ├── draft_hold.rs
 │   │   │   ├── draft_hold_session_tests.rs
 │   │   │   ├── final_ready_tests.rs
+│   │   │   ├── first_key_gate_tests.rs
 │   │   │   ├── hold_lifecycle_tests.rs
 │   │   │   ├── literal_chunks.rs
 │   │   │   ├── preparation_hold.rs
@@ -2132,12 +2133,14 @@ src/
 │   │   │   │   │   └── worker_entry.rs
 │   │   │   │   ├── provider_dispatch/
 │   │   │   │   │   ├── owner_input.rs
+│   │   │   │   │   ├── owner_input_busy_gate_tests.rs
 │   │   │   │   │   ├── owner_input_codex_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_tests.rs
 │   │   │   │   │   ├── owner_input_idle_tests.rs
 │   │   │   │   │   ├── owner_input_not_sent_tests.rs
 │   │   │   │   │   ├── owner_input_parent_tests.rs
 │   │   │   │   │   ├── owner_input_rollback_tests.rs
+│   │   │   │   │   ├── owner_input_stop_gate_tests.rs
 │   │   │   │   │   ├── owner_input_tests.rs
 │   │   │   │   │   ├── owner_provenance_tests.rs
 │   │   │   │   │   ├── producer_error_test_support.rs
@@ -2862,6 +2865,7 @@ src/
 │   │   │   │   ├── judged_stop_tests.rs
 │   │   │   │   ├── native_stop.rs
 │   │   │   │   ├── native_stop_contract_tests.rs
+│   │   │   │   ├── native_stop_gate_tests.rs
 │   │   │   │   ├── native_stop_identity_tests.rs
 │   │   │   │   ├── native_stop_ownership_tests.rs
 │   │   │   │   ├── pid_exit.rs
