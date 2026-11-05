@@ -136,7 +136,7 @@ impl LiveEnd {
         }
     }
 
-    /// One end pass, returning once the task it started settled the turn or `limit` passed.
+    /// One end pass, observing the mailbox until it is released or `limit` passes.
     pub(in crate::services::discord) fn pass(&self, limit: Duration) {
         self.rt.block_on(async {
             crate::services::discord::recovery_engine::herdr_row_end::row_end_pass(
@@ -148,6 +148,25 @@ impl LiveEnd {
             while Instant::now() < deadline && self.held().await {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
+        });
+    }
+
+    /// Runs one end pass and requires its notice, row removal and mailbox release within `limit`.
+    pub(in crate::services::discord) fn pass_and_wait_for_end(&self, limit: Duration) {
+        self.rt.block_on(async {
+            let notice = Self::notice();
+            tokio::time::timeout(limit, async {
+                crate::services::discord::recovery_engine::herdr_row_end::row_end_pass(
+                    &self.shared,
+                    &self.provider,
+                )
+                .await;
+                while self.held().await || self.row().is_some() || !self.texts().contains(&notice) {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("the live turn's notice, row removal and mailbox release before the deadline");
         });
     }
 
@@ -475,7 +494,7 @@ fn a_live_claude_turn_whose_provider_died_ends_once_and_frees_its_channel_pg() {
         assert_eq!(fx.row(), Some(HostedState::Retired));
         assert!(!token.is_completion_cleanup() && !token.cancelled.load(Ordering::SeqCst));
         live.route();
-        live.pass(Duration::from_secs(15));
+        live.pass_and_wait_for_end(Duration::from_secs(15));
         let ended = (
             live.texts(),
             live.row().is_none(),

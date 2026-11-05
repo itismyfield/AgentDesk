@@ -23,6 +23,9 @@ pub(super) async fn load_latest_turn(
                 cache_read_tokens::BIGINT AS cache_read_tokens
          FROM turns
          WHERE channel_id = $1
+           -- A receipt-only row for an input removed before it ran is no turn.
+           AND (terminal_outcome IN ('cancelled', 'failed')
+                AND started_at = finished_at AND session_id IS NULL) IS NOT TRUE
          ORDER BY finished_at DESC, started_at DESC, created_at DESC
          LIMIT 1",
     )

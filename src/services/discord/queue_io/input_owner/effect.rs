@@ -175,6 +175,8 @@ pub(crate) struct BusyClaude {
     pub(crate) declared: bool,
     /// Tells the original once that a draft beside the pasted input may not be kept.
     pub(crate) draft_notice: Option<DraftNotice>,
+    /// The turn's token, whose first-key gate the paste consumes.
+    pub(crate) cancel: Arc<crate::services::provider::CancelToken>,
 }
 
 /// Raises the one notice an original owes when its paste met a draft C-s could not park.
@@ -201,11 +203,22 @@ impl BusyClaude {
             // Enter ends the transaction: the receipt is only recorded off this thread.
             let inject = || {
                 let declared = self.declared;
-                let report = busy_inject::inject_owned(&self.pane, &request, self.timing, declared);
-                busy_inject::collect_receipt(&request, &report, self.timing);
-                (report.outcome, report.draft_unproven)
+                let sink = crate::services::claude_tui::guarded_outcome::with_receipt_sink;
+                sink(Some(&self.cancel), || {
+                    let report =
+                        busy_inject::inject_owned(&self.pane, &request, self.timing, declared);
+                    busy_inject::collect_receipt(&request, &report, self.timing);
+                    (report.outcome, report.draft_unproven)
+                })
             };
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(inject));
+            // A stop that took the gate before the first key left nothing sent and nothing to resend.
+            if matches!(outcome, Ok((Outcome::NotSent(_), _)))
+                && self.cancel.native_stop.receipt_sink().stopped_before_key()
+            {
+                owner_input::stop_took_gate();
+                return Ok(Completion::WriteUncertain("stopped_before_key".into()));
+            }
             let outcome = outcome.map(|(outcome, unproven)| {
                 if unproven && let Some(notice) = notice {
                     tracing::info!(channel_id = self.channel, nonce = %self.nonce, "owned paste met an unparked draft");
@@ -321,9 +334,15 @@ pub(crate) fn idle_claude(
     use crate::services::claude_tui::guarded_outcome::SubmissionError;
     Box::new(move |frame| {
         crate::services::claude_tui::guarded_outcome::with_receipt_sink(Some(&receipt), || {
-            match crate::services::claude_tui::input::send_warm_followup_owned(
+            let sent = crate::services::claude_tui::input::send_warm_followup_owned(
                 &session, &frame, None,
-            ) {
+            );
+            // A stop that took the writer's gate first left no key and nothing to send again.
+            if sent.is_err() && receipt.native_stop.receipt_sink().stopped_before_key() {
+                owner_input::stop_took_gate();
+                return Ok(Completion::WriteUncertain("stopped_before_key".into()));
+            }
+            match sent {
                 Ok(()) => Ok(Completion::Submitted),
                 Err(SubmissionError::Held(hold)) if hold.modal => {
                     arm_screen(channel, pane.clone());

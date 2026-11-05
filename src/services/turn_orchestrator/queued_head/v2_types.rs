@@ -1,4 +1,4 @@
-//! Durable V2 data; production admission remains closed.
+//! Durable V2 data: the owner's queue, attempts, retained inputs and admission binds.
 use super::{HeadPhase, PendingQueueItem, QueueIdentity};
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +18,18 @@ pub(crate) struct SnapshotV2 {
     /// Which admission ticket each queued, attempted or settled input came in under.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) admission_binds: Vec<AdmissionBind>,
+    /// Terminal receipts owed for removed inputs that carried an origin, committed with the removal.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) owed_drop_receipts: Vec<OwedDrop>,
+}
+
+/// A removed input's terminal receipt not yet in the database; acked once it is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct OwedDrop {
+    pub(crate) message_id: u64,
+    pub(crate) origins: Vec<String>,
+    pub(crate) outcome: crate::db::turns::TerminalOutcome,
+    pub(crate) at_ms: u64,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
