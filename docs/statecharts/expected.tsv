@@ -79,3 +79,8 @@ session-lifecycle/HerdrSameRoot.cfg	HerdrRootRecovery	-	-
 session-lifecycle/HerdrSession.cfg	HerdrSession	NoDeadlock,NoOrphanPane,PromptOnlyToAgent,RowMatchesPane	-
 session-lifecycle/TmuxSession.cfg	TmuxSession	NoDeadlock,RowNamesSession,RowOnlyWithTurn	-
 session-lifecycle/TmuxSocketBoot.cfg	TmuxSocketBoot	-	-
+turn-presence/TurnPresence.cfg	TurnPresence	-	-
+turn-presence/TurnPresenceMain.cfg	TurnPresence	NoProgressIdentityUnknown,NoProgressIdentityNotice	EventuallyStableBusy,PublicationContinues
+turn-presence/TurnPresenceM1.cfg	TurnPresence	NoProgressIdentityUnknown,NoProgressIdentityNotice	EventuallyStableBusy,PublicationContinues
+turn-presence/TurnPresenceM2.cfg	TurnPresence	-	PublicationContinues
+turn-presence/TurnPresenceM3.cfg	TurnPresence	NoOldProofAfterObservedBoundary,NoWrongAdmission,NoWrongPublication	-

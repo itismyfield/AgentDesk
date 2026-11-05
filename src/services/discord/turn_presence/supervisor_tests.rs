@@ -897,3 +897,38 @@ fn injection_hourglass_requires_registration_confirmation_and_a_running_supervis
     );
     lock(&REGISTERED).remove(provider.as_str());
 }
+pub(in crate::services::discord) struct NoticeProbe {
+    fake: Arc<Fake>,
+    inner: Supervisor<Fake>,
+    reading: Arc<Mutex<Option<Reading>>>,
+    channel: u64,
+}
+impl NoticeProbe {
+    pub(in crate::services::discord) fn new(channel: u64) -> Self {
+        let fake = Fake::new(&[channel], BUSY);
+        *lock(&fake.head) = Some(7);
+        let reading = Arc::new(Mutex::new(None));
+        let next = reading.clone();
+        *lock(&fake.reader) = Some(Arc::new(move |_| lock(&next).take().expect("live reading")));
+        let mut inner = Supervisor::new(fake.clone());
+        inner.presence(channel);
+        Self {
+            fake,
+            inner,
+            reading,
+            channel,
+        }
+    }
+    pub(in crate::services::discord) async fn tick(&self, reading: Reading, now: Instant) {
+        *lock(&self.reading) = Some(reading);
+        self.inner.tick(now).await;
+        let owner = lock(&self.inner.channels[&self.channel])
+            .notice
+            .clone()
+            .unwrap();
+        owner.settled_for_tests().await;
+    }
+    pub(in crate::services::discord) fn notice_count(&self) -> usize {
+        self.fake.notices().len()
+    }
+}
