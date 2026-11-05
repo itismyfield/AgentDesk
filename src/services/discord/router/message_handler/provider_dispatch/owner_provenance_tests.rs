@@ -54,7 +54,7 @@ async fn legacy_and_owned(start: Start) -> (String, String) {
     if start.flat {
         sqlx::query(bound).execute(&pool).await.unwrap();
     }
-    let mut seen = Vec::new();
+    let (mut seen, mut read) = (Vec::new(), None);
     for (channel, side, user) in [
         (LEGACY, "sidelegacy", 7_272_001),
         (OWNED, "sideowned", 7_272_002),
@@ -77,11 +77,18 @@ async fn legacy_and_owned(start: Start) -> (String, String) {
                 false => kept(start.source, metadata, label, user, side),
             };
             // The stub CLI ends the turn after its start resolved; only the choices are compared.
-            let _settled = owned(&shared, context).await;
+            read = Some(owned(&shared, context).await.0);
         }
         let starts = STARTS_RESOLVED.lock().unwrap().clone();
         let resolved = starts.iter().rev().find(|(at, _)| *at == channel.get());
         let resolved = resolved.map(|(_, s)| s.clone()).unwrap_or_default();
+        if let Some(read) = read.take() {
+            let took = format!("tmux_session: Some({read:?})");
+            assert!(
+                resolved.contains(&took),
+                "the start read {read}: {resolved}"
+            );
+        }
         let resolved = resolved
             .replace(side, "SIDE")
             .replace(&channel.get().to_string(), "CH");
@@ -193,8 +200,8 @@ fn flat(metadata: Value) -> Value {
 }
 
 /// The start admitted under its turn's ticket by the owned channel's owner before a restart, then
-/// its front started by the restored owner's idle start.
-async fn owned(shared: &Arc<SharedData>, context: Value) -> Result<(), String> {
+/// its front started by the restored owner's idle start; also returns the pane that start read.
+async fn owned(shared: &Arc<SharedData>, context: Value) -> (String, Result<(), String>) {
     let mailbox = shared.mailbox(OWNED);
     let dir = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap();
     let dir = dir.join("claude/provenance-owner");
@@ -211,7 +218,7 @@ async fn owned(shared: &Arc<SharedData>, context: Value) -> Result<(), String> {
     std::fs::create_dir_all(generation.parent().unwrap()).unwrap();
     std::fs::write(generation, "5").unwrap();
     let turn = format!("discord:{}:9100000000000757002", OWNED.get());
-    let (original, ticket) = routine::synthetic_original(&turn, OWNED.get(), PROMPT, 1)?;
+    let (original, ticket) = routine::synthetic_original(&turn, OWNED.get(), PROMPT, 1).unwrap();
     // The pane the start takes reads idle, as a live pane with its transcript does.
     let pane = crate::services::discord::router::message_handler::headless_turn::owner_start_pane;
     let (tmux, _) = pane(shared, OWNED, &context).await.expect("a tmux pane");
@@ -247,9 +254,10 @@ async fn owned(shared: &Arc<SharedData>, context: Value) -> Result<(), String> {
         let front = owner.front().ok_or("no front")?;
         owner.grant_front(&front).map(|()| front)
     });
-    let started = start_idle(Arc::clone(shared), OWNED, granted.await?).await;
+    let granted = granted.await.unwrap();
+    let started = start_idle(Arc::clone(shared), OWNED, granted).await;
     drop(transcript);
-    started
+    (tmux, started)
 }
 
 /// A real provider CLI must not start if a regression reaches the launch.
