@@ -895,6 +895,11 @@
       "path": "migrations/postgres/0184_core_status_checks.sql",
       "sha256": "a0c11382c3683b9ed0bea70b2ecb3a3241931ea53b412e579a5d9a79080ffb3e",
       "version": 184
+    },
+    {
+      "path": "migrations/postgres/0185_deploy_gate_check_vertical_tab.sql",
+      "sha256": "8bd96d83809b1574b1b1d533ba85c871395deef1a17d98e834d7de4bf0b11034",
+      "version": 185
     }
   ],
   "version": 1

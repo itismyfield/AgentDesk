@@ -1035,6 +1035,10 @@ async fn later_branch_migrations_upgrade_a_main_database_already_at_0161_pg() {
                 "constraint:routine_runs_status_check",
             ],
         ),
+        (
+            185,
+            &["constraint:auto_queue_entries_deploy_gate_unavailable_check"],
+        ),
     ];
     assert_eq!(
         expected
