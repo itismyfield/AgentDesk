@@ -282,7 +282,7 @@ AgentDesk can run multiple release instances against one PostgreSQL control plan
 - **Capability-aware routing** — Dispatch claims compare required labels/providers/MCP health against registered runner capabilities and record routing diagnostics when a node is ineligible.
 - **Lease-backed work claims** — `task_dispatches` and dispatch outbox rows use PG claim owner, expiry, and idempotency fields so multiple nodes do not process the same work item concurrently.
 - **Exclusive resource locks** — `/api/cluster/resource-locks*` serializes node-local resources such as Unreal Editor, MCP endpoints, and project-level test execution.
-- **Issue-as-spec phase evidence** — `issue_specs`, `test_phase_runs`, and `test_results` connect GitHub issue acceptance criteria to deterministic phase runs, and `/api/cluster/test-phase-runs/evidence` returns the latest passing evidence for a phase and PR head SHA. No policy gates merges on it.
+- **Issue-as-spec phase evidence** — `issue_specs` and `test_phase_runs` connect GitHub issue acceptance criteria to deterministic phase runs, and `/api/cluster/test-phase-runs/evidence` returns the latest passing evidence for a phase and PR head SHA. No policy gates merges on it.
 - **Regression coverage** — `.github/workflows/ci-nightly.yml` runs the `multinode_regression` job; the physical MacBook + Mac mini smoke plan lives in `docs/agent-maintenance/multinode-two-node-smoke.md`.
 
 ## Configuration

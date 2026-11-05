@@ -17,7 +17,6 @@ use std::time::Duration;
 
 use anyhow::Result;
 use rquickjs::{Context, Function, Persistent, Runtime};
-use sqlx::Row;
 
 use crate::config::Config;
 
@@ -106,7 +105,7 @@ enum EngineCommand {
     ListPolicies {
         reply: mpsc::Sender<Vec<PolicyInfo>>,
     },
-    DrainStartupHooks {
+    RecordServerBoot {
         reply: mpsc::Sender<()>,
     },
     Shutdown,
@@ -213,8 +212,8 @@ impl PolicyEngineActor {
                 EngineCommand::ListPolicies { reply } => {
                     let _ = reply.send(engine.list_policies_inline());
                 }
-                EngineCommand::DrainStartupHooks { reply } => {
-                    engine.drain_startup_hooks_inline();
+                EngineCommand::RecordServerBoot { reply } => {
+                    engine.record_server_boot_inline();
                     let _ = reply.send(());
                 }
                 EngineCommand::Shutdown => unreachable!(),
@@ -521,33 +520,22 @@ impl PolicyEngine {
         Ok(())
     }
 
-    /// Drain any legacy deferred hooks that survived a restart (#125).
-    /// New runtimes no longer enqueue deferred hooks; this is a compatibility
-    /// path so old rows can be replayed once and cleared.
-    pub fn drain_startup_hooks(&self) {
+    /// Stamp `kv_meta.server_boot_at` once per boot; orphan recovery and the kanban
+    /// policy hold off for 10 minutes after it.
+    pub fn record_server_boot(&self) {
         if self.actor.is_actor_thread() {
-            self.drain_startup_hooks_inline();
+            self.record_server_boot_inline();
             return;
         }
-        if let Err(e) = self.roundtrip(|reply| EngineCommand::DrainStartupHooks { reply }) {
-            tracing::warn!("failed to drain legacy startup hooks: {e}");
+        if let Err(e) = self.roundtrip(|reply| EngineCommand::RecordServerBoot { reply }) {
+            tracing::warn!("failed to record server boot: {e}");
         }
     }
 
-    fn drain_startup_hooks_inline(&self) {
-        tracing::info!("[startup] draining legacy deferred hooks from DB");
-
-        if let Some(pool) = self.pg_pool().cloned() {
-            self.drain_startup_hooks_inline_pg(pool);
+    fn record_server_boot_inline(&self) {
+        let Some(pool) = self.pg_pool().cloned() else {
             return;
-        }
-
-        {
-            return;
-        }
-    }
-
-    fn drain_startup_hooks_inline_pg(&self, pool: sqlx::PgPool) {
+        };
         let _ = crate::utils::async_bridge::block_on_pg_result(
             &pool,
             move |bridge_pool| async move {
@@ -566,136 +554,6 @@ impl PolicyEngine {
                 error
             },
         );
-
-        loop {
-            let fetch_result = crate::utils::async_bridge::block_on_pg_result(
-                &pool,
-                move |bridge_pool| async move {
-                    let rows = sqlx::query(
-                        "SELECT id, hook_name, payload
-                         FROM deferred_hooks
-                         WHERE status IN ('pending', 'processing')
-                         ORDER BY id ASC
-                         LIMIT 50",
-                    )
-                    .fetch_all(&bridge_pool)
-                    .await
-                    .map_err(|error| format!("load postgres deferred hooks: {error}"))?;
-                    let hooks = rows
-                        .into_iter()
-                        .map(|row| {
-                            Ok::<_, String>((
-                                row.try_get::<i64, _>("id")
-                                    .map_err(|error| format!("decode deferred hook id: {error}"))?,
-                                row.try_get::<String, _>("hook_name").map_err(|error| {
-                                    format!("decode deferred hook hook_name: {error}")
-                                })?,
-                                row.try_get::<String, _>("payload").map_err(|error| {
-                                    format!("decode deferred hook payload: {error}")
-                                })?,
-                            ))
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    for (id, _, _) in &hooks {
-                        sqlx::query(
-                            "UPDATE deferred_hooks SET status = 'processing' WHERE id = $1",
-                        )
-                        .bind(*id)
-                        .execute(&bridge_pool)
-                        .await
-                        .map_err(|error| {
-                            format!("mark postgres deferred hook {id} processing: {error}")
-                        })?;
-                    }
-                    Ok(hooks)
-                },
-                |error| error,
-            );
-            let hooks: Vec<(i64, String, String)> = match fetch_result {
-                Ok(hooks) => hooks,
-                Err(error) => {
-                    tracing::warn!("failed to load postgres deferred hooks: {error}");
-                    return;
-                }
-            };
-            if hooks.is_empty() {
-                return;
-            }
-
-            for (id, hook_name, payload_str) in &hooks {
-                let payload: serde_json::Value =
-                    serde_json::from_str(payload_str).unwrap_or(serde_json::json!({}));
-                let span = crate::logging::hook_span(hook_name, &payload);
-                let _guard = span.enter();
-                tracing::info!(deferred_hook_id = *id, "[startup] replaying deferred hook");
-
-                let fire_result = if let Some(hook) = Hook::from_str(hook_name) {
-                    self.fire_hook_inline(hook, payload)
-                } else {
-                    self.fire_hook_by_name_inline(hook_name, payload)
-                };
-
-                let update_result = if fire_result.is_err() {
-                    crate::utils::async_bridge::block_on_pg_result(
-                        &pool,
-                        {
-                            let id = *id;
-                            move |bridge_pool| async move {
-                                sqlx::query(
-                                    "UPDATE deferred_hooks SET status = 'pending' WHERE id = $1",
-                                )
-                                .bind(id)
-                                .execute(&bridge_pool)
-                                .await
-                                .map_err(|error| {
-                                    format!("mark postgres deferred hook {id} pending: {error}")
-                                })?;
-                                Ok(())
-                            }
-                        },
-                        |error| error,
-                    )
-                } else {
-                    crate::utils::async_bridge::block_on_pg_result(
-                        &pool,
-                        {
-                            let id = *id;
-                            move |bridge_pool| async move {
-                                sqlx::query("DELETE FROM deferred_hooks WHERE id = $1")
-                                    .bind(id)
-                                    .execute(&bridge_pool)
-                                    .await
-                                    .map_err(|error| {
-                                        format!("delete postgres deferred hook {id}: {error}")
-                                    })?;
-                                Ok(())
-                            }
-                        },
-                        |error| error,
-                    )
-                };
-
-                if let Err(error) = fire_result {
-                    tracing::warn!("[startup] deferred hook {hook_name} failed: {error}");
-                    if let Err(update_error) = update_result {
-                        tracing::warn!(
-                            "failed to restore postgres deferred hook {} after replay failure: {}",
-                            id,
-                            update_error
-                        );
-                    }
-                    continue;
-                }
-
-                if let Err(update_error) = update_result {
-                    tracing::warn!(
-                        "failed to delete postgres deferred hook {} after replay success: {}",
-                        id,
-                        update_error
-                    );
-                }
-            }
-        }
     }
 
     /// Fire a dynamic hook by name string. Used for pipeline-defined hooks

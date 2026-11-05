@@ -903,7 +903,7 @@ async fn later_branch_migrations_upgrade_a_main_database_already_at_0161_pg() {
     }
     // Each later file leaves (or, with `!`, drops) at least one object of its own,
     // so a partial apply cannot pass.
-    let expected: [(i64, &[&str]); 11] = [
+    let expected: [(i64, &[&str]); 24] = [
         (
             163,
             &["table:channel_home_preferences", "constraint:chp_mode_home"],
@@ -970,6 +970,86 @@ async fn later_branch_migrations_upgrade_a_main_database_already_at_0161_pg() {
         (171, &["column:message_outbox.producer_turn_nonce"]),
         (172, &["!column:agents.xp"]),
         (173, &["column:message_outbox.body_census"]),
+        (174, &["index:idx_task_dispatches_card_created"]),
+        (175, &["index:idx_auto_queue_entries_card"]),
+        (
+            176,
+            &[
+                "!index:delivery_journal_obligation_order",
+                "index:delivery_journal_obligation_slot_unique",
+            ],
+        ),
+        (
+            177,
+            &[
+                "!index:kakao_calendar_operations_target",
+                "index:kakao_calendar_operations_target_id_revision_key",
+            ],
+        ),
+        (
+            178,
+            &[
+                "!index:idx_arce_channel_seq_desc",
+                "index:uq_arce_channel_seq",
+            ],
+        ),
+        (
+            179,
+            &["!index:iso_watermark", "index:iso_unique_generation"],
+        ),
+        (
+            180,
+            &[
+                "!index:idx_aq_entry_dispatch_history_entry",
+                "index:auto_queue_entry_dispatch_history_entry_id_dispatch_id_key",
+            ],
+        ),
+        (
+            181,
+            &[
+                "!index:idx_aci_card_id",
+                "index:automation_candidate_iterations_card_id_iteration_key",
+            ],
+        ),
+        (
+            182,
+            &[
+                "!index:idx_turn_lifecycle_events_turn_id",
+                "index:idx_turn_lifecycle_events_turn_channel_created_at",
+            ],
+        ),
+        (
+            183,
+            &[
+                "!index:idx_aq_phase_gates_run_phase",
+                "index:uq_aq_phase_gates_run_phase_dispatch_key",
+            ],
+        ),
+        (
+            184,
+            &[
+                "constraint:auto_queue_entries_status_check",
+                "constraint:auto_queue_runs_status_check",
+                "constraint:message_outbox_status_check",
+                "constraint:dispatch_outbox_status_check",
+                "constraint:routines_status_check",
+                "constraint:routine_runs_status_check",
+            ],
+        ),
+        (
+            185,
+            &["constraint:auto_queue_entries_deploy_gate_unavailable_check"],
+        ),
+        (
+            186,
+            &[
+                "!table:db_table_metadata",
+                "!table:dispatch_queue",
+                "!table:test_results",
+                "!table:deferred_hooks",
+                "!table:channel_recovery_custody",
+            ],
+        ),
     ];
     assert_eq!(
         expected
