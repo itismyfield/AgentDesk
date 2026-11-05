@@ -430,6 +430,7 @@ async fn owner_observer_ignores_a_held_attempts_completion_and_completes_its_ret
     db.drop().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn start_failure_retained_routine_closes_without_retry_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
