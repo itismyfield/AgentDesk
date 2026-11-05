@@ -2,7 +2,7 @@
   "configuration_errors":[],
   "count_unit_version":1,
   "edge_count_unit":"static reference occurrences",
-  "generation_command":"python3 scripts/audit_maintainability/checks/module_layer_baseline.py --input-sha 4eb8a84ff4fb416ead547a75d51c79a6400ef0d3 --output scripts/audit_maintainability/baselines/generated/module_layers.json --update-reductions",
+  "generation_command":"python3 scripts/audit_maintainability/checks/module_layer_baseline.py --input-sha f5bc1cceffb8a61720fe88e457112986bd8501bd --output scripts/audit_maintainability/baselines/generated/module_layers.json --update-reductions",
   "indeterminate_dependencies":[
     {"count":1,"id":"001620dfdc6b0012b85cc8dc9706a8fcae27f886f7b268992054eb9605d4ca64","kind":"reexport","source":"src/lib.rs::crate::services::turn_orchestrator","target":"src/lib.rs::crate::services::turn_orchestrator::inbound_order"},
     {"count":10,"id":"0016c977514e2920df45010536f02df4f6728ec84e3ac09b8ce8f1836ac228b6","kind":"path","source":"src/lib.rs::crate::server::routes::auth","target":"src/lib.rs::crate::api_caller_observability"},
@@ -4154,7 +4154,7 @@
   ],
   "indeterminate_edges":4147,
   "indeterminate_occurrences":9722,
-  "input_sha":"4eb8a84ff4fb416ead547a75d51c79a6400ef0d3",
+  "input_sha":"f5bc1cceffb8a61720fe88e457112986bd8501bd",
   "mapping_sha256":"30f39b6c761109ffe752220eb96c624685ae6c81d4b857eac2d9c223acf367b1",
   "reverse_dependencies":[
     {"count":3,"id":"004548ea3340d4f2db928565ed126a4a242f7421b1c3421bba76cf7df27c3fc4","kind":"import","source":"src/lib.rs::crate::services::auto_queue","target":"src/lib.rs::crate::error"},
