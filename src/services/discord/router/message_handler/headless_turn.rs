@@ -525,7 +525,9 @@ async fn start_reserved_headless_turn_admitted(
         // The provider-state clear does not remove Claude's live-TUI runtime
         // binding. Clear it explicitly so fresh routine and goal turns cannot
         // recover resume mode from a warm tmux pane.
-        if let Some(ref tmux_session) = tmux_session_name {
+        if let Some(ref tmux_session) = tmux_session_name
+            && owner.is_none()
+        {
             crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(tmux_session);
         }
     }
@@ -544,10 +546,23 @@ async fn start_reserved_headless_turn_admitted(
         session_id = None;
         memento_context_loaded = false;
         session_strategy_reason = "scheduled_snapshot_context";
-        if let Some(ref tmux_session) = tmux_session_name {
+        if let Some(ref tmux_session) = tmux_session_name
+            && owner.is_none()
+        {
             crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(tmux_session);
         }
     }
+    // The owned start's late read takes the session id only for the channel's own pane, and runs
+    // the binding clear a fresh or snapshot start deferred.
+    #[cfg(unix)]
+    let owner = owner.map(|mut owner| {
+        let channel_pane = channel_name
+            .as_deref()
+            .map(|name| provider.build_tmux_session_name(name));
+        let own = channel_pane.is_some() && channel_pane == tmux_session_name;
+        owner.read_late(own, force_fresh_provider_session || scheduled_snapshot_turn);
+        owner
+    });
     if session_id.is_none() {
         if force_fresh_provider_session || scheduled_snapshot_turn {
             let ts = chrono::Local::now().format("%H:%M:%S");
