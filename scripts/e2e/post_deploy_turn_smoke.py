@@ -401,8 +401,8 @@ def cell_reset(*, base_url: str, cell: str, channel_id: str, config_path: Path,
     channels = herdr.get("channels", {}) if isinstance(herdr, dict) else None
     if not isinstance(channels, dict):
         raise ValueError("Herdr channels mapping unreadable")
-    if str(channel_id) in {str(key) for key in channels}:
-        log("skipped: configured channel is owned by Herdr")
+    if cell_driver.channel_reset.preserve_herdr_session(
+            channel_id=channel_id, configured_channels=[str(key) for key in channels], log=log):
         return
     with ExitStack() as held:
         try:
