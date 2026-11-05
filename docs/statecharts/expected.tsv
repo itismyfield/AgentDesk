@@ -20,6 +20,8 @@ host-migration/HostMigration.cfg	HostMigration	NoDeadlock,RecordMatchesProcesses
 host-migration/HostMigrationClean.cfg	HostMigration	-	-
 host-migration/HostMigrationIdOnly.cfg	HostMigration	NoDeadlock	-
 input-single-path/InputOwnership.cfg	InputOwnership	HeldResumes,NoSilentLoss,NoSilentLossObserved	-
+input-single-path/InputOwnershipA2b.cfg	InputOwnership	-	-
+input-single-path/InputOwnershipA2bReadGone.cfg	InputOwnership	NativeHeldResumes,NoSilentLoss	-
 input-single-path/InputOwnershipA2d1.cfg	InputOwnership	AnswerOnce,DraftToldOnce,NoSilentLoss,NoTimedRetry,StartNotDropped	-
 input-single-path/InputOwnershipA2d2.cfg	InputOwnership	AnswerOnce,HeldResumes,NoSilentLoss,NoSilentLossObserved	-
 input-single-path/InputOwnershipA2d3.cfg	InputOwnership	HeldResumes,NoSilentLoss,NoSilentLossObserved	-
@@ -58,6 +60,11 @@ input-single-path/InputOwnershipOwnerBusyMarked.cfg	InputOwnershipAdmission	-	-
 input-single-path/InputOwnershipOwnerBusyMarkedMutant.cfg	InputOwnershipAdmission	OwnerBusyKeepsMarked	-
 input-single-path/InputPath.cfg	InputPath	BusyInputLands,DraftSafe,HeldNotDropped,NoDeadlock,NoSilentLoss	-
 input-single-path/InputPathClean.cfg	InputPath	-	-
+input-single-path/InputPathStopGate.cfg	InputPath	-	-
+input-single-path/InputPathStopNoGate.cfg	InputPath	StoppedBeforeKey	-
+input-single-path/InputPathStopNotSent.cfg	InputPath	StoppedBeforeKey	-
+input-single-path/InputPathStopBusyNoGate.cfg	InputPath	StoppedBeforeKey	-
+input-single-path/InputPathStopProofOverStop.cfg	InputPath	StoppedBeforeKey	-
 session-lifecycle/HerdrRootBefore.cfg	HerdrRootRecovery	-	ReplacedInputProgress
 session-lifecycle/HerdrRootFixed.cfg	HerdrRootRecovery	-	-
 session-lifecycle/HerdrSameRoot.cfg	HerdrRootRecovery	-	-

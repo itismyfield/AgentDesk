@@ -33,6 +33,7 @@ pub(crate) async fn recover(
     if let Err(error) = synced {
         tracing::warn!(%error, channel, "input owner history projection failed after restart");
     }
+    // The drain also settles the receipts a removal committed before the restart still owes.
     match pool {
         Some(pool) => super::notice::drain(pool, handle, provider, channel).await,
         None => Ok(0),
@@ -46,3 +47,7 @@ pub(crate) async fn settle_due(handle: &ChannelMailboxHandle) -> Result<Option<u
         .v2_request(|slot| Ok(slot.as_ref().and_then(|owner| owner.settle_due())))
         .await
 }
+
+#[cfg(all(test, unix))]
+#[path = "owed_drop_tests.rs"]
+mod owed_drop_tests;

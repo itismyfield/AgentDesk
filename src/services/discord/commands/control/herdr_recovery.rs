@@ -196,11 +196,16 @@ async fn discard_waiting(
 ) {
     use crate::services::turn_orchestrator::QueuePersistenceContext;
     let persistence = QueuePersistenceContext::new(provider, &shared.token_hash, None);
-    match shared
-        .mailbox(channel)
-        .discard_waiting_or_refused(persistence)
-        .await
-    {
+    let mailbox = shared.mailbox(channel);
+    let discarded = mailbox.discard_waiting_or_refused(persistence).await;
+    crate::services::discord::receipt_settle::settle_v2_drops(
+        shared.pg_pool.as_ref(),
+        &mailbox,
+        provider.as_str(),
+        channel,
+    )
+    .await;
+    match discarded {
         Ok(mut cleared) => {
             let mut excluded = excluded.clone();
             excluded.extend(cleared.persistence.not_waiting.iter().copied());
@@ -269,3 +274,7 @@ async fn discard_waiting(
     }
     shared.dispatch.role_overrides.remove(&channel);
 }
+
+#[cfg(all(test, unix))]
+#[path = "herdr_recovery_tests.rs"]
+mod tests;
