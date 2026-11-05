@@ -1,7 +1,7 @@
 # Owner start failure slice
 
 Historical RED code SHA: `b0bab6ebf693502f86c0b2e2c0307033fa411c29`.
-Live repair code SHA: `5742a64d54e0f92c7740dcd4c767baf06f00dde2`; two-fact contract follows below.
+Live repair code SHA: `fc9dd7f8e61f9b0d3dff6f5e8ec70da1146eaa6a`; two-fact contract follows below.
 `InputOwnership.tla` / `SFSpec` isolates this policy in the `observer` record; older slices keep their transitions.
 The fixed classification is in its StartFailure comment and the fixture header. The historical typed-cause erasure at `host_refusal.rs:28–37` is covered by the live
 Discord and headless entrypoint fixtures.
@@ -29,7 +29,7 @@ Discord and headless entrypoint fixtures.
 `EarlyClearDelivers` requires A's payload even if a bad policy removed it from the queue.
 `ReserveResetsFailures` checks the reserve state directly, before an effect-held result can hide it.
 The two negative configs inject only those faults; the unmutated policy transitions stay the same.
-Full checker: 83 configs, rc=0, expected/actual mismatches=0 (261.5 s, after merging main `b4907b41dc68ecc4bda30e5f7aec73ffee2670a9`).
+Full checker: 83 configs, rc=0, expected/actual mismatches=0.
 Isolated traces reproduce EarlyClearDelivers exit 13, FirstOpaqueFailureKept exit 12 and
 ReserveResetsFailures exit 12; repository model bytes remain unchanged during those runs.
 
@@ -74,9 +74,11 @@ does not hold the drive while cleanup and B payload delivery complete.
 
 ## Physical row removal contract
 
-Paths below are relative to `src/services/discord/` at the live comparison checkpoint. Fresh birth pins must
+Paths below are relative to `src/services/discord/` at the live repair code SHA. Fresh birth pins must
 be captured under the existing row lock and notified only after actual unlink/active rename succeeds.
-No actor response is awaited while holding that lock. Missing, mismatch, failed I/O, unknown identity
+The caller keeps its existing file-delete operation and guards; the helper captures the fresh pin,
+runs that operation and notifies only after success. No new raw deletion site or audit-baseline
+entry is introduced. No actor response is awaited while holding that lock. Missing, mismatch, failed I/O, unknown identity
 and duplicate notifications cannot release another closing pin or create another wake.
 
 | Physical point | Existing path / authority |
@@ -84,17 +86,17 @@ and duplicate notifications cannot release another closing pin or create another
 | `inflight.rs:575` | Policy API `remove_inflight_row_for_policy_op`; public JS `src/engine/ops/exec_ops.rs:313–379` |
 | `inflight/circuit_removal.rs:74` | Checked delete with circuit handoff |
 | `inflight/rebind_reap.rs:311` | Abandoned rebind reap |
-| `inflight/rebind_reap.rs:386` | Other-provider abandoned rebind reap |
+| `inflight/rebind_reap.rs:387` | Other-provider abandoned rebind reap |
 | `inflight/removal.rs:375` | Existing stale-generation invalidation |
 | `inflight/removal/boot_reaper.rs:218` | Locked boot verdict for stale/provider-mismatch/malformed rows |
 | `inflight/clear_store/mod.rs:79` | Ordinary receipt-protected clear |
-| `inflight/clear_store/mod.rs:321` | Guarded active-path archive rename |
-| `inflight/clear_store/mod.rs:483` | User-message-guarded clear |
-| `inflight/clear_store/mod.rs:563` | Zero-owned clear |
-| `inflight/clear_store/mod.rs:601` | Exact snapshot / path-less Herdr remove_row |
-| `inflight/clear_store/mod.rs:650` | Lifecycle death-evidence clear |
-| `inflight/clear_store/mod.rs:751` | After-delivery clear |
-| `inflight/clear_store/mod.rs:817` | Tmux-response test seam (no current live caller) |
+| `inflight/clear_store/mod.rs:324` | Guarded active-path archive rename |
+| `inflight/clear_store/mod.rs:486` | User-message-guarded clear |
+| `inflight/clear_store/mod.rs:567` | Zero-owned clear |
+| `inflight/clear_store/mod.rs:606` | Exact snapshot / path-less Herdr remove_row |
+| `inflight/clear_store/mod.rs:655` | Lifecycle death-evidence clear |
+| `inflight/clear_store/mod.rs:757` | After-delivery clear |
+| `inflight/clear_store/mod.rs:825` | Tmux-response test seam (no current live caller) |
 | `inflight/clear_store/abandon.rs:241` | Exact placeholder-abandon cleanup |
 | `inflight/clear_store/identity.rs:119` | Exact finalizer CAS, marked-row late settle and other captured clears |
 
