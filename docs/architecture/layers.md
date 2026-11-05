@@ -201,6 +201,23 @@ source authority 아래 파일 정리(:1183), JSONL 기록(:1315)을 실행한�
 같은 source에서 K commit의 매핑을 이전 매핑으로 고정해 `--admit-classification`으로
 기록한다. 새 역방향 편입은 0 ID·0회이며 기존 역방향 130 ID·316회 한도는 유지한다.
 
+### Claude/Codex TUI와 tmux wrappers
+
+Claude/Codex TUI 본체와 tmux wrappers는 provider 입력 transport·세션 실행·파일 관측을
+소유하므로 adapter다. 화면·문자열·경로 판정 leaf는 긴 foundation prefix로 구분한다.
+foundation leaf의 상위 실행 모듈 참조는 배치 부채로 기록하며 추출 가능으로 선언하지 않는다.
+`services::claude_tui::hook_server`와 그 하위는 provider hook 수신 transport·event bus·값 계약인
+adapter다. `src/server/web_surface.rs:36`이 router를 장착하므로 assembly→adapter 정방향이다.
+HTTP handler를 조립하는 `services::claude_tui::tui_relay`만 assembly로 둔다.
+`services::claude_tui::owner_input`은 C6에서 함께 분류(진행 중 입력 레인이 이 모듈을 만짐)한다.
+이 모듈은 명시적 미분류로 남기고 `services` 상위 미분류 규칙도 유지한다.
+
+편입 ID·count·accepted 이후 증가량은 생성기의 `--report` 출력인
+[`module-layer-c2-admission.tsv`](module-layer-c2-admission.tsv)에 기록한다.
+이는 검토 증거이며 생성기 입력 manifest나 별도 편입 정본이 아니다.
+기존 역방향 양수 record와 zero-rule 한도는 유지하고, 같은 source anchor의 정확한
+판정 불가→역방향 ID·count만 편입한다.
+
 ## 검토된 모듈 이동의 old→new 대응
 
 이동 대응은 [`layer_moves.toml`](../../scripts/audit_maintainability/layer_moves.toml)에 적는다.

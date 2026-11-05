@@ -7,9 +7,58 @@ const CREATED_AT: &str = "created_at < NOW() - ($1::INT || ' days')::INTERVAL";
 // `stat_date` is a zero-padded `YYYY-MM-DD` string, so text order is date order.
 const STAT_DATE: &str = "stat_date < to_char(CURRENT_DATE - $1::INT, 'YYYY-MM-DD')";
 
+// A redrive key stays while its outbox row exists, so the same key keeps replaying.
+const REDRIVE_AUDIT: &str = "requested_at < NOW() - ($1::INT || ' days')::INTERVAL \
+     AND NOT EXISTS (SELECT 1 FROM message_outbox o \
+                     WHERE o.id = message_outbox_redrive_audit.message_outbox_id)";
+
+// Kept: every transition of an entry in an open (or unknown) run, and for any other live
+// entry its latest transition and latest `skipped` one, which the phase gate reads.
+const ENTRY_TRANSITION: &str = "created_at < NOW() - ($1::INT || ' days')::INTERVAL \
+     AND NOT EXISTS ( \
+         SELECT 1 FROM auto_queue_entries e \
+         LEFT JOIN auto_queue_runs r ON r.id = e.run_id \
+         WHERE e.id = auto_queue_entry_transitions.entry_id \
+           AND (r.id IS NULL OR r.status IS NULL OR r.status NOT IN ('completed', 'cancelled') \
+                OR NOT EXISTS (SELECT 1 FROM auto_queue_entry_transitions n \
+                    WHERE n.entry_id = e.id \
+                      AND (n.created_at, n.id) > (auto_queue_entry_transitions.created_at, \
+                                                  auto_queue_entry_transitions.id)) \
+                OR (auto_queue_entry_transitions.to_status = 'skipped' \
+                    AND NOT EXISTS (SELECT 1 FROM auto_queue_entry_transitions n \
+                        WHERE n.entry_id = e.id AND n.to_status = 'skipped' \
+                          AND (n.created_at, n.id) > (auto_queue_entry_transitions.created_at, \
+                                                      auto_queue_entry_transitions.id)))))";
+
+// Only superseded `failed` attempts go; a key's one non-failed row (0046 unique) is its
+// dedupe record. Kept too: in-flight dispatches, each dispatch's latest row.
+const DELIVERY_EVENT: &str = "status = 'failed' \
+     AND created_at < NOW() - ($1::INT || ' days')::INTERVAL \
+     AND NOT EXISTS (SELECT 1 FROM task_dispatches td \
+         WHERE td.id = dispatch_delivery_events.dispatch_id \
+           AND td.status IN ('pending', 'dispatched')) \
+     AND EXISTS (SELECT 1 FROM dispatch_delivery_events n \
+         WHERE n.dispatch_id = dispatch_delivery_events.dispatch_id \
+           AND n.correlation_id = dispatch_delivery_events.correlation_id \
+           AND n.semantic_event_id = dispatch_delivery_events.semantic_event_id \
+           AND n.operation = dispatch_delivery_events.operation \
+           AND n.target_kind = dispatch_delivery_events.target_kind \
+           AND COALESCE(n.target_channel_id, '') \
+               = COALESCE(dispatch_delivery_events.target_channel_id, '') \
+           AND COALESCE(n.target_thread_id, '') \
+               = COALESCE(dispatch_delivery_events.target_thread_id, '') \
+           AND (n.attempt, n.updated_at, n.id) > (dispatch_delivery_events.attempt, \
+                dispatch_delivery_events.updated_at, dispatch_delivery_events.id)) \
+     AND EXISTS (SELECT 1 FROM dispatch_delivery_events n \
+         WHERE n.dispatch_id = dispatch_delivery_events.dispatch_id \
+           AND n.operation = dispatch_delivery_events.operation \
+           AND n.target_kind = dispatch_delivery_events.target_kind \
+           AND (n.updated_at, n.id) > (dispatch_delivery_events.updated_at, \
+                                       dispatch_delivery_events.id))";
+
 // `(table, aged-row predicate with the window days as $1, days)`; NULL times are kept.
 // Runs after the archive copies, so a row archived this pass gets its archive window.
-const CAPS: [(&str, &str, i32); 10] = [
+const CAPS: [(&str, &str, i32); 13] = [
     (
         "session_transcripts_archive",
         CREATED_AT,
@@ -52,6 +101,21 @@ const CAPS: [(&str, &str, i32); 10] = [
         MEMENTO_FEEDBACK_STATS_RETENTION_DAYS,
     ),
     ("dispatch_events", CREATED_AT, DISPATCH_EVENT_RETENTION_DAYS),
+    (
+        "message_outbox_redrive_audit",
+        REDRIVE_AUDIT,
+        REDRIVE_AUDIT_RETENTION_DAYS,
+    ),
+    (
+        "auto_queue_entry_transitions",
+        ENTRY_TRANSITION,
+        ENTRY_TRANSITION_RETENTION_DAYS,
+    ),
+    (
+        "dispatch_delivery_events",
+        DELIVERY_EVENT,
+        DELIVERY_EVENT_RETENTION_DAYS,
+    ),
 ];
 
 pub(super) async fn retain(
@@ -306,6 +370,325 @@ mod tests {
                 "{table}: only the row past the window is deleted"
             );
         }
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    async fn exec(pool: &PgPool, sql: &str) {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_string()))
+            .execute(pool)
+            .await
+            .unwrap_or_else(|err| panic!("fixture `{sql}`: {err}"));
+    }
+
+    async fn keys(pool: &PgPool, sql: &'static str) -> Vec<String> {
+        sqlx::query_scalar(sql)
+            .fetch_all(pool)
+            .await
+            .unwrap_or_else(|err| panic!("read `{sql}`: {err}"))
+    }
+
+    /// Ledger tables lose only aged rows no live reader can still pick, and the redrive
+    /// and phase-gate readers answer as before.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn db_retention_keeps_ledger_rows_live_readers_still_use() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_db_retention_record_caps_excluded",
+            "db_retention excluded ledger rows",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        let day = |n: i32| format!("NOW() - INTERVAL '{n} days'");
+
+        // Redrive: a real redrive writes the key, then the outbox row fails again.
+        let outbox_id = crate::services::message_outbox::enqueue_outbox_pg_returning_id_with_ttl(
+            &pool,
+            crate::services::message_outbox::OutboxMessage {
+                target: "channel:20",
+                content: "notice",
+                bot: "notify",
+                source: "catch_up_too_old",
+                reason_code: Some("catch_up_too_old"),
+                session_key: Some("session:20"),
+            },
+            0,
+        )
+        .await
+        .expect("enqueue outbox row")
+        .expect("outbox row inserted");
+        let fail = format!(
+            "UPDATE message_outbox SET status = 'failed', retry_count = 5, \
+             error = 'terminal failure' WHERE id = {outbox_id}"
+        );
+        exec(&pool, &fail).await;
+        let redrive = || {
+            crate::services::message_outbox_recovery::redrive_failed_rows(
+                &pool,
+                std::slice::from_ref(&outbox_id),
+                "stable-key",
+                "incident",
+                false,
+            )
+        };
+        let first = redrive().await.expect("first redrive");
+        assert_eq!(first[0].outcome, "redriven");
+        exec(
+            &pool,
+            &format!(
+                "{fail}; \
+                 UPDATE message_outbox_redrive_audit SET requested_at = {}; \
+                 INSERT INTO message_outbox_redrive_audit \
+                     (message_outbox_id, idempotency_key, reason, requested_at) \
+                 VALUES (999999, 'gone-old', 'x', {}), (999998, 'gone-new', 'x', {})",
+                day(100),
+                day(91),
+                day(89)
+            ),
+        )
+        .await;
+
+        // Entry transitions: `from_status` carries the row label.
+        exec(
+            &pool,
+            "INSERT INTO agents (id, name, provider, discord_channel_id) \
+                 VALUES ('agent-rc', 'Agent', 'claude', '999'); \
+             INSERT INTO auto_queue_runs (id, repo, agent_id, status) \
+                 VALUES ('run-open', 'repo', 'agent-rc', 'active'), \
+                        ('run-done', 'repo', 'agent-rc', 'completed'); \
+             INSERT INTO kanban_cards (id, title, status, assigned_agent_id) \
+                 VALUES ('card-open', 'open', 'in_progress', 'agent-rc'), \
+                        ('card-done', 'done', 'done', 'agent-rc'); \
+             INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, \
+                 priority_rank, thread_group, batch_phase) \
+                 VALUES ('e-skip', 'run-open', 'card-open', 'agent-rc', 'skipped', 0, 0, 0), \
+                        ('e-next', 'run-open', NULL, 'agent-rc', 'pending', 0, 0, 1), \
+                        ('e-done', 'run-done', 'card-done', 'agent-rc', 'done', 0, 0, 0)",
+        )
+        .await;
+        let mut transitions = Vec::new();
+        for (label, entry, to, source, age) in [
+            ("open-1", "e-skip", "dispatched", "auto", 102),
+            ("open-2", "e-skip", "skipped", "manual_skip", 101),
+            ("done-0", "e-done", "dispatched", "auto", 104),
+            ("done-1", "e-done", "skipped", "manual_skip", 103),
+            ("done-2", "e-done", "pending", "auto", 102),
+            ("done-3", "e-done", "done", "auto", 101),
+            ("gone-old", "e-gone", "done", "auto", 91),
+            ("gone-new", "e-gone", "done", "auto", 89),
+        ] {
+            transitions.push(format!(
+                "('{entry}', '{label}', '{to}', '{source}', {})",
+                day(age)
+            ));
+        }
+        exec(
+            &pool,
+            &format!(
+                "INSERT INTO auto_queue_entry_transitions \
+                 (entry_id, from_status, to_status, trigger_source, created_at) VALUES {}",
+                transitions.join(", ")
+            ),
+        )
+        .await;
+
+        // Delivery events: `error` carries the row label; `(created, updated)` ages.
+        exec(
+            &pool,
+            "INSERT INTO task_dispatches (id, status, dispatch_type) \
+             VALUES ('d-live', 'pending', 'implementation'), \
+                    ('d-fail', 'failed', 'implementation'), \
+                    ('d-fresh', 'failed', 'implementation')",
+        )
+        .await;
+        let mut events = Vec::new();
+        for (label, dispatch, event, attempt, status, created, updated) in [
+            ("sent-1", "d-fail", "n", 1, "sent", 104, 104),
+            ("failed-2", "d-fail", "n", 2, "failed", 103, 103),
+            ("failed-3", "d-fail", "n", 3, "failed", 102, 102),
+            ("dispatch-latest", "d-fail", "m", 1, "failed", 105, 100),
+            ("key-latest", "d-fail", "m", 2, "failed", 104, 104),
+            ("reserved", "d-fail", "r", 1, "reserved", 106, 106),
+            ("live-1", "d-live", "n", 1, "failed", 103, 103),
+            ("live-2", "d-live", "n", 2, "failed", 102, 102),
+            ("fresh-1", "d-fresh", "n", 1, "failed", 89, 89),
+            ("fresh-2", "d-fresh", "n", 2, "failed", 88, 88),
+        ] {
+            events.push(format!(
+                "('{dispatch}', 'dispatch:{dispatch}', '{event}', '{status}', {attempt}, \
+                 '{label}', {}, {}, NOW() - INTERVAL '1 day')",
+                day(created),
+                day(updated)
+            ));
+        }
+        exec(
+            &pool,
+            &format!(
+                "INSERT INTO dispatch_delivery_events (dispatch_id, correlation_id, \
+                 semantic_event_id, status, attempt, error, created_at, updated_at, \
+                 reserved_until) VALUES {}",
+                events.join(", ")
+            ),
+        )
+        .await;
+
+        const REDRIVE: &str = "SELECT idempotency_key FROM message_outbox_redrive_audit ORDER BY 1";
+        const TRANSITIONS: &str = "SELECT from_status FROM auto_queue_entry_transitions ORDER BY 1";
+        const EVENTS: &str = "SELECT error FROM dispatch_delivery_events ORDER BY 1";
+        let snapshot = |pool: PgPool| async move {
+            (
+                keys(&pool, REDRIVE).await,
+                keys(&pool, TRANSITIONS).await,
+                keys(&pool, EVENTS).await,
+            )
+        };
+        let seeded = snapshot(pool.clone()).await;
+
+        let dry = db_retention_job(&pool, true).await.expect("dry-run pass");
+        let report = |r: &RetentionReport, action: &str| {
+            [
+                "message_outbox_redrive_audit",
+                "auto_queue_entry_transitions",
+                "dispatch_delivery_events",
+            ]
+            .map(|table| r.get(table, action).map(|t| t.rows_affected))
+        };
+        assert_eq!(report(&dry, "delete_would"), [Some(1), Some(3), Some(1)]);
+        assert_eq!(
+            snapshot(pool.clone()).await,
+            seeded,
+            "dry-run deletes nothing"
+        );
+
+        let live = db_retention_job(&pool, false).await.expect("live pass");
+        assert_eq!(report(&live, "delete"), [Some(1), Some(3), Some(1)]);
+        let strings = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            snapshot(pool.clone()).await,
+            (
+                strings(&["gone-new", "stable-key"]),
+                strings(&["done-1", "done-3", "gone-new", "open-1", "open-2"]),
+                strings(&[
+                    "dispatch-latest",
+                    "failed-3",
+                    "fresh-1",
+                    "fresh-2",
+                    "key-latest",
+                    "live-1",
+                    "live-2",
+                    "reserved",
+                    "sent-1",
+                ]),
+            ),
+            "only aged rows no reader can pick are deleted"
+        );
+
+        // The readers answer as before the pass.
+        let replay = redrive().await.expect("same-key replay");
+        assert_eq!(replay[0].outcome, "idempotent_replay");
+        let outbox: String = sqlx::query_scalar("SELECT status FROM message_outbox WHERE id = $1")
+            .bind(outbox_id)
+            .fetch_one(&pool)
+            .await
+            .expect("outbox status");
+        assert_eq!(outbox, "failed", "the kept key blocks a second redrive");
+        assert_eq!(
+            crate::db::auto_queue::current_batch_phase_pg(&pool, "run-open")
+                .await
+                .expect("phase gate"),
+            Some(1),
+            "the manual_skip entry still does not hold phase 0 open"
+        );
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// A finished run's skipped entry keeps the transition the phase gate reads when two
+    /// skips share a timestamp, and runs of unknown status keep every transition.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn db_retention_keeps_the_phase_gate_skip_on_ties_and_null_runs() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_db_retention_record_caps_ties",
+            "db_retention transition ties and null runs",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        // Run `tie-a` writes the manual skip first (smaller id), `tie-b` writes it last.
+        exec(
+            &pool,
+            "INSERT INTO agents (id, name, provider, discord_channel_id) \
+                 VALUES ('agent-t', 'Agent', 'claude', '998'); \
+             INSERT INTO auto_queue_runs (id, repo, agent_id, status) \
+                 VALUES ('tie-a', 'repo', 'agent-t', 'completed'), \
+                        ('tie-b', 'repo', 'agent-t', 'completed'), \
+                        ('run-null', 'repo', 'agent-t', NULL); \
+             INSERT INTO kanban_cards (id, title, status, assigned_agent_id) \
+                 VALUES ('card-a', 'a', 'in_progress', 'agent-t'), \
+                        ('card-b', 'b', 'in_progress', 'agent-t'); \
+             INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, \
+                 priority_rank, thread_group, batch_phase) \
+                 VALUES ('e-a', 'tie-a', 'card-a', 'agent-t', 'skipped', 0, 0, 0), \
+                        ('e-a-next', 'tie-a', NULL, 'agent-t', 'pending', 0, 0, 1), \
+                        ('e-b', 'tie-b', 'card-b', 'agent-t', 'skipped', 0, 0, 0), \
+                        ('e-b-next', 'tie-b', NULL, 'agent-t', 'pending', 0, 0, 1), \
+                        ('e-null', 'run-null', NULL, 'agent-t', 'done', 0, 0, 0), \
+                        ('e-norun', NULL, NULL, 'agent-t', 'done', 0, 0, 0); \
+             INSERT INTO auto_queue_entry_transitions \
+                 (entry_id, from_status, to_status, trigger_source, created_at) VALUES \
+                 ('e-a', 'a-old', 'dispatched', 'auto', NOW() - INTERVAL '110 days'), \
+                 ('e-a', 'a-manual', 'skipped', 'manual_skip', NOW() - INTERVAL '100 days'), \
+                 ('e-a', 'a-auto', 'skipped', 'auto', NOW() - INTERVAL '100 days'), \
+                 ('e-a', 'a-null', 'pending', 'auto', NULL), \
+                 ('e-b', 'b-old', 'dispatched', 'auto', NOW() - INTERVAL '110 days'), \
+                 ('e-b', 'b-auto', 'skipped', 'auto', NOW() - INTERVAL '100 days'), \
+                 ('e-b', 'b-manual', 'skipped', 'manual_skip', NOW() - INTERVAL '100 days'), \
+                 ('e-null', 'null-1', 'dispatched', 'auto', NOW() - INTERVAL '110 days'), \
+                 ('e-null', 'null-2', 'done', 'auto', NOW() - INTERVAL '100 days'), \
+                 ('e-norun', 'norun-1', 'dispatched', 'auto', NOW() - INTERVAL '110 days'), \
+                 ('e-norun', 'norun-2', 'done', 'auto', NOW() - INTERVAL '100 days')",
+        )
+        .await;
+        // The two `100 days` values above are one statement's `NOW()`, so they tie exactly.
+        let phases = |pool: PgPool| async move {
+            let mut out = Vec::new();
+            for run in ["tie-a", "tie-b"] {
+                out.push(
+                    crate::db::auto_queue::current_batch_phase_pg(&pool, run)
+                        .await
+                        .expect("phase gate"),
+                );
+            }
+            out
+        };
+        // `tie-a`'s latest skip is the automatic one, so its entry holds phase 0.
+        assert_eq!(phases(pool.clone()).await, vec![Some(0), Some(1)]);
+
+        let report = db_retention_job(&pool, false).await.expect("live pass");
+        assert_eq!(
+            report
+                .get("auto_queue_entry_transitions", "delete")
+                .map(|t| t.rows_affected),
+            Some(4),
+            "the old dispatch rows and the losing tied skips go"
+        );
+        assert_eq!(
+            keys(
+                &pool,
+                "SELECT from_status FROM auto_queue_entry_transitions ORDER BY 1"
+            )
+            .await,
+            [
+                "a-auto", "a-null", "b-manual", "norun-1", "norun-2", "null-1", "null-2"
+            ]
+            .map(String::from),
+            "tied skips keep the larger id; unknown-status and run-less entries keep all"
+        );
+        assert_eq!(
+            phases(pool.clone()).await,
+            vec![Some(0), Some(1)],
+            "the phase gate answers as before the pass"
+        );
 
         pool.close().await;
         db.drop().await;

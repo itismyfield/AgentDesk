@@ -182,7 +182,7 @@ async fn purge_on(
     run_pre_purge_hook_for_test(provider, channel_id, handle).await;
     // A V2 owner's queue purges only as captured; the head it already attempted stays.
     #[cfg(unix)]
-    if let Some(purge) = purge_v2(handle, persistence.clone()).await {
+    if let Some(purge) = purge_v2(handle, persistence.clone(), || std::future::ready(())).await {
         return purge;
     }
     let purge = handle
@@ -214,10 +214,12 @@ async fn purge_on(
 mod v2_tests;
 
 /// `None` when no V2 owner holds the queue; a refused or unanswered purge preserves it.
+/// `captured` runs between the capture and the checked purge, where the queue may change.
 #[cfg(unix)]
-async fn purge_v2(
+async fn purge_v2<F: std::future::Future<Output = ()>>(
     handle: &ChannelMailboxHandle,
     persistence: QueuePersistenceContext,
+    captured: impl FnOnce() -> F,
 ) -> Option<Option<PurgeQueueResult>> {
     let expected = match handle.try_capture_v2().await {
         Ok(Some(expected)) => expected,
@@ -227,6 +229,7 @@ async fn purge_v2(
             return Some(None);
         }
     };
+    captured().await;
     let purge = handle.try_purge_queue_if_unchanged(persistence, expected);
     let purge = purge.await.ok().filter(|purge| purge.failed.is_none());
     Some(purge.map(|purge| PurgeQueueResult {
