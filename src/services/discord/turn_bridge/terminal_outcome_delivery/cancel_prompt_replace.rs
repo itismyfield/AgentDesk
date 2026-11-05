@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use super::foreign_terminal_handoff::cancelled_terminal_response;
 use super::*;
+use crate::services::discord::outbound::body_census::{BodyOffer, BodySource};
 use crate::services::discord::session_banner::DiscordTurnSessionBanner;
-use crate::services::tui_o::cutover::{BodySend, claim_then_send};
+use crate::services::tui_o::cutover::{BodySend, BodySite, claim_then_send_at};
 
 pub(super) enum CancelPromptReplaceMessage {
     Cancelled,
@@ -246,9 +247,10 @@ pub(super) async fn handle_cancel_prompt_replace(
                 current_msg_id,
                 inflight_state.tmux_session_name.as_deref(),
                 BodySend::flatten(
-                    claim_then_send(body_claim, || {
+                    BodySource::from_state(inflight_state).observe(BodySite::BridgeCancelled,
+                    BodyOffer::body(!partial.trim().is_empty()), claim_then_send_at(BodySite::BridgeCancelled, body_claim, || {
                         gateway.replace_message_with_outcome(channel_id, current_msg_id, &terminal_response)
-                    })
+                    }))
                     .await,
                 ),
                 dispatch_id.as_deref(),
@@ -358,8 +360,8 @@ pub(super) async fn handle_cancel_prompt_replace(
                     channel_id,
                     current_msg_id,
                     inflight_state.tmux_session_name.as_deref(),
-                    gateway
-                        .replace_message_with_outcome(channel_id, current_msg_id, &display_response)
+                    BodySource::from_state(inflight_state).observe(BodySite::BridgeCancelled, BodyOffer::NonBody,
+                        gateway.replace_message_with_outcome(channel_id, current_msg_id, &display_response))
                         .await,
                     dispatch_id.as_deref(),
                     adk_session_key.as_deref(),

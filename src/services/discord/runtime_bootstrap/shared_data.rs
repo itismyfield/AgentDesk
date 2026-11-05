@@ -65,6 +65,7 @@ pub(super) fn run_bot_build_shared_data(
         pg_pool,
         engine,
     } = services;
+    crate::engine::ops::turn_ops::set_global_health_registry(&health_registry);
     let ProcessLifecycleCounters {
         global_active,
         global_finalizing,
@@ -252,4 +253,72 @@ pub(super) fn run_bot_build_shared_data(
         readopted_mailbox_ledger:
             crate::services::discord::readopted_mailbox_ledger::ReadoptedMailboxLedger::default(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct RestoreRegistry(Option<Arc<health::HealthRegistry>>);
+
+    impl Drop for RestoreRegistry {
+        fn drop(&mut self) {
+            let restored = self
+                .0
+                .take()
+                .unwrap_or_else(|| Arc::new(health::HealthRegistry::new()));
+            crate::engine::ops::turn_ops::set_global_health_registry(&restored);
+            runtime_store::set_process_generation_for_tests(None);
+        }
+    }
+
+    #[test]
+    fn shared_data_publishes_runtime_registry_without_policy_engine() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let _restore = RestoreRegistry(crate::engine::ops::turn_ops::health_registry());
+        let registry = Arc::new(health::HealthRegistry::new());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _entered = runtime.enter();
+        let shared = run_bot_build_shared_data(
+            DiscordBotSettings::default(),
+            &ProviderKind::Claude,
+            RuntimeServices {
+                initial_skills: Vec::new(),
+                token_hash: "registry-bootstrap".to_owned(),
+                api_port: 9,
+                health_registry: registry.clone(),
+                pg_pool: None,
+                engine: None,
+            },
+            ProcessLifecycleCounters {
+                global_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                global_finalizing: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                shutdown_remaining: Arc::new(std::sync::atomic::AtomicUsize::new(1)),
+            },
+            UiFeatureFlags {
+                two_message_panel_enabled: false,
+            },
+            RestoredSessionState {
+                model_overrides: &[],
+                node_overrides: &[],
+                fast_mode_channels: &[],
+                fast_mode_reset_entries: &[],
+                fast_mode_reset_channels: &[],
+                codex_goals_channels: &[],
+                codex_goals_reset_channels: &[],
+            },
+        );
+        assert!(shared.policy.engine.is_none());
+        let published = crate::engine::ops::turn_ops::health_registry()
+            .expect("runtime registry must be published without a policy engine");
+        assert!(Arc::ptr_eq(&published, &registry));
+        let shared_registry = shared
+            .health_registry
+            .upgrade()
+            .expect("caller retains its registry while the runtime lives");
+        assert!(Arc::ptr_eq(&shared_registry, &registry));
+    }
 }

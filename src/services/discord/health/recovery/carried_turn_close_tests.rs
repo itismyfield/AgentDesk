@@ -997,10 +997,11 @@ mod cases {
                 ..Options::default()
             };
             let fx = Fixture::new(channel, user_msg_id, options).await;
+            // Queued without an enqueue kick: every kick counted below is the close's.
             let waiting = discord::relay_recovery::tests::orphan_token_finish::queued(channel + 1);
-            let queued =
-                discord::mailbox_enqueue_intervention(&fx.shared, &PROVIDER, fx.channel, waiting);
-            assert!(queued.await.enqueued);
+            let context = discord::queue_persistence_context(&fx.shared, &PROVIDER, fx.channel);
+            let mailbox = fx.shared.mailbox(fx.channel);
+            mailbox.replace_queue(vec![waiting], context).await;
             let kicks = Arc::new(Mutex::new(0_usize));
             let (seen, at) = (kicks.clone(), fx.channel);
             let _hook = discord::queue_io::set_idle_queue_kick_hook_for_tests(Arc::new(
@@ -1013,21 +1014,33 @@ mod cases {
                     Box::pin(async move { outcome })
                 },
             ));
+            let completion =
+                discord::queue_io::cancel_backstop_test_support::KickoffCompletion::install(
+                    fx.channel,
+                );
             discord::spawn_turn_completion_idle_queue_listener(fx.shared.clone(), PROVIDER);
-            // The enqueue's own kick met the row; what follows is the close's.
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            let before = *kicks.lock().unwrap();
+            completion.listener_ready(Duration::from_secs(10)).await;
+            tokio::time::pause();
             fx.pass().await;
             fx.assert_closed(&format!("episode={episode}")).await;
-            for _ in 0..100 {
-                if *kicks.lock().unwrap() > before {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            let after = *kicks.lock().unwrap() - before;
-            assert_eq!(after, 1, "episode={episode}: the close kicks once");
+            completion
+                .processed(usize::from(episode), Duration::from_secs(55))
+                .await;
+            assert_eq!(
+                *kicks.lock().unwrap(),
+                1,
+                "episode={episode}: the close kicks once"
+            );
+            fx.pass().await;
+            completion
+                .processed(usize::from(episode), Duration::from_secs(55))
+                .await;
+            assert_eq!(
+                *kicks.lock().unwrap(),
+                1,
+                "episode={episode}: a closed turn kicks no more"
+            );
+            tokio::time::resume();
         }
     }
 }

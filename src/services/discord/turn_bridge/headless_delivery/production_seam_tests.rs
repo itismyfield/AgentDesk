@@ -1,6 +1,90 @@
 use super::*;
 use crate::services::message_outbox::{OutboxEnqueueOutcome, OutboxMessage};
 
+#[path = "observation_tests.rs"]
+mod observation_tests;
+
+#[tokio::test]
+async fn tui_no_direct_enqueue_keeps_source_until_real_worker_delivery_pg() {
+    use crate::server::outbox_worker::{drain_message_outbox_once, origin_fixture::Discord};
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+    use crate::services::cluster::intake_router_hook::owner_record::output;
+    use crate::services::discord::outbound::raw_output::tests as recording;
+    if recording::isolated(
+        concat!(
+            module_path!(),
+            "::tui_no_direct_enqueue_keeps_source_until_real_worker_delivery_pg"
+        )
+        .trim_start_matches("agentdesk::"),
+    ) {
+        return;
+    }
+    let (_db, pool, _origin) = output::tests::fixture("72280700").await;
+    let log = recording::journal().await;
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let mut state = test_inflight_state();
+    state.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+    state.runtime_kind_unknown_on_disk = false;
+    state.delivery_bot = Some("notify".into());
+    let provider = ProviderKind::Claude;
+    let arguments = assemble_headless_delivery_arguments(
+        &state,
+        HeadlessDeliveryInputs {
+            shared: &shared,
+            channel_id: ChannelId::new(72280700),
+            owning_user_msg_id: Some(MessageId::new(90001)),
+            session_key: None,
+            provider: &provider,
+            content: "census answer",
+            cancel_token: None,
+        },
+    );
+    let mock = Discord::new().await;
+    let registry = mock.registry().await;
+    let consume = async {
+        let row: serde_json::Value =
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    let row: Option<serde_json::Value> = sqlx::query_scalar(
+                        "SELECT to_jsonb(m) FROM message_outbox m WHERE content='census answer'",
+                    )
+                    .fetch_optional(&pool)
+                    .await
+                    .unwrap();
+                    if let Some(row) = row {
+                        break row;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            row["body_census"]["tag"]["binding_mode"], "TUI",
+            "a no-direct TUI answer must not lose its source at enqueue"
+        );
+        assert!(mock.posts().is_empty(), "enqueue is not a wire success");
+        assert_eq!(
+            drain_message_outbox_once(&Arc::new(pool.clone()), &registry, "census-worker").await,
+            1
+        );
+    };
+    let (outcome, ()) = tokio::join!(enqueue_claimed_headless_delivery(None, arguments), consume);
+    assert!(matches!(outcome, HeadlessDeliveryOutcome::Delivered));
+    recording::flushed().await;
+    let rows: Vec<serde_json::Value> = std::fs::read_to_string(log)
+        .unwrap()
+        .lines()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .filter(|v: &serde_json::Value| v["kind"] == "target")
+        .collect();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[1]["outcome"], "confirmed");
+    assert_eq!(rows[1]["census"]["site"], "W17");
+    assert_eq!(rows[1]["census"]["binding_mode"], "TUI");
+}
+
 fn test_delivery_arguments<'a>(
     shared: &'a Arc<SharedData>,
     state: &'a InflightTurnState,

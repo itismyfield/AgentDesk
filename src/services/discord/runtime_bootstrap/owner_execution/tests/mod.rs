@@ -20,6 +20,14 @@ async fn owner_bootstrap_pg_snapshot_precedes_restore_for_all_runtime_roles() {
         "agents":[{"id":"custody-agent","name":"owner","channels":{"claude":{"id":channel.to_string(),"runtime":"tui"}}}],
         "tui_o":{"writer":{"channels":[channel]}}})).unwrap();
     let _channels = cutover::test_override::force_boot(BootChannels::validate(&config).unwrap());
+    use crate::services::cluster::intake_router_hook::owner_record::{OwnerIdentity, custody};
+    let mut competing = pool.begin().await.unwrap();
+    custody::lock(
+        &mut competing,
+        &OwnerIdentity::new("claude", &channel.to_string()),
+    )
+    .await
+    .unwrap();
     for role in ["gateway", "standby", "worker"] {
         prepare(&ProviderKind::Claude, Some(&pool)).await;
         let view = cutover::boot_snapshot()
@@ -41,6 +49,7 @@ async fn owner_bootstrap_pg_snapshot_precedes_restore_for_all_runtime_roles() {
             "{role} restore must see the PG execution owner"
         );
     }
+    competing.rollback().await.unwrap();
     pool.close().await;
     prepare(&ProviderKind::Claude, Some(&pool)).await;
     assert!(

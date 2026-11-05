@@ -272,7 +272,7 @@ impl RoutineSessionController {
         // belonging to this host; the namespace-exact DB disconnect still runs.
         let remote_owned = session_key_is_remote_owned(
             ownership_token,
-            &crate::services::platform::shell::hostname_short(),
+            &crate::services::platform::session_host_label(),
         );
         let lifecycle = if remote_owned {
             tracing::warn!(

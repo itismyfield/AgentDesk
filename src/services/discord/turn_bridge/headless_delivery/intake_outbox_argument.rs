@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::services::discord::outbound::body_census::BodySource;
+
 struct IntakeOutboxArgument(Option<i64>);
 
 impl IntakeOutboxArgument {
@@ -16,6 +18,7 @@ pub(in crate::services::discord::turn_bridge) struct HeadlessDeliveryArguments<'
     session_key: Option<&'a str>,
     delivery_bot: Option<&'a str>,
     _intake_outbox_id: IntakeOutboxArgument,
+    body_source: BodySource,
     provider: &'a ProviderKind,
     born_generation: u64,
     producer_turn_nonce: Option<&'a str>,
@@ -33,7 +36,7 @@ pub(in crate::services::discord::turn_bridge) struct HeadlessDeliveryInputs<'a> 
     pub(in crate::services::discord::turn_bridge) cancel_token: Option<&'a CancelToken>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct HeadlessDeliveryRuntimeArguments<'a> {
     pub(super) shared: &'a Arc<SharedData>,
     pub(super) channel_id: ChannelId,
@@ -44,11 +47,15 @@ pub(super) struct HeadlessDeliveryRuntimeArguments<'a> {
     pub(super) born_generation: u64,
     pub(super) producer_turn_nonce: Option<&'a str>,
     pub(super) intake_outbox_id: Option<i64>,
+    pub(super) body_source: BodySource,
     pub(super) content: &'a str,
     pub(super) cancel_token: Option<&'a CancelToken>,
 }
 
 impl<'a> HeadlessDeliveryArguments<'a> {
+    pub(super) fn body_source(&self) -> BodySource {
+        self.body_source.clone()
+    }
     pub(super) fn into_runtime_arguments(self) -> HeadlessDeliveryRuntimeArguments<'a> {
         let IntakeOutboxArgument(intake_outbox_id) = self._intake_outbox_id;
         HeadlessDeliveryRuntimeArguments {
@@ -61,6 +68,7 @@ impl<'a> HeadlessDeliveryArguments<'a> {
             born_generation: self.born_generation,
             producer_turn_nonce: self.producer_turn_nonce,
             intake_outbox_id,
+            body_source: self.body_source,
             content: self.content,
             cancel_token: self.cancel_token,
         }
@@ -78,6 +86,7 @@ pub(in crate::services::discord::turn_bridge) fn assemble_headless_delivery_argu
         session_key: inputs.session_key,
         delivery_bot: inflight_state.delivery_bot.as_deref(),
         _intake_outbox_id: IntakeOutboxArgument::from_inflight(inflight_state),
+        body_source: BodySource::from_state(inflight_state),
         provider: inputs.provider,
         born_generation: inflight_state.born_generation,
         // The turn's own nonce, copied from its cancel token at intake; empty means unknown.

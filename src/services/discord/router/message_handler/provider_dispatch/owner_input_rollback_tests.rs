@@ -898,3 +898,99 @@ async fn terminal_waiting_status_keeps_a_successor_active_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+/// A finished turn's row kept marked because its receipt failed: the owned front's one wake records
+/// that receipt, replaces the row and submits once to the idle pane, with no other wake.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_marked_row_is_settled_and_the_owned_front_submitted_on_one_wake_pg() {
+    if !creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::",
+        "a_marked_row_is_settled_and_the_owned_front_submitted_on_one_wake_pg"
+    )) {
+        return;
+    }
+    use crate::services::discord::inflight;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let rig =
+        IntakeRig::with_storage(7_676_108, false, ProviderKind::Claude, Some(pool.clone())).await;
+    fs::create_dir_all(rig.transcript.parent().unwrap()).unwrap();
+    fs::write(rig.renderer.join("transcript"), IDLE).unwrap();
+    fs::hard_link(rig.renderer.join("transcript"), &rig.transcript).unwrap();
+    let mut marked = inflight::InflightTurnState::new(
+        ProviderKind::Claude,
+        rig.channel.get(),
+        None,
+        7,
+        9,
+        0,
+        "ended".into(),
+        None,
+        None,
+        None,
+        None,
+        0,
+    );
+    marked.turn_nonce = Some("ended-turn".into());
+    marked.input_origin_ids = vec!["G-marked".into()];
+    marked.terminal_receipt = Some(inflight::TerminalReceiptStamp {
+        outcome: crate::db::turns::TerminalOutcome::Completed,
+        confirmed_at: chrono::Utc::now(),
+    });
+    inflight::save_inflight_state_create_new(&marked).unwrap();
+    let (completed, bridge) = tokio::sync::oneshot::channel();
+    *discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
+        .lock()
+        .unwrap() = Some((rig.channel, completed));
+    let (drive, mut settled) = rig.drive();
+    crate::services::discord::queue_io::input_owner::drive::wake(drive.clone());
+    let result = tokio::time::timeout(Duration::from_secs(30), settled.recv())
+        .await
+        .unwrap_or_else(|_| panic!("{}", rig.trace.text()))
+        .unwrap();
+    assert_eq!(result, Ok(()), "{}", rig.trace.text());
+    let receipt: Option<(Vec<String>, String)> = sqlx::query_as(
+        "SELECT consumed_origin_ids, terminal_outcome FROM turns
+         WHERE turn_id = $1 AND terminal_outcome IS NOT NULL",
+    )
+    .bind(format!("discord:{}:9", rig.channel))
+    .fetch_optional(&pool)
+    .await
+    .unwrap();
+    assert_eq!(receipt, Some((vec!["G-marked".into()], "completed".into())));
+    let row = inflight::load_inflight_state_read_only(&ProviderKind::Claude, rig.channel.get());
+    assert_ne!(
+        row.map(|row| row.user_msg_id),
+        Some(9),
+        "the marked row is gone"
+    );
+    assert_eq!(rig.state().await["items"], json!([]));
+    use std::io::Write;
+    let mut native = fs::OpenOptions::new()
+        .append(true)
+        .open(&rig.transcript)
+        .unwrap();
+    writeln!(native, "{}", json!({"type":"assistant","uuid":"marked-answer","apiBlockIndex":0,
+        "message":{"id":"marked-answer","role":"assistant","content":[{"type":"text","text":"answered after the marked row"}],"stop_reason":"end_turn"}})).unwrap();
+    writeln!(
+        native,
+        "{}",
+        json!({"type":"system","subtype":"turn_duration"})
+    )
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(30), bridge)
+        .await
+        .unwrap_or_else(|_| panic!("{}", rig.trace.text()))
+        .unwrap();
+    let enters = events(&rig.renderer)
+        .iter()
+        .filter(|e| *e == "Enter")
+        .count();
+    assert_eq!(enters, 1, "submitted once");
+    assert!(settled.try_recv().is_err(), "one wake, one pass");
+    drop(drive);
+    drop(rig);
+    pool.close().await;
+    db.drop().await;
+}

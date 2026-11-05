@@ -1,5 +1,8 @@
 //! The legacy long replace and, after a failed edit, its fallback post under one claimed send.
 
+use crate::services::discord::outbound::body_census::{BodyOffer, BodySource};
+use crate::services::tui_o::cutover::BodySite;
+
 use std::sync::Arc;
 
 use poise::serenity_prelude as serenity;
@@ -10,7 +13,7 @@ use crate::services::discord::formatting::{
     DeferredReplaceLongMessageOutcome, ReplaceLongMessageOutcome, replace_long_message_raw_deferred,
 };
 use crate::services::provider::ProviderKind;
-use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send_held};
+use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send_held_at};
 
 /// What the legacy long replace delivered, or that a failed edit's range was committed already.
 pub(super) enum WatcherDeferredReplaceOutcome {
@@ -41,10 +44,14 @@ pub(super) async fn replace_or_post_after_edit_failure(
 ) -> Option<Result<WatcherDeferredReplaceOutcome, Box<dyn std::error::Error + Send + Sync>>> {
     let replace = move || {
         let anchor = last_chunk_anchor;
-        replace_long_message_raw_deferred(http, channel_id, msg_id, relay_text, shared, anchor)
+        BodySource::inherited().observe(
+            BodySite::WatcherReplace,
+            BodyOffer::Body,
+            replace_long_message_raw_deferred(http, channel_id, msg_id, relay_text, shared, anchor),
+        )
     };
     let Ok((BodySend::Sent(replace_outcome), legacy_send)) =
-        claim_then_send_held(body_claim, replace).await
+        claim_then_send_held_at(BodySite::WatcherReplace, body_claim, replace).await
     else {
         return None;
     };
@@ -63,13 +70,18 @@ pub(super) async fn replace_or_post_after_edit_failure(
             ) {
                 Ok(WatcherDeferredReplaceOutcome::AlreadyCommittedAfterEditFailure { edit_error })
             } else {
-                crate::services::discord::formatting::send_long_message_raw_with_rollback_returning_receipts(
-                    http,
-                    channel_id,
-                    msg_id,
-                    relay_text,
-                    shared,
-                )
+                legacy_send
+                    .run(async {
+                        BodySource::captured(crate::services::discord::outbound::current_census())
+                            .observe(
+                                BodySite::WatcherPostFallback,
+                                BodyOffer::Body,
+                                crate::services::discord::formatting::send_long_message_raw_with_rollback_returning_receipts(
+                                    http, channel_id, msg_id, relay_text, shared,
+                                ),
+                            )
+                            .await
+                    })
                 .await
                 .and_then(|receipts| {
                     let message_ids =

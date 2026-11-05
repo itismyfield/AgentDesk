@@ -1,6 +1,6 @@
 //! A boot snapshot authorizes a local channel host; every raw effect still checks PG.
 use super::OwnershipGate;
-use crate::services::cluster::intake_router_hook::owner_record::{OwnerIdentity, custody};
+use crate::services::cluster::intake_router_hook::owner_record::OwnerIdentity;
 use crate::services::tui_o::channel_policy::Candidate;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -130,12 +130,13 @@ pub(crate) async fn read_observation(
     legacy_present: impl FnOnce() -> Result<bool, String>,
 ) -> Result<Option<Arc<OwnerPermit>>, ReadError> {
     let identity = OwnerIdentity::new(provider, &channel.to_string());
-    let mut tx = pool.begin().await.map_err(ReadError::temporary)?;
-    sqlx::query("SET LOCAL lock_timeout='2s'")
-        .execute(&mut *tx)
+    // Read all authority rows from one snapshot without waiting for effect custody.
+    let mut tx = pool
+        .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         .await
         .map_err(ReadError::temporary)?;
-    custody::lock(&mut tx, &identity)
+    sqlx::query("SET LOCAL lock_timeout='2s'")
+        .execute(&mut *tx)
         .await
         .map_err(ReadError::temporary)?;
     let managed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM intake_outbox WHERE provider=$1 AND channel_id=$2 AND routing_receipt_id IS NOT NULL)")

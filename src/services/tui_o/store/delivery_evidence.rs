@@ -71,6 +71,7 @@ pub(crate) fn stamp(root: &Path, channel: u64) -> Option<std::time::SystemTime> 
 #[derive(Clone, Default)]
 pub(crate) struct LocalEvidence {
     pieces: HashMap<(UnitKey, u32), (u64, ledger::PieceRecord)>,
+    confirmations: HashMap<u64, Box<ledger::PostConfirmation>>,
     #[cfg(test)]
     pub retained_payload_bytes: usize,
     #[cfg(test)]
@@ -81,6 +82,18 @@ pub(crate) struct LocalEvidence {
 }
 
 impl LocalEvidence {
+    pub(crate) fn confirmed_post(&self, key: &UnitKey, index: u32, bot_id: u64) -> Option<u64> {
+        let (serial, piece) = self.latest_piece(key, index)?;
+        let confirmation = self.confirmations.get(&serial)?;
+        if !confirmation.matches(serial, piece, bot_id) {
+            return None;
+        }
+        match piece.outcome {
+            Some(ledger::PieceOutcome::Posted(id)) => Some(id),
+            _ => None,
+        }
+    }
+
     pub(crate) fn latest_piece(
         &self,
         key: &UnitKey,
@@ -258,7 +271,8 @@ pub(crate) fn local(
                     continue;
                 }
                 let key = (unit_key.clone(), piece_index);
-                if let Some((_, previous)) = state.pieces.remove(&key) {
+                if let Some((previous_serial, previous)) = state.pieces.remove(&key) {
+                    state.confirmations.remove(&previous_serial);
                     payload_bytes -= previous.payload.len();
                 }
                 payload_bytes += payload.len();
@@ -285,8 +299,14 @@ pub(crate) fn local(
                 );
             }
             entry => {
+                let mut posted_confirmation = None;
                 let (serial, outcome) = match entry {
-                    ledger::LedgerEntry::Posted { serial, msg_id } => {
+                    ledger::LedgerEntry::Posted {
+                        serial,
+                        msg_id,
+                        confirmation,
+                    } => {
+                        posted_confirmation = confirmation;
                         (serial, ledger::PieceOutcome::Posted(msg_id))
                     }
                     ledger::LedgerEntry::Rejected { serial, status } => {
@@ -318,6 +338,11 @@ pub(crate) fn local(
                     }
                     record.outcome = Some(outcome);
                     record.outcome_at = Some(parsed.at);
+                    if let Some(confirmation) = posted_confirmation
+                        .filter(|confirmation| confirmation.matches_piece(serial, record))
+                    {
+                        state.confirmations.insert(serial, confirmation);
+                    }
                 }
             }
         }

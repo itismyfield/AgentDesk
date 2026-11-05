@@ -335,8 +335,9 @@ pub(super) async fn run_pre_emit_guard(
                 surrender_stale_channel_session(shared, watcher_provider, channel_id).await;
             // Clear DB session_id
             {
-                let hostname = crate::services::platform::hostname_short();
-                let session_key = format!("{}:{}", hostname, tmux_session_name);
+                let session_key = crate::services::discord::adk_session::build_legacy_session_key(
+                    tmux_session_name,
+                );
                 crate::services::discord::adk_session::clear_provider_session_id(
                     &session_key,
                     shared.api_port,

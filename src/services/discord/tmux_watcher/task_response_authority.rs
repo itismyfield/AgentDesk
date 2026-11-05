@@ -7,9 +7,10 @@ use super::*;
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::discord::SharedData;
 use crate::services::discord::inflight::opt_message_id;
+use crate::services::discord::outbound::body_census::{BodyOffer, BodySource};
 use crate::services::discord::task_notification_delivery as task_delivery;
 use crate::services::provider::ProviderKind;
-use crate::services::tui_o::cutover::{BodyClaim, BodySend};
+use crate::services::tui_o::cutover::{BodyClaim, BodySend, BodySite};
 
 struct PreparedWatcherTaskResponse {
     claim: task_delivery::ResponseDeliveryClaimOutcome,
@@ -27,6 +28,7 @@ pub(super) enum PrepareWatcherTaskResponseError {
 }
 
 pub(super) struct WatcherTaskResponseLocals<'a> {
+    pub(super) census_source: BodySource,
     pub(super) placeholder_msg_id: &'a mut Option<MessageId>,
     pub(super) placeholder_from_restored_inflight: &'a mut bool,
     pub(super) last_edit_text: &'a mut String,
@@ -295,6 +297,7 @@ pub(super) async fn apply_watcher_task_response(
     locals: WatcherTaskResponseLocals<'_>,
 ) -> WatcherTaskResponseOutcome {
     let WatcherTaskResponseLocals {
+        census_source,
         placeholder_msg_id,
         placeholder_from_restored_inflight,
         last_edit_text,
@@ -306,20 +309,25 @@ pub(super) async fn apply_watcher_task_response(
     let mut relay_ok = true;
     let mut direct_send_delivered = false;
     let mut external_input_lease_consumed_by_relay = false;
-    match prepare_watcher_task_response(
-        http,
-        shared,
-        provider,
-        channel_id,
-        tmux_session_name,
-        kind,
-        context,
-        response_turn_key,
-        turn_started_at,
-        turn_start_offset,
-        turn_end_offset,
-    )
-    .await
+    match BodySource::inherited()
+        .observe(
+            BodySite::WatcherTaskResponse,
+            BodyOffer::NonBody,
+            Box::pin(prepare_watcher_task_response(
+                http,
+                shared,
+                provider,
+                channel_id,
+                tmux_session_name,
+                kind,
+                context,
+                response_turn_key,
+                turn_started_at,
+                turn_start_offset,
+                turn_end_offset,
+            )),
+        )
+        .await
     {
         Err(PrepareWatcherTaskResponseError::Transient(error)) => {
             tracing::warn!(
@@ -404,17 +412,26 @@ pub(super) async fn apply_watcher_task_response(
                             task_delivery::DiscordTaskCardTransport::new(shared.clone());
                         // The response is the body: its first chunk post claims the channel.
                         let body = BodyClaim::tmux(channel_id.get(), Some(tmux_session_name));
-                        let claimed = task_delivery::claim_at_post(&response_transport, body);
-                        let sent = task_delivery::send_task_response_chunks_with_card_repair(
-                            shared.pg_pool.as_ref(),
-                            &prepared.clients,
-                            &card_transport,
-                            &claimed,
-                            &prepared.event,
-                            claim.clone(),
-                            relay_text,
-                        )
-                        .await;
+                        let claimed = task_delivery::claim_at_post(&response_transport, body)
+                            .observing(census_source.clone(), BodySite::WatcherTaskResponse);
+                        let sent = census_source
+                            .clone()
+                            .observe(
+                                BodySite::WatcherTaskResponse,
+                                BodyOffer::Body,
+                                Box::pin(
+                                    task_delivery::send_task_response_chunks_with_card_repair(
+                                        shared.pg_pool.as_ref(),
+                                        &prepared.clients,
+                                        &card_transport,
+                                        &claimed,
+                                        &prepared.event,
+                                        claim.clone(),
+                                        relay_text,
+                                    ),
+                                ),
+                            )
+                            .await;
                         let send_result = match claimed.settle(sent) {
                             Ok(BodySend::Sent(result)) => result,
                             Ok(BodySend::OwnedByO) | Err(_) => {

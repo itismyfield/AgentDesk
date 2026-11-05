@@ -1,0 +1,40 @@
+---
+title: "An idle input waits for its observer, issue 7676 F6"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Done
+    lg1: Waiting
+  }
+  class lg0 teal
+  class lg1 blue
+  s0: Owner wake before observer attaches
+  s1: Owner handoff has no observer
+  s2: Observer attached, owner wake pending
+  s3: Refusal settled, bridge still holds the turn token
+  s4: Owner handoff has its observer
+  s5: Handoff captured no observer, source now attached
+  s6: Refused before keys, claim still outstanding
+  s7: Refusal settled, attachment kickoff waits for turn release
+  s8: Input delivered once
+  [*] --> s0
+  s0 --> s1: the owner drive grants the waiting front
+  s0 --> s2: a readable observer source attaches and wakes the waiting owner once
+  s1 --> s3: idle submit refuses without an observer, before any key
+  s1 --> s5: a readable observer source attaches and wakes the waiting owner once
+  s2 --> s4: the owner drive grants the waiting front
+  s3 --> s6: the bridge releases its turn token and the existing latch completes
+  s3 --> s7: a readable observer source attaches and wakes the waiting owner once
+  s4 --> s8: the observed owner handoff delivers the input once
+  s5 --> s7: idle submit refuses without an observer, before any key
+  s6 --> s2: a readable observer source attaches and wakes the waiting owner once
+  s7 --> s2: the bridge releases its turn token and the existing latch completes
+  class s0 blue
+  class s1 blue
+  class s2 blue
+  class s3 blue
+  class s4 blue
+  class s5 blue
+  class s6 blue
+  class s7 blue
+  class s8 teal

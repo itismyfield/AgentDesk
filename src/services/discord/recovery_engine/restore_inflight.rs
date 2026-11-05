@@ -1854,16 +1854,20 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                             None,
                             shared.restart.current_generation,
                         );
-                        let relay_ok = relay_recovered_terminal_text_to_placeholder(
-                            http,
-                            shared,
-                            channel_id,
-                            current_msg_id,
-                            &format!("❌ {error}\nmain workspace fallback blocked."),
-                            recovery_context.as_ref(),
-                        )
-                        .await
-                        .delivered();
+                        let relay_ok =
+                            super::completion_delivery::observe_worktree_recovery_refusal(
+                                &state,
+                                relay_recovered_terminal_text_to_placeholder(
+                                    http,
+                                    shared,
+                                    channel_id,
+                                    current_msg_id,
+                                    &format!("❌ {error}\nmain workspace fallback blocked."),
+                                    recovery_context.as_ref(),
+                                ),
+                            )
+                            .await
+                            .delivered();
                         if should_advance_recovery_dispatch_after_relay(relay_ok) {
                             super::turn_bridge::fail_dispatch_with_retry(
                                 shared.api_port,
@@ -2116,13 +2120,16 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                     None,
                     shared.restart.current_generation,
                 );
-                let relay_ok = relay_recovered_terminal_text_to_placeholder(
-                    http,
-                    shared,
-                    channel_id,
-                    current_msg_id,
-                    &format!("❌ {error}\nmain workspace fallback blocked."),
-                    recovery_context.as_ref(),
+                let relay_ok = super::completion_delivery::observe_worktree_recovery_refusal(
+                    &state,
+                    relay_recovered_terminal_text_to_placeholder(
+                        http,
+                        shared,
+                        channel_id,
+                        current_msg_id,
+                        &format!("❌ {error}\nmain workspace fallback blocked."),
+                        recovery_context.as_ref(),
+                    ),
                 )
                 .await
                 .delivered();

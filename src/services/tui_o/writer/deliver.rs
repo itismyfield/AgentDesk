@@ -24,7 +24,8 @@ use crate::services::tui_o::repost::send::{DispatchReport, WireOutcome};
 use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::store::ChannelStore;
 use crate::services::tui_o::store::ledger::{
-    LedgerEntry, LedgerState, LocalRetryMark, PieceDisposition, PieceOutcome, PieceRecord, Unsent,
+    LedgerEntry, LedgerState, LocalRetryMark, PieceDisposition, PieceOutcome, PieceRecord,
+    PostConfirmation, Unsent,
 };
 use crate::services::tui_prompt_dedupe::codex_verified::provenance::admission::EpisodePermissionRecord;
 use crate::services::tui_prompt_dedupe::codex_verified::provenance::dormant::OwedOrigin;
@@ -461,7 +462,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     /// Appends one ledger entry; a store error or a violation the entry exposed stops the channel.
     pub(super) fn record(&mut self, entry: LedgerEntry) -> Result<(), Step> {
         let posted = match entry {
-            LedgerEntry::Posted { serial, msg_id } => Some((serial, msg_id)),
+            LedgerEntry::Posted { serial, msg_id, .. } => Some((serial, msg_id)),
             _ => None,
         };
         #[cfg(test)]
@@ -781,6 +782,22 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                 LedgerEntry::Posted {
                     serial,
                     msg_id: message.id,
+                    confirmation: (message.id != 0 && message.content == payload)
+                        .then(|| {
+                            self.store
+                                .ledger()
+                                .piece(serial)
+                                .filter(|piece| piece.payload == payload)
+                                .map(|piece| {
+                                    Box::new(PostConfirmation::new(
+                                        serial,
+                                        piece,
+                                        message.id,
+                                        self.port.bot_id(),
+                                    ))
+                                })
+                        })
+                        .flatten(),
                 }
             }
             PostOutcome::Withheld(reason) => {
@@ -874,7 +891,14 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             .await
         };
         let (entry, alarm) = match verdict {
-            Verdict::Posted(msg_id) => (LedgerEntry::Posted { serial, msg_id }, None),
+            Verdict::Posted(msg_id) => (
+                LedgerEntry::Posted {
+                    serial,
+                    msg_id,
+                    confirmation: None,
+                },
+                None,
+            ),
             Verdict::Ambiguous(candidates) => (
                 LedgerEntry::Ambiguous { serial, candidates },
                 Some(WriterAlarm::Ambiguous { serial }),

@@ -19,6 +19,8 @@ use crate::services::{claude, claude_tui, codex, gemini, opencode, qwen};
 
 #[cfg(unix)]
 mod owner_input;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use owner_input::hand_busy;
 #[cfg(unix)]
 pub(in crate::services::discord) use owner_input::{
     OwnerTurn, admit_start as owner_admit_start, recover as owner_recover, wake as owner_wake,

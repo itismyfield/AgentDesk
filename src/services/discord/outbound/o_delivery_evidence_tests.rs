@@ -25,6 +25,8 @@ pub(in crate::services::discord) struct Port {
     first: u64,
     pub uncertain: AtomicUsize,
     pub on_get: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    pub get_once: AtomicUsize,
+    transform: bool,
 }
 impl DiscordPort for Port {
     fn bot_id(&self) -> u64 {
@@ -39,7 +41,11 @@ impl DiscordPort for Port {
         let message = SeenMessage {
             id: self.first + ((messages.len() as u64) << 22) + messages.len() as u64,
             author_id: 42,
-            content,
+            content: if self.transform {
+                format!("transformed: {content}")
+            } else {
+                content
+            },
         };
         messages.push(message.clone());
         let uncertain = self.uncertain.load(Ordering::SeqCst);
@@ -79,7 +85,10 @@ impl DeliveryLease for Lease {
 pub(in crate::services::discord) struct Alarms;
 impl AlarmSink for Alarms {
     fn raise(&self, _: u64, alarm: WriterAlarm) {
-        if !matches!(alarm, WriterAlarm::Unresolved { .. }) {
+        if !matches!(
+            alarm,
+            WriterAlarm::Unresolved { .. } | WriterAlarm::ContentTransform { .. }
+        ) {
             panic!("writer alarm: {alarm:?}");
         }
     }
@@ -143,6 +152,13 @@ pub(in crate::services::discord) async fn bounded_with<T>(
         .unwrap_or_else(|_| panic!("{seam} did not finish within {limit:?}"))
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PostEvidence {
+    Legacy,
+    Exact,
+    Transformed,
+}
+
 impl Fixture {
     pub async fn new(channel: u64, provider: ProviderKind, bodies: &[&str]) -> Self {
         Self::new_mode(channel, provider, bodies, false).await
@@ -177,7 +193,7 @@ impl Fixture {
             uncertain,
             ending,
             None,
-            (0, false, false),
+            (0, false, false, PostEvidence::Legacy),
         )
         .await
     }
@@ -190,7 +206,7 @@ impl Fixture {
             0,
             None,
             Some(prefix),
-            (0, false, false),
+            (0, false, false, PostEvidence::Legacy),
         )
         .await
     }
@@ -203,7 +219,39 @@ impl Fixture {
             0,
             None,
             Some(4096),
-            (if large { 2_426_345 } else { 0 }, true, duration),
+            (
+                if large { 2_426_345 } else { 0 },
+                true,
+                duration,
+                PostEvidence::Legacy,
+            ),
+        )
+        .await
+    }
+
+    pub async fn confirmed_with_prefix(
+        channel: u64,
+        bodies: &[&str],
+        prefix: usize,
+        transform: bool,
+    ) -> Self {
+        Self::new_scoped(
+            channel,
+            ProviderKind::Claude,
+            bodies,
+            0,
+            None,
+            Some(prefix),
+            (
+                0,
+                false,
+                false,
+                if transform {
+                    PostEvidence::Transformed
+                } else {
+                    PostEvidence::Exact
+                },
+            ),
         )
         .await
     }
@@ -215,7 +263,7 @@ impl Fixture {
         uncertain: u8,
         ending: Option<serde_json::Value>,
         prefix: Option<usize>,
-        (padding, early_stop, duration): (usize, bool, bool),
+        (padding, early_stop, duration, evidence): (usize, bool, bool, PostEvidence),
     ) -> Self {
         let root = crate::config::runtime_root().unwrap();
         std::fs::create_dir_all(&root).unwrap();
@@ -328,6 +376,8 @@ impl Fixture {
             first: snowflake(390),
             uncertain: AtomicUsize::new(usize::from(uncertain)),
             on_get: Mutex::new(None),
+            get_once: AtomicUsize::new(0),
+            transform: evidence == PostEvidence::Transformed,
         });
         let mut writer = ChannelWriter::new(channel_store, gate, port.clone(), Lease, Alarms);
         for piece in work {
@@ -335,6 +385,26 @@ impl Fixture {
                 bounded("fixture writer delivery", writer.deliver(&piece)).await,
                 crate::services::tui_o::writer::deliver::Step::Done
             );
+        }
+        if evidence == PostEvidence::Legacy {
+            // Existing readback fixtures exercise receipts written before POST confirmations existed.
+            let ledger = root
+                .join("o_store")
+                .join(channel.to_string())
+                .join("ledger.jsonl");
+            let raw = std::fs::read_to_string(&ledger).unwrap();
+            let legacy: String = raw
+                .lines()
+                .map(|line| {
+                    let mut value: serde_json::Value = serde_json::from_str(line).unwrap();
+                    value["entry"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("confirmation");
+                    format!("{value}\n")
+                })
+                .collect();
+            std::fs::write(ledger, legacy).unwrap();
         }
         let kind = if provider == ProviderKind::Claude {
             RuntimeHandoffKind::ClaudeTui
@@ -424,13 +494,21 @@ impl Fixture {
         let channel = self.row.channel_id;
         let calls = self.get_calls.clone();
         let sends = self.sends.clone();
+        let seen = Arc::new(Mutex::new(std::collections::HashSet::new()));
         let app=Router::new().fallback(move|method:Method,uri:Uri|{
-            let port=port.clone();let calls=calls.clone();let sends=sends.clone();async move {
+            let port=port.clone();let calls=calls.clone();let sends=sends.clone();let seen=seen.clone();async move {
                 if method==Method::POST||method==Method::PATCH{sends.fetch_add(1,Ordering::SeqCst);}
                 if uri.path().ends_with("/users/@me") { return Json(json!({"id":"42","username":"bot","discriminator":"0001","avatar":null,"bot":true})).into_response(); }
                 if method==Method::DELETE{return StatusCode::NO_CONTENT.into_response();}
                 if !uri.path().contains("/messages") {return Json(json!({"id":channel.to_string(),"type":0,"guild_id":"1","name":"adk-cc","position":0,"permission_overwrites":[],"nsfw":false,"parent_id":null})).into_response();}
                 let id=uri.path().rsplit('/').next().unwrap().parse::<u64>().unwrap_or(snowflake(10));
+                if method==Method::GET {
+                    let repeated = !seen.lock().unwrap().insert(id);
+                    let policy = port.get_once.load(Ordering::SeqCst);
+                    if policy == 2 || (repeated && policy == 1) {
+                        std::future::pending::<()>().await;
+                    }
+                }
                 let msg=port.messages.lock().unwrap().iter().find(|m|m.id==id).cloned();
                 if method==Method::GET{if let Some(hook)=port.on_get.lock().unwrap().take(){hook();} calls.fetch_add(1,Ordering::SeqCst);if msg.is_none(){return StatusCode::NOT_FOUND.into_response();}}
                 let content=msg.map(|m|m.content).unwrap_or_default();
@@ -538,7 +616,8 @@ async fn i7441b_local_native_receipts_require_whole_episode_and_exact_payload() 
                 &plan,
                 plan.body.len() - 4,
                 Instant::now() + std::time::Duration::from_secs(10),
-                fixture_local(&f).as_ref()
+                fixture_local(&f).as_ref(),
+                &mut Verification::default(),
             )
             .await
             .is_some()
@@ -762,6 +841,30 @@ async fn i7441b_pg_only_runner_receipt_is_read_without_repairing_local_ledger_pg
         .await
         .is_some()
     );
+    {
+        let (http, _http) = f.http().await;
+        let shared =
+            crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+        assert!(
+            tail(
+                &http,
+                &shared,
+                Frame {
+                    provider: &ProviderKind::Claude,
+                    channel: ChannelId::new(f.row.channel_id),
+                    path: &f.source.path,
+                    file: (f.source.dev, f.source.ino),
+                    range: (0, f.row.last_offset),
+                    body: &f.body,
+                    sent: 0,
+                },
+                Instant::now() + std::time::Duration::from_secs(1)
+            )
+            .await
+            .is_some(),
+            "a completed shared query must wake this lookup before its next poll"
+        );
+    }
     crate::services::discord::tmux::tmux_watcher::o_evidence_tests::assert_receipted_fixture_suppressed(&f,&pool).await;
     for variant in 0..5 {
         let mut wrong = plan.clone();
@@ -874,7 +977,8 @@ async fn i7441b_multichunk_tail_proof_does_not_require_consumed_prefix() {
             &plan,
             sent,
             Instant::now() + std::time::Duration::from_secs(10),
-            fixture_local(&f).as_ref()
+            fixture_local(&f).as_ref(),
+            &mut Verification::default(),
         )
         .await
         .is_some()
@@ -1063,7 +1167,8 @@ async fn i7441b_read_only_ledger_torn_tail_wrong_sources_and_old_versions() {
             &empty,
             0,
             deadline,
-            fixture_local(&f).as_ref()
+            fixture_local(&f).as_ref(),
+            &mut Verification::default(),
         )
         .await
         .is_none()
@@ -1075,7 +1180,8 @@ async fn i7441b_read_only_ledger_torn_tail_wrong_sources_and_old_versions() {
             &plan,
             plan.body.len(),
             deadline,
-            fixture_local(&f).as_ref()
+            fixture_local(&f).as_ref(),
+            &mut Verification::default(),
         )
         .await
         .is_none()
@@ -1364,7 +1470,7 @@ async fn i7441c2_frame_read_bound_and_expired_deadline_are_exact() {
             0,
             None,
             Some(prefix),
-            (padding, false, false),
+            (padding, false, false, PostEvidence::Legacy),
         )
         .await;
         let query = || manifest::Query {
@@ -1566,7 +1672,8 @@ async fn i7441c3_streaming_reader_legacy_limits_and_latest_attempt() {
             &plan,
             0,
             Instant::now() + std::time::Duration::from_secs(1),
-            Some(&local)
+            Some(&local),
+            &mut Verification::default(),
         )
         .await
         .is_none()
@@ -1813,5 +1920,80 @@ async fn stored_variants_of_one_file_find_no_source_but_a_repeated_source_does()
                 );
             }
         }
+    }
+}
+
+#[tokio::test]
+async fn i7441d5_durable_post_confirmation_rejects_foreign_or_changed_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    for (case, field) in [
+        "exact",
+        "legacy",
+        "version",
+        "serial",
+        "unit_key",
+        "piece_index",
+        "msg_id",
+        "bot_id",
+        "payload_sha256",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let f =
+            Fixture::confirmed_with_prefix(744500 + case as u64, &["exact body"], 0, false).await;
+        let plan = f.plan();
+        let piece = &plan.pieces[0];
+        let ledger = f
+            .root
+            .join("o_store")
+            .join(f.row.channel_id.to_string())
+            .join("ledger.jsonl");
+        let raw = std::fs::read_to_string(&ledger).unwrap();
+        let changed: String = raw
+            .lines()
+            .map(|line| {
+                let mut value: serde_json::Value = serde_json::from_str(line).unwrap();
+                let entry = &mut value["entry"];
+                if entry["type"] == "posted" {
+                    assert!(
+                        entry["confirmation"].is_object(),
+                        "actual writer must record its exact response"
+                    );
+                    match field {
+                        "exact" => {}
+                        "legacy" => {
+                            entry.as_object_mut().unwrap().remove("confirmation");
+                        }
+                        "unit_key" => {
+                            entry["confirmation"]["unit_key"]["native_key"] =
+                                json!("different-turn")
+                        }
+                        "payload_sha256" => entry["confirmation"][field] = json!("0".repeat(64)),
+                        "version" => entry["confirmation"][field] = json!(2),
+                        _ => entry["confirmation"][field] = json!(999),
+                    }
+                }
+                format!("{value}\n")
+            })
+            .collect();
+        std::fs::write(&ledger, changed).unwrap();
+        let observed = delivery_evidence::local(
+            &f.root,
+            f.row.channel_id,
+            &[(piece.key.clone(), piece.index)],
+            Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .unwrap_or_else(|| panic!("snapshot for confirmation field {field}"));
+        let id = observed.confirmed_post(&piece.key, piece.index, 42);
+        assert_eq!(id.is_some(), field == "exact", "confirmation field {field}");
+        let mut other_turn = piece.key.clone();
+        other_turn.native_key.push_str("-other-turn");
+        assert!(
+            observed
+                .confirmed_post(&other_turn, piece.index, 42)
+                .is_none()
+        );
     }
 }

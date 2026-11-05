@@ -76,7 +76,40 @@ impl Drop for RuntimeBindingPublication<'_, '_> {
         if changed_providers || !same_runtime_source(self.previous.as_ref(), current) {
             self.authority.invalidate();
         }
+        #[cfg(unix)]
+        let attached = current
+            .filter(|binding| {
+                self.previous.as_ref().is_none_or(|previous| {
+                    previous.runtime_kind != binding.runtime_kind
+                        || previous.session_id != binding.session_id
+                        || previous.output_path != binding.output_path
+                })
+            })
+            .filter(|binding| {
+                matches!(
+                    binding.runtime_kind,
+                    RuntimeHandoffKind::ClaudeTui | RuntimeHandoffKind::CodexTui
+                ) && !binding.output_path.trim().is_empty()
+                    && std::fs::metadata(&binding.output_path).is_ok()
+            })
+            .filter(|binding| {
+                binding.runtime_kind != RuntimeHandoffKind::ClaudeTui
+                    || !self
+                        .staged
+                        .channel_by_tmux
+                        .get(session)
+                        .is_some_and(|channel| {
+                            binding.session_id.as_deref().is_some_and(|id| {
+                                binding_events::pending_seq(channel.value, session, id).is_some()
+                            })
+                        })
+            })
+            .cloned();
         std::mem::swap(self.target, &mut self.staged);
+        #[cfg(unix)]
+        if let Some(binding) = attached {
+            crate::services::discord::observer_binding_published(session.to_string(), binding);
+        }
     }
 }
 
@@ -263,6 +296,7 @@ fn publish_runtime_binding(
             Ok(None) => {}
         }
     }
+    let registered_channel = channel_id;
     with_runtime_binding_state_under_source_authority(authority, |state| {
         let channel_id = channel_id.or_else(|| {
             state
@@ -293,6 +327,15 @@ fn publish_runtime_binding(
             Some(Ok(persisted)) => persisted,
             None => record.unlogged(),
         };
+        if let Some(channel_id) = registered_channel {
+            state.channel_by_tmux.insert(
+                tmux_session_name.to_owned(),
+                TimedValue {
+                    value: channel_id,
+                    recorded_at: Instant::now(),
+                },
+            );
+        }
         state.runtime_by_tmux.insert(
             tmux_session_name.to_string(),
             TimedValue {

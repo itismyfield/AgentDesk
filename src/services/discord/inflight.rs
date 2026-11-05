@@ -10,6 +10,7 @@ pub(in crate::services::discord) mod budget;
 mod destructive_commit;
 mod finalizer_identity;
 mod host_locator;
+pub(in crate::services::discord) use host_locator::PersistedHostLocator;
 mod host_recovery_guard;
 #[cfg(test)]
 pub(in crate::services::discord) use host_recovery_guard::keyed_tests::{
