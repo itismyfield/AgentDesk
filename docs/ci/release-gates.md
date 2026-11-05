@@ -362,14 +362,8 @@ containment while trusted typed deployment evidence is unavailable. Its validate
 PostgreSQL `CHECK` constraint rejects `deploy-gate` case-insensitively after
 trimming ASCII space, tab, newline, carriage return, form feed, and vertical tab.
 `NULL`, blank legacy provenance, and `pr-confirm` remain valid. `NOT VALID` is not
-permitted for 0100: an existing normalized `deploy-gate` row must fail the migration
-rather than be silently converted, passed, or left outside enforcement.
-
-0100 spelled the vertical tab `E'\v'`, which PostgreSQL 16 and older read as the
-letter `v`. `0185_deploy_gate_check_vertical_tab.sql` replaces the constraint under
-the same name with `\x0b`. It is `NOT VALID`: every row 0100 admitted still passes
-except `deploy-gate` wrapped in U+000B on a database migrated by PostgreSQL 16 or
-older, and those rows are scanned by the deferred `VALIDATE CONSTRAINT` batch.
+permitted: an existing normalized `deploy-gate` row must fail the migration rather
+than be silently converted, passed, or left outside enforcement.
 
 The release script stages and signs the candidate binary, proves the PostgreSQL
 tunnel, and then runs the candidate's hidden `release-migrate-postgres` command
