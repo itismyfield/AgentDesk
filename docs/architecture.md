@@ -435,14 +435,6 @@ CREATE TABLE github_repos (
   last_synced_at      DATETIME
 );
 
--- 디스패치 큐 (auto-queue)
-CREATE TABLE dispatch_queue (
-  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-  kanban_card_id      TEXT REFERENCES kanban_cards(id),
-  priority_score      REAL,
-  queued_at           DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
 -- 파이프라인 스테이지
 CREATE TABLE pipeline_stages (
   id                  INTEGER PRIMARY KEY AUTOINCREMENT,
