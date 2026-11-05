@@ -218,6 +218,35 @@ HTTP handler를 조립하는 `services::claude_tui::tui_relay`만 assembly로 �
 기존 역방향 양수 record와 zero-rule 한도는 유지하고, 같은 source anchor의 정확한
 판정 불가→역방향 ID·count만 편입한다.
 
+### Dedupe·input·O와 prompt/turn 제어
+
+`services::tui_prompt_dedupe`는 prompt 상관 cache·binding log·runtime binding과
+source custody를 소유하는 adapter다. `synthetic_prompt`는 foundation,
+`binding_events::log_record`와 `runtime_binding::codex_verified::provenance`의 값 계약은
+vocabulary다. provenance 아래 admission·permission·live_grant와
+`dormant::construction`의 registry·파일·capability 실행은 adapter override로 함께 둔다.
+값 계약이 상위 실행 모듈의 타입을 참조하는 부분도 정확한 역방향 한도로 기록한다.
+
+`services::tui_input`의 pane 관측·tmux·submission 실행은 adapter다.
+`ansi`와 `actor::gate`의 문자열·화면 판정은 foundation, `input_key`의 정적 ID namespace는
+vocabulary다. 진행 중인 `fix/i7755-owned-input-stop`과 겹치는
+`human_frame::history` 및 하위 append·compat·screen·v2·v2::collision·v2::migration은
+명시적 미분류로 남기고, 해당 변경 착지 뒤 함께 검토한다. 그 아래에 더 긴 분류 규칙을
+두지 않는다. owner_input 계열의 C6 보류와 `services` 상위 미분류 규칙도 유지한다.
+
+`services::tui_o`의 channel 선택·cutover·turn admission·alarm 제어는 discord다.
+기존 writer·repost·store 규칙은 유지한다. shadow 값·설정 계약은 vocabulary,
+파일 capture·binding reader는 adapter, identity·seal·unit plan 계산은 foundation이다.
+`exact_episode`는 DTO뿐 아니라 `resolve_strict`의 authority·settlement 업무 정책을
+소유하므로 application이다. exact_pg·exact_submission·ownership 실행은 adapter로 둔다.
+`services::tui_prompt_control`의 문자열 판독은 foundation이고, 실제 입력을 실행하는
+`tui_steering`과 JSONL 파일을 관측하는 `tui_turn_state` 및 두 자식은 adapter다.
+
+편입 증거는 생성기의 `--report` 출력인
+[`module-layer-c3-admission.tsv`](module-layer-c3-admission.tsv)에 기록한다.
+C2와 같은 동일 source의 정확한 판정 불가→역방향 편입 계약을 적용하며,
+기존 역방향 양수 record와 zero-rule 한도를 올리지 않는다. TSV는 생성기 입력이 아니다.
+
 ## 검토된 모듈 이동의 old→new 대응
 
 이동 대응은 [`layer_moves.toml`](../../scripts/audit_maintainability/layer_moves.toml)에 적는다.
