@@ -337,3 +337,61 @@ fn an_end_read_stops_at_the_latest_start() {
         read.bytes_read
     );
 }
+
+/// An unnamed end after the turn's own end leaves its end unproven until another own end, by
+/// complete, abort or the root's id; the legacy verdict of the same records stays Unknown.
+#[test]
+fn an_unnamed_end_after_the_turns_own_is_resolved_only_by_a_later_own_end() {
+    let rooted = event(serde_json::json!({"type":"task_started","turn_id":"t","root_turn_id":"r"}));
+    let ends: [(&str, &str, fn(&str) -> String, String); 3] = [
+        (
+            "complete",
+            "t",
+            ended,
+            event(serde_json::json!({"type":"task_complete"})),
+        ),
+        (
+            "abort",
+            "t",
+            |turn| event(serde_json::json!({"type":"turn_aborted","turn_id":turn})),
+            event(serde_json::json!({"type":"turn_aborted"})),
+        ),
+        (
+            "root",
+            "r",
+            ended,
+            event(serde_json::json!({"type":"task_complete"})),
+        ),
+    ];
+    for (kind, id, own, unnamed) in ends {
+        let begin = if kind == "root" {
+            rooted.clone()
+        } else {
+            model("t")
+        } + &own(id)
+            + &unnamed;
+        let cases = [
+            ("own, unnamed", begin.clone(), NativeEnd::Unknown),
+            (
+                "own, unnamed, other",
+                begin.clone() + &ended("u"),
+                NativeEnd::Unknown,
+            ),
+            (
+                "own, unnamed, own",
+                begin.clone() + &own(id),
+                NativeEnd::Ended,
+            ),
+        ];
+        for (case, contents, expected) in cases {
+            let (_dir, path) = temporary(&contents);
+            assert_eq!(read_native_end(&path), expected, "{kind}: {case}");
+        }
+        let (_dir, path) = temporary(&(begin + &own(id)));
+        assert_eq!(
+            read_turn(&path),
+            Some(TurnVerdict::Unknown),
+            "{kind}: legacy"
+        );
+    }
+}

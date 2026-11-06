@@ -92,6 +92,18 @@ enum Rollout {
     Torn,
     /// Ended at the early read; a turn opens before the late read of the claimed start.
     Late,
+    /// The turn's own end, then an unnamed one, then another turn's: only its own end again ends it.
+    OwnUnnamed,
+    /// A turn runs in the bound rollout while a newer rollout of the same cwd shows an end.
+    BindingFirst,
+    /// The bound rollout is missing until it comes back.
+    BoundMissing,
+    /// The pane is bound to a rollout of another cwd until it is bound to its own.
+    CwdMismatch,
+    /// The pane's verified input is blocked until its execution context comes back.
+    Verified,
+    /// No binding: the channel's own pane is read through its session id.
+    OwnSid,
 }
 
 /// The start's caller: a `turn/start`, or the routine executor's persistent routine.
@@ -168,6 +180,19 @@ async fn codex_start(id: u64, by: By, case: Rollout) {
             vec![("the completed start line", TORN_START.1.to_string())],
             answer_for("t1", "native answer"),
         ),
+        Rollout::OwnUnnamed => (
+            earlier + &ended + &complete(None),
+            vec![("another turn's end", complete(Some("other-turn")))],
+            complete(Some("t0")),
+        ),
+        Rollout::BindingFirst | Rollout::OwnSid => (
+            opening("native-turn", "native prompt"),
+            vec![],
+            answer_for("native-turn", "native answer"),
+        ),
+        Rollout::BoundMissing | Rollout::CwdMismatch | Rollout::Verified => {
+            (earlier + &ended, vec![], String::new())
+        }
     };
     let mut steps = steps;
     // The routine meets the unnamed end first, so each kind of end is the first one a run reads.
@@ -175,6 +200,7 @@ async fn codex_start(id: u64, by: By, case: Rollout) {
         steps.reverse();
     }
     append(&begin);
+    let restore = bend(&rig, id, case);
     let shim = Shim::install(&rig);
     if case == Rollout::Late {
         let row = discord::runtime_store::discord_inflight_root().unwrap();
@@ -252,11 +278,135 @@ async fn codex_start(id: u64, by: By, case: Rollout) {
         }
     }
     let bridge = bridge_probe(&rig);
+    restore();
     append(&end);
     codex_runs_once(&rig, &pool, ORIGIN, &mut settled, bridge, append).await;
     drop(rig);
     pool.close().await;
     db.drop().await;
+}
+
+/// Binds Codex pane `name` to the rollout at `path`.
+fn bind(name: &str, path: &Path, sid: &str) {
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+        name,
+        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+            output_path: path.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some(sid.into()),
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
+}
+
+/// Bends the pane's source as `case` names, before the start meets it; the returned step puts it
+/// back as a person or the runtime would.
+fn bend(rig: &IntakeRig, id: u64, case: Rollout) -> Box<dyn FnOnce()> {
+    use crate::services::tmux_common as tc;
+    let name = ProviderKind::Codex.build_tmux_session_name(&format!("a1-rollback-{id}"));
+    let bound = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&name);
+    let sid = bound.and_then(|bound| bound.session_id).unwrap();
+    let (path, workspace) = (
+        rig.transcript.clone(),
+        rig._tmux.root.path().join("workspace"),
+    );
+    let earlier = opening("t0", "earlier prompt") + &answer_for("t0", "earlier");
+    match case {
+        Rollout::BindingFirst => {
+            let other = uuid::Uuid::new_v4().to_string();
+            let newer = path.with_file_name(format!("rollout-2026-11-06T00-00-01-{other}.jsonl"));
+            fs::write(newer, meta(&other, &workspace) + &earlier).unwrap();
+            Box::new(|| {})
+        }
+        Rollout::BoundMissing => {
+            let away = path.with_extension("away");
+            fs::rename(&path, &away).unwrap();
+            Box::new(move || fs::rename(away, path).unwrap())
+        }
+        Rollout::CwdMismatch => {
+            let elsewhere = path.with_file_name("rollout-2026-11-06T00-00-02-elsewhere.jsonl");
+            fs::write(&elsewhere, meta(&sid, rig._tmux.root.path()) + &earlier).unwrap();
+            bind(&name, &elsewhere, &sid);
+            Box::new(move || bind(&name, &path, &sid))
+        }
+        Rollout::Verified => {
+            // A rollout marker that claims Codex ownership, with no canonical execution context.
+            let crate::services::tui_prompt_dedupe::binding_context::SpawnNonceMarker::Known(nonce) =
+                crate::services::tui_prompt_dedupe::binding_context::observe_spawn_nonce_marker(
+                    &name,
+                )
+            else {
+                panic!("no spawn nonce");
+            };
+            let root = crate::config::runtime_root().unwrap();
+            let context = root.join(format!("runtime/binding_contexts/codex/{nonce}.json"));
+            let parked = context.with_extension("parked");
+            fs::rename(&context, &parked).unwrap();
+            let marker = tc::session_temp_path(&name, tc::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT);
+            let kept = fs::read(&marker).ok();
+            fs::write(&marker, "{\"codex_ownership\":{}}").unwrap();
+            let blocked = crate::services::tui_prompt_dedupe::codex_verified_input_blocked;
+            assert!(blocked(&name), "the pane's verified input is not blocked");
+            Box::new(move || {
+                fs::rename(parked, context).unwrap();
+                match kept {
+                    Some(kept) => fs::write(&marker, kept).unwrap(),
+                    None => fs::remove_file(&marker).unwrap(),
+                }
+                assert!(!blocked(&name), "the pane's verified input stays blocked");
+            })
+        }
+        Rollout::OwnSid => {
+            crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&name);
+            Box::new(|| {})
+        }
+        _ => Box::new(|| {}),
+    }
+}
+
+/// A start bound for another, label-named pane does not read the channel's session id: with no
+/// binding of its own that pane waits, though the channel's rollout shows an end; bound, it goes.
+async fn label_pane_reads(id: u64) {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let codex = ProviderKind::Codex;
+    let rig = IntakeRig::build(
+        id,
+        false,
+        codex.clone(),
+        None,
+        Some(false),
+        Some("G-label"),
+        None,
+    );
+    let rig = rig.await;
+    let channel = codex.build_tmux_session_name(&format!("a1-rollback-{id}"));
+    let bound = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&channel);
+    let sid = bound.and_then(|bound| bound.session_id).unwrap();
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(&rig.transcript)
+        .unwrap();
+    let ended = opening("t0", "earlier prompt") + &answer_for("t0", "earlier");
+    std::io::Write::write_all(&mut file, ended.as_bytes()).unwrap();
+    let label = format!("a1-label-{id}");
+    let pane = codex.build_tmux_session_name(&label);
+    let workspace = rig._tmux.root.path().join("workspace");
+    super::super::super::codex_tests::codex_renderer_in(&rig._tmux, &pane, true, Some(&workspace));
+    execution_proof(&pane, id);
+    let context = json!({"origin":"headless","synthetic_label":label});
+    let waits = super::super::super::super::start_waits;
+    let read = waits(&rig.shared, rig.channel, &context).await;
+    let watched = matches!(read, super::super::super::super::Wait::Watch(_));
+    assert!(watched, "the label pane went on by the channel's session");
+    bind(&pane, &rig.transcript, &sid);
+    let read = waits(&rig.shared, rig.channel, &context).await;
+    assert!(
+        matches!(read, super::super::super::super::Wait::Go),
+        "a bound ended pane waits"
+    );
 }
 
 fn bridge_probe(rig: &IntakeRig) -> tokio::sync::oneshot::Receiver<()> {
@@ -368,6 +518,58 @@ async fn a_codex_start_waits_while_a_new_start_line_is_torn_pg() {
 async fn a_codex_routine_waits_while_a_new_start_line_is_torn_pg() {
     let name = "a_codex_routine_waits_while_a_new_start_line_is_torn_pg";
     codex_pg(name, 7_772_209, By::Routine, Rollout::Torn).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_codex_start_waits_through_an_unnamed_end_after_its_turns_own_pg() {
+    let name = "a_codex_start_waits_through_an_unnamed_end_after_its_turns_own_pg";
+    codex_pg(name, 7_772_211, By::Http, Rollout::OwnUnnamed).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_codex_routine_waits_through_an_unnamed_end_after_its_turns_own_pg() {
+    let name = "a_codex_routine_waits_through_an_unnamed_end_after_its_turns_own_pg";
+    codex_pg(name, 7_772_212, By::Routine, Rollout::OwnUnnamed).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_codex_start_reads_its_bound_rollout_over_a_newer_one_pg() {
+    let name = "a_codex_start_reads_its_bound_rollout_over_a_newer_one_pg";
+    codex_pg(name, 7_772_213, By::Http, Rollout::BindingFirst).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_codex_start_waits_while_its_bound_rollout_is_missing_pg() {
+    let name = "a_codex_start_waits_while_its_bound_rollout_is_missing_pg";
+    codex_pg(name, 7_772_214, By::Http, Rollout::BoundMissing).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_codex_start_waits_while_its_pane_is_bound_to_another_cwd_pg() {
+    let name = "a_codex_start_waits_while_its_pane_is_bound_to_another_cwd_pg";
+    codex_pg(name, 7_772_215, By::Http, Rollout::CwdMismatch).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_codex_start_waits_while_its_verified_input_is_blocked_pg() {
+    let name = "a_codex_start_waits_while_its_verified_input_is_blocked_pg";
+    codex_pg(name, 7_772_216, By::Http, Rollout::Verified).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unbound_codex_pane_is_read_through_its_session_id_pg() {
+    let name = "an_unbound_codex_pane_is_read_through_its_session_id_pg";
+    codex_pg(name, 7_772_217, By::Http, Rollout::OwnSid).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_for_a_label_pane_reads_no_channel_session_rollout() {
+    let test =
+        "services::discord::router::message_handler::provider_dispatch::owner_input::tests::";
+    let name = "a_start_for_a_label_pane_reads_no_channel_session_rollout";
+    if creator_child(&format!("{test}rollback::native_read::codex::{name}")) {
+        label_pane_reads(7_772_218).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

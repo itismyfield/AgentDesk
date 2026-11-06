@@ -34,6 +34,7 @@ input-single-path/InputOwnershipA2bLive.cfg	InputOwnership	-	-
 input-single-path/InputOwnershipA2bReadGoneLive.cfg	InputOwnership	-	NativeHeldRuns
 input-single-path/InputOwnershipA7772.cfg	InputOwnership	-	-
 input-single-path/InputOwnershipA7772ClassifierIdle.cfg	InputOwnership	EarlyClaimHasIdleProof,StartOwnTurn	-
+input-single-path/InputOwnershipA7772ClosedFirst.cfg	InputOwnership	EarlyClaimHasIdleProof	-
 input-single-path/InputOwnershipA7772EarlyUnknownGoes.cfg	InputOwnership	EarlyClaimHasIdleProof	-
 input-single-path/InputOwnershipA7772LateNoUnwindWait.cfg	InputOwnership	NativeHeldResumes,NoSilentLoss,NoSilentLossObserved	-
 input-single-path/InputOwnershipA7772LateNoUnwindWaitLive.cfg	InputOwnership	-	NativeHeldRuns

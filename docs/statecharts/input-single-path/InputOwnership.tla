@@ -77,7 +77,8 @@ VARIABLES
                \* (it read unknown once and recovered; one failure per run bounds the model)
     ev,        \* a7772 Codex: what the rollout shows of its latest turn: none (a Claude pane), open,
                \* other (open, last an end naming another turn), unnamed (an end naming none), own
-               \* (that turn's own complete or abort), noStart (no turn start at all)
+               \* (that turn's own complete or abort), noStart (no turn start at all), ownUnnamed
+               \* (an unnamed end after its own), resolved (its own end again after that)
     prov,      \* a7772: a late-held attempt's own unwind: none, mailbox (still held), row (its row)
     seen       \* a7772 ghost: what the read showed when a start was claimed: none, idle, busy, unknown
 
@@ -161,14 +162,15 @@ A77 == Fix = "a7772"
 \* codex_read). Mutant classifierIdle takes any end for the turn's own, as the rollout classifier
 \* does; noStartEnded reads a rollout with no start as ended.
 CodexReads ==
-    CASE ev = "own" -> "idle"
+    CASE ev \in {"own", "resolved"} -> "idle"
+      [] ev = "ownUnnamed" -> IF Mut \in {"classifierIdle", "closedFirst"} THEN "idle" ELSE "unknown"
       [] ev = "open" -> "busy"
       [] ev = "other" -> IF Mut = "classifierIdle" THEN "idle" ELSE "busy"
       [] ev = "unnamed" -> IF Mut = "classifierIdle" THEN "idle" ELSE "unknown"
       [] ev = "noStart" -> IF Mut = "noStartEnded" THEN "idle" ELSE "unknown"
 \* What the pane's turn is, as a correct read proves it: the ghost a claim is judged by.
-CodexProof == CASE ev = "own" -> "idle" [] ev \in {"open", "other"} -> "busy"
-                [] ev \in {"unnamed", "noStart"} -> "unknown"
+CodexProof == CASE ev \in {"own", "resolved"} -> "idle" [] ev \in {"open", "other"} -> "busy"
+                [] ev \in {"unnamed", "noStart", "ownUnnamed"} -> "unknown"
 Reads == IF ev = "none" THEN nat ELSE CodexReads
 View == IF nr = "unknown" THEN "unknown" ELSE Reads
 Proof == IF nr = "unknown" THEN "unknown" ELSE IF ev = "none" THEN nat ELSE CodexProof
@@ -509,6 +511,23 @@ HumanStartsTurn ==
     /\ UNCHANGED drv
     /\ EvOpens /\ UNCHANGED <<row, ep, leak, outside, observer, nr, prov, seen>>
 
+\* After the turn's own end its rollout records an unnamed end, then once that turn's own end
+\* again; the pane stays idle. A resolved end takes no second unnamed one, so this happens once
+\* a turn. Mutant closedFirst reads the unnamed end after the own one as that end.
+CodexUnnamedAfterOwn ==
+    /\ ev = "own" /\ ev' = "ownUnnamed"
+    /\ UNCHANGED <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain, sentInto,
+                   win, rcv, userRow, twin, claim, pastes, lp, op, screen, draft, notices, wake,
+                   timer, byTimer, timed, heldBy, watch, aged, twinPend, envLeft, stale, old, acct,
+                   row, ep, leak, outside, observer, nr, prov, seen>>
+
+CodexOwnEndResolves ==
+    /\ ev = "ownUnnamed" /\ ev' = "resolved"
+    /\ UNCHANGED <<mode, src, mbx, nat, natOwner, inp, pend, reader, obsOk, route, plain, sentInto,
+                   win, rcv, userRow, twin, claim, pastes, lp, op, screen, draft, notices, wake,
+                   timer, byTimer, timed, heldBy, watch, aged, twinPend, envLeft, stale, old, acct,
+                   row, ep, leak, outside, observer, nr, prov, seen>>
+
 \* The running Codex turn's rollout records an end that names another turn or none; the turn
 \* runs on. A rollout with no start gains no start from an end (codex_observation.rs).
 CodexForeignEnds ==
@@ -721,6 +740,7 @@ Next ==
     \/ NativeWatchMisreads
     \/ DriveStartClaims \/ DriveStartRuns \/ DriveStartLateHolds \/ AttemptReleases
     \/ AttemptRowClears \/ DriveMeetsUnwind \/ ReadBreaks \/ ReadRecovers \/ CodexForeignEnds
+    \/ CodexUnnamedAfterOwn \/ CodexOwnEndResolves
     \/ CauseClearsBeforeRead \/ PaneGoes \/ WatchLosesPane
     \/ BootRequeues
     \/ DriveMeetsRow \/ CarriedCloses \/ HandedOutside
