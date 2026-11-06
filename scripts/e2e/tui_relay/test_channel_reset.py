@@ -30,9 +30,12 @@ class ResetServer:
                 mailbox = {"provider": "claude", "channel_id": fixture.channel,
                            "agent_turn_status": "idle", "relay_stall_state": "healthy",
                            "queue_depth": fixture.depth, "relay_health": {"queue_depth": fixture.relay_depth}}
-                # Like the real server: the public health endpoint has no Herdr block.
+                # Like the real server: only the detail endpoint carries the Herdr block.
+                route = self.path.split("?")[0]
+                if route not in ("/api/health", "/api/health/detail"):
+                    return self.reply(404, {"error": "not found"})
                 payload = {"mailboxes": [mailbox, *fixture.other_mailboxes]}
-                if self.path.split("?")[0] != "/api/health":
+                if route == "/api/health/detail":
                     payload["herdr"] = {"configured_channels": fixture.channels}
                 self.reply(200, payload)
 
