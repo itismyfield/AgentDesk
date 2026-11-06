@@ -4,7 +4,8 @@
   plan            nextest list JSON + archive -> plan.json and one config per worker (LPT by duration)
   verify-archive  worker preflight: archive digest, checkout SHA, run and config must match the plan
   audit           per-worker artifacts -> verdict JSON and Markdown summary; any gap is red
-  base-diff       compare a plan with the plan of a fixed comparison base SHA; every lost test needs a
+  base-diff       compare a plan with the plan of a fixed comparison base SHA (or, with --baseline-sha, of an
+                  ancestor, adding the base sources' Linux losses); every lost test needs a
                   matching scripts/ci/test-removal-justifications.txt row; landed rows only warn
   required-gate, comparison-base, classify-worker   see nextest_required.py
 
@@ -733,6 +734,16 @@ def platform_losses(path, binary_id):
     return found, by_platform
 
 
+def linux_source_losses(path, binary_id):
+    """Linux losses between the base and head sources, for a baseline plan older than the base."""
+    try:
+        doc = json.loads(Path(path).read_text())
+        names = {kind: doc[key]["linux"] for kind, key in (("removed", "removed"), ("runnable->ignored", "runnable_to_ignored"))}
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise PlanError(f"cannot read source losses {path}: {exc}") from exc
+    return {(_id_text(_check_id(binary_id, name)), kind): ["linux"] for kind, found in names.items() for name in found}
+
+
 def cmd_base_diff(args):
     plan = load_plan(args.plan)
     # A digest only proves the plan is self-consistent; this run's rust_build must have written it.
@@ -745,9 +756,10 @@ def cmd_base_diff(args):
         print(f"ERROR no baseline plan; regenerate it at {args.comparison_base_sha}", file=sys.stderr)
         return 2
     base = load_plan(path)
-    if base["identity"]["sha"] != args.comparison_base_sha or base["identity"]["scope"] != plan["identity"]["scope"]:
+    baseline_sha = args.baseline_sha or args.comparison_base_sha
+    if base["identity"]["sha"] != baseline_sha or base["identity"]["scope"] != plan["identity"]["scope"]:
         print(f"ERROR baseline is {base['identity']['sha']} {base['identity']['scope']}, need "
-              f"{args.comparison_base_sha} {plan['identity']['scope']}; regenerate it", file=sys.stderr)
+              f"{baseline_sha} {plan['identity']['scope']}; regenerate it", file=sys.stderr)
         return 2
     if base["identity"]["build"] != plan["identity"]["build"]:
         print(f"ERROR baseline build {_canonical(base['identity']['build'])} differs from "
@@ -763,13 +775,21 @@ def cmd_base_diff(args):
     binaries = {t[0] for t in run | ign}
     if len(binaries) != 1:
         raise PlanError(f"source removals need one lib binary in the plan, found {sorted(binaries)}")
-    platform_lost, native_present = platform_losses(args.source_removed, binaries.pop())
+    binary_id = binaries.pop()
+    platform_lost, native_present = platform_losses(args.source_removed, binary_id)
+    ancestor = baseline_sha != args.comparison_base_sha
+    if ancestor:
+        # The ancestor plan cannot see tests the base added; the base -> head sources stand in for Linux.
+        for (test, kind), platforms in linux_source_losses(args.source_removed, binary_id).items():
+            platform_lost.setdefault((test, kind), []).extend(platforms)
     diff = {"comparison_base_sha": args.comparison_base_sha, "scope": plan["identity"]["scope"],
             "removed": sorted(_id_text(t) for t in (base_run | base_ign) - (run | ign)),
             "runnable_to_ignored": sorted(_id_text(t) for t in base_run & ign),
             "ignored_to_runnable": sorted(_id_text(t) for t in base_ign & run),
             "added": sorted(_id_text(t) for t in (run | ign) - (base_run | base_ign)),
             "platform_losses": {f"{t} | {kind}": p for (t, kind), p in sorted(platform_lost.items())}}
+    if ancestor:
+        diff["baseline_sha"] = baseline_sha
     losses = {key: set(platforms) for key, platforms in platform_lost.items()}
     for kind, field in (("removed", "removed"), ("runnable->ignored", "runnable_to_ignored")):
         for test in diff[field]:
@@ -877,6 +897,7 @@ def main(argv=None):
     b.add_argument("--plan", required=True)
     b.add_argument("--baseline", required=True)
     b.add_argument("--comparison-base-sha", required=True)
+    b.add_argument("--baseline-sha", help="SHA the baseline plan must carry (default: the comparison base)")
     b.add_argument("--head-sha", required=True, help="SHA the head plan must have been planned for")
     b.add_argument("--head-run-id", required=True, help="run whose rust_build must have written the head plan")
     b.add_argument("--justifications", required=True, help="scripts/ci/test-removal-justifications.txt")
