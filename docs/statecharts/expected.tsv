@@ -130,6 +130,8 @@ input-single-path/InputOwnershipEarlyRetainBefore.cfg	InputOwnership	FirstOpaque
 input-single-path/InputOwnershipReserveResetBefore.cfg	InputOwnership	ReserveResetsFailures	-
 input-single-path/InputOwnershipPolicyEarlyRemove.cfg	InputOwnership	-	-
 input-single-path/InputOwnershipPolicyRowOnlyBefore.cfg	InputOwnership	RecoveryCreditPreserved	FailureEventuallyResolved
+tui-o-writer/WriterParkedAliasFixed.cfg	WriterParkedAlias	-	-
+tui-o-writer/WriterParkedAliasMain.cfg	WriterParkedAlias	HaltRepeatZero,NoHaltForConfirmedOld	FirstReplyExactlyOnce
 tui-o-writer/WriterReboundBirth.cfg	WriterRebound	ActiveLossVisible,CurrentNeverHistorical,UnknownNeedsAbsence,ReadyAfterFollow,ParkedReboundHalts	-
 tui-o-writer/WriterReboundCurrent.cfg	WriterRebound	-	-
 tui-o-writer/WriterWakeActiveLoss.cfg	WriterWake	-	-

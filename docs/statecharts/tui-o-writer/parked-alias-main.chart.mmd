@@ -1,0 +1,76 @@
+---
+title: "park된 저장 원본 A0의 확정 raw 이름 A1 뒤 fresh 응답"
+---
+%% Bug code baseline: 34822f3bf14c35907b440dbe8c81f62ad167e2ba; fixed implementation: 1e2763de57d7932e1ae2585b9951169232c730d8; main: 0a2996a8c537234c1cdc8da8c0ce67a06f0f600c
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks HaltRepeatZero or NoHaltForConfirmedOld
+    lg1: Path to the FirstReplyExactlyOnce or HaltRepeatZero or NoHaltForConfirmedOld bug
+    lg2: Repeats forever, so FirstReplyExactlyOnce breaks
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  class lg2 repeats
+  s0: 저장 cursor A0 #183; session 빈 값
+  s1: 경계: new/parent/미확정#183;모호 alias 준비 #183; old 예외로 넘기지 않음
+  s2: A0 bind 적용 #183; cp1
+  s3: 파일 있을 때 A0#8594;A1 적용 #183; cp2 #183; 저장 A0 유지
+  s4: A pathname 소실 #183; 세션 없음
+  s5: 저장 A0 park #183; 입력 승인 가능
+  s6: raw old A1#8594;fresh B #183; Startup #183; cp2
+  s7: new/parent/미확정#183;모호 alias는 기존 검증에서 halt
+  s8: raw old A1이 Missing A0 재open 요구 #183; halt 1회
+  s9: 이전 원본 reopen 실패 뒤 재호스트 1 #183; halt 1
+  s10: 경계: 참조 통과 #183; 새 target 엄격 검증/C6 전
+  s11: 같은 old A1#8594;B 재시도 #183; cp2 #183; 이전 halt 1 #183; 재호스트 1
+  s12: raw old A1이 Missing A0 재open 요구 #183; halt 2회
+  s13: 이전 원본 reopen 실패 뒤 재호스트 2 #183; halt 2
+  s14: 같은 old A1#8594;B 재시도 #183; cp2 #183; 이전 halt 2 #183; 재호스트 2
+  s15: raw old A1이 Missing A0 재open 요구 #183; halt 3회
+  s16: 이전 원본 reopen 실패 뒤 재호스트 2 #183; halt 3
+  s17: 같은 old A1#8594;B 재시도 #183; cp2 #183; 이전 halt 3 #183; 재호스트 2
+  [*] --> s0
+  [*] --> s1
+  s0 --> s2: Bound(A0) 적용
+  s2 --> s3: 존재하는 파일에서 이름 확정#183;prefix 적용
+  s3 --> s4: 원본 소실
+  s4 --> s5: 부재 확인 후 named A0 park
+  s5 --> s6: 입력 승인#183;bind 기록 [정상 경로 old=A1,new=B,Startup]
+  s1 --> s7: new/parent/미확정#183;모호 alias는 strict 검증 거부
+  s6 --> s8: old A1의 저장 A0 재open 요구 #183; Missing 실패
+  s1 --> s10: 복귀 파일의 기존 prefix 검증 성공 [new target]
+  s8 --> s9: owner cleanup 재호스트
+  s9 --> s11: A0 다시 park 후 같은 seq3 재시도
+  s10 --> s7: fresh B 검증#183;attach 또는 parked new C6 halt
+  s11 --> s12: old A1의 저장 A0 재open 요구 #183; Missing 실패
+  s12 --> s13: owner cleanup 재호스트
+  s13 --> s14: A0 다시 park 후 같은 seq3 재시도
+  s14 --> s15: old A1의 저장 A0 재open 요구 #183; Missing 실패
+  s15 --> s16: owner cleanup 재호스트
+  s16 --> s17: A0 다시 park 후 같은 seq3 재시도
+  s17 --> s15: old A1의 저장 A0 재open 요구 #183; Missing 실패
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s5 bugPath
+  class s6 bugPath
+  class s8 breaks
+  class s8 bugPath
+  class s9 breaks
+  class s9 bugPath
+  class s11 breaks
+  class s11 bugPath
+  class s12 breaks
+  class s12 bugPath
+  class s13 breaks
+  class s13 bugPath
+  class s14 breaks
+  class s14 bugPath
+  class s15 breaks
+  class s15 repeats
+  class s16 breaks
+  class s16 repeats
+  class s17 breaks
+  class s17 repeats
