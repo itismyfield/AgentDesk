@@ -23,7 +23,10 @@ impl Shim {
             "#!/bin/sh\nd='{dir}'\n\
              case \"$*\" in *capture-pane*) [ -f \"$d/screen\" ] && {{ cat \"$d/screen\"; exit 0; }} ;; esac\n\
              case \"$*\" in *pane_current_path*)\n\
-               c=$(cat \"$d/cwds\" 2>/dev/null || echo 0); echo $((c+1)) > \"$d/cwds\" ;;\n\
+               c=$(cat \"$d/cwds\" 2>/dev/null || echo 0); echo $((c+1)) > \"$d/cwds\"\n\
+               if [ -f \"$d/busy-armed\" ] && [ -f \"$(cat \"$d/row-path\")\" ]; then\n\
+                 rm -f \"$d/busy-armed\"; cat \"$d/busy-rows\" >> \"$(cat \"$d/transcript\")\"\n\
+               fi ;;\n\
              esac\n\
              case \"$*\" in *list-panes*pane_dead*)\n\
                n=$(cat \"$d/reads\" 2>/dev/null || echo 0); n=$((n+1)); echo \"$n\" > \"$d/reads\"\n\
@@ -64,6 +67,19 @@ impl Shim {
         fs::write(self.dir.join("fail-after"), "2").unwrap();
     }
 
+    /// The next read made while the channel's inflight row `row` exists, so after a claim, finds a
+    /// native turn opened in `transcript`, once.
+    fn busy_once_claimed(&self, row: &Path, transcript: &Path) {
+        fs::write(self.dir.join("row-path"), row.display().to_string()).unwrap();
+        fs::write(
+            self.dir.join("transcript"),
+            transcript.display().to_string(),
+        )
+        .unwrap();
+        fs::write(self.dir.join("busy-rows"), BUSY).unwrap();
+        fs::write(self.dir.join("busy-armed"), "").unwrap();
+    }
+
     async fn parked(&self) {
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while !self.dir.join("parked").exists() {
@@ -92,6 +108,8 @@ enum Read {
     ReadyTail,
     /// Idle at both reads; a later read of the pane's liveness fails once.
     ReadAgain,
+    /// A native turn opens after each claim, three times; the pane then reads idle.
+    LateAgain,
     /// As `Early`, for a start naming no pane: its session has no name, and Discord names it.
     Nameless,
     /// As `Nameless`, with only the channel's registered name to go by.
@@ -173,6 +191,42 @@ async fn start_meets(id: u64, case: Read) {
         if case == Read::ReadAgain {
             assert!(shim.dir.join("failed").exists(), "no liveness read failed");
         }
+        drop(rig);
+        pool.close().await;
+        db.drop().await;
+        return;
+    }
+    if case == Read::LateAgain {
+        let row = discord::runtime_store::discord_inflight_root().unwrap();
+        let row = row.join("claude").join(format!("{id}.json"));
+        shim.busy_once_claimed(&row, &rig.transcript);
+        crate::services::discord::queue_io::input_owner::drive::wake(drive);
+        for round in 0..3 {
+            // Each late hold is a scheduling hold: no start failure, retained input or notice.
+            let held = next_settle(&mut settled, &rig.trace).await;
+            assert_eq!(held, Err(START_WAITS.into()), "round {round}");
+            assert!(
+                !shim.dir.join("busy-armed").exists(),
+                "round {round}: no claimed read"
+            );
+            let state = rig.state().await;
+            let count = |key: &str| state[key].as_array().unwrap().len();
+            let queued = (count("items"), count("retained_inputs"));
+            assert_eq!(queued, (1, 0), "round {round}: {state}");
+            let owed = "SELECT count(*) FROM message_outbox WHERE source='retained_input_notice'";
+            let owed: i64 = sqlx::query_scalar(owed).fetch_one(&pool).await.unwrap();
+            assert_eq!(owed, 0, "round {round}");
+            wait("the held attempt's row cleared", || !row.exists());
+            if round < 2 {
+                shim.busy_once_claimed(&row, &rig.transcript);
+            }
+            append(IDLE);
+        }
+        let (completed, bridge) = tokio::sync::oneshot::channel();
+        *discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
+            .lock()
+            .unwrap() = Some((rig.channel, completed));
+        runs_once(&rig, &pool, ORIGIN, &mut settled, bridge, append).await;
         drop(rig);
         pool.close().await;
         db.drop().await;
@@ -370,6 +424,16 @@ async fn an_idle_late_read_is_registered_without_reading_the_pane_again_pg() {
         "an_idle_late_read_is_registered_without_reading_the_pane_again_pg",
         7_772_107,
         Read::ReadAgain,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_late_holds_spend_no_start_failure_and_post_no_notice_pg() {
+    native_read_pg(
+        "repeated_late_holds_spend_no_start_failure_and_post_no_notice_pg",
+        7_772_110,
+        Read::LateAgain,
     )
     .await;
 }
