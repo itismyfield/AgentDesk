@@ -55,6 +55,8 @@ input-single-path/InputOwnershipConsumedWaitingInvalidPin.cfg	InputOwnershipCons
 input-single-path/InputOwnershipConsumedWaitingNonO.cfg	InputOwnershipConsumedWaiting	-	-
 input-single-path/InputOwnershipConsumedWaitingOutcomeBefore.cfg	InputOwnershipConsumedWaiting	OrphanAReceiptCompleted	-
 input-single-path/InputOwnershipConsumedWaitingPinSupplyBefore.cfg	InputOwnershipConsumedWaiting	-	PendingBEventuallyStarts
+input-single-path/InputOwnershipDuplicateIntake.cfg	InputOwnershipDuplicateIntake	-	-
+input-single-path/InputOwnershipDuplicateIntakeBefore.cfg	InputOwnershipDuplicateIntake	NoFalseWarning	-
 input-single-path/InputOwnershipF.cfg	InputOwnership	NoSilentLoss,NoSilentLossObserved	-
 input-single-path/InputOwnershipF4.cfg	InputOwnership	NoSilentLoss,NoSilentLossObserved	-
 input-single-path/InputOwnershipF5.cfg	InputOwnership	-	-

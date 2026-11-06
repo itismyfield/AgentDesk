@@ -16,6 +16,10 @@ tokio::task_local! { static EXISTING_RETRY: bool; }
 tokio::task_local! { pub(crate) static ADOPTS: bool; }
 #[cfg(test)]
 tokio::task_local! {
+    pub(crate) static BEFORE_RESUME: std::cell::RefCell<Option<(
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>>;
     pub(crate) static BEFORE_INGRESS_HOLD: std::cell::RefCell<Option<(
         tokio::sync::oneshot::Sender<()>,
         tokio::sync::oneshot::Receiver<()>,
@@ -322,6 +326,13 @@ impl Original {
         let before = super::admission::status(handle, &self.ticket).await;
         let first = before.is_ok_and(|state| state != AdmissionState::Committed);
         let ticket = self.ticket.as_str().to_string();
+        #[cfg(test)]
+        if let Ok(Some((entered, release))) =
+            BEFORE_RESUME.try_with(|pause| pause.borrow_mut().take())
+        {
+            let _ = entered.send(());
+            let _ = release.await;
+        }
         match handle
             .v2_resume_ticket(self.item.clone(), ticket, same_input)
             .await
