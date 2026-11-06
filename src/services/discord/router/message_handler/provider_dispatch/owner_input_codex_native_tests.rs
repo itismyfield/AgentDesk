@@ -1,6 +1,5 @@
-//! A Codex start meets its pane's rollout: while the latest turn shows no end of its own (another
-//! turn's end, an unnamed one, no start at all, a torn line) it waits unclaimed or, once claimed,
-//! unsent; that turn's own complete or abort runs it once.
+//! A Codex start waits, unclaimed or once claimed unsent, while its pane's rollout shows no end of
+//! the latest turn's own; that turn's own complete or abort runs it once.
 use super::*;
 
 /// Stamps the markers and incarnation a spawned Codex pane `name` would carry; its session id.
