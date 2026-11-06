@@ -138,7 +138,7 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "abandon_request_store.rs": {"edit_outbound_message": 1},
     "admin_host_guard.rs": {".say": 1},
     "commands/config.rs": {".say": 2},
-    "commands/control.rs": {".say": 11},
+    "commands/control.rs": {".say": 12, "send_long_message*": 1},
     "commands/control/relaunch.rs": {".say": 1},
     "commands/diagnostics/mod.rs": {"send_long_message*": 4},
     "commands/fast_mode.rs": {".say": 2},
