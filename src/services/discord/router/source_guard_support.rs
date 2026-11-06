@@ -68,10 +68,6 @@ impl Lexed {
         self.find_all(needle).into_iter().find(|at| *at >= from)
     }
 
-    pub(in crate::services::discord) fn count(&self, needle: &str) -> usize {
-        self.find_all(needle).len()
-    }
-
     pub(in crate::services::discord) fn contains(&self, needle: &str) -> bool {
         !self.find_all(needle).is_empty()
     }
@@ -91,64 +87,6 @@ impl Lexed {
             mask: self.mask[range].to_string(),
             literals,
         }
-    }
-
-    /// Both views without ASCII whitespace outside literals (blanked comments included),
-    /// for checks that ignore formatting; literal bytes stay exactly as written.
-    pub(in crate::services::discord) fn compact(&self) -> Self {
-        let mut quoted = vec![false; self.code.len()];
-        for literal in &self.literals {
-            quoted[literal.clone()].fill(true);
-        }
-        let (mut code, mut mask, mut kept) = (Vec::new(), Vec::new(), Vec::new());
-        for (at, (byte, masked)) in self.code.bytes().zip(self.mask.bytes()).enumerate() {
-            kept.push(code.len());
-            if quoted[at] || !byte.is_ascii_whitespace() {
-                code.push(byte);
-                mask.push(masked);
-            }
-        }
-        kept.push(code.len());
-        let utf8 = |bytes| String::from_utf8(bytes).expect("dropping ASCII keeps UTF-8");
-        Self {
-            literals: self
-                .literals
-                .iter()
-                .map(|literal| kept[literal.start]..kept[literal.end])
-                .collect(),
-            code: utf8(code),
-            mask: utf8(mask),
-        }
-    }
-
-    /// The (optionally labeled) block after the `=>` of the first arm whose pattern starts
-    /// with as-written `head`; `None` for an expression arm or once the enclosing block closes.
-    pub(in crate::services::discord) fn arm(&self, head: &str) -> Option<Self> {
-        let at = self.find(head)?;
-        let mask = self.mask.as_bytes();
-        let mut depth = 0usize;
-        for index in at..mask.len() {
-            match mask[index] {
-                b'(' | b'[' | b'{' => depth += 1,
-                b')' | b']' | b'}' => depth = depth.checked_sub(1)?,
-                b'=' if depth == 0 && mask.get(index + 1) == Some(&b'>') => {
-                    let skip = |from: usize| {
-                        from + self.mask[from..].len() - self.mask[from..].trim_start().len()
-                    };
-                    let mut body = skip(index + 2);
-                    if mask.get(body) == Some(&b'\'') {
-                        body = skip(body + self.mask[body..].find(':')? + 1);
-                    }
-                    if mask.get(body) != Some(&b'{') {
-                        return None;
-                    }
-                    let span = braced_item_span(&self.mask[body..], "{")?;
-                    return Some(self.slice(body + span.start..body + span.end));
-                }
-                _ => {}
-            }
-        }
-        None
     }
 
     /// From the first as-written `head` through the `}` closing the block it opens;
