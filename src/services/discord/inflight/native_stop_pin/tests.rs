@@ -437,6 +437,7 @@ async fn hand_busy_children(
                 (mailbox.clone(), None),
                 ProviderKind::Claude,
                 (state.channel_id, front),
+                None,
             )
             .await,
             Ok(()),

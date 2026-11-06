@@ -188,7 +188,13 @@ pub(in crate::services::discord) fn owner_drive(
                     } else if matches!(transition, Some(Err(_))) {
                         Err(effect::unsent("session_transition_busy".into()))
                     } else {
-                        hand_busy((mailbox, pool), provider.clone(), (channel, front)).await
+                        hand_busy(
+                            (mailbox, pool),
+                            provider.clone(),
+                            (channel, front),
+                            runtime.clone(),
+                        )
+                        .await
                     }
                 }
                 Ok(false) => idle(front).await,
@@ -245,6 +251,7 @@ pub(in crate::services::discord) async fn hand_busy(
     (mailbox, pool): (ChannelMailboxHandle, Option<sqlx::PgPool>),
     provider: ProviderKind,
     (channel, front): (u64, Front),
+    runtime: Option<Shared>,
 ) -> Result<(), String> {
     let row = crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel)
         .ok_or_else(unobserved)?;
@@ -297,7 +304,7 @@ pub(in crate::services::discord) async fn hand_busy(
     }
     let (settled, answer) = tokio::sync::oneshot::channel();
     let thread = paste_busy(
-        (pool, provider),
+        (pool, provider, runtime),
         (channel, session, host),
         claim,
         owner,
@@ -318,7 +325,7 @@ fn unobserved() -> String {
 /// Runs the busy effect for a claimed front on a blocking thread that answers `settled` once the
 /// input settled; a body that cannot be built answers there too and starts no thread.
 async fn paste_busy(
-    (pool, provider): (Option<sqlx::PgPool>, ProviderKind),
+    (pool, provider, runtime): (Option<sqlx::PgPool>, ProviderKind, Option<Shared>),
     (channel, session, host): (u64, String, TurnHost),
     claim: FrontClaim,
     owner: Registration,
@@ -338,7 +345,7 @@ async fn paste_busy(
     Some(tokio::task::spawn_blocking(move || {
         let turn = StreamingTurn {
             pool: pool.as_ref(),
-            shared: None,
+            shared: runtime.as_ref(),
             provider: &provider,
             prompt: &payload,
             session_id: None,
@@ -371,6 +378,7 @@ async fn paste_busy(
 /// with the drive's answer once that input settled.
 pub(in crate::services::discord) struct OwnerTurn {
     mailbox: ChannelMailboxHandle,
+    runtime: Option<Shared>,
     claim: FrontClaim,
     settled: Settled,
     /// Where the front came from, read from the provenance its admission kept.
@@ -411,6 +419,7 @@ impl OwnerTurn {
     ) {
         let OwnerTurn {
             mailbox,
+            runtime,
             claim,
             settled,
             origin,
@@ -427,7 +436,7 @@ impl OwnerTurn {
             Err(error) => return drop(settled.send(Err(error))),
         };
         let at = (channel, session, host);
-        let _ = paste_busy((pool, provider), at, claim, owner, settled).await;
+        let _ = paste_busy((pool, provider, runtime), at, claim, owner, settled).await;
     }
 }
 
@@ -663,6 +672,7 @@ async fn start_idle(
     let refusal = std::sync::Arc::new(Mutex::new(None));
     let owner = OwnerTurn {
         mailbox,
+        runtime: Some(shared.clone()),
         claim,
         settled,
         origin,
@@ -755,11 +765,16 @@ pub(super) fn execute_owned(
     use crate::services::platform::tmux::pane_liveness;
     let OwnerTurn {
         mailbox,
+        runtime,
         claim,
         settled,
         origin,
         ..
     } = owner;
+    let turn = StreamingTurn {
+        shared: turn.shared.or(runtime.as_ref()),
+        ..turn
+    };
     let session = turn.tmux_session_name.unwrap_or_default();
     let live = matches!(turn.host, TurnHost::Tmux)
         && pane_liveness(session) == PaneLiveness::Live
@@ -1192,12 +1207,61 @@ fn run(
         target::Route::HerdrIdle => return Err("NotSent(\"idle_unowned\")".into()),
         target::Route::Held(reason) => return Err(format!("NotSent({reason:?})")),
     };
+    let busy = matches!(
+        route,
+        target::Route::ClaudeBusy
+            | target::Route::ClaudeHerdrBusy
+            | target::Route::CodexBusy
+            | target::Route::CodexHerdrBusy
+    );
+    let mut sources = Vec::new();
+    if busy {
+        if let Some(claim) = front.as_ref() {
+            for original in std::iter::once(&claim.front().1).chain(claim.followers()) {
+                let ids = match original.source_message_ids.as_slice() {
+                    [] => std::slice::from_ref(&original.message_id),
+                    ids => ids,
+                };
+                sources.extend_from_slice(ids);
+            }
+        } else {
+            sources.extend(r.sources.iter().filter_map(|id| id.parse::<u64>().ok()));
+        }
+        let mut seen = std::collections::HashSet::new();
+        sources.retain(|id| {
+            crate::services::discord::reaction_lifecycle::is_real_discord_message_id_value(*id)
+                && seen.insert(*id)
+        });
+    }
     let prepared = PreparedPayload {
         frame,
         sources: r.sources,
         attempt: r.attempt,
     };
-    submit((&r.mailbox, r.clock), front, prepared, leaf)
+    submit((&r.mailbox, r.clock), front, prepared, leaf)?;
+    if busy && let Some(shared) = turn.shared {
+        tokio::runtime::Handle::current().block_on(async {
+            use crate::services::discord::turn_view_reconciler::{
+                TurnViewIdentity, TurnViewTarget,
+            };
+            for message in sources {
+                let target = TurnViewTarget::intake_user_message(
+                    ChannelId::new(turn.channel_id),
+                    poise::serenity_prelude::MessageId::new(message),
+                );
+                shared
+                    .turn_view_reconciler
+                    .note_confirmed_injection(
+                        shared,
+                        turn.provider,
+                        target,
+                        TurnViewIdentity::IntakeShared,
+                    )
+                    .await;
+            }
+        });
+    }
+    Ok(())
 }
 
 /// Posts the original's one notice that a draft beside its paste may not be kept; the outbox key
