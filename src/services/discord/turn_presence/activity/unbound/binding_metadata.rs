@@ -82,10 +82,6 @@ pub(super) fn collect(
             && !candidates.inflight
             && !candidates.conflict
     });
-    #[cfg(test)]
-    let needed = needed
-        || std::env::var("AGENTDESK_N2B_TEST_MUTATION")
-            .is_ok_and(|mutation| mutation == "joint-metadata-all");
     if !needed {
         return Ok(snapshot);
     }
@@ -167,12 +163,9 @@ pub(super) fn collect(
         return Err("binding metadata source identity conflicts".into());
     }
     #[cfg(test)]
-    if std::env::var("AGENTDESK_N2B_TEST_MUTATION").is_ok_and(|mutation| {
-        matches!(
-            mutation.as_str(),
-            "joint-metadata-off" | "joint-metadata-missing"
-        )
-    }) {
+    if std::env::var("AGENTDESK_N2B_TEST_MUTATION")
+        .is_ok_and(|mutation| mutation == "joint-metadata-missing")
+    {
         return Ok(snapshot);
     }
     snapshot.name = Some(Name {

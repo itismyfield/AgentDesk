@@ -55,10 +55,6 @@ pub(super) fn read<T: Clone + Send + 'static>(
 
 // Truncate/append/rollback may restore both length and a coarse timestamp, so invalidate first.
 pub(super) fn invalidate(path: &Path) {
-    #[cfg(test)]
-    if super::n2b_mutant("binding-log-invalidate") {
-        return;
-    }
     READS
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())

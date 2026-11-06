@@ -28,16 +28,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         }
         let selection = self.writer.suspension.clone();
         let nonce = selection.nonce();
-        #[cfg(test)]
-        let nonce = if crate::services::claude_tui::source_verify::n2b_mutant("b1b-fix") {
-            None
-        } else {
-            nonce
-        };
-        #[cfg(test)]
-        if nonce.is_some() && crate::services::claude_tui::source_verify::n2b_mutant("b1b-once") {
-            return false;
-        }
         let channel = self.writer.channel();
         if !crate::services::tui_prompt_dedupe::clear_relaunch::fresh_scope_pending(
             channel,
@@ -53,10 +43,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             && self.writer.store().ledger().unresolved().is_none()
             && !self.transitions.has_apply_job()
             && self.sources.quiescent_for_rescope();
-        #[cfg(test)]
-        let quiescent = quiescent
-            || crate::services::claude_tui::source_verify::n2b_mutant("b1b-refreeze-noq")
-            || crate::services::claude_tui::source_verify::n2b_mutant("b1b-fix");
         let sources: Vec<_> = self
             .writer
             .store()
@@ -91,11 +77,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                         self.boot_previous_nonce.take().is_some_and(|previous| {
                             selection.nonce().is_some_and(|current| current != previous)
                         });
-                    #[cfg(test)]
-                    let boot_cross_nonce = boot_cross_nonce
-                        && !crate::services::claude_tui::source_verify::n2b_mutant(
-                            "b1b-boot-xnonce-alarm",
-                        );
                     if boot_cross_nonce {
                         tracing::warn!(
                             channel,
@@ -103,11 +84,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                             "[tui_o] previous incarnation remains suspended"
                         );
                         let incident = format!("cross_nonce_boot_rescope:{}", uuid::Uuid::new_v4());
-                        #[cfg(test)]
-                        let remember = !crate::services::claude_tui::source_verify::n2b_mutant(
-                            "b1b-boot-xnonce-incident",
-                        );
-                        #[cfg(not(test))]
                         let remember = true;
                         if remember {
                             self.waiting.incident = Some(incident.clone());
@@ -131,11 +107,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                     tracing::info!(channel, reason, "[tui_o] source resume held");
                     self.scope_hold = Some(reason);
                     if reason == "new_root_waiting" {
-                        #[cfg(test)]
-                        if crate::services::claude_tui::source_verify::n2b_mutant("b1b-root-alarm")
-                        {
-                            return false;
-                        }
                         let prepared = self
                             .writer
                             .store()
@@ -143,11 +114,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                             .unresolved()
                             .map(|(serial, _)| serial);
                         let incident = format!("new_root_waiting:{}", uuid::Uuid::new_v4());
-                        #[cfg(test)]
-                        let remember = !crate::services::claude_tui::source_verify::n2b_mutant(
-                            "b1b-root-incident",
-                        );
-                        #[cfg(not(test))]
                         let remember = true;
                         if remember {
                             self.waiting.incident = Some(incident.clone());
@@ -171,10 +137,6 @@ pub(super) fn configured_deriver(
     provider: ShadowProvider,
     ledger: &crate::services::tui_o::store::ledger::LedgerState,
 ) -> UnitDeriver {
-    #[cfg(test)]
-    if crate::services::claude_tui::source_verify::n2b_mutant("b1b-bare-deriver") {
-        return UnitDeriver::new(channel, provider);
-    }
     let inputs = super::super::pieces::ToolCardInputs {
         known: ledger.non_card_tool_keys(),
         recorded_cards: ledger.card_tool_keys(),

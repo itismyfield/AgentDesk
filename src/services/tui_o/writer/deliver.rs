@@ -351,10 +351,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     /// One re-post turn, after this poll's owed pieces; nothing without a turn or once stopped.
     pub(crate) async fn repost_turn(&mut self) {
         let allowed = self.suspension.is_empty();
-        #[cfg(test)]
-        let allowed = allowed
-            || crate::services::claude_tui::source_verify::n2b_mutant("b1b-repost")
-            || crate::services::claude_tui::source_verify::n2b_mutant("b1b-live-s");
         if !allowed {
             return;
         }
@@ -936,15 +932,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> RepostWriter for ChannelWri
             .cursors()
             .filter(|cursor| !cursor.retired)
             .map(|cursor| cursor.source.clone())
-            .collect();
-        #[cfg(test)]
-        let sources: Arc<[SourceId]> = sources
-            .iter()
-            .filter(|source| {
-                !crate::services::claude_tui::source_verify::n2b_mutant("b1b-live-s")
-                    || !self.suspension.contains(source)
-            })
-            .cloned()
             .collect();
         Arc::new(move || {
             live.load(Ordering::SeqCst)

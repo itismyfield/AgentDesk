@@ -248,10 +248,6 @@ impl TransitionPort {
     }
 
     pub(crate) fn sources_unsuspended(&self) -> bool {
-        #[cfg(test)]
-        if crate::services::claude_tui::source_verify::n2b_mutant("b1b-transition") {
-            return true;
-        }
         self.suspension.is_empty()
     }
 

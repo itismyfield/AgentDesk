@@ -33,10 +33,6 @@ pub(crate) async fn for_claimed_input(
     if !selected_codex_input(provider, channel) {
         return super::route(provider, channel);
     }
-    #[cfg(test)]
-    if crate::services::claude_tui::source_verify::n2b_mutant("b1b-fanout") {
-        return super::route(provider, channel);
-    }
     let provider = provider.to_owned();
     blocking_route(move || {
         super::route_parsed_with(
@@ -70,10 +66,6 @@ pub(crate) fn selected_codex_input(provider: &str, channel: u64) -> bool {
 }
 
 async fn blocking_route(work: impl FnOnce() -> IntakeRoute + Send + 'static) -> IntakeRoute {
-    #[cfg(test)]
-    if crate::services::claude_tui::source_verify::n2b_mutant("b1b-async-route") {
-        return work();
-    }
     tokio::task::spawn_blocking(work)
         .await
         .unwrap_or_else(|error| IntakeRoute::Hold(format!("O input observation failed: {error}")))

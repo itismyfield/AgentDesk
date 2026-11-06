@@ -191,31 +191,12 @@ pub(crate) fn observe_binding_hook(
     {
         // A prompt of the launch session may still supersede a Pending it outlived; no switch.
         let prompt = HookEventKind::from_path(event) == HookEventKind::UserPromptSubmit;
-        #[cfg(test)]
-        let prompt = prompt
-            && !crate::services::claude_tui::source_verify::n2b_mutant("r5-reclaim-ingress-off");
         if provider == "claude"
             && let Err(reason) =
                 adoption_retry::observe_launch_hook(command, &hook, envelope.as_ref(), prompt)
                     .and_then(|()| resume_start::record(payload_session, &hook, envelope.as_ref()))
         {
             return IngressOutcome::NotDurable(reason);
-        }
-        #[cfg(test)]
-        if provider == "claude"
-            && !prompt
-            && crate::services::claude_tui::source_verify::n2b_mutant("r5-ingress-start")
-        {
-            return match adoption_retry::adopt_from_enveloped_hook(
-                command,
-                payload_session,
-                &hook,
-                envelope.as_ref(),
-            ) {
-                AdoptionHttp::Durable(kind) => IngressOutcome::Durable(kind),
-                AdoptionHttp::NotDurable(reason) => IngressOutcome::NotDurable(reason),
-                AdoptionHttp::Skipped(skip) => classify_skip(skip, command, None),
-            };
         }
         return IngressOutcome::Proceed(ProceedReason::NoSessionSwitch);
     }
