@@ -302,12 +302,6 @@ fn check(
     {
         return Err(refuse(CodexDeferred));
     }
-    #[cfg(test)]
-    if snapshot.provider == ShadowProvider::Codex
-        && super::actor::codex_retention::mutant("consumer_deferred")
-    {
-        return Err(refuse(CodexDeferred));
-    }
     match &snapshot.home {
         Home::Settled => {}
         Home::Moving => return Err(refuse(HomeMoving)),
@@ -446,10 +440,6 @@ fn same_end(witness: &CleanupWitness, cursor: &Cursor) -> bool {
 }
 
 fn not_current(snapshot: &Snapshot, cursor: &Cursor) -> Result<(), Verdict> {
-    #[cfg(test)]
-    if super::actor::transition_hooks::retention_mutant("latest") {
-        return Ok(());
-    }
     let pinned =
         (snapshot.pinned.as_ref()).map_err(|e| unclear(Unclear::PinnedUnread(e.clone())))?;
     let pinned = pinned

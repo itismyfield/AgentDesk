@@ -108,24 +108,6 @@ impl Trace {
         self.first_posted(serial, msg_id, epoch);
     }
 
-    #[cfg(test)]
-    pub(super) fn before_record(&self, entry: &crate::services::tui_o::store::ledger::LedgerEntry) {
-        if super::replay::mutant("posted_before_append")
-            && let crate::services::tui_o::store::ledger::LedgerEntry::Posted {
-                serial, msg_id, ..
-            } = entry
-        {
-            self.first_posted(*serial, *msg_id, 0);
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn constructing(&self, serial: u64, epoch: u64) {
-        if super::replay::mutant("post_at_construction") {
-            self.first_post(serial, epoch);
-        }
-    }
-
     pub(super) fn first_posted(&self, serial: u64, msg_id: u64, epoch: u64) {
         if !self.0.posted.swap(true, Ordering::Relaxed) {
             self.emit(

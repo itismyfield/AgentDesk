@@ -27,9 +27,6 @@ thread_local! {
 }
 
 pub(crate) fn restart_policy_call(channel: u64) {
-    if super::replay::mutant("counter_off") {
-        return;
-    }
     RESTART_POLICY_CALLS.with(|calls| {
         if let Some((selected, count)) = calls.get()
             && selected == channel

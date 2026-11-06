@@ -7,7 +7,7 @@ use crate::services::claude_tui::source_verify::{
 };
 use crate::services::cluster::stream_relay::SourceFileIdentity;
 use crate::services::tui_o::store::ChannelStore;
-use crate::services::tui_o::store::clear_end::{ClearEnd, mutant};
+use crate::services::tui_o::store::clear_end::ClearEnd;
 use crate::services::tui_prompt_dedupe::binding_context::{
     execution_context, stable_host_identity,
 };
@@ -31,10 +31,10 @@ impl<B: BindingEvents> Sources<B> {
             self.clear_notice.borrow_and_update();
             self.clear_due = true;
         }
-        if !std::mem::take(&mut self.clear_due) || mutant("off") {
+        if !std::mem::take(&mut self.clear_due) {
             return Ok(());
         }
-        if self.provider != ShadowProvider::Claude && !mutant("any_provider") {
+        if self.provider != ShadowProvider::Claude {
             return Ok(());
         }
         let records = match writer.store().clear_ends() {
@@ -71,10 +71,6 @@ impl<B: BindingEvents> Sources<B> {
             }
             let made = match (next.seq, next.tmux_session.as_deref()) {
                 (Some(seq), Some(pane)) => (seq, pane),
-                _ if mutant("legacy_hops") => match self.legacy_hops.get(key) {
-                    Some((seq, pane)) => (*seq, pane.as_str()),
-                    None => continue,
-                },
                 _ => continue,
             };
             let (seq, pane) = made;
@@ -84,7 +80,7 @@ impl<B: BindingEvents> Sources<B> {
                 pane,
                 source: &next.source,
             };
-            if self.old_settled(store, key) && !mutant("missing_old") {
+            if self.old_settled(store, key) {
                 continue;
             }
             let proven = records.iter().rev().any(|record| {
@@ -107,14 +103,6 @@ impl<B: BindingEvents> Sources<B> {
                     "[tui_o] hop proved by a confirmed clear end"
                 );
             }
-        }
-        if mutant("proof_unwritten") {
-            for (key, _) in &proved {
-                if let Some(next) = self.rotation.successors.get_mut(key) {
-                    next.proof = None;
-                }
-            }
-            return Ok(());
         }
         let written = writer.store().write_rotation(&self.rotation);
         written.map_err(halted("rotation"))?;
@@ -146,7 +134,7 @@ impl<B: BindingEvents> Sources<B> {
         let ours = record.provider == "claude"
             && record.channel == self.channel
             && record.host.as_deref() == host;
-        let same_pane = record.tmux_session == hop.pane || mutant("any_pane");
+        let same_pane = record.tmux_session == hop.pane;
         if !ours || !same_pane {
             return false;
         }
@@ -154,7 +142,7 @@ impl<B: BindingEvents> Sources<B> {
             Some(stored) => source_key(&stored),
             None => return false,
         };
-        if old != hop.key && !mutant("any_source") {
+        if old != hop.key {
             return false;
         }
         let pane_moves = events.iter().filter(|event| {
@@ -165,16 +153,12 @@ impl<B: BindingEvents> Sources<B> {
                     BindingRecord::Bound { .. } | BindingRecord::Resolved { .. }
                 )
         });
-        let first = if mutant("any_later_hop") {
-            pane_moves.clone().find(|event| event.seq == hop.seq)
-        } else {
-            pane_moves.clone().next()
-        };
+        let first = pane_moves.clone().next();
         let Some(event) = first.filter(|event| event.seq == hop.seq) else {
             return false;
         };
         let nonce = event.execution_nonce.as_str();
-        if nonce.is_empty() || (nonce == record.execution_nonce && !mutant("same_nonce")) {
+        if nonce.is_empty() || nonce == record.execution_nonce {
             return false;
         }
         self.fresh_launch(store, nonce, hop, retry)
@@ -189,13 +173,10 @@ impl<B: BindingEvents> Sources<B> {
         hop: &Hop<'_>,
         retry: &mut bool,
     ) -> bool {
-        if mutant("context_off") {
-            return true;
-        }
         let Ok(context) = execution_context("claude", nonce) else {
             return false;
         };
-        let fresh = context.launch_mode == "fresh" || mutant("resume_ok");
+        let fresh = context.launch_mode == "fresh";
         let new_session = self.names.session(hop.source);
         let expected = if new_session.is_empty() {
             context
@@ -208,7 +189,6 @@ impl<B: BindingEvents> Sources<B> {
                 })
         } else {
             context.expected_native_session_id.as_deref() == Some(new_session)
-                || mutant("any_expected")
         };
         fresh
             && expected
@@ -303,9 +283,6 @@ impl<B: BindingEvents> Sources<B> {
         &mut self,
         writer: &mut ChannelWriter<P, L, A>,
     ) -> Result<(), WriterAlarm> {
-        if mutant("resume_wake_off") {
-            return Ok(());
-        }
         let store: &ChannelStore = writer.store();
         let proven: Vec<String> = (self.rotation.successors.iter())
             .filter(|(_, next)| next.proof.is_some())
