@@ -1,7 +1,7 @@
 use super::TurnViewState;
 
 const NONE: &[char] = &[];
-const QUEUED: &[char] = &['🔜'];
+const QUEUED: &[char] = &['📬'];
 const QUEUED_RECONCILE: &[char] = &['🔄'];
 const PENDING: &[char] = &['⏳'];
 const COMPLETED: &[char] = &['✅'];

@@ -58,7 +58,7 @@ fn reaction_add_count(shared: &SharedData, message_id: MessageId, emoji: char) -
 }
 
 fn mailbox_add_count(shared: &SharedData, message_id: MessageId) -> usize {
-    reaction_add_count(shared, message_id, '🔜')
+    reaction_add_count(shared, message_id, '📬')
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -186,7 +186,7 @@ async fn standalone_without_start_attempt_adds_mailbox_once() {
     assert_eq!(
         mailbox_add_count(&shared, message_id),
         1,
-        "race-loss standalone enqueue must imperatively add 🔜 without a start attempt"
+        "race-loss standalone enqueue must imperatively add 📬 without a start attempt"
     );
     assert!(
         crate::services::discord::outbound::reaction_control::take_test_reply_deliveries()
@@ -227,7 +227,7 @@ async fn matching_start_rollback_and_imperative_add_coalesce_without_double_mail
     assert_eq!(
         mailbox_add_count(&shared, message_id),
         1,
-        "rollback plus imperative ensure must not double-add 🔜"
+        "rollback plus imperative ensure must not double-add 📬"
     );
 }
 
@@ -295,7 +295,7 @@ async fn stale_start_attempt_repairs_mailbox_from_live_queue_truth() {
     assert_eq!(
         mailbox_add_count(&shared, message_id),
         1,
-        "actual mailbox membership must repair 🔜 despite a stale rollback attempt"
+        "actual mailbox membership must repair 📬 despite a stale rollback attempt"
     );
     let ops = shared.turn_view_reconciler.ops();
     assert_eq!(
@@ -322,7 +322,7 @@ async fn stale_start_attempt_repairs_mailbox_from_live_queue_truth() {
             visible.retain(|emoji| *emoji != op.emoji);
         }
     }
-    assert_eq!(visible, vec!['🔜']);
+    assert_eq!(visible, vec!['📬']);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -388,7 +388,7 @@ async fn busy_tui_requeue_preserves_standalone_marker_after_matching_rollback() 
     }
     assert_eq!(
         visible,
-        vec!['🔜'],
+        vec!['📬'],
         "accepted busy-TUI requeue ends at the reconciler's marker-only queued view"
     );
 }

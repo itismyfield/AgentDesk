@@ -210,7 +210,7 @@ async fn queued_then_started_swaps_queue_marker_for_new_hourglass_without_residu
     let ops = reconciler.ops();
     assert_eq!(
         ops.iter().map(|op| (op.emoji, op.add)).collect::<Vec<_>>(),
-        vec![('🔜', true), ('🔜', false), ('⏳', true)],
+        vec![('📬', true), ('📬', false), ('⏳', true)],
         "queued promotion must remove the queue marker and add a fresh pending hourglass"
     );
 }
@@ -243,8 +243,8 @@ async fn queued_states_are_marker_only() {
     let _root = scoped_runtime_root();
 
     for (index, state, emoji) in [
-        (0, TurnViewState::Queued, '🔜'),
-        (1, TurnViewState::QueuedMerged, '🔜'),
+        (0, TurnViewState::Queued, '📬'),
+        (1, TurnViewState::QueuedMerged, '📬'),
         (2, TurnViewState::QueuedReconcile, '🔄'),
     ] {
         let reconciler = TurnViewReconciler::default();
@@ -279,10 +279,10 @@ async fn requeue_renotification_of_queued_target_is_coalesced_noop() {
     let reconciler = note_sequence(&[TurnViewState::Queued, TurnViewState::Queued]).await;
 
     let ops = reconciler.ops();
-    assert_eq!(ops.iter().filter(|op| op.emoji == '🔜').count(), 1);
+    assert_eq!(ops.iter().filter(|op| op.emoji == '📬').count(), 1);
     assert_eq!(
         snapshot_reactions(&reconciler, target()),
-        vec![expected('🔜', "intake-a")]
+        vec![expected('📬', "intake-a")]
     );
 }
 
@@ -292,8 +292,8 @@ async fn queue_cancel_removes_mailbox_marker() {
     let reconciler = note_sequence(&[TurnViewState::Queued, TurnViewState::None]).await;
 
     let ops = reconciler.ops();
-    assert!(ops.iter().any(|op| op.add && op.emoji == '🔜'));
-    assert!(ops.iter().any(|op| !op.add && op.emoji == '🔜'));
+    assert!(ops.iter().any(|op| op.add && op.emoji == '📬'));
+    assert!(ops.iter().any(|op| !op.add && op.emoji == '📬'));
     assert_eq!(snapshot_reactions(&reconciler, target()), Vec::new());
 }
 
@@ -379,10 +379,10 @@ async fn regression_4248_start_rollback_to_queued_removes_hourglass_and_cancel_c
     let ops = reconciler.ops();
     assert_eq!(ops.len(), 3);
     assert!(!ops[1].add && ops[1].emoji == '⏳');
-    assert!(ops[2].add && ops[2].emoji == '🔜');
+    assert!(ops[2].add && ops[2].emoji == '📬');
     assert_eq!(
         snapshot_reactions(&reconciler, target),
-        vec![expected('🔜', "intake-a")]
+        vec![expected('📬', "intake-a")]
     );
     assert_eq!(
         reconciler
@@ -400,7 +400,7 @@ async fn regression_4248_start_rollback_to_queued_removes_hourglass_and_cancel_c
             target,
             owner,
             TurnViewIdentity::Test("ignored-cancel"),
-            '🔜',
+            '📬',
             "test_queue_exit_after_rollback",
         )
         .await;
@@ -657,7 +657,7 @@ async fn regression_4049_stale_clear_after_newer_rollback_keeps_queued_marker() 
 
     assert_eq!(
         snapshot_reactions(&reconciler, target),
-        vec![expected('🔜', "intake-a")]
+        vec![expected('📬', "intake-a")]
     );
     let current = reconciler
         .targets
@@ -688,7 +688,7 @@ async fn regression_4049_stale_clear_after_newer_rollback_keeps_queued_marker() 
     );
     assert_eq!(
         snapshot_reactions(&reconciler, target),
-        vec![expected('🔜', "intake-a")],
+        vec![expected('📬', "intake-a")],
         "stale attempt1 clear must not remove the newer queued state"
     );
     let current = reconciler
@@ -725,7 +725,7 @@ async fn persisted_v1_queued_state_is_invalidated_for_reapplication() {
 
     assert_eq!(
         snapshot_reactions(&reconciler, target),
-        vec![expected('🔜', "intake-a")],
+        vec![expected('📬', "intake-a")],
         "v1 queued records must be re-applied under the marker-only contract"
     );
     let text = std::fs::read_to_string(persisted_path(target)).expect("rewritten v4 state");
@@ -999,7 +999,7 @@ async fn regression_4049_late_queued_after_started_and_cancel_are_noops() {
             target,
             owner,
             TurnViewIdentity::Test("ignored-cancel"),
-            '🔜',
+            '📬',
             "test",
         )
         .await;
@@ -1052,7 +1052,7 @@ async fn queued_cancel_ignores_nonmatching_generation() {
             target,
             stale_cancel_owner,
             TurnViewIdentity::Test("ignored-cancel"),
-            '🔜',
+            '📬',
             "test",
         )
         .await;
@@ -1060,7 +1060,7 @@ async fn queued_cancel_ignores_nonmatching_generation() {
     assert_eq!(reconciler.ops().len(), ops_after_queue);
     assert_eq!(
         snapshot_reactions(&reconciler, target),
-        vec![expected('🔜', "intake-a")]
+        vec![expected('📬', "intake-a")]
     );
     assert!(persisted_exists(target));
     assert_eq!(
@@ -1378,7 +1378,7 @@ async fn regression_4049_late_queued_after_terminal_eviction_is_noop() {
     assert!(
         !snapshot_reactions(&reconciler, target)
             .iter()
-            .any(|(emoji, _)| *emoji == '🔜'),
+            .any(|(emoji, _)| *emoji == '📬'),
         "late queued notification must not re-add a queue marker next to the terminal reaction"
     );
     assert!(
@@ -1595,7 +1595,7 @@ async fn failed_queue_marker_apply_leaves_no_persisted_state() {
             .iter()
             .map(|op| (op.emoji, op.add))
             .collect::<Vec<_>>(),
-        vec![('🔜', true)]
+        vec![('📬', true)]
     );
     assert!(!persisted_exists(target));
 }
@@ -2058,7 +2058,7 @@ async fn reg_7832_cleanup_retry_restores_observed_receipt_and_idle_completion() 
     let ops = reconciler.ops();
     assert_eq!(
         ops.iter()
-            .filter(|op| op.target == target && op.emoji == '🔜' && !op.add)
+            .filter(|op| op.target == target && op.emoji == '📬' && !op.add)
             .count(),
         2,
         "a transient first cleanup failure must be retried"
@@ -2278,7 +2278,7 @@ async fn reg_7832_permanent_cleanup_failure_is_not_retried_or_registered() {
         )
         .await;
     assert_eq!(reconciler.ops().len(), 1);
-    assert_eq!(reconciler.ops()[0].emoji, '🔜');
+    assert_eq!(reconciler.ops()[0].emoji, '📬');
     assert!(!reconciler.ops()[0].add);
     assert_eq!(reconciler.pending_injected_count(target.channel_id), 0);
 }
@@ -2293,7 +2293,7 @@ async fn reg_7832_unknown_and_cold_terminal_cleanup_preserve_plus_and_clear_old_
     {
         let reconciler = TurnViewReconciler::default();
         let target = target_with(100_000_000_078_350, 100_000_000_078_351 + index as u64);
-        reg_7832_seed_reactions(&reconciler, target, "injected", &['➕', '📬', '📥', '🔜']);
+        reg_7832_seed_reactions(&reconciler, target, "injected", &['➕', '📬', '📥']);
         assert!(
             reconciler
                 .note_state(
@@ -2361,13 +2361,11 @@ async fn reg_7832_persisted_legacy_merged_versions_remove_old_plus() {
 
 #[tokio::test]
 async fn reg_7832_waiting_input_uses_soon_then_turn_start_uses_hourglass() {
-    for header in ["📬 **메시지 대기 중**", "🔜 **메시지 대기 중**"] {
-        let content = format!(
-            "{header}\n{}",
-            super::super::formatting::PLACEHOLDER_PROBE_MARKER
-        );
-        assert!(super::super::placeholder_sweeper::is_message_still_placeholder(&content));
-    }
+    let content = format!(
+        "📬 **메시지 대기 중**\n{}",
+        super::super::formatting::PLACEHOLDER_PROBE_MARKER
+    );
+    assert!(super::super::placeholder_sweeper::is_message_still_placeholder(&content));
     let _root = scoped_runtime_root();
     let shared = crate::services::discord::make_shared_data_for_tests();
     let target = target_with(100_000_000_078_370, 100_000_000_078_371);
@@ -2385,7 +2383,7 @@ async fn reg_7832_waiting_input_uses_soon_then_turn_start_uses_hourglass() {
     );
     assert_eq!(
         snapshot_reactions(&shared.turn_view_reconciler, target),
-        vec![expected('🔜', target.kind.identity_label())]
+        vec![expected('📬', target.kind.identity_label())]
     );
     assert!(
         note_intake_turn_started_current(
@@ -2406,6 +2404,6 @@ async fn reg_7832_waiting_input_uses_soon_then_turn_start_uses_hourglass() {
             .turn_view_reconciler
             .ops()
             .iter()
-            .all(|op| !op.add || !['➕', '📬', '📥'].contains(&op.emoji))
+            .all(|op| !op.add || !['➕', '📥'].contains(&op.emoji))
     );
 }

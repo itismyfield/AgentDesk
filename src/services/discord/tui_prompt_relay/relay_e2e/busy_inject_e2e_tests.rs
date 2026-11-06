@@ -375,7 +375,7 @@ async fn an_owner_refused_before_its_reservation_leaves_the_message_to_intake_pg
     // Intake merges the message into the input queued just before it.
     let queue = vec!["meanwhile\nstatus?".to_string()];
     rt.finish().await;
-    assert_eq!(observed, (refused, queue, vec![], vec!["🔜".to_string()]));
+    assert_eq!(observed, (refused, queue, vec![], vec!["📬".to_string()]));
 }
 
 /// Starts `message` and returns once its owner holds the reservation, parked at the first pane
@@ -419,7 +419,7 @@ async fn a_vetoed_paste_hands_the_message_back_ahead_of_input_sent_meanwhile_pg(
     rt.finish().await;
     assert_eq!(
         observed,
-        (queue, vec!["🔜".to_string()], Some(message), vec![], None)
+        (queue, vec!["📬".to_string()], Some(message), vec![], None)
     );
 }
 
@@ -770,7 +770,7 @@ async fn a_channel_outside_the_gate_reaches_no_injection_step_pg() {
     let none = hook::Seen::default();
     let base = (
         queued,
-        vec!["🔜".to_string()],
+        vec!["📬".to_string()],
         vec![],
         true,
         [vec![], vec![]],

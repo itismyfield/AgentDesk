@@ -722,14 +722,14 @@ mod tests {
         assert!(outcome.accepted());
         assert_eq!(
             outcome.pending_reaction,
-            PendingReactionDecision::Apply('🔜')
+            PendingReactionDecision::Apply('📬')
         );
         assert_eq!(
             effects.reactions,
             vec![(
                 serenity::ChannelId::new(42),
                 serenity::MessageId::new(100),
-                '🔜'
+                '📬'
             )]
         );
         assert_eq!(
@@ -875,7 +875,7 @@ mod tests {
                 refusal_reason: Some(EnqueueRefusalReason::SourceIdAlreadyQueued),
                 persistence_error: None,
             },
-            repair_reaction: Some('🔜'),
+            repair_reaction: Some('📬'),
             ..FakeEffects::default()
         };
 
@@ -889,14 +889,14 @@ mod tests {
         );
         assert_eq!(
             outcome.pending_reaction,
-            PendingReactionDecision::Apply('🔜')
+            PendingReactionDecision::Apply('📬')
         );
         assert_eq!(
             effects.reactions,
             vec![(
                 serenity::ChannelId::new(42),
                 serenity::MessageId::new(100),
-                '🔜'
+                '📬'
             )]
         );
         assert!(effects.checkpoints.is_empty());
@@ -919,7 +919,7 @@ mod tests {
                 refusal_reason: Some(EnqueueRefusalReason::SourceIdAlreadyQueued),
                 persistence_error: None,
             },
-            repair_reaction: Some('🔜'),
+            repair_reaction: Some('📬'),
             repair_delivery: false,
             ..FakeEffects::default()
         };
@@ -954,7 +954,7 @@ mod tests {
                 refusal_reason: Some(EnqueueRefusalReason::SourceIdAlreadyQueued),
                 persistence_error: None,
             },
-            repair_reaction: Some('🔜'),
+            repair_reaction: Some('📬'),
             ..FakeEffects::default()
         };
         let mut options = IntakeQueueCommitOptions::default();
@@ -1028,7 +1028,7 @@ mod tests {
         assert!(outcome.accepted());
         assert_eq!(
             outcome.pending_reaction,
-            PendingReactionDecision::Apply('🔜')
+            PendingReactionDecision::Apply('📬')
         );
         assert_eq!(effects.idle_kickoffs, 1);
         assert_eq!(outcome.idle_kickoff_started_count, Some(1));

@@ -15,7 +15,7 @@ use tokio::sync::Notify;
 const MESSAGE: u64 = 940_487_400_051_910;
 const WINNER: u64 = MESSAGE + 1;
 const PENDING: &str = "%E2%8F%B3";
-const QUEUED: &str = "%F0%9F%94%9C";
+const QUEUED: &str = "%F0%9F%93%AC";
 const DEADLINE: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Debug)]

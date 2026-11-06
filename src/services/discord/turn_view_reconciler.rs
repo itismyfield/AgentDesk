@@ -32,7 +32,7 @@ mod resolution;
 mod store;
 pub(in crate::services::discord) use orphan_sweep::sweep_orphan_tui_anchor_reactions;
 
-const TURN_VIEW_REACTIONS: [char; 8] = ['🔜', '📬', '📥', '🔄', '⏳', '✅', '⚠', '🛑'];
+const TURN_VIEW_REACTIONS: [char; 7] = ['📬', '📥', '🔄', '⏳', '✅', '⚠', '🛑'];
 const QUEUE_EXIT_FEEDBACK_REACTIONS: [char; 3] = ['🚫', '⌛', '⏏'];
 /// Marks on a message a busy turn's pane took or may have taken; never tracked as turn view state.
 const INJECTION_REACTIONS: [char; 3] = ['⏳', '➕', '❓'];
@@ -808,7 +808,7 @@ impl TurnViewReconciler {
             }
             return TurnViewDelivery::Delivered;
         }
-        if matches!(emoji, '📬' | '📥') {
+        if expected_state.is_none() && matches!(emoji, '📬' | '📥') {
             let resolved_identity = current
                 .as_ref()
                 .map(|entry| entry.identity.clone())

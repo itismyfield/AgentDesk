@@ -61,7 +61,7 @@ pub(super) async fn note_queue_pending(
     // #4554: rollback is attempt-scoped and may legitimately be unavailable or
     // refused after a newer start attempt. The mailbox enqueue is authoritative,
     // so always publish the desired queue marker through the reconciler. When the
-    // rollback already installed 🔜 this coalesces without a second HTTP add.
+    // rollback already installed 📬 this coalesces without a second HTTP add.
     let delivered = crate::services::discord::queue_marker::note_added_current(
         shared,
         http,

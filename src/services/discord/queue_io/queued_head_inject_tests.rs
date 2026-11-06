@@ -1811,14 +1811,9 @@ async fn queued_busy_injection_marks_committed_source(observed: bool) {
             .iter()
             .map(|(_, _, emoji)| emoji.as_str())
             .collect::<std::collections::BTreeSet<_>>(),
-        [
-            "%F0%9F%94%9C/@ME",
-            "%F0%9F%94%84/@ME",
-            "%F0%9F%93%AC/@ME",
-            "%F0%9F%93%A5/@ME",
-        ]
-        .into_iter()
-        .collect(),
+        ["%F0%9F%93%AC/@ME", "%F0%9F%94%84/@ME", "%F0%9F%93%A5/@ME",]
+            .into_iter()
+            .collect(),
         "new and legacy waiting markers clear without deleting the injection receipt"
     );
     assert_eq!(

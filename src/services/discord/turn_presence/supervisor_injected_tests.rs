@@ -95,7 +95,7 @@ async fn idle_completes_only_its_injections_and_preserves_anchor_and_queue_lifec
                     item,
                     owner.clone(),
                     TurnViewIdentity::Test("ordinary"),
-                    '🔜',
+                    '📬',
                     "fixture",
                 )
                 .await
