@@ -17,6 +17,7 @@ struct Rig {
     ctx: serenity::Context,
     replies: Arc<std::sync::Mutex<Vec<Value>>>,
     writes: Arc<std::sync::Mutex<Vec<String>>>,
+    messages: Arc<std::sync::Mutex<Vec<Value>>>,
     url: String,
     payload: Value,
     age_ms: u64,
@@ -54,6 +55,8 @@ impl Rig {
         let recorded = replies.clone();
         let writes = Arc::new(std::sync::Mutex::new(Vec::new()));
         let extra_writes = writes.clone();
+        let messages = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let extra_messages = messages.clone();
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let app = axum::Router::new()
             .route(
@@ -70,6 +73,7 @@ impl Rig {
                 let client = client.clone();
                 let backend = backend.clone();
                 let extra_writes = extra_writes.clone();
+                let extra_messages = extra_messages.clone();
                 async move {
                     let method = request.method().clone();
                     if method != axum::http::Method::GET {
@@ -92,6 +96,24 @@ impl Rig {
                     let body = axum::body::to_bytes(request.into_body(), 1024 * 1024)
                         .await
                         .unwrap();
+                    if method != axum::http::Method::GET
+                        && let Ok(message) = serde_json::from_slice::<Value>(&body)
+                    {
+                        extra_messages.lock().unwrap().push(message.clone());
+                        if request_uri_is_webhook(&url) {
+                            return (
+                                axum::http::StatusCode::OK,
+                                axum::body::Bytes::from(
+                                    discord_mock::history_message_json(
+                                        7678003,
+                                        message["content"].as_str().unwrap_or_default(),
+                                        true,
+                                    )
+                                    .to_string(),
+                                ),
+                            );
+                        }
+                    }
                     let response = client
                         .request(method, url)
                         .headers(headers)
@@ -120,6 +142,7 @@ impl Rig {
             ctx,
             replies,
             writes,
+            messages,
             url: format!("http://{address}"),
             payload,
             age_ms: network.age_ms,
@@ -128,6 +151,29 @@ impl Rig {
     }
 
     async fn invoke(&self, data: &Data, name: &str, focused: Option<(&str, &str)>) -> Value {
+        self.invoke_inner(data, name, focused, focused.is_some())
+            .await
+    }
+
+    #[cfg(unix)]
+    async fn invoke_cancel(&self, data: &Data, id: Option<&str>) -> Value {
+        let _ = data.shared.http.cached_serenity_ctx.set(self.ctx.clone());
+        self.invoke_inner(
+            data,
+            "cancel-queued",
+            id.map(|id| ("message_id", id)),
+            false,
+        )
+        .await
+    }
+
+    async fn invoke_inner(
+        &self,
+        data: &Data,
+        name: &str,
+        focused: Option<(&str, &str)>,
+        autocomplete: bool,
+    ) -> Value {
         let options = run_bot_framework_options(run_bot_build_slash_commands());
         let (root_name, child_name) = name
             .split_once(' ')
@@ -164,7 +210,7 @@ impl Rig {
             });
         let mut raw_options = focused.map_or(json!([]), |(parameter, value)| {
             json!([
-                {"type": 3, "name": parameter, "value": value, "focused": true}
+                {"type": 3, "name": parameter, "value": value, "focused": autocomplete}
             ])
         });
         if let Some(child) = child_name {
@@ -189,7 +235,7 @@ impl Rig {
             tokio::sync::Mutex::new(Box::new(()));
         let app = poise::ApplicationContext {
             interaction: &interaction,
-            interaction_type: if focused.is_some() {
+            interaction_type: if autocomplete {
                 poise::CommandInteractionType::Autocomplete
             } else {
                 poise::CommandInteractionType::Command
@@ -206,7 +252,7 @@ impl Rig {
             invocation_data: &invocation_data,
             __non_exhaustive: (),
         };
-        if focused.is_some() {
+        if autocomplete {
             let mut tree = Vec::new();
             let result = poise::dispatch::dispatch_autocomplete(
                 app.framework,
@@ -256,10 +302,10 @@ impl Rig {
             );
             let allowed = result.is_ok();
             assert!(
-                self.writes.lock().unwrap().is_empty(),
+                name == "cancel-queued" || self.writes.lock().unwrap().is_empty(),
                 "unexpected non-callback HTTP write"
             );
-            json!({"allowed": allowed, "replies": *self.replies.lock().unwrap()})
+            json!({"allowed": allowed, "replies": *self.replies.lock().unwrap(), "messages": *self.messages.lock().unwrap()})
         }
     }
 }
@@ -847,10 +893,7 @@ fn registered_census(
             }
             census.insert((path.clone(), name.into()));
             if parameter["type"] == 3 {
-                let explicit_exception = matches!(
-                    (path.as_str(), name),
-                    ("/skill", "args") | ("/cancel-queued", "message_id")
-                );
+                let explicit_exception = matches!((path.as_str(), name), ("/skill", "args"));
                 assert!(
                     parameter["autocomplete"] == true
                         || parameter["choices"]
@@ -1004,3 +1047,10 @@ fn rejected_command_still_replies_when_no_other_provider_name_is_available() {
         );
     });
 }
+
+fn request_uri_is_webhook(url: &str) -> bool {
+    url.contains("/webhooks/")
+}
+
+#[cfg(unix)]
+mod cancel_queued_tests;

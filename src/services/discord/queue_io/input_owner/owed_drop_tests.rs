@@ -224,6 +224,7 @@ async fn the_cancel_and_clear_entries_settle_what_they_remove_pg() {
     assert!(
         cancel(&shared, &provider, channel, MessageId::new(c))
             .await
+            .removed
             .is_some()
     );
     let rows = receipts(&pool, channel.get()).await;

@@ -100,7 +100,7 @@ pub(in crate::services::discord) async fn mailbox_cancel_queued_primary_message(
     provider: &ProviderKind,
     channel_id: ChannelId,
     message_id: MessageId,
-) -> Option<Intervention> {
+) -> CancelQueuedMessageResult {
     let mailbox = shared.mailbox(channel_id);
     let result: CancelQueuedMessageResult = mailbox
         .cancel_queued_primary_message(
@@ -116,7 +116,136 @@ pub(in crate::services::discord) async fn mailbox_cancel_queued_primary_message(
     )
     .await;
     apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
-    result.removed
+    result
+}
+
+pub(in crate::services::discord) struct CancelledInput {
+    pub author: u64,
+    pub id: u64,
+    pub text: String,
+}
+
+#[derive(Default)]
+pub(in crate::services::discord) struct CancelAllReport {
+    pub queued: Vec<CancelledInput>,
+    pub retained: Vec<CancelledInput>,
+    pub uncertain: usize,
+    pub kept: usize,
+    pub error: Option<String>,
+    pub count_unknown: bool,
+}
+
+pub(in crate::services::discord) async fn mailbox_cancel_all_waiting(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> CancelAllReport {
+    let mailbox = shared.mailbox(channel_id);
+    let cleared = mailbox
+        .v2_request(|slot| slot.as_mut().map(|owner| owner.clear_waiting()).transpose())
+        .await;
+    let (report, events) = match cleared {
+        Ok(Some(result)) => {
+            let (now, instant) = (std::time::SystemTime::now(), std::time::Instant::now());
+            let events = result
+                .queued
+                .iter()
+                .chain(&result.retained)
+                .cloned()
+                .map(|item| QueueExitEvent {
+                    intervention:
+                        crate::services::turn_orchestrator::pending_queue_item_to_intervention(
+                            item, now, instant,
+                        ),
+                    kind: QueueExitKind::Cancelled,
+                })
+                .collect::<Vec<_>>();
+            let input =
+                |item: crate::services::turn_orchestrator::PendingQueueItem| CancelledInput {
+                    author: item.author_id,
+                    id: item.message_id,
+                    text: item.text,
+                };
+            (
+                CancelAllReport {
+                    queued: result.queued.into_iter().map(input).collect(),
+                    retained: result.retained.into_iter().map(input).collect(),
+                    uncertain: result.uncertain,
+                    kept: result.kept,
+                    ..Default::default()
+                },
+                events,
+            )
+        }
+        Ok(None) => {
+            let result = match mailbox
+                .discard_waiting_or_refused(queue_persistence_context(shared, provider, channel_id))
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    return CancelAllReport {
+                        error: Some(format!("mailbox: {error:?}")),
+                        count_unknown: true,
+                        ..Default::default()
+                    };
+                }
+            };
+            let mut ids = result.discarded_message_ids;
+            ids.sort_unstable();
+            ids.dedup();
+            let queued = ids
+                .into_iter()
+                .map(|id| {
+                    let original = result
+                        .queue_exit_events
+                        .iter()
+                        .map(|e| &e.intervention)
+                        .find(|i| i.message_id == id || i.source_message_ids.contains(&id));
+                    CancelledInput {
+                        author: original.map_or(0, |i| i.author_id.get()),
+                        id: id.get(),
+                        text: original
+                            .map_or_else(|| "전달 직전 입력(본문 없음)".into(), |i| i.text.clone()),
+                    }
+                })
+                .collect();
+            let failed = &result.persistence.failed;
+            (
+                CancelAllReport {
+                    queued,
+                    kept: result
+                        .persistence
+                        .not_waiting
+                        .iter()
+                        .copied()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len(),
+                    error: (!failed.is_empty())
+                        .then(|| format!("저장 실패: {}", failed.join(", "))),
+                    count_unknown: result.persistence.count_unknown,
+                    ..Default::default()
+                },
+                result.queue_exit_events,
+            )
+        }
+        Err(error) => {
+            return CancelAllReport {
+                error: Some(error),
+                count_unknown: true,
+                ..Default::default()
+            };
+        }
+    };
+    super::receipt_settle::settle_v2_drops(
+        shared.pg_pool.as_ref(),
+        &mailbox,
+        provider.as_str(),
+        channel_id,
+    )
+    .await;
+    apply_queue_exit_feedback(shared, channel_id, &events).await;
+    report
 }
 
 pub(super) async fn with_post_enqueue_idle_queue_kick_suppressed<F>(future: F) -> F::Output

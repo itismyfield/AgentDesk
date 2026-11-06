@@ -8,7 +8,9 @@ use crate::services::provider::ProviderKind;
 
 use super::super::admin_host_guard::ManagedReset;
 use super::super::catch_up::retry_state::clear_channel_discarding_catch_up_backlog;
-use super::super::queue_io::mailbox_cancel_queued_primary_message;
+use super::super::queue_io::{mailbox_cancel_all_waiting, mailbox_cancel_queued_primary_message};
+use cancel_queued::autocomplete_cancel_queued;
+mod cancel_queued;
 use super::super::settings::save_bot_settings;
 use super::super::{Context, Error, SharedData, check_auth, saturating_decrement_global_active};
 use clear_teardown::stop_released_turn;
@@ -702,50 +704,69 @@ pub(super) fn parse_queued_message_id(raw: &str) -> Option<MessageId> {
         .map(MessageId::new)
 }
 
-/// /cancel-queued <message_id> — Remove one queued message (`/queue` shows IDs)
+/// /cancel-queued [message_id] — Pick one waiting input, or omit the ID to clear waiting inputs.
 ///
-/// The target is an exact Discord message id. The mailbox actor serializes the
-/// removal against dispatch, so a queued-to-active race is reported as stale
-/// instead of cancelling the newly active turn.
+/// Running turns and inputs already being delivered continue normally.
 #[poise::command(slash_command, rename = "cancel-queued")]
 pub(in crate::services::discord) async fn cmd_cancel_queued(
     ctx: Context<'_>,
-    #[description = "Queued Discord message ID"] message_id: String,
+    #[description = "Waiting input ID; omit to clear all waiting inputs"]
+    #[autocomplete = "autocomplete_cancel_queued"]
+    message_id: Option<String>,
 ) -> Result<(), Error> {
-    let user_id = ctx.author().id;
-    let user_name = &ctx.author().name;
-    if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
+    if !check_auth(
+        ctx.author().id,
+        &ctx.author().name,
+        &ctx.data().shared,
+        &ctx.data().token,
+    )
+    .await
+    {
         return Ok(());
     }
     if !super::enforce_slash_command_policy(&ctx, "/cancel-queued").await? {
         return Ok(());
     }
-
-    let Some(message_id) = parse_queued_message_id(&message_id) else {
+    ctx.defer().await?;
+    let Some(raw) = message_id else {
+        let report =
+            mailbox_cancel_all_waiting(&ctx.data().shared, &ctx.data().provider, ctx.channel_id())
+                .await;
+        return super::super::formatting::send_long_message_ctx(
+            ctx,
+            &cancel_queued::clear_reply(&report),
+        )
+        .await;
+    };
+    let Some(message_id) = parse_queued_message_id(&raw) else {
         ctx.say("유효한 큐 메시지 ID를 입력해 주세요.").await?;
         return Ok(());
     };
-
-    {
-        let removed = mailbox_cancel_queued_primary_message(
-            &ctx.data().shared,
-            &ctx.data().provider,
-            ctx.channel_id(),
-            message_id,
-        )
-        .await;
-        if removed.is_some() {
-            ctx.say(format!("큐 메시지 `{}`를 취소했어요.", message_id.get()))
-                .await?;
-        } else {
-            ctx.say(format!(
-                "큐 메시지 `{}`는 이미 처리됐거나 현재 채널의 대기열에 없어요.",
-                message_id.get()
-            ))
+    let result = mailbox_cancel_queued_primary_message(
+        &ctx.data().shared,
+        &ctx.data().provider,
+        ctx.channel_id(),
+        message_id,
+    )
+    .await;
+    if let Some(error) = result.persistence_error {
+        ctx.say(format!(
+            "큐 메시지 `{}`의 취소 저장 완료를 확인하지 못했어요. {}",
+            message_id.get(),
+            error
+        ))
+        .await?;
+    } else if result.removed.is_some() {
+        ctx.say(format!("큐 메시지 `{}`를 취소했어요.", message_id.get()))
             .await?;
-        }
-        Ok(())
+    } else {
+        ctx.say(format!(
+            "큐 메시지 `{}`는 이미 처리됐거나 현재 채널의 대기열에 없어요.",
+            message_id.get()
+        ))
+        .await?;
     }
+    Ok(())
 }
 
 /// /clear — Clear AI conversation history

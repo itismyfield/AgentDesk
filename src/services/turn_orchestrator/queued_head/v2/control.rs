@@ -217,7 +217,7 @@ fn cancel(owner: &mut Owner, message_id: MessageId) -> CancelQueuedMessageResult
     let (removed, persistence_error) = match found {
         None => (None, None),
         Some(at) => {
-            if at + first == 0 {
+            if first == 0 && at <= owner.followers().len() {
                 owner.revoke_front();
             }
             next.owe_queued(
@@ -240,8 +240,17 @@ fn cancel(owner: &mut Owner, message_id: MessageId) -> CancelQueuedMessageResult
         }
     };
     CancelQueuedMessageResult {
+        queue_exit_events: removed
+            .iter()
+            .cloned()
+            .map(|item| {
+                crate::services::turn_orchestrator::QueueExitEvent::new(
+                    item,
+                    crate::services::turn_orchestrator::QueueExitKind::Cancelled,
+                )
+            })
+            .collect(),
         removed,
-        queue_exit_events: Vec::new(),
         persistence_error,
     }
 }
@@ -281,3 +290,92 @@ mod tests;
 #[cfg(test)]
 #[path = "requeue_tests.rs"]
 mod requeue_tests;
+
+#[cfg(all(test, unix))]
+impl Owner {
+    pub(crate) fn cancel_sequence_for_tests(&self) -> u64 {
+        self.last_success_sequence
+    }
+    pub(crate) fn cancel_fault_for_tests(&mut self, before: bool) {
+        self.fault = if before { Fault::Before } else { Fault::Sync };
+    }
+}
+
+pub(crate) struct ClearedWaiting {
+    pub(crate) queued: Vec<PendingQueueItem>,
+    pub(crate) retained: Vec<PendingQueueItem>,
+    pub(crate) uncertain: usize,
+    pub(crate) kept: usize,
+}
+
+impl Owner {
+    /// Reads only originals the existing single-cancel path can take.
+    pub(crate) fn cancelable(&self) -> Vec<(u64, u64, Option<u64>, String, bool)> {
+        let queued = self
+            .snapshot
+            .items
+            .iter()
+            .skip(untried(self))
+            .map(|item| (item, false));
+        let retained = self
+            .snapshot
+            .retained_inputs
+            .iter()
+            .filter(|entry| super::retained::requeueable(entry, &self.snapshot.terminal_identities))
+            .flat_map(|entry| entry.input.members().map(|item| (item, true)));
+        queued
+            .chain(retained)
+            .map(|(item, retained)| {
+                (
+                    item.author_id,
+                    item.message_id,
+                    item.created_at_wall_time_ms,
+                    item.text.clone(),
+                    retained,
+                )
+            })
+            .collect()
+    }
+
+    /// Clears waiting inputs in one commit; in-flight evidence remains available to late settlement.
+    pub(crate) fn clear_waiting(&mut self) -> Result<ClearedWaiting, String> {
+        let mut next = requeued(self, |_| true);
+        let first = untried(self);
+        let at = super::origin::now_ms();
+        next.owe_queued(first..next.items.len(), TerminalOutcome::Cancelled, at);
+        let queued: Vec<_> = next.items.drain(first..).collect();
+        if first == 0 && !queued.is_empty() {
+            self.revoke_front();
+        }
+        let (mut retained, mut owed, mut uncertain) = (Vec::new(), Vec::new(), 0);
+        for entry in &mut next.retained_inputs {
+            if entry.notice.kind == super::retained::CLEARED_NOTICE {
+                continue;
+            }
+            retained.extend(entry.input.members().cloned());
+            if matches!(entry.reason, RetainedReason::Unconfirmed) {
+                uncertain += entry.input.members().count();
+            }
+            if matches!(entry.disposition, Some(RetainedDisposition::KnownNotSent))
+                && entry.input.attempt.is_some()
+                && !entry.notice.enqueued
+                && !super::retained::permanently_refused(entry)
+            {
+                owed.push(entry.input.clone());
+            }
+            entry.notice.enqueued = true;
+            entry.notice.kind = super::retained::CLEARED_NOTICE.into();
+        }
+        for input in owed {
+            next.owe_attempt(&input, TerminalOutcome::Cancelled, at);
+        }
+        self.commit(next)?;
+        self.project_slots();
+        Ok(ClearedWaiting {
+            queued,
+            retained,
+            uncertain,
+            kept: first,
+        })
+    }
+}

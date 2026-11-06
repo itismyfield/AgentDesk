@@ -14,7 +14,7 @@
 | `/inflight` | 없음 | 대상 인자 없음 | `commands/diagnostics/mod.rs:47` | #7678-1 |
 | `/clear` | 없음 | 대상 인자 없음, 소유 레인 착지 뒤 | `commands/control.rs:529` | #6486 |
 | `/stop` | 없음 | 대상 인자 없음, 소유 레인 착지 뒤 | `commands/control.rs:387` | #6486 |
-| `/cancel-queued` | `message_id` | 이번에는 코드 변경 없음. 현재 필수 문자열; 현재 채널 큐 autocomplete와 생략 시 전체 비우기는 조각 2, 소유 레인 착지 뒤 | `commands/control.rs:487` | #6486 / #7676 → #7678-2 |
+| `/cancel-queued` | `message_id` | 선택 문자열. 현재 actor가 가진 취소 가능한 대기·보관 입력을 autocomplete로 표시하며, 생략하면 실행 중 턴과 전달 중 head를 남기고 비운다 | `commands/control.rs:715` | #7678-2 |
 | `/skill` | `skill` | 기존 autocomplete 재사용: builtin·runtime cache 이름 / 값 skill 식별자. 권한·25개·이름 100자·값 100자·중복·응답 시간 제한 적용 | `commands/skill.rs:341` | #7678-1 |
 | `/skill` | `args` | 임의 프롬프트 문자열, ID·이름 목록이 아님. 선택지 제외 | `commands/skill.rs:346` | #7678-1 |
 | `/model` | 없음 | 이미 실행 후 런타임 모델 선택 UI 제공. 문자열 인자 추가 불필요 | `commands/model_picker.rs:194`, `commands/model_ui.rs:220` | #7678-1; 설정 저장 #6486 |
@@ -36,7 +36,7 @@
 | `/restart` | 없음 | 대상 인자 없음 | `commands/restart.rs:353` | #7678-1 |
 
 등록 계약 시험은 `run_bot_build_slash_commands`가 만든 Discord 등록 JSON의 모든 명령·하위 명령·인자를 이 표와 대조한다.
-문자열 인자는 autocomplete나 choices가 필요하며, 명시적 예외는 임의 프롬프트인 `skill.args`와 조각 2의 `cancel-queued.message_id`다.
+문자열 인자는 autocomplete나 choices가 필요하며, 명시적 예외는 임의 프롬프트인 `skill.args`다.
 
 자동완성 가드·권한·PG·후보 조회는 interaction 생성 시각 기준 2.3초의 단일 deadline을 공유한다.
 Discord 3초 한도까지 응답 전송 여유를 남기고, catalog는 같은 deadline보다 200ms 먼저 부분 결과를 반환한다.
@@ -52,32 +52,24 @@ HTTP API·버튼 custom_id·텍스트 명령을 슬래시 인자로 오인해 �
 [skill.rs L353](https://github.com/itismyfield/AgentDesk/blob/832254536a342caf0d94bf91abf281a93f43e2ce/src/services/discord/commands/skill.rs#L353).
 이번 조각은 등록을 유지하면서 공통 한도·권한 검사와 cwd 후보를 보완한다.
 
-## 조각 2 설계 메모
+## 대기 입력 취소
 
-#6486·#7676 착지 뒤 최신 main에서 아래 API를 다시 대조한다. 이 조각은 해당 owner 코드를 쓰지 않는다.
+`/cancel-queued [message_id]`의 자동완성은 현재 봇·채널에 이미 있는 actor를
+`mailboxes.peek`으로 찾는다. V2는 `Owner::cancelable`, V1은 `try_snapshot`의 Soft 입력을 읽는다.
+actor가 없거나 조회가 실패하면 빈 선택지를 반환한다. 조회 중 actor 생성, 파일 읽기·정리,
+adopt, commit은 하지 않는다. 값은 기존 단일 취소가 받는 primary 메시지 ID다.
 
-| 필요한 경계 | 현재 코드 좌표 | 후속 설계 |
-|---|---|---|
-| slash 진입·권한 | `commands/control.rs:487` | `message_id: Option<String>`으로 바꾸고 기존 check_auth·명령 정책 유지. autocomplete는 읽기 전용, 기존 공통 응답 제한 재사용 |
-| 단일 취소 직렬화 | `queue_io.rs:98`, `../turn_orchestrator/queued_head/v2/control.rs:96` | 현재 채널·provider·token namespace로 기존 actor 요청 사용. autocomplete 뒤 dispatch된 항목은 stale 응답; 실행 중 턴은 취소하지 않음 |
-| V1 읽기 | `../turn_orchestrator/checked_purge.rs:79`, `../turn_orchestrator/episode_identity.rs:441` | `try_snapshot()` 오류를 빈 큐 성공으로 바꾸지 않는다. 기본 snapshot의 intervention_queue만으로 V2가 비었다고 판단하면 안 됨 |
-| V2 owner 요청 | `../turn_orchestrator/queued_head/v2/actor.rs:56`, `../turn_orchestrator/queued_head/v2.rs:382` | actor의 기존 owner에서 `Owner::json`으로 읽을 수 있다. autocomplete용 queued·retained DTO 조회 API가 필요하며, 묶인 입력은 `InputAttempt::members`(`../turn_orchestrator/queued_head/v2.rs:389`)의 original+followers를 펼친다. 조회 중 v2_ensure/adopt 금지: adopt가 commit을 할 수 있음 |
-| 부팅 전 read-only 파일 조회 | `../turn_orchestrator/pending_queue_persistence/queued_recovery.rs:122`, `../turn_orchestrator/pending_queue_persistence/snapshot_io.rs:77` | read_catalog는 provider/token 범위 전체를 읽으므로 autocomplete에는 현재 채널 전용 checked reader 필요. 기존 snapshot_io reader는 V2를 거절하므로 `../turn_orchestrator/queued_head/compat.rs:10`의 read-only inspect를 사용하는 전용 projection이 필요하다. 디스크 조회는 spawn_blocking과 deadline 적용. namespace 일치 확인. `load_pending_queues_checked`는 임시 파일 정리 부작용이 있어 호출 금지 |
-| V2 기존 clear 제한 | `../turn_orchestrator/queued_head/v2/control.rs:230`, `../turn_orchestrator/queued_head/v2/projection.rs:154` | 기존 clear/purge는 untried만 제거하고 attempted head·retained·terminal을 보존. 전체 비우기에 그대로 사용하지 않음 |
-| owner 상태·commit | `../turn_orchestrator/queued_head/v2.rs:24`, `../turn_orchestrator/queued_head/v2/commit.rs:17` | 큐와 retained를 한 owner commit에서 비우는 전용 요청 필요. front grant/claim, admission receipt/bind, retained notice와 retry drive의 오래된 권한을 함께 무효화. active 턴 종료 권한은 추가하지 않음 |
-| 실행 drive | `queue_io/input_owner/drive.rs:37`, `queue_io/input_owner/drive.rs:163`, `queue_io/input_owner/recovery.rs:37` | 비우기와 claim/reserve/settle 경쟁을 actor가 직렬화. 이미 전송한 head의 Unknown 증거를 삭제해 재전송시키지 않도록 계약을 먼저 확정 |
+표시는 `작성자 · MM-DD HH:mm · 본문 앞부분`이고 시각은 KST다. 작성자는 로컬 cache를
+우선하며 없으면 `user:<id>` 또는 합성 입력 표시를 쓴다. 보관 입력에는 `(보관)`을 붙인다.
+공통 검색·25개·100자 제한을 적용하고 이름 조회용 REST 요청은 하지 않는다.
 
-자동완성 값은 실제 Discord message ID, 표시는 `작성자 · 시각 · 본문 앞부분`이다.
-현재 채널의 취소 가능한 queued·retained 입력만 읽고 25개·이름 100자 제한을 적용한다.
-retained의 합성 ID나 여러 source를 가진 입력을 어떤 ID로 선택할지는 #7676의 새 owner 계약을 따른다.
-Discord snowflake 시각 또는 저장된 생성 시각을 쓰며 작성자 이름은 로컬 캐시를 우선한다.
+ID를 생략하면 V2 `clear_waiting` 또는 V1 `discard_waiting_or_refused`로 대기 입력을 비운다.
+응답에 비운 개수·앞부분·유지한 입력 수를 표시한다. 전달 중 head와 실행 중 턴은 계속 진행하며,
+그 결과는 평소처럼 안내될 수 있다. 보관 입력은 같은 commit에서 `enqueued=true`,
+`kind=cleared`로 표시하여 재시작·recover 뒤에도 다시 대기시키거나 새 보관 안내를 만들지 않는다.
+전송 여부가 불확정인 보관의 원문·attempt·늦은 전달 확인은 보존한다.
+저장 실패나 개수 불확정은 성공 0개로 표시하지 않는다.
 
-인자 생략 시 전체 비우기는 큐 항목과 retained 입력을 모두 세어 개수·본문 앞부분을 응답한다.
-owner commit 실패·CAS 불확정은 성공 0개로 표시하지 않고 오류/보류로 응답한다.
-V2 파일 직접 쓰기·unlink·legacy /clear 우회는 금지한다.
-main의 현재 V2 clear는 attempted head와 retained를 보존한다는 점을 먼저 합의하고,
-"전체"가 실행 중/전송 불확정 head를 지울 권한까지 뜻한다고 임의 확장하지 않는다.
-
-후속 검증: V1/V2 각 prefix·25개·빈 결과·다른 채널/사용자 비노출, 선택 후 단일 취소,
-인자 생략 시 queued+retained 제거, 재시작 후 비어 있음, claim·reserve·notice와의 경쟁,
-commit 실패/Unknown 보존, 빈 큐 0개, 원인 제거 뮤턴트 RED, 운영 autocomplete 1회 확인.
+실제 dispatcher 시험은 `runtime_bootstrap/gateway_runtime/slash_command_tests/cancel_queued_tests.rs`에 있다.
+등록, 읽기 전용 후보, 채널·provider·권한, 단일 취소, 저장 오류, 무인자 비우기,
+재시작·recover·안내, 잘못된 ID, follower claim, 실행 중 턴과 held watch를 검사한다.

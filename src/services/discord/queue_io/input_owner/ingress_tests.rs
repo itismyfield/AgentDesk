@@ -184,7 +184,7 @@ async fn cancelled_source_is_not_reenqueued_by_its_committed_ticket() {
         req.user_msg_id,
     )
     .await;
-    assert!(removed.is_some());
+    assert!(removed.removed.is_some());
     handle
         .v2_adopt(path, shared.token_hash.clone())
         .await

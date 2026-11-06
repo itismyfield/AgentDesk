@@ -914,7 +914,7 @@ impl ChannelMailboxHandle {
         .unwrap_or(CancelQueuedMessageResult {
             removed: None,
             queue_exit_events: Vec::new(),
-            persistence_error: None,
+            persistence_error: Some("mailbox unreachable".into()),
         })
     }
 
