@@ -100,9 +100,7 @@ pub(super) async fn thread_guard_force_clean_stale_thread(
 ) -> bool {
     use crate::services::discord::inflight;
     let thread = witness.thread;
-    if inflight::before_start_receipt_present(provider, thread.get())
-        && !inflight::receipt_mutant("stale-a")
-    {
+    if inflight::before_start_receipt_present(provider, thread.get()) {
         return false;
     }
     let withdrawal = Box::new(ThreadParentWithdrawal {

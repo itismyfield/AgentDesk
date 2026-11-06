@@ -138,7 +138,7 @@ use self::rebind_reap::{
 mod removal;
 #[cfg(test)]
 pub(in crate::services::discord) use removal::{
-    invalidate_stale_generation_scoped, load_inflight_probe_scoped, scoped_restore_mutant,
+    invalidate_stale_generation_scoped, load_inflight_probe_scoped,
 };
 mod restart_mark;
 #[cfg(test)]
@@ -424,25 +424,9 @@ fn now_string() -> String {
 #[path = "inflight/receipt_boundary_tests.rs"]
 mod receipt_boundary_tests;
 
-pub(in crate::services::discord) fn receipt_mutant(_name: &str) -> bool {
-    #[cfg(test)]
-    if std::env::var("ADK_B3B2_MUTANT").ok().as_deref() == Some(_name) {
-        return true;
-    }
-    false
-}
-
 pub(in crate::services::discord) fn raw_before_start_receipt(content: &str) -> bool {
     #[cfg(all(test, unix))]
     receipt_boundary_tests::note_guard_read();
-    if receipt_mutant("off-protection")
-        && !crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
-    {
-        return false;
-    }
-    if receipt_mutant("absent-blocks") {
-        return true;
-    }
     match serde_json::from_str::<serde_json::Value>(content) {
         Ok(value) => value
             .as_object()

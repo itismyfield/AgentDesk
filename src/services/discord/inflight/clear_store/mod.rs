@@ -69,7 +69,7 @@ pub(crate) fn clear_inflight_state(provider: &ProviderKind, channel_id: u64) -> 
     let Ok(_lock) = lock_inflight_state_path(&path) else {
         return false;
     };
-    if receipt_protected_path(&path) && !receipt_mutant("clear") {
+    if receipt_protected_path(&path) {
         return false;
     }
     if handoff_before_discard_locked(&_lock).is_err() {
@@ -277,7 +277,7 @@ pub(super) fn archive_inflight_state_if_matches_identity_generation_in_root(
             return GuardedClearOutcome::IoError;
         }
     };
-    if super::raw_before_start_receipt(&data) && !super::receipt_mutant("clear") {
+    if super::raw_before_start_receipt(&data) {
         return GuardedClearOutcome::IoError;
     }
     let Ok(state) = serde_json::from_str::<InflightTurnState>(&data) else {
@@ -428,7 +428,7 @@ pub(in crate::services::discord) fn clear_inflight_state_if_matches_in_root(
     let Ok(data) = fs::read_to_string(&path) else {
         return GuardedClearOutcome::Missing;
     };
-    if super::raw_before_start_receipt(&data) && !super::receipt_mutant("clear") {
+    if super::raw_before_start_receipt(&data) {
         return GuardedClearOutcome::IoError;
     }
     let Ok(state) = parse_inflight_state_content(&data) else {
@@ -540,7 +540,7 @@ pub(in crate::services::discord) fn clear_inflight_state_if_matches_zero_owned_i
     let Ok(data) = fs::read_to_string(&path) else {
         return GuardedClearOutcome::Missing;
     };
-    if super::raw_before_start_receipt(&data) && !super::receipt_mutant("clear") {
+    if super::raw_before_start_receipt(&data) {
         return GuardedClearOutcome::IoError;
     }
     let Ok(state) = serde_json::from_str::<InflightTurnState>(&data) else {
@@ -627,7 +627,7 @@ pub(super) fn clear_lifecycle_inflight_state_if_matches_identity_after_death_evi
     let Ok(data) = fs::read_to_string(&path) else {
         return GuardedClearOutcome::Missing;
     };
-    if super::raw_before_start_receipt(&data) && !super::receipt_mutant("clear") {
+    if super::raw_before_start_receipt(&data) {
         return GuardedClearOutcome::IoError;
     }
     let Ok(state) = serde_json::from_str::<InflightTurnState>(&data) else {
@@ -698,7 +698,7 @@ pub(super) fn clear_inflight_state_if_matches_identity_after_delivery_in_root(
     let Ok(data) = fs::read_to_string(&path) else {
         return (GuardedClearOutcome::Missing, false);
     };
-    if super::raw_before_start_receipt(&data) && !super::receipt_mutant("clear") {
+    if super::raw_before_start_receipt(&data) {
         return (GuardedClearOutcome::IoError, false);
     }
     let Ok(state) = serde_json::from_str::<InflightTurnState>(&data) else {
@@ -796,7 +796,7 @@ pub(super) fn clear_inflight_state_if_matches_tmux_response_in_root(
     let Ok(data) = fs::read_to_string(&path) else {
         return GuardedClearOutcome::Missing;
     };
-    if super::raw_before_start_receipt(&data) && !super::receipt_mutant("clear") {
+    if super::raw_before_start_receipt(&data) {
         return GuardedClearOutcome::IoError;
     }
     let Ok(state) = serde_json::from_str::<InflightTurnState>(&data) else {

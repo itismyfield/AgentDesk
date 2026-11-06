@@ -893,9 +893,6 @@ fn capture_stop_events() -> (Arc<Mutex<Vec<String>>>, tracing::subscriber::Defau
             event: &tracing::Event<'_>,
             _: tracing_subscriber::layer::Context<'_, S>,
         ) {
-            if mutant("collector_drops_stop_events") {
-                return;
-            }
             struct Fields(Vec<String>);
             impl tracing::field::Visit for Fields {
                 fn record_debug(

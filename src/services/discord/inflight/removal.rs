@@ -347,7 +347,7 @@ pub(super) fn invalidate_stale_generation_in_root(
         if state.provider_kind().as_ref() != Some(provider) {
             continue;
         }
-        if receipt_protected_path(&path) && !receipt_mutant("generation") {
+        if receipt_protected_path(&path) {
             continue;
         }
         if state.restart_mode.is_some() {
@@ -446,7 +446,7 @@ pub(super) fn stale_removal_reason(
     age_secs: u64,
     current_generation: u64,
 ) -> Option<String> {
-    if state.herdr_before_start_stop.is_some() && !receipt_mutant("age") {
+    if state.herdr_before_start_stop.is_some() {
         return None;
     }
     // A marked row is removed only after boot or the next admission records its receipt.
@@ -578,13 +578,11 @@ fn relock(
     let lock = lock_inflight_state_path(path).map_err(|_| Box::new(RowVerdict::Skip(true)))?;
     match fs::read_to_string(path) {
         Ok(locked) => match parse_inflight_state_content(&locked) {
-            Ok(state) if state.herdr_before_start_stop.is_some() && !receipt_mutant("loader") => {
+            Ok(state) if state.herdr_before_start_stop.is_some() => {
                 Err(Box::new(RowVerdict::Keep(state, false)))
             }
             Ok(state) => Ok((state, lock)),
-            Err(_) if raw_before_start_receipt(&locked) && !receipt_mutant("malformed") => {
-                Err(Box::new(RowVerdict::Skip(true)))
-            }
+            Err(_) if raw_before_start_receipt(&locked) => Err(Box::new(RowVerdict::Skip(true))),
             Err(_) => Err(Box::new(RowVerdict::HideMalformed(
                 content.to_string(),
                 locked,
@@ -652,7 +650,7 @@ fn classify_inflight_row_for_restore(
                 Ok(parsed) => parsed,
                 Err(_) => (relock(path, &content)?.0, false),
             };
-        if raw_before_start_receipt(&content) && !receipt_mutant("loader") {
+        if raw_before_start_receipt(&content) {
             return Ok(RowVerdict::Keep(state, false));
         }
         let foreign = |row: &InflightTurnState| row.provider_kind().as_ref() != Some(provider);
@@ -665,8 +663,6 @@ fn classify_inflight_row_for_restore(
             (state, backfill) = (locked, false);
         }
         let retain = retain_for_restore && state.restart_mode.is_none();
-        #[cfg(test)]
-        let retain = retain || (retain_for_restore && scoped_restore_mutant("stale-planned"));
         if retain || stale_removal_reason_for_path(path, &state, generation).is_none() {
             return Ok(RowVerdict::Keep(state, backfill));
         }
@@ -702,11 +698,6 @@ pub(in crate::services::discord) struct InflightProbeLoad {
 }
 
 #[cfg(test)]
-pub(in crate::services::discord) fn scoped_restore_mutant(name: &str) -> bool {
-    std::env::var("ADK_S3ACT_B1_MUTANT").ok().as_deref() == Some(name)
-}
-
-#[cfg(test)]
 pub(in crate::services::discord) fn load_inflight_probe_scoped(
     provider: &ProviderKind,
     channel: u64,
@@ -723,15 +714,7 @@ pub(in crate::services::discord) fn load_inflight_probe_scoped(
             complete: false,
         };
     }
-    let mut loaded = if scoped_restore_mutant("scope") {
-        load_inflight_probe_with_scope(&root, provider, |_| false, None)
-    } else {
-        load_inflight_probe_with_scope(&root, provider, |id| id != channel, Some(channel))
-    };
-    if scoped_restore_mutant("complete") {
-        loaded.complete = true;
-    }
-    loaded
+    load_inflight_probe_with_scope(&root, provider, |id| id != channel, Some(channel))
 }
 
 mod scoped_restore;

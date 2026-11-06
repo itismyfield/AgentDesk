@@ -393,24 +393,6 @@ async fn begin_stop(
     bind_unbound: bool,
     reason: Option<&str>,
 ) -> CommandStop {
-    #[cfg(all(test, unix))]
-    if crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant("wire_stop")
-        && crate::services::provider::cancel_token_claude_interrupt::herdr_cancel_enabled()
-        && let Some(handle) = shared.mailbox_peek(channel)
-        && let Ok(Some(token)) = handle.cancel_token().await
-        && super::codex_stop_delivery::admit_herdr_command(
-            &token,
-            Some(&token),
-            provider,
-            channel.get(),
-            &shared.token_hash,
-            "/stop",
-        )
-        .is_ok()
-        && let Some(pool) = shared.pg_pool.as_ref()
-    {
-        let _ = super::codex_stop_delivery::interrupt_herdr(pool, &token, provider).await;
-    }
     let judgement = ChannelStop::judge(shared, provider, channel, None, bind_unbound).await;
     #[cfg(unix)]
     if let Some(reason) = reason
@@ -442,15 +424,6 @@ async fn begin_stop(
     }
     if keeps_turn(&judgement) {
         // A dormant stop must not acquire legacy tombstone effects.
-        #[cfg(all(test, unix))]
-        if reason.is_some()
-            && !crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
-            && crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant(
-                "dormant_records_tombstone",
-            )
-        {
-            crate::services::discord::tmux::record_recent_turn_stop(channel, None, "/stop").await;
-        }
         return CommandStop::HostRefused;
     }
     let Ok(Some(stop)) = judgement else {

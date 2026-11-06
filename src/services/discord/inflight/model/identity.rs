@@ -113,10 +113,6 @@ impl InflightTurnState {
         &self,
         channel_id: poise::serenity_prelude::ChannelId,
     ) -> bool {
-        #[cfg(test)]
-        if tests::recovery_retry_fence_disabled() {
-            return false;
-        }
         if !self.replay_rerun_blocked() {
             return false;
         }
@@ -159,10 +155,6 @@ impl InflightTurnState {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    pub(super) fn recovery_retry_fence_disabled() -> bool {
-        std::env::var("ADK_REPLAY_FENCE_MUTANT").ok().as_deref() == Some("recovery-retry")
-    }
 
     fn identity(user_msg_id: u64, turn_start_offset: Option<u64>) -> InflightTurnIdentity {
         InflightTurnIdentity {

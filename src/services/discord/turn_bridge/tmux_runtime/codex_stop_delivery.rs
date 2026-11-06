@@ -31,7 +31,7 @@ impl CodexStopTurnIdentity {
     /// ends mid-record is `Err`, never an idle turn.
     fn observe(path: &Path) -> Result<Option<Self>, ()> {
         match Self::scan(path, true) {
-            Some(None) if !mutant("identity_tail_only") => Self::scan(path, false).ok_or(()),
+            Some(None) => Self::scan(path, false).ok_or(()),
             scanned => scanned.ok_or(()),
         }
     }
@@ -120,8 +120,7 @@ impl CodexStopTurnIdentity {
             OwnTurnRead::Foreign => HerdrNotSent::Identity,
             OwnTurnRead::Unreadable | OwnTurnRead::NotYet => unobserved(),
         })?;
-        let rewritten = seen.is_some_and(|seen| seen != own.turn_id)
-            && !mutant("late_identity_ignores_native_id");
+        let rewritten = seen.is_some_and(|seen| seen != own.turn_id);
         if own.started_at != self.started_at || rewritten {
             return Err(HerdrNotSent::Identity);
         }
@@ -214,25 +213,9 @@ impl TurnIdentity {
     }
 }
 
-/// Test-only effect mutations run against one binary; production always keeps every fence.
-fn mutant(name: &str) -> bool {
-    #[cfg(test)]
-    {
-        std::env::var("ADK_P10_3_MUTANT").ok().as_deref() == Some(name)
-    }
-    #[cfg(not(test))]
-    {
-        let _ = name;
-        false
-    }
-}
-
 /// A turn that could not be read is never reported idle.
 fn unobserved() -> HerdrNotSent {
-    match mutant("unobserved_is_idle") {
-        true => HerdrNotSent::Idle,
-        false => HerdrNotSent::Unobserved,
-    }
+    HerdrNotSent::Unobserved
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -292,7 +275,6 @@ fn herdr_command_eligible(
         || owner.channel_id != channel.to_string()
         || owner.discord_token_hash != token_hash
         || token.tmux_session_name().as_deref() != Some(&owner.logical_key)
-        || (mutant("cold_start_marker_required") && !herdr_marked(&owner.logical_key))
     {
         return Err(HerdrNotSent::Identity);
     }
@@ -404,13 +386,6 @@ impl HerdrStop {
                 return "이미 중지 요청을 받았어요. 키를 추가로 보내지 않아요.";
             }
             Self::Requested(HerdrDelivery::NotSent(reason)) | Self::Refused(reason) => reason,
-        };
-        let reason = if mutant("notsent_reason_collapsed")
-            && matches!(reason, Generation | Identity | Holder | Gate)
-        {
-            Identity
-        } else {
-            reason
         };
         match reason {
             Pending => {
@@ -534,10 +509,7 @@ async fn late_stop(
         return HerdrDelivery::NotSent(HerdrNotSent::Pending);
     }
     let after = state.seen_progress().unwrap_or(0);
-    let delivery = match mutant("immediate_branch_skips_token_check") {
-        true => Some(interrupt_herdr(pool, token, provider).await),
-        false => late_attempt(shared, pool, token, provider, channel).await,
-    };
+    let delivery = late_attempt(shared, pool, token, provider, channel).await;
     if retries(delivery) {
         state.retry_late_stop(run.into_stop(), after);
     }
@@ -566,7 +538,7 @@ fn retries(delivery: Option<HerdrDelivery>) -> bool {
         Some(HerdrDelivery::NotSent(
             HerdrNotSent::Pending | HerdrNotSent::Unobserved
         ))
-    ) && !mutant("late_intent_dropped_on_notsent")
+    )
 }
 
 /// What a late stop needs on the turn's reader; it holds the channel state and token only weakly.
@@ -712,10 +684,7 @@ struct SpentOnUnwind<'a> {
 impl Drop for SpentOnUnwind<'_> {
     fn drop(&mut self) {
         let spend = std::thread::panicking() && self.attempted.load(Ordering::Acquire);
-        if spend
-            && !mutant("unwind_releases")
-            && let Some(generation) = self.generation.take()
-        {
+        if spend && let Some(generation) = self.generation.take() {
             let _ = generation.commit_success::<(), ()>(Ok(()));
         }
     }
@@ -749,9 +718,7 @@ fn deliver(
             .map_err(|()| unobserved())?
             .ok_or(Idle)?;
         // A Codex stop targets the turn its token began, never a later native turn of the pane.
-        if let TurnIdentity::Codex(turn) = &identity
-            && !mutant("late_escape_retargets_native_turn")
-        {
+        if let TurnIdentity::Codex(turn) = &identity {
             let seen = state.seen_turn_id();
             turn.is_own(state.turn_start.get().ok_or(Pending)?, seen.as_deref())?;
         }
@@ -768,23 +735,17 @@ fn deliver(
                 return Err(Holder);
             }
             let mut generation = SpentOnUnwind {
-                generation: if mutant("generation") {
-                    None
-                } else {
-                    Some(
-                        token
-                            .lock_current_interrupt_session(provider.clone(), logical)
-                            .ok_or(Generation)?,
-                    )
-                },
+                generation: Some(
+                    token
+                        .lock_current_interrupt_session(provider.clone(), logical)
+                        .ok_or(Generation)?,
+                ),
                 attempted,
             };
             let current =
                 crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(logical)
                     .ok_or(Pending)?;
-            if current.output_path != binding.output_path
-                || (!mutant("identity") && !identity.current())
-            {
+            if current.output_path != binding.output_path || !identity.current() {
                 return Err(Identity);
             }
             // One read decides: Codex's dim placeholder survives only in the styled read.
@@ -813,7 +774,7 @@ fn deliver(
                 }
                 _ => false,
             };
-            if !running && !mutant("running") {
+            if !running {
                 if let Some(judged) = judged {
                     let at = (channel, logical.as_str(), nonce);
                     let sources = (&binding, &current);
@@ -824,7 +785,7 @@ fn deliver(
                 return Err(Idle);
             }
             target.pin(HerdrMutation::Cancel).map_err(|_| Gate)?;
-            if (!mutant("identity") && !identity.current()) || !source_current() {
+            if !identity.current() || !source_current() {
                 target.discard_pin();
                 return Err(Identity);
             }
@@ -836,15 +797,8 @@ fn deliver(
                 target.discard_pin();
                 return Err(SwitchOff);
             }
-            if mutant("restart_cutpoint_not_reached") {
-                target.discard_pin();
-                return Err(Pending);
-            }
             attempted.store(true, Ordering::Release);
-            let swapped = mutant("stop_sent_as_indeterminate");
             let result = match target.send_keys(&[HostKey::Escape]) {
-                Ok(HostMutation::Confirmed) if swapped => Ok(HerdrDelivery::Indeterminate),
-                Ok(HostMutation::Indeterminate(_)) if swapped => Ok(HerdrDelivery::Sent),
                 Ok(HostMutation::Confirmed) => Ok(HerdrDelivery::Sent),
                 Ok(HostMutation::Indeterminate(_)) => Ok(HerdrDelivery::Indeterminate),
                 _ => Err(Gate),
@@ -854,12 +808,6 @@ fn deliver(
                 action();
             }
             let delivered = match generation.generation.take() {
-                Some(_)
-                    if mutant("indeterminate_claim")
-                        && result == Ok(HerdrDelivery::Indeterminate) =>
-                {
-                    result
-                }
                 Some(generation) => generation.commit_success(result),
                 None => result,
             };

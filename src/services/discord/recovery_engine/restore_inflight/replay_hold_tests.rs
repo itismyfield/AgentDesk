@@ -9,26 +9,13 @@ use crate::services::session_host::test_support::{InjectedLivenessGuard, Injecte
 use crate::services::session_host::{HostLiveness, HostPresence, HostSessionRef};
 use poise::serenity_prelude::ChannelId;
 
-pub(super) fn apply_read_error_mutant(
-    state: &mut inflight::InflightTurnState,
-    error: &sqlx::Error,
-) {
-    if std::env::var("ADK_REPLAY_FENCE_MUTANT").ok().as_deref() == Some("restore-read-error") {
-        state
-            .replay_hold_reasons
-            .push(format!("replay source disposition unreadable: {error}"));
-    }
-}
-
 async fn fixture() -> (
     crate::db::auto_queue::test_support::TestPostgresDb,
     sqlx::PgPool,
 ) {
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    if std::env::var("ADK_REPLAY_FENCE_MUTANT").ok().as_deref() != Some("restore-read-error") {
-        crate::db::replay_disposition::tests::apply_test_mutant(&pool).await;
-    }
+    crate::db::replay_disposition::tests::apply_test_mutant(&pool).await;
     let version: String = sqlx::query_scalar("SELECT version()")
         .fetch_one(&pool)
         .await

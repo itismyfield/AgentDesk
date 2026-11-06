@@ -57,8 +57,6 @@ pub(super) async fn hydrate_replay_hold_checked(
                 Ok(receipt) => receipt,
                 Err(error) => {
                     tracing::warn!(channel_id = state.channel_id, %error, "replay source lookup failed");
-                    #[cfg(all(test, unix))]
-                    super::replay_hold_tests::apply_read_error_mutant(state, &error);
                     return ReplayLookup::Unverified {
                         projected: false,
                         reason: format!("replay source lookup failed: {error}"),
