@@ -52,7 +52,7 @@ struct Open {
     compaction: bool,
     closed: bool,
     unreadable: bool,
-    /// An unnamed end not yet resolved by this turn's own end.
+    /// An unnamed end that no later end of this turn's own resolved.
     unnamed: bool,
     /// A malformed record or an unidentified start; only a later identified start clears it.
     invalid: bool,
@@ -249,12 +249,10 @@ fn scan(
         return Ok(unknown("turn_unknown", bytes_read));
     };
     let turn = open.turn.clone();
-    let end = if torn || open.invalid {
+    let end = if torn || open.invalid || open.unnamed {
         NativeEnd::Unknown
     } else if open.closed {
         NativeEnd::Ended
-    } else if open.unnamed {
-        NativeEnd::Unknown
     } else {
         NativeEnd::Open
     };
@@ -395,7 +393,11 @@ fn apply(record: &Value, open: &mut Option<Open>, review: &mut Review) {
             // An unnamed end may be this turn's, so the turn reads as Unknown.
             if let Some(open) = open.as_mut() {
                 match turn_id {
-                    Some(turn) if turn == open.turn || turn == open.root => open.closed = true,
+                    // The turn's own end resolves an unnamed one before it, not one after it.
+                    Some(turn) if turn == open.turn || turn == open.root => {
+                        open.closed = true;
+                        open.unnamed = false;
+                    }
                     Some(_) => {}
                     None => {
                         open.unreadable = true;
