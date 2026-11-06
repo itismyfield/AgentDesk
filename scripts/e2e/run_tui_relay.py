@@ -52,7 +52,7 @@ import yaml  # type: ignore[import-untyped]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from tui_relay import assertions, discord, durable_delivery, feature_accounting, fixtures, herdr, known_gap, lease, normal_intake_evidence, source_compare, tmux  # noqa: E402
-from tui_relay import health_readiness, herdr_restart, http_auth, midturn_kill, restart_guard, wait_timeout  # noqa: E402
+from tui_relay import channel_reset, health_readiness, herdr_restart, http_auth, midturn_kill, restart_guard, wait_timeout  # noqa: E402
 
 
 SUPPORTED_CELLS: tuple[str, ...] = (
@@ -190,6 +190,12 @@ class HarnessEvidenceError(assertions.AssertionError):
     """Required evidence could not be read; not a product root-cause verdict."""
 
 
+class ChannelResetError(HarnessEvidenceError):
+    def __init__(self, message: str, *, summary: dict[str, Any]):
+        super().__init__(message)
+        self.summary = summary
+
+
 @dataclass(frozen=True)
 class ObservationContext:
     """Bind native evidence to the API/channel actually exercised by the cell."""
@@ -294,7 +300,7 @@ def parse_args() -> argparse.Namespace:
         "--reset-before-each",
         action="store_true",
         default=True,
-        help="Cancel inflight + truncate relay queue before every scenario.",
+        help="Reset through the server queue API before every scenario; preserve Herdr sessions.",
     )
     parser.add_argument(
         "--no-reset-before-each",
@@ -305,7 +311,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--queue-runtime-root",
         default=str(Path.home() / ".adk" / "release" / "runtime"),
-        help="ADK runtime root used to truncate on-disk relay queues during reset.",
+        help="ADK runtime root used for runtime evidence and optional hard session reset.",
     )
     parser.add_argument(
         "--hard-reset-session-each",
@@ -1182,13 +1188,6 @@ def scenario_channel_id(scenario: dict[str, Any], args: argparse.Namespace) -> s
     return str(args.channel_id)
 
 
-def _truncate_queue_file(path: Path) -> None:
-    try:
-        path.write_text("[]")
-    except OSError:
-        pass
-
-
 def hard_reset_provider_session(
     *,
     cell: str,
@@ -1253,34 +1252,36 @@ def reset_channel_state(
     runtime_root: Path,
     provider: str,
 ) -> dict[str, Any]:
-    summary: dict[str, Any] = {"channel_id": channel_id, "actions": []}
+    summary: dict[str, Any] = {"channel_id": channel_id, "status": "fail", "actions": []}
     try:
-        summary["actions"].append(
-            {
-                "cancel_turn": cancel_turn(
-                    base_url=base_url,
-                    channel_id=channel_id,
-                    force=True,
-                    timeout_s=15,
-                )
-            }
+        _, health = _read_api_json(base_url, "/api/health")
+        hosts = health.get("herdr") if isinstance(health, dict) else None
+        preserve = channel_reset.preserve_herdr_session(
+            channel_id=channel_id,
+            configured_channels=hosts.get("configured_channels") if isinstance(hosts, dict) else None,
+            log=lambda action: summary["actions"].append({"host_policy": action}),
         )
+        summary["host"] = "herdr" if preserve else "legacy"
+        if not preserve:
+            cancelled = cancel_turn(base_url=base_url, channel_id=channel_id, force=True, timeout_s=15)
+            if cancelled.get("ok") is not True:
+                raise ValueError("cancel success unconfirmed")
+            depth = cancelled.get("queued_remaining")
+            if type(depth) is not int or depth != 0:
+                raise ValueError(f"cancel queue depth not confirmed empty: {depth!r}")
+            summary["actions"].append({"cancel_turn": cancelled})
+        mailbox = _target_mailbox(base_url, channel_id=channel_id, provider=provider)
+        depths = [mailbox.get("queue_depth"), _relay_health(mailbox).get("queue_depth")]
+        if any(type(depth) is not int or depth != 0 for depth in depths):
+            raise ValueError(f"reset queue depths not confirmed empty: {depths!r}")
+        if preserve and (reasons := _mailbox_busy_reasons(mailbox)):
+            raise ValueError(f"Herdr session is busy; reset refused: {reasons}")
+    except PhaseDeadlineExpired:
+        raise
     except Exception as error:  # noqa: BLE001
-        summary["actions"].append({"cancel_turn_error": f"{type(error).__name__}: {error}"})
-
-    for kind, subdir in (
-        ("pending_queue", "discord_pending_queue"),
-        ("placeholders", "discord_queued_placeholders"),
-    ):
-        cleared: list[str] = []
-        provider_dir = runtime_root / subdir / provider
-        if provider_dir.is_dir():
-            for token_dir in provider_dir.iterdir():
-                target = token_dir / f"{channel_id}.json"
-                if target.exists():
-                    _truncate_queue_file(target)
-                    cleared.append(str(target))
-        summary["actions"].append({kind: cleared})
+        summary["error"] = f"{type(error).__name__}: {error}"
+        raise ChannelResetError(f"channel reset refused: {summary['error']}", summary=summary) from error
+    summary.update(status="ready", queue_depths=depths)
     return summary
 
 
@@ -3359,14 +3360,21 @@ def run_scenario(
             return result
     if args.reset_before_each and not durable_probe and not args.dry_run and not is_local_fixture_scenario(scenario):
         runtime_root = Path(args.queue_runtime_root)
-        result["resets"] = [
-            reset_channel_state(
+        try:
+            reset = reset_channel_state(
                 base_url=args.base_url,
                 channel_id=target_channel_id,
                 runtime_root=runtime_root,
                 provider=cell_provider(cell),
             )
-        ]
+            if args.hard_reset_session_each and reset.get("host") == "herdr":
+                reset.update(status="fail", error="Herdr forbids hard session reset")
+                raise ChannelResetError(reset["error"], summary=reset)
+        except ChannelResetError as error:
+            result.update(status="fail", reason=str(error), resets=[error.summary])
+            result["failure_attribution"] = _failure_attribution("harness", str(error))
+            return result
+        result["resets"] = [reset]
         if args.hard_reset_session_each:
             result["hard_resets"] = [
                 hard_reset_provider_session(

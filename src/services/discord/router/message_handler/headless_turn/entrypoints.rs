@@ -43,22 +43,7 @@ pub(in crate::services::discord) async fn start_owner_headless(
     (prompt, context): (&str, &serde_json::Value),
     owner: super::super::OwnerTurn,
 ) -> Result<HeadlessTurnStartOutcome, HeadlessTurnStartError> {
-    let mut context = context.clone();
-    // A scheduled start kept before its provenance had keys of its own holds its metadata flat.
-    if context["origin"] == "scheduled" && context["metadata"].is_null() {
-        context["metadata"] = context.clone();
-        let agent = context["agent_id"].as_str().unwrap_or_default();
-        let bound = crate::db::agents::load_agent_channel_bindings_pg;
-        if let Some(pool) = &shared.pg_pool
-            && let Ok(Some(bound)) = bound(pool, agent).await
-        {
-            let hint = bound.channel_for_provider(Some(shared.provider.as_str()));
-            context["channel_name_hint"] = serde_json::json!(hint);
-        }
-        context["synthetic_label"] = context["scheduled_snapshot_session_label"].clone();
-        context["source"] = crate::services::scheduled_messages::OUTBOX_SOURCE.into();
-        context["is_dm"] = false.into();
-    }
+    let context = owner_start_context(shared, context).await;
     let text = |key: &str| context[key].as_str().map(str::to_owned);
     let source = text("source");
     let name = text("request_owner_name").or(source.clone());
@@ -84,6 +69,71 @@ pub(in crate::services::discord) async fn start_owner_headless(
         Some(owner),
     ))
     .await
+}
+
+/// A kept start's context as its headless start reads it: a scheduled start kept before its
+/// provenance had keys of its own holds its metadata flat, and gets its label and hint here.
+async fn owner_start_context(
+    shared: &Arc<SharedData>,
+    context: &serde_json::Value,
+) -> serde_json::Value {
+    let mut context = context.clone();
+    if context["origin"] == "scheduled" && context["metadata"].is_null() {
+        context["metadata"] = context.clone();
+        let agent = context["agent_id"].as_str().unwrap_or_default();
+        let bound = crate::db::agents::load_agent_channel_bindings_pg;
+        if let Some(pool) = &shared.pg_pool
+            && let Ok(Some(bound)) = bound(pool, agent).await
+        {
+            let hint = bound.channel_for_provider(Some(shared.provider.as_str()));
+            context["channel_name_hint"] = serde_json::json!(hint);
+        }
+        context["synthetic_label"] = context["scheduled_snapshot_session_label"].clone();
+        context["source"] = crate::services::scheduled_messages::OUTBOX_SOURCE.into();
+        context["is_dm"] = false.into();
+    }
+    context
+}
+
+/// The tmux pane a kept start's headless turn takes, named as that turn names it, and whether it is
+/// the channel's own pane; `None` for a process routine or a provider with no managed pane.
+pub(in crate::services::discord) async fn owner_start_pane(
+    shared: &Arc<SharedData>,
+    channel: ChannelId,
+    context: &serde_json::Value,
+) -> Option<(String, bool)> {
+    let context = owner_start_context(shared, context).await;
+    let metadata = Some(context["metadata"].clone()).filter(|m| !m.is_null());
+    let hint = context["channel_name_hint"].as_str().map(str::to_owned);
+    let channel_name = start_channel_name(shared, channel, hint).await;
+    let label = context["synthetic_label"].as_str();
+    let named = channel_name.as_deref();
+    let pane = routine_tmux_session_name(&shared.provider, metadata.as_ref(), label, named)?;
+    let own = named.is_some_and(|name| shared.provider.build_tmux_session_name(name) == pane);
+    Some((pane, own))
+}
+
+/// The channel name a headless start names its pane by: the session's, else its hint, else the
+/// name Discord gives the channel, else its registered fallback.
+async fn start_channel_name(
+    shared: &Arc<SharedData>,
+    channel: ChannelId,
+    hint: Option<String>,
+) -> Option<String> {
+    let named = {
+        let data = shared.core.lock().await;
+        let session = data.sessions.get(&channel);
+        session.and_then(|session| session.channel_name.clone())
+    };
+    if let Some(name) = named.or(hint) {
+        return Some(name);
+    }
+    let looked_up = match shared.http.cached_serenity_ctx.get() {
+        Some(ctx) => resolve_channel_category(&ctx.http, None, channel).await.0,
+        None => None,
+    };
+    let registered = crate::services::discord::adk_session::registered_channel_fallback_name;
+    looked_up.or_else(|| registered(channel, &shared.provider))
 }
 
 pub(in crate::services::discord) async fn start_headless_turn(

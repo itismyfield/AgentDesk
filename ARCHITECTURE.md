@@ -248,6 +248,8 @@ src/
 │   │   ├── advisory_lock.rs
 │   │   ├── advisory_lock_tests.rs
 │   │   ├── agent_sync.rs
+│   │   ├── pool_return.rs
+│   │   ├── pool_return_pg_tests.rs
 │   │   ├── shared_config.rs
 │   │   └── test_db_reclaim.rs
 │   ├── prompt_manifests/
@@ -2144,6 +2146,7 @@ src/
 │   │   │   │   │   ├── owner_input_codex_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_tests.rs
 │   │   │   │   │   ├── owner_input_idle_tests.rs
+│   │   │   │   │   ├── owner_input_native_read_tests.rs
 │   │   │   │   │   ├── owner_input_not_sent_tests.rs
 │   │   │   │   │   ├── owner_input_owned_stop_format_tests.rs
 │   │   │   │   │   ├── owner_input_owned_stop_tests.rs

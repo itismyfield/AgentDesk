@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use super::StreamingTurn;
+use crate::services::claude_tui::busy_inject::Screen;
 use crate::services::claude_tui::{busy_inject, owner_input as scope};
 use crate::services::discord::queue_io::input_owner::drive::{
     Drive, Front, FrontClaim, Handoff, Settled as Owed, claim_turn,
@@ -54,18 +55,31 @@ impl Registration {
     /// Absent, whatever `busy`.
     pub(super) fn observed(
         mailbox: ChannelMailboxHandle,
+        kind: (&str, InputOrigin, bool),
+        at: (&TurnHost, &str, Option<(&str, Option<&str>)>),
+        original: &PendingQueueItem,
+        until_done: Option<UntilDone>,
+    ) -> Result<Self, String> {
+        Self::read_as(mailbox, kind, at, original, (until_done, None))
+    }
+
+    /// As `observed`; a tmux pane whose liveness its caller already read is registered as read.
+    fn read_as(
+        mailbox: ChannelMailboxHandle,
         (provider, origin, busy): (&str, InputOrigin, bool),
         (host, session, live): (&TurnHost, &str, Option<(&str, Option<&str>)>),
         original: &PendingQueueItem,
-        until_done: Option<UntilDone>,
+        (until_done, read): (Option<UntilDone>, Option<bool>),
     ) -> Result<Self, String> {
         let herdr = match host {
             TurnHost::Herdr(plan) => bound_herdr(plan),
             _ => None,
         };
         // A pane kept after its process exited is no live execution; an unknown answer refuses.
-        let alive = match host {
-            TurnHost::Tmux => match crate::services::platform::tmux::pane_liveness(session) {
+        let alive = match (host, read) {
+            (TurnHost::Tmux, Some(alive)) => alive,
+            (TurnHost::Tmux, None) => match crate::services::platform::tmux::pane_liveness(session)
+            {
                 PaneLiveness::Live => !other_account(provider, session),
                 PaneLiveness::DeadOrAbsent => false,
                 PaneLiveness::ProbeError => return Err("NotSent(\"pane_unobserved\")".into()),
@@ -383,7 +397,17 @@ pub(in crate::services::discord) struct OwnerTurn {
     settled: Settled,
     /// Where the front came from, read from the provenance its admission kept.
     origin: InputOrigin,
+    /// What the start's headless turn knows of its pane for the late native read.
+    late: LateRead,
     refusal: std::sync::Arc<Mutex<Option<crate::services::turn_host::HerdrRefusal>>>,
+}
+
+/// Whether the start's session id names the pane it writes to, and whether its fresh or snapshot
+/// runtime-binding clear waits for that pane to read idle.
+#[derive(Clone, Copy, Default)]
+pub(in crate::services::discord) struct LateRead {
+    own_pane: bool,
+    clear_binding: bool,
 }
 
 impl OwnerTurn {
@@ -398,6 +422,13 @@ impl OwnerTurn {
         refusal: crate::services::turn_host::HerdrRefusal,
     ) {
         *self.refusal.lock().unwrap_or_else(|e| e.into_inner()) = Some(refusal);
+    }
+
+    pub(in crate::services::discord) fn read_late(&mut self, own_pane: bool, clear_binding: bool) {
+        self.late = LateRead {
+            own_pane,
+            clear_binding,
+        };
     }
 
     pub(in crate::services::discord) fn front(&self) -> &Front {
@@ -542,7 +573,7 @@ enum Wait {
 }
 
 /// Whether a start must wait for its pane's idle: a turn AgentDesk did not start holds the channel,
-/// or the channel pane the start would take runs a native Claude turn.
+/// or the pane the start would take runs a native Claude turn or cannot be read.
 async fn start_waits(shared: &Shared, channel: ChannelId, context: &Value) -> Wait {
     use crate::services::discord::inflight::{TurnSource, load_inflight_state_read_only};
     use crate::services::discord::turn_presence::activity::{Activity, activity_now};
@@ -555,64 +586,97 @@ async fn start_waits(shared: &Shared, channel: ChannelId, context: &Value) -> Wa
     }
     if crate::services::tui_o::turn_mode::transcript_turns(id) {
         let busy = activity_now(shared, provider, channel).await.activity != Activity::Idle;
-        return if busy { Wait::Event } else { Wait::Go };
+        if busy {
+            return Wait::Event;
+        }
+        // The activity read the channel's own pane; a start bound for another pane reads that one.
+        return match start_target(shared, channel, context).await {
+            Some(target) if !target.own_pane => native_wait(provider, target),
+            _ => Wait::Go,
+        };
     }
-    native_turn(shared, channel, context).await
+    match start_target(shared, channel, context).await {
+        Some(target) => native_wait(provider, target),
+        None => Wait::Go,
+    }
 }
 
-/// The channel's own Claude pane running a turn now, read as the start's execution reads it, with
-/// a read of that turn's end; a labelled or process start takes another pane or none.
-async fn native_turn(shared: &Shared, channel: ChannelId, context: &Value) -> Wait {
-    use busy_inject::Screen;
-    let named = |value: &Value, key: &str| value[key].as_str().is_some_and(|s| !s.is_empty());
-    let metadata = &context["metadata"];
-    let snapshot = "scheduled_snapshot_session_label";
-    let elsewhere = named(context, "synthetic_label")
-        || named(context, snapshot)
-        || named(metadata, snapshot)
-        || metadata["execution_mode"] == "process";
-    if elsewhere || shared.provider != ProviderKind::Claude {
-        return Wait::Go;
+/// The pane a start's headless turn writes to and where its native turn is read from; `None` when
+/// that turn takes no pane, or for a provider whose native turn is not read here yet.
+async fn start_target(
+    shared: &Shared,
+    channel: ChannelId,
+    context: &Value,
+) -> Option<NativeTarget> {
+    if shared.provider != ProviderKind::Claude {
+        return None;
     }
-    let (dir, session_id, name) = {
+    let pane = super::super::headless_turn::owner_start_pane(shared, channel, context);
+    let (tmux, own_pane) = pane.await?;
+    let (dir, session_id) = {
         let core = shared.core.lock().await;
-        let Some(session) = core.sessions.get(&channel) else {
-            return Wait::Go;
-        };
-        let name = session.channel_name.clone();
-        (
-            session.current_path.clone(),
-            session.session_id.clone(),
-            name,
-        )
+        let session = core.sessions.get(&channel);
+        let dir = session.and_then(|session| session.current_path.clone());
+        (dir, session.and_then(|session| session.session_id.clone()))
     };
-    let hint = context["channel_name_hint"].as_str().map(str::to_string);
-    let Some(name) = name.or(hint) else {
-        return Wait::Go;
-    };
-    let tmux = shared.provider.build_tmux_session_name(&name);
-    let read = move || {
-        match crate::services::platform::tmux::pane_liveness(&tmux) {
-            PaneLiveness::Live => {}
-            PaneLiveness::DeadOrAbsent => return Screen::Gone,
-            // A pane that could not be read is not gone; the watch reads it again.
-            PaneLiveness::ProbeError => return Screen::Unknown,
-        }
-        let resolve = super::super::tui_followup::claude_followup_transcript;
-        match resolve(dir.as_deref(), session_id.as_deref(), Some(&tmux)) {
-            Some(path)
-                if crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&path)
-                    .is_busy() =>
-            {
-                Screen::Blocked
-            }
-            Some(_) => Screen::Ready,
-            None => Screen::Unknown,
-        }
-    };
+    Some(NativeTarget {
+        tmux,
+        dir,
+        session_id: session_id.filter(|_| own_pane),
+        own_pane,
+    })
+}
+
+/// A start's read of its own pane: a running or unreadable native turn holds it with a watch of
+/// that pane; an idle or gone pane lets it go on.
+fn native_wait(provider: &ProviderKind, target: NativeTarget) -> Wait {
+    let provider = provider.clone();
+    let read = move || native_read(&provider, &target);
     match read() {
-        Screen::Blocked => Wait::Watch(Box::new(read)),
-        _ => Wait::Go,
+        Screen::Blocked | Screen::Unknown => Wait::Watch(Box::new(read)),
+        Screen::Ready | Screen::Gone => Wait::Go,
+    }
+}
+
+/// The pane a start writes to; its session id is kept only when that pane is the channel's own.
+struct NativeTarget {
+    tmux: String,
+    dir: Option<String>,
+    session_id: Option<String>,
+    own_pane: bool,
+}
+
+/// One read of a start's pane: gone (dead, absent or another account's), a running native Claude
+/// turn, an idle one, or unknown when the pane or its transcript cannot be read.
+fn native_read(provider: &ProviderKind, target: &NativeTarget) -> Screen {
+    use crate::services::tui_turn_state::{TuiTurnState, observe_claude_jsonl_turn_state};
+    match crate::services::platform::tmux::pane_liveness(&target.tmux) {
+        PaneLiveness::Live => {}
+        PaneLiveness::DeadOrAbsent => return Screen::Gone,
+        // A pane that could not be read is not gone; the watch reads it again.
+        PaneLiveness::ProbeError => return Screen::Unknown,
+    }
+    if other_account(provider.as_str(), &target.tmux) {
+        return Screen::Gone;
+    }
+    let resolve = super::super::tui_followup::claude_followup_transcript;
+    let (dir, session_id) = (target.dir.as_deref(), target.session_id.as_deref());
+    let Some(path) = resolve(dir, session_id, Some(&target.tmux)) else {
+        return Screen::Unknown;
+    };
+    match observe_claude_jsonl_turn_state(&path) {
+        TuiTurnState::Idle => Screen::Ready,
+        TuiTurnState::Streaming | TuiTurnState::UserSubmitted => Screen::Blocked,
+        // Session markers with no tool waiting read idle once the composer would take a send.
+        TuiTurnState::Unknown => {
+            use crate::services::claude_tui::input::{
+                final_prompt_ready, prompt_readiness_snapshot,
+            };
+            match final_prompt_ready(&prompt_readiness_snapshot(&target.tmux)) {
+                true => Screen::Ready,
+                false => Screen::Unknown,
+            }
+        }
     }
 }
 
@@ -649,17 +713,13 @@ async fn start_idle(
     };
     if let Wait::Watch(read) = wait {
         crate::services::discord::queue_io::input_owner::held_watch::arm(channel.get(), read);
-        let held = front.clone();
-        let held = mailbox
-            .v2_request(move |slot| slot.as_mut().ok_or("V2 not adopted")?.hold_front(&held));
-        if let Err(error) = held.await {
-            tracing::warn!(channel_id = channel.get(), %error, "start hold unwatched");
-        }
-        return Err("NotSent(\"synthetic_waits_idle\")".into());
+        hold_start(&mailbox, channel, &front).await;
+        return Err(START_WAITS.into());
     }
     if let Wait::Event = wait {
-        return Err("NotSent(\"synthetic_waits_idle\")".into());
+        return Err(START_WAITS.into());
     }
+    let (held, holder) = (front.clone(), mailbox.clone());
     let claim = claim_turn(&mailbox, front.1.message_id, &front).await?;
     let claim = claim.ok_or("NotSent(\"front_not_granted\")")?;
     let (settled, answer) = tokio::sync::oneshot::channel();
@@ -676,6 +736,7 @@ async fn start_idle(
         claim,
         settled,
         origin,
+        late: LateRead::default(),
         refusal: refusal.clone(),
     };
     let now = (std::time::SystemTime::now(), std::time::Instant::now());
@@ -734,9 +795,27 @@ async fn start_idle(
         }
     }
     match (answer.await, started) {
+        // The late read held the claimed start: it waits as an unclaimed start would, watched.
+        (Ok(Err(error)), _) if error == START_WAITS => {
+            hold_start(&holder, channel, &held).await;
+            Err(error)
+        }
         (Ok(settlement), _) => settlement,
         (Err(_), Err(error)) => Err(format!("NotSent({error:?})")),
         (Err(_), Ok(_)) => Err("NotSent(\"turn_not_started\")".into()),
+    }
+}
+
+/// A start's settlement while its pane's native turn runs or cannot be read: nothing was sent.
+const START_WAITS: &str = "NotSent(\"synthetic_waits_idle\")";
+
+/// Marks the start's front held so the drive watches the read a hold armed.
+async fn hold_start(mailbox: &ChannelMailboxHandle, channel: ChannelId, front: &Front) {
+    let held = front.clone();
+    let held =
+        mailbox.v2_request(move |slot| slot.as_mut().ok_or("V2 not adopted")?.hold_front(&held));
+    if let Err(error) = held.await {
+        tracing::warn!(channel_id = channel.get(), %error, "start hold unwatched");
     }
 }
 
@@ -769,6 +848,7 @@ pub(super) fn execute_owned(
         claim,
         settled,
         origin,
+        late,
         ..
     } = owner;
     let turn = StreamingTurn {
@@ -776,10 +856,47 @@ pub(super) fn execute_owned(
         ..turn
     };
     let session = turn.tmux_session_name.unwrap_or_default();
-    let live = matches!(turn.host, TurnHost::Tmux)
-        && pane_liveness(session) == PaneLiveness::Live
-        && !other_account(turn.provider.as_str(), session);
-    let running = live.then(|| running_transcript(&turn, session)).flatten();
+    // A start never joins a running or unreadable native Claude turn: read once before it registers,
+    // it waits unsent with a watch of that pane.
+    let synthetic = origin != InputOrigin::Discord
+        && matches!(turn.host, TurnHost::Tmux)
+        && *turn.provider == ProviderKind::Claude;
+    // Its idle or gone read is the pane it registers; no later read can turn it unobserved.
+    let mut read = None;
+    if synthetic {
+        let target = NativeTarget {
+            tmux: session.to_string(),
+            dir: Some(turn.working_dir.to_string()).filter(|dir| !dir.is_empty()),
+            session_id: (turn.session_id.filter(|_| late.own_pane)).map(str::to_string),
+            own_pane: late.own_pane,
+        };
+        let screen = native_read(turn.provider, &target);
+        read = Some(screen == Screen::Ready);
+        if let Screen::Blocked | Screen::Unknown = screen {
+            let nonce = turn.cancel.turn_nonce().map(str::to_string);
+            let at = (turn.channel_id, nonce);
+            let probe = late_probe(turn.provider.clone(), target, mailbox.clone(), at);
+            crate::services::discord::queue_io::input_owner::held_watch::arm(
+                turn.channel_id,
+                probe,
+            );
+            let _ = settled.send(Err(START_WAITS.into()));
+            return Err(START_WAITS.into());
+        }
+    }
+    if late.clear_binding
+        && let Some(tmux) = turn.tmux_session_name
+    {
+        crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(tmux);
+    }
+    let live = read.unwrap_or_else(|| {
+        matches!(turn.host, TurnHost::Tmux)
+            && pane_liveness(session) == PaneLiveness::Live
+            && !other_account(turn.provider.as_str(), session)
+    });
+    let running = (live && !synthetic)
+        .then(|| running_transcript(&turn, session))
+        .flatten();
     let registered = match &running {
         Some(transcript) => {
             let kind = (turn.provider.as_str(), origin, true);
@@ -797,7 +914,8 @@ pub(super) fn execute_owned(
             let observer = live.then(|| observer(&turn, &sender)).flatten();
             let kind = (turn.provider.as_str(), origin, false);
             let at = (turn.host, session, None);
-            Registration::observed(mailbox, kind, at, &claim.front().1, observer)
+            let front = &claim.front().1;
+            Registration::read_as(mailbox, kind, at, front, (observer, read))
         }
     };
     match registered {
@@ -807,6 +925,30 @@ pub(super) fn execute_owned(
             Err(error)
         }
     }
+}
+
+/// The late hold's read of its pane: ready only once the held attempt's own unwind ended (its
+/// mailbox turn released, its inflight row gone), so the one wake is not spent on its leftovers.
+fn late_probe(
+    provider: ProviderKind,
+    target: NativeTarget,
+    mailbox: ChannelMailboxHandle,
+    (channel, nonce): (u64, Option<String>),
+) -> crate::services::discord::queue_io::input_owner::held_watch::ScreenProbe {
+    use crate::services::discord::inflight::load_inflight_state_read_only_result as row_now;
+    Box::new(move || match native_read(&provider, &target) {
+        Screen::Ready => {
+            let active = futures::executor::block_on(mailbox.has_active_turn());
+            let own = |row: &crate::services::discord::inflight::InflightTurnState| {
+                nonce.is_some() && row.turn_nonce == nonce
+            };
+            match (active, row_now(&provider, channel)) {
+                (Ok(false), Ok(row)) if !row.as_ref().is_some_and(own) => Screen::Ready,
+                _ => Screen::Unknown,
+            }
+        }
+        read => read,
+    })
 }
 
 /// The transcript of a Claude tmux pane whose turn is running now, resolved by the pane's identity.

@@ -1424,6 +1424,7 @@ def run_foreign_active_restart_guard_scenario(
         handoff_from_agent="adk-e2e-orchestrator",
     )
     hold_released = False
+    hold_attempted = False
 
     try:
         if args.reset_before_each:
@@ -1448,6 +1449,7 @@ def run_foreign_active_restart_guard_scenario(
             },
             scenario_id=scenario_id,
         )
+        hold_attempted = True
         send_response = foreign_client.send_prompt(
             foreign["channel_id"],
             hold_prompt,
@@ -1555,8 +1557,8 @@ def run_foreign_active_restart_guard_scenario(
             str(result["reason"]),
         )
     finally:
-        if not hold_released:
-            # Best-effort release so a failed run never strands the foreign turn.
+        if hold_attempted and not hold_released:
+            # Release a hold this run may have submitted, even if its response was lost.
             try:
                 result.setdefault("teardown", {})["foreign_hold_cancel"] = (
                     cell_driver.cancel_turn(

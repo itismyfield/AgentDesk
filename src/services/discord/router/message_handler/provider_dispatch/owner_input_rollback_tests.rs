@@ -69,7 +69,7 @@ impl IntakeRig {
     }
 
     async fn with_bot(id: u64, busy: bool, bot: ProviderKind) -> Self {
-        Self::build(id, busy, bot, None, false, None, None).await
+        Self::build(id, busy, bot, None, None, None, None).await
     }
 
     async fn busy_with_screen(id: u64, screen: String) -> Self {
@@ -78,7 +78,7 @@ impl IntakeRig {
             true,
             ProviderKind::Claude,
             None,
-            false,
+            None,
             None,
             Some(screen),
         )
@@ -91,12 +91,21 @@ impl IntakeRig {
         bot: ProviderKind,
         pool: Option<sqlx::PgPool>,
     ) -> Self {
-        Self::build(id, busy, bot, pool, false, None, None).await
+        Self::build(id, busy, bot, pool, None, None, None).await
     }
 
     /// A busy pane whose front a `turn/start` admitted with its headless provenance.
     async fn turn_start(id: u64) -> Self {
-        Self::build(id, true, ProviderKind::Claude, None, true, None, None).await
+        Self::build(
+            id,
+            true,
+            ProviderKind::Claude,
+            None,
+            Some(false),
+            None,
+            None,
+        )
+        .await
     }
 
     /// A `turn/start` naming `origin` on a stored channel whose pane's transcript its observer finds.
@@ -106,7 +115,7 @@ impl IntakeRig {
             true,
             ProviderKind::Claude,
             Some(pool),
-            true,
+            Some(false),
             Some(origin),
             None,
         )
@@ -118,10 +127,12 @@ impl IntakeRig {
         busy: bool,
         bot: ProviderKind,
         pool: Option<sqlx::PgPool>,
-        start: bool,
+        start: Option<bool>,
         origin: Option<&str>,
         screen: Option<String>,
     ) -> Self {
+        // A `turn/start` front is admitted when `start` is set, as a fresh routine's when it is true.
+        let (start, fresh) = (start.is_some(), start == Some(true));
         let trace = Trace::default();
         tracing_subscriber::fmt()
             .with_ansi(false)
@@ -262,7 +273,11 @@ impl IntakeRig {
                 let provenance = start::HeadlessProvenance {
                     owner: (7, "imessage"),
                     source: Some("imessage"),
-                    metadata: origin.map(|o| json!({"human_input": {"origin_id": o}})),
+                    metadata: origin.map(|o| match fresh {
+                        true => json!({"human_input": {"origin_id": o},
+                            "routine_id": "routine-7772", "execution_strategy": "fresh"}),
+                        false => json!({"human_input": {"origin_id": o}}),
+                    }),
                     channel_hint: None,
                     label: None,
                     dm: None,
@@ -316,6 +331,27 @@ impl IntakeRig {
             })
         }));
         (drive, receiver)
+    }
+
+    /// Rebinds the pane to a transcript that only its binding names.
+    async fn bind_only(&mut self) {
+        self.transcript = self.renderer.join("bound-only.jsonl");
+        let name = format!("a1-rollback-{}", self.channel.get());
+        let name = ProviderKind::Claude.build_tmux_session_name(&name);
+        let core = self.shared.core.lock().await;
+        let session = core.sessions.get(&self.channel).unwrap().session_id.clone();
+        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+            &name,
+            crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+                runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+                output_path: self.transcript.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: session,
+                last_offset: 0,
+                relay_last_offset: None,
+            },
+        );
     }
 
     async fn state(&self) -> Value {
@@ -1097,11 +1133,15 @@ async fn an_unsent_start_cleared_later_leaves_only_its_removal_receipt_pg() {
         false,
         claude.clone(),
         Some(pool.clone()),
-        true,
+        Some(true),
         origin,
         None,
     );
-    let rig = rig.await;
+    let mut rig = rig.await;
+    // A fresh start reads the idle pane through its binding, then clears it, so no idle observer
+    // can be built for the start.
+    rig.bind_only().await;
+    fs::write(&rig.transcript, IDLE).unwrap();
     let (completed, bridge) = tokio::sync::oneshot::channel();
     *discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
         .lock()
@@ -1404,3 +1444,6 @@ async fn a_marked_row_is_settled_and_the_owned_front_submitted_on_one_wake_pg() 
     pool.close().await;
     db.drop().await;
 }
+
+#[path = "owner_input_native_read_tests.rs"]
+mod native_read;

@@ -1016,6 +1016,7 @@ fn idle_turn(
         claim,
         settled,
         origin: InputOrigin::Discord,
+        late: Default::default(),
         refusal: Default::default(),
     };
     let (host, provider) = (TurnHost::Tmux, ProviderKind::Claude);
