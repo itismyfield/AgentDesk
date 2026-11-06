@@ -15,7 +15,6 @@ async fn fixture() -> (
 ) {
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    crate::db::replay_disposition::tests::apply_test_mutant(&pool).await;
     let version: String = sqlx::query_scalar("SELECT version()")
         .fetch_one(&pool)
         .await

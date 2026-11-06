@@ -580,12 +580,8 @@ pub fn start_managed<I: HostIo>(
                 continue;
             }
         };
-        #[cfg(test)]
-        let use_global = super::super::ownership::execution::tests::mutant("host-global");
-        #[cfg(not(test))]
-        let use_global = false;
         let gate = match execution {
-            Some(Ok(permit)) if !use_global => permit.gate(),
+            Some(Ok(permit)) => permit.gate(),
             _ => Arc::clone(&gate),
         };
         #[cfg(test)]

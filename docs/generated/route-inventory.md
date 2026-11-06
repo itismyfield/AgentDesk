@@ -59,7 +59,7 @@
 | `PATCH` | `/api/channels/{id}` | `provider_auth_profiles::patch_channel_auth_profile` | `src/server/routes/provider_auth_profiles.rs:368` | `src/server/routes/domains/integrations.rs:70` |
 | `GET` | `/api/channels/{id}/queue` | `queue_api::list_channel_queue` | `src/server/routes/queue_api.rs:21` | `src/server/routes/domains/runtime.rs:105` |
 | `POST` | `/api/channels/{id}/relay-recovery` | `health_api::relay_recovery_handler` | `src/server/routes/health_api.rs:954` | `src/server/routes/domains/runtime.rs:110` |
-| `GET` | `/api/channels/{id}/watcher-state` | `queue_api::get_watcher_state` | `src/server/routes/queue_api.rs:279` | `src/server/routes/domains/runtime.rs:106` |
+| `GET` | `/api/channels/{id}/watcher-state` | `queue_api::get_watcher_state` | `src/server/routes/queue_api.rs:273` | `src/server/routes/domains/runtime.rs:106` |
 | `GET` | `/api/claude-accounts` | `claude_accounts_api::get_claude_accounts` | `src/server/routes/claude_accounts_api.rs:16` | `src/server/routes/domains/integrations.rs:42` |
 | `POST` | `/api/claude-accounts/switch` | `claude_accounts_api::switch_claude_account` | `src/server/routes/claude_accounts_api.rs:47` | `src/server/routes/domains/integrations.rs:46` |
 | `GET` | `/api/cluster/issue-specs` | `cluster::list_issue_specs` | `src/server/routes/cluster.rs:411` | `src/server/routes/domains/ops.rs:88` |
