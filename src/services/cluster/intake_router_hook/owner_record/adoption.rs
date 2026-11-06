@@ -21,19 +21,13 @@ pub(crate) async fn adopt_on_tx(
     let channel = id.raw_channel_id().parse().map_err(|_| {
         Error::Native(crate::services::tui_o::ownership::execution::NativeRefFailure::Malformed)
     })?;
-    #[cfg(test)]
-    let bypass = super::cleanup::tests::mutant("adoption-native");
-    #[cfg(not(test))]
-    let bypass = false;
-    if !bypass {
-        crate::services::tui_o::ownership::execution::validate_local(
-            id.provider(),
-            channel,
-            local,
-            binding,
-        )
-        .map_err(Error::Native)?;
-    }
+    crate::services::tui_o::ownership::execution::validate_local(
+        id.provider(),
+        channel,
+        local,
+        binding,
+    )
+    .map_err(Error::Native)?;
     custody::lock(tx, id).await?;
     let sessions: Vec<(i64, String, String)> = sqlx::query_as("SELECT id,session_key,instance_id FROM sessions WHERE LOWER(BTRIM(provider))=$1 AND channel_id=$2 AND COALESCE(LOWER(BTRIM(status)),'') NOT IN ('disconnected','aborted') ORDER BY id FOR UPDATE")
         .bind(id.provider()).bind(id.raw_channel_id()).fetch_all(&mut **tx).await?;

@@ -57,8 +57,7 @@ where
             {
                 false
             }
-            Err(response) if !identity_mutant() => return response,
-            _ => true,
+            Err(response) => return response,
         }
     };
     let Ok(transition) = shared.acquire_session_transition(channel_id).await else {
@@ -150,7 +149,7 @@ where
         return Response::IdentityChanged;
     }
     match binding_context::observe_spawn_nonce_marker(owner) {
-        SpawnNonceMarker::Known(current) if current != nonce && !identity_mutant() => {
+        SpawnNonceMarker::Known(current) if current != nonce => {
             return Response::IdentityChanged;
         }
         SpawnNonceMarker::Unreadable => return Response::Retry,
@@ -173,9 +172,7 @@ where
         }
         _ => {}
     }
-    if let Err(response) = validate_native(row, native)
-        && !identity_mutant()
-    {
+    if let Err(response) = validate_native(row, native) {
         return response;
     }
     if super::super::managed_reset::verified_codex_reset_refusal_for_target(
@@ -195,13 +192,6 @@ where
     if !cleanup::begin_end(pool, row).await.unwrap_or(false) {
         return Response::Retry;
     }
-    #[cfg(test)]
-    let transition = if cleanup::tests::mutant("pin-lifetime") {
-        drop(transition);
-        Arc::new(tokio::sync::Mutex::new(())).lock_owned().await
-    } else {
-        transition
-    };
     end(owner.into(), transition).await
 }
 
@@ -248,10 +238,6 @@ async fn finish_herdr(
         HostedLookup::Unknown(_) => return Response::Retry,
         _ => return Response::IdentityChanged,
     }
-    #[cfg(test)]
-    if cleanup::tests::mutant("herdr-postlude") {
-        return Response::Ended;
-    }
     let (response, original_session) = archive_completed_identity(shared, row).await;
     if response != Response::Ended {
         return response;
@@ -266,8 +252,6 @@ async fn finish_herdr(
         let matches_original = original_session
             .as_ref()
             .is_some_and(|id| session.session_id.as_ref() == Some(id));
-        #[cfg(test)]
-        let matches_original = matches_original || cleanup::tests::mutant("selector-unconditional");
         if matches_original {
             session.clear_provider_session();
         }
@@ -304,12 +288,6 @@ async fn normal_end(
                 .as_ref()
                 .ok_or(Response::NeedsOperator)?,
         );
-        #[cfg(test)]
-        let validation = if cleanup::tests::mutant("normal-source") {
-            Ok(())
-        } else {
-            validation
-        };
         validation?;
         let ended = super::super::managed_reset::end_under_source(authority);
         // A confirmed vacant slot still carries the exact old launch files after a host restart.
@@ -359,10 +337,6 @@ async fn inflight_ready(
     let state = discord::inflight::load_inflight_state_read_only_result(&shared.provider, channel)
         .map_err(|_| Response::Retry)?;
     let Some(state) = state else { return Ok(None) };
-    #[cfg(test)]
-    if cleanup::tests::mutant("inflight-busy") {
-        return Err(Response::Busy);
-    }
     let Some(native) = row.routing_cleanup.native.as_ref() else {
         return Err(Response::NeedsOperator);
     };
@@ -455,10 +429,6 @@ fn read_native_completion(
                     std::path::Path::new(path),
                 ) == discord::turn_finalizer::CompletionSignal::Done);
         }
-        #[cfg(test)]
-        if cleanup::tests::mutant("single-poll") {
-            return Ok(false);
-        }
     }
     Err(Response::Retry)
 }
@@ -498,17 +468,6 @@ async fn archive_completed_identity(
 
 #[cfg(test)]
 pub(crate) mod tests;
-
-fn identity_mutant() -> bool {
-    #[cfg(test)]
-    {
-        cleanup::tests::mutant("identity")
-    }
-    #[cfg(not(test))]
-    {
-        false
-    }
-}
 
 fn validate_native(row: &Record, native: &serde_json::Value) -> Result<(), Response> {
     use crate::services::tui_o::ownership::execution::{NativeRefFailure, validate_local};

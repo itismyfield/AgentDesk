@@ -52,8 +52,6 @@ pub(crate) async fn save_on_tx(
     let target = plan.target.as_str();
     let fresh = snapshot::read_on_tx(tx, id, &observation.context).await?;
     let proof_matches = fresh.proof == observation.proof;
-    #[cfg(test)]
-    let proof_matches = proof_matches || super::cleanup::tests::mutant("plan-home");
     if !proof_matches
         || owner(&fresh) != owner(observation)
         || fresh.target() != Target::Selected(target)
@@ -127,13 +125,7 @@ pub(crate) async fn replan_held(
         .map(|o| (o.owner_instance_id.as_str(), o.generation));
     let mut head = None;
     for (index, (delivery, revision, wait)) in held.into_iter().enumerate() {
-        #[cfg(test)]
-        if index > 0 && super::cleanup::tests::mutant("plan-followers") {
-            break;
-        }
         let stale = revision != fresh.raw_revision || wait != expected.map(|(_, g)| g);
-        #[cfg(test)]
-        let stale = stale && !super::cleanup::tests::mutant("replan-refresh");
         if stale {
             custody::refresh_stage_on_tx(
                 &mut tx,
@@ -156,10 +148,6 @@ pub(crate) async fn replan_held(
         }
         // A changed observation rolls back every refresh, so the next tick still sees stale rows.
         let Some(saved) = save_on_tx(&mut tx, id, delivery, &fresh).await? else {
-            #[cfg(test)]
-            if super::cleanup::tests::mutant("replan-partial") {
-                tx.commit().await?;
-            }
             return Ok(None);
         };
         if index == 0 {
@@ -200,10 +188,6 @@ pub(crate) async fn replan_stale(
 }
 
 async fn release_held(pool: &sqlx::PgPool, id: &OwnerIdentity) -> Result<(), sqlx::Error> {
-    #[cfg(test)]
-    if super::cleanup::tests::mutant("release-skip") {
-        return Ok(());
-    }
     let mut tx = pool.begin().await?;
     custody::lock(&mut tx, id).await?;
     let held: Vec<(i64, i64)> = sqlx::query_as("SELECT d.id,d.routing_receipt_id FROM intake_outbox d JOIN intake_outbox r ON r.id=d.routing_receipt_id WHERE d.provider=$1 AND d.channel_id=$2 AND d.routing_state='held' AND r.replay_disposition='registered_not_started' ORDER BY d.id FOR UPDATE OF d")

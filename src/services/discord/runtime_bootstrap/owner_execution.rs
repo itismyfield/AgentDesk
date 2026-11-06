@@ -144,12 +144,6 @@ fn legacy_present(
 
 /// A failed observation pauses admission without discarding the last verified execution.
 pub(super) async fn refresh(provider: &ProviderKind, pool: Option<&sqlx::PgPool>) {
-    #[cfg(test)]
-    if crate::services::cluster::intake_router_hook::owner_record::cleanup::tests::mutant(
-        "refresh-old",
-    ) {
-        return prepare(provider, pool).await;
-    }
     let Some(snapshot) = cutover::boot_snapshot() else {
         return;
     };

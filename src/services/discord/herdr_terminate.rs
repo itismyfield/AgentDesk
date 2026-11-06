@@ -393,11 +393,6 @@ pub(in crate::services::discord) async fn terminate_explicit_herdr(
 ) -> TerminationResult {
     let ExplicitTerminate { request, after } = request.into();
     let resume_retired = after.is_some();
-    #[cfg(test)]
-    let resume_retired = resume_retired
-        && !crate::services::cluster::intake_router_hook::owner_record::cleanup::tests::mutant(
-            "retired-resume",
-        );
     match terminate_scoped(request, shared, pool, None, resume_retired).await {
         Ok(exclusion) => {
             if let Some(after) = after {
@@ -516,10 +511,11 @@ async fn terminate_scoped(
             .map_err(|error| Indeterminate(error.to_string()))?
             .map_err(|error| {
                 let retryable = error.retryable();
-                #[cfg(test)]
-                let retryable = retryable && !crate::services::cluster::intake_router_hook::owner_record::cleanup::tests::mutant("retired-read-refused");
-                if retryable { Indeterminate(format!("{error:?}")) }
-                else { Refused(format!("{error:?}")) }
+                if retryable {
+                    Indeterminate(format!("{error:?}"))
+                } else {
+                    Refused(format!("{error:?}"))
+                }
             })?;
         if !proof.matches(record) {
             return Err(Refused("retired execution changed".into()));
