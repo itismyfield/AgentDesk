@@ -818,3 +818,63 @@ async fn legacy_imessage_twenty_one_materialized_debts_exclude_on_reopen_without
     assert_eq!(actor.notice_debt_extra(), 0);
     assert!(c.port.posts.lock().unwrap().is_empty());
 }
+
+async fn repeated_nonce_case(separate_namespace: bool) {
+    let c = Case::new(if separate_namespace {
+        "nonce-namespace"
+    } else {
+        "nonce-identity"
+    });
+    let frame = c.frame();
+    let (registry, first) = c.v2(&frame, 8823, false);
+    c.input("full-key-first", &frame);
+    assert_eq!(
+        registry.receipt(
+            NAMESPACE,
+            &first,
+            (&c.path, 0, "user", Some("full-key-first"), &frame)
+        ),
+        Some(true)
+    );
+    let (second_namespace, mut second) = if separate_namespace {
+        ("notice-owner-other", first.clone())
+    } else {
+        (
+            NAMESPACE,
+            registration(&c.path, &c.logical, OWNER_NONCE, 8824, false),
+        )
+    };
+    if !separate_namespace {
+        second["attempt"]["nonce"] = first["attempt"]["nonce"].clone();
+        second["attempt"]["source"]["offset"] = std::fs::metadata(&c.path).unwrap().len().into();
+    }
+    assert_eq!(first["attempt"]["nonce"], second["attempt"]["nonce"]);
+    assert_ne!((NAMESPACE, &first), (second_namespace, &second));
+    registry
+        .prepare(second_namespace, &registered_input(&second, &frame))
+        .unwrap();
+    assert!(registry.registered(second_namespace, &second, &c.path, &frame));
+    c.input("full-key-second", &frame);
+    let mut actor = c.open();
+    c.run(&mut actor).await;
+    assert_eq!(
+        c.notices(),
+        0,
+        "a receipt must occupy only its full namespace/key"
+    );
+    c.excluded(&mut actor, "full-key-second");
+    assert_eq!(
+        *c.port.posts.lock().unwrap(),
+        ["answer-full-key-first", "answer-full-key-second"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn notice_owner_keeps_distinct_v2_identities_with_same_nonce() {
+    repeated_nonce_case(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn notice_owner_keeps_distinct_v2_namespaces_with_same_nonce() {
+    repeated_nonce_case(true).await;
+}

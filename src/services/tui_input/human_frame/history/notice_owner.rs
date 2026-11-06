@@ -192,7 +192,7 @@ fn candidates(
             }
             continue;
         }
-        let entry: Entry = serde_json::from_value(raw.clone()).map_err(|e| e.to_string())?;
+        let mut entry: Entry = serde_json::from_value(raw.clone()).map_err(|e| e.to_string())?;
         if entry.provider != "claude" || entry.session != origin.logical_session {
             continue;
         }
@@ -202,6 +202,12 @@ fn candidates(
         }
         // Migrated V1 evidence has no execution nonce or native-session field to invent.
         if registration.is_null() || historical_match(registration, &entry, origin)? {
+            // Pair by full registration identity; a nonce can recur in another key or namespace.
+            entry.id = if registration.is_null() {
+                format!("legacy:{}", entry.id)
+            } else {
+                serde_json::json!([registration["namespace"], registration["key"]]).to_string()
+            };
             entries.push(entry);
         } else {
             blocked.push((entry.class_hash, "registration_source_mismatch"));
