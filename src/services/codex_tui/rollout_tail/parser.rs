@@ -491,16 +491,12 @@ fn event_msg_message(json: &Value, state: &mut RolloutParseState) -> Option<Stre
             if (state.native_seeded
                 || state.managed_turn.is_some()
                 || state.discord_origin_prompt.is_some())
-                && (codex_payload_turn_id(payload).is_some()
-                    || (!state.saw_assistant_text
-                        && !managed_empty::mutant("unwitnessed_fallback"))
-                    || managed_empty::mutant("unnamed_complete"))
+                && (codex_payload_turn_id(payload).is_some() || !state.saw_assistant_text)
                 && !(started_turn_named_by(state, payload)
-                    || (!managed_empty::mutant("managed_complete")
-                        && same_codex_turn(
-                            state.managed_turn.as_deref(),
-                            codex_payload_turn_id(payload),
-                        ))) =>
+                    || same_codex_turn(
+                        state.managed_turn.as_deref(),
+                        codex_payload_turn_id(payload),
+                    )) =>
         {
             state.lifecycle_activity = true;
             None
@@ -533,7 +529,7 @@ fn event_msg_message(json: &Value, state: &mut RolloutParseState) -> Option<Stre
 
 fn started_turn_named_by(state: &RolloutParseState, payload: &Value) -> bool {
     let started = state.started_turn.as_ref().and_then(Option::as_deref);
-    same_codex_turn(started, codex_payload_turn_id(payload)) || managed_empty::mutant("native_turn")
+    same_codex_turn(started, codex_payload_turn_id(payload))
 }
 
 /// A Herdr turn's reply takes the fallback body only from its own `task_complete`.
@@ -618,8 +614,7 @@ pub(super) fn herdr_eof(
     if super::try_process_complete_partial_line(partial_line, sender, state, accept) {
         return Some(None);
     }
-    use crate::services::provider::herdr_before_start::mutant;
-    let gone = || !mutant("prb_newline_required") && !is_alive();
+    let gone = || !is_alive();
     if herdr_replay::take_whole_tail(partial_line, (sender, state), accept, gone) {
         return Some(None);
     }
@@ -629,7 +624,7 @@ pub(super) fn herdr_eof(
         let input = herdr.submission.lock().unwrap_or_else(|e| e.into_inner());
         input.execution.is_some()
     });
-    if (!submitted || mutant("prb_codex_reader_liveness")) && !is_alive() {
+    if !submitted && !is_alive() {
         let offset = turn.0.saturating_add(state.bytes_read);
         return Some(Some(ReadOutputResult::SessionDied { offset }));
     }
@@ -854,7 +849,7 @@ pub(super) fn emit_done(
     if terminal_range_eligible
         && finalize_path != RolloutFinalizePath::Heuristic
         && offset == complete_record_end
-        && managed_empty::body_or_verified_empty(state, "typed_guard")
+        && managed_empty::body_or_verified_empty(state)
         && complete_record_end > source_start
         && let Some((tmux_session_name, turn_nonce)) = identity
     {

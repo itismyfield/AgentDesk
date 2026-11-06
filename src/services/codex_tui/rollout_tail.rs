@@ -708,7 +708,7 @@ fn explicit_finalize_path(
     promote_task_complete_fallback_text(state);
 
     // A bodyless terminal needs the managed input's own native completion witness.
-    if !parser::managed_empty::body_or_verified_empty(state, "body_guard") {
+    if !parser::managed_empty::body_or_verified_empty(state) {
         if !state.explicit_completion_missing_text_warned {
             tracing::warn!(
                 hook_completion_seen = state.hook_completion_seen,

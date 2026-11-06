@@ -57,33 +57,26 @@ impl StopReply {
     ) {
         {
             match self.stop {
-            CommandStop::Native(stop) => {
-                if stop.finish().await.token.is_some() {
+                CommandStop::Native(stop) => {
+                    if stop.finish().await.token.is_some() {
+                        after_native_publish(shared, provider, channel, None).await;
+                    }
+                }
+                CommandStop::Observed(_) => {}
+                CommandStop::Session(stop) => {
+                    stop.interrupt("/stop").await;
+                }
+                CommandStop::Stop(stop) => {
+                    stop.stop(turn_bridge::TmuxCleanupPolicy::PreserveSession, "/stop")
+                        .await;
                     after_native_publish(shared, provider, channel, None).await;
                 }
+                #[cfg(unix)]
+                CommandStop::Herdr(_) => {}
+                CommandStop::AlreadyStopping
+                | CommandStop::HostRefused
+                | CommandStop::NoActiveTurn => {}
             }
-            CommandStop::Observed(_) => {}
-            CommandStop::Session(stop) => {
-                stop.interrupt("/stop").await;
-            }
-            CommandStop::Stop(stop) => {
-                stop.stop(turn_bridge::TmuxCleanupPolicy::PreserveSession, "/stop")
-                    .await;
-                after_native_publish(shared, provider, channel, None).await;
-            }
-            #[cfg(unix)]
-            CommandStop::Herdr(_) =>
-            {
-                #[cfg(test)]
-                if crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant(
-                    "sent_as_terminal",
-                ) {
-                    crate::services::discord::mailbox_finish_turn(shared, provider, channel).await;
-                }
-            }
-            CommandStop::AlreadyStopping | CommandStop::HostRefused | CommandStop::NoActiveTurn => {
-            }
-        }
         }
     }
 }
@@ -94,17 +87,6 @@ pub(in crate::services::discord) async fn run_slash_stop(
     channel: ChannelId,
 ) -> StopReply {
     {
-        #[cfg(test)]
-        if crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant(
-            "slash_stop_uses_unnamed_begin",
-        ) {
-            return StopReply {
-                stop: {
-                    eprintln!("D2B_UNNAMED_BEGIN_CALLED");
-                    turn_bridge::begin_command_stop(shared, provider, channel, false).await
-                },
-            };
-        }
         StopReply {
             stop: turn_bridge::begin_user_stop(shared, provider, channel, false, "/stop").await,
         }

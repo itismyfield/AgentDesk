@@ -404,9 +404,7 @@ fn warn_release(logical: &str, released: HoldRelease) {
 }
 
 fn release_closed_hold(logical: &str, nonce: &str) {
-    if !crate::services::provider::herdr_before_start::mutant("closed_keeps_input_hold") {
-        warn_release(logical, release_hold(nonce));
-    }
+    warn_release(logical, release_hold(nonce));
 }
 
 /// A test's recorded Codex execution handed to the owner hook on this thread, unobserved.
@@ -639,11 +637,7 @@ fn followup_write(
     let run = match run {
         crate::services::provider::herdr_before_start::InputRun::Ran(run) => run,
         crate::services::provider::herdr_before_start::InputRun::Closed => {
-            if !crate::services::provider::herdr_before_start::mutant(
-                "closed_release_callsite_removed_codex_followup",
-            ) {
-                release_closed_hold(logical, nonce);
-            }
+            release_closed_hold(logical, nonce);
             if crate::services::claude_tui::owner_input::active() {
                 return Err(owned_hold("input_closed"));
             }
@@ -676,9 +670,8 @@ fn read_reply(
     });
     // Under settlement only the provider's terminal or the row pass's wake ends the read; the
     // tail asks whether the provider lives only of a final record that lacks its newline.
-    let held = crate::services::provider::herdr_provider_terminal_only(turn.cancel.as_deref())
-        .is_some()
-        && !crate::services::provider::herdr_before_start::mutant("prb_codex_reader_liveness");
+    let held =
+        crate::services::provider::herdr_provider_terminal_only(turn.cancel.as_deref()).is_some();
     let gone = || target.provider_absent() == Ok(true) && !target.execution_alive();
     let read = crate::services::codex_tui::rollout_tail::tail_rollout_file_from_offset(
         path,

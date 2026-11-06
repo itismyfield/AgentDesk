@@ -26,8 +26,7 @@ pub(super) struct Backoff {
 impl Backoff {
     /// Records another 425 of `head` at `now`; a head other than the last one starts over.
     pub(super) fn refused(&mut self, head: &Path, now: Instant) {
-        let carried = mutation("carry-to-next-request");
-        if self.head.as_deref() != Some(head) && !carried {
+        if self.head.as_deref() != Some(head) {
             self.refusals = 0;
         }
         self.head = Some(head.to_path_buf());
@@ -50,12 +49,6 @@ pub(super) struct CallerWindows {
 impl CallerWindows {
     /// Whether a caller still waits at `now` for the reply of any request in `request_paths`.
     pub(super) fn any_open(&mut self, request_paths: &[PathBuf], now: DateTime<Utc>) -> bool {
-        if mutation("backoff-ignores-caller") {
-            return false;
-        }
-        if mutation("windows-reread") {
-            self.windows.clear();
-        }
         let queued: HashSet<&PathBuf> = request_paths.iter().collect();
         self.windows.retain(|path, _| queued.contains(path));
         request_paths.iter().any(|path| {
@@ -94,27 +87,11 @@ fn read_window(path: &Path) -> Option<Option<DateTime<Utc>>> {
 
 /// 25ms after the first 425, doubling with each one after it up to 2s.
 pub(super) fn delay(refusals: u32) -> Duration {
-    if mutation("fixed-25ms") {
-        return FIRST_DELAY;
-    }
     let factor = 1u32
         .checked_shl(refusals.saturating_sub(1))
         .unwrap_or(u32::MAX);
     let delay = FIRST_DELAY.saturating_mul(factor);
-    if mutation("no-cap") {
-        return delay;
-    }
     delay.min(MAX_DELAY)
-}
-
-#[cfg(test)]
-fn mutation(name: &str) -> bool {
-    std::env::var("AGENTDESK_HOOK_RELAY_TEST_MUTATION").is_ok_and(|value| value == name)
-}
-
-#[cfg(not(test))]
-fn mutation(_: &str) -> bool {
-    false
 }
 
 #[cfg(test)]

@@ -40,12 +40,6 @@ pub(crate) fn observe_channel(channel: u64, limit: usize) -> Result<ChannelObser
             .filter(|line| !line.is_empty())
         {
             if records.len() == limit {
-                #[cfg(test)]
-                if std::env::var("ADK_CODEX_OBSERVATION_MUTANT")
-                    .is_ok_and(|name| name == "log_budget")
-                {
-                    break;
-                }
                 return Err(invalid("Codex binding log exceeds record budget"));
             }
             records.push(serde_json::from_slice::<Logged>(line).map_err(io::Error::other)?);

@@ -36,17 +36,6 @@ pub(crate) fn jsonl_completion_scan_idle(provider: &ProviderKind, path: &Path) -
     )
 }
 
-/// The tail scan with the Herdr abort flag, kept only as the backstop's start-offset mutant.
-#[cfg(test)]
-pub(crate) fn jsonl_herdr_completion_scan_idle(provider: &ProviderKind, path: &Path) -> bool {
-    scan_strict_terminator_idle_with_strictness(
-        provider,
-        path,
-        TerminatorStrictness::FinalizeAuthority,
-        true,
-    )
-}
-
 /// Shared windowed reverse-scan driver for the lenient and turn-END-only
 /// probes; `herdr_abort` is the caller's Herdr policy for a Codex abort.
 fn scan_strict_terminator_idle_with_strictness(

@@ -42,11 +42,7 @@ pub(super) async fn exit_held(
         .map(MessageId::new);
     // The row pass already settled this turn and woke its reader: nothing is left to finish.
     let settled = actor.is_completion_cleanup() && actor.herdr_interrupt_state().is_some();
-    if held
-        || (settled
-            && !terminal_admitted
-            && !crate::services::provider::herdr_before_start::mutant("prb_woken_bridge_finishes"))
-    {
+    if held || (settled && !terminal_admitted) {
         return true;
     }
     let exit = super::stream_loop::exit_reconcile::herdr_exit_decision(

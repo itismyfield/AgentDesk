@@ -54,16 +54,6 @@ pub(crate) enum InputRun<T> {
     Closed,
 }
 
-pub(crate) fn mutant(name: &str) -> bool {
-    #[cfg(test)]
-    return std::env::var("ADK_COLDSTOP_MUTANT").ok().as_deref() == Some(name);
-    #[cfg(not(test))]
-    {
-        let _ = name;
-        false
-    }
-}
-
 impl HerdrInterruptState {
     /// Caller holds the input lock. Own-start is only negative evidence.
     pub(crate) fn close_before_start(&self, input: &mut HerdrInputState) -> bool {
@@ -72,9 +62,7 @@ impl HerdrInterruptState {
 
     /// Closes on one stop observation `stop`, so a caller deciding more from it sees one instant.
     fn close_observed(&self, input: &mut HerdrInputState, stop: bool) -> bool {
-        if !super::cancel_token_claude_interrupt::herdr_stop_settlement_available()
-            && !mutant("policy_settlement_gate_removed")
-        {
+        if !super::cancel_token_claude_interrupt::herdr_stop_settlement_available() {
             return false;
         }
         if input.phase == InputPhase::Closed {
@@ -114,11 +102,11 @@ impl HerdrInterruptState {
     }
 
     pub(crate) fn prepare_input(&self, input: &mut HerdrInputState) -> bool {
-        if !mutant("cold_preinput_check_removed") && self.close_before_start(input) {
-            return mutant("close_does_not_block_input");
+        if self.close_before_start(input) {
+            return false;
         }
         if input.phase == InputPhase::Closed {
-            return mutant("close_does_not_block_input");
+            return false;
         }
         input.phase = InputPhase::Attempting;
         true
@@ -131,9 +119,7 @@ impl HerdrInterruptState {
         untouched: bool,
     ) {
         input.submission = submission;
-        input.phase = if (untouched && !mutant("typed_untouched_ignored"))
-            || mutant("indeterminate_is_untouched")
-        {
+        input.phase = if untouched {
             InputPhase::FinishedUntouched
         } else {
             InputPhase::MayHaveWritten
@@ -153,7 +139,7 @@ pub(crate) fn finish_execution(token: Option<&CancelToken>, failed: bool) {
     };
     let mut input = state.submission.lock().unwrap_or_else(|e| e.into_inner());
     input.failed |= failed;
-    if input.phase == InputPhase::BeforeInput && !mutant("noattempt_error_exit_unclosed") {
+    if input.phase == InputPhase::BeforeInput {
         input.phase = InputPhase::FinishedNoAttempt;
     }
     state.close_before_start(&mut input);
@@ -174,17 +160,13 @@ pub(crate) fn observed_execution(
 
 /// Releases a Claude input hold whose turn closed before any input.
 pub(crate) fn release_claude_hold(logical: &str, held: &std::path::Path) {
-    if !mutant("closed_keeps_input_hold")
-        && let Err(error) = std::fs::remove_file(held)
-    {
+    if let Err(error) = std::fs::remove_file(held) {
         tracing::warn!(logical, %error, "herdr turn: input hold kept");
     }
 }
 
 pub(crate) fn prelaunch_closed(token: Option<&CancelToken>) -> Result<bool, String> {
-    if !super::cancel_token_claude_interrupt::herdr_stop_settlement_available()
-        && !mutant("policy_settlement_gate_removed")
-    {
+    if !super::cancel_token_claude_interrupt::herdr_stop_settlement_available() {
         return Ok(false);
     }
     let Some(state) = token.and_then(CancelToken::herdr_interrupt_state) else {
@@ -194,7 +176,7 @@ pub(crate) fn prelaunch_closed(token: Option<&CancelToken>) -> Result<bool, Stri
         .submission
         .try_lock()
         .map_err(|_| "herdr turn: input observation busy; turn stays held".to_owned())?;
-    Ok(!mutant("cold_preinput_check_removed") && state.close_before_start(&mut input))
+    Ok(state.close_before_start(&mut input))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -226,7 +208,7 @@ pub(crate) fn seal_exit(
 ) -> ExitDecision {
     use super::cancel_token_claude_interrupt::herdr_stop_settlement_available;
     let exception = !herdr_stop_settlement_available() || cancelled || terminal_admitted;
-    if exception && !mutant("exit_exception_after_try_lock") {
+    if exception {
         return ExitDecision::Normal;
     }
     let Some(state) = token.herdr_interrupt_state() else {
@@ -251,10 +233,6 @@ pub(crate) fn seal_exit(
     if let Some(hook) = EXIT_OBSERVED.with(std::cell::Cell::get) {
         hook(&state);
     }
-    let stop = match mutant("exit_stop_reread") {
-        true => state.user_stop.load(Ordering::Acquire),
-        false => stop,
-    };
     let decision = if exception {
         ExitDecision::Normal
     } else if let (true, Some(basis)) = (closed, input.closed_from) {
@@ -264,10 +242,7 @@ pub(crate) fn seal_exit(
             generation: token.claude_interrupt_generation(),
             basis,
         })
-    } else if stop
-        || (input.submission != HerdrSubmission::Unsubmitted
-            && (!input.failed || mutant("prb_err_after_submit_holds")))
-    {
+    } else if stop || (input.submission != HerdrSubmission::Unsubmitted && !input.failed) {
         // A failed executor left no reader for the terminal: without a stop it ends as main does.
         ExitDecision::Hold
     } else {

@@ -58,12 +58,6 @@ pub(crate) fn verify_source_detail(
     let canonical_root = root
         .canonicalize()
         .map_err(|e| format!("provider root: {e}"))?;
-    if super::mutant("root_raw_rejected") && canonical_root != root {
-        return Err("provider root is not canonical".into());
-    }
-    if super::mutant("source_unchecked") {
-        return Ok(canonical_root);
-    }
     let canonical_source = source
         .path
         .canonicalize()
@@ -110,11 +104,7 @@ pub(crate) fn verify_source_detail(
             Ok(None) => Err(SourceFailure::Pending(
                 "fresh source evidence pending".into(),
             )),
-            Err(reason) => Err(SourceFailure::Rejected(if super::mutant("reason_merged") {
-                "fresh source does not match execution context".into()
-            } else {
-                reason
-            })),
+            Err(reason) => Err(SourceFailure::Rejected(reason)),
         },
         _ => Err("source is not the execution's fresh or resumed source".into()),
     }

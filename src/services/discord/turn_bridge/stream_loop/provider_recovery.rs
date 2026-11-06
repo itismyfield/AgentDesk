@@ -20,10 +20,7 @@ pub(super) async fn on_error(
     message: &str,
     stderr: &str,
 ) -> bool {
-    if !herdr_before_start_mutant("on_error_callsite_guard_removed")
-        && !herdr_before_start_mutant("on_error_guard_after_profile")
-        && before_start_recovery_blocked(provider, channel, &shared.token_hash, expected, inflight)
-    {
+    if before_start_recovery_blocked(provider, channel, &shared.token_hash, expected, inflight) {
         return false;
     }
     // A profile retry owns dispatch recovery; do not also request an agent takeover.
@@ -40,11 +37,6 @@ pub(super) async fn on_error(
         )
     {
         return true;
-    }
-    if herdr_before_start_mutant("on_error_guard_after_profile")
-        && before_start_recovery_blocked(provider, channel, &shared.token_hash, expected, inflight)
-    {
-        return false;
     }
     let Some(lease) = lease else {
         return false;
@@ -220,12 +212,7 @@ fn before_start_recovery_blocked(
     use crate::services::provider::cancel_token_claude_interrupt::{
         herdr_stop_settlement_available, herdr_turn,
     };
-    if !herdr_stop_settlement_available()
-        || crate::services::provider::herdr_before_start::mutant("on_error_ignores_user_stop")
-    {
-        return false;
-    }
-    if herdr_before_start_mutant("recovery_requires_locator") {
+    if !herdr_stop_settlement_available() {
         return false;
     }
     let Some((logical, nonce)) = inflight
@@ -604,8 +591,4 @@ mod coldstop_recovery_tests {
         pool.close().await;
         db.drop().await;
     }
-}
-
-fn herdr_before_start_mutant(name: &str) -> bool {
-    crate::services::provider::herdr_before_start::mutant(name)
 }

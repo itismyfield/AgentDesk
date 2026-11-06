@@ -35,19 +35,6 @@ pub(super) fn wait(
         return Ok(Some(fallback));
     };
     let path = Path::new(transcript);
-    if super::before_start::mutant("start_offset_fallback_zero")
-        || super::before_start::mutant("start_offset_replay_only")
-    {
-        #[cfg(test)]
-        test_hooks::poll(path);
-        return Ok(Some(
-            if super::before_start::mutant("start_offset_fallback_zero") {
-                0
-            } else {
-                fallback
-            },
-        ));
-    }
     let deadline = Instant::now() + Duration::from_secs(30);
     let file = loop {
         if cancel_requested(Some(token)) {
@@ -62,11 +49,6 @@ pub(super) fn wait(
         test_hooks::poll(path);
         pause(deadline)?;
     };
-    if super::before_start::mutant("start_offset_file_exists_only") {
-        #[cfg(test)]
-        test_hooks::poll(path);
-        return Ok(Some(fallback));
-    }
     let identity = SourceFileIdentity::from_open_file(&file);
     let mut reader = BufReader::new(file);
     let (mut record, mut offset) = (Vec::new(), 0u64);

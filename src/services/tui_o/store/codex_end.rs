@@ -330,14 +330,7 @@ pub(crate) fn seal(
     }
     match &record.successor {
         Some(existing) if existing != successor => {
-            #[cfg(all(test, unix))]
-            let overwrite = crate::services::codex_tui::execution_end::mutant("cas_overwrite");
-            #[cfg(not(all(test, unix)))]
-            let overwrite = false;
-            if !overwrite {
-                return Err("Codex end already names another successor".into());
-            }
-            record.successor = Some(successor.clone());
+            return Err("Codex end already names another successor".into());
         }
         Some(_) => {}
         None => record.successor = Some(successor.clone()),
