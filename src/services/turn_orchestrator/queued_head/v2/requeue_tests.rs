@@ -96,6 +96,7 @@ async fn retain(handle: &ChannelMailboxHandle, unit: &'static [u64], queued: Vec
                 input,
                 reason: RetainedReason::Rejected {
                     reason: "known_not_sent: vetoed: NotBusy".into(),
+                    start_failure: None,
                 },
                 disposition: Some(RetainedDisposition::KnownNotSent),
                 notice: NoticeIntent {

@@ -184,6 +184,7 @@ impl Owner {
             input,
             reason: RetainedReason::Rejected {
                 reason: format!("known_not_sent: {reason}"),
+                start_failure: None,
             },
             disposition: Some(RetainedDisposition::KnownNotSent),
             notice: NoticeIntent {
@@ -247,14 +248,14 @@ const PERMANENT: [&str; 2] = ["vetoed: frame_mismatch", "vetoed: InvalidInput"];
 
 /// Whether the owner refused a retained input for a reason no later look clears.
 fn permanently_refused(entry: &RetainedInput) -> bool {
-    matches!(&entry.reason, RetainedReason::Rejected { reason }
+    matches!(&entry.reason, RetainedReason::Rejected { reason, .. }
         if reason.strip_prefix("known_not_sent: ").is_some_and(|r| PERMANENT.contains(&r)))
 }
 
 /// Whether a retained input was refused before any key for a reason a later look may clear. One
 /// whose resend ask already went out stays retained: resending it is now the person's choice.
 fn requeueable(entry: &RetainedInput, terminal: &[TerminalIdentity]) -> bool {
-    let RetainedReason::Rejected { reason } = &entry.reason else {
+    let RetainedReason::Rejected { reason, .. } = &entry.reason else {
         return false;
     };
     let refused = reason.strip_prefix("known_not_sent: ");

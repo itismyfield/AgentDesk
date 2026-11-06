@@ -210,6 +210,7 @@ pub(in crate::services::discord) fn owner_drive(
             };
             if !synthetic
                 && let (Some(shared), Err(error)) = (&runtime, &result)
+                && error != "NotSent(\"owner_start_failed\")"
                 && let Some(hold) = ingress::Hold::from_refusal(error)
             {
                 ingress::handoff_held(shared, &provider, ChannelId::new(channel), &original, hold)
@@ -390,6 +391,7 @@ pub(in crate::services::discord) struct OwnerTurn {
     origin: InputOrigin,
     /// What the start's headless turn knows of its pane for the late native read.
     late: LateRead,
+    refusal: std::sync::Arc<Mutex<Option<crate::services::turn_host::HerdrRefusal>>>,
 }
 
 /// Whether the start's session id names the pane it writes to, and whether its fresh or snapshot
@@ -401,6 +403,19 @@ pub(in crate::services::discord) struct LateRead {
 }
 
 impl OwnerTurn {
+    pub(super) fn mailbox(&self) -> &ChannelMailboxHandle {
+        &self.mailbox
+    }
+    pub(super) fn claim(&self) -> &FrontClaim {
+        &self.claim
+    }
+    pub(in crate::services::discord) fn refused(
+        &self,
+        refusal: crate::services::turn_host::HerdrRefusal,
+    ) {
+        *self.refusal.lock().unwrap_or_else(|e| e.into_inner()) = Some(refusal);
+    }
+
     pub(in crate::services::discord) fn read_late(&mut self, own_pane: bool, clear_binding: bool) {
         self.late = LateRead {
             own_pane,
@@ -704,12 +719,15 @@ async fn start_idle(
         Some(Some("headless")) => InputOrigin::HttpStart,
         Some(_) => InputOrigin::Routine,
     };
+    let failed = super::start_failure::Failure::claimed(&mailbox, &claim);
+    let refusal = std::sync::Arc::new(Mutex::new(None));
     let owner = OwnerTurn {
         mailbox,
         claim,
         settled,
         origin,
         late: LateRead::default(),
+        refusal: refusal.clone(),
     };
     let now = (std::time::SystemTime::now(), std::time::Instant::now());
     let restore = crate::services::turn_orchestrator::pending_queue_item_to_intervention;
@@ -747,6 +765,25 @@ async fn start_idle(
             started.map(drop).map_err(|error| error.to_string())
         }
     };
+    let typed = refusal.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(refusal) = typed
+        && let Some(kind) = super::start_failure::confirmed(&refusal)
+    {
+        if failed
+            .commit(
+                kind,
+                refusal.to_string(),
+                Ok(None),
+                Some(shared.clone()),
+                channel,
+                None,
+            )
+            .await?
+            .is_some()
+        {
+            return Err("NotSent(\"owner_start_failed\")".into());
+        }
+    }
     match (answer.await, started) {
         // The late read held the claimed start: it waits as an unclaimed start would, watched.
         (Ok(Err(error)), _) if error == START_WAITS => {
@@ -801,6 +838,7 @@ pub(super) fn execute_owned(
         settled,
         origin,
         late,
+        ..
     } = owner;
     let session = turn.tmux_session_name.unwrap_or_default();
     // A start never joins a running or unreadable native Claude turn: read once before it registers,
@@ -972,7 +1010,7 @@ fn observer(
 
 /// The drive's answer for one front: its local settlement, never its AI completion.
 pub(super) type Settled = tokio::sync::oneshot::Sender<Result<(), String>>;
-type Reply = std::sync::Arc<dyn Fn(&Result<(), String>) + Send + Sync>;
+pub(super) type Reply = std::sync::Arc<dyn Fn(&Result<(), String>) + Send + Sync>;
 
 fn reply_once(settled: Option<Settled>) -> Reply {
     let slot = Mutex::new(settled);
@@ -1026,11 +1064,17 @@ pub(super) fn execute_front(
     settled: Settled,
 ) -> Result<(), String> {
     let reply = reply_once(Some(settled));
-    let result = match take_owned(&turn, Some(claim), owner, reply.clone()) {
+    let failure = super::start_failure::Failure::claimed(&owner.mailbox, &claim);
+    let watch =
+        crate::services::discord::inflight::row_removed::watch(turn.provider, turn.channel_id);
+    let context = turn.clone();
+    let inside = failure.guard_reply(reply.clone());
+    let result = match take_owned(&turn, Some(claim), owner, inside) {
         Some(Taken::Done(result)) => result,
         Some(Taken::Launch(guard)) => guard.finish(super::drive(turn, sender)),
         None => Err("NotSent(\"not_owned\")".into()),
     };
+    let result = failure.finish(&context, watch, result);
     reply(&result);
     result
 }

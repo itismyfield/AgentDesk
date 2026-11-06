@@ -152,6 +152,10 @@ async fn start_reserved_headless_turn_admitted(
     let pool = shared.pg_pool.as_ref();
     let host = crate::services::turn_host::refusal_before_turn;
     if let Some(refusal) = host(pool, &provider, channel_id.get(), session_key).await {
+        #[cfg(unix)]
+        if let Some(owner) = owner.as_ref() {
+            owner.refused(refusal.clone());
+        }
         return Err(HeadlessTurnStartError::InvalidTarget(refusal.to_string()));
     }
     let is_dm = is_dm_hint.unwrap_or(false);
