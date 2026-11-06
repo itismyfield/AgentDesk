@@ -250,8 +250,10 @@ async fn relay_deliver_preserves_tail_anchor_and_observes_persisted_proof() {
             .register(ProviderKind::Claude.as_str().into(), shared.clone())
             .await;
         let blocker = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
             .create(true)
-            .append(true)
+            .truncate(false)
             .open(log.with_file_name("writer.lock"))
             .unwrap();
         blocker.lock().unwrap();
