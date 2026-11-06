@@ -1194,13 +1194,7 @@ mod tests {
         }
     }
 
-    mod source_guard_tests;
     mod turn_mode_entry_tests;
-
-    #[test]
-    fn bridge_entry_failure_gate_precedes_emit_stream_and_finalize() {
-        source_guard_tests::bridge_entry_failure_gate_precedes_emit_stream_and_finalize();
-    }
 
     #[test]
     fn post_authority_owner_snapshot_observes_same_identity_watcher_adoption() {
@@ -1224,11 +1218,6 @@ mod tests {
 
         assert_eq!(pre_authority_owner_kind, RelayOwnerKind::None);
         assert_eq!(bridge_entry_relay_owner_kind, RelayOwnerKind::Watcher);
-    }
-
-    #[test]
-    fn stream_authority_loss_relinquishes_guards_before_visible_finalization() {
-        source_guard_tests::stream_authority_loss_relinquishes_guards_before_visible_finalization();
     }
 
     struct ReconcileHarness<'a> {

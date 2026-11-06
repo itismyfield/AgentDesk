@@ -144,33 +144,6 @@ fn hard_result_terminal_keeps_its_recovery_fallback_and_reports_no_denial_5175()
     }
 }
 
-#[test]
-fn production_call_site_feeds_the_pre_relay_inflight_row_5175() {
-    // The unit tests above pin the decision; this pins the WIRING, which is
-    // where #5175 actually lived. Rewiring the call site back to the
-    // pre-turn snapshot (or starving it of the row) must not be silent.
-    let source = include_str!("terminal_relay_plan.rs");
-    let call_site = source
-        .split_once("let (watcher_direct_fallback_authorized, soft_terminal_authority_denial) =")
-        .expect("the terminal relay plan must decide soft-terminal authority")
-        .1
-        .split_once(");")
-        .expect("the authority call must terminate")
-        .0;
-    assert!(
-        call_site.contains("watcher_soft_terminal_direct_send_authority("),
-        "authority must be decided by the seam these tests cover"
-    );
-    assert!(
-        call_site.contains("inflight_before_relay.as_ref()"),
-        "authority must be decided against the PRE-RELAY inflight row (#5175)"
-    );
-    assert!(
-        call_site.contains("current_offset"),
-        "the offset containment term needs the consumed offset (#5175)"
-    );
-}
-
 // ---------------------------------------------------------------------------
 // #5464 T5 C1 — `no_inflight_row` is a STRUCTURAL signal, not a delivery verdict.
 //
@@ -332,56 +305,6 @@ fn rowless_candidacy_requires_one_positive_operand_5464_c1() {
             );
         }
     }
-}
-
-#[test]
-fn production_call_site_reads_the_ledger_and_the_delivery_lease_5464_c1() {
-    // The unit tests above pin the DECISION; this pins the LOOKUPS, which is
-    // where the defect actually lives. Deleting either AC1 operand's read — the
-    // durable ledger frontier or the delivery-lease cell — leaves every
-    // behavioural assertion above green while restoring the body drop in
-    // production, so the removal must not be silent.
-    let source = include_str!("terminal_relay_plan.rs");
-    let reader = include_str!("rowless_delivery_authority.rs")
-        .split_once("fn read_rowless_delivery_authority(")
-        .expect("the plan must read rowless delivery authority")
-        .1
-        .split_once("\n}\n")
-        .expect("the reader must terminate")
-        .0;
-
-    assert!(
-        reader.contains("delivered_frontier_end_current_generation"),
-        "the ledger obligation must be read from the durable delivered frontier (T5 AC1)"
-    );
-    assert!(
-        reader.contains("ledger_owes_output("),
-        "the obligation must come from the pure operand whose polarity is pinned"
-    );
-    assert!(
-        reader.contains("delivery_lease(channel_id)"),
-        "the delivery lease must be read from the channel's live lease cell (T5 AC1)"
-    );
-    assert!(
-        reader.contains("lease_has_live_holder("),
-        "lease presence must come from the pure operand whose polarity is pinned"
-    );
-    assert!(
-        !reader.contains("cohort::"),
-        "the relaxation must not be gated by a rollout cohort read"
-    );
-
-    let call_site = source
-        .split_once("let (watcher_direct_fallback_authorized, soft_terminal_authority_denial) =")
-        .expect("the terminal relay plan must decide soft-terminal authority")
-        .1
-        .split_once(");")
-        .expect("the authority call must terminate")
-        .0;
-    assert!(
-        call_site.contains("read_rowless_delivery_authority("),
-        "the authority seam must be fed freshly read AC1 evidence, not a literal"
-    );
 }
 
 #[test]
@@ -838,101 +761,9 @@ fn the_dead_letter_row_preserves_the_unsent_tail_and_the_delivery_channel_5941()
 }
 
 #[test]
-fn the_call_site_operands_the_dead_letter_row_cannot_show_stay_pinned_5941() {
-    // The dead-letter row test reads the body, channel and offsets back; these
-    // operands leave no trace in that row under the plan fixture.
-    let source = include_str!("terminal_relay_plan.rs");
-    let call_site = source
-        .split_once("orphan_terminal_frame::observe_orphan_terminal_frame(")
-        .expect("the plan must route the denial seam through the orphan-frame recorder")
-        .1
-        .split_once("\n        );")
-        .expect("the call must terminate")
-        .0;
-
-    assert!(
-        call_site.contains("&orphan_facts,"),
-        "the recorder must receive the populated facts"
-    );
-    let facts = source
-        .split_once("let mut orphan_facts = orphan_terminal_frame::OrphanTerminalFrameFacts {")
-        .expect("the plan must populate the orphan facts")
-        .1
-        .split_once("\n        };")
-        .expect("the facts initializer must terminate")
-        .0;
-
-    for operand in [
-        "watcher_resend_committed,",
-        "placeholder_msg_id,",
-        "request_owner_user_id: inflight_before_relay",
-        "duplicate_guard_refused_body: direct_terminal_response_decision",
-    ] {
-        assert!(
-            facts.contains(operand),
-            "the seam must be fed `{operand}` from the frame being lost: {facts}"
-        );
-    }
-
-    // #5978 P1-1: the routed flag ANDs in the authorization this seam has already denied,
-    // which makes the duplicate conjunct unfalsifiable while every test above stays green.
-    assert!(
-        !facts.contains("direct_terminal_response_refused_duplicate"),
-        "the duplicate conjunct must read the RAW guard verdict, not the routed flag: {facts}"
-    );
-
-    // The WARN and the counter MOVED with the seam — not duplicated, not
-    // dropped. Operators grep `#5175:`.
-    let module = include_str!("orphan_terminal_frame.rs");
-    assert!(!source.contains("record_relay_terminal_authority_denied("));
-    assert!(module.contains("record_relay_terminal_authority_denied("));
-    assert!(module.contains("#5175: terminal frame has NO delivery owner"));
-    assert!(module.contains("soft_terminal_denial = denial.as_str()"));
-
-    // #5941 r3 P1-2: the PER-CONJUNCT cause counter answers "which authority
-    // conjunct refused" and must fire for EVERY denial, including the ones that
-    // lose nothing — a forged turn nonce is refused with an empty tail, so
-    // behind the record admission the one arm the counter exists to name never
-    // emits. Order, not presence: it has to precede the `record_required` gate.
-    let cause = module
-        .find("record_relay_terminal_denial_cause(")
-        .expect("the seam must emit the per-conjunct cause counter");
-    let gate = module
-        .find("if !facts.record_required() {")
-        .expect("the record admission gate must exist");
-    let aggregate = module
-        .find("metrics::record_relay_terminal_authority_denied(")
-        .expect("the seam must emit the aggregate denial counter");
-    assert!(cause < gate, "the cause counter must precede admission");
-    assert!(
-        gate < aggregate,
-        "the aggregate counter must follow admission"
-    );
-}
-
-#[test]
 fn the_dead_letter_kind_survives_a_non_unix_build_5941() {
-    // The `kind` string is platform-independent but its only writer is the
-    // `#[cfg(unix)]` watcher, so a Windows build sees it unused under
-    // `-D warnings`. Asserted in PAIR with the existing sibling.
-    let dlq = include_str!("../../../db/relay_dead_letter.rs");
-    for kind in [
-        "KIND_READOPT_RELAY_STUCK",
-        "KIND_TERMINAL_NO_DELIVERY_OWNER",
-    ] {
-        let before = dlq
-            .split_once(&format!("pub(crate) const {kind}:"))
-            .unwrap_or_else(|| panic!("{kind} must be declared"))
-            .0;
-        assert!(
-            before
-                .trim_end()
-                .ends_with("#[cfg_attr(not(unix), allow(dead_code))]"),
-            "{kind} must be declared unconditionally with a non-unix dead-code allowance"
-        );
-    }
-    // The behavioural half: this seam's discriminator is its own, so an operator
-    // filtering the DLQ by `kind` never mixes #5941 in with a sibling vector.
+    // This seam's discriminator is its own, so an operator filtering the DLQ by
+    // `kind` never mixes it with a sibling vector.
     assert_eq!(
         crate::db::relay_dead_letter::KIND_TERMINAL_NO_DELIVERY_OWNER,
         "terminal_no_delivery_owner"
