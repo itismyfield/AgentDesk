@@ -9,6 +9,7 @@ the only legacy instance is an exempt immutable migration.
 
 from __future__ import annotations
 
+import collections
 import os
 import re
 import subprocess
@@ -17,9 +18,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 try:
-    from rust_cfg import find_test_only_cfg_attribute
+    from rust_cfg import find_test_only_cfg_attribute, find_test_only_cfg_attributes
 except ModuleNotFoundError:  # imported from a repo-root unittest
-    from scripts.rust_cfg import find_test_only_cfg_attribute
+    from scripts.rust_cfg import find_test_only_cfg_attribute, find_test_only_cfg_attributes
 
 
 PRODUCTION_PREFIXES = (
@@ -159,6 +160,48 @@ def parse_added_lines(diff_text: str) -> list[AddedLine]:
     return added
 
 
+def parse_removed_lines(diff_text: str) -> list[AddedLine]:
+    """Lines a diff removes, numbered in the old file."""
+    removed: list[AddedLine] = []
+    path: str | None = None
+    old_line: int | None = None
+    for raw in diff_text.splitlines():
+        if raw.startswith("--- a/"):
+            path = raw[6:]
+            continue
+        if raw.startswith("--- /dev/null"):
+            path = None
+            continue
+        if raw.startswith("@@"):
+            match = re.search(r"-(\d+)(?:,(\d+))?", raw)
+            old_line = int(match.group(1)) if match else None
+            continue
+        if path is None or old_line is None or raw.startswith(("+++", "---")):
+            continue
+        if raw.startswith("-"):
+            removed.append(AddedLine(path, old_line, raw[1:]))
+            old_line += 1
+        elif not raw.startswith("+"):
+            old_line += 1
+    return removed
+
+
+def collect_removed_lines() -> list[AddedLine]:
+    seen: set[tuple[str, int, str]] = set()
+    lines: list[AddedLine] = []
+    for spec in diff_specs():
+        result = run_git(["diff", "--unified=0", "--no-ext-diff", *spec])
+        if result.returncode not in (0, 1):
+            print(result.stderr, file=sys.stderr)
+            sys.exit(result.returncode)
+        for removed in parse_removed_lines(result.stdout):
+            key = (removed.path, removed.line_no, removed.text)
+            if key not in seen:
+                seen.add(key)
+                lines.append(removed)
+    return lines
+
+
 def collect_added_lines() -> list[AddedLine]:
     seen: set[tuple[str, int, str]] = set()
     lines: list[AddedLine] = []
@@ -177,6 +220,7 @@ def collect_added_lines() -> list[AddedLine]:
         for path in untracked.stdout.splitlines():
             if not (
                 is_selected_production_path(path)
+                or is_mutant_hook_path(path)
                 or (path.startswith("migrations/postgres/") and path.endswith(".sql"))
             ):
                 continue
@@ -203,7 +247,8 @@ def is_test_path(path: str) -> bool:
     )
 
 
-def strip_rust_non_code(source: str) -> str:
+def strip_rust_non_code(source: str, keep_strings: bool = False) -> str:
+    """Blank comments, strings and char literals; ``keep_strings`` leaves string text in place."""
     result: list[str] = []
     block_comment_depth = 0
     in_string = False
@@ -227,20 +272,23 @@ def strip_rust_non_code(source: str) -> str:
             closer = '"' + "#" * raw_string_hashes
             if source.startswith(closer, idx):
                 raw_string_hashes = None
-                result.extend(" " * len(closer))
+                result.extend(closer if keep_strings else " " * len(closer))
                 idx += len(closer)
             else:
-                result.append("\n" if source[idx] == "\n" else " ")
+                result.append(source[idx] if keep_strings or source[idx] == "\n" else " ")
                 idx += 1
             continue
         if in_string:
             if source[idx] == "\\" and idx + 1 < len(source):
-                result.extend(" \n" if source[idx + 1] == "\n" else "  ")
+                if keep_strings:
+                    result.extend(source[idx : idx + 2])
+                else:
+                    result.extend(" \n" if source[idx + 1] == "\n" else "  ")
                 idx += 2
             else:
                 if source[idx] == '"':
                     in_string = False
-                result.append("\n" if source[idx] == "\n" else " ")
+                result.append(source[idx] if keep_strings or source[idx] == "\n" else " ")
                 idx += 1
             continue
 
@@ -260,12 +308,13 @@ def strip_rust_non_code(source: str) -> str:
         raw_string = RAW_STRING_OPEN_RE.match(source, idx)
         if raw_string:
             raw_string_hashes = len(raw_string.group(1))
-            result.extend(" " * (raw_string.end() - idx))
+            opener = source[idx : raw_string.end()]
+            result.extend(opener if keep_strings else " " * len(opener))
             idx = raw_string.end()
             continue
         if source[idx] == '"':
             in_string = True
-            result.append(" ")
+            result.append('"' if keep_strings else " ")
             idx += 1
             continue
         if source[idx] == "'":
@@ -407,6 +456,182 @@ def audit_migration_integers(lines: list[AddedLine]) -> list[str]:
             )
     return findings
 
+
+
+# Test-policy rule 3: env-armed mutant switches are proved inside a lane and reverted, never committed.
+MUTANT_HOOK_ROOTS = ("src/", "tests/")
+MUTANT_HOOK_SETTER_ROOTS = ("src", "tests", "scripts", ".github")
+MUTANT_ENV_RE = re.compile(r'"([A-Z][A-Z0-9_]*(?:MUTANT|MUTATION)[A-Z0-9_]*)"')
+MUTANT_FN_DEF_RE = re.compile(r"\bfn\s+((?:[a-z0-9_]*_)?mutant(?:_[a-z0-9_]+)?)\s*[(<]")
+# Calls into the hooks main still carries; drop this rule once S4b1 lands and no hook remains to call.
+MUTANT_CALL_RE = re.compile(
+    r"\b((?:[a-z0-9_]*_)?mutant(?:_[a-z0-9_]+)?|behavior_mutation_enabled|parser_bypassed)\s*\("
+)
+ENV_READ_RE = re.compile(r'\b(?:env::var(?:_os)?|option_env!|env!)\s*\(\s*"([A-Z][A-Z0-9_]*)"')
+RUNTIME_ENV_READ_RE = re.compile(r'\b(?:env::var(?:_os)?|option_env!)\s*\(\s*"([A-Z][A-Z0-9_]*)"')
+# (path, env) pairs a committed test really arms; each row needs a one-line reason comment.
+MUTANT_HOOK_ALLOWED: frozenset[tuple[str, str]] = frozenset()
+MUTANT_HOOK_HINT = (
+    "test switches stay out of committed code (docs/agent-maintenance/test-policy.md rule 3): "
+    "prove the mutant in the lane, revert it, and inject the situation through an argument"
+)
+
+_LEXED_CACHE: dict[tuple[str, bool], tuple[list[str], list[str]] | None] = {}
+_TEST_ITEM_CACHE: dict[str, set[int]] = {}
+_SETTER_TEXTS: list[tuple[str, str]] | None = None
+
+
+def is_mutant_hook_path(path: str) -> bool:
+    return path.endswith(".rs") and path.startswith(MUTANT_HOOK_ROOTS)
+
+
+def _lexed_line(path: str, line_no: int, text: str, keep_strings: bool) -> str:
+    """The added line with comments blanked, lexed in its file when the file still holds it."""
+    key = (path, keep_strings)
+    if key not in _LEXED_CACHE:
+        try:
+            source = Path(path).read_text(encoding="utf-8")
+        except OSError:
+            _LEXED_CACHE[key] = None
+        else:
+            _LEXED_CACHE[key] = (
+                source.splitlines(),
+                strip_rust_non_code(source, keep_strings=keep_strings).splitlines(),
+            )
+    lexed = _LEXED_CACHE[key]
+    if lexed is not None and line_no <= len(lexed[0]) and lexed[0][line_no - 1] == text:
+        return lexed[1][line_no - 1]
+    return strip_rust_non_code(text, keep_strings=keep_strings)
+
+
+def test_item_lines(path: str) -> set[int]:
+    """Lines of items and statements under a test-only cfg attribute."""
+    if path in _TEST_ITEM_CACHE:
+        return _TEST_ITEM_CACHE[path]
+    result: set[int] = set()
+    try:
+        code = strip_rust_non_code(Path(path).read_text(encoding="utf-8"))
+    except OSError:
+        _TEST_ITEM_CACHE[path] = result
+        return result
+    line_of = lambda offset: code.count("\n", 0, offset) + 1  # noqa: E731
+    for attribute in find_test_only_cfg_attributes(code):
+        if attribute.is_inner:
+            result.update(range(1, code.count("\n") + 2))
+            break
+        # The gated item ends at its closing brace (unless `else` follows), or at `;`/`,` outside brackets.
+        braces, brackets, end = 0, 0, len(code)
+        for idx in range(attribute.attribute_end(), len(code)):
+            char = code[idx]
+            if char in "([":
+                brackets += 1
+            elif char in ")]":
+                brackets -= 1
+            elif char == "{":
+                braces += 1
+            elif char == "}":
+                braces -= 1
+                if braces < 0 or (braces == 0 and not code[idx + 1 :].lstrip().startswith("else")):
+                    end = idx
+                    break
+            elif char in ";," and braces == 0 and brackets <= 0:
+                end = idx
+                break
+        result.update(range(line_of(attribute.start()), line_of(end) + 1))
+    _TEST_ITEM_CACHE[path] = result
+    return result
+
+
+def _setter_texts() -> list[tuple[str, str]]:
+    global _SETTER_TEXTS
+    if _SETTER_TEXTS is None:
+        _SETTER_TEXTS = []
+        for root in MUTANT_HOOK_SETTER_ROOTS:
+            base = Path(root)
+            if not base.is_dir():
+                continue
+            for path in sorted(base.rglob("*")):
+                if not path.is_file() or "__pycache__" in path.parts:
+                    continue
+                try:
+                    _SETTER_TEXTS.append((path.as_posix(), path.read_text(encoding="utf-8")))
+                except (OSError, UnicodeDecodeError):
+                    continue
+    return _SETTER_TEXTS
+
+
+def env_is_armed_somewhere(name: str) -> bool:
+    """True when src, tests, scripts or .github name the env in anything but a read."""
+    quoted = f'"{name}"'
+    for path, text in _setter_texts():
+        if name not in text:
+            continue
+        if not path.endswith(".rs"):
+            return True
+        for line in text.splitlines():
+            reads = sum(1 for read in ENV_READ_RE.findall(line) if read == name)
+            if line.count(quoted) > reads:
+                return True
+    return False
+
+
+def _hook_names(code: str, with_strings: str) -> list[tuple[str, str]]:
+    defined = MUTANT_FN_DEF_RE.findall(code)
+    return (
+        [("new mutant env", env) for env in MUTANT_ENV_RE.findall(with_strings)]
+        + [("new mutant hook fn", name) for name in defined]
+        + [("new call to mutant hook", name) for name in MUTANT_CALL_RE.findall(code) if name not in defined]
+    )
+
+
+def audit_mutant_hooks(
+    lines: list[AddedLine], base_resolved: bool, removed: list[AddedLine] | None = None
+) -> list[str]:
+    """Rules A (env name), B (hook fn) and D (hook call) count net additions per file, so a line
+    that only moves or reformats an existing hook passes; rule C checks test-only env reads."""
+    findings: list[str] = []
+    if not base_resolved:
+        return [
+            "mutant-hook audit found no diff base (AGENTDESK_AUDIT_BASE, origin/main, main, HEAD^); "
+            "set AGENTDESK_AUDIT_BASE instead of passing without the committed diff"
+        ]
+    # Removed lines are gone from the tree, so they are lexed alone.
+    removed_names: collections.Counter[tuple[str, str, str]] = collections.Counter(
+        (gone.path, kind, name)
+        for gone in removed or []
+        if is_mutant_hook_path(gone.path)
+        for kind, name in _hook_names(
+            strip_rust_non_code(gone.text), strip_rust_non_code(gone.text, keep_strings=True)
+        )
+    )
+    for added in lines:
+        if not is_mutant_hook_path(added.path):
+            continue
+        with_strings = _lexed_line(added.path, added.line_no, added.text, keep_strings=True)
+        code = _lexed_line(added.path, added.line_no, added.text, keep_strings=False)
+        where = f"{added.path}:{added.line_no}"
+        for kind, name in _hook_names(code, with_strings):
+            if kind == "new mutant env" and (added.path, name) in MUTANT_HOOK_ALLOWED:
+                continue
+            if removed_names[(added.path, kind, name)] > 0:
+                removed_names[(added.path, kind, name)] -= 1
+                continue
+            findings.append(f"{where}: {kind} `{name}`; {MUTANT_HOOK_HINT}")
+        # Rule C covers test-only branches of production functions; inline test modules are tests.
+        if is_test_path(added.path) or is_test_region(added.path, added.line_no):
+            continue
+        gated = "cfg!(test)" in code.replace(" ", "") or added.line_no in test_item_lines(added.path)
+        if not gated:
+            continue
+        for env in RUNTIME_ENV_READ_RE.findall(with_strings):
+            if MUTANT_ENV_RE.fullmatch(f'"{env}"') or (added.path, env) in MUTANT_HOOK_ALLOWED:
+                continue
+            if not env_is_armed_somewhere(env):
+                findings.append(
+                    f"{where}: test-only read of `{env}`, which nothing in src, tests, scripts "
+                    f"or .github sets; {MUTANT_HOOK_HINT}"
+                )
+    return findings
 
 
 # PostgreSQL 17 reads E'\v' as U+000B; 16 and older read it as the letter v.
@@ -618,7 +843,12 @@ def audit_sql_version_dependent_escapes(root: Path) -> tuple[list[str], int]:
 def main() -> int:
     lines = collect_added_lines()
     sql_findings, sql_files = audit_sql_version_dependent_escapes(Path("."))
-    findings = audit_unwrap_panic(lines) + audit_migration_integers(lines) + sql_findings
+    findings = (
+        audit_unwrap_panic(lines)
+        + audit_migration_integers(lines)
+        + audit_mutant_hooks(lines, merge_base() is not None, collect_removed_lines())
+        + sql_findings
+    )
     if findings:
         print("State/lint hardening audit failed:")
         for finding in findings:

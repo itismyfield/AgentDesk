@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -208,6 +210,154 @@ class SqlVersionDependentEscapeAuditTests(unittest.TestCase):
 
         self.assertEqual(scanned, 0)
         self.assertEqual(len(findings), 1)
+
+
+class MutantHookAuditTests(unittest.TestCase):
+    """Run the real script on a throwaway repository whose HEAD adds the given files."""
+
+    BASE_FILES = {
+        "src/lib.rs": "pub fn production() {}\n",
+        "migrations/postgres/0001_fixture.sql": "SELECT 1;\n",
+    }
+
+    def git(self, root: Path, *args: str) -> str:
+        return subprocess.run(
+            ["git", "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", *args],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    def write(self, root: Path, files: dict[str, str]) -> None:
+        for name, text in files.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+
+    def run_audit(
+        self, added: dict[str, str], *, base: bool = True, base_files: dict[str, str] | None = None
+    ) -> tuple[int, str]:
+        """``base=False`` is a one-commit clone: no main, no origin/main and no HEAD^."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.git(root, "init", "-q", "-b", "work")
+            self.write(root, {**self.BASE_FILES, **(base_files or {})})
+            if base:
+                self.git(root, "add", "-A")
+                self.git(root, "commit", "-q", "-m", "base")
+                base_sha = self.git(root, "rev-parse", "HEAD")
+            self.write(root, added)
+            self.git(root, "add", "-A")
+            self.git(root, "commit", "-q", "-m", "change")
+            env = {key: value for key, value in os.environ.items() if key != "AGENTDESK_AUDIT_BASE"}
+            if base:
+                env["AGENTDESK_AUDIT_BASE"] = base_sha
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT_PATH)], cwd=root, env=env, capture_output=True, text=True
+            )
+        return result.returncode, result.stdout + result.stderr
+
+    def assert_flagged(self, added: dict[str, str], needle: str) -> None:
+        rc, output = self.run_audit(added)
+        self.assertEqual(rc, 1, output)
+        self.assertIn(needle, output)
+
+    def assert_passes(self, added: dict[str, str]) -> None:
+        rc, output = self.run_audit(added)
+        self.assertEqual(rc, 0, output)
+
+    def test_mutant_env_in_production_code_fails(self) -> None:
+        self.assert_flagged(
+            {"src/lib.rs": 'pub fn production() {\n    let _ = std::env::var("ADK_NEW_MUTANT");\n}\n'},
+            "src/lib.rs:2: new mutant env `ADK_NEW_MUTANT`",
+        )
+
+    def test_mutant_hook_fn_in_a_test_module_file_fails(self) -> None:
+        self.assert_flagged(
+            {"src/owner/tests/mod.rs": "pub(crate) fn mutant(name: &str) -> bool {\n    name.is_empty()\n}\n"},
+            "src/owner/tests/mod.rs:1: new mutant hook fn `mutant`",
+        )
+
+    def test_comments_naming_a_mutant_pass(self) -> None:
+        self.assert_passes(
+            {
+                "src/lib.rs": (
+                    "// ADK_OLD_MUTANT was removed with its mutant(\"x\") calls\n"
+                    "/* \"ADK_OLD_MUTANT\" */\n"
+                    "/// fn mutant(name: &str) is gone\n"
+                    "pub fn production() {}\n"
+                )
+            }
+        )
+
+    def test_production_fn_ending_in_mutation_passes(self) -> None:
+        self.assert_passes(
+            {"src/lib.rs": "pub fn production() {}\npub fn begin_sink_delivery_mutation(seq: u64) -> u64 {\n    seq\n}\n"}
+        )
+
+    def test_test_only_env_read_nothing_sets_fails(self) -> None:
+        cases = {
+            "cfg(test) item": "#[cfg(test)]\nfn fault() -> bool {\n    std::env::var(\"ADK_FOO_FAULT\").is_ok()\n}\n",
+            "cfg(test) statement": "pub fn production() -> bool {\n    #[cfg(test)]\n    if std::env::var(\"ADK_FOO_FAULT\").is_ok() {\n        return false;\n    }\n    true\n}\n",
+            "cfg!(test) guard": "pub fn production() -> bool {\n    cfg!(test) && std::env::var(\"ADK_FOO_FAULT\").is_ok()\n}\n",
+        }
+        for name, source in cases.items():
+            with self.subTest(name):
+                self.assert_flagged({"src/fault.rs": source}, "test-only read of `ADK_FOO_FAULT`")
+
+    def test_test_only_env_read_a_test_sets_passes(self) -> None:
+        self.assert_passes(
+            {
+                "src/fault.rs": "#[cfg(test)]\nfn fault() -> bool {\n    std::env::var(\"ADK_FOO_FAULT\").is_ok()\n}\n",
+                "src/fault_tests.rs": "fn arm() {\n    std::env::set_var(\"ADK_FOO_FAULT\", \"1\");\n}\n",
+            }
+        )
+
+    def test_new_call_to_an_existing_mutant_hook_fails(self) -> None:
+        self.assert_flagged(
+            {"src/lib.rs": "pub fn production() {\n    if n2b_mutant(\"x\") {\n        return;\n    }\n}\n"},
+            "src/lib.rs:2: new call to mutant hook `n2b_mutant`",
+        )
+
+    def test_reformatting_an_existing_hook_passes_but_a_second_call_fails(self) -> None:
+        existing = {
+            "src/lib.rs": 'pub fn production() {\n    if n2b_mutant("x") { return; }\n'
+            '    let _ = std::env::var("ADK_OLD_MUTANT");\n}\n'
+        }
+        reformatted = (
+            'pub fn production() {\n    if n2b_mutant("x") {\n        return;\n    }\n'
+            '    let _old = std::env::var("ADK_OLD_MUTANT");\n}\n'
+        )
+        rc, output = self.run_audit({"src/lib.rs": reformatted}, base_files=existing)
+        self.assertEqual(rc, 0, output)
+        rc, output = self.run_audit(
+            {"src/lib.rs": reformatted[: -len("}\n")] + '    let _ = n2b_mutant("y");\n}\n'},
+            base_files=existing,
+        )
+        self.assertEqual(rc, 1, output)
+        self.assertIn("new call to mutant hook `n2b_mutant`", output)
+
+    def test_missing_diff_base_fails_instead_of_passing(self) -> None:
+        rc, output = self.run_audit({"src/next.rs": "pub fn next() {}\n"}, base=False)
+        self.assertNotEqual(rc, 0, output)
+        self.assertIn("no diff base", output)
+
+
+class MutantHookAllowListTests(unittest.TestCase):
+    def test_allowed_pair_passes_and_other_paths_still_fail(self) -> None:
+        line = '    if std::env::var("ADK_SEAM_MUTANT").is_ok() {'
+        allowed = AUDIT.MUTANT_HOOK_ALLOWED
+        AUDIT.MUTANT_HOOK_ALLOWED = frozenset({("src/seam.rs", "ADK_SEAM_MUTANT")})
+        try:
+            kept = AUDIT.audit_mutant_hooks([AUDIT.AddedLine("src/seam.rs", 1, line)], True)
+            other = AUDIT.audit_mutant_hooks([AUDIT.AddedLine("src/other.rs", 1, line)], True)
+        finally:
+            AUDIT.MUTANT_HOOK_ALLOWED = allowed
+        self.assertEqual(kept, [])
+        self.assertEqual(len(other), 1, other)
+        self.assertIn("ADK_SEAM_MUTANT", other[0])
+
 
 
 if __name__ == "__main__":
