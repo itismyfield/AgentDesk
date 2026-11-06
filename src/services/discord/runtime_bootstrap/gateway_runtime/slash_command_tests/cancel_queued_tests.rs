@@ -177,6 +177,8 @@ fn cancel_queued_t2_v2_candidates_are_read_only_and_bounded() {
                 .collect::<Vec<_>>(),
             [B.to_string(), C.to_string(), S.to_string(), D.to_string()]
         );
+        let retained_id = D.to_string();
+        let synthetic_id = S.to_string();
         for choice in choices {
             let name = choice["name"].as_str().unwrap();
             assert!(name.contains("11-06 09:00"), "KST: {name}");
@@ -187,19 +189,13 @@ fn cancel_queued_t2_v2_candidates_are_read_only_and_bounded() {
             );
         }
         assert!(
-            choices
-                .iter()
-                .find(|c| c["value"] == D.to_string())
-                .unwrap()["name"]
+            choices.iter().find(|c| c["value"] == retained_id).unwrap()["name"]
                 .as_str()
                 .unwrap()
                 .contains("보관")
         );
         assert!(
-            choices
-                .iter()
-                .find(|c| c["value"] == S.to_string())
-                .unwrap()["name"]
+            choices.iter().find(|c| c["value"] == synthetic_id).unwrap()["name"]
                 .as_str()
                 .unwrap()
                 .contains("합성")
