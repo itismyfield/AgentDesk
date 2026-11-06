@@ -540,8 +540,19 @@ async fn imessage_echo_enqueue_failure_preserves_result_pg() {
         CREATE TRIGGER reject_imessage_notice BEFORE INSERT ON message_outbox
         FOR EACH ROW EXECUTE FUNCTION reject_imessage_notice();")
         .execute(&f.pool).await.unwrap();
-    sqlx::query("INSERT INTO message_outbox (target,content,bot,source) VALUES ('channel:1','other producer','notify','system')")
-        .execute(&f.pool).await.unwrap();
+    crate::services::message_outbox::enqueue_outbox_pg(
+        &f.pool,
+        crate::services::message_outbox::OutboxMessage {
+            target: "channel:1",
+            content: "other producer",
+            bot: "notify",
+            source: "system",
+            reason_code: None,
+            session_key: None,
+        },
+    )
+    .await
+    .unwrap();
     let results = Arc::new(std::sync::Mutex::new(Vec::new()));
     let (status, body) = BACKEND_RESULTS
         .scope(
