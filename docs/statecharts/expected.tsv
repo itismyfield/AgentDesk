@@ -33,12 +33,15 @@ input-single-path/InputOwnershipA2bReadGone.cfg	InputOwnership	NativeHeldResumes
 input-single-path/InputOwnershipA2bLive.cfg	InputOwnership	-	-
 input-single-path/InputOwnershipA2bReadGoneLive.cfg	InputOwnership	-	NativeHeldRuns
 input-single-path/InputOwnershipA7772.cfg	InputOwnership	-	-
+input-single-path/InputOwnershipA7772ClassifierIdle.cfg	InputOwnership	EarlyClaimHasIdleProof,StartOwnTurn	-
+input-single-path/InputOwnershipA7772ClosedFirst.cfg	InputOwnership	EarlyClaimHasIdleProof	-
 input-single-path/InputOwnershipA7772EarlyUnknownGoes.cfg	InputOwnership	EarlyClaimHasIdleProof	-
 input-single-path/InputOwnershipA7772LateNoUnwindWait.cfg	InputOwnership	NativeHeldResumes,NoSilentLoss,NoSilentLossObserved	-
 input-single-path/InputOwnershipA7772LateNoUnwindWaitLive.cfg	InputOwnership	-	NativeHeldRuns
 input-single-path/InputOwnershipA7772LateNoWatch.cfg	InputOwnership	NativeHeldResumes,NoSilentLoss,NoSilentLossObserved	-
 input-single-path/InputOwnershipA7772LateNoWatchLive.cfg	InputOwnership	-	NativeHeldRuns
 input-single-path/InputOwnershipA7772LateUnknownIdle.cfg	InputOwnership	StartOwnTurn	-
+input-single-path/InputOwnershipA7772NoStartEnded.cfg	InputOwnership	EarlyClaimHasIdleProof	-
 input-single-path/InputOwnershipA7772Live.cfg	InputOwnership	-	-
 input-single-path/InputOwnershipA2d1.cfg	InputOwnership	AnswerOnce,DraftToldOnce,NoSilentLoss,NoTimedRetry,StartNotDropped	-
 input-single-path/InputOwnershipA2d2.cfg	InputOwnership	AnswerOnce,HeldResumes,NoSilentLoss,NoSilentLossObserved	-
