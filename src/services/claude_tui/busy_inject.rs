@@ -553,44 +553,69 @@ fn inject_locked(
     park: Park,
     policy: Policy,
 ) -> Report {
-    let Seen { park, unproven } = match before_paste_by(pane, park, policy.screen_proven) {
-        Ok(seen) => seen,
-        Err(veto) => return Report::not_sent(veto),
-    };
-    if matches!(policy.gate, TurnGate::BusyOnly)
-        && !crate::services::tui_turn_state::observe_claude_jsonl_turn_state(request.transcript)
-            .is_busy()
-    {
-        return Report::not_sent(Veto::NotBusy);
-    }
-    let Ok(offset) = std::fs::metadata(request.transcript).map(|meta| meta.len()) else {
-        return Report::not_sent(Veto::TranscriptUnavailable);
-    };
-    if let Err(error) = crate::services::tui_input::human_frame::history::register(
-        ("claude", request.session, request.nonce, request.author),
-        request.transcript,
-        offset,
-        text,
-    ) {
-        tracing::warn!(%error, "busy frame ledger registration failed");
-        return Report::not_sent(Veto::LoadFailed);
-    }
-    let outcome = stash::submit(pane, request.nonce, text, timing, park);
-    let report = Report {
-        outcome,
-        sent: (outcome == Outcome::Injected).then(|| Sent {
-            offset,
-            text: text.to_string(),
-            parked: park,
-        }),
-        draft_unproven: unproven && !matches!(outcome, Outcome::NotSent(_)),
-    };
-    if matches!(report.outcome, Outcome::NotSent(_)) {
-        crate::services::tui_input::human_frame::history::withdraw(
-            request.nonce,
+    use super::host_input::{InputRefusal, InputRun, StopCause};
+    use crate::services::tui_input::submission::Refusal;
+
+    super::guarded_outcome::receipt(request.session, text);
+    let report = (|| {
+        let Seen { park, unproven } = match before_paste_by(pane, park, policy.screen_proven) {
+            Ok(seen) => seen,
+            Err(veto) => return Report::not_sent(veto),
+        };
+        if matches!(policy.gate, TurnGate::BusyOnly)
+            && !crate::services::tui_turn_state::observe_claude_jsonl_turn_state(request.transcript)
+                .is_busy()
+        {
+            return Report::not_sent(Veto::NotBusy);
+        }
+        let Ok(offset) = std::fs::metadata(request.transcript).map(|meta| meta.len()) else {
+            return Report::not_sent(Veto::TranscriptUnavailable);
+        };
+        if let Err(error) = crate::services::tui_input::human_frame::history::register(
+            ("claude", request.session, request.nonce, request.author),
             request.transcript,
+            offset,
+            text,
+        ) {
+            tracing::warn!(%error, "busy frame ledger registration failed");
+            return Report::not_sent(Veto::LoadFailed);
+        }
+        let outcome = stash::submit_with_start(
+            pane,
+            request.nonce,
+            text,
+            timing,
+            park,
+            super::guarded_outcome::begin,
         );
-    }
+        let report = Report {
+            outcome,
+            sent: (outcome == Outcome::Injected).then(|| Sent {
+                offset,
+                text: text.to_string(),
+                parked: park,
+            }),
+            draft_unproven: unproven && !matches!(outcome, Outcome::NotSent(_)),
+        };
+        if matches!(report.outcome, Outcome::NotSent(_)) {
+            crate::services::tui_input::human_frame::history::withdraw(
+                request.nonce,
+                request.transcript,
+            );
+        }
+        report
+    })();
+    let result = match report.outcome {
+        Outcome::Injected => InputRun::Applied,
+        Outcome::NotSent(_) => {
+            InputRun::Refused(InputRefusal::Composer(Refusal::CaptureUnavailable))
+        }
+        Outcome::Failed(error) => InputRun::Indeterminate {
+            confirmed: 0,
+            cause: StopCause::Send(format!("busy input write failed: {error:?}")),
+        },
+    };
+    super::guarded_outcome::finish(&result);
     report
 }
 
