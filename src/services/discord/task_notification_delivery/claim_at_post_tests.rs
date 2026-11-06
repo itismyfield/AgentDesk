@@ -274,8 +274,10 @@ async fn a_task_response_stays_counted_across_its_chunks_until_the_transport_dro
         let transport = claim_at_post(&sink, BodyClaim::new(channel, Some(ClaudeTui)));
         let tag = json!({"case":case,"site":"W21","output_class":"LegacyBody","binding_mode":"TUI", "actual_runtime":"claude_tui","body_owner":"Legacy"});
         let blocker = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
             .create(true)
-            .append(true)
+            .truncate(false)
             .open(log.with_file_name("writer.lock"))
             .unwrap();
         blocker.lock().unwrap();
