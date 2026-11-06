@@ -274,10 +274,23 @@ class MutantHookAuditTests(unittest.TestCase):
         )
 
     def test_mutant_hook_fn_in_a_test_module_file_fails(self) -> None:
-        self.assert_flagged(
-            {"src/owner/tests/mod.rs": "pub(crate) fn mutant(name: &str) -> bool {\n    name.is_empty()\n}\n"},
-            "src/owner/tests/mod.rs:1: new mutant hook fn `mutant`",
-        )
+        # The generic form has no `mutant(` call text, so only rule B can catch it.
+        for signature in ("fn mutant(name: &str)", "fn mutant<T: AsRef<str>>(name: T)"):
+            with self.subTest(signature):
+                self.assert_flagged(
+                    {"src/owner/tests/mod.rs": f"pub(crate) {signature} -> bool {{\n    false\n}}\n"},
+                    "src/owner/tests/mod.rs:1: new mutant hook fn `mutant`",
+                )
+
+    def test_env_rule_compares_whole_literal_values(self) -> None:
+        prose = 'pub const HELP: &str =\n    r#"The switch "ADK_NEW_MUTANT" is no longer used."#;\n'
+        self.assert_passes({"src/help.rs": prose})
+        for literal in ('r#"ADK_NEW_MUTANT"#', '"ADK_NEW_MUTANT"'):
+            with self.subTest(literal):
+                self.assert_flagged(
+                    {"src/help.rs": f"pub const KEY: &str = {literal};\n"},
+                    "src/help.rs:1: new mutant env `ADK_NEW_MUTANT`",
+                )
 
     def test_comments_naming_a_mutant_pass(self) -> None:
         self.assert_passes(
@@ -294,24 +307,6 @@ class MutantHookAuditTests(unittest.TestCase):
     def test_production_fn_ending_in_mutation_passes(self) -> None:
         self.assert_passes(
             {"src/lib.rs": "pub fn production() {}\npub fn begin_sink_delivery_mutation(seq: u64) -> u64 {\n    seq\n}\n"}
-        )
-
-    def test_test_only_env_read_nothing_sets_fails(self) -> None:
-        cases = {
-            "cfg(test) item": "#[cfg(test)]\nfn fault() -> bool {\n    std::env::var(\"ADK_FOO_FAULT\").is_ok()\n}\n",
-            "cfg(test) statement": "pub fn production() -> bool {\n    #[cfg(test)]\n    if std::env::var(\"ADK_FOO_FAULT\").is_ok() {\n        return false;\n    }\n    true\n}\n",
-            "cfg!(test) guard": "pub fn production() -> bool {\n    cfg!(test) && std::env::var(\"ADK_FOO_FAULT\").is_ok()\n}\n",
-        }
-        for name, source in cases.items():
-            with self.subTest(name):
-                self.assert_flagged({"src/fault.rs": source}, "test-only read of `ADK_FOO_FAULT`")
-
-    def test_test_only_env_read_a_test_sets_passes(self) -> None:
-        self.assert_passes(
-            {
-                "src/fault.rs": "#[cfg(test)]\nfn fault() -> bool {\n    std::env::var(\"ADK_FOO_FAULT\").is_ok()\n}\n",
-                "src/fault_tests.rs": "fn arm() {\n    std::env::set_var(\"ADK_FOO_FAULT\", \"1\");\n}\n",
-            }
         )
 
     def test_new_call_to_an_existing_mutant_hook_fails(self) -> None:
@@ -338,6 +333,30 @@ class MutantHookAuditTests(unittest.TestCase):
         self.assertEqual(rc, 1, output)
         self.assertIn("new call to mutant hook `n2b_mutant`", output)
 
+    def test_deleted_comments_and_strings_do_not_offset_a_new_hook(self) -> None:
+        cases = {
+            "env in a block comment": (
+                '/*\nUse "ADK_NEW_MUTANT" for the experiment.\n*/\npub fn production() {}\n',
+                'pub fn production() {\n    let _ = std::env::var("ADK_NEW_MUTANT");\n}\n',
+                "new mutant env `ADK_NEW_MUTANT`",
+            ),
+            "fn in a block comment": (
+                "/*\nfn mutant(name: &str) -> bool {\n*/\npub fn production() {}\n",
+                "pub fn production() {}\nfn mutant(name: &str) -> bool {\n    false\n}\n",
+                "new mutant hook fn `mutant`",
+            ),
+            "call in a raw string": (
+                'pub const DOC: &str = r#"\nif n2b_mutant("x") {}\n"#;\npub fn production() {}\n',
+                'pub fn production() {\n    if n2b_mutant("x") {}\n}\n',
+                "new call to mutant hook `n2b_mutant`",
+            ),
+        }
+        for name, (before, after, needle) in cases.items():
+            with self.subTest(name):
+                rc, output = self.run_audit({"src/lib.rs": after}, base_files={"src/lib.rs": before})
+                self.assertEqual(rc, 1, output)
+                self.assertIn(needle, output)
+
     def test_missing_diff_base_fails_instead_of_passing(self) -> None:
         rc, output = self.run_audit({"src/next.rs": "pub fn next() {}\n"}, base=False)
         self.assertNotEqual(rc, 0, output)
@@ -358,6 +377,18 @@ class MutantHookAllowListTests(unittest.TestCase):
         self.assertEqual(len(other), 1, other)
         self.assertIn("ADK_SEAM_MUTANT", other[0])
 
+
+
+class MutantHookOldSnapshotTests(unittest.TestCase):
+    def test_removed_line_without_a_readable_old_file_offsets_nothing(self) -> None:
+        line = '    if n2b_mutant("x") {}'
+        added = [AUDIT.AddedLine("src/missing_fixture.rs", 1, line)]
+        for rev in (None, "0" * 40):
+            with self.subTest(rev=rev):
+                removed = [AUDIT.RemovedLine("src/missing_fixture.rs", 1, line, rev)]
+                findings = AUDIT.audit_mutant_hooks(added, True, removed)
+                self.assertEqual(len(findings), 1, findings)
+                self.assertIn("n2b_mutant", findings[0])
 
 
 if __name__ == "__main__":

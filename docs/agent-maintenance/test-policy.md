@@ -38,6 +38,8 @@ do the same thing?" If yes, do not write it.
 
 ## Scope
 
-This is an authoring policy for humans and agents. Only rule 3 is a CI gate:
-`scripts/audit_state_lint_hardening.py` fails on added mutant switches. Existing
-tests are cleaned up in the #7344 slices; do not bulk-rewrite them outside that work.
+This is an authoring policy for humans and agents. Rule 3 is enforced on added
+lines by `scripts/audit_state_lint_hardening.py` for `*_MUTANT`/`*_MUTATION` env
+names and `*mutant` hook functions; a switch under another name is left to review.
+Existing tests are cleaned up in the #7344 slices; do not bulk-rewrite them outside
+that work.
