@@ -17,6 +17,7 @@ struct Shared {
     executions: Mutex<Vec<String>>,
     accepted: AtomicUsize,
     open: AtomicUsize,
+    held: AtomicUsize,
 }
 
 /// One proxy in front of one upstream database; dropping it stops accepting connections.
@@ -80,18 +81,31 @@ impl PgWireProxy {
 
     /// A pool through the proxy with the runtime pool's `test_before_acquire` behavior.
     pub(crate) fn pool(&self, max_connections: u32) -> sqlx::PgPool {
-        let options = self
-            .upstream_options
-            .clone()
-            .host("127.0.0.1")
-            .port(self.port)
-            .ssl_mode(sqlx::postgres::PgSslMode::Disable);
+        let options = self.connect_options();
         sqlx::postgres::PgPoolOptions::new()
             .max_connections(max_connections)
             .min_connections(0)
             .acquire_timeout(Duration::from_secs(10))
             .test_before_acquire(true)
             .connect_lazy_with(options)
+    }
+
+    pub(crate) fn connect_options(&self) -> sqlx::postgres::PgConnectOptions {
+        self.upstream_options
+            .clone()
+            .host("127.0.0.1")
+            .port(self.port)
+            .ssl_mode(sqlx::postgres::PgSslMode::Disable)
+    }
+
+    pub(crate) async fn wait_held(&self, deadline: tokio::time::Instant) {
+        tokio::time::timeout_at(deadline, async {
+            while self.shared.held.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("proxy execution reached the stall");
     }
 
     pub(crate) fn set_delay(&self, delay: Duration) {
@@ -218,10 +232,17 @@ async fn write_server(
     while let Some((due, frame, executed)) = queued.recv().await {
         tokio::time::sleep_until(due).await;
         if let Some(sql) = executed {
+            let held = stalled(&shared, &sql);
+            if held {
+                shared.held.fetch_add(1, Ordering::SeqCst);
+            }
             while stalled(&shared, &sql) {
                 if release.changed().await.is_err() {
                     return Ok(());
                 }
+            }
+            if held {
+                shared.held.fetch_sub(1, Ordering::SeqCst);
             }
             shared.executions.lock().unwrap().push(sql);
         }

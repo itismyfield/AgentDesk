@@ -13,8 +13,12 @@ use crate::config::Config;
 
 mod advisory_lock;
 mod agent_sync;
+mod pool_return;
+#[cfg(test)]
+mod pool_return_pg_tests;
 pub use advisory_lock::AdvisoryLockLease;
 pub use agent_sync::sync_agents_from_config_pg;
+use pool_return::{RETURN_CLEANUP_BUDGET, with_return_cleanup};
 mod shared_config;
 pub(crate) use shared_config::shared_config_sync_enabled;
 pub use shared_config::startup_reseed_with_warmup_pool;
@@ -241,12 +245,13 @@ fn startup_pool_settings(config: &Config) -> PoolConnectSettings {
 }
 
 fn pool_options(settings: PoolConnectSettings) -> PgPoolOptions {
-    PgPoolOptions::new()
+    let options = PgPoolOptions::new()
         .max_connections(settings.max_connections)
         .acquire_timeout(settings.acquire_timeout)
         .idle_timeout(settings.idle_timeout)
         .max_lifetime(settings.max_lifetime)
-        .test_before_acquire(settings.test_before_acquire)
+        .test_before_acquire(settings.test_before_acquire);
+    with_return_cleanup(options, RETURN_CLEANUP_BUDGET)
 }
 
 async fn run_health_check(pool: &PgPool) -> Result<(), sqlx::Error> {
@@ -907,10 +912,13 @@ async fn connect_test_pool_with_options(
         .unwrap_or(TEST_POSTGRES_OP_TIMEOUT);
     run_test_postgres_sqlx_op(
         &format!("{label} connect postgres"),
-        PgPoolOptions::new()
-            .max_connections(max_connections.max(1))
-            .acquire_timeout(acquire_timeout)
-            .connect_with(options),
+        with_return_cleanup(
+            PgPoolOptions::new()
+                .max_connections(max_connections.max(1))
+                .acquire_timeout(acquire_timeout),
+            RETURN_CLEANUP_BUDGET,
+        )
+        .connect_with(options),
     )
     .await
 }

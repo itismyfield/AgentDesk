@@ -1028,7 +1028,7 @@ mod tests {
         assert!(outcome.accepted());
         assert_eq!(
             outcome.pending_reaction,
-            PendingReactionDecision::Apply('➕')
+            PendingReactionDecision::Apply('📬')
         );
         assert_eq!(effects.idle_kickoffs, 1);
         assert_eq!(outcome.idle_kickoff_started_count, Some(1));

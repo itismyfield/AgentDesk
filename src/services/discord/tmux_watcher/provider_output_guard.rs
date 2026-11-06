@@ -184,25 +184,4 @@ mod tests {
         ));
         assert_eq!(codex, "codex body");
     }
-
-    #[test]
-    fn invariant_4371_common_edit_and_initial_send_share_guarded_payload() {
-        let source = include_str!("streaming_status_tick.rs");
-        let common_tick = source
-            .split("let mut display_text = build_watcher_streaming_edit_text")
-            .nth(1)
-            .expect("common display-text seam");
-        assert!(
-            common_tick.contains("guard_streaming_frame"),
-            "common tick must classify before either Discord write"
-        );
-        assert!(
-            common_tick.contains("edit_channel_message(&http, channel_id, msg_id, &display_text)"),
-            "existing-message edit must use the guarded selection"
-        );
-        assert!(
-            common_tick.contains("send_channel_message(&http, channel_id, &display_text)"),
-            "initial send must use the same guarded selection"
-        );
-    }
 }

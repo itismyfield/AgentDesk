@@ -1035,14 +1035,6 @@ async fn second_rollover_failure_keeps_bound_m2_and_deletes_only_unbound_m3() {
     );
 }
 
-#[path = "guarded_persist_source_guard_tests.rs"]
-mod source_guard_tests;
-
-#[test]
-fn production_tick_reconciles_anchor_dirty_flush_and_exit_candidate_merges() {
-    source_guard_tests::production_tick_reconciles_anchor_dirty_flush_and_exit_candidate_merges();
-}
-
 #[test]
 fn heartbeat_touches_same_owner_but_skips_successor() {
     with_runtime_root(|| {

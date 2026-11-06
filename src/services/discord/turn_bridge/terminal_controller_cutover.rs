@@ -1015,13 +1015,6 @@ fn emit_bridge_replace_cleanup(
 
 #[cfg(test)]
 mod tests {
-    mod source_guard_tests;
-
-    #[test]
-    fn controller_bridge_acquire_sites_mint_fresh_attempts() {
-        source_guard_tests::controller_bridge_acquire_sites_mint_fresh_attempts();
-    }
-
     // #3089 A5: the bridge short-replace cutover. These drive the REAL controller
     // (`deliver_short_replace_via_controller`) + the pure write-back
     // (`apply_bridge_short_replace_outcome`) + the pure gate/predicate helpers

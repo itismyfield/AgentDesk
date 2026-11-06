@@ -30,6 +30,7 @@ fn a_busy_front_names_its_attempt_only_to_the_token_whose_row_it_entered() {
             (rig.mailbox.clone(), None),
             ProviderKind::Claude,
             (rig.channel, rig.granted_front()),
+            None,
         );
         assert_eq!(rig.runtime.block_on(handed), Ok(()), "owns={owns}");
         assert_eq!(rig.events(), ["paste", "Enter"], "owns={owns}");

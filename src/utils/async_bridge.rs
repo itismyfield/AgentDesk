@@ -1,5 +1,4 @@
 use sqlx::PgPool;
-use sqlx::postgres::PgPoolOptions;
 use std::{any::Any, future::Future, pin::Pin, time::Duration};
 
 fn panic_payload_to_string(payload: &(dyn Any + Send + 'static)) -> String {
@@ -98,11 +97,9 @@ async fn build_bridge_pg_pool<E>(
     map_runtime_error: impl Fn(String) -> E,
 ) -> Result<PgPool, E> {
     let connect_options = (*source_pool.connect_options()).clone();
-    let pool_options = source_pool.options();
-    PgPoolOptions::new()
-        .max_connections(pool_options.get_max_connections().max(1))
-        .min_connections(pool_options.get_min_connections())
-        .acquire_timeout(pool_options.get_acquire_timeout())
+    source_pool
+        .options()
+        .clone()
         .connect_with(connect_options)
         .await
         .map_err(|error| map_runtime_error(format!("connect postgres bridge pool: {error}")))
@@ -215,7 +212,7 @@ where
 mod tests {
     use super::*;
     use crate::engine::loader::ScopedBridgeDeadline;
-    use sqlx::postgres::PgConnectOptions;
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use std::time::Instant;
 
     #[test]

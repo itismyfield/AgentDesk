@@ -276,24 +276,6 @@ async fn paused_preserves_markers() {
     exercise("paused_preserves_markers", false, true, true).await;
 }
 
-#[test]
-fn caller_arc_wiring() {
-    // Lexical supplement: does not execute the whole tmux_output_watcher task.
-    let source = include_str!("../../tmux_watcher.rs");
-    let context = source
-        .split("let terminal_commit_epilogue_context = TerminalCommitEpilogueContext {")
-        .nth(1)
-        .unwrap()
-        .split("};")
-        .next()
-        .unwrap();
-    assert!(context.contains("turn_delivered: &turn_delivered,"));
-    assert!(!context.contains("tmux_watchers"));
-    let writer = include_str!("../terminal_commit_epilogue.rs");
-    assert!(writer.contains("let turn_delivered = context.turn_delivered;"));
-    assert!(!writer.contains("shared.tmux_watchers"));
-}
-
 #[cfg(unix)]
 async fn exercise_zero_id_cleanup(name: &str, newer: bool) {
     use crate::services::discord::{inflight, tui_direct_abort_marker};

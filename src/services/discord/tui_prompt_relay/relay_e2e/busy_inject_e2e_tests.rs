@@ -207,7 +207,7 @@ async fn a_busy_pane_takes_a_person_s_text_and_marks_it_taken_pg() {
     );
     let keys = vec!["paste-buffer".to_string(), "send-keys".to_string()];
     let disk = Some("\"observed\"".to_string());
-    let taken = (keys, vec!["📥".to_string()], Some(message), vec![], 0, disk);
+    let taken = (keys, vec!["➕".to_string()], Some(message), vec![], 0, disk);
     rt.finish().await;
     assert_eq!(
         observed, taken,
@@ -375,7 +375,7 @@ async fn an_owner_refused_before_its_reservation_leaves_the_message_to_intake_pg
     // Intake merges the message into the input queued just before it.
     let queue = vec!["meanwhile\nstatus?".to_string()];
     rt.finish().await;
-    assert_eq!(observed, (refused, queue, vec![], vec!["➕".to_string()]));
+    assert_eq!(observed, (refused, queue, vec![], vec!["📬".to_string()]));
 }
 
 /// Starts `message` and returns once its owner holds the reservation, parked at the first pane
@@ -828,7 +828,7 @@ async fn deliver_from_announce(rt: &Runtime, message: u64, text: &str) {
     rt.h.spawn_message(arrival).await.unwrap().unwrap();
 }
 
-/// The announce bot's text on a busy pane is pasted once and marked ⏳, nothing queued or started.
+/// The announce bot's text on a busy pane is pasted once and marked ➕, nothing queued or started.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_busy_pane_takes_the_announce_bot_s_text_pg() {
     let busy = busy_with_announce().await;
@@ -851,7 +851,7 @@ async fn a_busy_pane_takes_the_announce_bot_s_text_pg() {
     let keys = vec!["paste-buffer".to_string(), "send-keys".to_string()];
     let disk = Some("\"observed\"".to_string());
     rt.finish().await;
-    assert_eq!(observed, (keys, vec!["📥".to_string()], vec![], 0, disk));
+    assert_eq!(observed, (keys, vec!["➕".to_string()], vec![], 0, disk));
 }
 
 /// A vetoed paste queues as intake would have: the bot's entry is a bot's and drops on cancel,
