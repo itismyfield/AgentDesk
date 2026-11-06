@@ -696,13 +696,8 @@ async fn fire_tick_hook_by_name_with_pg(
     hook_name: &str,
     label: &str,
 ) {
-    #[cfg(not(test))]
-    let recovery_after_timeout = false;
-    #[cfg(test)]
-    let recovery_after_timeout = crate::reconcile::queue_recovery_mutant_is("timeout_first");
     // The orphan review timeout runs on the one-minute tier, including five-minute cycles.
     if hook_name == "OnTick1min"
-        && !recovery_after_timeout
         && let Some(pool) = pg_pool.or_else(|| engine.pg_pool())
         && let Err(error) =
             crate::reconcile::reconcile_missing_queue_review_dispatches_pg(pool, engine).await
@@ -716,18 +711,6 @@ async fn fire_tick_hook_by_name_with_pg(
         record_tick_hook_execution_pg(pool, tick_logging, label, &execution).await;
     }
     crate::kanban::drain_hook_side_effects_with_backends(engine);
-    #[cfg(test)]
-    if hook_name == "OnTick1min"
-        && recovery_after_timeout
-        && let Some(pool) = pg_pool.or_else(|| engine.pg_pool())
-    {
-        eprintln!("MUTANT_APPLIED=timeout_first");
-        if let Err(error) =
-            crate::reconcile::reconcile_missing_queue_review_dispatches_pg(pool, engine).await
-        {
-            tracing::warn!("[policy-tick] missing queue review dispatch reconcile failed: {error}");
-        }
-    }
 }
 
 async fn fire_tick_hook_by_name_with_timeout(

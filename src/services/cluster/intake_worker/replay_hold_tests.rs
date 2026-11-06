@@ -11,7 +11,6 @@ const WORKER: &str = "replay-worker";
 
 async fn fixture_pool(fixture: &TestPostgresDb) -> PgPool {
     let pool = fixture.connect_and_migrate().await;
-    crate::db::replay_disposition::tests::apply_test_mutant(&pool).await;
     let version: String = sqlx::query_scalar("SELECT version()")
         .fetch_one(&pool)
         .await

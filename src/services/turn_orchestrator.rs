@@ -2618,17 +2618,11 @@ fn input_mailbox_step(
             let _ = reply.send(result);
         }
         ChannelMailboxMsg::RestartDrain { persistence, reply } => {
-            state.last_persistence = Some(persistence.clone());
-            let persistence_error = absorb_disk_queue_error(&mut state, channel_id, &persistence)
-                .or_else(|| persist_queue(&mut state, channel_id, &persistence).err());
-            let _ = reply.send(RestartDrainResult {
-                queued_count: if persistence_error.is_some() {
-                    0
-                } else {
-                    state.intervention_queue.len()
-                },
-                persistence_error,
-            });
+            let _ = reply.send(dispatch_reservation::restart_drain_legacy(
+                &mut state,
+                channel_id,
+                &persistence,
+            ));
         }
         #[cfg(test)]
         ChannelMailboxMsg::AgeActiveTurnForTest { age, reply } => {

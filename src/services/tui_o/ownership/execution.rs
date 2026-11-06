@@ -37,10 +37,6 @@ impl OwnerPermit {
         Arc::clone(&self.gate)
     }
     pub(crate) fn first_binding(&self, other: &Self) -> Option<Arc<Self>> {
-        #[cfg(test)]
-        if tests::mutant("first-binding") {
-            return None;
-        }
         if self.identity != other.identity
             || self.executor != other.executor
             || self.generation != other.generation
@@ -194,10 +190,6 @@ pub(crate) fn validate_local(
     local: &str,
     binding: &Value,
 ) -> Result<(), NativeRefFailure> {
-    #[cfg(test)]
-    if tests::mutant("native") {
-        return Ok(());
-    }
     use crate::services::tui_prompt_dedupe::binding_context::{self, SpawnNonceMarker};
     let owner = binding["owner"]
         .as_str()
