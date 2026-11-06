@@ -740,3 +740,134 @@ mod recovery_commit_validation_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod decision_retention_pg_tests {
+    use super::{DecisionItem, resolve_review_card_id_pg, update_decisions_pg};
+
+    /// Retention drops aged decision items only where the rework card lookup and an
+    /// in-flight review's item list answer the same without them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retention_keeps_decisions_the_review_lookups_still_read() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_review_decision_retention",
+            "review decision retention",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        // `decision` carries the row label; `d-gone*` and `d-mix-gone` have no dispatch row. Each
+        // `d-mix-*` dispatch has an item the unordered lookup reads first and a `card-a` item.
+        sqlx::raw_sql(
+            "INSERT INTO kanban_cards (id, title, status) VALUES
+                 ('card-r', 'r', 'review'), ('card-a', 'a', 'review'), ('card-b', 'b', 'review');
+             INSERT INTO task_dispatches (id, status, dispatch_type, kanban_card_id) VALUES
+                 ('d-open', 'pending', 'review', 'card-r'),
+                 ('d-done', 'failed', 'review', 'card-r'),
+                 ('d-other', 'failed', 'review', NULL),
+                 ('d-mix-b', 'failed', 'review', 'card-b'),
+                 ('d-mix-null', 'failed', 'review', 'card-b'),
+                 ('d-mix-nocard', 'failed', 'review', NULL);
+             INSERT INTO review_decisions (kanban_card_id, dispatch_id, decision, decided_at) VALUES
+                 ('card-r', 'd-open', 'open-aged', NOW() - INTERVAL '100 days'),
+                 ('card-r', 'd-done', 'done-carded', NOW() - INTERVAL '100 days'),
+                 (NULL, 'd-done', 'done-no-card', NOW() - INTERVAL '100 days'),
+                 (NULL, 'd-done', 'done-fresh', NOW() - INTERVAL '10 days'),
+                 ('card-r', 'd-done', 'done-null-time', NULL),
+                 ('card-r', 'd-other', 'other-carded', NOW() - INTERVAL '100 days'),
+                 ('card-r', 'd-gone', 'gone-carded', NOW() - INTERVAL '100 days'),
+                 (NULL, 'd-gone2', 'gone-no-card', NOW() - INTERVAL '100 days'),
+                 ('card-b', 'd-mix-b', 'mix-b-first', NOW() - INTERVAL '100 days'),
+                 ('card-a', 'd-mix-b', 'mix-b-other', NOW() - INTERVAL '100 days'),
+                 (NULL, 'd-mix-null', 'mix-null-first', NOW() - INTERVAL '100 days'),
+                 ('card-a', 'd-mix-null', 'mix-null-other', NOW() - INTERVAL '100 days'),
+                 (NULL, 'd-mix-gone', 'mix-gone-first', NOW() - INTERVAL '100 days'),
+                 ('card-a', 'd-mix-gone', 'mix-gone-other', NOW() - INTERVAL '100 days'),
+                 (NULL, 'd-mix-nocard', 'mix-nocard-first', NOW() - INTERVAL '100 days'),
+                 ('card-a', 'd-mix-nocard', 'mix-nocard-other', NOW() - INTERVAL '100 days')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed review decisions");
+
+        let readers = |pool: sqlx::PgPool| async move {
+            let mut cards = Vec::new();
+            for dispatch in [
+                "d-open",
+                "d-done",
+                "d-other",
+                "d-gone",
+                "d-gone2",
+                "d-mix-b",
+                "d-mix-null",
+                "d-mix-gone",
+                "d-mix-nocard",
+            ] {
+                cards.push(resolve_review_card_id_pg(&pool, dispatch).await.unwrap());
+            }
+            let none: &[DecisionItem] = &[];
+            let open_items = update_decisions_pg(&pool, "d-open", none).await.unwrap();
+            (cards, open_items)
+        };
+        let before = readers(pool.clone()).await;
+        let (r, b) = (Some("card-r".to_string()), Some("card-b".to_string()));
+        assert_eq!(
+            before.0,
+            vec![
+                r.clone(),
+                r.clone(),
+                r.clone(),
+                r,
+                None,
+                b.clone(),
+                b,
+                None,
+                None
+            ],
+            "the first-read item (or the dispatch's card) decides each lookup"
+        );
+
+        let report =
+            crate::services::maintenance::jobs::db_retention::db_retention_job(&pool, false)
+                .await
+                .unwrap();
+        assert_eq!(
+            readers(pool.clone()).await,
+            before,
+            "the lookups answer as before"
+        );
+        assert!(
+            report
+                .summary()
+                .contains(&"review_decisions:delete=3".to_string()),
+            "the aged items the lookups no longer need go"
+        );
+        let left: Vec<String> =
+            sqlx::query_scalar("SELECT decision FROM review_decisions ORDER BY 1")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            left,
+            [
+                "done-fresh",
+                "done-null-time",
+                "gone-carded",
+                "mix-b-first",
+                "mix-b-other",
+                "mix-gone-first",
+                "mix-gone-other",
+                "mix-nocard-first",
+                "mix-nocard-other",
+                "mix-null-first",
+                "mix-null-other",
+                "open-aged",
+                "other-carded",
+            ]
+            .map(String::from),
+            "a dispatch with any item naming another card keeps all its items"
+        );
+
+        pool.close().await;
+        db.drop().await;
+    }
+}
