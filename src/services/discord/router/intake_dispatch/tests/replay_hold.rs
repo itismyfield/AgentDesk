@@ -57,7 +57,6 @@ async fn replay_live_absorbed_sources_cannot_forward_and_keep_original_pg() {
     let _env = ScopedIntakeTestEnv::enforce();
     let fixture = TestPostgresDb::create().await;
     let pool = fixture.connect_and_migrate().await;
-    crate::db::replay_disposition::tests::apply_test_mutant(&pool).await;
     let shared =
         crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
     let http = Arc::new(serenity::Http::new("Bot replay-admission-test"));
@@ -144,7 +143,6 @@ async fn replay_admission_dormant_and_other_identity_keeps_local_policy_pg() {
     let _env = ScopedIntakeTestEnv::with_mode("disabled");
     let fixture = TestPostgresDb::create().await;
     let pool = fixture.connect_and_migrate().await;
-    crate::db::replay_disposition::tests::apply_test_mutant(&pool).await;
     let shared =
         crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
     let http = Arc::new(serenity::Http::new("Bot replay-admission-test"));
@@ -190,7 +188,6 @@ async fn replay_queued_whole_consumed_and_mixed_original_restored_pg() {
     let _env = ScopedIntakeTestEnv::enforce();
     let fixture = TestPostgresDb::create().await;
     let pool = fixture.connect_and_migrate().await;
-    crate::db::replay_disposition::tests::apply_test_mutant(&pool).await;
     let channel = ChannelId::new(6_008_401);
     let source_a = 6_008_402;
     let source_b = 6_008_403;

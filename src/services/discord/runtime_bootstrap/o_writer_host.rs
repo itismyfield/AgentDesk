@@ -92,10 +92,6 @@ fn scoped_port(
     scope: Option<crate::services::cluster::intake_router_hook::owner_record::output::Scope>,
 ) -> Arc<GatewayPort> {
     let port = GatewayPort::new(http, bot_id);
-    #[cfg(test)]
-    if crate::services::tui_o::ownership::execution::tests::mutant("legacy-scope") {
-        return Arc::new(port);
-    }
     Arc::new(match scope {
         Some(scope) => port.with_owner_scope(scope),
         None => port,

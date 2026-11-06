@@ -68,10 +68,6 @@ pub(super) async fn open(
         #[cfg(test)]
         let http = host.rest.clone().unwrap_or(http);
         let bot = identity(permit.identity.provider(), &http).await?;
-        #[cfg(test)]
-        if crate::services::tui_o::ownership::execution::tests::mutant("scope") {
-            return Ok(Arc::new(GatewayPort::new(http, bot)));
-        }
         let port = GatewayPort::new(http, bot).with_owner_scope(Scope {
             pool: permit.pool.clone(),
             provider: permit.identity.provider().into(),

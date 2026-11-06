@@ -63,7 +63,6 @@ async fn snapshot(pool: &PgPool) -> Vec<DispatchSnapshot> {
 async fn replay_hold_prevents_actual_dispatch_claim_and_expired_lease_reclaim_pg() {
     let fixture = TestPostgresDb::create().await;
     let pool = fixture.connect_and_migrate().await;
-    crate::db::replay_disposition::tests::apply_test_mutant(&pool).await;
     for (index, disposition) in [
         "started_unclassified",
         "startup_failed_no_effect",
@@ -142,7 +141,6 @@ async fn replay_hold_prevents_actual_dispatch_claim_and_expired_lease_reclaim_pg
 async fn replay_schema_keeps_actual_dispatch_claim_without_a_hold_pg() {
     let fixture = TestPostgresDb::create().await;
     let pool = fixture.connect_and_migrate().await;
-    crate::db::replay_disposition::tests::apply_test_mutant(&pool).await;
     sqlx::query(
         "INSERT INTO task_dispatches (id, status, result)
          VALUES ('normal-dispatch', 'pending', 'preserved result')",

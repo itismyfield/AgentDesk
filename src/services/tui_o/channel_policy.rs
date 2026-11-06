@@ -297,12 +297,6 @@ impl BootChannels {
                     .filter(|(_, state)| **state != Adoption::Pending)
                     .map(|(&channel, _)| channel)
                     .collect();
-                #[cfg(test)]
-                if super::ownership::execution::tests::mutant("diagnostic-early") {
-                    for &channel in &self.foreign_stores {
-                        self.foreign_store_alarm(channel);
-                    }
-                }
                 let _ = home;
             }
         }
@@ -375,10 +369,6 @@ impl BootChannels {
     }
 
     pub(crate) fn execution(&self, channel: u64) -> Option<super::ownership::execution::View> {
-        #[cfg(test)]
-        if super::ownership::execution::tests::mutant("gateway") {
-            return None;
-        }
         self.execution
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -402,14 +392,6 @@ impl BootChannels {
             self.foreign_store_alarm(channel);
         }
 
-        #[cfg(test)]
-        let permit = if super::ownership::execution::tests::mutant("unknown")
-            && matches!(permit.as_ref(), Some(Err(_)))
-        {
-            None
-        } else {
-            permit
-        };
         let _install = self
             .execution_install
             .lock()
