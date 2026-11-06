@@ -57,11 +57,6 @@ pub(crate) fn braced_item_span(code: &str, signature: &str) -> Option<Range<usiz
     None
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum CommentForgery {
-    NestedBlock,
-}
-
 /// Comment and literal byte ranges of a source, each list in source order; a literal
 /// range covers its prefix, quotes and suffix.
 #[derive(Debug, Default)]
@@ -293,9 +288,6 @@ fn prefixed_literal_end(
         _ => Ok(None),
     }
 }
-
-#[cfg(test)]
-mod source_text_tests;
 
 pub(crate) mod lock_holder {
     //! Holder record for the process-wide test mutexes: the shared env lock (E) and the PG lifecycle lock (P).

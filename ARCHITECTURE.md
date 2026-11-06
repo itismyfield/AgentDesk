@@ -4455,8 +4455,7 @@ src/
 │   ├── decision_log_pg_tests.rs
 │   └── mod.rs
 ├── test_support/
-│   ├── serial_runtime.rs
-│   └── source_text_tests.rs
+│   └── serial_runtime.rs
 ├── ui/
 │   ├── ai_screen.rs
 │   └── mod.rs
@@ -4525,7 +4524,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/server/` | Axum server boot, routes, workers, background loops, and WebSocket broadcast. |
 | `src/services/` | Core runtime services: provider runners, Discord bot, queueing, memory, and platform helpers. |
 | `src/supervisor/` | Runtime supervisor signals and recovery decisions for orphaned or stalled work. |
-| `src/test_support/` | Tests for the test-only Rust source lexer. |
+| `src/test_support/` | Test runtime that holds fixture serialization for the whole async body. |
 | `src/ui/` | Compatibility shims for persisted UI/session types used by the Discord runtime. |
 | `src/utils/` | Shared formatting and Unicode-safe string utilities. |
 | `src/api_caller_observability.rs` | Request-principal classification and uniform log-only API caller attribution records for identity-consuming mutation paths. |
