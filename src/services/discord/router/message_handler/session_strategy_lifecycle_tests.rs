@@ -852,6 +852,40 @@ fn codex_late_item_new_task_still_blocks_followup() {
 
 #[cfg(unix)]
 #[test]
+fn codex_late_item_preserves_prior_active_evidence() {
+    use crate::services::tui_turn_state::TuiTurnState;
+
+    for (evidence, expected) in [
+        (
+            r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"new"}}"#,
+            TuiTurnState::Streaming,
+        ),
+        (
+            r#"{"type":"event_msg","payload":{"type":"task_started"}}"#,
+            TuiTurnState::Streaming,
+        ),
+        (
+            r#"{"type":"response_item","payload":{"type":"message","role":"user"}}"#,
+            TuiTurnState::UserSubmitted,
+        ),
+        (
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant"}}"#,
+            TuiTurnState::Streaming,
+        ),
+    ] {
+        assert_codex_late_item_followup(
+            &[
+                CODEX_COMPLETED_TURNS_WITH_LATE_ITEM[0],
+                evidence,
+                CODEX_COMPLETED_TURNS_WITH_LATE_ITEM[7],
+            ],
+            expected,
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn codex_late_item_completion_outside_window_still_blocks_followup() {
     let padding = serde_json::json!({"type":"event_msg", "payload":{"type":"token_count", "padding":"x".repeat(70_000)}}).to_string();
     assert_codex_late_item_followup(
