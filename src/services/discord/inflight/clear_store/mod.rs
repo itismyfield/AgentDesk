@@ -268,12 +268,6 @@ pub(super) fn archive_inflight_state_if_matches_identity_generation_in_root(
             return GuardedClearOutcome::Missing;
         }
         Err(_) => {
-            #[cfg(test)]
-            if crate::services::cluster::intake_router_hook::owner_record::cleanup::tests::mutant(
-                "archive-error",
-            ) {
-                return GuardedClearOutcome::Missing;
-            }
             return GuardedClearOutcome::IoError;
         }
     };
@@ -281,12 +275,6 @@ pub(super) fn archive_inflight_state_if_matches_identity_generation_in_root(
         return GuardedClearOutcome::IoError;
     }
     let Ok(state) = serde_json::from_str::<InflightTurnState>(&data) else {
-        #[cfg(test)]
-        if crate::services::cluster::intake_router_hook::owner_record::cleanup::tests::mutant(
-            "archive-error",
-        ) {
-            return GuardedClearOutcome::Missing;
-        }
         return GuardedClearOutcome::IoError;
     };
     if !expected.matches_state(&state)

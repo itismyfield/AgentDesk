@@ -18,8 +18,6 @@ pub(super) fn filter(
 ) -> ReplaySummary {
     #[cfg(test)]
     let mut kept = Vec::new();
-    #[cfg(test)]
-    let (filter_off, generic_settled) = (mutant("filter_off"), mutant("generic_settled"));
     let mut summary = ReplaySummary {
         deferred: ledger.unresolved().is_some() || ledger.violation().is_some(),
         ..ReplaySummary::default()
@@ -27,23 +25,6 @@ pub(super) fn filter(
     retain(&mut |derived| {
         summary.before += 1;
         let acked = !summary.deferred && super::owed::acked(ledger, derived);
-        #[cfg(test)]
-        let acked = {
-            let mut acked = acked;
-            if filter_off {
-                acked = false;
-            }
-            if !summary.deferred
-                && generic_settled
-                && let Derived::Piece(piece) = derived
-            {
-                acked = matches!(
-                    ledger.disposition(&piece.unit_key, piece.index),
-                    crate::services::tui_o::store::ledger::PieceDisposition::Settled
-                );
-            }
-            acked
-        };
         if !acked {
             summary.kept += 1;
             #[cfg(test)]
@@ -80,10 +61,6 @@ pub(super) fn after_open(pending: &mut bool, ledger: &LedgerState) -> bool {
         return false;
     }
     *pending = false;
-    #[cfg(test)]
-    if mutant("refilter_off") {
-        return false;
-    }
     true
 }
 
@@ -102,23 +79,12 @@ impl Budget {
 
     pub(super) async fn yield_if_due(&mut self) {
         self.steps += 1;
-        #[cfg(test)]
-        if mutant("yield_off") {
-            return;
-        }
         if self.steps >= 64 || self.started.elapsed() >= std::time::Duration::from_millis(10) {
             tokio::task::yield_now().await;
             self.steps = 0;
             self.started = std::time::Instant::now();
         }
     }
-}
-
-/// AGENTDESK_REPLAY_MUTANT selects faults only in dedicated mutation test builds.
-#[cfg(test)]
-pub(crate) fn mutant(name: &str) -> bool {
-    option_env!("AGENTDESK_REPLAY_MUTATION_BUILD") == Some("1")
-        && std::env::var("AGENTDESK_REPLAY_MUTANT").is_ok_and(|value| value == name)
 }
 
 #[cfg(test)]

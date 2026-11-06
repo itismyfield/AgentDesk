@@ -20,16 +20,15 @@ pub(super) fn last_dialogue(bytes: &[u8], source: &SourceId, root: &Path) -> Opt
             .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(&suffix))
     };
     let canonical = source.path.canonicalize().ok()?;
-    if !mutant("age_root")
-        && (!canonical.starts_with(root.canonicalize().ok()?)
-            || !native_name(&source.path)
-            || !native_name(&canonical))
+    if !canonical.starts_with(root.canonicalize().ok()?)
+        || !native_name(&source.path)
+        || !native_name(&canonical)
     {
         return None;
     }
     let mut rows = bytes.strip_suffix(b"\n")?.split(|byte| *byte == b'\n');
     let header: Value = serde_json::from_slice(rows.next()?).ok()?;
-    if !mutant("age_header") && !native_header(&header, source) {
+    if !native_header(&header, source) {
         return None;
     }
     let mut last = None;
@@ -41,37 +40,9 @@ pub(super) fn last_dialogue(bytes: &[u8], source: &SourceId, root: &Path) -> Opt
             }
             continue;
         }
-        #[cfg(all(test, unix))]
-        if mutant("age_type_allowlist")
-            && row["payload"]["type"] == "item_completed"
-            && matches!(
-                row["payload"]["item"]["type"].as_str(),
-                Some("UserMessage" | "AgentMessage")
-            )
-        {
-            let _ =
-                super::automatic_age::codex_tests::legacy_completed_shape(&row["payload"]["item"])?;
-        }
-        #[cfg(all(test, unix))]
-        if mutant("age_unknown_item") && row["payload"]["type"] == "item_completed" {
-            let mut item = row["payload"]["item"].clone();
-            if let Some(fields) = item.as_object_mut() {
-                fields.remove("content");
-            }
-            let _ = super::automatic_age::codex_tests::legacy_completed_shape(&item)?;
-        }
-        if (mutant("age_unknown") || mutant("age_skip_missing_timestamp"))
-            && row.get("timestamp").is_none()
-        {
-            continue;
-        }
         let timestamp =
             SystemTime::from(DateTime::parse_from_rfc3339(row["timestamp"].as_str()?).ok()?);
-        last = Some(if mutant("age_latest") {
-            timestamp
-        } else {
-            last.map_or(timestamp, |previous: SystemTime| previous.max(timestamp))
-        });
+        last = Some(last.map_or(timestamp, |previous: SystemTime| previous.max(timestamp)));
     }
     last
 }
@@ -87,14 +58,4 @@ fn native_header(row: &Value, source: &SourceId) -> bool {
             .is_some_and(|cwd| Path::new(cwd).is_absolute())
         && matches!(meta["source"].as_str(), Some("cli" | "exec" | "vscode"))
         && meta.get("parent_thread_id").is_none_or(Value::is_null)
-}
-
-#[cfg(test)]
-fn mutant(name: &str) -> bool {
-    std::env::var("AGENTDESK_BA_MUTANT").is_ok_and(|value| value == name)
-}
-
-#[cfg(not(test))]
-fn mutant(_name: &str) -> bool {
-    false
 }

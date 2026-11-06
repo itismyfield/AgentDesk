@@ -232,10 +232,6 @@ async fn owner_cleanup_normal_end_and_permanent_refusal_are_distinct_pg() {
     }
 }
 
-pub(crate) fn mutant(name: &str) -> bool {
-    std::env::var("ADK_PC_C_MUTANT").as_deref() == Ok(name)
-}
-
 #[tokio::test]
 async fn owner_cleanup_promotion_requires_durable_control_not_caller_readiness_pg() {
     let fx = Fixture::new(73369206).await;

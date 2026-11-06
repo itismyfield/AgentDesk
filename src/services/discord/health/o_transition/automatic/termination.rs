@@ -104,23 +104,10 @@ pub(crate) fn for_hop(
     let basis = if pane == execution.logical_key {
         let binding = binder(events, old, hop_seq, execution, pane)?;
         let nonce = binding.execution_nonce.as_str();
-        #[cfg(test)]
-        let nonce = if std::env::var("AGENTDESK_OTRANSITION_MUTANT").is_ok_and(|m| m == "nonce_hop")
-        {
-            event.execution_nonce.as_str()
-        } else {
-            nonce
-        };
         if execution.nonce.trim().is_empty() || nonce.trim().is_empty() {
             return Err("execution_nonce_unknown");
         }
         let different = nonce != execution.nonce;
-        #[cfg(test)]
-        let different = match std::env::var("AGENTDESK_OTRANSITION_MUTANT").as_deref() {
-            Ok("nonce_same") => false,
-            Ok("nonce_different") => true,
-            _ => different,
-        };
         if !different {
             return Err("current_execution");
         }

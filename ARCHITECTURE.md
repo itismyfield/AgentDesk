@@ -1075,9 +1075,6 @@ src/
 │   │   │   ├── source_read_proof.rs
 │   │   │   ├── source_read_proof_tests.rs
 │   │   │   └── terminal_resolution.rs
-│   │   ├── watcher_supervisor/
-│   │   │   └── tests/
-│   │   │       └── source_guard_tests.rs
 │   │   ├── agent_execution_node.rs
 │   │   ├── attachment_transfer.rs
 │   │   ├── capability_routing.rs
@@ -1156,7 +1153,6 @@ src/
 │   │   │   └── producer.rs
 │   │   ├── input/
 │   │   │   ├── tests/
-│   │   │   │   ├── source_guard_tests.rs
 │   │   │   │   └── startup_update_tests.rs
 │   │   │   ├── composer_content.rs
 │   │   │   ├── composer_lock.rs
@@ -1285,6 +1281,7 @@ src/
 │   │   │   │   │   │   ├── negative_tests.rs
 │   │   │   │   │   │   └── source_boundary_tests.rs
 │   │   │   │   │   └── absent_launch_tests.rs
+│   │   │   │   ├── cancel_queued.rs
 │   │   │   │   ├── clear_count_tests.rs
 │   │   │   │   ├── clear_end_tests.rs
 │   │   │   │   ├── clear_entry_tests.rs
@@ -2237,6 +2234,8 @@ src/
 │   │   │   └── turn_start.rs
 │   │   ├── runtime_bootstrap/
 │   │   │   ├── gateway_runtime/
+│   │   │   │   ├── slash_command_tests/
+│   │   │   │   │   └── cancel_queued_tests.rs
 │   │   │   │   ├── command_guard.rs
 │   │   │   │   └── slash_command_tests.rs
 │   │   │   ├── intake_delivery_sweep/

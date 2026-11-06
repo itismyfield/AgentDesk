@@ -1316,9 +1316,6 @@ async fn owner_cleanup_bundle_live_pin_and_withheld_seven_day_retention_pg() {
             .await
             .unwrap()
     );
-    if crate::services::cluster::intake_router_hook::owner_record::cleanup::tests::mutant("pin") {
-        sqlx::query("CREATE OR REPLACE FUNCTION intake_routing_bundle_pinned(bundle UUID) RETURNS BOOLEAN LANGUAGE SQL STABLE AS $$ SELECT EXISTS(SELECT 1 FROM intake_outbox d JOIN intake_outbox r ON r.id=d.routing_receipt_id WHERE d.routing_state IS NOT NULL AND r.replay_disposition<>'classified_normal' AND d.attachment_refs @> jsonb_build_array(jsonb_build_object('bundle_id',bundle::TEXT))) $$").execute(&pool).await.unwrap();
-    }
     let retained: bool = sqlx::query_scalar(
         "SELECT expires_at>=NOW()+INTERVAL '6 days' FROM intake_attachment_bundles WHERE id=$1",
     )

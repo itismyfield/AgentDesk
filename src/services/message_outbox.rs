@@ -780,20 +780,6 @@ pub(crate) async fn gc_stale_outbox_rows(pool: &PgPool) -> Result<(u64, u64, u64
             AND m.created_at < NOW() - INTERVAL '7 days'
             AND NOT EXISTS (SELECT 1 FROM intake_session_owners o
                              WHERE o.routing_notice_outbox_id = m.id)";
-    #[cfg(test)]
-    let failed = sqlx::AssertSqlSafe(
-        if crate::services::cluster::intake_router_hook::owner_record::cleanup::tests::mutant(
-            "gc-notice",
-        ) {
-            failed
-                .split("AND NOT EXISTS")
-                .next()
-                .unwrap_or(failed)
-                .to_owned()
-        } else {
-            failed.to_owned()
-        },
-    );
     let failed = sqlx::query(failed).execute(pool).await?.rows_affected();
     let sent = sqlx::query(
         "DELETE FROM message_outbox

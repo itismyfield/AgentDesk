@@ -163,14 +163,6 @@ pub(crate) async fn read_on_tx(
             Availability::Available
         };
     }
-    #[cfg(test)]
-    if super::cleanup::tests::mutant("fallback-unknown") {
-        for available in &mut availability {
-            if *available == Availability::Unknown {
-                *available = Availability::Unavailable;
-            }
-        }
-    }
     let proof = json!({"raw":data["raw"],"parent":data["parent"],"agents":data["agents"],
         "policy_channel":context.policy_channel,"auth_profile":context.auth_profile});
     Ok(Shared {

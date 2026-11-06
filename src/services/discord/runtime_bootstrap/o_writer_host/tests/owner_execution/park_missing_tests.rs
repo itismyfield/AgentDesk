@@ -107,6 +107,9 @@ async fn scenario(role: &str, cleanup_first: bool, superseded_first: bool, dorma
         "TMUX_TMPDIR",
         &root.path().canonicalize().unwrap(),
     );
+    // A tmux client prefers `TMUX` over `TMUX_TMPDIR`, so an inherited pane would expose the
+    // operator's sessions to the producer-absence probe and keep a missing source from parking.
+    let _pane = crate::config::TestEnvVarGuard::remove_after_shared_test_env_lock("TMUX");
     let channel = 78_450_001
         + match role {
             "worker" => 10,

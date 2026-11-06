@@ -111,8 +111,6 @@ fn claim(
     let mut bindings = Vec::new();
     for event in events {
         let companion = settled.contains(event.seq);
-        #[cfg(test)]
-        let companion = companion && !mutant("companion_unwired");
         if companion {
             continue;
         }
@@ -162,18 +160,6 @@ fn claim(
         )
     };
     let (binding_seq, binder_nonce) = (binding.seq, nonce.to_owned());
-    #[cfg(test)]
-    let binding_seq = if mutant("binder_seq") {
-        binder.seq
-    } else {
-        binding_seq
-    };
-    #[cfg(test)]
-    let binder_nonce = if mutant("hop_nonce") {
-        hop.execution_nonce.clone().unwrap_or_default()
-    } else {
-        binder_nonce
-    };
     Ok(RetentionClaimV1 {
         version: 1,
         provider: ShadowProvider::Codex,
@@ -214,8 +200,6 @@ pub(crate) fn historical(
         || old.host.as_deref() != Some(observed.target.host.as_str())
         || old.owner_runtime_root != observed.target.owner_runtime_root
         || !matches!(old.source_policy.as_deref(), Some("shadow" | "verified"));
-    #[cfg(test)]
-    let mismatch = mismatch && !mutant("historical_scope");
     if mismatch {
         return Err("codex_retention_old_context_not_local");
     }
@@ -228,11 +212,6 @@ pub(crate) fn historical(
     use sha2::{Digest, Sha256};
     let bytes = serde_json::to_vec(&old).map_err(|_| "codex_retention_old_context_unavailable")?;
     Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
-}
-
-#[cfg(test)]
-pub(crate) fn mutant(name: &str) -> bool {
-    std::env::var("AGENTDESK_BA_MUTANT").is_ok_and(|value| value == name)
 }
 
 #[cfg(all(test, unix))]

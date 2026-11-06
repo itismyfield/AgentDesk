@@ -228,7 +228,8 @@ async fn a_cancel_moves_only_the_input_it_names() {
         })
     };
     let before = retained().await.unwrap();
-    let cancelled = handle.v2_request(|s| Ok(cancel(s.as_mut().unwrap(), MessageId::new(20))));
+    let cancelled =
+        handle.v2_request(|s| Ok(cancel(s.as_mut().unwrap(), MessageId::new(20), false)));
     assert_eq!(
         cancelled.await.unwrap().removed.map(|r| r.message_id.get()),
         Some(20)
@@ -239,7 +240,8 @@ async fn a_cancel_moves_only_the_input_it_names() {
         "the unrelated input did not move"
     );
     assert_eq!(read(&handle, channel).await.0, Vec::<u64>::new());
-    let cancelled = handle.v2_request(|s| Ok(cancel(s.as_mut().unwrap(), MessageId::new(10))));
+    let cancelled =
+        handle.v2_request(|s| Ok(cancel(s.as_mut().unwrap(), MessageId::new(10), false)));
     assert_eq!(
         cancelled.await.unwrap().removed.map(|r| r.message_id.get()),
         Some(10)

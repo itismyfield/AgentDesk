@@ -97,11 +97,7 @@ pub(crate) async fn reserve_on_tx(
     else {
         return Ok(None);
     };
-    #[cfg(test)]
-    let skip_pointer = super::cleanup::tests::mutant("notice-pointer");
-    #[cfg(not(test))]
-    let skip_pointer = false;
-    if !skip_pointer && let Some(pointer) = pointer {
+    if let Some(pointer) = pointer {
         let event = event
             .ok_or_else(|| invalid("notice pointer has no event"))?
             .0;

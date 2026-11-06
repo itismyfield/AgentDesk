@@ -76,8 +76,8 @@ fn help_advertises_explicit_queue_cancellation_not_reaction_removal() {
     let messages =
         build_slash_help_messages(&ProviderKind::Claude, &run_bot_build_slash_commands());
     let body = messages.join("\n");
-    assert!(body.contains("`/cancel-queued <message_id>`"));
-    assert!(body.contains("`/queue` shows IDs"));
+    assert!(body.contains("`/cancel-queued [message_id]`"));
+    assert!(body.contains("omit the ID"));
     assert!(!body.contains("reaction remove"));
 }
 

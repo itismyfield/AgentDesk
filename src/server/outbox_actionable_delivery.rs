@@ -143,11 +143,6 @@ pub(super) async fn deliver(
     }
     let routing =
         row.source == crate::services::cluster::intake_router_hook::owner_record::event::SOURCE;
-    #[cfg(test)]
-    let routing = routing
-        && !crate::services::cluster::intake_router_hook::owner_record::cleanup::tests::mutant(
-            "notice-branch",
-        );
     if routing {
         return routing_notice::deliver(registry, pg_pool, row).await;
     }
@@ -209,18 +204,10 @@ pub(super) fn failure_action(
         }
     } else {
         let action = super::message_outbox_failure_action(row.retry_count);
-        #[cfg(test)]
-        let action_stays =
-            crate::services::cluster::intake_router_hook::owner_record::cleanup::tests::mutant(
-                "notice-retry",
-            );
-        #[cfg(not(test))]
-        let action_stays = false;
         match action {
             // A failed routing POST must resume while its stored nonce still deduplicates.
             super::MessageOutboxFailureAction::Retry { retry_count, .. }
-                if !action_stays
-                    && row.source
+                if row.source
                         == crate::services::cluster::intake_router_hook::owner_record::event::SOURCE =>
             {
                 super::MessageOutboxFailureAction::Retry {
