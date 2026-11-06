@@ -37,6 +37,9 @@ async fn reply_scenario(restart: bool, dormant: bool) {
         "TMUX_TMPDIR",
         &root.path().canonicalize().unwrap(),
     );
+    // A tmux client prefers `TMUX` over `TMUX_TMPDIR`, so an inherited pane would expose the
+    // operator's sessions to the producer-absence probe and keep a missing source from parking.
+    let _pane = crate::config::TestEnvVarGuard::remove_after_shared_test_env_lock("TMUX");
     let channel = 78_450_101 + u64::from(restart) + 100 * u64::from(dormant);
     let name = format!("park-reply-{channel}");
     let pane = ProviderKind::Claude.build_tmux_session_name(&name);
