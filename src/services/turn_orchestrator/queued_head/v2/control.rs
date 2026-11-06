@@ -204,6 +204,19 @@ fn requeued(owner: &mut Owner, pick: impl Fn(&RetainedInput) -> bool) -> Snapsho
 
 /// Takes only the cancelled original; an unrelated retained input stays where it is.
 fn cancel(owner: &mut Owner, message_id: MessageId) -> CancelQueuedMessageResult {
+    if owner
+        .cancelable_primary_counts()
+        .get(&message_id.get())
+        .is_some_and(|count| *count > 1)
+    {
+        return CancelQueuedMessageResult {
+            removed: None,
+            queue_exit_events: Vec::new(),
+            persistence_error: Some(
+                "모호한 ID: 취소 가능한 원본이 여러 개여서 단일 취소를 거절합니다.".into(),
+            ),
+        };
+    }
     let first = untried(owner);
     let named = |entry: &RetainedInput| {
         (entry.input.members()).any(|member| member.message_id == message_id.get())
@@ -309,8 +322,7 @@ pub(crate) struct ClearedWaiting {
 }
 
 impl Owner {
-    /// Reads only originals the existing single-cancel path can take.
-    pub(crate) fn cancelable(&self) -> Vec<(u64, u64, Option<u64>, String, bool)> {
+    fn cancelable_items(&self) -> impl Iterator<Item = (&PendingQueueItem, bool)> {
         let queued = self
             .snapshot
             .items
@@ -323,8 +335,22 @@ impl Owner {
             .iter()
             .filter(|entry| super::retained::requeueable(entry, &self.snapshot.terminal_identities))
             .flat_map(|entry| entry.input.members().map(|item| (item, true)));
-        queued
-            .chain(retained)
+        queued.chain(retained)
+    }
+
+    fn cancelable_primary_counts(&self) -> std::collections::BTreeMap<u64, usize> {
+        let mut counts = std::collections::BTreeMap::new();
+        for (item, _) in self.cancelable_items() {
+            *counts.entry(item.message_id).or_default() += 1;
+        }
+        counts
+    }
+
+    /// Counts all cancelable originals before text search can hide an ID collision.
+    pub(crate) fn cancelable(&self) -> Vec<(u64, u64, Option<u64>, String, bool)> {
+        let counts = self.cancelable_primary_counts();
+        self.cancelable_items()
+            .filter(|(item, _)| counts.get(&item.message_id) == Some(&1))
             .map(|(item, retained)| {
                 (
                     item.author_id,

@@ -709,21 +709,12 @@ pub(super) fn before_stop_cancel() {
     }
 }
 
-/// The decision as the stop branches on it; the mutant rebuilds it from a later token read.
+/// The decision as the stop branches on it.
 pub(super) fn after_stop_decision(decision: StopCancel) -> StopCancel {
-    use crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant;
     if let Some(hook) = AFTER_DECISION.with_borrow_mut(Option::take) {
         hook();
     }
-    match decision {
-        StopCancel::Herdr(token)
-            if herdr_interrupt_mutant("p2b_reread_cancelled")
-                && token.cancelled.load(Ordering::Acquire) =>
-        {
-            StopCancel::Published(token)
-        }
-        decision => decision,
-    }
+    decision
 }
 
 /// The ordering a user stop meets its Herdr turn's prepare in.

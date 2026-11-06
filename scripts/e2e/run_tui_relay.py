@@ -1254,7 +1254,8 @@ def reset_channel_state(
 ) -> dict[str, Any]:
     summary: dict[str, Any] = {"channel_id": channel_id, "status": "fail", "actions": []}
     try:
-        _, health = _read_api_json(base_url, "/api/health")
+        # Only the detail endpoint carries the Herdr block; the public one never does.
+        _, health = _read_api_json(base_url, "/api/health/detail")
         hosts = health.get("herdr") if isinstance(health, dict) else None
         preserve = channel_reset.preserve_herdr_session(
             channel_id=channel_id,

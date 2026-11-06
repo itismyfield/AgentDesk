@@ -32,6 +32,10 @@ Left out: Codex (4f §4 leaf has the same read-before-key shape), cold Bootstrap
 
 사용자가 비운 보관 입력은 비우기 응답이 안내를 대신한다. 시도 중 head는 범위 밖이다.
 
+`InputCancelSelection` models selection separately: queued and requeueable retained originals share one primary count before text search; protected heads are excluded. `NoAmbiguousOffer` and `NoAmbiguousExecution` require every exposed or cancelled original's primary to name exactly one eligible original in that operation's snapshot. Distinct primaries remain selectable. Disabling the guard breaks both invariants, including queued/retained collisions and direct ID submission. Delivery, ownership and wake rules in `InputPath` are unchanged.
+
+TLC checked 12,672 distinct states (272,449 generated) with both invariants holding. The ambiguity mutant violates both invariants; `scripts/ci/statecharts_tlc.py` confirmed the exact expected violation set (one clean run, three mutant runs, under five seconds total).
+
 ## Rules
 
 1. `NoDuplicate`: no input reaches Claude twice.

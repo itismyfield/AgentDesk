@@ -18,6 +18,8 @@ struct Rig {
     replies: Arc<std::sync::Mutex<Vec<Value>>>,
     writes: Arc<std::sync::Mutex<Vec<String>>>,
     messages: Arc<std::sync::Mutex<Vec<Value>>>,
+    edits: Arc<std::sync::Mutex<Vec<(String, Value)>>>,
+    mock: discord_mock::DiscordMockState,
     url: String,
     payload: Value,
     age_ms: u64,
@@ -50,13 +52,15 @@ impl Rig {
         } else {
             mock.name_channel(discord_mock::CHANNEL_ID, name);
         }
-        let (backend, gateway, server) = discord_mock::start(mock).await;
+        let (backend, gateway, server) = discord_mock::start(mock.clone()).await;
         let replies = Arc::new(std::sync::Mutex::new(Vec::new()));
         let recorded = replies.clone();
         let writes = Arc::new(std::sync::Mutex::new(Vec::new()));
         let extra_writes = writes.clone();
         let messages = Arc::new(std::sync::Mutex::new(Vec::new()));
         let extra_messages = messages.clone();
+        let edits = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let extra_edits = edits.clone();
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let app = axum::Router::new()
             .route(
@@ -74,8 +78,10 @@ impl Rig {
                 let backend = backend.clone();
                 let extra_writes = extra_writes.clone();
                 let extra_messages = extra_messages.clone();
+                let extra_edits = extra_edits.clone();
                 async move {
                     let method = request.method().clone();
+                    let uri = request.uri().to_string();
                     if method != axum::http::Method::GET {
                         extra_writes
                             .lock()
@@ -100,6 +106,9 @@ impl Rig {
                         && let Ok(message) = serde_json::from_slice::<Value>(&body)
                     {
                         extra_messages.lock().unwrap().push(message.clone());
+                        if method == axum::http::Method::PATCH {
+                            extra_edits.lock().unwrap().push((uri, message.clone()));
+                        }
                         if request_uri_is_webhook(&url) {
                             return (
                                 axum::http::StatusCode::OK,
@@ -143,6 +152,8 @@ impl Rig {
             replies,
             writes,
             messages,
+            edits,
+            mock,
             url: format!("http://{address}"),
             payload,
             age_ms: network.age_ms,

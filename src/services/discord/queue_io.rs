@@ -205,8 +205,15 @@ pub(in crate::services::discord) async fn mailbox_cancel_all_waiting(
                     CancelledInput {
                         author: original.map_or(0, |i| i.author_id.get()),
                         id: id.get(),
-                        text: original
-                            .map_or_else(|| "전달 직전 입력(본문 없음)".into(), |i| i.text.clone()),
+                        text: original.map_or_else(
+                            || "전달 직전 입력(본문 없음)".into(),
+                            |i| {
+                                i.source_text_segments()
+                                    .into_iter()
+                                    .find(|segment| segment.message_id == id)
+                                    .map_or_else(|| i.text.clone(), |segment| segment.text)
+                            },
+                        ),
                     }
                 })
                 .collect();

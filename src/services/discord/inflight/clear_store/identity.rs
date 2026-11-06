@@ -29,9 +29,7 @@ pub(in crate::services::discord) fn clear_inflight_state_if_matches_identity_ret
     let Ok(data) = fs::read_to_string(&path) else {
         return (GuardedClearOutcome::Missing, None);
     };
-    if super::super::raw_before_start_receipt(&data)
-        && !super::super::receipt_mutant("identity-clear")
-    {
+    if super::super::raw_before_start_receipt(&data) {
         return (GuardedClearOutcome::IoError, None);
     }
     let Ok(state) = serde_json::from_str::<InflightTurnState>(&data) else {
@@ -101,7 +99,7 @@ fn remove_identity_matched_state(
     state: InflightTurnState,
     reason: &'static str,
 ) -> (GuardedClearOutcome, Option<InflightTurnState>) {
-    if receipt_protected_path(path) && !receipt_mutant("identity-clear") {
+    if receipt_protected_path(path) {
         return (GuardedClearOutcome::IoError, None);
     }
     remove_identity_matched_state_unchecked(path, provider, channel_id, expected, state, reason)
@@ -168,9 +166,7 @@ fn clear_inflight_state_if_matches_identity_turn_nonce_impl_in_root(
     let Ok(data) = super::snapshot::read_row(provider, channel_id, &path) else {
         return ReconcileClearOutcome::Delegated(GuardedClearOutcome::Missing);
     };
-    if super::super::raw_before_start_receipt(&data)
-        && !super::super::receipt_mutant("identity-clear")
-    {
+    if super::super::raw_before_start_receipt(&data) {
         return ReconcileClearOutcome::Delegated(GuardedClearOutcome::IoError);
     }
     let Ok(state) = super::snapshot::parse_row(provider, channel_id, &data) else {
@@ -470,9 +466,7 @@ fn clear_rebind_origin_inflight_state_if_matches_identity_impl_in_root(
     let Ok(data) = fs::read_to_string(&path) else {
         return ReconcileClearOutcome::Delegated(GuardedClearOutcome::Missing);
     };
-    if super::super::raw_before_start_receipt(&data)
-        && !super::super::receipt_mutant("identity-clear")
-    {
+    if super::super::raw_before_start_receipt(&data) {
         return ReconcileClearOutcome::Delegated(GuardedClearOutcome::IoError);
     }
     let Ok(state) = serde_json::from_str::<InflightTurnState>(&data) else {

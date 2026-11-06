@@ -64,7 +64,7 @@ impl InflightDeleteRequest<'_> {
             let Ok(_lock) = lock_inflight_state_path(&path) else {
                 break 'decision InflightDeleteOutcome::Failed;
             };
-            if receipt_protected_path(&path) && !receipt_mutant("delete") {
+            if receipt_protected_path(&path) {
                 break 'decision InflightDeleteOutcome::ProtectedReceipt;
             }
             if handoff_before_discard_locked(&_lock).is_err() {

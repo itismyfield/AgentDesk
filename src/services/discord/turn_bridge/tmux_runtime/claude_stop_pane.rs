@@ -3,9 +3,7 @@
 use crate::services::tmux_common as screen;
 
 pub(super) fn foreground_tool_running(pane: &str) -> bool {
-    if mutant("foreground_off")
-        || !screen::tmux_capture_indicates_claude_tui_exact_empty_composer(pane)
-    {
+    if !screen::tmux_capture_indicates_claude_tui_exact_empty_composer(pane) {
         return false;
     }
     let lines: Vec<_> = pane
@@ -56,8 +54,6 @@ pub(super) fn veto(pane: &str) -> bool {
     screen::tmux_capture_indicates_claude_tui_prompt_draft(pane)
         || screen::tmux_capture_indicates_claude_tui_interactive_modal(pane)
 }
-
-pub(super) use crate::services::provider::native_stop::mutant;
 
 pub(super) fn legacy_evidence(pane: &str) -> (bool, bool, bool) {
     use crate::services::tmux_common as screen;

@@ -331,9 +331,7 @@ async fn finalize_abandoned_mailbox_admitted(
     sweep_started_before: std::time::Instant,
     evidence: AbandonedCleanupEvidence,
 ) -> AbandonedTmuxCleanupOutcome {
-    if super::super::inflight::before_start_receipt_present(provider, state.channel_id)
-        && !super::super::inflight::receipt_mutant("placeholder")
-    {
+    if super::super::inflight::before_start_receipt_present(provider, state.channel_id) {
         return AbandonedTmuxCleanupOutcome {
             decision: AbandonedTmuxCleanupDecision::PreserveRetry,
             state_delete_authorized: false,

@@ -62,6 +62,84 @@ async fn enqueue(handle: &ChannelMailboxHandle, ids: &[u64]) {
             .unwrap();
     }
 }
+async fn ambiguous(data: &Data, retained: bool) -> ChannelMailboxHandle {
+    let (handle, _) = empty_owner(data).await;
+    for text in ["alpha", "beta"] {
+        let mut original = item(S);
+        original.text = text.into();
+        handle
+            .v2_admit_ticket_with_context(
+                original,
+                format!("ticket-{text}"),
+                json!({"origin":"headless","metadata":{"human_input":{"origin_id":text}}}),
+            )
+            .await
+            .unwrap();
+        if retained && text == "alpha" {
+            handle.v2_request(|s| {
+                let o = s.as_mut().unwrap();
+                let key = o.reserve(serde_json::from_value(attempt(S)).unwrap(),
+                    serde_json::from_value(payload(vec![])).unwrap())?;
+                drop(o.arm(&key, 0)?);
+                    let mut input = o.snapshot.head_injection.take().unwrap();
+                    input.phase = serde_json::from_value(json!("reserved")).unwrap();
+                o.snapshot.items.clear();
+                o.snapshot.retained_inputs.push(serde_json::from_value(json!({"input":input,
+                    "reason":{"kind":"rejected","reason":"known_not_sent: synthetic_waits_idle"},
+                    "disposition":"known_not_sent","notice":{"kind":"retained_retry_required","enqueued":false}}))
+                    .map_err(|e|e.to_string())?);
+                o.tick(0)
+            }).await.unwrap();
+        }
+    }
+    enqueue(&handle, &[C]).await;
+    handle
+}
+async fn ambiguous_choice(retained: bool) {
+    let rig = Rig::new().await;
+    let data = authorized().await;
+    let handle = ambiguous(&data, retained).await;
+    let before = snapshot(&handle).await;
+    let choices = rig
+        .invoke(&data, "cancel-queued", Some(("message_id", "beta")))
+        .await;
+    assert_eq!(choices["choices"], json!([]), "{choices}");
+    let all = rig
+        .invoke(&data, "cancel-queued", Some(("message_id", "")))
+        .await;
+    assert_eq!(all["choices"].as_array().unwrap().len(), 1, "{all}");
+    assert_eq!(all["choices"][0]["value"], C.to_string());
+    assert_eq!(snapshot(&handle).await, before);
+}
+async fn ambiguous_cancel(retained: bool) {
+    let rig = Rig::new().await;
+    let data = authorized().await;
+    let handle = ambiguous(&data, retained).await;
+    let before = snapshot(&handle).await;
+    let reply = content(&rig.invoke_cancel(&data, Some(&S.to_string())).await);
+    assert!(reply.contains("모호") && reply.contains("원본"), "{reply}");
+    assert_eq!(
+        snapshot(&handle).await,
+        before,
+        "both originals must survive"
+    );
+}
+#[test]
+fn cancel_queued_p2_1_queued_choices_reject_ambiguous_primary() {
+    isolated(ambiguous_choice(false));
+}
+#[test]
+fn cancel_queued_p2_1_retained_choices_reject_ambiguous_primary() {
+    isolated(ambiguous_choice(true));
+}
+#[test]
+fn cancel_queued_p2_1_queued_direct_cancel_preserves_both_originals() {
+    isolated(ambiguous_cancel(false));
+}
+#[test]
+fn cancel_queued_p2_1_retained_direct_cancel_preserves_both_originals() {
+    isolated(ambiguous_cancel(true));
+}
 async fn seeded(data: &Data) -> (ChannelMailboxHandle, PathBuf) {
     let (handle, path) = empty_owner(data).await;
     for id in [D, E, 700, 800, 900, 1000] {
@@ -371,12 +449,64 @@ fn cancel_queued_t7_clear_retained_is_durable_quiet_and_preserves_evidence() {
         let data = authorized().await;
         let (handle, path) = seeded(&data).await;
         let before = snapshot(&handle).await;
+        let card = serenity::MessageId::new(7678007);
+        let legacy_card = serenity::MessageId::new(7678008);
+        rig.mock.seed_message(card.get(), "📬 메시지 대기 중");
+        rig.mock.seed_message(
+            legacy_card.get(),
+            "🚫 **큐에서 제거됨** — 사용자 취소로 처리되지 않습니다.",
+        );
+        let lock = data.shared.queued_placeholders_persist_lock(channel());
+        let guard = lock.lock().await;
+        data.shared
+            .insert_queued_placeholder_locked(channel(), serenity::MessageId::new(E), card);
+        data.shared.insert_queued_placeholder_locked(
+            channel(),
+            serenity::MessageId::new(D),
+            legacy_card,
+        );
+        drop(guard);
         let result = rig.invoke_cancel(&data, None).await;
         let reply = content(&result);
         assert!(
             reply.contains("9개") && reply.contains("앞부분") && reply.contains("유지 1"),
             "{result}"
         );
+        assert!(reply.contains("불확정"), "{reply}");
+        {
+            let edits = rig.edits.lock().unwrap();
+            let (_, body) = edits
+                .iter()
+                .find(|(uri, _)| uri.ends_with(&format!("/messages/{card}")))
+                .expect("the Unconfirmed input's placeholder must be edited");
+            let body = body["content"].as_str().unwrap();
+            assert!(
+                body.contains("사용자 요청으로 대기 목록에서 제외했습니다."),
+                "{body}"
+            );
+            assert!(!body.contains("처리되지 않습니다"), "{body}");
+            assert!(
+                edits.iter().any(
+                    |(uri, body)| uri.ends_with(&format!("/messages/{legacy_card}"))
+                        && body["content"]
+                            .as_str()
+                            .unwrap()
+                            .contains("사용자 요청으로 대기 목록에서 제외했습니다.")
+                ),
+                "legacy card must still be cleared"
+            );
+            // Both wordings remain terminal cards for the sweeper.
+            for terminal in [
+                body,
+                "🚫 **큐에서 제거됨** — 사용자 취소로 처리되지 않습니다.",
+            ] {
+                assert!(
+                    !crate::services::discord::placeholder_sweeper::is_message_still_placeholder(
+                        terminal
+                    )
+                );
+            }
+        }
         let state = snapshot(&handle).await;
         assert_eq!(ids(&state), [A]);
         assert_eq!(state["head_injection"], before["head_injection"]);
@@ -470,9 +600,37 @@ fn cancel_queued_t8_v1_no_argument_reports_excerpts() {
     isolated(async {
         let rig = Rig::new().await;
         let data = authorized().await;
-        let handle = seed_v1(&data, &[B, C]).await;
+        let handle = data.shared.mailbox(channel());
+        for (id, text) in [
+            (A, format!("알파 원본 {}", "가".repeat(120))),
+            (B, "베타 원본 고유 본문".into()),
+        ] {
+            let mut original = item(id);
+            original.text = text;
+            let intervention =
+                pending_queue_item_to_intervention(original, SystemTime::now(), Instant::now());
+            assert!(
+                handle
+                    .enqueue(
+                        intervention,
+                        queue_persistence_context(&data.shared, &data.provider, channel())
+                    )
+                    .await
+                    .enqueued
+            );
+        }
+        let queued = handle.snapshot().await.intervention_queue;
+        assert_eq!(queued.len(), 1, "fixture must actually merge");
+        assert_eq!(queued[0].source_message_ids.len(), 2);
         let reply = content(&rig.invoke_cancel(&data, None).await);
-        assert!(reply.contains("2개") && reply.contains("앞부분"), "{reply}");
+        assert!(reply.contains("2개"), "{reply}");
+        for (id, text) in [(A, "알파 원본"), (B, "베타 원본 고유 본문")] {
+            let line = reply
+                .lines()
+                .find(|line| line.contains(&id.to_string()))
+                .expect("source ID line");
+            assert!(line.contains(text), "{line}");
+        }
         assert!(handle.snapshot().await.intervention_queue.is_empty());
     });
 }
@@ -627,11 +785,15 @@ fn cancel_queued_t12_clear_keeps_active_token_and_held_watch_cannot_restart() {
                 Box::pin(async { Ok(()) })
             }),
         });
+        let (cleared, wait_for_clear) = std::sync::mpsc::sync_channel(1);
         input_owner::held_watch::arm(
             channel().get(),
-            Box::new(|| crate::services::claude_tui::busy_inject::Screen::Ready),
+            Box::new(move || {
+                wait_for_clear.recv_timeout(Duration::from_secs(5)).unwrap();
+                crate::services::claude_tui::busy_inject::Screen::Ready
+            }),
         );
-        input_owner::held_watch::watch(drive, S);
+        let (generation, completed) = input_owner::held_watch::watch_observed(drive, S);
         assert!(content(&Rig::new().await.invoke_cancel(&data, None).await).contains("1개"));
         assert!(
             handle
@@ -642,7 +804,13 @@ fn cancel_queued_t12_clear_keeps_active_token_and_held_watch_cannot_restart() {
                 .is_some_and(|t| Arc::ptr_eq(t, &v2_token))
         );
         assert!(!v2_token.cancelled.load(std::sync::atomic::Ordering::SeqCst));
-        tokio::time::sleep(Duration::from_millis(2200)).await;
+        cleared.send(()).unwrap();
+        let observation = tokio::time::timeout(Duration::from_secs(5), completed)
+            .await
+            .expect("watcher verdict completion timed out")
+            .expect("watcher completion closed");
+        assert_eq!(observation.generation, generation);
+        assert_eq!(observation.verdict, input_owner::held_watch::Verdict::End);
         assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 0);
     });
 }
