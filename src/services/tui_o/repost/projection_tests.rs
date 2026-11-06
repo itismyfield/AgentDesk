@@ -311,7 +311,10 @@ async fn d4d_receipted_approval_is_never_owed_pg() {
         watch::channel(None).0,
         owing,
     );
-    let config = WriterConfig { enabled: true };
+    let config = WriterConfig {
+        enabled: true,
+        ..Default::default()
+    };
     let provider = ShadowProvider::Claude;
     let task = spawn_projecting(&config, None, writer, provider, bindings, watches).unwrap();
     until(|| projection.borrow().is_some()).await;

@@ -1,6 +1,10 @@
 use super::*;
 use crate::services::tui_o::cutover::intake_route::{IntakeRoute, for_input_placement};
 
+#[cfg(unix)]
+#[path = "park_missing_tests.rs"]
+mod park_missing_tests;
+
 async fn closed_pool() -> sqlx::PgPool {
     let pool = sqlx::PgPool::connect_lazy("postgres://invalid@127.0.0.1:1/unused").unwrap();
     pool.close().await;

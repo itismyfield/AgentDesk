@@ -281,7 +281,10 @@ async fn resume_older_native_header(delayed_descriptor: bool, prior_execution: b
     let (_command_port, receiver) = actor::codex_submission::Port::new(1);
     let task = actor::codex_submission::spawning(receiver, || {
         actor::spawn_projecting(
-            &WriterConfig { enabled: true },
+            &WriterConfig {
+                enabled: true,
+                ..Default::default()
+            },
             None,
             writer,
             ShadowProvider::Codex,
@@ -464,7 +467,10 @@ async fn source_read_unknown_hook_posts_and_follows_descriptor_compact_resume() 
     let (_command_port, receiver) = actor::codex_submission::Port::new(1);
     let task = actor::codex_submission::spawning(receiver, || {
         actor::spawn_projecting(
-            &WriterConfig { enabled: true },
+            &WriterConfig {
+                enabled: true,
+                ..Default::default()
+            },
             None,
             writer,
             ShadowProvider::Codex,
@@ -654,7 +660,10 @@ async fn source_read_wrong_nonce_or_uuid_never_posts_newer_same_cwd_source() {
     let (writer, port) = owed_writer(opened);
     let (stop, stopped) = watch::channel(false);
     let task = actor::spawn_if_enabled(
-        &WriterConfig { enabled: true },
+        &WriterConfig {
+            enabled: true,
+            ..Default::default()
+        },
         writer,
         ShadowProvider::Codex,
         Arc::new(f.log()),
@@ -677,7 +686,10 @@ async fn source_read_late_missing_descriptor_hook_preserves_marker_proof_cursor(
     let (writer, port) = owed_writer(opened);
     let (stop, stopped) = watch::channel(false);
     let task = actor::spawn_if_enabled(
-        &WriterConfig { enabled: true },
+        &WriterConfig {
+            enabled: true,
+            ..Default::default()
+        },
         writer,
         ShadowProvider::Codex,
         Arc::new(f.log()),

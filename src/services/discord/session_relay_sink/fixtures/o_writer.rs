@@ -176,7 +176,10 @@ impl WriterFixture {
         let (gate, port, alarms) = (self.gate.clone(), self.port.clone(), self.alarms.clone());
         let writer = ChannelWriter::new(self.channel(), gate, port, FakeLease, alarms);
         let bindings = Arc::clone(&self.binding);
-        let config = WriterConfig { enabled: true };
+        let config = WriterConfig {
+            enabled: true,
+            ..Default::default()
+        };
         let resumed = watch::channel(false).0;
         let spawned =
             actor::spawn_if_enabled(&config, writer, self.provider, bindings, stopped, resumed);

@@ -46,6 +46,11 @@ impl Scene {
         let hosts = hosted(&harness, &io, true, &ready);
         polls(3).await;
         assert!(ready.accepts(CHANNEL), "the boot actor is up");
+        assert_eq!(
+            std::mem::take(&mut *io.alarms.1.lock().unwrap()),
+            [(CHANNEL, "cleared")],
+            "boot clears stale halt once before this recovery scenario begins"
+        );
         Self {
             harness,
             path,

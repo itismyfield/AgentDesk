@@ -65,7 +65,7 @@ pub struct Undelivered {
     pub prepared: usize,
     /// Announced units whose sealing record is still to come.
     pub unsealed: usize,
-    /// Sources not retired whose spooled cursor is behind the file's length.
+    /// Active sources whose spooled cursor is behind the file's length.
     pub uncaptured: usize,
     /// Binds past the checkpoint not applied yet, and sources whose start waits on an operator.
     pub binding_pending: usize,
@@ -75,7 +75,7 @@ pub struct Undelivered {
     pub verified_work: usize,
     /// The channel's POSTs started and not ended.
     pub posting: usize,
-    /// Each unretired source's path and how far its bytes are captured.
+    /// Each unretired, unparked source's path and how far its bytes are captured.
     pub captured: Vec<(std::path::PathBuf, u64)>,
 }
 
@@ -167,7 +167,7 @@ where
             bindings,
             (stop, resumed),
             projections,
-            (None, readers),
+            (None, readers, config.producer_absent),
             (commands, transitions),
         ))
     };
@@ -238,7 +238,7 @@ where
         bindings,
         (stop, resumed),
         projections,
-        (None, None),
+        (None, None, false),
         (None, None),
     )
     .await
@@ -251,7 +251,11 @@ async fn run_publishing<P, L, A, B>(
     bindings: Arc<B>,
     (mut stop, resumed): (watch::Receiver<bool>, watch::Sender<bool>),
     (unsettled, owing): (Unsettled, Owing),
-    (utc, readers): (Option<chrono::DateTime<chrono::Utc>>, Option<ReaderConfig>),
+    (utc, readers, producer_absent): (
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<ReaderConfig>,
+        bool,
+    ),
     (mut commands, transitions): (
         Option<codex_submission::Receiver>,
         Option<transition_port::Receiver>,
@@ -267,7 +271,8 @@ where
     let deriver =
         fresh_resume::configured_deriver(writer.channel(), provider, writer.store().ledger());
     let mut sources = Sources::new(writer.channel(), provider, Arc::clone(&bindings))
-        .with_suspension(writer.suspension.clone());
+        .with_suspension(writer.suspension.clone())
+        .with_producer_absent(producer_absent);
     if let Some(readers) = readers {
         sources = sources.with_readers(readers);
     }
@@ -340,6 +345,7 @@ where
                 Some(log) => actor.sources.resume(writer, deriver, log),
                 None => actor.sources.resume(writer, deriver, &mut actor.owed),
             };
+            let restored = restored.and_then(|()| actor.sources.follow(&mut actor.writer));
             if let Err(alarm) = restored {
                 actor.writer.stop(alarm);
             }
@@ -354,7 +360,10 @@ where
                 actor.boot_previous_nonce = None;
                 actor.project_operator_resumes();
                 fresh = actor.persist_notice_evidence();
-                resumed.send_replace(true);
+                if !actor.writer.is_stopped() {
+                    actor.writer.halt_cleared();
+                    resumed.send_replace(true);
+                }
             }
         }
         actor.prepare_notices(&fresh).await;
@@ -468,7 +477,7 @@ where
         bindings,
         (stop, watch::channel(false).0),
         (watch::channel(None).0, Owing::default()),
-        (Some(utc), None),
+        (Some(utc), None, false),
         (None, None),
     )
     .await
@@ -814,7 +823,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         let checkpoint = store.binding_checkpoint().ok()?;
         let mut uncaptured = 0;
         let mut captured = Vec::new();
-        for cursor in store.cursors().filter(|cursor| !cursor.retired) {
+        for cursor in store
+            .cursors()
+            .filter(|cursor| !cursor.retired && !self.sources.is_parked(&cursor.source))
+        {
             let len = std::fs::metadata(&cursor.source.path).ok()?.len();
             uncaptured += usize::from(cursor.captured_through < len);
             let through = match crate::services::tui_o::turn_mode::carried_close_mutant("producer")

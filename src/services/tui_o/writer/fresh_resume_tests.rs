@@ -1007,7 +1007,10 @@ async fn selection_install_fault(after_rename: bool) {
     let transition = transition.with_suspension(selection.clone());
     let actor = transition_port::spawning(receiver, || {
         spawn_if_enabled(
-            &crate::services::tui_o::writer::WriterConfig { enabled: true },
+            &crate::services::tui_o::writer::WriterConfig {
+                enabled: true,
+                ..Default::default()
+            },
             writer,
             ShadowProvider::Codex,
             Arc::new(ChannelBindingLog::new(
