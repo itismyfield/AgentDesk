@@ -679,9 +679,6 @@ async fn reset_broken_auto_queue_entries_pg(pool: &PgPool) -> Result<usize> {
                       OR (td.status = 'completed' AND td.dispatch_type IN ('implementation', 'rework')))
              )
            )";
-    #[cfg(test)]
-    let sql =
-        sqlx::AssertSqlSafe(dispatch_delivery_reconcile_tests::mutate_queue_recovery_sql(sql));
     let reset = sqlx::query(sql).execute(pool).await?.rows_affected() as usize;
 
     Ok(terminalized + reset)
@@ -738,9 +735,6 @@ async fn missing_review_dispatch_candidates_pg(
            )
          ORDER BY CASE WHEN $1 THEN c.id END
          LIMIT CASE WHEN $1 THEN $3::BIGINT END";
-    #[cfg(test)]
-    let sql =
-        sqlx::AssertSqlSafe(dispatch_delivery_reconcile_tests::mutate_queue_recovery_sql(sql));
     sqlx::query_as(sql)
         .bind(only_dispatched_queue)
         .bind(AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_GRACE.as_secs() as i64)
@@ -930,52 +924,8 @@ async fn active_review_dispatch_exists_pg(pool: &PgPool, card_id: &str) -> Resul
 }
 
 #[cfg(test)]
-pub(crate) use dispatch_delivery_reconcile_tests::queue_recovery_mutant_is;
-
-#[cfg(test)]
 mod dispatch_delivery_reconcile_tests {
     use super::*;
-
-    pub(crate) fn queue_recovery_mutant_is(name: &str) -> bool {
-        std::env::var("AGENTDESK_TEST_QUEUE_RECOVERY_MUTANT").as_deref() == Ok(name)
-    }
-
-    pub(super) fn mutate_queue_recovery_sql(sql: &str) -> String {
-        let mut query = sql.to_string();
-        for (mode, from, to) in [
-            (
-                "issued_review",
-                "AND COALESCE(rv.created_at, 'infinity'::timestamptz) >=",
-                "AND FALSE AND COALESCE(rv.created_at, 'infinity'::timestamptz) >=",
-            ),
-            (
-                "batch_unbounded",
-                "LIMIT CASE WHEN $1 THEN $3::BIGINT END",
-                "LIMIT CASE WHEN $1 THEN NULLIF($3::BIGINT, $3::BIGINT) END",
-            ),
-            (
-                "manual_wait",
-                "AND (NOT $1 OR COALESCE(c.review_status, 'reviewing') = 'reviewing')",
-                "AND TRUE",
-            ),
-            (
-                "drop_impl_preservation",
-                "OR (td.status = 'completed' AND td.dispatch_type IN ('implementation', 'rework'))",
-                "",
-            ),
-            (
-                "preserve_all_completed",
-                "td.status NOT IN ('cancelled', 'failed', 'completed')",
-                "td.status NOT IN ('cancelled', 'failed')",
-            ),
-        ] {
-            if queue_recovery_mutant_is(mode) && query.contains(from) {
-                query = query.replace(from, to);
-                eprintln!("MUTANT_APPLIED={mode}");
-            }
-        }
-        query
-    }
 
     use std::{
         io::{self, Write},

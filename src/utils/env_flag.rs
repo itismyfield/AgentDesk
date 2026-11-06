@@ -20,10 +20,6 @@ pub(crate) fn read_env_flag(name: &str, default: bool) -> (bool, bool) {
 }
 
 pub(super) fn parse_value(name: &str, value: &str, default: bool) -> bool {
-    #[cfg(test)]
-    if tests::parser_bypassed() {
-        return default;
-    }
     match value.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => true,
         "0" | "false" | "no" | "off" => false,
@@ -54,10 +50,6 @@ mod tests {
     use super::*;
     use std::io::{self, Write};
     use std::sync::Arc;
-
-    pub(super) fn parser_bypassed() -> bool {
-        std::env::var("ADK_ENV_FLAG_MUTANT").as_deref() == Ok("default_only")
-    }
 
     #[test]
     fn env_flag_contract_table() {

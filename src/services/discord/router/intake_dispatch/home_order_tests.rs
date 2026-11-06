@@ -189,7 +189,6 @@ mod source_forwarding_tests {
         let _env = EnforceEnv::new();
         let fixture = TestPostgresDb::create().await;
         let pool = fixture.connect_and_migrate().await;
-        crate::db::replay_disposition::tests::apply_test_mutant(&pool).await;
         seed(&pool).await;
         let shared =
             crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
@@ -345,7 +344,6 @@ mod source_forwarding_tests {
         let _env = EnforceEnv::new();
         let fixture = TestPostgresDb::create().await;
         let pool = fixture.connect_and_migrate().await;
-        crate::db::replay_disposition::tests::apply_test_mutant(&pool).await;
         seed(&pool).await;
         let shared =
             crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
@@ -457,7 +455,6 @@ async fn dormant_owner_admission_primitive_preserves_full_sources_without_receip
     let _env = EnforceEnv::new();
     let fixture = TestPostgresDb::create().await;
     let pool = fixture.connect_and_migrate().await;
-    crate::db::replay_disposition::tests::apply_test_mutant(&pool).await;
     seed(&pool).await;
     let representative = OTHER * 100 + 62;
     let sources = vec![(representative - 1).to_string(), representative.to_string()];

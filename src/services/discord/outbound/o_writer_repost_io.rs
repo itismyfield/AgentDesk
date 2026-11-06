@@ -209,10 +209,6 @@ impl BoundedTransport for RepostHttp {
             {
                 Ok(hold) => hold,
                 Err(error) => {
-                    #[cfg(test)]
-                    if crate::services::tui_o::ownership::execution::tests::mutant("repost-class") {
-                        return WireOutcome::Unsent(error.to_string());
-                    }
                     return WireOutcome::Withheld(error.to_string());
                 }
             };
