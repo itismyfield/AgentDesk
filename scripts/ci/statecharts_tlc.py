@@ -336,8 +336,8 @@ def expected_rows(text: str) -> dict[str, str]:
 
 def module_dependencies(text: str) -> set[str]:
     """Read EXTENDS lists and INSTANCE names, excluding strings and nested comments."""
-    token = re.compile(r'\\\*[^\n]*|\(\*|"(?:[^"\\]|\\.)*"|[A-Za-z_][A-Za-z0-9_]*|\S')
-    word = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+    token = re.compile(r'\\\*[^\n]*|\(\*|"(?:[^"\\]|\\.)*"|[A-Za-z0-9_]+|\S')
+    word = re.compile(r"[A-Za-z0-9_]+\Z")
     tokens, pos = [], 0
     while match := token.search(text, pos):
         value, pos = match.group(), match.end()

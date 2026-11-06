@@ -439,6 +439,13 @@ class SelectionTest(unittest.TestCase):
         self.write("a/Bridge.tla", "---- MODULE Bridge ----\nEXTENDS First\n====\n")
         self.assertEqual(self.select("docs/statecharts/a/Bridge.tla"), ["a/First.cfg", "a/Variant.cfg"])
 
+    def test_module_names_can_start_with_digits(self) -> None:
+        self.write("shared/1Shared.tla", "---- MODULE 1Shared ----\n====\n")
+        self.write("a/First.tla", "---- MODULE First ----\nEXTENDS 1Shared\n====\n")
+        self.write("b/Second.tla", "---- MODULE Second ----\nS == INSTANCE 1Shared\n====\n")
+        self.assertEqual(self.select("docs/statecharts/shared/1Shared.tla"),
+                         ["a/First.cfg", "a/Variant.cfg", "b/Second.cfg"])
+
     def test_local_module_takes_precedence_over_same_name_in_another_folder(self) -> None:
         self.write("c/Shared.tla", "---- MODULE Shared ----\n====\n")
         self.write("c/Other.tla", "---- MODULE Other ----\nEXTENDS Shared\n====\n")
