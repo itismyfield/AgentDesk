@@ -471,6 +471,11 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(self.select("README.md", "docs/statecharts/a/report.md"), [])
         self.assertEqual(self.select(), [])
 
+    def test_full_selection_keeps_the_cfg_file_boundary(self) -> None:
+        self.write("notes.txt", "not a config\n")
+        expected = dict(self.expected, **{"notes.txt": ("Other", set())})
+        self.assertEqual(tlc.select_configs(self.root, expected, None), sorted(self.expected))
+
     def test_deleted_shared_module_still_selects_its_consumers(self) -> None:
         (self.root / "shared/Shared.tla").unlink()
         self.assertEqual(self.select("docs/statecharts/shared/Shared.tla"),

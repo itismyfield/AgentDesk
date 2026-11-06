@@ -368,7 +368,7 @@ def select_configs(root: Path, expected: dict[str, tuple[str, set[str]]],
                    changed_paths: list[str] | None,
                    previous_expected: dict[str, str] | None = None) -> list[str]:
     """Select existing configs from repository-relative changed paths; None means all."""
-    configs = {cfg for cfg in expected if (root / cfg).is_file()}
+    configs = {path.relative_to(root).as_posix() for path in root.rglob("*.cfg")} & set(expected)
     if changed_paths is None or CHECKER_PATHS.intersection(changed_paths):
         return sorted(configs)
     changed = set()
