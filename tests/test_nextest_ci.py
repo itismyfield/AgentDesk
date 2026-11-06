@@ -932,11 +932,15 @@ class ScriptRepo(Fixture):
     """A git checkout holding the CI scripts, with gh and cargo stubbed by the subclass texts."""
 
     LIB = "#[test]\nfn a() {}\n#[cfg(windows)]\n#[test]\nfn w() {}\n"
+    COMPILE_ERROR = "error: could not compile `agentdesk` (lib test) due to 1 previous error"
     # Like gh: `run list` filters by workflow, commit, status or conclusion and limit before --jq runs on
     # the --json fields; `run download` fails without the artifact and never overwrites a file.
     GH = """#!/usr/bin/env python3
 import json, os, shutil, subprocess, sys
 args = sys.argv[1:]
+if os.environ.get("GH_LOG"):
+    with open(os.environ["GH_LOG"], "a") as log:
+        log.write(" ".join(args) + "\\n")
 opt = lambda name: args[args.index(name) + 1] if name in args else None
 if args[:2] == ["run", "list"] and opt("--workflow") == "ci-main.yml":
     runs = [r for r in json.loads(os.environ["GH_RUNS"]) if r["headSha"] == opt("--commit")]
@@ -959,7 +963,7 @@ else:
     CARGO = """#!/bin/sh
 echo "$*" >> "$CARGO_LOG"
 [ "$2" = --version ] && { echo "cargo-nextest 0.9.149"; exit 0; }
-[ -z "$CARGO_FAIL" ] || exit 101
+if [ -n "$CARGO_FAIL" ]; then printf '%s\n' "$CARGO_FAIL_TEXT" >&2; exit "${CARGO_FAIL_CODE:-101}"; fi
 if [ "$2" = archive ]; then while [ "$1" != --archive-file ]; do shift; done; echo bytes > "$2"; exit 0; fi
 [ "$2" = list ] && cat "$BASE_LIST"
 """
@@ -1010,13 +1014,13 @@ if [ "$2" = archive ]; then while [ "$1" != --archive-file ]; do shift; done; ec
         return self.dir / out / "plan.json"
 
     def main_runs(self, *runs):
-        """gh env for CI Main runs of the base SHA, newest first: (id, event, status, conclusion, baseline plan
-        or None, download fails after writing the plan)."""
+        """gh env for CI Main runs, newest first: (id, event, status, conclusion, baseline plan or None,
+        download fails after writing the plan[, head SHA, default the base])."""
         import shutil
         rows = []
-        for run_id, event, status, conclusion, plan, partial in runs:
-            rows.append({"databaseId": int(run_id), "headSha": self.base_sha, "event": event, "status": status,
-                         "conclusion": conclusion})
+        for run_id, event, status, conclusion, plan, partial, *sha in runs:
+            rows.append({"databaseId": int(run_id), "headSha": sha[0] if sha else self.base_sha, "event": event,
+                         "status": status, "conclusion": conclusion})
             if plan:
                 (self.dir / "artifacts" / run_id).mkdir(parents=True, exist_ok=True)
                 shutil.copy(plan, self.dir / "artifacts" / run_id / "plan.json")
@@ -1027,15 +1031,17 @@ if [ "$2" = archive ]; then while [ "$1" != --archive-file ]; do shift; done; ec
     def main_success(self, plan):
         return self.main_runs(("5", "push", "completed", "success", plan, False))
 
-    def run_script(self, head, **env):
+    def run_script(self, head, cwd=None, **env):
         summary = self.dir / "summary.md"
         summary.write_text("")
+        cwd = cwd or self.repo
         full = {**os.environ, "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}", "PR_HEAD_SHA": head,
-                "GITHUB_SHA": head, "GITHUB_RUN_ID": "7", "GITHUB_REPOSITORY": "o/r", "GITHUB_WORKSPACE": str(self.repo), "GITHUB_STEP_SUMMARY": str(summary),
+                "GITHUB_SHA": head, "GITHUB_RUN_ID": "7", "GITHUB_REPOSITORY": "o/r", "GITHUB_WORKSPACE": str(cwd), "GITHUB_STEP_SUMMARY": str(summary),
                 "CARGO_LOG": str(self.dir / "cargo.log"), "BASE_LIST": str(self.dir / "base-list.json"),
-                "GH_RUNS": "[]", "GH_ARTIFACTS": str(self.dir / "artifacts"), "CARGO_FAIL": "", **env}
+                "GH_RUNS": "[]", "GH_ARTIFACTS": str(self.dir / "artifacts"), "GH_LOG": str(self.dir / "gh.log"),
+                "CARGO_FAIL": "", "CARGO_FAIL_TEXT": self.COMPILE_ERROR, **env}
         full.pop("GITHUB_OUTPUT", None)
-        done = self.sp.run(["bash", "scripts/ci/nextest-base-diff.sh", str(self.dir / "nextest")], cwd=self.repo,
+        done = self.sp.run(["bash", "scripts/ci/nextest-base-diff.sh", str(self.dir / "nextest")], cwd=cwd,
                            env=full, capture_output=True, text=True)
         cargo = (self.dir / "cargo.log").read_text() if (self.dir / "cargo.log").exists() else ""
         return done.returncode, done.stdout + done.stderr, summary.read_text(), cargo
@@ -1145,6 +1151,210 @@ class BaseDiffScript(ScriptRepo):
         self.git("worktree", "prune")
         rc, out, _, _ = self.run_script(head, **self.main_success(baseline))
         self.assertEqual(rc, 0, out)
+
+
+class AncestorBaseDiffScript(ScriptRepo):
+    """nextest-base-diff.sh when the base does not compile: the nearest first-parent ancestor's CI Main baseline."""
+
+    LIB = "#[test]\nfn still_here() {}\n"
+    BROKEN = LIB + "mod missing;\n"
+    REPAIR = {"src/missing.rs": "pub fn repaired() {}\n"}
+
+    def setUp(self):
+        super().setUp()
+        self.a_sha = self.base_sha
+
+    def base(self, lib, files=None, parent=None):
+        self.reset(parent or self.a_sha)
+        self.base_sha = self.commit(lib, "base", files)
+        self.git("update-ref", "refs/remotes/origin/main", self.base_sha)
+        return self.base_sha
+
+    def commit(self, lib, message, files=None):
+        for rel, text in (files or {}).items():
+            path = self.repo / rel
+            if text is None:
+                path.unlink()
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+        return super().commit(lib, message)
+
+    def head(self, lib, files=None, names=("still_here",), ignored=()):
+        head = self.commit(lib, "head", files)
+        self.plan_ok(list(names), workers=1, out="nextest/plan", sha=head, ignored=list(ignored))
+        return head
+
+    def reset(self, sha):
+        for path in ("nextest", "artifacts", "gh.log", "cargo.log"):
+            self.sp.run(["rm", "-rf", str(self.dir / path)], check=True)
+        self.git("worktree", "prune")
+        self.git("checkout", "-q", "--detach", sha)
+
+    def runs(self, *rows):
+        """Push runs, newest first: (id, head SHA, conclusion, baseline plan or None)."""
+        return self.main_runs(*((run_id, "push", "completed", conclusion, plan, False, sha)
+                                for run_id, sha, conclusion, plan in rows))
+
+    def go(self, head, **env):
+        rc, out, summary, cargo = self.run_script(head, **env)
+        gh = (self.dir / "gh.log").read_text() if (self.dir / "gh.log").exists() else ""
+        diff = self.dir / "nextest/base/diff.json"
+        return rc, out, summary, cargo, gh, json.loads(diff.read_text()) if diff.exists() else None
+
+    def test_broken_base_compares_with_the_nearest_ancestor_baseline_and_keeps_its_verdict(self):
+        a0 = self.a_sha
+        a0_plan = self.baseline(["still_here"], out="a0", sha=a0)
+        a1 = self.commit(self.LIB + "// a1\n", "a1")
+        self.a_sha = a1
+        plans = {"nearest": self.baseline(["still_here"], out="a1", sha=a1),
+                 "cargo-only test lost": self.baseline(["still_here", "dyn_g"], out="a1-lost", sha=a1),
+                 "cargo-only test ignored": self.baseline(["still_here", "dyn_g"], out="a1-ignored", sha=a1),
+                 "artifact of another SHA": self.baseline(["still_here"], out="a1-other", sha="c" * 40)}
+        for label, a1_plan in plans.items():
+            with self.subTest(label):
+                b = self.base(self.BROKEN + "// a1\n", parent=a1)
+                head = self.head(self.BROKEN + "// a1\n", self.REPAIR,
+                                 ignored=("dyn_g",) if label == "cargo-only test ignored" else ())
+                rc, out, summary, cargo, gh, doc = self.go(head, CARGO_FAIL="1", **self.runs(
+                    ("9", b, "failure", None), ("6", a1, "success", a1_plan), ("5", a0, "success", a0_plan)))
+                self.assertIn(f"nextest base sources at {b} lack module files (src/lib.rs:3 mod missing:", summary)
+                self.assertIn(f"nextest base build failed at {b}: compiler errors", summary)
+                self.assertEqual(cargo.count("nextest archive"), 1)
+                self.assertIn(f"--commit {a1}", gh)
+                self.assertNotIn(f"--commit {a0}", gh)
+                if label == "nearest":
+                    self.assertEqual(rc, 0, out)
+                    self.assertIn(f"ancestor {a1} (1 first-parent commits below {b})", summary)
+                    self.assertEqual((doc["comparison_base_sha"], doc["baseline_sha"]), (b, a1))
+                elif label == "artifact of another SHA":
+                    self.assertEqual(rc, 1, out)
+                    self.assertIn(f"need {a1} linux-lib", out)
+                    self.assertIn("no comparable baseline was found within 30 first-parent ancestors", summary)
+                else:
+                    kind = "removed" if label.endswith("lost") else "runnable->ignored"
+                    self.assertEqual(rc, 1, out)
+                    self.assertIn(f"lost without a justification row: {BIN} dyn_g | {kind}", out)
+
+    def test_ancestor_comparison_counts_linux_tests_the_base_has_and_the_head_loses(self):
+        a_plan = self.baseline(["still_here"], out="a", sha=self.a_sha)
+        linux = '#[cfg(target_os = "linux")]\n#[test]\nfn linux_only() {}\n'
+        for kind, lib in (("removed", self.BROKEN), ("runnable->ignored", self.BROKEN + linux.replace("#[test]", "#[test]\n#[ignore]"))):
+            with self.subTest(kind):
+                b = self.base(self.BROKEN + linux)
+                head = self.head(lib, self.REPAIR)
+                rc, out, *_ = self.go(head, CARGO_FAIL="1", **self.runs(("5", self.a_sha, "success", a_plan)))
+                self.assertEqual(rc, 1, out)
+                self.assertIn(f"against the ancestor baseline at {self.a_sha} for base {b}", self.dir.joinpath("summary.md").read_text())
+                self.assertIn(f"lost without a justification row: {BIN} linux_only | {kind}", out)
+
+    def test_unreadable_sources_or_stranded_test_files_fail_before_any_build(self):
+        a_plan = self.baseline(["still_here"], out="a", sha=self.a_sha)
+        guard = {"src/platform/tests.rs": "#[test]\nfn windows_guard() {}\n"}
+        stranded = "missing modules leave test sources unreachable: src/platform/tests.rs"
+        cases = (
+            ("head lacks a module file", self.BROKEN, {}, self.BROKEN + "mod other;\n", self.REPAIR, "ERROR head sources:"),
+            ("base cfg_attr path", self.LIB + '#[cfg_attr(unix, path = "y.rs")]\nmod y;\n', {}, self.LIB, {},
+             "ERROR base sources: "),
+            ("base unknown cfg", self.LIB + '#[cfg(foo = "bar")]\n#[test]\nfn u() {}\n', {}, self.LIB, {},
+             "ERROR base sources: "),
+            ("head deletes the stranded test file", self.LIB + "mod platform;\n", guard, self.LIB,
+             {"src/platform/tests.rs": None}, stranded),
+            ("head restores the parent with cfg(any())", self.LIB + "mod platform;\n", guard,
+             self.LIB + "mod platform;\n", {"src/platform.rs": "#[cfg(any())]\nmod tests;\n"}, stranded),
+        )
+        for label, base_lib, base_files, head_lib, head_files, needle in cases:
+            with self.subTest(label):
+                self.base(base_lib, base_files)
+                head = self.head(head_lib, head_files)
+                rc, out, summary, cargo, gh, _ = self.go(head, CARGO_FAIL="1", **self.runs(("5", self.a_sha, "success", a_plan)))
+                self.assertEqual(rc, 1, out)
+                self.assertIn(needle, out)
+                self.assertIn("nextest base comparison stopped in sources (exit 1)", summary)
+                self.assertEqual((gh, cargo), ("", ""))
+
+    def test_build_failures_other_than_compiler_errors_never_use_an_ancestor(self):
+        a_plan = self.baseline(["still_here"], out="a", sha=self.a_sha)
+        cases = (("exit 1 with the footer", "1", self.COMPILE_ERROR),
+                 ("exit 101 without the footer", "101", "error[E0583]: file not found for module `missing`"),
+                 ("linker failure only", "101", "error: linking with `cc` failed: exit status: 1\n" + self.COMPILE_ERROR),
+                 ("signal only", "101", "process didn't exit successfully: `rustc` (signal: 9, SIGKILL: kill)\n"
+                                        + self.COMPILE_ERROR))
+        for label, code, text in cases:
+            with self.subTest(label):
+                b = self.base(self.BROKEN)
+                head = self.head(self.BROKEN, self.REPAIR)
+                rc, out, summary, cargo, gh, _ = self.go(head, CARGO_FAIL="1", CARGO_FAIL_CODE=code, CARGO_FAIL_TEXT=text,
+                                                         **self.runs(("5", self.a_sha, "success", a_plan)))
+                self.assertEqual(rc, int(code), out)
+                self.assertIn(f"nextest base build failed at {b} (exit {code}); the ancestor fallback takes only "
+                              "compiler errors without a linker or signal trace", summary)
+                self.assertIn(f"--commit {b}", gh)
+                self.assertNotIn(f"--commit {self.a_sha}", gh)
+        with self.subTest("no ancestor baseline"):
+            b = self.base(self.BROKEN)
+            head = self.head(self.BROKEN, self.REPAIR)
+            rc, out, summary, cargo, gh, _ = self.go(head, CARGO_FAIL="1", **self.runs(("5", self.a_sha, "success", None)))
+            self.assertEqual(rc, 101, out)
+            self.assertIn(f"--commit {self.a_sha}", gh)
+            self.assertIn(f"nextest base build failed at {b}: compiler errors", summary)
+            self.assertIn(f"nextest base build failed at {b} and no comparable baseline was found within 30 "
+                          "first-parent ancestors", summary)
+            self.assertIn("nextest base comparison stopped in ancestor-baseline (exit 101)", summary)
+
+    def test_compiling_base_keeps_its_own_baseline_or_rebuild(self):
+        a_plan = self.baseline(["still_here"], out="a", sha=self.a_sha)
+        base_lib = self.LIB + "#[test]\nfn b() {}\n"
+        self.write("base-list.json", nextest_list(["still_here", "b"]))
+        for label in ("exact", "rebuild"):
+            with self.subTest(label):
+                b = self.base(base_lib)
+                head = self.head(base_lib + "#[test]\nfn h() {}\n", names=("still_here", "b", "h"))
+                rows = [("5", self.a_sha, "success", a_plan)]
+                if label == "exact":
+                    rows.insert(0, ("9", b, "success", self.baseline(["still_here", "b"], out="b", sha=b)))
+                rc, out, summary, cargo, gh, doc = self.go(head, **self.runs(*rows))
+                self.assertEqual(rc, 0, out)
+                self.assertNotIn(f"--commit {self.a_sha}", gh)
+                self.assertNotIn("ancestor", summary)
+                self.assertEqual((doc["comparison_base_sha"], doc["removed"], doc["added"]), (b, [], [f"{BIN} h"]))
+                self.assertNotIn("baseline_sha", doc)
+                if label == "exact":
+                    self.assertIn(f"against CI Main's baseline at {b}: exit 0", summary)
+                    self.assertNotIn("archive", cargo)
+                else:
+                    self.assertIn(f"against the fallback base plan at {b}: exit 0", summary)
+                    self.assertIn("nextest archive --lib", cargo)
+
+    def test_shallow_merge_checkout_fetches_the_first_parent_line(self):
+        a_plan = self.baseline(["still_here"], out="a", sha=self.a_sha)
+        cancelled = self.commit(self.LIB + "// cancelled\n", "cancelled")
+        b = self.base(self.BROKEN + "// cancelled\n", parent=cancelled)
+        self.git("checkout", "-q", "-b", "pr")
+        pr = self.commit(self.BROKEN + "// cancelled\n", "repair", self.REPAIR)
+        self.git("checkout", "-q", "-b", "merge-ref", b)
+        self.git("-c", "user.name=t", "-c", "user.email=t@t", "merge", "-q", "--no-ff", "-m", "merge", "pr")
+        merge = self.git("rev-parse", "HEAD")
+        clone = self.dir / "clone"
+        self.sp.run(["git", "clone", "-q", "--depth", "2", "--branch", "merge-ref", f"file://{self.repo}", str(clone)],
+                    check=True)
+        self.assertEqual(self.sp.run(["git", "-C", str(clone), "rev-list", "--count", "HEAD"], check=True,
+                                     capture_output=True, text=True).stdout.strip(), "3")
+        self.plan_ok(["still_here"], workers=1, out="nextest/plan", sha=merge)
+        rows = self.runs(("9", b, "failure", None), ("8", cancelled, "cancelled", None), ("5", self.a_sha, "success", a_plan))
+        for label, url in (("fetch", f"file://{self.repo}"), ("fetch fails", f"file://{self.dir}/absent")):
+            with self.subTest(label):
+                self.sp.run(["rm", "-rf", str(self.dir / "nextest/base")], check=True)
+                self.sp.run(["git", "-C", str(clone), "worktree", "prune"], check=True)
+                self.sp.run(["git", "-C", str(clone), "remote", "set-url", "origin", url], check=True)
+                rc, out, summary, *_ = self.run_script(merge, cwd=clone, PR_HEAD_SHA=pr, CARGO_FAIL="1", **rows)
+                if label == "fetch":
+                    self.assertEqual(rc, 0, out)
+                    self.assertIn(f"ancestor {self.a_sha} (2 first-parent commits below {b})", summary)
+                else:
+                    self.assertEqual(rc, 1, out)
+                    self.assertIn(f"nextest ancestor lookup failed: cannot fetch the first-parent line of {b}", summary)
+                    self.assertNotIn("against the ancestor baseline", summary)
 
 
 class NativeScript(ScriptRepo):

@@ -13,15 +13,20 @@ summary="${GITHUB_STEP_SUMMARY:-/dev/null}"
 ancestor_limit=30
 mkdir -p "$work"
 ci() { python3 scripts/ci/nextest_ci.py "$@"; }
-phase=comparison-base
-trap 'rc=$?; [ "$rc" -eq 0 ] || echo "nextest base comparison stopped in $phase (exit $rc)" >>"$summary"' EXIT
+phase="comparison-base"
+# A failing run names the step it stopped in, so a base failure reads apart from the head's losses.
+report_stop() {
+  local code=$?
+  [ "$code" -eq 0 ] || echo "nextest base comparison stopped in $phase (exit $code)" >>"$summary"
+}
+trap report_stop EXIT
 
 ci comparison-base --pr-head-sha "$PR_HEAD_SHA" --github-output "$work/base.env"
 base_sha="$(sed -n 's/^base_sha=//p' "$work/base.env")"
 [ -n "$base_sha" ] || { echo "ERROR no comparison base SHA" >&2; exit 1; }
 
 # Linux removals come from the plans; macOS and Windows only from the base and head sources.
-phase=sources
+phase="sources"
 git worktree add --detach "$work/src" "$base_sha" >/dev/null
 python3 scripts/ci/rust_test_sources.py removed --base-root "$work/src" --json-out "$work/source-removed.json"
 missing="$(python3 -c 'import json,sys; print("; ".join(json.load(open(sys.argv[1])).get("base_missing_files", [])))' "$work/source-removed.json")"
@@ -50,10 +55,10 @@ fetch_main_baseline() {
   return 1
 }
 
-phase=main-baseline
+phase="main-baseline"
 reason="no CI Main run of $base_sha has uploaded its nextest-baseline artifact"
 if fetch_main_baseline "$base_sha"; then
-  phase=diff
+  phase="diff"
   status=0
   ci base-diff --baseline "$work/main/plan.json" "${diff_args[@]}" || status=$?
   if [ "$status" -ne 2 ]; then
@@ -65,7 +70,7 @@ fi
 
 # Fallback: build the base plan with the head plan's scope and build flags. Only a compiler error in that
 # build turns to an ancestor's baseline; any other failure fails the step.
-phase=base-build
+phase="base-build"
 echo "::warning title=nextest baseline fallback::$reason; building the base plan at $base_sha"
 echo "nextest baseline fallback: $reason; the base plan was built in this job" >>"$summary"
 printf 'version = 1\n' >"$work/no-retries.toml"
@@ -92,7 +97,7 @@ if [ "$build_status" -ne 0 ]; then
   fi
   echo "::warning title=nextest base build failed::$base_sha does not compile (cargo nextest archive exit 101); a base failure, not the head's"
   echo "nextest base build failed at $base_sha: compiler errors (cargo nextest archive exit 101)" >>"$summary"
-  phase=ancestor-baseline
+  phase="ancestor-baseline"
   if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
     git fetch --no-tags --quiet --depth=$((ancestor_limit + 1)) origin "$base_sha" \
       || { echo "nextest ancestor lookup failed: cannot fetch the first-parent line of $base_sha" >>"$summary"; exit 1; }
@@ -105,7 +110,7 @@ if [ "$build_status" -ne 0 ]; then
     fetch_main_baseline "$sha" || continue
     echo "::warning title=nextest ancestor baseline::comparing with $sha, $distance first-parent commits below $base_sha"
     echo "nextest comparison baseline: ancestor $sha ($distance first-parent commits below $base_sha); tests $base_sha has and the head lacks are also checked from the sources" >>"$summary"
-    phase=diff
+    phase="diff"
     status=0
     ci base-diff --baseline "$work/main/plan.json" --baseline-sha "$sha" "${diff_args[@]}" || status=$?
     echo "nextest base diff against the ancestor baseline at $sha for base $base_sha: exit $status" >>"$summary"
@@ -123,7 +128,7 @@ fi
 )
 ci plan --universe "$work/base-universe.json" --archive "$work/base-tests.tar.zst" --workers 1 --sha "$base_sha" \
   --identity-from "$plan" --retry-policy "$work/no-retries.toml" --output "$work/built"
-phase=diff
+phase="diff"
 status=0
 ci base-diff --baseline "$work/built/plan.json" "${diff_args[@]}" || status=$?
 echo "nextest base diff against the fallback base plan at $base_sha: exit $status" >>"$summary"
