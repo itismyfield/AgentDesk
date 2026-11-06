@@ -1,4 +1,4 @@
-//! Debug/test counterpart of the PostgreSQL observation receipt contract.
+//! Test counterpart of the PostgreSQL observation receipt contract.
 use super::*;
 
 #[derive(Clone)]

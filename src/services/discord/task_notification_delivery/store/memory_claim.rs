@@ -1,4 +1,4 @@
-//! In-memory debug counterpart of the durable task-card claim.
+//! In-memory test counterpart of the durable task-card claim.
 use super::*;
 
 pub(super) fn claim_card_memory(

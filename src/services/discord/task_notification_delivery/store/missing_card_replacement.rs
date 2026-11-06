@@ -37,9 +37,9 @@ async fn claim(
         Some(pool) => {
             claim_missing_card_replacement_pg(pool, scope, missing_message_id, payload).await
         }
-        None if cfg!(any(test, debug_assertions)) => {
-            claim_missing_card_replacement_memory(scope, missing_message_id, payload)
-        }
+        #[cfg(test)]
+        None => claim_missing_card_replacement_memory(scope, missing_message_id, payload),
+        #[cfg(not(test))]
         None => Err(memory_fallback_unavailable()),
     }
 }
@@ -189,6 +189,7 @@ async fn claim_missing_card_replacement_pg(
     Ok(MissingCardReplacementClaim::Owned(Box::new(claimed)))
 }
 
+#[cfg(test)]
 fn claim_missing_card_replacement_memory(
     scope: &TaskCardScope,
     missing_message_id: u64,
