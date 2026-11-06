@@ -247,6 +247,148 @@ vocabulary다. 진행 중인 `fix/i7755-owned-input-stop`과 겹치는
 C2와 같은 동일 source의 정확한 판정 불가→역방향 편입 계약을 적용하며,
 기존 역방향 양수 record와 zero-rule 한도를 올리지 않는다. TSV는 생성기 입력이 아니다.
 
+### Cluster·Herdr 실행과 provider hosting
+
+`services::cluster`의 node 배치·용량·라우팅 정책은 application이다.
+SQL 저장·process registry·환경 및 config snapshot·machine 관측·relay 실행은
+더 긴 adapter prefix로 구분한다. intake worker의 Discord turn 실행과 fallback 안내는
+별도 discord 경계다. `intake_router_hook::model`, attachment uploads,
+stream frame·terminal resolution은 vocabulary 값 계약이며, 상위 실행 타입을 참조하는
+부분은 정확한 역방향 부채로 남긴다. owner_record의 PG/CAS 실행과
+`owner_record::fallback`의 입력 배치 정책(application)도 구분한다.
+
+`cluster::session_matcher`는 adapter다. rollout path를 만드는
+`src/services/cluster/session_matcher.rs:409`·:436이
+`src/services/tmux_common.rs:1131`의 `session_temp_path`를 거쳐
+같은 파일 :1068·:1076의 lazy 디렉터리 보장 I/O로 이어진다.
+주석의 순수 함수 표현이나 문자열 계산만으로 모듈 전체를 foundation으로 내리지 않는다.
+stream relay의 `source_read_proof`와 metadata·enqueue가 섞인 identity도 adapter다.
+
+`services::herdr_launch`의 PG/CAS·pane·launch evidence 실행, `herdr_admission`의
+stop-file·환경 관측, `provider_hosting`의 registry·driver 선택은 adapter다.
+`herdr_launch::policy`의 요청 값·permit future·grant store trait은 vocabulary이며,
+미도입 구현은 오류만 반환한다. provider_hosting의 같은 prefix 미분류 항목은 제거한다.
+
+편입 증거는 생성기의 `--report` 출력인
+[`module-layer-c4-admission.tsv`](module-layer-c4-admission.tsv)에 기록한다.
+진행 중 레인 ref를 시작과 최종 검증 때 대조하여 C4 대상과 겹치지 않음을 확인했다.
+C2·C3 known 층, owner_input의 기존 분류와 C6 보류, history 7개 보류는 유지한다.
+`services::tui_o::turn_mode`의 application 정교화는 후속으로 남기고 이번에는 적용하지 않는다.
+동일 source의 정확한 판정 불가→역방향 ID·count만 편입하며, 기존 역방향 양수 record와
+zero-rule의 한도를 올리지 않는다. TSV는 검토 증거이고 생성기 입력이 아니다.
+
+C3 squash 결과는 검토한 C3 accepted의 매핑·부채 records·zero-rule과 대조하고 provenance 차이는 별도로 기록한다.
+동일하면 검토된 C4 canonical과 C3·C4 기록을 보존하여 충돌을 풀고, 다르면 `DESIGN_DELTA`로 멈춘다.
+새 병합 source anchor에서 `--update-reductions`와 일반 `--check`를 실행하며, 과거 C3 매핑으로 C4 편입을 다시 승인하지 않는다.
+C5·C6도 이전 조각의 실제 squash와 검토한 accepted를 대조하는 같은 착지 절차를 적용한다.
+
+### Config·runtime·core와 model/org 저장 경계
+
+`config` 본체와 `runtime_layout`, live reload·credential·eventbus·logging은
+파일·환경·process snapshot 실행을 소유하는 adapter다. 기존 config 값 계약 세 규칙과
+`runtime_layout::paths` foundation은 유지한다. config DTO는 vocabulary,
+받은 snapshot의 구조·경로 계산은 foundation, reload·runtime profile·hosting 검증과
+migration 허용 정책은 application으로 구분한다. `config_path::selection`은 실제
+`Path::is_file`을 수행하므로 adapter를 상속한다. approval snapshot과 consent hold의
+실제 파일·저장 실행에는 긴 adapter override를 둔다.
+
+`config::session_hosts`는 platform·provider/TUI 적격성과 restart 필요성 정책의
+application 경계다(`src/config/session_hosts.rs:180`, :264, :296).
+실행 핸들을 보유하는 `services::agent_protocol`과 provider model catalog·org loader·
+Discord runtime store는 adapter다. GitHub process 실행과 sync/triage 업무,
+supervisor 복구 정책, utils의 계산·파일 실행·HTTP 응답 경계도 구분한다.
+`ui::ai_screen`은 DTO 외 문자열 정제를 수행하므로 foundation override를 함께 두며,
+`manual_intervention`의 개입 필요 판정은 application으로 둔다.
+
+이 조각은 논리 모듈 70개를 규칙 43개로 분류한다. 편입 60 ID·127회의 증거는
+[`module-layer-c5-admission.tsv`](module-layer-c5-admission.tsv)에 기록한다.
+`accepted_indeterminate_count` 합계는 126, `grown_since_accepted` 합계는 1이다.
+증가한 path ID `97f26d5fe215da0ee672dc095e808ee5c3f3517771e3a353d6bb3e3dcd72605c`는
+`session_host::herdr::launch_host` → `config::session_hosts`이며 accepted 판정 불가 한도는
+3회다. 같은 source anchor의 이전 매핑에서는 현재 판정 불가 4회이고, 새 매핑에서
+역방향 4회로 바뀐다. 기존 역방향 양수 record·zero-rule에는 없으며 편입 count는
+현재 판정 불가 exact count와 같다. 원인은 #7808 commit
+`b0bab6ebf693502f86c0b2e2c0307033fa411c29`이 추가한
+`src/services/session_host/herdr/launch_host.rs:289`의 `EndpointMode::UserDefault` 참조다.
+기존 역방향 양수 record·zero-rule 한도는 올리지 않고, 나머지 경고 증가도 흡수하지 않는다.
+
+진행 중 ref와 C5 대상의 겹침은 시작과 최종 검증 때 다시 대조한다.
+`services` 상위 미분류, owner_input의 기존 분류와 C6 보류, history 7개 보류와
+C2·C3·C4 known 층은 유지한다. `tui_o::turn_mode` application 정교화는 C6에서 다룬다.
+
+### Turn·recovery·session과 routine/scheduling
+
+`services::tui_o::turn_mode`는 retire가 성공한 채널만 turn 전환을 확정하는
+application 정책이다(`src/services/tui_o/turn_mode.rs:94`). 기존 known 재분류이므로
+먼저 `--update-reductions --reclassify services::tui_o::turn_mode`로 M1에 기록했다.
+M1은 역방향 281 ID·629회와 미분류 295개, 기존 positive·zero 기록을 그대로 유지한다.
+이후 unknown 편입은 C5 매핑 대신 M1의 매핑·accepted를 비교 기준으로 사용한다.
+
+turn orchestrator·lifecycle·host 선택·취소 queue 보존의 업무 정책은 application이다.
+pending queue 파일 저장, mailbox snapshot·signal transport·wall-clock 관측과
+legacy/V2 snapshot 복원은 긴 adapter prefix로 구분한다. snapshot 복원의 generation 0
+경로는 runtime_store의 boot 미할당 fallback에서 디스크 counter를 읽으므로
+순수 parser로 선언하지 않는다. reply 결과 DTO는 vocabulary, 관측된 stop result의
+표현·거절 사유·queue depth 계산은 foundation이다.
+
+recovery 상태·takeover·owner 복귀와 routine/예약 실행 조립은 application이다.
+checkpoint·durable PG/process 실행, routine loader·store·provider 전송·파일 탐색은
+adapter이고, routine Discord 로그는 discord다. context/action의 값 계약은 vocabulary,
+받은 binding/checkpoint의 fallback plan 구성과 shared scheduling 계산은 foundation이다.
+scheduled timing의 종결·재시도 정책은 application을 상속한다. session forwarding은
+route handler를 조립하지 않는 transport adapter, HTTP resume handler는 assembly이며
+transcript catalog 탐색은 adapter override로 둔다.
+
+진행 중 입력 실패 레인과 겹친 routines/예약 owner_input 및 queued_head V2 경계는
+그 후손을 포함한 15개 논리 모듈을 각각 명시적 미분류로 유지한다. 그 아래 새 known
+규칙을 두지 않는다. Claude owner_input은 live owner/writer lease/payload callback의
+adapter로 분류하며, 기존 Discord·Codex owner_input 분류와 history 7개 보류는 유지한다.
+C2 hook_server adapter, C3 exact_episode application 및 C4·C5 분류도 유지한다.
+
+M1 뒤 논리 모듈 105개를 규칙 42개로 편입한 증거는
+[`module-layer-c6-admission.tsv`](module-layer-c6-admission.tsv)에 기록한다.
+새 역방향은 97 ID·240회, `accepted_indeterminate_count` 합계 239,
+`grown_since_accepted` 합계 1이다. 증가한 path ID
+`8dd9c815ca11f5f0c4ce3cc88b0fc72f548711a70a4a13cfdf006f62c63a2e42`는
+`routines::legacy_body_census` → `cluster::node_registry`의 1회 참조다.
+M1 accepted에 없으므로 accepted count는 기본값 0이며, 기존 zero-rule도 없다.
+같은 source의 이전 매핑에서는 판정 불가 1회이고 새 매핑에서 역방향 1회가 된다.
+이전 source에 있던 참조의 도입은 #7783 commit
+`bfa5c7171c223e7ad3c09f299ee72f749c17f582`의
+`src/services/routines/legacy_body_census.rs:61`이다. accepted에 없던 ID의 exact 편입도
+TSV에 드러내며 기존 역방향 양수·zero 한도와 나머지 경고 증가를 흡수하지 않는다.
+
+### 나머지 서비스 가족
+
+C7은 C6의 매핑·accepted를 기준으로 남은 167개 모듈을 규칙 96개로 분류한다.
+관측·git·인증 profile·메시지 outbox·memory transport·process boot의 실제
+파일·PG·HTTP·process·cache 실행은 adapter다. dispatch·calendar·SLO·입력 readiness,
+종료 warrant·review 상태·memory scope 선택과 outbox 복구 정책은 application이다.
+manual steer·task completion·분석 DTO·remote profile의 값 계약은 vocabulary이고,
+문자열·identity·marker·증거/관측 window의 계산 leaf는 foundation으로 구분한다.
+실제 entropy를 획득하는 manual steer action handle과 시계·파일을 읽는 summary quota는
+adapter override를 둔다. foundation이라는 이유로 즉시 추출 가능하다고 선언하지 않는다.
+
+review decision·dispatched session·onboarding의 HTTP 최종 응답 조립은 assembly다.
+kanban 서비스와 공개 façade는 application이며, 일반 인증 helper의 HTTP 값만으로
+handler라고 분류하지 않는다. imsg admission은 외부 직렬화 callback을 사용하며
+승자만 전달하고 admission 결과를 정착시키는 application 정책이다.
+Discord issue 카드와 outbox session 안내 표현은 discord로 구분한다.
+부모와 필요한 leaf 규칙을 이번 편입에 함께 넣었고 기존 known 층은 바꾸지 않았다.
+
+편입 증거는 [`module-layer-c7-admission.tsv`](module-layer-c7-admission.tsv)에 둔다.
+신규 역방향은 126 ID·258회, `accepted_indeterminate_count` 합계는 243,
+`grown_since_accepted` 합계는 15다. 증가한 10행은 모두 C6 accepted의 양수·zero에
+없던 ID다. #7783의 census 관측에서 도입됐으며 같은 현재 source의 이전 매핑에서는
+판정 불가 15회, 새 매핑에서는 정확히 역방향 15회다. 기존 역방향·zero 한도를
+올리지 않고 나머지 판정 불가·uncertainty 증가도 기준선에 흡수하지 않는다.
+
+시작과 최종 시점에 진행 중 ref의 source diff를 다시 대조한다. C7의 직접 겹침은
+없으며, C2~C6 분류와 history 7개·C6 보류 15개는 유지한다. 최신 main의
+queued_head V2 start_failure도 상위 미분류 규칙을 상속한다. 따라서 남은 미분류는
+services namespace 1개와 위 보류 23개를 합친 24개다. 새 병합 뒤에는 C4 착지 계약에
+따라 검토된 canonical을 보존하고 일반 감소 갱신·감사를 수행한다.
+
 ## 검토된 모듈 이동의 old→new 대응
 
 이동 대응은 [`layer_moves.toml`](../../scripts/audit_maintainability/layer_moves.toml)에 적는다.

@@ -93,9 +93,42 @@ const CHECKPOINT_EVENT: &str = "at < NOW() - ($1::INT || ' days')::INTERVAL \
          FROM agent_recovery_checkpoint_events) ranked WHERE newest <= 8)";
 const _: () = assert!(crate::services::agent_recovery::checkpoint::DEFAULT_READ_EVENT_LIMIT == 8);
 
-// `(table, aged-row predicate with the window days as $1, days)`; NULL times are kept.
+// Server campaign records have no time column, so they are capped by count: rows past each
+// campaign's newest $1 by `sequence` go, except every row of the campaign's current run.
+const CAMPAIGN_EVENTS: &str = "(campaign_id, sequence) IN (SELECT campaign_id, sequence FROM \
+         (SELECT campaign_id, sequence, \
+              ROW_NUMBER() OVER (PARTITION BY campaign_id ORDER BY sequence DESC) AS newest \
+          FROM server_campaign_events) ranked WHERE newest > $1) \
+     AND NOT EXISTS (SELECT 1 FROM server_campaign_definitions d \
+         WHERE d.campaign_id = server_campaign_events.campaign_id \
+           AND d.run_id = server_campaign_events.run_id)";
+const CAMPAIGN_RUN_HISTORY: &str = "(campaign_id, run_id, sequence) IN \
+         (SELECT campaign_id, run_id, sequence FROM (SELECT campaign_id, run_id, sequence, \
+              ROW_NUMBER() OVER (PARTITION BY campaign_id ORDER BY sequence DESC, run_id DESC) \
+                  AS newest \
+          FROM server_campaign_run_history) ranked WHERE newest > $1) \
+     AND NOT EXISTS (SELECT 1 FROM server_campaign_definitions d \
+         WHERE d.campaign_id = server_campaign_run_history.campaign_id \
+           AND d.run_id = server_campaign_run_history.run_id)";
+const CAMPAIGN_ACTION_HISTORY: &str = "(campaign_id, run_id, action_id, sequence) IN \
+         (SELECT campaign_id, run_id, action_id, sequence FROM (SELECT campaign_id, run_id, \
+              action_id, sequence, ROW_NUMBER() OVER (PARTITION BY campaign_id \
+                  ORDER BY sequence DESC, run_id DESC, action_id DESC) AS newest \
+          FROM server_campaign_action_history) ranked WHERE newest > $1) \
+     AND NOT EXISTS (SELECT 1 FROM server_campaign_definitions d \
+         WHERE d.campaign_id = server_campaign_action_history.campaign_id \
+           AND d.run_id = server_campaign_action_history.run_id)";
+
+// An issue row is the GitHub-issue dedupe record and is not touched after the issue exists, so
+// it goes only once no event of its fingerprint is left and its last record is past $1 days.
+const API_FRICTION_ISSUE: &str = "COALESCE(last_event_at, updated_at, created_at) \
+         < NOW() - ($1::INT || ' days')::INTERVAL \
+     AND NOT EXISTS (SELECT 1 FROM api_friction_events e \
+         WHERE e.fingerprint = api_friction_issues.fingerprint)";
+
+// `(table, predicate binding the window days (or row count) as $1, value)`; NULL times are kept.
 // Runs after the archive copies, so a row archived this pass gets its archive window.
-const CAPS: [(&str, &str, i32); 17] = [
+const CAPS: [(&str, &str, i32); 21] = [
     (
         "session_transcripts_archive",
         CREATED_AT,
@@ -172,6 +205,26 @@ const CAPS: [(&str, &str, i32); 17] = [
         "agent_recovery_checkpoint_events",
         CHECKPOINT_EVENT,
         CHECKPOINT_EVENT_RETENTION_DAYS,
+    ),
+    (
+        "server_campaign_events",
+        CAMPAIGN_EVENTS,
+        SERVER_CAMPAIGN_KEEP_ROWS,
+    ),
+    (
+        "server_campaign_run_history",
+        CAMPAIGN_RUN_HISTORY,
+        SERVER_CAMPAIGN_KEEP_ROWS,
+    ),
+    (
+        "server_campaign_action_history",
+        CAMPAIGN_ACTION_HISTORY,
+        SERVER_CAMPAIGN_KEEP_ROWS,
+    ),
+    (
+        "api_friction_issues",
+        API_FRICTION_ISSUE,
+        API_FRICTION_ISSUE_RETENTION_DAYS,
     ),
 ];
 

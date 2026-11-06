@@ -228,8 +228,10 @@ async fn a_watcher_task_response_that_sends_no_body_leaves_a_pending_adoption() 
         let (mut placeholder, mut restored, mut last_edit) = (None, false, String::new());
         let (mut retry, mut visible, mut present, mut response_claim) = (false, false, false, None);
         let blocker = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
             .create(true)
-            .append(true)
+            .truncate(false)
             .open(log.with_file_name("writer.lock"))
             .unwrap();
         blocker.lock().unwrap();

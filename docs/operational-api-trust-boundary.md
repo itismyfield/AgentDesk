@@ -40,20 +40,16 @@ Tailscale·신뢰 Wi-Fi 환경에서 같은 바인드와 opt-in을 유지했음�
 `/ws`, `/hooks/*`, `/tui/*`, 대시보드)에서 소켓 peer 주소만으로 출처를 가른다.
 프록시 헤더는 보지 않는다. 필터는 주소 대역을 판정할 뿐이며, peer가 이 소유자의
 tailnet에 속한 기기인지는 확인하지 않는다. 분류는 loopback(127.0.0.0/8, ::1),
-Tailscale(100.64.0.0/10, fd7a:115c:a1e0::/48), 사설 LAN(10/8·172.16/12·192.168/16·
-169.254/16, Tailscale 대역 밖의 IPv6 fc00::/7·fe80::/10), 그 밖(공인 등)이다.
-IPv4-mapped IPv6는 IPv4로 판정한다.
+Tailscale(100.64.0.0/10, fd7a:115c:a1e0::/48), 그 밖이다. 사설 LAN(10/8·172.16/12·
+192.168/16·169.254/16, Tailscale 대역 밖의 IPv6 fc00::/7·fe80::/10)과 공인 IP는 모두
+그 밖에 든다. IPv4-mapped IPv6는 IPv4로 판정한다.
 
-`server.peer_filter`가 동작을 정한다. 코드 기본값은 `log`이고 운영 노드는 `enforce`를
-쓴다. `off`는 필터를 두지 않는다. `log`는 사설 LAN과 그 밖의 출처를 WARN으로만
-기록하고 응답은 바꾸지 않는다. `enforce`는 그 밖의 출처(공인 IP 등)를 403
-(`peer_not_allowed`)으로 거절한다.
-
-현재 집행은 위 결정의 이전 단계다. 사설 LAN 출처는 어느 모드에서도 통과하되
-`peer_class=private_lan` WARN으로 관측한다. 두 노드에 배포한 뒤 연속 5일 동안 이
-WARN이 0건이면 기본값을 사설 LAN과 공인 IP를 모두 403으로 거절하는 `tailnet_only`로
-바꾸고, `enforce`도 같은 뜻으로 옮긴다. 한 건이라도 나오면 전환하지 않고 출처 IP와
-경로를 붙여 사용자 결정으로 올린다.
+`server.peer_filter`가 동작을 정한다. 기본값 `tailnet_only`는 그 밖의 출처를 403
+(`peer_not_allowed`)으로 거절하고 WARN(`peer_class=outside`, 피어별 60초에 한 줄)을
+남긴다. `enforce`는 `tailnet_only`의 옛 이름이며 같은 뜻으로 읽힌다. 설정을 저장하면
+기본값이라 이 키가 파일에 남지 않는다. `log`는 그 밖의 출처를 WARN으로만 기록하고
+응답은 바꾸지 않으며, `off`는 필터를 두지 않는다. 이 둘은 위 결정의 경계를 집행하지
+않는다.
 
 이 경계는 주소 대역에 기대므로 다음 구성에서는 판정이 달라진다. 이 설치에서 각
 구성의 사용 여부는 확인하지 않았다.
@@ -63,7 +59,7 @@ WARN이 0건이면 기본값을 사설 LAN과 공인 IP를 모두 403으로 거�
   loopback으로 보이므로 이 경계로 가를 수 없다.
 - subnet router를 거친 요청의 출발 주소는 SNAT 설정에 따라 다르다. SNAT를 켜면
   라우터의 Tailscale 주소로 보여 Tailscale로 분류되고, 끄면 원래 LAN 주소로 보여
-  사설 LAN으로 분류된다.
+  그 밖으로 분류돼 거절된다.
 - node sharing으로 이 기기를 공유받은 다른 tailnet의 Tailscale 사용자는 Tailscale
   주소로 접속하므로 Tailscale로 분류된다.
 

@@ -90,6 +90,8 @@ const DELIVERY_EVENT_RETENTION_DAYS: i32 = 90; // dispatch delivery attempts
 const REVIEW_TUNING_RETENTION_DAYS: i32 = 90; // review tuning outcomes (the aggregate reads 30 days)
 const REVIEW_DECISION_RETENTION_DAYS: i32 = 90; // review decision items, on `decided_at`
 const CHECKPOINT_EVENT_RETENTION_DAYS: i32 = 90; // agent recovery checkpoint WAL, on `at`
+const SERVER_CAMPAIGN_KEEP_ROWS: i32 = 5_000; // newest rows per campaign, current run kept whole
+const API_FRICTION_ISSUE_RETENTION_DAYS: i32 = 365; // after the fingerprint's events are gone
 // `find_origin_receipt` looks up archived turns with no age bound, so keep them well past
 // the 90-day hot window.
 const TURNS_ARCHIVE_RETENTION_DAYS: i32 = 365;
