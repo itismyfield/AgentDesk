@@ -1,6 +1,8 @@
 //! In-memory test counterpart of the durable task-card claim.
+#[cfg(test)]
 use super::*;
 
+#[cfg(test)]
 pub(super) fn claim_card_memory(
     scope: &TaskCardScope,
     preferred_bot_key: &str,

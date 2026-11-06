@@ -1,7 +1,6 @@
 //! PostgreSQL-backed task-card state and lease authority (#4055).
 
 mod card_claim;
-#[cfg(test)]
 mod memory_claim;
 #[cfg(test)]
 use memory_claim::claim_card_memory;

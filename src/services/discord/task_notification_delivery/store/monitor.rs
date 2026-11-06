@@ -1,7 +1,6 @@
 //! Monitor observations share a leased card; successful edits atomically retain receipts.
 
 use super::*;
-#[cfg(test)]
 #[path = "monitor_memory.rs"]
 mod memory;
 use super::super::{TaskCardEvent, content_hash};
