@@ -132,7 +132,7 @@ impl IntakeRig {
         screen: Option<String>,
     ) -> Self {
         // A `turn/start` front is admitted when `start` is set, as a fresh routine's when it is true;
-        // a Codex start runs on its own Codex pane, and a fresh one is the routine executor's.
+        // a Codex start runs on its own Codex pane, and when true is the routine executor's.
         let (start, fresh) = (start.is_some(), start == Some(true));
         let codex = bot == ProviderKind::Codex && start;
         let trace = Trace::default();

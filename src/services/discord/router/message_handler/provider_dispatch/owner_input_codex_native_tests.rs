@@ -26,10 +26,11 @@ pub(in super::super) fn meta(sid: &str, workspace: &Path) -> String {
     row(json!({"type":"session_meta","payload":{"id":sid,"cwd":cwd,"source":"cli"}}))
 }
 
-/// A fresh routine's start as the routine executor keeps it.
+/// A persistent routine's start as the routine executor keeps it.
 pub(in super::super) fn routine_context(origin: Option<&str>) -> Value {
     json!({"origin":"routine","source":"routine","is_dm":false,
-        "metadata":{"human_input":{"origin_id":origin},"routine_id":"routine-7772"}})
+        "metadata":{"human_input":{"origin_id":origin},"routine_id":"routine-7772",
+            "execution_strategy":"persistent"}})
 }
 
 fn row(value: Value) -> String {
@@ -93,7 +94,7 @@ enum Rollout {
     Late,
 }
 
-/// The start's caller: a `turn/start`, or the routine executor's fresh routine.
+/// The start's caller: a `turn/start`, or the routine executor's persistent routine.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum By {
     Http,
@@ -168,6 +169,11 @@ async fn codex_start(id: u64, by: By, case: Rollout) {
             answer_for("t1", "native answer"),
         ),
     };
+    let mut steps = steps;
+    // The routine meets the unnamed end first, so each kind of end is the first one a run reads.
+    if (by, case) == (By::Routine, Rollout::Foreign) {
+        steps.reverse();
+    }
     append(&begin);
     let shim = Shim::install(&rig);
     if case == Rollout::Late {
