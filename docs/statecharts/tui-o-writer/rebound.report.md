@@ -1,5 +1,8 @@
 # WriterRebound — 현재 원본 판정과 park 안전성
 
+구현 소스 참조: `2b07eed6f3a2a4ce9292456b1483d1fd9e5ef170` (main `a2ab3f26df7059ecf13d9ae9f7fcffa418560089` 위 구현). 최종 검증 결과는 구현 레인 보고서를 따른다.
+
+
 코드 기준 SHA: `7a0c819e127964befd6bc0d022c5d4194d669c9c`. 구판은 이 base 위의 impl-1 birth 비교 작업 트리, 신판은 독립 설계 리뷰 `design-2-review.out.md`의 「구현 조각 계약 (델타)」를 모델링한다. 최종 Rust 코드의 검증 결과는 구현 레인 보고서에 기록하며 모델의 GREEN으로 대체하지 않는다.
 
 외부 최소 반례 모델을 이 저장소 위치로 옮기고 6 invariant와 중단 경계를 추가했다. 모든 cfg는 같은 모델을 사용하며 `LogCurrent=FALSE`는 최초 link seq/outgoing successor, TRUE는 전체 log의 마지막 유효 Bound를 기준으로 한다.
@@ -45,7 +48,7 @@ source는 A/B/C 세 개이고 초기 adopted A는 link가 없다. B/C의 birth s
 
 ## 구판의 최단 반례와 코드 대조
 
-- **ActiveLossVisible / CurrentNeverHistorical, 5단계:** 0 A 채택 → 1 B bind → 2 A 재bind rotation 저장 → 3 checkpoint 저장 → 4 A Missing → 5 현재 A park/ready. impl-1 `rotation.rs:628`은 기존 A의 link를 만들지 않고, `:681/:707`은 successor A 제거/B→A만 남긴다. impl-1 helper `rotation.rs:953`의 birth 비교가 A0<B2를 historical로 오판한다. 실제 Rust `rebound_adopted_latest_missing_source_without_absence_stays_halted`는 `accepts=true halted=[]`로 RED였으며 원시 증거는 구현 레인의 `logs/rebound-reachable-summary.json`과 해당 시험 log다.
+- **ActiveLossVisible / CurrentNeverHistorical, 5단계:** 0 A 채택 → 1 B bind → 2 A 재bind rotation 저장 → 3 checkpoint 저장 → 4 A Missing → 5 현재 A park/ready. impl-1 `rotation.rs:628`은 기존 A의 link를 만들지 않고, `:681/:707`은 successor A 제거/B→A만 남긴다. impl-1의 `source_superseded` helper(구 행 953)의 birth 비교가 A0<B2를 historical로 오판한다. 실제 Rust `rebound_adopted_latest_missing_source_without_absence_stays_halted`는 `accepts=true halted=[]`로 RED였으며 원시 증거는 구현 레인의 `logs/rebound-reachable-summary.json`과 해당 시험 log다.
 - **UnknownNeedsAbsence, 3단계:** 0 A 채택 → 1 unknown current가 되는 log 준비 → 2 A Missing → 3 producer Unknown인데 park. impl-1 reopen 후보/park guard `rotation/readers.rs:111/:460`은 durable birth 비교만으로 absence=false를 우회한다. 추가 시험 6·7의 RED/GREEN이 실제 입력·log 오류 해석을 확인해야 한다.
 - **ReadyAfterFollow, 3단계:** 0 A 채택 → 1 cp 뒤 새 bind → 2 A Missing → 3 bind 적용 전에 ready. impl-1 actor `actor.rs:362`가 resumed=true를 게시하고 이후 read_sources/follow가 적용된다. 추가 시험 4·5와 Mf가 이 순서를 실제 검증한다.
 - **ParkedReboundHalts, 4단계:** 0 A 채택 → 1 B current → 2 A Missing → 3 A park/ready → 4 tail 뒤 A bind인데 계속 running. impl-1 `rotation.rs:728`의 기존 non-retired cursor 분기는 Ok로 끝나 reopened capture를 만들지 않는다. 추가 시험 8과 Mg가 실제 halt/다음 host reopen을 확인한다.

@@ -1,5 +1,8 @@
 이 WriterWake는 historical 여부를 이미 올바르게 판정된 입력으로 추상화한다. 최초 link seq와 실제 current를 비교하는 구현의 안전성은 [WriterRebound](rebound.report.md)가 별도로 검사한다. superseded 입력은 델타 계약의 `Current::Known(c) && c != source`를 뜻하며, link birth seq 자체가 historical 증거라는 뜻이 아니다.
 
+구현 소스 참조: `2b07eed6f3a2a4ce9292456b1483d1fd9e5ef170` (main `a2ab3f26df7059ecf13d9ae9f7fcffa418560089` 위 구현). 최종 검증 결과는 구현 레인 보고서를 따른다.
+
+
 # WriterWake — 소실 원본 park와 입력 재개
 
 코드 기준 SHA: `7a0c819e127964befd6bc0d022c5d4194d669c9c`. `ParkRule=FALSE`는 이 SHA의 missing resume 실패를 모델링하며, `TRUE`는 #7845 park-and-run 계약을 적용한다. 조사 모델 `WriterWake`를 옮겨 입력 승인을 새 세션 생성의 선행 조건으로 고쳤다. 이 모델은 코드 실행 시험을 대신하지 않는다.
