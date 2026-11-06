@@ -3206,6 +3206,9 @@ mod local_tmux_lifecycle_tests {
         let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        // Rotation tests clear the adopted-session map under their own lock; hold it so they wait.
+        let _rotations =
+            crate::services::tui_prompt_dedupe::lock_claude_session_rotations_for_tests();
         let (cwd, home) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let tmux_session_name = format!("AgentDesk-claude-adopted-{}", uuid::Uuid::new_v4());
         // The cached provider session still has a transcript on disk, so the selector resumes it.
@@ -3246,9 +3249,11 @@ mod local_tmux_lifecycle_tests {
         .expect("resolve live pane");
 
         assert!(crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&tmux_session_name));
-        assert!(crate::services::tui_prompt_dedupe::forget_hook_adopted_claude_session_id(
-            &tmux_session_name
-        ));
+        assert!(
+            crate::services::tui_prompt_dedupe::forget_hook_adopted_claude_session_id(
+                &tmux_session_name
+            )
+        );
         assert_eq!(
             (
                 found.resolution.session_id.as_str(),
