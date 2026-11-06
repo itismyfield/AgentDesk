@@ -14,8 +14,8 @@ use super::pending_queue_persistence::{
 };
 use super::{
     ChannelMailboxState, DispatchLease, HydratePendingQueueResult, Intervention, InterventionMode,
-    QueuePersistenceContext, RequeueInterventionResult, TakeNextSoftResult,
-    persist_queue_or_restore,
+    QueuePersistenceContext, RequeueInterventionResult, RestartDrainResult, TakeNextSoftResult,
+    persist_queue, persist_queue_or_restore,
 };
 
 pub(super) mod held_settle;
@@ -443,6 +443,44 @@ pub(super) fn absorb_disk_queue_error(
     persistence: &QueuePersistenceContext,
 ) -> Option<String> {
     absorb_disk_queue(state, channel_id, persistence).persistence_error
+}
+
+pub(super) fn restart_drain_legacy(
+    state: &mut ChannelMailboxState,
+    channel_id: ChannelId,
+    persistence: &QueuePersistenceContext,
+) -> RestartDrainResult {
+    state.last_persistence = Some(persistence.clone());
+    let read_only_v2 =
+        pending_queue_file_path(&persistence.provider, &persistence.token_hash, channel_id)
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .is_some_and(|content| {
+                matches!(
+                    super::queued_head::compat::inspect(&content),
+                    Ok(super::queued_head::compat::SnapshotRead::ReadOnlyV2(_))
+                )
+            });
+    // Only a parsed V2 snapshot skips legacy writes; read/parse failures still take the checked
+    // legacy path. Any legacy backlog must remain a restart failure rather than be lost on exit.
+    let persistence_error = if read_only_v2 {
+        (!state.intervention_queue.is_empty()).then(|| {
+            format!(
+                "read-only V2 queue for channel {channel_id} still has {} legacy queued item(s)",
+                state.intervention_queue.len()
+            )
+        })
+    } else {
+        absorb_disk_queue_error(state, channel_id, persistence)
+            .or_else(|| persist_queue(state, channel_id, persistence).err())
+    };
+    RestartDrainResult {
+        queued_count: if read_only_v2 || persistence_error.is_some() {
+            0
+        } else {
+            state.intervention_queue.len()
+        },
+        persistence_error,
+    }
 }
 
 impl RequeueInterventionResult {
@@ -904,5 +942,6 @@ mod tests {
     }
 
     mod hydrate_corrupt_queue_tests;
+    mod restart_drain_tests;
     mod restored_merge_tests;
 }
