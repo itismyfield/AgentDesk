@@ -13,7 +13,6 @@ pub(super) fn capture_for(
 ) -> Option<CapturedOldExecution> {
     if !matches!(provider, ProviderKind::Codex)
         || crate::config::session_hosts::herdr_endpoint(channel).is_some()
-        || execution_end::mutant("observer_off")
     {
         return None;
     }

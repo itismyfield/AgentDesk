@@ -45,16 +45,10 @@ pub async fn run_bounded_tmux(command: &mut Command) -> Result<Output, BoundedTm
 
 pub struct Pending {
     cleanup: JoinHandle<Result<Output, BoundedTmuxError>>,
-    #[cfg(test)]
-    start: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl Pending {
     pub async fn wait(self) -> Result<Output, BoundedTmuxError> {
-        #[cfg(test)]
-        if let Some(start) = self.start {
-            let _ = start.send(());
-        }
         self.cleanup.await.map_err(|error| BoundedTmuxError::Io {
             source: io::Error::other(error),
             killed: false,
@@ -101,23 +95,8 @@ pub(super) fn spawn_with_budget(
             .stderr(Stdio::piped());
         let child = command.spawn().map_err(BoundedTmuxError::Spawn)?;
         let cleanup = platform::run(child, budget.min(Duration::from_secs(5)));
-        #[cfg(test)]
-        if super::mutant("cleanup_wait") {
-            let (start, started) = tokio::sync::oneshot::channel();
-            return Ok(Pending {
-                cleanup: handle.spawn(async move {
-                    if started.await.is_err() {
-                        std::future::pending::<()>().await;
-                    }
-                    cleanup.await
-                }),
-                start: Some(start),
-            });
-        }
         Ok(Pending {
             cleanup: handle.spawn(cleanup),
-            #[cfg(test)]
-            start: None,
         })
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -207,11 +186,6 @@ mod platform {
         }
 
         async fn terminate(&mut self) -> (bool, bool) {
-            #[cfg(test)]
-            if super::super::mutant("kill_reap") {
-                self.owned = false;
-                return (false, false);
-            }
             let killed = self.kill();
             let until = self.cleanup_deadline();
             loop {
@@ -232,11 +206,6 @@ mod platform {
         fn drop(&mut self) {
             if self.owned {
                 self.kill();
-                #[cfg(test)]
-                if super::super::mutant("drop_reap") {
-                    let _ = self.reap();
-                    return;
-                }
                 let until = self.cleanup_deadline();
                 // Runtime shutdown can cancel async cleanup before the killed child exits.
                 while matches!(self.reap(), Ok(None)) && self.owned && Instant::now() < until {
@@ -287,12 +256,6 @@ mod platform {
         };
         let deadline = Instant::now() + budget;
         async move {
-            #[cfg(test)]
-            let deadline = if super::super::mutant("deadline_wait") {
-                Instant::now() + budget
-            } else {
-                deadline
-            };
             let result = async {
                 if let Some(pipe) = &owner.child.stdout {
                     nonblocking(pipe)?;

@@ -13,11 +13,6 @@ pub(crate) const RELAY_RESPOND_BY_HEADER: &str = "x-agentdesk-relay-respond-by";
 pub(crate) const DELIVERY_TTL: Duration = Duration::from_secs(60 * 60);
 pub(crate) const LEDGER_RETENTION: Duration = Duration::from_secs(2 * 60 * 60);
 
-#[cfg(test)]
-fn behavior_mutation_enabled(name: &str) -> bool {
-    std::env::var("AGENTDESK_HOOK_RELAY_TEST_MUTATION").is_ok_and(|value| value == name)
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RelayReceiptPin {
     provider: String,
@@ -141,10 +136,6 @@ impl RelayReceiptLedger {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         prune_entries(&mut entries, now);
-        #[cfg(test)]
-        if behavior_mutation_enabled("receipt-bypass") {
-            entries.remove(&request_id);
-        }
         if let Some(existing) = entries.get(&request_id) {
             if existing.pin() != &pin {
                 return RelayReceiptBegin::Respond(error_response(
@@ -250,10 +241,6 @@ fn freshness_headers_present(headers: &HeaderMap) -> bool {
 }
 
 fn validate_freshness(headers: &HeaderMap, now: DateTime<Utc>) -> Result<(), RelayReceiptResponse> {
-    #[cfg(test)]
-    if behavior_mutation_enabled("freshness-removal") {
-        return Ok(());
-    }
     let published = header_string(headers, RELAY_PUBLISHED_AT_HEADER);
     let deadline = header_string(headers, RELAY_DEADLINE_HEADER);
     let (Some(published), Some(deadline)) = (published, deadline) else {

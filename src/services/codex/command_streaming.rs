@@ -47,10 +47,7 @@ pub(crate) fn execute_command_streaming_observed(
     } = request;
     #[cfg(unix)]
     let _end_attempt = crate::services::codex_tui::execution_end::attempt::begin(
-        report_channel_id.filter(|_| {
-            force_fresh_provider_session
-                || !crate::services::codex_tui::execution_end::mutant("fresh_only_take")
-        }),
+        report_channel_id,
         tmux_session_name,
     );
     #[cfg(unix)]

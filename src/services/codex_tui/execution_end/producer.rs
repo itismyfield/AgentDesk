@@ -44,9 +44,6 @@ impl LaunchObservation {
             {
                 return None;
             }
-            if super::mutant("replacement_capture_off") {
-                return None;
-            }
             capture::capture(id.channel(), pane)
                 .map(|capture| OldEnd::Replacement(Box::new(capture)))
                 .inspect_err(|reason| {
@@ -72,7 +69,6 @@ impl LaunchObservation {
             && context.expected_native_session_id.is_none()
             && context.source_policy.as_deref() == Some("shadow")
             && let Some((reason, pid)) = self.capture_failure.take()
-            && !super::mutant("capture_reason_removed")
         {
             tracing::warn!(channel = id.channel(), pane = id.pane(), ?pid,
                 pgid = ?None::<u32>, attempt_state = ?id, reason,
@@ -144,9 +140,6 @@ pub(crate) fn warm_bound(channel: Option<u64>, pane: &str) {
 
 /// The publisher already holds this authority; never reacquire the pane lock here.
 pub(crate) fn binding_published_under(authority: &TmuxSourceAuthority<'_>) {
-    if super::mutant("seal_callback_removed") {
-        return;
-    }
     let SpawnNonceMarker::Known(nonce) = contexts::observe_spawn_nonce_marker(authority.session())
     else {
         return;
@@ -166,9 +159,6 @@ pub(crate) fn retry_bound_candidate(
     nonce: &str,
 ) {
     attempt::with_candidate_under(channel, authority, nonce, |mut candidate| {
-        if candidate.first.is_some() && super::mutant("retry_removed") {
-            return Some(candidate);
-        }
         match candidate.seal(authority) {
             Ok(true) => None,
             Ok(false) => Some(candidate),
@@ -329,9 +319,7 @@ impl Candidate {
             match codex_end::append(&root, record)? {
                 Appended::Durable => self.old = OldEnd::Stored(record.end_id.clone()),
                 Appended::PublishedUnsynced(reason) => {
-                    if !super::mutant("evicted_recreate") {
-                        self.old = OldEnd::Stored(record.end_id.clone());
-                    }
+                    self.old = OldEnd::Stored(record.end_id.clone());
                     return Err(Failure::Pending(format!(
                         "replacement End unsynced: {reason}"
                     )));
@@ -404,10 +392,6 @@ fn first_source<'a>(
 }
 
 fn diagnostic(terminal: bool, channel: u64, pane: &str, old: &OldEnd, reason: &str, state: &str) {
-    if terminal && super::mutant("seal_reason_removed") {
-        tracing::warn!("Codex successor Seal not recorded");
-        return;
-    }
     let (pid, pgid) = match old {
         OldEnd::Replacement(capture) => (Some(capture.pane_pid), Some(capture.pgid)),
         OldEnd::Stored(_) | OldEnd::Confirmed(_) => (None, None),
