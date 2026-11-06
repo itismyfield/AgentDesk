@@ -21,6 +21,7 @@ class ResetServer:
         self.channel, self.herdr = channel, herdr
         self.cancel_status, self.cancel = 200, {"ok": True, "queued_remaining": 0}
         self.depth, self.relay_depth, self.channels, self.calls = 0, 0, [channel] if herdr else [], []
+        self.other_mailboxes = []
         fixture = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -29,7 +30,8 @@ class ResetServer:
                 mailbox = {"provider": "claude", "channel_id": fixture.channel,
                            "agent_turn_status": "idle", "relay_stall_state": "healthy",
                            "queue_depth": fixture.depth, "relay_health": {"queue_depth": fixture.relay_depth}}
-                self.reply(200, {"herdr": {"configured_channels": fixture.channels}, "mailboxes": [mailbox]})
+                self.reply(200, {"herdr": {"configured_channels": fixture.channels},
+                                 "mailboxes": [mailbox, *fixture.other_mailboxes]})
 
             def do_POST(self):
                 fixture.calls.append(("POST", self.path))
@@ -124,6 +126,53 @@ class ChannelResetTests(unittest.TestCase):
                 self.assertEqual({path: path.read_bytes() for path in before}, before)
                 if name in {"unknown-host", "malformed-host", "herdr-residue", "noncanonical-channel"}:
                     self.assertFalse(any(method == "POST" for method, _ in api.calls))
+
+
+class MatrixResetTeardownTests(unittest.TestCase):
+    def run_matrix(self, api, runtime_root, *, target="111", send_error=None):
+        import run_multi_provider_matrix as matrix
+        scenarios = Path(__file__).resolve().parents[3] / "tests/e2e/tui_relay/scenarios"
+        scenario = next(row for row in matrix.load_restart_guard_scenarios(scenarios) if row["id"] == "E-17")
+        args = Namespace(base_url=api.base_url, dry_run=False, queue_runtime_root=str(runtime_root),
+                         reset_before_each=True, turn_start_timeout_s=5, allow_destructive=True,
+                         required_agent_mode=None, required_coverage_class=None)
+        with patch.dict("os.environ", {"AGENTDESK_E2E_ALLOW_DESTRUCTIVE": "1"}), \
+             patch.object(driver.discord.DiscordClient, "send_prompt",
+                          side_effect=send_error or OSError("unexpected hold input")) as send_prompt:
+            result = matrix.run_foreign_active_restart_guard_scenario(
+                scenario, args=args, run_id="matrix-reset", channel_ids={"claude-tui": target, "codex-tui": "222"},
+                selected_cells=["claude-tui", "codex-tui"], pass_index=1)
+        return result, send_prompt
+
+    def test_reset_refusal_never_cancels_a_hold_this_run_did_not_attempt(self):
+        cases = [("herdr-residue", ["111"], 1, "111", 200, 0, "queue depths"),
+                 ("unknown-host", None, 0, "111", 200, 0, "mapping unreadable"),
+                 ("noncanonical-channel", ["111"], 0, "0111", 200, 0, "channel is unreadable"),
+                 ("legacy-409", [], 0, "111", 409, 1, "HTTP 409")]
+        for name, channels, depth, target, status, expected_posts, reason in cases:
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as tmp, ResetServer("111") as api:
+                api.channels, api.depth, api.relay_depth, api.cancel_status = channels, depth, depth, status
+                root = Path(tmp)
+                before = ChannelResetTests().seed(root, api.channel)
+                result, send_prompt = self.run_matrix(api, root, target=target)
+                self.assertEqual(result["status"], "fail")
+                self.assertIn(reason, result["reason"])
+                send_prompt.assert_not_called()
+                self.assertEqual(sum(method == "POST" for method, _ in api.calls), expected_posts)
+                self.assertNotIn("foreign_hold_cancel", result.get("teardown", {}))
+                self.assertEqual({path: path.read_bytes() for path in before}, before)
+
+    def test_lost_hold_response_still_cancels_after_the_submission_attempt(self):
+        with tempfile.TemporaryDirectory() as tmp, ResetServer("111", herdr=True) as api:
+            api.other_mailboxes = [{"provider": "codex", "channel_id": "222", "queue_depth": 0,
+                                    "relay_health": {"queue_depth": 0}}]
+            result, send_prompt = self.run_matrix(api, Path(tmp), send_error=OSError("hold response lost"))
+            self.assertEqual(result["status"], "fail")
+            self.assertIn("hold response lost", result["reason"])
+            self.assertEqual(send_prompt.call_count, 1)
+            self.assertEqual(api.calls.count(("POST", "/api/turns/111/cancel?force=true")), 1)
+            self.assertEqual(api.calls.count(("POST", "/api/turns/222/cancel?force=true")), 1)
+            self.assertTrue(result["teardown"]["foreign_hold_cancel"]["ok"])
 
 
 if __name__ == "__main__":
