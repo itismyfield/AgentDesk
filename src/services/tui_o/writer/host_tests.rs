@@ -27,22 +27,35 @@ use chrono::{DateTime, TimeDelta};
 const OTHER: u64 = 8;
 
 #[derive(Clone, Default)]
-struct Raised(Arc<Mutex<Vec<(u64, WriterAlarm)>>>, Resumes);
+struct Raised(
+    Arc<Mutex<Vec<(u64, WriterAlarm)>>>,
+    Resumes,
+    Option<Arc<crate::services::tui_o::alarm::AlarmRouter>>,
+);
 
 /// The host's resume reports, in order: `pending`, `settled` (no longer pending) and `cleared`.
 type Resumes = Arc<Mutex<Vec<(u64, &'static str)>>>;
 
 impl AlarmSink for Raised {
     fn raise(&self, channel: u64, alarm: WriterAlarm) {
+        if let Some(router) = &self.2 {
+            router.raise(channel, alarm.clone());
+        }
         self.0.lock().unwrap().push((channel, alarm));
     }
 
     fn resume_pending(&self, channel: u64, pending: bool) {
+        if let Some(router) = &self.2 {
+            router.resume_pending(channel, pending);
+        }
         let report = if pending { "pending" } else { "settled" };
         self.1.lock().unwrap().push((channel, report));
     }
 
     fn halt_cleared(&self, channel: u64) {
+        if let Some(router) = &self.2 {
+            router.halt_cleared(channel);
+        }
         self.1.lock().unwrap().push((channel, "cleared"));
     }
 }
@@ -74,6 +87,12 @@ impl Raised {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum ProducerObservation {
+    Present,
+    Unknown,
+}
+
 /// The gateway side as the host sees it; records which channel asked for what.
 struct TestIo {
     port: Arc<FakePort>,
@@ -81,6 +100,7 @@ struct TestIo {
     alarms: Raised,
     calls: Mutex<Vec<(&'static str, u64)>>,
     facts: Mutex<Result<ActivationFacts, String>>,
+    producer: Mutex<Option<ProducerObservation>>,
     custody: Mutex<Result<Custody, String>>,
     queued_bodies: std::sync::atomic::AtomicI64,
     fence_error: Mutex<Option<String>>,
@@ -129,6 +149,7 @@ impl TestIo {
             alarms: Raised::default(),
             calls: Mutex::default(),
             facts: Mutex::new(Ok(ActivationFacts::default())),
+            producer: Mutex::default(),
             custody: Mutex::new(Ok(Custody::Free)),
             queued_bodies: Default::default(),
             fence_error: Mutex::default(),
@@ -189,6 +210,22 @@ impl HostIo for TestIo {
     fn bindings(&self, channel: u64, provider: ShadowProvider) -> Arc<ChannelBindingLog> {
         self.calls.lock().unwrap().push(("bindings", channel));
         Arc::new(ChannelBindingLog::new(channel, provider))
+    }
+
+    fn producer_absent(
+        &self,
+        channel: u64,
+        _: ShadowProvider,
+    ) -> impl Future<Output = bool> + Send {
+        let observation = *self.producer.lock().unwrap();
+        if let Some(observation) = observation {
+            let name = match observation {
+                ProducerObservation::Present => "producer-present",
+                ProducerObservation::Unknown => "producer-unknown",
+            };
+            self.calls.lock().unwrap().push((name, channel));
+        }
+        std::future::ready(false)
     }
 
     fn late_adopt_enabled(&self) -> bool {
@@ -460,6 +497,83 @@ async fn an_actor_that_cannot_resume_its_sources_is_never_ready() {
     assert!(!ready.is_ready(CHANNEL));
     let halted = io.alarms.halted();
     assert!(matches!(halted.as_slice(), [(CHANNEL, detail)] if detail.contains("source reopen")));
+}
+
+#[tokio::test(start_paused = true)]
+async fn latest_missing_source_without_absence_observation_stays_halted() {
+    let (harness, path, _) = switched_over(&row("m0", "before the switch"));
+    harness.channel().set_binding_checkpoint(0).unwrap();
+    std::fs::remove_file(path).unwrap();
+    harness.gate.acquired();
+    let _selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    let tasks = hosted(&harness, &io, true, &ready);
+    polls(3).await;
+    assert!(!ready.accepts(CHANNEL));
+    assert!(
+        matches!(io.alarms.halted().as_slice(), [(CHANNEL, detail)] if detail.contains("source reopen"))
+    );
+    abort(tasks);
+}
+
+#[tokio::test(start_paused = true)]
+async fn stale_halt_cleared_only_after_resume() {
+    let (harness, path, _) = switched_over(&row("m0", "before the switch"));
+    harness.channel().set_binding_checkpoint(0).unwrap();
+    let aside = path.with_extension("held");
+    std::fs::rename(&path, &aside).unwrap();
+    harness.gate.acquired();
+    let _selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
+    let health = Arc::new(crate::services::tui_o::alarm::AlarmHealth::default());
+    let mut io = TestIo::over(&harness);
+    Arc::get_mut(&mut io).unwrap().alarms.2 = Some(Arc::new(
+        crate::services::tui_o::alarm::AlarmRouter::new(None, None, health.clone()),
+    ));
+    let reason = format!("tui_o:halted:{CHANNEL}");
+    for cycle in 0..3 {
+        let ready = Arc::new(Readiness::default());
+        let tasks = hosted(&harness, &io, true, &ready);
+        for sample in 0..3 {
+            polls(1).await;
+            assert!(!ready.accepts(CHANNEL));
+            assert!(
+                health
+                    .current_at(std::time::Instant::now())
+                    .contains(&reason),
+                "failed resume must retain halted health: cycle={cycle} sample={sample}"
+            );
+            assert!(
+                !io.alarms
+                    .1
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(_, action)| *action == "cleared"),
+                "a transient health gap is forbidden even between samples"
+            );
+        }
+        abort(tasks);
+    }
+    std::fs::rename(&aside, &path).unwrap();
+    let ready = Arc::new(Readiness::default());
+    let tasks = hosted(&harness, &io, true, &ready);
+    polls(3).await;
+    assert!(ready.accepts(CHANNEL), "{:?}", io.alarms.halted());
+    assert!(
+        !health
+            .current_at(std::time::Instant::now())
+            .contains(&reason),
+        "successful resume must clear the old halted health reason"
+    );
+    assert!(
+        io.alarms
+            .1
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, action)| *action == "cleared")
+    );
+    abort(tasks);
 }
 
 #[tokio::test(start_paused = true)]

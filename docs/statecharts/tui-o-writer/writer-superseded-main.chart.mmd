@@ -1,0 +1,29 @@
+---
+title: "소실 원본을 park한 기록기의 입력 승인과 첫 응답"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Path to the NewSourceGetsFirstReply bug
+    lg1: Repeats forever, so NewSourceGetsFirstReply breaks
+  }
+  class lg0 bugPath
+  class lg1 repeats
+  s0: 최초 실행 #183; 원본 재열기
+  s1: 소실로 중단
+  s2: 기록기 종료
+  s3: 최초 실행 #183; 원본 재열기 #183; 반복 부팅
+  s4: 소실로 중단 #183; 반복 부팅
+  s5: 기록기 종료 #183; 반복 부팅
+  [*] --> s0
+  s0 --> s1: 안전 조건 불충족 #8594; 기존 halt
+  s1 --> s2: 기록기 종료#183;자리 반환
+  s2 --> s3: 주기 정리가 기록기 다시 요청
+  s3 --> s4: 안전 조건 불충족 #8594; 기존 halt
+  s4 --> s5: 기록기 종료#183;자리 반환
+  s5 --> s3: 주기 정리가 기록기 다시 요청
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 repeats
+  class s4 repeats
+  class s5 repeats

@@ -1,6 +1,8 @@
 //! Installed reader policy through the real host, with one BOOT per child process.
 
 use super::*;
+#[path = "current_host_tests.rs"]
+mod current_host;
 use crate::services::tui_o::channel_policy;
 use crate::services::tui_o::store::fault::{self, Keep, Step as FaultStep};
 use crate::services::tui_o::store::rotation::{Boundary, Rotation, SourceLink, Successor};
@@ -117,6 +119,133 @@ struct ReaderHost {
     ready: Arc<Readiness>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
     _selected: test_override::ChannelsGuard,
+}
+
+async fn missing_predecessor_stays_hosted(readers: bool) {
+    let mut scene = ReaderHost::legacy(readers, false);
+    std::fs::remove_file(&scene.old.path).unwrap();
+    let before = scene.h.channel().cursor(&scene.old).unwrap().clone();
+    scene.launch();
+    scene
+        .wait("a missing superseded source leaves the actor ready", || {
+            scene.ready.accepts(CHANNEL)
+        })
+        .await;
+    polls(5).await;
+    assert!(scene.ready.accepts(CHANNEL));
+    assert!(scene.io.alarms.halted().is_empty());
+    assert_eq!(
+        serde_json::to_vec(scene.h.channel().cursor(&scene.old).unwrap()).unwrap(),
+        serde_json::to_vec(&before).unwrap()
+    );
+    assert!(!scene.h.channel().cursor(&scene.old).unwrap().retired);
+    abort(std::mem::take(&mut scene.tasks));
+}
+
+#[tokio::test(start_paused = true)]
+async fn superseded_missing_predecessor_parks_while_session_present() {
+    if !child_case(concat!(
+        module_path!(),
+        "::superseded_missing_predecessor_parks_while_session_present"
+    )) {
+        return;
+    }
+    missing_predecessor_stays_hosted(false).await;
+    let mut scene = ReaderHost::legacy(false, false);
+    let mut store = scene.h.channel();
+    let mut rotation = store.rotation().unwrap();
+    rotation
+        .successors
+        .get_mut(&source_key(&scene.old))
+        .unwrap()
+        .seq = None;
+    store.write_rotation(&rotation).unwrap();
+    drop(store);
+    std::fs::remove_file(&scene.old.path).unwrap();
+    scene.launch();
+    scene
+        .wait("legacy successor without seq remains historical", || {
+            scene.ready.accepts(CHANNEL)
+        })
+        .await;
+    assert!(scene.io.alarms.halted().is_empty());
+    abort(std::mem::take(&mut scene.tasks));
+}
+
+#[tokio::test(start_paused = true)]
+async fn rebound_adopted_latest_missing_source_without_absence_stays_halted() {
+    if !child_case(concat!(
+        module_path!(),
+        "::rebound_adopted_latest_missing_source_without_absence_stays_halted"
+    )) {
+        return;
+    }
+    current_host::rebound_absence_guard().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn reader_policy_parks_missing_predecessor_without_cleanup_evidence() {
+    if !child_case(concat!(
+        module_path!(),
+        "::reader_policy_parks_missing_predecessor_without_cleanup_evidence"
+    )) {
+        return;
+    }
+    missing_predecessor_stays_hosted(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn missing_source_with_drain_or_unsafe_path_still_halts() {
+    if !child_case(concat!(
+        module_path!(),
+        "::missing_source_with_drain_or_unsafe_path_still_halts"
+    )) {
+        return;
+    }
+    for anomaly in ["drain", "replaced", "denied", "shrunk"] {
+        let mut scene = ReaderHost::legacy(false, false);
+        match anomaly {
+            "drain" => {
+                let mut store = scene.h.channel();
+                let mut rotation = store.rotation().unwrap();
+                let through = store.cursor(&scene.old).unwrap().captured_through;
+                rotation
+                    .successors
+                    .get_mut(&source_key(&scene.old))
+                    .unwrap()
+                    .drain_to = Some(through + 1);
+                store.write_rotation(&rotation).unwrap();
+                std::fs::remove_file(&scene.old.path).unwrap();
+            }
+            "replaced" => {
+                std::fs::rename(&scene.old.path, scene.old.path.with_extension("held")).unwrap();
+                std::os::unix::fs::symlink("absent-target", &scene.old.path).unwrap();
+            }
+            "denied" => {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&scene.old.path, std::fs::Permissions::from_mode(0o0))
+                    .unwrap();
+            }
+            "shrunk" => {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&scene.old.path)
+                    .unwrap()
+                    .set_len(0)
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        scene.launch();
+        scene
+            .wait("unsafe source must keep its halt", || {
+                !scene.io.alarms.halted().is_empty()
+            })
+            .await;
+        assert!(!scene.ready.accepts(CHANNEL), "{anomaly}");
+        assert!(!scene.h.channel().cursor(&scene.old).unwrap().retired);
+        abort(std::mem::take(&mut scene.tasks));
+    }
 }
 
 impl ReaderHost {

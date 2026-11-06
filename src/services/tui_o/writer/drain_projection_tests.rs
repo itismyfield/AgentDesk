@@ -72,7 +72,10 @@ fn spawn_owing(
         watch::channel(None).0,
         owing,
     );
-    let config = WriterConfig { enabled: true };
+    let config = WriterConfig {
+        enabled: true,
+        ..Default::default()
+    };
     let task = spawn_projecting(&config, None, writer, provider, bindings, watches);
     (stop, task.expect("enabled"), owed, demand)
 }

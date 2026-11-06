@@ -1,5 +1,5 @@
-//! The sources one channel reads. A bind attaches its new source at offset 0 and the old one is
-//! read until it provably stops; a resumed or forked source skips what its parent already holds.
+//! A bind attaches its source at offset 0; old sources drain until proven stopped.
+//! Historical or sessionless missing sources park while their cursor and spool remain retained.
 
 use std::collections::{HashMap, HashSet};
 use std::{
@@ -52,9 +52,11 @@ mod codex_end;
 #[cfg(unix)]
 #[path = "rotation/codex_fresh.rs"]
 mod codex_fresh;
+mod current;
 #[path = "fork_lineage.rs"]
 mod fork_lineage;
 mod owe;
+use current::Current;
 pub(crate) mod provenance;
 #[path = "rotation/readers.rs"]
 mod readers;
@@ -89,6 +91,7 @@ struct Reader {
     idle: Option<(Fingerprint, Instant)>,
     observation: Option<CleanupWitness>,
     persisted_at: Option<SystemTime>,
+    parked: bool,
 }
 
 struct Validation {
@@ -116,6 +119,7 @@ impl Reader {
             idle: None,
             observation: None,
             persisted_at: None,
+            parked: false,
         }
     }
 
@@ -136,6 +140,8 @@ pub struct Sources<B> {
     bindings: Arc<B>,
     notice: watch::Receiver<u64>,
     checkpoint: Option<u64>,
+    current: Current,
+    view_tail: u64,
     rotation: Rotation,
     /// Every attached source, in bind order.
     readers: Vec<Reader>,
@@ -165,6 +171,7 @@ pub struct Sources<B> {
     clear_notice: watch::Receiver<u64>,
     clear_due: bool,
     reader_config: Option<ReaderConfig>,
+    producer_absent: bool,
     last_wall: Option<SystemTime>,
     validation: Option<Validation>,
     #[cfg(test)]
@@ -310,6 +317,8 @@ impl<B: BindingEvents> Sources<B> {
             bindings,
             notice,
             checkpoint: None,
+            current: Current::Unknown,
+            view_tail: 0,
             rotation: Rotation::default(),
             readers: Vec::new(),
             suspension: super::suspension::Suspension::default(),
@@ -330,6 +339,7 @@ impl<B: BindingEvents> Sources<B> {
             clear_due: false,
             replayed: super::ReplaySummary::default(),
             reader_config: None,
+            producer_absent: false,
             last_wall: None,
             validation: None,
             #[cfg(test)]
@@ -337,6 +347,18 @@ impl<B: BindingEvents> Sources<B> {
             #[cfg(test)]
             hold_validation: false,
         }
+    }
+
+    #[must_use]
+    pub fn with_producer_absent(mut self, absent: bool) -> Self {
+        self.producer_absent = absent;
+        self
+    }
+
+    pub fn is_parked(&self, source: &SourceId) -> bool {
+        self.readers
+            .iter()
+            .any(|reader| reader.source == *source && reader.parked)
     }
 
     /// Selects the cleanup engine explicitly; existing actor callers keep the legacy path.
@@ -429,33 +451,6 @@ impl<B: BindingEvents> Sources<B> {
         let Some((events, _)) = self.read_log(writer, checkpoint)? else {
             return Ok(());
         };
-        let resolved: HashMap<u64, SourceId> = events
-            .iter()
-            .filter_map(|event| match &event.record {
-                BindingRecord::Resolved {
-                    resolves_seq,
-                    source,
-                } => Some((*resolves_seq, source.clone())),
-                _ => None,
-            })
-            .collect();
-        let pending = events.iter().filter(|event| {
-            let target = match &event.record {
-                BindingRecord::Bound { new, .. } => Some(new),
-                _ => None,
-            };
-            matches!(target, Some(BindingTarget::Pending { .. }))
-        });
-        let superseded: HashSet<u64> = pending
-            .filter(|p| {
-                events.iter().any(|later| {
-                    super::adoption::supersedes(p, later)
-                        || matches!(&later.record, BindingRecord::Rejected { closes: Some(seq), .. }
-                                if *seq == p.seq && later.seq > p.seq)
-                })
-            })
-            .map(|p| p.seq)
-            .collect();
         let mut expected = checkpoint + 1;
         for event in &events {
             if event.seq != expected {
@@ -467,19 +462,15 @@ impl<B: BindingEvents> Sources<B> {
             }
             if let BindingRecord::Bound {
                 old,
-                new,
                 cause,
                 parent_hint,
                 ..
             } = &event.record
             {
-                let new = match (new, resolved.get(&event.seq)) {
-                    (BindingTarget::Source(source), _) | (_, Some(source)) => Some(source.clone()),
-                    // Nothing resolves a superseded Pending; the hook that superseded it binds.
-                    (BindingTarget::Pending { .. }, None) if superseded.contains(&event.seq) => {
-                        None
-                    }
-                    (BindingTarget::Pending { .. }, None) => {
+                let new = match current::bound_target(&events, event, &events) {
+                    current::BoundTarget::Source(source) => Some(source.clone()),
+                    current::BoundTarget::Skipped => None,
+                    current::BoundTarget::Waiting => {
                         self.wait_resolution(writer, event);
                         return Ok(());
                     }
@@ -661,6 +652,7 @@ impl<B: BindingEvents> Sources<B> {
             }
             self.rotation.links.insert(key.clone(), link);
         }
+        let refined_before = self.refined.len();
         self.refine_provisional(writer, event, &new, parent_hint)?;
         self.rotation.successors.remove(&key);
         // A source bound again leaves its old rotation, so a next one measures its own quiet.
@@ -702,6 +694,14 @@ impl<B: BindingEvents> Sources<B> {
                 Ok(())
             }
             Some(cursor) if cursor.retired => self.unretire(writer, &new),
+            Some(_)
+                if self.is_parked(&new)
+                    && (event.seq > self.view_tail || self.refined.len() > refined_before) =>
+            {
+                Err(halt(
+                    "a parked source was bound again; restart to revalidate it",
+                ))
+            }
             Some(_) => Ok(()),
         }
     }
@@ -837,15 +837,19 @@ impl<B: BindingEvents> Sources<B> {
         writer.reconcile_boundary_pending(count);
     }
 
-    /// Sources whose segments may be collected, with how many to keep; undecided and pending
-    /// boundaries keep their spool.
+    /// Sources whose segments may be collected, with how many to keep; parked readers and
+    /// undecided or pending boundaries keep their spool.
     pub fn collectable(&self) -> Vec<(SourceId, usize)> {
         let decided = |reader: &&Reader| {
             let link = self.rotation.link(&reader.source);
             link.is_none_or(|link| matches!(link.boundary, Boundary::Owed { .. }))
         };
         let keep = |reader: &Reader| usize::from(reader.pending.is_none());
-        let readers = self.readers.iter().filter(decided);
+        let readers = self
+            .readers
+            .iter()
+            .filter(|reader| !reader.parked)
+            .filter(decided);
         readers.map(|r| (r.source.clone(), keep(r))).collect()
     }
 }

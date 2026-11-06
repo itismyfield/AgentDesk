@@ -1,0 +1,72 @@
+---
+title: "소실 원본 park: 최초 연결 순서와 현재 binding 판정"
+---
+%% Code baseline: 7a0c819e127964befd6bc0d022c5d4194d669c9c; reviewed Current delta
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks ActiveLossVisible or CurrentNeverHistorical or ParkedReboundHalts or ReadyAfterFollow or UnknownNeedsAbsence
+    lg1: Path to the ActiveLossVisible or CurrentNeverHistorical or ParkedReboundHalts or ReadyAfterFollow or UnknownNeedsAbsence bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: A 채택 #183; link 없음
+  s1: B 연결 #183; A 다음 B
+  s2: 전체 binding log와 복원 상태 준비
+  s3: 원본 소실 #183; resume 시작
+  s4: A 재연결 rotation 저장 #183; checkpoint는 아직 B
+  s5: 현재성 Unknown #183; park #183; producer absent
+  s6: 현재성 Unknown #183; park #183; producer present
+  s7: 현재성 Unknown #183; park #183; producer unknown
+  s8: 소실 또는 follow 실패 #183; halted #183; ready=false
+  s9: ready #183; 현재 C #183; producer absent
+  s10: ready #183; 현재 C #183; producer present
+  s11: ready #183; 현재 C #183; producer unknown
+  s12: ready #183; 현재 B #183; producer absent
+  s13: ready #183; 현재 B #183; producer present
+  s14: ready #183; 현재 B #183; producer unknown
+  s15: 유효 새 bind 미적용인데 ready
+  s16: A 재연결 완료
+  s17: park된 A 재연결 또는 refinement 뒤에도 running
+  s18: ready #183; 현재 A #183; producer absent
+  s19: 현재 A를 historical로 오판 #183; park #183; halted 없음
+  [*] --> s0
+  s0 --> s1: A #8594; B 신규 bind
+  s0 --> s2: oldless #183; 미적용 #183; Pending #183; 실패 log 시나리오
+  s1 --> s4: B #8594; A 재연결 #183; rotation만 먼저 저장
+  s2 --> s3: 원본 pathname Missing
+  s3 --> s5: 전체 log에서 current 판정 후 park 여부 결정
+  s3 --> s6: 전체 log에서 current 판정 후 park 여부 결정
+  s3 --> s7: 전체 log에서 current 판정 후 park 여부 결정
+  s3 --> s9: 전체 log에서 current 판정 후 park 여부 결정
+  s3 --> s10: 전체 log에서 current 판정 후 park 여부 결정
+  s3 --> s11: 전체 log에서 current 판정 후 park 여부 결정
+  s3 --> s12: 전체 log에서 current 판정 후 park 여부 결정
+  s3 --> s13: 전체 log에서 current 판정 후 park 여부 결정
+  s3 --> s14: 전체 log에서 current 판정 후 park 여부 결정
+  s3 --> s15: 전체 log에서 current 판정 후 park 여부 결정
+  s3 --> s8: 전체 log에서 current 판정 후 park 여부 결정
+  s4 --> s2: 해당 bind checkpoint 저장 or rotation 저장 뒤 checkpoint 저장 전 중단
+  s4 --> s16: 해당 bind checkpoint 저장
+  s12 --> s17: 판정 tail 뒤 parked 원본으로 다시 bind or parked 원본의 boundary refinement 적용
+  s13 --> s17: 판정 tail 뒤 parked 원본으로 다시 bind or parked 원본의 boundary refinement 적용
+  s14 --> s17: 판정 tail 뒤 parked 원본으로 다시 bind or parked 원본의 boundary refinement 적용
+  s16 --> s2: A #8594; C 신규 bind
+  s3 --> s18: 전체 log에서 current 판정 후 park 여부 결정
+  s3 --> s19: 전체 log에서 current 판정 후 park 여부 결정
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s6 breaks
+  class s7 breaks
+  class s7 bugPath
+  class s14 bugPath
+  class s15 breaks
+  class s15 bugPath
+  class s17 breaks
+  class s17 bugPath
+  class s18 breaks
+  class s19 breaks
+  class s19 bugPath
