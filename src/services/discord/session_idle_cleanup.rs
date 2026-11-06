@@ -261,10 +261,6 @@ fn component_is_idle_recap_clear_button(component: &serenity::ActionRowComponent
 }
 
 fn message_is_idle_recap_card(message: &serenity::Message) -> bool {
-    #[cfg(test)]
-    if recap_cleanup_mutant("bypass_card_guard") {
-        return true;
-    }
     content_looks_like_idle_recap_card(&message.content)
         && message.components.iter().any(|row| {
             row.components
@@ -274,10 +270,6 @@ fn message_is_idle_recap_card(message: &serenity::Message) -> bool {
 }
 
 pub(crate) async fn delete_previous_card(http: &serenity::Http, channel_id: u64, message_id: u64) {
-    #[cfg(test)]
-    if recap_cleanup_mutant("skip_delete") {
-        return;
-    }
     let channel = ChannelId::new(channel_id);
     let message = MessageId::new(message_id);
     match http.get_message(channel, message).await {
@@ -316,10 +308,6 @@ pub(crate) async fn clear_recap_pointer(
     session_key: &str,
     expected_message_id: u64,
 ) -> Result<bool, sqlx::Error> {
-    #[cfg(test)]
-    if recap_cleanup_mutant("skip_pointer_clear") {
-        return Ok(false);
-    }
     sqlx::query(
         "UPDATE sessions
          SET idle_recap_message_id = NULL,
@@ -383,12 +371,6 @@ async fn clear_specific_idle_recap_card(
 ) {
     delete_previous_card(http, channel_id, message_id).await;
     let _ = clear_recap_pointer(pool, session_key, message_id).await;
-}
-
-/// Test-only cleanup mutations; production retains the claim and card guards.
-#[cfg(test)]
-pub(in crate::services::discord) fn recap_cleanup_mutant(name: &str) -> bool {
-    std::env::var("ADK_RECAP_CLEANUP_MUTANT").ok().as_deref() == Some(name)
 }
 
 #[cfg(test)]

@@ -12,7 +12,7 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 96
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 94
 - Platform and third-party variables: 40
 
 ## AgentDesk variables
@@ -24,13 +24,11 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_BUSY_INJECT_DISCORD_CHANNELS` | `src/services/discord/router/intake_gate/busy_inject.rs` | `ADK_BUSY_INJECT_DISCORD_CHANNELS` opens busy-turn injection of admitted Discord text, read once per process: `*` or channel ids split by commas or spaces, thr… |
 | `ADK_BUSY_INJECT_STASH_CHANNELS` | `src/services/claude_tui/busy_inject.rs` | Channel ids whose panes may take the stash path, comma-separated and read once; unset is none. |
 | `ADK_CAMPAIGN_PHASE_NONCE` | `src/services/campaign_execution/verification_runner.rs` | Set on every phase child so a later observation can match the exact process, not just its PID. |
-| `ADK_CARRIED_CLOSE_MUTANT` | `src/services/tui_o/turn_mode.rs` | Test mutant switch of the carried-turn close (`ADK_CARRIED_CLOSE_MUTANT`); constant false outside tests. |
 | `ADK_ENV_PANIC_PROBE_CHILD` | `src/test_env_panic_probe.rs` |  |
 | `ADK_ENV_PROBE_MODE` | `src/test_env_panic_probe.rs` |  |
 | `ADK_FORCE_LOCAL_MEMORY` | `src/server/routes/memory_api.rs` | `ADK_FORCE_LOCAL_MEMORY=1` → always Local (testing / escape hatch). |
 | `ADK_GITHUB_SYNC_ALERT_CHANNEL` | `src/github/sync.rs` |  |
 | `ADK_HERDR_ADMISSION` | `src/services/herdr_admission.rs` | Herdr admission kill switch: `ADK_HERDR_ADMISSION`, read once, and a stop file that, once seen, keeps admission stopped until restart. |
-| `ADK_HERDR_ROW_END_MUTANT` | `src/services/discord/recovery_engine/herdr_row_end.rs` | A test build's mutant switch; always off otherwise. |
 | `ADK_IMSG_OBLIGATIONS` | `src/services/imsg_reply/mod.rs` |  |
 | `ADK_INTAKE_ROUTING_MODE` | `src/services/cluster/intake_routing_config.rs`, `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs` |  |
 | `ADK_OBSERVABILITY_COUNTER_SNAPSHOT_RETENTION_DAYS` | `src/services/observability/retention.rs` |  |

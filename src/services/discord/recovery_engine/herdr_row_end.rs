@@ -39,7 +39,7 @@ pub(super) fn held_at_restore(
         return true;
     }
     let current = super::runtime_store::process_generation();
-    let restarted = !mutant("restore") && target(provider, state, current);
+    let restarted = target(provider, state, current);
     if restarted {
         tracing::info!(
             channel_id = state.channel_id,
@@ -66,9 +66,8 @@ fn target(provider: &ProviderKind, state: &inflight::InflightTurnState, current:
         && !state.replay_rerun_blocked()
         && !state.runtime_kind_unknown_on_disk
         && !(state.runtime_kind.is_none() && state.version > inflight::inflight_state_version())
-        && (mutant("herdr-only")
-            || recovery_tmux_session_name(provider, state)
-                .is_some_and(|name| super::turn_bridge::herdr_marked(&name)))
+        && recovery_tmux_session_name(provider, state)
+            .is_some_and(|name| super::turn_bridge::herdr_marked(&name))
         && !inflight::before_start_receipt_present(provider, state.channel_id)
 }
 
@@ -114,7 +113,7 @@ pub(in crate::services::discord) async fn row_end_pass(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
 ) {
-    if mutant("tick") || !shared.restart.reconcile_done.load(Ordering::Acquire) {
+    if !shared.restart.reconcile_done.load(Ordering::Acquire) {
         return;
     }
     let current = shared.restart.current_generation;
@@ -130,10 +129,6 @@ pub(in crate::services::discord) async fn row_end_pass(
             continue;
         };
         let (shared, provider) = (shared.clone(), provider.clone());
-        if mutant("inline") {
-            end_row(&shared, &provider, row).await;
-            continue;
-        }
         super::task_supervisor::spawn_observed("herdr_row_end", async move {
             let _ending = ending;
             match live {
@@ -236,9 +231,7 @@ async fn settle_row(
         return Err("cleanup_owner_changed");
     }
     // A prior process's turn has no actor here; one present now is another turn's.
-    if !mutant("actor") {
-        actor_absent(shared, provider, channel, &row).await?;
-    }
+    actor_absent(shared, provider, channel, &row).await?;
     let pool = shared.pg_pool.as_ref().ok_or("pool_unavailable")?;
     diagnostics::phase(provider, channel.get(), "observe");
     let seen = observe(pool, &shared.token_hash, provider, &row).await?;
@@ -410,10 +403,10 @@ async fn observe(
                 .target(&record)
                 .ok_or("endpoint_unavailable")?;
             match execution_end(target.clone(), record.clone()).await {
-                ExecutionEnd::ProviderAlive if !mutant("exited-only") => {
+                ExecutionEnd::ProviderAlive => {
                     return Err("provider_alive_after_pane_exit");
                 }
-                ExecutionEnd::Ended | ExecutionEnd::ProviderAlive => Some((observation, record)),
+                ExecutionEnd::Ended => Some((observation, record)),
                 ExecutionEnd::Unconfirmed => {
                     let outcome = idle(provider, row, &record, target, &nonce).await?;
                     return Ok(Seen {
@@ -502,9 +495,6 @@ async fn commit(pool: &sqlx::PgPool, seen: &Seen) -> Result<(), Held> {
         tests::hook("before_retire").await;
         let retired = retire_confirmed(pool, observation, record).await;
         retired.map_err(|_| "retire_cas_failed")?;
-    }
-    if seen.idle && mutant("hold") {
-        return Ok(());
     }
     match release_hold(&seen.nonce) {
         HoldRelease::Released => Ok(()),
@@ -605,9 +595,7 @@ fn idle_read(
             if !codex::pane_looks_ready_for_codex_prompt(&screen) {
                 return Err("composer_busy");
             }
-            if !mutant("no-empty-composer")
-                && codex::active_composer_content_in_pane(&screen) != ComposerContent::Empty
-            {
+            if codex::active_composer_content_in_pane(&screen) != ComposerContent::Empty {
                 return Err("composer_draft");
             }
         }
@@ -646,11 +634,11 @@ fn turn_body(turn: Option<Terminal>) -> Option<String> {
         semantic_chunk_separator_needed, text_ends_inside_open_code_fence,
     };
     let turn = turn.filter(|turn| turn.kind == NativeTerminalKind::Completed)?;
-    if !turn.result.trim().is_empty() || mutant("done-overwrites") {
-        return Some(turn.result).filter(|result| !result.trim().is_empty());
+    if !turn.result.trim().is_empty() {
+        return Some(turn.result);
     }
     let mut body = String::new();
-    for part in turn.output.iter().filter(|_| !mutant("no-body-collect")) {
+    for part in turn.output.iter() {
         match part {
             TurnOutput::Tool if !body.is_empty() => {
                 body.truncate(body.trim_end().len());
@@ -705,11 +693,6 @@ fn codex_last_turn_closed(file: &mut std::fs::File, len: u64) -> Option<bool> {
         }
     }
     Some(closed)
-}
-
-/// A test build's mutant switch; always off otherwise.
-fn mutant(name: &str) -> bool {
-    cfg!(test) && std::env::var("ADK_HERDR_ROW_END_MUTANT").as_deref() == Ok(name)
 }
 
 #[path = "herdr_row_end/diagnostics.rs"]

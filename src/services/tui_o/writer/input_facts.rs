@@ -397,8 +397,7 @@ impl InputFacts {
             }
             _ if self.state != TurnState::Idle => {
                 let aborted = aborted(self.binding.provider, value);
-                let opened = self.opened
-                    || crate::services::tui_o::turn_mode::carried_close_mutant("opener");
+                let opened = self.opened;
                 self.last_close_aborted = opened.then_some(aborted);
                 self.queued.closed();
                 self.events.push(Ordered::Closed {
