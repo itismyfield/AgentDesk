@@ -1221,3 +1221,193 @@ async fn migration_upgrades_main_schema_and_preserves_legacy_records_pg() {
     pool.close().await;
     fixture.drop().await;
 }
+
+async fn sequences(pool: &PgPool, campaign: &str, run: Option<&str>) -> Vec<u64> {
+    let mut seen = Vec::new();
+    let mut after = 0;
+    loop {
+        let page = events(pool, campaign, run, after, 500).await.unwrap();
+        let Some(last) = page.last() else {
+            return seen;
+        };
+        after = i64::try_from(last.sequence).unwrap();
+        seen.extend(page.iter().map(|event| event.sequence));
+    }
+}
+
+/// Retention keeps each campaign's newest 5,000 event and history rows plus its current run's
+/// rows; the cursor readers answer from what is left, and protection follows the current run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retention_keeps_the_newest_campaign_rows_and_the_whole_current_run_pg() {
+    let h = Harness::new().await;
+    h.seed(domain::with_action(ActionState::Reconciled, true))
+        .await;
+    // `old-run` holds 100..=5104 (plus `action-b` at 104 and 105), the current `run` 10..=12 and
+    // a run-less event 20; `campaign-2` reuses the ids with three `old-run` rows per table.
+    sqlx::raw_sql(
+        "INSERT INTO server_campaign_runs (campaign_id, run_id, document, nodes, definition_pin)
+             SELECT campaign_id, 'old-run', jsonb_set(document, '{id}', '\"old-run\"'), nodes,
+                    definition_pin FROM server_campaign_runs WHERE run_id = 'run';
+         INSERT INTO server_campaign_actions (campaign_id, run_id, action_id, document)
+             SELECT campaign_id, 'old-run', action_id, document FROM server_campaign_actions
+             WHERE run_id = 'run'
+             UNION ALL SELECT campaign_id, 'old-run', 'action-b', document
+             FROM server_campaign_actions WHERE run_id = 'run';
+         CREATE TEMP TABLE seed_docs AS
+             SELECT (SELECT document FROM server_campaign_events LIMIT 1) AS event_doc,
+                    (SELECT document FROM server_campaign_run_history LIMIT 1) AS run_doc,
+                    (SELECT nodes FROM server_campaign_run_history LIMIT 1) AS nodes,
+                    (SELECT definition_pin FROM server_campaign_run_history LIMIT 1) AS pin,
+                    (SELECT document FROM server_campaign_action_history LIMIT 1) AS action_doc;
+         DELETE FROM server_campaign_events;
+         DELETE FROM server_campaign_run_history;
+         DELETE FROM server_campaign_action_history;
+         INSERT INTO server_campaign_events (campaign_id, sequence, run_id, document)
+             SELECT 'campaign', s.seq, s.run_id, jsonb_set(jsonb_set(d.event_doc, '{sequence}',
+                    to_jsonb(s.seq)), '{run_id}', COALESCE(to_jsonb(s.run_id), 'null'::jsonb))
+             FROM seed_docs d, (SELECT g AS seq, 'old-run' AS run_id FROM generate_series(100, 5104) g
+                 UNION ALL SELECT g, 'run' FROM generate_series(10, 12) g
+                 UNION ALL SELECT 20, NULL) s;
+         INSERT INTO server_campaign_run_history
+                 (campaign_id, run_id, sequence, document, nodes, definition_pin)
+             SELECT 'campaign', s.run_id, s.seq, d.run_doc, d.nodes, d.pin
+             FROM seed_docs d, (SELECT g AS seq, 'old-run' AS run_id FROM generate_series(100, 5104) g
+                 UNION ALL SELECT g, 'run' FROM generate_series(10, 12) g) s;
+         INSERT INTO server_campaign_action_history
+                 (campaign_id, run_id, action_id, sequence, document)
+             SELECT 'campaign', s.run_id, s.action_id, s.seq, d.action_doc
+             FROM seed_docs d, (SELECT g AS seq, 'old-run' AS run_id, 'action' AS action_id
+                     FROM generate_series(100, 5104) g
+                 UNION ALL SELECT g, 'old-run', 'action-b' FROM generate_series(104, 105) g
+                 UNION ALL SELECT g, 'run', 'action' FROM generate_series(10, 12) g) s;
+         INSERT INTO server_campaign_keys (campaign_id) VALUES ('campaign-2');
+         INSERT INTO server_campaign_runs (campaign_id, run_id, document, nodes, definition_pin)
+             SELECT 'campaign-2', run_id, document, nodes, definition_pin
+             FROM server_campaign_runs WHERE campaign_id = 'campaign';
+         INSERT INTO server_campaign_definitions (campaign_id, revision, definition, control,
+                 run_id, nodes, event_sequence, last_event_at)
+             SELECT 'campaign-2', revision, definition, control, run_id, nodes, event_sequence,
+                    last_event_at FROM server_campaign_definitions WHERE campaign_id = 'campaign';
+         INSERT INTO server_campaign_actions (campaign_id, run_id, action_id, document)
+             SELECT 'campaign-2', run_id, action_id, document FROM server_campaign_actions
+             WHERE campaign_id = 'campaign' AND run_id = 'old-run' AND action_id = 'action';
+         INSERT INTO server_campaign_events (campaign_id, sequence, run_id, document)
+             SELECT 'campaign-2', g, 'old-run', jsonb_set(jsonb_set(d.event_doc, '{sequence}',
+                    to_jsonb(g)), '{run_id}', '\"old-run\"')
+             FROM seed_docs d, generate_series(10, 12) g;
+         INSERT INTO server_campaign_run_history
+                 (campaign_id, run_id, sequence, document, nodes, definition_pin)
+             SELECT 'campaign-2', 'old-run', g, d.run_doc, d.nodes, d.pin
+             FROM seed_docs d, generate_series(10, 12) g;
+         INSERT INTO server_campaign_action_history
+                 (campaign_id, run_id, action_id, sequence, document)
+             SELECT 'campaign-2', 'old-run', 'action', g, d.action_doc
+             FROM seed_docs d, generate_series(10, 12) g;",
+    )
+    .execute(&h.pool)
+    .await
+    .unwrap();
+
+    let readers = |pool: PgPool| async move {
+        (
+            sequences(&pool, "campaign", Some("run")).await,
+            run_history(&pool, "campaign", "run", 0, 500).await.unwrap(),
+            action_history(&pool, "campaign", "run", "action", 0, 500)
+                .await
+                .unwrap(),
+        )
+    };
+    let second = |pool: PgPool| async move {
+        let keys: Vec<(String, String, i64)> = sqlx::query_as(
+            "SELECT 'run_history', run_id, sequence FROM server_campaign_run_history
+             WHERE campaign_id = 'campaign-2'
+             UNION ALL SELECT 'action_history:' || action_id, run_id, sequence
+             FROM server_campaign_action_history WHERE campaign_id = 'campaign-2'
+             ORDER BY 1, 2, 3",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        (sequences(&pool, "campaign-2", None).await, keys)
+    };
+    let second_before = second(h.pool.clone()).await;
+    assert_eq!(second_before.0, vec![10, 11, 12]);
+    let before = readers(h.pool.clone()).await;
+    let all_before = sequences(&h.pool, "campaign", None).await;
+    assert_eq!(before.0, vec![10, 11, 12]);
+
+    let dry = crate::services::maintenance::jobs::db_retention::db_retention_job(&h.pool, true)
+        .await
+        .unwrap();
+    let counts = |report: &crate::services::maintenance::jobs::db_retention::RetentionReport,
+                  action: &str| {
+        [
+            "server_campaign_events",
+            "server_campaign_run_history",
+            "server_campaign_action_history",
+        ]
+        .map(|table| report.get(table, action).map(|t| t.rows_affected))
+    };
+    assert_eq!(counts(&dry, "delete_would"), [Some(6), Some(5), Some(7)]);
+    assert_eq!(
+        sequences(&h.pool, "campaign", None).await,
+        all_before,
+        "dry-run deletes nothing"
+    );
+
+    let live = crate::services::maintenance::jobs::db_retention::db_retention_job(&h.pool, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        readers(h.pool.clone()).await,
+        before,
+        "the current run reads the same"
+    );
+    let kept: Vec<u64> = all_before
+        .iter()
+        .copied()
+        .filter(|seq| !(100..=104).contains(seq) && *seq != 20)
+        .collect();
+    assert_eq!(
+        sequences(&h.pool, "campaign", None).await,
+        kept,
+        "the cursor walks what is left"
+    );
+    // An `after` older than the oldest kept old-run row starts at that row (the gap is silent).
+    let resumed = events(&h.pool, "campaign", None, 13, 1).await.unwrap();
+    assert_eq!(resumed[0].sequence, 105);
+    let old_actions: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT action_id, sequence FROM server_campaign_action_history
+         WHERE campaign_id = 'campaign' AND run_id = 'old-run' AND sequence <= 106
+         ORDER BY sequence, action_id",
+    )
+    .fetch_all(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        old_actions,
+        vec![("action-b".to_string(), 105), ("action".to_string(), 106)],
+        "ties at one sequence keep the larger action id"
+    );
+    assert_eq!(counts(&live, "delete"), [Some(6), Some(5), Some(7)]);
+    assert_eq!(
+        second(h.pool.clone()).await,
+        second_before,
+        "each campaign is ranked on its own, so the small campaign keeps every row"
+    );
+
+    // Once the campaign points at `old-run`, `run`'s rows are no longer protected.
+    sqlx::query(
+        "UPDATE server_campaign_definitions SET run_id = 'old-run' WHERE campaign_id = 'campaign'",
+    )
+    .execute(&h.pool)
+    .await
+    .unwrap();
+    let next = crate::services::maintenance::jobs::db_retention::db_retention_job(&h.pool, false)
+        .await
+        .unwrap();
+    assert_eq!(counts(&next, "delete"), [Some(3), Some(3), Some(3)]);
+    assert!(sequences(&h.pool, "campaign", Some("run")).await.is_empty());
+    assert_eq!(second(h.pool.clone()).await, second_before);
+    h.close().await;
+}

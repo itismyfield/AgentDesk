@@ -68,8 +68,7 @@ enum PeerClass {
     Loopback,
     /// 100.64.0.0/10 or fd7a:115c:a1e0::/48.
     Tailscale,
-    /// RFC1918, 169.254/16, and IPv6 unique-local (outside Tailscale's /48) or link-local.
-    PrivateLan,
+    /// Everything else, private LAN ranges included.
     Outside,
 }
 
@@ -78,7 +77,6 @@ impl PeerClass {
         match self {
             Self::Loopback => "loopback",
             Self::Tailscale => "tailscale",
-            Self::PrivateLan => "private_lan",
             Self::Outside => "outside",
         }
     }
@@ -93,8 +91,6 @@ fn classify_peer(ip: IpAddr) -> PeerClass {
                 PeerClass::Loopback
             } else if a == 100 && (b & 0xc0) == 64 {
                 PeerClass::Tailscale
-            } else if v4.is_private() || v4.is_link_local() {
-                PeerClass::PrivateLan
             } else {
                 PeerClass::Outside
             }
@@ -104,8 +100,6 @@ fn classify_peer(ip: IpAddr) -> PeerClass {
                 PeerClass::Loopback
             } else if v6.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0] {
                 PeerClass::Tailscale
-            } else if v6.is_unique_local() || v6.is_unicast_link_local() {
-                PeerClass::PrivateLan
             } else {
                 PeerClass::Outside
             }
@@ -126,8 +120,6 @@ async fn filter(State(filter): State<PeerFilter>, req: Request, next: Next) -> R
     if matches!(class, PeerClass::Loopback | PeerClass::Tailscale) {
         return next.run(req).await;
     }
-    // Private LAN peers are still served; they are logged so callers that would lose access
-    // under a Tailscale-only boundary show up before that boundary is enforced.
     let total = filter.flagged_total.fetch_add(1, Ordering::Relaxed) + 1;
     if filter.should_warn(peer, Instant::now()) {
         tracing::warn!(
@@ -140,7 +132,7 @@ async fn filter(State(filter): State<PeerFilter>, req: Request, next: Next) -> R
             "peer filter: request from outside loopback/Tailscale"
         );
     }
-    if class == PeerClass::Outside && filter.mode == PeerFilterMode::Enforce {
+    if filter.mode == PeerFilterMode::TailnetOnly {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"error": "forbidden", "code": "peer_not_allowed"})),
