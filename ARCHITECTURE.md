@@ -248,6 +248,8 @@ src/
 │   │   ├── advisory_lock.rs
 │   │   ├── advisory_lock_tests.rs
 │   │   ├── agent_sync.rs
+│   │   ├── pool_return.rs
+│   │   ├── pool_return_pg_tests.rs
 │   │   ├── shared_config.rs
 │   │   └── test_db_reclaim.rs
 │   ├── prompt_manifests/
