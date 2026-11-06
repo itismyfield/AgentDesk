@@ -1,9 +1,13 @@
 """statecharts_tlc counts only a clean TLC finish or one named rule breaking."""
 
 import importlib.util
+import contextlib
+import io
 import os
+import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -388,6 +392,207 @@ class ExpectedTest(unittest.TestCase):
         for text in ("a.cfg\tM\t-\tLive,\n", "a.cfg\tM\t-\tLive\textra\n"):
             with self.subTest(text), self.assertRaises(tlc.CheckError):
                 self.read(text)
+
+
+class SelectionTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.expected = {
+            "a/First.cfg": ("First", set()),
+            "a/Variant.cfg": ("First", set()),
+            "b/Second.cfg": ("Second", set()),
+            "c/Other.cfg": ("Other", set()),
+        }
+        for cfg in self.expected:
+            self.write(cfg, "INIT Init\nNEXT Next\n")
+        self.write("expected.tsv", "".join(f"{cfg}\t{module}\t-\n" for cfg, (module, _) in self.expected.items()))
+        self.write("a/First.tla", "---- MODULE First ----\nEXTENDS Bridge\n====\n")
+        self.write("a/Bridge.tla", "---- MODULE Bridge ----\nS == INSTANCE Shared\n====\n")
+        self.write("b/Second.tla", "---- MODULE Second ----\nLOCAL S ==\n INSTANCE Shared WITH x <- y\n====\n")
+        self.write("shared/Shared.tla", "---- MODULE Shared ----\nEXTENDS Naturals\n====\n")
+        self.write("c/Other.tla", '---- MODULE Other ----\n\\* EXTENDS Shared\n'
+                   '(* outer (* INSTANCE Shared *) ignored *)\nText == "INSTANCE Shared"\n====\n')
+
+    def write(self, path: str, text: str) -> None:
+        target = self.root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+
+    def select(self, *paths: str, previous: dict | None = None) -> list[str]:
+        rows = None if previous is None else {
+            cfg: f"{cfg}\t{module}\t{','.join(sorted(rules)) or '-'}"
+            for cfg, (module, rules) in previous.items()
+        }
+        return tlc.select_configs(self.root, self.expected, list(paths), rows)
+
+    def test_changed_cfg_selects_only_that_variant(self) -> None:
+        self.assertEqual(self.select("docs/statecharts/a/Variant.cfg"), ["a/Variant.cfg"])
+
+    def test_shared_module_selects_transitive_extends_and_instance_consumers_across_folders(self) -> None:
+        self.assertEqual(self.select("docs/statecharts/shared/Shared.tla"),
+                         ["a/First.cfg", "a/Variant.cfg", "b/Second.cfg"])
+
+    def test_extends_lists_can_span_lines_and_dependency_cycles_terminate(self) -> None:
+        self.write("a/First.tla", "---- MODULE First ----\nEXTENDS Naturals,\n Bridge, Shared\n====\n")
+        self.write("a/Bridge.tla", "---- MODULE Bridge ----\nEXTENDS First\n====\n")
+        self.assertEqual(self.select("docs/statecharts/a/Bridge.tla"), ["a/First.cfg", "a/Variant.cfg"])
+
+    def test_local_module_takes_precedence_over_same_name_in_another_folder(self) -> None:
+        self.write("c/Shared.tla", "---- MODULE Shared ----\n====\n")
+        self.write("c/Other.tla", "---- MODULE Other ----\nEXTENDS Shared\n====\n")
+        self.assertEqual(self.select("docs/statecharts/shared/Shared.tla"),
+                         ["a/First.cfg", "a/Variant.cfg", "b/Second.cfg"])
+
+    def test_only_changed_expected_rows_select_configs(self) -> None:
+        previous = dict(self.expected)
+        previous["b/Second.cfg"] = ("Second", {"OldRule"})
+        self.assertEqual(self.select("docs/statecharts/expected.tsv", previous=previous), ["b/Second.cfg"])
+        self.assertEqual(self.select("docs/statecharts/expected.tsv", previous=self.expected), [])
+
+    def test_expected_row_edits_select_even_when_the_rule_set_is_unchanged(self) -> None:
+        previous = tlc.expected_rows((self.root / "expected.tsv").read_text(encoding="utf-8"))
+        self.write("expected.tsv", "".join(f"{cfg}\t{module}\t-\t-\n" for cfg, (module, _) in self.expected.items()))
+        self.assertEqual(tlc.select_configs(self.root, self.expected, ["docs/statecharts/expected.tsv"], previous),
+                         sorted(self.expected))
+
+    def test_missing_expected_history_falls_back_to_all(self) -> None:
+        self.assertEqual(self.select("docs/statecharts/expected.tsv"), sorted(self.expected))
+
+    def test_checker_changes_and_full_mode_select_all(self) -> None:
+        for path in ("scripts/ci/statecharts_tlc.py", "scripts/ci/StatechartFairness.java",
+                     ".github/workflows/statecharts-tlc.yml"):
+            with self.subTest(path):
+                self.assertEqual(self.select(path), sorted(self.expected))
+        self.assertEqual(tlc.select_configs(self.root, self.expected, None), sorted(self.expected))
+
+    def test_unrelated_files_select_nothing(self) -> None:
+        self.assertEqual(self.select("README.md", "docs/statecharts/a/report.md"), [])
+        self.assertEqual(self.select(), [])
+
+    def test_deleted_shared_module_still_selects_its_consumers(self) -> None:
+        (self.root / "shared/Shared.tla").unlink()
+        self.assertEqual(self.select("docs/statecharts/shared/Shared.tla"),
+                         ["a/First.cfg", "a/Variant.cfg", "b/Second.cfg"])
+
+    def test_renamed_and_deleted_configs_only_select_existing_targets(self) -> None:
+        (self.root / "a/Variant.cfg").rename(self.root / "a/Renamed.cfg")
+        self.expected["a/Renamed.cfg"] = self.expected.pop("a/Variant.cfg")
+        self.assertEqual(self.select("docs/statecharts/a/Variant.cfg", "docs/statecharts/a/Renamed.cfg"),
+                         ["a/Renamed.cfg"])
+        (self.root / "a/First.cfg").unlink()
+        self.expected.pop("a/First.cfg")
+        self.assertEqual(self.select("docs/statecharts/a/First.cfg"), [])
+
+
+class SelectionCliTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name)
+        self.root = self.repo / "docs/statecharts"
+        self.root.mkdir(parents=True)
+        self.git("init", "-q")
+        self.git("config", "user.name", "TLC tests")
+        self.git("config", "user.email", "tlc@example.invalid")
+        for cfg in ("M.cfg", "N.cfg"):
+            (self.root / cfg).write_text("INIT Init\nNEXT Next\n", encoding="utf-8")
+        self.expected = self.root / "expected.tsv"
+        self.expected.write_text("M.cfg\tM\t-\nN.cfg\tN\t-\n", encoding="utf-8")
+        self.commit()
+        self.base = self.git("rev-parse", "HEAD").strip()
+
+    def git(self, *args: str) -> str:
+        return subprocess.run(["git", "-C", str(self.repo), *args], check=True,
+                              capture_output=True, text=True).stdout
+
+    def commit(self) -> None:
+        self.git("add", ".")
+        self.git("commit", "-qm", "fixture")
+
+    def run_main(self, *args: str, barrier: threading.Barrier | None = None) -> tuple[int, str, str, mock.Mock]:
+        out, err = io.StringIO(), io.StringIO()
+        jar = self.repo / "tla2tools.jar"
+        jar.touch()
+
+        def check(root, cfg, module, rules, java, jar, timeout):
+            if barrier is not None:
+                barrier.wait(timeout=5)
+            return tlc.Result(cfg, rules, broken=rules, rules=list(rules), runs=1)
+
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                mock.patch.object(tlc, "REPO_ROOT", self.repo), \
+                mock.patch.object(tlc, "check_cfg", side_effect=check) as checked:
+            rc = tlc.main(["--root", str(self.root), "--jar", str(jar), "--base", self.base, *args])
+        return rc, out.getvalue(), err.getvalue(), checked
+
+    def test_cli_reads_base_expected_rows_and_preserves_broken_output(self) -> None:
+        self.expected.write_text("M.cfg\tM\tKnown\nN.cfg\tN\t-\n", encoding="utf-8")
+        self.commit()
+        rc, out, err, checked = self.run_main("--jobs", "2")
+        self.assertEqual((rc, err), (0, ""))
+        self.assertEqual([call.args[1] for call in checked.call_args_list], ["M.cfg"])
+        self.assertTrue(out.startswith("Selected 1 configs (changed):\n  M.cfg\n"))
+        self.assertIn("broken=Known", out)
+        self.assertIn("| M.cfg | Known | Known |", out)
+        self.assertIn("1 configs", out)
+
+    def test_parallel_full_fallback_checks_each_config_once_and_keeps_sorted_output(self) -> None:
+        checker = self.repo / "scripts/ci/statecharts_tlc.py"
+        checker.parent.mkdir(parents=True)
+        checker.write_text("checker changed\n", encoding="utf-8")
+        self.expected.write_text("M.cfg\tM\tKnown\nN.cfg\tN\tOther\n", encoding="utf-8")
+        self.commit()
+        rc, out, err, checked = self.run_main("--jobs", "2", barrier=threading.Barrier(2))
+        self.assertEqual((rc, err), (0, ""))
+        self.assertCountEqual([call.args[1] for call in checked.call_args_list], ["M.cfg", "N.cfg"])
+        self.assertLess(out.index("ok   M.cfg"), out.index("ok   N.cfg"))
+        self.assertIn("| M.cfg | Known | Known |", out)
+        self.assertIn("| N.cfg | Other | Other |", out)
+
+    def test_no_targets_is_explicit_and_never_claims_a_check_passed(self) -> None:
+        (self.repo / "README.md").write_text("docs only\n", encoding="utf-8")
+        self.commit()
+        rc, out, err, checked = self.run_main()
+        self.assertEqual((rc, err), (0, ""))
+        checked.assert_not_called()
+        self.assertIn("Selected 0 configs (changed):", out)
+        self.assertIn("NO_TARGETS", out)
+        self.assertNotIn("broken=", out)
+        self.assertNotIn("| cfg |", out)
+
+    def test_deleted_config_with_stale_expected_row_fails_even_without_targets(self) -> None:
+        (self.root / "M.cfg").unlink()
+        self.commit()
+        rc, out, err, checked = self.run_main()
+        self.assertEqual(rc, 1)
+        self.assertIn("M.cfg: listed in expected.tsv but the file is gone", err)
+        self.assertIn("NO_TARGETS", out)
+        checked.assert_not_called()
+
+    def test_git_rename_checks_new_config_and_clean_deletion_has_no_targets(self) -> None:
+        (self.root / "M.cfg").rename(self.root / "Renamed.cfg")
+        self.expected.write_text("Renamed.cfg\tM\t-\nN.cfg\tN\t-\n", encoding="utf-8")
+        self.commit()
+        rc, out, err, checked = self.run_main()
+        self.assertEqual((rc, err), (0, ""))
+        self.assertEqual([call.args[1] for call in checked.call_args_list], ["Renamed.cfg"])
+        self.base = self.git("rev-parse", "HEAD").strip()
+        (self.root / "Renamed.cfg").unlink()
+        self.expected.write_text("N.cfg\tN\t-\n", encoding="utf-8")
+        self.commit()
+        rc, out, err, checked = self.run_main()
+        self.assertEqual((rc, err), (0, ""))
+        self.assertIn("NO_TARGETS", out)
+        checked.assert_not_called()
+
+    def test_invalid_base_is_a_failure(self) -> None:
+        self.base = "missing-base"
+        rc, out, err, checked = self.run_main()
+        self.assertEqual(rc, 1)
+        self.assertIn("FAIL", err)
+        checked.assert_not_called()
 
 
 class ProblemsTest(unittest.TestCase):
