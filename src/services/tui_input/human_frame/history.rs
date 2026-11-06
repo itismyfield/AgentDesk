@@ -9,6 +9,7 @@ mod checked_tests;
 mod compat;
 #[cfg(test)]
 mod compat_tests;
+pub(crate) mod notice_owner;
 mod screen;
 #[cfg(test)]
 mod screen_tests;

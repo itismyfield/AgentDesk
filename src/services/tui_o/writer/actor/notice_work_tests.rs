@@ -912,7 +912,8 @@ fn notice_evidence(actor: &mut Host, key: &UnitKey) -> usize {
 }
 
 #[tokio::test(start_paused = true)]
-async fn pending_injection_ownership_keeps_notice_debt_through_raw_release_until_receipt() {
+async fn ambiguous_ownership_after_raw_release_is_excluded_after_rival_abandoned_and_exact_receipt()
+{
     let _guard = crate::config::TestRuntimeRootGuard::new();
     let runtime = tempfile::tempdir().unwrap();
     let path = runtime.path().join("native.jsonl");
@@ -922,7 +923,7 @@ async fn pending_injection_ownership_keeps_notice_debt_through_raw_release_until
         body("pending-body", "pending answer"),
     ]
     .concat();
-    std::fs::write(&path, &original).unwrap();
+    std::fs::write(&path, b"").unwrap();
     let source =
         crate::services::tui_o::shadow::binding_reader::source_id_for("native", &path).unwrap();
     let logical = "pending-notice-pane";
@@ -933,7 +934,9 @@ async fn pending_injection_ownership_keeps_notice_debt_through_raw_release_until
         logical,
         "73320000000000000000000000000097",
     );
-    history::register(("claude", logical, "attempt", "733201"), &path, 0, &prompt).unwrap();
+    let (registry, keys) =
+        ambiguous_registration(&path, logical, "73320000000000000000000000000097", &prompt);
+    append(&path, &original);
     assert!(matches!(
         history::observed_attempt_checked(
             "claude",
@@ -1006,28 +1009,21 @@ async fn pending_injection_ownership_keeps_notice_debt_through_raw_release_until
     assert_eq!(actor.notice_debt_extra(), 1);
     assert_eq!(actor.obligations().unwrap().owed, 1);
 
-    assert_eq!(
-        history::receipt("attempt", &path, 0, "user", Some("pending"), &prompt),
-        Some(true)
-    );
+    {
+        let posts = port.posts.lock().unwrap();
+        assert_eq!(posts.len(), 2);
+        assert!(posts.iter().all(|p| !p.starts_with("-# ⌨️")));
+    }
+    abandon_rival(&registry, &keys, &prompt);
+    ambiguous_receipt(&registry, &keys[0], &path, "pending", &prompt);
     actor.prepare_notices(&[]).await;
     actor.deliver_owed(&progress).await;
     assert_eq!(
         actor.writer.store().ledger().excluded(&key),
         Some("input_notice_source")
     );
-    assert!(
-        actor
-            .writer
-            .store()
-            .ledger()
-            .latest_piece(&key, 0)
-            .is_none()
-    );
     assert_eq!(actor.notice_debt_extra(), 0);
-    let posts = port.posts.lock().unwrap();
-    assert_eq!(posts.len(), 2);
-    assert!(posts.iter().all(|p| !p.starts_with("-# ⌨️")));
+    assert_eq!(notice_evidence(&mut actor, &key), 1);
 }
 
 #[tokio::test(start_paused = true)]
@@ -1111,3 +1107,8 @@ async fn notice_admission_contention_after_preflight_still_lets_the_later_body_p
 
 #[path = "notice_activation_tests.rs"]
 mod activation;
+
+#[path = "notice_owner_tests.rs"]
+mod owner;
+
+use owner::{abandon_rival, ambiguous_receipt, ambiguous_registration, ambiguous_withdraw};

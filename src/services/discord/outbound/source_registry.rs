@@ -1,5 +1,7 @@
 //! Single authorization registry for Discord outbound source labels.
 
+pub(crate) const IMESSAGE_INPUT_NOTICE_SOURCE: &str = "imessage_input_notice";
+
 pub(crate) const RETIRED_SEND_SOURCES: &[&str] = &["merge-automation"];
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -62,6 +64,7 @@ enum StaticSendSource {
     BootCustodyNotice,
     QueueOverflowNotice,
     RetainedInputNotice,
+    ImessageInputNotice,
     OutboxDeliveryAlert,
     LongTurnWatchdog,
     RelaySignalRollup,
@@ -117,6 +120,7 @@ const POLICIES: &[SourcePolicy] = &[
     policy!(BootCustodyNotice, "boot_custody_notice", LOOPBACK),
     policy!(QueueOverflowNotice, "queue_overflow_notice", LOOPBACK),
     policy!(RetainedInputNotice, "retained_input_notice", LOOPBACK),
+    policy!(ImessageInputNotice, "imessage_input_notice", LOOPBACK),
     policy!(OutboxDeliveryAlert, "outbox_delivery_alert", LOOPBACK),
     policy!(LongTurnWatchdog, "long_turn_watchdog", LOOPBACK),
     policy!(RelaySignalRollup, "relay_signal_rollup", LOOPBACK),
@@ -178,6 +182,7 @@ pub(crate) fn is_static_notice_kind(source: &str) -> bool {
             | BootCustodyNotice
             | QueueOverflowNotice
             | RetainedInputNotice
+            | ImessageInputNotice
             | OutboxDeliveryAlert
             | LongTurnWatchdog
             | RelaySignalRollup
@@ -235,6 +240,7 @@ mod tests {
         "boot_custody_notice",
         "queue_overflow_notice",
         "retained_input_notice",
+        "imessage_input_notice",
         "outbox_delivery_alert",
         "long_turn_watchdog",
         "relay_signal_rollup",
@@ -244,6 +250,20 @@ mod tests {
         "adopt_fence_forward_notice",
         "routing_transition",
     ];
+
+    #[test]
+    fn imessage_input_notice_is_authorized_and_classified_as_nonbody() {
+        assert!(super::is_static_notice_kind(
+            super::IMESSAGE_INPUT_NOTICE_SOURCE
+        ));
+        assert!(
+            validate_send_source_for(
+                super::IMESSAGE_INPUT_NOTICE_SOURCE,
+                SendCallerClass::LoopbackInternal
+            )
+            .is_ok()
+        );
+    }
 
     #[test]
     fn producer_contract_lists_every_loopback_source() {

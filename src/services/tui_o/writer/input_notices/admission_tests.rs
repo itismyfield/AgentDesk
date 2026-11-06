@@ -209,7 +209,9 @@ fn body_bypasses_notice_authority_and_unreadable_binding_history() {
     f.piece.notice_origin = None;
     let called = Cell::new(0);
     let result = tc::with_tmux_source_authority(LOGICAL, |_| {
-        admit_notice(&f.piece, &mut f.store, |_| called.set(called.get() + 1))
+        admit_notice(&f.piece, &mut f.store, None, |_| {
+            called.set(called.get() + 1)
+        })
     });
     assert!(result.is_ok());
     assert_eq!(called.get(), 1);
@@ -220,7 +222,9 @@ fn clear_first_excludes_before_start_and_survives_reopening() {
     let mut f = Fixture::new();
     f.clear();
     let called = Cell::new(0);
-    let result = admit_notice(&f.piece, &mut f.store, |_| called.set(called.get() + 1));
+    let result = admit_notice(&f.piece, &mut f.store, None, |_| {
+        called.set(called.get() + 1)
+    });
     assert!(matches!(result, Err(NoticeRefusal::Withheld(_))));
     assert_eq!(called.get(), 0);
     assert_eq!(
@@ -249,7 +253,7 @@ fn notice_start_holds_source_authority_and_later_clear_prevents_a_second_start()
     .unwrap();
     let called = Cell::new(0);
     let nested = Cell::new(false);
-    let result = admit_notice(&f.piece, &mut f.store, |_| {
+    let result = admit_notice(&f.piece, &mut f.store, None, |_| {
         called.set(called.get() + 1);
         nested.set(tc::try_with_tmux_source_authority(LOGICAL, |_| ()).is_some());
     });
@@ -263,7 +267,9 @@ fn notice_start_holds_source_authority_and_later_clear_prevents_a_second_start()
         "authority must cover prepare and the first poll"
     );
     f.clear();
-    let result = admit_notice(&f.piece, &mut f.store, |_| called.set(called.get() + 1));
+    let result = admit_notice(&f.piece, &mut f.store, None, |_| {
+        called.set(called.get() + 1)
+    });
     assert!(matches!(result, Err(NoticeRefusal::Withheld(_))));
     assert_eq!(called.get(), 1);
 }
@@ -275,13 +281,15 @@ fn missing_provenance_and_unreadable_or_foreign_binding_never_start() {
     let mut missing = f.piece.clone();
     missing.notice_origin = None;
     assert!(matches!(
-        admit_notice(&missing, &mut f.store, |_| called.set(called.get() + 1)),
+        admit_notice(&missing, &mut f.store, None, |_| called
+            .set(called.get() + 1)),
         Err(NoticeRefusal::Withheld(_))
     ));
     let mut foreign = f.piece.clone();
     foreign.notice_origin.as_mut().unwrap().binding_seq = 999;
     assert!(matches!(
-        admit_notice(&foreign, &mut f.store, |_| called.set(called.get() + 1)),
+        admit_notice(&foreign, &mut f.store, None, |_| called
+            .set(called.get() + 1)),
         Err(NoticeRefusal::Withheld(_))
     ));
     std::fs::write(
@@ -293,7 +301,8 @@ fn missing_provenance_and_unreadable_or_foreign_binding_never_start() {
     )
     .unwrap();
     assert!(matches!(
-        admit_notice(&f.piece, &mut f.store, |_| called.set(called.get() + 1)),
+        admit_notice(&f.piece, &mut f.store, None, |_| called
+            .set(called.get() + 1)),
         Err(NoticeRefusal::Withheld(_))
     ));
     assert_eq!(called.get(), 0);
@@ -305,7 +314,9 @@ fn source_contention_yields_before_start_without_a_blocking_lock() {
     let mut f = Fixture::new();
     let called = Cell::new(0);
     let result = tc::with_tmux_source_authority(LOGICAL, |_| {
-        admit_notice(&f.piece, &mut f.store, |_| called.set(called.get() + 1))
+        admit_notice(&f.piece, &mut f.store, None, |_| {
+            called.set(called.get() + 1)
+        })
     });
     assert_eq!(result, Err(NoticeRefusal::Busy));
     assert_eq!(called.get(), 0);
@@ -339,7 +350,11 @@ fn descendant_clear_excludes_original_input_across_normal_resume() {
             p5::BindingCause::Resume,
         );
         let called = Cell::new(0);
-        assert!(admit_notice(&f.piece, &mut f.store, |_| called.set(called.get() + 1)).is_ok());
+        assert!(
+            admit_notice(&f.piece, &mut f.store, None, |_| called
+                .set(called.get() + 1))
+            .is_ok()
+        );
         assert_eq!(
             called.get(),
             1,
@@ -383,7 +398,8 @@ fn descendant_clear_excludes_original_input_across_normal_resume() {
             );
         }
         assert!(matches!(
-            admit_notice(&f.piece, &mut f.store, |_| called.set(called.get() + 1)),
+            admit_notice(&f.piece, &mut f.store, None, |_| called
+                .set(called.get() + 1)),
             Err(NoticeRefusal::Withheld(_))
         ));
         assert_eq!(called.get(), 1);
@@ -424,7 +440,8 @@ fn native_clear_pending_excludes_before_new_transcript_resolves() {
         assert!(!path.exists());
         let called = Cell::new(0);
         assert!(matches!(
-            admit_notice(&f.piece, &mut f.store, |_| called.set(called.get() + 1)),
+            admit_notice(&f.piece, &mut f.store, None, |_| called
+                .set(called.get() + 1)),
             Err(NoticeRefusal::Withheld(_))
         ));
         assert_eq!(called.get(), 0);
