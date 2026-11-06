@@ -26,10 +26,6 @@ impl TmuxWatcherRegistry {
             &self.owner_channel_by_tmux_session,
             &self.restored_owner_by_tmux_session,
         ] {
-            #[cfg(test)]
-            if tests::skip_map(owners, &self.restored_owner_by_tmux_session) {
-                continue;
-            }
             names.extend(
                 owners
                     .iter()
@@ -53,10 +49,6 @@ impl TmuxWatcherRegistry {
         &self,
         channel_id: &ChannelId,
     ) -> Option<TmuxWatcherBinding> {
-        #[cfg(test)]
-        if let Some(binding) = tests::widen_binding(self, channel_id) {
-            return Some(binding);
-        }
         let tmux_session_name = self.tmux_session_by_channel.get(channel_id)?.clone();
         let owner_channel_id = self
             .owner_channel_by_tmux_session
@@ -87,41 +79,9 @@ impl TmuxWatcherRegistry {
     }
 }
 
-#[cfg(all(test, unix))]
-pub(in crate::services::discord) use tests::owner_stop_mutant;
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    pub(in crate::services::discord) fn owner_stop_mutant(name: &str) -> bool {
-        std::env::var("ADK_OWNER_STOP_MUTANT").as_deref() == Ok(name)
-    }
-
-    pub(super) fn skip_map(
-        owners: &dashmap::DashMap<String, ChannelId>,
-        restored: &dashmap::DashMap<String, ChannelId>,
-    ) -> bool {
-        owner_stop_mutant("2a-live-only") && std::ptr::eq(owners, restored)
-    }
-
-    pub(super) fn widen_binding(
-        registry: &TmuxWatcherRegistry,
-        channel: &ChannelId,
-    ) -> Option<TmuxWatcherBinding> {
-        if !owner_stop_mutant("2a-channel-binding-widened") {
-            return None;
-        }
-        let owner = registry
-            .authoritative_session_bindings(*channel)
-            .into_iter()
-            .next()?;
-        Some(TmuxWatcherBinding {
-            owner_channel_id: owner.owner_channel_id,
-            tmux_session_name: owner.tmux_session_name,
-            output_path: None,
-        })
-    }
 
     #[test]
     fn authoritative_snapshot_dedupes_sorts_and_rechecks_live_precedence() {

@@ -17,8 +17,6 @@ pub(in crate::services::discord) use owner_observation::{
     owner_observation_epoch, with_owner_publication,
 };
 
-#[cfg(all(test, unix))]
-pub(in crate::services::discord) use session_binding::owner_stop_mutant;
 pub(in crate::services::discord) use session_binding::{
     AuthoritativeSessionBinding, TmuxWatcherBinding,
 };

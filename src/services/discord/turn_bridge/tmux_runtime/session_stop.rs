@@ -88,12 +88,6 @@ impl SessionStop {
         let open = Arc::new(move || {
             #[cfg(test)]
             let _root = TestBindingRoot::enter(binding_root.as_deref());
-            #[cfg(all(test, unix))]
-            if crate::services::discord::tmux_watcher_registry::owner_stop_mutant(
-                "2a-delivery-recheck-off",
-            ) {
-                return true;
-            }
             observe(&shared, &provider, channel).ok().flatten().as_ref() == Some(&expected)
         });
         super::interrupt_session_on(&self.target, &self.provider, reason, open).await
@@ -112,18 +106,11 @@ fn observe(
     };
     let owners: Vec<AuthoritativeSessionBinding> =
         shared.tmux_watchers.authoritative_session_bindings(channel);
-    #[cfg(all(test, unix))]
-    let owners = tests::mutate_initial_owners(channel, owners);
     if owners.is_empty() {
         return Ok(None);
     }
     let events =
-        ChannelBindingLog::new(channel.get(), shadow).binding_events_since(channel.get(), 0);
-    #[cfg(all(test, unix))]
-    let events = tests::mutate_events(channel, events);
-    let events = events?;
-    #[cfg(all(test, unix))]
-    let owners = tests::mutate_bound_owners(channel, &events, owners);
+        ChannelBindingLog::new(channel.get(), shadow).binding_events_since(channel.get(), 0)?;
     let mut candidates = Vec::new();
     for owner in owners {
         if owner.owner_channel_id != channel {
@@ -154,8 +141,6 @@ fn observe(
             },
         ));
     }
-    #[cfg(all(test, unix))]
-    tests::mutate_candidates(&mut candidates);
     if candidates.len() > 1 {
         return Err("ambiguous authoritative session binding".into());
     }

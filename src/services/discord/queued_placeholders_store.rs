@@ -162,13 +162,6 @@ pub(super) fn load_channel_queued_placeholders_checked(
     token_hash: &str,
     channel: ChannelId,
 ) -> Result<HashMap<(ChannelId, MessageId), MessageId>, String> {
-    #[cfg(test)]
-    if crate::services::discord::inflight::scoped_restore_mutant("post-filter") {
-        return Ok(load_queued_placeholders(provider, token_hash)
-            .into_iter()
-            .filter(|((id, _), _)| *id == channel)
-            .collect());
-    }
     let path =
         channel_file_path(provider, token_hash, channel).ok_or("placeholder root unavailable")?;
     let content = match fs::read_to_string(&path) {

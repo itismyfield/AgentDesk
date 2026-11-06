@@ -50,7 +50,7 @@ pub(in crate::services::discord) fn empty() -> CancelActiveTurnResult {
 fn confirmed_missing_session(session: &str) -> bool {
     match session_presence(session) {
         SessionPresence::Missing => true,
-        SessionPresence::ProbeFailed => super::claude_stop_pane::mutant("probe_is_absent"),
+        SessionPresence::ProbeFailed => false,
         SessionPresence::Present => false,
     }
 }
@@ -102,10 +102,8 @@ fn live_bridge_owner(
     channel: ChannelId,
     token: &Arc<CancelToken>,
 ) -> bool {
-    !super::claude_stop_pane::mutant("ignore_live_owner")
-        && (crate::services::discord::live_bridge::retain_original(provider, channel.get(), token)
-            .is_some()
-            || token.native_stop.has_live_bridge())
+    crate::services::discord::live_bridge::retain_original(provider, channel.get(), token).is_some()
+        || token.native_stop.has_live_bridge()
 }
 
 type StopRowIdentity = (
@@ -237,9 +235,6 @@ impl NativeStop {
         {
             return None;
         }
-        if super::claude_stop_pane::mutant("native_always_none") {
-            return None;
-        }
         let completed = token.native_stop.is_completed();
         let row_before = row_identity(provider, channel);
         let binding_before = token.tmux_session_name();
@@ -270,11 +265,7 @@ impl NativeStop {
             return Some(stop);
         }
         let recovery = recovery_admissible(provider, channel, token, session, completed);
-        if !super::claude_stop_pane::mutant("protect_unowned")
-            && (recovery == Some(true)
-                || (token.native_stop.is_completed()
-                    && super::claude_stop_pane::mutant("recovery_without_owner_gate")))
-        {
+        if recovery == Some(true) {
             let weak = Arc::downgrade(token);
             let expected_binding = token.tmux_session_name();
             let expected_source =
@@ -291,9 +282,8 @@ impl NativeStop {
                         )
                         .map(|binding| binding.output_path)
                             == expected_source
-                        && (recovery_admissible(&provider, channel, &token, &session, completed)
+                        && recovery_admissible(&provider, channel, &token, &session, completed)
                             == Some(true)
-                            || super::claude_stop_pane::mutant("recovery_without_owner_gate"))
                 })
             });
             if token.native_stop.handoff_recovery(witness) {
@@ -377,9 +367,7 @@ impl NativeStop {
             });
             stop.terminal = terminal.clone();
             if terminal() {
-                if !super::claude_stop_pane::mutant("idle_short_circuit")
-                    && token.native_stop.handoff_idle(terminal.clone())
-                {
+                if token.native_stop.handoff_idle(terminal.clone()) {
                     return None;
                 }
                 stop.finished = true;
@@ -412,9 +400,6 @@ impl NativeStop {
         }
         if !stop.sent && !stop.finished {
             stop.notify = token.native_stop.claim_notice();
-        }
-        if !stop.sent && super::claude_stop_pane::mutant("unconfirmed_cancel") {
-            return None;
         }
         Some(stop)
     }
@@ -512,7 +497,7 @@ impl NativeStop {
             if !self.current().await {
                 return empty();
             }
-            if (self.terminal)() || super::claude_stop_pane::mutant("proof_is_terminal") {
+            if (self.terminal)() {
                 let result = self
                     .mailbox
                     .cancel_active_turn_if_current_unless_herdr(
