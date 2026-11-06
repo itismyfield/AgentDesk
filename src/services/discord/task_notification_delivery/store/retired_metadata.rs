@@ -3,6 +3,7 @@
 use super::super::{TaskCardPayload, content_hash};
 use super::*;
 
+#[cfg(test)]
 #[derive(Clone)]
 struct Snapshot {
     scope: TaskCardScope,
@@ -23,9 +24,9 @@ pub(in crate::services::discord::task_notification_delivery) async fn claim_reti
 ) -> Result<Option<(ClaimedCard, String)>, String> {
     match pool {
         Some(pool) => claim_pg(pool, scope, payload, bot_key, message_id).await,
-        None if cfg!(any(test, debug_assertions)) => {
-            claim_memory(scope, payload, bot_key, message_id)
-        }
+        #[cfg(test)]
+        None => claim_memory(scope, payload, bot_key, message_id),
+        #[cfg(not(test))]
         None => Err(memory_fallback_unavailable()),
     }
 }
@@ -107,6 +108,7 @@ async fn claim_pg(
     .transpose()
 }
 
+#[cfg(test)]
 fn claim_memory(
     scope: &TaskCardScope,
     payload: &TaskCardPayload,
@@ -149,6 +151,7 @@ fn claim_memory(
     claim_memory_snapshot(snapshot)
 }
 
+#[cfg(test)]
 fn claim_memory_snapshot(snapshot: Snapshot) -> Result<Option<(ClaimedCard, String)>, String> {
     let mut rows = MEMORY_STORE
         .lock()

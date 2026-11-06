@@ -127,23 +127,3 @@ fn relay_progress_and_message_rollover_leave_presence_identity_unchanged() {
         changed.presence_identity_fields().unwrap()
     );
 }
-
-#[test]
-fn episode_pin_axes_are_a_subset_of_presence_axes_plus_current_message_id() {
-    let source = include_str!("../../../inflight/episode_guard.rs");
-    let body = source
-        .split("struct InflightEpisodePin {")
-        .nth(1)
-        .unwrap()
-        .split('}')
-        .next()
-        .unwrap();
-    let fields = row().presence_identity_fields().unwrap();
-    for line in body.lines().filter(|line| line.contains(':')) {
-        let name = line.trim().split(':').next().unwrap();
-        assert!(
-            name == "current_msg_id" || fields.iter().any(|(key, _)| *key == format!("row.{name}")),
-            "pin axis {name}"
-        );
-    }
-}

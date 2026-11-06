@@ -1,14 +1,19 @@
 //! Durable per-turn card-before-response claims (#4055).
 
+#[cfg(test)]
 use std::collections::HashMap;
+#[cfg(test)]
 use std::sync::{LazyLock, Mutex};
+#[cfg(test)]
 use std::time::{Duration, Instant};
 
 use sqlx::{PgPool, Row};
 
 use super::super::TaskCardScope;
+#[cfg(not(test))]
+use super::memory_fallback_unavailable;
 use super::response_identity::{ResponseTurnCoordinates, TurnRelation, parse_turn_started_at};
-use super::{db_id, memory_fallback_unavailable, message_id};
+use super::{db_id, message_id};
 const RESPONSE_LEASE_SECONDS: i64 = 120;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,7 +99,8 @@ pub(in super::super) async fn claim_response_delivery(
             )
             .await
         }
-        None if cfg!(any(test, debug_assertions)) => claim_response_delivery_memory(
+        #[cfg(test)]
+        None => claim_response_delivery_memory(
             scope,
             response_turn_key,
             recovery_turn_key,
@@ -102,6 +108,7 @@ pub(in super::super) async fn claim_response_delivery(
             card_message_id,
             owner,
         ),
+        #[cfg(not(test))]
         None => Err(memory_fallback_unavailable()),
     }
 }
@@ -120,9 +127,9 @@ pub(in super::super) async fn claim_existing_response_delivery(
         Some(pool) => {
             claim_existing_response_delivery_pg(pool, lookup_scope, response_turn_key, owner).await
         }
-        None if cfg!(any(test, debug_assertions)) => {
-            claim_existing_response_delivery_memory(lookup_scope, response_turn_key, owner)
-        }
+        #[cfg(test)]
+        None => claim_existing_response_delivery_memory(lookup_scope, response_turn_key, owner),
+        #[cfg(not(test))]
         None => Err(memory_fallback_unavailable()),
     }
 }
@@ -133,7 +140,9 @@ pub(in super::super) async fn renew_response_delivery(
 ) -> Result<(), String> {
     match pool {
         Some(pool) => renew_response_delivery_pg(pool, claim).await,
-        None if cfg!(any(test, debug_assertions)) => renew_response_delivery_memory(claim),
+        #[cfg(test)]
+        None => renew_response_delivery_memory(claim),
+        #[cfg(not(test))]
         None => Err(memory_fallback_unavailable()),
     }
 }
@@ -148,7 +157,9 @@ pub(in super::super) async fn mark_response_delivered(
             super::cleanup_old_rows_pg(pool).await;
             Ok(())
         }
-        None if cfg!(any(test, debug_assertions)) => mark_response_delivered_memory(claim),
+        #[cfg(test)]
+        None => mark_response_delivered_memory(claim),
+        #[cfg(not(test))]
         None => Err(memory_fallback_unavailable()),
     }
 }
@@ -159,7 +170,9 @@ pub(in super::super) async fn mark_response_sent(
 ) -> Result<(), String> {
     match pool {
         Some(pool) => mark_response_sent_pg(pool, claim).await,
-        None if cfg!(any(test, debug_assertions)) => mark_response_sent_memory(claim),
+        #[cfg(test)]
+        None => mark_response_sent_memory(claim),
+        #[cfg(not(test))]
         None => Err(memory_fallback_unavailable()),
     }
 }
@@ -171,9 +184,9 @@ pub(in super::super) async fn rebind_response_card(
 ) -> Result<ResponseDeliveryClaim, String> {
     match pool {
         Some(pool) => rebind_response_card_pg(pool, claim, replacement_card_message_id).await,
-        None if cfg!(any(test, debug_assertions)) => {
-            rebind_response_card_memory(claim, replacement_card_message_id)
-        }
+        #[cfg(test)]
+        None => rebind_response_card_memory(claim, replacement_card_message_id),
+        #[cfg(not(test))]
         None => Err(memory_fallback_unavailable()),
     }
 }
@@ -608,12 +621,14 @@ async fn rebind_response_card_pg(
     Ok(rebound)
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MemoryResponseState {
     Claimed,
     Sent,
     Delivered,
 }
+#[cfg(test)]
 #[derive(Clone, Debug)]
 struct MemoryResponseRow {
     event_key: String,
@@ -627,8 +642,10 @@ struct MemoryResponseRow {
     delivered_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+#[cfg(test)]
 type MemoryResponseKey = (u64, String, String, String);
 
+#[cfg(test)]
 static MEMORY_RESPONSES: LazyLock<Mutex<HashMap<MemoryResponseKey, MemoryResponseRow>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -647,6 +664,7 @@ pub(in super::super) fn force_response_deliver_failures(
         .insert(memory_key(&claim.scope, &claim.response_turn_key), attempts);
 }
 
+#[cfg(test)]
 fn memory_key(scope: &TaskCardScope, response_turn_key: &str) -> MemoryResponseKey {
     (
         scope.channel_id,
@@ -656,6 +674,7 @@ fn memory_key(scope: &TaskCardScope, response_turn_key: &str) -> MemoryResponseK
     )
 }
 
+#[cfg(test)]
 fn claim_response_delivery_memory(
     scope: &TaskCardScope,
     response_turn_key: &str,
@@ -830,6 +849,7 @@ fn claim_response_delivery_memory(
     }))
 }
 
+#[cfg(test)]
 fn claim_existing_response_delivery_memory(
     lookup_scope: &TaskCardScope,
     response_turn_key: &str,
@@ -890,6 +910,7 @@ fn claim_existing_response_delivery_memory(
     }))
 }
 
+#[cfg(test)]
 fn renew_response_delivery_memory(claim: &ResponseDeliveryClaim) -> Result<(), String> {
     let mut rows = MEMORY_RESPONSES
         .lock()
@@ -909,6 +930,7 @@ fn renew_response_delivery_memory(claim: &ResponseDeliveryClaim) -> Result<(), S
     Ok(())
 }
 
+#[cfg(test)]
 fn mark_response_sent_memory(claim: &ResponseDeliveryClaim) -> Result<(), String> {
     let mut rows = MEMORY_RESPONSES
         .lock()
@@ -926,6 +948,7 @@ fn mark_response_sent_memory(claim: &ResponseDeliveryClaim) -> Result<(), String
     Ok(())
 }
 
+#[cfg(test)]
 fn rebind_response_card_memory(
     claim: &ResponseDeliveryClaim,
     replacement_card_message_id: u64,
@@ -950,8 +973,8 @@ fn rebind_response_card_memory(
     Ok(rebound)
 }
 
+#[cfg(test)]
 fn mark_response_delivered_memory(claim: &ResponseDeliveryClaim) -> Result<(), String> {
-    #[cfg(test)]
     {
         let key = memory_key(&claim.scope, &claim.response_turn_key);
         let mut failures = FORCED_DELIVER_FAILURES

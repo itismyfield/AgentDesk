@@ -1586,7 +1586,9 @@ pub(in crate::services::discord) fn queue_exit_feedback_emoji(kind: QueueExitKin
 /// run.
 fn queue_exit_card_body(kind: QueueExitKind) -> &'static str {
     match kind {
-        QueueExitKind::Cancelled => "🚫 **큐에서 제거됨** — 사용자 취소로 처리되지 않습니다.",
+        QueueExitKind::Cancelled => {
+            "🚫 **큐에서 제거됨** — 사용자 요청으로 대기 목록에서 제외했습니다."
+        }
         QueueExitKind::Expired => "⌛ **큐에서 제거됨** — 대기 시간 초과로 처리되지 않습니다.",
         // #4260 dual r1: the pre-split ⏏ text carries over to `Overflow`.
         QueueExitKind::Superseded | QueueExitKind::Overflow => {

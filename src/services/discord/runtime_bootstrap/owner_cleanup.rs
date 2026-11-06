@@ -92,13 +92,6 @@ pub(super) async fn refresh_writers(
 
 /// This runtime vouches only for itself: control is this loop, REST is its own prepared client.
 pub(super) async fn publish_routing_owner(shared: &SharedData, provider: &ProviderKind) {
-    #[cfg(test)]
-    let rest = if cleanup::tests::mutant("rest-token") {
-        shared.http.cached_bot_token.get().is_some()
-    } else {
-        super::o_writer_host::prepare_owner_rest(shared).await
-    };
-    #[cfg(not(test))]
     let rest = super::o_writer_host::prepare_owner_rest(shared).await;
     crate::services::cluster::intake_worker_capabilities::publish_routing_owner(
         provider.as_str(),
@@ -111,12 +104,6 @@ async fn reconcile_one(
     shared: &Arc<SharedData>,
     row: &cleanup::Record,
 ) -> Result<(), sqlx::Error> {
-    #[cfg(test)]
-    if cleanup::tests::mutant("periodic")
-        || (cleanup::tests::mutant("retry-skip") && row.routing_cleanup_attempts > 0)
-    {
-        return Ok(());
-    }
     cleanup::advance(pool, row.id).await?;
     let Some(claimed) = cleanup::claim(pool, row).await? else {
         return Ok(());

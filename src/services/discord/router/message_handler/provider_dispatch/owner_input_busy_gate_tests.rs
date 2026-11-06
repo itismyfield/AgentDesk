@@ -298,6 +298,23 @@ fn hold_first_then(
     (held, go, original)
 }
 
+/// A failed peer must release both the shim and the turn before its panic can be joined.
+struct ReleaseBusyGateOnPanic {
+    cancel: Arc<CancelToken>,
+    go: std::path::PathBuf,
+}
+
+impl Drop for ReleaseBusyGateOnPanic {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.cancel
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::Release);
+            let _ = fs::write(&self.go, "");
+        }
+    }
+}
+
 /// A stop that takes the gate just before the busy paste's first key leaves the pane keyless and
 /// the attempt unconfirmed, never resent; a paste that keyed first leaves the gate MayHaveWritten.
 #[test]
@@ -328,7 +345,12 @@ fn an_armed_start_on_a_busy_pane_pastes_only_through_the_first_key_gate() {
         sink.arm_first_key();
         let (stopper, transcript) = (cancel.clone(), rig.transcript());
         let (renderer, gate) = (rig.renderer.clone(), sink.clone());
+        let release = ReleaseBusyGateOnPanic {
+            cancel: cancel.clone(),
+            go: go.clone(),
+        };
         let other = std::thread::spawn(move || {
+            let _release = release;
             wait("the busy writer reaches its first key", || held.exists());
             let keyed = gate.may_have_written();
             if stop_first {
@@ -339,6 +361,18 @@ fn an_armed_start_on_a_busy_pane_pastes_only_through_the_first_key_gate() {
             if !stop_first {
                 // The pasted input's AI turn ends, so its observer returns.
                 wait("Enter", || events(&renderer).iter().any(|e| e == "Enter"));
+                // Enter is recorded before the renderer writes the user row; its turn must end later.
+                let body = fs::read_to_string(renderer.join("body")).unwrap();
+                wait("the busy input's transcript row", || {
+                    fs::read_to_string(&transcript)
+                        .unwrap()
+                        .lines()
+                        .any(|line| {
+                            serde_json::from_str::<Value>(line).is_ok_and(|row| {
+                                row["type"] == "user" && row["message"]["content"] == body
+                            })
+                        })
+                });
                 let mut file = fs::OpenOptions::new()
                     .append(true)
                     .open(&transcript)
@@ -387,7 +421,12 @@ fn refused_busy_start(
     let cancel = fresh();
     cancel.native_stop.receipt_sink().arm_first_key();
     let stopper = cancel.clone();
+    let release = ReleaseBusyGateOnPanic {
+        cancel: cancel.clone(),
+        go: go.clone(),
+    };
     let other = std::thread::spawn(move || {
+        let _release = release;
         wait("the busy writer loads its buffer", || held.exists());
         if stop {
             let decided = StopCancel::decide(Some(stopper), "!stop".into());

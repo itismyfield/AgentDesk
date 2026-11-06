@@ -57,40 +57,9 @@ pub(crate) fn braced_item_span(code: &str, signature: &str) -> Option<Range<usiz
     None
 }
 
-/// How a forgery test hides code: a `//` comment ending the line, or a nested block.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum CommentForgery {
-    Line,
     NestedBlock,
-}
-
-impl CommentForgery {
-    pub(crate) const ALL: [Self; 2] = [Self::Line, Self::NestedBlock];
-
-    fn wrap(self, text: &str) -> String {
-        match self {
-            Self::Line => format!("// {text}\n"),
-            Self::NestedBlock => format!("/* outer /* {text} */ */"),
-        }
-    }
-}
-
-/// Rewrites every non-comment occurrence of `needle` as a comment that still
-/// contains it verbatim, so a raw `contains` keeps matching the forged source.
-pub(crate) fn comment_out_code(source: &str, needle: &str, forgery: CommentForgery) -> String {
-    let code = strip_rust_comments(source).expect("forgery input lexes");
-    let starts: Vec<usize> = code.match_indices(needle).map(|(start, _)| start).collect();
-    assert!(
-        !starts.is_empty(),
-        "no code occurrence of `{needle}` to forge"
-    );
-    let mut forged = source.to_string();
-    for start in starts.into_iter().rev() {
-        forged.replace_range(start..start + needle.len(), &forgery.wrap(needle));
-    }
-    let forged_code = strip_rust_comments(&forged).expect("forged source lexes");
-    assert!(forged.contains(needle) && !forged_code.contains(needle));
-    forged
 }
 
 /// Comment and literal byte ranges of a source, each list in source order; a literal

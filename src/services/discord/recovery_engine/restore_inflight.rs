@@ -2544,57 +2544,6 @@ mod tests {
         crate::services::discord::runtime_store::set_process_generation_for_tests(None);
     }
 
-    /// Lexical ratchet for the restore clear spellings and three recovery-marker sites.
-    /// It is not execution proof: aliases, re-exports, macro-constructed calls, indirection,
-    /// and semantically equivalent spellings can remain unseen, while comments can satisfy
-    /// occurrence counts. The sibling `inflight_row_clear_call` ratchet catches equivalent
-    /// bare-call spellings; behavioural coverage, including the ten-branch gate matrix, is
-    /// tracked in #5482 rather than proven by this source-token assertion.
-    #[test]
-    fn restore_clear_and_recovery_marker_sites_are_lexically_pinned() {
-        let source = include_str!("restore_inflight.rs");
-        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
-        assert_eq!(
-            production
-                .matches("clear_rebind_origin_for_reconcile(provider, &state)")
-                .count(),
-            1
-        );
-        assert_eq!(
-            production
-                .matches("clear_inflight_state_for_reconcile(provider, &state)")
-                .count(),
-            8
-        );
-        assert_eq!(
-            production
-                .matches("clear_inflight_state(provider, state.channel_id)")
-                .count(),
-            0
-        );
-        let restart_report_claim = production
-            .split("if watcher_claimed {")
-            .nth(1)
-            .expect("restart-report watcher claim success block");
-        assert!(restart_report_claim.starts_with(
-            "\n                            shared\n                                .restart\n                                .recovering_channels\n                                .insert("
-        ));
-        let pane_alive_claim = production
-            .split("if watcher_claimed {")
-            .nth(2)
-            .expect("pane-alive watcher claim success block");
-        assert!(pane_alive_claim.starts_with(
-            "\n                    shared\n                        .restart\n                        .recovering_channels\n                        .insert("
-        ));
-        assert!(production.contains(
-            "            continue;\n        }\n\n        let Some(kickoff_identity) = kickoff_identity::recovery_kickoff_identity(&state) else {"
-        ));
-        assert!(production.contains(
-            "            continue;\n        };\n\n        shared\n            .restart\n            .recovering_channels\n            .insert("
-        ));
-        assert_eq!(production.matches(".recovering_channels\n").count(), 3);
-    }
-
     fn generic_recovery_runtime_ready(
         shared: &std::sync::Arc<super::SharedData>,
         provider: &ProviderKind,

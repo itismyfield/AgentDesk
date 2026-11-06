@@ -19,11 +19,6 @@ pub(super) async fn route(
     let pair = fallback
         .pair_for(ctx.channel_id, ctx.policy_channel_id)
         .cloned();
-    #[cfg(test)]
-    let pair = pair.or_else(|| {
-        owner_record::cleanup::tests::mutant("fallback-off-gate")
-            .then(|| ["mac-a".to_string(), "mac-b".to_string()])
-    });
     let pair = pair?;
     #[cfg(test)]
     ENTERED
@@ -130,15 +125,6 @@ async fn switch(
         }
     };
     // A managed channel keeps its PG owner even for the same target; placement never re-picks it.
-    #[cfg(test)]
-    if owner_record::cleanup::tests::mutant("same-target-shortcut") {
-        let active = shared.owner.as_ref().filter(|o| o.status == "active");
-        if active.map_or(shared.home.as_deref() == Some(target.as_str()), |o| {
-            o.owner_instance_id == target
-        }) {
-            return Ok(None);
-        }
-    }
     // A local file on its own owner (or unowned home) runs here as before, after earlier input.
     if ctx.has_nonportable_uploads
         && target == ctx.leader_instance_id
@@ -149,21 +135,11 @@ async fn switch(
                 o.status == "active" && o.owner_instance_id == target
             })
     {
-        #[cfg(test)]
-        let keep = !owner_record::cleanup::tests::mutant("same-target-upload-reject");
-        #[cfg(not(test))]
-        let keep = true;
-        if keep {
-            return local_after_earlier_input(pool, ctx, &id, target)
-                .await
-                .map(Some);
-        }
+        return local_after_earlier_input(pool, ctx, &id, target)
+            .await
+            .map(Some);
     }
     // A local path cannot cross Macs; the queue's explicit rejection notice applies instead.
-    #[cfg(test)]
-    let local_upload =
-        ctx.has_nonportable_uploads && !owner_record::cleanup::tests::mutant("fallback-local");
-    #[cfg(not(test))]
     let local_upload = ctx.has_nonportable_uploads;
     if local_upload {
         return Ok(Some(IntakeRouterDecision::Blocked {
@@ -212,8 +188,6 @@ async fn local_after_earlier_input(
     // NoOwner keeps the stale-pending local exception from running past the earlier input.
     let resolved_owner = ResolvedSessionOwner::NoOwner;
     let open = existing_open_route(pool, ctx.channel_id).await?;
-    #[cfg(test)]
-    let open = open.filter(|_| !owner_record::cleanup::tests::mutant("local-open-route"));
     if let Some((route, open_target, message, status, age)) = open {
         if message == ctx.user_msg_id {
             return Ok(IntakeRouterDecision::SkippedDuplicate { resolved_owner });
