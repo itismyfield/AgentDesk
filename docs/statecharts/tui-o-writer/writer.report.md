@@ -1,6 +1,6 @@
 이 WriterWake는 historical 여부를 이미 올바르게 판정된 입력으로 추상화한다. 최초 link seq와 실제 current를 비교하는 구현의 안전성은 [WriterRebound](rebound.report.md)가 별도로 검사한다. superseded 입력은 델타 계약의 `Current::Known(c) && c != source`를 뜻하며, link birth seq 자체가 historical 증거라는 뜻이 아니다.
 
-구현 소스 참조: `2b07eed6f3a2a4ce9292456b1483d1fd9e5ef170` (main `a2ab3f26df7059ecf13d9ae9f7fcffa418560089` 위 구현). 최종 검증 결과는 구현 레인 보고서를 따른다.
+구현 소스 참조: `d563afb856870980a766a77003b55a84ea60ff62` (main `4a13d1d32e0f00d4ceaff475b95c033ba7967a8b` 위 구현). 최종 검증 결과는 구현 레인 보고서를 따른다.
 
 
 # WriterWake — 소실 원본 park와 입력 재개

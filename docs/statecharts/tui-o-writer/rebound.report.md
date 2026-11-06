@@ -1,6 +1,6 @@
 # WriterRebound — 현재 원본 판정과 park 안전성
 
-구현 소스 참조: `2b07eed6f3a2a4ce9292456b1483d1fd9e5ef170` (main `a2ab3f26df7059ecf13d9ae9f7fcffa418560089` 위 구현). 최종 검증 결과는 구현 레인 보고서를 따른다.
+구현 소스 참조: `d563afb856870980a766a77003b55a84ea60ff62` (main `4a13d1d32e0f00d4ceaff475b95c033ba7967a8b` 위 구현). 최종 검증 결과는 구현 레인 보고서를 따른다.
 
 
 코드 기준 SHA: `7a0c819e127964befd6bc0d022c5d4194d669c9c`. 구판은 이 base 위의 impl-1 birth 비교 작업 트리, 신판은 독립 설계 리뷰 `design-2-review.out.md`의 「구현 조각 계약 (델타)」를 모델링한다. 최종 Rust 코드의 검증 결과는 구현 레인 보고서에 기록하며 모델의 GREEN으로 대체하지 않는다.
