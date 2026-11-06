@@ -23,14 +23,14 @@ impl InflightTurnState {
             return GuardedClearOutcome::Missing;
         };
         // A receipt written after recovery chose the row belongs to receipt settlement.
-        if receipt_rechecked() && raw_before_start_receipt(&data) {
+        if raw_before_start_receipt(&data) {
             return GuardedClearOutcome::IoError;
         }
         let Ok(fresh) = serde_json::from_str::<InflightTurnState>(&data) else {
             return GuardedClearOutcome::Missing;
         };
         let expected = InflightTurnIdentity::from_state(self);
-        let receipt = fresh.herdr_before_start_stop.is_some() && receipt_rechecked();
+        let receipt = fresh.herdr_before_start_stop.is_some();
         if receipt
             || self.turn_nonce.as_deref().is_none_or(str::is_empty)
             || fresh.turn_nonce != self.turn_nonce
@@ -69,9 +69,4 @@ impl InflightTurnState {
 fn o_still_owns(fresh: &InflightTurnState) -> bool {
     let peek = crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel;
     peek(fresh.channel_id, fresh.runtime_kind) == Ok(true)
-}
-
-/// The receipt recheck, which only a test build's mutant turns off.
-fn receipt_rechecked() -> bool {
-    !cfg!(test) || std::env::var("ADK_HERDR_ROW_END_MUTANT").as_deref() != Ok("receipt")
 }

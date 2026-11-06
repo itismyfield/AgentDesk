@@ -8,11 +8,11 @@ pub(in crate::services::discord) async fn invalidate_stale_generation_scoped(
     expected: &InflightTurnState,
 ) -> Result<bool, RestoreFailure> {
     let protected = |row: &InflightTurnState| {
-        (row.herdr_before_start_stop.is_some() && !receipt_mutant("scoped-snapshot"))
+        row.herdr_before_start_stop.is_some()
             || row.restart_mode.is_some()
             || row.rebind_origin
-            || (!scoped_restore_mutant("replay-front")
-                && (row.replay_rerun_blocked() || row.replay_receipt_id.is_some()))
+            || row.replay_rerun_blocked()
+            || row.replay_receipt_id.is_some()
     };
     if protected(expected)
         || expected
@@ -30,13 +30,12 @@ pub(in crate::services::discord) async fn invalidate_stale_generation_scoped(
     let path = inflight_state_path(&root, provider, channel);
     let _guard = try_lock_inflight_state_path(&path).map_err(RestoreFailure::retryable)?;
     let bytes = fs::read_to_string(&path).map_err(RestoreFailure::retryable)?;
-    if raw_before_start_receipt(&bytes) && !receipt_mutant("scoped-fresh") {
+    if raw_before_start_receipt(&bytes) {
         return Ok(false);
     }
     let fresh = parse_inflight_state_content(&bytes).map_err(|error| error.to_string())?;
-    if !scoped_restore_mutant("snapshot")
-        && serde_json::to_value(&fresh).map_err(|error| error.to_string())?
-            != serde_json::to_value(expected).map_err(|error| error.to_string())?
+    if serde_json::to_value(&fresh).map_err(|error| error.to_string())?
+        != serde_json::to_value(expected).map_err(|error| error.to_string())?
     {
         return Err("generation restore snapshot changed".into());
     }
@@ -62,7 +61,6 @@ pub(in crate::services::discord) async fn invalidate_stale_generation_scoped(
     .await
     .map_err(RestoreFailure::retryable)?
     .is_some()
-        && !scoped_restore_mutant("canonical-replay")
     {
         return Ok(false);
     }
@@ -104,17 +102,9 @@ pub(super) fn backfill_scoped_restore(
             &state,
             "scoped_restore_backfill",
         );
-        #[cfg(test)]
-        if scoped_restore_mutant("backfill-ack") && outcome.is_err() {
-            return Ok(state);
-        }
         let saved = outcome.map_err(RestoreFailure::retryable)?.ok_or_else(|| {
             RestoreFailure::Rejected("scoped backfill persistence refused".into())
         })?;
-        #[cfg(test)]
-        if scoped_restore_mutant("fsync-failure") {
-            return Err(RestoreFailure::retryable("parent fsync failed"));
-        }
         crate::services::discord::runtime_store::fsync_parent_dir(path)
             .map_err(RestoreFailure::retryable)?;
         Ok(saved)

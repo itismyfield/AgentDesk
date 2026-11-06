@@ -252,7 +252,6 @@ async fn release_queue_blocked_stale_active_turn(
         provider,
         channel_id.get(),
     ) == crate::services::discord::inflight::InflightDeleteOutcome::ProtectedReceipt
-        && !crate::services::discord::inflight::receipt_mutant("stale-b")
     {
         return false;
     }

@@ -12,9 +12,8 @@ pub(super) async fn settle_receipt(
     provider: &ProviderKind,
     state: &inflight::InflightTurnState,
 ) -> bool {
-    if inflight::receipt_mutant("all-early")
-        || (state.herdr_before_start_stop.is_none()
-            && !inflight::before_start_receipt_present(provider, state.channel_id))
+    if state.herdr_before_start_stop.is_none()
+        && !inflight::before_start_receipt_present(provider, state.channel_id)
     {
         return false;
     }
@@ -88,9 +87,6 @@ pub(super) fn decode(
     let receipt = state.herdr_before_start_stop.as_ref()?;
     if !crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
     {
-        if inflight::receipt_mutant("off-decode") {
-            return None;
-        }
         return Some(BeforeStartRestart::Held("policy settlement is unavailable"));
     }
     let current = shared.restart.current_generation;
@@ -107,11 +103,9 @@ pub(super) fn decode(
         "the receipt names another turn"
     } else if admitted == 0 {
         "a receipt without its generation"
-    } else if admitted >= current && !inflight::receipt_mutant("same-generation") {
+    } else if admitted >= current {
         "this process's own close owns the receipt"
-    } else if inflight::row_is_current_generation(state, current)
-        && !inflight::receipt_mutant("same-generation")
-    {
+    } else if inflight::row_is_current_generation(state, current) {
         "the row was born in this process"
     } else {
         return Some(match inflight::opt_channel_id(state.channel_id) {
@@ -134,7 +128,7 @@ impl BeforeStartRestart {
             Self::Held(why) => return kept(state, why),
             Self::Settle(provider, channel) => (provider, channel),
         };
-        if state.restart_mode.is_some() && !inflight::receipt_mutant("mode-bypass") {
+        if state.restart_mode.is_some() {
             return kept(state, "planned restart owns the row");
         }
         let Some(o_body) =
@@ -147,7 +141,6 @@ impl BeforeStartRestart {
             .await
             .cancel_token
             .is_some()
-            && !inflight::receipt_mutant("actor-present")
         {
             return kept(state, "a live actor owns the channel");
         }
@@ -160,7 +153,6 @@ impl BeforeStartRestart {
             .herdr_before_start_stop
             .as_ref()
             .is_some_and(|receipt| receipt.notice_pending())
-            || inflight::receipt_mutant("delivered-resend")
         {
             // Where O owns the body the stop is a reply to the turn's message, never an edit of it.
             let acked = if o_body {
@@ -188,7 +180,6 @@ impl BeforeStartRestart {
             .await
             .cancel_token
             .is_some()
-            && !inflight::receipt_mutant("actor-present")
         {
             return kept(state, "an actor arrived before cleanup");
         }

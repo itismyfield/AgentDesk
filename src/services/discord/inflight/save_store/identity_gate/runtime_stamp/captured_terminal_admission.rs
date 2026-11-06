@@ -22,7 +22,7 @@ pub(super) async fn admit_uncaptured_terminal(
             kind: crate::services::agent_protocol::NativeTerminalKind::Aborted,
             ..
         }
-    ) || ((can_deliver_directly || mutant("headless_admission"))
+    ) || (can_deliver_directly
         && matches!(&message, StreamMessage::CodexTuiTerminalDone { result, .. } if result.is_empty()));
     let mut owned_local = local.clone();
     let mut owned_baseline = baseline.clone();
@@ -48,18 +48,8 @@ pub(super) async fn admit_uncaptured_terminal(
     }
 }
 
-fn mutant(name: &str) -> bool {
-    #[cfg(test)]
-    return std::env::var("ADK_EMPTY_TERMINAL_MUTANT").ok().as_deref() == Some(name);
-    #[cfg(not(test))]
-    {
-        let _ = name;
-        false
-    }
-}
-
 pub(super) fn nonce_matches(row: &InflightTurnState, nonce: &str) -> bool {
-    nonempty(row.turn_nonce.as_deref()) == Some(nonce) || mutant("nonce")
+    nonempty(row.turn_nonce.as_deref()) == Some(nonce)
 }
 
 pub(super) fn body_admissible(result: &str) -> bool {
@@ -67,7 +57,7 @@ pub(super) fn body_admissible(result: &str) -> bool {
 }
 
 pub(super) fn range_matches(row: &InflightTurnState, start: u64) -> bool {
-    (row.turn_start_offset == Some(start) && row.last_offset == start) || mutant("range")
+    row.turn_start_offset == Some(start) && row.last_offset == start
 }
 
 pub(super) fn legacy_source(
@@ -79,7 +69,7 @@ pub(super) fn legacy_source(
 ) -> Result<(PathBuf, i64), GuardedSaveOutcome> {
     let (canonical, file_len) =
         canonical_regular_file(rollout).ok_or(GuardedSaveOutcome::AuthorityPinned)?;
-    if file_len < end || (!marker_matches(tmux, &canonical, session, start) && !mutant("source")) {
+    if file_len < end || !marker_matches(tmux, &canonical, session, start) {
         return Err(GuardedSaveOutcome::AuthorityPinned);
     }
     // A dead prelaunch source may have no raw path; live sources retain their exact binding.
@@ -96,7 +86,7 @@ pub(super) fn legacy_source(
         == Some(canonical.as_path())
         && binding_matches(tmux, &canonical, session, [start, end]);
     let generation = tmux_generation_file_mtime_ns(tmux);
-    if ((!cold && !warm) && !mutant("source")) || generation == 0 {
+    if (!cold && !warm) || generation == 0 {
         return Err(GuardedSaveOutcome::AuthorityPinned);
     }
     Ok((canonical, generation))

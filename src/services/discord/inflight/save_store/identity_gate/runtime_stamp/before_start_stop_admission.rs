@@ -21,30 +21,12 @@ pub(in crate::services::discord) fn deserialize_receipt<'de, D: serde::Deseriali
     deserializer: D,
 ) -> Result<Option<BeforeStartReceipt>, D::Error> {
     let value = serde_json::Value::deserialize(deserializer)?;
-    #[cfg(test)]
-    let mut value = value;
-    #[cfg(test)]
-    {
-        let mutant = super::super::super::super::receipt_mutant;
-        if mutant("raw-type") && !value.is_object() {
-            return Err(serde::de::Error::custom("object required"));
-        }
-        if mutant("raw-null") && value.is_null() {
-            return Ok(None);
-        }
-        if mutant("raw-shape") {
-            if let Some(object) = value.as_object_mut() {
-                object.remove("future");
-            }
-        }
-    }
     Ok(Some(BeforeStartReceipt(value)))
 }
 
 impl BeforeStartReceipt {
     pub(in crate::services::discord) fn supported(&self) -> bool {
-        (super::super::super::super::receipt_mutant("unknown-field")
-            || self.0.as_object().is_some_and(|object| object.len() == 6))
+        self.0.as_object().is_some_and(|object| object.len() == 6)
             && self.0["protocol"].as_u64() == Some(u64::from(PROTOCOL))
             && self.0["kind"].as_str() == Some(KIND)
             && matches!(self.0["basis"].as_str(), Some("no_attempt" | "untouched"))
@@ -169,11 +151,6 @@ impl InflightTurnState {
         &mut self,
         existing: Option<&InflightTurnState>,
     ) -> Result<(), String> {
-        if super::super::super::super::receipt_mutant("absent-blocks")
-            && self.herdr_before_start_stop.is_none()
-        {
-            return Err("receipt required".into());
-        }
         let durable = existing.and_then(|row| row.herdr_before_start_stop.as_ref());
         if (durable.is_some() || existing.is_some_and(|row| row.stop_notice_message_id.is_some()))
             && existing.is_some_and(|row| {
@@ -202,13 +179,7 @@ impl InflightTurnState {
             return Ok(());
         }
         if durable.is_none() && outgoing.is_some() {
-            if super::super::super::super::receipt_mutant("mint") {
-                return Ok(());
-            }
             return Err("policy receipt requires admission authority".into());
-        }
-        if super::super::super::super::receipt_mutant("raise") {
-            return Ok(());
         }
         self.herdr_before_start_stop = durable.cloned();
         self.stop_notice_message_id = existing.and_then(|row| row.stop_notice_message_id);

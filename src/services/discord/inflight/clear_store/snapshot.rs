@@ -98,7 +98,7 @@ pub(super) fn clear_if_matches_generation_and_episode_in_root(
         Ok(data) => data,
         Err(reason) => return (GuardedClearOutcome::Missing, detail(reason, None)),
     };
-    if super::super::raw_before_start_receipt(&data) && !super::super::receipt_mutant("clear") {
+    if super::super::raw_before_start_receipt(&data) {
         return (GuardedClearOutcome::IoError, detail("start_receipt", None));
     }
     let state = match parse_row(provider, channel_id, &data) {

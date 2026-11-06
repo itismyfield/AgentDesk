@@ -115,9 +115,8 @@ pub(in crate::services::discord) async fn restore_inflight_states(
             continue;
         }
         #[cfg(not(unix))]
-        if !inflight::receipt_mutant("all-early")
-            && (state.herdr_before_start_stop.is_some()
-                || inflight::before_start_receipt_present(provider, state.channel_id))
+        if state.herdr_before_start_stop.is_some()
+            || inflight::before_start_receipt_present(provider, state.channel_id)
         {
             continue;
         }
