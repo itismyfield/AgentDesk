@@ -344,7 +344,17 @@ impl Original {
             Err(error) if error.is_pending() => {
                 (Intake::Pending(OwnerPending(self.ticket.clone())), false)
             }
-            Err(error) => (Intake::Rejected(error.into()), false),
+            Err(error) => {
+                // A committed Discord ticket survives delivery removing its stored original.
+                let committed = super::admission::status(handle, &self.ticket)
+                    .await
+                    .is_ok_and(|state| state == AdmissionState::Committed);
+                if committed {
+                    (Intake::Accepted, false)
+                } else {
+                    (Intake::Rejected(error.into()), false)
+                }
+            }
         }
     }
 }

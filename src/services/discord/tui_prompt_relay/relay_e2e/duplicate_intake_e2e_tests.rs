@@ -270,6 +270,13 @@ async fn a_real_queue_write_failure_posts_one_warning_pg() {
         },
     );
     live(rt, fresh_id(), FIRST).await;
+    assert!(
+        watch
+            .events()
+            .iter()
+            .any(|event| event.step == Step::Write && !event.ok),
+        "the real queue write must reach the injected failure"
+    );
     assert_eq!(
         rt.notices()
             .iter()
