@@ -200,24 +200,6 @@ async fn release_on(
         observed_before: Instant::now(),
         clear_outcome: clear_outcome.clone(),
     }));
-    #[cfg(test)]
-    let event = if crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant(
-        "operator_synthesizes_cancel",
-    ) {
-        TerminalEvent::Cancel
-    } else {
-        event
-    };
-    #[cfg(test)]
-    if crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant(
-        "operator_flips_token",
-    ) {
-        if let Some(token) = held.as_ref() {
-            token
-                .cancelled
-                .store(true, std::sync::atomic::Ordering::Release);
-        }
-    }
     match shared
         .turn_finalizer
         .submit_terminal(

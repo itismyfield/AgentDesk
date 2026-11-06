@@ -63,22 +63,11 @@ pub(super) fn herdr_completion_signal_from_transcript(
     use crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available;
     let signal = completion_signal_from_transcript(provider, runtime_kind, transcript_path);
     let own_abort = || {
-        #[cfg(test)]
-        if super::watcher_backstop::backstop_mutant("backstop_start_offset_ignored") {
-            return crate::services::tui_turn_state::jsonl_herdr_completion_scan_idle(
-                provider,
-                transcript_path,
-            );
-        }
         let Some(held) = held else {
             return false;
         };
         // A turn the reader already saw at this start must be the one read there now.
         let seen = held.seen_turn_id();
-        #[cfg(test)]
-        let seen = seen.filter(|_| {
-            !super::watcher_backstop::backstop_mutant("backstop_seen_native_id_ignored")
-        });
         held.read_own_codex_turn(transcript_path, seen.as_deref())
             .is_some_and(|turn| turn.aborted)
     };

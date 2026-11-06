@@ -396,10 +396,7 @@ impl State {
             return Err(());
         }
         if let Some(attempt) = &inner.attempt
-            && (inner.completed
-                || (!mutant("unconfirmed_cancel")
-                    && (attempt.delivered.get() != Some(&true)
-                        || (!mutant("proof_is_terminal") && !(attempt.terminal)()))))
+            && (inner.completed || attempt.delivered.get() != Some(&true) || !(attempt.terminal)())
         {
             return Err(());
         }
@@ -433,18 +430,6 @@ impl Attempt {
             }
             changed.await;
         }
-    }
-}
-
-pub(crate) fn mutant(name: &str) -> bool {
-    #[cfg(test)]
-    {
-        std::env::var("AGENTDESK_I7193_MUTANT").ok().as_deref() == Some(name)
-    }
-    #[cfg(not(test))]
-    {
-        let _ = name;
-        false
     }
 }
 
