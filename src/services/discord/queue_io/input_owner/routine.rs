@@ -76,6 +76,59 @@ impl OwnerInput {
         .await)
     }
 
+    pub(crate) async fn start_rejection(
+        &self,
+        handle: &ChannelMailboxHandle,
+    ) -> Result<Option<String>, String> {
+        self.check_address(handle).await?;
+        if !handle
+            .v2_admission_status(self.ticket.clone())
+            .await?
+            .committed()
+        {
+            return Ok(None);
+        }
+        let original = serde_json::from_value(self.original.clone())
+            .map_err(|e| format!("stored original: {e}"))?;
+        let context = handle
+            .v2_admission_context(original, self.ticket.clone())
+            .await?;
+        if context.as_ref() != Some(&self.context) {
+            return Err("owner rejection context mismatch".into());
+        }
+        let original = self.original.clone();
+        handle
+            .v2_request(move |slot| {
+                let state = slot.as_ref().ok_or("owner absent")?.json()?;
+                Ok(state["retained_inputs"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find_map(|r| {
+                        (r["input"]["original"] == original
+                            && r["input"]["attempt"].is_null()
+                            && r["disposition"] == "known_not_sent")
+                            .then(|| {
+                                r["reason"]["reason"]
+                                    .as_str()
+                                    .filter(|reason| reason.starts_with("start_rejected: "))
+                                    .map(str::to_string)
+                            })
+                            .flatten()
+                    }))
+            })
+            .await
+    }
+    pub(crate) async fn runtime_pool(&self) -> Result<sqlx::PgPool, String> {
+        let registry =
+            crate::engine::ops::turn_ops::health_registry().ok_or("owner registry unavailable")?;
+        let (shared, _) = runtime(&registry, &self.provider, self.channel).await?;
+        shared
+            .pg_pool
+            .clone()
+            .ok_or_else(|| "owner database unavailable".into())
+    }
+
     /// NotArmed only means no arm occurred; it does not guarantee automatic progress.
     pub(crate) async fn may_observe(
         &self,

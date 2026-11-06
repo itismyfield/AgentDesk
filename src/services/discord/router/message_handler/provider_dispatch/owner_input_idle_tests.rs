@@ -1016,6 +1016,7 @@ fn idle_turn(
         claim,
         settled,
         origin: InputOrigin::Discord,
+        refusal: Default::default(),
     };
     let (host, provider) = (TurnHost::Tmux, ProviderKind::Claude);
     let turn = StreamingTurn {
@@ -2660,6 +2661,7 @@ pub(crate) fn claimed_root_recovery_launch(
         claim,
         settled,
         origin,
+        ..
     } = owner;
     assert_eq!(
         origin, expected_origin,

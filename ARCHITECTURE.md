@@ -1666,6 +1666,8 @@ src/
 │   │   │   ├── replay_projection_tests.rs
 │   │   │   ├── restart_mark.rs
 │   │   │   ├── restart_mark_tests.rs
+│   │   │   ├── row_removed.rs
+│   │   │   ├── row_removed_tests.rs
 │   │   │   ├── save_store.rs
 │   │   │   ├── store.rs
 │   │   │   ├── terminal_delivery_evidence_loss.rs
@@ -2143,13 +2145,18 @@ src/
 │   │   │   │   │   ├── owner_input_herdr_tests.rs
 │   │   │   │   │   ├── owner_input_idle_tests.rs
 │   │   │   │   │   ├── owner_input_not_sent_tests.rs
+│   │   │   │   │   ├── owner_input_owned_stop_format_tests.rs
+│   │   │   │   │   ├── owner_input_owned_stop_tests.rs
 │   │   │   │   │   ├── owner_input_parent_tests.rs
 │   │   │   │   │   ├── owner_input_rollback_tests.rs
 │   │   │   │   │   ├── owner_input_stop_gate_tests.rs
 │   │   │   │   │   ├── owner_input_tests.rs
 │   │   │   │   │   ├── owner_provenance_tests.rs
+│   │   │   │   │   ├── owner_start_failure_tests.rs
 │   │   │   │   │   ├── producer_error_test_support.rs
-│   │   │   │   │   └── replay_scope.rs
+│   │   │   │   │   ├── replay_scope.rs
+│   │   │   │   │   ├── start_failure.rs
+│   │   │   │   │   └── start_failure_state_tests.rs
 │   │   │   │   ├── provider_isolation/
 │   │   │   │   │   └── feature_settings.rs
 │   │   │   │   ├── root_replaced_recovery_tests/
@@ -2875,6 +2882,7 @@ src/
 │   │   │   │   ├── native_stop_gate_tests.rs
 │   │   │   │   ├── native_stop_identity_tests.rs
 │   │   │   │   ├── native_stop_ownership_tests.rs
+│   │   │   │   ├── owned_input_stop.rs
 │   │   │   │   ├── pid_exit.rs
 │   │   │   │   ├── process_backend_cancel.rs
 │   │   │   │   ├── process_force_kill_tests.rs
@@ -4260,6 +4268,8 @@ src/
 │   │   │   │   ├── retained.rs
 │   │   │   │   ├── source_admission.rs
 │   │   │   │   ├── sources.rs
+│   │   │   │   ├── start_failure.rs
+│   │   │   │   ├── start_failure_tests.rs
 │   │   │   │   └── unit_tests.rs
 │   │   │   ├── compat.rs
 │   │   │   ├── compat_tests.rs

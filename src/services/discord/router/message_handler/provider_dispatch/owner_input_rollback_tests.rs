@@ -10,6 +10,8 @@ use poise::serenity_prelude::ChannelId;
 
 #[path = "owner_input_carried_restart_tests.rs"]
 mod carried_restart;
+#[path = "owner_input_owned_stop_tests.rs"]
+mod owned_stop;
 
 #[derive(Clone, Default)]
 struct Trace(Arc<std::sync::Mutex<Vec<u8>>>);
@@ -67,7 +69,20 @@ impl IntakeRig {
     }
 
     async fn with_bot(id: u64, busy: bool, bot: ProviderKind) -> Self {
-        Self::build(id, busy, bot, None, false, None).await
+        Self::build(id, busy, bot, None, false, None, None).await
+    }
+
+    async fn busy_with_screen(id: u64, screen: String) -> Self {
+        Self::build(
+            id,
+            true,
+            ProviderKind::Claude,
+            None,
+            false,
+            None,
+            Some(screen),
+        )
+        .await
     }
 
     async fn with_storage(
@@ -76,12 +91,12 @@ impl IntakeRig {
         bot: ProviderKind,
         pool: Option<sqlx::PgPool>,
     ) -> Self {
-        Self::build(id, busy, bot, pool, false, None).await
+        Self::build(id, busy, bot, pool, false, None, None).await
     }
 
     /// A busy pane whose front a `turn/start` admitted with its headless provenance.
     async fn turn_start(id: u64) -> Self {
-        Self::build(id, true, ProviderKind::Claude, None, true, None).await
+        Self::build(id, true, ProviderKind::Claude, None, true, None, None).await
     }
 
     /// A `turn/start` naming `origin` on a stored channel whose pane's transcript its observer finds.
@@ -93,6 +108,7 @@ impl IntakeRig {
             Some(pool),
             true,
             Some(origin),
+            None,
         )
         .await
     }
@@ -104,6 +120,7 @@ impl IntakeRig {
         pool: Option<sqlx::PgPool>,
         start: bool,
         origin: Option<&str>,
+        screen: Option<String>,
     ) -> Self {
         let trace = Trace::default();
         tracing_subscriber::fmt()
@@ -166,7 +183,14 @@ impl IntakeRig {
         let channel = ChannelId::new(id);
         let label = format!("a1-rollback-{id}");
         let name = ProviderKind::Claude.build_tmux_session_name(&label);
-        let renderer = renderer_with(&f, &name, "normal", view("", false), "", PROMPT);
+        let renderer = renderer_with(
+            &f,
+            &name,
+            "normal",
+            screen.unwrap_or_else(|| view("", false)),
+            "",
+            PROMPT,
+        );
         let proof = d1_execution_proof(&name, id);
         let sid = proof.context.expected_native_session_id.as_deref().unwrap();
         let workspace = f.root.path().join("workspace");
@@ -1075,6 +1099,7 @@ async fn an_unsent_start_cleared_later_leaves_only_its_removal_receipt_pg() {
         Some(pool.clone()),
         true,
         origin,
+        None,
     );
     let rig = rig.await;
     let (completed, bridge) = tokio::sync::oneshot::channel();

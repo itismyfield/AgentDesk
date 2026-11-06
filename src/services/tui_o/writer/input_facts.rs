@@ -11,6 +11,7 @@ use crate::services::tui_o::shadow::{
 };
 
 mod queued;
+pub(crate) use queued::{Record as QueueRecord, classify as classify_queued_record};
 pub mod reactions;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

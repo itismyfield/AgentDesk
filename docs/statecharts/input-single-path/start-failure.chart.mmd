@@ -1,0 +1,25 @@
+flowchart TD
+    Q["A queued; ingress wake"] --> D{"wake; no closing; token free"}
+    D --> S["claim A; intake/headless entry"]
+    S --> H["SchedulingHeld; failures unchanged"]
+    H --> E["existing hold event / S2 completion"]
+    E --> D
+    S --> R["reserve commit; failures = 0; EffectOwned"]
+    R --> P["existing effect settlement; payload once"]
+    S --> F{"BeforeInput failure; exact claim; no reserve"}
+    F --> C["commit failures += 1; revoke claim; closing if row exists"]
+    C --> K{"allowlist or failures = 2"}
+    K -->|yes| T["attemptless retained; one notice obligation"]
+    K -->|no| A["keep A at front"]
+    T --> N["outbox notice independently"]
+    T --> E0{"wrapper row exists?"}
+    E0 -->|yes| X["NotSent bridge; delete placeholder"]
+    E0 -->|no| W
+    A --> X
+    C --> R0["existing remover: exact row deletion, either order"]
+    X --> T0["exact token released"]
+    R0 --> C0{"both facts for failed episode"}
+    T0 --> C0
+    C0 --> W["clear closing; wake once"]
+    W --> D
+    D -->|A retained| B["claim B; deliver B"]

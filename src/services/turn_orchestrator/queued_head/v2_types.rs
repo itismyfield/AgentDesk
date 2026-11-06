@@ -149,7 +149,11 @@ pub(crate) enum RetainedDisposition {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum RetainedReason {
     Unconfirmed,
-    Rejected { reason: String },
+    Rejected {
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start_failure: Option<StartFailureDetail>,
+    },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -171,4 +175,19 @@ pub(crate) struct AdmissionContext {
     pub(crate) original: Option<serde_json::Value>,
     #[serde(default)]
     pub(crate) execution: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StartFailureKind {
+    Opaque,
+    ProviderUnsupported,
+    EndpointNotLocal,
+    ExecutorNotWired,
+    HostedHerdrUnconfigured,
+}
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct StartFailureDetail {
+    pub(crate) kind: StartFailureKind,
+    pub(crate) failures: u8,
 }
