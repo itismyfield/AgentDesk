@@ -38,7 +38,6 @@ fn runtime_fixture() -> RuntimeFixture {
 async fn setup() -> (TestPostgresDb, sqlx::PgPool) {
     let fixture = TestPostgresDb::create().await;
     let pool = fixture.connect_and_migrate().await;
-    crate::db::replay_disposition::tests::apply_test_mutant(&pool).await;
     let version: String = sqlx::query_scalar("SELECT version()")
         .fetch_one(&pool)
         .await

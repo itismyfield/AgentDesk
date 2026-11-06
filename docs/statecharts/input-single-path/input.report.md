@@ -30,6 +30,14 @@ Source column: **code** = landed `0a9b3f99cf`, **4f** = design-4f-r1 section, **
 
 Left out: Codex (4f §4 leaf has the same read-before-key shape), cold BootstrapAndFirstInput, a provider incarnation change (4f §12.1: ready Target refused before keys → NotSent, the same exit as Held), the human typing between our read and our Enter (no pane is read after a key, `stash.rs:1`; an inherent race), /clear and cancel (4f §12.2: only unattempted items), HTTP/routine/scheduled adapters, history receipts, more than one channel.
 
+사용자가 비운 보관 입력은 비우기 응답이 안내를 대신한다. 시도 중 head는 범위 밖이다.
+
+`InputCancelSelection` separates a user's single selection from the internal first-match cancellation. Queued and requeueable retained originals share one primary count before text search; protected heads are excluded. `NoAmbiguousOffer` and `NoAmbiguousExecution` apply to user selections. The mailbox carries that intent to the actor, which checks ambiguity in the same turn as cancellation. A bare internal message ID keeps its existing first-match contract, even when distinct ticket-bound slots share that primary.
+
+The model also grants and spends an exact front's grant. `LegacyFrontRemoved` requires cancellation of the current unattempted front to remove its slot, and `FrontGrantRevoked` requires its grant to be revoked. There is no owner front while a head is protected. Slot symbols distinguish originals with the same primary; fixed rank abstracts their queue order. Delivery and wake rules in `InputPath` are unchanged.
+
+TLC and `scripts/ci/statecharts_tlc.py` checked all four invariants. The normal config passes; disabling selection ambiguity checks breaks only the two selection invariants, applying the guard to legacy cancellation breaks `LegacyFrontRemoved`, and omitting grant revocation breaks `FrontGrantRevoked`. The four configs completed in about 13 seconds (eight checker runs), with exactly the expected violation sets.
+
 ## Rules
 
 1. `NoDuplicate`: no input reaches Claude twice.

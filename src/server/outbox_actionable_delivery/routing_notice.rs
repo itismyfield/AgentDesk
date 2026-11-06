@@ -42,16 +42,6 @@ pub(super) async fn deliver(
             "routing notice target is not a channel".into(),
         );
     };
-    #[cfg(test)]
-    let nonce =
-        if crate::services::cluster::intake_router_hook::owner_record::cleanup::tests::mutant(
-            "notice-nonce",
-        ) {
-            row.delivery_ids().1
-        } else {
-            event.nonce.clone()
-        };
-    #[cfg(not(test))]
     let nonce = event.nonce.clone();
     let content =
         crate::services::discord::dispatch_policy::prepend_operational_alert_origin(&event.content);

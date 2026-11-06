@@ -134,8 +134,6 @@ pub(super) use task_notification_lifecycle::{
     task_notification_closes_background_child,
 };
 pub(crate) use tmux_runtime::TmuxCleanupPolicy;
-#[cfg(test)]
-pub(super) use tmux_runtime::begin_command_stop;
 pub(super) use tmux_runtime::bind_cancel_token_tmux_runtime;
 pub(super) use tmux_runtime::cancel_active_token;
 pub(super) use tmux_runtime::handoff_interrupted_message;

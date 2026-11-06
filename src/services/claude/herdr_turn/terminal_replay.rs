@@ -4,7 +4,6 @@ use std::io::{Read, Seek, SeekFrom};
 
 use super::{HerdrTurnLines, SourceFileIdentity, is_turn_output, is_turn_prompt, start_offset};
 use crate::services::agent_protocol::{NativeTerminalKind, StreamMessage};
-use crate::services::provider::herdr_before_start::mutant;
 
 /// A turn's provider terminal as `HerdrTurnLines` accepts it, and the record range it read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,10 +73,7 @@ pub(crate) fn ended_turn_read(
     len: u64,
 ) -> Result<TurnRead, Unobserved> {
     let bytes = read_prefix(file, len)?;
-    let (records, torn) = records_to_end(&bytes);
-    if !torn.trim_ascii().is_empty() && mutant("prb_torn_tail_unobserved") {
-        return Err(Unobserved);
-    }
+    let (records, _) = records_to_end(&bytes);
     Ok(turn_read(&records, submitted_at, len))
 }
 
@@ -128,8 +124,7 @@ fn turn_in(
     len: u64,
 ) -> Result<Option<Terminal>, Interleaved> {
     let Some((start, at)) = records.iter().enumerate().find_map(|(at, (start, line))| {
-        (start_offset::eligible(line, &submitted_at) || mutant("start_offset_reader_only"))
-            .then_some((*start, at))
+        start_offset::eligible(line, &submitted_at).then_some((*start, at))
     }) else {
         return Ok(None);
     };
@@ -195,7 +190,7 @@ fn read_prefix(file: &mut std::fs::File, len: u64) -> Result<Vec<u8>, Unobserved
         .read_to_end(&mut bytes)
         .map_err(|_| Unobserved)?;
     // A file cut after its length was read reads short, and a short read is no read.
-    if bytes.len() as u64 != len && !mutant("prb_short_read_ok") {
+    if bytes.len() as u64 != len {
         return Err(Unobserved);
     }
     Ok(bytes)
@@ -227,7 +222,7 @@ pub(crate) fn ended_tail(
 ) -> Option<String> {
     let mut file = std::fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
-    if SourceFileIdentity::from_open_file(&file) != opened || mutant("prb_newline_required") {
+    if SourceFileIdentity::from_open_file(&file) != opened {
         return None;
     }
     let (mut tail, want) = (String::new(), len.checked_sub(from)?);

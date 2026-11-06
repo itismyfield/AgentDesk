@@ -360,10 +360,6 @@ impl LateReservationGuard {
 
 impl Drop for LateReservationGuard {
     fn drop(&mut self) {
-        #[cfg(test)]
-        let kept = self.keep.load(Ordering::SeqCst)
-            && std::env::var("ADK_S3B_MUTANT").ok().as_deref() != Some("stop_settles_reservation");
-        #[cfg(not(test))]
         let kept = self.keep.load(Ordering::SeqCst);
         if kept {
             return;

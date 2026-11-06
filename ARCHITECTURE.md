@@ -640,6 +640,9 @@ src/
 │   │   ├── herdr_terminate_tests.rs
 │   │   ├── home_metrics.rs
 │   │   ├── hooks.rs
+│   │   ├── imessage_input_notice.rs
+│   │   ├── imessage_input_notice_display_tests.rs
+│   │   ├── imessage_input_notice_tests.rs
 │   │   ├── kakao_calendar.rs
 │   │   ├── kanban.rs
 │   │   ├── kanban_list_view_tests.rs
@@ -1075,9 +1078,6 @@ src/
 │   │   │   ├── source_read_proof.rs
 │   │   │   ├── source_read_proof_tests.rs
 │   │   │   └── terminal_resolution.rs
-│   │   ├── watcher_supervisor/
-│   │   │   └── tests/
-│   │   │       └── source_guard_tests.rs
 │   │   ├── agent_execution_node.rs
 │   │   ├── attachment_transfer.rs
 │   │   ├── capability_routing.rs
@@ -1156,7 +1156,6 @@ src/
 │   │   │   └── producer.rs
 │   │   ├── input/
 │   │   │   ├── tests/
-│   │   │   │   ├── source_guard_tests.rs
 │   │   │   │   └── startup_update_tests.rs
 │   │   │   ├── composer_content.rs
 │   │   │   ├── composer_lock.rs
@@ -1285,6 +1284,7 @@ src/
 │   │   │   │   │   │   ├── negative_tests.rs
 │   │   │   │   │   │   └── source_boundary_tests.rs
 │   │   │   │   │   └── absent_launch_tests.rs
+│   │   │   │   ├── cancel_queued.rs
 │   │   │   │   ├── clear_count_tests.rs
 │   │   │   │   ├── clear_end_tests.rs
 │   │   │   │   ├── clear_entry_tests.rs
@@ -2237,6 +2237,8 @@ src/
 │   │   │   └── turn_start.rs
 │   │   ├── runtime_bootstrap/
 │   │   │   ├── gateway_runtime/
+│   │   │   │   ├── slash_command_tests/
+│   │   │   │   │   └── cancel_queued_tests.rs
 │   │   │   │   ├── command_guard.rs
 │   │   │   │   └── slash_command_tests.rs
 │   │   │   ├── intake_delivery_sweep/
@@ -3762,6 +3764,7 @@ src/
 │   │   │   │   ├── checked_tests.rs
 │   │   │   │   ├── compat.rs
 │   │   │   │   ├── compat_tests.rs
+│   │   │   │   ├── notice_owner.rs
 │   │   │   │   ├── rollback_reader_tests.rs
 │   │   │   │   ├── screen.rs
 │   │   │   │   ├── screen_tests.rs
@@ -3904,6 +3907,7 @@ src/
 │   │   │   │   ├── codex_submission.rs
 │   │   │   │   ├── fresh_resume.rs
 │   │   │   │   ├── notice_activation_tests.rs
+│   │   │   │   ├── notice_owner_tests.rs
 │   │   │   │   ├── notice_work.rs
 │   │   │   │   ├── notice_work_tests.rs
 │   │   │   │   ├── scoped_submission_tests.rs
@@ -4237,6 +4241,7 @@ src/
 │   │   ├── dispatch_reservation/
 │   │   │   ├── tests/
 │   │   │   │   ├── hydrate_corrupt_queue_tests.rs
+│   │   │   │   ├── restart_drain_tests.rs
 │   │   │   │   └── restored_merge_tests.rs
 │   │   │   ├── held_settle.rs
 │   │   │   └── restore_snapshot.rs

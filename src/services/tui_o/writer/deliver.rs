@@ -125,10 +125,6 @@ fn with_in_flight<R>(use_counts: impl FnOnce(&mut BTreeMap<u64, Arc<AtomicUsize>
 /// The POSTs of `channel` started and not ended in this process; `None` until a writer of the
 /// channel counted them.
 pub fn posts_in_flight(channel: u64) -> Option<usize> {
-    #[cfg(test)]
-    if bo_mutant("none_zero") {
-        return Some(0);
-    }
     with_in_flight(|counts| {
         counts
             .get(&channel)
@@ -151,10 +147,6 @@ pub(super) fn source_delivery_allowed(
 
 impl Running {
     fn start(count: Arc<AtomicUsize>) -> Self {
-        #[cfg(test)]
-        if bo_mutant("post_start") {
-            return Self(count);
-        }
         count.fetch_add(1, Ordering::SeqCst);
         Self(count)
     }
@@ -162,10 +154,6 @@ impl Running {
 
 impl Drop for Running {
     fn drop(&mut self) {
-        #[cfg(test)]
-        if bo_mutant("post_start") {
-            return;
-        }
         self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
@@ -273,20 +261,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             Arc::clone(counts.entry(channel).or_default())
         };
         let posts = Some(with_in_flight(shared));
-        #[cfg(test)]
-        let posts = if bo_mutant("counter_herdr_only")
-            && crate::config::session_hosts::herdr_endpoint(channel).is_none()
-        {
-            None
-        } else if bo_mutant("counter_reset") {
-            let fresh = Arc::new(AtomicUsize::new(0));
-            with_in_flight(|counts| {
-                counts.insert(channel, Arc::clone(&fresh));
-            });
-            Some(fresh)
-        } else {
-            posts
-        };
         let mut writer = Self {
             notice_owners: Default::default(),
             notice_pending: HashMap::new(),
@@ -473,8 +447,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             LedgerEntry::Posted { serial, msg_id, .. } => Some((serial, msg_id)),
             _ => None,
         };
-        #[cfg(test)]
-        self.boot.before_record(&entry);
         if let Err(error) = self.store.append_ledger(entry) {
             return Err(self.stop(WriterAlarm::Halted {
                 detail: format!("{error:?}"),
@@ -681,8 +653,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                                 "[tui_o] operator approval consumed by Prepared");
                         }
                         let running = posts.take().map(Running::start);
-                        #[cfg(test)]
-                        boot.constructing(serial, epoch);
                         let post = port.post_origin(
                             channel,
                             piece.payload.clone(),
@@ -1061,13 +1031,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> RepostWriter for ChannelWri
             let Some((serial, open)) = self.store.ledger().unresolved() else {
                 return;
             };
-            #[cfg(test)]
-            if super::super::ownership::execution::tests::mutant("repost-record")
-                && matches!(report.outcome, WireOutcome::Withheld(_))
-            {
-                let _ = self.record(LedgerEntry::NotSent { serial });
-                return;
-            }
             if matches!(
                 report.outcome,
                 WireOutcome::Unsent(_) | WireOutcome::Throttled
@@ -1096,11 +1059,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> TurnWriter for ChannelWrite
         let live = live && self.stopped.is_none();
         self.repost_live.0.store(live, Ordering::SeqCst);
     }
-}
-
-#[cfg(test)]
-pub(super) fn bo_mutant(name: &str) -> bool {
-    std::env::var("AGENTDESK_BO_MUTANT").is_ok_and(|value| value == name)
 }
 
 #[cfg(test)]

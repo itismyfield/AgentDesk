@@ -421,6 +421,18 @@ pub(crate) struct EnqueueInterventionResult {
     pub(crate) persistence_error: Option<String>,
 }
 
+/// A legacy first match or a user's selection, whose primary must name one original.
+pub(crate) enum QueuedCancelTarget {
+    FirstMatch(MessageId),
+    SingleSelection(MessageId),
+}
+
+impl From<MessageId> for QueuedCancelTarget {
+    fn from(id: MessageId) -> Self {
+        Self::FirstMatch(id)
+    }
+}
+
 pub(crate) struct CancelQueuedMessageResult {
     pub(crate) removed: Option<Intervention>,
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
@@ -902,11 +914,16 @@ impl ChannelMailboxHandle {
 
     pub(crate) async fn cancel_queued_primary_message(
         &self,
-        message_id: MessageId,
+        target: impl Into<QueuedCancelTarget>,
         persistence: QueuePersistenceContext,
     ) -> CancelQueuedMessageResult {
+        let (message_id, reject_ambiguous) = match target.into() {
+            QueuedCancelTarget::FirstMatch(id) => (id, false),
+            QueuedCancelTarget::SingleSelection(id) => (id, true),
+        };
         self.request(|reply| ChannelMailboxMsg::CancelQueuedPrimaryMessage {
             message_id,
+            reject_ambiguous,
             persistence,
             reply,
         })
@@ -914,7 +931,7 @@ impl ChannelMailboxHandle {
         .unwrap_or(CancelQueuedMessageResult {
             removed: None,
             queue_exit_events: Vec::new(),
-            persistence_error: None,
+            persistence_error: Some("mailbox unreachable".into()),
         })
     }
 
@@ -1371,6 +1388,7 @@ enum ChannelMailboxMsg {
     },
     CancelQueuedPrimaryMessage {
         message_id: MessageId,
+        reject_ambiguous: bool,
         persistence: QueuePersistenceContext,
         reply: oneshot::Sender<CancelQueuedMessageResult>,
     },
@@ -2357,6 +2375,7 @@ fn input_mailbox_step(
             message_id,
             persistence,
             reply,
+            ..
         } => {
             state.last_persistence = Some(persistence.clone());
             let previous_queue = state.intervention_queue.clone();
@@ -2599,17 +2618,11 @@ fn input_mailbox_step(
             let _ = reply.send(result);
         }
         ChannelMailboxMsg::RestartDrain { persistence, reply } => {
-            state.last_persistence = Some(persistence.clone());
-            let persistence_error = absorb_disk_queue_error(&mut state, channel_id, &persistence)
-                .or_else(|| persist_queue(&mut state, channel_id, &persistence).err());
-            let _ = reply.send(RestartDrainResult {
-                queued_count: if persistence_error.is_some() {
-                    0
-                } else {
-                    state.intervention_queue.len()
-                },
-                persistence_error,
-            });
+            let _ = reply.send(dispatch_reservation::restart_drain_legacy(
+                &mut state,
+                channel_id,
+                &persistence,
+            ));
         }
         #[cfg(test)]
         ChannelMailboxMsg::AgeActiveTurnForTest { age, reply } => {

@@ -247,14 +247,14 @@ impl Owner {
 const PERMANENT: [&str; 2] = ["vetoed: frame_mismatch", "vetoed: InvalidInput"];
 
 /// Whether the owner refused a retained input for a reason no later look clears.
-fn permanently_refused(entry: &RetainedInput) -> bool {
+pub(super) fn permanently_refused(entry: &RetainedInput) -> bool {
     matches!(&entry.reason, RetainedReason::Rejected { reason, .. }
         if reason.strip_prefix("known_not_sent: ").is_some_and(|r| PERMANENT.contains(&r)))
 }
 
 /// Whether a retained input was refused before any key for a reason a later look may clear. One
 /// whose resend ask already went out stays retained: resending it is now the person's choice.
-fn requeueable(entry: &RetainedInput, terminal: &[TerminalIdentity]) -> bool {
+pub(super) fn requeueable(entry: &RetainedInput, terminal: &[TerminalIdentity]) -> bool {
     let RetainedReason::Rejected { reason, .. } = &entry.reason else {
         return false;
     };
@@ -386,3 +386,5 @@ fn remove_members(snapshot: &mut SnapshotV2, input: &InputAttempt) -> Result<(),
     }
     Ok(())
 }
+
+pub(super) const CLEARED_NOTICE: &str = "cleared";

@@ -4,6 +4,7 @@ use super::*;
 #[path = "monitor_memory.rs"]
 mod memory;
 use super::super::{TaskCardEvent, content_hash};
+#[cfg(test)]
 pub(super) use memory::{claim as claim_memory, record as record_memory};
 
 #[derive(Clone, Debug)]

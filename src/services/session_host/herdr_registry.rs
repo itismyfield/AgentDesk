@@ -286,15 +286,6 @@ impl HerdrRegistry {
                 return Err("Herdr census invalid pane identity".into());
             }
             if count > limit {
-                #[cfg(test)]
-                if std::env::var("ADK_CODEX_OBSERVATION_MUTANT").as_deref() == Ok("herdr_budget") {
-                    panes.truncate(limit.saturating_sub(self.endpoints.len()));
-                    census.push((
-                        format!("{}:{before:?}", registered.endpoint.config_key()),
-                        panes,
-                    ));
-                    return Ok(census);
-                }
                 return Err("Herdr census budget exceeded".into());
             }
             census.push((

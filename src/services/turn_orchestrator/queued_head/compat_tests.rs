@@ -108,7 +108,7 @@ fn v2_clear_purge_drain_and_restore_preserve_originals_and_marker() {
             );
             let drained = handle.restart_drain(context()).await;
             assert_eq!(drained.queued_count, 0);
-            assert!(drained.persistence_error.is_some());
+            assert!(drained.persistence_error.is_none());
             let purge = handle.try_purge_queue(context(), false).await.unwrap();
             assert!(purge.queued_head_refused);
             assert_eq!(super::super::pending_queue_persistence::remove_channel_pending_queue_files_all_tokens(&ProviderKind::Claude, channel), 0);

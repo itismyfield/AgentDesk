@@ -215,12 +215,6 @@ pub async fn cancel_turn(
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     // A home-stop envelope is a holder's request, never a direct cancel: refused before any effect.
     let envelope = names_home_stop_envelope(&body);
-    #[cfg(test)]
-    let envelope = envelope
-        && std::env::var("ADK_TEST_HOME_COMMAND_MUTANT")
-            .ok()
-            .as_deref()
-            != Some("cancel_endpoint_accepts_v1");
     if envelope {
         return Err(
             AppError::bad_request("home stop envelope on a direct cancel")

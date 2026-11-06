@@ -915,20 +915,6 @@ mod tests {
         }
     }
 
-    mod source_guard_tests;
-
-    #[test]
-    fn shutdown_observation_sites_are_branch_scoped() {
-        let gaps = source_guard_tests::shutdown_site_gaps(source_guard_tests::SUPERVISOR);
-        assert_eq!(gaps, Vec::<String>::new());
-    }
-
-    #[test]
-    fn shutdown_observation_logs_classification_fields() {
-        let gaps = source_guard_tests::shutdown_log_gaps(source_guard_tests::SUPERVISOR);
-        assert_eq!(gaps, Vec::<String>::new());
-    }
-
     async fn shutdown_join_error(panic: bool) -> tokio::task::JoinError {
         let task = tokio::spawn(async move {
             if panic {

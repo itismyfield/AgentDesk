@@ -23,8 +23,6 @@ impl<B: BindingEvents> Sources<B> {
     ) -> Result<(), WriterAlarm> {
         let started = std::time::Instant::now();
         let mut records = 0;
-        #[cfg(test)]
-        let raw_skip = super::super::replay::mutant("raw_skip");
         if self.reader_config.is_some() {
             self.observe_clock(wall_now)?;
             writer
@@ -98,10 +96,6 @@ impl<B: BindingEvents> Sources<B> {
                     .for_each_frame(&cursor.source, |frame, identity_version| {
                         if let SpoolFrame::Record(record) = frame {
                             records += 1;
-                            #[cfg(test)]
-                            if raw_skip {
-                                return;
-                            }
                             captured_any = true;
                             self.owe(deriver, owed, &cursor.source, &record, identity_version);
                         }
@@ -230,7 +224,7 @@ impl<B: BindingEvents> Sources<B> {
             }
         }
         // Clear ends published while the actor was down, and proofs boot put to sleep, apply now.
-        self.clear_due = !crate::services::tui_o::store::clear_end::mutant("resume_settle_off");
+        self.clear_due = true;
         self.settle_cleared(writer)?;
         self.wake_resumed_proofs(writer)?;
         self.reconcile_boundary_pending(writer);

@@ -82,10 +82,6 @@ pub(crate) async fn request(
     };
     let changed=sqlx::query("UPDATE intake_session_owners SET routing_cleanup=$5,routing_cleanup_state='pending',routing_cleanup_deadline=NOW()+make_interval(secs=>$6::INT::DOUBLE PRECISION),routing_cleanup_next=NOW() WHERE provider=$1 AND raw_channel_id=$2 AND owner_instance_id=$3 AND generation=$4 AND routing_cleanup IS NULL")
         .bind(id.provider()).bind(id.raw_channel_id()).bind(old.0).bind(old.1).bind(sqlx::types::Json(work)).bind(timeout).execute(&mut *tx).await?.rows_affected();
-    #[cfg(test)]
-    if changed == 0 && tests::mutant("deadline") {
-        sqlx::query("UPDATE intake_session_owners SET routing_cleanup_deadline=NOW()+INTERVAL '1 hour' WHERE provider=$1 AND raw_channel_id=$2 AND generation=$3").bind(id.provider()).bind(id.raw_channel_id()).bind(old.1).execute(&mut *tx).await?;
-    }
     tx.commit().await?;
     Ok(changed == 1)
 }
@@ -124,11 +120,6 @@ pub(crate) async fn claim(pool: &PgPool, row: &Record) -> Result<Option<Record>,
 }
 /// The attempt is durable before the existing end path may produce an effect.
 pub(crate) async fn begin_end(pool: &PgPool, row: &Record) -> Result<bool, sqlx::Error> {
-    #[cfg(test)]
-    if tests::mutant("budget") {
-        return Ok(true);
-    }
-
     let changed=sqlx::query("UPDATE intake_session_owners SET routing_cleanup_attempts=routing_cleanup_attempts+1 WHERE id=$1 AND routing_cleanup=$2 AND routing_cleanup_claim=$3 AND routing_cleanup_state='running' AND routing_cleanup_attempts=$4 AND routing_cleanup_attempts<3")
         .bind(row.id).bind(&row.routing_cleanup).bind(row.routing_cleanup_claim).bind(row.routing_cleanup_attempts).execute(pool).await?.rows_affected();
     Ok(changed == 1)
@@ -139,12 +130,8 @@ pub(crate) async fn respond(
     response: Response,
 ) -> Result<bool, sqlx::Error> {
     let mut tx = locked(pool, row).await?;
-    #[cfg(test)]
-    let late = tests::mutant("late");
-    #[cfg(not(test))]
-    let late = false;
     let changed=sqlx::query("UPDATE intake_session_owners SET routing_cleanup_state=CASE WHEN $4='retry' AND (routing_cleanup_attempts>=3 OR routing_cleanup_deadline<=NOW()) THEN 'deferred' ELSE $4 END,routing_cleanup_seen=NOW(),routing_cleanup_next=NOW()+INTERVAL '2 seconds',routing_cleanup_deferred=($4 IN ('retry','needs_operator','identity_changed')) WHERE id=$1 AND routing_cleanup=$2 AND (routing_cleanup_claim=$3 OR $5) AND routing_cleanup_state='running'")
-        .bind(row.id).bind(&row.routing_cleanup).bind(row.routing_cleanup_claim).bind(response.state()).bind(late).execute(&mut *tx).await?.rows_affected();
+        .bind(row.id).bind(&row.routing_cleanup).bind(row.routing_cleanup_claim).bind(response.state()).bind(false).execute(&mut *tx).await?.rows_affected();
     tx.commit().await?;
     Ok(changed == 1)
 }
@@ -162,8 +149,6 @@ pub(crate) async fn advance(pool: &PgPool, id: i64) -> Result<bool, sqlx::Error>
         return Ok(false);
     };
     let ready=sqlx::query_scalar::<_,bool>("SELECT routing_cleanup_deadline<=NOW() AND (routing_cleanup_seen IS NULL OR routing_cleanup_seen+make_interval(secs=>COALESCE((routing_cleanup->>'control_seconds')::INT,12)::DOUBLE PRECISION)<=NOW()) FROM intake_session_owners WHERE id=$1").bind(id).fetch_one(&mut *tx).await?;
-    #[cfg(test)]
-    let ready = ready || tests::mutant("busy");
     let readiness = match row.routing_cleanup_state.as_str() {
         "ended" => custody::SwitchReadiness::NormalEnd,
         "needs_operator" | "identity_changed" | "deferred" => custody::SwitchReadiness::Unavailable,
@@ -177,8 +162,6 @@ pub(crate) async fn advance(pool: &PgPool, id: i64) -> Result<bool, sqlx::Error>
     let Some((pending, mut target, planned)) = pending else {
         return Ok(false);
     };
-    #[cfg(test)]
-    let planned = planned || tests::mutant("advance-plan-skip");
     if !planned {
         let identity = OwnerIdentity::new(&row.provider, &row.raw_channel_id);
         match replan_head(pool, &identity, pending).await? {
@@ -210,16 +193,8 @@ pub(crate) async fn allows_on_tx(
     target: &str,
     readiness: custody::SwitchReadiness,
 ) -> Result<bool, sqlx::Error> {
-    #[cfg(test)]
-    if tests::mutant("no-control") {
-        return Ok(true);
-    }
     let found:Option<(sqlx::types::Json<Work>,String,bool,i32)>=sqlx::query_as("SELECT routing_cleanup,routing_cleanup_state,routing_cleanup_deadline<=NOW() AND (routing_cleanup_seen IS NULL OR routing_cleanup_seen+make_interval(secs=>COALESCE((routing_cleanup->>'control_seconds')::INT,12)::DOUBLE PRECISION)<=NOW()),routing_cleanup_attempts FROM intake_session_owners WHERE provider=$1 AND raw_channel_id=$2 AND generation=$3 AND routing_cleanup IS NOT NULL")
         .bind(id.provider()).bind(id.raw_channel_id()).bind(generation).fetch_optional(&mut **tx).await?;
-    #[cfg(test)]
-    if tests::mutant("busy") {
-        return Ok(true);
-    }
     let Some((work, state, expired, attempts)) = found else {
         return Ok(false);
     };
@@ -244,11 +219,6 @@ pub(crate) async fn allows_on_tx(
 
 /// Any healthy runtime may advance an already stored control request; physical end stays local.
 pub(crate) async fn advance_pending(pool: &PgPool, provider: &str) -> Result<(), sqlx::Error> {
-    #[cfg(test)]
-    if tests::mutant("periodic") {
-        return Ok(());
-    }
-
     sqlx::query("UPDATE intake_outbox d SET routing_state='superseded' WHERE d.provider=$1 AND d.routing_state='held' AND EXISTS(SELECT 1 FROM intake_outbox r WHERE r.id=d.routing_receipt_id AND r.replay_disposition IN ('withheld','classified_normal'))").bind(provider).execute(pool).await?;
     let ids:Vec<i64>=sqlx::query_scalar("SELECT o.id FROM intake_session_owners o JOIN LATERAL (SELECT d.* FROM intake_outbox d WHERE d.provider=o.provider AND d.channel_id=o.raw_channel_id AND d.routing_wait_owner_generation=o.generation AND d.routing_state='held' ORDER BY d.id LIMIT 1) d ON TRUE WHERE o.provider=$1 AND d.routing_state='held' AND d.routing_home_revision=COALESCE((SELECT revision FROM channel_home_preferences h WHERE h.provider=d.provider AND h.raw_channel_id=d.channel_id),0) AND (o.routing_cleanup_state IN ('ended','needs_operator','identity_changed','deferred') OR o.routing_cleanup_attempts>=3 OR (o.routing_cleanup_deadline<=NOW() AND (o.routing_cleanup_seen IS NULL OR o.routing_cleanup_seen+make_interval(secs=>COALESCE((o.routing_cleanup->>'control_seconds')::INT,12)::DOUBLE PRECISION)<=NOW()))) ORDER BY o.routing_cleanup_deadline,o.id LIMIT 32")
         .bind(provider).fetch_all(pool).await?;
@@ -258,12 +228,6 @@ pub(crate) async fn advance_pending(pool: &PgPool, provider: &str) -> Result<(),
     // A /node change after staging leaves held plans on an old revision; re-plan or release them.
     let stale:Vec<(String,serde_json::Value)>=sqlx::query_as("SELECT d.channel_id,d.routing_plan->'home_proof' FROM intake_outbox d WHERE d.provider=$1 AND d.routing_state='held' AND d.routing_plan IS NOT NULL AND d.routing_home_revision<>COALESCE((SELECT revision FROM channel_home_preferences h WHERE h.provider=d.provider AND h.raw_channel_id=d.channel_id),0) AND NOT EXISTS(SELECT 1 FROM intake_outbox h WHERE h.provider=d.provider AND h.channel_id=d.channel_id AND h.routing_state='held' AND h.id<d.id) ORDER BY d.id LIMIT 32")
         .bind(provider).fetch_all(pool).await?;
-    #[cfg(test)]
-    let stale = if tests::mutant("stale-replan") {
-        Vec::new()
-    } else {
-        stale
-    };
     for (channel, proof) in stale {
         let id = OwnerIdentity::new(provider, &channel);
         if let Some((head, plan)) = super::plan::replan_stale(pool, &id, &proof).await? {
@@ -273,13 +237,7 @@ pub(crate) async fn advance_pending(pool: &PgPool, provider: &str) -> Result<(),
     let heads:Vec<(i64,String,String,i64,bool)>=sqlx::query_as("SELECT d.id,d.target_instance_id,o.owner_instance_id,o.generation,d.routing_plan->>'target' IS NOT DISTINCT FROM d.target_instance_id FROM intake_outbox d JOIN intake_session_owners o ON o.provider=d.provider AND o.raw_channel_id=d.channel_id AND o.status='active' AND o.generation=d.routing_wait_owner_generation AND o.owner_instance_id=d.target_instance_id WHERE d.provider=$1 AND d.routing_state='held' AND NOT EXISTS(SELECT 1 FROM intake_outbox h WHERE h.provider=d.provider AND h.channel_id=d.channel_id AND h.routing_state='held' AND h.id<d.id) AND EXISTS(SELECT 1 FROM intake_session_owners history WHERE history.provider=d.provider AND history.raw_channel_id=d.channel_id AND history.routing_cleanup IS NOT NULL) ORDER BY d.id LIMIT 32")
         .bind(provider).fetch_all(pool).await?;
     for (id, target, owner, generation, planned) in heads {
-        #[cfg(test)]
-        let planned = planned || tests::mutant("plan-less-head");
         // Custody without a matching plan is planned afresh first; legacy custody stays put.
-        #[cfg(test)]
-        if !planned && tests::mutant("heads-replan-skip") {
-            continue;
-        }
         if !planned {
             let channel =
                 sqlx::query_scalar::<_, String>("SELECT channel_id FROM intake_outbox WHERE id=$1")
@@ -300,10 +258,6 @@ pub(crate) async fn advance_pending(pool: &PgPool, provider: &str) -> Result<(),
             custody::SwitchReadiness::Wait,
         )
         .await?;
-    }
-    #[cfg(test)]
-    if tests::mutant("plan-head-history") {
-        return Ok(());
     }
     // A first switch has no cleanup history; its saved plan still owns the held head.
     let planned:Vec<(i64,String,Option<String>,Option<i64>)>=sqlx::query_as("SELECT d.id,d.target_instance_id,o.owner_instance_id,o.generation FROM intake_outbox d LEFT JOIN LATERAL (SELECT owner_instance_id,generation,status FROM intake_session_owners x WHERE x.provider=d.provider AND x.raw_channel_id=d.channel_id ORDER BY generation DESC LIMIT 1) o ON TRUE WHERE d.provider=$1 AND d.routing_state='held' AND d.routing_plan->>'target'=d.target_instance_id AND (o.status IS DISTINCT FROM 'active' OR o.owner_instance_id=d.target_instance_id) AND NOT EXISTS(SELECT 1 FROM intake_outbox h WHERE h.provider=d.provider AND h.channel_id=d.channel_id AND h.routing_state='held' AND h.id<d.id) AND NOT EXISTS(SELECT 1 FROM intake_session_owners history WHERE history.provider=d.provider AND history.raw_channel_id=d.channel_id AND history.routing_cleanup IS NOT NULL) ORDER BY d.id LIMIT 32")

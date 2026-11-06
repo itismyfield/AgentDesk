@@ -109,7 +109,6 @@ async fn recovery_orphan_boot_keeps_protected_dispatch_notify_fenced_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    crate::db::replay_disposition::tests::apply_test_mutant(&pool).await;
     let mut dispatches = Vec::new();
     for (n, state) in [
         "withheld",

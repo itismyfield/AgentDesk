@@ -45,9 +45,6 @@ impl AdmittedRestartTerminal {
     }
 
     fn kind(&self) -> NativeTerminalKind {
-        if mutant("restart_admitted_kind_reclassified") {
-            return NativeTerminalKind::Completed;
-        }
         self.kind
     }
 
@@ -61,15 +58,7 @@ impl AdmittedRestartTerminal {
         if self.kind() != NativeTerminalKind::Completed {
             return Some(ADMITTED_ABORT_NOTICE.to_string());
         }
-        let stored = if mutant("restart_admitted_body_eof") {
-            state
-                .output_path
-                .as_deref()
-                .map(|path| extract_response_from_output(path, state.last_offset))
-                .unwrap_or_default()
-        } else {
-            state.full_response.clone()
-        };
+        let stored = state.full_response.clone();
         (!stored.trim().is_empty())
             .then(|| super::formatting::format_for_discord_with_provider(&stored, provider))
     }
@@ -98,16 +87,12 @@ impl AdmittedRestartTerminal {
         state: &inflight::InflightTurnState,
     ) -> AdmittedRestartReport {
         let (provider, channel_id) = (&self.provider, self.channel);
-        // A restart that kept the prior process's actor would leave this settlement unmade.
-        if mutant("restart_in_process") {
-            return kept(state, "a live actor owns the channel");
-        }
         // A hot swap may still overlap the prior process; a drain restart left the row to settle.
         let hot_swap = matches!(
             state.restart_mode,
             Some(crate::services::discord::InflightRestartMode::HotSwapHandoff)
         );
-        if hot_swap && !mutant("restart_admitted_restart_mode_settled") {
+        if hot_swap {
             return kept(state, "a hot-swap handoff owns the row");
         }
         // Where O owns the body its frontier keeps that body; an unreadable answer keeps the row.
@@ -115,11 +100,10 @@ impl AdmittedRestartTerminal {
             return kept(state, "O ownership is unreadable");
         };
         // A prior process's turn has no actor here; one present now is another turn's.
-        if !mutant("restart_admitted_mailbox_channel_scoped")
-            && super::mailbox_snapshot(shared, channel_id)
-                .await
-                .cancel_token
-                .is_some()
+        if super::mailbox_snapshot(shared, channel_id)
+            .await
+            .cancel_token
+            .is_some()
         {
             return kept(state, "a live actor owns the channel");
         }
@@ -145,7 +129,7 @@ impl AdmittedRestartTerminal {
             {
                 return kept(state, "the stop reply was not shown");
             }
-        } else if !self.delivered && !mutant("restart_admitted_row_dropped") {
+        } else if !self.delivered {
             let Some(text) = self.delivery(provider, &row) else {
                 return kept(state, "a completion with no stored body");
             };
@@ -154,11 +138,6 @@ impl AdmittedRestartTerminal {
             // O's body marker is not this terminal's delivery.
             if o_owns(&row) != Some(false) {
                 delivery.outcome = RecoveryRelayOutcome::TransientFailure;
-            }
-            if mutant("restart_admitted_anchor_dropped")
-                && let Some(pending) = delivery.pending_anchor.take()
-            {
-                let _ = pending.bind_after_actor_check(shared, &mut row.clone());
             }
             let commit = CapturedReadyDeliveryCommit {
                 shared: shared.clone(),
@@ -176,10 +155,7 @@ impl AdmittedRestartTerminal {
         }
         #[cfg(test)]
         test_hooks::before_cleanup().await;
-        if mutant("restart_admitted_mailbox_channel_scoped") {
-            let source = "recovery_herdr_admitted_terminal";
-            finish_recovered_turn_mailbox(shared, provider, channel_id, source).await;
-        } else if super::mailbox_snapshot(shared, channel_id)
+        if super::mailbox_snapshot(shared, channel_id)
             .await
             .cancel_token
             .is_some()
@@ -197,20 +173,9 @@ impl AdmittedRestartTerminal {
             return kept(state, "its receipt is kept marked until it commits");
         }
         let current = super::runtime_store::process_generation();
-        let wildcard = mutant("restart_admitted_clear_wildcard_nonce")
-            || mutant("restart_admitted_row_dropped")
-            || mutant("restart_admitted_mailbox_channel_scoped");
-        let cleared = if wildcard {
-            inflight::clear_inflight_state_if_matches_identity_turn_nonce(
-                provider,
-                row.channel_id,
-                &inflight::InflightTurnIdentity::from_state(&row),
-                Some(self.turn_nonce.as_str()),
-            )
-        } else {
-            let nonce = &self.turn_nonce;
-            inflight::clear_admitted_restart_terminal(provider, &row, nonce, current, o_body)
-        };
+        let nonce = &self.turn_nonce;
+        let cleared =
+            inflight::clear_admitted_restart_terminal(provider, &row, nonce, current, o_body);
         if cleared == inflight::GuardedClearOutcome::Cleared {
             AdmittedRestartReport::Settled
         } else {
@@ -246,22 +211,7 @@ fn kept(state: &inflight::InflightTurnState, why: &'static str) -> AdmittedResta
 
 /// Whether O owns this row's destination body; `None` while that cannot be read.
 fn o_owns(state: &inflight::InflightTurnState) -> Option<bool> {
-    if mutant("restart_admitted_o_marker_acked") {
-        return Some(false);
-    }
     crate::services::discord::turn_bridge::before_start_stop::o_owns_body(state)
-}
-
-fn mutant(name: &str) -> bool {
-    #[cfg(test)]
-    {
-        crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant(name)
-    }
-    #[cfg(not(test))]
-    {
-        let _ = name;
-        false
-    }
 }
 
 /// The restart terminal of `state`, if it is a prior process's admitted Herdr turn.

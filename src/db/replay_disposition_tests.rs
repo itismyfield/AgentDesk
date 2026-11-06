@@ -14,34 +14,12 @@ fn is_replay_fence_refusal(error: &sqlx::Error) -> bool {
 async fn setup() -> (TestPostgresDb, PgPool) {
     let fixture = TestPostgresDb::create().await;
     let pool = fixture.connect_and_migrate_with_max_connections(4).await;
-    apply_test_mutant(&pool).await;
     let version: String = sqlx::query_scalar("SELECT version()")
         .fetch_one(&pool)
         .await
         .expect("real PostgreSQL must answer before replay fence assertions");
     eprintln!("replay disposition real-PG fixture: {version}");
     (fixture, pool)
-}
-
-// Mutants exist only inside disposable test databases; production has no environment bypass.
-pub(crate) async fn apply_test_mutant(pool: &PgPool) {
-    let sql = match std::env::var("ADK_REPLAY_FENCE_MUTANT").ok().as_deref() {
-        None | Some("") => return,
-        Some("source-fence") => {
-            "CREATE OR REPLACE FUNCTION replay_sources_blocked(
-            p_provider TEXT, p_channel TEXT, p_sources TEXT[], p_except BIGINT DEFAULT NULL)
-            RETURNS BOOLEAN LANGUAGE sql STABLE AS $$ SELECT FALSE $$"
-        }
-        Some("disposition-fence") => {
-            "CREATE OR REPLACE FUNCTION replay_disposition_blocks_rerun(
-            disposition TEXT) RETURNS BOOLEAN LANGUAGE sql IMMUTABLE AS $$ SELECT FALSE $$"
-        }
-        Some(value) => panic!("unrecognized replay fence test mutant: {value}"),
-    };
-    sqlx::raw_sql(sql)
-        .execute(pool)
-        .await
-        .expect("install replay fence test mutant");
 }
 
 async fn finish(fixture: TestPostgresDb, pool: PgPool) {

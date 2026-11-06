@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check every docs/statecharts TLA+ config with plain TLC against expected.tsv.
+"""Check selected docs/statecharts TLA+ configs with plain TLC against expected.tsv.
 
 Each config is run until no rule breaks: a broken rule is recorded, dropped from
 the config and the model is run again. TLC stops at the first violation and
@@ -19,12 +19,18 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ROOT = REPO_ROOT / "docs/statecharts"
 FAIRNESS_HELPER = Path(__file__).with_name("StatechartFairness.java")
 DEADLOCK = "NoDeadlock"
+STATECHARTS_PATH = Path("docs/statecharts")
+CHECKER_PATHS = {
+    "scripts/ci/statecharts_tlc.py", "scripts/ci/StatechartFairness.java",
+    ".github/workflows/statecharts-tlc.yml",
+}
 
 # tlc2.output.EC message codes and tlc2.TLC exit codes (tla2tools 1.7.4).
 MSG_INVARIANT_INITIAL = 2107
@@ -299,24 +305,147 @@ def check_cfg(root: Path, cfg: str, module: str, expected: set[str], java: str, 
     return result
 
 
-def read_expected(path: Path) -> dict[str, tuple[str, set[str]]]:
+def parse_expected(text: str, source: str = "expected.tsv") -> dict[str, tuple[str, set[str]]]:
     rows: dict[str, tuple[str, set[str]]] = {}
-    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    for number, line in enumerate(text.splitlines(), 1):
         if not line.strip() or line.startswith("#"):
             continue
         fields = line.split("\t")
         if len(fields) not in (3, 4) or not fields[0] or not fields[1]:
-            raise CheckError(f"{path.name}:{number}: want 3 or 4 tab-separated fields: cfg, module, safety, [liveness]")
+            raise CheckError(f"{source}:{number}: want 3 or 4 tab-separated fields: cfg, module, safety, [liveness]")
         rules: set[str] = set()
         for names in fields[2:]:
             listed = set() if names.strip() in ("", "-") else {r.strip() for r in names.split(",")}
             if "" in listed or fields[0] in listed:
-                raise CheckError(f"{path.name}:{number}: bad rule list {names!r}")
+                raise CheckError(f"{source}:{number}: bad rule list {names!r}")
             rules.update(listed)
         if fields[0] in rows:
-            raise CheckError(f"{path.name}:{number}: {fields[0]} listed twice")
+            raise CheckError(f"{source}:{number}: {fields[0]} listed twice")
         rows[fields[0]] = (fields[1], rules)
     return rows
+
+
+def read_expected(path: Path) -> dict[str, tuple[str, set[str]]]:
+    return parse_expected(path.read_text(encoding="utf-8"), path.name)
+
+
+def expected_rows(text: str) -> dict[str, str]:
+    return {line.split("\t", 1)[0]: line for line in text.splitlines()
+            if line.strip() and not line.startswith("#")}
+
+
+def module_dependencies(text: str) -> set[str]:
+    """Read EXTENDS lists and INSTANCE names, excluding strings and nested comments."""
+    first_line = text.lstrip().partition("\n")[0].rstrip()
+    if not re.fullmatch(r"-{4,}[ \t]+MODULE[ \t]+[A-Za-z0-9_]+[ \t]+-{4,}", first_line):
+        raise CheckError("dependency selection requires a MODULE header on the first nonblank line; "
+                         "module preambles are not supported")
+    token = re.compile(r'\\\*[^\n]*|\(\*|"(?:[^"\\\n]|\\[^\n])*"|[A-Za-z0-9_]+|\S')
+    word = re.compile(r"[A-Za-z0-9_]+\Z")
+    tokens, pos = [], 0
+    while match := token.search(text, pos):
+        value, pos = match.group(), match.end()
+        if value == "(*":
+            depth = 1
+            while depth:
+                mark = BLOCK_MARK.search(text, pos)
+                if mark is None:
+                    raise CheckError("TLA+ block comment not closed")
+                depth += 1 if mark.group() == "(*" else -1
+                pos = mark.end()
+        elif value == '"':
+            raise CheckError("TLA+ string not closed on its line; cannot select dependencies safely")
+        elif not value.startswith(('\\*', '"')):
+            tokens.append(value)
+    names = set()
+    for i, value in enumerate(tokens):
+        if value not in ("EXTENDS", "INSTANCE"):
+            continue
+        j = i + 1
+        while j < len(tokens) and word.fullmatch(tokens[j]):
+            names.add(tokens[j])
+            if value == "INSTANCE" or j + 1 == len(tokens) or tokens[j + 1] != ",":
+                break
+            j += 2
+    return names
+
+
+def select_configs(root: Path, expected: dict[str, tuple[str, set[str]]],
+                   changed_paths: list[str] | None,
+                   previous_expected: dict[str, str] | None = None) -> list[str]:
+    """Select existing configs from repository-relative changed paths; None means all."""
+    configs = {path.relative_to(root).as_posix() for path in root.rglob("*.cfg")} & set(expected)
+    if changed_paths is None or CHECKER_PATHS.intersection(changed_paths):
+        return sorted(configs)
+    changed = set()
+    for path in changed_paths:
+        try:
+            changed.add(Path(path).relative_to(STATECHARTS_PATH))
+        except ValueError:
+            continue
+    selected = {cfg for cfg in configs if Path(cfg) in changed}
+    if Path("expected.tsv") in changed:
+        if previous_expected is None:
+            return sorted(configs)
+        current_rows = expected_rows((root / "expected.tsv").read_text(encoding="utf-8"))
+        selected.update(cfg for cfg in configs if current_rows.get(cfg) != previous_expected.get(cfg))
+    changed_modules = {p for p in changed if p.suffix == ".tla"}
+    if not changed_modules:
+        return sorted(selected)
+    sources = {p.relative_to(root) for p in root.rglob("*.tla")}
+    by_name: dict[str, set[Path]] = {}
+    # Deleted modules remain dependency candidates so their consumers cannot be skipped.
+    for path in sources | changed_modules:
+        by_name.setdefault(path.stem, set()).add(path)
+    graph = {}
+    for path in sources:
+        dependencies = set()
+        try:
+            names = module_dependencies((root / path).read_text(encoding="utf-8"))
+        except CheckError as error:
+            raise CheckError(f"{path}: {error}") from error
+        for name in names:
+            local = path.with_name(f"{name}.tla")
+            dependencies.update({local} if local in sources | changed_modules else by_name.get(name, set()))
+        graph[path] = dependencies
+    for cfg in configs:
+        pending = [Path(cfg).parent / f"{expected[cfg][0]}.tla"]
+        visited = set()
+        while pending:
+            path = pending.pop()
+            if path in visited:
+                continue
+            if path in changed_modules:
+                selected.add(cfg)
+                break
+            visited.add(path)
+            pending.extend(graph.get(path, set()) - visited)
+    return sorted(selected)
+
+
+def git_selection(base: str, head: str) -> tuple[list[str] | None, dict[str, str]]:
+    def git(*arguments: str) -> str:
+        result = subprocess.run(["git", "-C", str(REPO_ROOT), *arguments], capture_output=True, check=False)
+        if result.returncode:
+            raise CheckError(f"git selection failed: {result.stderr.decode('utf-8', errors='replace').strip()}")
+        return result.stdout.decode("utf-8")
+
+    try:
+        comparison_base = git("merge-base", base, head).strip()
+        if not comparison_base:
+            raise CheckError("git merge-base returned no commit")
+    except (CheckError, OSError) as error:
+        print(f"FULL_FALLBACK: cannot determine PR merge-base; checking all configs: {error}", file=sys.stderr)
+        return None, {}
+    # Disable rename detection to retain both the old and new dependency paths.
+    paths = git("diff", "--name-only", "--no-renames", "-z", f"{comparison_base}..{head}", "--").split("\0")
+    expected_path = (STATECHARTS_PATH / "expected.tsv").as_posix()
+    previous = {}
+    if expected_path in paths and git("ls-tree", "--name-only", comparison_base, "--", expected_path).strip():
+        text = git("show", f"{comparison_base}:{expected_path}")
+        parse_expected(text, f"{comparison_base}:expected.tsv")
+        previous = expected_rows(text)
+    return [path for path in paths if path], previous
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -325,28 +454,47 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--jar", default=os.environ.get("TLA2TOOLS"), help="tla2tools.jar 1.7.4 (env TLA2TOOLS)")
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--timeout", type=float, default=300.0, help="seconds per config")
+    parser.add_argument("--base", help="select configs changed from this commit's merge-base with --head")
+    parser.add_argument("--head", default="HEAD", help="diff head (default HEAD); model files come from --root")
+    parser.add_argument("--jobs", type=int, default=1, help="number of configs to check concurrently (default 1)")
     args = parser.parse_args(argv)
-    if not args.jar or not Path(args.jar).is_file():
-        parser.error("tla2tools.jar not found: pass --jar or set TLA2TOOLS")
+    if args.jobs < 1:
+        parser.error("--jobs must be at least 1")
     root = args.root.resolve()
     started = time.monotonic()
     try:
         expected = read_expected(root / "expected.tsv")
+        paths, previous = git_selection(args.base, args.head) if args.base else (None, None)
+        selected = select_configs(root, expected, paths, previous)
     except (CheckError, OSError) as error:
         print(f"FAIL {error}", file=sys.stderr)
         return 1
     on_disk = {p.relative_to(root).as_posix() for p in root.rglob("*.cfg")}
     problems = [f"{cfg}: config not listed in expected.tsv" for cfg in sorted(on_disk - set(expected))]
     problems += [f"{cfg}: listed in expected.tsv but the file is gone" for cfg in sorted(set(expected) - on_disk)]
+    print(f"Selected {len(selected)} configs ({'changed' if args.base else 'all'}):", flush=True)
+    for cfg in selected:
+        print(f"  {cfg}", flush=True)
+    if not selected:
+        print("NO_TARGETS: no configs selected; TLC was not run.", flush=True)
+        for problem in problems:
+            print(f"FAIL {problem}", file=sys.stderr)
+        return 1 if problems else 0
+    if not args.jar or not Path(args.jar).is_file():
+        parser.error("tla2tools.jar not found: pass --jar or set TLA2TOOLS")
     results = []
-    for cfg in sorted(set(expected) & on_disk):
+
+    def check(cfg: str) -> Result:
         module, rules = expected[cfg]
-        result = check_cfg(root, cfg, module, rules, args.java, Path(args.jar).resolve(), args.timeout)
-        status = "ok" if not result.problems() else "FAIL"
-        print(f"{status:4} {cfg} runs={result.runs} {result.seconds:.1f}s broken={','.join(sorted(result.broken)) or '-'}",
-              flush=True)
-        results.append(result)
-        problems += result.problems()
+        return check_cfg(root, cfg, module, rules, args.java, Path(args.jar).resolve(), args.timeout)
+
+    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+        for result in pool.map(check, selected):
+            status = "ok" if not result.problems() else "FAIL"
+            print(f"{status:4} {result.cfg} runs={result.runs} {result.seconds:.1f}s broken={','.join(sorted(result.broken)) or '-'}",
+                  flush=True)
+            results.append(result)
+            problems += result.problems()
     print("\n| cfg | expected to break | broken | seconds |\n|---|---|---|---|")
     for r in results:
         actual = "ERROR" if r.error else (", ".join(sorted(r.broken)) or "-")
