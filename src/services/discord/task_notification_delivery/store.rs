@@ -2,6 +2,7 @@
 
 mod card_claim;
 mod memory_claim;
+#[cfg(test)]
 use memory_claim::claim_card_memory;
 mod inline_claim;
 pub(super) mod monitor;
@@ -15,8 +16,11 @@ mod response_identity;
 mod retention;
 mod terminal_footer;
 
+#[cfg(test)]
 use std::collections::HashMap;
+#[cfg(test)]
 use std::sync::{LazyLock, Mutex};
+#[cfg(test)]
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -59,8 +63,9 @@ const LEASE_SECONDS: i64 = 30;
 const RETENTION_DAYS: i64 = 7;
 const RETENTION_DELETE_LIMIT: i64 = 64;
 
+#[cfg(not(test))]
 fn memory_fallback_unavailable() -> String {
-    "task card PostgreSQL authority is unavailable in an optimized release build".to_string()
+    "task card PostgreSQL authority is unavailable without a database pool".to_string()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,9 +116,9 @@ pub(super) async fn record_footer_only(
 ) -> Result<(), String> {
     match pool {
         Some(pool) => record_footer_only_pg(pool, scope, content, content_hash).await,
-        None if cfg!(any(test, debug_assertions)) => {
-            record_footer_only_memory(scope, content, content_hash)
-        }
+        #[cfg(test)]
+        None => record_footer_only_memory(scope, content, content_hash),
+        #[cfg(not(test))]
         None => Err(memory_fallback_unavailable()),
     }
 }
@@ -138,9 +143,9 @@ pub(super) async fn claim_card(
             )
             .await
         }
-        None if cfg!(any(test, debug_assertions)) => {
-            claim_card_memory(scope, preferred_bot_key, seed_content, seed_hash, intent)
-        }
+        #[cfg(test)]
+        None => claim_card_memory(scope, preferred_bot_key, seed_content, seed_hash, intent),
+        #[cfg(not(test))]
         None => Err(memory_fallback_unavailable()),
     }
 }
@@ -154,9 +159,9 @@ pub(super) async fn mark_posted(
 ) -> Result<(), String> {
     match pool {
         Some(pool) => mark_posted_pg(pool, claimed, message_id, content, content_hash).await,
-        None if cfg!(any(test, debug_assertions)) => {
-            mark_posted_memory(claimed, message_id, content, content_hash)
-        }
+        #[cfg(test)]
+        None => mark_posted_memory(claimed, message_id, content, content_hash),
+        #[cfg(not(test))]
         None => Err(memory_fallback_unavailable()),
     }
 }
@@ -167,7 +172,9 @@ pub(super) async fn begin_card_post(
 ) -> Result<CardPostAttempt, String> {
     match pool {
         Some(pool) => begin_card_post_pg(pool, claimed).await,
-        None if cfg!(any(test, debug_assertions)) => begin_card_post_memory(claimed),
+        #[cfg(test)]
+        None => begin_card_post_memory(claimed),
+        #[cfg(not(test))]
         None => Err(memory_fallback_unavailable()),
     }
 }
@@ -179,9 +186,9 @@ pub(super) async fn mark_card_post_ambiguous(
 ) -> Result<(), String> {
     match pool {
         Some(pool) => mark_failure_pg(pool, claimed, None, "posting", error).await,
-        None if cfg!(any(test, debug_assertions)) => {
-            mark_failure_memory(claimed, None, MemoryState::Posting, error)
-        }
+        #[cfg(test)]
+        None => mark_failure_memory(claimed, None, MemoryState::Posting, error),
+        #[cfg(not(test))]
         None => Err(memory_fallback_unavailable()),
     }
 }
@@ -195,9 +202,9 @@ pub(super) async fn mark_edited(
 ) -> Result<(), String> {
     match pool {
         Some(pool) => mark_edited_pg(pool, claimed, message_id, content, content_hash).await,
-        None if cfg!(any(test, debug_assertions)) => {
-            mark_edited_memory(claimed, message_id, content, content_hash)
-        }
+        #[cfg(test)]
+        None => mark_edited_memory(claimed, message_id, content, content_hash),
+        #[cfg(not(test))]
         None => Err(memory_fallback_unavailable()),
     }
 }
@@ -209,9 +216,9 @@ pub(super) async fn mark_post_failure(
 ) -> Result<(), String> {
     match pool {
         Some(pool) => mark_failure_pg(pool, claimed, None, "posting", error).await,
-        None if cfg!(any(test, debug_assertions)) => {
-            mark_failure_memory(claimed, None, MemoryState::Posting, error)
-        }
+        #[cfg(test)]
+        None => mark_failure_memory(claimed, None, MemoryState::Posting, error),
+        #[cfg(not(test))]
         None => Err(memory_fallback_unavailable()),
     }
 }
@@ -224,9 +231,9 @@ pub(super) async fn mark_edit_failure(
 ) -> Result<(), String> {
     match pool {
         Some(pool) => mark_failure_pg(pool, claimed, Some(message_id), "card_posted", error).await,
-        None if cfg!(any(test, debug_assertions)) => {
-            mark_failure_memory(claimed, Some(message_id), MemoryState::CardPosted, error)
-        }
+        #[cfg(test)]
+        None => mark_failure_memory(claimed, Some(message_id), MemoryState::CardPosted, error),
+        #[cfg(not(test))]
         None => Err(memory_fallback_unavailable()),
     }
 }
@@ -242,9 +249,9 @@ pub(super) async fn prepare_replacement(
         Some(pool) => {
             prepare_replacement_pg(pool, claimed, missing_message_id, content, content_hash).await
         }
-        None if cfg!(any(test, debug_assertions)) => {
-            prepare_replacement_memory(claimed, missing_message_id, content, content_hash)
-        }
+        #[cfg(test)]
+        None => prepare_replacement_memory(claimed, missing_message_id, content, content_hash),
+        #[cfg(not(test))]
         None => Err(memory_fallback_unavailable()),
     }?;
     replacement.monitor = claimed.monitor.clone();
@@ -550,6 +557,7 @@ fn exact_change(changed: u64, action: &str) -> Result<(), String> {
         .ok_or_else(|| format!("{action} changed {changed} rows; exact lease ownership was lost"))
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MemoryState {
     FooterOnly,
@@ -557,6 +565,7 @@ enum MemoryState {
     CardPosted,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug)]
 struct MemoryRow {
     state: MemoryState,
@@ -574,9 +583,11 @@ struct MemoryRow {
     last_error: Option<String>,
 }
 
+#[cfg(test)]
 static MEMORY_STORE: LazyLock<Mutex<HashMap<TaskCardScope, MemoryRow>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+#[cfg(test)]
 #[derive(Clone, Debug)]
 struct MemoryTerminalDelivery {
     channel_id: u64,
@@ -589,9 +600,11 @@ struct MemoryTerminalDelivery {
     content_hash: String,
 }
 
+#[cfg(test)]
 static MEMORY_TERMINAL_DELIVERIES: LazyLock<Mutex<Vec<MemoryTerminalDelivery>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
 
+#[cfg(test)]
 fn find_terminal_delivery_memory(
     scope: &TaskCardScope,
     content_hash: &str,
@@ -640,6 +653,7 @@ fn find_terminal_delivery_memory(
     Ok(Some((message_id, bot_key)))
 }
 
+#[cfg(test)]
 fn record_terminal_delivery_memory(
     claimed: &ClaimedCard,
     message_id: u64,
@@ -682,6 +696,7 @@ fn record_terminal_delivery_memory(
     Ok(())
 }
 
+#[cfg(test)]
 fn record_footer_only_memory(
     scope: &TaskCardScope,
     content: &str,
@@ -726,6 +741,7 @@ fn record_footer_only_memory(
     Ok(())
 }
 
+#[cfg(test)]
 fn begin_card_post_memory(claimed: &ClaimedCard) -> Result<CardPostAttempt, String> {
     let mut rows = MEMORY_STORE
         .lock()
@@ -752,6 +768,7 @@ fn begin_card_post_memory(claimed: &ClaimedCard) -> Result<CardPostAttempt, Stri
     })
 }
 
+#[cfg(test)]
 fn memory_claim(
     scope: &TaskCardScope,
     lease_owner: &str,
@@ -775,6 +792,7 @@ fn memory_claim(
     }
 }
 
+#[cfg(test)]
 fn mark_posted_memory(
     claimed: &ClaimedCard,
     message_id: u64,
@@ -799,6 +817,7 @@ fn mark_posted_memory(
     monitor::record_memory(claimed, message_id)
 }
 
+#[cfg(test)]
 fn mark_edited_memory(
     claimed: &ClaimedCard,
     message_id: u64,
@@ -823,6 +842,7 @@ fn mark_edited_memory(
     monitor::record_memory(claimed, message_id)
 }
 
+#[cfg(test)]
 fn mark_failure_memory(
     claimed: &ClaimedCard,
     message_id: Option<u64>,
@@ -840,6 +860,7 @@ fn mark_failure_memory(
     })
 }
 
+#[cfg(test)]
 fn prepare_replacement_memory(
     claimed: &ClaimedCard,
     missing_message_id: u64,
@@ -874,6 +895,7 @@ fn prepare_replacement_memory(
     ))
 }
 
+#[cfg(test)]
 fn update_owned_memory(
     claimed: &ClaimedCard,
     update: impl FnOnce(&mut MemoryRow) -> Result<(), String>,

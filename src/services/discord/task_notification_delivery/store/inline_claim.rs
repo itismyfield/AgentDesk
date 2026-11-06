@@ -14,7 +14,9 @@ pub(in crate::services::discord::task_notification_delivery) async fn claim_even
     if event.payload.is_monitor() && intent == StoreIntent::Observation {
         return match pool {
             Some(pool) => monitor::claim(pool, event, bot).await,
-            None if cfg!(any(test, debug_assertions)) => monitor::claim_memory(event, bot),
+            #[cfg(test)]
+            None => monitor::claim_memory(event, bot),
+            #[cfg(not(test))]
             None => Err(memory_fallback_unavailable()),
         };
     }
@@ -46,7 +48,9 @@ pub(in crate::services::discord::task_notification_delivery) async fn claim_even
         if let Some(claim) = repin(pool, event, bot, &content, &hash, intent).await? {
             return Ok(claim);
         }
-    } else if cfg!(any(test, debug_assertions)) {
+    }
+    #[cfg(test)]
+    if pool.is_none() {
         if event.scope.terminal_delivery_fingerprint.is_some() {
             let legacy_hash = content_hash(&event.payload.legacy_render(1));
             if let Some((message_id, bot_key)) =
@@ -136,6 +140,7 @@ async fn repin(
     Ok(Some(CardClaim::Owned(Box::new(claim))))
 }
 
+#[cfg(test)]
 fn repin_memory(event: &TaskCardEvent, bot: &str, content: &str, hash: &str, intent: StoreIntent) {
     let Ok(mut rows) = MEMORY_STORE.lock() else {
         return;
@@ -185,14 +190,16 @@ pub(in crate::services::discord::task_notification_delivery) async fn restore_co
         sqlx::query_scalar::<_,String>("SELECT rendered_content FROM task_notification_card_state WHERE channel_id=$1 AND provider=$2 AND session_key=$3 AND event_key=$4")
             .bind(event.scope.channel_id as i64).bind(&event.scope.provider).bind(&event.scope.session_key)
             .bind(&event.scope.event_key).fetch_optional(pool).await.map_err(|e|e.to_string())?
-    } else if cfg!(any(test, debug_assertions)) {
-        MEMORY_STORE
+    } else {
+        #[cfg(test)]
+        let content = MEMORY_STORE
             .lock()
             .map_err(|e| e.to_string())?
             .get(&event.scope)
-            .map(|row| row.rendered_content.clone())
-    } else {
-        None
+            .map(|row| row.rendered_content.clone());
+        #[cfg(not(test))]
+        let content = None;
+        content
     };
     let mut event = event.clone();
     if let Some(content) = content.filter(|content| {

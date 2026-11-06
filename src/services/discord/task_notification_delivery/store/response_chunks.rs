@@ -1,13 +1,17 @@
 //! Durable pre-POST journal for task-response chunks (#4055/#4446).
 
+#[cfg(test)]
 use std::collections::HashMap;
+#[cfg(test)]
 use std::sync::{LazyLock, Mutex};
 
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 
 use super::super::ResponseDeliveryClaim;
-use super::{db_id, memory_fallback_unavailable, message_id};
+#[cfg(not(test))]
+use super::memory_fallback_unavailable;
+use super::{db_id, message_id};
 
 const AMBIGUOUS_BACKOFF_SECONDS: i64 = 300;
 
@@ -82,7 +86,8 @@ pub(in super::super) async fn prepare_response_chunk(
             )
             .await
         }
-        None if cfg!(any(test, debug_assertions)) => prepare_response_chunk_memory(
+        #[cfg(test)]
+        None => prepare_response_chunk_memory(
             claim,
             chunk_index,
             chunk_count,
@@ -91,6 +96,7 @@ pub(in super::super) async fn prepare_response_chunk(
             bot_user_id,
             referenced_message_id,
         ),
+        #[cfg(not(test))]
         None => Err(ResponseChunkPrepareError::Store(
             memory_fallback_unavailable(),
         )),
@@ -105,9 +111,9 @@ pub(in super::super) async fn confirm_response_chunk(
 ) -> Result<(), String> {
     match pool {
         Some(pool) => confirm_response_chunk_pg(pool, claim, prepared, discord_message_id).await,
-        None if cfg!(any(test, debug_assertions)) => {
-            confirm_response_chunk_memory(claim, prepared, discord_message_id)
-        }
+        #[cfg(test)]
+        None => confirm_response_chunk_memory(claim, prepared, discord_message_id),
+        #[cfg(not(test))]
         None => Err(memory_fallback_unavailable()),
     }
 }
@@ -119,9 +125,9 @@ pub(in super::super) async fn mark_response_chunk_posting(
 ) -> Result<PreparedResponseChunk, String> {
     match pool {
         Some(pool) => mark_response_chunk_posting_pg(pool, claim, prepared).await,
-        None if cfg!(any(test, debug_assertions)) => {
-            mark_response_chunk_posting_memory(claim, prepared)
-        }
+        #[cfg(test)]
+        None => mark_response_chunk_posting_memory(claim, prepared),
+        #[cfg(not(test))]
         None => Err(memory_fallback_unavailable()),
     }
 }
@@ -134,9 +140,9 @@ pub(in super::super) async fn mark_response_chunk_ambiguous(
 ) -> Result<(), String> {
     match pool {
         Some(pool) => mark_response_chunk_ambiguous_pg(pool, claim, prepared, reason).await,
-        None if cfg!(any(test, debug_assertions)) => {
-            mark_response_chunk_ambiguous_memory(claim, prepared, reason)
-        }
+        #[cfg(test)]
+        None => mark_response_chunk_ambiguous_memory(claim, prepared, reason),
+        #[cfg(not(test))]
         None => Err(memory_fallback_unavailable()),
     }
 }
@@ -428,17 +434,21 @@ async fn mark_response_chunk_ambiguous_pg(
         .ok_or_else(|| format!("record ambiguous task response chunk changed {changed} rows"))
 }
 
+#[cfg(test)]
 type MemoryChunkKey = (u64, String, String, String, i32, usize);
 
+#[cfg(test)]
 #[derive(Clone)]
 struct MemoryChunkRow {
     owner_token: String,
     journal: ResponseChunkJournal,
 }
 
+#[cfg(test)]
 static MEMORY_CHUNKS: LazyLock<Mutex<HashMap<MemoryChunkKey, MemoryChunkRow>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+#[cfg(test)]
 fn memory_key(claim: &ResponseDeliveryClaim, chunk_index: usize) -> MemoryChunkKey {
     (
         claim.scope.channel_id,
@@ -450,6 +460,7 @@ fn memory_key(claim: &ResponseDeliveryClaim, chunk_index: usize) -> MemoryChunkK
     )
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn prepare_response_chunk_memory(
     claim: &ResponseDeliveryClaim,
@@ -501,6 +512,7 @@ fn prepare_response_chunk_memory(
     Ok(row.journal.clone())
 }
 
+#[cfg(test)]
 fn mark_response_chunk_posting_memory(
     claim: &ResponseDeliveryClaim,
     prepared: &PreparedResponseChunk,
@@ -522,6 +534,7 @@ fn mark_response_chunk_posting_memory(
     Ok(posting)
 }
 
+#[cfg(test)]
 fn confirm_response_chunk_memory(
     claim: &ResponseDeliveryClaim,
     prepared: &PreparedResponseChunk,
@@ -545,6 +558,7 @@ fn confirm_response_chunk_memory(
     Ok(())
 }
 
+#[cfg(test)]
 fn mark_response_chunk_ambiguous_memory(
     claim: &ResponseDeliveryClaim,
     prepared: &PreparedResponseChunk,

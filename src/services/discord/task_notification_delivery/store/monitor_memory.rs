@@ -1,6 +1,8 @@
-//! Debug/test counterpart of the PostgreSQL observation receipt contract.
+//! Test counterpart of the PostgreSQL observation receipt contract.
+#[cfg(test)]
 use super::*;
 
+#[cfg(test)]
 #[derive(Clone)]
 struct Receipt {
     scope: TaskCardScope,
@@ -8,8 +10,10 @@ struct Receipt {
     message: u64,
     bot: String,
 }
+#[cfg(test)]
 static RECEIPTS: LazyLock<Mutex<Vec<Receipt>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
+#[cfg(test)]
 pub(in crate::services::discord::task_notification_delivery::store) fn record(
     claimed: &ClaimedCard,
     message: u64,
@@ -33,6 +37,7 @@ pub(in crate::services::discord::task_notification_delivery::store) fn record(
     Ok(())
 }
 
+#[cfg(test)]
 pub(in crate::services::discord::task_notification_delivery::store) fn claim(
     event: &TaskCardEvent,
     bot: &str,
