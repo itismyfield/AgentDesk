@@ -19,6 +19,10 @@ execution-authority/ExecutionAuthorityWorker.cfg	ExecutionAuthority	-	-
 host-migration/HostMigration.cfg	HostMigration	NoDeadlock,RecordMatchesProcesses	-
 host-migration/HostMigrationClean.cfg	HostMigration	-	-
 host-migration/HostMigrationIdOnly.cfg	HostMigration	NoDeadlock	-
+input-single-path/InputNoticeSettlementAcceptanceGap.cfg	InputNoticeSettlement	-	AcceptedEventuallyEchoed
+input-single-path/InputNoticeSettlementAfter.cfg	InputNoticeSettlement	-	-
+input-single-path/InputNoticeSettlementBefore.cfg	InputNoticeSettlement	-	OwnedEventuallyExcluded,AcceptedEventuallyEchoed
+input-single-path/InputNoticeSettlementBeforeKnown.cfg	InputNoticeSettlement	NoFalseExcludeDirect	-
 input-single-path/InputNativeStop.cfg	InputNativeStop	-	-
 input-single-path/InputNativeStopAbsorptionBefore.cfg	InputNativeStop	NoForeignEscape,OwnInputStops	-
 input-single-path/InputNativeStopBefore.cfg	InputNativeStop	OwnInputStops	-
