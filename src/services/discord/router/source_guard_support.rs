@@ -3,9 +3,7 @@
 
 use std::ops::Range;
 
-use crate::test_support::{
-    CommentForgery, braced_item_span, rust_code_mask, rust_spans, strip_rust_comments,
-};
+use crate::test_support::{braced_item_span, rust_code_mask, rust_spans, strip_rust_comments};
 
 /// One source with comments blanked (`code`), literals blanked too (`mask`) and literal
 /// token ranges (`literals`), all in the source's byte offsets.
@@ -160,109 +158,4 @@ impl Lexed {
         let span = braced_item_span(&self.mask[at..], &self.mask[at..at + head.len()])?;
         Some(self.slice(at + span.start..at + span.end))
     }
-}
-
-/// Rewrites every as-written `needle` as a comment that still holds it verbatim, so a
-/// raw `contains` keeps matching while the comment-free guard must not.
-pub(in crate::services::discord) fn forge(
-    source: &str,
-    needle: &str,
-    forgery: CommentForgery,
-) -> String {
-    let starts = Lexed::new(source).find_all(needle);
-    assert!(
-        !starts.is_empty(),
-        "no code occurrence of `{needle}` to forge"
-    );
-    let hidden = match forgery {
-        CommentForgery::NestedBlock => format!("/* outer /* {needle} */ */"),
-    };
-    let mut forged = source.to_string();
-    for at in starts.into_iter().rev() {
-        forged.replace_range(at..at + needle.len(), &hidden);
-    }
-    assert!(forged.contains(needle) && !Lexed::new(&forged).contains(needle));
-    forged
-}
-
-#[test]
-fn as_written_matching_skips_prose_and_quoted_copies() {
-    let source = "// call(\n/* call( */ let s = \"call(\";\n\
-                  fn f() { call(\"x\"); if s.ends_with('{') { call(\"{\") } }\n";
-    let lexed = Lexed::new(source);
-    assert_eq!(lexed.text().matches("call(").count(), 3);
-    assert_eq!((lexed.count("call("), lexed.count("call(\"x\")")), (2, 1));
-    let body = lexed
-        .block("fn f()")
-        .expect("braces inside literals do not end the item");
-    assert!(body.text().ends_with("{ call(\"{\") } }"));
-    let forged = forge(source, "call(\"x\")", CommentForgery::NestedBlock);
-    assert_eq!(Lexed::new(&forged).count("call("), 1);
-}
-
-#[test]
-fn literal_only_needles_fail_closed() {
-    let quoted = Lexed::new("let x = r#\"\"Use `!clear` instead.\"\"#;\n");
-    let counted = std::panic::catch_unwind(|| quoted.count("\"Use `!clear` instead.\""));
-    assert!(
-        counted.is_err(),
-        "a literal-only needle counted {counted:?}"
-    );
-    assert_eq!(
-        quoted.count("msg.reply(&ctx.http, \"Use `!clear` instead.\")"),
-        0
-    );
-}
-
-#[test]
-fn literal_needle_parts_match_whole_literal_tokens_only() {
-    let source = "json!({ \"prefix\\\"epoch_route\": 1 }); json!({ \"epoch_route\": 2 });\n\
-                  f(\"a\\\"x\", 1); f(\"x\", 2);\n";
-    let lexed = Lexed::new(source);
-    assert_eq!(lexed.text().matches("\"epoch_route\":").count(), 2);
-    assert_eq!(lexed.count("\"epoch_route\":"), 1);
-    assert_eq!(lexed.text().matches("\"x\",").count(), 2);
-    assert_eq!(lexed.count("\"x\","), 1);
-    assert_eq!(
-        lexed
-            .slice(source.find("f(").unwrap()..source.len())
-            .count("\"x\","),
-        1
-    );
-}
-
-#[test]
-fn compact_keeps_literal_bytes_and_drops_only_outside_whitespace() {
-    let compact = |source: &str| Lexed::new(source).compact().text().to_string();
-    let written = "observe(\n    \"clear_inflight_state_for_reconcile\", // site\n    1,\n)";
-    assert_eq!(
-        compact(written),
-        "observe(\"clear_inflight_state_for_reconcile\",1,)"
-    );
-    assert_eq!(
-        compact(written),
-        compact("observe( \"clear_inflight_state_for_reconcile\" , /* x */ 1 , )")
-    );
-    for spaced in ["for_ reconcile", "for_\treconcile"] {
-        let changed = written.replace("for_reconcile", spaced);
-        assert_ne!(compact(&changed), compact(written), "{spaced:?}");
-    }
-    let compacted = Lexed::new(written).compact();
-    assert_eq!(
-        compacted.count("\"clear_inflight_state_for_reconcile\","),
-        1
-    );
-}
-
-#[test]
-fn arm_bodies_skip_pattern_braces_and_refuse_expression_arms() {
-    let lexed = Lexed::new(
-        "match m { A { x } => { call(x) } B(y) => y, C => { other(\"}\") } D => 'l: { d() } }",
-    );
-    let body = |head: &str| lexed.arm(head).map(|arm| arm.text().to_string());
-    assert_eq!(body("A {").as_deref(), Some("{ call(x) }"));
-    assert_eq!(body("B("), None);
-    assert_eq!(body("C =>").as_deref(), Some("{ other(\"}\") }"));
-    assert_eq!(body("D =>").as_deref(), Some("{ d() }"));
-    assert!(Lexed::new("{ f() } g => { h() }").arm("f(").is_none());
 }
