@@ -5,7 +5,8 @@
   check      fail on test files no crate root reaches, missing module/include files and unreadable cfg
   compare    compare the source inventory for one platform with an unfiltered nextest list
   removed    per platform, tests a base checkout compiles that this tree no longer compiles, and tests
-             runnable there that `#[ignore]` (plain or cfg_attr) now skips here
+             runnable there that `#[ignore]` (plain or cfg_attr) now skips here; this tree must read
+             cleanly, the base may lack mod/include! files as long as no test file becomes unreachable
 
 A compiled list cannot see a test file that no `mod` connects, so the orphan check stays source based.
 Nothing here runs cargo.
@@ -267,6 +268,8 @@ class Inventory:
     # Reached file -> every module path its items live in; more than one means one file, several modules.
     modules: dict = field(default_factory=dict)
     errors: list = field(default_factory=list)
+    # The subset of errors that name a mod or include! target file that does not exist.
+    missing_files: list = field(default_factory=list)
     unreadable: list = field(default_factory=list)
     # Declaration site -> its ignore conditions: () for a plain #[ignore], else a cfg_attr predicate.
     ignores: dict = field(default_factory=dict)
@@ -403,6 +406,7 @@ def walk(root, repo_root, inventory=None, *, production=False):
                     if child is None:
                         inv.errors.append(f"{site} mod {name}: no file at "
                                           f"{', '.join(str(c.relative_to(repo_root)) if c.is_relative_to(repo_root) else str(c) for c in candidates)}")
+                        inv.missing_files.append(inv.errors[-1])
                     else:
                         owns_dir = pending_path is not None or child.name == "mod.rs"
                         queue.append((child, names + (name,), child.parent if owns_dir else child.parent / child.stem,
@@ -415,6 +419,7 @@ def walk(root, repo_root, inventory=None, *, production=False):
                     inv.unreadable.append(f"{site} include! with a non-literal path")
                 elif not target.is_file():
                     inv.errors.append(f"{site} include! names missing file {target}")
+                    inv.missing_files.append(inv.errors[-1])
                 else:
                     # Included text keeps this module's names, but rustc resolves its mod and #[path] beside the included file.
                     queue.append((target, names, target.parent, target.parent, cfgs + pending_cfgs))
@@ -481,6 +486,7 @@ def lib_inventory(repo_root):
             walk(root, repo_root, reached)
     lib.reached = reached.reached
     lib.errors += [e for e in reached.errors if e not in lib.errors]
+    lib.missing_files += [e for e in reached.missing_files if e not in lib.missing_files]
     lib.unreadable += [u for u in reached.unreadable if u not in lib.unreadable]
     return lib
 
@@ -593,14 +599,22 @@ def _source_ignored(inv, test_id, target_os, features):
     return bool(states) and all(s is not False for s in states)
 
 
-def platform_tests(repo_root):
-    """{platform: (compiled, ignored) test IDs} for one tree; anything unreadable fails, since it cannot prove a loss."""
+def platform_tests(repo_root, allow_missing_files=False):
+    """{platform: (compiled, ignored) test IDs} for one tree; anything unreadable fails, since it cannot prove a loss.
+
+    allow_missing_files also reads a tree whose only errors are absent mod/include! files, unless a test file
+    under src/ is then unreachable: its tests would silently drop out of the comparison."""
     inv, features, found = lib_inventory(repo_root), default_features(repo_root), {}
     if inv.unreadable:
         raise ValueError(f"{repo_root}: unreadable attributes ({inv.unreadable[0]}); run `check` there")
+    if allow_missing_files and inv.missing_files:
+        stranded = orphans(repo_root, inv)
+        if stranded:
+            raise ValueError(f"{repo_root}: missing modules leave test sources unreachable: {stranded[0]}")
+    other = [e for e in inv.errors if not (allow_missing_files and e in inv.missing_files)]
     for platform, target_os in PLATFORMS.items():
         compiled, _, unknown = platform_split(inv, target_os, features)
-        if unknown or inv.errors:
+        if unknown or other:
             raise ValueError(f"{repo_root}: cfg unknown or sources missing on {platform}; run `check` there")
         ignored = set()
         for test_id in compiled:
@@ -613,7 +627,7 @@ def platform_tests(repo_root):
             if all(states):
                 ignored.add(test_id)
         found[platform] = (compiled, ignored)
-    return found
+    return found, list(inv.missing_files) if allow_missing_files else []
 
 
 def _ignored_on(conditions, target_os, features):
@@ -651,14 +665,22 @@ def main(argv=None):
     args = parser.parse_args(argv)
     root = args.repo_root.resolve()
     if args.command == "removed":
+        # Head first and strict: only the base may lack files, and only mod/include! targets.
         try:
-            base, head = platform_tests(args.base_root.resolve()), platform_tests(root)
+            head, _ = platform_tests(root)
         except (OSError, ValueError) as exc:
-            print(f"ERROR {exc}", file=sys.stderr)
+            print(f"ERROR head sources: {exc}", file=sys.stderr)
+            return 1
+        try:
+            base, missing = platform_tests(args.base_root.resolve(), allow_missing_files=True)
+        except (OSError, ValueError) as exc:
+            print(f"ERROR base sources: {exc}", file=sys.stderr)
             return 1
         lost = {"removed": {p: sorted(base[p][0] - head[p][0]) for p in PLATFORMS},
                 "runnable_to_ignored": {p: sorted((base[p][0] - base[p][1]) & head[p][1]) for p in PLATFORMS},
                 "present_tests": {p: sorted(base[p][0] | head[p][0]) for p in PLATFORMS}}
+        if missing:
+            lost["base_missing_files"] = missing
         Path(args.json_out).write_text(json.dumps(lost, indent=1, sort_keys=True) + "\n")
         print(" · ".join(f"{p} -{len(lost['removed'][p])} ignored+{len(lost['runnable_to_ignored'][p])}"
                          for p in PLATFORMS))
