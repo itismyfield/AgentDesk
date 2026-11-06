@@ -188,6 +188,23 @@ async fn order(catch_up_first: bool) {
         restart(rt).await;
         live(rt, message, FIRST).await;
     }
+    let state = owner_snapshot(&rt.h.shared).await;
+    assert!(
+        state["items"].as_array().unwrap().is_empty(),
+        "a duplicate must leave no queued copy before cleanup: {state}"
+    );
+    assert!(state["head_injection"].is_null(), "{state}");
+    assert!(
+        state["retained_inputs"].as_array().unwrap().is_empty(),
+        "{state}"
+    );
+    let terminals = state["terminal_identities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["identity"]["primary"].as_u64() == Some(message))
+        .count();
+    assert_eq!(terminals, 1, "a duplicate must settle only once: {state}");
     no_warning(rt);
     assert_eq!(
         busy.pane.keys(),
@@ -195,6 +212,11 @@ async fn order(catch_up_first: bool) {
         "the duplicate must not reach the pane"
     );
     assert_eq!(busy.pane.read("buffer").unwrap(), frame);
+    assert_eq!(
+        busy.pane.records().join("\n").matches(FIRST).count(),
+        1,
+        "the pane must record the input only once before cleanup"
+    );
     assert!(
         rt.h.unhandled_requests().is_empty(),
         "{:?}",
