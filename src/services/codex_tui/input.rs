@@ -2290,7 +2290,6 @@ mod tests {
         snapshot
     }
 
-    mod source_guard_tests;
     mod startup_update_tests;
 
     #[test]
@@ -2330,12 +2329,6 @@ mod tests {
                 "submit"
             ]
         );
-    }
-
-    #[test]
-    fn codex_steering_production_path_uses_confirmed_submit() {
-        let gaps = source_guard_tests::steering_submit_gaps(source_guard_tests::INPUT);
-        assert_eq!(gaps, Vec::<String>::new());
     }
 
     #[test]

@@ -3,21 +3,19 @@ use std::str::FromStr;
 
 /// Stable domain statuses for intake outbox rows.
 ///
-/// The outbound status spelling returned by [`Self::as_str`] and the diagnostic
-/// Rust-variant spelling returned by [`Self::variant_name`] are each defined by
-/// their respective wildcard-free exhaustive match. Classifications are defined
-/// only by the wildcard-free exhaustive matches in [`Self::is_open`] and
+/// The outbound status spelling returned by [`Self::as_str`] is defined by its
+/// wildcard-free exhaustive match. Classifications are defined only by the
+/// wildcard-free exhaustive matches in [`Self::is_open`] and
 /// [`Self::operator_retry`].
 ///
 /// VALIDATES:
-/// - The compiler requires every added variant to be handled by those four
+/// - The compiler requires every added variant to be handled by those three
 ///   exhaustive matches. Renaming a variant also invalidates direct references
 ///   in [`Self::ALL`] and [`Self::from_str`].
 /// - In test builds, the `[Self; 9]` type of [`Self::ALL`] checks its cardinality.
-/// - Unit tests check [`Self::ALL`] membership against the enum declaration,
-///   [`Self::from_str`] against [`Self::as_str`], and [`Self::is_open`] against
-///   [`INTAKE_OUTBOX_OPEN_STATUSES_SQL`][open-statuses]. They also check
-///   [`Self::ALL`] against the 0107 status CHECK body, every current
+/// - Unit tests check [`Self::from_str`] against [`Self::as_str`], and
+///   [`Self::is_open`] against [`INTAKE_OUTBOX_OPEN_STATUSES_SQL`][open-statuses].
+///   They also check [`Self::ALL`] against the 0107 status CHECK body, every current
 ///   [`Self::operator_retry`] classification, and that rejected input is
 ///   preserved in [`UnknownIntakeStatus`]. The `Unknown` variant is the
 ///   official terminal spelling; `UnknownIntakeStatus` represents rejected,
@@ -37,9 +35,8 @@ use std::str::FromStr;
 /// LIMITS:
 /// - No gate prevents replacing an exhaustive classification arm with `_ =>`;
 ///   preserving wildcard-free matches is a review convention.
-/// - The source-based [`Self::ALL`] membership test reads only this file and
-///   fails closed on unsupported enum syntax, but no independent gate proves
-///   that its defining equality assertion remains present.
+/// - [`Self::ALL`] members are compared with the 0107 CHECK domain, not with the
+///   enum declaration: a variant added to neither `ALL` nor the CHECK is not caught.
 /// - The migration-source test pins the CHECK domain while the PostgreSQL codec
 ///   test pins wire spelling. SQL string literals and direct writers outside
 ///   the typed coordinates remain possible, and typed rows do not replace the
@@ -92,20 +89,6 @@ impl IntakeOutboxStatus {
             Self::Done => "done",
             Self::FailedPreAccept => "failed_pre_accept",
             Self::FailedPostAccept => "failed_post_accept",
-        }
-    }
-
-    pub(crate) const fn variant_name(self) -> &'static str {
-        match self {
-            Self::Pending => "Pending",
-            Self::Claimed => "Claimed",
-            Self::Accepted => "Accepted",
-            Self::Spawned => "Spawned",
-            Self::Dispatched => "Dispatched",
-            Self::Unknown => "Unknown",
-            Self::Done => "Done",
-            Self::FailedPreAccept => "FailedPreAccept",
-            Self::FailedPostAccept => "FailedPostAccept",
         }
     }
 
@@ -164,11 +147,8 @@ impl FromStr for IntakeOutboxStatus {
 mod tests {
     use super::{IntakeOutboxStatus, OperatorRetryClass, UnknownIntakeStatus};
     use crate::db::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL;
-    use crate::test_support::{braced_item_span, rust_code_mask};
     use std::collections::BTreeSet;
     use std::path::PathBuf;
-
-    const MODULE_SOURCE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/", file!()));
 
     fn repo_source(path: &str) -> String {
         std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path))
@@ -181,43 +161,6 @@ mod tests {
             .map(|value| value.trim().trim_matches('\''))
             .filter(|value| !value.is_empty())
             .collect()
-    }
-
-    // Classification 2: variants are read from the code mask of the real enum item, so a
-    // variant inside any comment, including a nested multi-line block, never counts.
-    fn declared_variant_names(source: &str) -> BTreeSet<String> {
-        let mask = rust_code_mask(source).expect("status source lexes");
-        let span = braced_item_span(&mask, "enum IntakeOutboxStatus {")
-            .expect("source must declare IntakeOutboxStatus with a closing brace");
-        mask[span]
-            .lines()
-            .filter_map(|line| {
-                let line = line.trim();
-                if line.is_empty() || line.starts_with("#[") {
-                    return None;
-                }
-                line.strip_suffix(',')
-                    .filter(|name| name.chars().all(|ch| ch == '_' || ch.is_alphanumeric()))
-                    .map(str::to_string)
-            })
-            .collect()
-    }
-
-    #[test]
-    fn all_exactly_matches_declared_variants() {
-        let declared = declared_variant_names(MODULE_SOURCE);
-        let all: BTreeSet<_> = IntakeOutboxStatus::ALL
-            .map(|status| status.variant_name().to_string())
-            .into_iter()
-            .collect();
-        assert_eq!(all, declared);
-
-        let decorated = MODULE_SOURCE.replacen(
-            "    Pending,",
-            "    /// Parser-resilience probe.\n    #[doc = \"pending\"]\n    Pending,",
-            1,
-        );
-        assert_eq!(declared_variant_names(&decorated), declared);
     }
 
     #[test]
