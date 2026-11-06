@@ -50,10 +50,6 @@ impl Transitions {
     }
 
     pub(super) fn has_apply_job(&self) -> bool {
-        #[cfg(test)]
-        if super::super::deliver::bo_mutant("inspect_rescope") {
-            return self.job.is_some();
-        }
         self.job.as_ref().is_some_and(|job| job.apply)
     }
     pub(super) fn new(receiver: Option<Receiver>, stop: watch::Receiver<bool>) -> Self {
@@ -183,10 +179,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         let suspended = suspended
             && !crate::services::claude_tui::source_verify::n2b_mutant("b1b-poll-transition");
         if suspended {
-            let discard = true;
-            #[cfg(test)]
-            let discard = discard && !super::super::deliver::bo_mutant("inspect_job_cleanup");
-            if discard && let Some(job) = self.transitions.job.take() {
+            if let Some(job) = self.transitions.job.take() {
                 debug_assert!(!job.apply);
                 let _ = job
                     .reply
@@ -315,10 +308,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         let (mut unprobed, mut receipts): (Vec<&Judged>, Vec<&Judged>) =
             first.iter().filter(unprobed).partition(pending);
         let limited = automatic.is_none();
-        #[cfg(test)]
-        let limited = limited
-            || test_hooks::retention_mutant("budget_receipt")
-            || test_hooks::retention_mutant("budget_panes");
         if !limited {
             receipts.clear();
         } else if unprobed.len() >= CANDIDATES && !receipts.is_empty() {
@@ -523,15 +512,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             let Some(observer) = &job.context.codex else {
                 return Outcome::Held(Hold::InspectScopeChanged);
             };
-            #[cfg(not(test))]
-            let skip = false;
-            #[cfg(test)]
-            let skip = super::codex_retention::mutant("skip_refresh");
-            let refreshed = if skip {
-                Ok(Arc::clone(observer))
-            } else {
-                observer.refresh().await
-            };
+            let refreshed = observer.refresh().await;
             let Ok(observer) = refreshed else {
                 return Outcome::Held(Hold::InspectScopeChanged);
             };
@@ -734,10 +715,6 @@ pub(crate) mod test_hooks {
         static SNAPSHOTS: Cell<usize> = const { Cell::new(0) };
         static AT_RETIRE: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
         static SKEW: Cell<(Option<Duration>, Duration)> = const { Cell::new((None, Duration::ZERO)) };
-    }
-
-    pub(crate) fn retention_mutant(tag: &str) -> bool {
-        std::env::var("AGENTDESK_OTRANSITION_MUTANT").is_ok_and(|value| value == tag)
     }
 
     pub(super) fn receiving() {

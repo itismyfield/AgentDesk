@@ -202,10 +202,6 @@ fn admitted(
     activate: impl FnOnce() -> Result<(), String>,
 ) -> Option<Result<(), String>> {
     #[cfg(test)]
-    if std::env::var("ADK_S3B_MUTANT").ok().as_deref() == Some("first_init_unfenced") {
-        return Some(activate());
-    }
-    #[cfg(test)]
     {
         use activation::test_hook::{Step, note_refused, run};
         if let Err(detail) = run(_channel, Step::BeforeAdmit) {

@@ -456,10 +456,6 @@ pub(in crate::services::discord) fn resolve_known_tmux_channel_id(
     tmux_session_name: &str,
 ) -> Option<u64> {
     let durable = crate::services::tmux_common::read_tmux_channel_binding(tmux_session_name);
-    #[cfg(test)]
-    if std::env::var("AGENTDESK_BO_MUTANT").is_ok_and(|value| value == "pane_channel_file_only") {
-        return durable;
-    }
     durable
         .or_else(|| {
             shared

@@ -53,17 +53,6 @@ pub(crate) enum Appended {
     PublishedUnsynced(String),
 }
 
-/// Test-only switch arming one named mutant of the clear-end contract.
-#[cfg(test)]
-pub(crate) fn mutant(name: &str) -> bool {
-    std::env::var("ADK_CLEAR_END_MUTANT").is_ok_and(|armed| armed == name)
-}
-
-#[cfg(not(test))]
-pub(crate) fn mutant(_name: &str) -> bool {
-    false
-}
-
 static WRITE: Mutex<()> = Mutex::new(());
 static VERSIONS: LazyLock<Mutex<HashMap<u64, watch::Sender<u64>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -126,9 +115,7 @@ pub(crate) fn append(runtime_root: &Path, record: ClearEnd) -> Result<Appended, 
     let appended = match durable::replace(&target, &bytes) {
         Ok(()) => Appended::Durable,
         // The rename may have published the file before the failure; what it holds decides.
-        Err(error)
-            if fs::read(&target).is_ok_and(|now| now == bytes) || mutant("unpublished_bumps") =>
-        {
+        Err(error) if fs::read(&target).is_ok_and(|now| now == bytes) => {
             Appended::PublishedUnsynced(error.to_string())
         }
         Err(error) => return Err(error.to_string()),

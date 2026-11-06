@@ -1,5 +1,7 @@
 #[path = "input_notice_actor_tests.rs"]
 mod input_notice_composition;
+#[path = "park_unsealed_actor_tests.rs"]
+mod park_unsealed;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 #[path = "tool_card_actor_tests.rs"]
@@ -862,7 +864,10 @@ async fn the_writer_stays_dormant_unless_enabled() {
     assert!(spawned.is_none());
     polls(3).await;
     assert!(harness.port.posts().is_empty());
-    let enabled = WriterConfig { enabled: true };
+    let enabled = WriterConfig {
+        enabled: true,
+        ..Default::default()
+    };
     let (stop, stopped) = watch::channel(false);
     let mut writer = harness.writer();
     let log = startup_log(&mut writer);

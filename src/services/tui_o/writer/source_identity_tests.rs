@@ -12,6 +12,9 @@ use crate::services::tui_o::writer::rotation::{Sources, probe};
 const REBOOT: u64 = 1 << 40;
 const SECOND_REBOOT: u64 = 1 << 41;
 
+#[path = "park_alias_tests.rs"]
+mod park_alias;
+
 /// A switched-over channel whose startup bound `t.jsonl` with an empty session.
 fn started_empty(body: &[u8]) -> (Harness, PathBuf, SourceId, Arc<FakeBindings>) {
     let mut stored = None;

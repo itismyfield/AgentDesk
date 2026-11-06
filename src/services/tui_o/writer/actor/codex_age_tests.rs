@@ -376,37 +376,3 @@ fn automatic_codex_age_repeated_headers_must_keep_native_session_identity() {
         );
     }
 }
-
-// Narrow item and content checks reintroduce rejected native shapes only in mutants.
-pub(crate) fn legacy_completed_shape(item: &Value) -> Option<bool> {
-    match item["type"].as_str()? {
-        "UserMessage" | "AgentMessage" => {
-            if let Some(body) = item.get("content") {
-                legacy_content_shape(body).then_some(true)
-            } else {
-                item["id"]
-                    .as_str()
-                    .filter(|id| !id.is_empty())
-                    .map(|_| true)
-            }
-        }
-        "user_message" | "agent_message" => item["text"].is_string().then_some(true),
-        "Reasoning" | "CommandExecution" | "FileChange" | "McpToolCall" | "WebSearch"
-        | "ContextCompaction" | "EnteredReviewMode" | "ExitedReviewMode" | "reasoning"
-        | "command_execution" | "file_change" | "mcp_tool_call" | "web_search" => Some(false),
-        _ => None,
-    }
-}
-
-fn legacy_content_shape(value: &Value) -> bool {
-    value.as_array().is_some_and(|items| {
-        !items.is_empty()
-            && items.iter().all(|item| match item["type"].as_str() {
-                Some("text" | "input_text" | "output_text") => item["text"].is_string(),
-                Some("input_image" | "image") => {
-                    item["image_url"].is_string() || item["url"].is_string()
-                }
-                _ => false,
-            })
-    })
-}

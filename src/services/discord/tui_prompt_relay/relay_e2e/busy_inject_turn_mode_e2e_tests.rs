@@ -168,6 +168,10 @@ async fn bb_live_rollover_uses_real_intake_and_redelivery_is_not_reinjected_pg()
 }
 
 async fn owner_fixture() -> Busy {
+    owner_fixture_with_health(false).await
+}
+
+async fn owner_fixture_with_health(with_health: bool) -> Busy {
     let env = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let mut db = None;
     let storage = Box::pin(async {
@@ -178,7 +182,7 @@ async fn owner_fixture() -> Busy {
     });
     let h = Box::pin(RelayE2eHarness::start_inner_with_env_lock(
         ProviderStub::Success,
-        false,
+        with_health,
         storage,
         true,
         env,
@@ -739,3 +743,6 @@ async fn reg_7832_owner_not_sent_and_held_have_no_receipt_pg() {
 async fn reg_7832_owner_uncertain_write_has_no_receipt_pg() {
     owner_refused_receipt("uncertain").await;
 }
+
+#[path = "duplicate_intake_e2e_tests.rs"]
+mod duplicate_intake;

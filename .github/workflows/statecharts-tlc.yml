@@ -1,7 +1,7 @@
 name: Statecharts TLC
 
-# Checks every docs/statecharts TLA+ config with plain TLC against
-# docs/statecharts/expected.tsv. Alert only: not a required check.
+# PRs check affected configs; nightly/manual runs check all against expected.tsv.
+# Alert only: not a required check.
 on:
   pull_request:
     paths:
@@ -30,11 +30,13 @@ jobs:
   tlc:
     name: Statecharts TLC
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 15 || 45 }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - uses: actions/setup-java@v4
         with:
@@ -78,7 +80,17 @@ jobs:
         run: python3 -m unittest tests.test_statecharts_tlc
 
       - name: Check models against expected.tsv
-        run: python3 scripts/ci/statecharts_tlc.py --java java --timeout 300
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--java java --timeout 300 --jobs 2)
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            args+=(--base "$BASE_SHA" --head "$HEAD_SHA")
+          fi
+          python3 scripts/ci/statecharts_tlc.py "${args[@]}"
 
   report:
     name: Statecharts TLC nightly report
